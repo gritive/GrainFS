@@ -151,7 +151,10 @@ func (ex blockIOExecutor) executeCowAction(
 	}
 	liveMap[action.BlkNum] = action.Key
 	result.LiveMapDirty = true
-	result.InvalidatedKeys = append(result.InvalidatedKeys, action.OldKey, action.Key)
+	if !isNew {
+		result.InvalidatedKeys = append(result.InvalidatedKeys, action.OldKey)
+	}
+	result.InvalidatedKeys = append(result.InvalidatedKeys, action.Key)
 	if isNew {
 		*newBlocks++
 	}
@@ -253,8 +256,15 @@ func (ex blockIOExecutor) executeDirectAsync(
 		blkData := ex.getBlkBuf(vol.BlockSize)
 		rc, _, readErr := ex.objects.GetObject(ctx, volumeBucketName, action.OldKey)
 		if readErr == nil {
-			io.ReadFull(rc, blkData) //nolint:errcheck
-			rc.Close()
+			if _, err := io.ReadFull(rc, blkData); err != nil {
+				ex.putBlkBuf(blkData)
+				_ = rc.Close()
+				return fmt.Errorf("read block %d: %w", action.BlkNum, err)
+			}
+			if err := rc.Close(); err != nil {
+				ex.putBlkBuf(blkData)
+				return fmt.Errorf("close block %d: %w", action.BlkNum, err)
+			}
 		}
 		copy(blkData[action.BlkOff:int(action.BlkOff)+action.CanWrite], data)
 		_, commitFn, err := ex.deferred.PutObjectAsync(ctx, volumeBucketName, action.Key,

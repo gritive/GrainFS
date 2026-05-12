@@ -31,11 +31,10 @@ type BlockAction struct {
 	//   ActionCow:    cowBlockKey(name, blkNum)
 	Key string
 
-	// OldKey is the key currently in store (may equal Key for ActionDirect).
-	// Empty string means the block is new (IsNew=true).
-	//   ActionDirect: same as Key (blockKey)
-	//   ActionDedup:  canonical key from dedup.ReadBlock; "" if no entry exists
-	//   ActionCow:    physicalKey(name, blkNum, liveMap)
+	// OldKey is the key currently in store.
+	//   ActionDirect: same as Key (blockKey); never empty
+	//   ActionDedup:  canonical key from dedup.ReadBlock; "" if no entry exists (IsNew=true)
+	//   ActionCow:    physicalKey(name, blkNum, liveMap); equals blockKey when block is new
 	OldKey string
 
 	// IsNew is true when no existing block was found for this blkNum.
