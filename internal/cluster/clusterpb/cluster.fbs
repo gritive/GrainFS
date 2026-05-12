@@ -8,6 +8,72 @@ table Command {
   data:[ubyte];
 }
 
+// --- ClusterConfig optional-field boxes (Slice 1 of admin-API config) ---
+table BoolBox   { v:bool;   }
+table Int32Box  { v:int32;  }
+table Int64Box  { v:int64;  }
+table DoubleBox { v:double; }
+
+// --- ClusterConfig: cluster-wide policy stored in MetaFSM ---
+// Stored representation: only explicit overrides. Unset fields → getter returns code default.
+table ClusterConfig {
+  rev:                                uint64;
+  updated_at_unix_ms:                 int64;
+
+  // Balancer (10 fields)
+  balancer_enabled:                   BoolBox;
+  balancer_imbalance_trigger_pct:     DoubleBox;
+  balancer_imbalance_stop_pct:        DoubleBox;
+  balancer_migration_rate:            Int32Box;
+  balancer_leader_tenure_min_ns:      Int64Box;
+  balancer_warmup_timeout_ns:         Int64Box;
+  balancer_cb_threshold:              DoubleBox;
+  balancer_migration_max_retries:     Int32Box;
+  balancer_migration_pending_ttl_ns:  Int64Box;
+  balancer_gossip_interval_ns:        Int64Box;
+
+  // Alert webhook (URL + wrapped secret).
+  // alert_webhook semantics: "" = disabled (explicit clear or default). Setting
+  // "" via PATCH is an explicit clear; reset_keys["alert-webhook"] is equivalent.
+  alert_webhook:                      string;       // "" = disabled
+  alert_webhook_secret_wrapped:       [ubyte];      // empty = unset; wrapped via EncryptWithAAD using AAD "cluster_config.alert_webhook_secret"
+
+  // Disk thresholds
+  disk_warn_frac:                     DoubleBox;
+  disk_critical_frac:                 DoubleBox;
+}
+
+// Patch command — same fields; nil = leave alone.
+// secret_plaintext travels only on the admin UDS / Raft log inside the Apply context
+// (leader wraps it before commit; the wrapped bytes are what ends up in ClusterConfig).
+table MetaClusterConfigPatchCmd {
+  balancer_enabled:                   BoolBox;
+  balancer_imbalance_trigger_pct:     DoubleBox;
+  balancer_imbalance_stop_pct:        DoubleBox;
+  balancer_migration_rate:            Int32Box;
+  balancer_leader_tenure_min_ns:      Int64Box;
+  balancer_warmup_timeout_ns:         Int64Box;
+  balancer_cb_threshold:              DoubleBox;
+  balancer_migration_max_retries:     Int32Box;
+  balancer_migration_pending_ttl_ns:  Int64Box;
+  balancer_gossip_interval_ns:        Int64Box;
+
+  alert_webhook:                      string;       // explicit clear ("" disables); use reset_keys[] for symmetry with other fields
+  alert_webhook_secret_wrapped:       [ubyte];      // handler wraps plaintext via EncryptWithAAD before propose; cleared via reset_keys["alert-webhook-secret"]
+
+  disk_warn_frac:                     DoubleBox;
+  disk_critical_frac:                 DoubleBox;
+
+  reset_keys:                         [string];     // explicit field names to remove from FSM (default-restore)
+  expected_rev:                       uint64;       // 0 = no CAS; nonzero = If-Match-Rev semantics
+
+  // updated_at_unix_ms is stamped by the proposer (single source of truth) so
+  // that the FSM apply path is deterministic — every replica writes the same
+  // clusterConfigSnap.updatedAt for the same Raft log entry, keeping snapshots
+  // byte-identical. 0 = legacy/unstamped (FSM falls back to time.Now()).
+  updated_at_unix_ms:                 int64;
+}
+
 table CreateBucketCmd {
   bucket:string;
 }
@@ -253,6 +319,7 @@ enum MetaCmdType : uint8 {
   IAMBucketUpstreamDelete = 33, // IAM: bucket-scoped upstream remove
   BucketLifecyclePut      = 34, // Bucket lifecycle policy upsert (ADR 0011)
   BucketLifecycleDelete   = 35, // Bucket lifecycle policy remove (ADR 0011)
+  ClusterConfigPatch     = 36,
 }
 
 table MetaNodeEntry {
@@ -444,6 +511,7 @@ table MetaStateSnapshot {
   iceberg_namespaces:[IcebergNamespaceEntry];
   iceberg_tables:[IcebergTableEntry];
   object_index:[MetaObjectIndexEntry];
+  cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

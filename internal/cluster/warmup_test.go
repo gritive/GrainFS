@@ -11,8 +11,7 @@ import (
 func testBalancerProposerForWarmup(store *NodeStatsStore, peers []string, timeout time.Duration) *BalancerProposer {
 	node := &mockRaftNode{nodeID: "self", peerIDs: peers, state: 2}
 	cfg := testBalancerConfig()
-	cfg.WarmupTimeout = timeout
-	cfg.PeerSeenWindow = 2 * cfg.GossipInterval
+	cfg.warmupTimeout = timeout
 	p := NewBalancerProposer("self", store, node, cfg)
 	return p
 }

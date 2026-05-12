@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.155.0] - 2026-05-12 — refactor(adminapi): Details → json.RawMessage + typed structs
+## [0.0.156.0] - 2026-05-12 — refactor(adminapi): Details → json.RawMessage + typed structs
 
 ### Changed
 - `adminapi.Error.Details` 타입이 `map[string]any` → `json.RawMessage`로 전환. 캘러는 endpoint별 typed struct에 `json.Unmarshal(e.Details, &d)` 한 줄로 디코드 — typed-everything 일관성 완성, `map[string]any` 타입어설션 보일러 제거.
@@ -10,6 +10,74 @@
 - `adminapi.Transport.parseErrorBody` legacy flat-shape 경로: 원본 body bytes를 그대로 `Details`에 할당 (zero-alloc; typed struct가 `code`/`error` 키 자연 무시).
 - `server/admin.NewConflict`/`NewUnsupported` 헬퍼가 입력 map[string]any를 내부에서 marshal 후 RawMessage로 채움 — 호출 시그니처는 보존, 호출부 무변경.
 - wire bytes 무변경 — JSON 응답 모양 동일. 모든 변경은 Go 측 표현형 (map → bytes + typed struct).
+
+## [0.0.155.0] - 2026-05-12 — BREAKING: cluster-wide policy moved to admin API
+
+Cluster-wide policy values are now stored in MetaFSM (Raft-replicated) and
+configured exclusively through the admin UDS (`/v1/cluster/config` GET/PATCH).
+Per-node flag overrides for these values are no longer possible — divergence
+across nodes is now structurally impossible — and changes take effect at the
+next consumer tick without restart.
+
+### Removed flags
+
+    --balancer-enabled
+    --balancer-imbalance-trigger-pct, --balancer-imbalance-stop-pct
+    --balancer-migration-rate, --balancer-migration-max-retries,
+      --balancer-migration-pending-ttl
+    --balancer-leader-tenure-min, --balancer-warmup-timeout
+    --balancer-cb-threshold, --balancer-gossip-interval
+    --alert-webhook, --alert-webhook-secret
+    --disk-warn-threshold, --disk-critical-threshold
+
+### New: `grainfs cluster config`
+
+    grainfs cluster config show
+    grainfs cluster config get <key>
+    grainfs cluster config set <key>=<value> [<key>=<value> ...]
+    grainfs cluster config reset <key> [<key> ...]
+    grainfs cluster config diff
+
+All commands talk to the admin UDS (default `<data>/admin.sock`).
+
+### Migration
+
+1. Remove the removed flags from systemd units / ansible playbooks. The cluster
+   boots with the documented defaults (unchanged from v0.150).
+2. If you previously overrode any value, after the cluster is up:
+
+    grainfs cluster config set \
+      balancer-imbalance-trigger-pct=15 \
+      alert-webhook=https://hooks.slack.com/... \
+      alert-webhook-secret=<secret>
+
+### Key rotation note
+
+The cluster-wide `alert-webhook-secret` is wrapped at `cluster config set`
+time using the current cluster key. After `cluster rotate-key` completes
+and the `previous.key` grace window ends, a wrapped value that was set
+before the rotation will fail to decrypt — alerts will stop firing.
+Re-issue `grainfs cluster config set alert-webhook-secret=<secret>` after
+rotation (any time before the grace window closes) to refresh the wrap.
+
+### Default reference
+
+| Key                                  | Default |
+| ------------------------------------ | ------- |
+| balancer-enabled                     | true    |
+| balancer-imbalance-trigger-pct       | 20.0    |
+| balancer-imbalance-stop-pct          | 5.0     |
+| balancer-migration-rate              | 1       |
+| balancer-leader-tenure-min           | 5m      |
+| balancer-warmup-timeout              | 60s     |
+| balancer-cb-threshold                | 0.90    |
+| balancer-migration-max-retries       | 3       |
+| balancer-migration-pending-ttl       | 5m      |
+| balancer-gossip-interval             | 30s    |
+| alert-webhook                        | (none)  |
+| alert-webhook-secret                 | (none)  |
+| disk-warn-threshold                  | 0.80    |
+| disk-critical-threshold              | 0.90    |
 
 ## [0.0.154.0] - 2026-05-12 — refactor(clusteradmin): extract BaseOptions to match volumeadmin
 

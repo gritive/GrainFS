@@ -77,5 +77,18 @@ func init() {
 	clusterCmd.AddCommand(clusterHealthCmd())
 	clusterCmd.AddCommand(clusterPlacementCmd())
 	clusterCmd.AddCommand(clusterBalancerCmd)
+
+	// Task 12: read-only cluster config inspection.
+	clusterConfigShowCmd.Flags().Bool("json", false, "raw JSON output")
+	clusterConfigGetCmd.Flags().Bool("json", false, "raw JSON output")
+	// Task 13: cluster config writes (atomic PATCH + reset).
+	clusterConfigSetCmd.Flags().Uint64("if-match-rev", 0,
+		"optimistic-concurrency: require this rev or fail with 409")
+	clusterConfigResetCmd.Flags().Uint64("if-match-rev", 0,
+		"optimistic-concurrency: require this rev or fail with 409")
+	clusterConfigCmd.AddCommand(clusterConfigShowCmd, clusterConfigGetCmd, clusterConfigDiffCmd,
+		clusterConfigSetCmd, clusterConfigResetCmd)
+	clusterCmd.AddCommand(clusterConfigCmd)
+
 	rootCmd.AddCommand(clusterCmd)
 }

@@ -158,6 +158,23 @@ type RaftBalancerNode interface {
 	TransferLeadership() error
 }
 
+// BalancerClusterCfg is the minimal cluster-config surface the balancer reads
+// each tick. Production: *ClusterConfig (returns its getters); tests inject a
+// stub. Hot-reload: balancer reads these every tick, so PATCH /admin/cluster-config
+// changes take effect on the next gossip interval.
+type BalancerClusterCfg interface {
+	BalancerEnabled() bool
+	BalancerImbalanceTriggerPct() float64
+	BalancerImbalanceStopPct() float64
+	BalancerMigrationRate() int32
+	BalancerLeaderTenureMin() time.Duration
+	BalancerWarmupTimeout() time.Duration
+	BalancerCBThreshold() float64
+	BalancerMigrationMaxRetries() int32
+	BalancerMigrationPendingTTL() time.Duration
+	BalancerGossipInterval() time.Duration
+}
+
 type balancerMsgKind int
 
 const (
@@ -178,10 +195,17 @@ type balancerMsg struct {
 // All mutable state (active, inflight, cbs) is owned exclusively by the Run()
 // goroutine — no mutex needed.
 type BalancerProposer struct {
-	nodeID      string
-	store       *NodeStatsStore
-	node        RaftBalancerNode
-	cfg         BalancerConfig
+	nodeID     string
+	store      *NodeStatsStore
+	node       RaftBalancerNode
+	clusterCfg BalancerClusterCfg
+	// Non-cluster (still hardcoded) defaults — read once at construction.
+	leaderLoadThreshold   float64
+	gracePeriod           time.Duration
+	peerSeenWindow        time.Duration
+	migrationProposalRate float64
+	stickyDonorHoldTime   time.Duration
+
 	active      bool // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt   time.Time
 	picker      ObjectPicker               // nil = no proposals until SetObjectPicker is called
@@ -194,32 +218,36 @@ type BalancerProposer struct {
 	ch          chan balancerMsg // inbound messages to the actor loop
 	stopCh      chan struct{}    // closed by Stop()
 	stopOnce    sync.Once
+
+	// tickCount is incremented at the end of each tickOnce call (test-only
+	// observability for hot-reload tests).
+	tickCount int64
 }
 
-// NewBalancerProposer creates a BalancerProposer with the given config.
-func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancerNode, cfg BalancerConfig) *BalancerProposer {
+// NewBalancerProposer creates a BalancerProposer that reads tunables from
+// clusterCfg at every tick (hot-reload). The 5 non-cluster fields
+// (LeaderLoadThreshold / GracePeriod / PeerSeenWindow / MigrationProposalRate /
+// StickyDonorHoldTime) come from DefaultBalancerConfig() and are fixed for the
+// lifetime of the proposer.
+func NewBalancerProposer(nodeID string, store *NodeStatsStore, node RaftBalancerNode, clusterCfg BalancerClusterCfg) *BalancerProposer {
 	def := DefaultBalancerConfig()
-	if cfg.CBThreshold == 0 {
-		cfg.CBThreshold = def.CBThreshold
-	}
-	if cfg.MigrationProposalRate == 0 {
-		cfg.MigrationProposalRate = def.MigrationProposalRate
-	}
-	if cfg.StickyDonorHoldTime == 0 {
-		cfg.StickyDonorHoldTime = def.StickyDonorHoldTime
-	}
 	return &BalancerProposer{
-		nodeID:    nodeID,
-		store:     store,
-		node:      node,
-		cfg:       cfg,
-		startedAt: time.Now(),
-		inflight:  make(map[string]time.Time),
-		cbs:       make(map[string]*circuitBreaker),
-		migQueue:  NewMigrationPriorityQueue(cfg.MigrationProposalRate),
-		logger:    log.With().Str("component", "balancer").Logger(),
-		ch:        make(chan balancerMsg, balancerChanBuf),
-		stopCh:    make(chan struct{}),
+		nodeID:                nodeID,
+		store:                 store,
+		node:                  node,
+		clusterCfg:            clusterCfg,
+		leaderLoadThreshold:   def.LeaderLoadThreshold,
+		gracePeriod:           def.GracePeriod,
+		peerSeenWindow:        def.PeerSeenWindow,
+		migrationProposalRate: def.MigrationProposalRate,
+		stickyDonorHoldTime:   def.StickyDonorHoldTime,
+		startedAt:             time.Now(),
+		inflight:              make(map[string]time.Time),
+		cbs:                   make(map[string]*circuitBreaker),
+		migQueue:              NewMigrationPriorityQueue(def.MigrationProposalRate),
+		logger:                log.With().Str("component", "balancer").Logger(),
+		ch:                    make(chan balancerMsg, balancerChanBuf),
+		stopCh:                make(chan struct{}),
 	}
 }
 
@@ -232,7 +260,7 @@ func (p *BalancerProposer) syncCB(peers []NodeStats) {
 		}
 		cb, ok := p.cbs[ns.NodeID]
 		if !ok {
-			cb = newCircuitBreaker(p.cfg.CBThreshold)
+			cb = newCircuitBreaker(p.clusterCfg.BalancerCBThreshold())
 			p.cbs[ns.NodeID] = cb
 		}
 		cb.update(ns)
@@ -303,11 +331,16 @@ func (p *BalancerProposer) SetObjectPicker(picker ObjectPicker) {
 }
 
 // Run starts the balancer actor loop. Blocks until ctx is cancelled or Stop() is called.
+// The gossip-interval ticker is hot-reloaded: each tick re-reads
+// BalancerGossipInterval() and calls ticker.Reset if it changed. Honors
+// BalancerEnabled() — when false, the tick is a no-op (still consumes the tick
+// so the interval stays current).
 func (p *BalancerProposer) Run(ctx context.Context) {
 	// Reset tenure timer here so LeaderTenureMin is measured from the moment this
 	// node becomes active (leader), not from when BalancerProposer was constructed.
 	p.startedAt = time.Now()
-	ticker := time.NewTicker(p.cfg.GossipInterval)
+	lastGossipInterval := p.clusterCfg.BalancerGossipInterval()
+	ticker := time.NewTicker(lastGossipInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -318,6 +351,13 @@ func (p *BalancerProposer) Run(ctx context.Context) {
 		case msg := <-p.ch:
 			p.handleMsg(msg)
 		case <-ticker.C:
+			if cur := p.clusterCfg.BalancerGossipInterval(); cur != lastGossipInterval {
+				ticker.Reset(cur)
+				lastGossipInterval = cur
+			}
+			if !p.clusterCfg.BalancerEnabled() {
+				continue
+			}
 			p.tickOnce()
 		}
 	}
@@ -342,9 +382,24 @@ func (p *BalancerProposer) Stop() {
 	p.stopOnce.Do(func() { close(p.stopCh) })
 }
 
+// Active reports the current hysteresis state. Test-only accessor — read from
+// the actor goroutine is the contract (tests poll after sleep, accepting a
+// benign read).
+//
+//nolint:unused // used from hot-reload tests in the same package.
+func (p *BalancerProposer) Active() bool { return p.active }
+
+// TickCount returns the number of tickOnce invocations since start. Test-only
+// observability for the hot-reload-ticker test.
+//
+//nolint:unused // used from hot-reload tests in the same package.
+func (p *BalancerProposer) TickCount() int64 { return p.tickCount }
+
 // tickOnce is a single balancer evaluation cycle, exposed for testing.
-// Must be called from the actor goroutine only.
+// Must be called from the actor goroutine only. Reads cluster-managed
+// tunables fresh from clusterCfg each call (hot-reload).
 func (p *BalancerProposer) tickOnce() {
+	defer func() { p.tickCount++ }()
 	if !p.node.IsLeader() {
 		return
 	}
@@ -354,9 +409,12 @@ func (p *BalancerProposer) tickOnce() {
 		return
 	}
 
+	triggerPct := p.clusterCfg.BalancerImbalanceTriggerPct()
+	stopPct := p.clusterCfg.BalancerImbalanceStopPct()
+
 	// Leader load check: transfer leadership if this leader is significantly overloaded.
-	if time.Since(p.startedAt) >= p.cfg.LeaderTenureMin {
-		if _, overloaded := selectPeerByLoad(p.store, p.nodeID, p.cfg.LeaderLoadThreshold); overloaded {
+	if time.Since(p.startedAt) >= p.clusterCfg.BalancerLeaderTenureMin() {
+		if _, overloaded := selectPeerByLoad(p.store, p.nodeID, p.leaderLoadThreshold); overloaded {
 			if err := p.node.TransferLeadership(); err != nil {
 				p.logger.Warn().Err(err).Msg("balancer: TransferLeadership failed")
 			} else {
@@ -370,8 +428,8 @@ func (p *BalancerProposer) tickOnce() {
 	metrics.BalancerImbalancePct.Set(diff)
 
 	// Effective trigger: relaxed by 1.5× if any node is still within its join grace period.
-	effectiveTrigger := p.cfg.ImbalanceTriggerPct
-	if p.cfg.GracePeriod > 0 && p.anyNodeInGracePeriod() {
+	effectiveTrigger := triggerPct
+	if p.gracePeriod > 0 && p.anyNodeInGracePeriod() {
 		effectiveTrigger *= 1.5
 		metrics.BalancerGracePeriodActiveTicks.Inc()
 	}
@@ -385,7 +443,7 @@ func (p *BalancerProposer) tickOnce() {
 		}
 		p.active = true
 	} else {
-		if diff < p.cfg.ImbalanceStopPct {
+		if diff < stopPct {
 			p.active = false
 			return
 		}
@@ -398,12 +456,12 @@ func (p *BalancerProposer) tickOnce() {
 
 	// Feed all overloaded nodes into the migration queue, sorted by DiskUsedPct.
 	for _, ns := range allPeers {
-		if ns.DiskUsedPct >= p.cfg.ImbalanceTriggerPct {
+		if ns.DiskUsedPct >= triggerPct {
 			p.migQueue.Upsert(ns.NodeID, ns.DiskUsedPct)
 		}
 	}
 	// Always ensure self is in the queue (self is always a valid src when overloaded).
-	if selfNS, ok := p.store.Get(p.nodeID); ok && selfNS.DiskUsedPct >= p.cfg.ImbalanceTriggerPct {
+	if selfNS, ok := p.store.Get(p.nodeID); ok && selfNS.DiskUsedPct >= triggerPct {
 		p.migQueue.Upsert(p.nodeID, selfNS.DiskUsedPct)
 	}
 
@@ -415,7 +473,7 @@ func (p *BalancerProposer) tickOnce() {
 	} else if s, ok := p.migQueue.TryDequeue(); ok {
 		src = s
 		p.stickyDonor = src
-		p.stickyUntil = now.Add(p.cfg.StickyDonorHoldTime)
+		p.stickyUntil = now.Add(p.stickyDonorHoldTime)
 	} else {
 		src = p.nodeID // fallback to self
 	}
@@ -451,7 +509,7 @@ func (p *BalancerProposer) Status() BalancerStatus {
 // within the configured GracePeriod window.
 func (p *BalancerProposer) anyNodeInGracePeriod() bool {
 	for _, ns := range p.store.GetAll() {
-		if !ns.JoinedAt.IsZero() && time.Since(ns.JoinedAt) < p.cfg.GracePeriod {
+		if !ns.JoinedAt.IsZero() && time.Since(ns.JoinedAt) < p.gracePeriod {
 			return true
 		}
 	}
@@ -459,14 +517,14 @@ func (p *BalancerProposer) anyNodeInGracePeriod() bool {
 }
 
 // warmupComplete returns true once all peers have gossiped recently or the warmup timeout has passed.
-// "Recently" is defined as UpdatedAt within PeerSeenWindow (or 2× GossipInterval if zero).
+// "Recently" is defined as UpdatedAt within peerSeenWindow (or 2× BalancerGossipInterval if zero).
 func (p *BalancerProposer) warmupComplete(peers []string) bool {
-	if time.Since(p.startedAt) >= p.cfg.WarmupTimeout {
+	if time.Since(p.startedAt) >= p.clusterCfg.BalancerWarmupTimeout() {
 		return true
 	}
-	window := p.cfg.PeerSeenWindow
+	window := p.peerSeenWindow
 	if window == 0 {
-		window = 2 * p.cfg.GossipInterval
+		window = 2 * p.clusterCfg.BalancerGossipInterval()
 	}
 	for _, peerID := range peers {
 		ns, ok := p.store.Get(peerID)

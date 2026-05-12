@@ -45,10 +45,38 @@ type AlertsState struct {
 // failure callback is captured here so the state can record the last failed
 // alert for the Force Resend button.
 func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.DegradedConfig) *AlertsState {
-	s := &AlertsState{}
-	s.dispatcher = alerts.NewDispatcher(webhookURL, opts, func(a alerts.Alert, err error) {
-		s.recordFailure(a, err)
+	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
+		return alerts.NewDispatcher(webhookURL, opts, func(a alerts.Alert, err error) {
+			s.recordFailure(a, err)
+		})
 	})
+}
+
+// NewAlertsStateWithConfig builds an AlertsState whose dispatcher reads its
+// webhook URL + wrapped secret from cfg on every Send. This is the production
+// wiring used by serveruntime — a cluster-config PATCH that flips the URL or
+// rotates the secret takes effect on the next alert without a process restart.
+//
+// cfg must not be nil; enc may be nil (in which case the secret is treated as
+// disabled even if the wrapped blob is populated, matching the static
+// empty-secret path).
+func NewAlertsStateWithConfig(
+	cfg alerts.AlertCfgReader,
+	enc alerts.SecretDecrypter,
+	secretAAD []byte,
+	opts alerts.Options,
+	trackerCfg alerts.DegradedConfig,
+) *AlertsState {
+	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
+		return alerts.NewDispatcherWithConfig(cfg, enc, secretAAD, opts, func(a alerts.Alert, err error) {
+			s.recordFailure(a, err)
+		})
+	})
+}
+
+func newAlertsStateFromDispatcher(trackerCfg alerts.DegradedConfig, build func(*AlertsState) *alerts.Dispatcher) *AlertsState {
+	s := &AlertsState{}
+	s.dispatcher = build(s)
 	// When the tracker trips into hold mode, send a critical webhook so
 	// the on-call human knows the system is being held degraded for them.
 	// Fire the send in a goroutine: OnHold already runs outside the tracker

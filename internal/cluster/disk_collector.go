@@ -20,13 +20,14 @@ const (
 	DiskLevelCritical DiskThresholdLevel = "critical"
 )
 
-// Default warning thresholds — tuneable via SetThresholds. 80% / 90% match
-// the design doc's predictive-warning spec; tuning to lower values gives
-// earlier signal at the cost of more frequent transitions.
-const (
-	defaultDiskWarnPct     = 80.0
-	defaultDiskCriticalPct = 90.0
-)
+// DiskCfgReader is the minimal cluster-config surface the disk collector reads
+// at every collect tick so threshold rotations land without a process restart.
+// *cluster.ClusterConfig satisfies this contract; the values are fractions in
+// (0, 1] (e.g. 0.80 = 80% disk used).
+type DiskCfgReader interface {
+	DiskWarnFrac() float64
+	DiskCriticalFrac() float64
+}
 
 // DiskCollector periodically reads local disk stats and updates the NodeStatsStore.
 type DiskCollector struct {
@@ -37,12 +38,17 @@ type DiskCollector struct {
 	mu       sync.RWMutex
 	statFunc func(dir string) (usedPct float64, availBytes uint64)
 
+	// cfg is the live cluster-config view; thresholds are read every tick so
+	// PATCH /v1/cluster/config takes effect without restart. nil disables the
+	// threshold callback entirely (used by the standalone balancer collector
+	// which never sets OnThreshold).
+	cfg DiskCfgReader
+
 	// Threshold callback. Fires once per transition between OK/Warn/Critical
 	// levels — does NOT spam every tick while above threshold. Set via
 	// SetOnThreshold before Run().
 	onThreshold func(level DiskThresholdLevel, pct float64, availBytes uint64)
-	warnPct     float64
-	criticalPct float64
+
 	// lastLevel is read+written from the same goroutine (collect loop) so an
 	// atomic.Value is overkill — simple field is fine. Kept under mu for the
 	// rare external Reset() use cases (tests).
@@ -50,15 +56,16 @@ type DiskCollector struct {
 }
 
 // NewDiskCollector creates a collector for nodeID reading disk stats from dataDir.
-func NewDiskCollector(nodeID, dataDir string, store *NodeStatsStore, interval time.Duration) *DiskCollector {
+// cfg provides live warn/critical thresholds; pass nil to disable threshold
+// callbacks (e.g. when the collector is used only for stats gossip).
+func NewDiskCollector(nodeID, dataDir string, store *NodeStatsStore, interval time.Duration, cfg DiskCfgReader) *DiskCollector {
 	return &DiskCollector{
-		nodeID:      nodeID,
-		dataDir:     dataDir,
-		store:       store,
-		interval:    interval,
-		statFunc:    sysDiskStat,
-		warnPct:     defaultDiskWarnPct,
-		criticalPct: defaultDiskCriticalPct,
+		nodeID:   nodeID,
+		dataDir:  dataDir,
+		store:    store,
+		interval: interval,
+		statFunc: sysDiskStat,
+		cfg:      cfg,
 	}
 }
 
@@ -75,17 +82,6 @@ func (d *DiskCollector) SetStatFunc(f func(string) (float64, uint64)) {
 // goroutine if it makes blocking calls like webhook delivery).
 func (d *DiskCollector) SetOnThreshold(fn func(level DiskThresholdLevel, pct float64, availBytes uint64)) {
 	d.onThreshold = fn
-}
-
-// SetThresholds overrides the default warn/critical disk-used percentages.
-// Call before Run(). Validates ordering (warn ≤ critical); silently ignores
-// invalid input rather than panicking on operator typo.
-func (d *DiskCollector) SetThresholds(warnPct, criticalPct float64) {
-	if warnPct <= 0 || warnPct > 100 || criticalPct <= 0 || criticalPct > 100 || warnPct > criticalPct {
-		return
-	}
-	d.warnPct = warnPct
-	d.criticalPct = criticalPct
 }
 
 // Run starts the collection loop. Blocks until ctx is cancelled.
@@ -128,18 +124,21 @@ func (d *DiskCollector) collect() {
 }
 
 // fireThresholdIfChanged fires onThreshold exactly once per OK↔Warn↔Critical
-// transition. A sample exactly at criticalPct counts as critical; at warnPct
-// counts as warn. Lower-bound transitions (e.g. critical→warn) also fire so
-// the operator sees recovery progress.
+// transition. Thresholds are re-read from cfg each tick so cluster-config
+// PATCH lands without restart. A sample exactly at criticalPct counts as
+// critical; at warnPct counts as warn. Lower-bound transitions (e.g.
+// critical→warn) also fire so the operator sees recovery progress.
 func (d *DiskCollector) fireThresholdIfChanged(usedPct float64, availBytes uint64) {
-	if d.onThreshold == nil {
+	if d.onThreshold == nil || d.cfg == nil {
 		return
 	}
+	warnPct := d.cfg.DiskWarnFrac() * 100
+	criticalPct := d.cfg.DiskCriticalFrac() * 100
 	var level DiskThresholdLevel
 	switch {
-	case usedPct >= d.criticalPct:
+	case usedPct >= criticalPct:
 		level = DiskLevelCritical
-	case usedPct >= d.warnPct:
+	case usedPct >= warnPct:
 		level = DiskLevelWarn
 	default:
 		level = DiskLevelOK

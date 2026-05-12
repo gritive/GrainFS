@@ -43,6 +43,7 @@ const (
 	MetaCmdTypeIAMBucketUpstreamDelete MetaCmdType = 33
 	MetaCmdTypeBucketLifecyclePut      MetaCmdType = 34
 	MetaCmdTypeBucketLifecycleDelete   MetaCmdType = 35
+	MetaCmdTypeClusterConfigPatch      MetaCmdType = 36
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -82,6 +83,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeIAMBucketUpstreamDelete: "IAMBucketUpstreamDelete",
 	MetaCmdTypeBucketLifecyclePut:      "BucketLifecyclePut",
 	MetaCmdTypeBucketLifecycleDelete:   "BucketLifecycleDelete",
+	MetaCmdTypeClusterConfigPatch:      "ClusterConfigPatch",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -121,6 +123,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"IAMBucketUpstreamDelete": MetaCmdTypeIAMBucketUpstreamDelete,
 	"BucketLifecyclePut":      MetaCmdTypeBucketLifecyclePut,
 	"BucketLifecycleDelete":   MetaCmdTypeBucketLifecycleDelete,
+	"ClusterConfigPatch":      MetaCmdTypeClusterConfigPatch,
 }
 
 func (v MetaCmdType) String() string {

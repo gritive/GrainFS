@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -208,6 +209,18 @@ type MetaFSM struct {
 	// lifecycleStore is wired via SetLifecycle. nil = lifecycle commands return
 	// an error (not configured).
 	lifecycleStore *lifecycle.Store
+
+	// clusterCfg holds the cluster-wide policy snapshot. Initialised to an
+	// empty ClusterConfig (defaults) in NewMetaFSM; mutated only from the FSM
+	// apply goroutine via applyClusterConfigPatch / Restore. Consumers read
+	// lock-free via atomic.Pointer.
+	clusterCfg *ClusterConfig
+
+	// encryptor is used to gate cluster-config patches that carry a wrapped
+	// alert-webhook secret. nil = --no-encryption mode; such patches are
+	// rejected at apply time (see applyClusterConfigPatch). Wired via
+	// SetEncryptor before the raft log starts replaying.
+	encryptor *encrypt.Encryptor
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -222,8 +235,13 @@ func NewMetaFSM() *MetaFSM {
 		icebergTables:     make(map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
 		iamStore:          iam.NewStore(),
+		clusterCfg:        NewClusterConfig(),
 	}
 }
+
+// ClusterConfig returns the cluster-wide policy snapshot. Read-only; consumers
+// call its getters at use-time. Safe for concurrent reads.
+func (f *MetaFSM) ClusterConfig() *ClusterConfig { return f.clusterCfg }
 
 // SetIAM wires the IAM Applier into the MetaFSM. Must be called before the
 // raft log starts replaying; set alongside the Encryptor used to decrypt
@@ -237,6 +255,19 @@ func (f *MetaFSM) SetIAM(store *iam.Store, applier *iam.Applier) {
 
 // IAMStore returns the IAM Store for read access (auth checks, bootstrap shim).
 func (f *MetaFSM) IAMStore() *iam.Store { return f.iamStore }
+
+// SetEncryptor wires the cluster-wide encryptor used to gate cluster-config
+// patches carrying wrapped secrets. Must be called before the raft log starts
+// replaying. nil = --no-encryption mode; cluster-config patches with a wrapped
+// secret will be rejected at apply.
+func (f *MetaFSM) SetEncryptor(e *encrypt.Encryptor) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.encryptor = e
+}
+
+// Encryptor returns the registered encryptor (nil in --no-encryption mode).
+func (f *MetaFSM) Encryptor() *encrypt.Encryptor { return f.encryptor }
 
 // SetLifecycle wires the lifecycle store into the MetaFSM. Must be called
 // before raft Start so apply does not race with replay.
@@ -356,6 +387,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyBucketLifecyclePut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketLifecycleDelete:
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeClusterConfigPatch:
+		return f.applyClusterConfigPatch(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -1468,6 +1501,13 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
 	objectIndexVec := buildMetaObjectIndexEntriesVector(b, objectEntries)
 
+	// ClusterConfig: serialize the wrapper's current snap into a stand-alone
+	// FBS buffer and embed it as a [ubyte] vector. Always emit — the inner
+	// buffer is small (~tens of bytes) and a zero-rev empty config round-trips
+	// to the same zero clusterConfigSnap on Restore.
+	ccBytes := serializeClusterConfig(f.clusterCfg)
+	clusterConfigVec := b.CreateByteVector(ccBytes)
+
 	clusterpb.MetaStateSnapshotStart(b)
 	clusterpb.MetaStateSnapshotAddNodes(b, nodesVec)
 	clusterpb.MetaStateSnapshotAddShardGroups(b, sgVec)
@@ -1479,6 +1519,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, icebergNamespaceVec)
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
+	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -1679,6 +1720,20 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
+	// ClusterConfig: decode the embedded FBS blob and atomically swap into
+	// f.clusterCfg via ReplaceSnap so the outer *ClusterConfig handle held
+	// by consumers (e.g. balancer, alerts, disk monitor) stays valid across
+	// snapshot install. Empty/missing blob (legacy pre-Slice-1 snapshots)
+	// leaves the existing clusterCfg untouched.
+	var newClusterCfgSnap *clusterConfigSnap
+	if snap.ClusterConfigLength() > 0 {
+		cs, err := deserializeClusterConfig(snap.ClusterConfigBytes())
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode cluster config: %w", err)
+		}
+		newClusterCfgSnap = cs
+	}
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
@@ -1691,6 +1746,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.icebergTables = newIcebergTables
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
+
+	if newClusterCfgSnap != nil {
+		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
+	}
 	if cb != nil {
 		for bucket, groupID := range newBucketAssignments {
 			cb(bucket, groupID)
