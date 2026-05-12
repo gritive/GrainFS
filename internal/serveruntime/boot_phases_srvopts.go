@@ -66,6 +66,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		cluster.ClusterConfigAlertSecretAAD,
 		alerts.Options{},
 		alerts.DegradedConfig{},
+		"cluster",
 	)
 
 	// Wire predictive disk warnings into the collector now that clusterAlerts

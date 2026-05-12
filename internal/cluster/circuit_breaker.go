@@ -4,21 +4,23 @@ import "sync"
 
 // circuitBreaker is a 2-state (open/closed) gate per destination node.
 // open = disk is full, reject writes; closed = allow writes.
-// threshold is in percent (e.g. 0.90 means 90%).
+//
+// Threshold is NOT stored on the breaker — it lives in ClusterConfig
+// (single source of truth, hot-reloadable). update() takes the threshold
+// per call so a cluster_config PATCH reaches existing breakers on the next
+// syncCB tick (state minimization: threshold is a derived value, not cached).
 type circuitBreaker struct {
-	mu        sync.RWMutex
-	open      bool
-	threshold float64 // percent threshold [0,100) — open when DiskUsedPct >= threshold*100
+	mu   sync.RWMutex
+	open bool
 }
 
-func newCircuitBreaker(thresholdFraction float64) *circuitBreaker {
-	return &circuitBreaker{threshold: thresholdFraction * 100}
-}
+func newCircuitBreaker() *circuitBreaker { return &circuitBreaker{} }
 
-// update recalculates open/closed from the latest gossip stats.
-func (cb *circuitBreaker) update(ns NodeStats) {
+// update recalculates open/closed from the latest gossip stats against the
+// caller-supplied threshold (percent, e.g. 85.0 for 85%).
+func (cb *circuitBreaker) update(ns NodeStats, thresholdPct float64) {
 	cb.mu.Lock()
-	cb.open = ns.DiskUsedPct >= cb.threshold
+	cb.open = ns.DiskUsedPct >= thresholdPct
 	cb.mu.Unlock()
 }
 

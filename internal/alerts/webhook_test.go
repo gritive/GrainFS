@@ -241,7 +241,7 @@ func TestWebhook_HotReload_URL(t *testing.T) {
 	srv, captured, mu := stubReceiver(t, http.StatusOK)
 	cfg := &fakeAlertCfg{}
 
-	d := alerts.NewDispatcherWithConfig(cfg, nil, nil, alerts.Options{}, nil)
+	d := alerts.NewDispatcherWithConfig(cfg, nil, nil, alerts.Options{}, nil, "test")
 
 	// Empty URL → Send is a no-op, no request reaches the receiver.
 	require.NoError(t, d.Send(alerts.Alert{Type: "t", Severity: alerts.SeverityWarning, Message: "m1"}))
@@ -266,7 +266,7 @@ func TestWebhook_HotReload_Secret(t *testing.T) {
 	cfg := &fakeAlertCfg{url: srv.URL}
 	dec := &fakeDecrypter{plaintext: []byte("rotated-secret")}
 
-	d := alerts.NewDispatcherWithConfig(cfg, dec, []byte("aad"), alerts.Options{}, nil)
+	d := alerts.NewDispatcherWithConfig(cfg, dec, []byte("aad"), alerts.Options{}, nil, "test")
 
 	// No wrapped secret yet → no signature header (matches static empty-secret).
 	require.NoError(t, d.Send(alerts.Alert{Type: "t1", Severity: alerts.SeverityWarning, Resource: "r1", Message: "m"}))

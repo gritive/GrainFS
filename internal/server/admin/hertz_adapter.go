@@ -22,6 +22,7 @@ type router interface {
 // RegisterAdmin wires the admin handlers under the `/v1/...` prefix on the
 // given Hertz instance. This is what the Unix-socket admin server calls.
 func RegisterAdmin(h *server.Hertz, d *Deps) {
+	h.Use(peerCredMiddleware())
 	g := h.Group("/v1")
 	registerVolume(g, d)
 	registerSnapshot(g, d)

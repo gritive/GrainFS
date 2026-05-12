@@ -7,12 +7,14 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/network/standard"
+	"github.com/rs/zerolog/log"
 )
 
 // Config configures the admin Unix-socket server.
@@ -81,9 +83,20 @@ func Start(cfg Config) (*Server, error) {
 		}
 	}
 
+	// Wrap the raw UDS listener so every accepted conn carries the resolved
+	// peer ucred in its RemoteAddr() as a *peerCredAddr. The peerCred Hertz
+	// middleware (installed in RegisterAdmin) type-asserts on this to attach
+	// PeerCredValue to the per-request context. Failure to resolve credentials
+	// is non-fatal (audit-only, not authorization).
+	pcl := newPeerCredListener(ln)
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		log.Warn().Str("event", "peercred_unsupported").Str("os", runtime.GOOS).
+			Msg("admin UDS peercred unsupported on this OS; audit log actor_uid will be unresolved")
+	}
+
 	transporter := standard.NewTransporter
 	h := server.New(
-		server.WithListener(ln),
+		server.WithListener(pcl),
 		server.WithTransport(transporter),
 		server.WithHostPorts(""),
 	)

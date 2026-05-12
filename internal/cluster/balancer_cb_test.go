@@ -13,7 +13,7 @@ func TestTickOnce_CBUpdatesFromStoreGetAll(t *testing.T) {
 	store := NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1"}, state: 2}
 	cfg := testBalancerConfig()
-	cfg.cbThreshold = 0.90
+	cfg.cbThreshold.Store(0.90)
 
 	p := NewBalancerProposer("self", store, node, cfg)
 	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second) // skip warmup
@@ -35,8 +35,8 @@ func TestTickOnce_AllDstsCBOpen_NoProposal(t *testing.T) {
 	store := NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1", "n2"}, state: 2}
 	cfg := testBalancerConfig()
-	cfg.cbThreshold = 0.90
-	cfg.imbalanceTriggerPct = 5 // easily triggered
+	cfg.cbThreshold.Store(0.90)
+	cfg.imbalanceTriggerPct.Store(5.0) // easily triggered
 
 	p := NewBalancerProposer("self", store, node, cfg)
 	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second)
@@ -58,8 +58,8 @@ func TestTickOnce_CBOpenSkipsDst(t *testing.T) {
 	store := NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1", "n2"}, state: 2}
 	cfg := testBalancerConfig()
-	cfg.cbThreshold = 0.90
-	cfg.imbalanceTriggerPct = 5
+	cfg.cbThreshold.Store(0.90)
+	cfg.imbalanceTriggerPct.Store(5.0)
 
 	p := NewBalancerProposer("self", store, node, cfg)
 	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second)

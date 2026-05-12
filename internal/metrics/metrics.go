@@ -427,6 +427,11 @@ var (
 		Help: "Webhook deliveries that exhausted all retries.",
 	})
 
+	WebhookSignatureDecryptFailureTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_webhook_signature_decrypt_failure_total",
+		Help: "Webhook signing-secret decrypt failures, partitioned by alert dispatcher kind and error class. Indicates a stale wrapped-secret after cluster rotate-key; alerts continue to deliver unsigned.",
+	}, []string{"alert_kind", "err_class"})
+
 	// Raft snapshot operator metrics.
 	RaftSnapshotTriggerTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_raft_snapshot_trigger_total",

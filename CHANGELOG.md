@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.160.0] - 2026-05-12 — cluster-config v1.1 hardening (peerUID + webhook loud-fail + CB hot-reload + deferred tests)
+
+Slice 1 (PR #305, v0.0.155.0)의 cluster-wide config가 출하한 4가지 deferred 항목을 모두 해결. ACL/eager rewrap 등 spec out-of-scope 항목은 별도 슬라이스로 분리.
+
+### Changed
+- **Admin UDS audit log에 실제 peer uid 기록.** `peerCredListener`가 admin UDS conn을 wrap해서 `SO_PEERCRED` (linux) / `LOCAL_PEERCRED` (darwin)로 ucred를 읽고, Hertz 미들웨어가 `*peerCredAddr` typed addr를 통해 `WithPeerCred(ctx, ...)`로 context에 전파. `cluster_config_patch_received` 감사 로그가 이제 `actor_uid` + `actor_uid_resolved` 필드를 emit. FreeBSD/Windows 빌드는 `actor_uid_resolved:false`로 영구 표시 + boot 시 `peercred_unsupported` warn.
+- **Webhook signature decrypt 실패 가시화.** `Dispatcher.resolveLive`가 `DecryptWithAAD` 실패 시 `grainfs_webhook_signature_decrypt_failure_total{alert_kind,err_class}` 카운터 증가 + 1분당 1회로 rate-limit된 warn 로그 emit. Alert 전송은 unsigned로 계속 진행 (DoS-by-rotation 방지). `classifyDecryptErr`가 실제 encrypt 패키지의 AEAD 태그 실패 메시지 (`"message authentication failed"`)를 `aad_mismatch`로 분류.
+- **BalancerCBThreshold 핫리로드가 기존 breaker에 도달.** `circuitBreaker`에서 threshold 필드 제거 (state minimization) — `update(ns, thresholdPct)`가 호출당 threshold를 인자로 받음. `syncCB`는 매 gossip tick에서 `clusterCfg.BalancerCBThreshold() * 100`을 다시 읽음. Slice 1이 유일하게 핫리로드 no-op이었던 키가 이제 동작.
+- **`BalancerProposer.active`/`tickCount`를 atomic으로 변환** — `atomic.Bool`/`atomic.Int64`로 race-clean. 테스트 fake (`fakeBalancerCfg`)의 hot-reload 가능한 필드도 `atomic.Value`로 wrap. `go test -race ./internal/cluster/...` clean pass.
+
+### Added
+- **Audit integration test** (`internal/clusteradmin/cluster_config_handler_audit_test.go`, linux/darwin only): admin UDS dial → PATCH → 감사 로그가 `os.Getuid()` + `actor_uid_resolved:true` 캐리하는지 검증.
+- **Webhook decrypt-failure tests** (`internal/alerts/webhook_decrypt_failure_test.go`): 단일 실패 → metric+log+unsigned delivery 검증, 100-burst → metric=100/log=1 rate-limit 검증, 실제 `*encrypt.Encryptor` key-rotation classification 검증, bounded-enum cardinality 보호.
+- **CB threshold hot-reload tests**: `circuitBreaker` 단위 (`circuit_breaker_test.go::TestCircuitBreaker_ThresholdHotReloadAcrossUpdates`) + `BalancerProposer.syncCB` 통합 (`balancer_cb_threshold_test.go`).
+- **BalancerImbalanceTriggerPct 핫리로드 테스트** (`balancer_hot_reload_test.go`): trigger를 낮추면 같은 imbalance에서도 `Active()`가 `true`로 전환되는지 검증.
+- **AlertWebhook URL+secret 핫리로드 테스트** (`internal/server/alerts_api_hot_reload_test.go`): real `*cluster.MetaFSM` + real `*encrypt.Encryptor` + 두 `httptest.Server` receiver로 회전 후 새 secret HMAC 서명 일치 검증. 계획상 e2e 형태에서 integration 형태로 다운스코프 (cluster boot 비용 회피, 동일 코드 경로 커버).
+
+### Notes
+- `DiskWarnThreshold` 핫리로드 검증은 Slice 1의 `TestDiskCollector_Threshold_HotReload` (PR #305에 동봉)이 이미 커버 — 추가 코드 불필요.
+- `cluster rotate-key` eager rewrap (spec의 (e) 항목)은 별도 슬라이스로 분리 — secret 종류별 rewrap 정책, 백그라운드 워커, 진행률 보고, 실패 복구 등 설계 공간이 별개.
+- ACL/uid 화이트리스트는 이 슬라이스 범위 밖 — peerUID는 audit-only이며 authorization은 admin UDS group ownership (0660 + chown :admin) 유지.
+
 ## [0.0.159.0] - 2026-05-12 — refactor(cluster): EC object writer owns the full data path
 
 ### Changed
