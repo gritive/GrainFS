@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.166.0] - 2026-05-13 — feat(cluster): runtime UDS join + .join-pending boot simplification
+
+클러스터 join 워크플로우 단순화. 모든 노드가 동일한 `grainfs serve` 명령으로 기동.
+새 노드 추가는 런타임 UDS admin API(`grainfs join <peer>`)로 단일 명령 처리.
+
+### Added
+- `grainfs join <peer> [--endpoint <sock>]`: 실행 중인 노드에 join을 요청하는 새 CLI 명령.
+  - UDS admin socket으로 `POST /v1/cluster/join`을 호출.
+  - 이미 멀티노드 클러스터 멤버 → `already_member` no-op.
+  - peer가 자기 자신 → `already_member` no-op.
+  - solo 상태 → `.join-pending` 파일 기록 후 graceful restart 트리거.
+- `POST /v1/cluster/join` admin UDS 엔드포인트 (`JoinHandler`).
+- `clusterNodes` 인터페이스: `JoinHandler`가 클러스터 멤버십을 조회하는 minimal 인터페이스 (production: `*cluster.MetaRaft`, test: `fakeClusterNodes`).
+- `.join-pending` 파일 기반 부팅 시 join 감지: `grainfs serve` 시작 시 데이터 디렉터리에 파일이 있으면 자동으로 join 모드로 진입.
+- `wipeSoloRaftState()`: join 전 solo Raft 상태를 `.pre-join-backup`으로 이동 (롤백 가능).
+- e2e 테스트: `TestE2E_Bootstrap_JoinUDS_AlreadyMember`, `TestE2E_Bootstrap_JoinCLI_Idempotent`.
+
+### Removed
+- `grainfs serve --peers <addr,...>`: 다중 노드 정적 피어 목록 플래그 제거.
+- `grainfs serve --join <addr>`: serve 시 즉시 join 플래그 제거.
+- `grainfs cluster join`: 별도 프로세스로 join하던 서브커맨드 제거. `grainfs join`으로 대체.
+
+### Changed
+- `grainfs serve`: 모든 노드가 동일한 명령으로 기동. 시드 노드와 팔로워 노드 구분 없음.
+  - 기존 Raft 상태 존재 → 재연결 모드.
+  - Raft 상태 없음 + `.join-pending` 없음 → solo bootstrap.
+  - `.join-pending` 존재 → join 모드 (한 번만 처리 후 파일 삭제).
+
+### Deferred (follow-up PR)
+- Phase 1.3: `clusterMode` 항상 `true` 고정 (solo 부팅 시에도 `--cluster-key` 필수화). 단위 테스트 ~18개 + e2e 인프라 수정 범위.
+- Phase 3.2: solo 노드에 사용자 데이터 있을 때 `--force` 없이 join 방지 가드.
+
 ## [0.0.165.0] - 2026-05-13 — feat(reshard): separate ring-reshard-interval from reshard-interval
 
 ring reshard(EC 오브젝트 ring topology 마이그레이션)를 EC reshard(N×→EC 변환/프로파일 업그레이드)에서 분리.
