@@ -47,8 +47,6 @@ func TestE2E_NBDMultiNode_ByteLevelReplication(t *testing.T) {
 	client.Flush(t)
 	requireNBDReadEventually(t, client, 0, body)
 
-	t.Skip("physical byte-level fanout assertion requires pre-join multi-voter shard groups; raft-v2 static e2e now boots via join-mode single-voter seed groups")
-
 	// Poll up to 10s for replication fan-out. FLUSH commits the write-back
 	// mutation, but peer fan-out can still settle asynchronously.
 	var (
