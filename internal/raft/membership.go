@@ -1,597 +1,738 @@
 package raft
 
 import (
-	"context"
-	"errors"
+	"fmt"
 	"time"
-
-	flatbuffers "github.com/google/flatbuffers/go"
-
-	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 )
 
-var (
-	ErrConfChangeInProgress           = errors.New("raft: another config change is already in progress")
-	ErrMixedVersionNoMembershipChange = errors.New("raft: membership change rejected during mixed-version operation")
-)
-
-// LogEntryType distinguishes normal FSM commands from Raft protocol entries.
-// Values match the FlatBuffers LogEntryType enum (default 0 = Command, backward-compatible).
-type LogEntryType int8
-
-const (
-	LogEntryCommand         LogEntryType = 0
-	LogEntryConfChange      LogEntryType = 1
-	LogEntryJointConfChange LogEntryType = 2 // reserved; not implemented
-	LogEntryNoOp            LogEntryType = 3
-	LogEntrySnapshot        LogEntryType = 4
-)
-
-// ConfChangeOp is the membership change operation.
-// Values match the FlatBuffers ConfChangeOp enum.
-type ConfChangeOp int8
-
-const (
-	ConfChangeAddVoter    ConfChangeOp = 0
-	ConfChangeRemoveVoter ConfChangeOp = 1
-	ConfChangeAddLearner  ConfChangeOp = 2
-	ConfChangePromote     ConfChangeOp = 3
-)
-
-// ConfChangePayload is the decoded in-memory representation of a membership change.
-type ConfChangePayload struct {
-	Op             ConfChangeOp
-	ID             string
-	Address        string
-	ManagedByJoint bool // PR-K3: true if ChangeMembership added this learner
-}
-
-// encodeConfChange serializes a membership change for use as LogEntry.Command.
-// managedByJoint is true for learners added by ChangeMembership (PR-K3).
-func encodeConfChange(p ConfChangePayload) []byte {
-	b := flatbuffers.NewBuilder(128)
-	idOff := b.CreateString(p.ID)
-	addrOff := b.CreateString(p.Address)
-	pb.ConfChangeEntryStart(b)
-	pb.ConfChangeEntryAddOp(b, pb.ConfChangeOp(p.Op))
-	pb.ConfChangeEntryAddServerId(b, idOff)
-	pb.ConfChangeEntryAddServerAddress(b, addrOff)
-	pb.ConfChangeEntryAddManagedByJoint(b, p.ManagedByJoint)
-	root := pb.ConfChangeEntryEnd(b)
-	pb.FinishConfChangeEntryBuffer(b, root)
-	return b.FinishedBytes()
-}
-
-// decodeConfChange deserializes a ConfChangePayload from LogEntry.Command bytes.
-func decodeConfChange(data []byte) ConfChangePayload {
-	e := pb.GetRootAsConfChangeEntry(data, 0)
-	return ConfChangePayload{
-		Op:             ConfChangeOp(e.Op()),
-		ID:             string(e.ServerId()),
-		Address:        string(e.ServerAddress()),
-		ManagedByJoint: e.ManagedByJoint(),
-	}
-}
-
-// AddVoter proposes adding a new full voting member to the cluster.
-// Performs learner-first: AddLearner → wait catch-up → PromoteToVoter automatically.
-// Idempotent if the node is already a voter (returns nil immediately).
-func (n *Node) AddVoter(id, addr string) error {
-	return n.AddVoterCtx(context.Background(), id, addr)
-}
-
-// AddVoterCtx is AddVoter with an explicit context for cancellation/timeout.
+// handleConfChange processes an AddVoter / RemoveVoter request submitted via
+// cmdCh. Implements Raft §4.3 phase 1: validate, build Cnew, append a
+// LogEntryJointConfChange (Cold ∪ Cnew), update the in-memory effective
+// config to joint, and dispatch replication. The caller's reply channel is
+// stored in n.st.pendingConfChange and resolved when phase 2 commits.
 //
-// Sequence:
-//  1. Pre-check: if id (or addr) is already in config.Peers, return nil (idempotent).
-//  2. Propose AddLearner ConfChange and wait for commit.
-//  3. Register a per-id promote channel and wait until apply loop closes it
-//     (PromoteToVoter committed by the leader watcher).
+// Validation:
+//   - Must be Leader (ErrNotLeader).
+//   - At most one in-flight membership change. If pendingConfChange is set,
+//     or if the latest config entry is not yet committed, reject with
+//     ErrConfChangeInFlight (mirrors hashicorp/raft's pragmatic rule).
+//   - AddVoter: id must NOT already be a voter. RemoveVoter: id MUST already
+//     be a voter (otherwise the change is a no-op and the operator probably
+//     made a typo — surface the error rather than silently succeed).
+func (n *Node) handleConfChange(cmd command) {
+	if n.st.state != Leader {
+		cmd.ccReply <- confChangeResult{err: ErrNotLeader}
+		return
+	}
+	// M6.0 Path B in-flight gate: a single-phase ConfChange (AddLearner /
+	// PromoteStage1) or a queued PromoteToVoter chain is also exclusive
+	// with a fresh joint change. The three-way check prevents a race
+	// where a Promote stage-2 (joint) starts inside the actor while a
+	// caller submits AddVoter for the same target.
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	// Refuse if the previous membership change has not yet committed —
+	// guards against pipelining edge cases where a second change races
+	// the first's final ConfChange entry to commit.
+	if n.st.appendedConfigIndex > n.st.commitIndex {
+		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	// Defense-in-depth: becomeLeader now rebuilds pendingConfChange from
+	// log replay via recoverInFlightJoint, so the pendingConfChange != nil
+	// gate above will normally catch a half-finished joint. This branch
+	// remains as a last-resort guard against a hypothetical state where
+	// currentConfig.joint is set but recovery did not synthesize a pending
+	// entry (e.g. the joint log entry was truncated below our window). In
+	// that case we still cannot safely start a fresh change — refuse.
+	if n.st.currentConfig.joint {
+		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+
+	old := append([]string(nil), n.st.currentConfig.voters...)
+	newV, err := buildNextVoters(old, cmd.ccID, cmd.ccAdd)
+	if err != nil {
+		cmd.ccReply <- confChangeResult{err: err}
+		return
+	}
+
+	jointIdx := n.st.lastLogIndex() + 1
+	jointEntry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   jointIdx,
+		Type:    LogEntryJointConfChange,
+		Command: encodeJointConfChange(old, newV),
+	}
+	if err := n.st.log.Append([]LogEntry{jointEntry}); err != nil {
+		panic("raftv2: handleConfChange: Append joint: " + err.Error())
+	}
+
+	// Push the prior config onto the history stack BEFORE swapping in the
+	// joint config so a later truncation can revert exactly. Then swap
+	// currentConfig to the joint state — per Raft §4.3, a server uses the
+	// configuration in the most recent log entry it has appended, even
+	// while uncommitted.
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: jointIdx,
+		prev:     prev,
+	})
+	n.st.currentConfig = newJointConfig(old, newV)
+	n.st.appendedConfigIndex = jointIdx
+	n.st.invalidatePeerSet()
+
+	// On entering the joint state, peers may have grown (Cnew adds). Add
+	// any newcomers to the leader's per-peer replication maps so the next
+	// dispatch can address them. nextIndex starts at lastLogIndex+1 which
+	// is the joint entry's index + 1; matchIndex stays at 0 until we get a
+	// successful AE reply. Existing peers keep their tracked indices.
+	last := n.st.lastLogIndex()
+	for _, p := range n.st.peerSet() {
+		if _, ok := n.st.nextIndex[p]; !ok {
+			n.st.nextIndex[p] = last + 1
+			n.st.matchIndex[p] = 0
+			n.st.peerInFlight[p] = false
+			n.st.peerLastRound[p] = 0
+		}
+	}
+
+	n.st.pendingConfChange = &pendingConfChange{
+		jointIndex: jointIdx,
+		newVoters:  newV,
+		reply:      cmd.ccReply,
+	}
+
+	n.publish()
+
+	// Solo-voter → multi-voter transition: the previous becomeLeader skipped
+	// the heartbeat ticker for an empty peer set, so start one now.
+	if n.heartbeatTicker == nil && len(n.st.peerSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+
+	// Solo-leader edge case: if Cold = {self} (e.g. AddVoter on a 1-node
+	// cluster) the joint quorum reduces to "self approves" because Cold
+	// majority is just self. The shared maybeAdvanceCommitIndex handles
+	// that correctly via commitOK. Cnew majority still requires self plus
+	// any added voter to ack — so this only commits the joint entry inline
+	// when adding to a degenerate cluster (rare). Normal case: peers
+	// catch up on the broadcast above and commit advances on heartbeat
+	// reply.
+	n.maybeAdvanceCommitIndex()
+}
+
+// advanceConfChangePhase drives the in-flight membership change forward.
+// Called from applyCommitted after every commitIndex advance. Idempotent.
 //
-// Failure modes: ErrNotLeader (caller on follower), ErrMixedVersionNoMembershipChange,
-// ErrConfChangeInProgress (concurrent), ctx.Err() (timeout — learner remains).
-func (n *Node) AddVoterCtx(ctx context.Context, id, addr string) error {
-	// 0. Already-voter pre-check (idempotent, prevents voter→learner regression)
-	n.mu.Lock()
-	for _, p := range n.config.Peers {
-		if p == id || p == addr {
-			n.mu.Unlock()
-			return nil
-		}
-	}
-	n.mu.Unlock()
-
-	// 1. AddLearner (proposeConfChangeWait checks ErrNotLeader / MixedVersion / ConfChangeInProgress)
-	if err := n.proposeConfChangeWait(ctx, ConfChangeAddLearner, id, addr, false); err != nil {
-		return err
-	}
-
-	// 2. Register promote notification channel
-	promoteCh := make(chan struct{})
-	n.mu.Lock()
-	n.learnerPromoteCh[id] = promoteCh
-	_, isStillLearner := n.learnerIDs[id]
-	n.mu.Unlock()
-
-	if !isStillLearner {
-		// Promoted between AddLearner commit and registration — cleanup and return.
-		n.mu.Lock()
-		delete(n.learnerPromoteCh, id)
-		n.mu.Unlock()
-		return nil
-	}
-
-	// 3. Wait for promote commit (apply loop closes promoteCh on commit-time)
-	defer func() {
-		n.mu.Lock()
-		delete(n.learnerPromoteCh, id)
-		n.mu.Unlock()
-	}()
-
-	select {
-	case <-promoteCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopCh:
-		return ErrProposalFailed
-	}
-}
-
-// RemoveVoter proposes removing a voting member from the cluster.
-func (n *Node) RemoveVoter(id string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangeRemoveVoter, id, "", false)
-}
-
-// AddLearner proposes adding a non-voting observer to the cluster.
-// Learners replicate the log but do not count toward quorum.
-func (n *Node) AddLearner(id, addr string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangeAddLearner, id, addr, false)
-}
-
-// PromoteToVoter promotes a learner to a full voting member.
-func (n *Node) PromoteToVoter(id string) error {
-	return n.proposeConfChangeWait(context.Background(), ConfChangePromote, id, "", false)
-}
-
-// SetMixedVersion marks the cluster as mixed-version, blocking all membership
-// changes until cleared. Call with true when a rolling upgrade is in progress;
-// call with false once all nodes are confirmed to be on the same version.
-func (n *Node) SetMixedVersion(v bool) {
-	n.mu.Lock()
-	n.mixedVersion = v
-	n.mu.Unlock()
-}
-
-// proposeConfChangeWait enforces the single-pending-change invariant and waits
-// for the ConfChange entry to be committed (or context to cancel).
-func (n *Node) proposeConfChangeWait(ctx context.Context, op ConfChangeOp, id, addr string, managedByJoint bool) error {
-	n.mu.Lock()
-	if n.state != Leader {
-		n.mu.Unlock()
-		return ErrNotLeader
-	}
-	if n.mixedVersion {
-		n.mu.Unlock()
-		return ErrMixedVersionNoMembershipChange
-	}
-	if n.pendingConfChangeIndex != 0 {
-		n.mu.Unlock()
-		return ErrConfChangeInProgress
-	}
-	n.mu.Unlock()
-
-	cmd := encodeConfChange(ConfChangePayload{Op: op, ID: id, Address: addr, ManagedByJoint: managedByJoint})
-	doneCh := make(chan proposalResult, 1)
-	p := proposal{command: cmd, entryType: LogEntryConfChange, doneCh: doneCh, ctx: ctx}
-	select {
-	case n.proposalCh <- p:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopCh:
-		return ErrProposalFailed
-	}
-	select {
-	case result := <-doneCh:
-		return result.err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-n.stopCh:
-		return ErrProposalFailed
-	}
-}
-
-// applyConfigChangeLocked applies a ConfChange or JointConfChange entry to
-// config.Peers immediately when the entry is appended (§4.4: "regardless of
-// whether committed"). For JointConfChange this also maintains the §4.3 phase
-// state on every node, including caller wakeup on JointLeave commit.
-// MUST be called with n.mu held.
-func (n *Node) applyConfigChangeLocked(entry LogEntry) {
-	changed := false
-	switch entry.Type {
-	case LogEntryConfChange:
-		changed = n.applyConfChangeLocked(entry)
-	case LogEntryJointConfChange:
-		changed = n.applyJointConfChangeLocked(entry)
-	}
-	if changed {
-		n.publishMembershipViewLocked()
-	}
-}
-
-func (n *Node) applyConfChangeLocked(entry LogEntry) bool {
-	cc := decodeConfChange(entry.Command)
-	// peerKey: data-Raft uses QUIC address; meta-Raft uses nodeID.
-	peerKey := cc.ID
-	if cc.Address != "" {
-		peerKey = cc.Address
-	}
-
-	// A node never lists itself in config.Peers (which is "peers excluding
-	// self") or learnerIDs. Replaying our own AddLearner/Promote (DynamicJoin
-	// catch-up) must be a no-op for the local membership view — otherwise
-	// publishMembershipViewLocked counts self twice (n.id ++ config.Peers)
-	// and quorum inflates.
-	selfRef := cc.ID == n.id || peerKey == n.id
-
-	changed := false
-	switch cc.Op {
-	case ConfChangeAddVoter:
-		if !selfRef {
-			alreadyPresent := false
-			for _, p := range n.config.Peers {
-				if p == peerKey {
-					alreadyPresent = true
-					break
-				}
-			}
-			if !alreadyPresent {
-				n.config.Peers = append(n.config.Peers, peerKey)
-				changed = true
-				if n.state == Leader {
-					n.nextIndex[peerKey] = n.lastLogIdx() + 1
-					n.matchIndex[peerKey] = 0
-				}
-			}
-		}
-
-	case ConfChangeRemoveVoter:
-		peers := make([]string, 0, len(n.config.Peers))
-		found := false
-		for _, p := range n.config.Peers {
-			if p != peerKey {
-				peers = append(peers, p)
-			} else {
-				found = true
-			}
-		}
-		if found {
-			n.config.Peers = peers
-			delete(n.nextIndex, peerKey)
-			delete(n.matchIndex, peerKey)
-			changed = true
-		}
-
-	case ConfChangeAddLearner:
-		if !selfRef {
-			if _, exists := n.learnerIDs[cc.ID]; !exists {
-				n.learnerIDs[cc.ID] = peerKey
-				changed = true
-				if n.state == Leader {
-					n.nextIndex[peerKey] = n.lastLogIdx() + 1
-					n.matchIndex[peerKey] = 0
-				}
-			}
-		}
-		if cc.ManagedByJoint {
-			if n.jointManagedLearners == nil {
-				n.jointManagedLearners = make(map[string]struct{})
-			}
-			if _, exists := n.jointManagedLearners[cc.ID]; !exists {
-				changed = true
-			}
-			n.jointManagedLearners[cc.ID] = struct{}{}
-		}
-
-	case ConfChangePromote:
-		if selfRef {
-			// Belt-and-suspenders: covers a log written by old code where
-			// self WAS recorded in learnerIDs. Still a real log entry.
-			n.pendingConfChangeIndex = entry.Index
-			return false
-		}
-		pk, ok := n.learnerIDs[cc.ID]
-		if !ok {
-			break // idempotent: already promoted or not tracked
-		}
-		delete(n.learnerIDs, cc.ID)
-		changed = true
-		alreadyVoter := false
-		for _, p := range n.config.Peers {
-			if p == pk {
-				alreadyVoter = true
-				break
-			}
-		}
-		if !alreadyVoter {
-			n.config.Peers = append(n.config.Peers, pk)
-		}
-	}
-
-	n.pendingConfChangeIndex = entry.Index
-	return changed
-}
-
-// applyJointConfChangeLocked drives the §4.3 state machine.
+// Phase 1 → 2: when commitIndex >= jointIndex and the final entry hasn't
+// been appended yet, append LogEntryConfChange (Cnew alone) and replicate.
+// The final entry's index is recorded so the next commit can resolve.
 //
-//	JointEnter:
-//	  jointPhase = JointEntering, voter sets recorded, jointEnterIndex = entry.Index.
-//	  Leader bootstraps replication state for newly added voters.
-//	JointLeave:
-//	  jointPhase = JointNone, config.Peers = newServers (single mode).
-//	  jointResultCh signaled on every node so proposeJointConfChangeWait callers
-//	  wake up regardless of which node currently holds leadership.
-//	  Leader self-removal triggers step-down at the end of apply (Decision 8 +
-//	  cross-model Codex #7 / Gemini #8 — apply-time, not append-time).
-//	JointAbort:
-//	  jointPhase = JointNone, config.Peers restored to C_old from entry payload.
-//	  jointResultCh signaled with ErrJointAborted. No-op if not in JointEntering.
-func (n *Node) applyJointConfChangeLocked(entry LogEntry) bool {
-	jc := decodeJointConfChange(entry.Command)
-	switch jc.Op {
-	case JointOpEnter:
-		n.jointPhase = JointEntering
-		n.jointOldVoters = serverPeerKeys(jc.OldServers)
-		n.jointNewVoters = serverPeerKeys(jc.NewServers)
-		n.jointEnterIndex = entry.Index
-		n.jointEnterTime = time.Now()
-		n.jointLeaveProposed = false
-		if n.state == Leader {
-			n.initLeaderStateForNewVoters(jc.OldServers, jc.NewServers)
-		}
-		return true
-
-	case JointOpLeave:
-		if n.jointPhase != JointEntering {
-			return false // idempotency guard: JointAbort already resolved this transition
-		}
-		if n.hasJointAbortAfter(entry.Index) {
-			return false // stale JointLeave superseded by a later JointOpAbort
-		}
-		// Append-time: §4.4 invariant — config.Peers updates immediately so
-		// quorum decisions on subsequent entries use C_new. config.Peers in
-		// this codebase excludes self (peer IDs are the OTHER nodes); voter
-		// sets in joint entries include self because §4.3 reasons about full
-		// voter membership.
-		n.config.Peers = peersExcludingSelf(jc.NewServers, n.id)
-		// learnerIDs cleanup: any ID promoted to voter via this JointLeave
-		// must be removed from learnerIDs to keep the state-machine invariant
-		// (a server is either voter or learner, never both).
-		for _, s := range jc.NewServers {
-			delete(n.learnerIDs, s.ID)
-			delete(n.jointManagedLearners, s.ID)
-		}
-		n.jointPhase = JointNone
-		n.jointOldVoters = nil
-		n.jointNewVoters = nil
-		n.jointEnterIndex = 0
-		n.jointLeaveProposed = false
-		n.jointAbortProposed = false
-		return true
-
-	case JointOpAbort:
-		if n.jointPhase != JointEntering {
-			return false // idempotency guard: already resolved
-		}
-		// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
-		n.config.Peers = peersExcludingSelf(jc.OldServers, n.id)
-		n.jointPhase = JointNone
-		n.jointOldVoters = nil
-		n.jointNewVoters = nil
-		n.jointEnterIndex = 0
-		n.jointLeaveProposed = false
-		n.jointAbortProposed = false
-		// Remove managed learners from learnerIDs before clearing the map.
-		// Without this, checkLearnerCatchup would see them as ordinary learners
-		// and attempt auto-promotion after the abort.
-		for id := range n.jointManagedLearners {
-			delete(n.learnerIDs, id)
-		}
-		n.jointManagedLearners = nil
-		return true
+// Phase 2 → done: when commitIndex >= finalIndex, deliver confChangeResult
+// to the caller, clear pendingConfChange, and let the
+// maybeStepDownAfterRemoval hook handle the self-removed-leader case.
+func (n *Node) advanceConfChangePhase() {
+	pcc := n.st.pendingConfChange
+	if pcc == nil {
+		return
 	}
-	return false
+	// Only the leader drives phase progression — followers shadow whatever
+	// the leader appends and have no caller to reply to. Followers
+	// reconstruct their own pendingConfChange from log replay only via
+	// reconstructConfig (no waiter); they will not enter this branch.
+	if n.st.state != Leader {
+		return
+	}
+	// Phase 2 has already committed → resolve.
+	if pcc.finalIndex != 0 && n.st.commitIndex >= pcc.finalIndex {
+		pcc.reply <- confChangeResult{index: pcc.finalIndex}
+		n.st.pendingConfChange = nil
+		return
+	}
+	// Phase 1 committed → append the final entry.
+	if pcc.finalIndex == 0 && n.st.commitIndex >= pcc.jointIndex {
+		finalIdx := n.st.lastLogIndex() + 1
+		finalEntry := LogEntry{
+			Term:    n.st.currentTerm,
+			Index:   finalIdx,
+			Type:    LogEntryConfChange,
+			Command: encodeJointExitConfChange(pcc.newVoters, n.st.currentConfig.learners),
+		}
+		if err := n.st.log.Append([]LogEntry{finalEntry}); err != nil {
+			panic("raftv2: advanceConfChangePhase: Append final: " + err.Error())
+		}
+		// Push history before swapping, mirroring handleConfChange so
+		// truncation reverts apply uniformly.
+		prev := n.st.currentConfig
+		n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+			logIndex: finalIdx,
+			prev:     prev,
+		})
+		// Leave joint state, settle on Cnew.
+		n.st.currentConfig = newSingleConfig(pcc.newVoters)
+		n.st.appendedConfigIndex = finalIdx
+		n.st.invalidatePeerSet()
+		pcc.finalIndex = finalIdx
+
+		// Stale replication-map entries for now-non-voters are benign:
+		// commitOK and quorumOK both consult currentConfig (not the maps)
+		// for membership, so an entry for a dropped voter has no effect
+		// on commit decisions. They age out at the next becomeLeader.
+
+		n.publish()
+		n.broadcastHeartbeat()
+
+		// If quorum is already satisfied at append (e.g. solo voter or
+		// degenerate Cnew = {self}), drive commit advancement inline.
+		n.maybeAdvanceCommitIndex()
+		return
+	}
 }
 
-// peersExcludingSelf returns peerKeys for every entry whose id is not selfID.
-// This bridges the §4.3 voter-set convention (full membership) and the existing
-// config.Peers convention (peers excluding self).
-func peersExcludingSelf(servers []ServerEntry, selfID string) []string {
-	out := make([]string, 0, len(servers))
-	for _, s := range servers {
-		key := s.Address
-		if key == "" {
-			key = s.ID
-		}
-		if key == selfID || s.ID == selfID {
+// recoverInFlightJoint resurrects a pendingConfChange when a new leader
+// inherits a joint state with no following final entry. Reads the joint
+// entry's encoded Cnew so phase 2 can append the right payload once
+// commit is re-confirmed under the new term.
+//
+// Pre-conditions (caller's responsibility): we just became Leader, no
+// pendingConfChange is set, and currentConfig.joint is true.
+//
+// If the live log lacks the originating joint entry (because the
+// snapshot ate it but a follower's currentConfig is stale — should not
+// happen since handleInstallSnapshot resets currentConfig, but defensive
+// nonetheless), the recovery is a no-op. The ErrConfChangeInFlight gate
+// would still apply, requiring operator intervention; that is preferable
+// to dispatching a fabricated entry.
+func (n *Node) recoverInFlightJoint() {
+	if n.st.pendingConfChange != nil {
+		return
+	}
+	if !n.st.currentConfig.joint {
+		return
+	}
+	if n.st.appendedConfigIndex == 0 {
+		return
+	}
+	idx := n.st.appendedConfigIndex
+	first := n.st.log.FirstIndex()
+	if idx < first || idx > n.st.lastLogIndex() {
+		return
+	}
+	e, err := n.st.log.Entry(idx)
+	if err != nil {
+		return
+	}
+	if e.Type != LogEntryJointConfChange {
+		// The latest config entry isn't a joint entry — nothing to
+		// recover. Should not happen given currentConfig.joint == true,
+		// but guard against state corruption.
+		return
+	}
+	p := configEntryPayload(e)
+	// Reply is a buffered throwaway: no caller is waiting because the
+	// original AddVoter/RemoveVoter call died with the previous leader.
+	// Cap-1 buffer is load-bearing for advanceConfChangePhase's
+	// unconditional send (membership.go ~L150); the buffer absorbs that
+	// single send so the actor cannot block on a receiverless channel.
+	// stepDownToFollower's send uses select-with-default so it does not
+	// depend on the buffer. A future refactor that makes the phase-advance
+	// send blocking (or removes the buffer) would deadlock the actor here.
+	n.st.pendingConfChange = &pendingConfChange{
+		jointIndex: idx,
+		newVoters:  p.NewVoters,
+		reply:      make(chan confChangeResult, 1),
+	}
+	// applyCommitted will fire advanceConfChangePhase the next time
+	// commitIndex advances; if the joint entry was already committed
+	// before we became leader, drive it inline now.
+	if n.st.commitIndex >= idx {
+		n.advanceConfChangePhase()
+	}
+}
+
+// maybeStepDownAfterRemoval implements the Raft §4.3 self-removed-leader
+// rule: a leader that is in Cold but not in Cnew stays at its post until
+// the final ConfChange entry commits, then steps down. Called after every
+// applyCommitted advance.
+//
+// Step-down condition: live config is non-joint, the most recent appended
+// config entry (appendedConfigIndex) is committed, and self is not a
+// voter in the resulting Cnew. Checking commit (rather than just append)
+// is load-bearing — advanceConfChangePhase appends and immediately swaps
+// currentConfig to Cnew before the new entry commits, so a step-down
+// gated on append alone would fire one tick too early and drain the
+// caller's pendingConfChange with ErrProposalFailed.
+func (n *Node) maybeStepDownAfterRemoval() {
+	if n.st.state != Leader {
+		return
+	}
+	if n.st.currentConfig.joint {
+		return
+	}
+	if n.st.currentConfig.containsVoter(n.st.id) {
+		return
+	}
+	if n.st.appendedConfigIndex == 0 || n.st.appendedConfigIndex > n.st.commitIndex {
+		// The Cnew entry that excludes us has not yet committed (or there
+		// is no config entry at all — degenerate case where cfg.Peers
+		// already excluded us at boot, which is operator misconfiguration).
+		// Stay at our post.
+		return
+	}
+	// Cnew is committed and excludes us. Step down so a Cnew voter can
+	// take over. stepDownToFollower drains leader-only state including
+	// any residual pendingConfChange (which advanceConfChangePhase has
+	// already resolved by this point on the happy path).
+	n.becomeFollower(n.st.currentTerm)
+}
+
+// appendAndTrackConfig appends entries to the actor's log and updates
+// currentConfig + configHistory + appendedConfigIndex for any
+// LogEntryConfChange / LogEntryJointConfChange entries among them.
+// Used by handleAppendEntries on the follower path so a follower's
+// effective config tracks the leader's per Raft §4.3.
+//
+// Single-call append per the existing log invariants — entries must be
+// contiguous in index. We update config state in-order so configHistory
+// remains sorted by logIndex.
+func (n *Node) appendAndTrackConfig(entries []LogEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	if err := n.st.log.Append(entries); err != nil {
+		panic("raftv2: appendAndTrackConfig: Append: " + err.Error())
+	}
+	for _, e := range entries {
+		if e.Type != LogEntryConfChange && e.Type != LogEntryJointConfChange {
 			continue
 		}
-		out = append(out, key)
+		prev := n.st.currentConfig
+		n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+			logIndex: e.Index,
+			prev:     prev,
+		})
+		n.st.currentConfig = applyConfigEntry(prev, e)
+		n.st.appendedConfigIndex = e.Index
+		n.st.invalidatePeerSet()
+
+		// M6.0 follow-up — race-close on self learner→voter transition.
+		// The last AE-received-as-learner reset our election timer at AE
+		// arrival (actor.go:429), but the randomized [ET, 2·ET) window
+		// drawn at THAT moment can be near-deadline by the time this
+		// promoting entry lands. Without a fresh draw at the suffrage
+		// flip, the timer can fire before the leader's next heartbeat
+		// arrives, causing the new voter to campaign and depose the
+		// leader (PromoteToVoter "node stepped down"). Reset gives a
+		// fresh window starting at the transition instant — guaranteed
+		// to be ≥ ET, which dominates the heartbeat interval.
+		// Cnew (voters list) is the load-bearing side: the Cjoint append
+		// flips containsVoter false→true (n2 enters Cnew); the Cnew-final
+		// append is true→true (no spurious reset).
+		if !prev.containsVoter(n.st.id) && n.st.currentConfig.containsVoter(n.st.id) {
+			n.resetElectionTimer()
+		}
 	}
-	return out
 }
 
-// restoreConfigFromServers splits a snapshot servers list into peers (Voter,
-// excluding self) and a learnerIDs map (NonVoter, nodeID → nodeID).
-// selfID is the local node's ID; it is excluded from both outputs.
-func restoreConfigFromServers(servers []Server, selfID string) (peers []string, learners map[string]string) {
-	learners = make(map[string]string)
-	for _, sv := range servers {
-		if sv.ID == selfID {
-			continue
-		}
-		if sv.Suffrage == Voter {
-			peers = append(peers, sv.ID)
-		} else {
-			learners[sv.ID] = sv.ID
-		}
+// truncateAndRevertConfig truncates the log past idx and rolls back any
+// config-history entries with logIndex > idx. currentConfig reverts to the
+// most recent surviving prev (or, if all were popped, to the original
+// effective config that pre-dates the configHistory).
+//
+// "Pre-history" config: when configHistory is empty after pop, we cannot
+// reconstruct the original boot config without re-reading the snapshot +
+// log replay. The simpler invariant: the FIRST configHistory entry's prev
+// IS the pre-history config, since we always push prev BEFORE swapping in
+// the new config. So if we pop all entries, restore the popped-stack's
+// last (deepest) prev. If history was already empty before this call,
+// currentConfig is unchanged (no config entries to revert).
+func (n *Node) truncateAndRevertConfig(idx uint64) {
+	if err := n.st.log.TruncateAfter(idx); err != nil {
+		panic("raftv2: truncateAndRevertConfig: TruncateAfter: " + err.Error())
 	}
-	return peers, learners
+	// Walk configHistory from the back, popping entries strictly above idx.
+	// The popped entry's prev becomes the candidate currentConfig — the
+	// LAST popped (deepest) prev is the correct revert target because pop
+	// order is from newest to oldest.
+	reverted := false
+	for len(n.st.configHistory) > 0 {
+		top := n.st.configHistory[len(n.st.configHistory)-1]
+		if top.logIndex <= idx {
+			break
+		}
+		n.st.currentConfig = top.prev
+		n.st.configHistory = n.st.configHistory[:len(n.st.configHistory)-1]
+		reverted = true
+	}
+	if reverted {
+		n.st.invalidatePeerSet()
+	}
+	// Recompute appendedConfigIndex: the highest surviving config-entry
+	// index, or 0 if none.
+	if len(n.st.configHistory) > 0 {
+		n.st.appendedConfigIndex = n.st.configHistory[len(n.st.configHistory)-1].logIndex
+	} else {
+		n.st.appendedConfigIndex = 0
+	}
 }
 
-// rebuildConfigFromLog reconstructs config.Peers from basePeers and all
-// ConfChange entries in the current in-memory log at index ≥ startIndex.
-// Pass startIndex=0 and basePeers=n.initialPeers for normal bootstrap.
-// Pass the snapshot index and servers-derived peers when restoring from snapshot.
-// MUST be called with n.mu held.
-func (n *Node) rebuildConfigFromLog(startIndex uint64, basePeers []string, baseLearners map[string]string) {
-	peers := make([]string, len(basePeers))
-	copy(peers, basePeers)
-	learnerAddrs := make(map[string]string, len(baseLearners))
-	for k, v := range baseLearners {
-		learnerAddrs[k] = v
+// handleAddLearner appends a single-phase ConfChange entry that registers a
+// new non-voting observer (M6.0 Path B). Quorum math is unchanged; voter
+// slices are unchanged; the learner immediately starts receiving log
+// entries via broadcastHeartbeat (replicaSet includes learners).
+//
+// Validation:
+//   - Must be Leader (ErrNotLeader).
+//   - At most one in-flight membership change. The single-phase entry
+//     reuses the same gate as joint changes — concurrent AddLearner +
+//     AddVoter would race on appendedConfigIndex semantics.
+//   - id must NOT already be a voter (either side of joint) or a learner.
+func (n *Node) handleAddLearner(cmd command) {
+	reply := cmd.ccReply
+	if n.st.state != Leader {
+		reply <- confChangeResult{err: ErrNotLeader}
+		return
+	}
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.appendedConfigIndex > n.st.commitIndex {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.currentConfig.joint {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	id := cmd.learnerID
+	if id == "" {
+		reply <- confChangeResult{err: fmt.Errorf("raftv2: AddLearner: empty id")}
+		return
+	}
+	if n.st.currentConfig.containsAnyVoter(id) || n.st.currentConfig.isLearner(id) {
+		reply <- confChangeResult{err: ErrAlreadyLearner}
+		return
 	}
 
-	// Joint state replays alongside ConfChange entries so a truncated JointLeave
-	// reverts to JointEntering state (Decision 4-bis). Without this, a node that
-	// applied JointLeave but had it truncated by a new leader would silently
-	// keep config.Peers = C_new while the cluster expects C_old+new dual quorum.
-	var jPhase jointPhase
-	var jOldVoters, jNewVoters []string
-	var jEnterIndex uint64
-	// removedFromCluster mirrors the apply-path commit-time hook (raft.go:586):
-	// orphan election guard must survive process restart from log replay.
-	// Without this, a restarted self-removed node has flag=false and rejoins
-	// elections, splitting votes against C_new.
-	var removed bool
-	// managedLearners mirrors n.jointManagedLearners for the replay path.
-	managedLearners := make(map[string]struct{})
-	// jAborted tracks whether the current joint cycle was resolved by a
-	// JointOpAbort so that a subsequent JointOpLeave (for the same cycle)
-	// is skipped rather than re-applied.
-	var jAborted bool
+	// Build the resulting effective config (Cnew snapshot for the wire).
+	voters := append([]string(nil), n.st.currentConfig.voters...)
+	learners := make([]confLearner, 0, len(n.st.currentConfig.learners)+1)
+	for lid, laddr := range n.st.currentConfig.learners {
+		learners = append(learners, confLearner{ID: lid, Address: laddr})
+	}
+	learners = append(learners, confLearner{ID: id, Address: cmd.learnerAddr})
 
-	for _, entry := range n.log {
-		if entry.Index < startIndex {
+	entryIdx := n.st.lastLogIndex() + 1
+	entry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   entryIdx,
+		Type:    LogEntryConfChange,
+		Command: encodeConfChange(ConfChangeAddLearner, id, cmd.learnerAddr, voters, learners),
+	}
+	if err := n.st.log.Append([]LogEntry{entry}); err != nil {
+		panic("raftv2: handleAddLearner: Append: " + err.Error())
+	}
+
+	// Push prior config onto history BEFORE swapping so truncation can
+	// revert exactly (mirrors handleConfChange).
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: entryIdx,
+		prev:     prev,
+	})
+	next := prev
+	next.voters = append([]string(nil), prev.voters...)
+	next.oldVoters = append([]string(nil), prev.oldVoters...)
+	next.learners = prev.cloneLearners()
+	if next.learners == nil {
+		next.learners = make(map[string]string, 1)
+	}
+	next.learners[id] = cmd.learnerAddr
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = entryIdx
+	n.st.invalidatePeerSet()
+
+	// Initialise replication tracking for the new learner so the next
+	// broadcastHeartbeat addresses it from nextIndex = lastLogIndex+1
+	// (i.e. it receives the AddLearner entry itself plus everything after).
+	if n.st.matchIndex != nil {
+		n.st.matchIndex[id] = 0
+		n.st.nextIndex[id] = n.st.lastLogIndex() + 1
+		n.st.peerInFlight[id] = false
+		n.st.peerLastRound[id] = 0
+	}
+
+	n.st.pendingSingleConf = &pendingSingleConf{idx: entryIdx, reply: reply}
+
+	n.publish()
+
+	// Start the heartbeat ticker if we did not have replicas before.
+	if n.heartbeatTicker == nil && len(n.st.replicaSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+
+	// Solo-voter shortcut: if the leader is the sole voter, the new
+	// learner entry is already trivially "committed" by the leader's own
+	// quorum. Drive commit advance inline so the reply fires now.
+	n.maybeAdvanceCommitIndex()
+}
+
+// handlePromote is the entry point for PromoteToVoter (Path B two-entry
+// sequence). Validates the target is a learner and caught up, then
+// appends a single-phase PromoteStage1 entry. The chain finishes when
+// applyCommitted sees stage 1 commit and kicks off the joint AddVoter
+// via finishPromote.
+func (n *Node) handlePromote(cmd command) {
+	reply := cmd.ccReply
+	if n.st.state != Leader {
+		reply <- confChangeResult{err: ErrNotLeader}
+		return
+	}
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.appendedConfigIndex > n.st.commitIndex {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.currentConfig.joint {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	id := cmd.learnerID
+	if id == "" {
+		reply <- confChangeResult{err: fmt.Errorf("raftv2: PromoteToVoter: empty id")}
+		return
+	}
+	if !n.st.currentConfig.isLearner(id) {
+		reply <- confChangeResult{err: ErrNotALearner}
+		return
+	}
+
+	// Catchup gate: only enforced when threshold > 0. Threshold is the
+	// allowed lag in entries; the learner must satisfy
+	// matchIndex+threshold >= commitIndex. Self-as-learner cannot happen
+	// (PromoteToVoter is leader-only and a learner cannot be leader).
+	if n.cfg.LearnerCatchupThreshold > 0 {
+		matchIdx := n.st.matchIndex[id]
+		if matchIdx+n.cfg.LearnerCatchupThreshold < n.st.commitIndex {
+			reply <- confChangeResult{err: ErrLearnerNotCaughtUp}
+			return
+		}
+	}
+
+	// Stage 1: drop-from-learners single-phase entry. Voter set unchanged.
+	voters := append([]string(nil), n.st.currentConfig.voters...)
+	learners := make([]confLearner, 0, len(n.st.currentConfig.learners))
+	for lid, laddr := range n.st.currentConfig.learners {
+		if lid == id {
 			continue
 		}
-		switch entry.Type {
-		case LogEntryConfChange:
-			cc := decodeConfChange(entry.Command)
-			peerKey := cc.ID
-			if cc.Address != "" {
-				peerKey = cc.Address
-			}
-			// Mirror applyConfChangeLocked: a node never lists itself in
-			// config.Peers ("peers excluding self") or learnerIDs. Replaying our
-			// own AddLearner/Promote (DynamicJoin catch-up) must be a no-op for
-			// the local membership view — otherwise publishMembershipViewLocked
-			// counts self twice (n.id ++ config.Peers) and quorum inflates.
-			selfRef := cc.ID == n.id || peerKey == n.id
-			switch cc.Op {
-			case ConfChangeAddVoter:
-				if !selfRef {
-					found := false
-					for _, p := range peers {
-						if p == peerKey {
-							found = true
-							break
-						}
-					}
-					if !found {
-						peers = append(peers, peerKey)
-					}
-				}
-			case ConfChangeRemoveVoter:
-				out := peers[:0]
-				for _, p := range peers {
-					if p != peerKey {
-						out = append(out, p)
-					}
-				}
-				peers = out
-			case ConfChangeAddLearner:
-				if !selfRef {
-					learnerAddrs[cc.ID] = peerKey
-				}
-				if cc.ManagedByJoint {
-					managedLearners[cc.ID] = struct{}{}
-				}
-			case ConfChangePromote:
-				if selfRef {
-					// Belt-and-suspenders: covers a log written by old code
-					// where self WAS recorded in learnerAddrs.
-					break
-				}
-				if pk, ok := learnerAddrs[cc.ID]; ok {
-					delete(learnerAddrs, cc.ID)
-					found := false
-					for _, p := range peers {
-						if p == pk {
-							found = true
-							break
-						}
-					}
-					if !found {
-						peers = append(peers, pk)
-					}
-				}
-			}
+		learners = append(learners, confLearner{ID: lid, Address: laddr})
+	}
 
-		case LogEntryJointConfChange:
-			jc := decodeJointConfChange(entry.Command)
-			switch jc.Op {
-			case JointOpEnter:
-				jPhase = JointEntering
-				jOldVoters = serverPeerKeys(jc.OldServers)
-				jNewVoters = serverPeerKeys(jc.NewServers)
-				jEnterIndex = entry.Index
-				jAborted = false // new joint cycle resets prior abort flag
-				// JointEnter that brings self into C_new clears any prior
-				// removal flag (rejoin scenario).
-				if containsPeer(jNewVoters, n.id) {
-					removed = false
-				}
-			case JointOpLeave:
-				if jAborted {
-					// JointOpAbort already resolved this joint cycle; skip the
-					// stale JointOpLeave that was appended before the abort committed.
-					jAborted = false
-					continue
-				}
-				peers = peersExcludingSelf(jc.NewServers, n.id)
-				// Mirror apply path: clear promoted learners from the replay map.
-				for _, s := range jc.NewServers {
-					delete(learnerAddrs, s.ID)
-					delete(managedLearners, s.ID)
-				}
-				// Mirror commit-time hook (raft.go:586): orphan election guard.
-				removed = !containsPeer(serverPeerKeys(jc.NewServers), n.id)
-				jPhase = JointNone
-				jOldVoters = nil
-				jNewVoters = nil
-				jEnterIndex = 0
+	entryIdx := n.st.lastLogIndex() + 1
+	entry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   entryIdx,
+		Type:    LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePromoteStage1, id, "", voters, learners),
+	}
+	if err := n.st.log.Append([]LogEntry{entry}); err != nil {
+		panic("raftv2: handlePromote: Append stage1: " + err.Error())
+	}
 
-			case JointOpAbort:
-				// Restore C_old from entry payload — self-contained, safe after snapshot truncation.
-				peers = peersExcludingSelf(jc.OldServers, n.id)
-				managedLearners = make(map[string]struct{})
-				jPhase = JointNone
-				jOldVoters = nil
-				jNewVoters = nil
-				jEnterIndex = 0
-				jAborted = true // signal to skip any stale JointOpLeave in this cycle
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: entryIdx,
+		prev:     prev,
+	})
+	next := prev
+	next.voters = append([]string(nil), prev.voters...)
+	next.oldVoters = append([]string(nil), prev.oldVoters...)
+	next.learners = prev.cloneLearners()
+	delete(next.learners, id)
+	if len(next.learners) == 0 {
+		next.learners = nil
+	}
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = entryIdx
+	n.st.invalidatePeerSet()
+
+	// Stage 1 reply is a throwaway internal channel — the user's reply
+	// (cmd.ccReply) waits for the stage-2 joint AddVoter to complete.
+	stage1Reply := make(chan confChangeResult, 1)
+	n.st.pendingSingleConf = &pendingSingleConf{idx: entryIdx, reply: stage1Reply}
+	n.st.pendingPromote = &pendingPromote{targetID: id, reply: reply}
+
+	n.publish()
+
+	if n.heartbeatTicker == nil && len(n.st.replicaSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+	n.maybeAdvanceCommitIndex()
+}
+
+// advanceSingleConfPhase delivers the pending single-phase reply when its
+// entry commits, and (if a pendingPromote is queued) chains into the
+// joint AddVoter for the promoted target.
+func (n *Node) advanceSingleConfPhase() {
+	psc := n.st.pendingSingleConf
+	if psc == nil {
+		return
+	}
+	if n.st.state != Leader {
+		return
+	}
+	if n.st.commitIndex < psc.idx {
+		return
+	}
+	// Deliver the stage-1 reply (or AddLearner reply).
+	select {
+	case psc.reply <- confChangeResult{index: psc.idx}:
+	default:
+	}
+	n.st.pendingSingleConf = nil
+
+	// If this was the stage-1 of a PromoteToVoter, kick off stage 2 now.
+	if pp := n.st.pendingPromote; pp != nil {
+		n.startPromoteStage2(pp)
+	}
+}
+
+// startPromoteStage2 launches the joint AddVoter transition for an
+// already-dropped-from-learners target. Re-uses the existing v2 joint
+// path by adapting the targeted ID into a synthetic cmdConfChange flow.
+func (n *Node) startPromoteStage2(pp *pendingPromote) {
+	// Clear pendingPromote — the joint flow will deliver the user reply
+	// via pendingConfChange when stage 2 commits.
+	id := pp.targetID
+	userReply := pp.reply
+	n.st.pendingPromote = nil
+
+	// Sanity: target must not already be a voter (it shouldn't be —
+	// stage 1 only dropped from learners). If somehow it is, deliver
+	// success immediately so the caller is unblocked.
+	if n.st.currentConfig.containsAnyVoter(id) {
+		select {
+		case userReply <- confChangeResult{index: n.st.commitIndex}:
+		default:
+		}
+		return
+	}
+
+	// Build Cnew = currentConfig.voters ∪ {id}. Joint flow handles the
+	// rest. The joint encoder is voter-only — learners (which now
+	// exclude id) survive via actor state.
+	old := append([]string(nil), n.st.currentConfig.voters...)
+	newV, err := buildNextVoters(old, id, true)
+	if err != nil {
+		select {
+		case userReply <- confChangeResult{err: err}:
+		default:
+		}
+		return
+	}
+
+	jointIdx := n.st.lastLogIndex() + 1
+	jointEntry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   jointIdx,
+		Type:    LogEntryJointConfChange,
+		Command: encodeJointConfChange(old, newV),
+	}
+	if err := n.st.log.Append([]LogEntry{jointEntry}); err != nil {
+		panic("raftv2: startPromoteStage2: Append joint: " + err.Error())
+	}
+
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: jointIdx,
+		prev:     prev,
+	})
+	next := newJointConfig(old, newV)
+	next.learners = prev.cloneLearners()
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = jointIdx
+	n.st.invalidatePeerSet()
+
+	// Initialise replication tracking for the now-voter target. It was
+	// already in matchIndex/nextIndex as a learner; the entries already
+	// reflect its current progress — keep them so commit-advance math
+	// can use the learner's actual catchup state.
+
+	n.st.pendingConfChange = &pendingConfChange{
+		jointIndex: jointIdx,
+		newVoters:  newV,
+		reply:      userReply,
+	}
+
+	n.publish()
+
+	if n.heartbeatTicker == nil && len(n.st.replicaSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+	n.maybeAdvanceCommitIndex()
+}
+
+// buildNextVoters returns Cnew given Cold, the target voter ID, and whether
+// the operation is add or remove. For add: appends id if not present, errors
+// if already present. For remove: filters id out, errors if id is not
+// present. Order of remaining voters is preserved.
+func buildNextVoters(old []string, id string, add bool) ([]string, error) {
+	if id == "" {
+		return nil, fmt.Errorf("raftv2: confchange: empty voter id")
+	}
+	if add {
+		for _, v := range old {
+			if v == id {
+				return nil, fmt.Errorf("raftv2: AddVoter: %q is already a voter", id)
 			}
 		}
+		out := make([]string, len(old)+1)
+		copy(out, old)
+		out[len(old)] = id
+		return out, nil
 	}
-	n.config.Peers = peers
-	n.learnerIDs = learnerAddrs
-	n.jointPhase = jPhase
-	n.jointOldVoters = jOldVoters
-	n.jointNewVoters = jNewVoters
-	n.jointEnterIndex = jEnterIndex
-	n.removedFromCluster = removed
-	n.jointManagedLearners = managedLearners
-	n.jointLeaveProposed = false // truncation 후 leader watcher가 재평가
-	n.publishMembershipViewLocked()
+	out := make([]string, 0, len(old))
+	found := false
+	for _, v := range old {
+		if v == id {
+			found = true
+			continue
+		}
+		out = append(out, v)
+	}
+	if !found {
+		return nil, fmt.Errorf("raftv2: RemoveVoter: %q is not a voter", id)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("raftv2: RemoveVoter: cannot remove the last voter %q", id)
+	}
+	return out, nil
 }

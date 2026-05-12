@@ -138,10 +138,21 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 		args := msg.(*InstallSnapshotArgs)
 		b := raftBuilderPool.Get()
 
+		servers := args.Servers
+		if len(servers) == 0 {
+			servers = make([]Server, 0, len(args.Configuration)+len(args.Learners))
+			for _, id := range args.Configuration {
+				servers = append(servers, Server{ID: id, Suffrage: Voter})
+			}
+			for id := range args.Learners {
+				servers = append(servers, Server{ID: id, Suffrage: NonVoter})
+			}
+		}
+
 		// Build ServerEntry objects before Start (FlatBuffers reverse-order rule)
-		serverOffs := make([]flatbuffers.UOffsetT, len(args.Servers))
-		for i := len(args.Servers) - 1; i >= 0; i-- {
-			s := args.Servers[i]
+		serverOffs := make([]flatbuffers.UOffsetT, len(servers))
+		for i := len(servers) - 1; i >= 0; i-- {
+			s := servers[i]
 			idOff := b.CreateString(s.ID)
 			pb.ServerEntryStart(b)
 			pb.ServerEntryAddId(b, idOff)
@@ -283,12 +294,24 @@ func decodeInstallSnapshotArgs(data []byte) (args *InstallSnapshotArgs, err erro
 		}
 	}()
 	a := pb.GetRootAsInstallSnapshotArgs(data, 0)
-	servers := make([]Server, a.ServersLength())
+	servers := make([]Server, 0, a.ServersLength())
+	cfg := make([]string, 0, a.ServersLength())
+	learners := make(map[string]string)
 	var se pb.ServerEntry
 	for i := 0; i < a.ServersLength(); i++ {
 		if a.Servers(&se, i) {
-			servers[i] = Server{ID: string(se.Id()), Suffrage: ServerSuffrage(se.Suffrage())}
+			id := string(se.Id())
+			suffrage := ServerSuffrage(se.Suffrage())
+			servers = append(servers, Server{ID: id, Suffrage: suffrage})
+			if suffrage == NonVoter {
+				learners[id] = ""
+				continue
+			}
+			cfg = append(cfg, id)
 		}
+	}
+	if len(learners) == 0 {
+		learners = nil
 	}
 	return &InstallSnapshotArgs{
 		Term:              a.Term(),
@@ -297,6 +320,8 @@ func decodeInstallSnapshotArgs(data []byte) (args *InstallSnapshotArgs, err erro
 		LastIncludedTerm:  a.LastIncludedTerm(),
 		Data:              a.DataBytes(),
 		Servers:           servers,
+		Configuration:     cfg,
+		Learners:          learners,
 	}, nil
 }
 

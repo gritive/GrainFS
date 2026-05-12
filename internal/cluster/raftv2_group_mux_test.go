@@ -80,7 +80,7 @@ func newV2GroupMuxCluster(t *testing.T, n int, groupID string) *v2GroupMuxCluste
 			ElectionTimeout:  200 * time.Millisecond,
 			HeartbeatTimeout: 50 * time.Millisecond,
 		}
-		node, _, err := newRaftNode(rcfg, nil, "")
+		node, _, err := newRaftNode(rcfg, "")
 		require.NoError(t, err)
 		sender := muxes[i].ForGroup(groupID)
 		node.SetTransport(sender.RequestVote, sender.AppendEntries)

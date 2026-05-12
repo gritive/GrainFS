@@ -54,7 +54,7 @@ func startV2MetaQUICCluster(t *testing.T, n int) *v2MetaQUICCluster {
 			ElectionTimeout:  200 * time.Millisecond,
 			HeartbeatTimeout: 50 * time.Millisecond,
 		}
-		node, _, err := newRaftNode(rcfg, nil, "")
+		node, _, err := newRaftNode(rcfg, "")
 		require.NoError(t, err)
 		nodes[i] = node
 	}

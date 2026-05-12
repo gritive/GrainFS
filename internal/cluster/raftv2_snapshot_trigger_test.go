@@ -25,7 +25,7 @@ func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 	require.NoError(t, err)
 
 	rcfg := raft.DefaultConfig("v2-leader", nil)
-	node, closeFn, err := newRaftNode(rcfg, nil, dir)
+	node, closeFn, err := newRaftNode(rcfg, dir)
 	require.NoError(t, err)
 	require.NotNil(t, closeFn, "v2 path expected: closeFn must be non-nil")
 
