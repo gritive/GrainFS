@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -41,6 +43,61 @@ func startFakeClusterConfigUDS(t *testing.T, body map[string]any) string {
 		_ = os.RemoveAll(d)
 	})
 	return sock
+}
+
+// recordedPatch captures the last PATCH /v1/cluster/config body and If-Match-Rev
+// header against a fake admin UDS for Task 13 CLI set/reset tests.
+type recordedPatch struct {
+	mu         sync.Mutex
+	body       []byte
+	ifMatchRev string
+}
+
+func (r *recordedPatch) LastPatchBody() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return string(r.body)
+}
+
+func (r *recordedPatch) LastIfMatchRev() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ifMatchRev
+}
+
+// startFakePatchUDS spins a fake admin UDS server that records the last PATCH
+// /v1/cluster/config body + If-Match-Rev header, replies 200 with {"rev":N}.
+func startFakePatchUDS(t *testing.T, replyRev uint64) (string, *recordedPatch) {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "ccfg-patch-")
+	require.NoError(t, err)
+	sock := filepath.Join(d, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+
+	rec := &recordedPatch{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/cluster/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		rec.mu.Lock()
+		rec.body = body
+		rec.ifMatchRev = r.Header.Get("If-Match-Rev")
+		rec.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"rev": replyRev})
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+		_ = os.RemoveAll(d)
+	})
+	return sock, rec
 }
 
 func sampleConfigBody() map[string]any {
@@ -133,4 +190,37 @@ func TestClusterConfigDiff_OnlyExplicit(t *testing.T) {
 	require.Contains(t, s, "alert-webhook")
 	// Default-sourced key is suppressed:
 	require.NotContains(t, s, "balancer-imbalance-stop-pct")
+}
+
+func TestClusterConfigSet_SingleField(t *testing.T) {
+	sock, rec := startFakePatchUDS(t, 8)
+	require.NoError(t, runClusterConfigSet(sock, []string{"balancer-imbalance-trigger-pct=27.5"}, 0))
+	require.JSONEq(t, `{"balancer-imbalance-trigger-pct":27.5}`, rec.LastPatchBody())
+	require.Equal(t, "", rec.LastIfMatchRev())
+}
+
+func TestClusterConfigSet_MultiField_Atomic(t *testing.T) {
+	sock, rec := startFakePatchUDS(t, 8)
+	require.NoError(t, runClusterConfigSet(sock, []string{
+		"balancer-imbalance-trigger-pct=30",
+		"alert-webhook=https://x.example",
+		"balancer-enabled=true",
+	}, 0))
+	require.JSONEq(t, `{
+	  "balancer-imbalance-trigger-pct":30,
+	  "alert-webhook":"https://x.example",
+	  "balancer-enabled":true
+	}`, rec.LastPatchBody())
+}
+
+func TestClusterConfigSet_IfMatchRev(t *testing.T) {
+	sock, rec := startFakePatchUDS(t, 8)
+	require.NoError(t, runClusterConfigSet(sock, []string{"balancer-imbalance-trigger-pct=27"}, 7))
+	require.Equal(t, "7", rec.LastIfMatchRev())
+}
+
+func TestClusterConfigReset(t *testing.T) {
+	sock, rec := startFakePatchUDS(t, 8)
+	require.NoError(t, runClusterConfigReset(sock, []string{"balancer-imbalance-trigger-pct", "alert-webhook"}, 0))
+	require.JSONEq(t, `{"reset_keys":["balancer-imbalance-trigger-pct","alert-webhook"]}`, rec.LastPatchBody())
 }
