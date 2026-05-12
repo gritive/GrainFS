@@ -153,6 +153,18 @@ func TestOpRouter_RouteObjectRead_InternalBucketBypassesIndex(t *testing.T) {
 	require.Equal(t, storage.NFS4BucketName, entry.Bucket)
 }
 
+func TestOpRouter_RouteObjectWrite_InternalBucketPreservesGroupPeers(t *testing.T) {
+	probe := &fakeLeaderProbe{}
+	r := routerForTestWithBucket(t, probe)
+	r.router.AssignBucket(storage.NFS4BucketName, "g1")
+
+	target, group, err := r.RouteObjectWrite(storage.NFS4BucketName, "obj")
+	require.NoError(t, err)
+	require.Equal(t, "g1", target.GroupID)
+	require.Equal(t, "g1", group.ID)
+	require.Equal(t, []string{"node-1", "node-2", "node-3"}, group.PeerIDs)
+}
+
 func TestOpRouter_RouteObjectRead_NilIndexReturnsError(t *testing.T) {
 	probe := &fakeLeaderProbe{}
 	r := routerForTestWithBucket(t, probe)

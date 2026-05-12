@@ -152,7 +152,14 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 	}
 	if storage.IsInternalBucket(bucket) {
 		target, err := r.RouteBucket(bucket)
-		return target, ShardGroupEntry{ID: target.GroupID}, err
+		if err != nil {
+			return RouteTarget{}, ShardGroupEntry{}, err
+		}
+		group, ok := r.groups.ShardGroup(target.GroupID)
+		if !ok {
+			return RouteTarget{}, ShardGroupEntry{}, ErrNoGroup
+		}
+		return target, group, nil
 	}
 	group, err := SelectObjectPlacementGroup(bucket, key, r.groups.ShardGroups(), r.ec)
 	if err != nil {
