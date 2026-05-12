@@ -85,6 +85,10 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				RegisterIAMAdminRoutes(h, state.iamAdminAPI)
 				RegisterBucketAdminRoutes(h, state.iamAdminAPI)
 			}
+			if state.metaRaft != nil {
+				// proposer is nil until Task 10 wires the raft propose path.
+				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), nil)
+			}
 		},
 	})
 	if err != nil {
