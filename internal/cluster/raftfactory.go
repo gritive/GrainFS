@@ -76,6 +76,7 @@ func newRaftNodeV2(rcfg raft.Config, v2StoreDir string) (*raftV2Node, func() err
 		LearnerCatchupThreshold:       rcfg.LearnerCatchupThreshold,
 		JointAbortTimeout:             rcfg.JointAbortTimeout,
 		ElectionPriorityKey:           rcfg.ElectionPriorityKey,
+		JoinMode:                      rcfg.JoinMode,
 	}
 
 	var closeFn func() error

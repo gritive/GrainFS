@@ -526,7 +526,7 @@ func (n *Node) submitConfChange(ctx context.Context, id string, add bool) error 
 //   - ErrAlreadyLearner: id is already a voter or a learner.
 //   - ErrProposalFailed: leader stepped down before the entry committed.
 func (n *Node) AddLearner(id, addr string) error {
-	return n.submitLearnerCmd(cmdAddLearner, id, addr)
+	return n.submitLearnerCmd(context.Background(), cmdAddLearner, id, addr)
 }
 
 // PromoteToVoter triggers the two-entry Path B promotion sequence: a
@@ -541,24 +541,32 @@ func (n *Node) AddLearner(id, addr string) error {
 //     cfg.LearnerCatchupThreshold entries behind commitIndex. Wait and
 //     retry.
 func (n *Node) PromoteToVoter(id string) error {
-	return n.submitLearnerCmd(cmdPromote, id, "")
+	return n.submitLearnerCmd(context.Background(), cmdPromote, id, "")
 }
 
 // submitLearnerCmd enqueues a learner-targeted command and waits for the
-// actor's reply.
-func (n *Node) submitLearnerCmd(kind cmdKind, id, addr string) error {
+// actor's reply. The ctx case is honoured both on the enqueue side (in
+// case the actor cmdCh is full and the actor is wedged on a long apply)
+// and on the reply-wait side (so callers with deadlines do not block
+// forever when the actor's joint-AddVoter never commits — e.g., when a
+// peer step-down stalls the second-phase quorum).
+func (n *Node) submitLearnerCmd(ctx context.Context, kind cmdKind, id, addr string) error {
 	if !n.IsLeader() {
 		return ErrNotLeader
 	}
 	reply := make(chan confChangeResult, 1)
 	select {
 	case n.cmdCh <- command{kind: kind, learnerID: id, learnerAddr: addr, ccReply: reply}:
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-n.stopCh:
 		return ErrNodeStopped
 	}
 	select {
 	case res := <-reply:
 		return res.err
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-n.stopCh:
 		return ErrNodeStopped
 	}
