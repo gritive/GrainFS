@@ -101,13 +101,15 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   stdout,
+			Stderr:   stderr,
+			Stdin:    strings.NewReader(""),
+		},
 		ID:        "n3",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    stdout,
-		Stderr:    stderr,
-		Stdin:     strings.NewReader(""),
 	})
 	require.NoError(t, err)
 	assert.Contains(t, stdout.String(), "removed n3")
@@ -118,11 +120,13 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 func TestRemovePeer_NonPositiveTimeoutRefused(t *testing.T) {
 	for _, d := range []time.Duration{0, -1 * time.Second} {
 		err := RemovePeer(context.Background(), RemovePeerOptions{
-			Endpoint: "http://127.0.0.1:1",
-			ID:       "n3",
-			Timeout:  d,
-			Stdout:   &bytes.Buffer{},
-			Stderr:   &bytes.Buffer{},
+			BaseOptions: BaseOptions{
+				Endpoint: "http://127.0.0.1:1",
+				Timeout:  d,
+				Stdout:   &bytes.Buffer{},
+				Stderr:   &bytes.Buffer{},
+			},
+			ID: "n3",
 		})
 		require.Error(t, err, "timeout=%s must be rejected", d)
 		assert.Contains(t, err.Error(), "timeout must be positive")
@@ -135,12 +139,14 @@ func TestRemovePeer_LocalModeRefusedBeforeNetwork(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n3",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not in cluster mode")
@@ -160,12 +166,14 @@ func TestRemovePeer_FollowerAbortedClientSide(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n3",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not the leader")
@@ -185,12 +193,14 @@ func TestRemovePeer_UnknownPeerAbortedClientSide(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n99",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a current voter")
@@ -217,12 +227,14 @@ func TestRemovePeer_PreflightBlocksWithoutForce(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n2",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "alive_after")
@@ -248,12 +260,14 @@ func TestRemovePeer_ConfiguredPeerDoesNotCountAsAlive(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n3",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 
 	require.Error(t, err)
@@ -280,13 +294,15 @@ func TestRemovePeer_ForceDoesNotBypassUnresolvedLegacyBlocker(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n2",
 		Force:     true,
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 
 	require.Error(t, err)
@@ -315,13 +331,15 @@ func TestRemovePeer_ForcePropagatesToServer(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n2",
 		Force:     true,
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 	require.NoError(t, err)
 	body := stub.removedBody.Load().(map[string]any)
@@ -349,24 +367,28 @@ func TestRemovePeer_PromptYesProceedsBlankAborts(t *testing.T) {
 
 	// "y\n" proceeds.
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint: srv.URL,
-		ID:       "n3",
-		Timeout:  5 * time.Second,
-		Stdout:   &bytes.Buffer{},
-		Stderr:   &bytes.Buffer{},
-		Stdin:    strings.NewReader("y\n"),
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+			Stdin:    strings.NewReader("y\n"),
+		},
+		ID: "n3",
 	})
 	require.NoError(t, err)
 	require.Equal(t, int32(1), stub.removeCalls.Load())
 
 	// blank line aborts (default no).
 	err = RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint: srv.URL,
-		ID:       "n3",
-		Timeout:  5 * time.Second,
-		Stdout:   &bytes.Buffer{},
-		Stderr:   &bytes.Buffer{},
-		Stdin:    strings.NewReader("\n"),
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+			Stdin:    strings.NewReader("\n"),
+		},
+		ID: "n3",
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "aborted")
@@ -394,12 +416,14 @@ func TestRemovePeer_ServerErrorSurfaced(t *testing.T) {
 	defer srv.Close()
 
 	err := RemovePeer(context.Background(), RemovePeerOptions{
-		Endpoint:  srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   &bytes.Buffer{},
+			Stderr:   &bytes.Buffer{},
+		},
 		ID:        "n3",
 		AssumeYes: true,
-		Timeout:   5 * time.Second,
-		Stdout:    &bytes.Buffer{},
-		Stderr:    &bytes.Buffer{},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conf change in progress")
@@ -420,10 +444,12 @@ func TestPeers_TextRendersAndJSONPassesThrough(t *testing.T) {
 	// Text format renders the table.
 	out := &bytes.Buffer{}
 	require.NoError(t, Peers(context.Background(), PeersOptions{
-		Endpoint: srv.URL,
-		Format:   "text",
-		Timeout:  5 * time.Second,
-		Stdout:   out,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   out,
+		},
+		Format: "text",
 	}))
 	rendered := out.String()
 	assert.Contains(t, rendered, "ID")
@@ -432,10 +458,12 @@ func TestPeers_TextRendersAndJSONPassesThrough(t *testing.T) {
 	// JSON format must emit the parsed Status as JSON.
 	out.Reset()
 	require.NoError(t, Peers(context.Background(), PeersOptions{
-		Endpoint: srv.URL,
-		Format:   "json",
-		Timeout:  5 * time.Second,
-		Stdout:   out,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   out,
+		},
+		Format: "json",
 	}))
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(out.Bytes(), &parsed))
@@ -449,10 +477,12 @@ func TestPeers_LocalModeShortCircuits(t *testing.T) {
 
 	out := &bytes.Buffer{}
 	require.NoError(t, Peers(context.Background(), PeersOptions{
-		Endpoint: srv.URL,
-		Format:   "text",
-		Timeout:  5 * time.Second,
-		Stdout:   out,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   out,
+		},
+		Format: "text",
 	}))
 	assert.Contains(t, out.String(), "local")
 }
@@ -471,12 +501,14 @@ func TestEvents_RendersAndAppliesFilter(t *testing.T) {
 	// Unfiltered: all 3 events present.
 	out := &bytes.Buffer{}
 	require.NoError(t, Events(context.Background(), EventsOptions{
-		Endpoint: srv.URL,
-		Since:    time.Hour,
-		Limit:    100,
-		Format:   "text",
-		Timeout:  5 * time.Second,
-		Stdout:   out,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   out,
+		},
+		Since:  time.Hour,
+		Limit:  100,
+		Format: "text",
 	}))
 	rendered := out.String()
 	assert.Contains(t, rendered, "cluster-join")
@@ -486,13 +518,15 @@ func TestEvents_RendersAndAppliesFilter(t *testing.T) {
 	// Filter on cluster-remove-peer only.
 	out.Reset()
 	require.NoError(t, Events(context.Background(), EventsOptions{
-		Endpoint:    srv.URL,
+		BaseOptions: BaseOptions{
+			Endpoint: srv.URL,
+			Timeout:  5 * time.Second,
+			Stdout:   out,
+		},
 		Since:       time.Hour,
 		Limit:       100,
 		TypeFilters: []string{"cluster-remove-peer"},
 		Format:      "text",
-		Timeout:     5 * time.Second,
-		Stdout:      out,
 	}))
 	filtered := out.String()
 	assert.Contains(t, filtered, "cluster-remove-peer")

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.154.0] - 2026-05-12 — refactor(clusteradmin): extract BaseOptions to match volumeadmin
+
+### Changed
+- `internal/clusteradmin/operations.go`가 `BaseOptions{Endpoint, Timeout, Stdout, Stderr, Stdin}` struct를 추출. `RemovePeerOptions`/`PeersOptions`/`EventsOptions`가 이를 embed하면서 5 공통 필드를 인라인 반복하던 비대칭을 제거 — `volumeadmin.BaseOptions` 패턴과 정렬.
+- 동작 무변경: strict validation(`Stdout==nil`/`Timeout<=0` → 즉시 에러)은 그대로 유지. helper(`clientFor`/`withTimeout` 등)는 도입 안 함 — volumeadmin의 관대한 fallback과 의도적으로 다름.
+- wire/CLI flag 무변경. cmd/grainfs 호출부 3곳 + 테스트 17곳이 `BaseOptions: BaseOptions{...}` 명시 nested 형태로 갱신.
+
 ## [0.0.153.0] - 2026-05-12 — refactor: unify admin client transport via adminapi
 
 ### Changed
