@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.169.0] - 2026-05-13 — feat: always-cluster mode + solo data guard for grainfs join
+
+### Changed
+- `clusterMode` 항상 true: 단일 노드 포함 모든 `grainfs serve` 실행에서 클러스터 모드 활성화. `--cluster-key`가 모든 모드에서 필수 (기존에는 멀티노드 모드에서만 필수). **Breaking**: cluster key 없이 solo 기동 불가.
+
+### Added
+- `grainfs join --force`: solo 노드에 사용자 데이터가 있을 때 데이터 가드를 우회하여 join 강제 실행. `--force` 없이 데이터가 있으면 409 `data_present` 반환.
+- `JoinHandler` 데이터 가드: solo 노드에 버킷 등 사용자 데이터가 있고 `force=false`이면 409 `data_present` 응답으로 join 거부. 데이터 손실 방지용 안전 장치.
+- `TestE2E_Bootstrap_DataPresent_BlocksJoin`: solo 노드에 버킷 생성 후 force 없이 join 시도 시 409를 반환하는지 검증하는 e2e 테스트.
+
+### Fixed
+- `grainfs join` 409 응답을 친화적 CLI 출력으로 디코딩: `status`, `message` 필드를 파싱해 사용자에게 `--force=true` 힌트 포함 메시지 출력.
+- e2e 스냅샷 테스트 interval 500ms → 1s: `cluster-config` 검증 로직이 1s 미만 값을 거부하므로 수정.
+
 ## [0.0.168.0] - 2026-05-13 — refactor(lifecycle): deepen Store.put seam + Apply→Worker round-trip test
 
 ### Changed
