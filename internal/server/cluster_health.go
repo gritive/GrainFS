@@ -8,35 +8,18 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
-// Health is the response of GET /v1/cluster/health. Mirrors clusteradmin.Health.
-type Health struct {
-	Mode     string          `json:"mode"`
-	Degraded bool            `json:"degraded"`
-	LeaderID string          `json:"leader_id,omitempty"`
-	Term     uint64          `json:"term,omitempty"`
-	Quorum   QuorumInfo      `json:"quorum"`
-	Peers    []PeerHealthRow `json:"peers,omitempty"`
-	Issues   []string        `json:"issues,omitempty"`
-}
-
-// QuorumInfo summarises voter liveness vs the size required for majority.
-type QuorumInfo struct {
-	VotersTotal int  `json:"voters_total"`
-	AliveCount  int  `json:"alive_count"`
-	Required    int  `json:"required"`
-	Healthy     bool `json:"healthy"`
-}
-
-// PeerHealthRow is one row in Health.Peers. State is one of:
-// "self", "live", "cooldown", "down", or "configured".
-type PeerHealthRow struct {
-	PeerID   string `json:"peer_id"`
-	State    string `json:"state"`
-	RaftAddr string `json:"raft_addr,omitempty"`
-}
+// Health, QuorumInfo, PeerHealthRow are the wire types for GET /v1/cluster/health.
+// Canonical definitions live in adminapi; aliased here so server's deriveHealth
+// can keep returning literal `Health{...}` values without touching production code.
+type (
+	Health        = adminapi.Health
+	QuorumInfo    = adminapi.QuorumInfo
+	PeerHealthRow = adminapi.PeerHealthRow
+)
 
 // clusterHealth handles GET /v1/cluster/health. Server-side derivation of
 // Issues so the dashboard and CLI share the same rules.
