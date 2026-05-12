@@ -322,6 +322,23 @@ func (n *Node) appendAndTrackConfig(entries []LogEntry) {
 		n.st.currentConfig = applyConfigEntry(prev, e)
 		n.st.appendedConfigIndex = e.Index
 		n.st.invalidatePeerSet()
+
+		// M6.0 follow-up — race-close on self learner→voter transition.
+		// The last AE-received-as-learner reset our election timer at AE
+		// arrival (actor.go:429), but the randomized [ET, 2·ET) window
+		// drawn at THAT moment can be near-deadline by the time this
+		// promoting entry lands. Without a fresh draw at the suffrage
+		// flip, the timer can fire before the leader's next heartbeat
+		// arrives, causing the new voter to campaign and depose the
+		// leader (PromoteToVoter "node stepped down"). Reset gives a
+		// fresh window starting at the transition instant — guaranteed
+		// to be ≥ ET, which dominates the heartbeat interval.
+		// Cnew (voters list) is the load-bearing side: the Cjoint append
+		// flips containsVoter false→true (n2 enters Cnew); the Cnew-final
+		// append is true→true (no spurious reset).
+		if !prev.containsVoter(n.st.id) && n.st.currentConfig.containsVoter(n.st.id) {
+			n.resetElectionTimer()
+		}
 	}
 }
 
