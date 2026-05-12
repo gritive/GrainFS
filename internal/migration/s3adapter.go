@@ -52,21 +52,25 @@ func (s *S3Source) ListBuckets() ([]string, error) {
 	return names, nil
 }
 
-func (s *S3Source) ListObjects(bucket string) ([]string, error) {
-	var keys []string
-	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+func (s *S3Source) ListObjectsPage(bucket, cursor string) (keys []string, nextCursor string, err error) {
+	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket),
-	})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		for _, obj := range page.Contents {
-			keys = append(keys, aws.ToString(obj.Key))
-		}
 	}
-	return keys, nil
+	if cursor != "" {
+		input.ContinuationToken = aws.String(cursor)
+	}
+	out, errCall := s.client.ListObjectsV2(context.Background(), input)
+	if errCall != nil {
+		return nil, "", errCall
+	}
+	keys = make([]string, 0, len(out.Contents))
+	for _, obj := range out.Contents {
+		keys = append(keys, aws.ToString(obj.Key))
+	}
+	if aws.ToBool(out.IsTruncated) {
+		nextCursor = aws.ToString(out.NextContinuationToken)
+	}
+	return keys, nextCursor, nil
 }
 
 func (s *S3Source) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {

@@ -14,7 +14,9 @@ import (
 // Source is the minimal interface required from a migration source.
 type Source interface {
 	ListBuckets() ([]string, error)
-	ListObjects(bucket string) ([]string, error)
+	// ListObjectsPage returns up to one page of object keys starting after cursor.
+	// An empty cursor starts from the beginning. An empty nextCursor signals the last page.
+	ListObjectsPage(bucket, cursor string) (keys []string, nextCursor string, err error)
 	GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error)
 }
 
@@ -80,43 +82,49 @@ func (inj *Injector) RunContext(ctx context.Context) (Stats, error) {
 			}
 		}
 
-		keys, err := inj.src.ListObjects(bucket)
-		if err != nil {
-			log.Warn().Str("bucket", bucket).Err(err).Msg("migration: list objects failed")
-			stats.Errors++
-			continue
-		}
+		cursor := ""
+		for {
+			keys, next, err := inj.src.ListObjectsPage(bucket, cursor)
+			if err != nil {
+				log.Warn().Str("bucket", bucket).Err(err).Msg("migration: list objects failed")
+				stats.Errors++
+				break
+			}
+			for _, key := range keys {
+				if inj.skipExisting {
+					rc, _, err := inj.dst.GetObject(ctx, bucket, key)
+					if err == nil {
+						rc.Close()
+						stats.Skipped++
+						continue
+					}
+				}
 
-		for _, key := range keys {
-			if inj.skipExisting {
-				rc, _, err := inj.dst.GetObject(ctx, bucket, key)
-				if err == nil {
-					rc.Close()
-					stats.Skipped++
+				rc, obj, err := inj.src.GetObject(bucket, key)
+				if err != nil {
+					log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: get object failed")
+					stats.Errors++
 					continue
 				}
-			}
 
-			rc, obj, err := inj.src.GetObject(bucket, key)
-			if err != nil {
-				log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: get object failed")
-				stats.Errors++
-				continue
-			}
+				ct := ""
+				if obj != nil {
+					ct = obj.ContentType
+				}
 
-			ct := ""
-			if obj != nil {
-				ct = obj.ContentType
-			}
-
-			if _, err := inj.dst.PutObject(ctx, bucket, key, rc, ct); err != nil {
+				if _, err := inj.dst.PutObject(ctx, bucket, key, rc, ct); err != nil {
+					rc.Close()
+					log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: put object failed")
+					stats.Errors++
+					continue
+				}
 				rc.Close()
-				log.Warn().Str("bucket", bucket).Str("key", key).Err(err).Msg("migration: put object failed")
-				stats.Errors++
-				continue
+				stats.Copied++
 			}
-			rc.Close()
-			stats.Copied++
+			if next == "" {
+				break
+			}
+			cursor = next
 		}
 	}
 
