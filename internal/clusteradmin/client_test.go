@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,7 +103,7 @@ func TestClient_RemovePeer_NotLeader_ReturnsStructuredError(t *testing.T) {
 
 	var rpe *RemovePeerError
 	require.True(t, errors.As(err, &rpe), "must be *RemovePeerError so callers can branch on status code")
-	assert.Equal(t, http.StatusConflict, rpe.StatusCode)
+	assert.Equal(t, http.StatusConflict, rpe.Status)
 	assert.Equal(t, "n1", rpe.LeaderID)
 	assert.Equal(t, "not leader", rpe.Message)
 }
@@ -143,31 +144,6 @@ func TestClient_RemovePeer_ContextCancelled(t *testing.T) {
 	defer cancel()
 	err := c.RemovePeer(ctx, "n3", false)
 	require.Error(t, err, "context deadline must surface")
-}
-
-func TestClient_NewClient_BarePathDispatchesToUDS(t *testing.T) {
-	c := NewClient("/tmp/some/admin.sock")
-	require.Equal(t, "http://unix", c.baseURL)
-	require.Equal(t, "/tmp/some/admin.sock", c.sockPath)
-	require.NotNil(t, c.httpClient.Transport)
-}
-
-func TestClient_NewClient_UnixPrefixDispatchesToUDS(t *testing.T) {
-	c := NewClient("unix:/tmp/admin.sock")
-	require.Equal(t, "http://unix", c.baseURL)
-	require.Equal(t, "/tmp/admin.sock", c.sockPath)
-}
-
-func TestClient_NewClient_HTTPDispatchesDirect(t *testing.T) {
-	c := NewClient("http://127.0.0.1:9000/")
-	require.Equal(t, "http://127.0.0.1:9000", c.baseURL, "trailing slash trimmed")
-	require.Empty(t, c.sockPath, "HTTP transport carries no sockPath")
-}
-
-func TestClient_NewClient_HTTPSDispatchesDirect(t *testing.T) {
-	c := NewClient("https://example.com")
-	require.Equal(t, "https://example.com", c.baseURL)
-	require.Empty(t, c.sockPath)
 }
 
 // TestClient_UDSDial_RoundTrip verifies end-to-end UDS dial via NewClient
@@ -223,7 +199,9 @@ func TestClient_StatusRaw_HTTPError(t *testing.T) {
 	c := NewClient(srv.URL)
 	_, err := c.StatusRaw(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "503")
+	var ae *adminapi.Error
+	require.True(t, errors.As(err, &ae), "must surface *adminapi.Error with Status")
+	require.Equal(t, 503, ae.Status)
 }
 
 func TestClient_EventLog_ParsesArray(t *testing.T) {

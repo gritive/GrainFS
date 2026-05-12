@@ -128,11 +128,30 @@ func (t *Transport) Do(ctx context.Context, method, path string, in any, out any
 
 func (t *Transport) parseErrorBody(status int, body []byte) error {
 	var wire Error
-	if err := json.Unmarshal(body, &wire); err != nil || wire.Code == "" {
-		return &Error{Status: status, Code: "internal", Message: string(body)}
+	if err := json.Unmarshal(body, &wire); err == nil && wire.Code != "" {
+		wire.Status = status
+		return &wire
 	}
-	wire.Status = status
-	return &wire
+	// Legacy flat shape: {"error":"...","leader_id":"...",...}
+	// Decode as a generic map and lift "error" → Message, rest → Details so
+	// endpoint-specific parsers (e.g. parseRemovePeerError) can read fields
+	// regardless of envelope shape.
+	var flat map[string]any
+	if err := json.Unmarshal(body, &flat); err == nil && len(flat) > 0 {
+		out := &Error{Status: status, Code: "internal"}
+		if msg, ok := flat["error"].(string); ok && msg != "" {
+			out.Message = msg
+		} else {
+			out.Message = string(body)
+		}
+		delete(flat, "code")
+		delete(flat, "error")
+		if len(flat) > 0 {
+			out.Details = flat
+		}
+		return out
+	}
+	return &Error{Status: status, Code: "internal", Message: string(body)}
 }
 
 // wrapTransportError maps transport-level failures (context cancel, dial
