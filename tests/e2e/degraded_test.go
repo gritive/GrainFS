@@ -48,16 +48,6 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
@@ -74,7 +64,6 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", "0",
@@ -102,17 +91,20 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// All nodes share the full 5-node peer list. Start the complete peer set
-	// before probing writes so meta-raft does not elect against a partial
-	// bootstrap view and then churn while the last voters join.
-	for i := range numNodes {
+	// Start seed node first, then let followers join via .join-pending.
+	procs[0] = startNode(0)
+	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
+	time.Sleep(2 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+	for i := 1; i < numNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 60*time.Second)
 	time.Sleep(4 * time.Second)
-
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

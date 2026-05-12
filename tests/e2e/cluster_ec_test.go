@@ -57,16 +57,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
@@ -85,7 +75,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			"--shard-cache-size=0",
@@ -119,7 +108,12 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	for i := 0; i < numNodes; i++ {
+	// Start seed node, then let followers join via .join-pending.
+	procs[0] = startNode(0)
+	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
+	time.Sleep(2 * time.Second)
+	for i := 1; i < numNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -428,16 +422,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	// force the existing leader to step down (standard Raft), causing a livelock.
 	// With a uniform 6-node config, quorum=4, so no election succeeds until ≥4
 	// nodes are up — handled by the require.Eventually 120s window on CreateBucket.
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/tp-node-%d-stderr.log", i))
 		require.NoError(t, err, "create stderr file for node %d", i)
@@ -446,7 +430,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
@@ -479,15 +462,12 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 	}
 	t.Cleanup(killAll)
 
-	// All nodes share the full 6-node peer list and quorum=4. Bring up quorum
-	// first so the cluster can elect once, then add the remaining peers without
-	// making all six race through the first election at the same time.
-	for i := 0; i < 4; i++ {
-		procs[i] = startNode(i)
-		time.Sleep(150 * time.Millisecond)
-	}
-	waitForPortsParallel(t, httpPorts[:4], 60*time.Second)
-	for i := 4; i < numNodes; i++ {
+	// Start seed node, then let followers join sequentially via .join-pending.
+	procs[0] = startNode(0)
+	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
+	time.Sleep(2 * time.Second)
+	for i := 1; i < numNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
