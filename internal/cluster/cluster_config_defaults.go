@@ -21,6 +21,9 @@ const (
 
 	DefaultClusterDiskWarnFrac     = 0.80
 	DefaultClusterDiskCriticalFrac = 0.90
+
+	DefaultClusterSnapshotInterval = 1 * time.Hour
+	DefaultClusterSnapshotRetain   = 24
 )
 
 // DefaultAlertWebhook returns "" — webhooks are disabled by default.
