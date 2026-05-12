@@ -209,8 +209,8 @@ func TestService_Apply_ThenWorkerProcesses(t *testing.T) {
 	svc := NewService(store, prop, lead, be, del, 10*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go svc.Run(ctx)
+	runDone := make(chan struct{})
+	go func() { svc.Run(ctx); close(runDone) }()
 
 	// Apply config via service (simulates FSM: writes to store via PutRaw).
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>`)
@@ -224,10 +224,11 @@ func TestService_Apply_ThenWorkerProcesses(t *testing.T) {
 		return len(del.deleted) > 0
 	}, 2*time.Second, 10*time.Millisecond, "worker should delete expired object after Apply")
 
-	// Cancel to stop the worker, then assert. The worker may have run more than one
-	// cycle before stopping, so we check that the deletion happened rather than that
-	// it happened exactly once.
+	// Stop the service and wait for Run to fully exit (including workerWG.Wait) before
+	// asserting, so no worker cycle can race with the assertion. The worker may have
+	// run more than one cycle, so check Contains rather than exact-slice equality.
 	cancel()
+	<-runDone
 	del.mu.Lock()
 	assert.Contains(t, del.deleted, "b/old.log")
 	del.mu.Unlock()
