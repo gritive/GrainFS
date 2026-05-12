@@ -592,9 +592,9 @@ func (s *badgerLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntr
 // The log MUST be empty at call time (caller ensures via TruncateAfter(0)).
 // Persists durably (db.Sync).
 func (s *badgerLogStore) InstallSnapshotBoundary(lastIncludedIndex, lastIncludedTerm uint64) error {
-	if s.lastIdx.Load() != 0 {
-		// LastIndex > 0 means entry keys exist. InstallSnapshot must
-		// TruncateAfter(0) first.
+	if s.LastIndex() != s.FirstIndex()-1 {
+		// The log must be empty above the current snapshot boundary.
+		// InstallSnapshot must TruncateAfter(FirstIndex()-1) first.
 		return ErrLogIndexOutOfRange
 	}
 	firstBuf := make([]byte, 8)
@@ -615,6 +615,7 @@ func (s *badgerLogStore) InstallSnapshotBoundary(lastIncludedIndex, lastIncluded
 	}
 	s.firstIdx.Store(lastIncludedIndex + 1)
 	s.prevTerm.Store(lastIncludedTerm)
+	s.lastIdx.Store(0)
 	return nil
 }
 

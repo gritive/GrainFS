@@ -634,6 +634,12 @@ func reconstructConfig(snap *Snapshot, logStore LogStore, selfID string, peers [
 	var current effectiveConfig
 	if snap != nil && len(snap.Configuration) > 0 {
 		current = newSingleConfig(snap.Configuration)
+		if len(snap.Learners) > 0 {
+			current.learners = make(map[string]string, len(snap.Learners))
+			for id, addr := range snap.Learners {
+				current.learners[id] = addr
+			}
+		}
 	} else {
 		current = seedConfigFromCfg(selfID, peers)
 	}

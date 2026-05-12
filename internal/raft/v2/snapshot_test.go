@@ -64,6 +64,52 @@ func TestSnapshot_CreateAndCompact(t *testing.T) {
 	require.Equal(t, snap.LastIncludedTerm, term, "TermAt(boundary) must equal snapshot's LastIncludedTerm")
 }
 
+func TestSnapshot_CreatePreservesLearners(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1"})
+	require.NoError(t, err)
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Command: []byte("x")}}))
+	n.st.commitIndex = 1
+	n.st.currentConfig = effectiveConfig{
+		voters:   []string{"n1"},
+		learners: map[string]string{"n2": "addr2"},
+	}
+
+	reply := make(chan error, 1)
+	n.handleCreateSnapshot(command{kind: cmdCreateSnapshot, csIndex: 1, csData: []byte("fsm"), csReply: reply})
+	require.NoError(t, <-reply)
+
+	snap, err := n.LatestSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"n2": "addr2"}, snap.Learners)
+}
+
+func TestInstallSnapshot_PreservesLearners(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2"}})
+	require.NoError(t, err)
+	n.Start()
+	t.Cleanup(n.Stop)
+	go func() {
+		for range n.ApplyCh() {
+		}
+	}()
+
+	reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "leader",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  1,
+		Configuration:     []string{"n1"},
+		Learners:          map[string]string{"n3": "addr3"},
+		Data:              []byte("snapshot"),
+	})
+	require.Equal(t, uint64(1), reply.Term)
+
+	require.Eventually(t, func() bool {
+		cfg := n.rs.Load().config
+		return cfg.isLearner("n3") && cfg.learners["n3"] == "addr3"
+	}, time.Second, 10*time.Millisecond)
+}
+
 // TestSnapshot_RejectUncommitted: CreateSnapshot at index > commitIndex
 // returns an error and leaves state unchanged.
 func TestSnapshot_RejectUncommitted(t *testing.T) {

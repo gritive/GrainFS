@@ -508,8 +508,6 @@ func (n *Node) handleAppendEntries(cmd command) {
 	for i, e := range args.Entries {
 		target := args.PrevLogIndex + uint64(i) + 1
 		if e.Index != target {
-			// Entry index disagrees with the expected logical position.
-			// Reject without mutating the log; leader will retry.
 			aeOutcome = "conflict"
 			cmd.aeReply <- &AppendEntriesReply{
 				Term:          n.st.currentTerm,
@@ -519,6 +517,9 @@ func (n *Node) handleAppendEntries(cmd command) {
 			}
 			return
 		}
+	}
+	for i, e := range args.Entries {
+		target := args.PrevLogIndex + uint64(i) + 1
 		if target <= n.st.lastLogIndex() {
 			if n.mustTermAt(target) != e.Term {
 				// Conflict at logical index target. Truncate and break — the

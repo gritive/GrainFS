@@ -220,6 +220,7 @@ type InstallSnapshotArgs struct {
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
 	Configuration     []string
+	Learners          map[string]string
 	Data              []byte
 }
 

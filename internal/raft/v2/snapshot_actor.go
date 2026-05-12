@@ -47,11 +47,13 @@ func (n *Node) handleCreateSnapshot(cmd command) {
 	}
 	cfgVoters := make([]string, len(n.st.currentConfig.voters))
 	copy(cfgVoters, n.st.currentConfig.voters)
+	cfgLearners := n.st.currentConfig.cloneLearners()
 
 	snap := &Snapshot{
 		LastIncludedIndex: cmd.csIndex,
 		LastIncludedTerm:  lastIncludedTerm,
 		Configuration:     cfgVoters,
+		Learners:          cfgLearners,
 		Data:              cmd.csData,
 	}
 	if err := n.snaps.Save(snap); err != nil {
@@ -140,6 +142,7 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 		LastIncludedIndex: args.LastIncludedIndex,
 		LastIncludedTerm:  args.LastIncludedTerm,
 		Configuration:     args.Configuration,
+		Learners:          args.Learners,
 		Data:              args.Data,
 	}
 	if err := n.snaps.Save(snap); err != nil {
@@ -177,7 +180,14 @@ func (n *Node) handleInstallSnapshot(cmd command) {
 	// authoritative committed config at LastIncludedIndex (snapshot
 	// CreateSnapshot refuses to write while joint, so this is always a
 	// non-joint voter list — see handleCreateSnapshot guard).
-	n.st.currentConfig = newSingleConfig(args.Configuration)
+	nextConfig := newSingleConfig(args.Configuration)
+	if len(args.Learners) > 0 {
+		nextConfig.learners = make(map[string]string, len(args.Learners))
+		for id, addr := range args.Learners {
+			nextConfig.learners[id] = addr
+		}
+	}
+	n.st.currentConfig = nextConfig
 	n.st.configHistory = nil
 	n.st.appendedConfigIndex = 0
 	n.st.invalidatePeerSet()
@@ -308,6 +318,7 @@ func (n *Node) dispatchOne(peer string) {
 			LastIncludedIndex: snap.LastIncludedIndex,
 			LastIncludedTerm:  snap.LastIncludedTerm,
 			Configuration:     snap.Configuration,
+			Learners:          snap.Learners,
 			Data:              snap.Data,
 		}
 		n.st.peerInFlight[peer] = true

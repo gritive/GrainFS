@@ -321,6 +321,29 @@ func TestLogStore_CompactBefore_Idempotent(t *testing.T) {
 	}
 }
 
+func TestLogStore_InstallSnapshotBoundaryAfterPriorSnapshot(t *testing.T) {
+	for _, f := range allStores {
+		t.Run(f.name, func(t *testing.T) {
+			s := f.new(t)
+			installer, ok := s.(snapshotInstaller)
+			require.True(t, ok)
+
+			require.NoError(t, installer.InstallSnapshotBoundary(50, 1))
+			require.Equal(t, uint64(51), s.FirstIndex())
+			require.Equal(t, uint64(50), s.LastIndex())
+
+			require.NoError(t, s.Append([]LogEntry{{Term: 1, Index: 51}}))
+			require.NoError(t, s.TruncateAfter(s.FirstIndex()-1))
+			require.NoError(t, installer.InstallSnapshotBoundary(100, 2))
+			require.Equal(t, uint64(101), s.FirstIndex())
+			require.Equal(t, uint64(100), s.LastIndex())
+			term, err := s.TermAt(100)
+			require.NoError(t, err)
+			require.Equal(t, uint64(2), term)
+		})
+	}
+}
+
 // TestLogStore_CompactBefore_BeyondLast: CompactBefore at boundary > LastIndex
 // returns ErrLogIndexOutOfRange (no entry covers that index).
 func TestLogStore_CompactBefore_BeyondLast(t *testing.T) {

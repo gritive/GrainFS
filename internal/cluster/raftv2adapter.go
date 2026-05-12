@@ -378,13 +378,12 @@ func (b *v2TransportBridge) SendInstallSnapshot(peer string, args *raftv2.Instal
 	if sendPtr == nil || *sendPtr == nil {
 		return nil, raftv2.ErrNotImplemented
 	}
-	// v2's Configuration is []string of voter IDs; v1's wire format carries
-	// raft.Server entries (ID + Suffrage). The inbound side (HandleInstallSnapshot
-	// in this adapter) only forwards IDs to v2 anyway, so synthesise voter
-	// entries for outbound. See translation note near HandleInstallSnapshot.
-	servers := make([]raft.Server, len(args.Configuration))
-	for i, id := range args.Configuration {
-		servers[i] = raft.Server{ID: id, Suffrage: raft.Voter}
+	servers := make([]raft.Server, 0, len(args.Configuration)+len(args.Learners))
+	for _, id := range args.Configuration {
+		servers = append(servers, raft.Server{ID: id, Suffrage: raft.Voter})
+	}
+	for id := range args.Learners {
+		servers = append(servers, raft.Server{ID: id, Suffrage: raft.NonVoter})
 	}
 	v1args := &raft.InstallSnapshotArgs{
 		Term:              args.Term,
@@ -569,9 +568,17 @@ func (a *raftV2Node) HandleAppendEntries(args *raft.AppendEntriesArgs) *raft.App
 }
 
 func (a *raftV2Node) HandleInstallSnapshot(args *raft.InstallSnapshotArgs) *raft.InstallSnapshotReply {
-	cfg := make([]string, len(args.Servers))
-	for i, s := range args.Servers {
-		cfg[i] = s.ID
+	cfg := make([]string, 0, len(args.Servers))
+	learners := make(map[string]string)
+	for _, s := range args.Servers {
+		if s.Suffrage == raft.NonVoter {
+			learners[s.ID] = ""
+			continue
+		}
+		cfg = append(cfg, s.ID)
+	}
+	if len(learners) == 0 {
+		learners = nil
 	}
 	v2args := &raftv2.InstallSnapshotArgs{
 		Term:              args.Term,
@@ -579,6 +586,7 @@ func (a *raftV2Node) HandleInstallSnapshot(args *raft.InstallSnapshotArgs) *raft
 		LastIncludedIndex: args.LastIncludedIndex,
 		LastIncludedTerm:  args.LastIncludedTerm,
 		Configuration:     cfg,
+		Learners:          learners,
 		Data:              args.Data,
 	}
 	reply := a.n.HandleInstallSnapshot(v2args)
