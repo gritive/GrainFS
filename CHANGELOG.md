@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.162.0] - 2026-05-12 — feat(cluster-config): snapshot-interval / snapshot-retain → cluster config
+
+자동 스냅샷 정책을 노드 실행 flag에서 cluster config(Raft-replicated + admin API hot-patchable)로 이주. 운영 중 RPO 조정 시 노드 재시작 불필요.
+
+### Breaking changes
+- `--snapshot-interval` / `--snapshot-retain` 플래그 제거. 이제 cluster config 키로 관리:
+  ```
+  curl --unix-socket <data>/admin.sock -X PATCH http://./v1/cluster/config \
+       -H "Content-Type: application/json" \
+       -d '{"snapshot-interval":"30m","snapshot-retain":12}'
+  ```
+  기본값 동일 (interval=1h, retain=24). `snapshot-interval=0`이면 auto-snapshot 비활성. 비활성 ↔ 활성 토글은 같은 PATCH 경로로 런타임 변경 가능 (재시작 불필요).
+
+### Added
+- `snapshot-interval` / `snapshot-retain` cluster config 키 (FBS schema + defaults + getter + admin GET/PATCH + Raft replicate + validate). `SourceForKey()`도 두 키 지원.
+- `internal/snapshot/auto.SnapshotPolicy` 인터페이스. `AutoSnapshotter`는 매 tick에 `policy.SnapshotInterval()` / `policy.SnapshotRetain()` 재조회 → PATCH 적용 latency 최대 5s (idle bound).
+- forward-compat decoder 테스트 (`TestClusterConfigCodec_SnapshotForwardCompatEmptyPayload`): 새 필드 없는 buffer 디코드 시 default fallback.
+- e2e harness helper `patchSnapshotInterval(t, dataDir, dur)` — 5 주요 진입점에서 부팅 직후 `"0s"`로 자동 비활성.
+
+### Changed
+- `internal/snapshot/AutoSnapshotter` 시그니처: `(interval, retain)` 스칼라 → `(policy SnapshotPolicy, idleWhenDisabled time.Duration)`. `time.NewTicker` → `time.After + idle 단위 chunked wait` 패턴 (PATCH→effect latency를 interval에 무관하게 idle로 제한).
+- `internal/serveruntime.StartAutoSnapshotterWhenReady` 시그니처: `(interval, retain)` 제거, `cfg *cluster.ClusterConfig` 추가.
+- `serveruntime.Config.SnapInterval` / `SnapRetain` 필드 제거.
+
+### Notes
+- Mixed-version rolling upgrade 시 구버전 노드는 새 키 무시 → 정책 노드별 차이 가능. 업그레이드 완료 후 cluster config로 재설정 권장. 후속 작업은 `TODOS.md > Cluster Day-2 Operations > snapshot-config v1.1 rolling-upgrade gap`에서 추적.
+- `meta_fsm_cluster_config.go` audit log dict는 snapshot 키 patch를 아직 emit하지 않음 — `TODOS.md`의 같은 항목에서 후속 보완.
+
 ## [0.0.161.0] - 2026-05-12 — fix(raft/v2): preserve learner state across snapshots
 
 ### Fixed
