@@ -41,6 +41,10 @@ table ClusterConfig {
   // Disk thresholds
   disk_warn_frac:                     DoubleBox;
   disk_critical_frac:                 DoubleBox;
+
+  // Snapshot (object PITR) — interval=0 disables auto-snapshot, hot-toggleable.
+  snapshot_interval_ns:               Int64Box;
+  snapshot_retain:                    Int32Box;
 }
 
 // Patch command — same fields; nil = leave alone.
@@ -63,6 +67,9 @@ table MetaClusterConfigPatchCmd {
 
   disk_warn_frac:                     DoubleBox;
   disk_critical_frac:                 DoubleBox;
+
+  snapshot_interval_ns:               Int64Box;
+  snapshot_retain:                    Int32Box;
 
   reset_keys:                         [string];     // explicit field names to remove from FSM (default-restore)
   expected_rev:                       uint64;       // 0 = no CAS; nonzero = If-Match-Rev semantics
