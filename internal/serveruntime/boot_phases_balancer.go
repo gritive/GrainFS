@@ -38,7 +38,7 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 			MigrationMaxRetries: cfg.BalancerMigrationMaxRetries,
 			MigrationPendingTTL: cfg.BalancerMigrationPendingTTL,
 		}
-		bp, gr, err := StartBalancer(ctx, bopts, state.nodeID, cfg.DataDir, statsStore, state.node, state.peers, state.fsm, state.quicTransport, state.shardSvc, state.effectiveEC.NumShards())
+		bp, gr, err := StartBalancer(ctx, bopts, state.nodeID, cfg.DataDir, statsStore, state.node, state.peers, state.fsm, state.quicTransport, state.shardSvc, state.effectiveEC.NumShards(), state.metaRaft.FSM().ClusterConfig())
 		if err != nil {
 			log.Warn().Err(err).Msg("balancer start failed")
 		}

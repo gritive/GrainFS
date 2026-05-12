@@ -57,6 +57,9 @@ func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.Transfe
 // replays any persisted pending tasks. Returns the GossipReceiver so the
 // caller can wire additional StreamType consumers (e.g. Phase 16 Slice 2
 // receipt gossip) onto the same receiver.
+//
+// clusterCfg is the live ClusterConfig view (typically metaFSM.ClusterConfig())
+// — the balancer reads its 10 cluster-managed tunables from it every tick.
 func StartBalancer(
 	ctx context.Context,
 	opts BalancerOptions,
@@ -68,29 +71,14 @@ func StartBalancer(
 	quicTransport transport.Transport,
 	shardSvc *cluster.ShardService,
 	numShards int,
+	clusterCfg cluster.BalancerClusterCfg,
 ) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
 	if opts.CBThreshold < 0 || opts.CBThreshold > 1 {
 		return nil, nil, fmt.Errorf("balancer cb-threshold must be in [0, 1], got %g", opts.CBThreshold)
 	}
 
-	def := cluster.DefaultBalancerConfig()
-	cfg := cluster.BalancerConfig{
-		GossipInterval:      opts.GossipInterval,
-		WarmupTimeout:       opts.WarmupTimeout,
-		ImbalanceTriggerPct: opts.ImbalanceTriggerPct,
-		ImbalanceStopPct:    opts.ImbalanceStopPct,
-		MigrationRate:       opts.MigrationRate,
-		LeaderTenureMin:     opts.LeaderTenureMin,
-		LeaderLoadThreshold: def.LeaderLoadThreshold,
-		GracePeriod:         def.GracePeriod,
-		PeerSeenWindow:      def.PeerSeenWindow,
-		CBThreshold:         opts.CBThreshold,
-		MigrationMaxRetries: opts.MigrationMaxRetries,
-		MigrationPendingTTL: opts.MigrationPendingTTL,
-	}
-
 	adapter := NewRaftBalancerAdapter(node, peers)
-	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, cfg)
+	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, clusterCfg)
 
 	balancer.SetObjectPicker(cluster.NewLocalObjectPicker(filepath.Join(dataDir, "shards")))
 

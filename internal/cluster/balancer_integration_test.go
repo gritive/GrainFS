@@ -22,15 +22,9 @@ func TestBalancerIntegration_ProposesOnImbalance(t *testing.T) {
 		peerIDs: []string{"peer-a"},
 	}
 
-	cfg := BalancerConfig{
-		GossipInterval:      10 * time.Millisecond,
-		WarmupTimeout:       1 * time.Millisecond, // immediate
-		ImbalanceTriggerPct: 20.0,
-		ImbalanceStopPct:    5.0,
-		MigrationRate:       1,
-		LeaderTenureMin:     0,
-		LeaderLoadThreshold: 1.3,
-	}
+	cfg := defaultFakeBalancerCfg()
+	cfg.warmupTimeout = 1 * time.Millisecond // immediate
+	cfg.migrationRate = 1
 
 	p := NewBalancerProposer("leader", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
@@ -152,15 +146,9 @@ func TestBalancerIntegration_DiskCollector(t *testing.T) {
 		peerIDs: []string{"peer-a"},
 	}
 
-	cfg := BalancerConfig{
-		GossipInterval:      10 * time.Millisecond,
-		WarmupTimeout:       1 * time.Millisecond,
-		ImbalanceTriggerPct: 20.0,
-		ImbalanceStopPct:    5.0,
-		MigrationRate:       1,
-		LeaderTenureMin:     0,
-		LeaderLoadThreshold: 1.3,
-	}
+	cfg := defaultFakeBalancerCfg()
+	cfg.warmupTimeout = 1 * time.Millisecond
+	cfg.migrationRate = 1
 
 	p := NewBalancerProposer("leader", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
