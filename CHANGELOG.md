@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.152.0] - 2026-05-12 — feat(raft/v2): M6.0 — AddLearner + PromoteToVoter (Path B)
+
+### Added
+- `raft/v2` learner support. `AddLearner(id, addr)` registers a non-voting observer via a single-phase ConfChange — quorum math is byte-for-byte unchanged. `PromoteToVoter(id)` runs the two-entry Path B sequence: drop-from-learners → joint AddVoter. Catchup-gated by `cfg.LearnerCatchupThreshold`; returns `ErrLearnerNotCaughtUp` when the learner is lagging.
+- New v2 sentinels exported: `ErrLearnerNotCaughtUp`, `ErrNotALearner`, `ErrAlreadyLearner`. The cluster adapter maps the catchup sentinel to a new mirrored `raft.ErrLearnerNotCaughtUp` (the v1 package retains it for caller compatibility).
+- New `effectiveConfig.learners map[string]string` (id → address). Voter slices (`voters`, `oldVoters`) are NEVER mutated by learner operations, so the existing joint quorum math (`quorumOK`, `commitOK`, `quorumOKByRound`) and joint encoder shape are unchanged.
+
+### Internal
+- Path B: learners ride out-of-band of joint encoder. New `replicaSet()` (voters ∪ learners − self) drives broadcastHeartbeat + the post-propose dispatch. Quorum-shaped sites (RequestVote, TransferLeadership target, becomeLeader peer setup) keep using the voter-only `peerSet()`.
+- ConfChange single-phase wire format bumped to version 0x02; carries an `Op` tag + (optional) learner target + the full resulting voters / learners snapshot. The joint encoder (version 0x01, kind 0x01) is UNCHANGED.
+- v2 BadgerLogStore stamps a schema version on first open. Opening any pre-M6.0 store with entries or compaction meta but no stamp fails fast with a migration hint.
+- v2 BadgerSnapshotStore encoding bumped to 0x02 with a learners section after the voter list.
+
+### BREAKING — on-disk schema bump
+
+Pre-M6.0 v2 deployments cannot upgrade in place. Operators must:
+
+1. Drain or accept service interruption (best on a quiesced cluster).
+2. Stop every grainfs node.
+3. Wipe each node's `<dataDir>/raft-v2/` directory (the log + stable + snapshot keyspaces under that prefix). The FSM-state DB (`<dataDir>/shared-fsm/`) is untouched.
+4. Re-bootstrap the cluster (`grainfs cluster bootstrap` or equivalent) and rejoin nodes.
+
+v2 has been the production raft since M5 PR 28b (2026-05-12), so the soak window is short. Single-node and small-cluster operators can recover via re-bootstrap; multi-node production with retained FSM state needs the same wipe applied per node before they rejoin.
+
+### Operational notes for M6.0
+
+- A leader that crashes between the PromoteToVoter stage-1 commit and stage-2 dispatch leaves the target ID in neither voters nor learners (orphan). `pendingPromote` is leader-local state and does NOT survive failover. Recovery is operator-driven: re-issue `AddLearner` + `PromoteToVoter` for the orphaned ID after the new leader stabilises. A future revision may synthesize a fix-up entry at `becomeLeader` time; for now the workaround is documented here.
+- `LearnerCatchupThreshold` defaults to 0 (gate disabled in v2 — promote at proposal time without lag check). Set it to a non-zero entry count to enforce the catchup gate.
+
 ## [0.0.151.0] - 2026-05-12 — chore: trim serve flags (hide no-encryption/direct-io, remove quic-mux)
 
 ### Changed

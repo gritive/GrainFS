@@ -179,7 +179,12 @@ func translateV2SentinelErr(err error) error {
 		return raft.ErrNoPeers
 	case errors.Is(err, raftv2.ErrAlreadyBootstrapped):
 		return raft.ErrAlreadyBootstrapped
+	case errors.Is(err, raftv2.ErrLearnerNotCaughtUp):
+		return raft.ErrLearnerNotCaughtUp
 	}
+	// ErrNotALearner / ErrAlreadyLearner have no v1 counterpart — pass
+	// through as v2 sentinels. Callers that need to differentiate must
+	// match against raftv2's exported names directly.
 	return err
 }
 

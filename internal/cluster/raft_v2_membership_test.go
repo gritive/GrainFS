@@ -94,16 +94,14 @@ func TestRaftV2Membership_RemoveVoter_PassesThroughToV2(t *testing.T) {
 		"expected raft.ErrNotLeader (translated from raftv2), got: %v", err)
 }
 
-// TestRaftV2Membership_AddLearner_ReturnsErrNotImplemented verifies that under
-// v2, AddLearner surfaces ErrNotImplemented rather than a silent nil-skip.
-func TestRaftV2Membership_AddLearner_ReturnsErrNotImplemented(t *testing.T) {
+// TestRaftV2Membership_AddLearner_PassesThroughToV2 verifies that under v2
+// (since M6.0, Path B), AddLearner is live: on a single-voter leader the
+// single-phase ConfChange commits inline and returns nil.
+func TestRaftV2Membership_AddLearner_PassesThroughToV2(t *testing.T) {
 	node := newV2LeaderForMembership(t)
 
 	err := node.AddLearner("n2", "addr-n2")
-	require.Error(t, err, "AddLearner must return an error under v2")
-	assert.True(t,
-		errors.Is(err, raftv2.ErrNotImplemented),
-		"expected ErrNotImplemented, got: %v", err)
+	require.NoError(t, err, "AddLearner on a single-voter leader must succeed (M6.0)")
 }
 
 // TestRaftV2Membership_TransferLeadership_PassesThroughToV2 verifies that
@@ -119,17 +117,17 @@ func TestRaftV2Membership_TransferLeadership_PassesThroughToV2(t *testing.T) {
 		"expected raft.ErrNoPeers (translated from raftv2), got: %v", err)
 }
 
-// TestRaftV2Membership_PromoteToVoter_ReturnsErrNotImplemented verifies that
-// under v2, PromoteToVoter surfaces ErrNotImplemented rather than a silent
-// nil-skip.
-func TestRaftV2Membership_PromoteToVoter_ReturnsErrNotImplemented(t *testing.T) {
+// TestRaftV2Membership_PromoteToVoter_RejectsNonLearner verifies that under
+// v2 (since M6.0, Path B), PromoteToVoter on a live leader fails fast when
+// the target id is not a registered learner.
+func TestRaftV2Membership_PromoteToVoter_RejectsNonLearner(t *testing.T) {
 	node := newV2LeaderForMembership(t)
 
 	err := node.PromoteToVoter("n2")
-	require.Error(t, err, "PromoteToVoter must return an error under v2")
+	require.Error(t, err, "PromoteToVoter on a non-learner must return an error")
 	assert.True(t,
-		errors.Is(err, raftv2.ErrNotImplemented),
-		"expected ErrNotImplemented, got: %v", err)
+		errors.Is(err, raftv2.ErrNotALearner),
+		"expected ErrNotALearner, got: %v", err)
 }
 
 // TestRaftV2Membership_ChangeMembership_SequencesAddsRemoves verifies the v2
