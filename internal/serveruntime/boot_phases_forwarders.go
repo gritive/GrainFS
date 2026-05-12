@@ -127,6 +127,9 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
+		if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
+			return err
+		}
 		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
 	})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
@@ -166,6 +169,37 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	}
 
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
+	return nil
+}
+
+type legacyDataRaftMembership interface {
+	ID() string
+	Peers() []string
+	AddVoterCtx(ctx context.Context, id, addr string) error
+}
+
+func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembership, nodes []cluster.MetaNodeEntry, nodeID string) error {
+	if node == nil || nodeID == "" || nodeID == node.ID() {
+		return nil
+	}
+	addr := ""
+	for _, n := range nodes {
+		if n.ID == nodeID {
+			addr = n.Address
+			break
+		}
+	}
+	if addr == "" {
+		return fmt.Errorf("add joined node to legacy data raft: node %q not found in meta membership", nodeID)
+	}
+	for _, peer := range node.Peers() {
+		if peer == nodeID || peer == addr {
+			return nil
+		}
+	}
+	if err := node.AddVoterCtx(ctx, nodeID, addr); err != nil {
+		return fmt.Errorf("add joined node %q to legacy data raft: %w", nodeID, err)
+	}
 	return nil
 }
 

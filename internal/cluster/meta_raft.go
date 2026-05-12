@@ -38,6 +38,7 @@ type MetaRaftConfig struct {
 	NodeID    string
 	RaftID    string   // raft peer ID; production uses the QUIC address
 	Peers     []string // raft peer IDs; production uses peer QUIC addresses
+	JoinMode  bool     // suppresses solo self-election until dynamic join installs membership
 	DataDir   string   // directory for BadgerDB; meta store lives at DataDir/meta_raft
 	Transport MetaTransport
 }
@@ -85,6 +86,7 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 		raftID = cfg.NodeID
 	}
 	nodeCfg := raft.DefaultConfig(raftID, cfg.Peers)
+	nodeCfg.JoinMode = cfg.JoinMode
 	// Meta-Raft shares the QUIC transport and process with data Raft, shard RPC,
 	// S3 startup probes, and per-group Raft workers. Give the control plane a
 	// wider election window so local/CI CPU contention does not leave bucket

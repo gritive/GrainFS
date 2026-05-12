@@ -92,6 +92,23 @@ func TestMetaRaft_Bootstrap_SingleNode(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond, "single node must become leader")
 }
 
+func TestMetaRaft_JoinModeDoesNotSelfElectBeforeJoin(t *testing.T) {
+	m, err := NewMetaRaft(MetaRaftConfig{
+		NodeID:   "node-joiner",
+		RaftID:   "node-joiner-addr",
+		JoinMode: true,
+		DataDir:  t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Start(context.Background()))
+
+	require.Never(t, func() bool {
+		return m.node.IsLeader()
+	}, 300*time.Millisecond, 20*time.Millisecond, "join-mode meta raft must wait for cluster membership instead of forming a solo cluster")
+}
+
 func TestMetaRaft_Join_AddsLearnerThenVoter(t *testing.T) {
 	dir0 := t.TempDir()
 	dir1 := t.TempDir()
