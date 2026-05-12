@@ -135,5 +135,7 @@ func logClusterConfigLoaded(cfg *cluster.ClusterConfig) {
 		Bool("alert-webhook-secret-set", len(cfg.AlertWebhookSecretWrapped()) > 0).
 		Float64("disk-warn-threshold", cfg.DiskWarnFrac()).
 		Float64("disk-critical-threshold", cfg.DiskCriticalFrac()).
+		Dur("snapshot-interval", cfg.SnapshotInterval()).
+		Int32("snapshot-retain", cfg.SnapshotRetain()).
 		Msg("cluster config loaded")
 }
