@@ -26,7 +26,6 @@ func bootValidateConfig(state *bootState) error {
 	cfg := state.cfg
 	state.nodeID = cfg.NodeID
 	state.raftAddr = cfg.RaftAddr
-	state.peers = cfg.Peers
 
 	if state.nodeID == "" {
 		var err error
@@ -38,9 +37,9 @@ func bootValidateConfig(state *bootState) error {
 	}
 
 	// D6/D7: --cluster-key is required when running in actual cluster mode
-	// (peers > 0 || join != ""). Solo runs through this same function but
-	// does not require a cluster key — Run handles both modes.
-	state.clusterMode = len(state.peers) > 0 || cfg.JoinMode
+	// (peers > 0). Solo runs through this same function but does not require
+	// a cluster key — Run handles both modes.
+	state.clusterMode = len(state.peers) > 0
 	if state.clusterMode {
 		if err := transport.ValidateClusterKey(cfg.ClusterKey); err != nil {
 			if errors.Is(err, transport.ErrEmptyClusterKey) {
@@ -48,15 +47,6 @@ func bootValidateConfig(state *bootState) error {
 			}
 			log.Warn().Err(err).Msg("--cluster-key is below recommended length")
 		}
-	}
-	if cfg.JoinMode {
-		if len(state.peers) > 0 {
-			return fmt.Errorf("--join cannot be used with --peers")
-		}
-		if state.raftAddr == "" {
-			return fmt.Errorf("--raft-addr is required when --join is set")
-		}
-		state.peers = []string{cfg.JoinAddr}
 	}
 
 	// When no peers are configured, we boot a singleton Raft node on a

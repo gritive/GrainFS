@@ -26,49 +26,6 @@ func TestBootValidateConfig_AutogeneratesNodeID(t *testing.T) {
 	assert.Equal(t, filepath.Join(dir, "raft"), state.raftDir)
 }
 
-// TestBootValidateConfig_JoinWithoutRaftAddr — invariant from run.go that
-// --join requires --raft-addr; bootValidateConfig surfaces the error before
-// any I/O so cmd/serve fails fast.
-func TestBootValidateConfig_JoinWithoutRaftAddr(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", JoinMode: true, ClusterKey: "x"})
-
-	err := bootValidateConfig(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--raft-addr is required when --join is set")
-}
-
-// TestBootValidateConfig_JoinAndPeersConflict — --join and --peers cannot
-// coexist; bootValidateConfig rejects.
-func TestBootValidateConfig_JoinAndPeersConflict(t *testing.T) {
-	state := newBootState(Config{
-		DataDir:    t.TempDir(),
-		NodeID:     "n1",
-		RaftAddr:   "127.0.0.1:9000",
-		JoinMode:   true,
-		Peers:      []string{"p1"},
-		ClusterKey: "x",
-	})
-
-	err := bootValidateConfig(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--join cannot be used with --peers")
-}
-
-// TestBootValidateConfig_PeersWithoutRaftAddr — explicit cluster mode with
-// peers requires raftAddr. bootValidateConfig rejects with a helpful message.
-func TestBootValidateConfig_PeersWithoutRaftAddr(t *testing.T) {
-	state := newBootState(Config{
-		DataDir:    t.TempDir(),
-		NodeID:     "n1",
-		Peers:      []string{"p1"},
-		ClusterKey: "x",
-	})
-
-	err := bootValidateConfig(state)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--raft-addr is required when --peers is set")
-}
-
 // TestBootAutoMigrate_NoOpOnFreshDir — empty dataDir means no legacy meta
 // to migrate; bootAutoMigrate returns silently.
 func TestBootAutoMigrate_NoOpOnFreshDir(t *testing.T) {

@@ -28,7 +28,7 @@ import (
 // Inputs:  state.clusterCoord, state.wal, state.cfg.IAMStore,
 //
 //	state.roleRegistry, state.startupDecisions, state.cfg.DataDir,
-//	state.peers, state.cfg.RaftAddrExplicit, state.cfg.JoinMode,
+//	state.peers, state.cfg.RaftAddrExplicit, state.joinMode,
 //	state.walDir, state.nodeID,
 //	state.raftAddr, state.addr from cfg, state.cfg.FlagsSnapshot.
 //
@@ -109,7 +109,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	log.Info().Str("component", "server").Str("version", cfg.Version).
 		Str("node_id", state.nodeID).Str("raft_addr", state.raftAddr).Strs("peers", state.peers).
 		Str("addr", cfg.Addr).Str("data", cfg.DataDir).Msg("server started")
-	LogStartupConfigSnapshot(cfg.FlagsSnapshot, cfg.Addr, cfg.DataDir, state.nodeID, state.raftAddr, state.peers)
+	LogStartupConfigSnapshot(cfg.FlagsSnapshot, cfg.Addr, cfg.DataDir, state.nodeID, state.raftAddr)
 	logClusterConfigLoaded(state.metaRaft.FSM().ClusterConfig())
 	return nil
 }

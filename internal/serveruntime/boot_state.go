@@ -41,8 +41,12 @@ type bootState struct {
 	raftAddr    string
 	peers       []string
 	clusterMode bool
-	metaDir     string
-	raftDir     string
+	// join-pending mode: set by bootValidateConfig when .join-pending file exists.
+	// Task 3 populates these from the sentinel file.
+	joinMode bool
+	joinAddr string
+	metaDir  string
+	raftDir  string
 
 	// Storage role tracking (populated incrementally by storage phases;
 	// readers in run.go body use these for the boot decision summary).

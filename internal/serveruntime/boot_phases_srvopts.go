@@ -31,7 +31,7 @@ import (
 //	state.balancerProposer, state.metaForwardSender, state.metaReadSender,
 //	state.quicTransport, state.streamRouter, state.gossipReceiver,
 //	state.roleRegistry, state.recoveryReadOnly, state.shardCache,
-//	state.cfg.JoinMode.
+//	state.joinMode.
 //
 // Outputs: state.srvOpts, state.clusterAlerts, state.receiptWiring,
 //
@@ -119,7 +119,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
 	}
-	if len(peers) == 0 && !cfg.RaftAddrExplicit && !cfg.JoinMode {
+	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.joinMode {
 		legacyStore := icebergcatalog.NewStore(state.db, "s3://grainfs-tables/warehouse")
 		metaCatalog := cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
 		if err := MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, state.backend); err != nil {
@@ -229,7 +229,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.AddCleanup(func() { resourcewatch.DeregisterDB(dedupVlogEntry) })
 	}
 	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(state.shardCache))
-	if !cfg.JoinMode {
+	if !state.joinMode {
 		srvOpts = append(srvOpts, server.WithReadIndexer(state.distBackend))
 	}
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(state.distBackend))

@@ -26,8 +26,10 @@ func bootMetaRaftWiring(state *bootState) error {
 	// address as a voter ID — see run.go's raftPeers comment for the term-
 	// storm mechanism. The joiner is added to meta-raft as a voter by the
 	// leader after PerformMetaJoin succeeds.
+	// state.joinMode is populated by bootValidateConfig (Task 3 sets it from
+	// the .join-pending sentinel file).
 	metaPeers := state.peers
-	if state.cfg.JoinMode {
+	if state.joinMode {
 		metaPeers = nil
 	}
 	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
@@ -130,7 +132,7 @@ func bootRotationAndAdminAPI(state *bootState) error {
 // without a real admin UDS. Production callers pass StartRotationSocket;
 // tests can pass a no-op.
 func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocket func(context.Context, string, *cluster.MetaRaft) error) error {
-	if !state.cfg.JoinMode {
+	if !state.joinMode {
 		if err := state.metaRaft.Bootstrap(); err != nil {
 			return fmt.Errorf("meta-raft bootstrap: %w", err)
 		}

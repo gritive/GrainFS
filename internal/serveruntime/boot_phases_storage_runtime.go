@@ -41,7 +41,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	}
 	normalGroupVoters := state.effectiveEC.NumShards()
 
-	if !state.cfg.JoinMode {
+	if !state.joinMode {
 		if err := WaitForMetaRaftLeader(ctx, state.metaRaft, 15*time.Second); err != nil {
 			return err
 		}
@@ -184,7 +184,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft),
 	)
 	state.metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		if state.cfg.JoinMode {
+		if state.joinMode {
 			return
 		}
 		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)

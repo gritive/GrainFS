@@ -30,9 +30,6 @@ type Config struct {
 	RaftAddr         string
 	RaftAddrExplicit bool
 	ClusterKey       string
-	JoinAddr         string
-	JoinMode         bool
-	Peers            []string
 
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts  []server.Option
@@ -107,19 +104,17 @@ type Config struct {
 // LogStartupConfigSnapshot writes the structured startup-config debug log and
 // the on-disk .last-config.json snapshot. It accepts a pre-redacted snapshot
 // map (built upstream by cmd/grainfs/collectFlagsSnapshot) plus the
-// resolved-at-runtime fields (addr/dataDir/nodeID/raftAddr/peers) that aren't
+// resolved-at-runtime fields (addr/dataDir/nodeID/raftAddr) that aren't
 // cobra-derived.
 func LogStartupConfigSnapshot(
 	flagsSnap map[string]string,
 	addr, dataDir, nodeID, raftAddr string,
-	peers []string,
 ) {
-	snapshot := make(map[string]any, len(flagsSnap)+5)
+	snapshot := make(map[string]any, len(flagsSnap)+4)
 	snapshot["addr"] = addr
 	snapshot["data_dir"] = dataDir
 	snapshot["node_id"] = nodeID
 	snapshot["raft_addr"] = raftAddr
-	snapshot["peers"] = peers
 	for k, v := range flagsSnap {
 		snapshot[k] = v
 	}
