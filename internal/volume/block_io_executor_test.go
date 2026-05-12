@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/volume/dedup"
 	"github.com/stretchr/testify/require"
 )
 
@@ -154,6 +155,126 @@ func TestExecuteWrite_CowWritesToCowKey(t *testing.T) {
 	require.Equal(t, p, store.objects[cowKey])
 }
 
+func TestExecuteWrite_DirectWriteAtPath(t *testing.T) {
+	store := newFakeBlockStore()
+	store.writeAtSupport = true
+	ex := executorForTest(store, newFakeBlockCache(), nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := bytes.Repeat([]byte("a"), DefaultBlockSize)
+	key := blockKey("v", 0)
+	actions := []BlockAction{
+		{Kind: ActionDirect, BlkNum: 0, BlkOff: 0, DataStart: 0, CanWrite: DefaultBlockSize,
+			Key: key, OldKey: key, IsNew: true},
+	}
+
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+
+	require.NoError(t, err)
+	require.Equal(t, DefaultBlockSize, result.Bytes)
+	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
+	require.Equal(t, p, store.objects[key])
+}
+
+func TestExecuteWrite_DirectPartialBlock(t *testing.T) {
+	store := newFakeBlockStore()
+	store.objects[blockKey("v", 0)] = make([]byte, DefaultBlockSize)
+	ex := executorForTest(store, newFakeBlockCache(), nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := []byte("hello")
+	key := blockKey("v", 0)
+	actions := []BlockAction{
+		{Kind: ActionDirect, BlkNum: 0, BlkOff: 10, DataStart: 0, CanWrite: 5,
+			Key: key, OldKey: key, IsNew: false},
+	}
+
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, 10, nil, actions)
+
+	require.NoError(t, err)
+	require.Equal(t, 5, result.Bytes)
+	require.Equal(t, []byte("hello"), store.objects[key][10:15])
+}
+
+func TestExecuteWrite_AsyncDirectPartialBlock(t *testing.T) {
+	store := newFakeBlockStore()
+	store.objects[blockKey("v", 0)] = make([]byte, DefaultBlockSize)
+	deferred := &fakeAsyncPutter{}
+	ex := executorForTest(store, newFakeBlockCache(), nil)
+	ex.deferred = deferred
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := []byte("hello")
+	key := blockKey("v", 0)
+	actions := []BlockAction{
+		{Kind: ActionDirect, BlkNum: 0, BlkOff: 10, DataStart: 0, CanWrite: 5,
+			Key: key, OldKey: key, IsNew: false, Async: true},
+	}
+
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, 10, nil, actions)
+
+	require.NoError(t, err)
+	require.Len(t, result.CommitFns, 1)
+	require.Contains(t, deferred.puts, key)
+}
+
+func TestExecuteWrite_DedupToDeleteDecrementsBlocks(t *testing.T) {
+	store := newFakeBlockStore()
+	toDeleteKey := "to-delete-key"
+	store.objects[toDeleteKey] = make([]byte, DefaultBlockSize)
+	existingKey := "canonical-key"
+	store.objects[existingKey] = bytes.Repeat([]byte("x"), DefaultBlockSize)
+	di := &fakeDedupIndexWithDelete{
+		blocks:   map[int64]string{0: existingKey},
+		toDelete: toDeleteKey,
+	}
+	ex := executorForTest(store, newFakeBlockCache(), di)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := bytes.Repeat([]byte("x"), DefaultBlockSize)
+	actions := []BlockAction{
+		{Kind: ActionDedup, BlkNum: 0, BlkOff: 0, DataStart: 0, CanWrite: DefaultBlockSize,
+			Key: "proposed-key", OldKey: existingKey, IsNew: false},
+	}
+
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+
+	require.NoError(t, err)
+	require.Equal(t, -int64(DefaultBlockSize), result.AllocationBytesDelta)
+	require.NotContains(t, store.objects, toDeleteKey)
+}
+
+func TestExecuteWrite_CowNewBlockSkipsRead(t *testing.T) {
+	store := newFakeBlockStore()
+	ex := executorForTest(store, newFakeBlockCache(), nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	liveMap := map[int64]string{}
+	p := bytes.Repeat([]byte("w"), DefaultBlockSize)
+	cowKey := cowBlockKey("v", 0)
+	actions := []BlockAction{
+		{Kind: ActionCow, BlkNum: 0, BlkOff: 0, DataStart: 0, CanWrite: DefaultBlockSize,
+			Key: cowKey, OldKey: "", IsNew: true},
+	}
+
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, liveMap, actions)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
+	require.Equal(t, p, store.objects[cowKey])
+	require.Empty(t, store.gets) // no GetObject called for new CoW block
+}
+
+func TestExecuteWrite_InvalidateAllNilCache(t *testing.T) {
+	store := newFakeBlockStore()
+	ex := executorForTest(store, nil, nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := bytes.Repeat([]byte("a"), DefaultBlockSize)
+	key := blockKey("v", 0)
+	actions := []BlockAction{
+		{Kind: ActionDirect, BlkNum: 0, BlkOff: 0, DataStart: 0, CanWrite: DefaultBlockSize,
+			Key: key, OldKey: key, IsNew: true},
+	}
+
+	_, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	require.NoError(t, err) // must not panic with nil cache
+}
+
 // fakeAsyncPutter is a test double for blockDeferredWriter.
 type fakeAsyncPutter struct {
 	puts []string
@@ -163,4 +284,28 @@ func (f *fakeAsyncPutter) PutObjectAsync(_ context.Context, _, key string, r io.
 	data, _ := io.ReadAll(r)
 	f.puts = append(f.puts, key)
 	return &storage.Object{Key: key, Size: int64(len(data))}, func() error { return nil }, nil
+}
+
+// fakeDedupIndexWithDelete simulates dedup WriteBlock returning a ToDelete key.
+type fakeDedupIndexWithDelete struct {
+	blocks   map[int64]string
+	toDelete string
+}
+
+func (d *fakeDedupIndexWithDelete) ReadBlock(_ string, blkNum int64) (string, bool, error) {
+	k, ok := d.blocks[blkNum]
+	return k, ok, nil
+}
+
+func (d *fakeDedupIndexWithDelete) WriteBlock(_ string, blkNum int64, _ [32]byte, _ string) (dedup.WriteResult, error) {
+	canonical := d.blocks[blkNum]
+	return dedup.WriteResult{Canonical: canonical, IsNew: false, ToDelete: d.toDelete}, nil
+}
+
+func (d *fakeDedupIndexWithDelete) FreeBlock(_ string, blkNum int64) (string, bool, error) {
+	key, ok := d.blocks[blkNum]
+	if ok {
+		delete(d.blocks, blkNum)
+	}
+	return key, ok, nil
 }

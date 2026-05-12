@@ -155,13 +155,66 @@ func TestPlanWrite_PartialBlockAtOffset(t *testing.T) {
 	require.Equal(t, 0, a.DataStart)
 }
 
+func TestPlanWrite_CowExistingBlock(t *testing.T) {
+	store := newFakeBlockStore()
+	oldKey := physicalKey("v", 0, nil)
+	store.objects[oldKey] = make([]byte, DefaultBlockSize) // block exists → headErr == nil
+	pl := plannerForTest(store, nil)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize, SnapshotCount: 1}
+	liveMap := map[int64]string{0: oldKey}
+	p := make([]byte, DefaultBlockSize)
+
+	actions, err := pl.planWrite("v", vol, p, 0, liveMap, 0, 0, false)
+
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	a := actions[0]
+	require.Equal(t, ActionCow, a.Kind)
+	require.False(t, a.IsNew)
+	require.Equal(t, oldKey, a.OldKey)
+}
+
+func TestPlanWrite_DedupExistingBlock(t *testing.T) {
+	store := newFakeBlockStore()
+	di := &fakeDedupIndex{blocks: map[int64]string{0: "existing-canonical"}}
+	pl := plannerForTest(store, di)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := make([]byte, DefaultBlockSize)
+
+	actions, err := pl.planWrite("v", vol, p, 0, nil, 0, 0, false)
+
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	a := actions[0]
+	require.Equal(t, ActionDedup, a.Kind)
+	require.False(t, a.IsNew)
+	require.Equal(t, "existing-canonical", a.OldKey)
+}
+
+func TestPlanWrite_DedupReadBlockError(t *testing.T) {
+	store := newFakeBlockStore()
+	di := &fakeDedupIndex{blocks: map[int64]string{}, readErr: fmt.Errorf("index error")}
+	pl := plannerForTest(store, di)
+	vol := &Volume{Name: "v", Size: int64(DefaultBlockSize * 2), BlockSize: DefaultBlockSize}
+	p := make([]byte, DefaultBlockSize)
+
+	_, err := pl.planWrite("v", vol, p, 0, nil, 0, 0, false)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dedup read block")
+}
+
 // fakeDedupIndex is a test double for blockDedupIndex.
 type fakeDedupIndex struct {
 	blocks   map[int64]string // blkNum → canonical key; absent = not found
+	readErr  error
 	writeErr error
 }
 
 func (d *fakeDedupIndex) ReadBlock(_ string, blkNum int64) (string, bool, error) {
+	if d.readErr != nil {
+		return "", false, d.readErr
+	}
 	k, ok := d.blocks[blkNum]
 	return k, ok, nil
 }
