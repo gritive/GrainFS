@@ -491,7 +491,14 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			return
 		case req := <-b.snapRequests:
 			b.completeRaftSnapshotRequest(req)
-		case entry := <-b.node.ApplyCh():
+		case entry, ok := <-b.node.ApplyCh():
+			if !ok {
+				// ApplyCh closed (Raft node stopped). Exit cleanly so the
+				// loop does not spin on zero-value reads. Closing surfaces
+				// from the v2 adapter when the underlying actor terminates.
+				b.logger.Debug().Msg("apply loop: ApplyCh closed; exiting")
+				return
+			}
 			if err := b.fsm.Apply(entry.Command); err != nil {
 				b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
 			}

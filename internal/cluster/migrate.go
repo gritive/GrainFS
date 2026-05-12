@@ -131,7 +131,13 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 			select {
 			case <-stopApply:
 				return
-			case entry := <-node.ApplyCh():
+			case entry, ok := <-node.ApplyCh():
+				if !ok {
+					// ApplyCh closed (node stopped); exit cleanly to avoid
+					// busy-looping on zero-value reads.
+					logger.Debug().Msg("migration apply loop: ApplyCh closed; exiting")
+					return
+				}
 				if err := fsm.Apply(entry.Command); err != nil {
 					logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error during migration")
 				}
