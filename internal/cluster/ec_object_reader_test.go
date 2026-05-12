@@ -295,3 +295,104 @@ func TestECObjectReader_NilShardService_ReturnsError(t *testing.T) {
 	_, err := r.ReadObject(context.Background(), "bucket", "key", rec)
 	require.Error(t, err)
 }
+
+func TestECObjectReader_OpenObject_AllLocal(t *testing.T) {
+	// ParityShards=0: Redundant()==false and no cache → exercises streaming path.
+	cfg := ECConfig{DataShards: 2, ParityShards: 0}
+	data := []byte("hello world open")
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a"}}
+	rec.K = cfg.DataShards
+
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(data)))
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+}
+
+func TestECObjectReader_OpenObject_NilShardService_ReturnsError(t *testing.T) {
+	r := ecObjectReader{selfID: "node-a", shards: nil, ecConfig: ECConfig{DataShards: 2, ParityShards: 0}}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a"}}
+	rec.K = 2
+
+	_, err := r.OpenObject(context.Background(), "bucket", "key", rec, 100)
+	require.Error(t, err)
+}
+
+func TestECObjectReader_ReadAt_PlacementMismatch(t *testing.T) {
+	// rec.Nodes length (2) != NumShards for DataShards=2 ParityShards=1 (3).
+	r := ecObjectReader{selfID: "node-a", ecConfig: ECConfig{DataShards: 2, ParityShards: 1}}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a"}}
+	rec.K = 2
+	rec.M = 1
+
+	buf := make([]byte, 4)
+	_, err := r.ReadAt(context.Background(), "bucket", "key", rec, 100, 0, buf)
+	require.Error(t, err)
+}
+
+func TestECObjectReader_ReadAt_InvalidDataShards(t *testing.T) {
+	r := ecObjectReader{selfID: "node-a", ecConfig: ECConfig{DataShards: 0, ParityShards: 0}}
+	rec := PlacementRecord{Nodes: []string{}}
+	rec.K = 0
+
+	buf := make([]byte, 4)
+	_, err := r.ReadAt(context.Background(), "bucket", "key", rec, 100, 0, buf)
+	require.Error(t, err)
+}
+
+func TestECObjectReader_ReadAt_MultiShardSpan(t *testing.T) {
+	cfg := ECConfig{DataShards: 4, ParityShards: 0}
+	data := []byte("0123456789abcdef") // 16 bytes, 4 bytes per shard
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+
+	// offset=2, len=8 spans shards 0→1→2: "23456789"
+	buf := make([]byte, 8)
+	n, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 2, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, []byte("23456789"), buf)
+}
+
+func TestECObjectReader_ReadAt_PartialFillAtEnd(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 0}
+	data := []byte("hello") // 5 bytes
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a"}}
+	rec.K = cfg.DataShards
+
+	// offset=3, buf=10 → only 2 bytes remain ("lo"), no error
+	buf := make([]byte, 10)
+	n, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 3, buf)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, []byte("lo"), buf[:n])
+}
+
+func TestECObjectReader_CacheCanStore_NilCache(t *testing.T) {
+	r := ecObjectReader{cache: nil}
+	require.False(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
+}
+
+func TestECObjectReader_CacheCanStore_ZeroCapacity(t *testing.T) {
+	r := ecObjectReader{cache: newFakeCache(0)}
+	require.False(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
+}
+
+func TestECObjectReader_CacheCanStore_FitsInCache(t *testing.T) {
+	r := ecObjectReader{cache: newFakeCache(1 << 20)}
+	require.True(t, r.cacheCanStore("b", "k", ECConfig{DataShards: 2, ParityShards: 1}, 100))
+}

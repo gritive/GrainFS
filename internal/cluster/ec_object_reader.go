@@ -84,6 +84,9 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 // ReadAt reads len(buf) bytes at offset within the EC object without
 // reconstructing the full object.
 func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize, offset int64, buf []byte) (int, error) {
+	if r.shards == nil {
+		return 0, fmt.Errorf("shard service unavailable")
+	}
 	recCfg := rec.ECConfigOrFallback(r.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
 		return 0, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())

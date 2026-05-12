@@ -2367,9 +2367,12 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) newECObjectReader() ecObjectReader {
-	r := ecObjectReader{selfID: b.selfAddr, shards: b.shardSvc, peerHealth: b.peerHealth, ecConfig: b.ecConfig}
+	r := ecObjectReader{selfID: b.selfAddr, shards: b.shardSvc, ecConfig: b.ecConfig}
 	if b.shardCache != nil {
 		r.cache = b.shardCache
+	}
+	if b.peerHealth != nil {
+		r.peerHealth = b.peerHealth
 	}
 	return r
 }

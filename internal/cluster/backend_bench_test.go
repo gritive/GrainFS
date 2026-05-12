@@ -128,7 +128,7 @@ func BenchmarkGetObjectEC_DirectReconstruct(b *testing.B) {
 				er := bk.newECObjectReader()
 				rc, err := er.OpenObject(context.Background(), "bench", resolved.ShardKey, resolved.Record, int64(len(data)))
 				require.NoError(b, err)
-				err = ECReconstructStreamTo(io.Discard, resolved.Record.ECConfigOrFallback(bk.ecConfig), []io.Reader{rc})
+				_, err = io.Copy(io.Discard, rc)
 				_ = rc.Close()
 				require.NoError(b, err)
 			}
