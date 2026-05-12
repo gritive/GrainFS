@@ -41,6 +41,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -57,7 +58,20 @@ type raftV2Node struct {
 	once        sync.Once // for observer no-op warning
 	applyOnce   sync.Once // for apply channel bridge goroutine
 	applyBridge chan raft.LogEntry
+
+	// bridge holds the v2.Transport adapter created by SetTransport. Stored on
+	// the adapter so SetInstallSnapshotTransport can publish the IS callback
+	// regardless of whether it is called before or after SetTransport (the
+	// callback ultimately lives on the bridge via atomic.Pointer).
+	bridge *v2TransportBridge
+	// pendingIS holds an IS callback supplied via SetInstallSnapshotTransport
+	// before SetTransport built the bridge. SetTransport drains it.
+	pendingIS atomic.Pointer[installSnapshotFn]
 }
+
+// installSnapshotFn is the outbound v1-style InstallSnapshot send callback.
+// Boxed via atomic.Pointer so it can be swapped lock-free.
+type installSnapshotFn func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error)
 
 // newRaftV2Node constructs the adapter. Callers must call SetTransport then
 // Start before using the node.
@@ -263,16 +277,41 @@ func (a *raftV2Node) SetTransport(
 	sendRequestVote func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error),
 	sendAppendEntries func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error),
 ) {
-	a.n.SetTransport(&v2TransportBridge{
+	b := &v2TransportBridge{
 		sendRV: sendRequestVote,
 		sendAE: sendAppendEntries,
-	})
+	}
+	// Drain any IS callback that was wired before SetTransport built the bridge.
+	if pending := a.pendingIS.Load(); pending != nil {
+		b.sendIS.Store(pending)
+	}
+	a.bridge = b
+	a.n.SetTransport(b)
+}
+
+// SetInstallSnapshotTransport stores the outbound InstallSnapshot send callback
+// on the v2 adapter's transport bridge. If called before SetTransport, the
+// callback is parked on the adapter and SetTransport applies it when building
+// the bridge.
+func (a *raftV2Node) SetInstallSnapshotTransport(
+	send func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error),
+) {
+	fn := installSnapshotFn(send)
+	if a.bridge != nil {
+		a.bridge.sendIS.Store(&fn)
+		return
+	}
+	a.pendingIS.Store(&fn)
 }
 
 // v2TransportBridge adapts v1-style callback pair to the v2.Transport interface.
 type v2TransportBridge struct {
 	sendRV func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
 	sendAE func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)
+	// sendIS is wired through SetInstallSnapshotTransport. atomic.Pointer so
+	// publication is lock-free; nil means the caller did not wire IS support
+	// (SendInstallSnapshot returns ErrNotImplemented in that case).
+	sendIS atomic.Pointer[installSnapshotFn]
 }
 
 func (b *v2TransportBridge) SendRequestVote(peer string, args *raftv2.RequestVoteArgs) (*raftv2.RequestVoteReply, error) {
@@ -324,11 +363,37 @@ func (b *v2TransportBridge) SendAppendEntries(peer string, args *raftv2.AppendEn
 	}, nil
 }
 
-// SendInstallSnapshot satisfies v2.Transport. In PR 22 the cluster package
-// does not wire snapshot transport for v2; returning an error causes the
-// leader to skip snapshot-based replication for this peer.
-func (b *v2TransportBridge) SendInstallSnapshot(_ string, _ *raftv2.InstallSnapshotArgs) (*raftv2.InstallSnapshotReply, error) {
-	return nil, raftv2.ErrNotImplemented
+// SendInstallSnapshot satisfies v2.Transport. When SetInstallSnapshotTransport
+// has wired an outbound callback (e.g. via RaftV2MetaQUICTransport), delegate
+// to it after translating v2 wire types ↔ v1. Otherwise return
+// ErrNotImplemented so the leader skips snapshot-based replication for this
+// peer (pre-M6.2 behavior).
+func (b *v2TransportBridge) SendInstallSnapshot(peer string, args *raftv2.InstallSnapshotArgs) (*raftv2.InstallSnapshotReply, error) {
+	sendPtr := b.sendIS.Load()
+	if sendPtr == nil || *sendPtr == nil {
+		return nil, raftv2.ErrNotImplemented
+	}
+	// v2's Configuration is []string of voter IDs; v1's wire format carries
+	// raft.Server entries (ID + Suffrage). The inbound side (HandleInstallSnapshot
+	// in this adapter) only forwards IDs to v2 anyway, so synthesise voter
+	// entries for outbound. See translation note near HandleInstallSnapshot.
+	servers := make([]raft.Server, len(args.Configuration))
+	for i, id := range args.Configuration {
+		servers[i] = raft.Server{ID: id, Suffrage: raft.Voter}
+	}
+	v1args := &raft.InstallSnapshotArgs{
+		Term:              args.Term,
+		LeaderID:          args.LeaderID,
+		LastIncludedIndex: args.LastIncludedIndex,
+		LastIncludedTerm:  args.LastIncludedTerm,
+		Data:              args.Data,
+		Servers:           servers,
+	}
+	reply, err := (*sendPtr)(peer, v1args)
+	if err != nil {
+		return nil, err
+	}
+	return &raftv2.InstallSnapshotReply{Term: reply.Term}, nil
 }
 
 // SendTimeoutNow satisfies v2.Transport. The cluster package does not yet wire
