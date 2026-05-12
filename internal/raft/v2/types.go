@@ -264,6 +264,18 @@ type Config struct {
 	JointAbortTimeout             time.Duration
 	ElectionPriorityKey           string
 
+	// JoinMode disables the solo-voter auto-promote shortcut. When true and
+	// the effective config reduces to {selfID} only, the node stays in
+	// Follower indefinitely instead of becoming Leader at term 1. Used by
+	// dynamic-join paths where the joiner must not self-elect — its node is
+	// added as a learner by the cluster leader (via AddLearner) and then
+	// promoted (PromoteToVoter), at which point the leader's AppendEntries
+	// installs a multi-voter config and the node participates normally.
+	//
+	// Default false preserves v1-equivalent single-voter bootstrap behaviour
+	// for callers that rely on it (tests, non-join cluster init).
+	JoinMode bool
+
 	// LogStore, if non-nil, is used as the durable log backing. Defaults to an
 	// in-memory implementation if nil. To enable crash recovery, supply a
 	// persistent impl such as badgerLogStore.

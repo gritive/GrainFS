@@ -78,6 +78,12 @@ func Run(ctx context.Context, cfg Config) error {
 	raftCfg := raft.DefaultConfig(state.nodeID, raftPeers)
 	raftCfg.ManagedMode = cfg.BadgerManagedMode
 	raftCfg.LogGCInterval = cfg.RaftLogGCInterval
+	// JoinMode is forwarded to v2 so the joiner's solo-voter local config
+	// ({selfID} when raftPeers is nil) does NOT auto-promote to Leader —
+	// see internal/raft/v2/types.go JoinMode docstring. Without this gate
+	// the joiner becomes a phantom leader of its own 1-node cluster and
+	// the cluster leader's joint AddVoter wait deadlocks.
+	raftCfg.JoinMode = cfg.JoinMode
 
 	// M5 PR 29: raft v2 is the only path. The GRAINFS_RAFT_V2 flag is gone;
 	// v1 (*raft.Node) is unreachable from serveruntime. PR 30 deletes the v1
