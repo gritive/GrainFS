@@ -79,6 +79,11 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 		log.Info().Dur("interval", cfg.LifecycleInterval).Msg("cluster lifecycle service started")
 	}
 
+	if state.migrationSvc != nil {
+		go state.migrationSvc.Run(ctx)
+		log.Info().Dur("interval", cfg.MigrationInterval).Msg("migration service started")
+	}
+
 	// Start the degraded mode monitor — checks live node count vs EC threshold
 	// every 30 s. The first check fires immediately so the server knows its
 	// state before serving any requests.
