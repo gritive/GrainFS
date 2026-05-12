@@ -27,7 +27,8 @@ type ForwardReceiver struct {
 	// scrubLookup is wired via WithScrubSessionLookup; reads happen on every
 	// inbound forward and writes only at startup, but we use atomic.Pointer
 	// so -race is clean even if rewiring ever lands.
-	scrubLookup atomic.Pointer[ScrubSessionLookup]
+	scrubLookup   atomic.Pointer[ScrubSessionLookup]
+	indexProposer objectIndexProposer // nil = no index commit (single-node / test)
 }
 
 func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
@@ -43,6 +44,14 @@ func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *For
 		return r
 	}
 	r.scrubLookup.Store(&lookup)
+	return r
+}
+
+// WithObjectIndexProposer wires the object-index proposer so mutating forward
+// handlers commit the index entry on the leader side, eliminating the crash
+// window between storage write and index commit.
+func (r *ForwardReceiver) WithObjectIndexProposer(p objectIndexProposer) *ForwardReceiver {
+	r.indexProposer = p
 	return r
 }
 
@@ -216,21 +225,51 @@ func contextForForwardedGroup(ctx context.Context, dg *DataGroup) context.Contex
 	})
 }
 
+// buildObjectIndexEntry builds an ObjectIndexEntry from a ShardGroupEntry and
+// the storage.Object returned by a mutating operation. Shared by
+// commitObjectIndex (ClusterCoordinator) and objectIndexEntryForDataGroup
+// (ForwardReceiver) to keep the EC config lookup in one place.
+func buildObjectIndexEntry(group ShardGroupEntry, bucket, key string, obj *storage.Object, isDeleteMarker bool) ObjectIndexEntry {
+	ecCfg := objectIndexECConfigForGroup(group)
+	return ObjectIndexEntry{
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        obj.VersionID,
+		PlacementGroupID: group.ID,
+		Size:             obj.Size,
+		ContentType:      obj.ContentType,
+		ETag:             obj.ETag,
+		ModTime:          obj.LastModified,
+		ECData:           uint8(ecCfg.DataShards),
+		ECParity:         uint8(ecCfg.ParityShards),
+		NodeIDs:          objectIndexNodeIDsForGroup(group, ecCfg),
+		IsDeleteMarker:   isDeleteMarker,
+	}
+}
+
+// objectIndexEntryForDataGroup builds an ObjectIndexEntry from the DataGroup
+// topology and the storage.Object returned by a mutating operation.
+func objectIndexEntryForDataGroup(dg *DataGroup, bucket, key string, obj *storage.Object, isDeleteMarker bool) ObjectIndexEntry {
+	return buildObjectIndexEntry(ShardGroupEntry{ID: dg.ID(), PeerIDs: dg.PeerIDs()}, bucket, key, obj, isDeleteMarker)
+}
+
 func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport.Message {
-	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
-	body := pa.BodyBytes()
-	obj, err := dg.Backend().PutObject(
-		ctx,
-		string(pa.Bucket()),
-		string(pa.Key()),
-		bytes.NewReader(body),
-		string(pa.ContentType()),
-	)
+	bucket := string(pa.Bucket())
+	key := string(pa.Key())
+	ctx := contextForForwardedGroup(context.Background(), dg)
+	obj, err := dg.Backend().PutObject(ctx, bucket, key, bytes.NewReader(pa.BodyBytes()), string(pa.ContentType()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
+	if r.indexProposer != nil {
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {

@@ -2,12 +2,24 @@ package cluster
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
+
+// failingObjectIndexProposer returns an error for every propose call.
+type failingObjectIndexProposer struct{}
+
+func (f *failingObjectIndexProposer) ProposeObjectIndex(_ context.Context, _ ObjectIndexEntry, _ bool) error {
+	return errors.New("simulated propose failure")
+}
+func (f *failingObjectIndexProposer) ProposeDeleteObjectIndex(_ context.Context, _, _, _ string) error {
+	return errors.New("simulated propose failure")
+}
 
 // Test helpers
 
@@ -80,4 +92,43 @@ func TestForwardReceiver_NonLeaderVoter_ReturnsHint(t *testing.T) {
 	status := fr.Status()
 	require.True(t, status == raftpb.ForwardStatusOK || status == raftpb.ForwardStatusNotVoter || status == raftpb.ForwardStatusNotLeader,
 		"expected OK/NotVoter/NotLeader, got %v", status)
+}
+
+func TestForwardReceiver_HandlePutObject_CommitsObjectIndex(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	proposer := &recordingObjectIndexProposer{}
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(proposer)
+
+	args := buildPutObjectArgs("bucket", "mykey", "text/plain", []byte("hello"))
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
+	require.Len(t, proposer.entries, 1, "expected exactly one index commit")
+	require.Equal(t, "bucket", proposer.entries[0].Bucket)
+	require.Equal(t, "mykey", proposer.entries[0].Key)
+	require.NotEmpty(t, proposer.entries[0].VersionID)
+	require.Equal(t, "group-1", proposer.entries[0].PlacementGroupID)
+	require.False(t, proposer.entries[0].IsDeleteMarker)
+}
+
+func TestForwardReceiver_HandlePutObject_ProposeError_ReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(&failingObjectIndexProposer{})
+
+	args := buildPutObjectArgs("bucket", "mykey", "text/plain", []byte("hello"))
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
 }

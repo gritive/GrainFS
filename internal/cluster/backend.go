@@ -988,7 +988,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	defer sp.Cleanup()
 
 	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
-		if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
+		if b.shardSvc == nil {
 			return b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, contentType)
 		}
 		return nil, fmt.Errorf("put object: EC storage is required")
