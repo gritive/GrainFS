@@ -201,17 +201,17 @@ func TestECReconstructStreamReader_MultiWindowRoundTrip(t *testing.T) {
 	assert.True(t, bytes.Equal(data, got), "multi-window stream reader output mismatch")
 }
 
-func TestDistributedBackend_HasLocalECDataShard(t *testing.T) {
-	b := &DistributedBackend{selfAddr: "self"}
+func TestECObjectReader_HasLocalDataShard(t *testing.T) {
+	r := ecObjectReader{selfID: "self"}
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 
-	require.True(t, b.hasLocalECDataShard(PlacementRecord{
+	require.True(t, r.hasLocalDataShard(PlacementRecord{
 		Nodes: []string{"remote-a", "self", "remote-b"},
 	}, cfg))
-	require.False(t, b.hasLocalECDataShard(PlacementRecord{
+	require.False(t, r.hasLocalDataShard(PlacementRecord{
 		Nodes: []string{"remote-a", "remote-b", "self"},
 	}, cfg))
-	require.False(t, b.hasLocalECDataShard(PlacementRecord{
+	require.False(t, r.hasLocalDataShard(PlacementRecord{
 		Nodes: []string{"remote-a", "remote-b", "remote-c"},
 	}, cfg))
 }

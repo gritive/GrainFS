@@ -4,6 +4,10 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### cluster — pre-existing issues
+
+- [ ] **P0: race condition in TestClusterCoordinator_FindObjectIndexOrphans_ScansGroupLocalObjects** — `internal/cluster/cluster_coordinator_test.go`에서 race detector가 intermittent하게 감지됨. 이번 브랜치(EC Object Reader 추출, 2026-05-13) diff와 무관한 기존 버그. `-race` 빌드에서 간헐적으로 발생. **Re-open trigger:** `go test -race -count=3 ./internal/cluster/`에서 재현 시 조사 및 수정. **연관 파일:** `internal/cluster/cluster_coordinator_test.go`, `internal/cluster/cluster_coordinator.go`.
+
 ### raft v2 (M2-M5 follow-ups from M1 adversarial review)
 
 > 2026-05-08 /ship adversarial review on `internal/raft/v2/` (M1 milestone, 0 caller until M5) raised 13 findings. Filed here for M2/M3/M5 work. v2 ships as new code only; not yet exercised in production.

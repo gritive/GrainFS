@@ -125,16 +125,11 @@ func BenchmarkGetObjectEC_DirectReconstruct(b *testing.B) {
 				require.NoError(b, err)
 				resolved, err := bk.ResolvePlacement(context.Background(), "bench", "readkey", placementMeta)
 				require.NoError(b, err)
-				recCfg, shards, err := bk.getObjectECShardReadersAtShardKey(context.Background(), "bench", resolved.ShardKey, resolved.Record, int64(len(data)))
+				er := bk.newECObjectReader()
+				rc, err := er.OpenObject(context.Background(), "bench", resolved.ShardKey, resolved.Record, int64(len(data)))
 				require.NoError(b, err)
-				readers := make([]io.Reader, len(shards))
-				for i, shard := range shards {
-					if shard != nil {
-						readers[i] = shard
-					}
-				}
-				err = ECReconstructStreamTo(io.Discard, recCfg, readers)
-				closeECShardReaders(shards)
+				_, err = io.Copy(io.Discard, rc)
+				_ = rc.Close()
 				require.NoError(b, err)
 			}
 		})

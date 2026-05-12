@@ -239,6 +239,25 @@ with identity state `self`. Compatibility adapters may omit self when filling
 legacy wire fields such as `peers`, but the module's own interface represents
 the whole membership view.
 
+### EC Object Reader
+
+The EC object reader is the private cluster module that reconstructs
+erasure-coded objects from their constituent shards. It mirrors the EC Object
+Writer in structure: a per-call struct with injected adapters for shard I/O
+(`ecObjectShardFetcher`), the shard LRU cache (`ecObjectShardCache`), and
+peer-health marking (`ecObjectPeerHealth`).
+
+The reader exposes three operations: `ReadObject` (full buffered reconstruction
+into a byte slice), `OpenObject` (streaming reconstruction via an
+`io.ReadCloser`), and `ReadAt` (range read without full reconstruction). It owns
+the k-of-n fan-out strategy, local data-shard fast paths, cache pre-pass,
+parity-shard fallback, and peer-health transitions from shard fetch outcomes.
+
+Shard-key derivation (key + versionID) and the decision to invoke the reader
+stay at the `DistributedBackend` seam. This concentrates the data-plane read
+side effects in one testable place and leaves object placement policy outside
+the reader.
+
 ### EC Object Writer
 
 The EC object writer is the private cluster module that executes resolved

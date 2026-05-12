@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.164.0] - 2026-05-13 — refactor(cluster): extract EC object reader
+
+`DistributedBackend`에 흩어져 있던 EC 읽기 경로(~450줄)를 `ecObjectReader` 모듈로 추출.
+`ecObjectWriter` 패턴을 대칭적으로 따르며, 단위 테스트 8개 추가.
+
+### Changed
+- `ecObjectReader` struct 신설(`internal/cluster/ec_object_reader.go`):
+  - 공개 메서드: `ReadObject`, `OpenObject`, `ReadAt`
+  - 의존성 인터페이스: `ecObjectShardFetcher`, `ecObjectShardCache`
+  - compile-time interface assertion: `var _ ecObjectShardFetcher = (*ShardService)(nil)`
+- `DistributedBackend`에 `newECObjectReader()` 헬퍼 추가 — typed-nil 캐시 가드 포함
+- `DistributedBackend`의 EC 읽기 메서드들이 `newECObjectReader()` 위임 호출로 단순화
+
+### Tests
+- `ec_object_reader_test.go` 신설: AllLocal, FallsBackToParityShard, MarksUnhealthyPeerOnFetchError, ErrorsWhenNotEnoughShards, UsesCache, ReadAt_ReturnsCorrectRange, ReadAt_PastEOFReturnsEOF, NilShardService_ReturnsError 총 8개
+
 ## [0.0.163.0] - 2026-05-13 — refactor(volume): split blockIOEngine.write into planner + executor
 
 `blockIOEngine.write()` 의 라우팅 결정 로직과 I/O 실행 로직을 분리.
