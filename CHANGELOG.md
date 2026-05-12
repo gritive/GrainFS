@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.150.0] - 2026-05-12 — chore: remove dead --raft-log-fsync flag
+
+### Removed
+- `--raft-log-fsync` CLI flag. It was a no-op: nothing ever read it, and the "auto" behavior its help text described (cluster=false / single=true) was never implemented. Raft-log durability is unchanged — the v1 BadgerLogStore still opens with `SyncWrites=true`, and the v2 LogStore (the default) opens with `SyncWrites=false` plus explicit `Sync()` at consensus-critical points, which is already the smarter version of what the flag promised.
+
 ## [0.0.149.0] - 2026-05-12 — feat(cluster): per-node shared FSM-state DB (C2 P3)
 
 ### Changed
