@@ -46,7 +46,6 @@ SERVE_ARGS=(
   --nfs4-port 0
   --nbd-port 0
   $(bench_encryption_args)
-  --snapshot-interval 0
   --lifecycle-interval 0
   --log-level warn
 )

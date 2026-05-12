@@ -431,8 +431,8 @@ What's NOT in P0b:
   Defers half the win until full C2 P3 lands.
 - Migration / auto-conversion: `--shared-badger=false` lets legacy per-group
   layouts continue. Mixing modes on the same data dir is unsupported.
-- `Snapshot`/`Restore` prefix-scoping: perf test uses
-  `--snapshot-interval 0`, so unsafe Restore can't fire. Full C2 must fix.
+- `Snapshot`/`Restore` prefix-scoping: perf test disables auto-snapshot via
+  cluster config (`snapshot-interval=0`), so unsafe Restore can't fire. Full C2 must fix.
 - Group teardown safety: prototype assumes cluster runs to completion.
 
 ### Status: smoke run blocked by host load
