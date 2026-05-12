@@ -85,7 +85,7 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return errReply(raftpb.ForwardStatusNotVoter, "")
 	}
 
-	node := dg.Backend().RaftNode()
+	node := dg.Backend().Node()
 	if node == nil || !node.IsLeader() {
 		hint := ""
 		if node != nil {
@@ -149,7 +149,7 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 		return errReply(raftpb.ForwardStatusNotVoter, "")
 	}
 
-	node := dg.Backend().RaftNode()
+	node := dg.Backend().Node()
 	if node == nil || !node.IsLeader() {
 		drainForwardBody(body)
 		hint := ""
@@ -188,7 +188,7 @@ func (r *ForwardReceiver) HandleRead(req *transport.Message) (*transport.Message
 		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
 	}
 
-	node := dg.Backend().RaftNode()
+	node := dg.Backend().Node()
 	if node == nil || !node.IsLeader() {
 		hint := ""
 		if node != nil {

@@ -38,7 +38,7 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 		}
 		startECManager := func(managerCtx context.Context, dg *cluster.DataGroup) {
 			gb := dg.Backend()
-			leader := gb.RaftNode()
+			leader := gb.Node()
 			if leader == nil {
 				log.Warn().Str("group", dg.ID()).Msg("reshard manager skipped: group has no raft node")
 				return

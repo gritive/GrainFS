@@ -20,7 +20,7 @@ type localBackendLookup interface {
 // Returning (nil, nil) means "forward instead" — a non-error signal so
 // callers don't need to translate errors back into routing decisions.
 //
-// F3: ResolveWrite re-checks RaftNode().IsLeader() at entry to close the
+// F3: ResolveWrite re-checks Node().IsLeader() at entry to close the
 // route→execute leadership flip race.
 type LocalExecution struct {
 	groups localBackendLookup
@@ -48,7 +48,7 @@ func (e *LocalExecution) ResolveRead(ctx context.Context, target RouteTarget) (*
 	if !target.SelfIsVoter {
 		return nil, nil
 	}
-	if gb.RaftNode() == nil {
+	if gb.Node() == nil {
 		return nil, nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, localExecFollowerReadDeadline)

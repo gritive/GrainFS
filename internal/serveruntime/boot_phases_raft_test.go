@@ -10,7 +10,7 @@ import (
 )
 
 // raftPhasePrereqs runs every phase up to (but not including) the raft phases:
-// config validate, meta DB open, raft log store, transport (QUIC + peers + mux).
+// config validate, meta DB open, transport (QUIC + peers + mux).
 // Returns a state ready for the four raft phases under test.
 func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
@@ -19,8 +19,6 @@ func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootAutoMigrate(state))
 	require.NoError(t, bootOpenMetaDB(state))
 	require.NoError(t, bootValidateTimings(state))
-	require.NoError(t, bootOpenRaftLogStore(state))
-	require.NoError(t, bootOpenSharedRaftLogDB(state))
 	t.Cleanup(state.Cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

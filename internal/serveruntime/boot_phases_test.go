@@ -121,58 +121,6 @@ func TestBootValidateTimings_AcceptsValidConfig(t *testing.T) {
 	assert.NoError(t, bootValidateTimings(state))
 }
 
-// TestBootOpenRaftLogStore_Opens — phase opens the raft log store and records
-// the raft-log startup decision.
-func TestBootOpenRaftLogStore_Opens(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
-	require.NoError(t, bootValidateConfig(state))
-
-	require.NoError(t, bootOpenRaftLogStore(state))
-	require.NotNil(t, state.logStore)
-
-	// Last decision is the raft-log role; verify ordering invariant.
-	last := state.startupDecisions[len(state.startupDecisions)-1]
-	assert.Equal(t, badgerrole.RoleMetaRaftLog, last.Role)
-
-	state.Cleanup()
-}
-
-// TestBootOpenSharedRaftLogDB_Opens — happy path: a fresh dataDir gets a
-// shared raft-log BadgerDB at <dataDir>/shared-raft-log/ and the matching
-// startup decision.
-func TestBootOpenSharedRaftLogDB_Opens(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
-	require.NoError(t, bootValidateConfig(state))
-
-	require.NoError(t, bootOpenSharedRaftLogDB(state))
-	require.NotNil(t, state.sharedRaftLogDB)
-	last := state.startupDecisions[len(state.startupDecisions)-1]
-	assert.Equal(t, badgerrole.RoleSharedRaftLog, last.Role)
-
-	state.Cleanup()
-}
-
-// TestBootOpenSharedRaftLogDB_IgnoresLegacyPerGroupDir — a stale pre-P0b
-// <dataDir>/groups/*/raft/ directory must NOT block boot. The flag and the
-// refusal guard are gone; the phase opens the shared DB and moves on. If a
-// guard ever comes back by accident, this fails.
-func TestBootOpenSharedRaftLogDB_IgnoresLegacyPerGroupDir(t *testing.T) {
-	dir := t.TempDir()
-	legacyRaft := filepath.Join(dir, "groups", "group-0", "raft")
-	require.NoError(t, os.MkdirAll(legacyRaft, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(legacyRaft, "MANIFEST"), []byte{}, 0o644))
-
-	state := newBootState(Config{DataDir: dir, NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
-	require.NoError(t, bootValidateConfig(state))
-
-	require.NoError(t, bootOpenSharedRaftLogDB(state))
-	require.NotNil(t, state.sharedRaftLogDB)
-	last := state.startupDecisions[len(state.startupDecisions)-1]
-	assert.Equal(t, badgerrole.RoleSharedRaftLog, last.Role)
-
-	state.Cleanup()
-}
-
 // TestBootOpenSharedFSMDB_Opens — happy path: a fresh dataDir gets a shared
 // FSM-state BadgerDB at <dataDir>/shared-fsm/ and the matching startup decision.
 func TestBootOpenSharedFSMDB_Opens(t *testing.T) {

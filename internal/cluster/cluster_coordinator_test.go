@@ -193,7 +193,7 @@ func TestClusterCoordinator_PutObject_WaitsForLocalSingletonLeaderBeforeForward(
 	t.Cleanup(func() { close(stopApply) })
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		gb.RaftNode().Start()
+		gb.Node().Start()
 	}()
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))

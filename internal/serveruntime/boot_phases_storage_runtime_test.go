@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -32,8 +33,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootAutoMigrate(state))
 	require.NoError(t, bootOpenMetaDB(state))
 	require.NoError(t, bootValidateTimings(state))
-	require.NoError(t, bootOpenRaftLogStore(state))
-	require.NoError(t, bootOpenSharedRaftLogDB(state))
 	require.NoError(t, bootOpenSharedFSMDB(state))
 	t.Cleanup(state.Cleanup)
 
@@ -48,9 +47,15 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	raftCfg := raft.DefaultConfig(state.nodeID, state.peers)
 	raftCfg.ManagedMode = true
 	raftCfg.LogGCInterval = state.cfg.RaftLogGCInterval
-	node := raft.NewNode(raftCfg, state.logStore)
+	node, closeNode, err := cluster.NewRaftV2NodeForServeruntime(raftCfg, state.raftDir)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeNode != nil {
+			_ = closeNode()
+		}
+	})
 	state.node = node
-	state.rpcTransport = raft.NewQUICRPCTransport(state.quicTransport, node)
+	state.rpcTransport = cluster.NewRaftQUICRPCTransport(state.quicTransport, node)
 	state.rpcTransport.SetTransport()
 
 	require.NoError(t, bootMetaRaftWiring(state))

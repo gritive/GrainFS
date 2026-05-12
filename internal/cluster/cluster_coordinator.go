@@ -48,10 +48,10 @@ func (p dataGroupManagerLeaderProbe) GroupLeaderIsSelf(groupID string) bool {
 		return false
 	}
 	b := dg.Backend()
-	if b == nil || b.RaftNode() == nil {
+	if b == nil || b.Node() == nil {
 		return false
 	}
-	return b.RaftNode().IsLeader()
+	return b.Node().IsLeader()
 }
 
 // dataGroupManagerLocalBackend adapts *DataGroupManager to LocalExecution's

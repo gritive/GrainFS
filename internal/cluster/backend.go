@@ -3443,17 +3443,5 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
 }
 
-// RaftNode returns the underlying *raft.Node via type assertion. Since M5 PR
-// 29 removed the GRAINFS_RAFT_V2 flag, b.node is always *raftV2Node in
-// production and this returns nil. PR 30 deletes the v1 raft package and
-// this method outright; kept here so existing nil-checking callers
-// (DataGroupPlanExecutor) compile.
-func (b *DistributedBackend) RaftNode() *raft.Node {
-	v1, _ := b.node.(*raft.Node)
-	return v1
-}
-
-// Node returns the RaftNode interface for v1/v2-agnostic access (State,
-// observer registration, leadership queries). Prefer this over RaftNode() in
-// code that must work under raft v2 (M5 PR 28 serveruntime default-on).
+// Node returns the RaftNode interface for leadership and raft control.
 func (b *DistributedBackend) Node() RaftNode { return b.node }

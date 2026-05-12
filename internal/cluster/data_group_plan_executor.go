@@ -241,8 +241,8 @@ func (e *DataGroupPlanExecutor) peerCaughtUp(node dataRaftNode, peerID string, c
 	return false
 }
 
-// compile-time check: *raft.Node must satisfy dataRaftNode.
-var _ dataRaftNode = (*raft.Node)(nil)
+// compile-time check: the production adapter must satisfy dataRaftNode.
+var _ dataRaftNode = (*raftNodeAdapter)(nil)
 
 // DataRaftNode is the exported alias of dataRaftNode for test injection.
 type DataRaftNode = dataRaftNode
