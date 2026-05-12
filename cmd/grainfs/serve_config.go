@@ -64,9 +64,6 @@ func buildClusterConfig(
 	cfg.HealReceiptGossipInterval, _ = cmd.Flags().GetDuration("heal-receipt-gossip-interval")
 	cfg.HealReceiptWindow, _ = cmd.Flags().GetInt("heal-receipt-window")
 
-	cfg.SnapInterval, _ = cmd.Flags().GetDuration("snapshot-interval")
-	cfg.SnapRetain, _ = cmd.Flags().GetInt("snapshot-retain")
-
 	cfg.LifecycleInterval, _ = cmd.Flags().GetDuration("lifecycle-interval")
 	cfg.DedupEnabled, _ = cmd.Flags().GetBool("dedup")
 	cfg.BlockCacheSize, _ = cmd.Flags().GetInt64("block-cache-size")
