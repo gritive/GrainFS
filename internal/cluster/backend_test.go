@@ -183,6 +183,21 @@ func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
+// TestDistributedBackend_PutObject_NilShardSvc_WithPlacementCtx_TakesNxPath verifies
+// that shardSvc==nil routes to the Nx (non-EC) path even when the context carries a
+// PlacementGroupEntry (as injected by contextForForwardedGroup for forwarded requests).
+func TestDistributedBackend_PutObject_NilShardSvc_WithPlacementCtx_TakesNxPath(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+
+	// Inject placement entry to simulate a forwarded-request context.
+	ctx := contextForForwardedGroup(context.Background(), NewDataGroup("group-1", []string{"n1", "n2"}))
+
+	obj, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err, "nil-shardSvc backend must succeed via Nx path even with placement context")
+	require.Equal(t, "key.txt", obj.Key)
+}
+
 func TestDistributedBackend_HeadObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))

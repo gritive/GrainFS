@@ -96,7 +96,11 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 			}
 			return hint
 		})
-	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr)
+	indexProposer := cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
+		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	})
+	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr).
+		WithObjectIndexProposer(indexProposer)
 	state.forwardReceiver.Register(state.shardSvc)
 
 	metaForwardDialer := func(peer string, payload []byte) ([]byte, error) {
@@ -143,9 +147,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		WithNodeAddressResolver(metaRaft.FSM()).
 		WithSelfPeerAlias(state.raftAddr).
 		WithECConfig(state.effectiveEC).
-		WithObjectIndexProposer(cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
-			return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-		}))
+		WithObjectIndexProposer(indexProposer)
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 
