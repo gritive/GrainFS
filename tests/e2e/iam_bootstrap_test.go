@@ -182,5 +182,22 @@ func startUnbootstrappedE2EServer(t testing.TB) (dataDir, s3URL, adminSock strin
 	s3URL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
 	adminSock = filepath.Join(dir, "admin.sock")
+
+	// Wait for admin.sock then disable auto-snapshot for deterministic e2e
+	// behavior. Tests that need the auto-snapshot loop PATCH it back to a
+	// non-zero interval explicitly. PATCH /v1/cluster/config does not require
+	// IAM bootstrap, so it works even though this helper intentionally skips
+	// admin SA creation.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(adminSock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("admin socket %s did not appear within 10s", adminSock)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
 	return dir, s3URL, adminSock, port
 }

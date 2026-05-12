@@ -159,6 +159,11 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 	}
 	c.leaderIdx = leaderIdx
 
+	// Disable auto-snapshot cluster-wide for deterministic e2e behavior.
+	// PATCH is Raft-replicated so calling it on the leader's UDS suffices.
+	// Tests that need auto-snapshot enable it explicitly.
+	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
+
 	// Allow the automatic seed loop to complete before exercising routing.
 	time.Sleep(8 * time.Second)
 	return c, nil

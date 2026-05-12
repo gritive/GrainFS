@@ -111,6 +111,18 @@ func TestMain(m *testing.M) {
 	testAccessKey = ak
 	testSecretKey = sk
 
+	// Disable auto-snapshot for deterministic e2e behavior. Tests that need
+	// the auto-snapshot loop (e.g. auto_snapshot_test.go) PATCH it back to a
+	// non-zero interval explicitly via patchSnapshotInterval.
+	if err := patchSnapshotIntervalM(dir, "0s"); err != nil {
+		fmt.Fprintf(os.Stderr, "disable auto-snapshot: %v\n", err)
+		terminateProcess(cmd)
+		if cleanupErr := cleanupDataDir(); cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, cleanupErr)
+		}
+		os.Exit(1)
+	}
+
 	testS3Client = newS3Client(testServerURL)
 
 	// Verify SigV4 verifier has the new key wired in.
@@ -449,6 +461,9 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	// Bootstrap an admin SA via UDS for this isolated server. Each call
 	// gets its own creds since each call has its own data dir.
 	ak, sk := bootstrapAdminViaUDS(t, dir)
+	// Disable auto-snapshot for deterministic e2e behavior. Tests that need
+	// the auto-snapshot loop PATCH it back to a non-zero interval explicitly.
+	patchSnapshotInterval(t, dir, "0s")
 	cli := s3ClientFor(url, ak, sk)
 	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
 	return url, cli

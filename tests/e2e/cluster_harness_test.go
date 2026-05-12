@@ -229,6 +229,10 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 		}
 	}
 	c.leaderIdx = 0
+	// Disable auto-snapshot cluster-wide for deterministic e2e behavior.
+	// PATCH is Raft-replicated so calling it on the leader's UDS suffices.
+	// Tests that need auto-snapshot enable it explicitly.
+	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
 	return c, nil
 }
 
@@ -279,6 +283,10 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		return nil, fmt.Errorf("no writable endpoint found within timeout: %w", err)
 	}
 	c.leaderIdx = leaderIdx
+	// Disable auto-snapshot cluster-wide for deterministic e2e behavior.
+	// PATCH is Raft-replicated so calling it on the leader's UDS suffices.
+	// Tests that need auto-snapshot enable it explicitly.
+	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
 	return c, nil
 }
 
