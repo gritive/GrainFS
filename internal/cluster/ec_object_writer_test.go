@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
@@ -37,19 +39,9 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 	_, err := writer.writeShardReaders(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
 	}, "test")
-	if !errors.Is(err, writeErr) {
-		t.Fatalf("writeShardReaders error = %v, want wrapping %v", err, writeErr)
-	}
-
-	if got, want := len(shards.deleteLocalCalls), 1; got != want {
-		t.Fatalf("DeleteLocalShards calls = %d, want %d", got, want)
-	}
-	if got, want := shards.deleteLocalCalls[0], "bucket/object/v1"; got != want {
-		t.Fatalf("DeleteLocalShards key = %q, want %q", got, want)
-	}
-	if got := len(shards.deleteRemoteCalls); got != 0 {
-		t.Fatalf("DeleteShards calls = %d, want 0 because remote write never succeeded", got)
-	}
+	require.ErrorIs(t, err, writeErr)
+	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
+	require.Empty(t, shards.deleteRemoteCalls)
 }
 
 func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
@@ -71,42 +63,20 @@ func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
 	sp := &spooledObject{Size: 5}
 
 	result, err := writer.writeSingleLocalReader(plan, sp, strings.NewReader("hello"), "test", md5.New())
-	if err != nil {
-		t.Fatalf("writeSingleLocalReader error = %v", err)
-	}
+	require.NoError(t, err)
 
-	if got, want := len(shards.localWrites), 1; got != want {
-		t.Fatalf("local writes = %d, want %d", got, want)
-	}
+	require.Len(t, shards.localWrites, 1)
 	gotBody := shards.localWrites[0].body
-	if got, want := len(gotBody), shardHeaderSize+len("hello"); got != want {
-		t.Fatalf("local write len = %d, want %d", got, want)
-	}
+	require.Len(t, gotBody, shardHeaderSize+len("hello"))
 	gotSize, _, err := decodeShardHeader(gotBody[:shardHeaderSize])
-	if err != nil {
-		t.Fatalf("decode header: %v", err)
-	}
-	if got, want := gotSize, int64(5); got != want {
-		t.Fatalf("header size = %d, want %d", got, want)
-	}
-	if got, want := string(gotBody[shardHeaderSize:]), "hello"; got != want {
-		t.Fatalf("body = %q, want %q", got, want)
-	}
-	if got, want := result.ETag, "5d41402abc4b2a76b9719d911017c592"; got != want {
-		t.Fatalf("etag = %q, want %q", got, want)
-	}
-	if got, want := sp.ETag, result.ETag; got != want {
-		t.Fatalf("sp ETag = %q, want result ETag %q", got, want)
-	}
-	if got, want := result.ShardKey, "object/v1"; got != want {
-		t.Fatalf("shard key = %q, want %q", got, want)
-	}
-	if got, want := result.ECData, uint8(1); got != want {
-		t.Fatalf("ECData = %d, want %d", got, want)
-	}
-	if got, want := result.ECParity, uint8(0); got != want {
-		t.Fatalf("ECParity = %d, want %d", got, want)
-	}
+	require.NoError(t, err)
+	require.Equal(t, int64(5), gotSize)
+	require.Equal(t, "hello", string(gotBody[shardHeaderSize:]))
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", result.ETag)
+	require.Equal(t, result.ETag, sp.ETag)
+	require.Equal(t, "object/v1", result.ShardKey)
+	require.Equal(t, uint8(1), result.ECData)
+	require.Equal(t, uint8(0), result.ECParity)
 }
 
 func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
@@ -117,9 +87,7 @@ func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t 
 	}
 	dir := t.TempDir()
 	spoolPath := filepath.Join(dir, "object")
-	if err := os.WriteFile(spoolPath, []byte("hello"), 0o600); err != nil {
-		t.Fatalf("write spool: %v", err)
-	}
+	require.NoError(t, os.WriteFile(spoolPath, []byte("hello"), 0o600))
 	sp := &spooledObject{Path: spoolPath, Size: 5, ETag: "etag"}
 	plan := ecObjectWritePlan{
 		Bucket:           "bucket",
@@ -133,29 +101,42 @@ func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t 
 	}
 
 	result, err := writer.writeSpooledShards(context.Background(), plan, dir, sp)
-	if err != nil {
-		t.Fatalf("writeSpooledShards error = %v", err)
+	require.NoError(t, err)
+
+	require.Len(t, shards.bufferedWrites, 1)
+	write := shards.bufferedWrites[0]
+	require.Equal(t, "node-b", write.peer)
+	require.Equal(t, "object/v1", write.key)
+	require.Equal(t, int64(5), result.Size)
+	require.Equal(t, "etag", result.ETag)
+	require.Equal(t, uint8(1), result.ECData)
+}
+
+func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "node-a",
+		shards: shards,
+	}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 1, ParityShards: 0},
+		Placement:        []string{"node-a"},
+		RingVersion:      7,
+		ContentType:      "text/plain",
 	}
 
-	if got, want := len(shards.bufferedWrites), 1; got != want {
-		t.Fatalf("buffered remote writes = %d, want %d", got, want)
-	}
-	write := shards.bufferedWrites[0]
-	if got, want := write.peer, "node-b"; got != want {
-		t.Fatalf("peer = %q, want %q", got, want)
-	}
-	if got, want := write.key, "object/v1"; got != want {
-		t.Fatalf("key = %q, want %q", got, want)
-	}
-	if got, want := result.Size, int64(5); got != want {
-		t.Fatalf("result size = %d, want %d", got, want)
-	}
-	if got, want := result.ETag, "etag"; got != want {
-		t.Fatalf("result ETag = %q, want %q", got, want)
-	}
-	if got, want := result.ECData, uint8(1); got != want {
-		t.Fatalf("ECData = %d, want %d", got, want)
-	}
+	result, err := writer.writeDataShards(context.Background(), plan, []byte("hello"))
+	require.NoError(t, err)
+
+	require.Len(t, shards.localWrites, 1)
+	require.Equal(t, int64(5), result.Size)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", result.ETag)
+	require.Equal(t, "object/v1", result.ShardKey)
+	require.Equal(t, []string{"node-a"}, result.Placement)
 }
 
 type fakeECObjectWriterShards struct {

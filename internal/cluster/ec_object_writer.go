@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"hash"
@@ -128,6 +129,25 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 		}
 		return bytes.NewReader(shards[idx]), nil
 	}, "ec_memory")
+}
+
+func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
+	shards, err := ECSplit(plan.Config, data)
+	if err != nil {
+		return ecObjectWriteResult{}, fmt.Errorf("ec split: %w", err)
+	}
+	h := md5.Sum(data)
+	sp := &spooledObject{
+		Size: int64(len(data)),
+		ETag: hex.EncodeToString(h[:]),
+	}
+
+	return w.writeShardReaders(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		if idx < 0 || idx >= len(shards) {
+			return nil, fmt.Errorf("ec data shard %d out of range", idx)
+		}
+		return bytes.NewReader(shards[idx]), nil
+	}, "ec")
 }
 
 func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {

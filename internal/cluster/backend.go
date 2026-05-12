@@ -1584,10 +1584,6 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 
 	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
-	shards, err := ECSplit(effectiveCfg, data)
-	if err != nil {
-		return nil, fmt.Errorf("ec split: %w", err)
-	}
 
 	// ShardService's key parameter carries the versionID as a suffix so shards
 	// for different versions land at different paths without changing the API.
@@ -1599,95 +1595,26 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
 	}
-	selfID := b.selfAddr
-
-	// Track nodes we wrote to so cleanup can target them precisely.
-	// writtenMu: concurrent goroutines append to written simultaneously.
-	var (
-		writtenMu sync.Mutex
-		written   []string
-	)
-	cleanup := func() {
-		// Called after g.Wait() — single goroutine, no mutex needed here.
-		for _, n := range written {
-			if n == selfID {
-				_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
-				continue
-			}
-			_ = b.shardSvc.DeleteShards(ctx, n, bucket, shardKey)
-		}
-	}
-
-	// Fan-out: write all shards in parallel. Write-all consistency.
-	// Total latency = max(per-shard latency) instead of Σ(per-shard latency).
-	// Each remote write gets a bounded deadline so a dead peer fails without
-	// letting the object PUT hang forever.
-	g, gctx := errgroup.WithContext(ctx)
-	for i, node := range placement {
-		i, node := i, node
-		g.Go(func() error {
-			var werr error
-			if node == selfID {
-				werr = b.shardSvc.WriteLocalShard(bucket, shardKey, i, shards[i])
-			} else {
-				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
-				defer writeCancel()
-				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, shards[i])
-				if b.peerHealth != nil {
-					if werr != nil {
-						b.peerHealth.MarkUnhealthy(node)
-					} else {
-						b.peerHealth.MarkHealthy(node)
-					}
-				}
-			}
-			if werr != nil {
-				return fmt.Errorf("ec write shard %d to %s: %w", i, node, werr)
-			}
-			writtenMu.Lock()
-			written = append(written, node)
-			writtenMu.Unlock()
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		cleanup()
-		return nil, err
-	}
-
-	h := md5.Sum(data)
-	etag := hex.EncodeToString(h[:])
-	now := time.Now().Unix()
 
 	// Commit metadata. RingVersion + ECData/ECParity + NodeIDs stored so reads
 	// can reconstruct shards without a separate placement record (NodeIDs fallback
 	// is used when RingVersion==0 and no placement record exists).
 	// On failure, best-effort cleanup of orphaned shards.
-	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	plan := ecObjectWritePlan{
 		Bucket:      bucket,
 		Key:         key,
-		Size:        int64(len(data)),
-		ContentType: contentType,
-		ETag:        etag,
-		ModTime:     now,
 		VersionID:   versionID,
+		Config:      effectiveCfg,
+		Placement:   placement,
 		RingVersion: ringVer,
-		ECData:      uint8(effectiveCfg.DataShards),
-		ECParity:    uint8(effectiveCfg.ParityShards),
-		NodeIDs:     placement,
-	}); merr != nil {
-		go b.deleteShardsAsync(bucket, placement, shardKey)
-		return nil, merr
+		ContentType: contentType,
 	}
-
-	return &storage.Object{
-		Key:          key,
-		Size:         int64(len(data)),
-		ContentType:  contentType,
-		ETag:         etag,
-		LastModified: now,
-		VersionID:    versionID,
-	}, nil
+	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	result, err := writer.writeDataShards(ctx, plan, data)
+	if err != nil {
+		return nil, err
+	}
+	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
