@@ -1676,9 +1676,38 @@ func (s *Server) evaluateRemovePeerPreflight(id string) (cluster.RemovePeerPrefl
 	}
 	return cluster.EvaluateRemovePeerPreflight(cluster.RemovePeerPreflightInput{
 		TargetID: id,
-		Voters:   s.cluster.Peers(),
+		Voters:   removePeerPreflightVoters(s.cluster.Peers(), snapshot),
 		Snapshot: snapshot,
 	}), true
+}
+
+func removePeerPreflightVoters(voters []string, snapshot []cluster.PeerLivenessRow) []string {
+	if len(voters) == 0 || len(snapshot) == 0 {
+		return voters
+	}
+	byAddr := make(map[string]string, len(snapshot))
+	byID := make(map[string]string, len(snapshot))
+	for _, row := range snapshot {
+		if row.IdentityState == cluster.PeerIdentitySelf || row.PeerID == "" {
+			continue
+		}
+		byID[row.PeerID] = row.PeerID
+		if row.RaftAddr != "" {
+			byAddr[row.RaftAddr] = row.PeerID
+		}
+	}
+	out := make([]string, len(voters))
+	for i, voter := range voters {
+		switch {
+		case byID[voter] != "":
+			out[i] = byID[voter]
+		case byAddr[voter] != "":
+			out[i] = byAddr[voter]
+		default:
+			out[i] = voter
+		}
+	}
+	return out
 }
 
 func writeRemovePeerSnapshotUnavailable(c *app.RequestContext) {

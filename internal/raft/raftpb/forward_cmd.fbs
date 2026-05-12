@@ -22,7 +22,8 @@ enum ForwardOp : byte {
   DeleteObjectVersion = 12,
   ListObjectVersions = 13,
   ScrubSessionStat = 14,
-  ReadAt = 15
+  ReadAt = 15,
+  SetObjectACL = 16
 }
 
 table ScrubSessionStatArgs {
@@ -84,6 +85,12 @@ table HeadObjectArgs {
 table DeleteObjectArgs {
   bucket:string;
   key:string;
+}
+
+table SetObjectACLArgs {
+  bucket:string;
+  key:string;
+  acl:ubyte;
 }
 
 table DeleteObjectVersionArgs {

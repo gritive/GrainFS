@@ -107,3 +107,73 @@ type transferLeaderConformance interface {
 func TestRaftClusterInfo_SatisfiesTransferLeader(t *testing.T) {
 	var _ transferLeaderConformance = (*RaftClusterInfo)(nil)
 }
+
+func TestRaftClusterInfo_PeerSnapshotMarksLivePeersLiveWithoutReplicationEvidence(t *testing.T) {
+	info := NewRaftClusterInfo(&fakeRaftNode{
+		id:    "n1",
+		peers: []string{"10.0.0.2:7001", "10.0.0.3:7001"},
+	}, nil, nil, fakeAddressBook{nodes: []cluster.MetaNodeEntry{
+		{ID: "n2", Address: "10.0.0.2:7001"},
+		{ID: "n3", Address: "10.0.0.3:7001"},
+	}})
+
+	got := info.PeerSnapshot()
+
+	require.Equal(t, []cluster.PeerLivenessRow{
+		{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive, Reason: "self"},
+		{PeerID: "n2", RaftAddr: "10.0.0.2:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
+		{PeerID: "n3", RaftAddr: "10.0.0.3:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
+	}, got)
+}
+
+type fakeRaftNode struct {
+	id    string
+	peers []string
+}
+
+func (f *fakeRaftNode) Start()                                              {}
+func (f *fakeRaftNode) Close()                                              {}
+func (f *fakeRaftNode) ID() string                                          { return f.id }
+func (f *fakeRaftNode) State() raft.NodeState                               { return raft.Leader }
+func (f *fakeRaftNode) Term() uint64                                        { return 1 }
+func (f *fakeRaftNode) IsLeader() bool                                      { return true }
+func (f *fakeRaftNode) LeaderID() string                                    { return f.id }
+func (f *fakeRaftNode) CommittedIndex() uint64                              { return 0 }
+func (f *fakeRaftNode) Configuration() raft.Configuration                   { return raft.Configuration{} }
+func (f *fakeRaftNode) Peers() []string                                     { return append([]string(nil), f.peers...) }
+func (f *fakeRaftNode) PeerMatchIndex(string) (uint64, bool)                { return 0, false }
+func (f *fakeRaftNode) Bootstrap() error                                    { return nil }
+func (f *fakeRaftNode) Propose([]byte) error                                { return nil }
+func (f *fakeRaftNode) ProposeWait(context.Context, []byte) (uint64, error) { return 0, nil }
+func (f *fakeRaftNode) ReadIndex(context.Context) (uint64, error)           { return 0, nil }
+func (f *fakeRaftNode) WaitApplied(context.Context, uint64) error           { return nil }
+func (f *fakeRaftNode) ApplyCh() <-chan raft.LogEntry                       { return nil }
+func (f *fakeRaftNode) SetTransport(func(string, *raft.RequestVoteArgs) (*raft.RequestVoteReply, error), func(string, *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)) {
+}
+func (f *fakeRaftNode) SetInstallSnapshotTransport(func(string, *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error)) {
+}
+func (f *fakeRaftNode) SetNoOpCommand([]byte)                             {}
+func (f *fakeRaftNode) RegisterObserver(chan<- raft.Event)                {}
+func (f *fakeRaftNode) DeregisterObserver(chan<- raft.Event)              {}
+func (f *fakeRaftNode) AddVoter(string, string) error                     { return nil }
+func (f *fakeRaftNode) AddVoterCtx(context.Context, string, string) error { return nil }
+func (f *fakeRaftNode) RemoveVoter(string) error                          { return nil }
+func (f *fakeRaftNode) AddLearner(string, string) error                   { return nil }
+func (f *fakeRaftNode) PromoteToVoter(string) error                       { return nil }
+func (f *fakeRaftNode) TransferLeadership() error                         { return nil }
+func (f *fakeRaftNode) ChangeMembership(context.Context, []raft.ServerEntry, []string) error {
+	return nil
+}
+func (f *fakeRaftNode) HandleRequestVote(*raft.RequestVoteArgs) *raft.RequestVoteReply { return nil }
+func (f *fakeRaftNode) HandleAppendEntries(*raft.AppendEntriesArgs) *raft.AppendEntriesReply {
+	return nil
+}
+func (f *fakeRaftNode) HandleInstallSnapshot(*raft.InstallSnapshotArgs) *raft.InstallSnapshotReply {
+	return nil
+}
+func (f *fakeRaftNode) HandleTimeoutNow()                   {}
+func (f *fakeRaftNode) CreateSnapshot(uint64, []byte) error { return nil }
+func (f *fakeRaftNode) SnapshotStatus() (raft.SnapshotStatus, error) {
+	return raft.SnapshotStatus{}, nil
+}
+func (f *fakeRaftNode) LatestSnapshot() (*raft.Snapshot, error) { return nil, nil }

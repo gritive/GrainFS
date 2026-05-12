@@ -108,6 +108,11 @@ func TestDistributedBackend_CreateBucketConflict(t *testing.T) {
 	require.ErrorIs(t, b.CreateBucket(context.Background(), "dup"), storage.ErrBucketAlreadyExists)
 }
 
+func TestProposalForwardPeersFallsBackToShardServicePeers(t *testing.T) {
+	got := proposalForwardPeers(nil, []string{"127.0.0.1:7001", "127.0.0.1:7002"}, "127.0.0.1:7002")
+	require.Equal(t, []string{"127.0.0.1:7001"}, got)
+}
+
 func TestDistributedBackend_ListBuckets(t *testing.T) {
 	b := newTestDistributedBackend(t)
 

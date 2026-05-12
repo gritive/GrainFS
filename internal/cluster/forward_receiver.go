@@ -105,6 +105,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleHeadObject(dg, fbsArgs)
 	case raftpb.ForwardOpDeleteObject:
 		return r.handleDeleteObject(dg, fbsArgs)
+	case raftpb.ForwardOpSetObjectACL:
+		return r.handleSetObjectACL(dg, fbsArgs)
 	case raftpb.ForwardOpListObjects:
 		return r.handleListObjects(dg, fbsArgs)
 	case raftpb.ForwardOpWalkObjects:
@@ -441,6 +443,14 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 		Key:       key,
 		VersionID: markerID,
 	}, bucket)}
+}
+
+func (r *ForwardReceiver) handleSetObjectACL(dg *DataGroup, args []byte) *transport.Message {
+	sa := raftpb.GetRootAsSetObjectACLArgs(args, 0)
+	if err := dg.Backend().SetObjectACL(string(sa.Bucket()), string(sa.Key()), sa.Acl()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildOKReply()}
 }
 
 func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) *transport.Message {

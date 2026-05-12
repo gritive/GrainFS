@@ -214,6 +214,40 @@ func TestClusterCoordinator_PutObject_WaitsForLocalSingletonLeaderBeforeForward(
 	require.Empty(t, d.calls)
 }
 
+func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+	gb.Node().Start()
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("write-bucket", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial))
+	w, err := wal.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, w.Close()) })
+	ops := storage.NewOperations(wal.NewBackend(c, w))
+
+	obj, err := ops.PutObjectWithACL(context.Background(), "write-bucket", "key", strings.NewReader("body"), "text/plain", 7)
+
+	require.NoError(t, err)
+	require.Equal(t, uint8(7), obj.ACL)
+	require.Empty(t, d.calls)
+	require.Eventually(t, func() bool {
+		head, err := gb.HeadObject(context.Background(), "write-bucket", "key")
+		return err == nil && head.ACL == 7
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestFollowerGroupBackend(t, "g1", "self")

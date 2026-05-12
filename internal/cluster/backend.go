@@ -727,7 +727,7 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	// know the seed/join peer address and must try it instead of failing early.
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	peers := b.node.Peers()
+	peers := proposalForwardPeers(b.node.Peers(), b.allNodes, b.selfAddr)
 	if len(peers) == 0 {
 		return raft.ErrNotLeader
 	}
@@ -738,6 +738,23 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		}
 	}
 	return lastErr
+}
+
+func proposalForwardPeers(raftPeers, allNodes []string, selfAddr string) []string {
+	if len(raftPeers) > 0 {
+		return append([]string(nil), raftPeers...)
+	}
+	if len(allNodes) == 0 {
+		return nil
+	}
+	peers := make([]string, 0, len(allNodes))
+	for _, node := range allNodes {
+		if node == "" || node == selfAddr {
+			continue
+		}
+		peers = append(peers, node)
+	}
+	return peers
 }
 
 // Close closes the metadata database. When shared is true the DB is owned by

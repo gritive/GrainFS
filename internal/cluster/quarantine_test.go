@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -69,4 +71,28 @@ func TestQuarantine_VersionScopedIsolationDoesNotBlockNewerVersion(t *testing.T)
 
 	_, err = b.PutObject(context.Background(), "b", "bad", bytes.NewReader([]byte("newer")), "application/octet-stream")
 	assert.NoError(t, err)
+}
+
+func TestQuarantineCorruptShardLocalRecordsIsolatedIncident(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	rec := &recordingIncidentRecorder{}
+	b.SetIncidentRecorder(rec)
+
+	require.NoError(t, b.QuarantineCorruptShardLocal("b", "bad", "v1", 0, "CRC mismatch"))
+
+	require.NotEmpty(t, rec.facts)
+	require.Equal(t, incident.FactObserved, rec.facts[0].Type)
+	require.Equal(t, incident.CauseCorruptShard, rec.facts[0].Cause)
+	require.Equal(t, incident.ScopeObject, rec.facts[0].Scope.Kind)
+	require.Equal(t, "b", rec.facts[0].Scope.Bucket)
+	require.Equal(t, "bad", rec.facts[0].Scope.Key)
+	require.Equal(t, "v1", rec.facts[0].Scope.VersionID)
+	require.Equal(t, 0, rec.facts[0].Scope.ShardID)
+	require.Equal(t, incident.FactIsolated, rec.facts[len(rec.facts)-1].Type)
+
+	state, err := incident.NewReducer().Reduce(append([]incident.Fact(nil), rec.facts...))
+	require.NoError(t, err)
+	require.Equal(t, incident.StateIsolated, state.State)
+	require.Equal(t, incident.ActionIsolateObject, state.Action)
+	require.WithinDuration(t, time.Now().UTC(), state.CompletedAt, time.Second)
 }

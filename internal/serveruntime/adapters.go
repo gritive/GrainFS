@@ -388,16 +388,34 @@ func (r *RaftClusterInfo) PeerStates() map[string]string {
 }
 
 func (r *RaftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
-	var evidence []raft.PeerReplicationEvidence
+	var probes []cluster.PeerProbeResult
 	if source, ok := any(r.node).(peerReplicationEvidenceSource); ok {
-		evidence = source.PeerReplicationEvidence()
+		probes = freshReplicationProbeResults(source.PeerReplicationEvidence(), r.addrBook, time.Now(), cluster.MetaRaftLivenessFreshnessWindow)
+	} else {
+		probes = raftLivePeerProbeResults(r.normalizePeerIDs(r.node.Peers()), time.Now())
 	}
 	return cluster.BuildPeerLivenessSnapshot(cluster.PeerLivenessInput{
 		SelfID:       r.node.ID(),
 		Voters:       r.node.Peers(),
 		AddressBook:  r.addrBook,
-		ProbeResults: freshReplicationProbeResults(evidence, r.addrBook, time.Now(), cluster.MetaRaftLivenessFreshnessWindow),
+		ProbeResults: probes,
 	})
+}
+
+func raftLivePeerProbeResults(peers []string, observedAt time.Time) []cluster.PeerProbeResult {
+	out := make([]cluster.PeerProbeResult, 0, len(peers))
+	for _, peer := range peers {
+		if peer == "" {
+			continue
+		}
+		out = append(out, cluster.PeerProbeResult{
+			PeerID:     peer,
+			Live:       true,
+			ObservedAt: observedAt,
+			Reason:     "raft_live_peer",
+		})
+	}
+	return out
 }
 
 func freshReplicationProbeResults(evidence []raft.PeerReplicationEvidence, addrBook cluster.NodeAddressBook, now time.Time, freshness time.Duration) []cluster.PeerProbeResult {

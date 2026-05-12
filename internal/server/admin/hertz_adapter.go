@@ -24,8 +24,8 @@ type router interface {
 func RegisterAdmin(h *server.Hertz, d *Deps) {
 	h.Use(peerCredMiddleware())
 	g := h.Group("/v1")
-	registerVolume(g, d)
 	registerSnapshot(g, d)
+	registerVolume(g, d)
 	registerScrub(g, d)
 	registerCluster(g, d)
 	registerResource(g, d)
@@ -38,8 +38,8 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 // handler logic).
 func RegisterUI(h *server.Hertz, d *Deps) {
 	g := h.Group("/ui/api")
-	registerVolume(g, d)
 	registerSnapshot(g, d)
+	registerVolume(g, d)
 	registerScrub(g, d)
 	registerCluster(g, d)
 	registerResource(g, d)

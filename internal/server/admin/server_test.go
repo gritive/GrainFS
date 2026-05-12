@@ -14,6 +14,7 @@ import (
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 
 	"github.com/gritive/GrainFS/internal/server/admin"
+	"github.com/gritive/GrainFS/internal/volumeadmin"
 )
 
 func TestServer_StartCleansStaleSocketAndChmods0660(t *testing.T) {
@@ -149,6 +150,51 @@ func TestServer_ServesListVolumesOverUnixSocket(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestServer_SnapshotAndCloneRoutesDoNotHitVolumeNameRoute(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "a.sock")
+
+	s, err := admin.Start(admin.Config{
+		SocketPath: sock,
+		Deps:       newServerDeps(t, dir),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	cli, err := volumeadmin.NewClient(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := cli.CreateVolume(ctx, volumeadmin.CreateVolumeReq{Name: "src", Size: 4 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := cli.CreateSnapshot(ctx, "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.DeleteSnapshot(ctx, "src", snap.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.GetVolume(ctx, "src"); err != nil {
+		t.Fatalf("snapshot delete routed as volume delete: %v", err)
+	}
+
+	if err := cli.CloneVolume(ctx, "src", "dst"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.GetVolume(ctx, "src"); err != nil {
+		t.Fatalf("clone routed through a volume-name route that removed source: %v", err)
+	}
+	if _, err := cli.GetVolume(ctx, "dst"); err != nil {
+		t.Fatalf("clone did not create destination: %v", err)
 	}
 }
 

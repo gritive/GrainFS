@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"sync"
@@ -985,6 +986,56 @@ func (c *ClusterCoordinator) PutObject(
 		return nil, ErrForwardBodySizeMismatch
 	}
 	return obj, nil
+}
+
+func (c *ClusterCoordinator) PutObjectWithACL(
+	bucket, key string, r io.Reader, contentType string, acl uint8,
+) (*storage.Object, error) {
+	ctx := context.Background()
+	obj, err := c.PutObject(ctx, bucket, key, r, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.SetObjectACL(bucket, key, acl); err != nil {
+		if obj == nil || obj.VersionID == "" {
+			return nil, fmt.Errorf("%w: acl error: %v; rollback error: missing version id",
+				storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonRollbackFailed},
+				err,
+			)
+		}
+		if rollbackErr := c.DeleteObjectVersion(bucket, key, obj.VersionID); rollbackErr != nil {
+			return nil, fmt.Errorf("%w: acl error: %v; rollback error: %v",
+				storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonRollbackFailed},
+				err,
+				rollbackErr,
+			)
+		}
+		return nil, err
+	}
+	obj.ACL = acl
+	return obj, nil
+}
+
+func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
+	ctx := context.Background()
+	target, err := c.routeReadOrBucket(bucket, key, "")
+	if err != nil {
+		return err
+	}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
+		return gb.SetObjectACL(bucket, key, acl)
+	}
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildSetObjectACLArgs(bucket, key, acl)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpSetObjectACL, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as

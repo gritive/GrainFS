@@ -99,6 +99,18 @@ func buildDeleteObjectArgs(bucket, key string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildSetObjectACLArgs(bucket, key string, acl uint8) []byte {
+	b := flatbuffers.NewBuilder(64)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	raftpb.SetObjectACLArgsStart(b)
+	raftpb.SetObjectACLArgsAddBucket(b, bk)
+	raftpb.SetObjectACLArgsAddKey(b, k)
+	raftpb.SetObjectACLArgsAddAcl(b, acl)
+	b.Finish(raftpb.SetObjectACLArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
