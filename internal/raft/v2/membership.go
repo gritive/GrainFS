@@ -24,7 +24,12 @@ func (n *Node) handleConfChange(cmd command) {
 		cmd.ccReply <- confChangeResult{err: ErrNotLeader}
 		return
 	}
-	if n.st.pendingConfChange != nil {
+	// M6.0 Path B in-flight gate: a single-phase ConfChange (AddLearner /
+	// PromoteStage1) or a queued PromoteToVoter chain is also exclusive
+	// with a fresh joint change. The three-way check prevents a race
+	// where a Promote stage-2 (joint) starts inside the actor while a
+	// caller submits AddVoter for the same target.
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
 		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
 		return
 	}
@@ -159,7 +164,7 @@ func (n *Node) advanceConfChangePhase() {
 			Term:    n.st.currentTerm,
 			Index:   finalIdx,
 			Type:    LogEntryConfChange,
-			Command: encodeConfChange(pcc.newVoters),
+			Command: encodeJointExitConfChange(pcc.newVoters, n.st.currentConfig.learners),
 		}
 		if err := n.st.log.Append([]LogEntry{finalEntry}); err != nil {
 			panic("raftv2: advanceConfChangePhase: Append final: " + err.Error())
@@ -360,6 +365,322 @@ func (n *Node) truncateAndRevertConfig(idx uint64) {
 	} else {
 		n.st.appendedConfigIndex = 0
 	}
+}
+
+// handleAddLearner appends a single-phase ConfChange entry that registers a
+// new non-voting observer (M6.0 Path B). Quorum math is unchanged; voter
+// slices are unchanged; the learner immediately starts receiving log
+// entries via broadcastHeartbeat (replicaSet includes learners).
+//
+// Validation:
+//   - Must be Leader (ErrNotLeader).
+//   - At most one in-flight membership change. The single-phase entry
+//     reuses the same gate as joint changes — concurrent AddLearner +
+//     AddVoter would race on appendedConfigIndex semantics.
+//   - id must NOT already be a voter (either side of joint) or a learner.
+func (n *Node) handleAddLearner(cmd command) {
+	reply := cmd.ccReply
+	if n.st.state != Leader {
+		reply <- confChangeResult{err: ErrNotLeader}
+		return
+	}
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.appendedConfigIndex > n.st.commitIndex {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.currentConfig.joint {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	id := cmd.learnerID
+	if id == "" {
+		reply <- confChangeResult{err: fmt.Errorf("raftv2: AddLearner: empty id")}
+		return
+	}
+	if n.st.currentConfig.containsAnyVoter(id) || n.st.currentConfig.isLearner(id) {
+		reply <- confChangeResult{err: ErrAlreadyLearner}
+		return
+	}
+
+	// Build the resulting effective config (Cnew snapshot for the wire).
+	voters := append([]string(nil), n.st.currentConfig.voters...)
+	learners := make([]confLearner, 0, len(n.st.currentConfig.learners)+1)
+	for lid, laddr := range n.st.currentConfig.learners {
+		learners = append(learners, confLearner{ID: lid, Address: laddr})
+	}
+	learners = append(learners, confLearner{ID: id, Address: cmd.learnerAddr})
+
+	entryIdx := n.st.lastLogIndex() + 1
+	entry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   entryIdx,
+		Type:    LogEntryConfChange,
+		Command: encodeConfChange(ConfChangeAddLearner, id, cmd.learnerAddr, voters, learners),
+	}
+	if err := n.st.log.Append([]LogEntry{entry}); err != nil {
+		panic("raftv2: handleAddLearner: Append: " + err.Error())
+	}
+
+	// Push prior config onto history BEFORE swapping so truncation can
+	// revert exactly (mirrors handleConfChange).
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: entryIdx,
+		prev:     prev,
+	})
+	next := prev
+	next.voters = append([]string(nil), prev.voters...)
+	next.oldVoters = append([]string(nil), prev.oldVoters...)
+	next.learners = prev.cloneLearners()
+	if next.learners == nil {
+		next.learners = make(map[string]string, 1)
+	}
+	next.learners[id] = cmd.learnerAddr
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = entryIdx
+	n.st.invalidatePeerSet()
+
+	// Initialise replication tracking for the new learner so the next
+	// broadcastHeartbeat addresses it from nextIndex = lastLogIndex+1
+	// (i.e. it receives the AddLearner entry itself plus everything after).
+	if n.st.matchIndex != nil {
+		n.st.matchIndex[id] = 0
+		n.st.nextIndex[id] = n.st.lastLogIndex() + 1
+		n.st.peerInFlight[id] = false
+		n.st.peerLastRound[id] = 0
+	}
+
+	n.st.pendingSingleConf = &pendingSingleConf{idx: entryIdx, reply: reply}
+
+	n.publish()
+
+	// Start the heartbeat ticker if we did not have replicas before.
+	if n.heartbeatTicker == nil && len(n.st.replicaSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+
+	// Solo-voter shortcut: if the leader is the sole voter, the new
+	// learner entry is already trivially "committed" by the leader's own
+	// quorum. Drive commit advance inline so the reply fires now.
+	n.maybeAdvanceCommitIndex()
+}
+
+// handlePromote is the entry point for PromoteToVoter (Path B two-entry
+// sequence). Validates the target is a learner and caught up, then
+// appends a single-phase PromoteStage1 entry. The chain finishes when
+// applyCommitted sees stage 1 commit and kicks off the joint AddVoter
+// via finishPromote.
+func (n *Node) handlePromote(cmd command) {
+	reply := cmd.ccReply
+	if n.st.state != Leader {
+		reply <- confChangeResult{err: ErrNotLeader}
+		return
+	}
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.appendedConfigIndex > n.st.commitIndex {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	if n.st.currentConfig.joint {
+		reply <- confChangeResult{err: ErrConfChangeInFlight}
+		return
+	}
+	id := cmd.learnerID
+	if id == "" {
+		reply <- confChangeResult{err: fmt.Errorf("raftv2: PromoteToVoter: empty id")}
+		return
+	}
+	if !n.st.currentConfig.isLearner(id) {
+		reply <- confChangeResult{err: ErrNotALearner}
+		return
+	}
+
+	// Catchup gate: only enforced when threshold > 0. Threshold is the
+	// allowed lag in entries; the learner must satisfy
+	// matchIndex+threshold >= commitIndex. Self-as-learner cannot happen
+	// (PromoteToVoter is leader-only and a learner cannot be leader).
+	if n.cfg.LearnerCatchupThreshold > 0 {
+		matchIdx := n.st.matchIndex[id]
+		if matchIdx+n.cfg.LearnerCatchupThreshold < n.st.commitIndex {
+			reply <- confChangeResult{err: ErrLearnerNotCaughtUp}
+			return
+		}
+	}
+
+	// Stage 1: drop-from-learners single-phase entry. Voter set unchanged.
+	voters := append([]string(nil), n.st.currentConfig.voters...)
+	learners := make([]confLearner, 0, len(n.st.currentConfig.learners))
+	for lid, laddr := range n.st.currentConfig.learners {
+		if lid == id {
+			continue
+		}
+		learners = append(learners, confLearner{ID: lid, Address: laddr})
+	}
+
+	entryIdx := n.st.lastLogIndex() + 1
+	entry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   entryIdx,
+		Type:    LogEntryConfChange,
+		Command: encodeConfChange(ConfChangePromoteStage1, id, "", voters, learners),
+	}
+	if err := n.st.log.Append([]LogEntry{entry}); err != nil {
+		panic("raftv2: handlePromote: Append stage1: " + err.Error())
+	}
+
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: entryIdx,
+		prev:     prev,
+	})
+	next := prev
+	next.voters = append([]string(nil), prev.voters...)
+	next.oldVoters = append([]string(nil), prev.oldVoters...)
+	next.learners = prev.cloneLearners()
+	delete(next.learners, id)
+	if len(next.learners) == 0 {
+		next.learners = nil
+	}
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = entryIdx
+	n.st.invalidatePeerSet()
+
+	// Stage 1 reply is a throwaway internal channel — the user's reply
+	// (cmd.ccReply) waits for the stage-2 joint AddVoter to complete.
+	stage1Reply := make(chan confChangeResult, 1)
+	n.st.pendingSingleConf = &pendingSingleConf{idx: entryIdx, reply: stage1Reply}
+	n.st.pendingPromote = &pendingPromote{targetID: id, reply: reply}
+
+	n.publish()
+
+	if n.heartbeatTicker == nil && len(n.st.replicaSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+	n.maybeAdvanceCommitIndex()
+}
+
+// advanceSingleConfPhase delivers the pending single-phase reply when its
+// entry commits, and (if a pendingPromote is queued) chains into the
+// joint AddVoter for the promoted target.
+func (n *Node) advanceSingleConfPhase() {
+	psc := n.st.pendingSingleConf
+	if psc == nil {
+		return
+	}
+	if n.st.state != Leader {
+		return
+	}
+	if n.st.commitIndex < psc.idx {
+		return
+	}
+	// Deliver the stage-1 reply (or AddLearner reply).
+	select {
+	case psc.reply <- confChangeResult{index: psc.idx}:
+	default:
+	}
+	n.st.pendingSingleConf = nil
+
+	// If this was the stage-1 of a PromoteToVoter, kick off stage 2 now.
+	if pp := n.st.pendingPromote; pp != nil {
+		n.startPromoteStage2(pp)
+	}
+}
+
+// startPromoteStage2 launches the joint AddVoter transition for an
+// already-dropped-from-learners target. Re-uses the existing v2 joint
+// path by adapting the targeted ID into a synthetic cmdConfChange flow.
+func (n *Node) startPromoteStage2(pp *pendingPromote) {
+	// Clear pendingPromote — the joint flow will deliver the user reply
+	// via pendingConfChange when stage 2 commits.
+	id := pp.targetID
+	userReply := pp.reply
+	n.st.pendingPromote = nil
+
+	// Sanity: target must not already be a voter (it shouldn't be —
+	// stage 1 only dropped from learners). If somehow it is, deliver
+	// success immediately so the caller is unblocked.
+	if n.st.currentConfig.containsAnyVoter(id) {
+		select {
+		case userReply <- confChangeResult{index: n.st.commitIndex}:
+		default:
+		}
+		return
+	}
+
+	// Build Cnew = currentConfig.voters ∪ {id}. Joint flow handles the
+	// rest. The joint encoder is voter-only — learners (which now
+	// exclude id) survive via actor state.
+	old := append([]string(nil), n.st.currentConfig.voters...)
+	newV, err := buildNextVoters(old, id, true)
+	if err != nil {
+		select {
+		case userReply <- confChangeResult{err: err}:
+		default:
+		}
+		return
+	}
+
+	jointIdx := n.st.lastLogIndex() + 1
+	jointEntry := LogEntry{
+		Term:    n.st.currentTerm,
+		Index:   jointIdx,
+		Type:    LogEntryJointConfChange,
+		Command: encodeJointConfChange(old, newV),
+	}
+	if err := n.st.log.Append([]LogEntry{jointEntry}); err != nil {
+		panic("raftv2: startPromoteStage2: Append joint: " + err.Error())
+	}
+
+	prev := n.st.currentConfig
+	n.st.configHistory = append(n.st.configHistory, configHistoryEntry{
+		logIndex: jointIdx,
+		prev:     prev,
+	})
+	next := newJointConfig(old, newV)
+	next.learners = prev.cloneLearners()
+	n.st.currentConfig = next
+	n.st.appendedConfigIndex = jointIdx
+	n.st.invalidatePeerSet()
+
+	// Initialise replication tracking for the now-voter target. It was
+	// already in matchIndex/nextIndex as a learner; the entries already
+	// reflect its current progress — keep them so commit-advance math
+	// can use the learner's actual catchup state.
+
+	n.st.pendingConfChange = &pendingConfChange{
+		jointIndex: jointIdx,
+		newVoters:  newV,
+		reply:      userReply,
+	}
+
+	n.publish()
+
+	if n.heartbeatTicker == nil && len(n.st.replicaSet()) > 0 {
+		interval := n.cfg.HeartbeatTimeout
+		if interval <= 0 {
+			interval = defaultHeartbeatTimeout
+		}
+		n.heartbeatTicker = time.NewTicker(interval)
+	}
+	n.broadcastHeartbeat()
+	n.maybeAdvanceCommitIndex()
 }
 
 // buildNextVoters returns Cnew given Cold, the target voter ID, and whether

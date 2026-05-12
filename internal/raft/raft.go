@@ -28,6 +28,14 @@ var (
 	ErrLeadershipLost      = errors.New("raft: leadership lost during joint consensus")
 	ErrMembershipChanged   = errors.New("raft: membership changed during read index")
 	ErrNodeStopped         = errors.New("raft: node stopped")
+	// ErrLearnerNotCaughtUp mirrors raft/v2's sentinel of the same name.
+	// Returned by PromoteToVoter when the learner's matchIndex lags more
+	// than cfg.LearnerCatchupThreshold entries behind commitIndex.
+	// Added in M6.0; v1 has no native PromoteToVoter that exercises
+	// this code path, but the sentinel is mirrored here so callers
+	// using errors.Is(err, raft.ErrLearnerNotCaughtUp) match correctly
+	// regardless of which raft implementation served the call.
+	ErrLearnerNotCaughtUp = errors.New("raft: learner not caught up to leader commit")
 )
 
 // readIndexWaiter tracks a pending leader-side ReadIndex quorum confirmation.

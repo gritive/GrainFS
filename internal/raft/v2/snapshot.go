@@ -11,10 +11,14 @@ package raftv2
 type Snapshot struct {
 	LastIncludedIndex uint64
 	LastIncludedTerm  uint64
-	// Configuration at snapshot time. Just the voter ID list for now;
-	// joint-config encoding is task 2's concern. Empty/nil for tests
-	// that don't care about config recovery.
+	// Configuration at snapshot time. Voter ID list only — learners ride
+	// in Learners (added M6.0). Empty/nil for tests that don't care about
+	// config recovery.
 	Configuration []string
+	// Learners are non-voting observers at snapshot time. id → address.
+	// Nil/empty when no learners. Added M6.0 (Path B); pre-M6.0 snapshots
+	// decode with Learners == nil and the schema gate refuses the store.
+	Learners map[string]string
 	// Data is opaque FSM state bytes provided by the caller of CreateSnapshot.
 	Data []byte
 }
@@ -52,6 +56,12 @@ func (s *memSnapshotStore) Save(snap *Snapshot) error {
 	if len(snap.Configuration) > 0 {
 		cp.Configuration = make([]string, len(snap.Configuration))
 		copy(cp.Configuration, snap.Configuration)
+	}
+	if len(snap.Learners) > 0 {
+		cp.Learners = make(map[string]string, len(snap.Learners))
+		for k, v := range snap.Learners {
+			cp.Learners[k] = v
+		}
 	}
 	if len(snap.Data) > 0 {
 		cp.Data = make([]byte, len(snap.Data))

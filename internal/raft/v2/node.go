@@ -440,9 +440,14 @@ func (n *Node) Bootstrap() error {
 func (n *Node) Configuration() Configuration {
 	rs := n.rs.Load()
 	all := rs.config.allVoters()
-	servers := make([]Server, 0, len(all))
+	servers := make([]Server, 0, len(all)+len(rs.config.learners))
 	for _, id := range all {
 		servers = append(servers, Server{ID: id, Suffrage: Voter})
+	}
+	// Learners (Path B sibling): emit each as NonVoter so callers
+	// (Configuration consumers, the dashboard, e2e checks) can see them.
+	for id := range rs.config.learners {
+		servers = append(servers, Server{ID: id, Suffrage: NonVoter})
 	}
 	return Configuration{Servers: servers}
 }
@@ -510,13 +515,54 @@ func (n *Node) submitConfChange(ctx context.Context, id string, add bool) error 
 	}
 }
 
-// AddLearner is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) AddLearner(id, addr string) error { return ErrNotImplemented }
+// AddLearner submits a single-phase ConfChange that registers id as a
+// non-voting observer (M6.0 Path B). Quorum math is unchanged; the
+// learner immediately starts receiving replicated entries but its acks
+// are NEVER counted in commit advance. Blocks until the entry commits.
+//
+// Errors:
+//   - ErrNotLeader: not the leader.
+//   - ErrConfChangeInFlight: a previous membership change is pending.
+//   - ErrAlreadyLearner: id is already a voter or a learner.
+//   - ErrProposalFailed: leader stepped down before the entry committed.
+func (n *Node) AddLearner(id, addr string) error {
+	return n.submitLearnerCmd(cmdAddLearner, id, addr)
+}
 
-// PromoteToVoter is a stub for v1 API parity. Real implementation lands in M2
-// (configuration changes via joint consensus).
-func (n *Node) PromoteToVoter(id string) error { return ErrNotImplemented }
+// PromoteToVoter triggers the two-entry Path B promotion sequence: a
+// single-phase drop-from-learners entry, then the existing v2
+// joint-consensus AddVoter flow. Blocks until the joint AddVoter's
+// final entry commits.
+//
+// Errors:
+//   - ErrNotLeader, ErrConfChangeInFlight, ErrProposalFailed as above.
+//   - ErrNotALearner: id is not a registered learner.
+//   - ErrLearnerNotCaughtUp: the learner's matchIndex lags more than
+//     cfg.LearnerCatchupThreshold entries behind commitIndex. Wait and
+//     retry.
+func (n *Node) PromoteToVoter(id string) error {
+	return n.submitLearnerCmd(cmdPromote, id, "")
+}
+
+// submitLearnerCmd enqueues a learner-targeted command and waits for the
+// actor's reply.
+func (n *Node) submitLearnerCmd(kind cmdKind, id, addr string) error {
+	if !n.IsLeader() {
+		return ErrNotLeader
+	}
+	reply := make(chan confChangeResult, 1)
+	select {
+	case n.cmdCh <- command{kind: kind, learnerID: id, learnerAddr: addr, ccReply: reply}:
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+	select {
+	case res := <-reply:
+		return res.err
+	case <-n.stopCh:
+		return ErrNodeStopped
+	}
+}
 
 // HandleTimeoutNow processes an incoming TimeoutNow RPC from the current leader
 // (Raft §3.10). Safe to call from any goroutine; routes through the actor and

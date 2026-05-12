@@ -21,7 +21,7 @@ func TestConfChange_RoundtripSingle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			blob := encodeConfChange(tc.voters)
+			blob := encodeJointExitConfChange(tc.voters, nil)
 			got, err := decodeConfChange(blob)
 			require.NoError(t, err)
 			require.False(t, got.IsJoint)
@@ -62,7 +62,7 @@ func TestConfChange_DecodeRejectsTruncated(t *testing.T) {
 // TestConfChange_DecodeRejectsUnknownVersion ensures an unknown version byte
 // is refused so future encodings can break old readers loudly.
 func TestConfChange_DecodeRejectsUnknownVersion(t *testing.T) {
-	blob := encodeConfChange([]string{"n1"})
+	blob := encodeJointExitConfChange([]string{"n1"}, nil)
 	blob[0] = 0xFF
 	_, err := decodeConfChange(blob)
 	require.Error(t, err)
@@ -71,7 +71,7 @@ func TestConfChange_DecodeRejectsUnknownVersion(t *testing.T) {
 // TestConfChange_DecodeRejectsUnknownKind ensures an unknown kind byte is
 // refused (defends against future kinds being silently treated as single).
 func TestConfChange_DecodeRejectsUnknownKind(t *testing.T) {
-	blob := encodeConfChange([]string{"n1"})
+	blob := encodeJointExitConfChange([]string{"n1"}, nil)
 	blob[1] = 0x7F
 	_, err := decodeConfChange(blob)
 	require.Error(t, err)
@@ -150,7 +150,7 @@ func TestApplyConfigEntry_Single(t *testing.T) {
 		Type:    LogEntryConfChange,
 		Index:   42,
 		Term:    7,
-		Command: encodeConfChange([]string{"n1", "n2", "n3"}),
+		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3"}, nil),
 	}
 	got := applyConfigEntry(prev, e)
 	require.False(t, got.joint)
@@ -212,7 +212,7 @@ func TestReconstructConfig_ReplaysJointThenSingle(t *testing.T) {
 	// Index 3: final entry settling on Cnew.
 	require.NoError(t, store.Append([]LogEntry{{
 		Term: 1, Index: 3, Type: LogEntryConfChange,
-		Command: encodeConfChange([]string{"n1", "n2", "n3", "n4"}),
+		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
 	}}))
 
 	cfg, hist, appendedIdx := reconstructConfig(nil, store, "n1", []string{"n2", "n3"})

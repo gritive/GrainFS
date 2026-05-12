@@ -13,19 +13,22 @@ import (
 //
 // Encoding (after the 1-byte version prefix):
 //
-//	[Version: 1B = 0x01]
+//	[Version: 1B = 0x02]  // bumped from 0x01 in M6.0 for learners section
 //	[LastIncludedIndex: 8B BE]
 //	[LastIncludedTerm:  8B BE]
 //	[NumVoters: 4B BE]
 //	  Repeated NumVoters times:
 //	    [VoterIDLen: 4B BE]
 //	    [VoterID: VoterIDLen bytes]
+//	[NumLearners: 4B BE]  // M6.0 addition (Path B)
+//	  Repeated NumLearners times:
+//	    [LearnerIDLen:   2B BE][LearnerID]
+//	    [LearnerAddrLen: 2B BE][LearnerAddr]
 //	[DataLen: 8B BE]
 //	[Data: DataLen bytes]
 //
-// The version prefix exists for forward-compat: future encodings can bump
-// it and reject unknown versions on load. Total fixed overhead: 1 + 8 + 8 + 4
-// + 8 = 29 bytes plus per-voter and Data lengths.
+// Pre-M6.0 snapshots (Version 0x01) are refused on load — the logstore
+// schema-version gate handles the migration story (clean re-bootstrap).
 //
 // Durability: Save calls db.Sync() after the write transaction commits, so
 // the snapshot is power-loss durable on return. badger.DefaultOptions sets
@@ -37,7 +40,7 @@ type badgerSnapshotStore struct {
 	keyPrefix []byte // copied at construction; immutable
 }
 
-const snapshotEncodingVersion byte = 0x01
+const snapshotEncodingVersion byte = 0x02
 
 // newBadgerSnapshotStore opens a SnapshotStore view into db under prefix.
 // Multiple Raft groups can coexist in one Badger DB with distinct prefixes.
@@ -112,6 +115,10 @@ func encodeSnapshot(snap *Snapshot) []byte {
 	for _, v := range snap.Configuration {
 		size += 4 + len(v)
 	}
+	size += 4 // numLearners
+	for id, addr := range snap.Learners {
+		size += 2 + len(id) + 2 + len(addr)
+	}
 	size += 8 + len(snap.Data) // dataLen + data
 	buf := make([]byte, size)
 
@@ -129,6 +136,18 @@ func encodeSnapshot(snap *Snapshot) []byte {
 		off += 4
 		copy(buf[off:], v)
 		off += len(v)
+	}
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(snap.Learners)))
+	off += 4
+	for id, addr := range snap.Learners {
+		binary.BigEndian.PutUint16(buf[off:], uint16(len(id)))
+		off += 2
+		copy(buf[off:], id)
+		off += len(id)
+		binary.BigEndian.PutUint16(buf[off:], uint16(len(addr)))
+		off += 2
+		copy(buf[off:], addr)
+		off += len(addr)
 	}
 	binary.BigEndian.PutUint64(buf[off:], uint64(len(snap.Data)))
 	off += 8
@@ -172,6 +191,38 @@ func decodeSnapshot(val []byte) (*Snapshot, error) {
 			off += vlen
 		}
 	}
+	// Learners section (M6.0 v2 schema).
+	if len(val) < off+4 {
+		return nil, fmt.Errorf("badgerSnapshotStore: short numLearners")
+	}
+	numLearners := int(binary.BigEndian.Uint32(val[off:]))
+	off += 4
+	var learners map[string]string
+	if numLearners > 0 {
+		learners = make(map[string]string, numLearners)
+		for i := 0; i < numLearners; i++ {
+			if len(val) < off+2 {
+				return nil, fmt.Errorf("badgerSnapshotStore: short learner[%d] id len", i)
+			}
+			idLen := int(binary.BigEndian.Uint16(val[off:]))
+			off += 2
+			if len(val) < off+idLen {
+				return nil, fmt.Errorf("badgerSnapshotStore: short learner[%d] id", i)
+			}
+			id := string(val[off : off+idLen])
+			off += idLen
+			if len(val) < off+2 {
+				return nil, fmt.Errorf("badgerSnapshotStore: short learner[%d] addr len", i)
+			}
+			addrLen := int(binary.BigEndian.Uint16(val[off:]))
+			off += 2
+			if len(val) < off+addrLen {
+				return nil, fmt.Errorf("badgerSnapshotStore: short learner[%d] addr", i)
+			}
+			learners[id] = string(val[off : off+addrLen])
+			off += addrLen
+		}
+	}
 	if len(val) < off+8 {
 		return nil, fmt.Errorf("badgerSnapshotStore: short DataLen")
 	}
@@ -189,6 +240,7 @@ func decodeSnapshot(val []byte) (*Snapshot, error) {
 		LastIncludedIndex: lastIdx,
 		LastIncludedTerm:  lastTerm,
 		Configuration:     voters,
+		Learners:          learners,
 		Data:              data,
 	}, nil
 }

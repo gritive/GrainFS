@@ -119,6 +119,20 @@ type command struct {
 	ccAdd   bool
 	ccReply chan confChangeResult
 
+	// AddLearner / PromoteToVoter payload (kinds cmdAddLearner / cmdPromote).
+	// Reuses ccReply for the reply channel — confChangeResult shape works
+	// for both single-phase and joint flows.
+	learnerID   string
+	learnerAddr string
+
+	// Test-only fields for cmdTestPeekMatchIndex / cmdTestSetMatchIndex.
+	// Kept here (rather than in a _test.go) because Go does not let
+	// _test.go files extend struct fields. Production code never sets
+	// these.
+	testMatchReply chan uint64
+	testMatchValue uint64
+	testDone       chan struct{}
+
 	// TimeoutNow inbound payload (kind == cmdHandleTimeoutNow). Sent by the
 	// leader to trigger an immediate election on the target (Raft §3.10).
 	tnArgs  *TimeoutNowArgs
@@ -142,8 +156,12 @@ const (
 	cmdInstallSnapshot
 	cmdInstallSnapshotReply
 	cmdConfChange
+	cmdAddLearner         // M6.0 (Path B): single-phase AddLearner
+	cmdPromote            // M6.0 (Path B): two-entry PromoteToVoter
 	cmdHandleTimeoutNow   // inbound TimeoutNow from leader (Raft §3.10)
 	cmdTransferLeadership // local call to initiate leadership transfer
+	cmdTestPeekMatchIndex // test-only: read matchIndex[id]
+	cmdTestSetMatchIndex  // test-only: force matchIndex[id] = v
 )
 
 // proposalResult is delivered to ProposeWait callers when their entry commits
@@ -278,6 +296,24 @@ func (n *Node) handle(cmd command) {
 		n.handleInstallSnapshotReply(cmd)
 	case cmdConfChange:
 		n.handleConfChange(cmd)
+	case cmdAddLearner:
+		n.handleAddLearner(cmd)
+	case cmdPromote:
+		n.handlePromote(cmd)
+	case cmdTestPeekMatchIndex:
+		v := uint64(0)
+		if n.st.matchIndex != nil {
+			v = n.st.matchIndex[cmd.learnerID]
+		}
+		select {
+		case cmd.testMatchReply <- v:
+		default:
+		}
+	case cmdTestSetMatchIndex:
+		if n.st.matchIndex != nil {
+			n.st.matchIndex[cmd.learnerID] = cmd.testMatchValue
+		}
+		close(cmd.testDone)
 	case cmdHandleTimeoutNow:
 		n.handleTimeoutNow(cmd)
 	case cmdTransferLeadership:
@@ -556,6 +592,9 @@ func (n *Node) applyCommitted(oldCommit, newCommit uint64) {
 	// our pendingConfChange's joint or final index, drive the next phase
 	// (or resolve the caller). Idempotent — safe to call after any commit.
 	n.advanceConfChangePhase()
+	// M6.0 Path B: single-phase ConfChange completion + Promote stage-2
+	// chaining. Idempotent.
+	n.advanceSingleConfPhase()
 	// Self-removed-leader hook (Raft §4.3): if we are no longer in the
 	// committed Cnew, step down so a Cnew member can take over.
 	n.maybeStepDownAfterRemoval()
@@ -671,9 +710,11 @@ func (n *Node) handlePropose(cmd command) {
 	}
 	n.publish()
 
-	for _, peer := range n.st.peerSet() {
+	for _, peer := range n.st.replicaSet() {
 		// dispatchOne picks AE vs InstallSnapshot based on nextIndex[peer]
-		// vs FirstIndex(); single-flight gate honoured inside.
+		// vs FirstIndex(); single-flight gate honoured inside. Learners
+		// are included in replicaSet — they receive the new entry but
+		// their acks do not contribute to commit advance.
 		n.dispatchOne(peer)
 	}
 }
@@ -814,6 +855,18 @@ func (n *Node) becomeLeader() {
 		n.st.nextIndex[peer] = last + 1
 		n.st.peerLastRound[peer] = 0
 	}
+	// Learners (Path B): initialise replication state so the new leader
+	// can address them on the very next broadcastHeartbeat. Learners do
+	// not contribute to quorum (peerLastRound[learner] is benign — it is
+	// only read via quorumOKByRound, which iterates voter slices only).
+	for id := range n.st.currentConfig.learners {
+		if id == n.st.id {
+			continue
+		}
+		n.st.matchIndex[id] = 0
+		n.st.nextIndex[id] = last + 1
+		n.st.peerLastRound[id] = 0
+	}
 
 	n.publish()
 
@@ -826,11 +879,12 @@ func (n *Node) becomeLeader() {
 	}
 	n.electionTimer.Reset(idleElectionTimeout)
 
-	// Multi-voter only: start heartbeat ticker and fire an immediate AE so
-	// followers learn of the new leader without waiting a full interval.
-	// Single-voter clusters have no peers; skipping the ticker avoids waking
-	// the actor every 50ms for an empty broadcastHeartbeat.
-	if len(peers) > 0 {
+	// Start the heartbeat ticker and fire an immediate AE so followers /
+	// learners learn of the new leader without waiting a full interval.
+	// Single-voter clusters with no learners have no replicas to address
+	// — skipping the ticker avoids waking the actor every 50ms for an
+	// empty broadcastHeartbeat.
+	if len(n.st.replicaSet()) > 0 {
 		interval := n.cfg.HeartbeatTimeout
 		if interval <= 0 {
 			interval = defaultHeartbeatTimeout
@@ -900,6 +954,20 @@ func (n *Node) stepDownToFollower(term uint64) {
 			default:
 			}
 			n.st.pendingConfChange = nil
+		}
+		if n.st.pendingSingleConf != nil {
+			select {
+			case n.st.pendingSingleConf.reply <- confChangeResult{err: ErrProposalFailed}:
+			default:
+			}
+			n.st.pendingSingleConf = nil
+		}
+		if n.st.pendingPromote != nil {
+			select {
+			case n.st.pendingPromote.reply <- confChangeResult{err: ErrProposalFailed}:
+			default:
+			}
+			n.st.pendingPromote = nil
 		}
 	}
 	if term > n.st.currentTerm {
@@ -1036,7 +1104,11 @@ func (n *Node) handleTransferLeadership(cmd command) {
 // round; ReadIndex requests in flight during a snapshot install simply wait
 // for the next heartbeat round.
 func (n *Node) broadcastHeartbeat() {
-	for _, peer := range n.st.peerSet() {
+	// Path B (M6.0): leader dispatches to voters AND learners (replicaSet).
+	// Quorum math elsewhere keeps using peerSet (voters only) — learner
+	// acks are received and update matchIndex but never count toward
+	// commit advance.
+	for _, peer := range n.st.replicaSet() {
 		n.dispatchOne(peer)
 	}
 }

@@ -19,6 +19,53 @@ func openBadgerStore(t *testing.T, dir string) (*badgerLogStore, *badger.DB) {
 	return store, db
 }
 
+// TestBadgerLogStore_SchemaVersionRefusesPreM60 simulates a pre-M6.0 store
+// (no schema-version stamp but with entries / compaction meta present) and
+// confirms newBadgerLogStore refuses to open it.
+func TestBadgerLogStore_SchemaVersionRefusesPreM60(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	// Seed a fake entry key under the expected prefix without the schema
+	// stamp. The shape mirrors what a pre-M6.0 store would have on disk.
+	prefix := []byte("raft/v2/log/")
+	key := make([]byte, len(prefix)+8)
+	copy(key, prefix)
+	for i := len(prefix); i < len(key); i++ {
+		key[i] = 0
+	}
+	key[len(key)-1] = 1
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		// 21 bytes of zeroes — short payload, but the existence of any
+		// entry-shaped key is enough to trip the gate.
+		return txn.Set(key, make([]byte, 21))
+	}))
+	require.NoError(t, db.Close())
+
+	db2, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db2.Close() })
+	_, err = newBadgerLogStore(db2, prefix)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "schema version")
+}
+
+// TestBadgerLogStore_SchemaVersionStampedOnFreshOpen confirms an empty
+// directory gets the schema stamp on first open and survives a reopen.
+func TestBadgerLogStore_SchemaVersionStampedOnFreshOpen(t *testing.T) {
+	dir := t.TempDir()
+	store, db := openBadgerStore(t, dir)
+	require.NoError(t, store.Append([]LogEntry{{Term: 1, Index: 1, Command: []byte("x")}}))
+	require.NoError(t, db.Close())
+
+	db2, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db2.Close() })
+	store2, err := newBadgerLogStore(db2, []byte("raft/v2/log/"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), store2.LastIndex())
+}
+
 // TestBadgerLogStore_EmptyDirectoryFirstOpen verifies that a fresh Badger
 // directory starts with FirstIndex==1 and LastIndex==0, and that an immediate
 // Append works correctly.
