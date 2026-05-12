@@ -99,11 +99,16 @@ type RaftNode interface {
 	RemoveVoter(id string) error
 
 	// AddLearner proposes adding a non-voting observer to the cluster.
-	// v2 returns ErrNotImplemented (M2 scope).
+	// v2 (since M6.0): single-phase ConfChange — quorum unchanged. The
+	// new learner immediately starts receiving replicated entries but
+	// its acks never contribute to commit advance.
 	AddLearner(id, addr string) error
 
-	// PromoteToVoter promotes a learner to a full voting member.
-	// v2 returns ErrNotImplemented (M2 scope).
+	// PromoteToVoter triggers the two-entry Path B promotion sequence
+	// (drop-from-learners → joint AddVoter). Returns ErrLearnerNotCaughtUp
+	// when the learner's matchIndex lags more than
+	// cfg.LearnerCatchupThreshold entries behind commit. Surface this
+	// error to callers so they can retry once the learner drains.
 	PromoteToVoter(id string) error
 
 	// TransferLeadership initiates a leadership transfer to another voter.

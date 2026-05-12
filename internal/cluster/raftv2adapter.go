@@ -442,17 +442,21 @@ func (a *raftV2Node) RemoveVoter(id string) error {
 	return translateV2SentinelErr(a.n.RemoveVoter(id))
 }
 
-// --- Membership: passthrough to ErrNotImplemented (v2 stubs) ---
+// --- Membership: learner support (live since M6.0, Path B) ---
 
-// AddLearner passes through to v2. v2 returns ErrNotImplemented (deferred
-// beyond M5; v2 currently has no learner support — see
-// internal/raft/v2/node.go::AddLearner). The adapter surfaces this error so
-// operators see a clear failure rather than a silent skip.
-func (a *raftV2Node) AddLearner(id, addr string) error { return a.n.AddLearner(id, addr) }
+// AddLearner passes through to v2's single-phase AddLearner. Path B:
+// quorum math unchanged, learner immediately receives replication but
+// never contributes to commit advance. See plan §M6.0.0 amendment.
+func (a *raftV2Node) AddLearner(id, addr string) error {
+	return translateV2SentinelErr(a.n.AddLearner(id, addr))
+}
 
-// PromoteToVoter passes through to v2. v2 returns ErrNotImplemented (deferred
-// beyond M5 with AddLearner).
-func (a *raftV2Node) PromoteToVoter(id string) error { return a.n.PromoteToVoter(id) }
+// PromoteToVoter passes through to v2's two-entry Path B promotion
+// sequence. Returns raft.ErrLearnerNotCaughtUp when the learner is
+// lagging (callers should wait + retry).
+func (a *raftV2Node) PromoteToVoter(id string) error {
+	return translateV2SentinelErr(a.n.PromoteToVoter(id))
+}
 
 // TransferLeadership passes through to v2 (Raft §3.10, implemented in
 // v0.0.143.0 / PR #288).
