@@ -181,6 +181,119 @@ func TestJoinHandler_Handle_WriteFileFails(t *testing.T) {
 	assert.Equal(t, "error", jr.Status)
 }
 
+// --- Phase 3.2: solo data guard tests ---
+
+// fakeDataChecker implements soloDataChecker for tests.
+type fakeDataChecker struct{ hasData bool }
+
+func (f *fakeDataChecker) HasUserData() bool { return f.hasData }
+
+// TestJoinHandler_SoloDataGuard_Blocked: solo + data present + force=false → 409
+func TestJoinHandler_SoloDataGuard_Blocked(t *testing.T) {
+	dataDir := t.TempDir()
+	h := &JoinHandler{
+		dataDir:     dataDir,
+		raftAddr:    "127.0.0.1:7001",
+		cancel:      func() {},
+		nodes:       soloNodes(),
+		dataChecker: &fakeDataChecker{hasData: true},
+	}
+	cli := startJoinHandlerTestServer(t, h)
+
+	body, _ := json.Marshal(JoinRequest{PeerAddr: "127.0.0.1:8001", Force: false})
+	code, jr := joinPost(t, cli, string(body))
+	assert.Equal(t, 409, code)
+	assert.Equal(t, "data_present", jr.Status)
+
+	// .join-pending must NOT be written.
+	_, err := os.Stat(filepath.Join(dataDir, JoinPendingFile))
+	assert.True(t, os.IsNotExist(err))
+}
+
+// TestJoinHandler_SoloDataGuard_ForceOverride: solo + data present + force=true → 200
+func TestJoinHandler_SoloDataGuard_ForceOverride(t *testing.T) {
+	dataDir := t.TempDir()
+	h := &JoinHandler{
+		dataDir:     dataDir,
+		raftAddr:    "127.0.0.1:7001",
+		cancel:      func() {},
+		nodes:       soloNodes(),
+		dataChecker: &fakeDataChecker{hasData: true},
+	}
+	cli := startJoinHandlerTestServer(t, h)
+
+	body, _ := json.Marshal(JoinRequest{PeerAddr: "127.0.0.1:8001", Force: true})
+	code, jr := joinPost(t, cli, string(body))
+	assert.Equal(t, 200, code)
+	assert.Equal(t, "restart_initiated", jr.Status)
+
+	// .join-pending must be written.
+	_, err := os.Stat(filepath.Join(dataDir, JoinPendingFile))
+	require.NoError(t, err)
+}
+
+// TestJoinHandler_SoloDataGuard_NoData: solo + no data + force=false → 200
+func TestJoinHandler_SoloDataGuard_NoData(t *testing.T) {
+	dataDir := t.TempDir()
+	h := &JoinHandler{
+		dataDir:     dataDir,
+		raftAddr:    "127.0.0.1:7001",
+		cancel:      func() {},
+		nodes:       soloNodes(),
+		dataChecker: &fakeDataChecker{hasData: false},
+	}
+	cli := startJoinHandlerTestServer(t, h)
+
+	body, _ := json.Marshal(JoinRequest{PeerAddr: "127.0.0.1:8001", Force: false})
+	code, jr := joinPost(t, cli, string(body))
+	assert.Equal(t, 200, code)
+	assert.Equal(t, "restart_initiated", jr.Status)
+
+	// .join-pending must be written.
+	_, err := os.Stat(filepath.Join(dataDir, JoinPendingFile))
+	require.NoError(t, err)
+}
+
+// TestJoinHandler_SoloDataGuard_AlreadyMember: 2-node + data present → already_member (guard skipped)
+func TestJoinHandler_SoloDataGuard_AlreadyMember(t *testing.T) {
+	dataDir := t.TempDir()
+	h := &JoinHandler{
+		dataDir:     dataDir,
+		raftAddr:    "127.0.0.1:7001",
+		cancel:      func() {},
+		nodes:       multiNodes(),
+		dataChecker: &fakeDataChecker{hasData: true},
+	}
+	cli := startJoinHandlerTestServer(t, h)
+
+	body, _ := json.Marshal(JoinRequest{PeerAddr: "127.0.0.1:8001", Force: false})
+	code, jr := joinPost(t, cli, string(body))
+	assert.Equal(t, 200, code)
+	assert.Equal(t, "already_member", jr.Status)
+}
+
+// TestJoinHandler_SoloDataGuard_NilChecker: dataChecker=nil → guard disabled, join proceeds
+func TestJoinHandler_SoloDataGuard_NilChecker(t *testing.T) {
+	dataDir := t.TempDir()
+	h := &JoinHandler{
+		dataDir:     dataDir,
+		raftAddr:    "127.0.0.1:7001",
+		cancel:      func() {},
+		nodes:       soloNodes(),
+		dataChecker: nil,
+	}
+	cli := startJoinHandlerTestServer(t, h)
+
+	body, _ := json.Marshal(JoinRequest{PeerAddr: "127.0.0.1:8001", Force: false})
+	code, jr := joinPost(t, cli, string(body))
+	assert.Equal(t, 200, code)
+	assert.Equal(t, "restart_initiated", jr.Status)
+
+	// .join-pending must be written.
+	_, err := os.Stat(filepath.Join(dataDir, JoinPendingFile))
+	require.NoError(t, err)
+}
+
 func TestJoinHandler_isSelf(t *testing.T) {
 	h := &JoinHandler{raftAddr: "127.0.0.1:8301"}
 	assert.True(t, h.isSelf("127.0.0.1:8301"))

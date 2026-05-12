@@ -52,6 +52,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -159,6 +160,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr

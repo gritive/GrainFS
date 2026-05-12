@@ -17,24 +17,29 @@ func newJoinTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "join <peer>", Args: cobra.ExactArgs(1), RunE: runJoin}
 	registerAdminEndpointFlag(cmd)
 	registerAdminTimeoutFlag(cmd)
+	cmd.Flags().Bool("force", false, "")
 	return cmd
 }
 
-func runJoinCmd(t *testing.T, sock string, peerAddr string) (string, error) {
+func runJoinCmd(t *testing.T, sock string, peerAddr string, extraArgs ...string) (string, error) {
 	t.Helper()
 	cmd := newJoinTestCmd()
 	out := &bytes.Buffer{}
 	cmd.SetOut(out)
 	cmd.SetErr(out)
-	cmd.SetArgs([]string{"--endpoint", sock, peerAddr})
+	args := append([]string{"--endpoint", sock}, extraArgs...)
+	args = append(args, peerAddr)
+	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), err
 }
 
 type stubJoinServer struct {
-	calls    atomic.Int32
-	lastPeer atomic.Value // string
-	response map[string]any
+	calls      atomic.Int32
+	lastPeer   atomic.Value // string
+	lastForce  atomic.Bool
+	response   map[string]any
+	statusCode int // 0 → 200
 }
 
 func (s *stubJoinServer) handler() http.Handler {
@@ -43,10 +48,17 @@ func (s *stubJoinServer) handler() http.Handler {
 		s.calls.Add(1)
 		var req struct {
 			PeerAddr string `json:"peer_addr"`
+			Force    bool   `json:"force"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		s.lastPeer.Store(req.PeerAddr)
+		s.lastForce.Store(req.Force)
 		w.Header().Set("Content-Type", "application/json")
+		code := s.statusCode
+		if code == 0 {
+			code = http.StatusOK
+		}
+		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(s.response)
 	})
 	return mux
@@ -80,4 +92,42 @@ func TestJoinCmd_AlreadyMember(t *testing.T) {
 	out, err := runJoinCmd(t, sock, "127.0.0.1:8300")
 	require.NoError(t, err, out)
 	assert.Contains(t, strings.ToLower(out), "already_member")
+}
+
+func TestJoinCmd_ForceFlag_PropagatedToServer(t *testing.T) {
+	stub := &stubJoinServer{
+		response: map[string]any{"status": "restart_initiated"},
+	}
+	sock := startUDSStubServer(t, stub.handler())
+
+	_, err := runJoinCmd(t, sock, "127.0.0.1:8300", "--force")
+	require.NoError(t, err)
+	assert.True(t, stub.lastForce.Load(), "force=true must be sent to server")
+}
+
+func TestJoinCmd_NoForceFlag_SendsFalse(t *testing.T) {
+	stub := &stubJoinServer{
+		response: map[string]any{"status": "restart_initiated"},
+	}
+	sock := startUDSStubServer(t, stub.handler())
+
+	_, err := runJoinCmd(t, sock, "127.0.0.1:8300")
+	require.NoError(t, err)
+	assert.False(t, stub.lastForce.Load(), "force must default to false")
+}
+
+func TestJoinCmd_DataPresent_409_DisplaysFriendlyMessage(t *testing.T) {
+	stub := &stubJoinServer{
+		statusCode: http.StatusConflict,
+		response: map[string]any{
+			"status":  "data_present",
+			"message": "solo node has user data; re-send with force=true to discard it and join",
+		},
+	}
+	sock := startUDSStubServer(t, stub.handler())
+
+	out, err := runJoinCmd(t, sock, "127.0.0.1:8300")
+	require.Error(t, err)
+	assert.Contains(t, out, "data_present")
+	assert.Contains(t, out, "force=true")
 }

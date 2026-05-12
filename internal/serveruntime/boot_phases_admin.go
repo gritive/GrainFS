@@ -94,10 +94,11 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), proposer, state.cfg.Encryptor)
 
 				joinH := &JoinHandler{
-					dataDir:  cfg.DataDir,
-					raftAddr: state.raftAddr,
-					cancel:   state.cancel,
-					nodes:    state.metaRaft,
+					dataDir:     cfg.DataDir,
+					raftAddr:    state.raftAddr,
+					cancel:      state.cancel,
+					nodes:       state.metaRaft,
+					dataChecker: state.metaRaft.FSM(),
 				}
 				h.POST("/v1/cluster/join", joinH.Handle)
 			}

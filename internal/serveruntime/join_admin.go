@@ -20,20 +20,28 @@ type clusterNodes interface {
 	Nodes() []cluster.MetaNodeEntry
 }
 
+// soloDataChecker reports whether the local FSM holds any user-created data.
+// Satisfied by *cluster.MetaFSM in production; a stub in tests.
+type soloDataChecker interface {
+	HasUserData() bool
+}
+
 // JoinHandler handles POST /v1/cluster/join requests from the `grainfs join`
 // CLI. If the node is already a multi-node cluster member the request is a
 // no-op. If solo, it writes the .join-pending file and triggers a graceful
 // server restart so the next boot performs the actual cluster join.
 type JoinHandler struct {
-	dataDir  string
-	raftAddr string
-	cancel   context.CancelFunc
-	nodes    clusterNodes
+	dataDir     string
+	raftAddr    string
+	cancel      context.CancelFunc
+	nodes       clusterNodes
+	dataChecker soloDataChecker // nil = data guard disabled
 }
 
 // JoinRequest is the body for POST /v1/cluster/join.
 type JoinRequest struct {
 	PeerAddr string `json:"peer_addr"`
+	Force    bool   `json:"force"`
 }
 
 // JoinResponse is the response body for POST /v1/cluster/join.
@@ -71,6 +79,16 @@ func (h *JoinHandler) Handle(ctx context.Context, c *app.RequestContext) {
 	// Peer is self → no-op.
 	if h.isSelf(req.PeerAddr) {
 		c.JSON(200, JoinResponse{Status: "self", Message: "peer resolves to this node; already bootstrapped solo"})
+		return
+	}
+
+	// Data guard: refuse join when the solo node holds user data and Force is
+	// not set, to prevent accidental data loss.
+	if !req.Force && h.dataChecker != nil && h.dataChecker.HasUserData() {
+		c.JSON(409, JoinResponse{
+			Status:  "data_present",
+			Message: "solo node has user data; re-send with force=true to discard it and join",
+		})
 		return
 	}
 

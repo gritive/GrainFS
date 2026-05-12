@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -99,4 +101,39 @@ func runGrainFSJoin(ctx context.Context, sock, peerAddr string) (string, error) 
 	cmd := exec.CommandContext(ctx, getBinary(), "join", peerAddr, "--endpoint", sock)
 	out, err := cmd.CombinedOutput()
 	return fmt.Sprintf("%s", out), err
+}
+
+// TestE2E_Bootstrap_DataPresent_BlocksJoin verifies that a solo node with
+// existing user data rejects a join request with 409 data_present when
+// force=false (the default).
+func TestE2E_Bootstrap_DataPresent_BlocksJoin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+	// Nodes:1 + ClusterModeDynamicJoin → single solo node with admin SA bootstrapped.
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      1,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-DATA-GUARD-KEY",
+		LogPrefix:  "grainfs-data-guard",
+		DisableNFS: true,
+		DisableNBD: true,
+	})
+
+	// Create a bucket so HasUserData() → true.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := c.S3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String("guard-test-bucket"),
+	})
+	require.NoError(t, err)
+
+	// Any non-self, non-empty host:port works — the data guard fires before
+	// the handler tries to reach the peer.
+	sock := filepath.Join(c.dataDirs[0], "admin.sock")
+	code, body := joinViaUDS(t, sock, "127.0.0.1:19999")
+	require.Equal(t, 409, code, "expected 409 when solo has data and force=false; body: %v", body)
+	require.Equal(t, "data_present", body["status"])
+	require.Contains(t, body["message"], "force=true",
+		"message must hint at --force; got: %s", body["message"])
 }

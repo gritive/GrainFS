@@ -50,9 +50,10 @@ func wipeSoloRaftState(dataDir string) error {
 }
 
 // bootValidateConfig validates flag combinations, resolves nodeID, computes
-// clusterMode, defaults raftAddr for solo mode, and stages metaDir/raftDir
-// paths. No I/O on DB or network; the only side effect is GenerateNodeID
-// writing the node-id file when nodeID is empty.
+// clusterMode (always true — --cluster-key required in all modes), defaults
+// raftAddr for solo mode, and stages metaDir/raftDir paths. No I/O on DB or
+// network; the only side effect is GenerateNodeID writing the node-id file
+// when nodeID is empty.
 func bootValidateConfig(state *bootState) error {
 	cfg := state.cfg
 	state.nodeID = cfg.NodeID
@@ -83,22 +84,20 @@ func bootValidateConfig(state *bootState) error {
 		}
 	}
 
-	// --cluster-key is required in join mode.
-	state.clusterMode = state.joinMode
-	if state.clusterMode {
-		if err := transport.ValidateClusterKey(cfg.ClusterKey); err != nil {
-			if errors.Is(err, transport.ErrEmptyClusterKey) {
-				return fmt.Errorf("--cluster-key is required in cluster mode (generate with: openssl rand -hex 32)")
-			}
-			log.Warn().Err(err).Msg("--cluster-key is below recommended length")
+	// clusterMode is always true: --cluster-key is required in all modes.
+	state.clusterMode = true
+	if err := transport.ValidateClusterKey(cfg.ClusterKey); err != nil {
+		if errors.Is(err, transport.ErrEmptyClusterKey) {
+			return fmt.Errorf("--cluster-key is required (generate with: openssl rand -hex 32)")
 		}
+		log.Warn().Err(err).Msg("--cluster-key is below recommended length")
 	}
 
 	// Solo mode: let the kernel pick a free loopback port so multiple instances
 	// (dev, tests) coexist without collisions.
 	if state.raftAddr == "" {
-		if state.clusterMode {
-			return fmt.Errorf("--raft-addr is required in cluster mode")
+		if state.joinMode {
+			return fmt.Errorf("--raft-addr is required in join mode")
 		}
 		state.raftAddr = "127.0.0.1:0"
 	}

@@ -16,16 +16,17 @@ import (
 // transport, raft) and seeds state.node + state.rpcTransport, leaving the
 // state ready for the three storage runtime phases under test.
 //
-// Solo mode (no peers, no join) is used so bootValidateConfig does not require
-// --cluster-key. In solo mode bootShardService still runs the !JoinMode branch
-// — meta-raft has a single voter so the leader wait completes near-instantly.
+// --cluster-key is required in all modes; a fixed test key is supplied.
+// In solo mode bootShardService still runs the !JoinMode branch — meta-raft
+// has a single voter so the leader wait completes near-instantly.
 // The data-plane raft node is constructed but not Bootstrap'd — bootStreamRouter
 // fires node.Start() in production; tests rely on the cleanup stack to Stop it.
 func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
 	state := newBootState(Config{
-		DataDir: t.TempDir(),
-		NodeID:  "n1",
+		DataDir:    t.TempDir(),
+		NodeID:     "n1",
+		ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	})
 	require.NoError(t, bootValidateConfig(state))
 	require.NoError(t, bootAutoMigrate(state))
