@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,18 +34,12 @@ func TestServeCmd_RemovesManualECFlags(t *testing.T) {
 }
 
 // TestRunCluster_EmptyClusterKey_ReturnsError verifies the cluster-key guard.
-// serveruntime.Run must refuse to start in join mode when --cluster-key is empty.
-// Join mode is triggered by a .join-pending file in the data dir.
+// Since clusterMode is always true, --cluster-key is required in all modes.
 func TestRunCluster_EmptyClusterKey_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	dataDir := t.TempDir()
-	// Write join-pending sentinel to trigger join mode (which requires cluster-key).
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dataDir, serveruntime.JoinPendingFile),
-		[]byte("127.0.0.1:7001"), 0o600))
-
 	cmd := newServeTestCmd("" /* empty cluster-key */)
 	cfg := buildClusterConfig(cmd, ":9000", dataDir, "node1", "127.0.0.1:0", "", nil, nil, nil, nil)
 	err := serveruntime.Run(ctx, cfg)
