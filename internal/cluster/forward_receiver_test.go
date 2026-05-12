@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -169,6 +170,61 @@ func TestForwardReceiver_HandlePutObjectStream_ProposeError_ReturnsInternal(t *t
 
 	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, bytes.NewReader([]byte("body")))
 
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
+}
+
+func TestForwardReceiver_HandleCompleteMultipartUpload_CommitsObjectIndex(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+
+	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "mpu-key", "text/plain")
+	require.NoError(t, err)
+
+	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-body")))
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	proposer := &recordingObjectIndexProposer{}
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(proposer)
+
+	args := buildCompleteMultipartUploadArgs("bucket", "mpu-key", up.UploadID, []storage.Part{*part})
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCompleteMultipartUpload, args)
+
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
+	require.Len(t, proposer.entries, 1, "expected exactly one index commit")
+	require.Equal(t, "bucket", proposer.entries[0].Bucket)
+	require.Equal(t, "mpu-key", proposer.entries[0].Key)
+	require.NotEmpty(t, proposer.entries[0].VersionID)
+	require.Equal(t, "group-1", proposer.entries[0].PlacementGroupID)
+	require.False(t, proposer.entries[0].IsDeleteMarker)
+}
+
+func TestForwardReceiver_HandleCompleteMultipartUpload_ProposeError_ReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+
+	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "mpu-key", "text/plain")
+	require.NoError(t, err)
+
+	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-body")))
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(&failingObjectIndexProposer{})
+
+	args := buildCompleteMultipartUploadArgs("bucket", "mpu-key", up.UploadID, []storage.Part{*part})
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCompleteMultipartUpload, args)
+
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
 	require.NotNil(t, reply)
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")

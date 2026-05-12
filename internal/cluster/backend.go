@@ -3017,7 +3017,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	var obj *storage.Object
 	if b.ecConfig.NumShards() > 0 && b.shardSvc != nil {
 		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
-	} else if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
+	} else if b.shardSvc == nil {
 		obj, err = b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")

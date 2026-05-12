@@ -527,8 +527,10 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 }
 
 func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
-	ctx := context.Background()
+	ctx := contextForForwardedGroup(context.Background(), dg)
 	ca := raftpb.GetRootAsCompleteMultipartUploadArgs(args, 0)
+	bucket := string(ca.Bucket())
+	key := string(ca.Key())
 	n := ca.PartsLength()
 	parts := make([]storage.Part, n)
 	var partRef raftpb.PartRef
@@ -540,17 +542,18 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 			}
 		}
 	}
-	obj, err := dg.Backend().CompleteMultipartUpload(
-		ctx,
-		string(ca.Bucket()),
-		string(ca.Key()),
-		string(ca.UploadId()),
-		parts,
-	)
+	obj, err := dg.Backend().CompleteMultipartUpload(ctx, bucket, key, string(ca.UploadId()), parts)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(ca.Bucket()))}
+	if r.indexProposer != nil {
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
