@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -74,4 +75,66 @@ func TestDecodeClusterConfigPatchCmd_SecretBytesIndependent(t *testing.T) {
 	}
 	require.Equal(t, original, got.AlertWebhookSecretWrapped,
 		"decoded secret must be independent of the source buffer")
+}
+
+func TestClusterConfigCodec_SnapshotRoundTrip(t *testing.T) {
+	d := 45 * time.Minute
+	r := int32(7)
+	in := ClusterConfigPatch{SnapshotInterval: &d, SnapshotRetain: &r}
+
+	buf, err := EncodeClusterConfigPatchInner(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := DecodeClusterConfigPatchCmd(buf)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.SnapshotInterval == nil || *out.SnapshotInterval != d {
+		t.Fatalf("SnapshotInterval round-trip mismatch: %v", out.SnapshotInterval)
+	}
+	if out.SnapshotRetain == nil || *out.SnapshotRetain != r {
+		t.Fatalf("SnapshotRetain round-trip mismatch: %v", out.SnapshotRetain)
+	}
+}
+
+// Forward-compat: a buffer encoded BEFORE these fields existed (or by a
+// stripped-down encoder) must decode cleanly with both fields nil so getters
+// fall back to defaults. Critical for mixed-version rolling upgrade safety
+// (see eng-review D3 / TODOS rolling-upgrade gap).
+func TestClusterConfigCodec_SnapshotForwardCompatEmptyPayload(t *testing.T) {
+	// Encode an empty patch (no snapshot fields set).
+	buf, err := EncodeClusterConfigPatchInner(ClusterConfigPatch{})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := DecodeClusterConfigPatchCmd(buf)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.SnapshotInterval != nil {
+		t.Fatalf("SnapshotInterval should be nil on empty payload, got %v", *out.SnapshotInterval)
+	}
+	if out.SnapshotRetain != nil {
+		t.Fatalf("SnapshotRetain should be nil on empty payload, got %v", *out.SnapshotRetain)
+	}
+}
+
+func TestClusterConfigCodec_SnapshotSerializeRoundTrip(t *testing.T) {
+	c := NewClusterConfig()
+	d := 12 * time.Minute
+	r := int32(3)
+	c.applyPatch(ClusterConfigPatch{SnapshotInterval: &d, SnapshotRetain: &r}, time.UnixMilli(100))
+
+	buf := serializeClusterConfig(c)
+	snap, err := deserializeClusterConfig(buf)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	if snap.snapshotInterval == nil || *snap.snapshotInterval != d {
+		t.Fatalf("snapshotInterval roundtrip: %v", snap.snapshotInterval)
+	}
+	if snap.snapshotRetain == nil || *snap.snapshotRetain != r {
+		t.Fatalf("snapshotRetain roundtrip: %v", snap.snapshotRetain)
+	}
 }
