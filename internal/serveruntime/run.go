@@ -63,7 +63,19 @@ func Run(ctx context.Context, cfg Config) error {
 	// Construct the data-plane raft node here (between transport and meta-raft
 	// phases) — consumed by both PR 4 (RPC transport wiring) and PR 5 (storage
 	// runtime). Bootstrap runs in non-join mode.
-	raftCfg := raft.DefaultConfig(state.nodeID, state.peers)
+	//
+	// In join mode, state.peers carries the join target transport address
+	// (used by PerformMetaJoin / bootPeerConnections); it is NOT a node-ID
+	// list and must NOT be fed to raft as cfg.Peers — doing so makes v2's
+	// reconstructConfig seed the initial voter set with a transport address
+	// as a voter ID, triggering a term storm that step-downs n1 mid-promote.
+	// The joiner enters the cluster as a learner via PromoteToVoter from the
+	// leader's perspective; its local raft starts as a single-voter {selfID}.
+	raftPeers := state.peers
+	if cfg.JoinMode {
+		raftPeers = nil
+	}
+	raftCfg := raft.DefaultConfig(state.nodeID, raftPeers)
 	raftCfg.ManagedMode = cfg.BadgerManagedMode
 	raftCfg.LogGCInterval = cfg.RaftLogGCInterval
 
