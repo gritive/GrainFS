@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.161.0] - 2026-05-12 — fix(raft/v2): preserve learner state across snapshots
+
+### Fixed
+- Raft v2 snapshots now preserve learner membership when snapshots are created, transmitted, installed, and used to reconstruct configuration after restart.
+- Followers can now install a fresher snapshot after already compacting to a prior snapshot boundary.
+- Malformed AppendEntries batches with an internal index gap are rejected before any partial log mutation.
+
+### Added
+- Regression coverage for learner-preserving snapshot creation/install, adapter suffrage translation, repeated Badger snapshot boundary installs, and atomic AppendEntries batch rejection.
+
 ## [0.0.160.0] - 2026-05-12 — cluster-config v1.1 hardening (peerUID + webhook loud-fail + CB hot-reload + deferred tests)
 
 Slice 1 (PR #305, v0.0.155.0)의 cluster-wide config가 출하한 4가지 deferred 항목을 모두 해결. ACL/eager rewrap 등 spec out-of-scope 항목은 별도 슬라이스로 분리.
