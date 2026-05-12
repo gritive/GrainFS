@@ -45,8 +45,8 @@ func TestBlockIOWriteFullBlockSelectsDirectKeyAndReportsAllocation(t *testing.T)
 	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
 	require.False(t, result.LiveMapDirty)
 	require.Equal(t, src, store.objects[blockKey("vol", 0)])
-	require.Equal(t, []string{blockKey("vol", 0), blockKey("vol", 0)}, result.InvalidatedKeys)
-	require.Equal(t, []string{blockKey("vol", 0), blockKey("vol", 0)}, cache.invalidations)
+	require.Equal(t, []string{blockKey("vol", 0)}, result.InvalidatedKeys)
+	require.Equal(t, []string{blockKey("vol", 0)}, cache.invalidations)
 }
 
 func TestBlockIODiscardDeletesLiveMapBlockAndReportsFreedBytes(t *testing.T) {
