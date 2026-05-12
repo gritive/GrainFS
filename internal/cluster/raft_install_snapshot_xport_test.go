@@ -2,10 +2,12 @@ package cluster
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
+	raftv2 "github.com/gritive/GrainFS/internal/raft/v2"
 )
 
 // TestRaftNode_SetInstallSnapshotTransport_V2 asserts the setter is reachable
@@ -33,4 +35,63 @@ func TestRaftNode_SetInstallSnapshotTransport_V2(t *testing.T) {
 		return &raft.InstallSnapshotReply{Term: args.Term}, nil
 	})
 	_ = called
+}
+
+func TestV2TransportBridge_SendInstallSnapshotPreservesLearnerSuffrage(t *testing.T) {
+	bridge := &v2TransportBridge{}
+	fn := installSnapshotFn(func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
+		require.Equal(t, "n2", peer)
+		require.ElementsMatch(t, []raft.Server{
+			{ID: "n1", Suffrage: raft.Voter},
+			{ID: "n3", Suffrage: raft.NonVoter},
+		}, args.Servers)
+		return &raft.InstallSnapshotReply{Term: args.Term}, nil
+	})
+	bridge.sendIS.Store(&fn)
+
+	reply, err := bridge.SendInstallSnapshot("n2", &raftv2.InstallSnapshotArgs{
+		Term:          7,
+		LeaderID:      "n1",
+		Configuration: []string{"n1"},
+		Learners:      map[string]string{"n3": "addr3"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), reply.Term)
+}
+
+func TestRaftV2Node_HandleInstallSnapshotPreservesLearnerSuffrage(t *testing.T) {
+	inner, err := raftv2.NewNode(raftv2.Config{ID: "n1", Peers: []string{"n2"}})
+	require.NoError(t, err)
+	node := newRaftV2Node(inner)
+	node.Start()
+	t.Cleanup(node.Close)
+	go func() {
+		for range node.ApplyCh() {
+		}
+	}()
+
+	reply := node.HandleInstallSnapshot(&raft.InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "leader",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  1,
+		Servers: []raft.Server{
+			{ID: "n1", Suffrage: raft.Voter},
+			{ID: "n3", Suffrage: raft.NonVoter},
+		},
+		Data: []byte("snapshot"),
+	})
+	require.Equal(t, uint64(1), reply.Term)
+
+	require.Eventually(t, func() bool {
+		cfg := node.Configuration()
+		if len(cfg.Servers) != 2 {
+			return false
+		}
+		byID := make(map[string]raft.ServerSuffrage, len(cfg.Servers))
+		for _, srv := range cfg.Servers {
+			byID[srv.ID] = srv.Suffrage
+		}
+		return byID["n1"] == raft.Voter && byID["n3"] == raft.NonVoter
+	}, time.Second, 10*time.Millisecond)
 }

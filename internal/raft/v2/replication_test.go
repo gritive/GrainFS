@@ -31,6 +31,33 @@ func mustLogEntry(n *Node, idx uint64) LogEntry {
 	return e
 }
 
+func TestAppendEntriesRejectsNonContiguousBatch(t *testing.T) {
+	n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}, ElectionTimeout: time.Hour})
+	require.NoError(t, err)
+	n.Start()
+	t.Cleanup(n.Stop)
+	go func() {
+		for range n.ApplyCh() {
+		}
+	}()
+
+	reply := n.HandleAppendEntries(&AppendEntriesArgs{
+		Term:         1,
+		LeaderID:     "leader",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries: []LogEntry{
+			{Term: 1, Index: 1, Command: []byte("ok")},
+			{Term: 1, Index: 3, Command: []byte("gap")},
+		},
+		LeaderCommit: 0,
+	})
+
+	require.False(t, reply.Success)
+	n.Stop()
+	require.Equal(t, uint64(0), n.st.log.LastIndex(), "malformed batch must not partially append")
+}
+
 // startClusterCapture is the replication-test counterpart of startCluster.
 // Unlike startCluster, it does NOT drain ApplyCh in background goroutines;
 // instead it returns a per-node []LogEntry that captures every applied entry
