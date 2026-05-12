@@ -46,3 +46,32 @@ func TestClusterConfigPatchCmd_UpdatedAt_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stamp, got.UpdatedAtUnixMs)
 }
+
+// TestDecodeClusterConfigPatchCmd_SecretBytesIndependent verifies that
+// DecodeClusterConfigPatchCmd copies AlertWebhookSecretWrapped out of the
+// underlying FlatBuffer rather than aliasing it. The Raft log entry buffer
+// may be pooled/reused after Apply commits; if the decode aliased the FB
+// bytes, the in-memory clusterConfigSnap's ciphertext would mutate silently
+// once the buffer was reused.
+func TestDecodeClusterConfigPatchCmd_SecretBytesIndependent(t *testing.T) {
+	secret := []byte("wrapped-ciphertext-bytes")
+	p := ClusterConfigPatch{
+		AlertWebhookSecretWrapped: secret,
+	}
+	data, err := EncodeClusterConfigPatchInner(p)
+	require.NoError(t, err)
+
+	got, err := DecodeClusterConfigPatchCmd(data)
+	require.NoError(t, err)
+	require.Equal(t, secret, got.AlertWebhookSecretWrapped)
+
+	// Mutate every byte of the source buffer to simulate a pooled/reused
+	// Raft log entry. If Decode aliased the FB bytes, got's slice would
+	// reflect this mutation.
+	original := append([]byte(nil), got.AlertWebhookSecretWrapped...)
+	for i := range data {
+		data[i] ^= 0xFF
+	}
+	require.Equal(t, original, got.AlertWebhookSecretWrapped,
+		"decoded secret must be independent of the source buffer")
+}

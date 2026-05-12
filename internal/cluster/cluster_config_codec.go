@@ -215,7 +215,14 @@ func DecodeClusterConfigPatchCmd(data []byte) (ClusterConfigPatch, error) {
 		p.AlertWebhook = &s
 	}
 	if t.AlertWebhookSecretWrappedLength() > 0 {
-		p.AlertWebhookSecretWrapped = t.AlertWebhookSecretWrappedBytes()
+		// Copy out of the FB buffer: the source []byte is a Raft log entry
+		// that may be pooled/reused after Apply commits. Aliasing would let
+		// the in-memory clusterConfigSnap's ciphertext mutate silently.
+		// Mirrors deserializeClusterConfig's snapshot-restore path.
+		raw := t.AlertWebhookSecretWrappedBytes()
+		cp := make([]byte, len(raw))
+		copy(cp, raw)
+		p.AlertWebhookSecretWrapped = cp
 	}
 	if b := t.DiskWarnFrac(nil); b != nil {
 		v := b.V()
