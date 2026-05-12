@@ -114,6 +114,12 @@ type actorState struct {
 	// read-only — callers MUST NOT mutate it.
 	leaderPeersScratch []string
 
+	// leaderReplicasScratch caches the replication-send set (voters ∪
+	// learners − self) for the leader's broadcastHeartbeat. Mirrors
+	// leaderPeersScratch but includes learners — used ONLY by send paths,
+	// never by quorum math. Invalidated alongside leaderPeersScratch.
+	leaderReplicasScratch []string
+
 	// pendingConfChange holds the per-change state the leader needs to drive
 	// a joint-consensus membership change to completion. When non-nil, a
 	// joint entry is in flight and applyCommitted, on observing commit
@@ -121,6 +127,22 @@ type actorState struct {
 	// entry. Cleared once the final entry commits and the caller's reply
 	// has been delivered. Leader-only — cleared on stepDownToFollower.
 	pendingConfChange *pendingConfChange
+
+	// pendingSingleConf tracks a single-phase ConfChange (M6.0 Path B:
+	// AddLearner, PromoteStage1, RemoveLearner). When the entry at idx
+	// commits, deliver to reply and clear. Mutually exclusive with
+	// pendingConfChange via the in-flight gate in handleAddLearner /
+	// handlePromote. Leader-only — drained on stepDownToFollower.
+	pendingSingleConf *pendingSingleConf
+
+	// pendingPromote chains the two ordered entries of PromoteToVoter
+	// (Path B). After stage 1 (drop-from-learners) commits, the actor
+	// proposes the joint AddVoter for the same target ID. Stage 1 lives
+	// in pendingSingleConf with a throwaway internal reply; the user's
+	// reply lives here and is delivered when the subsequent joint
+	// transition completes via pendingConfChange. Cleared on completion
+	// or step-down.
+	pendingPromote *pendingPromote
 }
 
 // pendingConfChange tracks an in-flight Raft §4.3 joint-consensus
@@ -138,6 +160,24 @@ type pendingConfChange struct {
 	finalIndex uint64                // log index of the final ConfChange entry (set after phase 2 dispatched)
 	newVoters  []string              // Cnew — used to build the final entry's payload
 	reply      chan confChangeResult // single-reply channel; cap-1 buffered
+}
+
+// pendingSingleConf tracks a single-phase ConfChange entry (M6.0 Path B:
+// AddLearner / PromoteStage1 / RemoveLearner). idx is the entry's log
+// index; reply is the caller's channel (or a throwaway internal channel
+// for the stage-1 leg of a PromoteToVoter chain).
+type pendingSingleConf struct {
+	idx   uint64
+	reply chan confChangeResult
+}
+
+// pendingPromote chains the two-entry PromoteToVoter sequence (Path B).
+// After the stage-1 entry (drop-from-learners) commits, the actor must
+// propose a joint AddVoter for the same target. targetID + reply travel
+// here until the joint flow takes over and delivers via pendingConfChange.
+type pendingPromote struct {
+	targetID string
+	reply    chan confChangeResult
 }
 
 // confChangeResult is delivered to AddVoter / RemoveVoter callers once the
@@ -219,11 +259,24 @@ func (s *actorState) peerSet() []string {
 	return s.leaderPeersScratch
 }
 
-// invalidatePeerSet clears the cached peer slice so the next peerSet() call
-// rebuilds it from currentConfig. Must be called by every site that mutates
-// currentConfig.
+// invalidatePeerSet clears the cached peer + replica slices so the next
+// peerSet() / replicaSet() call rebuilds them from currentConfig. Must be
+// called by every site that mutates currentConfig OR learners.
 func (s *actorState) invalidatePeerSet() {
 	s.leaderPeersScratch = nil
+	s.leaderReplicasScratch = nil
+}
+
+// replicaSet returns the leader's replication-send set: voters (Cold ∪
+// Cnew when joint) plus learners, minus self. Used by broadcastHeartbeat
+// and dispatchAppendEntries — NEVER by quorum math (commitOK, quorumOK,
+// quorumOKByRound iterate only over voter slices). Cached and invalidated
+// alongside leaderPeersScratch. Read-only: callers must NOT mutate.
+func (s *actorState) replicaSet() []string {
+	if s.leaderReplicasScratch == nil {
+		s.leaderReplicasScratch = s.currentConfig.replicasExcluding(s.id)
+	}
+	return s.leaderReplicasScratch
 }
 
 // isSoloVoter reports whether the cluster reduces to {self} only — used by
