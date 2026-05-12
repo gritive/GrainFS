@@ -144,7 +144,6 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int, encKeyFil
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--encryption-key-file", encKeyFile,
-		"--snapshot-interval", "0",
 		"--lifecycle-interval", "0",
 	)
 	cmd.Stdout = os.Stdout

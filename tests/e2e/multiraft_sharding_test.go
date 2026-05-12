@@ -200,7 +200,6 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--encryption-key-file", c.encKeyFile,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

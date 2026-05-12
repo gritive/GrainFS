@@ -313,7 +313,6 @@ func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
 		"--encryption-key-file", c.encKeyFile,
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
-		"--snapshot-interval", "0",
 		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
 	}

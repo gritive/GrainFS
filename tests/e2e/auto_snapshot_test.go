@@ -13,8 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAutoSnapshot_CreatesSnapshotAutomatically verifies that when started with
-// --snapshot-interval, the server creates snapshots automatically.
+// TestAutoSnapshot_CreatesSnapshotAutomatically verifies that when the
+// cluster-config snapshot-interval is set to a non-zero value via PATCH, the
+// server creates snapshots automatically.
 func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 	binary := getBinary()
 	dir, err := os.MkdirTemp("", "grainfs-autosnap-e2e-*")
@@ -27,7 +28,6 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "500ms",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -40,6 +40,11 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 	})
 
 	waitForPort(t, port, 5*time.Second)
+
+	// Enable auto-snapshot via cluster-config PATCH. The --snapshot-interval
+	// CLI flag was removed; tests that need the auto-snapshot loop opt in via
+	// the admin UDS PATCH.
+	patchSnapshotInterval(t, dir, "500ms")
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	snapshots := waitForAutoSnapshots(t, endpoint, 2, 10*time.Second)

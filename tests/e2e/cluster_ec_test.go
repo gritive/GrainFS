@@ -91,7 +91,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 			"--shard-cache-size=0",
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
@@ -452,7 +451,6 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)

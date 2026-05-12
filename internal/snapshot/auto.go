@@ -49,22 +49,37 @@ func (a *AutoSnapshotter) Start(ctx context.Context) {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
+		// elapsed tracks how long we've been waiting toward the current
+		// interval. Each iteration sleeps for at most idle so PATCH→effect
+		// latency is bounded to idle even when interval is much larger
+		// (default is 1h). The snapshot fires when elapsed >= interval.
+		var elapsed time.Duration
 		for {
 			interval := a.policy.SnapshotInterval()
-			wait := interval
-			if wait <= 0 {
-				wait = a.idle
+			wait := a.idle
+			if interval > 0 && interval-elapsed < wait {
+				wait = interval - elapsed
+				if wait <= 0 {
+					wait = 0
+				}
 			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(wait):
 			}
+			elapsed += wait
 			// Re-check after wake: policy may have changed.
-			if a.policy.SnapshotInterval() <= 0 {
+			interval = a.policy.SnapshotInterval()
+			if interval <= 0 {
+				elapsed = 0
+				continue
+			}
+			if elapsed < interval {
 				continue
 			}
 			a.takeAndPrune()
+			elapsed = 0
 		}
 	}()
 }

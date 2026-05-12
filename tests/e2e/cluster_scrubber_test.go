@@ -101,7 +101,6 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 			"--encryption-key-file", encKeyFile,
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--snapshot-interval", "0",
 			"--scrub-interval", scrubInterval,
 			"--lifecycle-interval", "0",
 		)

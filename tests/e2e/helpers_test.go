@@ -62,7 +62,6 @@ func TestMain(m *testing.M) {
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0"}
 
@@ -446,7 +445,6 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

@@ -45,7 +45,6 @@ func startECServer(t *testing.T) (*s3.Client, string, func()) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

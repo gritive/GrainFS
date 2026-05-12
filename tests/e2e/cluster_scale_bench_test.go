@@ -85,7 +85,6 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
 			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
 			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--snapshot-interval", "0",
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)

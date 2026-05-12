@@ -50,7 +50,6 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--encryption-key-file", encKeyFile,
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -158,7 +157,6 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
 		"--encryption-key-file", encKeyFile,
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

@@ -31,7 +31,6 @@ func TestBucketUpstream_CLIRoundtrip(t *testing.T) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--snapshot-interval", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
