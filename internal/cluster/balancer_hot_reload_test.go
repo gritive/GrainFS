@@ -20,8 +20,8 @@ import (
 // hot-reload pipeline.
 func TestBalancerProposer_HotReload_TriggerPct(t *testing.T) {
 	cfg := testBalancerConfig()
-	cfg.imbalanceTriggerPct = 20.0
-	cfg.imbalanceStopPct = 5.0
+	cfg.imbalanceTriggerPct.Store(20.0)
+	cfg.imbalanceStopPct.Store(5.0)
 
 	store := NewNodeStatsStore(1 * time.Minute)
 	// Two peers with a 15pp imbalance — below the 20% trigger initially.
@@ -37,13 +37,13 @@ func TestBalancerProposer_HotReload_TriggerPct(t *testing.T) {
 	require.False(t, p.Active(), "expected inactive at 15%% imbalance vs 20%% trigger")
 
 	// Hot-reload: lower trigger to 10%. Same stats. Next tick should activate.
-	cfg.imbalanceTriggerPct = 10.0
+	cfg.imbalanceTriggerPct.Store(10.0)
 	p.tickOnce()
 	require.True(t, p.Active(), "expected active after trigger lowered to 10%%")
 
 	// Hot-reload: raise stop to 20% (above the 15pp current imbalance).
 	// Next tick: active && diff < stopPct → deactivate.
-	cfg.imbalanceStopPct = 20.0
+	cfg.imbalanceStopPct.Store(20.0)
 	p.tickOnce()
 	require.False(t, p.Active(), "expected inactive after stop raised above current imbalance")
 }

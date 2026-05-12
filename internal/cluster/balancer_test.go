@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,53 +52,75 @@ func (m *mockRaftNode) ProposedAt(i int) []byte {
 	return m.proposed[i]
 }
 
-// fakeBalancerCfg is a test stub implementing BalancerClusterCfg. Fields are
-// exported so individual tests can mutate them in place (hot-reload tests rely
-// on this; non-mutating tests treat the struct as a one-shot configuration).
-// Mutation is not synchronized — tests that share a fake across goroutines
-// must accept Go's relaxed-memory atomic-read-of-machine-word semantics, which
-// is fine for the simple bool/float64/int32/duration types here.
+// fakeBalancerCfg is a test stub implementing BalancerClusterCfg. Hot-reload-
+// mutable fields are wrapped in atomic.Value so tests can rotate them from a
+// non-actor goroutine while BalancerProposer.Run reads them concurrently — the
+// race detector treats unsynchronized writes as races regardless of word size,
+// so each mutable knob is stored/loaded atomically. Fields that are set once
+// at construction (enabled, migrationRate, leaderTenureMin, warmupTimeout,
+// migrationMaxRetries, migrationPendingTTL) stay as plain values.
 type fakeBalancerCfg struct {
 	enabled             bool
-	imbalanceTriggerPct float64
-	imbalanceStopPct    float64
+	imbalanceTriggerPct atomic.Value // float64
+	imbalanceStopPct    atomic.Value // float64
 	migrationRate       int32
 	leaderTenureMin     time.Duration
 	warmupTimeout       time.Duration
-	cbThreshold         float64
+	cbThreshold         atomic.Value // float64
 	migrationMaxRetries int32
 	migrationPendingTTL time.Duration
-	gossipInterval      time.Duration
+	gossipInterval      atomic.Value // time.Duration
 }
 
-func (f *fakeBalancerCfg) BalancerEnabled() bool                      { return f.enabled }
-func (f *fakeBalancerCfg) BalancerImbalanceTriggerPct() float64       { return f.imbalanceTriggerPct }
-func (f *fakeBalancerCfg) BalancerImbalanceStopPct() float64          { return f.imbalanceStopPct }
-func (f *fakeBalancerCfg) BalancerMigrationRate() int32               { return f.migrationRate }
-func (f *fakeBalancerCfg) BalancerLeaderTenureMin() time.Duration     { return f.leaderTenureMin }
-func (f *fakeBalancerCfg) BalancerWarmupTimeout() time.Duration       { return f.warmupTimeout }
-func (f *fakeBalancerCfg) BalancerCBThreshold() float64               { return f.cbThreshold }
+func (f *fakeBalancerCfg) BalancerEnabled() bool { return f.enabled }
+func (f *fakeBalancerCfg) BalancerImbalanceTriggerPct() float64 {
+	if v := f.imbalanceTriggerPct.Load(); v != nil {
+		return v.(float64)
+	}
+	return 0
+}
+func (f *fakeBalancerCfg) BalancerImbalanceStopPct() float64 {
+	if v := f.imbalanceStopPct.Load(); v != nil {
+		return v.(float64)
+	}
+	return 0
+}
+func (f *fakeBalancerCfg) BalancerMigrationRate() int32           { return f.migrationRate }
+func (f *fakeBalancerCfg) BalancerLeaderTenureMin() time.Duration { return f.leaderTenureMin }
+func (f *fakeBalancerCfg) BalancerWarmupTimeout() time.Duration   { return f.warmupTimeout }
+func (f *fakeBalancerCfg) BalancerCBThreshold() float64 {
+	if v := f.cbThreshold.Load(); v != nil {
+		return v.(float64)
+	}
+	return 0
+}
 func (f *fakeBalancerCfg) BalancerMigrationMaxRetries() int32         { return f.migrationMaxRetries }
 func (f *fakeBalancerCfg) BalancerMigrationPendingTTL() time.Duration { return f.migrationPendingTTL }
-func (f *fakeBalancerCfg) BalancerGossipInterval() time.Duration      { return f.gossipInterval }
+func (f *fakeBalancerCfg) BalancerGossipInterval() time.Duration {
+	if v := f.gossipInterval.Load(); v != nil {
+		return v.(time.Duration)
+	}
+	return 0
+}
 
 // defaultFakeBalancerCfg returns a fakeBalancerCfg with aggressive timings for
 // testing, mirroring the production DefaultBalancerConfig() values for fields
 // not specifically tuned.
 func defaultFakeBalancerCfg() *fakeBalancerCfg {
 	def := DefaultBalancerConfig()
-	return &fakeBalancerCfg{
+	f := &fakeBalancerCfg{
 		enabled:             true,
-		gossipInterval:      10 * time.Millisecond,
 		warmupTimeout:       50 * time.Millisecond,
-		imbalanceTriggerPct: 20.0,
-		imbalanceStopPct:    5.0,
 		migrationRate:       100, // migrations per second in tests
 		leaderTenureMin:     0,   // no tenure requirement in tests
-		cbThreshold:         def.CBThreshold,
 		migrationMaxRetries: int32(def.MigrationMaxRetries),
 		migrationPendingTTL: def.MigrationPendingTTL,
 	}
+	f.gossipInterval.Store(10 * time.Millisecond)
+	f.imbalanceTriggerPct.Store(20.0)
+	f.imbalanceStopPct.Store(5.0)
+	f.cbThreshold.Store(def.CBThreshold)
+	return f
 }
 
 // testBalancerConfig returns a fakeBalancerCfg with aggressive timings for testing.
@@ -199,12 +222,12 @@ func TestBalancerProposer_HysteresisStopsAtLowThreshold(t *testing.T) {
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	// Simulate already-triggered state (imbalance was above 20%, now dropped to 3%)
-	p.active = true
+	p.active.Store(true)
 
 	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "should stop migration when diff < 5% (hysteresis)")
-	assert.False(t, p.active, "active flag should be cleared below stop threshold")
+	assert.False(t, p.active.Load(), "active flag should be cleared below stop threshold")
 }
 
 func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
@@ -506,8 +529,8 @@ func TestBalancer_HotReload_TriggerPct(t *testing.T) {
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
-	cfg.imbalanceTriggerPct = 50.0 // initially very high — no migration
-	cfg.imbalanceStopPct = 5.0
+	cfg.imbalanceTriggerPct.Store(50.0) // initially very high — no migration
+	cfg.imbalanceStopPct.Store(5.0)
 	cfg.warmupTimeout = 1 * time.Millisecond // skip warmup
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
@@ -524,7 +547,7 @@ func TestBalancer_HotReload_TriggerPct(t *testing.T) {
 	assert.Equal(t, 0, node.ProposedLen(), "high trigger: no proposal expected")
 
 	// Hot-reload to a low trigger; balancer should activate within a few ticks.
-	cfg.imbalanceTriggerPct = 1.0
+	cfg.imbalanceTriggerPct.Store(1.0)
 	require.Eventually(t, func() bool { return p.Active() }, 500*time.Millisecond, 10*time.Millisecond,
 		"balancer should activate after trigger lowered")
 }
@@ -537,7 +560,7 @@ func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
 	store.Set(NodeStats{NodeID: "self", DiskUsedPct: 10})
 	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{}}
 	cfg := testBalancerConfig()
-	cfg.gossipInterval = 100 * time.Millisecond
+	cfg.gossipInterval.Store(100 * time.Millisecond)
 	cfg.warmupTimeout = 1 * time.Millisecond
 
 	p := NewBalancerProposer("self", store, node, cfg)
@@ -553,7 +576,7 @@ func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
 	// Speed up the interval. The ticker.Reset path fires from inside the next
 	// tick handler, so we must wait at least one full pre-reset interval
 	// (~100ms) for the reset to take effect.
-	cfg.gossipInterval = 10 * time.Millisecond
+	cfg.gossipInterval.Store(10 * time.Millisecond)
 	time.Sleep(250 * time.Millisecond)
 	delta := p.TickCount() - prevTicks
 	assert.Greater(t, delta, int64(5), "ticker should reset to faster interval: got %d ticks in 250ms after speed-up", delta)

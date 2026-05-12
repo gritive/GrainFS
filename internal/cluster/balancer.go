@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -206,7 +207,7 @@ type BalancerProposer struct {
 	migrationProposalRate float64
 	stickyDonorHoldTime   time.Duration
 
-	active      bool // hysteresis state: true once trigger fired, false after stop threshold
+	active      atomic.Bool // hysteresis state: true once trigger fired, false after stop threshold
 	startedAt   time.Time
 	picker      ObjectPicker               // nil = no proposals until SetObjectPicker is called
 	inflight    map[string]time.Time       // proposed migrations not yet committed; keyed by task.id()
@@ -221,7 +222,7 @@ type BalancerProposer struct {
 
 	// tickCount is incremented at the end of each tickOnce call (test-only
 	// observability for hot-reload tests).
-	tickCount int64
+	tickCount atomic.Int64
 }
 
 // NewBalancerProposer creates a BalancerProposer that reads tunables from
@@ -371,7 +372,7 @@ func (p *BalancerProposer) handleMsg(msg balancerMsg) {
 		delete(p.inflight, msg.bucket+"/"+msg.key+"/"+msg.ver)
 	case msgBalancerStatus:
 		msg.replyCh <- BalancerStatus{
-			Active:       p.active,
+			Active:       p.active.Load(),
 			ImbalancePct: imbalancePct(p.store),
 			Nodes:        p.store.GetAll(),
 		}
@@ -383,24 +384,19 @@ func (p *BalancerProposer) Stop() {
 	p.stopOnce.Do(func() { close(p.stopCh) })
 }
 
-// Active reports the current hysteresis state. Test-only accessor — read from
-// the actor goroutine is the contract (tests poll after sleep, accepting a
-// benign read).
-//
-//nolint:unused // used from hot-reload tests in the same package.
-func (p *BalancerProposer) Active() bool { return p.active }
+// Active returns whether the balancer is currently in the "active migration"
+// hysteresis state. Safe for cross-goroutine reads (atomic).
+func (p *BalancerProposer) Active() bool { return p.active.Load() }
 
-// TickCount returns the number of tickOnce invocations since start. Test-only
-// observability for the hot-reload-ticker test.
-//
-//nolint:unused // used from hot-reload tests in the same package.
-func (p *BalancerProposer) TickCount() int64 { return p.tickCount }
+// TickCount returns the number of tickOnce evaluations since construction.
+// Test-friendly; safe for cross-goroutine reads (atomic).
+func (p *BalancerProposer) TickCount() int64 { return p.tickCount.Load() }
 
 // tickOnce is a single balancer evaluation cycle, exposed for testing.
 // Must be called from the actor goroutine only. Reads cluster-managed
 // tunables fresh from clusterCfg each call (hot-reload).
 func (p *BalancerProposer) tickOnce() {
-	defer func() { p.tickCount++ }()
+	defer p.tickCount.Add(1)
 	if !p.node.IsLeader() {
 		return
 	}
@@ -438,14 +434,14 @@ func (p *BalancerProposer) tickOnce() {
 	// Sync circuit breakers from latest gossip, then check hysteresis.
 	allPeers := p.store.GetAll()
 	p.syncCB(allPeers)
-	if !p.active {
+	if !p.active.Load() {
 		if diff < effectiveTrigger {
 			return
 		}
-		p.active = true
+		p.active.Store(true)
 	} else {
 		if diff < stopPct {
-			p.active = false
+			p.active.Store(false)
 			return
 		}
 	}
