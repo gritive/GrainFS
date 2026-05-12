@@ -55,6 +55,9 @@ func (h *JoinHandler) Handle(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Already a multi-node cluster member → no-op.
+	// plan-3.1: len(nodes) > 1 is the voter-count guard: MetaRaft only commits
+	// a node entry to the FSM after the Raft config-change is accepted, so this
+	// check also covers "follower accepted but not yet leader-forwarded" races.
 	nodes := h.nodes.Nodes()
 	if len(nodes) > 1 {
 		c.JSON(200, JoinResponse{Status: "already_member", Message: "node is already part of a multi-node cluster"})
