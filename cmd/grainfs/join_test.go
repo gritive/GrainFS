@@ -35,10 +35,11 @@ func runJoinCmd(t *testing.T, sock string, peerAddr string, extraArgs ...string)
 }
 
 type stubJoinServer struct {
-	calls     atomic.Int32
-	lastPeer  atomic.Value // string
-	lastForce atomic.Bool
-	response  map[string]any
+	calls      atomic.Int32
+	lastPeer   atomic.Value // string
+	lastForce  atomic.Bool
+	response   map[string]any
+	statusCode int // 0 → 200
 }
 
 func (s *stubJoinServer) handler() http.Handler {
@@ -53,6 +54,11 @@ func (s *stubJoinServer) handler() http.Handler {
 		s.lastPeer.Store(req.PeerAddr)
 		s.lastForce.Store(req.Force)
 		w.Header().Set("Content-Type", "application/json")
+		code := s.statusCode
+		if code == 0 {
+			code = http.StatusOK
+		}
+		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(s.response)
 	})
 	return mux
@@ -108,4 +114,20 @@ func TestJoinCmd_NoForceFlag_SendsFalse(t *testing.T) {
 	_, err := runJoinCmd(t, sock, "127.0.0.1:8300")
 	require.NoError(t, err)
 	assert.False(t, stub.lastForce.Load(), "force must default to false")
+}
+
+func TestJoinCmd_DataPresent_409_DisplaysFriendlyMessage(t *testing.T) {
+	stub := &stubJoinServer{
+		statusCode: http.StatusConflict,
+		response: map[string]any{
+			"status":  "data_present",
+			"message": "solo node has user data; re-send with force=true to discard it and join",
+		},
+	}
+	sock := startUDSStubServer(t, stub.handler())
+
+	out, err := runJoinCmd(t, sock, "127.0.0.1:8300")
+	require.Error(t, err)
+	assert.Contains(t, out, "data_present")
+	assert.Contains(t, out, "force=true")
 }
