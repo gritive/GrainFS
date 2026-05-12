@@ -27,8 +27,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // Severity is the urgency tier surfaced both in the Slack message and in
@@ -107,6 +112,7 @@ type Dispatcher struct {
 	cfg       AlertCfgReader
 	enc       SecretDecrypter
 	secretAAD []byte
+	alertKind string // bounded enum used as the alert_kind metric label
 
 	opts      Options
 	onFailure FailureCallback
@@ -130,6 +136,11 @@ type Dispatcher struct {
 	// HTTP retries run prevents a second concurrent Send with the same key
 	// from bypassing dedup during the unlocked HTTP window.
 	inFlight map[string]struct{}
+
+	// lastDecryptWarnAt rate-limits observeSecretDecryptFailure warn logs to
+	// once per minute per Dispatcher so a persistent decrypt failure cannot
+	// flood the log. Mu-protected.
+	lastDecryptWarnAt time.Time
 }
 
 // NewDispatcher constructs a static-config Dispatcher. An empty url turns Send
@@ -148,11 +159,17 @@ func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatc
 //
 // Options.Secret is ignored in this mode — the live wrapped secret takes
 // precedence so a stale flag value cannot shadow a rotated cluster-config secret.
-func NewDispatcherWithConfig(cfg AlertCfgReader, enc SecretDecrypter, secretAAD []byte, opts Options, onFailure FailureCallback) *Dispatcher {
+//
+// alertKind is recorded as the alert_kind label on
+// WebhookSignatureDecryptFailureTotal so multi-dispatcher deployments can
+// distinguish which dispatcher saw stale wrapped secrets after rotate-key.
+// Use a small bounded enum (e.g., "cluster", "degraded", "incident").
+func NewDispatcherWithConfig(cfg AlertCfgReader, enc SecretDecrypter, secretAAD []byte, opts Options, onFailure FailureCallback, alertKind string) *Dispatcher {
 	d := newDispatcher(opts, onFailure)
 	d.cfg = cfg
 	d.enc = enc
 	d.secretAAD = secretAAD
+	d.alertKind = alertKind
 	return d
 }
 
@@ -279,9 +296,11 @@ func dedupKey(a Alert) string {
 // SecretDecrypter on every call so a config PATCH between sends lands without
 // a restart. In static mode the constructor values are returned.
 //
-// A wrapped-secret decrypt failure is non-fatal: we log nothing (callers
-// already see delivery succeed/fail metrics) and proceed with an empty secret
-// so the webhook still fires unsigned rather than getting silently dropped.
+// On wrapped-secret decrypt failure (typically: stale wrapped blob after a
+// cluster rotate-key) observeSecretDecryptFailure increments
+// WebhookSignatureDecryptFailureTotal and emits a rate-limited warn log;
+// the delivery still proceeds with secret="" so a single rotation regression
+// never DoSes the alert pipeline.
 func (d *Dispatcher) resolveLive() (string, string) {
 	if d.cfg == nil {
 		return d.url, d.opts.Secret
@@ -293,6 +312,7 @@ func (d *Dispatcher) resolveLive() (string, string) {
 	}
 	secret, err := d.enc.DecryptWithAAD(wrapped, d.secretAAD)
 	if err != nil {
+		d.observeSecretDecryptFailure(err)
 		return url, ""
 	}
 	return url, string(secret)
@@ -384,3 +404,50 @@ func colorFor(s Severity) string {
 // helper that requires one. Currently unused at the public surface but kept
 // for callers building higher-level abstractions.
 var ErrEmptyURL = errors.New("webhook URL is empty")
+
+// observeSecretDecryptFailure is called when DecryptWithAAD fails inside
+// resolveLive. It increments the per-(alert_kind, err_class) counter on
+// every call and emits one warn log per minute per Dispatcher. Delivery
+// continues unsigned — single rotation regression never silences the alert
+// pipeline.
+func (d *Dispatcher) observeSecretDecryptFailure(err error) {
+	cls := classifyDecryptErr(err)
+	metrics.WebhookSignatureDecryptFailureTotal.WithLabelValues(d.alertKind, cls).Inc()
+
+	now := d.opts.Clock()
+	d.mu.Lock()
+	shouldLog := now.Sub(d.lastDecryptWarnAt) > time.Minute
+	if shouldLog {
+		d.lastDecryptWarnAt = now
+	}
+	d.mu.Unlock()
+
+	if shouldLog {
+		log.Warn().
+			Str("event", "webhook_signature_decrypt_failure").
+			Str("alert_kind", d.alertKind).
+			Str("err_class", cls).
+			Err(err).
+			Msg("webhook signing secret decrypt failed; delivering unsigned. Likely stale wrapped-secret after cluster rotate-key — PATCH cluster_config with a fresh alert-webhook-secret-plaintext to re-wrap.")
+	}
+}
+
+// classifyDecryptErr maps a DecryptWithAAD error to a small bounded enum.
+// Metric labels MUST go through this function — never label with raw
+// err.Error() (unbounded cardinality, leaks key material into series names).
+func classifyDecryptErr(err error) string {
+	if err == nil {
+		return "none"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "key not found"), strings.Contains(msg, "unknown key id"):
+		return "key_not_found"
+	case strings.Contains(msg, "aad"), strings.Contains(msg, "AAD"):
+		return "aad_mismatch"
+	case strings.Contains(msg, "decode"), strings.Contains(msg, "unmarshal"), strings.Contains(msg, "header"):
+		return "decode_error"
+	default:
+		return "other"
+	}
+}

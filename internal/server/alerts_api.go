@@ -60,17 +60,22 @@ func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.De
 // cfg must not be nil; enc may be nil (in which case the secret is treated as
 // disabled even if the wrapped blob is populated, matching the static
 // empty-secret path).
+//
+// alertKind is forwarded to the underlying Dispatcher and surfaces as the
+// alert_kind label on WebhookSignatureDecryptFailureTotal so operators can
+// tell which AlertsState saw stale wrapped secrets after a rotate-key.
 func NewAlertsStateWithConfig(
 	cfg alerts.AlertCfgReader,
 	enc alerts.SecretDecrypter,
 	secretAAD []byte,
 	opts alerts.Options,
 	trackerCfg alerts.DegradedConfig,
+	alertKind string,
 ) *AlertsState {
 	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
 		return alerts.NewDispatcherWithConfig(cfg, enc, secretAAD, opts, func(a alerts.Alert, err error) {
 			s.recordFailure(a, err)
-		})
+		}, alertKind)
 	})
 }
 
