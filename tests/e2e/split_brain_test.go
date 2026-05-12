@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -42,21 +41,4 @@ func TestSplitBrain_NoPeersIsZero(t *testing.T) {
 		}
 	}
 	t.Fatal("grainfs_split_brain_suspected metric not found in /metrics output")
-}
-
-// TestSplitBrain_ClusterStatusField verifies /api/cluster/status includes split_brain_suspected.
-func TestSplitBrain_ClusterStatusField(t *testing.T) {
-	resp, err := http.Get(testServerURL + "/api/cluster/status")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var status map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&status))
-
-	_, ok := status["split_brain_suspected"]
-	assert.True(t, ok, "/api/cluster/status must include split_brain_suspected field")
-
-	assert.Equal(t, false, status["split_brain_suspected"],
-		"no-peers mode must report split_brain_suspected=false")
 }

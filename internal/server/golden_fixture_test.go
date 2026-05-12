@@ -144,15 +144,17 @@ func newGoldenFixtureServer(t *testing.T) (*http.Client, string) {
 // output. Run `go test -update-golden ...` after intentional wire changes.
 var updateGolden = flag.Bool("update-golden", false, "rewrite testdata/*.golden.json")
 
-// assertGoldenJSON compares the raw response body (JSON) against the file at
-// testdata/<name>. With -update-golden it rewrites the file instead. Goldens
-// are written with a trailing newline; comparison trims a single trailing
-// newline from both sides so editor-added newlines don't cause spurious diffs.
+// assertGoldenJSON compares the raw response body against testdata/<name>
+// as JSON. Both sides are canonicalized (unmarshal → marshal with sorted
+// keys → indent) before comparison, so key order in the emit path does not
+// affect the result. Goldens themselves remain stored in alphabetical key
+// order for human readability. With -update-golden it rewrites the file
+// from the canonicalized response.
 func assertGoldenJSON(t *testing.T, name string, raw []byte) {
 	t.Helper()
 
-	var indented bytes.Buffer
-	if err := json.Indent(&indented, raw, "", "  "); err != nil {
+	canonical, err := canonicalJSON(raw)
+	if err != nil {
 		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, raw)
 	}
 
@@ -161,7 +163,7 @@ func assertGoldenJSON(t *testing.T, name string, raw []byte) {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
 			t.Fatal(err)
 		}
-		out := append(indented.Bytes(), '\n')
+		out := append(canonical, '\n')
 		if err := os.WriteFile(path, out, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -172,12 +174,26 @@ func assertGoldenJSON(t *testing.T, name string, raw []byte) {
 	if err != nil {
 		t.Fatalf("read golden %s: %v (run with -update-golden to create)", path, err)
 	}
-	got := bytes.TrimSuffix(indented.Bytes(), []byte("\n"))
-	wantTrim := bytes.TrimSuffix(want, []byte("\n"))
-	if !bytes.Equal(got, wantTrim) {
-		t.Fatalf("wire diff for %s:\n--- got\n%s\n--- want\n%s",
-			name, string(got), string(wantTrim))
+	wantCanonical, err := canonicalJSON(want)
+	if err != nil {
+		t.Fatalf("golden %s is not valid JSON: %v", path, err)
 	}
+	if !bytes.Equal(canonical, wantCanonical) {
+		t.Fatalf("wire diff for %s:\n--- got\n%s\n--- want\n%s",
+			name, string(canonical), string(wantCanonical))
+	}
+}
+
+// canonicalJSON returns raw re-marshaled with sorted keys and 2-space
+// indent. encoding/json sorts map[string]any keys alphabetically, which
+// gives a stable byte form independent of emit-side key order (e.g.
+// map[string]any vs struct field declaration order).
+func canonicalJSON(raw []byte) ([]byte, error) {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(v, "", "  ")
 }
 
 // fetchBody GETs path on the fixture client and returns the raw response body.
