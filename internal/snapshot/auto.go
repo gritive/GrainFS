@@ -37,9 +37,11 @@ type AutoSnapshotter struct {
 // so we use time.After + short idle so PATCH→effect latency is bounded to idle (5s),
 // not interval (could be 1h). idle=5s is a polling pattern but the CPU cost is
 // negligible (one cluster-config atomic.Pointer load per 5s).
+const defaultIdleWhenDisabled = 5 * time.Second
+
 func NewAutoSnapshotter(mgr *Manager, policy SnapshotPolicy, idleWhenDisabled time.Duration) *AutoSnapshotter {
 	if idleWhenDisabled <= 0 {
-		idleWhenDisabled = 5 * time.Second
+		idleWhenDisabled = defaultIdleWhenDisabled
 	}
 	return &AutoSnapshotter{mgr: mgr, policy: policy, idle: idleWhenDisabled}
 }
@@ -63,10 +65,12 @@ func (a *AutoSnapshotter) Start(ctx context.Context) {
 					wait = 0
 				}
 			}
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 			elapsed += wait
 			// Re-check after wake: policy may have changed.

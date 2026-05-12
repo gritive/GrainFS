@@ -112,4 +112,12 @@ func TestClusterConfig_Validate_SnapshotBounds(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("interval=0 must be allowed (disable): %v", err)
 	}
+
+	// sub-second positive interval rejected
+	c = NewClusterConfig()
+	tiny := time.Nanosecond
+	c.applyPatch(ClusterConfigPatch{SnapshotInterval: &tiny}, time.UnixMilli(0))
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for snapshot-interval=1ns")
+	}
 }

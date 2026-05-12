@@ -164,6 +164,18 @@ func TestClusterConfigHandler_SnapshotKeys(t *testing.T) {
 	require.Equal(t, "default", fsm.ClusterConfig().SourceForKey("snapshot-retain"))
 }
 
+func TestClusterConfigHandler_SnapshotKeys_InvalidDuration(t *testing.T) {
+	fsm := cluster.NewMetaFSM()
+	fsm.SetEncryptor(newTestEncryptor(t))
+	prop := &fakeProposer{fsm: fsm}
+	h := NewClusterConfigHandler(fsm, prop, fsm.Encryptor())
+	body := `{"snapshot-interval":"not-a-duration"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v1/cluster/config", strings.NewReader(body)))
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body=%s", rec.Body.String())
+	require.Contains(t, rec.Body.String(), "snapshot-interval")
+}
+
 func TestClusterConfigHandler_Patch_Reset(t *testing.T) {
 	fsm := cluster.NewMetaFSM()
 	fsm.SetEncryptor(newTestEncryptor(t))
