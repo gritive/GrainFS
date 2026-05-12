@@ -4,6 +4,12 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### cluster-bootstrap-simplify follow-ups (from PR cluster/bootstrap-simplify)
+
+- [ ] **Phase 1.3: clusterMode 항상 true 고정** — `internal/serveruntime/boot_phases.go:82`의 `state.clusterMode = state.joinMode`를 `state.clusterMode = true`로 변경. 현재는 solo 부팅 시 clusterMode=false라 `--cluster-key` 없이도 serve가 기동됨. 변경 시 단위 테스트 ~18개 수정 + e2e TestMain/startUnbootstrappedE2EServer에 `--cluster-key` 추가 필요. **Re-open trigger:** 별도 PR로 처리. 수정 후 `go test ./internal/serveruntime/... ./tests/e2e/...` 전체 통과 확인.
+
+- [ ] **Phase 3.2: solo 노드에 사용자 데이터 있을 때 join 방지 (--force 가드)** — `JoinHandler`에 `backend` 의존성을 주입해 `IsSoloEmpty()` 체크 추가. solo 노드에 객체가 있으면 `force=true` 없이는 join 거부(데이터가 사라질 수 있음을 명시). 현재 `JoinHandler`는 `clusterNodes`만 알고 backend에 접근 불가 — 새 인터페이스 `soloEmptyChecker` 추출 또는 JoinHandler 생성자에 optional checker 주입 필요. **Re-open trigger:** 별도 PR로 처리.
+
 ### cluster — pre-existing issues
 
 - [ ] **P0: race condition in TestClusterCoordinator_FindObjectIndexOrphans_ScansGroupLocalObjects** — `internal/cluster/cluster_coordinator_test.go`에서 race detector가 intermittent하게 감지됨. 이번 브랜치(EC Object Reader 추출, 2026-05-13) diff와 무관한 기존 버그. `-race` 빌드에서 간헐적으로 발생. **Re-open trigger:** `go test -race -count=3 ./internal/cluster/`에서 재현 시 조사 및 수정. **연관 파일:** `internal/cluster/cluster_coordinator_test.go`, `internal/cluster/cluster_coordinator.go`.
