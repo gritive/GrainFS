@@ -2,6 +2,7 @@ package snapshot_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,36 @@ func (m *mockSnapshotable) RestoreObjects(objects []storage.SnapshotObject) (int
 	return len(objects), nil, nil
 }
 
+// fakePolicy is a test-only SnapshotPolicy with mutable values for hot-reload tests.
+type fakePolicy struct {
+	interval atomic.Int64 // nanoseconds
+	retain   atomic.Int32
+}
+
+func (p *fakePolicy) SnapshotInterval() time.Duration { return time.Duration(p.interval.Load()) }
+func (p *fakePolicy) SnapshotRetain() int32           { return p.retain.Load() }
+
+func newFakePolicy(interval time.Duration, retain int32) *fakePolicy {
+	p := &fakePolicy{}
+	p.interval.Store(int64(interval))
+	p.retain.Store(retain)
+	return p
+}
+
+// countAutoSnaps counts auto-created snapshots (Reason == "auto" || "").
+func countAutoSnaps(t *testing.T, mgr *snapshot.Manager) int {
+	t.Helper()
+	snaps, err := mgr.List()
+	require.NoError(t, err)
+	n := 0
+	for _, s := range snaps {
+		if s.Reason == "auto" || s.Reason == "" {
+			n++
+		}
+	}
+	return n
+}
+
 func TestAutoSnapshotter_CreatesSnapshotOnInterval(t *testing.T) {
 	dir := t.TempDir()
 	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
@@ -34,8 +65,8 @@ func TestAutoSnapshotter_CreatesSnapshotOnInterval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	interval := 100 * time.Millisecond
-	as := snapshot.NewAutoSnapshotter(mgr, interval, 5)
+	pol := newFakePolicy(100*time.Millisecond, 5)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 10*time.Millisecond)
 	as.Start(ctx)
 
 	// Wait long enough for at least 2 snapshots
@@ -56,9 +87,9 @@ func TestAutoSnapshotter_RespectsRetention(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	const maxRetain = 3
-	interval := 80 * time.Millisecond
-	as := snapshot.NewAutoSnapshotter(mgr, interval, maxRetain)
+	const maxRetain int32 = 3
+	pol := newFakePolicy(80*time.Millisecond, maxRetain)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 10*time.Millisecond)
 	as.Start(ctx)
 
 	// Wait long enough to exceed retention
@@ -68,7 +99,7 @@ func TestAutoSnapshotter_RespectsRetention(t *testing.T) {
 
 	snaps, err := mgr.List()
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(snaps), maxRetain,
+	assert.LessOrEqual(t, len(snaps), int(maxRetain),
 		"auto-snapshotter must not keep more than maxRetain snapshots")
 }
 
@@ -93,8 +124,9 @@ func TestAutoSnapshotter_PruneOld_PreservesManual(t *testing.T) {
 
 	// maxRetain=1 means we want at most 1 auto snapshot kept.
 	// Running the auto-snapshotter's internal prune via a manual trigger:
-	as := snapshot.NewAutoSnapshotter(mgr, time.Hour, 1)
-	snapshot.RunPruneOld(as) // test-only helper
+	pol := newFakePolicy(time.Hour, 1)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 0)
+	snapshot.RunPruneOld(as, 1) // test-only helper
 
 	snaps, err := mgr.List()
 	require.NoError(t, err)
@@ -124,8 +156,9 @@ func TestAutoSnapshotter_LegacyReason(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	as := snapshot.NewAutoSnapshotter(mgr, time.Hour, 1)
-	snapshot.RunPruneOld(as)
+	pol := newFakePolicy(time.Hour, 1)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 0)
+	snapshot.RunPruneOld(as, 1)
 
 	snaps, err := mgr.List()
 	require.NoError(t, err)
@@ -144,8 +177,9 @@ func TestAutoSnapshotter_AllManual_NoOp(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	as := snapshot.NewAutoSnapshotter(mgr, time.Hour, 1)
-	snapshot.RunPruneOld(as)
+	pol := newFakePolicy(time.Hour, 1)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 0)
+	snapshot.RunPruneOld(as, 1)
 
 	snaps, err := mgr.List()
 	require.NoError(t, err)
@@ -158,7 +192,8 @@ func TestAutoSnapshotter_StopsOnContextCancel(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	as := snapshot.NewAutoSnapshotter(mgr, 50*time.Millisecond, 10)
+	pol := newFakePolicy(50*time.Millisecond, 10)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 10*time.Millisecond)
 	as.Start(ctx)
 
 	time.Sleep(80 * time.Millisecond)
@@ -171,4 +206,83 @@ func TestAutoSnapshotter_StopsOnContextCancel(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	snapsAfter, _ := mgr.List()
 	assert.Equal(t, count, len(snapsAfter), "no new snapshots after context cancel")
+}
+
+// TestAutoSnapshotter_HotReloadInterval verifies that changing
+// SnapshotInterval at runtime takes effect within bounded latency:
+// - interval=50ms produces snapshots
+// - interval=0 stops producing (idle poll)
+// - interval=20ms resumes producing
+func TestAutoSnapshotter_HotReloadInterval(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pol := newFakePolicy(50*time.Millisecond, 100)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 20*time.Millisecond)
+	as.Start(ctx)
+
+	// Phase 1: interval=50ms → expect at least 1 snapshot after 300ms
+	time.Sleep(300 * time.Millisecond)
+	phase1 := countAutoSnaps(t, mgr)
+	assert.GreaterOrEqual(t, phase1, 1, "phase1: expected at least 1 snapshot with interval=50ms")
+
+	// Phase 2: disable → snapshot count must not grow significantly.
+	// One in-flight wait of up to 50ms may still fire before the disabled
+	// re-check kicks in, so allow at most 1 additional snapshot.
+	pol.interval.Store(0)
+	// Wait long enough that any pending 50ms tick fires + idle re-checks
+	// observe the disabled state (idle=20ms, so several re-checks fit).
+	time.Sleep(200 * time.Millisecond)
+	phase2 := countAutoSnaps(t, mgr)
+	assert.LessOrEqual(t, phase2, phase1+1,
+		"phase2: snapshot count must not grow more than 1 (in-flight tick) after disable; phase1=%d phase2=%d",
+		phase1, phase2)
+
+	// Phase 3: re-enable with shorter interval → expect growth resumes.
+	pol.interval.Store(int64(20 * time.Millisecond))
+	time.Sleep(200 * time.Millisecond)
+	phase3 := countAutoSnaps(t, mgr)
+	assert.Greater(t, phase3, phase2,
+		"phase3: snapshot count must grow after re-enable; phase2=%d phase3=%d", phase2, phase3)
+
+	cancel()
+	as.Wait()
+}
+
+// TestAutoSnapshotter_HotReloadRetain verifies that lowering SnapshotRetain
+// at runtime causes the next prune cycle to drop excess auto snapshots.
+func TestAutoSnapshotter_HotReloadRetain(t *testing.T) {
+	dir := t.TempDir()
+	mgr, err := snapshot.NewManager(dir, &mockSnapshotable{}, "")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pol := newFakePolicy(20*time.Millisecond, 5)
+	as := snapshot.NewAutoSnapshotter(mgr, pol, 10*time.Millisecond)
+	as.Start(ctx)
+
+	// Accumulate up to retain=5 snapshots.
+	require.Eventually(t, func() bool {
+		return countAutoSnaps(t, mgr) >= 5
+	}, 2*time.Second, 10*time.Millisecond, "should reach retain=5 auto snapshots")
+
+	// Snapshot count should stabilize at ~5 (no more than retain).
+	time.Sleep(100 * time.Millisecond)
+	before := countAutoSnaps(t, mgr)
+	assert.LessOrEqual(t, before, 5, "should be capped at retain=5")
+
+	// Lower retain to 2; subsequent takeAndPrune cycles must drop excess.
+	pol.retain.Store(2)
+	require.Eventually(t, func() bool {
+		return countAutoSnaps(t, mgr) <= 2
+	}, 2*time.Second, 10*time.Millisecond, "should prune down to retain=2")
+
+	cancel()
+	as.Wait()
 }
