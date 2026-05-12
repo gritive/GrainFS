@@ -91,12 +91,18 @@ type metaJoinCoordinator interface {
 }
 
 type MetaJoinReceiver struct {
-	meta   metaJoinCoordinator
-	joinMu sync.Mutex
+	meta         metaJoinCoordinator
+	joinMu       sync.Mutex
+	postJoinHook func(context.Context, JoinRequest) error
 }
 
 func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
 	return &MetaJoinReceiver{meta: meta}
+}
+
+func (r *MetaJoinReceiver) WithPostJoinHook(fn func(context.Context, JoinRequest) error) *MetaJoinReceiver {
+	r.postJoinHook = fn
+	return r
 }
 
 func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
@@ -141,6 +147,11 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 	defer cancel()
 	if err := r.meta.Join(ctx, joinReq.NodeID, joinReq.Address); err != nil {
 		return joinMessage(joinReplyFromError(err))
+	}
+	if r.postJoinHook != nil {
+		if err := r.postJoinHook(ctx, joinReq); err != nil {
+			return joinMessage(joinReplyFromError(err))
+		}
 	}
 	return joinMessage(JoinReply{Accepted: true, Status: JoinStatusOK})
 }

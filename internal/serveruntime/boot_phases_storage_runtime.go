@@ -40,7 +40,16 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	}
 	normalGroupVoters := state.effectiveEC.NumShards()
 
-	if !state.joinMode {
+	if committed := state.metaRaft.Node().CommittedIndex(); committed > 0 {
+		replayCtx, replayCancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := state.metaRaft.WaitApplied(replayCtx, committed); err != nil {
+			replayCancel()
+			return fmt.Errorf("wait for meta-raft replay before shard bootstrap: %w", err)
+		}
+		replayCancel()
+	}
+
+	if !state.joinMode && len(state.metaRaft.FSM().ShardGroups()) == 0 {
 		if err := WaitForMetaRaftLeader(ctx, state.metaRaft, 15*time.Second); err != nil {
 			return err
 		}
@@ -268,6 +277,9 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		}()
 	}
 
+	state.metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
+		scheduleOwnedInstantiation(entry)
+	})
 	for _, entry := range state.metaRaft.FSM().ShardGroups() {
 		if err := instantiateOwnedIfNeeded(entry); err != nil {
 			recordStartupDecision(badgerrole.Decision{
@@ -280,9 +292,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			})
 		}
 	}
-	state.metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
-		scheduleOwnedInstantiation(entry)
-	})
 
 	state.AddCleanup(func() {
 		state.metaRaft.FSM().SetOnShardGroupAdded(nil)

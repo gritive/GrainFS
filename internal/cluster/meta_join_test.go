@@ -125,6 +125,32 @@ func TestMetaJoinReceiver_SerializesSameNodeIDJoin(t *testing.T) {
 	require.Equal(t, 1, coord.JoinCalls())
 }
 
+func TestMetaJoinReceiver_PostJoinHookRunsAfterMembershipCommit(t *testing.T) {
+	f := NewMetaFSM()
+	coord := &fakeJoinCoordinator{
+		leader: true,
+		fsm:    f,
+		onJoin: func(id, addr string) {
+			require.NoError(t, f.applyCmd(makeAddNodeCmd(t, id, addr, 0)))
+		},
+	}
+	var hookReq JoinRequest
+	receiver := NewMetaJoinReceiver(coord).WithPostJoinHook(func(_ context.Context, req JoinRequest) error {
+		hookReq = req
+		require.Len(t, coord.Nodes(), 1, "hook must see the committed meta membership")
+		return nil
+	})
+	payload, err := encodeJoinRequest(JoinRequest{NodeID: "node-2", Address: "10.0.0.2:7001"})
+	require.NoError(t, err)
+
+	resp := receiver.Handle(&transport.Message{Type: transport.StreamMetaJoin, Payload: payload})
+	reply, err := decodeJoinReply(resp.Payload)
+	require.NoError(t, err)
+
+	require.Equal(t, JoinStatusOK, reply.Status)
+	require.Equal(t, JoinRequest{NodeID: "node-2", Address: "10.0.0.2:7001"}, hookReq)
+}
+
 type fakeJoinCoordinator struct {
 	leader      bool
 	leaderID    string

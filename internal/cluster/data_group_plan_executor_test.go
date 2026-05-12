@@ -168,6 +168,48 @@ func TestMoveReplica_HappyPath(t *testing.T) {
 	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "node-0")
 }
 
+func TestAddReplica_HappyPath(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, fakeNode.lastAdds, 1)
+	require.Equal(t, "node-1", fakeNode.lastAdds[0].ID)
+	require.Equal(t, "10.0.0.1:9001", fakeNode.lastAdds[0].Address)
+	require.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
+	require.Empty(t, fakeNode.lastRemoves)
+
+	require.Len(t, sgUpdater.proposed, 1)
+	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
+	require.Equal(t, []string{"node-0", "node-1"}, sgUpdater.proposed[0].PeerIDs)
+	require.Equal(t, []string{"node-0", "node-1"}, exec.DGMgr().Get("group-0").PeerIDs())
+}
+
+func TestAddReplica_SkipsExistingVoter(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0", "node-1"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Empty(t, sgUpdater.proposed)
+}
+
 func TestMoveReplica_NotLeader(t *testing.T) {
 	fakeNode := &fakeRaftNode{isLeader: false}
 	exec, _ := newTestExecutor(t, fakeNode, nil)

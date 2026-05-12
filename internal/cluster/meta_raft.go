@@ -141,6 +141,11 @@ func (m *MetaRaft) TransferLeadership() error { return m.node.TransferLeadership
 // Nodes returns the current meta-FSM member snapshot.
 func (m *MetaRaft) Nodes() []MetaNodeEntry { return m.fsm.Nodes() }
 
+// WaitApplied blocks until the meta FSM has applied at least index.
+func (m *MetaRaft) WaitApplied(ctx context.Context, index uint64) error {
+	return m.waitApplied(ctx, index)
+}
+
 // FSM returns the MetaFSM for callback registration and state inspection.
 // Callers must set callbacks before Start() to avoid a data race with the apply loop.
 func (m *MetaRaft) FSM() *MetaFSM { return m.fsm }

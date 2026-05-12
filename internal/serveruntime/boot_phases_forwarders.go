@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -125,7 +126,9 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	}))
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
-	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft)
+	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
+		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
+	})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
 	metaReadDialer := func(peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
@@ -163,5 +166,34 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	}
 
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
+	return nil
+}
+
+func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeID string) error {
+	groups := state.metaRaft.FSM().ShardGroups()
+	targets := make([]cluster.ShardGroupEntry, 0, len(groups))
+	for _, group := range groups {
+		if group.ID == "group-0" || slices.Contains(group.PeerIDs, nodeID) {
+			continue
+		}
+		expanded := cluster.ShardGroupEntry{
+			ID:      group.ID,
+			PeerIDs: append(slices.Clone(group.PeerIDs), nodeID),
+		}
+		if err := state.metaRaft.ProposeShardGroup(ctx, expanded); err != nil {
+			return fmt.Errorf("expand shard groups for joined node %q: propose desired peers for %s: %w", nodeID, group.ID, err)
+		}
+		targets = append(targets, group)
+	}
+
+	executor := cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft)
+	for _, group := range targets {
+		if err := executor.AddReplica(ctx, group.ID, nodeID); err != nil {
+			return fmt.Errorf("expand shard groups for joined node %q: add data voter to %s: %w", nodeID, group.ID, err)
+		}
+	}
+	if len(targets) > 0 {
+		log.Info().Str("node_id", nodeID).Int("groups", len(targets)).Msg("expanded shard groups for joined node")
+	}
 	return nil
 }

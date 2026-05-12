@@ -78,6 +78,25 @@ func TestBootShardService_ComputesEffectiveEC(t *testing.T) {
 	assert.Equal(t, 0, state.effectiveEC.ParityShards)
 }
 
+func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
+	require.NoError(t, WaitForMetaRaftLeader(ctx, state.metaRaft, 5*time.Second))
+	require.NoError(t, state.metaRaft.ProposeShardGroup(ctx, cluster.ShardGroupEntry{
+		ID:      "group-1",
+		PeerIDs: []string{"n1", "n2", "n3"},
+	}))
+	require.Eventually(t, func() bool {
+		group, ok := state.metaRaft.FSM().ShardGroup("group-1")
+		return ok && assert.ObjectsAreEqual([]string{"n1", "n2", "n3"}, group.PeerIDs)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, bootShardService(ctx, state))
+
+	group, ok := state.metaRaft.FSM().ShardGroup("group-1")
+	require.True(t, ok)
+	assert.Equal(t, []string{"n1", "n2", "n3"}, group.PeerIDs)
+}
+
 // TestBootStreamRouter_RegistersHandlersAndStartsNode — bootStreamRouter wires
 // the QUIC stream multiplexer and fires the data-plane raft apply loop. The
 // cleanup stack must grow by one (node.Stop registered for shutdown).

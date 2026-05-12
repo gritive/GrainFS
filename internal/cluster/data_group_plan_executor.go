@@ -99,6 +99,54 @@ func (e *DataGroupPlanExecutor) resolveAddr(nodeID string) (string, error) {
 	return "", fmt.Errorf("data_group_executor: node %q not found in address book", nodeID)
 }
 
+// AddReplica adds toNode as a voter in groupID without removing existing voters.
+//
+// This is used when a new cluster node joins after shard groups were initially
+// seeded from a single bootstrap voter. Must be called from the data-group Raft
+// leader only.
+func (e *DataGroupPlanExecutor) AddReplica(ctx context.Context, groupID, toNode string) error {
+	dg := e.dgMgr.Get(groupID)
+	if dg == nil {
+		return fmt.Errorf("data_group_executor: group %q not found", groupID)
+	}
+	if slices.Contains(dg.PeerIDs(), toNode) {
+		return nil
+	}
+
+	node := e.nodeFor(dg)
+	if !node.IsLeader() {
+		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
+	}
+
+	for _, peer := range ResolveShardGroupPeers(e.addrBook, ShardGroupEntry{ID: groupID, PeerIDs: dg.PeerIDs()}) {
+		if peer.Unresolved {
+			return fmt.Errorf("data_group_executor: group %q has unresolved legacy peer %q", groupID, peer.Input)
+		}
+	}
+
+	toAddr, err := e.resolveAddr(toNode)
+	if err != nil {
+		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
+	}
+
+	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	defer cancel()
+	if err := node.ChangeMembership(addCtx,
+		[]raft.ServerEntry{{ID: toNode, Address: toAddr, Suffrage: raft.Voter}},
+		nil,
+	); err != nil {
+		return fmt.Errorf("data_group_executor: ChangeMembership: %w", err)
+	}
+
+	newPeers := append(slices.Clone(dg.PeerIDs()), toNode)
+	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
+		return fmt.Errorf("data_group_executor: ProposeShardGroup: %w", err)
+	}
+
+	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
+	return nil
+}
+
 // MoveReplica migrates a Raft voter in groupID from fromNode to toNode using a
 // single §4.3 atomic ChangeMembership call.
 //
