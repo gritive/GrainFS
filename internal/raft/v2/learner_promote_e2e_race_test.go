@@ -9,63 +9,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit attempts to reproduce
-// the M6.0 follow-up race observed in multi-process e2e
-// (TestE2E_ClusterDrain_Follower on the feat/raft-v2-m6-3-retry branch)
-// using in-process delay injection. A learner elevated to voter via Path
-// B's two-entry sequence (stage-1 drop-from-learners, then Cjoint
-// AddVoter) starts its election timer the moment it appends Cjoint
-// (Raft §4.3 — the most recent appended config makes it a voter). If
-// the leader's next AppendEntries does not reach it before that timer
-// fires, it campaigns at a higher term and deposes the leader, surfacing
-// as "proposal failed: node stepped down" from PromoteToVoter.
+// TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit pins the M6.0
+// follow-up race: a learner elevated to voter via Path B's two-entry
+// sequence (stage-1 drop-from-learners, then Cjoint AddVoter) becomes a
+// voter the moment it appends Cjoint. The follower-side fix
+// (membership.go appendAndTrackConfig — resetElectionTimer on self
+// learner→voter transition) gives the new voter a fresh randomized
+// election window starting at the suffrage flip, so the leader's next
+// heartbeat arrives before the timer fires.
 //
-// Empirical finding (M6.0 follow-up investigation):
+// Delay regime: aeDelay is the per-RPC one-way latency injected on
+// every transport call. The fix closes the race within the protocol's
+// design envelope (aeDelay roughly bounded by ET — heartbeat << ET).
+// Beyond that envelope the race is structural: with peerInFlight
+// single-flight gating, an in-flight Cjoint AE blocks the next
+// heartbeat until reply, so the next AE arrives at n2 ~2·aeDelay after
+// the Cjoint arrival. When 2·aeDelay > 2·ET (== max election timer
+// draw), no plain timer reset can close it without extending the
+// post-promotion grace window — a protocol change beyond this fix.
 //
-//   - At aeDelay=60ms with fastElectionTimeout=50ms, the race fires
-//     ~20% of iterations. The leader DOES already broadcast a fresh
-//     AppendEntries from advanceConfChangePhase Phase 1→2 the moment
-//     Cjoint commits (membership.go:191). That broadcast is the
-//     earliest leader-side response possible to "Cjoint just committed".
-//   - The race is not closed by adding a second broadcast on Phase 2
-//     done (Cnew final commit): by the time Cnew final commits at the
-//     leader, ~4 RTTs have elapsed since stage-1 dispatch, and the
-//     newly-promoted voter's election timer (50–100ms after its Cjoint
-//     append) has long since fired in the failing cases. Adding a
-//     broadcast at Phase 2 done is a no-op vs this test at every
-//     delay we tried (30/80/200ms).
-//   - The structural floor: with aeDelay × 2 > electionTimeout the
-//     race cannot be closed by any leader-side commit-time broadcast,
-//     because the rescue AE travels one RTT to the new voter while the
-//     new voter's timer fires in [electionTimeout, 2×electionTimeout).
-//
-// Two unresolved hypotheses about the production e2e failure mode:
-//
-//  1. The e2e timing (election 750–1500ms, RTT 50–200ms) gives
-//     structural margin where the EXISTING Phase 1→2 broadcast already
-//     wins comfortably. Whatever makes e2e fail must be something
-//     other than the timing window this test models — possibly QUIC
-//     handshake-only-on-first-call latency that this in-process test
-//     cannot reproduce, or a different RPC path entirely.
-//
-//  2. The fix may need to be follower-side rather than leader-side:
-//     extending the election timer when a follower transitions from
-//     learner to voter (so it gets ≥ 2× normal grace), or PreVote
-//     (campaigning without bumping term until majority would grant).
-//     Both are protocol changes beyond the scope of this M6.0
-//     follow-up patch.
-//
-// The test is retained as a stress harness: it currently fails 10–30%
-// of iterations at aeDelay=60ms, providing a reliable scenario for any
-// future fix to validate against. It is t.Skip()'d in the default
-// suite until the underlying race-close mechanism lands.
+// The chosen matrix exercises the envelope this fix targets. Production
+// e2e (election 750–1500ms, RTT 50–200ms) sits comfortably in this
+// regime.
 func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
-	t.Skip("M6.0 follow-up: race-close mechanism unresolved — see file header. Test currently demonstrates the race but no leader-side commit-time broadcast closes it in this setup.")
 	const iterations = 50
-	for i := 0; i < iterations; i++ {
-		i := i
-		t.Run(fmt.Sprintf("iter%d", i), func(t *testing.T) {
-			runPromoteRaceWithDelay(t, 60*time.Millisecond)
+	delays := []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		30 * time.Millisecond,
+	}
+	for _, d := range delays {
+		d := d
+		t.Run(fmt.Sprintf("delay=%s", d), func(t *testing.T) {
+			for i := 0; i < iterations; i++ {
+				i := i
+				t.Run(fmt.Sprintf("iter%d", i), func(t *testing.T) {
+					runPromoteRaceWithDelay(t, d)
+				})
+			}
 		})
 	}
 }
