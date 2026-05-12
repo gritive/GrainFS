@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.0.169.0] - 2026-05-13 — feat: always-cluster mode + solo data guard for grainfs join
+
+### Changed
+- `clusterMode` 항상 true: 단일 노드 포함 모든 `grainfs serve` 실행에서 클러스터 모드 활성화. `--cluster-key`가 모든 모드에서 필수 (기존에는 멀티노드 모드에서만 필수). **Breaking**: cluster key 없이 solo 기동 불가.
+
+### Added
+- `grainfs join --force`: solo 노드에 사용자 데이터가 있을 때 데이터 가드를 우회하여 join 강제 실행. `--force` 없이 데이터가 있으면 409 `data_present` 반환.
+- `JoinHandler` 데이터 가드: solo 노드에 버킷 등 사용자 데이터가 있고 `force=false`이면 409 `data_present` 응답으로 join 거부. 데이터 손실 방지용 안전 장치.
+- `TestE2E_Bootstrap_DataPresent_BlocksJoin`: solo 노드에 버킷 생성 후 force 없이 join 시도 시 409를 반환하는지 검증하는 e2e 테스트.
+
+### Fixed
+- `grainfs join` 409 응답을 친화적 CLI 출력으로 디코딩: `status`, `message` 필드를 파싱해 사용자에게 `--force=true` 힌트 포함 메시지 출력.
+- e2e 스냅샷 테스트 interval 500ms → 1s: `cluster-config` 검증 로직이 1s 미만 값을 거부하므로 수정.
+
+## [0.0.168.0] - 2026-05-13 — refactor(lifecycle): deepen Store.put seam + Apply→Worker round-trip test
+
+### Changed
+- `Store.Put()` → unexported `Store.put()`: FSM apply 경로(`PutRaw`)를 우회하는 public write 경로 제거. 운영 코드에서는 반드시 Raft proposal(`ProposeLifecyclePut` → FSM → `PutRaw`)을 통해서만 쓰기 가능.
+- `ListBuckets()` 주석 정리: "pre-FSM-era leftover" 문구 제거.
+- `reconcile()` 리더십 획득 로그 메시지 단순화.
+
+### Added
+- `fakeProposerWithStore` 테스트 헬퍼: `PutRaw`를 직접 호출해 동기 FSM apply를 시뮬레이션, 실제 Raft 노드 없이 Apply→Worker 라운드트립 검증 가능.
+- `TestService_Apply_ThenWorkerProcesses`: Apply() 후 Worker가 실제로 만료 객체를 삭제하는 end-to-end 모듈 불변 조건 테스트. race detector 통과 확인.
+
+## [0.0.167.0] - 2026-05-13 — feat(cluster): runtime UDS join + .join-pending boot simplification
+
+클러스터 join 워크플로우 단순화. 모든 노드가 동일한 `grainfs serve` 명령으로 기동.
+새 노드 추가는 런타임 UDS admin API(`grainfs join <peer>`)로 단일 명령 처리.
+
+### Added
+- `grainfs join <peer> [--endpoint <sock>]`: 실행 중인 노드에 join을 요청하는 새 CLI 명령.
+  - UDS admin socket으로 `POST /v1/cluster/join`을 호출.
+  - 이미 멀티노드 클러스터 멤버 → `already_member` no-op.
+  - peer가 자기 자신 → `already_member` no-op.
+  - solo 상태 → `.join-pending` 파일 기록 후 graceful restart 트리거.
+- `POST /v1/cluster/join` admin UDS 엔드포인트 (`JoinHandler`).
+- `clusterNodes` 인터페이스: `JoinHandler`가 클러스터 멤버십을 조회하는 minimal 인터페이스 (production: `*cluster.MetaRaft`, test: `fakeClusterNodes`).
+- `.join-pending` 파일 기반 부팅 시 join 감지: `grainfs serve` 시작 시 데이터 디렉터리에 파일이 있으면 자동으로 join 모드로 진입.
+- `wipeSoloRaftState()`: join 전 solo Raft 상태를 `.pre-join-backup`으로 이동 (롤백 가능).
+- e2e 테스트: `TestE2E_Bootstrap_JoinUDS_AlreadyMember`, `TestE2E_Bootstrap_JoinCLI_Idempotent`.
+
+### Removed
+- `grainfs serve --peers <addr,...>`: 다중 노드 정적 피어 목록 플래그 제거.
+- `grainfs serve --join <addr>`: serve 시 즉시 join 플래그 제거.
+- `grainfs cluster join`: 별도 프로세스로 join하던 서브커맨드 제거. `grainfs join`으로 대체.
+
+### Changed
+- `grainfs serve`: 모든 노드가 동일한 명령으로 기동. 시드 노드와 팔로워 노드 구분 없음.
+  - 기존 Raft 상태 존재 → 재연결 모드.
+  - Raft 상태 없음 + `.join-pending` 없음 → solo bootstrap.
+  - `.join-pending` 존재 → join 모드 (한 번만 처리 후 파일 삭제).
+
+### Deferred (follow-up PR)
+- Phase 1.3: `clusterMode` 항상 `true` 고정 (solo 부팅 시에도 `--cluster-key` 필수화). 단위 테스트 ~18개 + e2e 인프라 수정 범위.
+- Phase 3.2: solo 노드에 사용자 데이터 있을 때 `--force` 없이 join 방지 가드.
+
 ## [0.0.166.0] - 2026-05-13 — feat(cluster): forward operation atomicity — leader handles index commit
 
 follower가 storage write를 leader로 포워딩한 후 index commit을 follower에서 별도로 수행하던 방식을 제거.
@@ -13,7 +70,7 @@ follower가 storage write를 leader로 포워딩한 후 index commit을 follower
 
 ### Added
 - `internal/cluster/forward_receiver_test.go`: 5개 포워딩 경로의 index-propose 검증 테스트 10개.
-- `internal/cluster/backend_test.go`, `cluster_coordinator_test.go`: 판별 테스트 각 1개.
+- `internal/cluster/backend_test.go`, `cluster_coordinator_test.go`: 판별 테스트 각 1각.
 
 ## [0.0.165.0] - 2026-05-13 — feat(reshard): separate ring-reshard-interval from reshard-interval
 

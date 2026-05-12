@@ -28,6 +28,7 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -44,12 +45,12 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 	// Enable auto-snapshot via cluster-config PATCH. The --snapshot-interval
 	// CLI flag was removed; tests that need the auto-snapshot loop opt in via
 	// the admin UDS PATCH.
-	patchSnapshotInterval(t, dir, "500ms")
+	patchSnapshotInterval(t, dir, "1s")
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	snapshots := waitForAutoSnapshots(t, endpoint, 2, 10*time.Second)
 	assert.GreaterOrEqual(t, len(snapshots), 2,
-		"at least 2 auto-snapshots should have been created with 500ms interval")
+		"at least 2 auto-snapshots should have been created with 1s interval")
 }
 
 func waitForAutoSnapshots(t *testing.T, endpoint string, want int, timeout time.Duration) []map[string]any {

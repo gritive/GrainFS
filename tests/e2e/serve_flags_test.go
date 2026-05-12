@@ -28,7 +28,7 @@ func TestServe_RejectsRemovedUpstreamFlags(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.flag, func(t *testing.T) {
-			cmd := exec.Command(binary, "serve", c.flag, "value", "--data", "/tmp/_unused_serve_flags_test")
+			cmd := exec.Command(binary, "serve", c.flag, "value", "--data", "/tmp/_unused_serve_flags_test", "--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
 			out, err := cmd.CombinedOutput()
 			require.Error(t, err, "binary must exit non-zero when %s is present", c.flag)
 			assert.Contains(t, string(out), "unknown flag", "stderr must mention 'unknown flag' for %s; got: %s", c.flag, string(out))

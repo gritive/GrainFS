@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -51,16 +50,6 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 	pprofURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", pprofPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
@@ -79,7 +68,6 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", clusterKey,
 			"--encryption-key-file", encKeyFile,
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
@@ -113,14 +101,20 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 		}
 	})
 
-	for i := 0; i < numNodes; i++ {
+	// Start seed node first, then let followers join via .join-pending.
+	procs[0] = startNode(0)
+	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
+	time.Sleep(2 * time.Second)
+
+	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+	for i := 1; i < numNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 180*time.Second)
 	waitForPortsParallel(t, pprofPorts, 30*time.Second)
-
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()

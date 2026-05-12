@@ -32,9 +32,8 @@ func init() {
 	serveCmd.Flags().String("admin-group", "", "OS group name for admin socket chown (default: caller's primary group)")
 	serveCmd.Flags().String("public-url", "", "public dashboard base URL (e.g. https://node1:9000); defaults to localhost in `grainfs dashboard` output")
 	serveCmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
-	serveCmd.Flags().String("raft-addr", "", "Raft listen address (required when --peers is set)")
+	serveCmd.Flags().String("raft-addr", "", "Raft listen address for cluster communication (required in cluster mode)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
-	serveCmd.Flags().String("peers", "", "comma-separated list of peer Raft addresses (enables cluster mode)")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
 	serveCmd.Flags().Bool("no-encryption", false, "disable at-rest encryption")
 	_ = serveCmd.Flags().MarkHidden("no-encryption")
@@ -122,7 +121,6 @@ func init() {
 	// binaries). These two knobs tune the always-on mux path.
 	serveCmd.Flags().Int("quic-mux-pool", 4, "stream pool size per peer for multiplexed raft RPCs (avoids HoL with raft pipelining)")
 	serveCmd.Flags().Duration("quic-mux-flush", 2*time.Millisecond, "heartbeat coalescing flush window for multiplexed raft RPCs (must be << raft-heartbeat-interval)")
-	serveCmd.Flags().String("join", "", "join an existing cluster through this leader/follower raft address")
 	rootCmd.AddCommand(serveCmd)
 }
 

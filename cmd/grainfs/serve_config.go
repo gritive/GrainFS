@@ -1,8 +1,6 @@
 package main
 
 import (
-	"strings"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -39,11 +37,6 @@ func buildClusterConfig(
 		IAMStore:         iamStore,
 		IAMApplier:       iamApplier,
 	}
-
-	peersStr, _ := cmd.Flags().GetString("peers")
-	cfg.Peers = serveruntime.FilterEmpty(strings.Split(peersStr, ","))
-	cfg.JoinAddr, _ = cmd.Flags().GetString("join")
-	cfg.JoinMode = cfg.JoinAddr != ""
 
 	cfg.BadgerManagedMode, _ = cmd.Flags().GetBool("badger-managed-mode")
 	cfg.RaftLogGCInterval, _ = cmd.Flags().GetDuration("raft-log-gc-interval")

@@ -164,16 +164,6 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
 	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 	pprofURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", pprofPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
 
 	dataDirs := make([]string, perfNumNodes)
 	for i := range dataDirs {
@@ -197,14 +187,14 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 	}
 	defer cleanup()
 
-	bootStart := time.Now()
-	for i := 0; i < perfNumNodes; i++ {
+	startNode := func(i int) *exec.Cmd {
+		nodeLog, err := os.Create(filepath.Join(scenarioDir, fmt.Sprintf("node-%d.log", i)))
+		require.NoError(t, err, "create node-%d log", i)
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
 			"--node-id", fmt.Sprintf("perf-%s-%d", sc.name, i),
 			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
 			"--cluster-key", perfClusterKey,
 			"--encryption-key-file", encKeyFile,
 			fmt.Sprintf("--pprof-port=%d", pprofPorts[i]),
@@ -215,18 +205,28 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 		)
 		// 노드별 stdout/stderr를 scenarioDir에 캡처해 leader-election 실패 등 boot 단계
 		// 진단을 가능하게 한다. 파일은 cleanup()에서 procs와 함께 회수.
-		nodeLog, err := os.Create(filepath.Join(scenarioDir, fmt.Sprintf("node-%d.log", i)))
-		require.NoError(t, err, "create node-%d log", i)
 		cmd.Stdout = nodeLog
 		cmd.Stderr = nodeLog
 		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
+		return cmd
+	}
+
+	bootStart := time.Now()
+	// Start seed node first, then let followers join via .join-pending.
+	procs[0] = startNode(0)
+	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
+	time.Sleep(2 * time.Second)
+
+	// Bootstrap admin SA on the seed node before followers join.
+	perfAccessKey, perfSecretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+	for i := 1; i < perfNumNodes; i++ {
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+		procs[i] = startNode(i)
+		time.Sleep(150 * time.Millisecond)
 	}
 	waitForPortsParallel(t, httpPorts, 180*time.Second)
 	waitForPortsParallel(t, pprofPorts, 30*time.Second)
-
-	// Bootstrap admin SA via the leader's UDS once quorum exists.
-	perfAccessKey, perfSecretKey = bootstrapAdminViaUDSAny(t, dataDirs, 60*time.Second)
 
 	// 리더 발견 + bucket 준비
 	bucket := fmt.Sprintf("perf-%s", strings.ToLower(strings.ReplaceAll(sc.name, "_", "-")))

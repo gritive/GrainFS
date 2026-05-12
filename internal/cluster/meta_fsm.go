@@ -1136,6 +1136,15 @@ func (f *MetaFSM) BucketAssignments() map[string]string {
 	return out
 }
 
+// HasUserData reports whether the FSM holds any user-created buckets.
+// Used by the join handler to guard against accidental data loss.
+func (f *MetaFSM) HasUserData() bool {
+	f.mu.RLock()
+	has := len(f.bucketAssignments) > 0
+	f.mu.RUnlock()
+	return has
+}
+
 func (f *MetaFSM) ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

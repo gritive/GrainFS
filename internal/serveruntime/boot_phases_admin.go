@@ -92,6 +92,15 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				// forward path (see meta_raft.proposeOrForward).
 				proposer := &cluster.ClusterConfigProposer{Propose: state.metaRaft.Propose}
 				RegisterClusterConfigRoutes(h, state.metaRaft.FSM(), proposer, state.cfg.Encryptor)
+
+				joinH := &JoinHandler{
+					dataDir:     cfg.DataDir,
+					raftAddr:    state.raftAddr,
+					cancel:      state.cancel,
+					nodes:       state.metaRaft,
+					dataChecker: state.metaRaft.FSM(),
+				}
+				h.POST("/v1/cluster/join", joinH.Handle)
 			}
 		},
 	})

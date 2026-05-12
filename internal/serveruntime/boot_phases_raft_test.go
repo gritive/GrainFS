@@ -14,7 +14,7 @@ import (
 // Returns a state ready for the four raft phases under test.
 func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 	require.NoError(t, bootAutoMigrate(state))
 	require.NoError(t, bootOpenMetaDB(state))

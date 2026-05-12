@@ -11,13 +11,11 @@ import (
 	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
-func newClusterTestCmd(clusterKey string) *cobra.Command {
+func newServeTestCmd(clusterKey string) *cobra.Command {
 	cmd := &cobra.Command{Use: "serve"}
 	cmd.Flags().String("cluster-key", clusterKey, "")
-	cmd.Flags().String("peers", "127.0.0.1:7001,127.0.0.1:7002", "")
 	cmd.Flags().String("node-id", "test-node", "")
 	cmd.Flags().String("raft-addr", "127.0.0.1:0", "")
-	cmd.Flags().String("join", "", "")
 	cmd.Flags().Int("nfs-port", 0, "")
 	cmd.Flags().Int("nfs4-port", 0, "")
 	cmd.Flags().Int("nbd-port", 0, "")
@@ -35,14 +33,15 @@ func TestServeCmd_RemovesManualECFlags(t *testing.T) {
 	require.Nil(t, serveCmd.Flags().Lookup("seed-groups"))
 }
 
-// TestRunCluster_EmptyClusterKey_ReturnsError verifies the cluster-key guard
-// added in A7. serveruntime.Run must refuse to start when --cluster-key is empty.
+// TestRunCluster_EmptyClusterKey_ReturnsError verifies the cluster-key guard.
+// Since clusterMode is always true, --cluster-key is required in all modes.
 func TestRunCluster_EmptyClusterKey_ReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cmd := newClusterTestCmd("")
-	cfg := buildClusterConfig(cmd, ":9000", t.TempDir(), "node1", "127.0.0.1:0", "", nil, nil, nil, nil)
+	dataDir := t.TempDir()
+	cmd := newServeTestCmd("" /* empty cluster-key */)
+	cfg := buildClusterConfig(cmd, ":9000", dataDir, "node1", "127.0.0.1:0", "", nil, nil, nil, nil)
 	err := serveruntime.Run(ctx, cfg)
 
 	if err == nil {

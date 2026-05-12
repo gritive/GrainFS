@@ -34,6 +34,7 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -35,6 +35,7 @@ func TestSmoke_DeploymentVerification(t *testing.T) {
 		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

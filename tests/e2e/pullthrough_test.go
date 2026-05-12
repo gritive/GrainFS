@@ -39,6 +39,7 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	upCmd.Stdout = os.Stdout
 	upCmd.Stderr = os.Stderr
@@ -74,6 +75,7 @@ func TestPullThrough_FetchesFromUpstream(t *testing.T) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	localCmd.Stdout = os.Stdout
 	localCmd.Stderr = os.Stderr
@@ -136,6 +138,7 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	upCmd.Stdout = os.Stdout
 	upCmd.Stderr = os.Stderr
@@ -177,6 +180,7 @@ func TestPullthrough_LargeObjectE2E(t *testing.T) {
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	localCmd.Stdout = os.Stdout
 	localCmd.Stderr = os.Stderr

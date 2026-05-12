@@ -29,7 +29,7 @@ func TestStore_PutAndGet(t *testing.T) {
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r1", Status: "Enabled", Expiration: &Expiration{Days: 30}}},
 	}
-	require.NoError(t, s.Put("my-bucket", cfg))
+	require.NoError(t, s.put("my-bucket", cfg))
 
 	got, err := s.Get("my-bucket")
 	require.NoError(t, err)
@@ -42,7 +42,7 @@ func TestStore_PutAndGet(t *testing.T) {
 func TestStore_Delete(t *testing.T) {
 	s := NewStore(newTestDB(t))
 	cfg := &LifecycleConfiguration{Rules: []Rule{{ID: "r", Status: "Enabled"}}}
-	require.NoError(t, s.Put("b", cfg))
+	require.NoError(t, s.put("b", cfg))
 
 	require.NoError(t, s.Delete("b"))
 
@@ -61,8 +61,8 @@ func TestStore_PutOverwrites(t *testing.T) {
 	cfg1 := &LifecycleConfiguration{Rules: []Rule{{ID: "old", Status: "Enabled"}}}
 	cfg2 := &LifecycleConfiguration{Rules: []Rule{{ID: "new", Status: "Disabled"}}}
 
-	require.NoError(t, s.Put("b", cfg1))
-	require.NoError(t, s.Put("b", cfg2))
+	require.NoError(t, s.put("b", cfg1))
+	require.NoError(t, s.put("b", cfg2))
 
 	got, err := s.Get("b")
 	require.NoError(t, err)
