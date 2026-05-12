@@ -1,6 +1,6 @@
 // Package raft — group_transport_mux.go
 //
-// Mux-mode wiring for per-group raft RPCs. When --quic-mux is enabled,
+// Mux-mode wiring for per-group raft RPCs. When mux mode is enabled,
 // GroupRaftQUICMux dials a separate (mux-ALPN) QUIC connection per peer,
 // wraps it in a RaftConn, and routes:
 //

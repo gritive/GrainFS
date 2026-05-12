@@ -32,9 +32,9 @@ type RaftV2Handler interface {
 //
 // Wire prefix: [4B BE groupIDLen][groupID bytes][raft RPC FlatBuffers payload]
 //
-// Optional mux mode (--quic-mux=true): see group_transport_mux.go. When mux
-// mode is enabled, sends use a persistent RaftConn and entries-empty
-// AppendEntries calls are coalesced per peer via HeartbeatCoalescer.
+// Mux mode (see group_transport_mux.go) is enabled at startup: sends use a
+// persistent RaftConn and entries-empty AppendEntries calls are coalesced
+// per peer via HeartbeatCoalescer.
 //
 // nodes stores RaftV2Handler. Both v1 (*Node) and the cluster-layer v2 adapter
 // satisfy that interface, so the dispatch sites (handleRPC,

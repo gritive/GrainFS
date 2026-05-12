@@ -331,8 +331,8 @@ func defaultQUICConfig() *quic.Config {
 }
 
 // SetMuxConnHandler registers the callback that owns accepted mux QUIC
-// connections. internal/raft sets this during process startup if --quic-mux is
-// enabled. If unset, mux connections are rejected at accept time.
+// connections. internal/raft sets this during process startup. If unset,
+// mux connections are rejected at accept time.
 func (t *QUICTransport) SetMuxConnHandler(h MuxConnHandler) {
 	t.mu.Lock()
 	t.muxHandler = h
@@ -344,7 +344,7 @@ func (t *QUICTransport) SetMuxConnHandler(h MuxConnHandler) {
 // The listener advertises both the legacy ALPN ("grainfs") and the mux ALPN
 // ("grainfs-mux-v1"). Inbound connections are routed by negotiated ALPN:
 // legacy → handleInboundConnection (existing path);
-// mux → muxHandler (set by internal/raft if --quic-mux is enabled).
+// mux → muxHandler (set by internal/raft at startup).
 //
 // Authentication is via SPKI pinning (D5): both client and server present
 // the cluster identity cert; both verify the peer's cert SPKI matches the

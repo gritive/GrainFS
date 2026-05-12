@@ -49,7 +49,7 @@ func buildClusterConfig(
 	cfg.RaftLogGCInterval, _ = cmd.Flags().GetDuration("raft-log-gc-interval")
 	cfg.RaftHeartbeatInterval, _ = cmd.Flags().GetDuration("raft-heartbeat-interval")
 	cfg.RaftElectionTimeout, _ = cmd.Flags().GetDuration("raft-election-timeout")
-	cfg.QUICMuxEnabled, _ = cmd.Flags().GetBool("quic-mux")
+	cfg.QUICMuxEnabled = true // mux is always on; the --quic-mux flag was removed
 	cfg.QUICMuxPoolSize, _ = cmd.Flags().GetInt("quic-mux-pool")
 	cfg.QUICMuxFlushWindow, _ = cmd.Flags().GetDuration("quic-mux-flush")
 
