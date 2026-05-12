@@ -86,3 +86,30 @@ func TestClusterConfig_Validate_Invariants(t *testing.T) {
 }
 
 func ptrDuration(v time.Duration) *time.Duration { return &v }
+
+func TestClusterConfig_Validate_SnapshotBounds(t *testing.T) {
+	c := NewClusterConfig()
+
+	// Negative interval rejected
+	negD := -1 * time.Second
+	c.applyPatch(ClusterConfigPatch{SnapshotInterval: &negD}, time.UnixMilli(0))
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for negative snapshot-interval")
+	}
+
+	// retain=0 rejected
+	c = NewClusterConfig()
+	z := int32(0)
+	c.applyPatch(ClusterConfigPatch{SnapshotRetain: &z}, time.UnixMilli(0))
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for snapshot-retain=0")
+	}
+
+	// interval=0 allowed (disable)
+	c = NewClusterConfig()
+	zd := time.Duration(0)
+	c.applyPatch(ClusterConfigPatch{SnapshotInterval: &zd}, time.UnixMilli(0))
+	if err := c.Validate(); err != nil {
+		t.Fatalf("interval=0 must be allowed (disable): %v", err)
+	}
+}

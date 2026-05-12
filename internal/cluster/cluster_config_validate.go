@@ -57,6 +57,13 @@ func (c *ClusterConfig) Validate() error {
 		errs = append(errs, fmt.Sprintf("disk-warn-threshold must be <= disk-critical-threshold (warn=%v crit=%v)", dw, dc))
 	}
 
+	if d := c.SnapshotInterval(); d < 0 {
+		errs = append(errs, fmt.Sprintf("snapshot-interval must be >= 0 (0=disable), got %v", d))
+	}
+	if r := c.SnapshotRetain(); r < 1 {
+		errs = append(errs, fmt.Sprintf("snapshot-retain must be >= 1, got %v", r))
+	}
+
 	if u := c.AlertWebhook(); u != "" {
 		if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://localhost") {
 			errs = append(errs, fmt.Sprintf("alert-webhook must be https:// or http://localhost (tests), got %q", u))
