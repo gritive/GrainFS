@@ -263,6 +263,9 @@ func (m *ReshardManager) runRingOnly(ctx context.Context) (converted, skipped, e
 		if ctx.Err() != nil {
 			break
 		}
+		if m.leader != nil && !m.leader.IsLeader() {
+			break
+		}
 		if ref.ECData == 0 {
 			skipped++
 			continue
