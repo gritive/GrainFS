@@ -21,14 +21,13 @@ type blockIOExecutor struct {
 }
 
 // executeWrite executes a []BlockAction and returns the mutation result.
-// p and off are the original WriteAt arguments; the executor uses
+// p is the original WriteAt data slice; the executor uses
 // action.DataStart and action.CanWrite to slice p without copying.
 func (ex blockIOExecutor) executeWrite(
 	ctx context.Context,
 	name string,
 	vol *Volume,
 	p []byte,
-	off int64,
 	liveMap map[int64]string,
 	actions []BlockAction,
 ) (blockIOResult, error) {
@@ -174,14 +173,16 @@ func (ex blockIOExecutor) executeDirectAction(
 	data := p[action.DataStart : action.DataStart+action.CanWrite]
 
 	if isFullBlock {
-		if _, ok, err := ex.objects.WriteAt(ctx, volumeBucketName, action.Key, 0, data); ok {
-			if err != nil {
-				return fmt.Errorf("write block %d: %w", action.BlkNum, err)
+		if ex.objects.PreferWriteAt(volumeBucketName) {
+			if _, ok, err := ex.objects.WriteAt(ctx, volumeBucketName, action.Key, 0, data); ok {
+				if err != nil {
+					return fmt.Errorf("write block %d: %w", action.BlkNum, err)
+				}
+				if action.IsNew {
+					*newBlocks++
+				}
+				return nil
 			}
-			if action.IsNew {
-				*newBlocks++
-			}
-			return nil
 		}
 		if _, err := ex.objects.PutObject(ctx, volumeBucketName, action.Key,
 			bytes.NewReader(data), "application/octet-stream"); err != nil {
@@ -224,14 +225,16 @@ func (ex blockIOExecutor) executeDirectAsync(
 	data := p[action.DataStart : action.DataStart+action.CanWrite]
 
 	if isFullBlock {
-		if _, ok, err := ex.objects.WriteAt(ctx, volumeBucketName, action.Key, 0, data); ok {
-			if err != nil {
-				return fmt.Errorf("write block %d: %w", action.BlkNum, err)
+		if ex.objects.PreferWriteAt(volumeBucketName) {
+			if _, ok, err := ex.objects.WriteAt(ctx, volumeBucketName, action.Key, 0, data); ok {
+				if err != nil {
+					return fmt.Errorf("write block %d: %w", action.BlkNum, err)
+				}
+				if action.IsNew {
+					*newBlocks++
+				}
+				return nil
 			}
-			if action.IsNew {
-				*newBlocks++
-			}
-			return nil
 		}
 		_, commitFn, err := ex.deferred.PutObjectAsync(ctx, volumeBucketName, action.Key,
 			bytes.NewReader(data), "application/octet-stream")

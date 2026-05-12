@@ -194,7 +194,7 @@ func (e blockIOEngine) write(name string, vol *Volume, p []byte, off int64, live
 	if err != nil {
 		return blockIOResult{}, err
 	}
-	return ex.executeWrite(context.Background(), name, vol, p, off, liveMap, actions)
+	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
 }
 
 func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string) (blockIOResult, error) {
@@ -204,7 +204,7 @@ func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int
 	if err != nil {
 		return blockIOResult{}, err
 	}
-	return ex.executeWrite(context.Background(), name, vol, p, off, liveMap, actions)
+	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
 }
 
 func (e blockIOEngine) discard(name string, vol *Volume, off, length int64, liveMap map[int64]string) (blockIOResult, error) {

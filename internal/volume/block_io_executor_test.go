@@ -31,7 +31,7 @@ func TestExecuteWrite_DirectNewBlockPutsObject(t *testing.T) {
 			Key: blockKey("v", 0), OldKey: blockKey("v", 0), IsNew: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, DefaultBlockSize, result.Bytes)
@@ -50,7 +50,7 @@ func TestExecuteWrite_DirectExistingBlockNoAllocationDelta(t *testing.T) {
 			Key: blockKey("v", 0), OldKey: blockKey("v", 0), IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, int64(0), result.AllocationBytesDelta)
@@ -68,7 +68,7 @@ func TestExecuteWrite_DirectInvalidatesCache(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true},
 	}
 
-	_, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	_, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Contains(t, cache.invalidations, key)
@@ -87,7 +87,7 @@ func TestExecuteWrite_AsyncDirectCollectsCommitFn(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true, Async: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Len(t, result.CommitFns, 1)
@@ -105,7 +105,7 @@ func TestExecuteWrite_DedupNewBlockPutsObject(t *testing.T) {
 			Key: proposedKey, OldKey: "", IsNew: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
@@ -126,7 +126,7 @@ func TestExecuteWrite_DedupDuplicateSkipsPutObject(t *testing.T) {
 			Key: proposedKey, OldKey: existingKey, IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	// dedup hit: no new allocation
@@ -147,7 +147,7 @@ func TestExecuteWrite_CowWritesToCowKey(t *testing.T) {
 			Key: cowKey, OldKey: oldKey, IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, liveMap, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, liveMap, actions)
 
 	require.NoError(t, err)
 	require.True(t, result.LiveMapDirty)
@@ -167,7 +167,7 @@ func TestExecuteWrite_DirectWriteAtPath(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, DefaultBlockSize, result.Bytes)
@@ -187,7 +187,7 @@ func TestExecuteWrite_DirectPartialBlock(t *testing.T) {
 			Key: key, OldKey: key, IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 10, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, 5, result.Bytes)
@@ -208,7 +208,7 @@ func TestExecuteWrite_AsyncDirectPartialBlock(t *testing.T) {
 			Key: key, OldKey: key, IsNew: false, Async: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 10, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Len(t, result.CommitFns, 1)
@@ -233,7 +233,7 @@ func TestExecuteWrite_DedupToDeleteDecrementsBlocks(t *testing.T) {
 			Key: "proposed-key", OldKey: existingKey, IsNew: false},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, -int64(DefaultBlockSize), result.AllocationBytesDelta)
@@ -252,7 +252,7 @@ func TestExecuteWrite_CowNewBlockSkipsRead(t *testing.T) {
 			Key: cowKey, OldKey: "", IsNew: true},
 	}
 
-	result, err := ex.executeWrite(context.Background(), "v", vol, p, 0, liveMap, actions)
+	result, err := ex.executeWrite(context.Background(), "v", vol, p, liveMap, actions)
 
 	require.NoError(t, err)
 	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
@@ -271,7 +271,7 @@ func TestExecuteWrite_InvalidateAllNilCache(t *testing.T) {
 			Key: key, OldKey: key, IsNew: true},
 	}
 
-	_, err := ex.executeWrite(context.Background(), "v", vol, p, 0, nil, actions)
+	_, err := ex.executeWrite(context.Background(), "v", vol, p, nil, actions)
 	require.NoError(t, err) // must not panic with nil cache
 }
 
