@@ -77,6 +77,8 @@ func buildClusterConfig(
 
 	cfg.ScrubInterval, _ = cmd.Flags().GetDuration("scrub-interval")
 	cfg.ReshardInterval, _ = cmd.Flags().GetDuration("reshard-interval")
+	cfg.RingReshardInterval, _ = cmd.Flags().GetDuration("ring-reshard-interval")
+	cfg.DataGroupRefreshInterval, _ = cmd.Flags().GetDuration("datagroup-refresh-interval")
 	cfg.DegradedInterval, _ = cmd.Flags().GetDuration("degraded-check-interval")
 
 	cfg.NFS4Port, _ = cmd.Flags().GetInt("nfs4-port")
@@ -92,6 +94,7 @@ func buildClusterConfig(
 
 	cfg.FlagsSnapshot = collectFlagsSnapshot(cmd)
 
+	serveruntime.ValidateRequiredIntervals(&cfg)
 	return cfg
 }
 

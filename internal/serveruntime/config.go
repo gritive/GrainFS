@@ -81,9 +81,11 @@ type Config struct {
 	AdminGroup  string
 
 	// Scrub / reshard / degraded
-	ScrubInterval    time.Duration
-	ReshardInterval  time.Duration
-	DegradedInterval time.Duration
+	ScrubInterval            time.Duration
+	ReshardInterval          time.Duration
+	RingReshardInterval      time.Duration
+	DataGroupRefreshInterval time.Duration
+	DegradedInterval         time.Duration
 
 	// Node services
 	NFS4Port      int
