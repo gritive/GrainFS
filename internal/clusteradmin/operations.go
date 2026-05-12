@@ -119,8 +119,28 @@ func removePeerPreflightFromStatus(status *Status, target string) (cluster.Remov
 	return cluster.EvaluateRemovePeerPreflight(cluster.RemovePeerPreflightInput{
 		TargetID: target,
 		Voters:   status.Peers,
-		Snapshot: status.PeerSnapshot,
+		Snapshot: peerLivenessRowsFromWire(status.PeerSnapshot),
 	}), true
+}
+
+// peerLivenessRowsFromWire converts the wire shape back to the domain shape so
+// cluster.EvaluateRemovePeerPreflight (which switches on typed enums) can run
+// against an admin-API response.
+func peerLivenessRowsFromWire(rows []PeerLivenessRow) []cluster.PeerLivenessRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]cluster.PeerLivenessRow, len(rows))
+	for i, r := range rows {
+		out[i] = cluster.PeerLivenessRow{
+			PeerID:        r.PeerID,
+			RaftAddr:      r.RaftAddr,
+			IdentityState: cluster.PeerIdentityState(r.IdentityState),
+			LivenessState: cluster.PeerLivenessState(r.LivenessState),
+			Reason:        r.Reason,
+		}
+	}
+	return out
 }
 
 func removePeerPreflightSummary(result cluster.RemovePeerPreflightResult) string {

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
-	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // Client speaks to a single grainfs server's admin endpoints. Transport
@@ -31,77 +30,6 @@ type Client struct {
 func NewClient(endpoint string) *Client {
 	tp, _ := adminapi.NewTransport(endpoint)
 	return &Client{Transport: tp}
-}
-
-// Status mirrors the JSON shape returned by /v1/cluster/status. Fields
-// not present (e.g. local mode) decode to zero values; callers should branch
-// on Mode.
-type Status struct {
-	Mode              string                    `json:"mode"`
-	NodeID            string                    `json:"node_id,omitempty"`
-	State             string                    `json:"state,omitempty"`
-	Term              uint64                    `json:"term,omitempty"`
-	LeaderID          string                    `json:"leader_id,omitempty"`
-	Peers             []string                  `json:"peers,omitempty"`
-	DownNodes         []string                  `json:"down_nodes,omitempty"`
-	PeerAddrs         map[string]string         `json:"peer_addrs,omitempty"`
-	PeerStates        map[string]string         `json:"peer_states,omitempty"`
-	PeerSnapshot      []cluster.PeerLivenessRow `json:"peer_snapshot,omitempty"`
-	BucketAssignments map[string]string         `json:"bucket_assignments,omitempty"`
-	ShardGroups       []ShardGroup              `json:"shard_groups,omitempty"`
-}
-
-type ShardGroup struct {
-	ID      string   `json:"id"`
-	PeerIDs []string `json:"peer_ids"`
-}
-
-type PlacementOptions struct {
-	Bucket string
-	Key    string
-	Limit  int
-}
-
-type PlacementReport struct {
-	DesiredPolicyBasis    string                 `json:"desired_policy_basis"`
-	Bucket                string                 `json:"bucket,omitempty"`
-	Key                   string                 `json:"key,omitempty"`
-	ObjectCount           int                    `json:"object_count"`
-	Bytes                 int64                  `json:"bytes"`
-	ActualProfileCounts   map[string]int         `json:"actual_profile_counts"`
-	PendingUpgradeCount   int                    `json:"pending_upgrade_count"`
-	DowngradeSkippedCount int                    `json:"downgrade_skipped_count"`
-	UnknownLayoutCount    int                    `json:"unknown_layout_count"`
-	RepairNeededCount     int                    `json:"repair_needed_count"`
-	Details               []PlacementReportEntry `json:"details,omitempty"`
-}
-
-type PlacementReportEntry struct {
-	Bucket           string   `json:"bucket"`
-	Key              string   `json:"key"`
-	VersionID        string   `json:"version_id"`
-	PlacementGroupID string   `json:"placement_group_id"`
-	ActualECData     uint8    `json:"actual_ec_data"`
-	ActualECParity   uint8    `json:"actual_ec_parity"`
-	DesiredECData    int      `json:"desired_ec_data"`
-	DesiredECParity  int      `json:"desired_ec_parity"`
-	LayoutState      string   `json:"layout_state"`
-	NodeIDs          []string `json:"node_ids,omitempty"`
-	Size             int64    `json:"size"`
-}
-
-// Event mirrors eventstore.Event without importing the server package, which
-// would cycle internal/server -> internal/clusteradmin -> cmd back into
-// internal/server through wiring.
-type Event struct {
-	Timestamp int64          `json:"ts"`
-	Type      string         `json:"type"`
-	Action    string         `json:"action"`
-	Bucket    string         `json:"bucket,omitempty"`
-	Key       string         `json:"key,omitempty"`
-	User      string         `json:"user,omitempty"`
-	Size      int64          `json:"size,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // Status fetches /v1/cluster/status. ctx controls the deadline; pass a
@@ -175,13 +103,6 @@ func (c *Client) EventLog(ctx context.Context, since time.Duration, limit int) (
 	return out, nil
 }
 
-// TransferLeaderResult mirrors the 200 response of /v1/cluster/transfer-leader.
-type TransferLeaderResult struct {
-	OldLeader  string `json:"old_leader"`
-	Term       uint64 `json:"term"`
-	TargetHint string `json:"target_hint,omitempty"`
-}
-
 // TransferLeader issues POST /v1/cluster/transfer-leader. On non-2xx the
 // returned error is *TransferLeaderError so callers can branch on Retry.
 func (c *Client) TransferLeader(ctx context.Context) (*TransferLeaderResult, error) {
@@ -195,31 +116,6 @@ func (c *Client) TransferLeader(ctx context.Context) (*TransferLeaderResult, err
 	return &out, nil
 }
 
-// Health mirrors GET /v1/cluster/health response. Server-side derivation
-// of Issues so the dashboard and CLI render the same diagnostics.
-type Health struct {
-	Mode     string          `json:"mode"`
-	Degraded bool            `json:"degraded"`
-	LeaderID string          `json:"leader_id,omitempty"`
-	Term     uint64          `json:"term,omitempty"`
-	Quorum   QuorumInfo      `json:"quorum"`
-	Peers    []PeerHealthRow `json:"peers,omitempty"`
-	Issues   []string        `json:"issues,omitempty"`
-}
-
-type QuorumInfo struct {
-	VotersTotal int  `json:"voters_total"`
-	AliveCount  int  `json:"alive_count"`
-	Required    int  `json:"required"`
-	Healthy     bool `json:"healthy"`
-}
-
-type PeerHealthRow struct {
-	PeerID   string `json:"peer_id"`
-	State    string `json:"state"`
-	RaftAddr string `json:"raft_addr,omitempty"`
-}
-
 // Health fetches GET /v1/cluster/health (typed parse).
 func (c *Client) Health(ctx context.Context) (*Health, error) {
 	var h Health
@@ -227,24 +123,6 @@ func (c *Client) Health(ctx context.Context) (*Health, error) {
 		return nil, err
 	}
 	return &h, nil
-}
-
-// BalancerStatus mirrors the JSON shape produced by
-// /v1/cluster/balancer/status (snake_case fields per balancer_api.go).
-type BalancerStatus struct {
-	Available    bool                 `json:"available"`
-	Active       bool                 `json:"active"`
-	ImbalancePct float64              `json:"imbalance_pct"`
-	Nodes        []BalancerNodeStatus `json:"nodes"`
-}
-
-type BalancerNodeStatus struct {
-	NodeID         string  `json:"node_id"`
-	DiskUsedPct    float64 `json:"disk_used_pct"`
-	DiskAvailBytes uint64  `json:"disk_avail_bytes"`
-	RequestsPerSec float64 `json:"requests_per_sec"`
-	JoinedAt       string  `json:"joined_at,omitempty"`
-	UpdatedAt      string  `json:"updated_at,omitempty"`
 }
 
 // BalancerStatus fetches GET /v1/cluster/balancer/status (typed parse).
