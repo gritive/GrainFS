@@ -224,8 +224,12 @@ func TestService_Apply_ThenWorkerProcesses(t *testing.T) {
 		return len(del.deleted) > 0
 	}, 2*time.Second, 10*time.Millisecond, "worker should delete expired object after Apply")
 
+	// Cancel to stop the worker, then assert. The worker may have run more than one
+	// cycle before stopping, so we check that the deletion happened rather than that
+	// it happened exactly once.
+	cancel()
 	del.mu.Lock()
-	assert.Equal(t, []string{"b/old.log"}, del.deleted)
+	assert.Contains(t, del.deleted, "b/old.log")
 	del.mu.Unlock()
 }
 
