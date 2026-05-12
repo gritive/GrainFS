@@ -12,6 +12,8 @@
 
 ### cluster — pre-existing issues
 
+- [ ] **P0: intermittent failure in TestECObjectReader_ReadObject_MarksUnhealthyPeerOnFetchError** — `internal/cluster/` 패키지에서 간헐적으로 실패. lifecycle-deepen 브랜치(2026-05-13) diff와 무관 — 이 브랜치는 `internal/lifecycle/`만 변경. master HEAD에서도 동일하게 간헐 실패 확인됨. **Re-open trigger:** `go test -count=5 ./internal/cluster/` 에서 재현 시 조사 및 수정. **연관 파일:** `internal/cluster/`.
+
 - [ ] **P0: race condition in TestClusterCoordinator_FindObjectIndexOrphans_ScansGroupLocalObjects** — `internal/cluster/cluster_coordinator_test.go`에서 race detector가 intermittent하게 감지됨. 이번 브랜치(EC Object Reader 추출, 2026-05-13) diff와 무관한 기존 버그. `-race` 빌드에서 간헐적으로 발생. **Re-open trigger:** `go test -race -count=3 ./internal/cluster/`에서 재현 시 조사 및 수정. **연관 파일:** `internal/cluster/cluster_coordinator_test.go`, `internal/cluster/cluster_coordinator.go`.
 
 ### raft v2 (M2-M5 follow-ups from M1 adversarial review)
