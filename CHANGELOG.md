@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.157.0] - 2026-05-12 — refactor(server): clusterStatus emits typed adminapi.Status
+
+### Changed
+- `server.clusterStatus` 핸들러가 `map[string]any` 빌드 대신 `adminapi.Status` struct로 직접 emit. 서버와 클라이언트가 동일한 typed schema 공유 — wire-shape drift 위험 제거.
+- `adminapi.Status`에 `Degraded bool` (always-emit), `ObjectIndexSummary *ObjectIndexSummary` (closed-schema mirror) 필드 추가. `Mode`/`Degraded`/`DownNodes`는 zero value에도 의미가 있어 omitempty 제거.
+- `adminapi.ObjectIndexSummary` 새 타입 (`cluster.ObjectIndexSummary` mirror): adminapi 패키지가 cluster를 import 하지 않는 closed-schema 원칙 유지.
+- `internal/server/golden_fixture_test.go` `assertGoldenJSON` 헬퍼가 응답·골든 양쪽을 unmarshal→sort-key marshal 후 비교. struct 필드 선언 순서 vs map 알파벳 순서 차이에 robust.
+
+### Removed (BREAKING — wire schema)
+- `/v1/cluster/status` 응답에서 `split_brain_suspected` 필드 제거. 항상 하드코딩 `false`였고 내부 소비처 0건 — `grainfs_split_brain_suspected` Prometheus 메트릭은 그대로 유지되어 모니터링 경로 무영향.
+
 ## [0.0.156.0] - 2026-05-12 — refactor(adminapi): Details → json.RawMessage + typed structs
 
 ### Changed

@@ -19,6 +19,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
@@ -1339,33 +1340,33 @@ func toHTTPRequest(c *app.RequestContext) *http.Request {
 }
 
 func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
-	status := map[string]any{
-		"mode":                  "local",
-		"split_brain_suspected": false,
-		"degraded":              s.degradedFlag.Load(),
+	status := adminapi.Status{
+		Mode:      "local",
+		Degraded:  s.degradedFlag.Load(),
+		DownNodes: []string{},
 	}
 
 	if s.cluster != nil {
-		status["mode"] = "cluster"
-		status["node_id"] = s.cluster.NodeID()
-		status["state"] = s.cluster.State()
-		status["term"] = s.cluster.Term()
-		status["leader_id"] = s.cluster.LeaderID()
+		status.Mode = "cluster"
+		status.NodeID = s.cluster.NodeID()
+		status.State = s.cluster.State()
+		status.Term = s.cluster.Term()
+		status.LeaderID = s.cluster.LeaderID()
 
 		snap := s.cluster.Snapshot()
 		if snap.PeerSnapshot != nil {
-			status["peer_snapshot"] = cluster.PeerLivenessRowsToWire(snap.PeerSnapshot)
-			status["peers"] = legacyPeersFromSnapshot(snap.PeerSnapshot)
-			status["peer_addrs"] = legacyPeerAddrsFromSnapshot(snap.PeerSnapshot)
-			status["peer_states"] = legacyPeerStatesFromSnapshot(snap.PeerSnapshot)
-			status["down_nodes"] = legacyDownNodesFromSnapshot(snap.PeerSnapshot)
+			status.PeerSnapshot = cluster.PeerLivenessRowsToWire(snap.PeerSnapshot)
+			status.Peers = legacyPeersFromSnapshot(snap.PeerSnapshot)
+			status.PeerAddrs = legacyPeerAddrsFromSnapshot(snap.PeerSnapshot)
+			status.PeerStates = legacyPeerStatesFromSnapshot(snap.PeerSnapshot)
+			status.DownNodes = legacyDownNodesFromSnapshot(snap.PeerSnapshot)
 		} else {
-			status["peers"] = s.cluster.Peers()
+			status.Peers = s.cluster.Peers()
 			if snap.PeerAddrs != nil {
-				status["peer_addrs"] = snap.PeerAddrs
+				status.PeerAddrs = snap.PeerAddrs
 			}
 			if snap.PeerStates != nil {
-				status["peer_states"] = snap.PeerStates
+				status.PeerStates = snap.PeerStates
 			}
 
 			// Compute down nodes: configured peers minus live peers.
@@ -1374,21 +1375,25 @@ func (s *Server) clusterStatus(ctx context.Context, c *app.RequestContext) {
 			for _, p := range livePeers {
 				liveSet[p] = struct{}{}
 			}
-			var downNodes []string
+			downNodes := []string{}
 			for _, p := range s.cluster.Peers() {
 				if _, ok := liveSet[p]; !ok {
 					downNodes = append(downNodes, p)
 				}
 			}
-			status["down_nodes"] = downNodes
+			status.DownNodes = downNodes
 		}
 		if snap.BucketAssignments != nil {
-			status["bucket_assignments"] = snap.BucketAssignments
+			status.BucketAssignments = snap.BucketAssignments
 		}
 		if snap.ShardGroups != nil {
-			status["shard_groups"] = clusterStatusShardGroups(snap.ShardGroups)
+			status.ShardGroups = clusterStatusShardGroups(snap.ShardGroups)
 		}
-		status["object_index_summary"] = s.cluster.ObjectIndexSummary(string(c.QueryArgs().Peek("bucket")))
+		summary := s.cluster.ObjectIndexSummary(string(c.QueryArgs().Peek("bucket")))
+		status.ObjectIndexSummary = &adminapi.ObjectIndexSummary{
+			Bucket:               summary.Bucket,
+			PlacementGroupCounts: summary.PlacementGroupCounts,
+		}
 	}
 
 	data, _ := json.Marshal(status)
@@ -1424,16 +1429,11 @@ func (s *Server) clusterPlacement(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, s.cluster.PlacementReport(bucket, key, limit))
 }
 
-type clusterStatusShardGroup struct {
-	ID      string   `json:"id"`
-	PeerIDs []string `json:"peer_ids"`
-}
-
-func clusterStatusShardGroups(groups []cluster.ShardGroupEntry) []clusterStatusShardGroup {
-	out := make([]clusterStatusShardGroup, 0, len(groups))
+func clusterStatusShardGroups(groups []cluster.ShardGroupEntry) []adminapi.ShardGroup {
+	out := make([]adminapi.ShardGroup, 0, len(groups))
 	for _, group := range groups {
 		peers := append([]string(nil), group.PeerIDs...)
-		out = append(out, clusterStatusShardGroup{ID: group.ID, PeerIDs: peers})
+		out = append(out, adminapi.ShardGroup{ID: group.ID, PeerIDs: peers})
 	}
 	return out
 }

@@ -253,20 +253,34 @@ type CreateSnapshotResp struct {
 // --- Cluster wire types ---
 
 // Status mirrors the JSON body of GET /v1/cluster/status. The server emits
-// this shape from a map[string]any handler; clients decode through this view.
+// this shape from a typed Status struct; clients decode through this view.
+//
+// Always-emit fields (Mode, Degraded, DownNodes) carry meaning at zero
+// value and are not marked omitempty so the wire shape stays self-describing
+// in single-node mode and when the cluster has no down nodes.
 type Status struct {
-	Mode              string            `json:"mode"`
-	NodeID            string            `json:"node_id,omitempty"`
-	State             string            `json:"state,omitempty"`
-	Term              uint64            `json:"term,omitempty"`
-	LeaderID          string            `json:"leader_id,omitempty"`
-	Peers             []string          `json:"peers,omitempty"`
-	DownNodes         []string          `json:"down_nodes,omitempty"`
-	PeerAddrs         map[string]string `json:"peer_addrs,omitempty"`
-	PeerStates        map[string]string `json:"peer_states,omitempty"`
-	PeerSnapshot      []PeerLivenessRow `json:"peer_snapshot,omitempty"`
-	BucketAssignments map[string]string `json:"bucket_assignments,omitempty"`
-	ShardGroups       []ShardGroup      `json:"shard_groups,omitempty"`
+	Mode               string              `json:"mode"`
+	Degraded           bool                `json:"degraded"`
+	NodeID             string              `json:"node_id,omitempty"`
+	State              string              `json:"state,omitempty"`
+	Term               uint64              `json:"term,omitempty"`
+	LeaderID           string              `json:"leader_id,omitempty"`
+	Peers              []string            `json:"peers,omitempty"`
+	DownNodes          []string            `json:"down_nodes"`
+	PeerAddrs          map[string]string   `json:"peer_addrs,omitempty"`
+	PeerStates         map[string]string   `json:"peer_states,omitempty"`
+	PeerSnapshot       []PeerLivenessRow   `json:"peer_snapshot,omitempty"`
+	BucketAssignments  map[string]string   `json:"bucket_assignments,omitempty"`
+	ShardGroups        []ShardGroup        `json:"shard_groups,omitempty"`
+	ObjectIndexSummary *ObjectIndexSummary `json:"object_index_summary,omitempty"`
+}
+
+// ObjectIndexSummary mirrors cluster.ObjectIndexSummary on the wire. The
+// adminapi package keeps its schema closed (no internal/cluster import) so
+// the wire form is stable across cluster-internal type changes.
+type ObjectIndexSummary struct {
+	Bucket               string         `json:"bucket,omitempty"`
+	PlacementGroupCounts map[string]int `json:"placement_group_counts"`
 }
 
 // PeerLivenessRow is one row of the cluster peer liveness snapshot. Mirrors
