@@ -47,10 +47,18 @@ const entryHeaderSize = 8 + 8 + 1 + 4 // Term + Index + Type + CommandLen
 // More importantly, meta keys have length != len(keyPrefix)+8, so the entry-
 // scan loop (which validates that exact length) skips them cleanly.
 const (
-	metaMarker           = 0xFF
-	metaFirstIndexSuffix = "meta/firstIndex"
-	metaPrevTermSuffix   = "meta/prevTerm"
+	metaMarker            = 0xFF
+	metaFirstIndexSuffix  = "meta/firstIndex"
+	metaPrevTermSuffix    = "meta/prevTerm"
+	metaSchemaVersionSuff = "meta/schemaVersion"
 )
+
+// raftV2SchemaVersion is the on-disk schema version of a v2 log store.
+// Bumped to 1 in M6.0 (Path B) because single-phase ConfChange entries
+// gained an Op tag + learner snapshot. An older store decoded by the
+// post-M6.0 codec would mis-parse those bytes — open-time refusal forces
+// operators to clean-restart per CHANGELOG procedure.
+const raftV2SchemaVersion uint8 = 1
 
 // makeMetaKey returns prefix || 0xFF || suffix.
 func (s *badgerLogStore) makeMetaKey(suffix string) []byte {
@@ -77,9 +85,35 @@ func newBadgerLogStore(db *badger.DB, prefix []byte) (*badgerLogStore, error) {
 	// snapshot covers any entry yet). Loaded from meta keys below if present.
 	s.firstIdx.Store(1)
 
+	// Schema-version gate (M6.0). Refuse to open a pre-M6.0 store because
+	// the single-phase ConfChange wire format changed (Op tag + learner
+	// snapshot). Empty stores stamp the current version on first open.
+	// Detection rules:
+	//   - schema key present, value == raftV2SchemaVersion: OK.
+	//   - schema key present, value != raftV2SchemaVersion: refuse loudly.
+	//   - schema key absent + no entry keys exist + no compaction meta:
+	//     fresh store, stamp current version.
+	//   - schema key absent + entries OR compaction meta exist: pre-M6.0
+	//     store; refuse loudly.
+	stamped, sawEntries, sawCompaction, err := s.openSchemaCheck(db)
+	if err != nil {
+		return nil, err
+	}
+	if !stamped {
+		if sawEntries || sawCompaction {
+			return nil, fmt.Errorf("raftv2: log store schema version absent but entries/compaction present — pre-M6.0 store, wipe and re-bootstrap (see CHANGELOG)")
+		}
+		// Fresh store: stamp current version.
+		if err := db.Update(func(txn *badger.Txn) error {
+			return txn.Set(s.makeMetaKey(metaSchemaVersionSuff), []byte{raftV2SchemaVersion})
+		}); err != nil {
+			return nil, fmt.Errorf("raftv2: log store stamp schema version: %w", err)
+		}
+	}
+
 	// Load compaction meta first — if a previous run left the log compacted,
 	// FirstIndex must reflect that before any caller queries.
-	err := db.View(func(txn *badger.Txn) error {
+	err = db.View(func(txn *badger.Txn) error {
 		if v, err := readMetaUint64(txn, s.makeMetaKey(metaFirstIndexSuffix)); err != nil {
 			return fmt.Errorf("badgerLogStore: load firstIndex: %w", err)
 		} else if v > 0 {
@@ -151,6 +185,67 @@ func newBadgerLogStore(db *badger.DB, prefix []byte) (*badgerLogStore, error) {
 		return nil, fmt.Errorf("badgerLogStore: open scan: %w", err)
 	}
 	return s, nil
+}
+
+// openSchemaCheck inspects the store for the schema-version stamp and
+// reports whether the version is acceptable. Returns:
+//
+//	stamped       — true if the schema-version key exists and matches.
+//	sawEntries    — true if any entry-shaped key exists under keyPrefix.
+//	sawCompaction — true if either compaction meta key exists.
+//
+// If the stamp exists with the wrong value, the function returns an
+// error directly so callers can surface a clear migration message.
+func (s *badgerLogStore) openSchemaCheck(db *badger.DB) (stamped, sawEntries, sawCompaction bool, err error) {
+	err = db.View(func(txn *badger.Txn) error {
+		// Schema version key.
+		schemaKey := s.makeMetaKey(metaSchemaVersionSuff)
+		item, gerr := txn.Get(schemaKey)
+		if gerr == nil {
+			verr := item.Value(func(val []byte) error {
+				if len(val) != 1 {
+					return fmt.Errorf("raftv2: log store schema version: bad length %d", len(val))
+				}
+				if val[0] != raftV2SchemaVersion {
+					return fmt.Errorf("raftv2: log store schema version %d unsupported (need %d) — wipe and re-bootstrap (see CHANGELOG)", val[0], raftV2SchemaVersion)
+				}
+				return nil
+			})
+			if verr != nil {
+				return verr
+			}
+			stamped = true
+		} else if gerr != badger.ErrKeyNotFound {
+			return fmt.Errorf("raftv2: log store read schema version: %w", gerr)
+		}
+		// Compaction meta? (firstIndex / prevTerm)
+		if _, cerr := txn.Get(s.makeMetaKey(metaFirstIndexSuffix)); cerr == nil {
+			sawCompaction = true
+		} else if cerr != badger.ErrKeyNotFound {
+			return cerr
+		}
+		if !sawCompaction {
+			if _, cerr := txn.Get(s.makeMetaKey(metaPrevTermSuffix)); cerr == nil {
+				sawCompaction = true
+			} else if cerr != badger.ErrKeyNotFound {
+				return cerr
+			}
+		}
+		// Any entry key? (length == prefix+8) — scan the first one.
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		wantLen := len(s.keyPrefix) + 8
+		for it.Seek(s.keyPrefix); it.ValidForPrefix(s.keyPrefix); it.Next() {
+			if len(it.Item().Key()) == wantLen {
+				sawEntries = true
+				return nil
+			}
+		}
+		return nil
+	})
+	return stamped, sawEntries, sawCompaction, err
 }
 
 // readMetaUint64 reads an 8-byte big-endian uint64 from the given key. Returns
