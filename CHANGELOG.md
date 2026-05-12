@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.171.0] - 2026-05-13 — feat(migration): deep JobStore + leader-only Worker + FSM apply seam
+
+### Added
+- `migration.JobStore`: BadgerDB 기반 job 상태 (`StatusRunning/Complete/Failed`) 및 cursor 저장소. `jobPrefix`/`cursorPrefix` 별도 keyspace로 분리.
+- `migration.Worker`: trigger 채널 기반 leader-only job executor. 시작 시 running 잡 재개 + `Trigger()` 호출 또는 ticker로 pending 잡 처리.
+- `migration.Service`: `LeadershipSignal` 구독으로 leader/follower 전환 시 Worker 자동 start/stop. `SubmitJob` → Raft proposal → Worker trigger 흐름.
+- `migration.Source.ListObjectsPage`: cursor 기반 페이지네이션 API. 기존 `ListObjects` 대체 (cursor="": 처음부터, next="": 마지막 페이지).
+- FSM payload encode/decode (`payload.go`): `JobStart`/`JobDone`/`JobFailed` big-endian 바이너리 인코딩.
+- `MetaCmdType` 상수 추가: `MetaCmdTypeMigrationJobStart` (37), `MetaCmdTypeMigrationJobDone` (38), `MetaCmdTypeMigrationJobFailed` (39).
+- `MetaFSM.applyMigrationJobStart/Done/Failed`: FSM apply 메서드. `time.Now()` 미사용 — payload에서 디코딩한 타임스탬프만 사용 (결정론적 FSM 불변조건 준수).
+- `MigrationProposer`: `cluster` 패키지의 Proposer 어댑터. proposal 시점에 `time.Now().UnixNano()` 기록 (FSM 외부, determinism-safe).
+- `serveruntime` 부트 배선: `JobStore`, `MigrationProposer`, `RaftLeadership` 연결; `go state.migrationSvc.Run(ctx)`.
+- `MigrationInterval` config 필드 추가.
+
+### Known Limitations
+- 실행 중인 버킷에 `SubmitJob` 재호출 시 `Copied`/`StartedAt` 리셋 (cursor 보존). "잡 재시작" 의미론으로 의도된 동작.
+- `ProposeJobDone` 직전 크래시 시 커서 처음부터 재시작 (S3 PUT 멱등성으로 데이터 무결성 유지).
+
 ## [0.0.170.0] - 2026-05-13 — refactor: remove --nbd-volume-size flag and NBD auto-volume creation
 
 ### Removed
