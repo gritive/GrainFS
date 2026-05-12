@@ -164,9 +164,11 @@ func (h *ClusterConfigHandler) servePatch(w http.ResponseWriter, r *http.Request
 
 	// Operator-side audit log: emitted BEFORE propose so even a failed propose
 	// is traceable. peer_uid is best-effort (UDS SO_PEERCRED); 0 when unknown.
+	pc := peerUIDFrom(r)
 	log.Info().
 		Str("event", "cluster_config_patch_received").
-		Uint32("actor_uid", peerUIDFrom(r)).
+		Uint32("actor_uid", pc.UID).
+		Bool("actor_uid_resolved", pc.Resolved).
 		Msg("cluster config PATCH received")
 
 	if err := h.proposer.ProposeClusterConfigPatch(patch); err != nil {
@@ -241,12 +243,3 @@ func (req ClusterConfigPatchRequest) toPatch(enc *encrypt.Encryptor) (cluster.Cl
 	}
 	return p, nil
 }
-
-// peerUIDFrom extracts the connecting uid from an admin UDS request. The
-// existing admin UDS server (internal/admin) does not currently surface
-// SO_PEERCRED to handlers, so this returns 0 ("unknown") for now. peer-uid
-// is best-effort per spec — functional correctness does not depend on it.
-//
-// TODO(task-10): plumb SO_PEERCRED through the admin UDS listener so this
-// can return the real connecting uid.
-func peerUIDFrom(_ *http.Request) uint32 { return 0 }
