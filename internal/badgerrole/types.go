@@ -8,6 +8,7 @@ const (
 	RoleMeta          Role = "meta"
 	RoleMetaRaftLog   Role = "meta_raft_log"
 	RoleSharedRaftLog Role = "shared_raft_log"
+	RoleSharedFSM     Role = "shared_fsm"
 	RoleGroupState    Role = "group_state"
 	RoleGroupRaftLog  Role = "group_raft_log"
 	RoleReceipts      Role = "receipts"

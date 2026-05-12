@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/raft"
 )
 
 func makeAddNodeCmd(t *testing.T, id, addr string, role uint8) []byte {
@@ -78,7 +79,7 @@ func TestMetaFSM_Snapshot_Restore(t *testing.T) {
 	require.NotEmpty(t, snap)
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	nodes := f2.Nodes()
 	require.Len(t, nodes, 2)
@@ -220,7 +221,7 @@ func TestMetaFSM_ShardGroups_Snapshot_Restore(t *testing.T) {
 	require.NotEmpty(t, snap)
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	assert.Len(t, f2.Nodes(), 1)
 
@@ -387,7 +388,7 @@ func TestMetaFSM_ObjectIndexSnapshotRestore(t *testing.T) {
 	snap, err := f.Snapshot()
 	require.NoError(t, err)
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	latest, ok := f2.ObjectIndexLatest("b", "k")
 	require.True(t, ok)
@@ -404,7 +405,7 @@ func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	require.NotEmpty(t, snap)
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	assignments := f2.BucketAssignments()
 	require.Len(t, assignments, 2)
@@ -500,7 +501,7 @@ func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 	require.NotContains(t, string(snap), "current-snapshot-id", "metadata JSON bodies must not be snapshotted into meta-Raft")
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	restored, ok := f2.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.True(t, ok)
 	require.Equal(t, tbl.MetadataLocation, restored.MetadataLocation)
@@ -587,7 +588,7 @@ func TestMetaFSM_Restore_FiresOnBucketAssignedCallback(t *testing.T) {
 	f2.SetOnBucketAssigned(func(bucket, groupID string) {
 		got[bucket] = groupID
 	})
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 
 	assert.Equal(t, map[string]string{"photos": "group-0", "videos": "group-1"}, got)
 }
@@ -718,7 +719,7 @@ func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	ls := f2.LoadSnapshot()
 	assert.InDelta(t, 75.0, ls["n1"].DiskUsedPct, 0.01)
 }
@@ -732,7 +733,7 @@ func TestMetaFSM_ActivePlan_Snapshot_Restore(t *testing.T) {
 	require.NoError(t, err)
 
 	f2 := NewMetaFSM()
-	require.NoError(t, f2.Restore(snap))
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	assert.Equal(t, "plan-99", f2.ActivePlanID())
 }
 

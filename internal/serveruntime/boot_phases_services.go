@@ -14,8 +14,8 @@ import (
 // registers the s3-cache invalidator, and fires the distBackend apply loop
 // goroutine.
 //
-// Inputs: state.db, state.node, state.distBackend, state.stopApply,
-// cfg.PackThreshold, cfg.DataDir.
+// Inputs: state.db, state.distBackend, state.stopApply, cfg.PackThreshold,
+// cfg.DataDir.
 //
 // Outputs: state.fsm, state.cachedBackend.
 //
@@ -30,7 +30,12 @@ import (
 // starts — otherwise FSM-replicated writes can land before invalidator
 // wiring and stale cache entries survive cross-node.
 func bootSnapshotAndApplyLoop(state *bootState) error {
-	state.fsm = cluster.NewFSM(state.db)
+	// state.fsm IS the distBackend's FSM (same instance) so snapshot/restore
+	// scope matches the apply loop's scope — both carry the "group-0"
+	// keyspace prefix over the shared FSM-state DB (C2 P3). raftv2 owns
+	// snapshot lifecycle (M5 PR 29); the v1 SnapshotManager wiring that
+	// previously lived here is gone.
+	state.fsm = state.distBackend.FSMRef()
 
 	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend.
 	// The WAL + pullthrough wrappers are added downstream in run.go (later

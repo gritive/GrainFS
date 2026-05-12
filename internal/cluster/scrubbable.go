@@ -69,26 +69,23 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 
 	go func() {
 		defer close(ch)
-		latPrefix := []byte("lat:" + bucket + "/")
+		rawLatPrefix := []byte("lat:" + bucket + "/")
 
 		_ = b.db.View(func(txn *badger.Txn) error {
-			it := txn.NewIterator(badger.DefaultIteratorOptions)
-			defer it.Close()
-			for it.Seek(latPrefix); it.ValidForPrefix(latPrefix); it.Next() {
-				item := it.Item()
-				key := string(item.Key()[len(latPrefix):])
+			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
+				key := string(raw[len(rawLatPrefix):])
 
 				var versionID string
 				if err := item.Value(func(v []byte) error {
 					versionID = string(v)
 					return nil
 				}); err != nil || versionID == "" {
-					continue
+					return nil
 				}
 
-				metaItem, err := txn.Get(objectMetaKeyV(bucket, key, versionID))
+				metaItem, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
 				if err != nil {
-					continue
+					return nil
 				}
 				var meta objectMeta
 				if err := metaItem.Value(func(v []byte) error {
@@ -96,10 +93,10 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 					meta, derr = unmarshalObjectMeta(v)
 					return derr
 				}); err != nil {
-					continue
+					return nil
 				}
 				if meta.ETag == deleteMarkerETag {
-					continue // tombstone — no shards to scrub
+					return nil // tombstone — no shards to scrub
 				}
 
 				ch <- scrubber.ObjectRecord{
@@ -111,8 +108,8 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 					ETag:         meta.ETag,
 					LastModified: meta.LastModified,
 				}
-			}
-			return nil
+				return nil
+			})
 		})
 	}()
 

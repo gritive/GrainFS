@@ -7,10 +7,17 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Snapshotter creates and restores state machine snapshots.
+// FSMSnapshotFormatVersion is the format version stamped into every snapshot's
+// store-meta record (C2 P3). FSM implementations that care (see
+// cluster.FSM.Restore) refuse a restore whose meta carries any other value.
+const FSMSnapshotFormatVersion uint8 = 2
+
+// Snapshotter creates and restores state machine snapshots. Restore receives the
+// snapshot's store-meta record (carrying FormatVersion) so the implementation can
+// reject an incompatible payload before mutating any state.
 type Snapshotter interface {
 	Snapshot() ([]byte, error)
-	Restore(data []byte) error
+	Restore(meta SnapshotMeta, data []byte) error
 }
 
 // SnapshotConfig controls when automatic snapshots are taken.
@@ -174,6 +181,7 @@ func (m *SnapshotManager) createSnapshotLocked(appliedIndex, appliedTerm uint64,
 		JointNewVoters:       jNew,
 		JointEnterIndex:      jIdx,
 		JointManagedLearners: jManaged,
+		FormatVersion:        FSMSnapshotFormatVersion,
 	}); err != nil {
 		return SnapshotResult{}, fmt.Errorf("snapshot: save: %w", err)
 	}
@@ -210,7 +218,11 @@ func (m *SnapshotManager) Restore() (uint64, error) {
 		return 0, nil
 	}
 
-	if err := m.snapshotter.Restore(snap.Data); err != nil {
+	if err := m.snapshotter.Restore(SnapshotMeta{
+		Index:         snap.Index,
+		Term:          snap.Term,
+		FormatVersion: snap.FormatVersion,
+	}, snap.Data); err != nil {
 		return 0, err
 	}
 

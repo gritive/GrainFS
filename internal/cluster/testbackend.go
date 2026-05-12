@@ -60,7 +60,7 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 		t.Fatalf("no-peers node must become leader")
 	}
 
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	if err != nil {
 		t.Fatalf("NewDistributedBackend: %v", err)
 	}

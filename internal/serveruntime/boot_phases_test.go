@@ -218,6 +218,40 @@ func TestBootOpenSharedRaftLogDB_IgnoresLegacyPerGroupDir(t *testing.T) {
 	state.Cleanup()
 }
 
+// TestBootOpenSharedFSMDB_Opens — happy path: a fresh dataDir gets a shared
+// FSM-state BadgerDB at <dataDir>/shared-fsm/ and the matching startup decision.
+func TestBootOpenSharedFSMDB_Opens(t *testing.T) {
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+
+	require.NoError(t, bootOpenSharedFSMDB(state))
+	require.NotNil(t, state.sharedFSMDB)
+	last := state.startupDecisions[len(state.startupDecisions)-1]
+	assert.Equal(t, badgerrole.RoleSharedFSM, last.Role)
+
+	state.Cleanup()
+}
+
+// TestBootOpenSharedFSMDB_IgnoresLegacyPerGroupDir — a stale pre-P3
+// <dataDir>/groups/*/badger/ directory must NOT block boot. Pre-1.0, no
+// migration: the phase opens the shared FSM DB and moves on.
+func TestBootOpenSharedFSMDB_IgnoresLegacyPerGroupDir(t *testing.T) {
+	dir := t.TempDir()
+	legacyBadger := filepath.Join(dir, "groups", "group-0", "badger")
+	require.NoError(t, os.MkdirAll(legacyBadger, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyBadger, "MANIFEST"), []byte("legacy"), 0o644))
+
+	state := newBootState(Config{DataDir: dir, NodeID: "n1"})
+	require.NoError(t, bootValidateConfig(state))
+
+	require.NoError(t, bootOpenSharedFSMDB(state))
+	require.NotNil(t, state.sharedFSMDB)
+	last := state.startupDecisions[len(state.startupDecisions)-1]
+	assert.Equal(t, badgerrole.RoleSharedFSM, last.Role)
+
+	state.Cleanup()
+}
+
 // TestBootMetaDB_PreflightRejectsCorruptDB — when the BadgerDB on disk fails
 // the writability probe (e.g., a corrupt manifest), bootOpenMetaDB returns
 // a structured PreflightBadger error instead of plain badger.Open output.

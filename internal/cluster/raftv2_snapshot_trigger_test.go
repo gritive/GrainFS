@@ -41,7 +41,7 @@ func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 	require.NoError(t, node.Bootstrap())
 	require.Eventually(t, node.IsLeader, 3*time.Second, 20*time.Millisecond, "v2 node must elect itself")
 
-	backend, err := NewDistributedBackend(dir, db, node)
+	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
 
 	// Deliberately do NOT call SetSnapshotManager — that's the v2 path:

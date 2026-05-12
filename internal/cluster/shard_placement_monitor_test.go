@@ -24,7 +24,7 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 
 func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -48,7 +48,7 @@ func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 // CmdPutShardPlacement is a no-op; Scan finds no placement rows and reports 0 missing.
 func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -79,7 +79,7 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, _ := newTestShardService(t)
 
@@ -113,7 +113,7 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 
 func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
@@ -132,7 +132,7 @@ func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_NoPlacements(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, "anyone", time.Second)
@@ -143,7 +143,7 @@ func TestShardPlacementMonitor_Scan_NoPlacements(t *testing.T) {
 
 func TestShardPlacementMonitor_Stats(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", time.Second)
@@ -159,7 +159,7 @@ func TestShardPlacementMonitor_Stats(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	// Seed ~100 placements so iteration has something to traverse.
@@ -181,7 +181,7 @@ func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 
 func TestFSM_IterShardPlacements(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	// Empty FSM: callback never invoked.
 	count := 0
@@ -214,7 +214,7 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	monitor := NewShardPlacementMonitor(fsm, nil, nil, "node-A", time.Second)
 	_, err := monitor.Scan(context.Background())
 	require.Error(t, err)
@@ -226,7 +226,7 @@ func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
 		t.Skip("chmod 000 has no effect as root")
 	}
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, dir := newTestShardService(t)
 
 	const self = "node-A"
@@ -254,7 +254,7 @@ func TestShardPlacementMonitor_Scan_NonEnoentError(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	backend := &DistributedBackend{db: db, fsm: fsm}
 	svc, dir := newTestShardService(t)
 
@@ -299,7 +299,7 @@ func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 
 func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", 10*time.Millisecond)
@@ -321,7 +321,7 @@ func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"

@@ -81,6 +81,8 @@ type GroupBackendConfig struct {
 	// Badger DB that backs the v2 LogStore + StableStore + SnapshotStore
 	// trio. Nil for v1 paths (the BadgerLogStore field is the v1 closer).
 	V2StoreClose func() error
+	Keyspace     *stateKeyspace // nil → identity keyspace (newStateKeyspaceEmpty)
+	Shared       bool           // true → Close does not close the DB (caller owns lifecycle)
 }
 
 // WrapDistributedBackend wraps an EXISTING DistributedBackend as a GroupBackend.
@@ -112,7 +114,7 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 		return nil, fmt.Errorf("GroupBackend %s: Root/DB/Node required", cfg.ID)
 	}
 
-	dist, err := NewDistributedBackend(cfg.Root, cfg.DB, cfg.Node)
+	dist, err := NewDistributedBackend(cfg.Root, cfg.DB, cfg.Node, cfg.Keyspace, cfg.Shared)
 	if err != nil {
 		return nil, fmt.Errorf("GroupBackend %s: NewDistributedBackend: %w", cfg.ID, err)
 	}

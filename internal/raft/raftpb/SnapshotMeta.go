@@ -160,8 +160,20 @@ func (rcv *SnapshotMeta) JointManagedLearnersLength() int {
 	return 0
 }
 
+func (rcv *SnapshotMeta) FormatVersion() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SnapshotMeta) MutateFormatVersion(n byte) bool {
+	return rcv._tab.MutateByteSlot(20, n)
+}
+
 func SnapshotMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func SnapshotMetaAddIndex(builder *flatbuffers.Builder, index uint64) {
 	builder.PrependUint64Slot(0, index, 0)
@@ -198,6 +210,9 @@ func SnapshotMetaAddJointManagedLearners(builder *flatbuffers.Builder, jointMana
 }
 func SnapshotMetaStartJointManagedLearnersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func SnapshotMetaAddFormatVersion(builder *flatbuffers.Builder, formatVersion byte) {
+	builder.PrependByteSlot(8, formatVersion, 0)
 }
 func SnapshotMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

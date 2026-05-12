@@ -155,8 +155,8 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 	if err != nil {
 		return fmt.Errorf("open target meta db: %w", err)
 	}
-	fsm := NewFSM(db)
-	if err := fsm.Restore(snap.Data); err != nil {
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	if err := fsm.Restore(raft.SnapshotMeta{Index: snap.Index, Term: snap.Term, FormatVersion: snap.FormatVersion}, snap.Data); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("restore FSM snapshot: %w", err)
 	}
@@ -175,10 +175,11 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 	defer store.Close()
 
 	recovered := raft.Snapshot{
-		Index:   snap.Index,
-		Term:    snap.Term,
-		Data:    snap.Data,
-		Servers: []raft.Server{{ID: plan.Options.NewNodeID, Suffrage: raft.Voter}},
+		Index:         snap.Index,
+		Term:          snap.Term,
+		Data:          snap.Data,
+		Servers:       []raft.Server{{ID: plan.Options.NewNodeID, Suffrage: raft.Voter}},
+		FormatVersion: snap.FormatVersion,
 	}
 	if err := store.SaveSnapshot(recovered); err != nil {
 		return fmt.Errorf("write recovered snapshot: %w", err)

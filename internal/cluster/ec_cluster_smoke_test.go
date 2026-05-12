@@ -12,7 +12,7 @@ import (
 func TestLookupObjectECShards_NxMode(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	k, m, err := fsm.LookupObjectECShards("bkt", "key", "v1")
 	require.NoError(t, err)
@@ -25,7 +25,7 @@ func TestLookupObjectECShards_NxMode(t *testing.T) {
 func TestLookupObjectECShards_ECMode(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	fsm := NewFSM(db)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
 
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:    "bkt",

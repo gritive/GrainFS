@@ -1507,8 +1507,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	return out, nil
 }
 
-// Restore deserializes a MetaStateSnapshot and replaces current state.
-func (f *MetaFSM) Restore(data []byte) error {
+// Restore deserializes a MetaStateSnapshot and replaces current state. The
+// store-meta record (meta) carries the snapshot FormatVersion; the meta-Raft
+// FSM has its own in-payload versioning (FlatBuffers + IAM trailer) and accepts
+// any FormatVersion for backward compatibility with pre-C2-P3 data dirs.
+func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}

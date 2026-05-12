@@ -15,10 +15,6 @@ import (
 
 var ErrObjectQuarantined = errors.New("object quarantined")
 
-func quarantineKey(bucket, key, versionID string) []byte {
-	return []byte("quarantine:" + bucket + "\x00" + key + "\x00" + versionID)
-}
-
 func (b *DistributedBackend) QuarantineObject(ctx context.Context, bucket, key, versionID, cause, reason string) error {
 	return b.propose(ctx, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
 		Bucket:    bucket,
@@ -57,7 +53,7 @@ func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) 
 	var out PutObjectQuarantineCmd
 	err := b.db.View(func(txn *badger.Txn) error {
 		for _, candidate := range []string{versionID, ""} {
-			item, err := txn.Get(quarantineKey(bucket, key, candidate))
+			item, err := txn.Get(b.ks().QuarantineKey(bucket, key, candidate))
 			if err == badger.ErrKeyNotFound {
 				continue
 			}

@@ -16,6 +16,7 @@ const (
 const (
 	DBCategoryMeta          Category = "meta"
 	DBCategorySharedRaftLog Category = "shared-raft-log"
+	DBCategorySharedFSM     Category = "shared-fsm"
 	DBCategoryGroupRaft     Category = "group-raft"
 	DBCategoryIncident      Category = "incident"
 	DBCategoryReceipts      Category = "receipts"
