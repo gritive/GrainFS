@@ -276,3 +276,46 @@ func TestForwardReceiver_HandleDeleteObject_ProposeError_ReturnsInternal(t *test
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
 }
+
+func TestForwardReceiver_HandleDeleteObjectVersion_CommitsDeleteIndex(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	obj, err := gb.PutObject(context.Background(), "bucket", "ver-key", bytes.NewReader([]byte("data")), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	proposer := &recordingObjectIndexProposer{}
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(proposer)
+
+	args := buildDeleteObjectVersionArgs("bucket", "ver-key", obj.VersionID)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpDeleteObjectVersion, args)
+
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status(), "expected OK from leader backend")
+	require.Len(t, proposer.deleted, 1, "expected exactly one delete index commit")
+	require.Equal(t, "bucket/ver-key/"+obj.VersionID, proposer.deleted[0])
+}
+
+func TestForwardReceiver_HandleDeleteObjectVersion_ProposeError_ReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	obj, err := gb.PutObject(context.Background(), "bucket", "ver-key", bytes.NewReader([]byte("data")), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(&failingObjectIndexProposer{})
+
+	args := buildDeleteObjectVersionArgs("bucket", "ver-key", obj.VersionID)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpDeleteObjectVersion, args)
+
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeDeleteObjectIndex failure must return Internal")
+}

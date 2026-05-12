@@ -445,9 +445,18 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 
 func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) *transport.Message {
 	da := raftpb.GetRootAsDeleteObjectVersionArgs(args, 0)
-	err := dg.Backend().DeleteObjectVersion(string(da.Bucket()), string(da.Key()), string(da.VersionId()))
-	if err != nil {
+	bucket := string(da.Bucket())
+	key := string(da.Key())
+	versionID := string(da.VersionId())
+	if err := dg.Backend().DeleteObjectVersion(bucket, key, versionID); err != nil {
 		return statusReply(mapErrorToStatus(err))
+	}
+	if r.indexProposer != nil {
+		ctx := contextForForwardedGroup(context.Background(), dg)
+		if err := r.indexProposer.ProposeDeleteObjectIndex(ctx, bucket, key, versionID); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Str("version_id", versionID).Msg("forward: ProposeDeleteObjectIndex failed; stale index entry may remain")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
 	}
 	return &transport.Message{Payload: buildOKReply()}
 }
