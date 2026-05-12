@@ -1,13 +1,10 @@
 package volume
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 
-	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
@@ -191,269 +188,23 @@ func (e blockIOEngine) read(name string, vol *Volume, p []byte, off int64, liveM
 }
 
 func (e blockIOEngine) write(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string, currentAllocatedBytes, poolQuota int64) (blockIOResult, error) {
-	bs := int64(vol.BlockSize)
-	useCow := e.dedup == nil && vol.SnapshotCount > 0
-
-	if poolQuota > 0 {
-		newBlocksNeeded := int64(0)
-		firstBlk := off / bs
-		lastBlk := (off + int64(len(p)) - 1) / bs
-		if lastBlk >= vol.Size/bs {
-			lastBlk = vol.Size/bs - 1
-		}
-		for blkNum := firstBlk; blkNum <= lastBlk; blkNum++ {
-			var existErr error
-			if e.dedup != nil {
-				_, found, err := e.dedup.ReadBlock(name, blkNum)
-				if err != nil {
-					existErr = err
-				} else if !found {
-					existErr = fmt.Errorf("not found")
-				}
-			} else {
-				_, existErr = e.objects.HeadObject(context.Background(), volumeBucketName, physicalKey(name, blkNum, liveMap))
-			}
-			if existErr != nil {
-				newBlocksNeeded++
-			}
-		}
-
-		if currentAllocatedBytes+newBlocksNeeded*bs > poolQuota {
-			return blockIOResult{}, ErrPoolQuotaExceeded
-		}
+	pl := blockIOPlanner{objects: e.objects, dedup: e.dedup}
+	ex := blockIOExecutor{objects: e.objects, dedup: e.dedup, cache: e.cache, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
+	actions, err := pl.planWrite(name, vol, p, off, liveMap, currentAllocatedBytes, poolQuota, false)
+	if err != nil {
+		return blockIOResult{}, err
 	}
-
-	var result blockIOResult
-	var newBlocks int64
-
-	for result.Bytes < len(p) && off+int64(result.Bytes) < vol.Size {
-		pos := off + int64(result.Bytes)
-		blkNum := pos / bs
-		blkOff := pos % bs
-
-		canWrite := int(bs - blkOff)
-		remaining := len(p) - result.Bytes
-		if canWrite > remaining {
-			canWrite = remaining
-		}
-		endPos := off + int64(result.Bytes) + int64(canWrite)
-		if endPos > vol.Size {
-			canWrite = int(vol.Size - pos)
-		}
-
-		isFullBlock := e.dedup == nil && !useCow && blkOff == 0 && canWrite == int(bs)
-
-		var blkData []byte
-		if !isFullBlock {
-			blkData = e.getBlkBuf(vol.BlockSize)
-		}
-		var isNew bool
-		var oldKey string
-		if e.dedup != nil {
-			canonical, found, rErr := e.dedup.ReadBlock(name, blkNum)
-			if rErr != nil {
-				e.putBlkBuf(blkData)
-				return result, fmt.Errorf("read dedup block %d: %w", blkNum, rErr)
-			}
-			if found {
-				rc, _, readErr := e.objects.GetObject(context.Background(), volumeBucketName, canonical)
-				if readErr == nil {
-					if _, err := io.ReadFull(rc, blkData); err != nil {
-						_ = rc.Close()
-						e.putBlkBuf(blkData)
-						return result, fmt.Errorf("read block %d: %w", blkNum, err)
-					}
-					if err := rc.Close(); err != nil {
-						e.putBlkBuf(blkData)
-						return result, fmt.Errorf("close block %d: %w", blkNum, err)
-					}
-				}
-				result.InvalidatedKeys = append(result.InvalidatedKeys, canonical)
-			} else {
-				isNew = true
-			}
-		} else {
-			oldKey = physicalKey(name, blkNum, liveMap)
-			if isFullBlock {
-				_, headErr := e.objects.HeadObject(context.Background(), volumeBucketName, oldKey)
-				isNew = headErr != nil
-			} else {
-				rc, _, readErr := e.objects.GetObject(context.Background(), volumeBucketName, oldKey)
-				isNew = readErr != nil
-				if !isNew {
-					if _, err := io.ReadFull(rc, blkData); err != nil {
-						_ = rc.Close()
-						e.putBlkBuf(blkData)
-						return result, fmt.Errorf("read block %d: %w", blkNum, err)
-					}
-					if err := rc.Close(); err != nil {
-						e.putBlkBuf(blkData)
-						return result, fmt.Errorf("close block %d: %w", blkNum, err)
-					}
-				}
-			}
-			result.InvalidatedKeys = append(result.InvalidatedKeys, oldKey)
-		}
-
-		if !isFullBlock {
-			copy(blkData[blkOff:blkOff+int64(canWrite)], p[result.Bytes:result.Bytes+canWrite])
-		}
-
-		var targetKey string
-		if e.dedup != nil {
-			newKey := fmt.Sprintf("%s%s/blk_%012d_v%s", metaPrefix, name, blkNum, uuid.Must(uuid.NewV7()).String())
-			hash := sha256.Sum256(blkData)
-			res, dedupErr := e.dedup.WriteBlock(name, blkNum, hash, newKey)
-			if dedupErr != nil {
-				e.putBlkBuf(blkData)
-				return result, fmt.Errorf("dedup block %d: %w", blkNum, dedupErr)
-			}
-			targetKey = res.Canonical
-			if res.IsNew {
-				if _, err := e.objects.PutObject(context.Background(), volumeBucketName, targetKey,
-					bytes.NewReader(blkData), "application/octet-stream"); err != nil {
-					e.putBlkBuf(blkData)
-					return result, fmt.Errorf("write block %d: %w", blkNum, err)
-				}
-			}
-			if res.ToDelete != "" {
-				e.objects.DeleteObject(context.Background(), volumeBucketName, res.ToDelete) //nolint:errcheck
-				newBlocks--
-			}
-			if res.IsNew {
-				newBlocks++
-			}
-		} else if useCow {
-			targetKey = cowBlockKey(name, blkNum)
-			if _, err := e.objects.PutObject(context.Background(), volumeBucketName, targetKey,
-				bytes.NewReader(blkData), "application/octet-stream"); err != nil {
-				e.putBlkBuf(blkData)
-				return result, fmt.Errorf("write block %d: %w", blkNum, err)
-			}
-			if oldKey != targetKey {
-				if !isNew {
-					e.objects.DeleteObject(context.Background(), volumeBucketName, oldKey) //nolint:errcheck
-				}
-				liveMap[blkNum] = targetKey
-				result.LiveMapDirty = true
-			}
-		} else {
-			targetKey = blockKey(name, blkNum)
-			if isFullBlock && e.objects.PreferWriteAt(volumeBucketName) {
-				if _, ok, err := e.objects.WriteAt(context.Background(), volumeBucketName, targetKey, 0, p[result.Bytes:result.Bytes+canWrite]); ok {
-					if err != nil {
-						e.putBlkBuf(blkData)
-						return result, fmt.Errorf("write block %d: %w", blkNum, err)
-					}
-				} else if _, err := e.objects.PutObject(context.Background(), volumeBucketName, targetKey, bytes.NewReader(p[result.Bytes:result.Bytes+canWrite]), "application/octet-stream"); err != nil {
-					e.putBlkBuf(blkData)
-					return result, fmt.Errorf("write block %d: %w", blkNum, err)
-				}
-			} else {
-				src := bytes.NewReader(blkData)
-				if isFullBlock {
-					src = bytes.NewReader(p[result.Bytes : result.Bytes+canWrite])
-				}
-				if _, err := e.objects.PutObject(context.Background(), volumeBucketName, targetKey, src, "application/octet-stream"); err != nil {
-					e.putBlkBuf(blkData)
-					return result, fmt.Errorf("write block %d: %w", blkNum, err)
-				}
-			}
-		}
-
-		if e.dedup == nil && isNew {
-			newBlocks++
-		}
-		if targetKey != "" {
-			result.InvalidatedKeys = append(result.InvalidatedKeys, targetKey)
-		}
-		e.putBlkBuf(blkData)
-		result.Bytes += canWrite
-	}
-
-	e.invalidate(result.InvalidatedKeys)
-	result.AllocationBytesDelta = newBlocks * bs
-	return result, nil
+	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
 }
 
 func (e blockIOEngine) writeDeferred(name string, vol *Volume, p []byte, off int64, liveMap map[int64]string) (blockIOResult, error) {
-	bs := int64(vol.BlockSize)
-	var result blockIOResult
-	var newBlocks int64
-
-	for result.Bytes < len(p) && off+int64(result.Bytes) < vol.Size {
-		pos := off + int64(result.Bytes)
-		blkNum := pos / bs
-		blkOff := pos % bs
-
-		canWrite := int(bs - blkOff)
-		if rem := len(p) - result.Bytes; canWrite > rem {
-			canWrite = rem
-		}
-		if end := off + int64(result.Bytes) + int64(canWrite); end > vol.Size {
-			canWrite = int(vol.Size - pos)
-		}
-
-		isFullBlock := blkOff == 0 && canWrite == int(bs)
-		oldKey := physicalKey(name, blkNum, liveMap)
-		targetKey := blockKey(name, blkNum)
-		result.InvalidatedKeys = append(result.InvalidatedKeys, oldKey, targetKey)
-
-		var blkSrc io.Reader
-		if isFullBlock {
-			_, headErr := e.objects.HeadObject(context.Background(), volumeBucketName, oldKey)
-			if headErr != nil {
-				newBlocks++
-			}
-			blkSrc = bytes.NewReader(p[result.Bytes : result.Bytes+canWrite])
-		} else {
-			blkData := e.getBlkBuf(vol.BlockSize)
-			rc, _, readErr := e.objects.GetObject(context.Background(), volumeBucketName, oldKey)
-			if readErr != nil {
-				newBlocks++
-			} else {
-				io.ReadFull(rc, blkData) //nolint:errcheck
-				rc.Close()
-			}
-			copy(blkData[blkOff:blkOff+int64(canWrite)], p[result.Bytes:result.Bytes+canWrite])
-			blkSrc = bytes.NewReader(blkData)
-			_, commitFn, putErr := e.deferred.PutObjectAsync(context.Background(), volumeBucketName, targetKey, blkSrc, "application/octet-stream")
-			e.putBlkBuf(blkData)
-			if putErr != nil {
-				return result, fmt.Errorf("write block %d: %w", blkNum, putErr)
-			}
-			result.CommitFns = append(result.CommitFns, commitFn)
-			result.Bytes += canWrite
-			continue
-		}
-
-		if isFullBlock && e.objects.PreferWriteAt(volumeBucketName) {
-			if _, ok, err := e.objects.WriteAt(context.Background(), volumeBucketName, targetKey, 0, p[result.Bytes:result.Bytes+canWrite]); ok {
-				if err != nil {
-					return result, fmt.Errorf("write block %d: %w", blkNum, err)
-				}
-			} else {
-				_, commitFn, putErr := e.deferred.PutObjectAsync(context.Background(), volumeBucketName, targetKey, bytes.NewReader(p[result.Bytes:result.Bytes+canWrite]), "application/octet-stream")
-				if putErr != nil {
-					return result, fmt.Errorf("write block %d: %w", blkNum, putErr)
-				}
-				result.CommitFns = append(result.CommitFns, commitFn)
-			}
-			result.Bytes += canWrite
-			continue
-		}
-
-		_, commitFn, putErr := e.deferred.PutObjectAsync(context.Background(), volumeBucketName, targetKey, blkSrc, "application/octet-stream")
-		if putErr != nil {
-			return result, fmt.Errorf("write block %d: %w", blkNum, putErr)
-		}
-		result.CommitFns = append(result.CommitFns, commitFn)
-		result.Bytes += canWrite
+	pl := blockIOPlanner{objects: e.objects, dedup: e.dedup}
+	ex := blockIOExecutor{objects: e.objects, dedup: e.dedup, cache: e.cache, deferred: e.deferred, getBlkBuf: e.getBlkBuf, putBlkBuf: e.putBlkBuf}
+	actions, err := pl.planWrite(name, vol, p, off, liveMap, 0, 0, true)
+	if err != nil {
+		return blockIOResult{}, err
 	}
-
-	e.invalidate(result.InvalidatedKeys)
-	result.AllocationBytesDelta = newBlocks * bs
-	return result, nil
+	return ex.executeWrite(context.Background(), name, vol, p, liveMap, actions)
 }
 
 func (e blockIOEngine) discard(name string, vol *Volume, off, length int64, liveMap map[int64]string) (blockIOResult, error) {

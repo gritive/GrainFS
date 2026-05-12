@@ -45,8 +45,8 @@ func TestBlockIOWriteFullBlockSelectsDirectKeyAndReportsAllocation(t *testing.T)
 	require.Equal(t, int64(DefaultBlockSize), result.AllocationBytesDelta)
 	require.False(t, result.LiveMapDirty)
 	require.Equal(t, src, store.objects[blockKey("vol", 0)])
-	require.Equal(t, []string{blockKey("vol", 0), blockKey("vol", 0)}, result.InvalidatedKeys)
-	require.Equal(t, []string{blockKey("vol", 0), blockKey("vol", 0)}, cache.invalidations)
+	require.Equal(t, []string{blockKey("vol", 0)}, result.InvalidatedKeys)
+	require.Equal(t, []string{blockKey("vol", 0)}, cache.invalidations)
 }
 
 func TestBlockIODiscardDeletesLiveMapBlockAndReportsFreedBytes(t *testing.T) {
@@ -79,6 +79,7 @@ func testBlockIOEngine(store *fakeBlockStore, cache blockCache, meter blockReadM
 type fakeBlockStore struct {
 	objects         map[string][]byte
 	gets            []string
+	heads           []string
 	deletes         []string
 	preferReadAt    bool
 	preferWriteAt   bool
@@ -118,6 +119,7 @@ func (s *fakeBlockStore) DeleteObject(_ context.Context, _, key string) error {
 }
 
 func (s *fakeBlockStore) HeadObject(_ context.Context, _, key string) (*storage.Object, error) {
+	s.heads = append(s.heads, key)
 	data, ok := s.objects[key]
 	if !ok {
 		return nil, fmt.Errorf("not found")
