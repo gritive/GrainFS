@@ -235,7 +235,14 @@ func (n *Node) run() {
 	// voter Nodes start as Follower and rely on the election timer firing.
 	// The effective config was reconstructed in NewNode from snapshot + log
 	// replay; cfg.Peers is the seed-only fallback when no snapshot exists.
-	if n.st.isSoloVoter() {
+	//
+	// JoinMode suppresses the shortcut: in dynamic-join the joiner's local
+	// config is {selfID} until the cluster leader's AE installs the real
+	// multi-voter config. Auto-promoting here would make the joiner a
+	// phantom leader of its own 1-node cluster, deadlocking the leader's
+	// joint AddVoter wait. The election-timer guard in onElectionTimeout
+	// keeps the joiner from campaigning while isSoloVoter() remains true.
+	if n.st.isSoloVoter() && !n.cfg.JoinMode {
 		// Only advance currentTerm to 1 if we haven't already been here
 		// (recovery case: persisted currentTerm >= 1 means we were Leader before).
 		if n.st.currentTerm < 1 {
@@ -747,6 +754,16 @@ func (n *Node) onElectionTimeout() {
 	// node — both are the correct behaviour for a node that has been
 	// ejected.
 	if !n.st.currentConfig.containsAnyVoter(n.st.id) {
+		n.resetElectionTimer()
+		return
+	}
+	// JoinMode guard: a joining node whose local config is still {selfID}
+	// must not campaign — it would become a phantom leader of its own
+	// 1-node cluster and deadlock the cluster leader's joint AddVoter
+	// wait. Re-arm and wait for the cluster leader's AE to install the
+	// multi-voter config (at which point isSoloVoter flips false and
+	// this guard relaxes automatically).
+	if n.cfg.JoinMode && n.st.isSoloVoter() {
 		n.resetElectionTimer()
 		return
 	}

@@ -208,6 +208,11 @@ type Config struct {
 	// across voters for this key. Data groups set this to their group ID so
 	// independent groups prefer different initial leaders without moving data.
 	ElectionPriorityKey string
+	// JoinMode is forwarded to v2.Config.JoinMode by the factory. v1 ignores
+	// the flag (v1 is Bootstrap-gated and does not auto-promote without an
+	// explicit Bootstrap call). Kept on raft.Config so the factory translation
+	// has a single Config-shape input until v1 is deleted.
+	JoinMode bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
