@@ -13,21 +13,34 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
-// RemovePeerOptions carries the inputs the operator-facing remove-peer
-// flow needs. The caller (CLI) populates this from flags + std streams.
-type RemovePeerOptions struct {
-	Endpoint  string
-	ID        string
-	Force     bool
-	AssumeYes bool
-	Timeout   time.Duration
+// BaseOptions carries the fields shared by every package-level Run* function
+// in clusteradmin: where to connect, how long to wait, and where to read/write.
+//
+// Mirrors volumeadmin.BaseOptions in shape. Stderr/Stdin are present even on
+// operations that don't read them (Peers/Events leave both nil) so the three
+// Options structs stay symmetric; RemovePeer is the only op that requires
+// Stderr (pre-flight prompt) and Stdin (y/N confirmation when !AssumeYes).
+//
+// Each Run* keeps inline strict validation (rejects nil writers / non-positive
+// Timeout). Helpers like volumeadmin's clientFor/withTimeout/stdout/stderr are
+// intentionally not adopted here — clusteradmin's strict contract catches
+// caller misuse at the boundary instead of silently falling back to os.Std*.
+type BaseOptions struct {
+	Endpoint string
+	Timeout  time.Duration
 
-	// Streams: Stderr is used for the pre-flight summary + prompt. Stdin is
-	// read for the y/N confirmation when AssumeYes is false. Stdout is where
-	// the success line lands so it composes cleanly in pipelines.
 	Stdout io.Writer
 	Stderr io.Writer
 	Stdin  io.Reader
+}
+
+// RemovePeerOptions carries the inputs the operator-facing remove-peer
+// flow needs. The caller (CLI) populates this from flags + std streams.
+type RemovePeerOptions struct {
+	BaseOptions
+	ID        string
+	Force     bool
+	AssumeYes bool
 }
 
 // errInvalidTimeout reports a non-positive Timeout. Returned eagerly so the
@@ -150,10 +163,8 @@ func removePeerPreflightSummary(result cluster.RemovePeerPreflightResult) string
 
 // PeersOptions describes how the peers listing should be fetched and rendered.
 type PeersOptions struct {
-	Endpoint string
-	Format   string // "text" or "json"
-	Timeout  time.Duration
-	Stdout   io.Writer
+	BaseOptions
+	Format string // "text" or "json"
 }
 
 // Peers fetches /api/cluster/status and renders either a tab-aligned voter
@@ -188,13 +199,11 @@ func Peers(ctx context.Context, opts PeersOptions) error {
 // EventsOptions describes how the audit-log listing should be fetched,
 // filtered, and rendered.
 type EventsOptions struct {
-	Endpoint    string
+	BaseOptions
 	Since       time.Duration
 	Limit       int
 	TypeFilters []string
 	Format      string // "text" or "json"
-	Timeout     time.Duration
-	Stdout      io.Writer
 }
 
 // Events fetches /api/eventlog, applies the client-side action filter, and

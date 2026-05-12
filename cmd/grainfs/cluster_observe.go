@@ -32,10 +32,12 @@ func runClusterPeers(cmd *cobra.Command, _ []string) error {
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
 	return clusteradmin.Peers(cmd.Context(), clusteradmin.PeersOptions{
-		Endpoint: endpoint,
-		Format:   format,
-		Timeout:  timeout,
-		Stdout:   cmd.OutOrStdout(),
+		BaseOptions: clusteradmin.BaseOptions{
+			Endpoint: endpoint,
+			Timeout:  timeout,
+			Stdout:   cmd.OutOrStdout(),
+		},
+		Format: format,
 	})
 }
 
@@ -212,12 +214,14 @@ func runClusterEvents(cmd *cobra.Command, _ []string) error {
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
 	return clusteradmin.Events(cmd.Context(), clusteradmin.EventsOptions{
-		Endpoint:    endpoint,
+		BaseOptions: clusteradmin.BaseOptions{
+			Endpoint: endpoint,
+			Timeout:  timeout,
+			Stdout:   cmd.OutOrStdout(),
+		},
 		Since:       since,
 		Limit:       limit,
 		TypeFilters: types,
 		Format:      format,
-		Timeout:     timeout,
-		Stdout:      cmd.OutOrStdout(),
 	})
 }

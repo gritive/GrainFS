@@ -42,13 +42,15 @@ func runClusterRemovePeer(cmd *cobra.Command, args []string) error {
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 
 	return clusteradmin.RemovePeer(cmd.Context(), clusteradmin.RemovePeerOptions{
-		Endpoint:  endpoint,
+		BaseOptions: clusteradmin.BaseOptions{
+			Endpoint: endpoint,
+			Timeout:  timeout,
+			Stdout:   cmd.OutOrStdout(),
+			Stderr:   cmd.ErrOrStderr(),
+			Stdin:    cmd.InOrStdin(),
+		},
 		ID:        args[0],
 		Force:     force,
 		AssumeYes: assumeYes,
-		Timeout:   timeout,
-		Stdout:    cmd.OutOrStdout(),
-		Stderr:    cmd.ErrOrStderr(),
-		Stdin:     cmd.InOrStdin(),
 	})
 }
