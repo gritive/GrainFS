@@ -184,7 +184,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// Backups (*.pre-join-backup) were safety nets for a failed wipe; now that
 	// join succeeded they are no longer needed.
 	if state.joinMode {
-		pendingFile := filepath.Join(cfg.DataDir, joinPendingFile)
+		pendingFile := filepath.Join(cfg.DataDir, JoinPendingFile)
 		_ = os.Remove(pendingFile)
 		for _, dir := range []string{"meta_raft", "raft", "shared-raft-log"} {
 			_ = os.RemoveAll(filepath.Join(cfg.DataDir, dir+".pre-join-backup"))

@@ -82,12 +82,14 @@ func TestE2E_Bootstrap_JoinCLI_Idempotent(t *testing.T) {
 	peerAddr := c.raftAddr(1)
 
 	for i := 1; i <= 2; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		out, err := runGrainFSJoin(ctx, sock, peerAddr)
-		cancel()
-		require.NoError(t, err, "grainfs join attempt %d: %s", i, out)
-		require.Contains(t, out, "already_member",
-			"attempt %d: expected already_member in output: %s", i, out)
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			out, err := runGrainFSJoin(ctx, sock, peerAddr)
+			require.NoError(t, err, "grainfs join attempt %d: %s", i, out)
+			require.Contains(t, out, "already_member",
+				"attempt %d: expected already_member in output: %s", i, out)
+		}()
 	}
 }
 

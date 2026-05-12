@@ -23,7 +23,7 @@ func TestE2E_Cluster_RefusesEmptyClusterKey(t *testing.T) {
 
 	// Write .join-pending to trigger join mode (which requires --cluster-key).
 	require.NoError(t, os.WriteFile(
-		fmt.Sprintf("%s/.join-pending", dir),
+		fmt.Sprintf("%s/%s", dir, joinPendingFile),
 		[]byte(fmt.Sprintf("127.0.0.1:%d", freePort())), 0o600))
 
 	cmd := exec.Command(getBinary(), "serve",
@@ -100,7 +100,7 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 	// Joiner with keyB: write .join-pending pointing to leader, then boot.
 	// Must fail (SPKI mismatch on QUIC handshake; cluster join cannot complete).
 	require.NoError(t, os.WriteFile(
-		fmt.Sprintf("%s/.join-pending", joinerDataDir),
+		fmt.Sprintf("%s/%s", joinerDataDir, joinPendingFile),
 		[]byte(fmt.Sprintf("127.0.0.1:%d", leaderRaft)), 0o600))
 
 	joinerCtx, joinerCancel := context.WithTimeout(context.Background(), 10*time.Second)

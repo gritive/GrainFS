@@ -53,11 +53,15 @@ func (h *JoinHandler) Handle(ctx context.Context, c *app.RequestContext) {
 		c.JSON(400, JoinResponse{Status: "error", Message: "peer_addr is required"})
 		return
 	}
+	if _, _, err := net.SplitHostPort(req.PeerAddr); err != nil {
+		c.JSON(400, JoinResponse{Status: "error", Message: "peer_addr must be host:port"})
+		return
+	}
 
 	// Already a multi-node cluster member → no-op.
-	// plan-3.1: len(nodes) > 1 is the voter-count guard: MetaRaft only commits
-	// a node entry to the FSM after the Raft config-change is accepted, so this
-	// check also covers "follower accepted but not yet leader-forwarded" races.
+	// len(nodes) > 1 is the voter-count guard: MetaRaft only commits a node entry
+	// to the FSM after the Raft config-change is accepted, so this check also
+	// covers "follower accepted but not yet leader-forwarded" races.
 	nodes := h.nodes.Nodes()
 	if len(nodes) > 1 {
 		c.JSON(200, JoinResponse{Status: "already_member", Message: "node is already part of a multi-node cluster"})
@@ -71,7 +75,7 @@ func (h *JoinHandler) Handle(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Write .join-pending and trigger graceful restart.
-	pendingFile := filepath.Join(h.dataDir, joinPendingFile)
+	pendingFile := filepath.Join(h.dataDir, JoinPendingFile)
 	if err := os.WriteFile(pendingFile, []byte(req.PeerAddr), 0o600); err != nil {
 		c.JSON(500, JoinResponse{Status: "error", Message: "write join-pending: " + err.Error()})
 		return

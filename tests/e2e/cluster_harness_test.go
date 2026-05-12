@@ -19,6 +19,9 @@ type ClusterMode string
 const (
 	ClusterModeDynamicJoin ClusterMode = "dynamic-join"
 	ClusterModeStaticPeers ClusterMode = "static-peers"
+
+	// joinPendingFile mirrors serveruntime.JoinPendingFile to avoid an import cycle.
+	joinPendingFile = ".join-pending"
 )
 
 type e2eClusterOptions struct {
@@ -352,7 +355,7 @@ func (c *e2eCluster) writeJoinPending(i int, seedRaftAddr string) error {
 // in tests that manage processes directly (outside e2eCluster).
 func writeNodeJoinPending(dataDir, seedRaftAddr string) error {
 	return os.WriteFile(
-		fmt.Sprintf("%s/.join-pending", dataDir),
+		fmt.Sprintf("%s/%s", dataDir, joinPendingFile),
 		[]byte(seedRaftAddr), 0o600,
 	)
 }

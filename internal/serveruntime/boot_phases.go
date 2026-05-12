@@ -25,9 +25,6 @@ import (
 // Exported so tests in cmd/grainfs can write it without duplicating the path.
 const JoinPendingFile = ".join-pending"
 
-// joinPendingFile is the package-local alias used by boot phase functions.
-const joinPendingFile = JoinPendingFile
-
 // wipeSoloRaftState renames meta_raft/, raft/, and shared-raft-log/ to
 // *.pre-join-backup/ so the join-mode boot starts with no existing Raft state.
 // Backups are removed by Run after a successful join. On failure the caller
@@ -36,8 +33,16 @@ func wipeSoloRaftState(dataDir string) error {
 	for _, dir := range []string{"meta_raft", "raft", "shared-raft-log"} {
 		src := filepath.Join(dataDir, dir)
 		dst := src + ".pre-join-backup"
-		_ = os.RemoveAll(dst)
-		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue // nothing to back up
+		}
+		if _, err := os.Stat(dst); err == nil {
+			// Backup from a previous failed join attempt exists; overwrite it
+			// only now that we have a fresh src to replace it with.
+			log.Warn().Str("backup", dst).Msg("overwriting pre-join backup from prior attempt")
+			_ = os.RemoveAll(dst)
+		}
+		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("backup %s: %w", dir, err)
 		}
 	}
@@ -64,7 +69,7 @@ func bootValidateConfig(state *bootState) error {
 
 	// File-based join detection: written by `grainfs join` UDS handler.
 	// Takes precedence over any other bootstrap logic.
-	pendingFile := filepath.Join(cfg.DataDir, joinPendingFile)
+	pendingFile := filepath.Join(cfg.DataDir, JoinPendingFile)
 	if rawPeer, err := os.ReadFile(pendingFile); err == nil {
 		peerAddr := strings.TrimSpace(string(rawPeer))
 		if peerAddr != "" {

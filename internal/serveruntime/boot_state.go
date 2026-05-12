@@ -45,7 +45,6 @@ type bootState struct {
 	peers       []string
 	clusterMode bool
 	// join-pending mode: set by bootValidateConfig when .join-pending file exists.
-	// Task 3 populates these from the sentinel file.
 	joinMode bool
 	joinAddr string
 	metaDir  string

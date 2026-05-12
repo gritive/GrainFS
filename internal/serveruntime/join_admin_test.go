@@ -152,7 +152,7 @@ func TestJoinHandler_Handle_HappyPath(t *testing.T) {
 	assert.Equal(t, "restart_initiated", jr.Status)
 
 	// .join-pending file must be written with the peer address.
-	data, err := os.ReadFile(filepath.Join(dataDir, joinPendingFile))
+	data, err := os.ReadFile(filepath.Join(dataDir, JoinPendingFile))
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1:8001", string(bytes.TrimSpace(data)))
 
