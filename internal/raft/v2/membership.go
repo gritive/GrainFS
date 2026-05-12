@@ -24,7 +24,12 @@ func (n *Node) handleConfChange(cmd command) {
 		cmd.ccReply <- confChangeResult{err: ErrNotLeader}
 		return
 	}
-	if n.st.pendingConfChange != nil {
+	// M6.0 Path B in-flight gate: a single-phase ConfChange (AddLearner /
+	// PromoteStage1) or a queued PromoteToVoter chain is also exclusive
+	// with a fresh joint change. The three-way check prevents a race
+	// where a Promote stage-2 (joint) starts inside the actor while a
+	// caller submits AddVoter for the same target.
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
 		cmd.ccReply <- confChangeResult{err: ErrConfChangeInFlight}
 		return
 	}

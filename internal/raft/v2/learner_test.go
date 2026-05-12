@@ -138,14 +138,39 @@ func TestLearner_PromoteToVoterFlipsSuffrage(t *testing.T) {
 
 	require.NoError(t, leader.PromoteToVoter("n2"))
 
-	// Verify both nodes are Voter, learners map is empty.
+	// Verify the LEADER's local view.
 	cfg := leader.Configuration()
 	voterCount := 0
 	for _, s := range cfg.Servers {
-		require.Equal(t, Voter, s.Suffrage, "all servers must be voters after promote")
+		require.Equal(t, Voter, s.Suffrage, "leader: all servers must be voters after promote")
 		voterCount++
 	}
 	require.Equal(t, 2, voterCount)
+
+	// Path B critical check: the FOLLOWER replays both entries
+	// (PromoteStage1 + joint Cnew + joint exit) and observes itself as
+	// a Voter. A bug in applyConfigEntry on the follower side would
+	// silently pass the leader-only check above.
+	var n2 *Node
+	for _, n := range fix.nodes {
+		if n.cfg.ID == "n2" {
+			n2 = n
+			break
+		}
+	}
+	require.NotNil(t, n2)
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		got := n2.Configuration()
+		if len(got.Servers) != 2 {
+			return false
+		}
+		for _, s := range got.Servers {
+			if s.Suffrage != Voter {
+				return false
+			}
+		}
+		return true
+	}), "n2 must replay PromoteStage1 + joint AddVoter and see itself as Voter")
 }
 
 // TestLearner_PromoteNotALearner asserts that PromoteToVoter rejects an
