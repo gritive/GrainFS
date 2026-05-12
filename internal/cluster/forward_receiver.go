@@ -27,7 +27,8 @@ type ForwardReceiver struct {
 	// scrubLookup is wired via WithScrubSessionLookup; reads happen on every
 	// inbound forward and writes only at startup, but we use atomic.Pointer
 	// so -race is clean even if rewiring ever lands.
-	scrubLookup atomic.Pointer[ScrubSessionLookup]
+	scrubLookup   atomic.Pointer[ScrubSessionLookup]
+	indexProposer objectIndexProposer // nil = no index commit (single-node / test)
 }
 
 func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
@@ -43,6 +44,14 @@ func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *For
 		return r
 	}
 	r.scrubLookup.Store(&lookup)
+	return r
+}
+
+// WithObjectIndexProposer wires the object-index proposer so mutating forward
+// handlers commit the index entry on the leader side, eliminating the crash
+// window between storage write and index commit.
+func (r *ForwardReceiver) WithObjectIndexProposer(p objectIndexProposer) *ForwardReceiver {
+	r.indexProposer = p
 	return r
 }
 
@@ -216,37 +225,70 @@ func contextForForwardedGroup(ctx context.Context, dg *DataGroup) context.Contex
 	})
 }
 
+// buildObjectIndexEntry builds an ObjectIndexEntry from a ShardGroupEntry and
+// the storage.Object returned by a mutating operation. Shared by
+// commitObjectIndex (ClusterCoordinator) and objectIndexEntryForDataGroup
+// (ForwardReceiver) to keep the EC config lookup in one place.
+func buildObjectIndexEntry(group ShardGroupEntry, bucket, key string, obj *storage.Object, isDeleteMarker bool) ObjectIndexEntry {
+	ecCfg := objectIndexECConfigForGroup(group)
+	return ObjectIndexEntry{
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        obj.VersionID,
+		PlacementGroupID: group.ID,
+		Size:             obj.Size,
+		ContentType:      obj.ContentType,
+		ETag:             obj.ETag,
+		ModTime:          obj.LastModified,
+		ECData:           uint8(ecCfg.DataShards),
+		ECParity:         uint8(ecCfg.ParityShards),
+		NodeIDs:          objectIndexNodeIDsForGroup(group, ecCfg),
+		IsDeleteMarker:   isDeleteMarker,
+	}
+}
+
+// objectIndexEntryForDataGroup builds an ObjectIndexEntry from the DataGroup
+// topology and the storage.Object returned by a mutating operation.
+func objectIndexEntryForDataGroup(dg *DataGroup, bucket, key string, obj *storage.Object, isDeleteMarker bool) ObjectIndexEntry {
+	return buildObjectIndexEntry(ShardGroupEntry{ID: dg.ID(), PeerIDs: dg.PeerIDs()}, bucket, key, obj, isDeleteMarker)
+}
+
 func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport.Message {
-	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
-	body := pa.BodyBytes()
-	obj, err := dg.Backend().PutObject(
-		ctx,
-		string(pa.Bucket()),
-		string(pa.Key()),
-		bytes.NewReader(body),
-		string(pa.ContentType()),
-	)
+	bucket := string(pa.Bucket())
+	key := string(pa.Key())
+	ctx := contextForForwardedGroup(context.Background(), dg)
+	obj, err := dg.Backend().PutObject(ctx, bucket, key, bytes.NewReader(pa.BodyBytes()), string(pa.ContentType()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
+	if r.indexProposer != nil {
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
 	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
-	obj, err := dg.Backend().PutObject(
-		ctx,
-		string(pa.Bucket()),
-		string(pa.Key()),
-		body,
-		string(pa.ContentType()),
-	)
+	bucket := string(pa.Bucket())
+	key := string(pa.Key())
+	obj, err := dg.Backend().PutObject(ctx, bucket, key, body, string(pa.ContentType()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(pa.Bucket()))}
+	if r.indexProposer != nil {
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
@@ -386,6 +428,15 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
+	if r.indexProposer != nil {
+		ctx := contextForForwardedGroup(context.Background(), dg)
+		marker := &storage.Object{Key: key, VersionID: markerID}
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, marker, true)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex (delete marker) failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
 	return &transport.Message{Payload: buildObjectReply(&storage.Object{
 		Key:       key,
 		VersionID: markerID,
@@ -394,9 +445,18 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 
 func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) *transport.Message {
 	da := raftpb.GetRootAsDeleteObjectVersionArgs(args, 0)
-	err := dg.Backend().DeleteObjectVersion(string(da.Bucket()), string(da.Key()), string(da.VersionId()))
-	if err != nil {
+	bucket := string(da.Bucket())
+	key := string(da.Key())
+	versionID := string(da.VersionId())
+	if err := dg.Backend().DeleteObjectVersion(bucket, key, versionID); err != nil {
 		return statusReply(mapErrorToStatus(err))
+	}
+	if r.indexProposer != nil {
+		ctx := contextForForwardedGroup(context.Background(), dg)
+		if err := r.indexProposer.ProposeDeleteObjectIndex(ctx, bucket, key, versionID); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Str("version_id", versionID).Msg("forward: ProposeDeleteObjectIndex failed; stale index entry may remain")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
 	}
 	return &transport.Message{Payload: buildOKReply()}
 }
@@ -485,8 +545,10 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 }
 
 func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
-	ctx := context.Background()
+	ctx := contextForForwardedGroup(context.Background(), dg)
 	ca := raftpb.GetRootAsCompleteMultipartUploadArgs(args, 0)
+	bucket := string(ca.Bucket())
+	key := string(ca.Key())
 	n := ca.PartsLength()
 	parts := make([]storage.Part, n)
 	var partRef raftpb.PartRef
@@ -498,17 +560,18 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 			}
 		}
 	}
-	obj, err := dg.Backend().CompleteMultipartUpload(
-		ctx,
-		string(ca.Bucket()),
-		string(ca.Key()),
-		string(ca.UploadId()),
-		parts,
-	)
+	obj, err := dg.Backend().CompleteMultipartUpload(ctx, bucket, key, string(ca.UploadId()), parts)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectReply(obj, string(ca.Bucket()))}
+	if r.indexProposer != nil {
+		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+			return statusReply(raftpb.ForwardStatusInternal)
+		}
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte) *transport.Message {

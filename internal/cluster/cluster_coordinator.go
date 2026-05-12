@@ -464,21 +464,7 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 	if c.indexWriter == nil {
 		return nil
 	}
-	ecConfig := objectIndexECConfigForGroup(group)
-	entry := ObjectIndexEntry{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        obj.VersionID,
-		PlacementGroupID: group.ID,
-		Size:             obj.Size,
-		ContentType:      obj.ContentType,
-		ETag:             obj.ETag,
-		ModTime:          obj.LastModified,
-		ECData:           uint8(ecConfig.DataShards),
-		ECParity:         uint8(ecConfig.ParityShards),
-		NodeIDs:          objectIndexNodeIDsForGroup(group, ecConfig),
-		IsDeleteMarker:   isDeleteMarker,
-	}
+	entry := buildObjectIndexEntry(group, bucket, key, obj, isDeleteMarker)
 	return c.indexWriter.ProposeObjectIndex(ctx, entry, false)
 }
 
@@ -739,9 +725,6 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 	}
 	obj, err := objectFromReply(reply)
 	if err == nil {
-		if err := c.commitObjectIndex(ctx, bucket, key, obj, ShardGroupEntry{ID: target.GroupID, PeerIDs: entry.NodeIDs}, true); err != nil {
-			return "", err
-		}
 		return obj.VersionID, nil
 	}
 	if errors.Is(err, errInternalReply) {
@@ -775,13 +758,7 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 	if err != nil {
 		return err
 	}
-	if err := parseReplyStatus(reply); err != nil {
-		return err
-	}
-	if c.indexWriter != nil {
-		return c.indexWriter.ProposeDeleteObjectIndex(ctx, bucket, key, versionID)
-	}
-	return nil
+	return parseReplyStatus(reply)
 }
 
 func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -951,11 +928,7 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 	if err != nil {
 		return nil, err
 	}
-	obj, err := objectFromReply(reply)
-	if err != nil {
-		return nil, err
-	}
-	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+	return objectFromReply(reply)
 }
 
 func (c *ClusterCoordinator) PutObject(
@@ -989,11 +962,7 @@ func (c *ClusterCoordinator) PutObject(
 		if err != nil {
 			return nil, err
 		}
-		obj, err := objectFromReply(reply)
-		if err != nil {
-			return nil, err
-		}
-		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+		return objectFromReply(reply)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
@@ -1015,7 +984,7 @@ func (c *ClusterCoordinator) PutObject(
 	if obj.Size != int64(len(body)) {
 		return nil, ErrForwardBodySizeMismatch
 	}
-	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+	return obj, nil
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as

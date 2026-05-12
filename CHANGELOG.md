@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.166.0] - 2026-05-13 — feat(cluster): runtime UDS join + .join-pending boot simplification
+## [0.0.167.0] - 2026-05-13 — feat(cluster): runtime UDS join + .join-pending boot simplification
 
 클러스터 join 워크플로우 단순화. 모든 노드가 동일한 `grainfs serve` 명령으로 기동.
 새 노드 추가는 런타임 UDS admin API(`grainfs join <peer>`)로 단일 명령 처리.
@@ -31,6 +31,21 @@
 ### Deferred (follow-up PR)
 - Phase 1.3: `clusterMode` 항상 `true` 고정 (solo 부팅 시에도 `--cluster-key` 필수화). 단위 테스트 ~18개 + e2e 인프라 수정 범위.
 - Phase 3.2: solo 노드에 사용자 데이터 있을 때 `--force` 없이 join 방지 가드.
+
+## [0.0.166.0] - 2026-05-13 — feat(cluster): forward operation atomicity — leader handles index commit
+
+follower가 storage write를 leader로 포워딩한 후 index commit을 follower에서 별도로 수행하던 방식을 제거.
+이제 ForwardReceiver가 leader 측에서 storage write + index commit을 원자적으로 처리하므로,
+두 단계 사이 크래시로 인한 고아 shard 생성 가능성이 없어짐.
+
+### Changed
+- `ForwardReceiver`: `PutObject`, `PutObjectStream`, `CompleteMultipartUpload`, `DeleteObject` (delete-marker), `DeleteObjectVersion` 핸들러에서 리더 측 `ProposeObjectIndex`/`ProposeDeleteObjectIndex` 호출 추가.
+- `ClusterCoordinator`: 포워딩 후 중복으로 수행하던 index commit 5곳 제거.
+- `bootWALAndForwarders`: `indexProposer`를 공유 로컬 변수로 추출하여 `ForwardingObjectIndexProposer`와 `ForwardReceiver` 양쪽에 전달.
+
+### Added
+- `internal/cluster/forward_receiver_test.go`: 5개 포워딩 경로의 index-propose 검증 테스트 10개.
+- `internal/cluster/backend_test.go`, `cluster_coordinator_test.go`: 판별 테스트 각 1각.
 
 ## [0.0.165.0] - 2026-05-13 — feat(reshard): separate ring-reshard-interval from reshard-interval
 

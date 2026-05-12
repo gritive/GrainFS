@@ -1333,3 +1333,18 @@ func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t 
 	args := raftpb.GetRootAsUploadPartArgs(d.calls[0].args, 0)
 	require.Equal(t, body, args.BodyBytes())
 }
+
+func TestClusterCoordinator_PutObject_ForwardPathDoesNotCommitIndex(t *testing.T) {
+	c, d := setupCoordWithForward(t, "b", "g1", []string{"a"})
+	proposer := &recordingObjectIndexProposer{}
+	c.WithObjectIndexProposer(proposer)
+
+	body := []byte("hello")
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", VersionID: "v1", Size: int64(len(body)), ETag: "etag"}, "b",
+	)
+
+	_, err := c.PutObject(context.Background(), "b", "k", bytes.NewReader(body), "text/plain")
+	require.NoError(t, err)
+	require.Empty(t, proposer.entries, "ClusterCoordinator must not commit index for forwarded PutObject — leader handles it")
+}
