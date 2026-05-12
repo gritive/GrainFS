@@ -1,9 +1,7 @@
 package serveruntime
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -37,11 +35,10 @@ func (n *NodeServices) Close() {
 func (n *NodeServices) NFS4() *nfs4server.Server { return n.nfs4Srv }
 
 // StartNodeServices spawns NFSv4 and NBD servers if their respective ports
-// are > 0. Returns the handle for shutdown. nbdVolumeSize is the default
-// volume size when the NBD worker auto-creates the "default" volume; ri
-// is an optional ReadIndexer for linearizable NBD reads (nil = no gate).
-func StartNodeServices(ctx context.Context, backend storage.Backend,
-	volMgr *volume.Manager, nfs4Port, nbdPort int, nbdVolumeSize int64, ri nbd.ReadIndexer,
+// are > 0. Returns the handle for shutdown. ri is an optional ReadIndexer
+// for linearizable NBD reads (nil = no gate).
+func StartNodeServices(backend storage.Backend,
+	volMgr *volume.Manager, nfs4Port, nbdPort int, ri nbd.ReadIndexer,
 ) *NodeServices {
 	svc := &NodeServices{}
 
@@ -57,9 +54,6 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 
 	if nbdPort > 0 {
 		const defaultVolName = "default"
-		if err := EnsureDefaultNBDVolume(ctx, volMgr, defaultVolName, nbdVolumeSize, 30*time.Second); err != nil {
-			log.Warn().Err(err).Msg("default nbd volume create failed")
-		}
 		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri)
 		if err != nil {
 			log.Error().Err(err).Msg("nbd server start failed")
@@ -69,35 +63,6 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 	}
 
 	return svc
-}
-
-func EnsureDefaultNBDVolume(ctx context.Context, volMgr *volume.Manager, name string, size int64, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		if _, err := volMgr.Get(name); err == nil {
-			return nil
-		}
-		if _, err := volMgr.Create(name, size); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return lastErr
-			}
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }
 
 func startNBDServer(mgr *volume.Manager, volName string, port int, ri nbd.ReadIndexer) (*nbd.Server, error) {

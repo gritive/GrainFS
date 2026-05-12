@@ -88,9 +88,8 @@ type Config struct {
 	DegradedInterval         time.Duration
 
 	// Node services
-	NFS4Port      int
-	NBDPort       int
-	NBDVolumeSize int64
+	NFS4Port int
+	NBDPort  int
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool
