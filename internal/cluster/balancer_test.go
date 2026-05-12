@@ -51,18 +51,58 @@ func (m *mockRaftNode) ProposedAt(i int) []byte {
 	return m.proposed[i]
 }
 
-// testBalancerConfig returns a BalancerConfig with aggressive timings for testing.
-func testBalancerConfig() BalancerConfig {
-	return BalancerConfig{
-		GossipInterval:      10 * time.Millisecond,
-		WarmupTimeout:       50 * time.Millisecond,
-		ImbalanceTriggerPct: 20.0,
-		ImbalanceStopPct:    5.0,
-		MigrationRate:       100, // migrations per second in tests
-		LeaderTenureMin:     0,   // no tenure requirement in tests
-		LeaderLoadThreshold: 1.3, // trigger if leader > median × 1.3
+// fakeBalancerCfg is a test stub implementing BalancerClusterCfg. Fields are
+// exported so individual tests can mutate them in place (hot-reload tests rely
+// on this; non-mutating tests treat the struct as a one-shot configuration).
+// Mutation is not synchronized — tests that share a fake across goroutines
+// must accept Go's relaxed-memory atomic-read-of-machine-word semantics, which
+// is fine for the simple bool/float64/int32/duration types here.
+type fakeBalancerCfg struct {
+	enabled             bool
+	imbalanceTriggerPct float64
+	imbalanceStopPct    float64
+	migrationRate       int32
+	leaderTenureMin     time.Duration
+	warmupTimeout       time.Duration
+	cbThreshold         float64
+	migrationMaxRetries int32
+	migrationPendingTTL time.Duration
+	gossipInterval      time.Duration
+}
+
+func (f *fakeBalancerCfg) BalancerEnabled() bool                      { return f.enabled }
+func (f *fakeBalancerCfg) BalancerImbalanceTriggerPct() float64       { return f.imbalanceTriggerPct }
+func (f *fakeBalancerCfg) BalancerImbalanceStopPct() float64          { return f.imbalanceStopPct }
+func (f *fakeBalancerCfg) BalancerMigrationRate() int32               { return f.migrationRate }
+func (f *fakeBalancerCfg) BalancerLeaderTenureMin() time.Duration     { return f.leaderTenureMin }
+func (f *fakeBalancerCfg) BalancerWarmupTimeout() time.Duration       { return f.warmupTimeout }
+func (f *fakeBalancerCfg) BalancerCBThreshold() float64               { return f.cbThreshold }
+func (f *fakeBalancerCfg) BalancerMigrationMaxRetries() int32         { return f.migrationMaxRetries }
+func (f *fakeBalancerCfg) BalancerMigrationPendingTTL() time.Duration { return f.migrationPendingTTL }
+func (f *fakeBalancerCfg) BalancerGossipInterval() time.Duration      { return f.gossipInterval }
+
+// defaultFakeBalancerCfg returns a fakeBalancerCfg with aggressive timings for
+// testing, mirroring the production DefaultBalancerConfig() values for fields
+// not specifically tuned.
+func defaultFakeBalancerCfg() *fakeBalancerCfg {
+	def := DefaultBalancerConfig()
+	return &fakeBalancerCfg{
+		enabled:             true,
+		gossipInterval:      10 * time.Millisecond,
+		warmupTimeout:       50 * time.Millisecond,
+		imbalanceTriggerPct: 20.0,
+		imbalanceStopPct:    5.0,
+		migrationRate:       100, // migrations per second in tests
+		leaderTenureMin:     0,   // no tenure requirement in tests
+		cbThreshold:         def.CBThreshold,
+		migrationMaxRetries: int32(def.MigrationMaxRetries),
+		migrationPendingTTL: def.MigrationPendingTTL,
 	}
 }
+
+// testBalancerConfig returns a fakeBalancerCfg with aggressive timings for testing.
+// Kept as a thin wrapper for source-stable test call sites.
+func testBalancerConfig() *fakeBalancerCfg { return defaultFakeBalancerCfg() }
 
 // --- BalancerProposer tests ---
 
@@ -137,7 +177,7 @@ func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b", "node-c"}}
 	cfg := testBalancerConfig()
-	cfg.WarmupTimeout = 1 * time.Millisecond // immediate timeout
+	cfg.warmupTimeout = 1 * time.Millisecond // immediate timeout
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
@@ -249,7 +289,7 @@ func TestLeaderBalance_TransfersWhenOverloaded(t *testing.T) {
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig() // LeaderLoadThreshold: 1.3, LeaderTenureMin: 0
 	p := NewBalancerProposer("leader", store, node, cfg)
-	p.startedAt = time.Now().Add(-cfg.WarmupTimeout - time.Second) // warmup done
+	p.startedAt = time.Now().Add(-cfg.warmupTimeout - time.Second) // warmup done
 
 	p.tickOnce()
 
@@ -265,7 +305,7 @@ func TestLeaderBalance_NoTransferWhenBalanced(t *testing.T) {
 	node := &mockRaftNode{state: 2, nodeID: "leader", peerIDs: []string{"peer-a", "peer-b"}}
 	cfg := testBalancerConfig()
 	p := NewBalancerProposer("leader", store, node, cfg)
-	p.startedAt = time.Now().Add(-cfg.WarmupTimeout - time.Second)
+	p.startedAt = time.Now().Add(-cfg.warmupTimeout - time.Second)
 
 	p.tickOnce()
 
@@ -305,7 +345,7 @@ func TestLeaderBalance_NoTransferWhenFollower(t *testing.T) {
 	node := &mockRaftNode{state: 0, nodeID: "node-a", peerIDs: []string{"node-b"}} // follower
 	cfg := testBalancerConfig()
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.startedAt = time.Now().Add(-cfg.WarmupTimeout - time.Second)
+	p.startedAt = time.Now().Add(-cfg.warmupTimeout - time.Second)
 
 	p.tickOnce()
 
@@ -325,8 +365,7 @@ func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
 		JoinedAt: time.Now().Add(-1 * time.Minute)}) // recently joined
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
-	cfg := testBalancerConfig()
-	cfg.GracePeriod = 10 * time.Minute // grace period active for 10 min after join
+	cfg := testBalancerConfig() // grace period inherits 10m default from DefaultBalancerConfig
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
@@ -344,7 +383,6 @@ func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
-	cfg.GracePeriod = 10 * time.Minute
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
@@ -363,7 +401,6 @@ func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) 
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	cfg := testBalancerConfig()
-	cfg.GracePeriod = 10 * time.Minute
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
@@ -453,4 +490,71 @@ func TestLocalObjectPicker_NestedKey(t *testing.T) {
 	assert.Equal(t, "mybucket", bucket)
 	assert.Equal(t, filepath.Join("photos", "2024", "img.jpg"), key)
 	assert.Empty(t, versionID)
+}
+
+// --- Hot-reload tests (Task 14) ---
+
+// TestBalancer_HotReload_TriggerPct verifies that mutating the cluster-config
+// fake mid-run changes the balancer's hysteresis behavior on the next tick.
+// Start with a very high trigger (no migration), then lower it — the balancer
+// should activate.
+func TestBalancer_HotReload_TriggerPct(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	// 30% imbalance — between the initial 50% trigger and the lowered 1% trigger.
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
+	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 50.0, DiskAvailBytes: 100 << 30})
+
+	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
+	cfg := testBalancerConfig()
+	cfg.imbalanceTriggerPct = 50.0 // initially very high — no migration
+	cfg.imbalanceStopPct = 5.0
+	cfg.warmupTimeout = 1 * time.Millisecond // skip warmup
+
+	p := NewBalancerProposer("node-a", store, node, cfg)
+	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	defer p.Stop()
+
+	// With high trigger, no migration after a few ticks.
+	time.Sleep(80 * time.Millisecond)
+	assert.False(t, p.Active(), "high trigger: balancer must not activate")
+	assert.Equal(t, 0, node.ProposedLen(), "high trigger: no proposal expected")
+
+	// Hot-reload to a low trigger; balancer should activate within a few ticks.
+	cfg.imbalanceTriggerPct = 1.0
+	require.Eventually(t, func() bool { return p.Active() }, 500*time.Millisecond, 10*time.Millisecond,
+		"balancer should activate after trigger lowered")
+}
+
+// TestBalancer_HotReload_GossipInterval_TickerReset verifies that mutating
+// BalancerGossipInterval mid-run causes the ticker to reset. Start slow,
+// speed up, observe more ticks per unit time.
+func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "self", DiskUsedPct: 10})
+	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{}}
+	cfg := testBalancerConfig()
+	cfg.gossipInterval = 100 * time.Millisecond
+	cfg.warmupTimeout = 1 * time.Millisecond
+
+	p := NewBalancerProposer("self", store, node, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	defer p.Stop()
+
+	// At 100ms interval, ~1 tick lands in 150ms (the first ticker.C fires at +100ms).
+	time.Sleep(150 * time.Millisecond)
+	prevTicks := p.TickCount()
+
+	// Speed up the interval. The ticker.Reset path fires from inside the next
+	// tick handler, so we must wait at least one full pre-reset interval
+	// (~100ms) for the reset to take effect.
+	cfg.gossipInterval = 10 * time.Millisecond
+	time.Sleep(250 * time.Millisecond)
+	delta := p.TickCount() - prevTicks
+	assert.Greater(t, delta, int64(5), "ticker should reset to faster interval: got %d ticks in 250ms after speed-up", delta)
 }

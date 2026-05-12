@@ -7,7 +7,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/cluster"
 )
+
+// disableBalancerForTest patches the live ClusterConfig so BalancerEnabled is
+// false. Needed because ClusterConfig defaults BalancerEnabled=true (matches
+// the former --balancer-enabled flag default); without this patch the
+// services-extra tests would start a real balancer goroutine.
+func disableBalancerForTest(t *testing.T, state *bootState) {
+	t.Helper()
+	disabled := false
+	require.NoError(t, state.metaRaft.FSM().ApplyClusterConfigPatchForTest(cluster.ClusterConfigPatch{BalancerEnabled: &disabled}))
+}
 
 // servicesExtraPrereqs runs every prior boot phase, including
 // bootSnapshotAndApplyLoop. The returned state is ready for the PR-final
@@ -28,11 +40,12 @@ func servicesExtraPrereqs(t *testing.T) (context.Context, *bootState) {
 	return ctx, state
 }
 
-// TestBootBalancerAndGossip_NoFlagsSkips — happy path: with cfg.BalancerEnabled
-// = false and HealReceiptEnabled = false, the phase is a no-op.
-// state.balancerProposer and state.gossipReceiver remain nil.
+// TestBootBalancerAndGossip_NoFlagsSkips — happy path: with BalancerEnabled
+// patched to false via ClusterConfig and HealReceiptEnabled = false, the phase
+// is a no-op. state.balancerProposer and state.gossipReceiver remain nil.
 func TestBootBalancerAndGossip_NoFlagsSkips(t *testing.T) {
 	ctx, state := servicesExtraPrereqs(t)
+	disableBalancerForTest(t, state)
 
 	assert.Nil(t, state.balancerProposer, "balancerProposer nil before phase")
 	assert.Nil(t, state.gossipReceiver, "gossipReceiver nil before phase")
@@ -48,6 +61,7 @@ func TestBootBalancerAndGossip_NoFlagsSkips(t *testing.T) {
 // JoinMode = false (test default) so the meta-join branch is skipped.
 func TestBootWALAndForwarders_PopulatesForwarders(t *testing.T) {
 	ctx, state := servicesExtraPrereqs(t)
+	disableBalancerForTest(t, state)
 	require.NoError(t, bootBalancerAndGossip(ctx, state))
 
 	require.NoError(t, bootWALAndForwarders(ctx, state))
@@ -74,6 +88,7 @@ func TestBootWALAndForwarders_PopulatesForwarders(t *testing.T) {
 // minimal test Config. Those are covered by the smoke E2E test.
 func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	ctx, state := servicesExtraPrereqs(t)
+	disableBalancerForTest(t, state)
 
 	// Before any phase: every services-extra field nil.
 	assert.Nil(t, state.balancerProposer)

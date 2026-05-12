@@ -13,10 +13,10 @@ func TestTickOnce_CBUpdatesFromStoreGetAll(t *testing.T) {
 	store := NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1"}, state: 2}
 	cfg := testBalancerConfig()
-	cfg.CBThreshold = 0.90
+	cfg.cbThreshold = 0.90
 
 	p := NewBalancerProposer("self", store, node, cfg)
-	p.startedAt = p.startedAt.Add(-cfg.WarmupTimeout - time.Second) // skip warmup
+	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second) // skip warmup
 
 	// Feed self + n1 (n1 disk at 95% — above threshold)
 	store.Set(NodeStats{NodeID: "self", DiskUsedPct: 10})
@@ -35,11 +35,11 @@ func TestTickOnce_AllDstsCBOpen_NoProposal(t *testing.T) {
 	store := NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1", "n2"}, state: 2}
 	cfg := testBalancerConfig()
-	cfg.CBThreshold = 0.90
-	cfg.ImbalanceTriggerPct = 5 // easily triggered
+	cfg.cbThreshold = 0.90
+	cfg.imbalanceTriggerPct = 5 // easily triggered
 
 	p := NewBalancerProposer("self", store, node, cfg)
-	p.startedAt = p.startedAt.Add(-cfg.WarmupTimeout - time.Second)
+	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second)
 	p.SetObjectPicker(&mockPicker{bucket: "b", key: "k"})
 
 	// Self has high disk, peers all full
@@ -58,11 +58,11 @@ func TestTickOnce_CBOpenSkipsDst(t *testing.T) {
 	store := NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1", "n2"}, state: 2}
 	cfg := testBalancerConfig()
-	cfg.CBThreshold = 0.90
-	cfg.ImbalanceTriggerPct = 5
+	cfg.cbThreshold = 0.90
+	cfg.imbalanceTriggerPct = 5
 
 	p := NewBalancerProposer("self", store, node, cfg)
-	p.startedAt = p.startedAt.Add(-cfg.WarmupTimeout - time.Second)
+	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second)
 	p.SetObjectPicker(&mockPicker{bucket: "b", key: "k"})
 
 	// Self heavy, n1 full (CB open), n2 light (CB closed) — expect migration to n2

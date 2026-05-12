@@ -11,7 +11,7 @@ func newTestBalancer(b *testing.B) *BalancerProposer {
 	b.Helper()
 	store := NewNodeStatsStore(1 * time.Minute)
 	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{}}
-	return NewBalancerProposer("self", store, node, DefaultBalancerConfig())
+	return NewBalancerProposer("self", store, node, defaultFakeBalancerCfg())
 }
 
 // BenchmarkBalancerStatus measures Status() throughput under concurrent access.

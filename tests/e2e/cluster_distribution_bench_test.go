@@ -169,14 +169,17 @@ func runDistributionScenario(t *testing.T, sc distributionScenario, outRoot stri
 		DisableNFS:  true,
 		DisableNBD:  true,
 		EnablePprof: true,
-		ExtraArgs: []string{
-			"--balancer-gossip-interval", "5s",
-		},
 	})
 	defer c.Stop()
 
 	bucket := fmt.Sprintf("dist-%s", strings.ToLower(strings.ReplaceAll(sc.name, "_", "-")))
 	leaderIdx := ensureDistributionBucket(t, c, bucket)
+	// --balancer-gossip-interval was removed in 0.0.151.0; configure via the
+	// cluster config admin API once raft is ready (writable endpoint implies
+	// leader is up).
+	SetClusterConfig(t, c.dataDirs[leaderIdx], map[string]any{
+		"balancer-gossip-interval": "5s",
+	})
 	settleTime := time.Duration(distributionNodes*4)*400*time.Millisecond + 5*time.Second
 	if settleTime > 60*time.Second {
 		settleTime = 60 * time.Second

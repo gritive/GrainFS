@@ -22,15 +22,9 @@ func TestBalancerIntegration_ProposesOnImbalance(t *testing.T) {
 		peerIDs: []string{"peer-a"},
 	}
 
-	cfg := BalancerConfig{
-		GossipInterval:      10 * time.Millisecond,
-		WarmupTimeout:       1 * time.Millisecond, // immediate
-		ImbalanceTriggerPct: 20.0,
-		ImbalanceStopPct:    5.0,
-		MigrationRate:       1,
-		LeaderTenureMin:     0,
-		LeaderLoadThreshold: 1.3,
-	}
+	cfg := defaultFakeBalancerCfg()
+	cfg.warmupTimeout = 1 * time.Millisecond // immediate
+	cfg.migrationRate = 1
 
 	p := NewBalancerProposer("leader", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
@@ -152,21 +146,15 @@ func TestBalancerIntegration_DiskCollector(t *testing.T) {
 		peerIDs: []string{"peer-a"},
 	}
 
-	cfg := BalancerConfig{
-		GossipInterval:      10 * time.Millisecond,
-		WarmupTimeout:       1 * time.Millisecond,
-		ImbalanceTriggerPct: 20.0,
-		ImbalanceStopPct:    5.0,
-		MigrationRate:       1,
-		LeaderTenureMin:     0,
-		LeaderLoadThreshold: 1.3,
-	}
+	cfg := defaultFakeBalancerCfg()
+	cfg.warmupTimeout = 1 * time.Millisecond
+	cfg.migrationRate = 1
 
 	p := NewBalancerProposer("leader", store, node, cfg)
 	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 
 	// Real DiskCollector with injected 80% disk usage.
-	collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond)
+	collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond, nil)
 	collector.SetStatFunc(func(string) (float64, uint64) { return 80.0, 1 << 30 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

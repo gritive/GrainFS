@@ -134,6 +134,13 @@ grainfs cluster --endpoint <data-dir>/admin.sock placement <bucket> <key> --form
 The same report is available from the admin socket at `/v1/cluster/placement`
 and from the HTTP admin API at `/api/cluster/placement`.
 
+### Cluster-Wide Policy via Admin API
+
+`grainfs cluster config` manages Raft-replicated policy values that apply to
+every node (balancer behavior, alert webhook, disk thresholds). Changes take
+effect at the next consumer tick — no restart. See `CHANGELOG.md` for the v0.155
+migration if you're upgrading.
+
 ### Recovery Commands
 
 ```bash
