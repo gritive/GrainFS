@@ -11,9 +11,13 @@
 - [ ] **`bucket policy` CLI** — `GetBucketPolicy/SetBucketPolicy/DeleteBucketPolicy` 노출. 현재 storage layer만 있고 admin API 미노출.
 - [ ] **`bucket versioning` CLI** — `SetBucketVersioning` admin API 노출.
 
+### Bucket Admin API
+
+- [ ] **ForceDeleteBucket: Badger MVCC 홀드 해소** — `WalkObjects` 콜백 내에서 Raft propose를 호출하면 db.View 트랜잭션이 N×RTT 동안 열려 있어 Badger GC가 블록됨. 수정: View 내에서 키 목록만 수집 후 View를 닫고, 루프 밖에서 delete 수행. PR #334 adversarial review 식별.
+- [ ] **ForceDeleteBucket: ctx 전파** — `DeleteObjectReturningMarker`가 `context.Background()`를 하드코딩. HTTP 요청 취소/타임아웃이 force-delete를 중단할 수 없음. PR #334 adversarial review 식별.
+- [ ] **ForceDeleteBucket: TOCTOU 오류 메시지** — force=true 중 concurrent write로 `ErrBucketNotEmpty` 발생 시 "use --force" 라는 오해를 주는 메시지 반환. force=true 경우는 별도 메시지(503 retry) 필요. PR #334 adversarial review 식별.
+
 ### 기타
-
-
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation

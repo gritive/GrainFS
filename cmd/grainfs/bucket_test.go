@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 // buildTestBucketRoot returns a fresh root+bucket command tree (no globals touched).
@@ -311,6 +312,60 @@ func TestBucketCreateCmd_JSON(t *testing.T) {
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
 		t.Errorf("output is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+}
+
+func TestBucketListCmd_HasUpstreamColumn(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"buckets":[{"name":"alpha","has_upstream":true},{"name":"beta","has_upstream":false}]}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "list"})
+	require.NoError(t, root.Execute())
+
+	out := buf.String()
+	if !strings.Contains(out, "HAS_UPSTREAM") {
+		t.Errorf("output %q missing HAS_UPSTREAM header", out)
+	}
+	if !strings.Contains(out, "yes") {
+		t.Errorf("output %q missing 'yes' for alpha", out)
+	}
+}
+
+func TestBucketInfoCmd_Enriched(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/my-bucket", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"my-bucket","object_count":42,"has_upstream":true,"versioning":"Enabled"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "info", "my-bucket"})
+	require.NoError(t, root.Execute())
+
+	out := buf.String()
+	if !strings.Contains(out, "VERSIONING") {
+		t.Errorf("output %q missing VERSIONING header", out)
+	}
+	if !strings.Contains(out, "HAS_UPSTREAM") {
+		t.Errorf("output %q missing HAS_UPSTREAM header", out)
+	}
+	if !strings.Contains(out, "Enabled") {
+		t.Errorf("output %q missing versioning value", out)
+	}
+	if !strings.Contains(out, "yes") {
+		t.Errorf("output %q missing 'yes' for has_upstream", out)
 	}
 }
 
