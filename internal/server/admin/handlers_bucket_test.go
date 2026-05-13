@@ -66,6 +66,22 @@ func (f *fakeBucketOps) CountObjects(_ context.Context, bucket string) (int64, e
 	return f.counts[bucket], nil
 }
 
+func (f *fakeBucketOps) GetBucketPolicy(bucket string) ([]byte, error) {
+	return nil, storage.UnsupportedOperationError{Op: "GetBucketPolicy", Reason: storage.UnsupportedReasonNoAdapter}
+}
+func (f *fakeBucketOps) SetBucketPolicy(bucket string, policyJSON []byte) error {
+	return storage.UnsupportedOperationError{Op: "SetBucketPolicy", Reason: storage.UnsupportedReasonNoAdapter}
+}
+func (f *fakeBucketOps) DeleteBucketPolicy(bucket string) error {
+	return storage.UnsupportedOperationError{Op: "DeleteBucketPolicy", Reason: storage.UnsupportedReasonNoAdapter}
+}
+func (f *fakeBucketOps) GetBucketVersioning(bucket string) (string, error) {
+	return "", storage.UnsupportedOperationError{Op: "GetBucketVersioning", Reason: storage.UnsupportedReasonNoAdapter}
+}
+func (f *fakeBucketOps) SetBucketVersioning(bucket, state string) error {
+	return storage.UnsupportedOperationError{Op: "SetBucketVersioning", Reason: storage.UnsupportedReasonNoAdapter}
+}
+
 func TestAdminCreateBucket(t *testing.T) {
 	fake := newFakeBucketOps()
 	d := &admin.Deps{Buckets: fake}
