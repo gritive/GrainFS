@@ -151,6 +151,8 @@ done
 echo ""
 echo "=== Benchmark complete ==="
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
+  wait "$CPU_PROFILE_PID" 2>/dev/null || true
+  CPU_PROFILE_PID=""
   echo ""
   echo "=== CPU top-10 (go tool pprof) ==="
   go tool pprof -top -nodecount=10 "$PROFILE_DIR/cpu.pb.gz" 2>/dev/null || echo "  pprof analysis failed"
