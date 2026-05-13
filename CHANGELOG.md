@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.176.0] - 2026-05-13 — feat: SendTimeoutNow QUIC RPC (leader transfer)
+
+### Added
+
+- `SetTimeoutNowTransport` on `RaftNode` interface and `raftNodeAdapter`/`raftTransportBridge`;
+  uses `atomic.Pointer[timeoutNowFn]` for lock-free late binding. Returns `ErrNotImplemented`
+  when not wired (nil pointer), same fallback contract as `SendInstallSnapshot`.
+- `sendTimeoutNow` + `SetTimeoutNowTransport` on `RaftQUICRPCTransport`; wire format is
+  byte-identical to the v1 QUIC codec using a new `v2RPCTypeTimeoutNow` message type.
+- `v2RPCTransport.SetTimeoutNowTransport()` call in `serveruntime.Run`; logged as
+  "raft v2: QUIC RPC transport wired (TimeoutNow enabled)".
+
+### Fixed
+
+- `TransferLeadership` (Raft §3.10) now works end-to-end over QUIC in multi-node v2 clusters.
+  Previously `SendTimeoutNow` returned `ErrNotImplemented`, causing the transfer target to miss
+  the TimeoutNow signal and rely on the natural [T, 2T) election window instead.
+
+### Verification
+
+- `go build ./...`
+- `go test ./internal/cluster/ -run TestSendTimeoutNow` (unit: ErrNotImplemented when unwired)
+- `go test ./internal/cluster/ -run TestSetTimeoutNowTransport` (unit: nil-bridge no-panic)
+- `go test ./internal/cluster/ -run TestV2QUICCluster_ThreeNode_TransferLeadership -count=5`
+  with ET=5s discriminator: new leader appears within 2s, proving TimeoutNow fired.
+
 ## [0.0.175.0] - 2026-05-13 — fix: eliminate peerHealth race in ecObjectReader goroutine drain
 
 ### Fixed
