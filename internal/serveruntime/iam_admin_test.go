@@ -129,7 +129,7 @@ func createSAViaAPI(t *testing.T, cli *http.Client, name string) iam.SACreateRes
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != 201 {
 		t.Fatalf("create status=%d body=%s", resp.StatusCode, body)
 	}
 	var out iam.SACreateResponse

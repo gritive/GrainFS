@@ -148,7 +148,7 @@ func registerIAM(g router, d *Deps) {
 	// SA
 	g.POST("/iam/sa", wrapBody[iam.SACreateRequest, iam.SACreateResponse](d, CreateSA))
 	g.GET("/iam/sa", wrapZero(d, ListSA))
-	g.GET("/iam/sa/:id", wrapName(d, GetSA))
+	g.GET("/iam/sa/:id", iamGetSAHandler(d))
 	g.DELETE("/iam/sa/:id", iamDeleteSAHandler(d))
 	// Key
 	g.POST("/iam/sa/:id/key", iamCreateKeyHandler(d))
@@ -160,8 +160,30 @@ func registerIAM(g router, d *Deps) {
 	// Bucket upstream (PUT upsert → 204)
 	g.PUT("/buckets/upstream", wrapBodyNoOut204[iam.BucketUpstreamPutRequest](d, PutBucketUpstream))
 	g.GET("/buckets/upstream", wrapZero(d, ListBucketUpstreams))
-	g.GET("/buckets/:bucket/upstream", wrapName(d, GetBucketUpstream))
+	g.GET("/buckets/:bucket/upstream", iamGetBucketUpstreamHandler(d))
 	g.DELETE("/buckets/:bucket/upstream", iamDeleteBucketUpstreamHandler(d))
+}
+
+func iamGetSAHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		resp, err := GetSA(ctx, d, c.Param("id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		writeOK(c, consts.StatusOK, resp)
+	}
+}
+
+func iamGetBucketUpstreamHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		resp, err := GetBucketUpstream(ctx, d, c.Param("bucket"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		writeOK(c, consts.StatusOK, resp)
+	}
 }
 
 func iamDeleteSAHandler(d *Deps) app.HandlerFunc {
