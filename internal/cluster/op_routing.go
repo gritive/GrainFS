@@ -92,6 +92,7 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 	t.SelfIsOnlyVoter = t.SelfIsVoter && len(entry.PeerIDs) == 1
 	if t.SelfIsVoter && r.leaderProbe != nil && r.leaderProbe.GroupLeaderIsSelf(entry.ID) {
 		t.SelfIsLeader = true
+		return t, nil
 	}
 	peers := NewShardGroupPeerSet(entry).ForwardOrder(r.selfID, r.selfAliases...)
 	if r.addr != nil {
