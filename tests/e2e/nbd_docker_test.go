@@ -53,6 +53,29 @@ func TestNBD_Docker(t *testing.T) {
 	runNBDDockerTest(t, "docker/nbd-test.sh", "Docker NBD Test: PASS")
 }
 
+func TestNBDDockerScriptsUseCurrentServeFlags(t *testing.T) {
+	for _, script := range []string{
+		"../../docker/nbd-test.sh",
+		"../../docker/nbd-cow-test.sh",
+		"../../docker/nbd-dedup-test.sh",
+	} {
+		body, err := os.ReadFile(script)
+		if err != nil {
+			t.Fatalf("read %s: %v", script, err)
+		}
+		if strings.Contains(string(body), "--nbd-volume-size") {
+			t.Fatalf("%s still passes removed serve flag --nbd-volume-size; create the volume with grainfs volume create instead", script)
+		}
+		if strings.Contains(string(body), `volume info default --data`) ||
+			strings.Contains(string(body), `volume create default --size "$NBD_SIZE" --data`) {
+			t.Fatalf("%s still passes removed volume CLI flag --data; use --endpoint \"$DATA_DIR/admin.sock\"", script)
+		}
+		if !strings.Contains(string(body), "--cluster-key") {
+			t.Fatalf("%s does not pass required serve flag --cluster-key", script)
+		}
+	}
+}
+
 // TestNBD_CoW_SnapshotRollback verifies CoW snapshot+rollback via the NBD block device:
 // write pattern → snapshot → overwrite → rollback → original pattern restored.
 func TestNBD_CoW_SnapshotRollback(t *testing.T) {

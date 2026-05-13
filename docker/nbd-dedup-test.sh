@@ -41,7 +41,7 @@ grainfs serve \
     --data "$DATA_DIR" \
     --port "$S3_PORT" \
     --nbd-port "$NBD_PORT" \
-    --nbd-volume-size "$NBD_SIZE" \
+    --cluster-key "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899" \
     --nfs4-port 0 \
     --dedup &
 SERVER_PID=$!
@@ -57,10 +57,10 @@ echo "OK: HTTP endpoint ready"
 
 echo "Ensuring default volume exists..."
 for i in $(seq 1 30); do
-    if grainfs volume info default --data "$DATA_DIR" >/tmp/grainfs-volume-create.out 2>&1; then
+    if grainfs volume info default --endpoint "$DATA_DIR/admin.sock" >/tmp/grainfs-volume-create.out 2>&1; then
         break
     fi
-    if grainfs volume create default --size "$NBD_SIZE" --data "$DATA_DIR" >/tmp/grainfs-volume-create.out 2>&1; then
+    if grainfs volume create default --size "$NBD_SIZE" --endpoint "$DATA_DIR/admin.sock" >/tmp/grainfs-volume-create.out 2>&1; then
         break
     fi
     if [ "$i" -eq 30 ]; then
@@ -91,7 +91,7 @@ echo "OK: NBD client connected"
 
 # Helper: get allocated_blocks for "default" volume
 get_allocated_blocks() {
-    grainfs volume info default --data "$DATA_DIR" --json \
+    grainfs volume info default --endpoint "$DATA_DIR/admin.sock" --format json \
         | python3 -c "import sys,json; print(json.load(sys.stdin)['allocated_blocks'])"
 }
 

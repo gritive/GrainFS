@@ -214,6 +214,31 @@ func TestClusterCoordinator_PutObject_WaitsForLocalSingletonLeaderBeforeForward(
 	require.Empty(t, d.calls)
 }
 
+func TestClusterCoordinator_PutObject_RejectsMissingBucketBeforeGroupWrite(t *testing.T) {
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb.Node().Start()
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, NewRouter(mgr), meta, "self").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	_, err := c.PutObject(context.Background(), "missing-bucket", "key", strings.NewReader("body"), "text/plain")
+
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+	require.Equal(t, []string{"HeadBucket:missing-bucket"}, base.calls)
+	_, _, getErr := gb.GetObject(context.Background(), "missing-bucket", "key")
+	require.ErrorIs(t, getErr, storage.ErrObjectNotFound)
+}
+
 func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestFollowerGroupBackend(t, "g1", "self")
@@ -246,6 +271,47 @@ func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *test
 		head, err := gb.HeadObject(context.Background(), "write-bucket", "key")
 		return err == nil && head.ACL == 7
 	}, time.Second, 10*time.Millisecond)
+}
+
+type emptyObjectIndexMeta struct {
+	fakeShardGroupSource
+}
+
+func (m *emptyObjectIndexMeta) ObjectIndexLatest(bucket, key string) (ObjectIndexEntry, bool) {
+	return ObjectIndexEntry{}, false
+}
+
+func (m *emptyObjectIndexMeta) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndexEntry, bool) {
+	return ObjectIndexEntry{}, false
+}
+
+func TestClusterCoordinator_DeleteObject_MissingObjectIsIdempotentWhenBucketExists(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb.Node().Start()
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("existing-bucket", "g1")
+	meta := &emptyObjectIndexMeta{fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}}
+	proposer := &recordingObjectIndexProposer{}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(proposer)
+
+	markerID, err := c.DeleteObjectReturningMarker("existing-bucket", "missing-key")
+
+	require.NoError(t, err)
+	require.NotEmpty(t, markerID)
+	require.Equal(t, []string{"HeadBucket:existing-bucket"}, base.calls)
+	require.Len(t, proposer.entries, 1)
+	require.True(t, proposer.entries[0].IsDeleteMarker)
+	require.Equal(t, "missing-key", proposer.entries[0].Key)
 }
 
 func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(t *testing.T) {

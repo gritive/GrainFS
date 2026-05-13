@@ -245,6 +245,13 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 	return c.opRouter.RouteObjectWrite(bucket, key)
 }
 
+func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
+	if storage.IsInternalBucket(bucket) || c.base == nil {
+		return nil
+	}
+	return c.base.HeadBucket(ctx, bucket)
+}
+
 func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
 	_, ok := NewShardGroupPeerSet(ShardGroupEntry{PeerIDs: []string{id}}).MatchLocal(c.selfID, c.selfAliases...)
 	return ok
@@ -695,16 +702,25 @@ func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key strin
 
 func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	ctx := context.Background()
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return "", err
+	}
 	var (
 		target RouteTarget
-		entry  ObjectIndexEntry
+		group  ShardGroupEntry
 		err    error
 	)
 	if c.indexWriter == nil {
 		target, err = c.opRouter.RouteBucket(bucket)
-		entry = ObjectIndexEntry{Bucket: bucket, Key: key, PlacementGroupID: target.GroupID}
+		group = ShardGroupEntry{ID: target.GroupID}
 	} else {
+		var entry ObjectIndexEntry
 		target, entry, err = c.opRouter.RouteObjectRead(bucket, key, "")
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			target, group, err = c.routeWriteOrBucket(bucket, key)
+		} else {
+			group = ShardGroupEntry{ID: entry.PlacementGroupID, PeerIDs: entry.NodeIDs}
+		}
 	}
 	if err != nil {
 		return "", err
@@ -717,7 +733,7 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 			return "", err
 		}
 		marker := &storage.Object{Key: key, VersionID: markerID, LastModified: time.Now().Unix()}
-		if err := c.commitObjectIndex(ctx, bucket, key, marker, ShardGroupEntry{ID: target.GroupID, PeerIDs: entry.NodeIDs}, true); err != nil {
+		if err := c.commitObjectIndex(ctx, bucket, key, marker, group, true); err != nil {
 			return "", err
 		}
 		return markerID, nil
@@ -887,6 +903,9 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 }
 
 func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -911,6 +930,9 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 }
 
 func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -945,6 +967,9 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 func (c *ClusterCoordinator) PutObject(
 	ctx context.Context, bucket, key string, r io.Reader, contentType string,
 ) (*storage.Object, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -1209,6 +1234,9 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 func (c *ClusterCoordinator) UploadPart(
 	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader,
 ) (*storage.Part, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -1278,6 +1306,9 @@ func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return err
+	}
 	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return err
