@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -197,4 +198,60 @@ func TestAdminGetBucket_InternalBucketForbidden(t *testing.T) {
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
 	assert.Equal(t, "forbidden", ae.Code)
+}
+
+// fakeIAMUpstream implements IAMService.GetBucketUpstream and ListBucketUpstreams only.
+type fakeIAMUpstream struct {
+	admin.IAMService
+	upstreams []iam.BucketUpstreamItem
+}
+
+func (s *fakeIAMUpstream) GetBucketUpstream(_ context.Context, bucket string) (iam.BucketUpstreamItem, error) {
+	for _, u := range s.upstreams {
+		if u.Bucket == bucket {
+			return u, nil
+		}
+	}
+	return iam.BucketUpstreamItem{}, &adminapi.Error{Code: "not_found", Message: "not found"}
+}
+
+func (s *fakeIAMUpstream) ListBucketUpstreams(_ context.Context) ([]iam.BucketUpstreamItem, error) {
+	return s.upstreams, nil
+}
+
+func TestAdminGetBucket_HasUpstreamTrue(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	fake.counts["my-bucket"] = 5
+	iamFake := &fakeIAMUpstream{
+		upstreams: []iam.BucketUpstreamItem{{Bucket: "my-bucket"}},
+	}
+	d := &admin.Deps{Buckets: fake, IAM: iamFake}
+
+	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.True(t, info.HasUpstream)
+}
+
+func TestAdminGetBucket_HasUpstreamFalse(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	fake.counts["my-bucket"] = 0
+	iamFake := &fakeIAMUpstream{upstreams: nil}
+	d := &admin.Deps{Buckets: fake, IAM: iamFake}
+
+	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.False(t, info.HasUpstream)
+}
+
+func TestAdminGetBucket_VersioningUnsupported(t *testing.T) {
+	// GetBucketVersioning이 UnsupportedOperationError를 반환하면 Versioning은 빈 문자열이어야 한다.
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
+
+	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "", info.Versioning)
 }

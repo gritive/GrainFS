@@ -47,7 +47,7 @@ func AdminListBuckets(ctx context.Context, d *Deps) (ListBucketsAdminResp, error
 	return ListBucketsAdminResp{Buckets: out}, nil
 }
 
-// AdminGetBucket returns BucketInfo (name + object count) for a single bucket.
+// AdminGetBucket returns BucketInfo (name + object count + upstream + versioning) for a single bucket.
 // CountObjects is O(N objects) — only for interactive use.
 func AdminGetBucket(ctx context.Context, d *Deps, name string) (BucketInfo, error) {
 	if storage.IsInternalBucket(name) {
@@ -63,7 +63,19 @@ func AdminGetBucket(ctx context.Context, d *Deps, name string) (BucketInfo, erro
 	if err != nil {
 		return BucketInfo{}, NewInternal("count objects: " + err.Error())
 	}
-	return BucketInfo{Name: name, ObjectCount: &count}, nil
+	info := BucketInfo{Name: name, ObjectCount: &count}
+
+	if d.IAM != nil {
+		if _, err := d.IAM.GetBucketUpstream(ctx, name); err == nil {
+			info.HasUpstream = true
+		}
+	}
+
+	if versioning, err := d.Buckets.GetBucketVersioning(name); err == nil {
+		info.Versioning = versioning
+	}
+
+	return info, nil
 }
 
 // AdminDeleteBucket deletes a bucket. If force is true, all objects are
