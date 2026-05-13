@@ -42,7 +42,6 @@ type Config struct {
 	IAMApplier *iam.Applier
 
 	// Raft tuning
-	BadgerManagedMode     bool
 	RaftLogGCInterval     time.Duration
 	RaftHeartbeatInterval time.Duration
 	RaftElectionTimeout   time.Duration

@@ -80,7 +80,7 @@ type MetaRaft struct {
 // SetTransport (needed when the QUIC transport requires the node handle first).
 func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	storePath := filepath.Join(cfg.DataDir, "meta_raft")
-	store, err := raft.NewBadgerLogStore(storePath)
+	store, err := raft.NewBadgerLogStore(storePath, raft.WithManagedMode())
 	if err != nil {
 		return nil, fmt.Errorf("meta_raft: open store: %w", err)
 	}

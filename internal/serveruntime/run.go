@@ -83,7 +83,7 @@ func Run(ctx context.Context, cfg Config) error {
 		raftPeers = nil
 	}
 	raftCfg := raft.DefaultConfig(state.nodeID, raftPeers)
-	raftCfg.ManagedMode = cfg.BadgerManagedMode
+	raftCfg.ManagedMode = true
 	raftCfg.LogGCInterval = cfg.RaftLogGCInterval
 	// JoinMode is forwarded to v2 so the joiner's solo-voter local config
 	// ({selfID} when raftPeers is nil) does NOT auto-promote to Leader —
