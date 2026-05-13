@@ -416,6 +416,9 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	if err := validateComponentName(objName); err != nil {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
 	}
+	if d.isPathReadOnly(d.currentPath) {
+		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ROFS}
+	}
 
 	newPath := path.Join(d.currentPath, objName)
 
@@ -698,6 +701,14 @@ func (d *Dispatcher) invalidatePath(p string) {
 	d.state.InvalidateObject(bucket, key)
 }
 
+func (d *Dispatcher) isPathReadOnly(p string) bool {
+	if d.server == nil {
+		return false
+	}
+	bucket, _ := extractBucketAndKey(p)
+	return d.server.isExportReadOnly(bucket)
+}
+
 func (d *Dispatcher) opAccess(data []byte) OpResult {
 	var requested uint32
 	if len(data) >= 4 {
@@ -893,6 +904,9 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_SERVERFAULT}
 	}
+	if d.isPathReadOnly(d.currentPath) {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_ROFS}
+	}
 
 	r := NewXDRReader(data[16:]) // skip stateid (16 bytes)
 	offset, _ := r.ReadUint64()
@@ -975,6 +989,9 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	fileName, _ := r.ReadString()
 	if err := validateComponentName(fileName); err != nil {
 		return OpResult{OpCode: OpOpen, Status: NFS4ERR_INVAL}
+	}
+	if openType == 1 && d.isPathReadOnly(d.currentPath) {
+		return OpResult{OpCode: OpOpen, Status: NFS4ERR_ROFS}
 	}
 
 	childPath := path.Join(d.currentPath, fileName)
@@ -1065,6 +1082,9 @@ func (d *Dispatcher) opRestoreFH() OpResult {
 func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	if d.isPathReadOnly(d.currentPath) {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_ROFS}
 	}
 	// data layout: stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)
 	if len(data) < 24 {
@@ -1199,6 +1219,9 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_INVAL}
 	}
 	targetPath := path.Join(d.currentPath, name)
+	if d.isPathReadOnly(targetPath) {
+		return OpResult{OpCode: OpRemove, Status: NFS4ERR_ROFS}
+	}
 	bucket, key := extractBucketAndKey(targetPath)
 
 	if _, err := d.backend.HeadObject(context.Background(), bucket, key); err != nil {
@@ -1257,7 +1280,12 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 	newPath := path.Join(d.currentPath, newName)
 	srcBucket, oldKey := extractBucketAndKey(oldPath)
 	dstBucket, newKey := extractBucketAndKey(newPath)
-	_ = dstBucket // Phase 0a: same as srcBucket; Phase 3 will enforce cross-export XDEV
+	if srcBucket != dstBucket {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_XDEV}
+	}
+	if d.isPathReadOnly(oldPath) || d.isPathReadOnly(newPath) {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_ROFS}
+	}
 
 	// Object store has no rename — read → write new → delete old.
 	rc, _, err := d.backend.GetObject(context.Background(), srcBucket, oldKey)
@@ -1270,11 +1298,11 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 		if err != nil {
 			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
 		}
-		if _, err := partial.WriteAt(context.Background(), srcBucket, newKey, 0, data); err != nil {
+		if _, err := partial.WriteAt(context.Background(), dstBucket, newKey, 0, data); err != nil {
 			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
 		}
 	} else {
-		if _, err := d.backend.PutObject(context.Background(), srcBucket, newKey, rc, "application/octet-stream"); err != nil {
+		if _, err := d.backend.PutObject(context.Background(), dstBucket, newKey, rc, "application/octet-stream"); err != nil {
 			rc.Close()
 			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
 		}

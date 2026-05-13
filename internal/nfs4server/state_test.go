@@ -95,17 +95,21 @@ func TestStateManager_InvalidateKey_UntrackedParentSkipped(t *testing.T) {
 	assert.False(t, sm.IsDir("/dir"), "InvalidateKey must not synthesize untracked parent dirs")
 }
 
-func TestServer_Invalidate_InvalidatesWithoutBucketFilter(t *testing.T) {
+func TestServer_Invalidate_OnlyInvalidatesRegisteredExport(t *testing.T) {
 	// Server.Invalidate is the duck-typed cluster.CacheInvalidator entry.
-	// Phase 0b removed the legacy dedicated-bucket filter, so any invalidation
-	// routed here clears the matching key until Phase 3 adds export-aware filters.
 	sm := NewStateManager()
-	sm.fileMeta.Store("file.txt", nfsFileMeta{Mode: 0644})
+	sm.fileMeta.Store(fileMetaCacheKey("exported", "file.txt"), nfsFileMeta{Mode: 0644})
+	sm.fileMeta.Store(fileMetaCacheKey("other-bucket", "file.txt"), nfsFileMeta{Mode: 0644})
 	srv := &Server{state: sm}
+	srv.exports.Store(buildSnap(map[string]exportConfig{"exported": {generation: 1}}))
 
 	srv.Invalidate("other-bucket", "file.txt")
-	_, ok := sm.fileMeta.Load("file.txt")
-	assert.False(t, ok, "any routed invalidation must drop fileMeta")
+	_, ok := sm.fileMeta.Load(fileMetaCacheKey("other-bucket", "file.txt"))
+	assert.True(t, ok, "unregistered export invalidation must be ignored")
+
+	srv.Invalidate("exported", "file.txt")
+	_, ok = sm.fileMeta.Load(fileMetaCacheKey("exported", "file.txt"))
+	assert.False(t, ok, "registered export invalidation must drop fileMeta")
 }
 
 func TestStateManager_SetClientID(t *testing.T) {

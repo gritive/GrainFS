@@ -78,6 +78,9 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	length, _ := r.ReadUint64()
 
 	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.server != nil && d.server.isExportReadOnly(bucket) {
+		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_ROFS}
+	}
 	if d.backend == nil {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
@@ -139,6 +142,9 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 	length, _ := r.ReadUint64()
 
 	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.server != nil && d.server.isExportReadOnly(bucket) {
+		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_ROFS}
+	}
 	if d.backend == nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 	}
@@ -200,7 +206,12 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	dstPath := d.currentPath
 	srcBucket, srcKey := extractBucketAndKey(srcPath)
 	dstBucket, dstKey := extractBucketAndKey(dstPath)
-	_ = dstBucket // Phase 0a: same as srcBucket.
+	if srcBucket != dstBucket {
+		return OpResult{OpCode: OpCopy, Status: NFS4ERR_XDEV}
+	}
+	if d.server != nil && d.server.isExportReadOnly(dstBucket) {
+		return OpResult{OpCode: OpCopy, Status: NFS4ERR_ROFS}
+	}
 
 	if d.backend == nil {
 		return OpResult{OpCode: OpCopy, Status: NFS4_OK}
@@ -232,12 +243,12 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	release := d.state.LockPath(d.currentPath)
 	defer release()
 	if partial, ok := partialIOBackend(d.backend); ok {
-		if _, err := partial.WriteAt(context.Background(), srcBucket, dstKey, dstOffset, srcData); err != nil {
+		if _, err := partial.WriteAt(context.Background(), dstBucket, dstKey, dstOffset, srcData); err != nil {
 			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 		}
 	} else {
 		var dstData []byte
-		if dstBody, _, err := d.backend.GetObject(context.Background(), srcBucket, dstKey); err == nil {
+		if dstBody, _, err := d.backend.GetObject(context.Background(), dstBucket, dstKey); err == nil {
 			dstData, err = io.ReadAll(dstBody)
 			dstBody.Close()
 			if err != nil {
@@ -252,7 +263,7 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 			dstData = append(dstData, make([]byte, int(endOffset)-len(dstData))...)
 		}
 		copy(dstData[dstOffset:endOffset], srcData)
-		if _, err := d.backend.PutObject(context.Background(), srcBucket, dstKey, bytes.NewReader(dstData), "application/octet-stream"); err != nil {
+		if _, err := d.backend.PutObject(context.Background(), dstBucket, dstKey, bytes.NewReader(dstData), "application/octet-stream"); err != nil {
 			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 		}
 	}
