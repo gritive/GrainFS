@@ -178,7 +178,7 @@ func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
 // for stream accept/read and conn close. The handler is registered by
 // internal/raft (the only consumer of mux connections); the transport package
 // does not interpret mux frames.
-type MuxConnHandler func(conn *quic.Conn)
+type MuxConnHandler func(ctx context.Context, conn *quic.Conn)
 
 // IdentitySnapshot is the active TLS identity state of a QUICTransport.
 // During steady-state, AcceptSPKIs has one entry. During phases 2/3 of a
@@ -402,7 +402,7 @@ func (t *QUICTransport) acceptLoop() {
 				_ = conn.CloseWithError(quicAppErrCode, "mux ALPN unsupported on this peer")
 				continue
 			}
-			go h(conn)
+			go h(t.ctx, conn)
 		case alpn == t.pskALPN():
 			go t.handleInboundConnection(conn)
 		default:
@@ -1086,6 +1086,11 @@ func (t *QUICTransport) Close() error {
 	for addr, conn := range t.conns {
 		_ = conn.CloseWithError(0, "transport closing")
 		delete(t.conns, addr)
+	}
+
+	for addr, conn := range t.muxConns {
+		_ = conn.CloseWithError(0, "transport closing")
+		delete(t.muxConns, addr)
 	}
 
 	if t.listener != nil {
