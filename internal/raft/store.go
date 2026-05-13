@@ -247,25 +247,14 @@ func (s *BadgerLogStore) checkManagedModeOnce() error {
 			if !errors.Is(err, badger.ErrKeyNotFound) {
 				return err
 			}
-			// First open: record the chosen mode.
-			val := "false"
-			if s.managedMode {
-				val = "true"
-			}
-			return txn.Set(s.keyManagedMode(), []byte(val))
+			// First open: always managed mode.
+			return txn.Set(s.keyManagedMode(), []byte("true"))
 		}
 		return item.Value(func(val []byte) error {
-			stored := string(val) == "true"
-			if stored == s.managedMode {
+			if string(val) == "true" {
 				return nil
 			}
-			if stored {
-				return fmt.Errorf("data dir opened in managed=true; " +
-					"use --badger-managed-mode or start fresh")
-			}
-			return fmt.Errorf("data dir opened in non-managed mode; " +
-				"remove --badger-managed-mode to continue non-managed, " +
-				"or wipe data/raft/ and restart to enable managed mode")
+			return fmt.Errorf("data dir was created in non-managed mode; wipe data/raft/ and restart to migrate")
 		})
 	})
 }
@@ -631,31 +620,6 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 		})
 	})
 	return snap, err
-}
-
-// InspectManagedModeReadOnly reads the persisted managed-mode bit without
-// running NewBadgerLogStore's first-open write path.
-func InspectManagedModeReadOnly(path string) (managed bool, present bool, err error) {
-	db, err := badger.Open(badger.DefaultOptions(path).WithLogger(nil).WithReadOnly(true))
-	if err != nil {
-		return false, false, fmt.Errorf("open raft store read-only: %w", err)
-	}
-	defer db.Close()
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyManagedMode)
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		present = true
-		return item.Value(func(val []byte) error {
-			managed = string(val) == "true"
-			return nil
-		})
-	})
-	return managed, present, err
 }
 
 // InspectSnapshotMetaReadOnly returns snapshot metadata and payload size without
