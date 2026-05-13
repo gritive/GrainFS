@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.174.0] - 2026-05-13 — feat: promote raft v2 actor and stabilize dynamic joins
+
+### Changed
+
+- Promoted the raft v2 actor package into `internal/raft` and removed the old
+  raft v1 lifecycle wiring.
+- Switched meta/data raft paths to the v2 actor and durable v2 store APIs,
+  including snapshot recovery.
+- Dynamic joins now preserve shard-group creation-epoch membership instead of
+  expanding existing groups on every join.
+
+### Fixed
+
+- Forwarded topology write failures now map to placement-unavailable errors
+  instead of surfacing low-level transport failures.
+- Degraded-state checks now derive placement health from topology shard groups
+  after dynamic joins.
+- Volume scrub EC verification and multiraft boot shard-group expectations were
+  aligned with topology-aware shard placement.
+
+### Verification
+
+- `go build -o bin/grainfs ./cmd/grainfs`
+- Targeted `internal/serveruntime` and `internal/cluster` regression suites.
+- Full `./tests/e2e` was started with a 30 minute timeout and passed through
+  backup/restore, bootstrap join, cluster EC, topology change, EC spike, health,
+  and incident tests before being intentionally interrupted.
+
 ## [0.0.173.0] - 2026-05-13 — refactor: remove `--badger-managed-mode` flag
 
 ### Removed
