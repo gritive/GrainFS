@@ -10,10 +10,11 @@ import (
 )
 
 // findVolumeBlockOnDisk walks dataDir for the on-disk file backing a volume
-// block. The actual layout is per-data-group sharded
-// ({dataDir}/groups/<gid>/data/__grainfs_volumes/.obj/__vol/<name>/blk_NNN[_vUUID]/current)
-// and the block key may carry a versionID suffix on initial allocation, so
-// we glob rather than reconstruct.
+// block. Volume blocks may be stored in the legacy object layout
+// (.../__vol/<name>/blk_NNN[_vUUID]/current) or the current EC shard layout
+// (.../shards/__grainfs_volumes/__vol/<name>/blk_NNN[_vUUID]/<version>/shard_N).
+// The block key may carry a versionID suffix on initial allocation, so we glob
+// rather than reconstruct the full path.
 func findVolumeBlockOnDisk(t *testing.T, dataDir, vol string, blockNum int) string {
 	t.Helper()
 	want := blockKeyName(blockNum)
@@ -22,29 +23,35 @@ func findVolumeBlockOnDisk(t *testing.T, dataDir, vol string, blockNum int) stri
 		if werr != nil || info == nil || info.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(p, "/current") {
+		if !isVolumeBlockFilePath(p, vol, want) {
 			return nil
 		}
-		// path ends in "/__vol/<vol>/<keyTail>/current"; keyTail starts with want.
-		if !strings.Contains(p, "/__vol/"+vol+"/") {
-			return nil
-		}
-		// extract keyTail
-		i := strings.LastIndex(p, "/__vol/"+vol+"/")
-		rest := p[i+len("/__vol/"+vol+"/"):]
-		end := strings.Index(rest, "/")
-		if end < 0 {
-			return nil
-		}
-		keyTail := rest[:end]
-		if strings.HasPrefix(keyTail, want) {
-			hit = p
-		}
+		hit = p
 		return nil
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, hit, "could not find on-disk block %s for volume %s under %s", want, vol, dataDir)
 	return hit
+}
+
+func isVolumeBlockFilePath(p, vol, want string) bool {
+	base := filepath.Base(p)
+	if base != "current" && !strings.HasPrefix(base, "shard_") {
+		return false
+	}
+
+	slashPath := filepath.ToSlash(p)
+	marker := "/__vol/" + vol + "/"
+	i := strings.LastIndex(slashPath, marker)
+	if i < 0 {
+		return false
+	}
+	rest := slashPath[i+len(marker):]
+	end := strings.Index(rest, "/")
+	if end < 0 {
+		return false
+	}
+	return strings.HasPrefix(rest[:end], want)
 }
 
 func blockKeyName(blockNum int) string {
@@ -56,6 +63,24 @@ func blockKeyName(blockNum int) string {
 		v /= 10
 	}
 	return string(s)
+}
+
+func TestFindVolumeBlockOnDiskFindsLegacyCurrentLayout(t *testing.T) {
+	dataDir := t.TempDir()
+	blockPath := filepath.Join(dataDir, "groups", "g1", "data", "__grainfs_volumes", ".obj", "__vol", "vs2", "blk_000000000000_vabc", "current")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
+	require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
+
+	require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
+}
+
+func TestFindVolumeBlockOnDiskFindsShardLayout(t *testing.T) {
+	dataDir := t.TempDir()
+	blockPath := filepath.Join(dataDir, "shards", "__grainfs_volumes", "__vol", "vs2", "blk_000000000000_vabc", "019e20ca-0000-7000-8000-000000000000", "shard_0")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
+	require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
+
+	require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
 }
 
 // TestE2E_VolumeScrub_HealthyNoop — clean scrub on a freshly-written volume
