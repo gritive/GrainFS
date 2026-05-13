@@ -249,7 +249,14 @@ func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket str
 	if storage.IsInternalBucket(bucket) || c.base == nil {
 		return nil
 	}
-	return c.base.HeadBucket(ctx, bucket)
+	err := c.base.HeadBucket(ctx, bucket)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, storage.ErrBucketNotFound) && c.bucketAssigned(bucket) {
+		return nil
+	}
+	return err
 }
 
 func (c *ClusterCoordinator) matchSelfPeer(id string) bool {

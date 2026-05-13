@@ -239,6 +239,35 @@ func TestClusterCoordinator_PutObject_RejectsMissingBucketBeforeGroupWrite(t *te
 	require.ErrorIs(t, getErr, storage.ErrObjectNotFound)
 }
 
+func TestClusterCoordinator_PutObject_AllowsMetaAssignedBucketBeforeLocalBucketRow(t *testing.T) {
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb.Node().Start()
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("assigned-bucket", "g1")
+	meta := &fakeBucketAssignmentSource{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self"}},
+		}},
+		assignments: map[string]string{"assigned-bucket": "g1"},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	obj, err := c.PutObject(context.Background(), "assigned-bucket", "key", strings.NewReader("body"), "text/plain")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(4), obj.Size)
+	require.Equal(t, []string{"HeadBucket:assigned-bucket"}, base.calls)
+}
+
 func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestFollowerGroupBackend(t, "g1", "self")
