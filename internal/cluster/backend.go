@@ -1047,12 +1047,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			sp.Cleanup()
-		}
-	}()
+	defer sp.Cleanup()
 	versionID := newVersionID()
 	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
 		return nil, nil, fmt.Errorf("put object async: EC storage is required")

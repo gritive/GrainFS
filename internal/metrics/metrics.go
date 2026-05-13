@@ -449,9 +449,9 @@ var (
 	})
 
 	// PeerUnhealthy is 1 while a peer sits in PeerHealth's cooldown window
-	// (recent transport / replication failure), 0 otherwise. Operators alert
-	// on `grainfs_peer_unhealthy > 0` to catch silent N×replication
-	// degradation.
+	// (recent transport or EC shard write failure), 0 otherwise. Operators alert
+	// on `grainfs_peer_unhealthy > 0` to catch EC stripe degradation before
+	// it affects durability.
 	PeerUnhealthy = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_peer_unhealthy",
 		Help: "1 if a peer is currently in PeerHealth cooldown, 0 otherwise.",
