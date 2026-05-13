@@ -305,7 +305,7 @@ func (b *DistributedBackend) clusterNodes() []string {
 // after a real node failure, new writes must avoid the dead node and place
 // shards across the surviving nodes. If health-filtering drops below the EC
 // activation threshold, fall back to configured membership so transient startup
-// peerHealth misses do not silently downgrade user writes to N-way replication.
+// peerHealth misses do not silently shrink the EC stripe below the configured width.
 func (b *DistributedBackend) ecWriteNodes() []string {
 	nodes := b.liveNodes()
 	if b.ecConfig.IsActive(len(nodes)) {
@@ -1037,10 +1037,8 @@ func sizedReaderAtSection(r io.Reader, maxBytes int64) (io.Reader, int64, bool) 
 }
 
 // PutObjectAsync is the write-back variant of PutObject.
-// It writes data locally and replicates to peers (fast path ~0.3ms), then
-// returns a commitFn that defers the Raft metadata proposal (~2ms).
-// On flush the caller runs all commitFns concurrently so the Raft batcher
-// coalesces them into a single fdatasync.
+// It delegates to putObjectECSpooled and returns a no-op commitFn for API
+// compatibility with callers that batch commitFns (e.g., block_io_executor).
 func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
@@ -2707,6 +2705,10 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 
 	now := time.Now().Unix()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	// GroupBackend (bypassBucketCheck=true) always injects a placement-group ID via
+	// context; missing one there is a programming error. Direct DistributedBackend
+	// callers (bypassBucketCheck=false) may omit it — putObjectECSpooled resolves
+	// placement from the stored empty string using the object's bucket assignment.
 	if !ok && b.shardSvc != nil && b.bypassBucketCheck {
 		return nil, fmt.Errorf("create multipart: missing placement_group_id")
 	}

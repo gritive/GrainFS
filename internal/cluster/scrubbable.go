@@ -50,8 +50,8 @@ func (b *DistributedBackend) acquireShardReadLock(bucket, key string) func() {
 // latest VersionID. Legacy unversioned data (no `lat:` pointer) is skipped;
 // EC is a cluster-mode feature and every EC object carries versioning.
 //
-// Delete markers (tombstones) and non-EC clusters return no records — EC has
-// no shards to scrub in those cases.
+// Delete markers (tombstones) and clusters where EC is not yet active
+// (ECActive() == false) return no records — no shards have been written yet.
 func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
 	if err := b.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, err

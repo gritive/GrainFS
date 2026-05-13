@@ -153,11 +153,9 @@ func (s *ShardService) RegisterReadHandler(st transport.StreamType, h func(*tran
 
 // WriteShard sends a shard to a remote node for storage.
 //
-// NOTE: In cluster mode, PutObject calls this with shardIdx=0 and the full object
-// (N× full-replication). migration_executor iterates shardIdx 0..N-1 but only
-// shard_0 actually exists on peers, so balancer-triggered migration currently
-// fails at ReadShard(idx>=1) — data remains safe (FSM atomic cancel).
-// Phase 18 Cluster EC will use real shardIdx routing per Reed-Solomon split.
+// PutObject now routes through ecObjectWriter, which calls this with the real
+// Reed-Solomon shard index per split. RepairReplica calls it with shardIdx=0
+// when repairing replicated (pre-EC) objects.
 func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
 	peerAddr, err := s.resolvePeerAddress(peer)
 	if err != nil {

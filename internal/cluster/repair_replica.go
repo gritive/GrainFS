@@ -17,7 +17,7 @@ import (
 //  1. headObjectMeta → expected ETag, versionID
 //  2. iterate liveNodes() with peerHealth priority
 //  3. shardSvc.ReadShard(peer, bucket, shardKey, 0) — shardKey = key+"/"+versionID
-//     (matches the shape used by replicating writes in putObjectNxSpooled)
+//     (shardKey = key+"/"+versionID, shardIdx 0 — replicated objects are single-shard)
 //  4. compute MD5; require match against meta.ETag
 //  5. atomic write (tmp + fsync + rename) to objectPathV(bucket, key, versionID)
 //  6. error if no peer returned matching bytes
