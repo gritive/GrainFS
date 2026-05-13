@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
@@ -84,6 +85,7 @@ type bootState struct {
 	rotationWorker   *cluster.RotationWorker
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
+	nfsExportSvc     *nfsexport.ExportService
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
