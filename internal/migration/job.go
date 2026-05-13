@@ -6,7 +6,7 @@ import "time"
 type JobStatus string
 
 const (
-	StatusIdle     JobStatus = "idle"
+	StatusIdle     JobStatus = "idle" // reserved for future pre-submission state
 	StatusRunning  JobStatus = "running"
 	StatusComplete JobStatus = "complete"
 	StatusFailed   JobStatus = "failed"

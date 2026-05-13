@@ -219,11 +219,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
 	}
 
+	mstore := migration.NewJobStore(state.distBackend.FSMDB())
+	state.metaRaft.FSM().SetMigration(mstore)
 	if cfg.MigrationInterval > 0 {
-		mstore := migration.NewJobStore(state.distBackend.FSMDB())
 		mprop := &cluster.MigrationProposer{Propose: state.metaRaft.Propose}
 		mlead := &cluster.RaftLeadership{Node: state.distBackend.Node()}
-		state.metaRaft.FSM().SetMigration(mstore)
 		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}
 

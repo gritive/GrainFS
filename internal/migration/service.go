@@ -148,7 +148,7 @@ func (s *Service) stop() {
 }
 
 // workerRunningForTest exposes internal state to package-internal tests only.
-func (s *Service) workerRunningForTest() bool { //nolint:unused
+func (s *Service) workerRunningForTest() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.running

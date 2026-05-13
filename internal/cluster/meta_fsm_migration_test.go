@@ -28,16 +28,28 @@ func makeMigrationCmd(t *testing.T, cmdType MetaCmdType, payload []byte) []byte 
 	return cmd
 }
 
-// TestMetaFSM_Migration_StoreNotWired verifies that apply methods return an
-// error when SetMigration has not been called.
+// TestMetaFSM_Migration_StoreNotWired verifies that all three apply methods
+// return an error when SetMigration has not been called.
 func TestMetaFSM_Migration_StoreNotWired(t *testing.T) {
-	f := NewMetaFSM()
-
-	startCmd := makeMigrationCmd(t, clusterpb.MetaCmdTypeMigrationJobStart,
-		migration.EncodeJobStartPayload("bucket-a", time.Now().UnixNano()))
-	err := f.applyCmd(startCmd)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "migration store not wired")
+	ts := time.Now().UnixNano()
+	tests := []struct {
+		name    string
+		cmdType clusterpb.MetaCmdType
+		payload []byte
+	}{
+		{"JobStart", clusterpb.MetaCmdTypeMigrationJobStart, migration.EncodeJobStartPayload("b", ts)},
+		{"JobDone", clusterpb.MetaCmdTypeMigrationJobDone, migration.EncodeJobDonePayload("b", 0, 0, ts)},
+		{"JobFailed", clusterpb.MetaCmdTypeMigrationJobFailed, migration.EncodeJobFailedPayload("b", "err", 0, ts)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewMetaFSM()
+			cmd := makeMigrationCmd(t, tc.cmdType, tc.payload)
+			err := f.applyCmd(cmd)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "migration store not wired")
+		})
+	}
 }
 
 // TestMetaFSM_MigrationJobStart verifies the happy path and decode-error path.
