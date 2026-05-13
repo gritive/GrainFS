@@ -161,7 +161,7 @@ run_fio() {
     --runtime="$FIO_RUNTIME" \
     --time_based \
     --output-format=normal \
-    "$@" 2>&1 | grep -E "READ:|WRITE:|iops|bw=|lat"
+    "$@" 2>&1 | tee -a "$PROFILE_DIR/fio_output.txt" | grep -E "READ:|WRITE:|iops|bw=|lat"
 }
 
 for fio_case in $FIO_CASES; do
