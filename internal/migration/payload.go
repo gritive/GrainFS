@@ -5,6 +5,9 @@ import (
 	"fmt"
 )
 
+const maxBucketLen = 255  // S3 bucket names ≤ 63 chars; 255 gives ample headroom
+const maxReasonLen = 4096 // error reason string cap
+
 // EncodeJobStartPayload encodes [4-byte bucket-len][bucket][8-byte startedAt unix-nano].
 func EncodeJobStartPayload(bucket string, startedAt int64) []byte {
 	b := make([]byte, 4+len(bucket)+8)
@@ -20,6 +23,9 @@ func DecodeJobStartPayload(buf []byte) (bucket string, startedAt int64, err erro
 		return "", 0, fmt.Errorf("migration: DecodeJobStartPayload: truncated header")
 	}
 	n := int(binary.BigEndian.Uint32(buf[:4]))
+	if n > maxBucketLen {
+		return "", 0, fmt.Errorf("migration: DecodeJobStartPayload: bucket name too long (%d)", n)
+	}
 	if len(buf) < 4+n+8 {
 		return "", 0, fmt.Errorf("migration: DecodeJobStartPayload: buffer too short")
 	}
@@ -46,6 +52,9 @@ func DecodeJobDonePayload(buf []byte) (bucket string, copied, errors, updatedAt 
 		return "", 0, 0, 0, fmt.Errorf("migration: DecodeJobDonePayload: truncated")
 	}
 	n := int(binary.BigEndian.Uint32(buf[:4]))
+	if n > maxBucketLen {
+		return "", 0, 0, 0, fmt.Errorf("migration: DecodeJobDonePayload: bucket name too long (%d)", n)
+	}
 	if len(buf) < 4+n+24 {
 		return "", 0, 0, 0, fmt.Errorf("migration: DecodeJobDonePayload: buffer too short")
 	}
@@ -77,12 +86,18 @@ func DecodeJobFailedPayload(buf []byte) (bucket, reason string, errors, updatedA
 		return "", "", 0, 0, fmt.Errorf("migration: DecodeJobFailedPayload: truncated")
 	}
 	n := int(binary.BigEndian.Uint32(buf[:4]))
+	if n > maxBucketLen {
+		return "", "", 0, 0, fmt.Errorf("migration: DecodeJobFailedPayload: bucket name too long (%d)", n)
+	}
 	if len(buf) < 4+n+4 {
 		return "", "", 0, 0, fmt.Errorf("migration: DecodeJobFailedPayload: buffer too short for reason header")
 	}
 	bucket = string(buf[4 : 4+n])
 	off := 4 + n
 	m := int(binary.BigEndian.Uint32(buf[off:]))
+	if m > maxReasonLen {
+		return "", "", 0, 0, fmt.Errorf("migration: DecodeJobFailedPayload: reason too long (%d)", m)
+	}
 	if len(buf) < off+4+m+16 {
 		return "", "", 0, 0, fmt.Errorf("migration: DecodeJobFailedPayload: buffer too short for reason body")
 	}

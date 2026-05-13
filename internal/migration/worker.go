@@ -88,7 +88,9 @@ func (w *Worker) processJob(ctx context.Context, job *JobState) {
 	if err := w.dst.CreateBucket(ctx, bucket); err != nil {
 		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
 			log.Error().Str("bucket", bucket).Err(err).Msg("migration: create bucket")
-			_ = w.proposer.ProposeJobFailed(ctx, bucket, err.Error(), totalErrors)
+			if propErr := w.proposer.ProposeJobFailed(ctx, bucket, err.Error(), totalErrors); propErr != nil {
+				log.Error().Str("bucket", bucket).Err(propErr).Msg("migration: propose job failed")
+			}
 			return
 		}
 	}
@@ -106,7 +108,9 @@ func (w *Worker) processJob(ctx context.Context, job *JobState) {
 		keys, next, err := w.src.ListObjectsPage(bucket, cursor)
 		if err != nil {
 			log.Error().Str("bucket", bucket).Err(err).Msg("migration: list page")
-			_ = w.proposer.ProposeJobFailed(ctx, bucket, err.Error(), totalErrors)
+			if propErr := w.proposer.ProposeJobFailed(ctx, bucket, err.Error(), totalErrors); propErr != nil {
+				log.Error().Str("bucket", bucket).Err(propErr).Msg("migration: propose job failed")
+			}
 			return
 		}
 		for _, key := range keys {
