@@ -418,7 +418,19 @@ func (c *mrCluster) addNode(t *testing.T) {
 				break
 			}
 		}
+	} else {
+		t.Logf("addNode: Status() unavailable (err=%v), leaderIdx unchanged", err)
 	}
+}
+
+// liveURLs returns the slice of HTTP URLs for nodes that are currently running.
+// When nodeCount == 0 (static clusters set all nodes before setting nodeCount),
+// it falls back to the full httpURLs slice.
+func (c *mrCluster) liveURLs() []string {
+	if c.nodeCount > 0 {
+		return c.httpURLs[:c.nodeCount]
+	}
+	return c.httpURLs
 }
 
 // countGroupDirsAcrossNodes returns the union of group_id directories that
@@ -796,7 +808,7 @@ func requireMRPutObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 	var lastNode int
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		for i, endpoint := range c.httpURLs {
+		for i, endpoint := range c.liveURLs() {
 			lastNode = i
 			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
 			versionID, lastErr = tryPutObjectVersioned(ctx, client, bucket, key, data)
@@ -859,7 +871,7 @@ func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrClu
 		if c.leaderIdx >= 0 && tryNode(c.leaderIdx) {
 			return true
 		}
-		for i := range c.httpURLs {
+		for i := range c.liveURLs() {
 			if tryNode(i) {
 				return true
 			}
@@ -886,7 +898,7 @@ func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 	var got []byte
 	var lastNode int
 	require.Eventually(t, func() bool {
-		for i, endpoint := range c.httpURLs {
+		for i, endpoint := range c.liveURLs() {
 			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
 			got, lastErr = getObjectBytes(ctx, client, bucket, key)
 			lastNode = i
@@ -1325,6 +1337,7 @@ func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
 	followerIdx := 1 - c.leaderIdx
 	t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
 	require.NotNil(t, c.procs[followerIdx])
+	require.NotNil(t, c.procs[followerIdx].Process)
 	require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
 	_ = c.procs[followerIdx].Wait()
 	c.procs[followerIdx] = nil
