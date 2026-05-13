@@ -266,7 +266,11 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 			if applyShardResult(res) && stopAtK && available == recCfg.DataShards {
 				cancel()
 				for k := j + 1; k < dispatched; k++ {
-					<-resultCh
+					select {
+					case <-resultCh:
+					case <-ctx.Done():
+						return
+					}
 				}
 				return
 			}
