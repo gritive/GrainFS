@@ -86,6 +86,8 @@ const (
 	NFS4ERR_PERM                = 1
 	NFS4ERR_NOENT               = 2
 	NFS4ERR_IO                  = 5
+	NFS4ERR_ACCESS              = 13
+	NFS4ERR_XDEV                = 18
 	NFS4ERR_NOTDIR              = 20
 	NFS4ERR_INVAL               = 22
 	NFS4ERR_FBIG                = 27
@@ -94,9 +96,11 @@ const (
 	NFS4ERR_STALE               = 70
 	NFS4ERR_BADHANDLE           = 10001
 	NFS4ERR_BAD_STATEID         = 10025
+	NFS4ERR_NOT_SAME            = 10027
 	NFS4ERR_RESOURCE            = 10018
 	NFS4ERR_SERVERFAULT         = 10006
 	NFS4ERR_NOTSUPP             = 10004
+	NFS4ERR_FHEXPIRED           = 10014
 	NFS4ERR_RESTOREFH           = 10030
 	NFS4ERR_NOFILEHANDLE        = 10020
 	NFS4ERR_BADSESSION          = 10052
@@ -106,6 +110,9 @@ const (
 	NFS4ERR_STALE_CLIENTID      = 10022
 	NFS4ERR_MINOR_VERS_MISMATCH = 10021
 	NFS4ERR_OP_ILLEGAL          = 10044
+	NFS4ERR_ADMIN_REVOKED       = 10047
+
+	SEQ4_STATUS_ADMIN_STATE_REVOKED = 0x00000020
 )
 
 // NFSv4 operation codes

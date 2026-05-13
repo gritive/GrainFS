@@ -1,9 +1,11 @@
 package nfs4server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -18,6 +20,7 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	logger   zerolog.Logger
+	exports  atomic.Pointer[exportSnap]
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
@@ -29,11 +32,16 @@ type Server struct {
 //	grainfs bucket create __grainfs_nfs4
 //	grainfs nfs export add __grainfs_nfs4
 func NewServer(backend storage.Backend) *Server {
-	return &Server{
+	s := &Server{
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 	}
+	s.exports.Store(emptySnap)
+	if err := s.RefreshExports(context.Background()); err != nil {
+		s.logger.Warn().Err(err).Msg("nfs4: initial RefreshExports failed; running with empty export set")
+	}
+	return s
 }
 
 // ListenAndServe starts the NFSv4 TCP server.

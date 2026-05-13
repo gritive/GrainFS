@@ -9,15 +9,15 @@ func TestExtractBucketAndKey(t *testing.T) {
 		wantBucket string
 		wantKey    string
 	}{
-		{"empty", "", "__grainfs_nfs4", ""},
-		{"root", "/", "__grainfs_nfs4", ""},
-		{"single segment no slash", "file.txt", "__grainfs_nfs4", "file.txt"},
-		{"leading slash single", "/file.txt", "__grainfs_nfs4", "file.txt"},
-		{"nested", "/dir/file.txt", "__grainfs_nfs4", "dir/file.txt"},
-		{"deep nested", "/a/b/c/d.txt", "__grainfs_nfs4", "a/b/c/d.txt"},
-		{"trailing slash", "/dir/", "__grainfs_nfs4", "dir/"},
-		{"double slash sanitized", "/dir//file", "__grainfs_nfs4", "dir//file"},
-		{"sidecar meta key", "__meta/foo", "__grainfs_nfs4", "__meta/foo"},
+		{"empty", "", "", ""},
+		{"root", "/", "", ""},
+		{"bucket only", "/bucket", "bucket", ""},
+		{"bucket trailing slash", "/bucket/", "bucket", ""},
+		{"bucket + leaf", "/bucket/key", "bucket", "key"},
+		{"bucket + nested", "/bucket/a/b/c", "bucket", "a/b/c"},
+		{"bucket + deep + trailing", "/bucket/a/b/", "bucket", "a/b/"},
+		{"double slash mid", "/bucket//x", "bucket", "/x"},
+		{"name with dot", "/my.bucket/key", "my.bucket", "key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
