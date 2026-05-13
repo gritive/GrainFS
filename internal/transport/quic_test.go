@@ -11,6 +11,7 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -584,4 +585,180 @@ func TestQUICTransport_CallReadContextDoesNotCancelReturnedBody(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, body, got)
+}
+
+func TestMuxALPNConstant(t *testing.T) {
+	tr := MustNewQUICTransport("test-cluster-psk")
+	defer tr.Close()
+	assert.Equal(t, ProtocolVersionMux, tr.MuxALPN())
+}
+
+func TestVersionHandshakeSuccess(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	connReady := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(connReady)
+		<-ctx.Done()
+	})
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+
+	conn, err := client.GetOrConnectMux(ctx, server.LocalAddr())
+	require.NoError(t, err)
+	require.NotNil(t, conn)
+
+	select {
+	case <-connReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("mux handler not called after capability exchange")
+	}
+}
+
+// TestMixedVersionRejection verifies that a peer sending CE version=2
+// receives an error response and the mux handler is not invoked.
+func TestMixedVersionRejection(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+
+	handlerCalled := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(handlerCalled)
+		<-ctx.Done()
+	})
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	// Raw client: dial with mux ALPN but send CE version=2 (wrong)
+	raw := MustNewQUICTransport("test-cluster-psk")
+	defer raw.Close()
+
+	tlsConf := raw.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{server.muxALPN()}
+	conn, err := quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "test done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+
+	codec := &BinaryCodec{}
+	require.NoError(t, codec.Encode(stream, &Message{
+		Type:    StreamCapabilityExchange,
+		Payload: []byte{0x02, 0x00}, // version=2, wrong
+	}))
+
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status, "server must reject CE version mismatch")
+	assert.Contains(t, string(resp.Payload), "upgrade required")
+
+	// Mux handler must NOT be called
+	select {
+	case <-handlerCalled:
+		t.Fatal("mux handler should not be called after CE version mismatch")
+	case <-time.After(time.Second):
+	}
+}
+
+// TestCapabilityExchangeTimeout verifies GetOrConnectMux fails and does not
+// cache the connection when the server reads CE but never responds.
+func TestCapabilityExchangeTimeout(t *testing.T) {
+	ctx := context.Background()
+
+	// Raw server: accepts mux conn, reads CE stream, never responds.
+	rawServer := MustNewQUICTransport("test-cluster-psk")
+	serverTLS := rawServer.buildServerTLSConfig()
+	listener, err := quic.ListenAddr("127.0.0.1:0", serverTLS, defaultQUICConfig())
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverAddr := listener.Addr().String()
+
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() {
+		conn, err := listener.Accept(ctx)
+		if err != nil {
+			return
+		}
+		stream, err := conn.AcceptStream(ctx)
+		if err != nil {
+			return
+		}
+		codec := &BinaryCodec{}
+		_, _ = codec.Decode(stream) // read CE but never write response
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	}()
+
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer client.Close()
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+
+	callCtx, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
+	defer cancel()
+
+	_, err = client.GetOrConnectMux(callCtx, serverAddr)
+	require.Error(t, err, "GetOrConnectMux must fail when CE response is not received")
+
+	client.mu.RLock()
+	_, cached := client.muxConns[serverAddr]
+	client.mu.RUnlock()
+	assert.False(t, cached, "timed-out CE must not cache the connection")
+}
+
+// TestCapabilityWrongFirstStream verifies the server sends an error and does
+// not call muxHandler when the first mux stream type is not StreamCapabilityExchange.
+func TestCapabilityWrongFirstStream(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+
+	handlerCalled := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(handlerCalled)
+		<-ctx.Done()
+	})
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	raw := MustNewQUICTransport("test-cluster-psk")
+	defer raw.Close()
+
+	tlsConf := raw.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{server.muxALPN()}
+	conn, err := quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "test done")
+
+	// Open first stream with wrong type (StreamControl, not StreamCapabilityExchange)
+	stream, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+
+	codec := &BinaryCodec{}
+	require.NoError(t, codec.Encode(stream, &Message{
+		Type:    StreamControl,
+		Payload: []byte("not-ce"),
+	}))
+
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status, "server must reject wrong first stream type")
+
+	// Mux handler must NOT be called
+	select {
+	case <-handlerCalled:
+		t.Fatal("mux handler should not be called after CE stream type rejection")
+	case <-time.After(time.Second):
+	}
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.186.0] - 2026-05-14 — feat: QUIC mux capability exchange handshake
+
+### Added
+
+- **`ProtocolVersionMux = "grainfs-mux-v1"`** — `internal/transport/version.go`에 단일 소스 프로토콜 버전 상수 추가. `muxALPN()`이 이 상수를 반환하도록 변경.
+- **`StreamCapabilityExchange = 0x12`** — mux QUIC 연결의 첫 스트림으로 사용하는 CE(Capability Exchange) 스트림 타입 추가.
+- **Capability Exchange 핸드셰이크** — 모든 mux QUIC 연결 수립 시 2바이트(`version=0x01, features=0x00`) CE를 교환. 버전 불일치 시 `"capability exchange failed"` 에러와 함께 연결 종료.
+- **`ceRejectionCloseDelay = 200ms`** — CE 거부 시 피어가 에러 응답을 읽을 시간을 확보한 후 `CloseWithError` 호출.
+- **5개 CE 테스트** — `TestMuxALPNConstant`, `TestVersionHandshakeSuccess`, `TestMixedVersionRejection`, `TestCapabilityExchangeTimeout`, `TestCapabilityWrongFirstStream`.
+
+### Fixed
+
+- **`TestQUICTransport_MuxRejectedWithoutHandler`** — CE 실패 경로에 맞게 테스트 단순화.
+
+### Verification
+
+- `go test ./internal/transport/... -run TestVersionHandshake` PASS
+- `go test ./internal/transport/... -run TestMixedVersion` PASS
+- `go test ./internal/transport/...` PASS (coverage: 73.4%)
+
 ## [0.0.185.0] - 2026-05-14 — fix: Colima Linux tests and NBD/NFS fast paths
 
 ### Added

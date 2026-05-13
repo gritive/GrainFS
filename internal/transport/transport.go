@@ -27,6 +27,7 @@ const (
 	StreamGroupForwardRead    StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
 	StreamShardWriteBody      StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
 	StreamShardReadBody       StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
+	StreamCapabilityExchange  StreamType = 0x12 // protocol version handshake; first stream on every mux QUIC conn
 )
 
 type StreamClass byte
