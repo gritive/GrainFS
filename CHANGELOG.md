@@ -18,6 +18,15 @@
 
 - `--raft-log-gc-interval` (default 30s) is kept as an operational tuning knob.
 - `docs/badger-managed-mode-rollback.md` updated to reflect always-on behaviour.
+- `WithManagedMode()` option and `IsManagedMode()` method removed from `BadgerLogStore` — managed mode is a DB invariant, not a per-open flag.
+- Pre-v0.0.173.0 data directories with persisted `raft:meta:managed=false` are transparently upgraded on first open (no wipe required).
+
+## [0.0.172.0] - 2026-05-13 — fix: EC reader goroutine drain + mux conn shutdown
+
+### Fixed
+- EC k-of-n early exit에서 모든 dispatched goroutine이 완료될 때까지 blocking 드레인. 기존 non-blocking `drainReady()`는 이미 채널에 있는 결과만 처리했으나 아직 실행 중인 goroutine이 `MarkUnhealthy`/`MarkHealthy`를 쓰는 도중 테스트 assertion과 경쟁하는 data race 유발. 드레인 루프에 `ctx.Done()` 탈출 추가로 NFS hang/디스크 degradation 시 무한 블록 방지.
+- `QUICTransport.Close()`가 `muxConns`(outbound mux 연결)를 닫지 않아 `RaftStream.readLoop` goroutine이 QUIC stream read에서 영구 블록되는 goroutine leak 수정.
+- `MuxConnHandler`에 transport 수명 context 전달. 기존 `handleInboundMuxConn`의 `context.Background()` 사용으로 transport 종료 시 inbound mux conn goroutine이 정리되지 않던 문제 수정.
 
 ## [0.0.171.0] - 2026-05-13 — feat(migration): deep JobStore + leader-only Worker + FSM apply seam
 
