@@ -363,6 +363,18 @@ func (d *Dispatcher) opPutFH(data []byte) OpResult {
 	if !ok {
 		return OpResult{OpCode: OpPutFH, Status: NFS4ERR_STALE}
 	}
+	if d.server != nil {
+		bucket, _ := extractBucketAndKey(p)
+		if bucket != "" {
+			cfg, ok := d.server.loadExports().byBucket[bucket]
+			if !ok {
+				return OpResult{OpCode: OpPutFH, Status: NFS4ERR_ADMIN_REVOKED}
+			}
+			if binding, ok := d.state.FHBinding(fh); ok && binding.generation != cfg.generation {
+				return OpResult{OpCode: OpPutFH, Status: NFS4ERR_FHEXPIRED}
+			}
+		}
+	}
 	d.currentFH = fh
 	d.currentPath = p
 	return OpResult{OpCode: OpPutFH, Status: NFS4_OK}
@@ -400,6 +412,9 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 	}
 
 	fh := d.state.GetOrCreateFH(childPath)
+	if d.server != nil && childBucket != "" {
+		d.state.BindFHGeneration(fh, childBucket, d.server.exportGeneration(childBucket))
+	}
 	d.currentFH = fh
 	d.currentPath = childPath
 	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
@@ -427,6 +442,10 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 		d.invalidatePath(newPath)
 	}
 	fh := d.state.GetOrCreateFH(newPath)
+	if d.server != nil {
+		bucket, _ := extractBucketAndKey(newPath)
+		d.state.BindFHGeneration(fh, bucket, d.server.exportGeneration(bucket))
+	}
 	d.currentFH = fh
 	d.currentPath = newPath
 
@@ -1034,6 +1053,10 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	}
 
 	fh := d.state.GetOrCreateFH(childPath)
+	if d.server != nil {
+		bucket, _ := extractBucketAndKey(childPath)
+		d.state.BindFHGeneration(fh, bucket, d.server.exportGeneration(bucket))
+	}
 	d.currentFH = fh
 	d.currentPath = childPath
 
