@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -80,6 +81,9 @@ type MetaRaft struct {
 // call Bootstrap then Start. Transport may be nil here and set later via
 // SetTransport (needed when the QUIC transport requires the node handle first).
 func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
+	if cfg.RaftID == "" && containsNetworkPeerID(cfg.Peers) {
+		return nil, fmt.Errorf("meta_raft: RaftID is required when Peers contain network addresses")
+	}
 	storePath := filepath.Join(cfg.DataDir, "meta_raft")
 	raftID := cfg.RaftID
 	if raftID == "" {
@@ -123,6 +127,15 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 		m.wireTransport(cfg.Transport)
 	}
 	return m, nil
+}
+
+func containsNetworkPeerID(peers []string) bool {
+	for _, peer := range peers {
+		if _, _, err := net.SplitHostPort(peer); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // Node returns the underlying raft node for external transport wiring.

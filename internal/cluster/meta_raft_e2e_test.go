@@ -152,6 +152,7 @@ func TestMetaRaft_QUICStaticFiveNodeBootstrap_E2E(t *testing.T) {
 
 		m, err := NewMetaRaft(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
+			RaftID:  addrs[i],
 			Peers:   peers,
 			DataDir: t.TempDir(),
 		})
@@ -235,12 +236,13 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 
 		tr := transport.MustNewQUICTransport("shared-raft-quic-test")
 		require.NoError(t, tr.Listen(context.Background(), addrs[i]))
-		dataNode, dataClose, err := newRaftNode(raft.DefaultConfig(fmt.Sprintf("node-%d", i), peers), "")
+		dataNode, dataClose, err := newRaftNode(raft.DefaultConfig(addrs[i], peers), "")
 		require.NoError(t, err)
 		dataRPC := NewRaftQUICRPCTransport(tr, dataNode)
 		dataRPC.SetTransport()
 		metaNode, err := NewMetaRaft(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
+			RaftID:  addrs[i],
 			Peers:   peers,
 			DataDir: t.TempDir(),
 		})

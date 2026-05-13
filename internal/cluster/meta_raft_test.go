@@ -109,6 +109,33 @@ func TestMetaRaft_JoinModeDoesNotSelfElectBeforeJoin(t *testing.T) {
 	}, 300*time.Millisecond, 20*time.Millisecond, "join-mode meta raft must wait for cluster membership instead of forming a solo cluster")
 }
 
+func TestMetaRaft_RequiresRaftIDForAddressPeers(t *testing.T) {
+	_, err := NewMetaRaft(MetaRaftConfig{
+		NodeID:  "node-1",
+		Peers:   []string{"127.0.0.1:9000"},
+		DataDir: t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "RaftID is required")
+}
+
+func TestMetaRaft_DistinctNodeIDAndRaftIDUsesRaftIDForMembership(t *testing.T) {
+	m, err := NewMetaRaft(MetaRaftConfig{
+		NodeID:  "node-1",
+		RaftID:  "127.0.0.1:9001",
+		Peers:   []string{"127.0.0.1:9000"},
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.Equal(t, "127.0.0.1:9001", m.node.ID())
+	require.ElementsMatch(t, []raft.Server{
+		{ID: "127.0.0.1:9001", Suffrage: raft.Voter},
+		{ID: "127.0.0.1:9000", Suffrage: raft.Voter},
+	}, m.node.Configuration().Servers)
+}
+
 func TestMetaRaft_Join_AddsLearnerThenVoter(t *testing.T) {
 	dir0 := t.TempDir()
 	dir1 := t.TempDir()

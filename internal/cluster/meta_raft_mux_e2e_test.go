@@ -57,6 +57,7 @@ func TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E(t *testing.T) {
 
 		m, err := NewMetaRaft(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
+			RaftID:  addrs[i],
 			Peers:   peers,
 			DataDir: t.TempDir(),
 		})
