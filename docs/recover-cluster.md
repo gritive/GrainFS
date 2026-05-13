@@ -18,8 +18,7 @@ grainfs recover cluster plan \
   --source-data /var/lib/grainfs \
   --target-data /var/lib/grainfs-recovered \
   --new-node-id node-recovered \
-  --new-raft-addr 10.0.0.10:19100 \
-  --badger-managed-mode
+  --new-raft-addr 10.0.0.10:19100
 ```
 
 4. Execute only after reviewing the plan:
@@ -29,8 +28,7 @@ grainfs recover cluster execute \
   --source-data /var/lib/grainfs \
   --target-data /var/lib/grainfs-recovered \
   --new-node-id node-recovered \
-  --new-raft-addr 10.0.0.10:19100 \
-  --badger-managed-mode
+  --new-raft-addr 10.0.0.10:19100
 ```
 
 5. Start the recovered node from the target directory. It starts read-only.

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.171.0] - 2026-05-13 — refactor: remove `--badger-managed-mode` flag
+
+### Removed
+
+- `serve --badger-managed-mode` flag and `Config.BadgerManagedMode`. Raft log GC
+  via quorum watermark is now the only mode. GrainFS is pre-1.0 with no
+  deployments using the non-managed (no-GC) layout, so the toggle and the
+  mismatch guard were dead weight.
+- `recover cluster --badger-managed-mode` flag. Recovery always writes a managed
+  store.
+- `cluster.RecoverClusterOptions.BadgerManagedMode` field and the
+  `managed-mode mismatch` check in `BuildRecoverClusterPlan`.
+- `raft.InspectManagedModeReadOnly` — no callers remain.
+
+### Changed
+
+- `--raft-log-gc-interval` (default 30s) is kept as an operational tuning knob.
+- `docs/badger-managed-mode-rollback.md` updated to reflect always-on behaviour.
+
 ## [0.0.171.0] - 2026-05-13 — feat(migration): deep JobStore + leader-only Worker + FSM apply seam
 
 ### Added

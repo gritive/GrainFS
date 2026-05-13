@@ -414,8 +414,7 @@ Code wired in commit `<TBD>`:
   `NumVersionsToKeep=1`). On startup, refuses to proceed when any
   `<dataDir>/groups/*/raft` directory exists from a pre-P0b deployment —
   failing closed instead of silently abandoning the legacy raft state.
-  Forwards `--badger-managed-mode` and other `BadgerLogStoreOption`s into
-  every group's `OpenSharedLogStore`.
+  Forwards `BadgerLogStoreOption`s into every group's `OpenSharedLogStore`.
 - `cmd/grainfs/serve.go`: `InstantiateLocalGroup` call site passes
   `LogStore: raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID)` when shared
   mode is on.
