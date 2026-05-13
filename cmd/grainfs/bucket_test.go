@@ -290,6 +290,30 @@ func TestBucketInfoCmd_JSON(t *testing.T) {
 	}
 }
 
+func TestBucketCreateCmd_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"name":"new-bucket"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "--json", "create", "new-bucket"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+}
+
 func TestBucketInfoCmd_NotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/missing", func(w http.ResponseWriter, r *http.Request) {
