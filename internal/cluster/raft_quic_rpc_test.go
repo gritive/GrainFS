@@ -169,3 +169,7 @@ func TestV2QUICCluster_ThreeNode_Propose_Replicate(t *testing.T) {
 		}
 	}
 }
+
+func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
+	t.Skip("WIP — 구현 후 활성화")
+}
