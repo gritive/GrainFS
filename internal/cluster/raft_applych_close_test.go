@@ -51,6 +51,10 @@ func (s *applyChCloseStubNode) SetInstallSnapshotTransport(
 	func(string, *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error),
 ) {
 }
+func (s *applyChCloseStubNode) SetTimeoutNowTransport(
+	func(string, *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error),
+) {
+}
 func (s *applyChCloseStubNode) SetNoOpCommand([]byte)                {}
 func (s *applyChCloseStubNode) RegisterObserver(chan<- raft.Event)   {}
 func (s *applyChCloseStubNode) DeregisterObserver(chan<- raft.Event) {}

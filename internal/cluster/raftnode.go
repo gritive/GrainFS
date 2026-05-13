@@ -59,6 +59,11 @@ type RaftNode interface {
 	// callback. Must be called before Start().
 	SetInstallSnapshotTransport(send func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error))
 
+	// SetTimeoutNowTransport wires the outbound TimeoutNow send callback.
+	// Must be called before Start(). Enables immediate leadership transfer
+	// on shutdown (Raft §3.10) instead of waiting for election timeout.
+	SetTimeoutNowTransport(send func(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error))
+
 	// SetNoOpCommand configures the FSM no-op payload proposed on leader election.
 	// The canonical actor emits no-op entries internally; the adapter is a no-op.
 	SetNoOpCommand(cmd []byte)

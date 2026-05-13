@@ -99,6 +99,34 @@ func (r *RaftQUICRPCTransport) sendAppendEntries(peer string, args *raft.AppendE
 	return v2DecodeAppendEntriesReply(data)
 }
 
+func (r *RaftQUICRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
+	defer cancel()
+
+	envelope, err := v2EncodeRPC(v2RPCTypeTimeoutNow, args)
+	if err != nil {
+		return nil, err
+	}
+	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
+	resp, err := r.transport.Call(ctx, peer, msg)
+	if err != nil {
+		return nil, fmt.Errorf("TimeoutNow to %s: %w", peer, err)
+	}
+	rpcType, _, err := v2DecodeRPC(resp.Payload)
+	if err != nil {
+		return nil, err
+	}
+	if rpcType != v2RPCTypeTimeoutNowReply {
+		return nil, fmt.Errorf("unexpected reply type: %s", rpcType)
+	}
+	return &raft.TimeoutNowReply{}, nil
+}
+
+// SetTimeoutNowTransport wires the outbound TimeoutNow callback into the RaftNode.
+func (r *RaftQUICRPCTransport) SetTimeoutNowTransport() {
+	r.node.SetTimeoutNowTransport(r.sendTimeoutNow)
+}
+
 // handleRPC dispatches inbound Raft RPCs to the v2 node via the RaftNode
 // interface. The interface methods accept v1 wire types (raft.*); the v2
 // adapter translates to v2 native types and back (see raftv2adapter.go).

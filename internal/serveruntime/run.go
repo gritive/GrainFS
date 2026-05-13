@@ -112,7 +112,8 @@ func Run(ctx context.Context, cfg Config) error {
 	// PR 30 deletes it.
 	v2RPCTransport := cluster.NewRaftQUICRPCTransport(state.quicTransport, v2Node)
 	v2RPCTransport.SetTransport()
-	log.Info().Msg("raft v2: QUIC RPC transport wired")
+	v2RPCTransport.SetTimeoutNowTransport()
+	log.Info().Msg("raft v2: QUIC RPC transport wired (TimeoutNow enabled)")
 
 	// PR 4: meta-raft callback registration BEFORE Start.
 	if err := bootMetaRaftWiring(state); err != nil {
