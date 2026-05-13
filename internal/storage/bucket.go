@@ -31,9 +31,6 @@ func ValidBucketName(name string) bool {
 // VFS layer can rely on in-place overwrite semantics.
 const VFSBucketPrefix = "__grainfs_vfs_"
 
-// NFS4BucketName is the single internal bucket used by the NFSv4 server.
-const NFS4BucketName = "__grainfs_nfs4"
-
 // IsVFSBucket reports whether bucket belongs to the VFS internal namespace.
 func IsVFSBucket(bucket string) bool {
 	return strings.HasPrefix(bucket, VFSBucketPrefix)
@@ -48,6 +45,12 @@ func IsVFSBucket(bucket string) bool {
 const internalBucketPrefix = "__grainfs_"
 
 // IsInternalBucket reports whether bucket is an internal GrainFS bucket.
+//
+// Phase 0b (D6): "__grainfs_nfs4" is explicitly excluded. It is treated as a
+// regular bucket so admin API can manage it and NFS exports can be explicit.
 func IsInternalBucket(bucket string) bool {
+	if bucket == "__grainfs_nfs4" {
+		return false
+	}
 	return strings.HasPrefix(bucket, internalBucketPrefix)
 }
