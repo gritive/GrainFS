@@ -201,6 +201,112 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 	return c, nil
 }
 
+// tryStartMRCluster starts numNodes nodes using dynamic sequential join:
+// node 0 (seed) starts first, then nodes 1..numNodes-1 each start after the
+// previous one is HTTP-ready. opts.FastBootstrap replaces the fixed 8-second
+// seed-loop wait with polling on shard-group count via the admin UDS.
+//
+// If opts.MaxNodes > numNodes, port/slice arrays are pre-allocated to MaxNodes
+// so addNode can attach more nodes later without reallocating.
+func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+	t.Helper()
+	maxNodes := opts.MaxNodes
+	if maxNodes < numNodes {
+		maxNodes = numNodes
+	}
+
+	c, err := newMRCluster(t, maxNodes, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Start seed node (node 0).
+	c.procs[0] = c.startNode(0)
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("seed node not ready: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// Bootstrap admin SA on the seed before any followers join.
+	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs[:1], 60*time.Second)
+	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
+	c.saID = admin.SAID
+	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
+	c.nodeCount = 1
+
+	// Start followers sequentially: wait for each before starting next.
+	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
+	for i := 1; i < numNodes; i++ {
+		if err := writeNodeJoinPending(c.dataDirs[i], seedRaftAddr); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
+		}
+		c.procs[i] = c.startNode(i)
+		if err := waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("node %d not ready: %w", i, err)
+		}
+		c.nodeCount++
+	}
+
+	// Wait for leader.
+	probeBucket := "__mrshard-dyn-leader-probe"
+	c.GrantAdminOnBuckets(probeBucket)
+	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	leaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		c.httpURLs[:numNodes],
+		180*time.Second,
+		5*time.Second,
+		time.Second,
+		func(ctx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			return tryCreateBucket(ctx, cli, probeBucket)
+		},
+	)
+	if err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("no leader found: %w", err)
+	}
+	c.leaderIdx = leaderIdx
+
+	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
+
+	// Wait for seed loop: dynamic (polling) or static (sleep).
+	// seedGroupCountForClusterSize(n) = max(n*4, 8).
+	expectedGroups := numNodes * 4
+	if expectedGroups < 8 {
+		expectedGroups = 8
+	}
+	if opts.FastBootstrap {
+		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], expectedGroups, 60*time.Second)
+	} else {
+		time.Sleep(8 * time.Second)
+	}
+
+	return c, nil
+}
+
+// startMRCluster retries tryStartMRCluster up to 3 times with fresh ports on
+// transient port-allocation or election-timing failures.
+func startMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) *mrCluster {
+	t.Helper()
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		c, err := tryStartMRCluster(t, numNodes, opts)
+		if err == nil {
+			return c
+		}
+		lastErr = err
+		t.Logf("startMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
+	}
+	require.Failf(t, "startMRCluster failed", "failed after %d attempts: %v", maxAttempts, lastErr)
+	return nil
+}
+
 func (c *mrCluster) startNode(i int) *exec.Cmd {
 	t := c.t
 	t.Helper()
