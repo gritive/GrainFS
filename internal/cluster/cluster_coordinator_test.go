@@ -1217,6 +1217,19 @@ func TestClusterCoordinator_ReadAt_ForwardSmallRangeUsesSingleFrame(t *testing.T
 	require.Equal(t, int64(len(body)), args.Length())
 }
 
+func TestClusterCoordinator_ReadAt_ForwardShortBodyReturnsEOF(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpReadAt] = buildReadAtReply([]byte("tail"))
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	buf := make([]byte, 128)
+	n, err := c.ReadAt(context.Background(), "bk", "k", 0, buf)
+
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 4, n)
+	require.Equal(t, []byte("tail"), buf[:n])
+}
+
 func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestGroupBackend(t, "group-1")

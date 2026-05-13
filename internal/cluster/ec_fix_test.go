@@ -294,3 +294,25 @@ func TestDistributedBackend_ReadAt_UserBucketECDataShards(t *testing.T) {
 	require.Equal(t, len(buf), n)
 	require.Equal(t, data[offset:int(offset)+len(buf)], buf)
 }
+
+func TestDistributedBackend_PutObject_EmptyUserBucketEC(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+
+	svc := NewShardService(b.root, nil)
+	allNodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
+	b.SetShardService(svc, allNodes)
+
+	obj, err := b.PutObject(context.Background(), "bkt", "empty", bytes.NewReader(nil), "application/octet-stream")
+	require.NoError(t, err)
+	require.EqualValues(t, 0, obj.Size)
+
+	rc, gotObj, err := b.GetObject(context.Background(), "bkt", "empty")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Empty(t, got)
+	require.EqualValues(t, 0, gotObj.Size)
+}

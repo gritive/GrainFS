@@ -328,13 +328,13 @@ func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) *transport.Me
 	}
 	buf := make([]byte, int(length))
 	n, err := dg.Backend().ReadAt(context.Background(), string(ra.Bucket()), string(ra.Key()), ra.Offset(), buf)
-	if err != nil && !(n > 0 && int64(n) == length) {
+	if err != nil && !(errors.Is(err, io.EOF) && n > 0) {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if int64(n) != length {
+	if n < 0 || n > len(buf) {
 		return statusReply(raftpb.ForwardStatusInternal)
 	}
-	return &transport.Message{Payload: buildReadAtReply(buf)}
+	return &transport.Message{Payload: buildReadAtReply(buf[:n])}
 }
 
 type backendReadAtStream struct {
