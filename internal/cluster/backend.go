@@ -2596,11 +2596,12 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 					ACL:          m.ACL,
 				}
 				placement = PlacementMeta{
-					VersionID:   versionID,
-					RingVersion: RingVersion(m.RingVersion),
-					ECData:      m.ECData,
-					ECParity:    m.ECParity,
-					NodeIDs:     m.NodeIDs,
+					VersionID:        versionID,
+					RingVersion:      RingVersion(m.RingVersion),
+					ECData:           m.ECData,
+					ECParity:         m.ECParity,
+					NodeIDs:          m.NodeIDs,
+					PlacementGroupID: m.PlacementGroupID,
 				}
 				return nil
 			})
@@ -3276,11 +3277,12 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 				ACL:          m.ACL,
 			}
 			placement = PlacementMeta{
-				VersionID:   versionID,
-				RingVersion: RingVersion(m.RingVersion),
-				ECData:      m.ECData,
-				ECParity:    m.ECParity,
-				NodeIDs:     m.NodeIDs,
+				VersionID:        versionID,
+				RingVersion:      RingVersion(m.RingVersion),
+				ECData:           m.ECData,
+				ECParity:         m.ECParity,
+				NodeIDs:          m.NodeIDs,
+				PlacementGroupID: m.PlacementGroupID,
 			}
 			return nil
 		})

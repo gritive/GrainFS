@@ -13,10 +13,20 @@ import (
 
 type pitrMockBackend struct {
 	objects []storage.SnapshotObject
+	buckets []storage.SnapshotBucket
 }
 
 func (m *pitrMockBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	return m.objects, nil
+}
+
+func (m *pitrMockBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
+	return m.buckets, nil
+}
+
+func (m *pitrMockBackend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	m.buckets = buckets
+	return nil
 }
 
 func (m *pitrMockBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
@@ -58,4 +68,37 @@ func TestPITRRestore_ReplaysVersionHistoryAndDeleteMarker(t *testing.T) {
 	require.False(t, byVersion["v2"].IsLatest)
 	require.True(t, byVersion["del-v3"].IsLatest)
 	require.True(t, byVersion["del-v3"].IsDeleteMarker)
+}
+
+func TestPITRRestore_DropsDeletedHistoryForUnversionedBuckets(t *testing.T) {
+	snapDir := t.TempDir()
+	backend := &pitrMockBackend{
+		buckets: []storage.SnapshotBucket{{Name: "b", VersioningState: ""}},
+		objects: []storage.SnapshotObject{
+			{
+				Bucket:    "b",
+				Key:       "ready",
+				ETag:      "etag-v1",
+				Size:      5,
+				VersionID: "v1",
+				IsLatest:  false,
+			},
+			{
+				Bucket:         "b",
+				Key:            "ready",
+				ETag:           "DEL",
+				VersionID:      "del-v2",
+				IsLatest:       true,
+				IsDeleteMarker: true,
+			},
+		},
+	}
+	mgr, err := snapshot.NewManager(snapDir, backend, "")
+	require.NoError(t, err)
+	_, err = mgr.Create("base")
+	require.NoError(t, err)
+
+	_, err = mgr.PITRRestore(time.Now().Add(time.Second))
+	require.NoError(t, err)
+	require.Empty(t, backend.objects, "unversioned deleted objects must not restore stale non-latest history")
 }

@@ -91,6 +91,7 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 	}
 
 	normalizeLatest(objects)
+	objects = applyBucketVersioningRestoreSemantics(objects, base.BucketMeta)
 
 	// Flatten map to slice
 	finalObjects := make([]storage.SnapshotObject, 0, len(objects))
@@ -131,6 +132,63 @@ func deleteAllVersions(objects map[string]storage.SnapshotObject, bucket, key st
 			delete(objects, k)
 		}
 	}
+}
+
+func applyBucketVersioningRestoreSemantics(objects map[string]storage.SnapshotObject, buckets []storage.SnapshotBucket) map[string]storage.SnapshotObject {
+	if len(buckets) == 0 {
+		return objects
+	}
+	versioning := make(map[string]string, len(buckets))
+	for _, bucket := range buckets {
+		versioning[bucket.Name] = bucket.VersioningState
+	}
+
+	type groupKey struct{ bucket, key string }
+	latestKey := make(map[groupKey]string)
+	latestVersion := make(map[groupKey]string)
+	hasExplicitLatest := make(map[groupKey]bool)
+	for mapKey, obj := range objects {
+		state, known := versioning[obj.Bucket]
+		if !known || state == "Enabled" {
+			continue
+		}
+		g := groupKey{bucket: obj.Bucket, key: obj.Key}
+		if obj.IsLatest {
+			latestKey[g] = mapKey
+			latestVersion[g] = obj.VersionID
+			hasExplicitLatest[g] = true
+			continue
+		}
+		if hasExplicitLatest[g] {
+			continue
+		}
+		if latestKey[g] == "" || obj.VersionID >= latestVersion[g] {
+			latestKey[g] = mapKey
+			latestVersion[g] = obj.VersionID
+		}
+	}
+	if len(latestKey) == 0 {
+		return objects
+	}
+
+	filtered := make(map[string]storage.SnapshotObject, len(objects))
+	for mapKey, obj := range objects {
+		state, known := versioning[obj.Bucket]
+		if !known || state == "Enabled" {
+			filtered[mapKey] = obj
+			continue
+		}
+		g := groupKey{bucket: obj.Bucket, key: obj.Key}
+		if latestKey[g] != mapKey {
+			continue
+		}
+		if obj.IsDeleteMarker {
+			continue
+		}
+		obj.IsLatest = true
+		filtered[mapKey] = obj
+	}
+	return filtered
 }
 
 func normalizeLatest(objects map[string]storage.SnapshotObject) {

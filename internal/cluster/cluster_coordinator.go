@@ -437,7 +437,7 @@ func (c *ClusterCoordinator) RestoreObjects(objects []storage.SnapshotObject) (i
 
 	byGroup := make(map[string][]storage.SnapshotObject)
 	for _, obj := range objects {
-		target, err := c.opRouter.RouteBucket(obj.Bucket)
+		target, _, err := c.routeWriteOrBucket(obj.Bucket, obj.Key)
 		if err != nil {
 			return 0, nil, err
 		}

@@ -339,3 +339,21 @@ func TestPullThrough_ForwardsSnapshotable(t *testing.T) {
 	require.True(t, ok, "pullthrough.Backend must expose Unwrap()")
 	assert.Equal(t, local, uw.Unwrap())
 }
+
+type walOffsetBackend struct {
+	storage.Backend
+	offset uint64
+}
+
+func (b *walOffsetBackend) WALOffset() uint64 { return b.offset }
+
+func TestPullThrough_ForwardsWALOffset(t *testing.T) {
+	local := newLocalBackend(t)
+	wrapped := &walOffsetBackend{Backend: local, offset: 42}
+	pt := pullthrough.NewBackend(wrapped, &staticResolver{up: &stubUpstream{}})
+
+	type walProvider interface{ WALOffset() uint64 }
+	wp, ok := storage.Backend(pt).(walProvider)
+	require.True(t, ok, "pullthrough.Backend must expose WALOffset for PITR snapshot anchors")
+	require.Equal(t, uint64(42), wp.WALOffset())
+}

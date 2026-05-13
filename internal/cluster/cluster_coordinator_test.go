@@ -877,6 +877,60 @@ func TestClusterCoordinator_RestoreObjects_RemovesDataGroupExtras(t *testing.T) 
 	require.Equal(t, "keep.txt", objs[0].Key)
 }
 
+func TestClusterCoordinator_RestoreObjects_RoutesByObjectPlacement(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos"}}
+	gb1 := newTestGroupBackend(t, "group-1")
+	gb2 := newTestGroupBackend(t, "group-2")
+	require.NoError(t, gb1.CreateBucket(context.Background(), "photos"))
+	require.NoError(t, gb2.CreateBucket(context.Background(), "photos"))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb1))
+	mgr.Add(NewDataGroupWithBackend("group-2", []string{"test-node"}, gb2))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+		"group-2": {ID: "group-2", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+
+	keyForGroup := func(groupID string) string {
+		for i := 0; i < 1000; i++ {
+			key := fmt.Sprintf("key-%s-%d.txt", groupID, i)
+			group, err := SelectObjectPlacementGroup("photos", key, meta.ShardGroups(), ECConfig{DataShards: 1, ParityShards: 0})
+			require.NoError(t, err)
+			if group.ID == groupID {
+				return key
+			}
+		}
+		require.FailNow(t, "could not find key for group", groupID)
+		return ""
+	}
+	key1 := keyForGroup("group-1")
+	key2 := keyForGroup("group-2")
+
+	obj1, err := c.PutObject(context.Background(), "photos", key1, strings.NewReader("one"), "text/plain")
+	require.NoError(t, err)
+	obj2, err := c.PutObject(context.Background(), "photos", key2, strings.NewReader("two"), "text/plain")
+	require.NoError(t, err)
+
+	snap := []storage.SnapshotObject{
+		{Bucket: "photos", Key: key1, ETag: obj1.ETag, Size: obj1.Size, ContentType: obj1.ContentType, Modified: obj1.LastModified, VersionID: obj1.VersionID, IsLatest: true},
+		{Bucket: "photos", Key: key2, ETag: obj2.ETag, Size: obj2.Size, ContentType: obj2.ContentType, Modified: obj2.LastModified, VersionID: obj2.VersionID, IsLatest: true},
+	}
+	restored, stale, err := c.RestoreObjects(snap)
+	require.NoError(t, err)
+	require.Equal(t, 2, restored)
+	require.Empty(t, stale)
+
+	_, err = gb1.HeadObject(context.Background(), "photos", key1)
+	require.NoError(t, err)
+	_, err = gb2.HeadObject(context.Background(), "photos", key2)
+	require.NoError(t, err)
+}
+
 // --- T6 forward-path test scaffolding ---
 
 // recordingDialer captures every (peer, payload) pair the ForwardSender hands
