@@ -107,10 +107,12 @@ func TestSaveFH_RestoreFH(t *testing.T) {
 	// savedFH is COMPOUND-scoped (Dispatcher reset on each COMPOUND), so SAVEFH and RESTOREFH must be in the same COMPOUND.
 	reply := sendCompound40(t, conn, 1,
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildOpenCreateOp("a.txt"),
 		buildGetFHOp(),
 		buildSaveFHOp(),
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildOpenCreateOp("b.txt"),
 		buildRestoreFHOp(),
 		buildGetFHOp(),
@@ -122,6 +124,8 @@ func TestSaveFH_RestoreFH(t *testing.T) {
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
 	r.ReadUint32()    // OPEN a.txt opcode+status
 	skipOpenResult(r) // OPEN a.txt result
 	r.ReadUint32()
@@ -131,6 +135,8 @@ func TestSaveFH_RestoreFH(t *testing.T) {
 	r.ReadUint32() // SAVEFH
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP export
 	r.ReadUint32()
 	r.ReadUint32()    // OPEN b.txt opcode+status
 	skipOpenResult(r) // OPEN b.txt result
@@ -175,9 +181,11 @@ func TestSaveFH_Overwrites(t *testing.T) {
 	// SAVEFH and RESTOREFH must be in the same COMPOUND (Dispatcher is per-COMPOUND).
 	reply := sendCompound40(t, conn, 1,
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildOpenCreateOp("x.txt"),
 		buildSaveFHOp(),
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildOpenCreateOp("y.txt"),
 		buildGetFHOp(), // y.txt FH
 		buildSaveFHOp(),
@@ -191,12 +199,16 @@ func TestSaveFH_Overwrites(t *testing.T) {
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
 	r.ReadUint32()    // OPEN x.txt opcode+status
 	skipOpenResult(r) // OPEN x.txt result
 	r.ReadUint32()
 	r.ReadUint32() // SAVEFH
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP export
 	r.ReadUint32()
 	r.ReadUint32()    // OPEN y.txt opcode+status
 	skipOpenResult(r) // OPEN y.txt result

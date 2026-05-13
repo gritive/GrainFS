@@ -15,19 +15,21 @@ func TestE2E_Remove(t *testing.T) {
 	// Create a file
 	c.writeTestFile("to-delete.txt", []byte("goodbye"))
 
-	// PUTROOTFH + REMOVE "to-delete.txt"
+	// PUTROOTFH + LOOKUP(export) + REMOVE "to-delete.txt"
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
 	ops.WriteUint32(uint32(OpRemove))
 	ops.WriteString("to-delete.txt")
 
-	reply := c.sendCompound(ops.Bytes(), 2)
+	reply := c.sendCompound(ops.Bytes(), 3)
 	status, _ := c.parseCompoundReply(reply)
 	require.Equal(t, uint32(NFS4_OK), status, "REMOVE should succeed")
 
 	// Verify file is gone via READDIR
 	ops2 := &XDRWriter{}
 	ops2.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops2)
 	ops2.WriteUint32(uint32(OpReadDir))
 	ops2.WriteUint64(0)    // cookie
 	ops2.WriteUint64(0)    // cookieverf
@@ -35,11 +37,13 @@ func TestE2E_Remove(t *testing.T) {
 	ops2.WriteUint32(4096) // maxcount
 	ops2.WriteUint32(0)    // attr bitmap len = 0
 
-	reply2 := c.sendCompound(ops2.Bytes(), 2)
+	reply2 := c.sendCompound(ops2.Bytes(), 3)
 	status2, r := c.parseCompoundReply(reply2)
 	require.Equal(t, uint32(NFS4_OK), status2)
 
-	// Skip PUTROOTFH result
+	// Skip PUTROOTFH + LOOKUP(export) results
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 
@@ -71,10 +75,11 @@ func TestE2E_Remove_NonExistent(t *testing.T) {
 
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
 	ops.WriteUint32(uint32(OpRemove))
 	ops.WriteString("ghost.txt")
 
-	reply := c.sendCompound(ops.Bytes(), 2)
+	reply := c.sendCompound(ops.Bytes(), 3)
 	status, _ := c.parseCompoundReply(reply)
 	assert.Equal(t, uint32(NFS4ERR_NOENT), status, "REMOVE of non-existent file should return NOENT")
 }
@@ -86,20 +91,22 @@ func TestE2E_Rename(t *testing.T) {
 
 	c.writeTestFile("old-name.txt", []byte("contents"))
 
-	// PUTROOTFH + RENAME "old-name.txt" -> "new-name.txt"
+	// PUTROOTFH + LOOKUP(export) + RENAME "old-name.txt" -> "new-name.txt"
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
 	ops.WriteUint32(uint32(OpRename))
 	ops.WriteString("old-name.txt")
 	ops.WriteString("new-name.txt")
 
-	reply := c.sendCompound(ops.Bytes(), 2)
+	reply := c.sendCompound(ops.Bytes(), 3)
 	status, _ := c.parseCompoundReply(reply)
 	require.Equal(t, uint32(NFS4_OK), status, "RENAME should succeed")
 
 	// Verify: old name gone, new name present
 	ops2 := &XDRWriter{}
 	ops2.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops2)
 	ops2.WriteUint32(uint32(OpReadDir))
 	ops2.WriteUint64(0)
 	ops2.WriteUint64(0)
@@ -107,10 +114,12 @@ func TestE2E_Rename(t *testing.T) {
 	ops2.WriteUint32(4096)
 	ops2.WriteUint32(0)
 
-	reply2 := c.sendCompound(ops2.Bytes(), 2)
+	reply2 := c.sendCompound(ops2.Bytes(), 3)
 	status2, r := c.parseCompoundReply(reply2)
 	require.Equal(t, uint32(NFS4_OK), status2)
 
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
@@ -141,11 +150,12 @@ func TestE2E_Rename_NonExistent(t *testing.T) {
 
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
 	ops.WriteUint32(uint32(OpRename))
 	ops.WriteString("does-not-exist.txt")
 	ops.WriteString("also-nope.txt")
 
-	reply := c.sendCompound(ops.Bytes(), 2)
+	reply := c.sendCompound(ops.Bytes(), 3)
 	status, _ := c.parseCompoundReply(reply)
 	assert.Equal(t, uint32(NFS4ERR_NOENT), status, "RENAME of non-existent file should return NOENT")
 }

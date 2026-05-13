@@ -89,7 +89,7 @@ type StateManager struct {
 	// Value type is chan struct{} (buffered 1).
 	writeGates pool.SyncMap[string, chan struct{}]
 
-	// fileMeta caches NFS-specific sidecar metadata by object key.
+	// fileMeta caches NFS-specific sidecar metadata by bucket/object key.
 	fileMeta pool.SyncMap[string, nfsFileMeta]
 
 	// WriteVerf is the 8-byte write verifier returned in COMMIT responses.
@@ -199,6 +199,15 @@ func (sm *StateManager) InvalidateKey(key string) {
 	parent := pathPkg.Dir(nfsPath)
 	if _, ok := sm.dirs.Load(parent); ok {
 		sm.dirs.Store(parent, time.Now().UnixNano())
+	}
+}
+
+func (sm *StateManager) InvalidateObject(bucket, key string) {
+	sm.fileMeta.Delete(fileMetaCacheKey(bucket, key))
+	for _, parent := range []string{pathPkg.Dir("/" + bucket + "/" + key), pathPkg.Dir("/" + key)} {
+		if _, ok := sm.dirs.Load(parent); ok {
+			sm.dirs.Store(parent, time.Now().UnixNano())
+		}
 	}
 }
 

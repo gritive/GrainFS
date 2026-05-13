@@ -192,7 +192,7 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 		e.Uint32("minorver", req.MinorVer).Ints("ops", ops).Msg("nfs4: COMPOUND")
 	}
 
-	d := getDispatcher(s.backend, s.state)
+	d := getDispatcher(s.backend, s.state, s)
 	defer putDispatcher(d)
 
 	resp := compoundRespPool.Get()
@@ -217,4 +217,33 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	} else {
 		encodeCompoundResponseInto(w, resp)
 	}
+}
+
+func (s *Server) isExportReadOnly(bucket string) bool {
+	if bucket == "" {
+		return false
+	}
+	cfg, ok := s.loadExports().byBucket[bucket]
+	return ok && cfg.readOnly
+}
+
+func (s *Server) isExportRegistered(bucket string) bool {
+	if bucket == "" {
+		return false
+	}
+	_, ok := s.loadExports().byBucket[bucket]
+	return ok
+}
+
+func (s *Server) exportGeneration(bucket string) uint64 {
+	cfg, ok := s.loadExports().byBucket[bucket]
+	if !ok {
+		return 0
+	}
+	return cfg.generation
+}
+
+func (s *Server) exportFSID(bucket string) (uint64, uint64) {
+	cfg := s.loadExports().byBucket[bucket]
+	return cfg.fsidMajor, cfg.fsidMinor
 }

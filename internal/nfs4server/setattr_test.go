@@ -46,7 +46,7 @@ func buildGetAttrOp(bm0, bm1 uint32) []byte {
 	return w.Bytes()
 }
 
-// createAndWriteFile creates a file at root/name and writes data to it.
+// createAndWriteFile creates a file at /legacyNFS4Bucket/name and writes data to it.
 func createAndWriteFile(t *testing.T, conn net.Conn, xid uint32, name string, data []byte) []byte {
 	t.Helper()
 	writeOp := func() []byte {
@@ -68,6 +68,7 @@ func createAndWriteFile(t *testing.T, conn net.Conn, xid uint32, name string, da
 
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildOpenCreateOp(name),
 		buildGetFHOp(),
 		writeOp,
@@ -83,6 +84,8 @@ func createAndWriteFile(t *testing.T, conn net.Conn, xid uint32, name string, da
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
 	r.ReadUint32()    // OPEN opcode+status
 	skipOpenResult(r) // OPEN result
 	r.ReadUint32()
@@ -91,12 +94,13 @@ func createAndWriteFile(t *testing.T, conn net.Conn, xid uint32, name string, da
 	return fh
 }
 
-// readFileSize sends PUTROOTFH + LOOKUP(name) + GETATTR(size) and returns the size.
+// readFileSize sends PUTROOTFH + LOOKUP(export) + LOOKUP(name) + GETATTR(size) and returns the size.
 func readFileSize(t *testing.T, conn net.Conn, xid uint32, name string) uint64 {
 	t.Helper()
 	getAttrSizeOp := buildGetAttrOp(1<<fattr4Size, 0)
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp(name),
 		getAttrSizeOp,
 	)
@@ -110,7 +114,9 @@ func readFileSize(t *testing.T, conn net.Conn, xid uint32, name string) uint64 {
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
-	r.ReadUint32() // LOOKUP
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP file
 	r.ReadUint32()
 	r.ReadUint32() // GETATTR opcode+status
 	bLen, _ := r.ReadUint32()
@@ -123,12 +129,13 @@ func readFileSize(t *testing.T, conn net.Conn, xid uint32, name string) uint64 {
 	return size
 }
 
-// readFileMode returns the mode attribute for root/name via LOOKUP + GETATTR.
+// readFileMode returns the mode attribute for /legacyNFS4Bucket/name via LOOKUP + GETATTR.
 func readFileMode(t *testing.T, conn net.Conn, xid uint32, name string) uint32 {
 	t.Helper()
 	getAttrModeOp := buildGetAttrOp(0, 1<<(fattr4Mode-32))
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp(name),
 		getAttrModeOp,
 	)
@@ -138,6 +145,8 @@ func readFileMode(t *testing.T, conn net.Conn, xid uint32, name string) uint32 {
 	status, r := parseCompoundReply(t, reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
@@ -155,12 +164,13 @@ func readFileMode(t *testing.T, conn net.Conn, xid uint32, name string) uint32 {
 	return mode
 }
 
-// readFileMtime returns TIME_MODIFY (seconds since epoch) for root/name.
+// readFileMtime returns TIME_MODIFY (seconds since epoch) for /legacyNFS4Bucket/name.
 func readFileMtime(t *testing.T, conn net.Conn, xid uint32, name string) int64 {
 	t.Helper()
 	getAttrMtimeOp := buildGetAttrOp(0, 1<<(fattr4TimeModify-32))
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp(name),
 		getAttrMtimeOp,
 	)
@@ -170,6 +180,8 @@ func readFileMtime(t *testing.T, conn net.Conn, xid uint32, name string) int64 {
 	status, r := parseCompoundReply(t, reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
@@ -229,6 +241,7 @@ func TestSetAttr_Mode(t *testing.T) {
 	setAttrOp := buildSetAttrOp(0, 1<<(fattr4Mode-32), modeVals)
 	setAttrCompound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("mode.txt"),
 		setAttrOp,
 	)
@@ -263,6 +276,7 @@ func TestSetAttr_Mtime(t *testing.T) {
 	setAttrOp := buildSetAttrOp(0, 1<<(fattr4TimeModifySet-32), mtimeVals)
 	setAttrCompound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("mtime.txt"),
 		setAttrOp,
 	)
@@ -296,6 +310,7 @@ func TestSetAttr_Truncate(t *testing.T) {
 	setAttrOp := buildSetAttrOp(1<<fattr4Size, 0, sizeVals)
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("trunc.bin"),
 		setAttrOp,
 	)
@@ -325,6 +340,7 @@ func TestSetAttr_TruncateExtend(t *testing.T) {
 	setAttrOp := buildSetAttrOp(1<<fattr4Size, 0, sizeVals)
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("extend.bin"),
 		setAttrOp,
 	)
@@ -347,6 +363,7 @@ func TestSetAttr_TruncateExtend(t *testing.T) {
 	}()
 	readCompound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("extend.bin"),
 		readOp,
 	)
@@ -359,7 +376,9 @@ func TestSetAttr_TruncateExtend(t *testing.T) {
 	rr.ReadUint32()
 	rr.ReadUint32() // PUTROOTFH
 	rr.ReadUint32()
-	rr.ReadUint32() // LOOKUP
+	rr.ReadUint32() // LOOKUP export
+	rr.ReadUint32()
+	rr.ReadUint32() // LOOKUP file
 	rr.ReadUint32()
 	rr.ReadUint32() // READ opcode+status
 	rr.ReadUint32() // eof flag
@@ -385,6 +404,7 @@ func TestSetAttr_TruncateZero(t *testing.T) {
 	setAttrOp := buildSetAttrOp(1<<fattr4Size, 0, sizeVals)
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("zero.bin"),
 		setAttrOp,
 	)
@@ -417,6 +437,7 @@ func TestSetAttr_MultiAttr(t *testing.T) {
 	setAttrOp := buildSetAttrOp(bm0, bm1, attrVals)
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("multi.bin"),
 		setAttrOp,
 	)
@@ -441,6 +462,7 @@ func TestSetAttr_Unknown(t *testing.T) {
 	setAttrOp := buildSetAttrOp(1<<30, 0, nil)
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("unknown.txt"),
 		setAttrOp,
 	)
@@ -472,7 +494,7 @@ func TestSetAttr_ConcurrentWrite(t *testing.T) {
 			return w.Bytes()
 		}()
 		op := buildSetAttrOp(1<<fattr4Size, 0, sizeVals)
-		compound := buildCompound40(buildPutRootFHOp(), buildLookupOp("concurrent.bin"), op)
+		compound := buildCompound40(buildPutRootFHOp(), buildLookupOp(legacyNFS4Bucket), buildLookupOp("concurrent.bin"), op)
 		if err := writeRPCFrame(conn1, buildRPCCallFrame(20, compound)); err != nil {
 			done <- err
 			return
@@ -491,7 +513,7 @@ func TestSetAttr_ConcurrentWrite(t *testing.T) {
 			w.WriteOpaque(make([]byte, 100))
 			return w.Bytes()
 		}()
-		compound := buildCompound40(buildPutRootFHOp(), buildLookupOp("concurrent.bin"), writeOp)
+		compound := buildCompound40(buildPutRootFHOp(), buildLookupOp(legacyNFS4Bucket), buildLookupOp("concurrent.bin"), writeOp)
 		if err := writeRPCFrame(conn2, buildRPCCallFrame(21, compound)); err != nil {
 			done <- err
 			return
@@ -515,6 +537,9 @@ func TestSetAttr_PersistAfterRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, backend1.CreateBucket(context.Background(), legacyNFS4Bucket))
 	srv1 := NewServer(backend1)
+	srv1.SetExportsForTest(buildSnap(map[string]exportConfig{
+		legacyNFS4Bucket: {fsidMajor: 1, fsidMinor: 1, generation: 1},
+	}))
 
 	ln1, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -542,7 +567,7 @@ func TestSetAttr_PersistAfterRestart(t *testing.T) {
 		return w.Bytes()
 	}()
 	setAttrOp := buildSetAttrOp(0, 1<<(fattr4Mode-32), modeVals)
-	compound := buildCompound40(buildPutRootFHOp(), buildLookupOp("persist.txt"), setAttrOp)
+	compound := buildCompound40(buildPutRootFHOp(), buildLookupOp(legacyNFS4Bucket), buildLookupOp("persist.txt"), setAttrOp)
 	require.NoError(t, writeRPCFrame(conn1, buildRPCCallFrame(20, compound)))
 	_, err = readRPCFrame(conn1)
 	require.NoError(t, err)
@@ -554,6 +579,9 @@ func TestSetAttr_PersistAfterRestart(t *testing.T) {
 	backend2, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 	srv2 := NewServer(backend2)
+	srv2.SetExportsForTest(buildSnap(map[string]exportConfig{
+		legacyNFS4Bucket: {fsidMajor: 1, fsidMinor: 1, generation: 1},
+	}))
 	ln2, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv2.mu.Lock()

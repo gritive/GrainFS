@@ -46,10 +46,11 @@ func putCompoundResponse(resp *CompoundResponse) {
 
 var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
-func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
+func getDispatcher(backend storage.Backend, state *StateManager, server *Server) *Dispatcher {
 	d := dispatcherPool.Get()
 	d.backend = backend
 	d.state = state
+	d.server = server
 	d.currentFH = FileHandle{}
 	d.currentPath = ""
 	d.savedFH = FileHandle{}
@@ -63,6 +64,7 @@ func getDispatcher(backend storage.Backend, state *StateManager) *Dispatcher {
 func putDispatcher(d *Dispatcher) {
 	d.backend = nil
 	d.state = nil
+	d.server = nil
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
 	dispatcherPool.Put(d)
@@ -193,6 +195,7 @@ type CompoundResponse struct {
 type Dispatcher struct {
 	backend          storage.Backend
 	state            *StateManager
+	server           *Server
 	currentFH        FileHandle
 	currentPath      string
 	savedFH          FileHandle
@@ -380,12 +383,15 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 		return OpResult{OpCode: OpLookup, Status: NFS4ERR_INVAL}
 	}
 	childPath := path.Join(d.currentPath, name)
+	childBucket, childKey := extractBucketAndKey(childPath)
 
 	// Check existence: backend file, tracked directory, or root
 	exists := d.state.IsDir(childPath)
+	if !exists && d.currentPath == "/" && childKey == "" && d.server != nil {
+		exists = d.server.isExportRegistered(childBucket)
+	}
 	if !exists && d.backend != nil {
-		bucket, key := extractBucketAndKey(childPath)
-		_, err := d.backend.HeadObject(context.Background(), bucket, key)
+		_, err := d.backend.HeadObject(context.Background(), childBucket, childKey)
 		exists = err == nil
 	}
 	log.Debug().Str("name", name).Str("child", childPath).Bool("exists", exists).Msg("nfs4: LOOKUP")
@@ -485,7 +491,7 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 
 		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
 		if !isDir {
-			meta := d.loadFileMeta(key)
+			meta := d.loadFileMeta(bucket, key)
 			sidecarMode = meta.Mode
 			if meta.Mtime > 0 {
 				lastModUnix = meta.Mtime / 1e9
@@ -688,11 +694,8 @@ func pathToFileID(p string) uint64 {
 }
 
 func (d *Dispatcher) invalidatePath(p string) {
-	key := p
-	if len(key) > 0 && key[0] == '/' {
-		key = key[1:]
-	}
-	d.state.InvalidateKey(key)
+	bucket, key := extractBucketAndKey(p)
+	d.state.InvalidateObject(bucket, key)
 }
 
 func (d *Dispatcher) opAccess(data []byte) OpResult {
@@ -726,6 +729,22 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 	w := getXDRWriter()
 
 	// cookieverf (8 bytes)
+	if d.currentPath == "/" && d.server != nil {
+		w.WriteUint64(d.server.loadExports().verifier)
+		snap := d.server.loadExports()
+		cookie := uint64(0)
+		for _, name := range snap.sortedNames {
+			cookie++
+			w.WriteUint32(1)
+			w.WriteUint64(cookie)
+			w.WriteString(name)
+			w.buf.Write(d.encodeAttrs(path.Join(d.currentPath, name), reqBit))
+		}
+		w.WriteUint32(0)
+		w.WriteUint32(1)
+		return OpResult{OpCode: OpReadDir, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+	}
+
 	w.WriteUint64(0)
 
 	if d.backend != nil {
@@ -935,7 +954,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 		}
 	}
-	d.state.InvalidateKey(key)
+	d.state.InvalidateObject(bucket, key)
 
 	w := getXDRWriter()
 	w.WriteUint32(uint32(len(writeData))) // count
@@ -979,7 +998,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 					return OpResult{OpCode: OpOpen, Status: NFS4ERR_IO}
 				}
 			}
-			d.state.InvalidateKey(key)
+			d.state.InvalidateObject(bucket, key)
 			log.Debug().Str("key", key).Msg("nfs4: OPEN CREATE created file")
 		}
 	}
@@ -1086,10 +1105,10 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		}
-		d.state.InvalidateKey(key)
+		d.state.InvalidateObject(bucket, key)
 	}
 
-	meta := d.loadFileMeta(key)
+	meta := d.loadFileMeta(bucket, key)
 	metaChanged := false
 
 	// FATTR4_MODE (word1 bit 1 = bit 33)
@@ -1127,10 +1146,10 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 	}
 
 	if metaChanged {
-		if err := d.saveFileMeta(key, meta); err != nil {
+		if err := d.saveFileMeta(bucket, key, meta); err != nil {
 			return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 		}
-		d.state.InvalidateKey(key)
+		d.state.InvalidateObject(bucket, key)
 	}
 
 	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult(bm0, bm1)}
@@ -1201,7 +1220,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_IO}
 	}
 	d.state.InvalidateFH(targetPath)
-	d.state.InvalidateKey(key)
+	d.state.InvalidateObject(bucket, key)
 
 	w := getXDRWriter()
 	// change_info4: atomic + before + after
@@ -1265,8 +1284,8 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 
 	d.state.InvalidateFH(oldPath)
 	d.state.GetOrCreateFH(newPath)
-	d.state.InvalidateKey(oldKey)
-	d.state.InvalidateKey(newKey)
+	d.state.InvalidateObject(srcBucket, oldKey)
+	d.state.InvalidateObject(dstBucket, newKey)
 
 	now := uint64(time.Now().UnixNano())
 	w := getXDRWriter()
@@ -1465,18 +1484,22 @@ func metaSidecarKey(key string) string {
 	return "__meta/" + key
 }
 
-func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
+func fileMetaCacheKey(bucket, key string) string {
+	return bucket + "\x00" + key
+}
+
+func (d *Dispatcher) loadFileMeta(bucket, key string) nfsFileMeta {
+	cacheKey := fileMetaCacheKey(bucket, key)
 	if d.state != nil {
-		if m, ok := d.state.fileMeta.Load(key); ok {
+		if m, ok := d.state.fileMeta.Load(cacheKey); ok {
 			return m
 		}
 	}
-	bucket, _ := extractBucketAndKey("/" + key)
 	rc, _, err := d.backend.GetObject(context.Background(), bucket, metaSidecarKey(key))
 	if err != nil {
 		m := nfsFileMeta{Mode: 0644}
 		if d.state != nil {
-			d.state.fileMeta.Store(key, m)
+			d.state.fileMeta.Store(cacheKey, m)
 		}
 		return m
 	}
@@ -1487,20 +1510,19 @@ func (d *Dispatcher) loadFileMeta(key string) nfsFileMeta {
 		m.Mode = 0644
 	}
 	if d.state != nil {
-		d.state.fileMeta.Store(key, m)
+		d.state.fileMeta.Store(cacheKey, m)
 	}
 	return m
 }
 
-func (d *Dispatcher) saveFileMeta(key string, m nfsFileMeta) error {
+func (d *Dispatcher) saveFileMeta(bucket, key string, m nfsFileMeta) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	bucket, _ := extractBucketAndKey("/" + key)
 	_, err = d.backend.PutObject(context.Background(), bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
 	if err == nil && d.state != nil {
-		d.state.fileMeta.Store(key, m)
+		d.state.fileMeta.Store(fileMetaCacheKey(bucket, key), m)
 	}
 	return err
 }

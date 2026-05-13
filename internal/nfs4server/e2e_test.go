@@ -23,6 +23,9 @@ func startTestNFS4Server(t *testing.T) (string, *Server) {
 	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
 
 	srv := NewServer(backend)
+	srv.SetExportsForTest(buildSnap(map[string]exportConfig{
+		legacyNFS4Bucket: {fsidMajor: 1, fsidMinor: 1, generation: 1},
+	}))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
@@ -212,14 +215,15 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	// Step 1: PUTROOTFH + OPEN(CREATE) "test.txt" + WRITE + CLOSE
+	// Step 1: PUTROOTFH + LOOKUP(export) + OPEN(CREATE) "test.txt" + WRITE + CLOSE
 	compound := &XDRWriter{}
 	compound.WriteString("") // tag
 	compound.WriteUint32(0)  // minor version
-	compound.WriteUint32(4)  // 4 ops: PUTROOTFH, OPEN, WRITE, CLOSE
+	compound.WriteUint32(5)  // 5 ops: PUTROOTFH, LOOKUP, OPEN, WRITE, CLOSE
 
 	// PUTROOTFH
 	compound.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(compound)
 
 	// OPEN (CREATE)
 	compound.WriteUint32(uint32(OpOpen))
@@ -269,16 +273,15 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 	status, _ := r.ReadUint32()
 	assert.Equal(t, uint32(NFS4_OK), status, "write compound should succeed")
 
-	// Step 2: PUTROOTFH + LOOKUP "test.txt" + READ
+	// Step 2: PUTROOTFH + LOOKUP(export) + LOOKUP "test.txt" + READ
 	compound2 := &XDRWriter{}
 	compound2.WriteString("")
 	compound2.WriteUint32(0)
-	compound2.WriteUint32(3) // PUTROOTFH, LOOKUP, READ
+	compound2.WriteUint32(4) // PUTROOTFH, LOOKUP export, LOOKUP file, READ
 
 	compound2.WriteUint32(uint32(OpPutRootFH))
-
-	compound2.WriteUint32(uint32(OpLookup))
-	compound2.WriteString("test.txt")
+	writeLookupLegacyExport(compound2)
+	writeLookupFile(compound2, "test.txt")
 
 	compound2.WriteUint32(uint32(OpRead))
 	compound2.WriteUint32(0)
@@ -306,12 +309,15 @@ func TestE2E_WriteAndReadFile(t *testing.T) {
 
 	r2.ReadString() // tag
 	opCount, _ := r2.ReadUint32()
-	assert.Equal(t, uint32(3), opCount)
+	assert.Equal(t, uint32(4), opCount)
 
 	// Skip PUTROOTFH result
 	r2.ReadUint32()
 	r2.ReadUint32()
 	// Skip LOOKUP result
+	r2.ReadUint32()
+	r2.ReadUint32()
+	// Skip LOOKUP file result
 	r2.ReadUint32()
 	r2.ReadUint32()
 	// READ result

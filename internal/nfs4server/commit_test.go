@@ -26,6 +26,7 @@ func TestCommit_AfterWrite(t *testing.T) {
 	}()
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp("commit.bin"),
 		commitOp,
 	)
@@ -40,7 +41,9 @@ func TestCommit_AfterWrite(t *testing.T) {
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
-	r.ReadUint32() // LOOKUP
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP file
 	r.ReadUint32()
 	r.ReadUint32() // COMMIT opcode+status
 	// writeverf4: 8 bytes (two uint32)
@@ -67,11 +70,13 @@ func TestCommit_VerferStable(t *testing.T) {
 	}()
 
 	getVerf := func(xid uint32) uint64 {
-		compound := buildCompound40(buildPutRootFHOp(), buildLookupOp("stable.bin"), commitOp)
+		compound := buildCompound40(buildPutRootFHOp(), buildLookupOp(legacyNFS4Bucket), buildLookupOp("stable.bin"), commitOp)
 		require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(xid, compound)))
 		reply, err := readRPCFrame(conn)
 		require.NoError(t, err)
 		_, r := parseCompoundReply(t, reply)
+		r.ReadUint32()
+		r.ReadUint32()
 		r.ReadUint32()
 		r.ReadUint32()
 		r.ReadUint32()

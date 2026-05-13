@@ -57,11 +57,22 @@ func (c *nfs4Client) parseCompoundReply(reply []byte) (status uint32, results *X
 	return status, r
 }
 
-// writeTestFile creates a file via PUTROOTFH + OPEN(CREATE) + WRITE + CLOSE.
+func writeLookupLegacyExport(w *XDRWriter) {
+	w.WriteUint32(uint32(OpLookup))
+	w.WriteString(legacyNFS4Bucket)
+}
+
+func writeLookupFile(w *XDRWriter, name string) {
+	w.WriteUint32(uint32(OpLookup))
+	w.WriteString(name)
+}
+
+// writeTestFile creates a file via PUTROOTFH + LOOKUP(export) + OPEN(CREATE) + WRITE + CLOSE.
 func (c *nfs4Client) writeTestFile(name string, data []byte) {
 	c.t.Helper()
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
 
 	ops.WriteUint32(uint32(OpOpen))
 	ops.WriteUint32(0) // seqid
@@ -90,12 +101,12 @@ func (c *nfs4Client) writeTestFile(name string, data []byte) {
 	ops.WriteUint64(0)
 	ops.WriteUint32(0) // seqid + stateid
 
-	reply := c.sendCompound(ops.Bytes(), 4)
+	reply := c.sendCompound(ops.Bytes(), 5)
 	status, _ := c.parseCompoundReply(reply)
 	assert.Equal(c.t, uint32(NFS4_OK), status, "writeTestFile %q should succeed", name)
 }
 
-// TestE2E_ReadDir verifies that files written to the root appear in READDIR output.
+// TestE2E_ReadDir verifies that files written to the legacy export appear in READDIR output.
 func TestE2E_ReadDir(t *testing.T) {
 	addr, _ := startTestNFS4Server(t)
 	c := newNFS4Client(t, addr)
@@ -105,9 +116,10 @@ func TestE2E_ReadDir(t *testing.T) {
 	c.writeTestFile("beta.txt", []byte("bbb"))
 	c.writeTestFile("gamma.txt", []byte("ccc"))
 
-	// PUTROOTFH + READDIR
+	// PUTROOTFH + LOOKUP(export) + READDIR
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
 	ops.WriteUint32(uint32(OpReadDir))
 	ops.WriteUint64(0)    // cookie = 0 (start)
 	ops.WriteUint64(0)    // cookieverf (8 bytes)
@@ -115,11 +127,13 @@ func TestE2E_ReadDir(t *testing.T) {
 	ops.WriteUint32(4096) // maxcount
 	ops.WriteUint32(0)    // attr bitmap len = 0
 
-	reply := c.sendCompound(ops.Bytes(), 2)
+	reply := c.sendCompound(ops.Bytes(), 3)
 	status, r := c.parseCompoundReply(reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
-	// Skip PUTROOTFH result
+	// Skip PUTROOTFH + LOOKUP(export) results
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 
@@ -158,21 +172,23 @@ func TestE2E_GetAttr_File(t *testing.T) {
 	content := []byte("hello getattr test")
 	c.writeTestFile("attrs.txt", content)
 
-	// PUTROOTFH + LOOKUP + GETATTR
+	// PUTROOTFH + LOOKUP(export) + LOOKUP(file) + GETATTR
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
-	ops.WriteUint32(uint32(OpLookup))
-	ops.WriteString("attrs.txt")
+	writeLookupLegacyExport(ops)
+	writeLookupFile(ops, "attrs.txt")
 	ops.WriteUint32(uint32(OpGetAttr))
 	ops.WriteUint32(2)    // bitmap len = 2
 	ops.WriteUint32(0x12) // request type (bit1) + size (bit4)
 	ops.WriteUint32(0)
 
-	reply := c.sendCompound(ops.Bytes(), 3)
+	reply := c.sendCompound(ops.Bytes(), 4)
 	status, r := c.parseCompoundReply(reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
-	// Skip PUTROOTFH + LOOKUP results
+	// Skip PUTROOTFH + LOOKUP(export) + LOOKUP(file) results
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
@@ -209,11 +225,11 @@ func TestE2E_ReadAtOffset(t *testing.T) {
 
 	c.writeTestFile("offset.txt", []byte("hello world"))
 
-	// PUTROOTFH + LOOKUP + READ at offset 6
+	// PUTROOTFH + LOOKUP(export) + LOOKUP(file) + READ at offset 6
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
-	ops.WriteUint32(uint32(OpLookup))
-	ops.WriteString("offset.txt")
+	writeLookupLegacyExport(ops)
+	writeLookupFile(ops, "offset.txt")
 	ops.WriteUint32(uint32(OpRead))
 	ops.WriteUint32(0)
 	ops.WriteUint64(0)
@@ -221,11 +237,13 @@ func TestE2E_ReadAtOffset(t *testing.T) {
 	ops.WriteUint64(6)    // offset = 6
 	ops.WriteUint32(1024) // count
 
-	reply := c.sendCompound(ops.Bytes(), 3)
+	reply := c.sendCompound(ops.Bytes(), 4)
 	status, r := c.parseCompoundReply(reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
-	// Skip PUTROOTFH + LOOKUP results
+	// Skip PUTROOTFH + LOOKUP(export) + LOOKUP(file) results
+	r.ReadUint32()
+	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
 	r.ReadUint32()
@@ -249,11 +267,11 @@ func TestE2E_ReadBeyondEOF(t *testing.T) {
 
 	c.writeTestFile("short.txt", []byte("hi"))
 
-	// PUTROOTFH + LOOKUP + READ with count > file size
+	// PUTROOTFH + LOOKUP(export) + LOOKUP(file) + READ with count > file size
 	ops := &XDRWriter{}
 	ops.WriteUint32(uint32(OpPutRootFH))
-	ops.WriteUint32(uint32(OpLookup))
-	ops.WriteString("short.txt")
+	writeLookupLegacyExport(ops)
+	writeLookupFile(ops, "short.txt")
 	ops.WriteUint32(uint32(OpRead))
 	ops.WriteUint32(0)
 	ops.WriteUint64(0)
@@ -261,14 +279,16 @@ func TestE2E_ReadBeyondEOF(t *testing.T) {
 	ops.WriteUint64(0)    // offset = 0
 	ops.WriteUint32(1024) // count = 1024 (much larger than file)
 
-	reply := c.sendCompound(ops.Bytes(), 3)
+	reply := c.sendCompound(ops.Bytes(), 4)
 	status, r := c.parseCompoundReply(reply)
 	require.Equal(t, uint32(NFS4_OK), status)
 
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
-	r.ReadUint32() // LOOKUP
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP file
 	r.ReadUint32() // READ op code
 	r.ReadUint32() // READ status
 

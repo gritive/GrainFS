@@ -15,8 +15,8 @@ func TestLoadFileMeta_CachesMissingSidecar(t *testing.T) {
 	backend := &fileMetaCacheBackend{}
 	d := &Dispatcher{backend: backend, state: NewStateManager()}
 
-	first := d.loadFileMeta("hot.bin")
-	second := d.loadFileMeta("hot.bin")
+	first := d.loadFileMeta(legacyNFS4Bucket, "hot.bin")
+	second := d.loadFileMeta(legacyNFS4Bucket, "hot.bin")
 
 	require.Equal(t, uint32(0644), first.Mode)
 	require.Equal(t, first, second)

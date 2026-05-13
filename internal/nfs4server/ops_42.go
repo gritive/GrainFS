@@ -102,7 +102,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 		if err := tr.Truncate(context.Background(), bucket, key, required); err != nil {
 			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 		}
-		d.state.InvalidateKey(key)
+		d.state.InvalidateObject(bucket, key)
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
@@ -120,7 +120,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 	}
-	d.state.InvalidateKey(key)
+	d.state.InvalidateObject(bucket, key)
 	return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 }
 
@@ -176,7 +176,7 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 	if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
 	}
-	d.state.InvalidateKey(key)
+	d.state.InvalidateObject(bucket, key)
 	return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 }
 
@@ -256,7 +256,7 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 		}
 	}
-	d.state.InvalidateKey(dstKey)
+	d.state.InvalidateObject(dstBucket, dstKey)
 
 	// RFC 7862 §15.2: return COPY4resok { write_response4, cr_consecutive, cr_synchronous }
 	// write_response4: wr_callback_id<1>=[] + wr_bytes_written + wr_stable + wr_writeverf(8)
