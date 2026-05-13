@@ -968,23 +968,55 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 
 // ForceDeleteBucket deletes all objects in the bucket and then removes it.
 // Unlike DeleteBucket, it does not fail when the bucket is non-empty.
+//
+// Scans all obj:<bucket>/ keys directly (not via WalkObjects) so that older
+// versions of multi-version objects are collected too. WalkObjects only returns
+// the latest version per key; skipping older versions would leave their Badger
+// keys behind, causing DeleteBucket to still see them and return ErrBucketNotEmpty.
 func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	// Collect (key, versionID) first so the Badger View is closed before any
+	// Collect all obj: refs first so the Badger View is closed before any
 	// Raft propose. Calling propose inside db.View holds the MVCC snapshot for
 	// N×RTT and blocks Badger GC.
 	type objRef struct {
 		key       string
-		versionID string
+		versionID string // empty for legacy unversioned keys
 	}
 	var refs []objRef
-	if err := b.WalkObjects(ctx, bucket, "", func(obj *storage.Object) error {
-		refs = append(refs, objRef{key: obj.Key, versionID: obj.VersionID})
+	if err := b.db.View(func(txn *badger.Txn) error {
+		// Build latMap so we can distinguish versioned sub-keys from unversioned
+		// legacy keys. A key of the form obj:<bucket>/<base>/<vid> is a versioned
+		// object iff <base> appears in latMap (i.e. lat:<bucket>/<base> exists).
+		latMap := make(map[string]struct{})
+		rawLatPfx := []byte("lat:" + bucket + "/")
+		latPfx := b.ks().Prefix(rawLatPfx)
+		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		for itLat.Seek(latPfx); itLat.ValidForPrefix(latPfx); itLat.Next() {
+			rawK := b.ks().MustStrip(itLat.Item().Key())
+			latMap[string(rawK[len(rawLatPfx):])] = struct{}{}
+		}
+		itLat.Close()
+
+		rawBucketPfx := []byte("obj:" + bucket + "/")
+		pfx := b.ks().Prefix(rawBucketPfx)
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			rawK := b.ks().MustStrip(it.Item().Key())
+			rest := string(rawK[len(rawBucketPfx):])
+			key, versionID := rest, ""
+			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
+				if _, inLat := latMap[rest[:slash]]; inLat {
+					key, versionID = rest[:slash], rest[slash+1:]
+				}
+			}
+			refs = append(refs, objRef{key: key, versionID: versionID})
+		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("force delete: walk objects: %w", err)
+		return fmt.Errorf("force delete: scan objects: %w", err)
 	}
 	for _, ref := range refs {
 		if ctx.Err() != nil {
@@ -997,28 +1029,25 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	return b.DeleteBucket(ctx, bucket)
 }
 
-// forceDeleteObject hard-deletes all Badger traces for a single object without
+// forceDeleteObject hard-deletes one Badger record for a single object without
 // creating a tombstone. Used only by ForceDeleteBucket.
 //
 // For versioned objects (versionID != ""): removes the versioned obj: key via
-// CmdDeleteObjectVersion and clears the lat: pointer if it was the last version.
-// For non-versioned objects (versionID == ""): the legacy-path CmdDeleteObject
-// (empty VersionID) removes the unversioned obj: key directly.
-// In both cases the unversioned legacy dual-write key is also removed so that
-// DeleteBucket's emptiness check finds no obj: keys remaining.
+// CmdDeleteObjectVersion. applyDeleteObjectVersion promotes the next-oldest
+// version to latest, or removes lat:/legacy obj: keys when the last version is
+// gone — so the final CmdDeleteObjectVersion call on each key leaves no traces.
+// For legacy unversioned objects (versionID == ""): CmdDeleteObject with empty
+// VersionID hard-deletes the unversioned obj: key (no tombstone written).
 func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key, versionID string) error {
 	if versionID != "" {
 		_ = os.Remove(b.objectPathV(bucket, key, versionID))
-		if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
+		return b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
 			Bucket:    bucket,
 			Key:       key,
 			VersionID: versionID,
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	// Remove the unversioned legacy dual-write key (applyDeleteObject with empty
-	// VersionID does a hard delete; no tombstone is written).
+	// Legacy unversioned key: hard-delete, no tombstone.
 	_ = os.Remove(b.objectPath(bucket, key))
 	return b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
 		Bucket:    bucket,

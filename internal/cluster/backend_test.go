@@ -735,3 +735,20 @@ func TestDistributedBackend_ForceDeleteBucket_CtxCancelledPropagates(t *testing.
 	err := b.ForceDeleteBucket(ctx, "any")
 	require.Error(t, err)
 }
+
+func TestDistributedBackend_ForceDeleteBucket_MultiVersion(t *testing.T) {
+	// 같은 키를 여러 번 PutObject하면 versioned obj: 키가 여러 개 생긴다.
+	// WalkObjects는 최신 버전만 반환하므로 이전 버전 키가 남아 DeleteBucket이
+	// ErrBucketNotEmpty를 반환하는 회귀를 방지한다.
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.CreateBucket(ctx, "mv-bucket"))
+	for i := range 3 {
+		_, err := b.PutObject(ctx, "mv-bucket", "doc.txt", strings.NewReader(fmt.Sprintf("v%d", i)), "text/plain")
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "mv-bucket"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "mv-bucket"), storage.ErrBucketNotFound)
+}
