@@ -66,6 +66,9 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 		return NewNotFound("bucket not found")
 	}
 	if errors.Is(err, storage.ErrBucketNotEmpty) {
+		if force {
+			return NewRetry("concurrent write during force-delete; retry the request")
+		}
 		return NewConflict("bucket not empty; use --force to delete all objects", nil)
 	}
 	return NewInternal("delete bucket: " + err.Error())

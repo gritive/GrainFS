@@ -705,3 +705,69 @@ func TestDistributedBackend_CreateBucket_RouterError_Propagates(t *testing.T) {
 	err := b.CreateBucket(context.Background(), "photos")
 	require.Error(t, err)
 }
+
+func TestDistributedBackend_ForceDeleteBucket_DeletesObjectsAndBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.CreateBucket(ctx, "todelete"))
+	_, err := b.PutObject(ctx, "todelete", "a.txt", strings.NewReader("aaa"), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "todelete", "b.txt", strings.NewReader("bbb"), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "todelete"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "todelete"), storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_ForceDeleteBucket_NotFound(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	err := b.ForceDeleteBucket(context.Background(), "nope")
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_ForceDeleteBucket_CtxCancelledPropagates(t *testing.T) {
+	// 취소된 ctx로 호출하면 HeadBucket 단계에서 곧바로 ctx 에러를 반환해야 한다.
+	// (propose 내부에서 context.Background()를 쓰지 않음을 확인)
+	b := newTestDistributedBackend(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately cancel
+	err := b.ForceDeleteBucket(ctx, "any")
+	require.Error(t, err)
+}
+
+func TestDistributedBackend_ForceDeleteBucket_MultiVersion(t *testing.T) {
+	// 같은 키를 여러 번 PutObject하면 versioned obj: 키가 여러 개 생긴다.
+	// WalkObjects는 최신 버전만 반환하므로 이전 버전 키가 남아 DeleteBucket이
+	// ErrBucketNotEmpty를 반환하는 회귀를 방지한다.
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.CreateBucket(ctx, "mv-bucket"))
+	for i := range 3 {
+		_, err := b.PutObject(ctx, "mv-bucket", "doc.txt", strings.NewReader(fmt.Sprintf("v%d", i)), "text/plain")
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "mv-bucket"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "mv-bucket"), storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_ForceDeleteBucket_SlashKeyAndVersionedPrefix(t *testing.T) {
+	// 버킷에 슬래시 포함 키 "dir/file"(비버전)과 그 접두사인 키 "dir"(버전)이
+	// 함께 존재할 때, latMap 충돌로 "dir/file"이 key="dir" versionID="file"로
+	// 잘못 분류되지 않고, 두 키 모두 정상 삭제되어야 한다.
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.CreateBucket(ctx, "slash-bucket"))
+	// versioned key "dir"
+	_, err := b.PutObject(ctx, "slash-bucket", "dir", strings.NewReader("versioned"), "text/plain")
+	require.NoError(t, err)
+	// legacy unversioned key "dir/file" (put before PutObject started versioning)
+	_, err = b.PutObject(ctx, "slash-bucket", "dir/file", strings.NewReader("nested"), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "slash-bucket"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "slash-bucket"), storage.ErrBucketNotFound)
+}

@@ -968,16 +968,123 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 
 // ForceDeleteBucket deletes all objects in the bucket and then removes it.
 // Unlike DeleteBucket, it does not fail when the bucket is non-empty.
+//
+// Scans all obj:<bucket>/ keys directly (not via WalkObjects) so that older
+// versions of multi-version objects are collected too. WalkObjects only returns
+// the latest version per key; skipping older versions would leave their Badger
+// keys behind, causing DeleteBucket to still see them and return ErrBucketNotEmpty.
 func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	if err := b.WalkObjects(ctx, bucket, "", func(obj *storage.Object) error {
-		return b.DeleteObject(ctx, bucket, obj.Key)
+	// Collect all obj: refs first so the Badger View is closed before any
+	// Raft propose. Calling propose inside db.View holds the MVCC snapshot for
+	// N×RTT and blocks Badger GC.
+	type objRef struct {
+		key       string
+		versionID string // empty for legacy unversioned keys
+	}
+	var refs []objRef
+	if err := b.db.View(func(txn *badger.Txn) error {
+		// Build latMap so we can distinguish versioned sub-keys from unversioned
+		// legacy keys. A key of the form obj:<bucket>/<base>/<vid> is a versioned
+		// object iff <base> appears in latMap (i.e. lat:<bucket>/<base> exists)
+		// AND <vid> is a valid UUID (all version IDs are UUID v4/v7). The UUID
+		// check prevents misclassifying a legacy key like "a/b" as key="a"
+		// versionID="b" when a versioned key "a" happens to share its prefix.
+		latMap := make(map[string]struct{})
+		rawLatPfx := []byte("lat:" + bucket + "/")
+		latPfx := b.ks().Prefix(rawLatPfx)
+		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		for itLat.Seek(latPfx); itLat.ValidForPrefix(latPfx); itLat.Next() {
+			rawK := b.ks().MustStrip(itLat.Item().Key())
+			latMap[string(rawK[len(rawLatPfx):])] = struct{}{}
+		}
+		itLat.Close()
+
+		rawBucketPfx := []byte("obj:" + bucket + "/")
+		pfx := b.ks().Prefix(rawBucketPfx)
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			rawK := b.ks().MustStrip(it.Item().Key())
+			rest := string(rawK[len(rawBucketPfx):])
+			key, versionID := rest, ""
+			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
+				candidateBase := rest[:slash]
+				candidateVID := rest[slash+1:]
+				if _, inLat := latMap[candidateBase]; inLat {
+					if _, err := uuid.Parse(candidateVID); err == nil {
+						key, versionID = candidateBase, candidateVID
+					}
+				}
+			}
+			refs = append(refs, objRef{key: key, versionID: versionID})
+		}
+		return nil
 	}); err != nil {
-		return fmt.Errorf("force delete: walk objects: %w", err)
+		return fmt.Errorf("force delete: scan objects: %w", err)
+	}
+	// Two-pass deletion to prevent ring refcount double-decRef:
+	//
+	// Pass 1 — versioned refs first. applyDeleteObjectVersion calls decRef(rv)
+	// for each version's ring. When the last versioned ref for a key is removed,
+	// applyDeleteObjectVersion also deletes the unversioned ObjectMetaKey, so
+	// Pass 2 finds it absent and skips decRef.
+	//
+	// Pass 2 — unversioned refs. applyDeleteObject("") only calls decRef if
+	// ObjectMetaKey still exists. If Pass 1 already removed it, rv stays 0 and
+	// decRef is not called, preventing a double-decRef of the ring refcount.
+	for _, ref := range refs {
+		if ref.versionID == "" {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := b.forceDeleteObject(ctx, bucket, ref.key, ref.versionID); err != nil {
+			return fmt.Errorf("force delete: %q: %w", ref.key, err)
+		}
+	}
+	for _, ref := range refs {
+		if ref.versionID != "" {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := b.forceDeleteObject(ctx, bucket, ref.key, ref.versionID); err != nil {
+			return fmt.Errorf("force delete: %q: %w", ref.key, err)
+		}
 	}
 	return b.DeleteBucket(ctx, bucket)
+}
+
+// forceDeleteObject hard-deletes one Badger record for a single object without
+// creating a tombstone. Used only by ForceDeleteBucket.
+//
+// For versioned objects (versionID != ""): removes the versioned obj: key via
+// CmdDeleteObjectVersion. applyDeleteObjectVersion promotes the next-oldest
+// version to latest, or removes lat:/legacy obj: keys when the last version is
+// gone — so the final CmdDeleteObjectVersion call on each key leaves no traces.
+// For legacy unversioned objects (versionID == ""): CmdDeleteObject with empty
+// VersionID hard-deletes the unversioned obj: key (no tombstone written).
+func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key, versionID string) error {
+	if versionID != "" {
+		_ = os.Remove(b.objectPathV(bucket, key, versionID))
+		return b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
+			Bucket:    bucket,
+			Key:       key,
+			VersionID: versionID,
+		})
+	}
+	// Legacy unversioned key: hard-delete, no tombstone.
+	_ = os.Remove(b.objectPath(bucket, key))
+	return b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: "", // empty = legacy hard delete, no tombstone
+	})
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the
@@ -2577,37 +2684,46 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 }
 
 func (b *DistributedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
-	_, err := b.DeleteObjectReturningMarker(bucket, key)
-	return err
+	return b.deleteObjectCtx(ctx, bucket, key)
 }
 
 // DeleteObjectReturningMarker satisfies server.VersionedSoftDeleter. Same
 // tombstone semantics as DeleteObject but returns the delete marker's
 // VersionID so the S3 handler can surface it in the response header.
 func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
-	ctx := context.Background()
+	return b.deleteObjectWithMarker(context.Background(), bucket, key)
+}
+
+// deleteObjectCtx is the ctx-aware core used by DeleteObject so that HTTP
+// request cancellation propagates into the Raft propose call.
+func (b *DistributedBackend) deleteObjectCtx(ctx context.Context, bucket, key string) error {
+	_, err := b.deleteObjectWithMarker(ctx, bucket, key)
+	return err
+}
+
+// deleteObjectWithMarker is the single implementation shared by DeleteObject
+// and DeleteObjectReturningMarker.
+//
+// Tombstone semantics: creates a delete marker as a new version. Prior version
+// data remains addressable via GetObjectVersion and is NOT physically removed
+// here. Hard-delete of a specific version goes through DeleteObjectVersion
+// (used by lifecycle/scrubber).
+//
+// For backward compatibility with the legacy N× on-disk layout, we also
+// remove the unversioned local object file if present — it's guaranteed to
+// be stale (superseded by a versioned path) and keeping it risks GetObject
+// serving it as a fallback read.
+func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket, key string) (string, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return "", err
 	}
-
-	// Tombstone semantics: DeleteObject creates a delete marker as a new
-	// version. Prior version data remains addressable via GetObjectVersion and
-	// is NOT physically removed here. Hard-delete of a specific version goes
-	// through DeleteObjectVersion (used by lifecycle/scrubber).
-	//
-	// For backward compatibility with the legacy N× on-disk layout, we also
-	// remove the unversioned local object file if present — it's guaranteed to
-	// be stale (superseded by a versioned path) and keeping it risks GetObject
-	// serving it as a fallback read.
 	os.Remove(b.objectPath(bucket, key))
-
 	markerID := newVersionID()
-	err := b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
+	if err := b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
 		Bucket:    bucket,
 		Key:       key,
 		VersionID: markerID,
-	})
-	if err != nil {
+	}); err != nil {
 		return "", err
 	}
 	return markerID, nil

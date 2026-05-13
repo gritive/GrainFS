@@ -98,3 +98,40 @@ func TestAdminDeleteBucket_NotFound(t *testing.T) {
 	require.ErrorAs(t, err, &ae)
 	assert.Equal(t, "not_found", ae.Code)
 }
+
+func TestAdminDeleteBucket_NotEmpty_NoForce(t *testing.T) {
+	fake := &fakeBucketOpsNotEmpty{}
+	d := &admin.Deps{Buckets: fake}
+	err := admin.AdminDeleteBucket(context.Background(), d, "b", false)
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "conflict", ae.Code)
+	assert.Contains(t, ae.Message, "--force")
+}
+
+func TestAdminDeleteBucket_NotEmpty_Force_Retry(t *testing.T) {
+	// force=true인데도 concurrent write로 ErrBucketNotEmpty가 발생하면
+	// "use --force" 대신 503 retry 메시지를 반환해야 한다.
+	fake := &fakeBucketOpsNotEmpty{}
+	d := &admin.Deps{Buckets: fake}
+	err := admin.AdminDeleteBucket(context.Background(), d, "b", true)
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "retry", ae.Code)
+	assert.NotContains(t, ae.Message, "--force")
+}
+
+// fakeBucketOpsNotEmpty는 ForceDeleteBucket/DeleteBucket이 항상 ErrBucketNotEmpty를 반환한다.
+type fakeBucketOpsNotEmpty struct{ fakeBucketOps }
+
+func (f *fakeBucketOpsNotEmpty) DeleteBucket(_ context.Context, _ string) error {
+	return storage.ErrBucketNotEmpty
+}
+func (f *fakeBucketOpsNotEmpty) ForceDeleteBucket(_ context.Context, _ string) error {
+	return storage.ErrBucketNotEmpty
+}
+func (f *fakeBucketOpsNotEmpty) HeadBucket(_ context.Context, _ string) error   { return nil }
+func (f *fakeBucketOpsNotEmpty) CreateBucket(_ context.Context, _ string) error { return nil }
+func (f *fakeBucketOpsNotEmpty) ListBuckets(_ context.Context) ([]string, error) {
+	return nil, nil
+}

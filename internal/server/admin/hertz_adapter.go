@@ -303,6 +303,8 @@ func statusForCode(c string) int {
 		return consts.StatusUnauthorized
 	case "forbidden":
 		return consts.StatusForbidden
+	case "retry":
+		return consts.StatusServiceUnavailable
 	default:
 		return consts.StatusInternalServerError
 	}

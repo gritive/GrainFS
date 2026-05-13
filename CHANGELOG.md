@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.181.0] - 2026-05-14 — fix: ForceDeleteBucket 버그 3종 수정
+
+### Fixed
+
+- **ForceDeleteBucket Badger MVCC snapshot 누수** — `db.View` 내부에서 Raft `propose`를 호출하면 N×RTT 동안 MVCC 스냅샷이 유지돼 Badger GC를 차단했던 문제 수정. 스캔과 propose를 분리(View → collect refs → propose).
+- **ForceDeleteBucket ctx 전파 누락** — 내부 루프에서 `ctx`를 전달하지 않아 컨텍스트 취소가 무시되던 버그 수정.
+- **ForceDeleteBucket multi-version 오브젝트 미삭제** — `WalkObjects`는 키당 최신 버전만 반환해 이전 버전 Badger 키가 남아 `DeleteBucket`이 `ErrBucketNotEmpty`를 반환했던 버그 수정. `obj:<bucket>/` 전체 키를 직접 스캔하도록 변경.
+- **ForceDeleteBucket ring refcount double-decRef** — 버전된 오브젝트의 unversioned ObjectMetaKey(`obj:<bucket>/<key>`)와 versioned 키를 모두 삭제할 때 ring `decRef`가 이중으로 호출되던 버그 수정. versioned ref를 먼저 처리(two-pass)해 `applyDeleteObjectVersion`이 ObjectMetaKey를 정리한 뒤 unversioned ref가 처리되도록 함.
+- **`AdminDeleteBucket` force=true 시 ErrBucketNotEmpty → 503 retry** — `--force`로 삭제 중 concurrent write로 `ErrBucketNotEmpty`가 발생하면 `"use --force"` 메시지 대신 503 retry 응답 반환.
+
 ## [0.0.180.2] - 2026-05-14 — fix: cluster benchmark and e2e latency regressions
 
 ### Fixed
