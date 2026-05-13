@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -88,6 +90,8 @@ func iamSACmd() *cobra.Command {
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List ServiceAccounts",
+		Example: `  grainfs iam sa list
+  grainfs iam --json sa list`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -97,8 +101,30 @@ func iamSACmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(c.OutOrStdout(), string(out))
-			return nil
+			asJSON, _ := c.Flags().GetBool("json")
+			if asJSON {
+				fmt.Fprintln(c.OutOrStdout(), string(out))
+				return nil
+			}
+			var items []struct {
+				SAID        string    `json:"sa_id"`
+				Name        string    `json:"name"`
+				Description string    `json:"description"`
+				CreatedAt   time.Time `json:"created_at"`
+				NumKeys     int       `json:"num_keys"`
+				NumGrants   int       `json:"num_grants"`
+			}
+			if err := json.Unmarshal(out, &items); err != nil {
+				return fmt.Errorf("parse response: %w", err)
+			}
+			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "SA ID\tNAME\tKEYS\tGRANTS\tCREATED AT")
+			for _, sa := range items {
+				fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
+					sa.SAID, sa.Name, sa.NumKeys, sa.NumGrants,
+					sa.CreatedAt.Format(time.RFC3339))
+			}
+			return tw.Flush()
 		},
 	}
 
@@ -258,7 +284,8 @@ func iamGrantCmd() *cobra.Command {
 
 func init() {
 	iamCmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
+		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
+	iamCmd.PersistentFlags().Bool("json", false, "output raw JSON")
 	iamCmd.AddCommand(iamSACmd(), iamKeyCmd(), iamGrantCmd())
 	rootCmd.AddCommand(iamCmd)
 }
