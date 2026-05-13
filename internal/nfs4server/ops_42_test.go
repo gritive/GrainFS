@@ -257,10 +257,10 @@ func TestSeek_HoleWhence(t *testing.T) {
 func TestCopy_UsesOffsetsAndCount(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
-	_, err = backend.PutObject(context.Background(), nfs4Bucket, "src.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
 	require.NoError(t, err)
-	_, err = backend.PutObject(context.Background(), nfs4Bucket, "dst.bin", bytes.NewReader([]byte("abcdefghij")), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("abcdefghij")), "application/octet-stream")
 	require.NoError(t, err)
 
 	d := &Dispatcher{
@@ -273,7 +273,7 @@ func TestCopy_UsesOffsetsAndCount(t *testing.T) {
 	result := d.opCopy(buildCopyArgs42(2, 4, 3))
 
 	require.Equal(t, NFS4_OK, result.Status)
-	body, _, err := backend.GetObject(context.Background(), nfs4Bucket, "dst.bin")
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
 	require.NoError(t, err)
 	defer body.Close()
 	got, err := io.ReadAll(body)
@@ -292,8 +292,8 @@ func TestCopy_UsesOffsetsAndCount(t *testing.T) {
 func TestReadDir_ListsFilesCreatedByPartialWrite(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
-	_, err = backend.WriteAt(context.Background(), nfs4Bucket, "dir/file.bin", 0, []byte("payload"))
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.WriteAt(context.Background(), legacyNFS4Bucket, "dir/file.bin", 0, []byte("payload"))
 	require.NoError(t, err)
 
 	d := &Dispatcher{
@@ -334,7 +334,7 @@ func TestReadDir_ListsFilesCreatedByPartialWrite(t *testing.T) {
 func TestOpenCreateRefreshesParentDirMtime(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
 	d := &Dispatcher{
 		backend:     backend,
 		state:       NewStateManager(),
@@ -388,7 +388,7 @@ func TestAllocate_UsesTruncateBackend(t *testing.T) {
 
 	require.Equal(t, NFS4_OK, result.Status)
 	require.Equal(t, 1, backend.truncateCalls)
-	assert.Equal(t, nfs4Bucket, backend.truncateBucket)
+	assert.Equal(t, legacyNFS4Bucket, backend.truncateBucket)
 	assert.Equal(t, "alloc-fast.bin", backend.truncateKey)
 	assert.Equal(t, int64(4096), backend.truncateSize)
 	assert.Zero(t, backend.getCalls, "ALLOCATE with Truncatable backend should not read the object")

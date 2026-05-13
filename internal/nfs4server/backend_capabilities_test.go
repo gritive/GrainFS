@@ -22,15 +22,15 @@ func (noPullthroughResolver) Resolve(string) (pullthrough.Upstream, bool) {
 func TestPartialIOBackendUnwrapsPullThroughDecorator(t *testing.T) {
 	local, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, local.CreateBucket(context.Background(), nfs4Bucket))
+	require.NoError(t, local.CreateBucket(context.Background(), legacyNFS4Bucket))
 
 	wrapped := pullthrough.NewBackend(local, noPullthroughResolver{})
 	partial, ok := partialIOBackend(wrapped)
 	require.True(t, ok, "NFS must see PartialIO through pullthrough to avoid full-object RMW")
 
-	_, err = partial.WriteAt(context.Background(), nfs4Bucket, "file.bin", 0, []byte("abc"))
+	_, err = partial.WriteAt(context.Background(), legacyNFS4Bucket, "file.bin", 0, []byte("abc"))
 	require.NoError(t, err)
-	rc, _, err := wrapped.GetObject(context.Background(), nfs4Bucket, "file.bin")
+	rc, _, err := wrapped.GetObject(context.Background(), legacyNFS4Bucket, "file.bin")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -41,16 +41,16 @@ func TestPartialIOBackendUnwrapsPullThroughDecorator(t *testing.T) {
 func TestTruncatableBackendUnwrapsPullThroughDecorator(t *testing.T) {
 	local, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, local.CreateBucket(context.Background(), nfs4Bucket))
-	_, err = local.PutObject(context.Background(), nfs4Bucket, "file.bin", strings.NewReader("abc"), "application/octet-stream")
+	require.NoError(t, local.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = local.PutObject(context.Background(), legacyNFS4Bucket, "file.bin", strings.NewReader("abc"), "application/octet-stream")
 	require.NoError(t, err)
 
 	wrapped := pullthrough.NewBackend(local, noPullthroughResolver{})
 	truncatable, ok := truncatableBackend(wrapped)
 	require.True(t, ok, "NFS must see Truncatable through pullthrough to avoid zero-filled RMW")
 
-	require.NoError(t, truncatable.Truncate(context.Background(), nfs4Bucket, "file.bin", 4096))
-	obj, err := wrapped.HeadObject(context.Background(), nfs4Bucket, "file.bin")
+	require.NoError(t, truncatable.Truncate(context.Background(), legacyNFS4Bucket, "file.bin", 4096))
+	obj, err := wrapped.HeadObject(context.Background(), legacyNFS4Bucket, "file.bin")
 	require.NoError(t, err)
 	assert.EqualValues(t, 4096, obj.Size)
 }

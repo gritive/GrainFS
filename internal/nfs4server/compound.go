@@ -156,9 +156,6 @@ const (
 	NF4DIR = 2
 )
 
-// The VFS bucket used for NFSv4 storage.
-const nfs4Bucket = storage.NFS4BucketName
-
 type Op struct {
 	OpCode  int
 	Data    []byte

@@ -1,7 +1,6 @@
 package nfs4server
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"sync"
@@ -22,19 +21,19 @@ type Server struct {
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
-// It ensures the NFS storage bucket exists.
+//
+// Phase 0b (D6): boot-time auto-creation of "__grainfs_nfs4" has been removed.
+// Operators must explicitly create buckets and register them as NFS exports
+// (Phase 1+: grainfs nfs export add <bucket>). Legacy data recovery:
+//
+//	grainfs bucket create __grainfs_nfs4
+//	grainfs nfs export add __grainfs_nfs4
 func NewServer(backend storage.Backend) *Server {
-	s := &Server{
+	return &Server{
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 	}
-	if err := backend.HeadBucket(context.Background(), nfs4Bucket); err != nil {
-		if err := backend.CreateBucket(context.Background(), nfs4Bucket); err != nil {
-			s.logger.Warn().Err(err).Str("bucket", nfs4Bucket).Msg("nfs4: could not create storage bucket")
-		}
-	}
-	return s
 }
 
 // ListenAndServe starts the NFSv4 TCP server.
@@ -87,12 +86,9 @@ func (s *Server) Addr() net.Addr {
 // so internal/nfs4server does not import internal/cluster. The Server is
 // registered in serveruntime.Run after StartNodeServices returns.
 //
-// Buckets other than nfs4Bucket are no-ops because NFS only ever serves
-// out of its dedicated bucket.
-func (s *Server) Invalidate(bucket, key string) {
-	if bucket != nfs4Bucket {
-		return
-	}
+// Phase 0b (D6): the legacy dedicated-bucket filter was removed. Phase 3 will
+// restore export-aware filtering using the active export registry.
+func (s *Server) Invalidate(_ string, key string) {
 	s.state.InvalidateKey(key)
 }
 

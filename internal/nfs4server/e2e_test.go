@@ -20,7 +20,7 @@ func startTestNFS4Server(t *testing.T) (string, *Server) {
 	require.NoError(t, err)
 
 	// Create the NFS4 bucket
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
 
 	srv := NewServer(backend)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

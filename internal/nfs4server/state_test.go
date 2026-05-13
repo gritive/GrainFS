@@ -95,20 +95,17 @@ func TestStateManager_InvalidateKey_UntrackedParentSkipped(t *testing.T) {
 	assert.False(t, sm.IsDir("/dir"), "InvalidateKey must not synthesize untracked parent dirs")
 }
 
-func TestServer_Invalidate_BucketScoping(t *testing.T) {
+func TestServer_Invalidate_InvalidatesWithoutBucketFilter(t *testing.T) {
 	// Server.Invalidate is the duck-typed cluster.CacheInvalidator entry.
-	// Different bucket → no-op; matching bucket → InvalidateKey runs.
+	// Phase 0b removed the legacy dedicated-bucket filter, so any invalidation
+	// routed here clears the matching key until Phase 3 adds export-aware filters.
 	sm := NewStateManager()
 	sm.fileMeta.Store("file.txt", nfsFileMeta{Mode: 0644})
 	srv := &Server{state: sm}
 
 	srv.Invalidate("other-bucket", "file.txt")
 	_, ok := sm.fileMeta.Load("file.txt")
-	assert.True(t, ok, "non-NFS bucket must be ignored")
-
-	srv.Invalidate(nfs4Bucket, "file.txt")
-	_, ok = sm.fileMeta.Load("file.txt")
-	assert.False(t, ok, "matching bucket must drop fileMeta")
+	assert.False(t, ok, "any routed invalidation must drop fileMeta")
 }
 
 func TestStateManager_SetClientID(t *testing.T) {
