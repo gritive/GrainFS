@@ -34,3 +34,14 @@ func (o *Operations) ForceDeleteBucket(ctx context.Context, bucket string) error
 	}
 	return o.DeleteBucket(ctx, bucket)
 }
+
+// CountObjects counts all objects in bucket. O(N in objects) — use for
+// bucket info only, not bulk list operations.
+func (o *Operations) CountObjects(ctx context.Context, bucket string) (int64, error) {
+	var n int64
+	err := o.WalkObjects(ctx, bucket, "", func(*Object) error {
+		n++
+		return nil
+	})
+	return n, err
+}

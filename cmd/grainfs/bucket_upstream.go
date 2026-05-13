@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -21,6 +24,10 @@ func bucketUpstreamCmd() *cobra.Command {
 		Use:   "put <bucket>",
 		Short: "Register or rotate the upstream credentials for a bucket",
 		Args:  cobra.ExactArgs(1),
+		Example: `  grainfs bucket upstream put my-bucket --upstream-url http://minio:9000 \
+      --access-key AKID --secret-key-stdin
+  echo "$SK" | grainfs bucket upstream put my-bucket --upstream-url http://minio:9000 \
+      --access-key AKID --secret-key-stdin`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -53,8 +60,12 @@ func bucketUpstreamCmd() *cobra.Command {
 				"access_key":   ak,
 				"secret_key":   sk,
 			}
-			_, err = iamRequest(c.Context(), sock, "PUT", "/v1/buckets/upstream", body)
-			return err
+			_, err = iamRequest(c.Context(), sock, "PUT", "/v1/upstreams", body)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Upstream configured for bucket %s\n", args[0])
+			return nil
 		},
 	}
 	putCmd.Flags().String("upstream-url", "", "upstream S3 endpoint URL (e.g., http://minio:9000)")
@@ -66,6 +77,8 @@ func bucketUpstreamCmd() *cobra.Command {
 		Use:   "get <bucket>",
 		Short: "Show the upstream config for a bucket (secret_key never returned)",
 		Args:  cobra.ExactArgs(1),
+		Example: `  grainfs bucket upstream get my-bucket
+  grainfs bucket --json upstream get my-bucket`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -76,32 +89,74 @@ func bucketUpstreamCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(c.OutOrStdout(), string(out))
-			return nil
+			asJSON, _ := c.Flags().GetBool("json")
+			if asJSON {
+				fmt.Fprintln(c.OutOrStdout(), string(out))
+				return nil
+			}
+			var item struct {
+				Bucket      string    `json:"bucket"`
+				UpstreamURL string    `json:"upstream_url"`
+				AccessKey   string    `json:"access_key"`
+				CreatedAt   time.Time `json:"created_at"`
+				CreatedBy   string    `json:"created_by"`
+			}
+			if err := json.Unmarshal(out, &item); err != nil {
+				return fmt.Errorf("parse response: %w", err)
+			}
+			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "BUCKET\tURL\tACCESS KEY\tCREATED AT")
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				item.Bucket, item.UpstreamURL, item.AccessKey, item.CreatedAt.Format(time.RFC3339))
+			return tw.Flush()
 		},
 	}
 
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all bucket-upstream configurations",
+		Example: `  grainfs bucket upstream list
+  grainfs bucket --json upstream list`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
-			out, err := iamRequest(c.Context(), sock, "GET", "/v1/buckets/upstream", nil)
+			out, err := iamRequest(c.Context(), sock, "GET", "/v1/upstreams", nil)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(c.OutOrStdout(), string(out))
-			return nil
+			asJSON, _ := c.Flags().GetBool("json")
+			if asJSON {
+				fmt.Fprintln(c.OutOrStdout(), string(out))
+				return nil
+			}
+			var resp struct {
+				Upstreams []struct {
+					Bucket      string    `json:"bucket"`
+					UpstreamURL string    `json:"upstream_url"`
+					AccessKey   string    `json:"access_key"`
+					CreatedAt   time.Time `json:"created_at"`
+				} `json:"upstreams"`
+			}
+			if err := json.Unmarshal(out, &resp); err != nil {
+				return fmt.Errorf("parse response: %w", err)
+			}
+			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "BUCKET\tURL\tACCESS KEY\tCREATED AT")
+			for _, u := range resp.Upstreams {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+					u.Bucket, u.UpstreamURL, u.AccessKey, u.CreatedAt.Format(time.RFC3339))
+			}
+			return tw.Flush()
 		},
 	}
 
 	deleteCmd := &cobra.Command{
-		Use:   "delete <bucket>",
-		Short: "Remove the upstream config for a bucket",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <bucket>",
+		Short:   "Remove the upstream config for a bucket",
+		Args:    cobra.ExactArgs(1),
+		Example: `  grainfs bucket upstream delete my-bucket`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -109,7 +164,11 @@ func bucketUpstreamCmd() *cobra.Command {
 			}
 			_, err = iamRequest(c.Context(), sock, "DELETE",
 				"/v1/buckets/"+url.PathEscape(args[0])+"/upstream", nil)
-			return err
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Removed upstream config for bucket %s\n", args[0])
+			return nil
 		},
 	}
 

@@ -1,11 +1,28 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+func buildTestBucketUpstreamRoot() *cobra.Command {
+	root := &cobra.Command{Use: "grainfs"}
+	bkt := &cobra.Command{Use: "bucket"}
+	bkt.PersistentFlags().String("endpoint", "", "")
+	bkt.PersistentFlags().Bool("json", false, "")
+	bkt.AddCommand(bucketUpstreamCmd())
+	root.AddCommand(bkt)
+	return root
+}
 
 func TestReadSecretKey_Stdin(t *testing.T) {
 	cases := []struct {
@@ -74,5 +91,214 @@ func TestReadSecretKey_FileNotFound(t *testing.T) {
 	_, err := readSecretKey(false, "/nonexistent/path/should/not/exist", nil)
 	if err == nil {
 		t.Fatal("readSecretKey on missing file: want error, got nil")
+	}
+}
+
+func TestBucketUpstreamGetCmd_Table(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/my-bucket/upstream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"bucket":"my-bucket","upstream_url":"http://minio:9000","access_key":"AKID","created_at":"2026-01-01T00:00:00Z"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "upstream", "get", "my-bucket"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "BUCKET") {
+		t.Errorf("output %q missing BUCKET header", out)
+	}
+	if !strings.Contains(out, "my-bucket") {
+		t.Errorf("output %q missing bucket name", out)
+	}
+}
+
+func TestBucketUpstreamGetCmd_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/my-bucket/upstream", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"bucket":"my-bucket","upstream_url":"http://minio:9000","access_key":"AKID"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "--json", "upstream", "get", "my-bucket"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+}
+
+func TestBucketUpstreamListCmd_Table(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"upstreams":[{"bucket":"b1","upstream_url":"http://minio:9000","access_key":"AK1","created_at":"2026-01-01T00:00:00Z"}]}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "upstream", "list"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "BUCKET") {
+		t.Errorf("output %q missing BUCKET header", out)
+	}
+	if !strings.Contains(out, "b1") {
+		t.Errorf("output %q missing bucket name", out)
+	}
+}
+
+func TestBucketUpstreamListCmd_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"upstreams":[{"bucket":"b1"}]}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "--json", "upstream", "list"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+}
+
+func TestBucketUpstreamDeleteCmd(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/my-bucket/upstream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "upstream", "delete", "my-bucket"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "my-bucket") {
+		t.Errorf("output %q missing bucket name feedback", buf.String())
+	}
+}
+
+func TestBucketUpstreamPutCmd_MissingURL(t *testing.T) {
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", "/tmp/fake.sock", "upstream", "put", "my-bucket",
+		"--access-key", "AKID", "--secret-key-stdin"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "upstream-url") {
+		t.Errorf("expected --upstream-url error, got: %v", err)
+	}
+}
+
+func TestBucketUpstreamPutCmd_MissingAccessKey(t *testing.T) {
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", "/tmp/fake.sock", "upstream", "put", "my-bucket",
+		"--upstream-url", "http://minio:9000", "--secret-key-stdin"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "access-key") {
+		t.Errorf("expected --access-key error, got: %v", err)
+	}
+}
+
+func TestBucketUpstreamPutCmd_SecretKeyConflict(t *testing.T) {
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	// neither --secret-key-stdin nor --secret-key-file provided
+	root.SetArgs([]string{"bucket", "--endpoint", "/tmp/fake.sock", "upstream", "put", "my-bucket",
+		"--upstream-url", "http://minio:9000", "--access-key", "AKID"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "secret-key") {
+		t.Errorf("expected secret-key exclusivity error, got: %v", err)
+	}
+}
+
+func TestBucketUpstreamPutCmd(t *testing.T) {
+	var gotBody map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketUpstreamRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetIn(strings.NewReader("mysecret\n"))
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "upstream", "put", "my-bucket",
+		"--upstream-url", "http://minio:9000", "--access-key", "AKID", "--secret-key-stdin"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	if gotBody["bucket"] != "my-bucket" {
+		t.Errorf("body bucket = %q, want my-bucket", gotBody["bucket"])
+	}
+	if gotBody["secret_key"] != "mysecret" {
+		t.Errorf("body secret_key = %q, want mysecret", gotBody["secret_key"])
+	}
+	if !strings.Contains(buf.String(), "Upstream configured for bucket my-bucket") {
+		t.Errorf("output %q missing upstream configured feedback", buf.String())
 	}
 }

@@ -73,6 +73,7 @@ func buildTestIAMRoot() *cobra.Command {
 	root := &cobra.Command{Use: "grainfs"}
 	iam := &cobra.Command{Use: "iam"}
 	iam.PersistentFlags().String("endpoint", "", "")
+	iam.PersistentFlags().Bool("json", false, "")
 	iam.AddCommand(iamSACmd(), iamKeyCmd(), iamGrantCmd())
 	root.AddCommand(iam)
 	return root
@@ -96,6 +97,29 @@ func TestIAMSACreate_EndToEnd(t *testing.T) {
 	sock := startFakeAdminUDS(t, mux)
 
 	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "--json", "sa", "create", "alice"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+}
+
+func TestIAMSACreate_TextFeedback(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"alice","access_key":"AK1","secret_key":"SK1"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
 	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "create", "alice"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -104,8 +128,96 @@ func TestIAMSACreate_EndToEnd(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v\noutput: %s", err, out.String())
 	}
-	if !strings.Contains(out.String(), `"sa_id":"sa-x"`) {
-		t.Errorf("unexpected output: %s", out.String())
+	s := out.String()
+	if !strings.Contains(s, "alice") {
+		t.Errorf("output %q missing name 'alice'", s)
+	}
+	if !strings.Contains(s, "sa-x") {
+		t.Errorf("output %q missing sa_id 'sa-x'", s)
+	}
+	if !strings.Contains(s, "AK1") {
+		t.Errorf("output %q missing access_key 'AK1'", s)
+	}
+	if !strings.Contains(s, "SK1") {
+		t.Errorf("output %q missing secret_key 'SK1'", s)
+	}
+}
+
+func TestIAMSAGet_Table(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"alice","description":"data team","created_at":"2026-01-01T00:00:00Z"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "get", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "SA ID") {
+		t.Errorf("output %q missing SA ID header", s)
+	}
+	if !strings.Contains(s, "sa-x") || !strings.Contains(s, "alice") {
+		t.Errorf("output %q missing sa_id/name", s)
+	}
+}
+
+func TestIAMSAGet_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"alice"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "--json", "sa", "get", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+}
+
+func TestIAMSADelete_Feedback(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "delete", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Deleted service account sa-x") {
+		t.Errorf("output %q missing delete feedback", out.String())
 	}
 }
 
@@ -225,5 +337,160 @@ func TestCLI_KeyCreate_NoBucketFlag(t *testing.T) {
 	// Verify the request body does NOT contain buckets field (preserves legacy {} wire format)
 	if _, present := gotBody["buckets"]; present {
 		t.Fatalf("body should not contain \"buckets\" key when --bucket not used; got %v", gotBody)
+	}
+}
+
+func TestIAMSAList_Table(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"sa_id":"sa-x","name":"alice","num_keys":1,"num_grants":2,"created_at":"2026-01-01T00:00:00Z"}]`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "list"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "SA ID") {
+		t.Errorf("output %q missing SA ID header", s)
+	}
+	if !strings.Contains(s, "sa-x") || !strings.Contains(s, "alice") {
+		t.Errorf("output %q missing sa_id/name", s)
+	}
+}
+
+func TestIAMSAList_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"sa_id":"sa-x","name":"alice"}]`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "--json", "sa", "list"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+}
+
+func TestIAMGrantPut(t *testing.T) {
+	var gotBody map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/grant", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "grant", "put", "sa-x", "my-bucket", "Write"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	if gotBody["sa_id"] != "sa-x" || gotBody["bucket"] != "my-bucket" || gotBody["role"] != "Write" {
+		t.Errorf("body = %v, want sa_id=sa-x bucket=my-bucket role=Write", gotBody)
+	}
+}
+
+func TestIAMGrantDelete(t *testing.T) {
+	var gotBody map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/grant", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "grant", "delete", "sa-x", "my-bucket"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	if gotBody["sa_id"] != "sa-x" || gotBody["bucket"] != "my-bucket" {
+		t.Errorf("body = %v, want sa_id=sa-x bucket=my-bucket", gotBody)
+	}
+}
+
+func TestIAMKeyRevoke(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x/key/AK1", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "key", "revoke", "sa-x", "AK1"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+}
+
+func TestAdminEndpointFromCmd_EnvVar(t *testing.T) {
+	t.Setenv("GRAINFS_ADMIN_SOCKET", "/tmp/env.sock")
+	cmd := &cobra.Command{}
+	cmd.Flags().String("endpoint", "", "")
+	got, err := adminEndpointFromCmd(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/tmp/env.sock" {
+		t.Errorf("got %q, want /tmp/env.sock", got)
+	}
+}
+
+func TestAdminEndpointFromCmd_FlagOverridesEnv(t *testing.T) {
+	t.Setenv("GRAINFS_ADMIN_SOCKET", "/tmp/env.sock")
+	cmd := &cobra.Command{}
+	cmd.Flags().String("endpoint", "/tmp/flag.sock", "")
+	got, err := adminEndpointFromCmd(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/tmp/flag.sock" {
+		t.Errorf("got %q, want /tmp/flag.sock", got)
 	}
 }

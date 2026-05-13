@@ -14,9 +14,15 @@ import (
 
 type fakeBucketOps struct {
 	buckets map[string]bool
+	counts  map[string]int64
 }
 
-func newFakeBucketOps() *fakeBucketOps { return &fakeBucketOps{buckets: map[string]bool{}} }
+func newFakeBucketOps() *fakeBucketOps {
+	return &fakeBucketOps{
+		buckets: map[string]bool{},
+		counts:  map[string]int64{},
+	}
+}
 
 func (f *fakeBucketOps) CreateBucket(_ context.Context, bucket string) error {
 	if f.buckets[bucket] {
@@ -51,6 +57,13 @@ func (f *fakeBucketOps) ForceDeleteBucket(_ context.Context, bucket string) erro
 	}
 	delete(f.buckets, bucket)
 	return nil
+}
+
+func (f *fakeBucketOps) CountObjects(_ context.Context, bucket string) (int64, error) {
+	if !f.buckets[bucket] {
+		return 0, storage.ErrBucketNotFound
+	}
+	return f.counts[bucket], nil
 }
 
 func TestAdminCreateBucket(t *testing.T) {
@@ -134,4 +147,38 @@ func (f *fakeBucketOpsNotEmpty) HeadBucket(_ context.Context, _ string) error   
 func (f *fakeBucketOpsNotEmpty) CreateBucket(_ context.Context, _ string) error { return nil }
 func (f *fakeBucketOpsNotEmpty) ListBuckets(_ context.Context) ([]string, error) {
 	return nil, nil
+}
+
+func TestAdminGetBucket(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	fake.counts["my-bucket"] = 42
+	d := &admin.Deps{Buckets: fake}
+
+	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "my-bucket", info.Name)
+	require.NotNil(t, info.ObjectCount)
+	assert.Equal(t, int64(42), *info.ObjectCount)
+}
+
+func TestAdminGetBucket_NotFound(t *testing.T) {
+	fake := newFakeBucketOps()
+	d := &admin.Deps{Buckets: fake}
+
+	_, err := admin.AdminGetBucket(context.Background(), d, "missing")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminGetBucket_InternalBucketForbidden(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["__grainfs_internal"] = true
+	d := &admin.Deps{Buckets: fake}
+
+	_, err := admin.AdminGetBucket(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
 }

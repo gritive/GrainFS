@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -223,4 +225,92 @@ func TestClusterConfigReset(t *testing.T) {
 	sock, rec := startFakePatchUDS(t, 8)
 	require.NoError(t, runClusterConfigReset(sock, []string{"balancer-imbalance-trigger-pct", "alert-webhook"}, 0))
 	require.JSONEq(t, `{"reset_keys":["balancer-imbalance-trigger-pct","alert-webhook"]}`, rec.LastPatchBody())
+}
+
+func TestClusterConfigSet_InvalidKV(t *testing.T) {
+	err := runClusterConfigSet("/tmp/unused.sock", []string{"no-equals-sign"}, 0)
+	if err == nil || err.Error() == "" {
+		t.Fatalf("expected error for invalid kv, got: %v", err)
+	}
+}
+
+// The following tests exercise the cobra RunE wrappers directly so that the
+// error-path and happy-path branches inside the RunE closures are covered.
+// Each test constructs a fresh *cobra.Command with the required flags instead
+// of going through the real global command tree, keeping tests isolated.
+
+func newClusterTestCmd(sock string, extraFlags ...string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("endpoint", sock, "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.Flags().Uint64("if-match-rev", 0, "")
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetContext(context.Background())
+	return cmd
+}
+
+func TestClusterConfigShowCmd_RunE(t *testing.T) {
+	sock := startFakeClusterConfigUDS(t, sampleConfigBody())
+	cmd := newClusterTestCmd(sock)
+	require.NoError(t, clusterConfigShowCmd.RunE(cmd, nil))
+	require.Contains(t, cmd.OutOrStdout().(*bytes.Buffer).String(), "REV: 7")
+}
+
+func TestClusterConfigGetCmd_RunE(t *testing.T) {
+	sock := startFakeClusterConfigUDS(t, sampleConfigBody())
+	cmd := newClusterTestCmd(sock)
+	require.NoError(t, clusterConfigGetCmd.RunE(cmd, []string{"balancer-imbalance-trigger-pct"}))
+	require.Contains(t, cmd.OutOrStdout().(*bytes.Buffer).String(), "25.5")
+}
+
+func TestClusterConfigDiffCmd_RunE(t *testing.T) {
+	sock := startFakeClusterConfigUDS(t, sampleConfigBody())
+	cmd := newClusterTestCmd(sock)
+	require.NoError(t, clusterConfigDiffCmd.RunE(cmd, nil))
+	require.Contains(t, cmd.OutOrStdout().(*bytes.Buffer).String(), "alert-webhook")
+}
+
+func TestClusterConfigSetCmd_RunE(t *testing.T) {
+	sock, rec := startFakePatchUDS(t, 9)
+	cmd := newClusterTestCmd(sock)
+	require.NoError(t, clusterConfigSetCmd.RunE(cmd, []string{"balancer-enabled=true"}))
+	require.JSONEq(t, `{"balancer-enabled":true}`, rec.LastPatchBody())
+}
+
+func TestClusterConfigResetCmd_RunE(t *testing.T) {
+	sock, rec := startFakePatchUDS(t, 9)
+	cmd := newClusterTestCmd(sock)
+	require.NoError(t, clusterConfigResetCmd.RunE(cmd, []string{"balancer-enabled"}))
+	require.JSONEq(t, `{"reset_keys":["balancer-enabled"]}`, rec.LastPatchBody())
+}
+
+func TestClusterConfigCmds_RunE_EndpointError(t *testing.T) {
+	// Verify that each RunE propagates the clusterEndpointFromCmd error when
+	// --endpoint is empty. This covers the single error-return statement in each
+	// RunE closure that would otherwise be unreachable via direct helper calls.
+	emptyCmd := func() *cobra.Command {
+		cmd := &cobra.Command{}
+		cmd.Flags().String("endpoint", "", "")
+		cmd.Flags().Bool("json", false, "")
+		cmd.Flags().Uint64("if-match-rev", 0, "")
+		cmd.SetContext(context.Background())
+		return cmd
+	}
+	cases := []struct {
+		name string
+		run  func(*cobra.Command) error
+	}{
+		{"show", func(c *cobra.Command) error { return clusterConfigShowCmd.RunE(c, nil) }},
+		{"get", func(c *cobra.Command) error { return clusterConfigGetCmd.RunE(c, []string{"k"}) }},
+		{"diff", func(c *cobra.Command) error { return clusterConfigDiffCmd.RunE(c, nil) }},
+		{"set", func(c *cobra.Command) error { return clusterConfigSetCmd.RunE(c, []string{"k=1"}) }},
+		{"reset", func(c *cobra.Command) error { return clusterConfigResetCmd.RunE(c, []string{"k"}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(emptyCmd())
+			require.Error(t, err, "expected endpoint error for %s", tc.name)
+		})
+	}
 }

@@ -49,7 +49,10 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api —
 	// they live only on the local admin Unix socket.
 	registerIAM(g, d)
-	registerBucket(g, d)
+	// registerBucket is intentionally NOT mounted on /ui/api: AdminGetBucket
+	// performs an unbounded CountObjects walk (full Badger scan) that any
+	// dashboard-token holder could trigger remotely, causing write starvation.
+	// Bucket admin ops are admin-UDS only.
 }
 
 // RegisterIAMOnly wires only the IAM admin routes. Used in tests to avoid
@@ -149,6 +152,7 @@ func registerBucket(g router, d *Deps) {
 	}
 	g.POST("/buckets", wrapBody[CreateBucketAdminReq, BucketInfo](d, AdminCreateBucket))
 	g.GET("/buckets", wrapZero(d, AdminListBuckets))
+	g.GET("/buckets/:name", wrapName(d, AdminGetBucket))
 	g.DELETE("/buckets/:name", bucketDeleteHandler(d))
 }
 
@@ -180,9 +184,11 @@ func registerIAM(g router, d *Deps) {
 	g.PUT("/iam/grant", wrapBodyNoOut204[iam.GrantPutRequest](d, PutGrant))
 	g.DELETE("/iam/grant", iamDeleteGrantHandler(d))
 	g.GET("/iam/grant", iamListGrantsHandler(d))
-	// Bucket upstream (PUT upsert → 204)
-	g.PUT("/buckets/upstream", wrapBodyNoOut204[iam.BucketUpstreamPutRequest](d, PutBucketUpstream))
-	g.GET("/buckets/upstream", wrapZero(d, ListBucketUpstreams))
+	// Bucket upstream (PUT upsert → 204). Routes under /upstreams (not
+	// /buckets/upstream) to avoid Hertz static-beats-param collision with
+	// GET /buckets/:name used by AdminGetBucket.
+	g.PUT("/upstreams", wrapBodyNoOut204[iam.BucketUpstreamPutRequest](d, PutBucketUpstream))
+	g.GET("/upstreams", wrapZero(d, ListBucketUpstreams))
 	g.GET("/buckets/:bucket/upstream", iamGetBucketUpstreamHandler(d))
 	g.DELETE("/buckets/:bucket/upstream", iamDeleteBucketUpstreamHandler(d))
 }

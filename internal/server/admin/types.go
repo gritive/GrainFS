@@ -89,6 +89,7 @@ type BucketOps interface {
 	DeleteBucket(ctx context.Context, bucket string) error
 	ListBuckets(ctx context.Context) ([]string, error)
 	ForceDeleteBucket(ctx context.Context, bucket string) error
+	CountObjects(ctx context.Context, bucket string) (int64, error)
 }
 
 // IAMService is the slim interface the IAM admin handlers need.

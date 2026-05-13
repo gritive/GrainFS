@@ -401,7 +401,8 @@ type TransferLeaderResult struct {
 
 // BucketInfo is the JSON representation of a bucket in admin responses.
 type BucketInfo struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	ObjectCount *int64 `json:"object_count,omitempty"`
 }
 
 // ListBucketsAdminResp is returned by GET /v1/buckets.
