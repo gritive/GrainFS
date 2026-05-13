@@ -15,16 +15,27 @@ locations.
 ## Start GrainFS
 
 ```sh
-grainfs serve --data ./data --port 9000
+grainfs serve --data ./data --port 9000 &
+
+# Bootstrap: create the first service account and note the access_key / secret_key
+grainfs iam sa create admin --endpoint ./data/admin.sock
+# {"access_key":"GRAIN...","secret_key":"<one-time>", ...}
+export GRAINFS_ADMIN_SOCKET=./data/admin.sock
 ```
 
 Create the warehouse bucket before writing table data:
 
 ```sh
-curl -X PUT http://127.0.0.1:9000/grainfs-tables
+curl -X PUT http://127.0.0.1:9000/grainfs-tables \
+  --aws-sigv4 "aws:amz:us-east-1:s3" \
+  -u "<access_key>:<secret_key>"
+# or with awscli: aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://grainfs-tables
 ```
 
 ## Attach from DuckDB
+
+> **Note:** `KEY_ID` and `SECRET` below are the `access_key` and `secret_key` returned
+> by `grainfs iam sa create` above. Replace the placeholder values before running.
 
 ```sql
 INSTALL iceberg;
@@ -35,8 +46,8 @@ LOAD httpfs;
 CREATE OR REPLACE SECRET grainfs_s3 (
     TYPE s3,
     PROVIDER config,
-    KEY_ID 'testkey',
-    SECRET 'testsecret',
+    KEY_ID '<access_key from iam sa create>',
+    SECRET '<secret_key from iam sa create>',
     REGION 'us-east-1',
     ENDPOINT '127.0.0.1:9000',
     USE_SSL false,

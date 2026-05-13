@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.186.1] - 2026-05-14 — docs: DX polish — NFS/NBD/Iceberg Quick Start
+
+### Added
+
+- **NFSv4 Quick Start** — README에 Phase 7 multi-export 기준 5-step 마운트 가이드 추가 (`grainfs nfs export add` → pseudo-root mount → `/mnt/<bucket>/`).
+- **NBD Quick Start (Linux)** — README에 `nbd-client` 설치부터 `mkfs.ext4` + mount까지 Linux 전용 Quick Start 추가.
+- **Iceberg IAM 연결 안내** — `docs/iceberg-duckdb.md`에 `grainfs iam sa create` 결과(`access_key`/`secret_key`)를 DuckDB SECRET에 매핑하는 1단락 안내 추가.
+- **`GRAINFS_ADMIN_SOCKET` 환경변수** — Quick Start에 `export GRAINFS_ADMIN_SOCKET=...` 추가해 이후 명령에서 `--endpoint` 생략 가능.
+
+### Fixed
+
+- **`--nbd-port` 기본값 오류** — README에 `default 0=비활성`으로 잘못 기재된 기본값을 실제 코드 값인 `10809`로 수정.
+
 ## [0.0.186.0] - 2026-05-14 — feat: QUIC mux capability exchange handshake
 
 ### Added

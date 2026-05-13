@@ -17,6 +17,9 @@ make build
 ./bin/grainfs iam sa create admin --endpoint ./storage/admin.sock
 # {"sa_id":"sa-default","access_key":"GRAIN...","secret_key":"<one-time>","grants":[{"bucket":"*","role":"admin"}]}
 
+# admin socket 경로를 환경변수로 등록하면 이후 모든 grainfs 명령에서 --endpoint 생략 가능
+export GRAINFS_ADMIN_SOCKET=./storage/admin.sock
+
 # 사용 (위 응답의 access_key/secret_key를 사용)
 aws --endpoint-url http://localhost:9000 \
     --access-key-id <access_key> --secret-access-key <secret_key> \
@@ -56,7 +59,7 @@ Flags:
   -p, --port int                 HTTP 포트 (default 9000)
       --nfs-port int             NFS v3 포트 (default 9002, 0=비활성)
       --nfs4-port int            NFS v4.0 포트 (default 2049, 0=비활성)
-      --nbd-port int             NBD 포트 (default 0=비활성, Linux only)
+      --nbd-port int             NBD 포트 (default 10809, 0=비활성). client-side nbd-client requires Linux.
       --nbd-volume-size int      기본 NBD 볼륨 크기 바이트 (default 1073741824 = 1GB)
       --scrub-interval duration  EC shard scrub 주기 (default 24h, 0=비활성)
       --reshard-interval duration EC background reshard 주기 (default 24h, 0=비활성)
@@ -358,7 +361,7 @@ rclone mount grainfs:mybucket /mnt/grainfs \
 | atomic create+rename | ❌   | rsync `--inplace` 필요한 워크로드는 NFSv4 권장      |
 | file locking         | ❌   | DB / git 인덱스 동시쓰기 워크로드는 NFSv4 권장      |
 
-엄격한 POSIX 시맨틱이 필요하면 NFSv4를 사용한다 (`mount -t nfs4 host:/ /mnt/x`).
+엄격한 POSIX 시맨틱이 필요하면 NFSv4를 사용한다 (아래 NFSv4 Quick Start 참고).
 
 검증: `make test-fuse-s3-colima` (macOS 호스트 + Colima Linux VM, rclone 마운트로 핵심 연산 round-trip 테스트).
 
@@ -371,6 +374,79 @@ rclone mount grainfs:mybucket /mnt/grainfs \
 | FUSE 오버헤드              | ≈ 0%        | ≈ 0%        |
 
 `--vfs-cache-mode off`로 close(2)가 PUT 완료까지 블록되도록 설정 → 동기 처리량 측정. `--vfs-cache-mode writes/full`을 쓰면 close 후 백그라운드 업로드 + 로컬 캐시 효과로 체감 처리량은 더 높지만, 정확한 S3 round-trip 측정에는 부적절.
+
+### NFSv4 Quick Start
+
+GrainFS NFSv4 서버는 `--nfs4-port 2049`(기본)로 함께 시작된다. 버킷을 NFS로 공개하려면 `grainfs nfs export add`를 사용한다. 마운트 후 `/mnt/<bucket>/`으로 접근하며, S3 API와 NFS 양쪽에서 같은 데이터를 본다.
+
+```bash
+# 1. 서버 시작 + 부트스트랩 (Quick Start와 동일)
+./bin/grainfs serve --data ./storage --port 9000 &
+./bin/grainfs iam sa create admin --endpoint ./storage/admin.sock
+export GRAINFS_ADMIN_SOCKET=./storage/admin.sock
+
+# 2. S3 버킷 생성
+aws --endpoint-url http://localhost:9000 \
+    --access-key-id <access_key> --secret-access-key <secret_key> \
+    s3 mb s3://mydata
+
+# 3. 버킷을 NFS로 공개
+./bin/grainfs nfs export add mydata
+
+# 4. 마운트 (macOS 또는 Linux — pseudo-root에 버킷이 서브디렉토리로 나타남)
+sudo mkdir -p /mnt/grainfs
+sudo mount -t nfs4 -o "vers=4.0,port=2049,rw,hard,intr" localhost:/ /mnt/grainfs
+
+# 5. 파일 읽기/쓰기 — POSIX 시맨틱 (atomic rename, file locking 지원)
+ls /mnt/grainfs/           # → mydata/
+echo "hello" | sudo tee /mnt/grainfs/mydata/test.txt
+aws ... s3 ls s3://mydata/ # → test.txt (S3에서도 동일하게 보임)
+
+# 마운트 해제 / export 해제
+sudo umount /mnt/grainfs
+./bin/grainfs nfs export remove mydata
+```
+
+export 관리 명령:
+
+```bash
+grainfs nfs export list                  # 활성 export 목록
+grainfs nfs export add mydata --ro       # 읽기 전용으로 공개
+grainfs nfs export update mydata --rw    # 읽기/쓰기로 변경
+grainfs nfs debug mydata                 # 연결 상태 진단
+```
+
+> **주의:** NFS 서버는 `--nfs4-port 0`으로 비활성화할 수 있다.
+> 컨테이너에서 비루트 사용자로 실행할 때는 `--nfs4-port 0`으로 비활성화하거나 적절한 권한을 부여해야 한다.
+
+### NBD Quick Start (Linux 전용)
+
+NBD(Network Block Device)는 Linux 커널 클라이언트가 필요하다. GrainFS NBD 서버는 `--nbd-port`로 활성화하며, `grainfs volume`으로 볼륨을 생성한 뒤 `nbd-client`로 연결한다.
+
+```bash
+# 서버 시작 — NBD 기본 포트 10809 (기본 활성)
+./bin/grainfs serve --data ./storage --port 9000 &
+export GRAINFS_ADMIN_SOCKET=./storage/admin.sock  # iam sa create 완료 후
+
+# 볼륨 생성
+./bin/grainfs volume create v1 --size 10Gi
+
+# (Linux) nbd-client 설치 후 연결 — 볼륨 이름(-N)은 위에서 생성한 이름
+sudo apt-get install nbd-client          # 또는 yum install nbd
+sudo modprobe nbd
+sudo nbd-client localhost 10809 /dev/nbd0 -N v1
+
+# 파일시스템 생성 + 마운트
+sudo mkfs.ext4 /dev/nbd0
+sudo mkdir -p /mnt/nbd-v1
+sudo mount /dev/nbd0 /mnt/nbd-v1
+
+# 사용 후 정리
+sudo umount /mnt/nbd-v1
+sudo nbd-client -d /dev/nbd0
+```
+
+> **macOS:** NBD 클라이언트는 Linux 전용이다. macOS에서 테스트하려면 colima VM을 사용한다 (아래 참고).
 
 ### NBD 테스트 (macOS)
 
