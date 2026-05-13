@@ -1,4 +1,4 @@
-# BadgerDB Managed Mode — Always Active (v0.0.171.0+)
+# BadgerDB Managed Mode — Always Active (v0.0.172.0+)
 
 ## What It Does
 
