@@ -972,12 +972,59 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
+	// Collect (key, versionID) first so the Badger View is closed before any
+	// Raft propose. Calling propose inside db.View holds the MVCC snapshot for
+	// N×RTT and blocks Badger GC.
+	type objRef struct {
+		key       string
+		versionID string
+	}
+	var refs []objRef
 	if err := b.WalkObjects(ctx, bucket, "", func(obj *storage.Object) error {
-		return b.DeleteObject(ctx, bucket, obj.Key)
+		refs = append(refs, objRef{key: obj.Key, versionID: obj.VersionID})
+		return nil
 	}); err != nil {
 		return fmt.Errorf("force delete: walk objects: %w", err)
 	}
+	for _, ref := range refs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := b.forceDeleteObject(ctx, bucket, ref.key, ref.versionID); err != nil {
+			return fmt.Errorf("force delete: %q: %w", ref.key, err)
+		}
+	}
 	return b.DeleteBucket(ctx, bucket)
+}
+
+// forceDeleteObject hard-deletes all Badger traces for a single object without
+// creating a tombstone. Used only by ForceDeleteBucket.
+//
+// For versioned objects (versionID != ""): removes the versioned obj: key via
+// CmdDeleteObjectVersion and clears the lat: pointer if it was the last version.
+// For non-versioned objects (versionID == ""): the legacy-path CmdDeleteObject
+// (empty VersionID) removes the unversioned obj: key directly.
+// In both cases the unversioned legacy dual-write key is also removed so that
+// DeleteBucket's emptiness check finds no obj: keys remaining.
+func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key, versionID string) error {
+	if versionID != "" {
+		_ = os.Remove(b.objectPathV(bucket, key, versionID))
+		if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
+			Bucket:    bucket,
+			Key:       key,
+			VersionID: versionID,
+		}); err != nil {
+			return err
+		}
+	}
+	// Remove the unversioned legacy dual-write key (applyDeleteObject with empty
+	// VersionID does a hard delete; no tombstone is written).
+	_ = os.Remove(b.objectPath(bucket, key))
+	return b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: "", // empty = legacy hard delete, no tombstone
+	})
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the
@@ -2577,37 +2624,47 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 }
 
 func (b *DistributedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
-	_, err := b.DeleteObjectReturningMarker(bucket, key)
-	return err
+	return b.deleteObjectCtx(ctx, bucket, key)
 }
 
 // DeleteObjectReturningMarker satisfies server.VersionedSoftDeleter. Same
 // tombstone semantics as DeleteObject but returns the delete marker's
 // VersionID so the S3 handler can surface it in the response header.
 func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
-	ctx := context.Background()
+	return b.deleteObjectWithMarker(context.Background(), bucket, key)
+}
+
+// deleteObjectCtx is the ctx-aware core used by DeleteObject and
+// ForceDeleteBucket so that HTTP request cancellation propagates into the
+// Raft propose call.
+func (b *DistributedBackend) deleteObjectCtx(ctx context.Context, bucket, key string) error {
+	_, err := b.deleteObjectWithMarker(ctx, bucket, key)
+	return err
+}
+
+// deleteObjectWithMarker is the single implementation shared by DeleteObject,
+// DeleteObjectReturningMarker, and ForceDeleteBucket.
+//
+// Tombstone semantics: creates a delete marker as a new version. Prior version
+// data remains addressable via GetObjectVersion and is NOT physically removed
+// here. Hard-delete of a specific version goes through DeleteObjectVersion
+// (used by lifecycle/scrubber).
+//
+// For backward compatibility with the legacy N× on-disk layout, we also
+// remove the unversioned local object file if present — it's guaranteed to
+// be stale (superseded by a versioned path) and keeping it risks GetObject
+// serving it as a fallback read.
+func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket, key string) (string, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return "", err
 	}
-
-	// Tombstone semantics: DeleteObject creates a delete marker as a new
-	// version. Prior version data remains addressable via GetObjectVersion and
-	// is NOT physically removed here. Hard-delete of a specific version goes
-	// through DeleteObjectVersion (used by lifecycle/scrubber).
-	//
-	// For backward compatibility with the legacy N× on-disk layout, we also
-	// remove the unversioned local object file if present — it's guaranteed to
-	// be stale (superseded by a versioned path) and keeping it risks GetObject
-	// serving it as a fallback read.
 	os.Remove(b.objectPath(bucket, key))
-
 	markerID := newVersionID()
-	err := b.propose(context.Background(), CmdDeleteObject, DeleteObjectCmd{
+	if err := b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
 		Bucket:    bucket,
 		Key:       key,
 		VersionID: markerID,
-	})
-	if err != nil {
+	}); err != nil {
 		return "", err
 	}
 	return markerID, nil

@@ -705,3 +705,33 @@ func TestDistributedBackend_CreateBucket_RouterError_Propagates(t *testing.T) {
 	err := b.CreateBucket(context.Background(), "photos")
 	require.Error(t, err)
 }
+
+func TestDistributedBackend_ForceDeleteBucket_DeletesObjectsAndBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.CreateBucket(ctx, "todelete"))
+	_, err := b.PutObject(ctx, "todelete", "a.txt", strings.NewReader("aaa"), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "todelete", "b.txt", strings.NewReader("bbb"), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "todelete"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "todelete"), storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_ForceDeleteBucket_NotFound(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	err := b.ForceDeleteBucket(context.Background(), "nope")
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_ForceDeleteBucket_CtxCancelledPropagates(t *testing.T) {
+	// 취소된 ctx로 호출하면 HeadBucket 단계에서 곧바로 ctx 에러를 반환해야 한다.
+	// (propose 내부에서 context.Background()를 쓰지 않음을 확인)
+	b := newTestDistributedBackend(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately cancel
+	err := b.ForceDeleteBucket(ctx, "any")
+	require.Error(t, err)
+}

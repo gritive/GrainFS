@@ -141,6 +141,7 @@ func NewUnsupported(msg string, details map[string]any) *Error {
 	raw, _ := json.Marshal(details)
 	return &Error{Code: "unsupported", Message: msg, Details: raw}
 }
+func NewRetry(msg string) *Error { return &Error{Code: "retry", Message: msg} }
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq
 type WriteAtVolumeResp = adminapi.WriteAtVolumeResp
