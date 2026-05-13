@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.180.2] - 2026-05-14 — fix: cluster benchmark and e2e latency regressions
+
+### Fixed
+
+- **Cluster runtime topology publication** — runtime join paths now publish cluster node topology and EC config as immutable snapshots so writes do not stay pinned to boot-time placement after nodes join. Coordinator routing/execution state now refreshes atomically with EC config.
+- **Cluster benchmark harnesses** — NFS, NBD, S3, and Iceberg cluster benchmarks now use dynamic join flow, shared encryption keys, admin socket readiness checks, node log archival, configurable node counts, and profile/runtime parameters.
+- **Benchmark auth and partial I/O setup** — Iceberg benchmark setup signs bucket creation with IAM credentials; NFS/NBD benchmark scripts wait for admin socket/CPU profile completion and quote runtime parameters correctly.
+- **Raft log reads** — badger raft log range reads now fetch contiguous indexes directly and fail on missing or mismatched entries instead of iterator-skipping metadata keys.
+- **NFSv4 backend capability checks** — NFS operations now have explicit backend capability coverage for partial I/O behavior.
+- **e2e harness latency** — static cluster startup removed fixed sleeps, process cleanup terminates signal-ignoring test children immediately, S3 e2e clients disable keep-alives, and expiring-key tests poll observed expiry instead of sleeping.
+- **IAM plaintext secret test scope** — the no-plaintext-secret e2e check now scans the IAM control-plane `meta_raft` persistence path instead of unrelated data-plane directories.
+- **Small Badger metadata DBs** — `SmallOptions` now caps value log files at 64 MiB to reduce test/runtime metadata store footprint.
+- **Auto-snapshot hot reload** — disabled snapshot polling idle interval reduced from 5s to 1s, bounding cluster config hot-reload latency.
+
+### Verification
+
+- `go test -count=1 ./internal/badgerutil ./internal/iam ./internal/snapshot ./internal/cluster ./internal/nfs4server ./internal/serveruntime ./internal/raft`
+- `go build -o bin/grainfs ./cmd/grainfs`
+- `GRAINFS_BINARY=$PWD/bin/grainfs go test -json -short -count=1 -timeout 5m ./tests/e2e` — PASS, 50.658s
+- `go list ./... | grep -v '^github.com/gritive/GrainFS/tests/e2e$' | xargs go test -count=1`
+
 ## [0.0.180.1] - 2026-05-13 — fix: RUNBOOK bootstrap 절차 및 snapshot audit log
 
 ### Fixed
