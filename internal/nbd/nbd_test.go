@@ -80,6 +80,22 @@ func setupNBDWithReadIndexer(t *testing.T, ri ReadIndexer) (*Server, net.Conn) {
 	return srv, client
 }
 
+func TestServerClosesConnectionWhenConfiguredVolumeMissing(t *testing.T) {
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+
+	mgr := volume.NewManager(backend)
+	srv := NewServer(mgr, "missing")
+	client, server := net.Pipe()
+	go srv.handleConn(server)
+	defer client.Close()
+
+	hdr := make([]byte, 18)
+	_, err = io.ReadFull(client, hdr)
+	require.ErrorIs(t, err, io.EOF)
+}
+
 type fakeReadIndexer struct {
 	readCalls atomic.Int32
 	waitCalls atomic.Int32

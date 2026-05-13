@@ -2,13 +2,17 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/volumeadmin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,6 +29,20 @@ const (
 type e2eNBDClient struct {
 	conn   net.Conn
 	handle uint64
+}
+
+func ensureE2ENBDVolume(t *testing.T, ctx context.Context, c *e2eCluster, name string, size int64) {
+	t.Helper()
+	leaderIdx := c.leaderIdx
+	if leaderIdx < 0 {
+		leaderIdx = 0
+	}
+	cli, err := volumeadmin.NewClient(filepath.Join(c.dataDirs[leaderIdx], "admin.sock"))
+	require.NoError(t, err)
+	_, err = cli.CreateVolume(ctx, volumeadmin.CreateVolumeReq{Name: name, Size: size})
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		require.NoError(t, err)
+	}
 }
 
 func dialE2ENBD(t *testing.T, addr string, export string) *e2eNBDClient {
