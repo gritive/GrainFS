@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +56,7 @@ func (f fakeIcebergCatalog) CommitTable(context.Context, icebergcatalog.Identifi
 
 type staleLoadCommitCatalog struct {
 	warehouse string
+	mu        sync.Mutex
 	commits   int
 }
 
@@ -88,6 +90,9 @@ func (s *staleLoadCommitCatalog) DeleteTable(context.Context, icebergcatalog.Ide
 	return nil
 }
 func (s *staleLoadCommitCatalog) CommitTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.commits++
 	wantExpected := "s3://grainfs-tables/warehouse/ns2/t/metadata/00000.json"
 	wantNext := "s3://grainfs-tables/warehouse/ns2/t/metadata/00001.json"
@@ -103,6 +108,12 @@ func (s *staleLoadCommitCatalog) CommitTable(_ context.Context, ident icebergcat
 		MetadataLocation: in.NewMetadataLocation,
 		Metadata:         append(json.RawMessage(nil), in.Metadata...),
 	}, nil
+}
+
+func (s *staleLoadCommitCatalog) commitCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commits
 }
 
 func TestIcebergConfigUsesJSONAndBypassesS3Routes(t *testing.T) {
@@ -305,7 +316,7 @@ func TestIcebergTransactionCommitReusesCommittedTableWithinRequest(t *testing.T)
 			"identifier":{"name":"t","namespace":["ns2"]}
 		}]
 	}`, http.StatusOK)
-	require.Equal(t, 2, catalog.commits)
+	require.Equal(t, 2, catalog.commitCount())
 }
 
 func TestIcebergSnapshotRequirementAllowsDuckDBRoundedLargeIDs(t *testing.T) {
