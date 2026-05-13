@@ -174,7 +174,7 @@ func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
 }
 
 // MuxConnHandler is invoked once per accepted mux QUIC connection (ALPN
-// "grainfs-mux-v1-..."). The handler owns the conn lifetime: it must arrange
+// ProtocolVersionMux). The handler owns the conn lifetime: it must arrange
 // for stream accept/read and conn close. The handler is registered by
 // internal/raft (the only consumer of mux connections); the transport package
 // does not interpret mux frames.
