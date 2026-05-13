@@ -90,44 +90,54 @@ func startStaticMRClusterWithOptions(t *testing.T, numNodes int, opts mrClusterO
 	return nil
 }
 
-func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+// newMRCluster allocates maxNodes port slots and temp dirs for a multi-raft
+// cluster. It does NOT start any processes. Callers (tryStartStaticMRCluster,
+// tryStartMRCluster) do the actual node startup.
+func newMRCluster(t *testing.T, maxNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	c := &mrCluster{
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
 		encKeyFile: makeSharedEncryptionKeyFile(t),
 	}
-	c.httpPorts = make([]int, numNodes)
-	c.raftPorts = make([]int, numNodes)
-	c.nfs4Ports = make([]int, numNodes)
-	c.nbdPorts = make([]int, numNodes)
-	c.httpURLs = make([]string, numNodes)
-	c.dataDirs = make([]string, numNodes)
-	c.procs = make([]*exec.Cmd, numNodes)
+	c.httpPorts = make([]int, maxNodes)
+	c.raftPorts = make([]int, maxNodes)
+	c.nfs4Ports = make([]int, maxNodes)
+	c.nbdPorts = make([]int, maxNodes)
+	c.httpURLs = make([]string, maxNodes)
+	c.dataDirs = make([]string, maxNodes)
+	c.procs = make([]*exec.Cmd, maxNodes)
 
-	// Allocate every listener port from one de-duplicated pool so HTTP, Raft,
-	// NFSv4 and NBD cannot collide within this cluster attempt.
-	ports := uniqueFreePorts(numNodes * 4)
-	for i := 0; i < numNodes; i++ {
+	ports := uniqueFreePorts(maxNodes * 4)
+	for i := 0; i < maxNodes; i++ {
 		c.httpPorts[i] = ports[i]
-		c.raftPorts[i] = ports[numNodes+i]
+		c.raftPorts[i] = ports[maxNodes+i]
 		if !opts.disableNFS4 {
-			c.nfs4Ports[i] = ports[2*numNodes+i]
+			c.nfs4Ports[i] = ports[2*maxNodes+i]
 		}
 		if !opts.disableNBD {
-			c.nbdPorts[i] = ports[3*numNodes+i]
+			c.nbdPorts[i] = ports[3*maxNodes+i]
 		}
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 
 		d, err := os.MkdirTemp("", fmt.Sprintf("mrshard-%d-*", i))
 		if err != nil {
 			c.Stop()
-			return nil, fmt.Errorf("mkdir tmp: %w", err)
+			return nil, fmt.Errorf("mkdir tmp node %d: %w", i, err)
 		}
 		c.dataDirs[i] = d
 	}
 
 	t.Cleanup(c.Stop)
+	return c, nil
+}
+
+func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+	t.Helper()
+	c, err := newMRCluster(t, numNodes, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// Start node 0 as seed leader, then let followers join via .join-pending.
 	c.procs[0] = c.startNode(0)
