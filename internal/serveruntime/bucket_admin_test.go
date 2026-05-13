@@ -98,42 +98,42 @@ func startBucketAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {
 	}
 }
 
-// TestBucketAdminRoutes_NewPathsRespond ensures the relocated routes are wired
-// and the legacy /v1/iam/bucket-upstream* routes are gone (regression for
-// ADR 0010 surface relocation).
+// TestBucketAdminRoutes_NewPathsRespond ensures the upstream routes are wired
+// at /v1/upstreams (to avoid static-beats-param collision with /v1/buckets/:name)
+// and the legacy /v1/iam/bucket-upstream* routes are gone.
 func TestBucketAdminRoutes_NewPathsRespond(t *testing.T) {
 	api := newAdminAPIWithBucketUpstream(t)
 	cli := startBucketAdminTestServer(t, api)
 
-	// New path: PUT /v1/buckets/upstream — create a record.
+	// PUT /v1/upstreams — create a record.
 	body, _ := json.Marshal(map[string]string{
 		"bucket":       "alpha",
 		"upstream_url": "http://up:9000",
 		"access_key":   "AKIAIOSFODNN7EXAMPLE",
 		"secret_key":   "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 	})
-	req, err := http.NewRequest("PUT", "http://unix/v1/buckets/upstream", bytes.NewReader(body))
+	req, err := http.NewRequest("PUT", "http://unix/v1/upstreams", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := cli.Do(req)
 	if err != nil {
-		t.Fatalf("PUT /v1/buckets/upstream: %v", err)
+		t.Fatalf("PUT /v1/upstreams: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT new path: expected 204, got %d", resp.StatusCode)
+		t.Fatalf("PUT: expected 204, got %d", resp.StatusCode)
 	}
 
-	// New path: GET /v1/buckets/upstream — list.
-	resp2, err := cli.Get("http://unix/v1/buckets/upstream")
+	// GET /v1/upstreams — list.
+	resp2, err := cli.Get("http://unix/v1/upstreams")
 	if err != nil {
-		t.Fatalf("GET /v1/buckets/upstream: %v", err)
+		t.Fatalf("GET /v1/upstreams: %v", err)
 	}
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("GET list new path: expected 200, got %d", resp2.StatusCode)
+		t.Fatalf("GET list: expected 200, got %d", resp2.StatusCode)
 	}
 
 	// New path: GET /v1/buckets/:bucket/upstream — single record.
@@ -170,7 +170,7 @@ func TestBucketAdminRoutes_DeleteAndGet(t *testing.T) {
 		"access_key":   "AKIAIOSFODNN7EXAMPLE",
 		"secret_key":   "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 	})
-	req, _ := http.NewRequest("PUT", "http://unix/v1/buckets/upstream", bytes.NewReader(body))
+	req, _ := http.NewRequest("PUT", "http://unix/v1/upstreams", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := cli.Do(req)
 	if err != nil {

@@ -24,6 +24,7 @@ var iamCmd = &cobra.Command{
 // iamHTTPClient builds an http.Client that dials the admin UDS.
 func iamHTTPClient(sock string) *http.Client {
 	return &http.Client{
+		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer

@@ -60,7 +60,7 @@ func bucketUpstreamCmd() *cobra.Command {
 				"access_key":   ak,
 				"secret_key":   sk,
 			}
-			_, err = iamRequest(c.Context(), sock, "PUT", "/v1/buckets/upstream", body)
+			_, err = iamRequest(c.Context(), sock, "PUT", "/v1/upstreams", body)
 			if err != nil {
 				return err
 			}
@@ -122,7 +122,7 @@ func bucketUpstreamCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := iamRequest(c.Context(), sock, "GET", "/v1/buckets/upstream", nil)
+			out, err := iamRequest(c.Context(), sock, "GET", "/v1/upstreams", nil)
 			if err != nil {
 				return err
 			}
@@ -153,9 +153,9 @@ func bucketUpstreamCmd() *cobra.Command {
 	}
 
 	deleteCmd := &cobra.Command{
-		Use:   "delete <bucket>",
-		Short: "Remove the upstream config for a bucket",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <bucket>",
+		Short:   "Remove the upstream config for a bucket",
+		Args:    cobra.ExactArgs(1),
 		Example: `  grainfs bucket upstream delete my-bucket`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)

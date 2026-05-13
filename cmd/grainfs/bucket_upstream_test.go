@@ -149,7 +149,7 @@ func TestBucketUpstreamGetCmd_JSON(t *testing.T) {
 
 func TestBucketUpstreamListCmd_Table(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/upstream", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -179,7 +179,7 @@ func TestBucketUpstreamListCmd_Table(t *testing.T) {
 
 func TestBucketUpstreamListCmd_JSON(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/upstream", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"upstreams":[{"bucket":"b1"}]}`)
 	})
@@ -271,7 +271,7 @@ func TestBucketUpstreamPutCmd_SecretKeyConflict(t *testing.T) {
 func TestBucketUpstreamPutCmd(t *testing.T) {
 	var gotBody map[string]string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/upstream", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "PUT" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -297,5 +297,8 @@ func TestBucketUpstreamPutCmd(t *testing.T) {
 	}
 	if gotBody["secret_key"] != "mysecret" {
 		t.Errorf("body secret_key = %q, want mysecret", gotBody["secret_key"])
+	}
+	if !strings.Contains(buf.String(), "Upstream configured for bucket my-bucket") {
+		t.Errorf("output %q missing upstream configured feedback", buf.String())
 	}
 }
