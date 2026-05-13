@@ -406,3 +406,87 @@ func TestAdminDeleteBucketPolicy_InternalForbidden(t *testing.T) {
 	require.ErrorAs(t, err, &ae)
 	assert.Equal(t, "forbidden", ae.Code)
 }
+
+type fakeBucketOpsWithVersioning struct {
+	*fakeBucketOps
+	versioning map[string]string
+}
+
+func newFakeBucketOpsWithVersioning() *fakeBucketOpsWithVersioning {
+	return &fakeBucketOpsWithVersioning{
+		fakeBucketOps: newFakeBucketOps(),
+		versioning:    map[string]string{},
+	}
+}
+
+func (f *fakeBucketOpsWithVersioning) GetBucketVersioning(bucket string) (string, error) {
+	return f.versioning[bucket], nil
+}
+func (f *fakeBucketOpsWithVersioning) SetBucketVersioning(bucket, state string) error {
+	f.versioning[bucket] = state
+	return nil
+}
+
+func TestAdminGetBucketVersioning(t *testing.T) {
+	fake := newFakeBucketOpsWithVersioning()
+	fake.buckets["my-bucket"] = true
+	fake.versioning["my-bucket"] = "Enabled"
+	d := &admin.Deps{Buckets: fake}
+
+	resp, err := admin.AdminGetBucketVersioning(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", resp.Status)
+}
+
+func TestAdminGetBucketVersioning_Unsupported(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	_, err := admin.AdminGetBucketVersioning(context.Background(), d, "my-bucket")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "unsupported", ae.Code)
+}
+
+func TestAdminSetBucketVersioning_Enabled(t *testing.T) {
+	fake := newFakeBucketOpsWithVersioning()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
+
+	err := admin.AdminSetBucketVersioning(context.Background(), d, "my-bucket", admin.BucketVersioningSetReq{Status: "Enabled"})
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", fake.versioning["my-bucket"])
+}
+
+func TestAdminSetBucketVersioning_InvalidStatus(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOpsWithVersioning()}
+	err := admin.AdminSetBucketVersioning(context.Background(), d, "my-bucket", admin.BucketVersioningSetReq{Status: "BadValue"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "invalid", ae.Code)
+}
+
+func TestAdminGetBucketVersioning_InternalForbidden(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	_, err := admin.AdminGetBucketVersioning(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
+}
+
+func TestAdminSetBucketVersioning_Unsupported(t *testing.T) {
+	// fakeBucketOps.SetBucketVersioning는 UnsupportedOperationError를 반환한다.
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminSetBucketVersioning(context.Background(), d, "my-bucket",
+		admin.BucketVersioningSetReq{Status: "Enabled"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "unsupported", ae.Code)
+}
+
+func TestAdminSetBucketVersioning_InternalForbidden(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOpsWithVersioning()}
+	err := admin.AdminSetBucketVersioning(context.Background(), d, "__grainfs_internal",
+		admin.BucketVersioningSetReq{Status: "Enabled"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
+}

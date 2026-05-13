@@ -158,3 +158,33 @@ func AdminDeleteBucketPolicy(ctx context.Context, d *Deps, name string) error {
 	}
 	return nil
 }
+
+func AdminGetBucketVersioning(ctx context.Context, d *Deps, name string) (BucketVersioningResp, error) {
+	if storage.IsInternalBucket(name) {
+		return BucketVersioningResp{}, NewForbidden("cannot access internal bucket")
+	}
+	status, err := d.Buckets.GetBucketVersioning(name)
+	if err != nil {
+		if errors.Is(err, storage.ErrUnsupportedOperation) {
+			return BucketVersioningResp{}, NewUnsupported("bucket versioning not supported in this configuration", nil)
+		}
+		return BucketVersioningResp{}, NewInternal("get bucket versioning: " + err.Error())
+	}
+	return BucketVersioningResp{Status: status}, nil
+}
+
+func AdminSetBucketVersioning(ctx context.Context, d *Deps, name string, req BucketVersioningSetReq) error {
+	if storage.IsInternalBucket(name) {
+		return NewForbidden("cannot access internal bucket")
+	}
+	if req.Status != "Enabled" && req.Status != "Suspended" {
+		return NewInvalid(`status must be "Enabled" or "Suspended"`)
+	}
+	if err := d.Buckets.SetBucketVersioning(name, req.Status); err != nil {
+		if errors.Is(err, storage.ErrUnsupportedOperation) {
+			return NewUnsupported("bucket versioning not supported in this configuration", nil)
+		}
+		return NewInternal("set bucket versioning: " + err.Error())
+	}
+	return nil
+}
