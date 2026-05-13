@@ -26,6 +26,7 @@ func init() {
 		bucketDeleteCmd(),
 		bucketInfoCmd(),
 		bucketUpstreamCmd(),
+		bucketPolicyCmd(),
 	)
 	rootCmd.AddCommand(bucketCmd)
 }
