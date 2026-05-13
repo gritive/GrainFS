@@ -17,6 +17,11 @@
   `(0, lastLogIndex+1)` when absent — the normal path seeds these when the target joins
   as a learner, but `becomeLeader` skips it since the target is no longer in
   `currentConfig.learners` after Stage-1.
+- **`handleCreateSnapshot` snapshot guard** (`internal/raft/snapshot_actor.go`): refuses
+  to compact the log past the Stage-1 index while `pendingPromote` is in-flight. Without
+  this guard, a periodic FSM snapshot taken between Stage-1 commit and leader crash would
+  erase the Stage-1 log entry, silently disabling `recoverOrphanedPromote` on the new
+  leader. Error message instructs the operator to retry after Stage-2 commits.
 
 ### Notes
 
