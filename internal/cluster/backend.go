@@ -988,7 +988,10 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	if err := b.db.View(func(txn *badger.Txn) error {
 		// Build latMap so we can distinguish versioned sub-keys from unversioned
 		// legacy keys. A key of the form obj:<bucket>/<base>/<vid> is a versioned
-		// object iff <base> appears in latMap (i.e. lat:<bucket>/<base> exists).
+		// object iff <base> appears in latMap (i.e. lat:<bucket>/<base> exists)
+		// AND <vid> is a valid UUID (all version IDs are UUID v4/v7). The UUID
+		// check prevents misclassifying a legacy key like "a/b" as key="a"
+		// versionID="b" when a versioned key "a" happens to share its prefix.
 		latMap := make(map[string]struct{})
 		rawLatPfx := []byte("lat:" + bucket + "/")
 		latPfx := b.ks().Prefix(rawLatPfx)
@@ -1008,8 +1011,12 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 			rest := string(rawK[len(rawBucketPfx):])
 			key, versionID := rest, ""
 			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
-				if _, inLat := latMap[rest[:slash]]; inLat {
-					key, versionID = rest[:slash], rest[slash+1:]
+				candidateBase := rest[:slash]
+				candidateVID := rest[slash+1:]
+				if _, inLat := latMap[candidateBase]; inLat {
+					if _, err := uuid.Parse(candidateVID); err == nil {
+						key, versionID = candidateBase, candidateVID
+					}
 				}
 			}
 			refs = append(refs, objRef{key: key, versionID: versionID})
@@ -1018,7 +1025,31 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	}); err != nil {
 		return fmt.Errorf("force delete: scan objects: %w", err)
 	}
+	// Two-pass deletion to prevent ring refcount double-decRef:
+	//
+	// Pass 1 — versioned refs first. applyDeleteObjectVersion calls decRef(rv)
+	// for each version's ring. When the last versioned ref for a key is removed,
+	// applyDeleteObjectVersion also deletes the unversioned ObjectMetaKey, so
+	// Pass 2 finds it absent and skips decRef.
+	//
+	// Pass 2 — unversioned refs. applyDeleteObject("") only calls decRef if
+	// ObjectMetaKey still exists. If Pass 1 already removed it, rv stays 0 and
+	// decRef is not called, preventing a double-decRef of the ring refcount.
 	for _, ref := range refs {
+		if ref.versionID == "" {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := b.forceDeleteObject(ctx, bucket, ref.key, ref.versionID); err != nil {
+			return fmt.Errorf("force delete: %q: %w", ref.key, err)
+		}
+	}
+	for _, ref := range refs {
+		if ref.versionID != "" {
+			continue
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -2663,16 +2694,15 @@ func (b *DistributedBackend) DeleteObjectReturningMarker(bucket, key string) (st
 	return b.deleteObjectWithMarker(context.Background(), bucket, key)
 }
 
-// deleteObjectCtx is the ctx-aware core used by DeleteObject and
-// ForceDeleteBucket so that HTTP request cancellation propagates into the
-// Raft propose call.
+// deleteObjectCtx is the ctx-aware core used by DeleteObject so that HTTP
+// request cancellation propagates into the Raft propose call.
 func (b *DistributedBackend) deleteObjectCtx(ctx context.Context, bucket, key string) error {
 	_, err := b.deleteObjectWithMarker(ctx, bucket, key)
 	return err
 }
 
-// deleteObjectWithMarker is the single implementation shared by DeleteObject,
-// DeleteObjectReturningMarker, and ForceDeleteBucket.
+// deleteObjectWithMarker is the single implementation shared by DeleteObject
+// and DeleteObjectReturningMarker.
 //
 // Tombstone semantics: creates a delete marker as a new version. Prior version
 // data remains addressable via GetObjectVersion and is NOT physically removed

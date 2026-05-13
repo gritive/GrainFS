@@ -752,3 +752,22 @@ func TestDistributedBackend_ForceDeleteBucket_MultiVersion(t *testing.T) {
 	require.NoError(t, b.ForceDeleteBucket(ctx, "mv-bucket"))
 	require.ErrorIs(t, b.HeadBucket(ctx, "mv-bucket"), storage.ErrBucketNotFound)
 }
+
+func TestDistributedBackend_ForceDeleteBucket_SlashKeyAndVersionedPrefix(t *testing.T) {
+	// 버킷에 슬래시 포함 키 "dir/file"(비버전)과 그 접두사인 키 "dir"(버전)이
+	// 함께 존재할 때, latMap 충돌로 "dir/file"이 key="dir" versionID="file"로
+	// 잘못 분류되지 않고, 두 키 모두 정상 삭제되어야 한다.
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.CreateBucket(ctx, "slash-bucket"))
+	// versioned key "dir"
+	_, err := b.PutObject(ctx, "slash-bucket", "dir", strings.NewReader("versioned"), "text/plain")
+	require.NoError(t, err)
+	// legacy unversioned key "dir/file" (put before PutObject started versioning)
+	_, err = b.PutObject(ctx, "slash-bucket", "dir/file", strings.NewReader("nested"), "text/plain")
+	require.NoError(t, err)
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "slash-bucket"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "slash-bucket"), storage.ErrBucketNotFound)
+}
