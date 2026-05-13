@@ -172,5 +172,21 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 		return target, groupSnapshot, nil
 	}
 	target, err := r.routeGroup(group.ID)
-	return target, group, err
+	if err != nil {
+		return RouteTarget{}, ShardGroupEntry{}, err
+	}
+	// When self is the leader, routeGroup skips peer resolution (short-circuit
+	// for RouteBucket). For object writes we still need forward candidates so
+	// the write can be forwarded to the rest of the group if leadership changes
+	// between routing and execution (route-to-execute race).
+	if target.SelfIsLeader && len(target.Peers) == 0 {
+		peers := NewShardGroupPeerSet(group).ForwardOrder(r.selfID, r.selfAliases...)
+		if r.addr != nil {
+			if resolved, resolveErr := ResolveNodeAddresses(r.addr, peers); resolveErr == nil {
+				peers = resolved
+			}
+		}
+		target.Peers = peers
+	}
+	return target, group, nil
 }
