@@ -392,6 +392,7 @@ func (s *ForwardSender) SendReadStream(
 		}
 	}()
 
+	_, callerHasDeadline := ctx.Deadline()
 	if s.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)
@@ -399,36 +400,63 @@ func (s *ForwardSender) SendReadStream(
 	}
 
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
-	var lastDialErr error
-	for _, peer := range peers {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		reply, body, err := s.readDialer(ctx, peer, payload)
-		if err != nil {
-			lastDialErr = err
-			continue
-		}
-		if isNotLeaderReply(reply) {
-			if body != nil {
-				_ = body.Close()
+	for {
+		var lastDialErr error
+		retryableNotLeader := false
+		for _, peer := range peers {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
 			}
-			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
-				r2, b2, err2 := s.readDialer(ctx, hint, payload)
-				if err2 == nil {
-					releaseSlot = false
-					return r2, newForwardSlotReadCloser(b2, readSlots), nil
+			reply, body, err := s.readDialer(ctx, peer, payload)
+			if err != nil {
+				lastDialErr = err
+				continue
+			}
+			if isNotLeaderReply(reply) {
+				if body != nil {
+					_ = body.Close()
 				}
+				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+					r2, b2, err2 := s.readDialer(ctx, hint, payload)
+					if err2 == nil {
+						releaseSlot = false
+						return r2, newForwardSlotReadCloser(b2, readSlots), nil
+					}
+					lastDialErr = err2
+					continue
+				}
+				if callerHasDeadline {
+					retryableNotLeader = true
+					continue
+				}
+				return reply, io.NopCloser(bytes.NewReader(nil)), nil
 			}
-			return reply, io.NopCloser(bytes.NewReader(nil)), nil
+			releaseSlot = false
+			return reply, newForwardSlotReadCloser(body, readSlots), nil
 		}
-		releaseSlot = false
-		return reply, newForwardSlotReadCloser(body, readSlots), nil
+		if lastDialErr == nil && !retryableNotLeader {
+			return nil, nil, ErrNoReachablePeer
+		}
+		if !callerHasDeadline {
+			if lastDialErr != nil {
+				return nil, nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+			}
+			return nil, nil, ErrNoReachablePeer
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastDialErr != nil {
+				return nil, nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+			}
+			return nil, nil, ErrNoReachablePeer
+		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
-	if lastDialErr != nil {
-		return nil, nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
-	}
-	return nil, nil, ErrNoReachablePeer
 }
 
 type forwardSlotReadCloser struct {

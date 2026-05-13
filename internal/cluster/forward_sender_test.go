@@ -489,6 +489,58 @@ func TestForwardSender_SendReadStreamUsesSeparateSlotPool(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestForwardSender_SendReadStreamStaleLeaderHintTriesRemainingPeer(t *testing.T) {
+	var connected []string
+	readDialer := func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+		connected = append(connected, peer)
+		switch peer {
+		case "peer-a":
+			return notLeaderReplyBytes(t, "dead-leader"), io.NopCloser(bytes.NewReader(nil)), nil
+		case "dead-leader":
+			return nil, nil, errors.New("connection refused")
+		case "peer-b":
+			return okReplyBytes(t), io.NopCloser(bytes.NewReader([]byte("body"))), nil
+		default:
+			return nil, nil, errors.New("unexpected peer")
+		}
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		return nil, errors.New("single-message dialer unused")
+	}).WithReadStreamDialer(readDialer)
+
+	reply, rc, err := s.SendReadStream(context.Background(), []string{"peer-a", "peer-b"}, "g",
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+	require.NoError(t, rc.Close())
+	require.Equal(t, []string{"peer-a", "dead-leader", "peer-b"}, connected)
+}
+
+func TestForwardSender_SendReadStreamRetriesNotLeaderWithinCallerDeadline(t *testing.T) {
+	var connected []string
+	readDialer := func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), io.NopCloser(bytes.NewReader(nil)), nil
+		}
+		return okReplyBytes(t), io.NopCloser(bytes.NewReader([]byte("body"))), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		return nil, errors.New("single-message dialer unused")
+	}).WithReadStreamDialer(readDialer)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	reply, rc, err := s.SendReadStream(ctx, []string{"peer-a", "peer-b"}, "g",
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+	require.NoError(t, rc.Close())
+	require.Equal(t, []string{"peer-a", "peer-b", "peer-a"}, connected)
+}
+
 func TestForwardSender_SendStreamUsesPerCallTimeoutContext(t *testing.T) {
 	started := make(chan struct{})
 	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
