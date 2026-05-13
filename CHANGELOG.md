@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.186.2] - 2026-05-14 — refactor: NFS legacy bucket hard removal
+
+### Changed
+
+- **NFSv4 legacy bucket demotion** — `__grainfs_nfs4` is no longer an internal bucket and the NFSv4 server no longer auto-creates it on startup.
+- **E2E parallelism control** — `make test-e2e` now runs per-test invocations in parallel via `E2E_TEST_JOBS` (default `2`; set `E2E_TEST_JOBS=1` for serial execution).
+
+### Added
+
+- **`GRAINFS_LOG_LEVEL` fallback** — `grainfs --log-level` still wins when explicitly provided, otherwise the CLI uses `GRAINFS_LOG_LEVEL` before falling back to `info`.
+
+### Fixed
+
+- **Forwarded short reads** — cluster `ReadAt` forwarding now preserves short EOF reads instead of converting them to internal errors.
+- **Empty EC objects** — EC-backed user buckets now accept zero-byte object writes, matching create/truncate flows used by NFS clients.
+
 ## [0.0.186.1] - 2026-05-14 — docs: DX polish — NFS/NBD/Iceberg Quick Start
 
 ### Added
