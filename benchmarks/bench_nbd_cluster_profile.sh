@@ -14,8 +14,11 @@ bench_require_colima
 HOST_IP="${HOST_IP:-192.168.5.2}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-nbd-cluster-bench}"
 NBD_DEV="${NBD_DEV:-/dev/nbd0}"
-VOL_SIZE=$((128 * 1024 * 1024))
-FIO_SIZE="64m"
+VOL_SIZE="${VOL_SIZE:-128Mi}"
+FIO_SIZE="${FIO_SIZE:-64m}"
+FIO_RUNTIME="${FIO_RUNTIME:-15}"
+FIO_CASES="${FIO_CASES:-seq-read-4K seq-write-4K seq-read-64K seq-write-64K rand-read-4K rand-write-4K}"
+CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-60}"
 
 HTTP0=$(bench_free_port); HTTP1=$(bench_free_port); HTTP2=$(bench_free_port)
 RAFT0=$(bench_free_port); RAFT1=$(bench_free_port); RAFT2=$(bench_free_port)
@@ -40,14 +43,6 @@ cleanup() {
   rm -rf "$BENCH_DIR"
 }
 trap cleanup EXIT INT TERM
-
-peers_for() {
-  case "$1" in
-    0) echo "127.0.0.1:$RAFT1,127.0.0.1:$RAFT2" ;;
-    1) echo "127.0.0.1:$RAFT0,127.0.0.1:$RAFT2" ;;
-    2) echo "127.0.0.1:$RAFT0,127.0.0.1:$RAFT1" ;;
-  esac
-}
 
 raft_addr() {
   case "$1" in
@@ -81,26 +76,38 @@ pprof_port() {
   esac
 }
 
-for i in 0 1 2; do
+start_node() {
+  local i="$1"
   "$BINARY" serve \
     --data "$BENCH_DIR/n$i" \
     --port "$(http_port "$i")" \
     --node-id "bench-nbd-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
-    --peers "$(peers_for "$i")" \
     --cluster-key "bench-nbd-cluster-key" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port "$(nbd_port "$i")" \
-    --nbd-volume-size "$VOL_SIZE" \
     --pprof-port "$(pprof_port "$i")" \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
-    --dedup=false \
     --log-level warn \
     > "$BENCH_DIR/n$i.log" 2>&1 &
   PIDS+=($!)
   echo "  node-$i: HTTP=:$(http_port "$i") NBD=:$(nbd_port "$i") Raft=$(raft_addr "$i")"
+}
+
+start_node 0
+bench_wait_tcp_port "127.0.0.1" "$HTTP0" "node-0 HTTP" 180 0.2
+bench_wait_tcp_port "127.0.0.1" "$PPROF0" "node-0 pprof" 180 0.2
+bench_wait_admin_socket "$BENCH_DIR/n0" 100 0.2
+"$BINARY" volume create default --size "$VOL_SIZE" --endpoint "$BENCH_DIR/n0/admin.sock" >/dev/null
+
+for i in 1 2; do
+  printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
+  chmod 600 "$BENCH_DIR/n$i/.join-pending"
+  start_node "$i"
+  bench_wait_tcp_port "127.0.0.1" "$(http_port "$i")" "node-$i HTTP" 180 0.2
+  bench_wait_tcp_port "127.0.0.1" "$(pprof_port "$i")" "node-$i pprof" 180 0.2
 done
 
 echo "=== waiting for cluster leader ==="
@@ -137,7 +144,7 @@ echo "OK: nbd-client connected ($NBD_DEV)"
 
 PROFILE_DIR="benchmarks/profiles/nbd-cluster-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$PROFILE_DIR"
-curl -sf "http://127.0.0.1:$LEADER_PPROF_PORT/debug/pprof/profile?seconds=60" \
+curl -sf "http://127.0.0.1:$LEADER_PPROF_PORT/debug/pprof/profile?seconds=$CPU_PROFILE_SECONDS" \
   -o "$PROFILE_DIR/cpu.pb.gz" &
 CPU_PROFILE_PID=$!
 
@@ -149,18 +156,26 @@ run_fio() {
     --name="$label" \
     --filename="$NBD_DEV" \
     --size="$FIO_SIZE" \
-    --runtime=15 \
+    --runtime="$FIO_RUNTIME" \
     --time_based \
     --output-format=normal \
     "$@" 2>&1 | grep -E "READ:|WRITE:|iops|bw=|lat"
 }
 
-run_fio "seq-read-4K"   --ioengine=sync --rw=read   --bs=4k
-run_fio "seq-write-4K"  --ioengine=sync --rw=write  --bs=4k
-run_fio "seq-read-64K"  --ioengine=sync --rw=read   --bs=64k
-run_fio "seq-write-64K" --ioengine=sync --rw=write  --bs=64k
-run_fio "rand-read-4K"  --ioengine=sync --rw=randread  --bs=4k
-run_fio "rand-write-4K" --ioengine=sync --rw=randwrite --bs=4k
+for fio_case in $FIO_CASES; do
+  case "$fio_case" in
+    seq-read-4K) run_fio "$fio_case" --ioengine=sync --rw=read --bs=4k ;;
+    seq-write-4K) run_fio "$fio_case" --ioengine=sync --rw=write --bs=4k ;;
+    seq-read-64K) run_fio "$fio_case" --ioengine=sync --rw=read --bs=64k ;;
+    seq-write-64K) run_fio "$fio_case" --ioengine=sync --rw=write --bs=64k ;;
+    rand-read-4K) run_fio "$fio_case" --ioengine=sync --rw=randread --bs=4k ;;
+    rand-write-4K) run_fio "$fio_case" --ioengine=sync --rw=randwrite --bs=4k ;;
+    *)
+      echo "[error] unknown FIO_CASES entry: $fio_case" >&2
+      exit 1
+      ;;
+  esac
+done
 
 wait "$CPU_PROFILE_PID" 2>/dev/null || true
 bench_collect_pprof "$LEADER_PPROF_PORT" "$PROFILE_DIR" mutex allocs heap goroutine

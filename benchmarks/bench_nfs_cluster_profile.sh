@@ -15,6 +15,12 @@ HOST_IP="${HOST_IP:-192.168.5.2}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-nfs-cluster-bench}"
 MNT="/mnt/grainfs-bench-nfs-cluster"
 NFS_VERS="${NFS_VERS:-4.0}"
+FIO_RUNTIME="${FIO_RUNTIME:-15}"
+FIO_STREAM_SIZE="${FIO_STREAM_SIZE:-256m}"
+FIO_STREAM_JOBS="${FIO_STREAM_JOBS:-4}"
+FIO_RAND_SIZE="${FIO_RAND_SIZE:-64m}"
+FIO_RAND_JOBS="${FIO_RAND_JOBS:-4}"
+CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-30}"
 
 HTTP0=$(bench_free_port); HTTP1=$(bench_free_port); HTTP2=$(bench_free_port)
 RAFT0=$(bench_free_port); RAFT1=$(bench_free_port); RAFT2=$(bench_free_port)
@@ -40,14 +46,6 @@ cleanup() {
   rm -rf "$BENCH_DIR"
 }
 trap cleanup EXIT INT TERM
-
-peers_for() {
-  case "$1" in
-    0) echo "127.0.0.1:$RAFT1,127.0.0.1:$RAFT2" ;;
-    1) echo "127.0.0.1:$RAFT0,127.0.0.1:$RAFT2" ;;
-    2) echo "127.0.0.1:$RAFT0,127.0.0.1:$RAFT1" ;;
-  esac
-}
 
 raft_addr() {
   case "$1" in
@@ -81,13 +79,13 @@ pprof_port() {
   esac
 }
 
-for i in 0 1 2; do
+start_node() {
+  local i="$1"
   "$BINARY" serve \
     --data "$BENCH_DIR/n$i" \
     --port "$(http_port "$i")" \
     --node-id "bench-nfs-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
-    --peers "$(peers_for "$i")" \
     --cluster-key "bench-nfs-cluster-key" \
     $(bench_encryption_args) \
     --nfs4-port "$(nfs_port "$i")" \
@@ -99,6 +97,18 @@ for i in 0 1 2; do
     > "$BENCH_DIR/n$i.log" 2>&1 &
   PIDS+=($!)
   echo "  node-$i: HTTP=:$(http_port "$i") NFS=:$(nfs_port "$i") Raft=$(raft_addr "$i")"
+}
+
+start_node 0
+bench_wait_tcp_port "127.0.0.1" "$HTTP0" "node-0 HTTP" 180 0.2
+bench_wait_tcp_port "127.0.0.1" "$PPROF0" "node-0 pprof" 180 0.2
+
+for i in 1 2; do
+  printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
+  chmod 600 "$BENCH_DIR/n$i/.join-pending"
+  start_node "$i"
+  bench_wait_tcp_port "127.0.0.1" "$(http_port "$i")" "node-$i HTTP" 180 0.2
+  bench_wait_tcp_port "127.0.0.1" "$(pprof_port "$i")" "node-$i pprof" 180 0.2
 done
 
 echo "=== waiting for cluster leader ==="
@@ -140,8 +150,8 @@ curl -sf "http://127.0.0.1:$LEADER_PPROF_PORT/debug/pprof/heap" \
 
 (
   sleep 5
-  echo "  [pprof] starting 30s CPU profile..."
-  curl -sf "http://127.0.0.1:$LEADER_PPROF_PORT/debug/pprof/profile?seconds=30" \
+  echo "  [pprof] starting ${CPU_PROFILE_SECONDS}s CPU profile..."
+  curl -sf "http://127.0.0.1:$LEADER_PPROF_PORT/debug/pprof/profile?seconds=$CPU_PROFILE_SECONDS" \
     -o "$PROFILE_DIR/cpu.pb.gz" && echo "  [pprof] cpu.pb.gz saved" || echo "  [pprof] CPU profile failed"
 ) &
 PPROF_PID=$!
@@ -152,16 +162,16 @@ set -e
 BENCH_DIR="${MNT}/fio-bench-\$(date +%s)"
 sudo mkdir -p "\$BENCH_DIR"
 
-echo "--- sequential write (4 threads, 128K blocks) ---"
-sudo fio --name=seq_write --directory="\$BENCH_DIR" --rw=write --bs=128k --size=256m --numjobs=4 --runtime=15 --time_based --group_reporting --output-format=normal --ioengine=sync
+echo "--- sequential write (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
+sudo fio --name=seq_write --directory="\$BENCH_DIR" --rw=write --bs=128k --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting --output-format=normal --ioengine=sync
 
 echo ""
-echo "--- sequential read (4 threads, 128K blocks) ---"
-sudo fio --name=seq_read --directory="\$BENCH_DIR" --rw=read --bs=128k --size=256m --numjobs=4 --runtime=15 --time_based --group_reporting --output-format=normal --ioengine=sync
+echo "--- sequential read (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
+sudo fio --name=seq_read --directory="\$BENCH_DIR" --rw=read --bs=128k --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting --output-format=normal --ioengine=sync
 
 echo ""
-echo "--- random read/write mix (4K blocks, 75% read) ---"
-sudo fio --name=rand_mix --directory="\$BENCH_DIR" --rw=randrw --rwmixread=75 --bs=4k --size=64m --numjobs=4 --runtime=15 --time_based --group_reporting --output-format=normal --ioengine=sync
+echo "--- random read/write mix (${FIO_RAND_JOBS} threads, 4K blocks, 75% read) ---"
+sudo fio --name=rand_mix --directory="\$BENCH_DIR" --rw=randrw --rwmixread=75 --bs=4k --size="$FIO_RAND_SIZE" --numjobs="$FIO_RAND_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting --output-format=normal --ioengine=sync
 
 sudo rm -rf "\$BENCH_DIR"
 SCRIPT
