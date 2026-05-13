@@ -81,6 +81,16 @@ type VolumePlacementSource interface {
 	VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]ReplicaLayoutFact, error)
 }
 
+// BucketOps is the slim interface bucket admin handlers need from storage.
+// Satisfied by *storage.Operations (and storage.Backend after ForceDeleteBucket was added).
+type BucketOps interface {
+	CreateBucket(ctx context.Context, bucket string) error
+	HeadBucket(ctx context.Context, bucket string) error
+	DeleteBucket(ctx context.Context, bucket string) error
+	ListBuckets(ctx context.Context) ([]string, error)
+	ForceDeleteBucket(ctx context.Context, bucket string) error
+}
+
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
 type IAMService interface {
@@ -111,6 +121,7 @@ type Deps struct {
 	ScrubAggregator ScrubAggregator       // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
 	VolumePlacement VolumePlacementSource // optional; nil disables replica/EC volume health signal
 	IAM             IAMService            // optional; nil disables IAM admin endpoints
+	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string

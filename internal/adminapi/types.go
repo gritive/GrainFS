@@ -396,3 +396,20 @@ type TransferLeaderResult struct {
 	Term       uint64 `json:"term"`
 	TargetHint string `json:"target_hint,omitempty"`
 }
+
+// --- Bucket admin wire types ---
+
+// BucketInfo is the JSON representation of a bucket in admin responses.
+type BucketInfo struct {
+	Name string `json:"name"`
+}
+
+// ListBucketsAdminResp is returned by GET /v1/buckets.
+type ListBucketsAdminResp struct {
+	Buckets []BucketInfo `json:"buckets"`
+}
+
+// CreateBucketAdminReq is the body for POST /v1/buckets.
+type CreateBucketAdminReq struct {
+	Name string `json:"name"`
+}
