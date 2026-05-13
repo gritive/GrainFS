@@ -83,9 +83,13 @@ func bucketListCmd() *cobra.Command {
 				return fmt.Errorf("parse response: %w", err)
 			}
 			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME")
+			fmt.Fprintln(tw, "NAME\tHAS_UPSTREAM")
 			for _, b := range resp.Buckets {
-				fmt.Fprintln(tw, b.Name)
+				upstream := "no"
+				if b.HasUpstream {
+					upstream = "yes"
+				}
+				fmt.Fprintf(tw, "%s\t%s\n", b.Name, upstream)
 			}
 			return tw.Flush()
 		},
@@ -147,12 +151,20 @@ func bucketInfoCmd() *cobra.Command {
 				return fmt.Errorf("parse response: %w", err)
 			}
 			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tOBJECTS")
+			fmt.Fprintln(tw, "NAME\tOBJECTS\tVERSIONING\tHAS_UPSTREAM")
 			objects := "<unknown>"
 			if info.ObjectCount != nil {
 				objects = fmt.Sprintf("%d", *info.ObjectCount)
 			}
-			fmt.Fprintf(tw, "%s\t%s\n", info.Name, objects)
+			versioning := "-"
+			if info.Versioning != "" {
+				versioning = info.Versioning
+			}
+			upstream := "no"
+			if info.HasUpstream {
+				upstream = "yes"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", info.Name, objects, versioning, upstream)
 			return tw.Flush()
 		},
 	}
