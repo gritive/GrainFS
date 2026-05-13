@@ -2,7 +2,10 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"testing"
@@ -66,6 +69,59 @@ func TestAuthAcceptsValidSignature(t *testing.T) {
 	require.NoError(t, err, "put")
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestAuthAcceptsSignedPostPolicyFormUpload(t *testing.T) {
+	base := setupAuthServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/form-auth", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "create bucket")
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	require.NoError(t, w.WriteField("key", "uploaded.txt"))
+	require.NoError(t, w.WriteField("Content-Type", "text/plain"))
+	require.NoError(t, w.WriteField("success_action_status", "201"))
+	addSignedPostPolicyFields(t, w, "form-auth", "uploaded.txt", "testkey", "testsecret")
+	fw, err := w.CreateFormFile("file", "uploaded.txt")
+	require.NoError(t, err)
+	_, err = fw.Write([]byte("form upload body"))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	req, _ = http.NewRequest(http.MethodPost, base+"/form-auth", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func addSignedPostPolicyFields(t *testing.T, w *multipart.Writer, bucket, key, accessKey, secretKey string) {
+	t.Helper()
+	date := time.Now().UTC().Format("20060102")
+	credential := accessKey + "/" + date + "/us-east-1/s3/aws4_request"
+	policy := map[string]any{
+		"expiration": time.Now().UTC().Add(time.Hour).Format("2006-01-02T15:04:05Z"),
+		"conditions": []any{
+			map[string]string{"bucket": bucket},
+			map[string]string{"key": key},
+			map[string]string{"Content-Type": "text/plain"},
+			map[string]string{"success_action_status": "201"},
+			map[string]string{"X-Amz-Credential": credential},
+		},
+	}
+	raw, err := json.Marshal(policy)
+	require.NoError(t, err)
+	policyB64 := base64.StdEncoding.EncodeToString(raw)
+	require.NoError(t, w.WriteField("policy", policyB64))
+	require.NoError(t, w.WriteField("X-Amz-Credential", credential))
+	require.NoError(t, w.WriteField("X-Amz-Signature", s3auth.SignPostPolicy(policyB64, secretKey, date, "us-east-1", "s3")))
 }
 
 func TestAuthRejectsWrongKey(t *testing.T) {

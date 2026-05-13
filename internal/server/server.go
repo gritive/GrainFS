@@ -521,6 +521,12 @@ func (s *Server) Run() error {
 	return s.hertz.Run()
 }
 
+func isBucketFormPost(c *app.RequestContext) bool {
+	return string(c.Method()) == "POST" &&
+		strings.TrimPrefix(c.Param("key"), "/") == "" &&
+		strings.HasPrefix(string(c.GetHeader("Content-Type")), "multipart/form-data")
+}
+
 // HertzEngine exposes the underlying Hertz instance so callers (serve.go) can
 // install additional middleware and routes (e.g. /ui/api/* admin endpoints,
 // dashboard token auth) before Run is called. Must be invoked before Run.
@@ -570,6 +576,11 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		}
 
 		r := toHTTPRequest(c)
+		if isBucketFormPost(c) {
+			ctx = WithAccessKey(ctx, "")
+			c.Next(ctx)
+			return
+		}
 
 		// Anonymous fast path: unsigned GET/HEAD on plain object data may be allowed
 		// by object ACL. Subresource requests (?acl, ?tagging, etc.) and all other
@@ -699,6 +710,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.HEAD("/:bucket", s.headBucket)
 	h.DELETE("/:bucket", s.deleteBucket)
 	h.GET("/:bucket", s.listObjects)
+	h.POST("/:bucket", s.handlePost)
 
 	// Object-level: Hertz uses *path to catch nested keys
 	h.PUT("/:bucket/*key", s.handlePut)

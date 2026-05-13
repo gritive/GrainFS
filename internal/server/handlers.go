@@ -1039,7 +1039,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	key := keys[0]
 
-	// Validate POST policy if authentication is enabled and policy is present
+	// Validate POST policy if authentication is enabled.
 	if s.verifier != nil {
 		policyB64 := ""
 		if ps := form.Value["policy"]; len(ps) > 0 {
@@ -1049,53 +1049,54 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 		if ss := form.Value["X-Amz-Signature"]; len(ss) > 0 {
 			sig = ss[0]
 		}
+		if policyB64 == "" || sig == "" {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "missing POST policy signature")
+			return
+		}
 
-		if policyB64 != "" {
-			// Validate expiration
-			if err := s3auth.ValidatePostPolicyExpiration(policyB64); err != nil {
-				writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
-				return
-			}
+		// Validate expiration
+		if err := s3auth.ValidatePostPolicyExpiration(policyB64); err != nil {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
+			return
+		}
 
-			// Validate conditions
-			formFields := map[string]string{
-				"bucket": bucket,
-				"key":    key,
+		// Validate conditions
+		formFields := map[string]string{
+			"bucket": bucket,
+			"key":    key,
+		}
+		for k, vs := range form.Value {
+			if len(vs) > 0 {
+				formFields[k] = vs[0]
 			}
-			for k, vs := range form.Value {
-				if len(vs) > 0 {
-					formFields[k] = vs[0]
-				}
-			}
-			if err := s3auth.ValidatePostPolicyConditions(policyB64, formFields); err != nil {
-				writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
-				return
-			}
+		}
+		if err := s3auth.ValidatePostPolicyConditions(policyB64, formFields); err != nil {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
+			return
+		}
 
-			// Validate signature
-			if sig != "" {
-				credential := ""
-				if cs := form.Value["X-Amz-Credential"]; len(cs) > 0 {
-					credential = cs[0]
-				}
-				// credential format: AKID/20260416/us-east-1/s3/aws4_request
-				parts := strings.SplitN(credential, "/", 5)
-				if len(parts) == 5 {
-					accessKey := parts[0]
-					date := parts[1]
-					region := parts[2]
-					service := parts[3]
-					secretKey := s.verifier.LookupSecret(accessKey)
-					if secretKey == "" {
-						writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid access key")
-						return
-					}
-					if err := s3auth.VerifyPostPolicy(policyB64, sig, secretKey, date, region, service); err != nil {
-						writeXMLError(c, consts.StatusForbidden, "SignatureDoesNotMatch", err.Error())
-						return
-					}
-				}
-			}
+		credential := ""
+		if cs := form.Value["X-Amz-Credential"]; len(cs) > 0 {
+			credential = cs[0]
+		}
+		// credential format: AKID/20260416/us-east-1/s3/aws4_request
+		parts := strings.SplitN(credential, "/", 5)
+		if len(parts) != 5 {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid credential")
+			return
+		}
+		accessKey := parts[0]
+		date := parts[1]
+		region := parts[2]
+		service := parts[3]
+		secretKey := s.verifier.LookupSecret(accessKey)
+		if secretKey == "" {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid access key")
+			return
+		}
+		if err := s3auth.VerifyPostPolicy(policyB64, sig, secretKey, date, region, service); err != nil {
+			writeXMLError(c, consts.StatusForbidden, "SignatureDoesNotMatch", err.Error())
+			return
 		}
 	}
 

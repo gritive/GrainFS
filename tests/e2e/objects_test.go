@@ -3,6 +3,8 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -273,6 +276,7 @@ func TestE2E_FormUpload(t *testing.T) {
 		require.NoError(t, w.WriteField("key", "uploaded.txt"))
 		require.NoError(t, w.WriteField("Content-Type", "text/plain"))
 		require.NoError(t, w.WriteField("success_action_status", "201"))
+		writeSignedPostPolicy(t, w, "form-upload", "uploaded.txt")
 
 		fw, err := w.CreateFormFile("file", "uploaded.txt")
 		require.NoError(t, err)
@@ -304,4 +308,26 @@ func TestE2E_FormUpload(t *testing.T) {
 
 	data, _ := io.ReadAll(out.Body)
 	assert.Equal(t, "form upload content", string(data))
+}
+
+func writeSignedPostPolicy(t *testing.T, w *multipart.Writer, bucket, key string) {
+	t.Helper()
+	date := time.Now().UTC().Format("20060102")
+	credential := testAccessKey + "/" + date + "/us-east-1/s3/aws4_request"
+	policy := map[string]any{
+		"expiration": time.Now().UTC().Add(time.Hour).Format("2006-01-02T15:04:05Z"),
+		"conditions": []any{
+			map[string]string{"bucket": bucket},
+			map[string]string{"key": key},
+			map[string]string{"Content-Type": "text/plain"},
+			map[string]string{"success_action_status": "201"},
+			map[string]string{"X-Amz-Credential": credential},
+		},
+	}
+	raw, err := json.Marshal(policy)
+	require.NoError(t, err)
+	policyB64 := base64.StdEncoding.EncodeToString(raw)
+	require.NoError(t, w.WriteField("policy", policyB64))
+	require.NoError(t, w.WriteField("X-Amz-Credential", credential))
+	require.NoError(t, w.WriteField("X-Amz-Signature", s3auth.SignPostPolicy(policyB64, testSecretKey, date, "us-east-1", "s3")))
 }
