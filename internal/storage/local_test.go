@@ -417,3 +417,51 @@ func TestCachedBackend_ReadAt_CacheMiss(t *testing.T) {
 	assert.Equal(t, 8, n)
 	assert.Equal(t, []byte("uncached"), buf[:n])
 }
+
+func TestForceDeleteBucket(t *testing.T) {
+	ctx := context.Background()
+	b := setupTestBackend(t)
+
+	require.NoError(t, b.CreateBucket(ctx, "force-test"))
+	_, err := b.PutObject(ctx, "force-test", "a.txt", bytes.NewReader([]byte("x")), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "force-test", "b.txt", bytes.NewReader([]byte("y")), "text/plain")
+	require.NoError(t, err)
+
+	// regular delete should fail (bucket non-empty)
+	require.ErrorIs(t, b.DeleteBucket(ctx, "force-test"), ErrBucketNotEmpty)
+
+	// force delete should succeed
+	require.NoError(t, b.ForceDeleteBucket(ctx, "force-test"))
+
+	// bucket should be gone
+	require.ErrorIs(t, b.HeadBucket(ctx, "force-test"), ErrBucketNotFound)
+}
+
+func TestForceDeleteBucket_NonExistent(t *testing.T) {
+	ctx := context.Background()
+	b := setupTestBackend(t)
+
+	require.ErrorIs(t, b.ForceDeleteBucket(ctx, "no-such-bucket"), ErrBucketNotFound)
+}
+
+func TestOperations_ForceDeleteBucket(t *testing.T) {
+	ctx := context.Background()
+	b := setupTestBackend(t)
+	ops := NewOperations(b)
+
+	require.NoError(t, ops.CreateBucket(ctx, "force-test"))
+	_, err := ops.PutObject(ctx, "force-test", "a.txt", bytes.NewReader([]byte("x")), "text/plain")
+	require.NoError(t, err)
+	_, err = ops.PutObject(ctx, "force-test", "b.txt", bytes.NewReader([]byte("y")), "text/plain")
+	require.NoError(t, err)
+
+	// regular delete should fail (bucket non-empty)
+	require.Error(t, ops.DeleteBucket(ctx, "force-test"))
+
+	// force delete should succeed
+	require.NoError(t, ops.ForceDeleteBucket(ctx, "force-test"))
+
+	// bucket should be gone
+	require.Error(t, ops.HeadBucket(ctx, "force-test"))
+}

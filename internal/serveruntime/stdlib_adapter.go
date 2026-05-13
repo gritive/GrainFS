@@ -6,40 +6,7 @@ import (
 	"net/http"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	hzserver "github.com/cloudwego/hertz/pkg/app/server"
-
-	"github.com/gritive/GrainFS/internal/iam"
 )
-
-// RegisterIAMAdminRoutes wires AdminAPI handlers under /v1/iam/* on the admin
-// UDS Hertz server. The IAM stdlib handlers are bridged to Hertz via small
-// adapters that translate request/response between net/http and Hertz.
-//
-// Routes:
-//
-//	POST   /v1/iam/sa
-//	GET    /v1/iam/sa
-//	GET    /v1/iam/sa/:id
-//	DELETE /v1/iam/sa/:id
-//	POST   /v1/iam/sa/:id/key
-//	DELETE /v1/iam/sa/:id/key/:ak
-//	PUT    /v1/iam/grant
-//	DELETE /v1/iam/grant
-//	GET    /v1/iam/grant
-//
-// Bucket-upstream routes are under /v1/buckets/* — see RegisterBucketAdminRoutes.
-func RegisterIAMAdminRoutes(h *hzserver.Hertz, api *iam.AdminAPI) {
-	g := h.Group("/v1/iam")
-	g.POST("/sa", wrapStdlibNoParam(api.HandleSACreate))
-	g.GET("/sa", wrapStdlibNoParam(api.HandleSAList))
-	g.GET("/sa/:id", wrapStdlibOneParam("id", api.HandleSAGet))
-	g.DELETE("/sa/:id", wrapStdlibOneParam("id", api.HandleSADelete))
-	g.POST("/sa/:id/key", wrapStdlibOneParam("id", api.HandleKeyCreate))
-	g.DELETE("/sa/:id/key/:ak", wrapStdlibTwoParams("id", "ak", api.HandleKeyRevoke))
-	g.PUT("/grant", wrapStdlibNoParam(api.HandleGrantPut))
-	g.DELETE("/grant", wrapStdlibNoParam(api.HandleGrantDelete))
-	g.GET("/grant", wrapStdlibNoParam(api.HandleGrantList))
-}
 
 func wrapStdlibNoParam(fn func(http.ResponseWriter, *http.Request)) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {

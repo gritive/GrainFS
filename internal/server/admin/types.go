@@ -10,6 +10,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/dashboard"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -80,6 +81,34 @@ type VolumePlacementSource interface {
 	VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]ReplicaLayoutFact, error)
 }
 
+// BucketOps is the slim interface bucket admin handlers need from storage.
+// Satisfied by *storage.Operations (and storage.Backend after ForceDeleteBucket was added).
+type BucketOps interface {
+	CreateBucket(ctx context.Context, bucket string) error
+	HeadBucket(ctx context.Context, bucket string) error
+	DeleteBucket(ctx context.Context, bucket string) error
+	ListBuckets(ctx context.Context) ([]string, error)
+	ForceDeleteBucket(ctx context.Context, bucket string) error
+}
+
+// IAMService is the slim interface the IAM admin handlers need.
+// Satisfied by *iam.AdminAPI.
+type IAMService interface {
+	CreateSA(ctx context.Context, req iam.SACreateRequest) (iam.SACreateResponse, error)
+	ListSA(ctx context.Context) ([]iam.SAListItem, error)
+	GetSA(ctx context.Context, saID string) (iam.SAGetResponse, error)
+	DeleteSA(ctx context.Context, saID string) error
+	CreateKey(ctx context.Context, saID string, req iam.KeyCreateRequest) (iam.KeyCreateResponse, error)
+	RevokeKey(ctx context.Context, saID, accessKey string) error
+	PutGrant(ctx context.Context, req iam.GrantPutRequest) error
+	DeleteGrant(ctx context.Context, req iam.GrantDeleteRequest) error
+	ListGrants(ctx context.Context, saFilter, bucketFilter string) ([]iam.GrantListItem, error)
+	PutBucketUpstream(ctx context.Context, req iam.BucketUpstreamPutRequest) error
+	GetBucketUpstream(ctx context.Context, bucket string) (iam.BucketUpstreamItem, error)
+	ListBucketUpstreams(ctx context.Context) ([]iam.BucketUpstreamItem, error)
+	DeleteBucketUpstream(ctx context.Context, bucket string) error
+}
+
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
@@ -91,6 +120,8 @@ type Deps struct {
 	ScrubProposer   ScrubProposer         // optional; nil disables POST /v1/scrub
 	ScrubAggregator ScrubAggregator       // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
 	VolumePlacement VolumePlacementSource // optional; nil disables replica/EC volume health signal
+	IAM             IAMService            // optional; nil disables IAM admin endpoints
+	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string
@@ -98,9 +129,10 @@ type Deps struct {
 
 type Error = adminapi.Error
 
-func NewNotFound(msg string) *Error { return &Error{Code: "not_found", Message: msg} }
-func NewInvalid(msg string) *Error  { return &Error{Code: "invalid", Message: msg} }
-func NewInternal(msg string) *Error { return &Error{Code: "internal", Message: msg} }
+func NewNotFound(msg string) *Error  { return &Error{Code: "not_found", Message: msg} }
+func NewInvalid(msg string) *Error   { return &Error{Code: "invalid", Message: msg} }
+func NewForbidden(msg string) *Error { return &Error{Code: "forbidden", Message: msg} }
+func NewInternal(msg string) *Error  { return &Error{Code: "internal", Message: msg} }
 func NewConflict(msg string, details map[string]any) *Error {
 	raw, _ := json.Marshal(details)
 	return &Error{Code: "conflict", Message: msg, Details: raw}

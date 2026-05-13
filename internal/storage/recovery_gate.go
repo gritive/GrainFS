@@ -29,8 +29,9 @@ func NewRecoveryWriteGate(inner Backend, err error) *RecoveryWriteGate {
 // multipart create/upload/complete/abort, copy, ACL/policy/versioning setters,
 // truncate, versioned deletes, and snapshot restore helpers. Read/list/head
 // methods delegate through Backend.
-func (g *RecoveryWriteGate) CreateBucket(context.Context, string) error { return g.err }
-func (g *RecoveryWriteGate) DeleteBucket(context.Context, string) error { return g.err }
+func (g *RecoveryWriteGate) CreateBucket(context.Context, string) error      { return g.err }
+func (g *RecoveryWriteGate) DeleteBucket(context.Context, string) error      { return g.err }
+func (g *RecoveryWriteGate) ForceDeleteBucket(context.Context, string) error { return g.err }
 func (g *RecoveryWriteGate) PutObject(context.Context, string, string, io.Reader, string) (*Object, error) {
 	return nil, g.err
 }

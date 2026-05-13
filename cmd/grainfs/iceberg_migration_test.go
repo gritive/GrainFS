@@ -150,8 +150,9 @@ func (m *migrationNoSuchBucketBackend) CreateBucket(ctx context.Context, bucket 
 	m.created = true
 	return nil
 }
-func (m *migrationNoSuchBucketBackend) HeadBucket(context.Context, string) error   { return nil }
-func (m *migrationNoSuchBucketBackend) DeleteBucket(context.Context, string) error { return nil }
+func (m *migrationNoSuchBucketBackend) HeadBucket(context.Context, string) error        { return nil }
+func (m *migrationNoSuchBucketBackend) DeleteBucket(context.Context, string) error      { return nil }
+func (m *migrationNoSuchBucketBackend) ForceDeleteBucket(context.Context, string) error { return nil }
 func (m *migrationNoSuchBucketBackend) ListBuckets(context.Context) ([]string, error) {
 	return nil, nil
 }

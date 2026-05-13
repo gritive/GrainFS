@@ -188,6 +188,17 @@ func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
 		buckets = filtered
 	}
 
+	// Filter internal GrainFS buckets — they are never user-facing S3 buckets.
+	{
+		filtered := buckets[:0]
+		for _, name := range buckets {
+			if !storage.IsInternalBucket(name) {
+				filtered = append(filtered, name)
+			}
+		}
+		buckets = filtered
+	}
+
 	result := listBucketsResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 	for _, name := range buckets {
 		result.Buckets = append(result.Buckets, bucketResult{

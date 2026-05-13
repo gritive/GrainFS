@@ -295,6 +295,13 @@ func (c *ClusterCoordinator) DeleteBucket(ctx context.Context, bucket string) er
 	}
 	return c.base.DeleteBucket(ctx, bucket)
 }
+
+// ForceDeleteBucket deletes all objects in the bucket and then removes it.
+// Unlike DeleteBucket, it does not fail when the bucket is non-empty.
+func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	return c.base.ForceDeleteBucket(ctx, bucket)
+}
+
 func (c *ClusterCoordinator) ListBuckets(ctx context.Context) ([]string, error) {
 	buckets, err := c.base.ListBuckets(ctx)
 	if err != nil {

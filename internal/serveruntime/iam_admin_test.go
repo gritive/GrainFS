@@ -19,6 +19,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/server/admin"
 )
 
 // inProcessPropose dispatches IAM cmd payloads directly to the FSM Applier,
@@ -79,7 +80,7 @@ func startIAMAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {
 		server.WithTransport(standard.NewTransporter),
 		server.WithHostPorts(""),
 	)
-	RegisterIAMAdminRoutes(h, api)
+	admin.RegisterIAMOnly(h, &admin.Deps{IAM: api})
 
 	go h.Spin() //nolint:errcheck
 	t.Cleanup(func() {
@@ -128,7 +129,7 @@ func createSAViaAPI(t *testing.T, cli *http.Client, name string) iam.SACreateRes
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != 201 {
 		t.Fatalf("create status=%d body=%s", resp.StatusCode, body)
 	}
 	var out iam.SACreateResponse
@@ -195,6 +196,29 @@ func TestRegisterIAMAdminRoutes_SAGetAndDelete(t *testing.T) {
 	}
 	if _, ok := store.LookupSA(created.SAID); ok {
 		t.Fatalf("SA not deleted")
+	}
+}
+
+// TestRegisterIAMAdminRoutes_WildcardGrantForbidden verifies that PUT /v1/iam/grant
+// with bucket:"*" on a non-default SA returns 403 (not 500).
+// Regression: statusForCode was missing the "forbidden" case and fell through to 500.
+func TestRegisterIAMAdminRoutes_WildcardGrantForbidden(t *testing.T) {
+	api, _ := newAdminAPIWithStore(t)
+	cli := startIAMAdminTestServer(t, api)
+
+	sa := createSAViaAPI(t, cli, "nondefault")
+
+	body, _ := json.Marshal(iam.GrantPutRequest{SAID: sa.SAID, Bucket: "*", Role: "Admin"})
+	req, _ := http.NewRequest("PUT", "http://unix/v1/iam/grant", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("grant put wildcard: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for wildcard grant on non-default SA, got %d", resp.StatusCode)
 	}
 }
 

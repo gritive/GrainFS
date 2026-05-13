@@ -75,6 +75,10 @@ func (b *contextRecorderBackend) ListParts(ctx context.Context, bucket, key, upl
 	b.ctx = ctx
 	return nil, nil
 }
+func (b *contextRecorderBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	b.ctx = ctx
+	return nil
+}
 func (b *contextRecorderBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	b.ctx = ctx
 	return nil

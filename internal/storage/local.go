@@ -145,6 +145,20 @@ func (b *LocalBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	})
 }
 
+// ForceDeleteBucket deletes all objects in the bucket and then removes it.
+// Unlike DeleteBucket, it does not fail when the bucket is non-empty.
+func (b *LocalBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	if err := b.WalkObjects(ctx, bucket, "", func(obj *Object) error {
+		return b.DeleteObject(ctx, bucket, obj.Key)
+	}); err != nil {
+		return fmt.Errorf("force delete: walk objects: %w", err)
+	}
+	return b.DeleteBucket(ctx, bucket)
+}
+
 func (b *LocalBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	_ = ctx
 	var buckets []string

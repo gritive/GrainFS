@@ -57,6 +57,10 @@ func (sb *SwappableBackend) DeleteBucket(ctx context.Context, bucket string) err
 	return (*sb.inner.Load()).DeleteBucket(ctx, bucket)
 }
 
+func (sb *SwappableBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	return (*sb.inner.Load()).ForceDeleteBucket(ctx, bucket)
+}
+
 func (sb *SwappableBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	return (*sb.inner.Load()).ListBuckets(ctx)
 }
