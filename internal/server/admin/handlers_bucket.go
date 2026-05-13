@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 
@@ -113,4 +114,47 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 		return NewConflict("bucket not empty; use --force to delete all objects", nil)
 	}
 	return NewInternal("delete bucket: " + err.Error())
+}
+
+func AdminGetBucketPolicy(ctx context.Context, d *Deps, name string) (BucketPolicyResp, error) {
+	if storage.IsInternalBucket(name) {
+		return BucketPolicyResp{}, NewForbidden("cannot access internal bucket")
+	}
+	data, err := d.Buckets.GetBucketPolicy(name)
+	if err != nil {
+		if errors.Is(err, storage.ErrUnsupportedOperation) {
+			return BucketPolicyResp{}, NewUnsupported("bucket policy not supported in this configuration", nil)
+		}
+		return BucketPolicyResp{}, NewInternal("get bucket policy: " + err.Error())
+	}
+	if data == nil {
+		return BucketPolicyResp{}, NewNotFound("no bucket policy set")
+	}
+	return BucketPolicyResp{Policy: json.RawMessage(data)}, nil
+}
+
+func AdminSetBucketPolicy(ctx context.Context, d *Deps, name string, req BucketPolicySetReq) error {
+	if storage.IsInternalBucket(name) {
+		return NewForbidden("cannot access internal bucket")
+	}
+	if err := d.Buckets.SetBucketPolicy(name, []byte(req.Policy)); err != nil {
+		if errors.Is(err, storage.ErrUnsupportedOperation) {
+			return NewUnsupported("bucket policy not supported in this configuration", nil)
+		}
+		return NewInternal("set bucket policy: " + err.Error())
+	}
+	return nil
+}
+
+func AdminDeleteBucketPolicy(ctx context.Context, d *Deps, name string) error {
+	if storage.IsInternalBucket(name) {
+		return NewForbidden("cannot access internal bucket")
+	}
+	if err := d.Buckets.DeleteBucketPolicy(name); err != nil {
+		if errors.Is(err, storage.ErrUnsupportedOperation) {
+			return NewUnsupported("bucket policy not supported in this configuration", nil)
+		}
+		return NewInternal("delete bucket policy: " + err.Error())
+	}
+	return nil
 }

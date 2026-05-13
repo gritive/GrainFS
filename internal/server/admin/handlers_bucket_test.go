@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -282,4 +283,126 @@ func TestAdminListBuckets_NilIAM(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Buckets, 1)
 	assert.False(t, resp.Buckets[0].HasUpstream)
+}
+
+type fakeBucketOpsWithPolicy struct {
+	*fakeBucketOps
+	policy map[string][]byte
+}
+
+func newFakeBucketOpsWithPolicy() *fakeBucketOpsWithPolicy {
+	return &fakeBucketOpsWithPolicy{
+		fakeBucketOps: newFakeBucketOps(),
+		policy:        map[string][]byte{},
+	}
+}
+
+func (f *fakeBucketOpsWithPolicy) GetBucketPolicy(bucket string) ([]byte, error) {
+	p, ok := f.policy[bucket]
+	if !ok {
+		return nil, nil
+	}
+	return p, nil
+}
+func (f *fakeBucketOpsWithPolicy) SetBucketPolicy(bucket string, policyJSON []byte) error {
+	f.policy[bucket] = policyJSON
+	return nil
+}
+func (f *fakeBucketOpsWithPolicy) DeleteBucketPolicy(bucket string) error {
+	delete(f.policy, bucket)
+	return nil
+}
+
+func TestAdminGetBucketPolicy(t *testing.T) {
+	fake := newFakeBucketOpsWithPolicy()
+	fake.buckets["my-bucket"] = true
+	fake.policy["my-bucket"] = []byte(`{"Version":"2012-10-17","Statement":[]}`)
+	d := &admin.Deps{Buckets: fake}
+
+	resp, err := admin.AdminGetBucketPolicy(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"Version":"2012-10-17","Statement":[]}`, string(resp.Policy))
+}
+
+func TestAdminGetBucketPolicy_Unsupported(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	_, err := admin.AdminGetBucketPolicy(context.Background(), d, "my-bucket")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "unsupported", ae.Code)
+}
+
+func TestAdminSetBucketPolicy(t *testing.T) {
+	fake := newFakeBucketOpsWithPolicy()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
+
+	policy := json.RawMessage(`{"Version":"2012-10-17","Statement":[]}`)
+	err := admin.AdminSetBucketPolicy(context.Background(), d, "my-bucket", admin.BucketPolicySetReq{Policy: policy})
+	require.NoError(t, err)
+	assert.Equal(t, []byte(policy), fake.policy["my-bucket"])
+}
+
+func TestAdminDeleteBucketPolicy(t *testing.T) {
+	fake := newFakeBucketOpsWithPolicy()
+	fake.buckets["my-bucket"] = true
+	fake.policy["my-bucket"] = []byte(`{}`)
+	d := &admin.Deps{Buckets: fake}
+
+	err := admin.AdminDeleteBucketPolicy(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.Nil(t, fake.policy["my-bucket"])
+}
+
+func TestAdminGetBucketPolicy_NilPolicy(t *testing.T) {
+	fake := newFakeBucketOpsWithPolicy()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
+
+	_, err := admin.AdminGetBucketPolicy(context.Background(), d, "my-bucket")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminGetBucketPolicy_InternalForbidden(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	_, err := admin.AdminGetBucketPolicy(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
+}
+
+func TestAdminSetBucketPolicy_Unsupported(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminSetBucketPolicy(context.Background(), d, "my-bucket",
+		admin.BucketPolicySetReq{Policy: json.RawMessage(`{}`)})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "unsupported", ae.Code)
+}
+
+func TestAdminSetBucketPolicy_InternalForbidden(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminSetBucketPolicy(context.Background(), d, "__grainfs_internal",
+		admin.BucketPolicySetReq{Policy: json.RawMessage(`{}`)})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
+}
+
+func TestAdminDeleteBucketPolicy_Unsupported(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminDeleteBucketPolicy(context.Background(), d, "my-bucket")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "unsupported", ae.Code)
+}
+
+func TestAdminDeleteBucketPolicy_InternalForbidden(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminDeleteBucketPolicy(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
 }

@@ -154,6 +154,39 @@ func registerBucket(g router, d *Deps) {
 	g.GET("/buckets", wrapZero(d, AdminListBuckets))
 	g.GET("/buckets/:name", wrapName(d, AdminGetBucket))
 	g.DELETE("/buckets/:name", bucketDeleteHandler(d))
+	g.GET("/buckets/:name/policy", wrapName(d, AdminGetBucketPolicy))
+	g.PUT("/buckets/:name/policy", bucketSetPolicyHandler(d))
+	g.DELETE("/buckets/:name/policy", bucketDeletePolicyHandler(d))
+}
+
+func bucketSetPolicyHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		name := c.Param("name")
+		var req BucketPolicySetReq
+		body := c.Request.Body()
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
+				return
+			}
+		}
+		if err := AdminSetBucketPolicy(ctx, d, name, req); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.SetStatusCode(consts.StatusNoContent)
+	}
+}
+
+func bucketDeletePolicyHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		name := c.Param("name")
+		if err := AdminDeleteBucketPolicy(ctx, d, name); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.SetStatusCode(consts.StatusNoContent)
+	}
 }
 
 func bucketDeleteHandler(d *Deps) app.HandlerFunc {
