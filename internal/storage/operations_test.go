@@ -264,9 +264,10 @@ func (b *dynamicACLBackend) SetObjectACL(bucket, key string, acl uint8) error {
 
 type basicBackend struct{}
 
-func (b *basicBackend) CreateBucket(context.Context, string) error { return nil }
-func (b *basicBackend) HeadBucket(context.Context, string) error   { return nil }
-func (b *basicBackend) DeleteBucket(context.Context, string) error { return nil }
+func (b *basicBackend) CreateBucket(context.Context, string) error      { return nil }
+func (b *basicBackend) HeadBucket(context.Context, string) error        { return nil }
+func (b *basicBackend) DeleteBucket(context.Context, string) error      { return nil }
+func (b *basicBackend) ForceDeleteBucket(context.Context, string) error { return nil }
 func (b *basicBackend) ListBuckets(context.Context) ([]string, error) {
 	return nil, nil
 }

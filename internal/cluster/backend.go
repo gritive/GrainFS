@@ -847,6 +847,20 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 	return b.propose(ctx, CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
 }
 
+// ForceDeleteBucket deletes all objects in the bucket and then removes it.
+// Unlike DeleteBucket, it does not fail when the bucket is non-empty.
+func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	if err := b.WalkObjects(ctx, bucket, "", func(obj *storage.Object) error {
+		return b.DeleteObject(ctx, bucket, obj.Key)
+	}); err != nil {
+		return fmt.Errorf("force delete: walk objects: %w", err)
+	}
+	return b.DeleteBucket(ctx, bucket)
+}
+
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the
 // versioning state change through Raft so all cluster nodes apply it atomically.
 func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {

@@ -122,6 +122,9 @@ type Backend interface {
 	CreateBucket(ctx context.Context, bucket string) error
 	HeadBucket(ctx context.Context, bucket string) error
 	DeleteBucket(ctx context.Context, bucket string) error
+	// ForceDeleteBucket deletes all objects in the bucket and then removes it.
+	// Unlike DeleteBucket, it does not fail when the bucket is non-empty.
+	ForceDeleteBucket(ctx context.Context, bucket string) error
 	ListBuckets(ctx context.Context) ([]string, error)
 
 	PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error)
