@@ -384,6 +384,43 @@ func (c *mrCluster) GrantAdminOnBuckets(buckets ...string) {
 	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }
 
+// addNode starts the next pre-allocated node slot and writes .join-pending so
+// it boots directly in join mode. Requires startMRCluster to have been called
+// with MaxNodes > current nodeCount. Blocks until the node is HTTP-ready, then
+// updates c.leaderIdx by probing the seed node's admin UDS.
+func (c *mrCluster) addNode(t *testing.T) {
+	t.Helper()
+	i := c.nodeCount
+	if i >= len(c.procs) {
+		t.Fatalf("addNode: nodeCount %d exceeds pre-allocated MaxNodes %d", i, len(c.procs))
+	}
+	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
+	require.NoError(t, writeNodeJoinPending(c.dataDirs[i], seedRaftAddr),
+		"addNode: write join-pending node %d", i)
+	c.procs[i] = c.startNode(i)
+	require.NoError(t,
+		waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second),
+		"addNode: node %d not ready", i)
+	c.nodeCount++
+
+	// Update leaderIdx by querying the seed node's admin UDS.
+	// Status.LeaderID equals the leader's raftAddr ("127.0.0.1:<raftPort>")
+	// because MetaRaftConfig.RaftID = state.raftAddr (see boot_phases_raft.go).
+	sock := filepath.Join(c.dataDirs[0], "admin.sock")
+	cli := clusteradmin.NewClient(sock)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if status, err := cli.Status(ctx); err == nil && status.LeaderID != "" {
+		t.Logf("addNode: leaderID=%q (nodeCount=%d)", status.LeaderID, c.nodeCount)
+		for j := 0; j < c.nodeCount; j++ {
+			if fmt.Sprintf("127.0.0.1:%d", c.raftPorts[j]) == status.LeaderID {
+				c.leaderIdx = j
+				break
+			}
+		}
+	}
+}
+
 // countGroupDirsAcrossNodes returns the union of group_id directories that
 // exist under any node's {dataDir}/groups/. Used to verify per-group BadgerDB
 // + raft were instantiated.
