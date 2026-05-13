@@ -20,8 +20,16 @@ type v2QUICCluster struct {
 	rpcs       []*RaftQUICRPCTransport
 }
 
-func newV2QUICCluster(t *testing.T, n int) *v2QUICCluster {
+// newV2QUICCluster creates an N-node cluster with optional election timeout
+// override (default 200ms). Pass a custom duration as the third argument when
+// the test needs to distinguish TimeoutNow from natural election (e.g. 5s).
+func newV2QUICCluster(t *testing.T, n int, electionTimeout ...time.Duration) *v2QUICCluster {
 	t.Helper()
+
+	et := 200 * time.Millisecond
+	if len(electionTimeout) > 0 {
+		et = electionTimeout[0]
+	}
 
 	ctx := context.Background()
 	transports := make([]*transport.QUICTransport, n)
@@ -46,7 +54,7 @@ func newV2QUICCluster(t *testing.T, n int) *v2QUICCluster {
 		rcfg := raft.Config{
 			ID:               addrs[i],
 			Peers:            peers,
-			ElectionTimeout:  200 * time.Millisecond,
+			ElectionTimeout:  et,
 			HeartbeatTimeout: 50 * time.Millisecond,
 		}
 		node, _, err := newRaftNode(rcfg, "")
@@ -73,6 +81,7 @@ func newV2QUICCluster(t *testing.T, n int) *v2QUICCluster {
 	for i := range nodes {
 		rpcs[i] = NewRaftQUICRPCTransport(transports[i], nodes[i])
 		rpcs[i].SetTransport()
+		rpcs[i].SetTimeoutNowTransport()
 	}
 
 	t.Cleanup(func() {
@@ -170,6 +179,33 @@ func TestV2QUICCluster_ThreeNode_Propose_Replicate(t *testing.T) {
 	}
 }
 
+// TestV2QUICCluster_ThreeNode_TransferLeadership verifies that TransferLeadership
+// sends TimeoutNow over QUIC and a different node becomes leader within one
+// election cycle — proving SendTimeoutNow is wired end-to-end.
+//
+// ElectionTimeout is set to 5s so that a new leader appearing within 1s can
+// only be explained by TimeoutNow (not natural election).
 func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
-	t.Skip("WIP — 구현 후 활성화")
+	// ET=5s: natural election takes [5s, 10s). TimeoutNow delivers within ~100ms.
+	cluster := newV2QUICCluster(t, 3, 5*time.Second)
+	cluster.startAll()
+
+	// Initial leader election: with ET=5s the window is [5s, 10s); allow 15s.
+	leader := cluster.waitForLeader(15 * time.Second)
+	require.NotNil(t, leader, "initial leader required")
+
+	err := leader.TransferLeadership()
+	require.NoError(t, err)
+
+	// A new leader within 2s proves TimeoutNow fired; without it the next
+	// natural election takes [5s, 10s) and the 2s window would expire.
+	// 2s (not 1s) gives GC and scheduling slack on loaded CI runners.
+	require.Eventually(t, func() bool {
+		for _, n := range cluster.nodes {
+			if n != leader && n.IsLeader() {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond, "a new leader must emerge after TransferLeadership")
 }
