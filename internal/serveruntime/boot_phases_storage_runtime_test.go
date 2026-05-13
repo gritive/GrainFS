@@ -78,6 +78,38 @@ func TestBootShardService_ComputesEffectiveEC(t *testing.T) {
 	assert.Equal(t, 0, state.effectiveEC.ParityShards)
 }
 
+func TestRuntimeTopologyNodesPrefersJoinedMetaNodes(t *testing.T) {
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "n0", Address: "127.0.0.1:7000"},
+		{ID: "n1", Address: "127.0.0.1:7001"},
+		{ID: "n2", Address: "127.0.0.1:7002"},
+		{ID: "n3", Address: "127.0.0.1:7003"},
+		{ID: "n4", Address: "127.0.0.1:7004"},
+	}
+
+	got := runtimeTopologyNodes("n0", "127.0.0.1:7000", []string{"127.0.0.1:7001"}, nodes)
+
+	require.Equal(t, []string{
+		"127.0.0.1:7000",
+		"127.0.0.1:7001",
+		"127.0.0.1:7002",
+		"127.0.0.1:7003",
+		"127.0.0.1:7004",
+	}, got)
+}
+
+func TestECConfigForShardGroupUsesJoinedGroupWidth(t *testing.T) {
+	group := cluster.ShardGroupEntry{
+		ID:      "group-12",
+		PeerIDs: []string{"n0", "n1", "n2", "n3", "n4"},
+	}
+	staleBootConfig := cluster.ECConfig{DataShards: 1, ParityShards: 1}
+
+	got := ecConfigForShardGroup(group, staleBootConfig)
+
+	require.Equal(t, cluster.ECConfig{DataShards: 3, ParityShards: 2}, got)
+}
+
 func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
 	require.NoError(t, WaitForMetaRaftLeader(ctx, state.metaRaft, 5*time.Second))

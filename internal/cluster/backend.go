@@ -232,6 +232,13 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 // expected so the self address can be cached before the slice is sorted).
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
+	b.SetClusterNodes(allNodes)
+}
+
+// SetClusterNodes refreshes the configured placement node set without
+// replacing the ShardService. Runtime join paths use this after meta-raft
+// membership grows so new writes do not stay pinned to boot-time topology.
+func (b *DistributedBackend) SetClusterNodes(allNodes []string) {
 	// Cache self address BEFORE sorting so per-request self-skip checks can
 	// compare raft addresses (node.ID() returns a UUID, not the address).
 	if len(allNodes) > 0 {

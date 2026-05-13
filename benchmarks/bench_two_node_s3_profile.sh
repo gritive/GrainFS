@@ -377,6 +377,8 @@ for vus in "${CONCURRENCY_VALUES[@]}"; do
   done
 done
 
+"$BINARY" cluster placement "$BUCKET" --endpoint "$BENCH_DIR/n1/admin.sock" \
+  >"$PROFILE_ROOT/placement.txt" 2>"$PROFILE_ROOT/placement.err" || true
 cp "$BENCH_DIR"/n*.log "$PROFILE_ROOT"/ 2>/dev/null || true
 
 echo ""
