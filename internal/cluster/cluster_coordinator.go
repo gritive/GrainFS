@@ -508,6 +508,24 @@ func contextWithObjectWritePlacement(ctx context.Context, group ShardGroupEntry)
 	return ContextWithPlacementGroupEntry(ctx, group)
 }
 
+func topologyForwardWriteError(group ShardGroupEntry, err error) error {
+	if err == nil || !errors.Is(err, ErrNoReachablePeer) || len(group.PeerIDs) == 0 {
+		return err
+	}
+	cfg := DesiredECConfigForGroup(group)
+	if cfg.NumShards() == 0 || len(group.PeerIDs) < cfg.NumShards() {
+		return err
+	}
+	return &ErrInsufficientPlacementTargets{
+		Operation:     "put_object",
+		GroupID:       group.ID,
+		Desired:       cfg,
+		Configured:    cloneStringSlice(group.PeerIDs),
+		Unavailable:   cloneStringSlice(group.PeerIDs),
+		FailureReason: fmt.Sprintf("forward target unavailable: %v", err),
+	}
+}
+
 func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
 	return &storage.Object{
 		Key:          entry.Key,
@@ -1003,7 +1021,7 @@ func (c *ClusterCoordinator) PutObject(
 		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
 		reply, err := c.forward.SendStream(streamCtx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, r)
 		if err != nil {
-			return nil, err
+			return nil, topologyForwardWriteError(group, err)
 		}
 		obj, err := objectFromReply(reply)
 		if err != nil {
@@ -1022,7 +1040,7 @@ func (c *ClusterCoordinator) PutObject(
 	args := buildPutObjectArgs(bucket, key, contentType, body)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpPutObject, args)
 	if err != nil {
-		return nil, err
+		return nil, topologyForwardWriteError(group, err)
 	}
 	obj, err := objectFromReply(reply)
 	if err != nil {

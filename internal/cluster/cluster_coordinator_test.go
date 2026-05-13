@@ -482,6 +482,34 @@ func TestClusterCoordinator_CommitObjectIndexUsesPlacementGroupECProfile(t *test
 	require.Equal(t, group.PeerIDs, proposer.entries[0].NodeIDs)
 }
 
+func TestClusterCoordinator_PutObject_MapsTopologyForwardUnreachableToPlacementUnavailable(t *testing.T) {
+	base := &fakeBackend{}
+	peers := []string{
+		"127.0.0.1:7001",
+		"127.0.0.1:7002",
+		"127.0.0.1:7003",
+		"127.0.0.1:7004",
+		"127.0.0.1:7005",
+		"127.0.0.1:7006",
+	}
+	groupID := "group-wide"
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup(groupID, peers))
+	router := NewRouter(mgr)
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		groupID: {ID: groupID, PeerIDs: peers},
+	}}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial)).
+		WithECConfig(AutoECConfigForClusterSize(len(peers))).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	_, err := c.PutObject(context.Background(), "bk", "k", strings.NewReader("body"), "text/plain")
+
+	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
+}
+
 func TestClusterCoordinator_CommitObjectIndexRecordsActualShardTargets(t *testing.T) {
 	proposer := &recordingObjectIndexProposer{}
 	c := NewClusterCoordinator(nil, nil, nil, nil, "self").
