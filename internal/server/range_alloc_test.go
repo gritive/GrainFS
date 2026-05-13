@@ -40,19 +40,29 @@ func (b *countingReadAtBackend) ReadAt(ctx context.Context, bucket, key string, 
 
 type transientNotFoundBackend struct {
 	storage.Backend
-	getFailures  atomic.Int32
-	headFailures atomic.Int32
+	getFailures        atomic.Int32
+	headFailures       atomic.Int32
+	getFailuresBefore  int32
+	headFailuresBefore int32
 }
 
 func (b *transientNotFoundBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	if b.getFailures.Add(1) == 1 {
+	failuresBefore := b.getFailuresBefore
+	if failuresBefore == 0 {
+		failuresBefore = 1
+	}
+	if b.getFailures.Add(1) <= failuresBefore {
 		return nil, nil, storage.ErrObjectNotFound
 	}
 	return b.Backend.GetObject(ctx, bucket, key)
 }
 
 func (b *transientNotFoundBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	if b.headFailures.Add(1) == 1 {
+	failuresBefore := b.headFailuresBefore
+	if failuresBefore == 0 {
+		failuresBefore = 1
+	}
+	if b.headFailures.Add(1) <= failuresBefore {
 		return nil, storage.ErrObjectNotFound
 	}
 	return b.Backend.HeadObject(ctx, bucket, key)
@@ -92,6 +102,38 @@ func TestGetAndHeadObjectRetryTransientReadAfterWriteNotFound(t *testing.T) {
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.GreaterOrEqual(t, backend.headFailures.Load(), int32(2))
+}
+
+func TestGetObjectRetryTransientReadAfterWriteNotFoundBeyondSingleTick(t *testing.T) {
+	tmp := t.TempDir()
+	local, err := storage.NewLocalBackend(tmp)
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+	_, err = local.PutObject(context.Background(), "b", "obj", bytes.NewReader([]byte("body")), "text/plain")
+	require.NoError(t, err)
+
+	backend := &transientNotFoundBackend{
+		Backend:            local,
+		getFailuresBefore:  20,
+		headFailuresBefore: 20,
+	}
+	s := New("127.0.0.1:0", backend)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rc, obj, err := s.getObjectWithReadAfterWriteRetry(ctx, "b", "obj")
+	require.NoError(t, err)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, []byte("body"), body)
+	require.Equal(t, "obj", obj.Key)
+	require.Equal(t, int32(21), backend.getFailures.Load())
+
+	got, err := s.headObjectWithReadAfterWriteRetry(ctx, "b", "obj")
+	require.NoError(t, err)
+	require.Equal(t, "obj", got.Key)
+	require.Equal(t, int32(21), backend.headFailures.Load())
 }
 
 func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {

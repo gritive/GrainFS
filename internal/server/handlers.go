@@ -125,7 +125,7 @@ type s3Error struct {
 }
 
 const (
-	readAfterWriteRetryTimeout  = 150 * time.Millisecond
+	readAfterWriteRetryTimeout  = 500 * time.Millisecond
 	readAfterWriteRetryInterval = 10 * time.Millisecond
 )
 
