@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.175.0] - 2026-05-13 — fix: eliminate peerHealth race in ecObjectReader goroutine drain
+
+### Fixed
+
+- Moved `peerHealth.MarkHealthy`/`MarkUnhealthy` calls from spawned shard-fetch
+  goroutines to the main goroutine in `ecObjectReader.readShards`. Previously,
+  k-of-n early exit could leave a goroutine still executing `MarkUnhealthy` while
+  the caller already read `health.unhealthy`, producing a DATA RACE under
+  `-race`. The fix encodes peer state (`peer`, `peerOK`, `canceled`) in
+  `shardResult` and processes it in `applyShardResult` and the drain loop —
+  both running on the single main goroutine.
+
+### Verification
+
+- `go test -race -count=100 ./internal/cluster/ -run TestECObjectReader_ReadObject_MarksUnhealthyPeerOnFetchError` — 100/100 PASS, 0 DATA RACE
+- `go test -race -count=5 ./internal/cluster/` — all PASS
+
 ## [0.0.174.0] - 2026-05-13 — feat: promote raft v2 actor and stabilize dynamic joins
 
 ### Changed
