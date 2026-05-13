@@ -124,6 +124,11 @@ type s3Error struct {
 	Message string   `xml:"Message"`
 }
 
+const (
+	readAfterWriteRetryTimeout  = 150 * time.Millisecond
+	readAfterWriteRetryInterval = 10 * time.Millisecond
+)
+
 func writeXMLError(c *app.RequestContext, status int, code, message string) {
 	c.SetContentType("application/xml")
 	data, _ := xml.Marshal(s3Error{Code: code, Message: message})
@@ -480,6 +485,53 @@ func recordObjectDeleteMetrics(previous storage.PreviousObject) {
 	applyObjectMetricDelta(objectDeleteMetricDelta(previous))
 }
 
+func (s *Server) getObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	deadline := time.Now().Add(readAfterWriteRetryTimeout)
+	var lastErr error
+	for {
+		rc, obj, err := s.ops.GetObject(ctx, bucket, key)
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return rc, obj, err
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, nil, lastErr
+		}
+		if !sleepReadAfterWriteRetry(ctx) {
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+func (s *Server) headObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	deadline := time.Now().Add(readAfterWriteRetryTimeout)
+	var lastErr error
+	for {
+		obj, err := s.ops.HeadObject(ctx, bucket, key)
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return obj, err
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		if !sleepReadAfterWriteRetry(ctx) {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func sleepReadAfterWriteRetry(ctx context.Context) bool {
+	timer := time.NewTimer(readAfterWriteRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if ri := s.readIndexer; ri != nil {
 		readIdx, err := ri.ReadIndex(ctx)
@@ -518,7 +570,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		rc, obj, err = s.ops.GetObjectVersion(bucket, key, versionID)
 	} else {
-		rc, obj, err = s.ops.GetObject(ctx, bucket, key)
+		rc, obj, err = s.getObjectWithReadAfterWriteRetry(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -691,7 +743,7 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 		return false
 	}
 
-	obj, err := s.ops.HeadObject(ctx, bucket, key)
+	obj, err := s.headObjectWithReadAfterWriteRetry(ctx, bucket, key)
 	if err != nil {
 		mapError(c, err)
 		return true
@@ -817,7 +869,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		obj, err = s.ops.HeadObjectVersion(bucket, key, versionID)
 	} else {
-		obj, err = s.ops.HeadObject(ctx, bucket, key)
+		obj, err = s.headObjectWithReadAfterWriteRetry(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {

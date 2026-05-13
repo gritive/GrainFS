@@ -1261,6 +1261,28 @@ func TestClusterCoordinator_PutObject_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
 }
 
+func TestClusterCoordinator_PutObject_ForwardCommitsObjectIndex(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
+	proposer := &recordingObjectIndexProposer{}
+	c.WithObjectIndexProposer(proposer)
+	body := []byte("manifest")
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put", ContentType: "application/octet-stream", VersionID: "v1"},
+		"bk",
+	)
+
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, proposer.entries, 1)
+	require.Equal(t, "bk", proposer.entries[0].Bucket)
+	require.Equal(t, "k", proposer.entries[0].Key)
+	require.Equal(t, "v1", proposer.entries[0].VersionID)
+	require.Equal(t, "g1", proposer.entries[0].PlacementGroupID)
+	require.Equal(t, []string{"a", "self"}, proposer.entries[0].NodeIDs)
+}
+
 func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := []byte("non-empty-body")
@@ -1396,17 +1418,22 @@ func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t 
 	require.Equal(t, body, args.BodyBytes())
 }
 
-func TestClusterCoordinator_PutObject_ForwardPathDoesNotCommitIndex(t *testing.T) {
+func TestClusterCoordinator_CompleteMultipartUpload_ForwardCommitsObjectIndex(t *testing.T) {
 	c, d := setupCoordWithForward(t, "b", "g1", []string{"a"})
 	proposer := &recordingObjectIndexProposer{}
 	c.WithObjectIndexProposer(proposer)
 
-	body := []byte("hello")
-	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
-		&storage.Object{Key: "k", VersionID: "v1", Size: int64(len(body)), ETag: "etag"}, "b",
+	d.replyByOp[raftpb.ForwardOpCompleteMultipartUpload] = buildObjectReply(
+		&storage.Object{Key: "k", VersionID: "v1", Size: 5, ETag: "etag"}, "b",
 	)
 
-	_, err := c.PutObject(context.Background(), "b", "k", bytes.NewReader(body), "text/plain")
+	_, err := c.CompleteMultipartUpload(context.Background(), "b", "k", "upload-1", []storage.Part{
+		{PartNumber: 1, ETag: "part-1", Size: 5},
+	})
 	require.NoError(t, err)
-	require.Empty(t, proposer.entries, "ClusterCoordinator must not commit index for forwarded PutObject — leader handles it")
+	require.Len(t, proposer.entries, 1)
+	require.Equal(t, "b", proposer.entries[0].Bucket)
+	require.Equal(t, "k", proposer.entries[0].Key)
+	require.Equal(t, "v1", proposer.entries[0].VersionID)
+	require.Equal(t, "g1", proposer.entries[0].PlacementGroupID)
 }

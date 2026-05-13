@@ -935,7 +935,11 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 	if err != nil {
 		return nil, err
 	}
-	return objectFromReply(reply)
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 }
 
 func (c *ClusterCoordinator) PutObject(
@@ -969,7 +973,11 @@ func (c *ClusterCoordinator) PutObject(
 		if err != nil {
 			return nil, err
 		}
-		return objectFromReply(reply)
+		obj, err := objectFromReply(reply)
+		if err != nil {
+			return nil, err
+		}
+		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
@@ -991,7 +999,7 @@ func (c *ClusterCoordinator) PutObject(
 	if obj.Size != int64(len(body)) {
 		return nil, ErrForwardBodySizeMismatch
 	}
-	return obj, nil
+	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 }
 
 func (c *ClusterCoordinator) PutObjectWithACL(
