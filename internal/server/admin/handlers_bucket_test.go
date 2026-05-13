@@ -14,9 +14,15 @@ import (
 
 type fakeBucketOps struct {
 	buckets map[string]bool
+	counts  map[string]int64
 }
 
-func newFakeBucketOps() *fakeBucketOps { return &fakeBucketOps{buckets: map[string]bool{}} }
+func newFakeBucketOps() *fakeBucketOps {
+	return &fakeBucketOps{
+		buckets: map[string]bool{},
+		counts:  map[string]int64{},
+	}
+}
 
 func (f *fakeBucketOps) CreateBucket(_ context.Context, bucket string) error {
 	if f.buckets[bucket] {
@@ -51,6 +57,13 @@ func (f *fakeBucketOps) ForceDeleteBucket(_ context.Context, bucket string) erro
 	}
 	delete(f.buckets, bucket)
 	return nil
+}
+
+func (f *fakeBucketOps) CountObjects(_ context.Context, bucket string) (int64, error) {
+	if !f.buckets[bucket] {
+		return 0, storage.ErrBucketNotFound
+	}
+	return f.counts[bucket], nil
 }
 
 func TestAdminCreateBucket(t *testing.T) {
