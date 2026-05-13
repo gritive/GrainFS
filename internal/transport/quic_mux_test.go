@@ -92,22 +92,10 @@ func TestQUICTransport_MuxRejectedWithoutHandler(t *testing.T) {
 	defer client.Close()
 	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
 
-	// Mux dial succeeds (TLS handshake completes — server advertises both ALPNs).
-	conn, err := client.GetOrConnectMux(ctx, server.LocalAddr())
-	require.NoError(t, err)
-
-	// But the connection is closed by the server right after handshake.
-	// Detect by trying to open a stream.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		_, err := conn.OpenStreamSync(ctx)
-		if err != nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_, err = conn.OpenStreamSync(ctx)
-	assert.Error(t, err, "expected stream open to fail after server rejects mux")
+	// After CE: server closes the conn (no handler), so GetOrConnectMux returns
+	// an error during the capability exchange.
+	_, err := client.GetOrConnectMux(ctx, server.LocalAddr())
+	assert.Error(t, err, "expected dial to fail when server has no mux handler")
 }
 
 // TestQUICTransport_MuxALPNFormat removed: after T2 (static ALPN), this test

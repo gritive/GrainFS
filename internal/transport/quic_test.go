@@ -11,6 +11,7 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -590,4 +591,32 @@ func TestMuxALPNConstant(t *testing.T) {
 	tr := MustNewQUICTransport("test-cluster-psk")
 	defer tr.Close()
 	assert.Equal(t, ProtocolVersionMux, tr.MuxALPN())
+}
+
+func TestVersionHandshakeSuccess(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	connReady := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(connReady)
+		<-ctx.Done()
+	})
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+
+	conn, err := client.GetOrConnectMux(ctx, server.LocalAddr())
+	require.NoError(t, err)
+	require.NotNil(t, conn)
+
+	select {
+	case <-connReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("mux handler not called after capability exchange")
+	}
 }

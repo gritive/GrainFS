@@ -39,6 +39,12 @@ const (
 	quicAppErrCode = 0x1
 )
 
+const (
+	ceVersion  = byte(0x01)
+	ceFeatures = byte(0x00)
+	ceTimeout  = 5 * time.Second
+)
+
 var quicStreamCopyBufferPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, quicStreamCopyBufferSize)
@@ -402,7 +408,14 @@ func (t *QUICTransport) acceptLoop() {
 				_ = conn.CloseWithError(quicAppErrCode, "mux ALPN unsupported on this peer")
 				continue
 			}
-			go h(t.ctx, conn)
+			go func() {
+				if err := t.handleCapabilityExchange(conn); err != nil {
+					log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("capability exchange failed")
+					_ = conn.CloseWithError(quicAppErrCode, err.Error())
+					return
+				}
+				h(t.ctx, conn)
+			}()
 		case alpn == t.pskALPN():
 			go t.handleInboundConnection(conn)
 		default:
@@ -588,6 +601,76 @@ func checkResponseStatus(addr string, resp *Message) (*Message, error) {
 	return nil, fmt.Errorf("transport response from %s status %d: %s", addr, resp.Status, string(resp.Payload))
 }
 
+// doCapabilityExchangeDial performs the client-side capability exchange on a
+// freshly dialed mux connection. Must be called before caching the conn.
+func (t *QUICTransport) doCapabilityExchangeDial(ctx context.Context, conn *quic.Conn) error {
+	ceCtx, cancel := context.WithTimeout(ctx, ceTimeout)
+	defer cancel()
+
+	stream, err := conn.OpenStreamSync(ceCtx)
+	if err != nil {
+		return fmt.Errorf("open CE stream: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	if dl, ok := ceCtx.Deadline(); ok {
+		_ = stream.SetDeadline(dl)
+	}
+
+	if err := t.codec.Encode(stream, &Message{
+		Type:    StreamCapabilityExchange,
+		Payload: []byte{ceVersion, ceFeatures},
+	}); err != nil {
+		return fmt.Errorf("encode CE: %w", err)
+	}
+
+	resp, err := t.codec.Decode(stream)
+	if err != nil {
+		return fmt.Errorf("decode CE response: %w", err)
+	}
+	if resp.Status != StatusOK {
+		return fmt.Errorf("CE rejected by peer: %s", string(resp.Payload))
+	}
+	return nil
+}
+
+// handleCapabilityExchange performs the server-side capability exchange on an
+// accepted mux connection. Must return nil before handing conn to muxHandler.
+func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
+	ctx, cancel := context.WithTimeout(t.ctx, ceTimeout)
+	defer cancel()
+
+	stream, err := conn.AcceptStream(ctx)
+	if err != nil {
+		return fmt.Errorf("accept CE stream: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	if dl, ok := ctx.Deadline(); ok {
+		_ = stream.SetDeadline(dl)
+	}
+
+	msg, err := t.codec.Decode(stream)
+	if err != nil {
+		return fmt.Errorf("decode CE: %w", err)
+	}
+	if msg.Type != StreamCapabilityExchange {
+		_ = t.codec.Encode(stream, NewErrorResponse(msg, StatusError,
+			fmt.Errorf("expected StreamCapabilityExchange (0x12), got 0x%02x", byte(msg.Type))))
+		return fmt.Errorf("unexpected CE stream type 0x%02x", byte(msg.Type))
+	}
+	peerVer := byte(0)
+	if len(msg.Payload) > 0 {
+		peerVer = msg.Payload[0]
+	}
+	if peerVer != ceVersion {
+		_ = t.codec.Encode(stream, NewErrorResponse(msg, StatusError,
+			fmt.Errorf("peer version %d, our version %d, upgrade required", peerVer, ceVersion)))
+		return fmt.Errorf("CE version mismatch: peer=%d ours=%d", peerVer, ceVersion)
+	}
+	return t.codec.Encode(stream, NewResponse(msg, []byte{ceVersion, ceFeatures}))
+}
+
 // GetOrConnectMux dials (or returns the cached) mux QUIC connection for addr.
 // Used by internal/raft to wrap the conn in a RaftConn for raft RPC traffic.
 // The returned *quic.Conn is owned by the transport; callers must not close it.
@@ -613,6 +696,11 @@ func (t *QUICTransport) GetOrConnectMux(ctx context.Context, addr string) (*quic
 		negotiated := state.TLS.NegotiatedProtocol
 		_ = dialed.CloseWithError(quicAppErrCode, "peer does not speak mux ALPN")
 		return nil, fmt.Errorf("peer at %s negotiated %q (expected %q)", addr, negotiated, t.muxALPN())
+	}
+
+	if err := t.doCapabilityExchangeDial(ctx, dialed); err != nil {
+		_ = dialed.CloseWithError(quicAppErrCode, "capability exchange failed")
+		return nil, fmt.Errorf("capability exchange with %s: %w", addr, err)
 	}
 
 	t.mu.Lock()
