@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.183.0] - 2026-05-14 — test: dynamic MR cluster E2E + clusterpb fbs fix
+
+### Added
+
+- **`TestE2E_TwoNodeAvailabilityTrap`** — 2-노드 quorum 손실 시 쓰기가 hang(context.DeadlineExceeded)으로 실패함을 문서화하는 회귀 테스트 추가.
+- **`TestE2E_DynamicGroupSeeding_1to5`** — `addNode`를 통한 1→5 순차 노드 확장 후 shard group 수가 `seedGroupCountForClusterSize(n)=max(n*4,8)` 공식에 따라 증가함을 검증하는 회귀 테스트 추가.
+- **`mrCluster.addNode`** — 동적 노드 추가: `.join-pending` 파일 쓰기 후 노드 기동, HTTP 준비 대기, leaderIdx 갱신.
+- **`startMRCluster` / `tryStartMRCluster`** — 동적 sequential join 방식(노드 0 부터 순차 부팅)으로 클러스터 기동. `FastBootstrap` 옵션으로 `time.Sleep(8s)` 대신 shard-group 폴링 사용.
+- **`waitForShardGroupCount`** — admin UDS `/v1/cluster/status`를 폴링해 shard group 수가 충족될 때까지 대기하는 헬퍼.
+- **`liveURLs()` 헬퍼** — `MaxNodes > nodeCount`인 동적 클러스터에서 미기동 노드 URL을 제외하고 실행 중인 노드만 순회.
+
+### Fixed
+
+- **`clusterpb` fbs 스키마** — `cluster.fbs`에 `MigrationJobStart/Done/Failed` enum 값 누락으로 `make build`(`flatc` 재생성) 후 `MetaCmdType.go`에서 상수가 사라지던 버그 수정. (동일 수정이 PR #340에도 포함됨)
+
+### Verification
+
+- `go test -count=1 ./tests/e2e/ -run TestE2E_MultiRaftSharding` (145s, PASS)
+- `go test -count=1 -race ./tests/e2e/ -run TestE2E_DynamicGroupSeeding_1to5` (344s, PASS)
+
 ## [0.0.182.0] - 2026-05-14 — feat: bucket & IAM CLI DX + security hardening
 
 ### Added
