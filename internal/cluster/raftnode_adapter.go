@@ -35,6 +35,10 @@ type raftNodeAdapter struct {
 // Boxed via atomic.Pointer so it can be swapped lock-free.
 type installSnapshotFn func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error)
 
+// timeoutNowFn is the outbound TimeoutNow send callback.
+// Boxed via atomic.Pointer so it can be swapped lock-free.
+type timeoutNowFn func(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error)
+
 // newRaftNodeAdapter constructs the adapter. Callers must call SetTransport then
 // Start before using the node.
 func newRaftNodeAdapter(n *raft.Node) *raftNodeAdapter {
@@ -236,6 +240,19 @@ func (a *raftNodeAdapter) SetInstallSnapshotTransport(
 	a.pendingIS.Store(&fn)
 }
 
+// SetTimeoutNowTransport stores the outbound TimeoutNow send callback.
+// MUST be called after SetTransport (which initialises a.bridge); a nil bridge
+// silently drops the callback rather than buffering it. run.go guarantees this
+// ordering — see serveruntime.Run where SetTransport() precedes SetTimeoutNowTransport().
+func (a *raftNodeAdapter) SetTimeoutNowTransport(
+	send func(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error),
+) {
+	fn := timeoutNowFn(send)
+	if a.bridge != nil {
+		a.bridge.sendTN.Store(&fn)
+	}
+}
+
 // raftTransportBridge adapts callback pairs to the raft.Transport interface.
 type raftTransportBridge struct {
 	sendRV func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
@@ -244,6 +261,10 @@ type raftTransportBridge struct {
 	// publication is lock-free; nil means the caller did not wire IS support
 	// (SendInstallSnapshot returns ErrNotImplemented in that case).
 	sendIS atomic.Pointer[installSnapshotFn]
+	// sendTN is wired through SetTimeoutNowTransport. atomic.Pointer so
+	// publication is lock-free; nil means TimeoutNow falls back to
+	// ErrNotImplemented and leadership transfer degrades to natural election.
+	sendTN atomic.Pointer[timeoutNowFn]
 }
 
 func (b *raftTransportBridge) SendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
@@ -323,12 +344,13 @@ func (b *raftTransportBridge) SendInstallSnapshot(peer string, args *raft.Instal
 	return &raft.InstallSnapshotReply{Term: reply.Term}, nil
 }
 
-// SendTimeoutNow satisfies raft.Transport. The cluster package does not yet wire
-// a dedicated TimeoutNow RPC; returning an error causes TransferLeadership to
-// degrade gracefully — the leader still steps down (Raft §3.10), and the
-// transfer target wins the next natural election instead of an immediate one.
-func (b *raftTransportBridge) SendTimeoutNow(_ string, _ *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
-	return nil, raft.ErrNotImplemented
+// SendTimeoutNow satisfies raft.Transport.
+func (b *raftTransportBridge) SendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
+	sendPtr := b.sendTN.Load()
+	if sendPtr == nil || *sendPtr == nil {
+		return nil, raft.ErrNotImplemented
+	}
+	return (*sendPtr)(peer, args)
 }
 
 // --- No-op stubs ---
