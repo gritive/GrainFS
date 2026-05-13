@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // bootHTTPServerAndAdmin constructs the data-plane server.Server, wires the
@@ -65,7 +66,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}),
 		VolumePlacement: NewVolumePlacementAdapter(state.metaRaft),
 		IAM:             state.iamAdminAPI,
-		Buckets:         state.backend,
+		Buckets:         storage.NewOperations(state.backend),
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
