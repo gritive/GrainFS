@@ -315,7 +315,7 @@ func (t *QUICTransport) pskALPN() string {
 // muxALPN returns the multiplexed-stream ALPN used by raft RPC connections.
 // Same rationale as pskALPN — static, no PSK material in the protocol string.
 func (t *QUICTransport) muxALPN() string {
-	return "grainfs-mux-v1"
+	return ProtocolVersionMux
 }
 
 func defaultQUICConfig() *quic.Config {

@@ -585,3 +585,9 @@ func TestQUICTransport_CallReadContextDoesNotCancelReturnedBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, body, got)
 }
+
+func TestMuxALPNConstant(t *testing.T) {
+	tr := MustNewQUICTransport("test-cluster-psk")
+	defer tr.Close()
+	assert.Equal(t, ProtocolVersionMux, tr.MuxALPN())
+}
