@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.184.0] - 2026-05-14 — feat: bucket policy/versioning admin API + CLI
+
+### Added
+
+- **`grainfs bucket policy get/set/delete <bucket>`** — admin UDS를 통해 버킷 S3 bucket policy 조회·설정·삭제. `set`은 `--file <path>` 또는 stdin(`-`)으로 JSON 정책 수신.
+- **`grainfs bucket versioning get/enable/suspend <bucket>`** — 버킷 버저닝 상태 조회·활성화·일시정지.
+- **`bucket list` + `bucket info`** — `HAS_UPSTREAM` 열 추가. `bucket info`는 `VERSIONING` 열도 추가.
+- **`GET/PUT/DELETE /v1/buckets/:name/policy`** — admin HTTP API. PUT은 빈 바디 시 400 반환.
+- **`GET/PUT /v1/buckets/:name/versioning`** — admin HTTP API. PUT의 `status`는 `Enabled` / `Suspended` 만 허용.
+- **`AdminGetBucket` 응답 보강** — `has_upstream`, `versioning` 필드 포함.
+- **`AdminListBuckets` 응답 보강** — `has_upstream` 필드 포함.
+
+### Fixed
+
+- **`bucket upstream list` 파싱** — 서버가 raw JSON array를 반환하는데 wrapped struct로 unmarshal 시도하던 버그 수정.
+- **PUT `/v1/buckets/:name/policy` 빈 바디 허용** — body 없이 호출 시 `policy` 필드 누락 검사 없이 통과하던 버그. 이제 400 반환.
+
+### Verification
+
+- `make test-e2e -run TestBucketUpstream_CLIRoundtrip` PASS
+- `make test-e2e -run TestBucketUpstream_LegacyCLI_Removed` PASS
+
 ## [0.0.183.0] - 2026-05-14 — test: dynamic MR cluster E2E + clusterpb fbs fix
 
 ### Added
