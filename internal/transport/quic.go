@@ -411,7 +411,7 @@ func (t *QUICTransport) acceptLoop() {
 			go func() {
 				if err := t.handleCapabilityExchange(conn); err != nil {
 					log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("capability exchange failed")
-					_ = conn.CloseWithError(quicAppErrCode, err.Error())
+					_ = conn.CloseWithError(quicAppErrCode, "capability exchange failed")
 					return
 				}
 				h(t.ctx, conn)
