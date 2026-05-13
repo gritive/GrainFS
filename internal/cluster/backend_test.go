@@ -105,6 +105,41 @@ func TestDistributedBackend_CreateAndHeadBucket(t *testing.T) {
 	require.ErrorIs(t, b.HeadBucket(context.Background(), "nope"), storage.ErrBucketNotFound)
 }
 
+func TestDistributedBackend_TruncateInternalBucketUpdatesPartialWriteObject(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, storage.NFS4BucketName))
+	_, err := b.WriteAt(ctx, storage.NFS4BucketName, "dir/file.bin", 0, []byte("0123456789"))
+	require.NoError(t, err)
+
+	require.NoError(t, b.Truncate(ctx, storage.NFS4BucketName, "dir/file.bin", 4))
+
+	obj, err := b.HeadObject(ctx, storage.NFS4BucketName, "dir/file.bin")
+	require.NoError(t, err)
+	require.EqualValues(t, 4, obj.Size)
+	body, _, err := b.GetObject(ctx, storage.NFS4BucketName, "dir/file.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, "0123", string(got))
+}
+
+func TestDistributedBackend_DeleteInternalBucketHardDeletesMetadata(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, storage.NFS4BucketName))
+	_, err := b.WriteAt(ctx, storage.NFS4BucketName, "dir/file.bin", 0, []byte("old"))
+	require.NoError(t, err)
+	require.NoError(t, b.DeleteObject(ctx, storage.NFS4BucketName, "dir/file.bin"))
+	_, err = b.WriteAt(ctx, storage.NFS4BucketName, "dir/file.bin", 0, []byte("new"))
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject(ctx, storage.NFS4BucketName, "dir/file.bin")
+	require.NoError(t, err)
+	require.EqualValues(t, 3, obj.Size)
+}
+
 func TestDistributedBackend_CreateBucketConflict(t *testing.T) {
 	b := newTestDistributedBackend(t)
 

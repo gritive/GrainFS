@@ -45,9 +45,7 @@ func joinViaUDS(t *testing.T, sock, peerAddr string) (int, map[string]string) {
 // /v1/cluster/join endpoint on a node that is already part of a multi-node
 // cluster returns status "already_member" (no-op, idempotent).
 func TestE2E_Bootstrap_JoinUDS_AlreadyMember(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -68,9 +66,7 @@ func TestE2E_Bootstrap_JoinUDS_AlreadyMember(t *testing.T) {
 // twice for the same peer on an already-joined node prints "already_member"
 // and exits zero both times.
 func TestE2E_Bootstrap_JoinCLI_Idempotent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -107,9 +103,7 @@ func runGrainFSJoin(ctx context.Context, sock, peerAddr string) (string, error) 
 // existing user data rejects a join request with 409 data_present when
 // force=false (the default).
 func TestE2E_Bootstrap_DataPresent_BlocksJoin(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	// Nodes:1 + ClusterModeDynamicJoin → single solo node with admin SA bootstrapped.
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,10 +18,13 @@ import (
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume/dedup"
+	"github.com/rs/zerolog/log"
 )
 
 // ErrNotFound is returned when a volume does not exist.
 var ErrNotFound = errors.New("volume not found")
+
+var volumeTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 const (
 	DefaultBlockSize = 4096
@@ -441,8 +445,14 @@ func (m *Manager) ReadAt(name string, p []byte, off int64) (int, error) {
 
 // WriteAt writes len(p) bytes to the volume starting at byte offset off.
 func (m *Manager) WriteAt(name string, p []byte, off int64) (int, error) {
+	tStart := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if volumeTraceEnabled {
+		defer func() {
+			log.Debug().Str("volume", name).Int("bytes", len(p)).Dur("total", time.Since(tStart)).Msg("Volume WriteAt trace")
+		}()
+	}
 
 	vol, err := m.getVolUnlocked(name)
 	if err != nil {
@@ -484,10 +494,16 @@ type asyncPutter interface {
 // Falls back to synchronous WriteAt when the backend doesn't implement asyncPutter
 // or when dedup/CoW is active.
 func (m *Manager) WriteAtDeferred(name string, p []byte, off int64) ([]func() error, int, error) {
+	tStart := time.Now()
 	ap, ok := m.backend.(asyncPutter)
 	if !ok {
 		n, err := m.WriteAt(name, p, off)
 		return nil, n, err
+	}
+	if volumeTraceEnabled {
+		defer func() {
+			log.Debug().Str("volume", name).Int("bytes", len(p)).Dur("total", time.Since(tStart)).Msg("Volume WriteAtDeferred trace")
+		}()
 	}
 
 	m.mu.Lock()

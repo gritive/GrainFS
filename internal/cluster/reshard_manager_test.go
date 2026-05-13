@@ -484,10 +484,9 @@ func TestReshardManager_Run_DoesNotConvertCorruptPlacement(t *testing.T) {
 	assert.Empty(t, conv.upgraded)
 }
 
-// TestUpgradeObjectEC_RoundTrip tests upgradeObjectEC end-to-end.
-// TODO(Task7): re-enable once upgradeObjectEC switches from CmdPutShardPlacement to ring-based placement.
+// TestUpgradeObjectEC_RoundTrip tests upgradeObjectEC end-to-end against the
+// current ObjectMeta placement model.
 func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
-	t.Skip("upgradeObjectEC still uses CmdPutShardPlacement; re-enable in Task7")
 	backend := NewSingletonBackendForTest(t)
 
 	// Wire a local-only ShardService (nil transport — no remote calls needed).
@@ -502,52 +501,50 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 	// Create the bucket through Raft so HeadBucket passes.
 	require.NoError(t, backend.CreateBucket(context.Background(), bucket))
 
-	// Seed object metadata directly into the FSM (no versionID → legacy layout).
+	// Seed old metadata directly into the FSM (no versionID → legacy layout).
 	etag := fmt.Sprintf("%x", md5.Sum(data))
+	oldCfg := ECConfig{DataShards: 2, ParityShards: 1}
+	oldNodes := make([]string, oldCfg.NumShards())
+	for i := range oldNodes {
+		oldNodes[i] = "self"
+	}
 	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket: bucket, Key: key, Size: int64(len(data)),
 		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
+		ECData: 2, ECParity: 1, NodeIDs: oldNodes,
 	})
 	require.NoError(t, err)
 	require.NoError(t, backend.fsm.Apply(raw))
 
 	// Write old shards (k=2, m=1 → 3 shards) directly to local storage.
-	oldCfg := ECConfig{DataShards: 2, ParityShards: 1}
 	oldShards, err := ECSplit(oldCfg, data)
 	require.NoError(t, err)
 	for i, shard := range oldShards {
 		require.NoError(t, svc.WriteLocalShard(bucket, key, i, shard))
 	}
 
-	// Seed old placement record (k=2,m=1, all 3 shards on "self").
-	selfNodes := make([]string, oldCfg.NumShards())
-	for i := range selfNodes {
-		selfNodes[i] = "self"
-	}
-	raw, err = EncodeCommand(CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket: bucket, Key: key, NodeIDs: selfNodes, K: 2, M: 1,
-	})
+	_, oldMeta, err := backend.headObjectMeta(context.Background(), bucket, key)
 	require.NoError(t, err)
-	require.NoError(t, backend.fsm.Apply(raw))
-
-	// Confirm the old placement is readable before upgrade.
-	oldRec, err := backend.fsm.LookupShardPlacement(bucket, key)
+	oldResolved, err := backend.ResolvePlacement(context.Background(), bucket, key, oldMeta)
 	require.NoError(t, err)
-	require.Equal(t, 3, len(oldRec.Nodes))
-	require.Equal(t, 2, oldRec.K)
-	require.Equal(t, 1, oldRec.M)
+	require.Equal(t, PlacementSourceMetadata, oldResolved.Source)
+	require.Equal(t, oldCfg.NumShards(), len(oldResolved.Record.Nodes))
+	require.Equal(t, oldCfg.DataShards, oldResolved.Record.K)
+	require.Equal(t, oldCfg.ParityShards, oldResolved.Record.M)
 
 	// Upgrade from k=2,m=1 to k=3,m=2.
 	newCfg := ECConfig{DataShards: 3, ParityShards: 2}
 	ctx := context.Background()
-	require.NoError(t, backend.upgradeObjectEC(ctx, bucket, key, oldRec, newCfg))
+	require.NoError(t, backend.upgradeObjectEC(ctx, bucket, key, oldResolved.Record, newCfg))
 
-	// Verify new placement record was committed via Raft.
-	newRec, err := backend.fsm.LookupShardPlacement(bucket, key)
+	_, newMeta, err := backend.headObjectMeta(context.Background(), bucket, key)
 	require.NoError(t, err)
-	assert.Equal(t, newCfg.NumShards(), len(newRec.Nodes), "new placement shard count")
-	assert.Equal(t, 3, newRec.K)
-	assert.Equal(t, 2, newRec.M)
+	newResolved, err := backend.ResolvePlacement(context.Background(), bucket, key, newMeta)
+	require.NoError(t, err)
+	assert.Equal(t, PlacementSourceMetadata, newResolved.Source)
+	assert.Equal(t, newCfg.NumShards(), len(newResolved.Record.Nodes), "new placement shard count")
+	assert.Equal(t, newCfg.DataShards, newResolved.Record.K)
+	assert.Equal(t, newCfg.ParityShards, newResolved.Record.M)
 
 	// Verify the object is still fully readable after the upgrade.
 	rc, obj, err := backend.GetObject(context.Background(), bucket, key)

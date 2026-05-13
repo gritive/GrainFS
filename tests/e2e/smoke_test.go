@@ -18,9 +18,7 @@ import (
 // TestSmoke_DeploymentVerification is a fast smoke test to verify deployment.
 // This test should complete in under 2 minutes and covers the critical path.
 func TestSmoke_DeploymentVerification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping smoke test in short mode")
-	}
+	skipIfShort(t, "skipping smoke test in short mode")
 
 	dir, err := os.MkdirTemp("", "grainfs-smoke-*")
 	require.NoError(t, err)

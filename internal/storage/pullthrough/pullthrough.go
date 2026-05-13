@@ -29,6 +29,7 @@ var (
 	_ storage.Backend            = (*Backend)(nil)
 	_ storage.Snapshotable       = (*Backend)(nil)
 	_ storage.BucketSnapshotable = (*Backend)(nil)
+	_ storage.PartialIO          = (*Backend)(nil)
 )
 
 // NewBackend creates a pull-through caching backend. The Resolver returns
@@ -41,6 +42,66 @@ func NewBackend(local storage.Backend, resolver Resolver) *Backend {
 // Unwrap exposes the wrapped backend so capability detection (and other
 // wrapper-aware code) can peel this decorator off.
 func (b *Backend) Unwrap() storage.Backend { return b.Backend }
+
+func (b *Backend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
+	putter, ok := b.Backend.(storage.UserMetadataPutter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+}
+
+func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+	type asyncPutter interface {
+		PutObjectAsync(context.Context, string, string, io.Reader, string) (*storage.Object, func() error, error)
+	}
+	ap, ok := b.Backend.(asyncPutter)
+	if !ok {
+		obj, err := b.Backend.PutObject(ctx, bucket, key, r, contentType)
+		return obj, func() error { return nil }, err
+	}
+	return ap.PutObjectAsync(ctx, bucket, key, r, contentType)
+}
+
+func (b *Backend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	partial, ok := b.Backend.(storage.PartialIO)
+	if !ok {
+		return nil, fmt.Errorf("pullthrough: inner backend does not support WriteAt")
+	}
+	return partial.WriteAt(ctx, bucket, key, offset, data)
+}
+
+func (b *Backend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	partial, ok := b.Backend.(storage.PartialIO)
+	if !ok {
+		return 0, fmt.Errorf("pullthrough: inner backend does not support ReadAt")
+	}
+	return partial.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+func (b *Backend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	partial, ok := b.Backend.(storage.PartialIO)
+	if !ok {
+		return fmt.Errorf("pullthrough: inner backend does not support Truncate")
+	}
+	return partial.Truncate(ctx, bucket, key, size)
+}
+
+func (b *Backend) PreferReadAt(bucket string) bool {
+	type readAtPreference interface {
+		PreferReadAt(bucket string) bool
+	}
+	pref, ok := b.Backend.(readAtPreference)
+	return ok && pref.PreferReadAt(bucket)
+}
+
+func (b *Backend) PreferWriteAt(bucket string) bool {
+	type writeAtPreference interface {
+		PreferWriteAt(bucket string) bool
+	}
+	pref, ok := b.Backend.(writeAtPreference)
+	return ok && pref.PreferWriteAt(bucket)
+}
 
 // WALOffset forwards PITR snapshot anchors through the pull-through decorator.
 func (b *Backend) WALOffset() uint64 {

@@ -54,9 +54,7 @@ func filepathWalkBlock(dataDir, vol string, blockNum int, hits *[]string) error 
 // handler registered on the wrong router). Without the fix this test fails
 // at the holders>=2 assertion (only the leader has a copy).
 func TestE2E_VolumeScrub_MultiNodeRepair(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:         3,

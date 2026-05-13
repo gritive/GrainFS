@@ -102,6 +102,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 		if err := tr.Truncate(context.Background(), nfs4Bucket, key, required); err != nil {
 			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 		}
+		d.state.InvalidateKey(key)
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
@@ -119,6 +120,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 	}
+	d.state.InvalidateKey(key)
 	return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 }
 
@@ -174,6 +176,7 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
 	}
+	d.state.InvalidateKey(key)
 	return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 }
 
@@ -189,9 +192,9 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	r := NewXDRReader(data)
 	r.ReadFixed(16) //nolint:errcheck // src stateid
 	r.ReadFixed(16) //nolint:errcheck // dst stateid
-	r.ReadUint64()  // src_offset (whole-file copy only)
-	r.ReadUint64()  // dst_offset
-	r.ReadUint64()  // count
+	srcOffset, _ := r.ReadUint64()
+	dstOffset, _ := r.ReadUint64()
+	count, _ := r.ReadUint64()
 
 	srcKey := pathToKey(d.savedPath)
 	dstKey := pathToKey(d.currentPath)
@@ -213,22 +216,54 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 	}
 
+	if srcOffset >= uint64(len(srcData)) {
+		srcData = nil
+	} else {
+		srcData = srcData[srcOffset:]
+		if count > 0 && count < uint64(len(srcData)) {
+			srcData = srcData[:count]
+		}
+	}
+	bytesWritten := uint64(len(srcData))
+
 	release := d.state.LockPath(d.currentPath)
 	defer release()
-
-	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, dstKey, bytes.NewReader(srcData), "application/octet-stream"); err != nil {
-		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
+	if partial, ok := partialIOBackend(d.backend); ok {
+		if _, err := partial.WriteAt(context.Background(), nfs4Bucket, dstKey, dstOffset, srcData); err != nil {
+			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
+		}
+	} else {
+		var dstData []byte
+		if dstBody, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, dstKey); err == nil {
+			dstData, err = io.ReadAll(dstBody)
+			dstBody.Close()
+			if err != nil {
+				return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
+			}
+		}
+		endOffset := dstOffset + bytesWritten
+		if endOffset > maxObjectBytes {
+			return OpResult{OpCode: OpCopy, Status: NFS4ERR_FBIG}
+		}
+		if uint64(len(dstData)) < endOffset {
+			dstData = append(dstData, make([]byte, int(endOffset)-len(dstData))...)
+		}
+		copy(dstData[dstOffset:endOffset], srcData)
+		if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, dstKey, bytes.NewReader(dstData), "application/octet-stream"); err != nil {
+			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
+		}
 	}
+	d.state.InvalidateKey(dstKey)
 
 	// RFC 7862 §15.2: return COPY4resok { write_response4, cr_consecutive, cr_synchronous }
 	// write_response4: wr_callback_id<1>=[] + wr_bytes_written + wr_stable + wr_writeverf(8)
 	w := getXDRWriter()
-	w.WriteUint32(0)                    // wr_callback_id count = 0 (synchronous)
-	w.WriteUint64(uint64(len(srcData))) // wr_bytes_written
-	w.WriteUint32(2)                    // wr_stable = FILE_SYNC
-	w.buf.Write(d.state.WriteVerf[:])   // wr_writeverf (8 bytes)
-	w.WriteUint32(1)                    // cr_consecutive = TRUE
-	w.WriteUint32(1)                    // cr_synchronous = TRUE
+	w.WriteUint32(0)                  // wr_callback_id count = 0 (synchronous)
+	w.WriteUint64(bytesWritten)       // wr_bytes_written
+	w.WriteUint32(2)                  // wr_stable = FILE_SYNC
+	w.buf.Write(d.state.WriteVerf[:]) // wr_writeverf (8 bytes)
+	w.WriteUint32(1)                  // cr_consecutive = TRUE
+	w.WriteUint32(1)                  // cr_synchronous = TRUE
 	return OpResult{OpCode: OpCopy, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 

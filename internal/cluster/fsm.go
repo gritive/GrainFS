@@ -69,6 +69,7 @@ type PutObjectMetaCmd struct {
 	NodeIDs     []string    // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
+	UserMetadata     map[string]string
 	// PreserveLatest writes this version without moving lat:{bucket}/{key}.
 	// Snapshot restore uses it for non-latest versions.
 	PreserveLatest bool

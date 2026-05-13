@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -157,6 +158,80 @@ func TestShardService_NoEncryption(t *testing.T) {
 	decoded, err := eccodec.DecodeShard(raw)
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, decoded, "without encryptor, CRC payload should be plaintext")
+}
+
+func TestShardService_DirectIOWriterSuccess(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO())
+
+	payload := []byte("direct writer payload")
+	directCalls := 0
+	svc.directWriter = func(path string, got []byte) error {
+		directCalls++
+		require.Equal(t, eccodec.EncodeShard(payload), got)
+		return os.WriteFile(path, got, 0o600)
+	}
+
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, payload))
+	require.Equal(t, 1, directCalls)
+
+	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
+	raw, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	decoded, err := eccodec.DecodeShard(raw)
+	require.NoError(t, err)
+	require.Equal(t, payload, decoded)
+}
+
+func TestShardService_DirectIOUnsupportedFallsBackToBuffered(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO())
+
+	payload := []byte("fallback payload")
+	svc.directWriter = func(path string, got []byte) error {
+		require.NoFileExists(t, path)
+		return errors.New("create tmp shard (direct): invalid argument")
+	}
+
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, payload))
+
+	got, err := svc.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+func TestShardService_DirectIONonUnsupportedErrorDoesNotFallback(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithDirectIO())
+
+	payload := []byte("should not be written")
+	svc.directWriter = func(path string, got []byte) error {
+		require.NoFileExists(t, path)
+		return errors.New("create tmp shard (direct): permission denied")
+	}
+
+	err := svc.WriteLocalShard("bkt", "obj", 0, payload)
+	require.ErrorContains(t, err, "permission denied")
+	require.NoFileExists(t, filepath.Join(dir, "shards", "bkt", "obj", "shard_0"))
+}
+
+func TestIsUnsupportedDirectIO(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "invalid argument", err: errors.New("create tmp shard (direct): invalid argument"), want: true},
+		{name: "operation not supported", err: errors.New("create tmp shard (direct): operation not supported"), want: true},
+		{name: "not implemented", err: errors.New("create tmp shard (direct): not implemented"), want: true},
+		{name: "other", err: errors.New("create tmp shard (direct): permission denied"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isUnsupportedDirectIO(tt.err))
+		})
+	}
 }
 
 func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {

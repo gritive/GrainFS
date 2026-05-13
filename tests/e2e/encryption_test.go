@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"context"
-	"crypto/aes"
 	"fmt"
 	"io"
 	"os"
@@ -61,7 +60,6 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
 }
 
 func TestEncryption_AtRest(t *testing.T) {
-	t.Skip("at-rest encryption on DistributedBackend shard path is a follow-up (tracked in TODOS v0.0.4.0)")
 	client, dataDir, cleanup := startEncryptionServer(t)
 	defer cleanup()
 
@@ -80,16 +78,26 @@ func TestEncryption_AtRest(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	dir := shardDir(dataDir, "enc-test", "secret.txt")
-	entries, err := os.ReadDir(dir)
+	var shardPaths []string
+	shardRoot := filepath.Join(dataDir, "shards", "enc-test", "secret.txt")
+	err = filepath.WalkDir(shardRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(filepath.Base(path), "shard_") {
+			shardPaths = append(shardPaths, path)
+		}
+		return nil
+	})
 	require.NoError(t, err)
-	require.NotEmpty(t, entries)
+	require.NotEmpty(t, shardPaths, "expected encrypted object shards under %s", shardRoot)
 
-	rawShard, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
-	require.NoError(t, err)
-
-	assert.NotContains(t, string(rawShard), "sensitive data")
-	assert.True(t, len(rawShard) >= aes.BlockSize, "encrypted shard should have overhead")
+	for _, shardPath := range shardPaths {
+		rawShard, err := os.ReadFile(shardPath)
+		require.NoError(t, err)
+		assert.NotContains(t, string(rawShard), "sensitive data", "raw shard %s must not contain plaintext", shardPath)
+		assert.NotContains(t, string(rawShard), content, "raw shard %s must not contain full plaintext", shardPath)
+	}
 
 	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("enc-test"),

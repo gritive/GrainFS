@@ -183,7 +183,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 - **기본 버킷 자동 생성**: 서버 시작 시 기본 버킷("default") 자동 생성 ✅
 - **Graceful Shutdown**: 진행 중인 요청 drain ✅, NFS 세션 정리 ✅, Raft 리더 이전 (TransferLeadership + TimeoutNow) ✅
 - **벤치마크 스위트**: k6 기반 성능 베이스라인 측정 ✅
-- **Docker 기반 NBD 테스트**: macOS에서 Docker 컨테이너로 NBD E2E 테스트 ✅
+- **Colima 기반 NBD 테스트**: macOS에서 Colima Linux VM으로 NBD E2E 테스트 ✅
 
 **검증:**
 - Object Browser에서 파일 업로드/다운로드/삭제 + 볼륨 생성/삭제 동작 확인

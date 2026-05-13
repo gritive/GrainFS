@@ -151,19 +151,60 @@ func TestOperationsCopyObjectRejectsUnsupportedETagConditionSelector(t *testing.
 	require.Equal(t, []string{"head:src/k"}, backend.calls)
 }
 
-func TestOperationsCopyObjectRejectsUnsupportedUserMetadata(t *testing.T) {
-	backend := &semanticCopyBackend{head: &Object{Key: "k", ETag: "etag", LastModified: 100}}
+func TestOperationsCopyObjectReplaceUserMetadata(t *testing.T) {
+	backend, err := NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
+	_, err = backend.PutObjectWithUserMetadata(
+		context.Background(),
+		"b",
+		"src",
+		strings.NewReader("data"),
+		"text/plain",
+		map[string]string{"x-amz-meta-owner": "old"},
+	)
+	require.NoError(t, err)
 	ops := NewOperations(backend)
 
-	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
-		Source:            ObjectRef{Bucket: "src", Key: "k"},
-		Destination:       ObjectRef{Bucket: "dst", Key: "k2"},
+	_, err = ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:            ObjectRef{Bucket: "b", Key: "src"},
+		Destination:       ObjectRef{Bucket: "b", Key: "dst"},
 		MetadataDirective: CopyMetadataReplace,
 		UserMetadata:      map[string]string{"x-amz-meta-owner": "me"},
 	})
 
-	requireUnsupportedOp(t, err, "CopyObject", UnsupportedReasonMetadataUnsupported)
-	require.Equal(t, []string{"head:src/k"}, backend.calls)
+	require.NoError(t, err)
+	obj, err := backend.HeadObject(context.Background(), "b", "dst")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"x-amz-meta-owner": "me"}, obj.UserMetadata)
+}
+
+func TestOperationsCopyObjectCopyPreservesUserMetadata(t *testing.T) {
+	backend, err := NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
+	_, err = backend.PutObjectWithUserMetadata(
+		context.Background(),
+		"b",
+		"src",
+		strings.NewReader("data"),
+		"text/plain",
+		map[string]string{"x-amz-meta-mtime": "1710000000"},
+	)
+	require.NoError(t, err)
+	ops := NewOperations(backend)
+
+	_, err = ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "b", Key: "src"},
+		Destination: ObjectRef{Bucket: "b", Key: "dst"},
+	})
+
+	require.NoError(t, err)
+	obj, err := backend.HeadObject(context.Background(), "b", "dst")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"x-amz-meta-mtime": "1710000000"}, obj.UserMetadata)
 }
 
 func TestOperationsCopyObjectRejectsSameDestinationNoopButAllowsExplicitVersionRestore(t *testing.T) {

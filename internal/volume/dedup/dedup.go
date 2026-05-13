@@ -9,11 +9,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog/log"
 )
 
 // WriteResult holds the outcome of a WriteBlock call.
@@ -147,6 +149,8 @@ const (
 	maxRetries  = 3
 )
 
+var traceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
+
 type badgerIndex struct {
 	db *badger.DB
 	// mu serializes WriteBlock/FreeBlock to prevent BadgerDB ErrConflict on
@@ -170,6 +174,7 @@ func blockBadgerPrefix(vol string) []byte {
 }
 
 func (b *badgerIndex) WriteBlock(vol string, blkNum int64, hash [32]byte, newKey string) (WriteResult, error) {
+	tStart := time.Now()
 	if strings.Contains(vol, ":") {
 		return WriteResult{}, fmt.Errorf("dedup: volume name %q must not contain ':'", vol)
 	}
@@ -253,6 +258,9 @@ func (b *badgerIndex) WriteBlock(vol string, blkNum int64, hash [32]byte, newKey
 			return txn.Set(blkKey, []byte(result.Canonical))
 		})
 	})
+	if traceEnabled {
+		log.Debug().Str("volume", vol).Int64("block", blkNum).Bool("new", result.IsNew).Dur("total", time.Since(tStart)).Msg("Dedup WriteBlock trace")
+	}
 	return result, err
 }
 

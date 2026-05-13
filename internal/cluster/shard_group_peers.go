@@ -43,6 +43,31 @@ func (s ShardGroupPeerSet) MatchLocal(localID string, aliases ...string) (string
 	return "", false
 }
 
+// AllMatchLocal reports whether every peer entry refers to the local process.
+// Some single-node EC topologies intentionally repeat the local peer to satisfy
+// shard-width calculations; those are still local-only for pwrite purposes.
+func (s ShardGroupPeerSet) AllMatchLocal(localID string, aliases ...string) bool {
+	if len(s.peers) == 0 {
+		return false
+	}
+	for _, peer := range s.peers {
+		if peer == localID {
+			continue
+		}
+		matchedAlias := false
+		for _, alias := range aliases {
+			if alias != "" && peer == alias {
+				matchedAlias = true
+				break
+			}
+		}
+		if !matchedAlias {
+			return false
+		}
+	}
+	return true
+}
+
 // ForwardOrder returns peer IDs with any local identity moved to the end.
 func (s ShardGroupPeerSet) ForwardOrder(localID string, aliases ...string) []string {
 	out := make([]string, 0, len(s.peers))

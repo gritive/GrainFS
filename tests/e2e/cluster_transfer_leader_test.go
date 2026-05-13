@@ -15,9 +15,7 @@ import (
 // `grainfs cluster transfer-leader --wait` against the leader's admin
 // socket. Verifies the leader changes and term advances.
 func TestE2E_ClusterTransferLeader(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -87,9 +85,7 @@ func TestE2E_ClusterTransferLeader(t *testing.T) {
 // The shared test server in testServerDataDir is single-node, so we can hit
 // it directly without spinning up startE2ECluster.
 func TestE2E_ClusterTransferLeader_NoPeers(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	binary := getBinary()
 	sock := filepath.Join(testServerDataDir, "admin.sock")

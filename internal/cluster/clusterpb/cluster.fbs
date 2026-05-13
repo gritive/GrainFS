@@ -104,6 +104,7 @@ table PutObjectMetaCmd {
   preserve_latest:bool = false;
   is_delete_marker:bool = false;
   placement_group_id:string;
+  user_metadata:[KeyValue];
 }
 
 table DeleteObjectCmd {
@@ -179,6 +180,7 @@ table ObjectMeta {
   ec_parity:uint8 = 0;
   node_ids:[string];
   placement_group_id:string;
+  user_metadata:[KeyValue];
 }
 
 table SetBucketVersioningCmd {
@@ -327,6 +329,9 @@ enum MetaCmdType : uint8 {
   BucketLifecyclePut      = 34, // Bucket lifecycle policy upsert (ADR 0011)
   BucketLifecycleDelete   = 35, // Bucket lifecycle policy remove (ADR 0011)
   ClusterConfigPatch     = 36,
+  MigrationJobStart      = 37,
+  MigrationJobDone       = 38,
+  MigrationJobFailed     = 39,
 }
 
 table MetaNodeEntry {

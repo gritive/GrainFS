@@ -20,9 +20,7 @@ import (
 // allows it (alive_after >= new_quorum), joint consensus commits, status
 // reflects the shrunk voter set, audit event surfaces.
 func TestE2E_ClusterRemovePeer_DeadFollower(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

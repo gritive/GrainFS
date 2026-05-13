@@ -6,12 +6,15 @@
 // separate post-open fcntl path and a different alignment story (no required
 // alignment), so it lives in its own benchmark when written.
 //
-// Run inside the e2e Docker image (host macOS cannot exercise O_DIRECT):
+// Run inside the Colima Linux VM (host macOS cannot exercise O_DIRECT):
 //
-//	make test-e2e-docker  # full suite, or:
-//	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock grainfs-e2e \
-//	  go test -run=^$ -bench=BenchmarkShardWrite -benchtime=3s -count=3 \
-//	  ./internal/cluster/...
+//	GOOS=linux GOARCH=$(colima ssh -- uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/') \
+//	  go test -c -o /tmp/shardio.test ./internal/cluster
+//	colima ssh -- mkdir -p /tmp/grainfs-shardio
+//	cat /tmp/shardio.test | colima ssh -- bash -lc \
+//	  'cat >/tmp/grainfs-shardio/shardio.test && chmod +x /tmp/grainfs-shardio/shardio.test'
+//	colima ssh -- /tmp/grainfs-shardio/shardio.test \
+//	  -test.run=^$ -test.bench=BenchmarkShardWrite -test.benchtime=3s -test.count=3
 //
 // What we're measuring: the ShardService.WriteLocalShard pattern (open+write+
 // fsync+close+rename+parent-dir-fsync). Production currently writes with the
@@ -24,7 +27,7 @@
 // shard fan-out is a separate axis we'll measure once the single-shard
 // numbers tell us whether to bother.
 //
-// First-pass results (Docker on Linux VM, 2026-04-28, 3s × 3 runs):
+// First-pass results (Linux VM, 2026-04-28, 3s × 3 runs):
 //
 //	1MB:   default 13-19 MB/s   |  O_DIRECT 166-195 MB/s  → ~10x faster
 //	4MB:   default 192-379 MB/s |  O_DIRECT 379-511 MB/s  → ~40% faster
@@ -183,7 +186,7 @@ func BenchmarkShardWrite_ODirect(b *testing.B) {
 // 16 and 64 tells us whether goroutine + blocking-syscall fan-out is enough
 // or whether io_uring batching would meaningfully help.
 //
-// First-pass results (Docker on Linux VM, 4MB shards, 3s × 2 runs):
+// First-pass results (Linux VM, 4MB shards, 3s × 2 runs):
 //
 //	conc=1   ~725 MB/s (379-1070 — extreme variance, single-thread peaks high)
 //	conc=4   ~297 MB/s (266-327)

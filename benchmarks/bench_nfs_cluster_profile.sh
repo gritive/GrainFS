@@ -88,7 +88,7 @@ start_node() {
     --port "$(http_port "$i")" \
     --node-id "bench-nfs-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
-    --cluster-key "bench-nfs-cluster-key" \
+    --cluster-key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
     $(bench_encryption_args) \
     --nfs4-port "$(nfs_port "$i")" \
     --nbd-port 0 \

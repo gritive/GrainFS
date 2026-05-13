@@ -104,6 +104,24 @@ func TestOpRouter_RouteBucket_LeaderShortCircuit(t *testing.T) {
 	require.Empty(t, got.Peers, "leader path skips peer resolution")
 }
 
+func TestOpRouter_RouteBucket_DuplicateSelfIsOnlyVoter(t *testing.T) {
+	r := routerWithGroups(t, map[string][]string{
+		"g1": {"node-1", "node-1", "node-1"},
+	})
+	r.AssignBucket("b1", "g1")
+	groups := &fakeShardGroupSource{
+		groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"node-1", "node-1", "node-1"}},
+		},
+	}
+	idx := &fakeObjectIndex{latest: map[string]ObjectIndexEntry{}, version: map[string]ObjectIndexEntry{}}
+	router := NewOpRouter(r, groups, idx, nil, &fakeLeaderProbe{}, ECConfig{}, "node-1", nil)
+
+	got, err := router.RouteBucket("b1")
+	require.NoError(t, err)
+	require.True(t, got.SelfIsOnlyVoter)
+}
+
 func TestOpRouter_RouteObjectRead_LatestFromIndex(t *testing.T) {
 	probe := &fakeLeaderProbe{}
 	r := routerForTestWithBucket(t, probe)

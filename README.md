@@ -31,27 +31,6 @@ aws --endpoint-url http://localhost:9000 \
 
 서버 시작 시 `default` 버킷이 자동 생성된다. 브라우저에서 `http://localhost:9000/ui/` 로 Object Browser 접근 가능. 부트스트랩 전에는 모든 S3 트래픽이 401을 반환한다.
 
-## Distribution
-
-GrainFS includes a root Dockerfile for local container builds.
-
-```bash
-# Local container build from the repository root
-make docker-build
-
-# Run the S3-only container profile
-docker run --rm \
-  -p 9000:9000 \
-  -v grainfs-data:/data \
-  grainfs:$(git describe --tags --always --dirty 2>/dev/null || echo dev)
-
-# Bootstrap admin SA via the admin UDS (mounted volume).
-# Run from another shell on the host or via `docker exec`:
-docker exec <container> grainfs iam sa create admin --endpoint /data/admin.sock
-```
-
-The default container command disables NFSv4 and NBD with `--nfs4-port 0 --nbd-port 0`, so it runs as a non-root user without privileged ports or Linux block-device access. Opt into NFSv4/NBD explicitly when the container runtime grants the required privileges.
-
 ## Features
 
 | 기능               | 설명                                                          |
@@ -395,21 +374,21 @@ rclone mount grainfs:mybucket /mnt/grainfs \
 
 ### NBD 테스트 (macOS)
 
-macOS에서 NBD는 커널 모듈이 필요하므로 Docker Desktop 대신 **colima**를 사용한다. Docker Desktop의 LinuxKit VM에는 NBD 모듈이 없다.
+macOS에서 NBD는 커널 모듈이 필요하므로 **colima** Linux VM을 클라이언트로 사용한다.
 
 ```bash
 # 1회 설치
-brew install colima qemu docker
+brew install colima qemu
 colima start --vm-type qemu
 
 # NBD E2E 테스트 실행
-DOCKER_HOST=unix://$HOME/.colima/docker.sock make test-nbd-docker
+make test-nbd-colima
 ```
 
-Linux에서는 Docker Desktop이든 colima든 상관없이 동작한다:
+Linux에서는 로컬 커널 클라이언트로 interop smoke를 실행한다:
 
 ```bash
-make test-nbd-docker
+make test-nbd-interop
 ```
 
 Modern NBD negotiation smoke는 qemu/libnbd 도구가 있을 때 실행한다:

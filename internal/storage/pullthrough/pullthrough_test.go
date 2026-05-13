@@ -92,6 +92,23 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 		"must return ErrObjectNotFound when neither local nor upstream has the object")
 }
 
+func TestPullThrough_ForwardsPartialIOCapabilities(t *testing.T) {
+	local := newLocalBackend(t)
+	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_volumes"))
+
+	pt := pullthrough.NewBackend(local, &staticResolver{})
+	require.True(t, pt.PreferWriteAt("__grainfs_volumes"))
+
+	_, err := pt.WriteAt(context.Background(), "__grainfs_volumes", "vol/blk", 0, []byte("abcd"))
+	require.NoError(t, err)
+
+	buf := make([]byte, 2)
+	n, err := pt.ReadAt(context.Background(), "__grainfs_volumes", "vol/blk", 1, buf)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, []byte("bc"), buf)
+}
+
 // streamingUpstream returns a ReadCloser that streams arbitrary bytes without
 // buffering the full body up-front. Used to verify pullthrough does not
 // buffer the entire upstream body in memory.

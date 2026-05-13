@@ -26,6 +26,7 @@ type objectMeta struct {
 	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
+	UserMetadata     map[string]string
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -111,6 +112,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
 	}
+	metadataOff := buildKeyValuePropertiesVector(b, c.UserMetadata, clusterpb.PutObjectMetaCmdStartUserMetadataVector)
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -124,6 +126,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddEcParity(b, c.ECParity)
 	if nodeIDsOff != 0 {
 		clusterpb.PutObjectMetaCmdAddNodeIds(b, nodeIDsOff)
+	}
+	if metadataOff != 0 {
+		clusterpb.PutObjectMetaCmdAddUserMetadata(b, metadataOff)
 	}
 	if c.PreserveLatest {
 		clusterpb.PutObjectMetaCmdAddPreserveLatest(b, true)
@@ -162,6 +167,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
+		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
 		PreserveLatest:   t.PreserveLatest(),
 		IsDeleteMarker:   t.IsDeleteMarker(),
 	}, nil
@@ -410,6 +416,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	if len(m.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
 	}
+	metadataOff := buildKeyValuePropertiesVector(b, m.UserMetadata, clusterpb.ObjectMetaStartUserMetadataVector)
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -422,6 +429,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddEcParity(b, m.ECParity)
 	if nodeIDsOff != 0 {
 		clusterpb.ObjectMetaAddNodeIds(b, nodeIDsOff)
+	}
+	if metadataOff != 0 {
+		clusterpb.ObjectMetaAddUserMetadata(b, metadataOff)
 	}
 	clusterpb.ObjectMetaAddPlacementGroupId(b, pgOff)
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
@@ -453,6 +463,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
+		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
 	}, nil
 }
 
