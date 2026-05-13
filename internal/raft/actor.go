@@ -344,6 +344,11 @@ func (n *Node) handleRequestVote(cmd command) {
 	args := cmd.rvArgs
 	reply := &RequestVoteReply{Term: n.st.currentTerm}
 
+	if !n.st.currentConfig.containsAnyVoter(args.CandidateID) {
+		cmd.rvReply <- reply
+		return
+	}
+
 	// Rule 1: deny stale term — no state change → no publish.
 	if args.Term < n.st.currentTerm {
 		cmd.rvReply <- reply

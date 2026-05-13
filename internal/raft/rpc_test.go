@@ -69,12 +69,25 @@ func startSingleVoter(t *testing.T, id string) *Node {
 	return n
 }
 
+func startFollowerWithPeers(t *testing.T, id string, peers ...string) *Node {
+	t.Helper()
+	n, err := NewNode(Config{ID: id, Peers: peers, ElectionTimeout: time.Hour})
+	require.NoError(t, err)
+	n.Start()
+	t.Cleanup(n.Stop)
+	go func() {
+		for range n.ApplyCh() {
+		}
+	}()
+	return n
+}
+
 // TestHandleRequestVote_GrantHappyPath: single-voter leader at term 1 receives
 // a RequestVote at a higher term from an empty-log candidate. Per Raft §5.4
 // the node must step down to Follower, advance to the higher term, and grant
 // the vote (its own log is empty too, so the candidate is "as up-to-date").
 func TestHandleRequestVote_GrantHappyPath(t *testing.T) {
-	n := startSingleVoter(t, "n1")
+	n := startFollowerWithPeers(t, "n1", "other")
 
 	reply := awaitRequestVote(t, n, &RequestVoteArgs{
 		Term:         2,
@@ -88,14 +101,13 @@ func TestHandleRequestVote_GrantHappyPath(t *testing.T) {
 
 	require.Equal(t, Follower, n.State())
 	require.Equal(t, uint64(2), n.Term())
-	require.False(t, n.IsLeader())
 	require.Equal(t, "other", n.rs.Load().votedFor)
 }
 
 // TestHandleRequestVote_DenyStaleTerm: a candidate with a lower term than
 // ours must be denied without state change.
 func TestHandleRequestVote_DenyStaleTerm(t *testing.T) {
-	n := startSingleVoter(t, "n1")
+	n := startFollowerWithPeers(t, "n1", "bumper", "stale")
 
 	// Force the actor to term 5 by sending a higher-term step-down RPC,
 	// then test rejection of a term-3 RequestVote.
@@ -125,7 +137,7 @@ func TestHandleRequestVote_DenyStaleTerm(t *testing.T) {
 // (split-vote prevention). We then verify that a request at a HIGHER term
 // from B succeeds because the term advance clears votedFor.
 func TestHandleRequestVote_DenyAlreadyVoted(t *testing.T) {
-	n := startSingleVoter(t, "n1")
+	n := startFollowerWithPeers(t, "n1", "alice", "bob")
 
 	// Step 1: term advances to 2, vote granted to "alice".
 	r1 := awaitRequestVote(t, n, &RequestVoteArgs{
@@ -162,7 +174,10 @@ func TestHandleRequestVote_DenyAlreadyVoted(t *testing.T) {
 // {1, 1}. A candidate claiming lastLogIndex=0,lastLogTerm=0 at higher term
 // must be denied.
 func TestHandleRequestVote_DenyStaleLog(t *testing.T) {
-	n := startSingleVoter(t, "n1")
+	nodes, _ := startCluster(t, "n1", "shortlog", "n3")
+	n := nodes[0]
+
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n.IsLeader() }))
 
 	// Append one entry as the auto-leader so our log is non-empty.
 	require.NoError(t, n.Propose([]byte("seed")))
@@ -235,9 +250,9 @@ func TestHandleAppendEntries_HeartbeatStepDown(t *testing.T) {
 func TestMemTransport_RoutesRequestVote(t *testing.T) {
 	net := newMemNetwork()
 
-	n1, err := NewNode(Config{ID: "n1"})
+	n1, err := NewNode(Config{ID: "n1", Peers: []string{"n2"}})
 	require.NoError(t, err)
-	n2, err := NewNode(Config{ID: "n2"})
+	n2, err := NewNode(Config{ID: "n2", Peers: []string{"n1"}, ElectionTimeout: time.Hour})
 	require.NoError(t, err)
 	n1.Start()
 	n2.Start()
@@ -251,8 +266,6 @@ func TestMemTransport_RoutesRequestVote(t *testing.T) {
 		for range n2.ApplyCh() {
 		}
 	}()
-
-	require.NoError(t, waitFor(time.Second, func() bool { return n2.IsLeader() }))
 
 	tr := net.Register("n1", n1)
 	net.Register("n2", n2)

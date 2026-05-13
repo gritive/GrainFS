@@ -134,7 +134,7 @@ func TestElection_LeaderStepsDownOnHigherTerm(t *testing.T) {
 	// intruder's log must be at least as up-to-date (same term, same index).
 	reply := n1.HandleRequestVote(&RequestVoteArgs{
 		Term:         leaderTerm + 5,
-		CandidateID:  "intruder",
+		CandidateID:  "n2",
 		LastLogIndex: 1,
 		LastLogTerm:  leaderTerm,
 	})
@@ -144,7 +144,30 @@ func TestElection_LeaderStepsDownOnHigherTerm(t *testing.T) {
 	require.Equal(t, Follower, n1.State(), "leader must step down")
 	require.False(t, n1.IsLeader())
 	require.Equal(t, leaderTerm+5, n1.Term())
-	require.Equal(t, "intruder", n1.rs.Load().votedFor)
+	require.Equal(t, "n2", n1.rs.Load().votedFor)
+}
+
+func TestElection_RejectsHigherTermVoteFromNonVoter(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1", ElectionTimeout: time.Hour, HeartbeatTimeout: 10 * time.Millisecond})
+	require.NoError(t, err)
+	n.Start()
+	defer n.Stop()
+
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n.IsLeader() }))
+	leaderTerm := n.Term()
+
+	reply := n.HandleRequestVote(&RequestVoteArgs{
+		Term:         leaderTerm + 5,
+		CandidateID:  "n2",
+		LastLogIndex: 1,
+		LastLogTerm:  leaderTerm,
+	})
+
+	require.False(t, reply.VoteGranted)
+	require.Equal(t, leaderTerm, reply.Term)
+	require.True(t, n.IsLeader(), "non-voter RequestVote must not step down the leader")
+	require.Equal(t, leaderTerm, n.Term())
+	require.Empty(t, n.rs.Load().votedFor)
 }
 
 // TestElection_TermAgreementAcrossCluster: after election stabilises, all
