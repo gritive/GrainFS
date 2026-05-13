@@ -664,7 +664,7 @@ func TestMixedVersionRejection(t *testing.T) {
 	select {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after CE version mismatch")
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(time.Second):
 	}
 }
 
@@ -682,6 +682,8 @@ func TestCapabilityExchangeTimeout(t *testing.T) {
 
 	serverAddr := listener.Addr().String()
 
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
 	go func() {
 		conn, err := listener.Accept(ctx)
 		if err != nil {
@@ -693,7 +695,10 @@ func TestCapabilityExchangeTimeout(t *testing.T) {
 		}
 		codec := &BinaryCodec{}
 		_, _ = codec.Decode(stream) // read CE but never write response
-		time.Sleep(10 * time.Second)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
 	}()
 
 	client := MustNewQUICTransport("test-cluster-psk")
@@ -754,6 +759,6 @@ func TestCapabilityWrongFirstStream(t *testing.T) {
 	select {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after CE stream type rejection")
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(time.Second):
 	}
 }

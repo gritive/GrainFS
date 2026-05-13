@@ -43,6 +43,9 @@ const (
 	ceVersion  = byte(0x01)
 	ceFeatures = byte(0x00)
 	ceTimeout  = 5 * time.Second
+	// ceRejectionCloseDelay gives the peer time to read the CE error response
+	// before CONNECTION_CLOSE interrupts stream reads.
+	ceRejectionCloseDelay = 200 * time.Millisecond
 )
 
 var quicStreamCopyBufferPool = sync.Pool{
@@ -414,9 +417,13 @@ func (t *QUICTransport) acceptLoop() {
 					// Delay connection close so the peer can drain the error
 					// response written by handleCapabilityExchange before the
 					// CONNECTION_CLOSE frame interrupts stream reads.
-					time.AfterFunc(200*time.Millisecond, func() {
+					go func() {
+						select {
+						case <-time.After(ceRejectionCloseDelay):
+						case <-t.ctx.Done():
+						}
 						_ = conn.CloseWithError(quicAppErrCode, "capability exchange failed")
-					})
+					}()
 					return
 				}
 				h(t.ctx, conn)
