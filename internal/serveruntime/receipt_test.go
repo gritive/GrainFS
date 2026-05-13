@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 func TestReceiptDBOptionsUseSmallBadgerArenas(t *testing.T) {
@@ -36,4 +37,17 @@ func TestOpenReceiptDBRemovesEmptyMemtableWAL(t *testing.T) {
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
 		return txn.Set([]byte("ok"), []byte("1"))
 	}))
+}
+
+func TestReceiptPeerAddressesUseMetaNodesForJoinedCluster(t *testing.T) {
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "127.0.0.1:10001"},
+		{ID: "node-b", Address: "127.0.0.1:10002"},
+		{ID: "node-c", Address: "127.0.0.1:10003"},
+	}
+
+	got := receiptPeerAddresses("node-b", "127.0.0.1:10002", []string{"127.0.0.1:10001"}, nodes)
+
+	require.ElementsMatch(t, []string{"127.0.0.1:10001", "127.0.0.1:10003"}, got)
+	require.NotContains(t, got, "127.0.0.1:10002")
 }

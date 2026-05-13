@@ -38,10 +38,11 @@ type ReceiptLookup interface {
 // responds "not found" or every peer fails, the broadcaster returns
 // (nil, false, nil) — a miss is expected and not an error.
 type ReceiptBroadcaster struct {
-	caller  Caller
-	peers   []string
-	timeout time.Duration
-	logger  zerolog.Logger
+	caller       Caller
+	peers        []string
+	peerProvider func() []string
+	timeout      time.Duration
+	logger       zerolog.Logger
 
 	// Observability hooks (S6). Nil-safe — counters only fire when the
 	// broadcaster is wired to real metrics.
@@ -79,6 +80,23 @@ func NewReceiptBroadcaster(caller Caller, peers []string, timeout time.Duration)
 	}
 }
 
+func NewReceiptBroadcasterWithPeerProvider(caller Caller, peerProvider func() []string, timeout time.Duration) *ReceiptBroadcaster {
+	return &ReceiptBroadcaster{
+		caller:       caller,
+		peerProvider: peerProvider,
+		timeout:      timeout,
+		logger:       log.With().Str("component", "receipt-broadcast").Logger(),
+		metrics:      noopMetrics{},
+	}
+}
+
+func (b *ReceiptBroadcaster) snapshotPeers() []string {
+	if b.peerProvider != nil {
+		return b.peerProvider()
+	}
+	return append([]string(nil), b.peers...)
+}
+
 // SetMetrics wires a real metrics recorder. nil switches back to no-op.
 func (b *ReceiptBroadcaster) SetMetrics(m BroadcastMetricsRecorder) {
 	if m == nil {
@@ -95,7 +113,8 @@ func (b *ReceiptBroadcaster) SetMetrics(m BroadcastMetricsRecorder) {
 func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byte, bool, error) {
 	b.metrics.OnBroadcastStart()
 
-	if len(b.peers) == 0 {
+	peers := b.snapshotPeers()
+	if len(peers) == 0 {
 		b.metrics.OnBroadcastMiss()
 		return nil, false, nil
 	}
@@ -111,10 +130,10 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 		found bool
 		err   error
 	}
-	results := make(chan result, len(b.peers))
+	results := make(chan result, len(peers))
 
 	var wg sync.WaitGroup
-	for _, peer := range b.peers {
+	for _, peer := range peers {
 		wg.Add(1)
 		go func(peer string) {
 			defer wg.Done()
@@ -155,8 +174,8 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 		case r, ok := <-results:
 			if !ok {
 				// Channel drained — nobody had it.
-				if responded > 0 && responded < len(b.peers) {
-					b.metrics.OnBroadcastPartialSuccess(responded, len(b.peers))
+				if responded > 0 && responded < len(peers) {
+					b.metrics.OnBroadcastPartialSuccess(responded, len(peers))
 				}
 				b.metrics.OnBroadcastMiss()
 				return nil, false, nil
@@ -169,8 +188,8 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 			if r.found {
 				// Report partial success when fewer than len(peers) peers
 				// had actually answered by the time of the hit.
-				if responded+failed < len(b.peers) {
-					b.metrics.OnBroadcastPartialSuccess(responded+failed, len(b.peers))
+				if responded+failed < len(peers) {
+					b.metrics.OnBroadcastPartialSuccess(responded+failed, len(peers))
 				}
 				b.metrics.OnBroadcastHit()
 				return r.json, true, nil

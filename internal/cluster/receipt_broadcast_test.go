@@ -113,6 +113,23 @@ func TestReceiptBroadcaster_Query_FirstSuccessReturns(t *testing.T) {
 	assert.JSONEq(t, string(receiptJSON), string(got))
 }
 
+func TestReceiptBroadcaster_QueryUsesLatestPeerProvider(t *testing.T) {
+	caller := newMockCaller()
+	receiptJSON := []byte(`{"receipt_id":"rcpt-dynamic"}`)
+	caller.setResp("peer-c", buildQueryResponse(t, true, receiptJSON))
+
+	peers := []string{"peer-c"}
+	b := NewReceiptBroadcasterWithPeerProvider(caller, func() []string {
+		return append([]string(nil), peers...)
+	}, 3*time.Second)
+
+	got, found, err := b.Query(context.Background(), "rcpt-dynamic")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.JSONEq(t, string(receiptJSON), string(got))
+	require.Equal(t, int32(1), caller.callCount.Load())
+}
+
 func TestReceiptBroadcaster_Query_NoneHaveReceipt(t *testing.T) {
 	caller := newMockCaller()
 	peers := []string{"peer-a", "peer-b"}

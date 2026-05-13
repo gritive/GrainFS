@@ -26,6 +26,38 @@ type ReceiptOptions struct {
 	WindowSize     int
 }
 
+func receiptPeerAddresses(selfNodeID, selfAddr string, seedPeers []string, nodes []cluster.MetaNodeEntry) []string {
+	seen := make(map[string]struct{}, len(seedPeers)+len(nodes)+2)
+	if selfNodeID != "" {
+		seen[selfNodeID] = struct{}{}
+	}
+	if selfAddr != "" {
+		seen[selfAddr] = struct{}{}
+	}
+
+	out := make([]string, 0, len(seedPeers)+len(nodes))
+	add := func(addr string) {
+		if addr == "" {
+			return
+		}
+		if _, ok := seen[addr]; ok {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	for _, node := range nodes {
+		if node.ID == selfNodeID || node.Address == selfAddr {
+			continue
+		}
+		add(node.Address)
+	}
+	for _, peer := range seedPeers {
+		add(peer)
+	}
+	return out
+}
+
 // HealReceiptWiring bundles the Phase 16 Slice 2 components so the caller
 // can defer a single teardown. Cluster-only fields (RoutingCache,
 // Broadcaster, GossipSender) are nil in no-peers mode.
@@ -101,6 +133,33 @@ func SetupClusterReceipt(
 	gossipReceiver *cluster.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, quicTransport, router, gossipReceiver, srvOpts)
+}
+
+func SetupClusterReceiptWithPeerProvider(
+	ctx context.Context,
+	opts ReceiptOptions,
+	dataDir, nodeID string,
+	peerProvider func() []string,
+	quicTransport *transport.QUICTransport,
+	router *transport.StreamRouter,
+	gossipReceiver *cluster.GossipReceiver,
+	srvOpts []server.Option,
+) ([]server.Option, *HealReceiptWiring, error) {
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, quicTransport, router, gossipReceiver, srvOpts)
+}
+
+func setupClusterReceipt(
+	ctx context.Context,
+	opts ReceiptOptions,
+	dataDir, nodeID string,
+	peers []string,
+	peerProvider func() []string,
+	quicTransport *transport.QUICTransport,
+	router *transport.StreamRouter,
+	gossipReceiver *cluster.GossipReceiver,
+	srvOpts []server.Option,
+) ([]server.Option, *HealReceiptWiring, error) {
 	if !opts.Enabled {
 		return srvOpts, nil, nil
 	}
@@ -110,7 +169,7 @@ func SetupClusterReceipt(
 	// against, so we fall back to a fixed local-only sentinel. Once the
 	// operator adds peers they must supply a PSK upstream.
 	if psk == "" {
-		if len(peers) > 0 {
+		if len(peers) > 0 || (peerProvider != nil && len(peerProvider()) > 0) {
 			return srvOpts, nil, fmt.Errorf("heal-receipt requires a PSK: set --heal-receipt-psk or --cluster-key")
 		}
 		psk = "local-no-peers"
@@ -145,11 +204,20 @@ func SetupClusterReceipt(
 	}
 
 	routingCache := receipt.NewRoutingCache()
-	broadcaster := cluster.NewReceiptBroadcaster(quicTransport, peers, 3*time.Second)
+	var broadcaster *cluster.ReceiptBroadcaster
+	var gossipSender *cluster.ReceiptGossipSender
+	if peerProvider != nil {
+		broadcaster = cluster.NewReceiptBroadcasterWithPeerProvider(quicTransport, peerProvider, 3*time.Second)
+		gossipSender = cluster.NewReceiptGossipSenderWithPeerProvider(
+			nodeID, peerProvider, quicTransport, store, opts.GossipInterval, opts.WindowSize,
+		)
+	} else {
+		broadcaster = cluster.NewReceiptBroadcaster(quicTransport, peers, 3*time.Second)
+		gossipSender = cluster.NewReceiptGossipSender(
+			nodeID, peers, quicTransport, store, opts.GossipInterval, opts.WindowSize,
+		)
+	}
 	broadcaster.SetMetrics(receipt.BroadcastMetrics{})
-	gossipSender := cluster.NewReceiptGossipSender(
-		nodeID, peers, quicTransport, store, opts.GossipInterval, opts.WindowSize,
-	)
 
 	if gossipReceiver != nil {
 		gossipReceiver.SetReceiptCache(routingCache)
