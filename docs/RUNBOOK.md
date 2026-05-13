@@ -529,23 +529,32 @@ docker build -t grainfs:latest .
 
 **Deployment:**
 ```bash
-# Create data volume
-docker volume create grainfs-data
+# Create host data directory
+mkdir -p /var/lib/grainfs
 
-# Start GrainFS container
+# Start GrainFS container (host bind-mount exposes admin.sock on the host)
 docker run -d \
   --name grainfs \
   --restart unless-stopped \
   -p 9000:9000 \
-  -v grainfs-data:/data \
+  -v /var/lib/grainfs:/data \
   grainfs:latest
 ```
 
-After the container starts, run the admin SA bootstrap once via the host-side
-admin socket (`docker cp` is not needed — `grainfs iam sa create` against
-`<host-data-dir>/admin.sock` works since the volume is shared with the host).
+After the container starts, bootstrap the admin SA once via the host-side
+admin socket:
+```bash
+grainfs iam sa create admin --endpoint /var/lib/grainfs/admin.sock
+```
 Export the returned credentials as `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY`
 for subsequent S3 client commands.
+
+> **Note:** Use a host bind-mount (`-v /var/lib/grainfs:/data`) rather than a
+> named Docker volume. Named volumes are not directly accessible on the host
+> filesystem on all platforms, so `admin.sock` inside the volume cannot be
+> reached by host-side `grainfs` commands. If you prefer a named volume,
+> bootstrap inside the container instead:
+> `docker exec grainfs grainfs iam sa create admin --endpoint /data/admin.sock`
 
 The image default command is `serve --data /data --port 9000 --nfs4-port 0 --nbd-port 0`.
 It is intentionally S3-only so the non-root container can start without binding privileged
@@ -578,10 +587,10 @@ docker run -d \
   --name grainfs \
   --restart unless-stopped \
   -p 9000:9000 \
-  -v grainfs-data:/grainfs/data \
+  -v /var/lib/grainfs:/data \
   grainfs:previous-version \
   serve \
-  --data /grainfs/data \
+  --data /data \
   --port 9000
 ```
 
@@ -606,7 +615,12 @@ kubectl apply -f k8s/deployment.yaml -n grainfs
 
 # Expose service
 kubectl apply -f k8s/service.yaml -n grainfs
+
+# Bootstrap admin SA (run once after first deploy)
+kubectl exec deploy/grainfs -n grainfs -- grainfs iam sa create admin --endpoint /grainfs/data/admin.sock
 ```
+Export the returned credentials as `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY`
+for subsequent S3 client commands.
 
 **Example k8s/deployment.yaml:**
 ```yaml

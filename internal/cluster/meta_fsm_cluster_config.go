@@ -105,6 +105,12 @@ func (f *MetaFSM) applyClusterConfigPatch(data []byte) error {
 	if p.DiskCriticalFrac != nil {
 		audit = audit.Float64("disk-critical-threshold", *p.DiskCriticalFrac)
 	}
+	if p.SnapshotInterval != nil {
+		audit = audit.Dur("snapshot-interval", *p.SnapshotInterval)
+	}
+	if p.SnapshotRetain != nil {
+		audit = audit.Int32("snapshot-retain", *p.SnapshotRetain)
+	}
 
 	log.Info().
 		Str("event", "cluster_config_changed").
