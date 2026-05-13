@@ -172,6 +172,10 @@ func bucketSetPolicyHandler(d *Deps) app.HandlerFunc {
 				return
 			}
 		}
+		if req.Policy == nil {
+			writeError(c, NewInvalid("policy field is required"))
+			return
+		}
 		if err := AdminSetBucketPolicy(ctx, d, name, req); err != nil {
 			writeError(c, err)
 			return
