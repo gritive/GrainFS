@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.178.0] - 2026-05-13 — fix: PromoteToVoter orphan recovery in Raft v2 becomeLeader
+
+### Fixed
+
+- **`recoverOrphanedPromote()`** added to `internal/raft/membership.go`, called from
+  `becomeLeader()` after `recoverInFlightJoint()`. Handles the crash scenario where the
+  prior leader committed Stage-1 (`ConfChangePromoteStage1` — drops target from learners)
+  but crashed before appending Stage-2 (`LogEntryJointConfChange`). The orphaned target
+  is left in neither voters nor learners, blocking it from participating in consensus.
+- Recovery synthesises `pendingSingleConf` (pointing to the Stage-1 log index) and
+  `pendingPromote` so the existing `advanceSingleConfPhase` machinery dispatches Stage-2
+  on the new leader. When Stage-1 is already committed at `becomeLeader` time the call
+  is driven inline; otherwise `applyCommitted → advanceSingleConfPhase` fires it.
+- `matchIndex`/`nextIndex` for the orphaned target is seeded to
+  `(0, lastLogIndex+1)` when absent — the normal path seeds these when the target joins
+  as a learner, but `becomeLeader` skips it since the target is no longer in
+  `currentConfig.learners` after Stage-1.
+- **`handleCreateSnapshot` snapshot guard** (`internal/raft/snapshot_actor.go`): refuses
+  to compact the log past the Stage-1 index while `pendingPromote` is in-flight. Without
+  this guard, a periodic FSM snapshot taken between Stage-1 commit and leader crash would
+  erase the Stage-1 log entry, silently disabling `recoverOrphanedPromote` on the new
+  leader. Error message instructs the operator to retry after Stage-2 commits.
+
+### Notes
+
+- **MetaRaft.Join operator action**: `recoverOrphanedPromote` completes the Raft membership
+  promotion but `ProposeAddNode` (the `MetaNodeEntry` write that follows `PromoteToVoter`
+  in `MetaRaft.Join`) never ran on the crashed leader. After recovery, the operator must
+  re-issue `Join` for the orphaned target to register it in the meta-Raft node table.
+
+### Verification
+
+- `go test -race ./internal/raft/ -run TestPromoteToVoter_OrphanRecovery -count=20` — all PASS
+- `go test ./internal/raft/ -timeout 120s -count=1` — all PASS (63 s, 63 tests)
+
 ## [0.0.177.0] - 2026-05-13 — fix: RouteObjectWrite preserves forward peers when self is leader
 
 ### Fixed

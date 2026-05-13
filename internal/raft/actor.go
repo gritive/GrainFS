@@ -926,6 +926,12 @@ func (n *Node) becomeLeader() {
 	// is re-confirmed under the new term. The reply chan is a cap-1
 	// throwaway since no caller is waiting.
 	n.recoverInFlightJoint()
+	// PromoteToVoter orphan recovery: if the prior leader committed Stage-1
+	// (dropped target from learners) but crashed before appending Stage-2,
+	// the target is in neither voters nor learners. Synthesise
+	// pendingSingleConf + pendingPromote so advanceSingleConfPhase dispatches
+	// Stage-2.
+	n.recoverOrphanedPromote()
 }
 
 // stepDownToFollower applies the state transition to Follower (term, vote,

@@ -258,6 +258,78 @@ func (n *Node) recoverInFlightJoint() {
 	}
 }
 
+// recoverOrphanedPromote detects and heals the orphan scenario where the
+// previous leader committed Stage-1 (ConfChangePromoteStage1 — drops target
+// from learners) but crashed before Stage-2 (the joint AddVoter entry) was
+// appended. In this state currentConfig.joint == false (no joint in progress),
+// but the target node sits in neither voters nor learners.
+//
+// Strategy: set synthetic pendingSingleConf + pendingPromote so the existing
+// advanceSingleConfPhase machinery dispatches Stage-2 exactly as if this new
+// leader had run handlePromote itself. If Stage-1 is already committed, drive
+// advanceSingleConfPhase inline; otherwise the entry will commit soon
+// (no-op replicates under the new term) and applyCommitted will fire it.
+//
+// Pre-conditions (caller's responsibility): we just became Leader.
+// recoverInFlightJoint runs first; if currentConfig.joint == true it owns the
+// recovery and we skip.
+func (n *Node) recoverOrphanedPromote() {
+	if n.st.pendingConfChange != nil || n.st.pendingSingleConf != nil || n.st.pendingPromote != nil {
+		return
+	}
+	if n.st.currentConfig.joint {
+		return // recoverInFlightJoint already owns this
+	}
+	idx := n.st.appendedConfigIndex
+	if idx == 0 {
+		return
+	}
+	first := n.st.log.FirstIndex()
+	if idx < first || idx > n.st.lastLogIndex() {
+		return // snapshotted or missing — operator intervention required
+	}
+	e, err := n.st.log.Entry(idx)
+	if err != nil || e.Type != LogEntryConfChange {
+		return
+	}
+	p := configEntryPayload(e)
+	if p.Op != ConfChangePromoteStage1 {
+		return
+	}
+	id := p.LearnerID
+	if id == "" || n.st.currentConfig.containsAnyVoter(id) {
+		return // already promoted — nothing to recover
+	}
+
+	// Target is orphaned: Stage-1 committed, Stage-2 never appended.
+	// The normal PromoteToVoter path seeds matchIndex/nextIndex when the
+	// target joined as a learner. In recovery the new leader's becomeLeader
+	// skips the target (it is no longer in currentConfig.learners), so those
+	// entries are absent. Prime them conservatively; startPromoteStage2 will
+	// use them for broadcastHeartbeat and maybeAdvanceCommitIndex.
+	if _, ok := n.st.matchIndex[id]; !ok {
+		n.st.matchIndex[id] = 0
+		n.st.nextIndex[id] = n.st.lastLogIndex() + 1
+	}
+
+	// Synthesise the in-flight state so the existing advanceSingleConfPhase
+	// chain dispatches Stage-2 when Stage-1 is (or becomes) committed.
+	// Cap-1 reply buffers: same throwaway rationale as recoverInFlightJoint.
+	n.st.pendingSingleConf = &pendingSingleConf{
+		idx:   idx,
+		reply: make(chan confChangeResult, 1),
+	}
+	n.st.pendingPromote = &pendingPromote{
+		targetID: id,
+		reply:    make(chan confChangeResult, 1),
+	}
+	// Drive Stage-2 inline if Stage-1 is already committed on this node.
+	// Otherwise applyCommitted → advanceSingleConfPhase fires it later.
+	if n.st.commitIndex >= idx {
+		n.advanceSingleConfPhase()
+	}
+}
+
 // maybeStepDownAfterRemoval implements the Raft §4.3 self-removed-leader
 // rule: a leader that is in Cold but not in Cnew stays at its post until
 // the final ConfChange entry commits, then steps down. Called after every
