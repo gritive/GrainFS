@@ -34,10 +34,10 @@ type AutoSnapshotter struct {
 // Rationale (eng-review D2): balancer hot-reload uses time.NewTicker + ticker.Reset
 // per tick (balancer.go:344-360). That works for balancer because gossip default is
 // 30s. AutoSnapshotter default is 1h and disable is a first-class operator action,
-// so we use time.After + short idle so PATCH→effect latency is bounded to idle (5s),
-// not interval (could be 1h). idle=5s is a polling pattern but the CPU cost is
-// negligible (one cluster-config atomic.Pointer load per 5s).
-const defaultIdleWhenDisabled = 5 * time.Second
+// so we use time.After + short idle so PATCH→effect latency is bounded to idle (1s),
+// not interval (could be 1h). idle=1s is a polling pattern but the CPU cost is
+// negligible (one cluster-config atomic.Pointer load per second).
+const defaultIdleWhenDisabled = time.Second
 
 func NewAutoSnapshotter(mgr *Manager, policy SnapshotPolicy, idleWhenDisabled time.Duration) *AutoSnapshotter {
 	if idleWhenDisabled <= 0 {

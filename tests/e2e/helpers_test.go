@@ -195,6 +195,22 @@ func TestCombinedOutputWithWaitDelayReturnsWhenDescendantKeepsPipeOpen(t *testin
 	require.Less(t, time.Since(started), 2*time.Second)
 }
 
+func TestE2EClusterStopTerminatesSignalIgnoringProcesses(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 60")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { terminateProcess(cmd) })
+
+	c := &e2eCluster{
+		procs:    []*exec.Cmd{cmd},
+		dataDirs: []string{t.TempDir()},
+	}
+	started := time.Now()
+	c.Stop()
+
+	require.Less(t, time.Since(started), time.Second)
+	require.Error(t, cmd.Process.Signal(syscall.Signal(0)))
+}
+
 func TestShortTempDirKeepsAdminSocketPathShort(t *testing.T) {
 	dir := shortTempDir(t)
 	require.Less(t, len(filepath.Join(dir, "admin.sock")), 104)
@@ -257,7 +273,15 @@ func newS3Client(endpoint string) *s3.Client {
 		Region:       "us-east-1",
 		Credentials:  credentials.NewStaticCredentialsProvider(testAccessKey, testSecretKey, ""),
 		UsePathStyle: true,
+		HTTPClient:   e2eNoKeepAliveHTTPClient(0),
 	})
+}
+
+func e2eNoKeepAliveHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		Timeout:   timeout,
+	}
 }
 
 // bootstrapAdminViaUDSForTestMain is a TestMain-friendly variant of

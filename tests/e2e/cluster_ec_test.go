@@ -643,6 +643,7 @@ func ecS3Client(endpoint, ak, sk string) *s3.Client {
 		Credentials:      staticCreds{ak: ak, sk: sk},
 		UsePathStyle:     true,
 		RetryMaxAttempts: 1,
+		HTTPClient:       e2eNoKeepAliveHTTPClient(0),
 	})
 }
 

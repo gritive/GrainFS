@@ -30,6 +30,7 @@ func adminUDSClient(dataDir string) *http.Client {
 	socket := filepath.Join(dataDir, "admin.sock")
 	return &http.Client{
 		Transport: &http.Transport{
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", socket)

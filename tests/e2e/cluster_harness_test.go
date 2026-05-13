@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -375,26 +374,7 @@ func (c *e2eCluster) Stop() {
 	}
 	c.stopped = true
 	for _, p := range c.procs {
-		if p != nil && p.Process != nil {
-			_ = p.Process.Signal(syscall.SIGTERM)
-		}
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for _, p := range c.procs {
-		if p == nil || p.Process == nil {
-			continue
-		}
-		done := make(chan struct{})
-		go func(p *exec.Cmd) {
-			_ = p.Wait()
-			close(done)
-		}(p)
-		select {
-		case <-done:
-		case <-time.After(time.Until(deadline)):
-			_ = p.Process.Kill()
-			<-done
-		}
+		terminateProcess(p)
 	}
 	for _, dir := range c.dataDirs {
 		_ = os.RemoveAll(dir)
