@@ -31,9 +31,15 @@ type fakeRaftNode struct {
 	changeMembershipCalls int
 	lastAdds              []raft.ServerEntry
 	lastRemoves           []string
+	isLeaderFn            func() bool
 }
 
-func (f *fakeRaftNode) IsLeader() bool         { return f.isLeader }
+func (f *fakeRaftNode) IsLeader() bool {
+	if f.isLeaderFn != nil {
+		return f.isLeaderFn()
+	}
+	return f.isLeader
+}
 func (f *fakeRaftNode) CommittedIndex() uint64 { return f.committed }
 func (f *fakeRaftNode) TransferLeadership() error {
 	if f.transferFn != nil {
@@ -208,6 +214,30 @@ func TestAddReplica_SkipsExistingVoter(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, fakeNode.changeMembershipCalls)
 	require.Empty(t, sgUpdater.proposed)
+}
+
+func TestAddReplica_WaitsForLocalLeadership(t *testing.T) {
+	checks := 0
+	fakeNode := &fakeRaftNode{committed: 10, autoCatchup: true}
+	fakeNode.isLeaderFn = func() bool {
+		checks++
+		return checks >= 3
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, checks, 3)
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, sgUpdater.proposed, 1)
+	require.Equal(t, []string{"node-0", "node-1"}, sgUpdater.proposed[0].PeerIDs)
 }
 
 func TestMoveReplica_NotLeader(t *testing.T) {

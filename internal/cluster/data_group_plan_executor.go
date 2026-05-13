@@ -114,8 +114,8 @@ func (e *DataGroupPlanExecutor) AddReplica(ctx context.Context, groupID, toNode 
 	}
 
 	node := e.nodeFor(dg)
-	if !node.IsLeader() {
-		return fmt.Errorf("data_group_executor: not leader of group %q", groupID)
+	if err := e.waitForLocalLeader(ctx, groupID, node); err != nil {
+		return err
 	}
 
 	for _, peer := range ResolveShardGroupPeers(e.addrBook, ShardGroupEntry{ID: groupID, PeerIDs: dg.PeerIDs()}) {
@@ -268,6 +268,26 @@ func (e *DataGroupPlanExecutor) waitForLeadershipTransferTarget(
 		case <-waitCtx.Done():
 			return fmt.Errorf("data_group_executor: no caught-up voter available for leadership transfer from %q: %w",
 				fromNode, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (e *DataGroupPlanExecutor) waitForLocalLeader(ctx context.Context, groupID string, node dataRaftNode) error {
+	waitCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if node.IsLeader() {
+			return nil
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("data_group_executor: not leader of group %q: %w", groupID, waitCtx.Err())
 		case <-ticker.C:
 		}
 	}
