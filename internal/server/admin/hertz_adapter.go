@@ -32,6 +32,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerResource(g, d)
 	registerDashboard(g, d)
 	registerIAM(g, d)
+	registerBucket(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the
@@ -48,6 +49,7 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api —
 	// they live only on the local admin Unix socket.
 	registerIAM(g, d)
+	registerBucket(g, d)
 }
 
 // RegisterIAMOnly wires only the IAM admin routes. Used in tests to avoid
@@ -139,6 +141,27 @@ func scrubJobCancelHandler(d *Deps) app.HandlerFunc {
 func registerDashboard(g router, d *Deps) {
 	g.GET("/dashboard/token", wrapZero(d, GetDashboardToken))
 	g.POST("/dashboard/token/rotate", wrapZero(d, RotateDashboardToken))
+}
+
+func registerBucket(g router, d *Deps) {
+	if d.Buckets == nil {
+		return
+	}
+	g.POST("/buckets", wrapBody[CreateBucketAdminReq, BucketInfo](d, AdminCreateBucket))
+	g.GET("/buckets", wrapZero(d, AdminListBuckets))
+	g.DELETE("/buckets/:name", bucketDeleteHandler(d))
+}
+
+func bucketDeleteHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		name := c.Param("name")
+		force := string(c.Query("force")) == "true"
+		if err := AdminDeleteBucket(ctx, d, name, force); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.SetStatusCode(consts.StatusNoContent)
+	}
 }
 
 func registerIAM(g router, d *Deps) {
