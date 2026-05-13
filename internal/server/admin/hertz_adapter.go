@@ -251,9 +251,11 @@ func iamRevokeKeyHandler(d *Deps) app.HandlerFunc {
 func iamDeleteGrantHandler(d *Deps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req iam.GrantDeleteRequest
-		if err := json.Unmarshal(c.Request.Body(), &req); err != nil {
-			writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
-			return
+		if body := c.Request.Body(); len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
+				return
+			}
 		}
 		if err := DeleteGrant(ctx, d, req); err != nil {
 			writeError(c, err)

@@ -2,6 +2,28 @@ package storage
 
 import "strings"
 
+// ValidBucketName reports whether name is a valid user-facing bucket name.
+// Rules (AWS-compatible): 3–63 chars, lowercase letters/digits/dots/hyphens only,
+// start and end with letter or digit, no path separators. Internal __grainfs_*
+// buckets are also rejected.
+func ValidBucketName(name string) bool {
+	if len(name) < 3 || len(name) > 63 {
+		return false
+	}
+	if IsInternalBucket(name) {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-') {
+			return false
+		}
+	}
+	isAlnum := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+	}
+	return isAlnum(name[0]) && isAlnum(name[len(name)-1])
+}
+
 // VFSBucketPrefix is the bucket-name prefix reserved for the VFS layer's
 // internal buckets (one per volume, e.g. "__grainfs_vfs_default").
 // VFS buckets are owned exclusively by the VFS layer; S3 versioning has

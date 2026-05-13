@@ -14,6 +14,8 @@
 
 - **S3 ListBuckets에서 내부 버킷 노출 차단** — `__grainfs_*` 접두사 버킷이 S3 ListBuckets 응답에 포함되던 버그 수정.
 - **admin HTTP 403 복원** — `statusForCode("forbidden")` 누락으로 wildcard grant 거부 시 500을 반환하던 버그 수정 → 403으로 복원.
+- **`AdminCreateBucket` 버킷명 검증** — 슬래시/대문자/특수문자를 포함한 이름이 허용되던 버그 수정. Badger 키 충돌 및 LocalBackend path traversal 방지. `storage.ValidBucketName` 추가.
+- **`AdminDeleteBucket` 내부 버킷 삭제 차단** — `__grainfs_*` 버킷에 대한 force-delete가 허용되던 버그 수정 → 403 Forbidden 반환.
 
 ### Changed
 

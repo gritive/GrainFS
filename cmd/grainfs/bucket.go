@@ -78,6 +78,6 @@ func bucketDeleteCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().Bool("force", false, "remove all objects then delete the bucket")
+	cmd.Flags().Bool("force", false, "remove all objects then delete the bucket (one Raft commit per object — avoid on large buckets)")
 	return cmd
 }

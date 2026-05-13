@@ -4,6 +4,12 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### Bucket Admin API
+
+- [ ] **ForceDeleteBucket: Badger MVCC 홀드 해소** — `WalkObjects` 콜백 내에서 Raft propose를 호출하면 db.View 트랜잭션이 N×RTT 동안 열려 있어 Badger GC가 블록됨. 수정: View 내에서 키 목록만 수집 후 View를 닫고, 루프 밖에서 delete 수행. PR #334 adversarial review 식별.
+- [ ] **ForceDeleteBucket: ctx 전파** — `DeleteObjectReturningMarker`가 `context.Background()`를 하드코딩. HTTP 요청 취소/타임아웃이 force-delete를 중단할 수 없음. PR #334 adversarial review 식별.
+- [ ] **ForceDeleteBucket: TOCTOU 오류 메시지** — force=true 중 concurrent write로 `ErrBucketNotEmpty` 발생 시 "use --force" 라는 오해를 주는 메시지 반환. force=true 경우는 별도 메시지(503 retry) 필요. PR #334 adversarial review 식별.
+
 ### 기타
 
 

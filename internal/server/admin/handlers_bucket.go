@@ -14,8 +14,8 @@ type ListBucketsAdminResp = adminapi.ListBucketsAdminResp
 type BucketInfo = adminapi.BucketInfo
 
 func AdminCreateBucket(ctx context.Context, d *Deps, req CreateBucketAdminReq) (BucketInfo, error) {
-	if req.Name == "" {
-		return BucketInfo{}, NewInvalid("name required")
+	if !storage.ValidBucketName(req.Name) {
+		return BucketInfo{}, NewInvalid("invalid bucket name: 3–63 lowercase alphanumeric/dot/hyphen, start and end with alnum")
 	}
 	if err := d.Buckets.CreateBucket(ctx, req.Name); err != nil {
 		if errors.Is(err, storage.ErrBucketAlreadyExists) {
@@ -50,6 +50,9 @@ func AdminListBuckets(ctx context.Context, d *Deps) (ListBucketsAdminResp, error
 // AdminDeleteBucket deletes a bucket. If force is true, all objects are
 // removed first; otherwise the bucket must be empty.
 func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) error {
+	if storage.IsInternalBucket(name) {
+		return NewForbidden("cannot delete internal bucket")
+	}
 	var err error
 	if force {
 		err = d.Buckets.ForceDeleteBucket(ctx, name)

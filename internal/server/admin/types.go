@@ -129,9 +129,10 @@ type Deps struct {
 
 type Error = adminapi.Error
 
-func NewNotFound(msg string) *Error { return &Error{Code: "not_found", Message: msg} }
-func NewInvalid(msg string) *Error  { return &Error{Code: "invalid", Message: msg} }
-func NewInternal(msg string) *Error { return &Error{Code: "internal", Message: msg} }
+func NewNotFound(msg string) *Error  { return &Error{Code: "not_found", Message: msg} }
+func NewInvalid(msg string) *Error   { return &Error{Code: "invalid", Message: msg} }
+func NewForbidden(msg string) *Error { return &Error{Code: "forbidden", Message: msg} }
+func NewInternal(msg string) *Error  { return &Error{Code: "internal", Message: msg} }
 func NewConflict(msg string, details map[string]any) *Error {
 	raw, _ := json.Marshal(details)
 	return &Error{Code: "conflict", Message: msg, Details: raw}
