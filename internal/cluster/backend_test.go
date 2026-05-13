@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -203,6 +204,34 @@ func TestDistributedBackend_PutObjectTopologyWriteRejectsUnhealthyTargetBeforeSh
 	_, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
 	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
 	require.ErrorContains(t, err, "known unhealthy placement target")
+}
+
+func TestDistributedBackend_SetClusterNodesConcurrentReaders(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	b.SetECConfig(ECConfig{DataShards: 3, ParityShards: 2})
+	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			b.SetClusterNodes([]string{"n1", "n2", "n3", "n4", fmt.Sprintf("n%d", i+5)})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_ = b.LiveNodes()
+			_ = b.ECActive()
+			_ = b.EffectiveECConfig()
+			_ = b.NodeID()
+			if ph := b.PeerHealth(); ph != nil {
+				_ = ph.Snapshot()
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 func TestDistributedBackend_WaitAppliedUsesBackendApplyProgress(t *testing.T) {

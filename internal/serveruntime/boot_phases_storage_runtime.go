@@ -157,8 +157,7 @@ func refreshRuntimeTopologyFromMetaNodes(state *bootState, nodes []cluster.MetaN
 		state.effectiveEC = cfg
 		if state.distBackend != nil {
 			allNodes := runtimeTopologyNodes(state.nodeID, state.raftAddr, state.peers, nodes)
-			state.distBackend.SetClusterNodes(allNodes)
-			state.distBackend.SetECConfig(cfg)
+			state.distBackend.SetClusterTopology(allNodes, cfg)
 		}
 		if state.clusterCoord != nil {
 			state.clusterCoord.WithECConfig(cfg)

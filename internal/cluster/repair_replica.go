@@ -69,10 +69,10 @@ func (b *DistributedBackend) repairReplicaWith(ctx context.Context, reader peerR
 	peers := b.liveNodes()
 	tried := 0
 	for _, peer := range peers {
-		if peer == b.selfAddr {
+		if peer == b.currentSelfAddr() {
 			continue
 		}
-		if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+		if b.currentPeerHealth() != nil && !b.currentPeerHealth().IsHealthy(peer) {
 			continue
 		}
 		if data, ok := b.tryRepairFromPeer(ctx, reader, peer, bucket, shardKey, expectedETag); ok {
@@ -81,10 +81,10 @@ func (b *DistributedBackend) repairReplicaWith(ctx context.Context, reader peerR
 		tried++
 	}
 	for _, peer := range peers {
-		if peer == b.selfAddr {
+		if peer == b.currentSelfAddr() {
 			continue
 		}
-		if b.peerHealth != nil && b.peerHealth.IsHealthy(peer) {
+		if b.currentPeerHealth() != nil && b.currentPeerHealth().IsHealthy(peer) {
 			continue
 		}
 		if data, ok := b.tryRepairFromPeer(ctx, reader, peer, bucket, shardKey, expectedETag); ok {
@@ -98,8 +98,8 @@ func (b *DistributedBackend) repairReplicaWith(ctx context.Context, reader peerR
 func (b *DistributedBackend) tryRepairFromPeer(ctx context.Context, reader peerReader, peer, bucket, shardKey, expectedETag string) ([]byte, bool) {
 	data, err := reader.ReadShard(ctx, peer, bucket, shardKey, 0)
 	if err != nil || data == nil {
-		if b.peerHealth != nil && err != nil {
-			b.peerHealth.MarkUnhealthy(peer)
+		if b.currentPeerHealth() != nil && err != nil {
+			b.currentPeerHealth().MarkUnhealthy(peer)
 		}
 		return nil, false
 	}
@@ -107,8 +107,8 @@ func (b *DistributedBackend) tryRepairFromPeer(ctx context.Context, reader peerR
 	if hex.EncodeToString(h[:]) != expectedETag {
 		return nil, false
 	}
-	if b.peerHealth != nil {
-		b.peerHealth.MarkHealthy(peer)
+	if b.currentPeerHealth() != nil {
+		b.currentPeerHealth().MarkHealthy(peer)
 	}
 	return data, true
 }
