@@ -27,9 +27,10 @@ type fileMetaCacheBackend struct {
 	getCalls int
 }
 
-func (b *fileMetaCacheBackend) CreateBucket(context.Context, string) error { return nil }
-func (b *fileMetaCacheBackend) HeadBucket(context.Context, string) error   { return nil }
-func (b *fileMetaCacheBackend) DeleteBucket(context.Context, string) error { return nil }
+func (b *fileMetaCacheBackend) CreateBucket(context.Context, string) error      { return nil }
+func (b *fileMetaCacheBackend) HeadBucket(context.Context, string) error        { return nil }
+func (b *fileMetaCacheBackend) DeleteBucket(context.Context, string) error      { return nil }
+func (b *fileMetaCacheBackend) ForceDeleteBucket(context.Context, string) error { return nil }
 func (b *fileMetaCacheBackend) ListBuckets(context.Context) ([]string, error) {
 	return nil, nil
 }

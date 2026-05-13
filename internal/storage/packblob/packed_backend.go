@@ -197,6 +197,10 @@ func (pb *PackedBackend) DeleteBucket(ctx context.Context, bucket string) error 
 	return pb.inner.DeleteBucket(ctx, bucket)
 }
 
+func (pb *PackedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	return pb.inner.ForceDeleteBucket(ctx, bucket)
+}
+
 func (pb *PackedBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	return pb.inner.ListBuckets(ctx)
 }

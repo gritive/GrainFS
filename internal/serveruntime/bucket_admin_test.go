@@ -16,6 +16,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/server/admin"
 )
 
 // inProcessProposeFull extends inProcessPropose with bucket-upstream commands so
@@ -67,8 +68,7 @@ func startBucketAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {
 		server.WithTransport(standard.NewTransporter),
 		server.WithHostPorts(""),
 	)
-	RegisterIAMAdminRoutes(h, api)
-	RegisterBucketAdminRoutes(h, api)
+	admin.RegisterIAMOnly(h, &admin.Deps{IAM: api})
 
 	go h.Spin() //nolint:errcheck
 	t.Cleanup(func() {

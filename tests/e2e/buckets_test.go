@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -107,4 +108,26 @@ func TestBuckets_DeleteNotEmpty(t *testing.T) {
 	var apiErr smithy.APIError
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "BucketNotEmpty", apiErr.ErrorCode())
+}
+
+func TestBuckets_ListExcludesInternal(t *testing.T) {
+	ctx := context.Background()
+
+	// Explicitly create an internal-prefixed bucket so the filter is exercised
+	// even when no NFS/VFS internal bucket exists in the test environment.
+	internalName := "__grainfs_review_test_internal"
+	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(internalName)})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(internalName)})
+	})
+
+	out, err := testS3Client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	require.NoError(t, err)
+	for _, b := range out.Buckets {
+		name := aws.ToString(b.Name)
+		if strings.HasPrefix(name, "__grainfs_") {
+			t.Errorf("ListBuckets exposed internal bucket %q", name)
+		}
+	}
 }

@@ -95,6 +95,11 @@ func (m *mockBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	return nil
 }
 
+func (m *mockBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	delete(m.data, bucket)
+	return nil
+}
+
 func (m *mockBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	var buckets []string
 	for k := range m.data {

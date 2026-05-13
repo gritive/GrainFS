@@ -81,12 +81,12 @@ func (n *clusterInfoRaftNode) SetTransport(
 	func(string, *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error),
 ) {
 }
-func (n *clusterInfoRaftNode) SetInstallSnapshotTransport(
-	func(string, *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error),
-) {
-}
 func (n *clusterInfoRaftNode) SetTimeoutNowTransport(
 	func(string, *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error),
+) {
+}
+func (n *clusterInfoRaftNode) SetInstallSnapshotTransport(
+	func(string, *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error),
 ) {
 }
 func (n *clusterInfoRaftNode) SetNoOpCommand([]byte)                {}

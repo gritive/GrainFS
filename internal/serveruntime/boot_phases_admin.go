@@ -64,6 +64,8 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
 		VolumePlacement: NewVolumePlacementAdapter(state.metaRaft),
+		IAM:             state.iamAdminAPI,
+		Buckets:         state.backend,
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
@@ -82,10 +84,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		Deps:       state.adminDeps,
 		ExtraRoutes: func(h *hzserver.Hertz) {
 			srv.RegisterClusterAdminUDS(h)
-			if state.iamAdminAPI != nil {
-				RegisterIAMAdminRoutes(h, state.iamAdminAPI)
-				RegisterBucketAdminRoutes(h, state.iamAdminAPI)
-			}
 			if state.metaRaft != nil {
 				// Production proposer routes through MetaRaft.Propose, which
 				// transparently leader-forwards on followers via the existing
