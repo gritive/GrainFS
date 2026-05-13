@@ -59,6 +59,9 @@ mkdir -p "$PROFILE_ROOT"
 for idx in $(seq 1 "$NODE_COUNT"); do
   mkdir -p "$BENCH_DIR/n${idx}"
 done
+BENCH_ENCRYPTION_KEY_FILE="${BENCH_ENCRYPTION_KEY_FILE:-$BENCH_DIR/encryption.key}"
+export BENCH_ENCRYPTION_KEY_FILE
+bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
 
 HTTP_PORTS=()
 RAFT_PORTS=()

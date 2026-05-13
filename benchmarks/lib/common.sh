@@ -89,7 +89,31 @@ bench_wait_tcp_port() {
 bench_encryption_args() {
   if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
     printf '%s\n' "--no-encryption"
+  elif [[ -n "${BENCH_ENCRYPTION_KEY_FILE:-}" ]]; then
+    printf '%s\n' "--encryption-key-file"
+    printf '%s\n' "$BENCH_ENCRYPTION_KEY_FILE"
   fi
+}
+
+bench_generate_encryption_key_file() {
+  local key_file="$1"
+
+  if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  python3 - "$key_file" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+parent = os.path.dirname(path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+with open(path, "wb") as f:
+    f.write(os.urandom(32))
+PY
+  chmod 600 "$key_file"
 }
 
 bench_wait_admin_socket() {

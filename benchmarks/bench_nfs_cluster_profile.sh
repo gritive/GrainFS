@@ -47,6 +47,9 @@ rm -rf "$BENCH_DIR"
 for idx in $(seq 0 $((NODE_COUNT - 1))); do
   mkdir -p "$BENCH_DIR/n$idx"
 done
+BENCH_ENCRYPTION_KEY_FILE="${BENCH_ENCRYPTION_KEY_FILE:-$BENCH_DIR/encryption.key}"
+export BENCH_ENCRYPTION_KEY_FILE
+bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
 
 cleanup() {
   echo "=== cleanup ==="
