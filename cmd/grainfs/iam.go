@@ -69,7 +69,9 @@ func iamSACmd() *cobra.Command {
 	createCmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a ServiceAccount; returns the first AccessKey + one-time secret",
-		Args:  cobra.ExactArgs(1),
+		Example: `  grainfs iam sa create alice --description "data team"
+  grainfs iam --json sa create alice`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -81,7 +83,30 @@ func iamSACmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(c.OutOrStdout(), string(out))
+			asJSON, _ := c.Flags().GetBool("json")
+			if asJSON {
+				fmt.Fprintln(c.OutOrStdout(), string(out))
+				return nil
+			}
+			var resp struct {
+				SAID      string `json:"sa_id"`
+				Name      string `json:"name"`
+				AccessKey string `json:"access_key"`
+				SecretKey string `json:"secret_key"`
+			}
+			if err := json.Unmarshal(out, &resp); err != nil {
+				return fmt.Errorf("parse response: %w", err)
+			}
+			w := c.OutOrStdout()
+			fmt.Fprintf(w, "Created service account %s\n", resp.Name)
+			tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+			fmt.Fprintf(tw, "sa_id:\t%s\n", resp.SAID)
+			fmt.Fprintf(tw, "access_key:\t%s\n", resp.AccessKey)
+			fmt.Fprintf(tw, "secret_key:\t%s\n", resp.SecretKey)
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			fmt.Fprintln(w, "Store the secret_key now — it will not be shown again.")
 			return nil
 		},
 	}
@@ -131,7 +156,9 @@ func iamSACmd() *cobra.Command {
 	getCmd := &cobra.Command{
 		Use:   "get <sa_id>",
 		Short: "Show SA detail",
-		Args:  cobra.ExactArgs(1),
+		Example: `  grainfs iam sa get sa-abc123
+  grainfs iam --json sa get sa-abc123`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -141,22 +168,45 @@ func iamSACmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(c.OutOrStdout(), string(out))
-			return nil
+			asJSON, _ := c.Flags().GetBool("json")
+			if asJSON {
+				fmt.Fprintln(c.OutOrStdout(), string(out))
+				return nil
+			}
+			var item struct {
+				SAID        string    `json:"sa_id"`
+				Name        string    `json:"name"`
+				Description string    `json:"description"`
+				CreatedAt   time.Time `json:"created_at"`
+				CreatedBy   string    `json:"created_by"`
+			}
+			if err := json.Unmarshal(out, &item); err != nil {
+				return fmt.Errorf("parse response: %w", err)
+			}
+			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "SA ID\tNAME\tDESCRIPTION\tCREATED AT")
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				item.SAID, item.Name, item.Description, item.CreatedAt.Format(time.RFC3339))
+			return tw.Flush()
 		},
 	}
 
 	deleteCmd := &cobra.Command{
-		Use:   "delete <sa_id>",
-		Short: "Delete an SA (cascades to its keys + grants via FSM)",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <sa_id>",
+		Short:   "Delete an SA (cascades to its keys + grants via FSM)",
+		Example: `  grainfs iam sa delete sa-abc123`,
+		Args:    cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
 			_, err = iamRequest(c.Context(), sock, "DELETE", "/v1/iam/sa/"+url.PathEscape(args[0]), nil)
-			return err
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Deleted service account %s\n", args[0])
+			return nil
 		},
 	}
 
@@ -170,7 +220,9 @@ func iamKeyCmd() *cobra.Command {
 	createCmd := &cobra.Command{
 		Use:   "create <sa_id>",
 		Short: "Issue a new AccessKey for the SA (one-time secret_key in response)",
-		Args:  cobra.ExactArgs(1),
+		Example: `  grainfs iam key create sa-abc123
+  grainfs iam key create sa-abc123 --bucket logs --bucket reports`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -196,9 +248,10 @@ func iamKeyCmd() *cobra.Command {
 	cmd.AddCommand(
 		createCmd,
 		&cobra.Command{
-			Use:   "revoke <sa_id> <access_key>",
-			Short: "Revoke an AccessKey",
-			Args:  cobra.ExactArgs(2),
+			Use:     "revoke <sa_id> <access_key>",
+			Short:   "Revoke an AccessKey",
+			Example: `  grainfs iam key revoke sa-abc123 AK1234`,
+			Args:    cobra.ExactArgs(2),
 			RunE: func(c *cobra.Command, args []string) error {
 				sock, err := adminEndpointFromCmd(c)
 				if err != nil {
@@ -217,9 +270,10 @@ func iamGrantCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "grant", Short: "Manage Grants"}
 
 	putCmd := &cobra.Command{
-		Use:   "put <sa_id> <bucket> <role>",
-		Short: "Grant role on bucket to SA (role: Read|Write|Admin)",
-		Args:  cobra.ExactArgs(3),
+		Use:     "put <sa_id> <bucket> <role>",
+		Short:   "Grant role on bucket to SA (role: Read|Write|Admin)",
+		Example: `  grainfs iam grant put sa-abc123 my-bucket Write`,
+		Args:    cobra.ExactArgs(3),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -232,9 +286,10 @@ func iamGrantCmd() *cobra.Command {
 	}
 
 	delCmd := &cobra.Command{
-		Use:   "delete <sa_id> <bucket>",
-		Short: "Remove grant from SA on bucket",
-		Args:  cobra.ExactArgs(2),
+		Use:     "delete <sa_id> <bucket>",
+		Short:   "Remove grant from SA on bucket",
+		Example: `  grainfs iam grant delete sa-abc123 my-bucket`,
+		Args:    cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
@@ -249,6 +304,9 @@ func iamGrantCmd() *cobra.Command {
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List grants (filter with --sa or --bucket)",
+		Example: `  grainfs iam grant list
+  grainfs iam grant list --sa sa-abc123
+  grainfs iam grant list --bucket my-bucket`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {

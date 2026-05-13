@@ -73,6 +73,7 @@ func buildTestIAMRoot() *cobra.Command {
 	root := &cobra.Command{Use: "grainfs"}
 	iam := &cobra.Command{Use: "iam"}
 	iam.PersistentFlags().String("endpoint", "", "")
+	iam.PersistentFlags().Bool("json", false, "")
 	iam.AddCommand(iamSACmd(), iamKeyCmd(), iamGrantCmd())
 	root.AddCommand(iam)
 	return root
@@ -96,6 +97,29 @@ func TestIAMSACreate_EndToEnd(t *testing.T) {
 	sock := startFakeAdminUDS(t, mux)
 
 	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "--json", "sa", "create", "alice"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+}
+
+func TestIAMSACreate_TextFeedback(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"alice","access_key":"AK1","secret_key":"SK1"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
 	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "create", "alice"})
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -104,8 +128,96 @@ func TestIAMSACreate_EndToEnd(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v\noutput: %s", err, out.String())
 	}
-	if !strings.Contains(out.String(), `"sa_id":"sa-x"`) {
-		t.Errorf("unexpected output: %s", out.String())
+	s := out.String()
+	if !strings.Contains(s, "alice") {
+		t.Errorf("output %q missing name 'alice'", s)
+	}
+	if !strings.Contains(s, "sa-x") {
+		t.Errorf("output %q missing sa_id 'sa-x'", s)
+	}
+	if !strings.Contains(s, "AK1") {
+		t.Errorf("output %q missing access_key 'AK1'", s)
+	}
+	if !strings.Contains(s, "SK1") {
+		t.Errorf("output %q missing secret_key 'SK1'", s)
+	}
+}
+
+func TestIAMSAGet_Table(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"alice","description":"data team","created_at":"2026-01-01T00:00:00Z"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "get", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "SA ID") {
+		t.Errorf("output %q missing SA ID header", s)
+	}
+	if !strings.Contains(s, "sa-x") || !strings.Contains(s, "alice") {
+		t.Errorf("output %q missing sa_id/name", s)
+	}
+}
+
+func TestIAMSAGet_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"alice"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "--json", "sa", "get", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+}
+
+func TestIAMSADelete_Feedback(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa/sa-x", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestIAMRoot()
+	root.SetArgs([]string{"iam", "--endpoint", sock, "sa", "delete", "sa-x"})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetContext(context.Background())
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Deleted service account sa-x") {
+		t.Errorf("output %q missing delete feedback", out.String())
 	}
 }
 
