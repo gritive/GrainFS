@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/clusteradmin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -282,6 +283,23 @@ func countGroupDirsAcrossNodes(c *mrCluster) map[string]int {
 		}
 	}
 	return out
+}
+
+// waitForShardGroupCount polls GET /v1/cluster/status via the admin UDS on
+// dataDir until at least minGroups shard groups are present or timeout.
+func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout time.Duration) {
+	t.Helper()
+	sock := filepath.Join(dataDir, "admin.sock")
+	cli := clusteradmin.NewClient(sock)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		status, err := cli.Status(ctx)
+		if err != nil {
+			return false
+		}
+		return len(status.ShardGroups) >= minGroups
+	}, timeout, time.Second, "expected >= %d shard groups in %s", minGroups, dataDir)
 }
 
 // ----- TestE2E_MultiRaftSharding_Boot --------------------------------------
