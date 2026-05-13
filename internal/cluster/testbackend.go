@@ -65,6 +65,10 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 		t.Fatalf("NewDistributedBackend: %v", err)
 	}
 
+	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+	svc := NewShardService(backend.root, nil)
+	backend.SetShardService(svc, []string{backend.selfAddr})
+
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
 

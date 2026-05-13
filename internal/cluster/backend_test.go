@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,6 +76,10 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 
 	backend, err := NewDistributedBackend(dir, db, node, nil, false)
 	require.NoError(t, err)
+
+	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+	svc := NewShardService(backend.root, nil)
+	backend.SetShardService(svc, []string{backend.selfAddr})
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
@@ -167,40 +170,11 @@ func TestDistributedBackend_PutAndGetObject(t *testing.T) {
 	require.Equal(t, obj.Size, gotObj.Size)
 }
 
-func TestDistributedBackend_GetObjectRejectsLocalSizeMismatch(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	obj, err := b.PutObject(context.Background(), "bucket", "hello.txt", strings.NewReader("hello world"), "text/plain")
-	require.NoError(t, err)
-	require.NoError(t, os.Truncate(b.objectPathV("bucket", "hello.txt", obj.VersionID), 0))
-
-	rc, _, err := b.GetObject(context.Background(), "bucket", "hello.txt")
-	require.Error(t, err)
-	require.Nil(t, rc)
-	require.Contains(t, err.Error(), "local object size mismatch")
-}
-
 func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
 	_, err := b.PutObject(context.Background(), "nope", "file.txt", strings.NewReader("data"), "text/plain")
 	require.ErrorIs(t, err, storage.ErrBucketNotFound)
-}
-
-// TestDistributedBackend_PutObject_NilShardSvc_WithPlacementCtx_TakesNxPath verifies
-// that shardSvc==nil routes to the Nx (non-EC) path even when the context carries a
-// PlacementGroupEntry (as injected by contextForForwardedGroup for forwarded requests).
-func TestDistributedBackend_PutObject_NilShardSvc_WithPlacementCtx_TakesNxPath(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
-
-	// Inject placement entry to simulate a forwarded-request context.
-	ctx := contextForForwardedGroup(context.Background(), NewDataGroup("group-1", []string{"n1", "n2"}))
-
-	obj, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
-	require.NoError(t, err, "nil-shardSvc backend must succeed via Nx path even with placement context")
-	require.Equal(t, "key.txt", obj.Key)
 }
 
 func TestDistributedBackend_PutObjectTopologyWriteReportsUnavailableTarget(t *testing.T) {

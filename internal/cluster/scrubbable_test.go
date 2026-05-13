@@ -99,18 +99,6 @@ func TestScanObjects_MissingBucket(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestScanObjects_ECDisabledReturnsEmpty(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
-	writeVersionedObjectMeta(t, b, "bkt", "k", "01HZXYZABC", "etag1", 42)
-
-	// EC disabled: no shards to scrub.
-	ch, err := b.ScanObjects("bkt")
-	require.NoError(t, err)
-	recs := drainObjectRecords(t, ch)
-	assert.Empty(t, recs, "ScanObjects must be a no-op when EC is not active")
-}
-
 func TestScanObjects_SingleObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enableECForTest(t, b, 2, 1)

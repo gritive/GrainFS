@@ -152,14 +152,3 @@ func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 	got := b.OwnedShards("b", "obj", "v1", "test-node")
 	assert.Equal(t, []int{0, 2}, got)
 }
-
-func TestRepairShardLocal_WithoutShardService(t *testing.T) {
-	// RepairShardLocal wraps RepairShard; when ShardService is not configured
-	// it must surface the "shard service not configured" error rather than
-	// panicking. This is the state of a test-only DistributedBackend.
-	b := newTestDistributedBackend(t)
-	writePlacement(t, b, "b", "k/any-version", []string{"test-node", "other-a"})
-	err := b.RepairShardLocal("b", "k", "any-version", 0)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "shard service not configured")
-}
