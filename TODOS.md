@@ -110,6 +110,7 @@
 
 - [ ] Redis 프로토콜 지원 (RESP, Streaming, Pub/Sub 이벤트)
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
+- [ ] **AppendObject API (minio-go 클라이언트 호환)** — minio-go SDK의 `AppendObject` 메서드 (`client.AppendObject(ctx, bucket, key, reader, size, opts)`) 와 호환되는 서버 구현. S3 Express One Zone의 `write-offset-bytes` 헤더 시멘틱 따름. 객체 부재 시 신규 생성, 존재 시 끝에 append. **유스케이스:** 감사 로그, 이벤트 스트림, PITR WAL 등 append-only 워크로드. **참고:** AWS S3 Standard/GCP/오픈소스 MinIO는 미지원, Azure Append Blob/AIStor만 네이티브 지원 — minio-go 클라이언트 라이브러리는 메서드를 제공하므로 GrainFS가 서버만 구현하면 클라이언트 변경 없이 동작. **설계 쟁점:** (a) S3 `PUT` + offset 헤더 기반 vs 별도 endpoint, (b) 내부 저장소 구조 (packblob append 재활용 vs WAL-style native append), (c) 동시 append 직렬화 보장, (d) 최대 크기 정책. **Re-open trigger:** 로그 수집/이벤트 스트림 유스케이스가 구체화되거나 minio-go 호환 append 요구가 들어올 때.
 
 ## Phase 20: Operations & Onboarding
 

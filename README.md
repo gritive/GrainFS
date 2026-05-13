@@ -89,8 +89,6 @@ Flags:
       --cluster-key string       클러스터 인증 키. **클러스터 모드(--peers/--join 사용 시) 필수**.
                                  권장: `openssl rand -hex 32` (32 random bytes hex = 64 chars / 256-bit).
                                  모든 노드는 동일한 값을 가져야 하며, 변경 시 무중단 롤링은 지원되지 않음.
-      --badger-managed-mode      Raft 로그 GC 활성화. 활성화 시 on-disk 포맷 변경; 이후 플래그 없이 재시작 불가
-                                 (상세: docs/badger-managed-mode-rollback.md)
       --raft-log-gc-interval duration Raft 로그 GC 실행 주기 (default 30s, 0=비활성)
 
   Balancer (클러스터 모드 전용):
@@ -298,7 +296,7 @@ Badger role startup recovery는 metadata, raft-log, group-state, receipt, dedup,
 - [Production runbook](docs/RUNBOOK.md)
 - [SLI/SLO](docs/SLI_SLO.md)
 - [RecoverCluster drill](docs/recover-cluster.md)
-- [Badger managed mode rollback](docs/badger-managed-mode-rollback.md)
+- [Raft log GC (managed mode, always active)](docs/badger-managed-mode-rollback.md)
 - [Protocol layering contract](docs/architecture/protocol-layering.md)
 - [DuckDB Iceberg REST Catalog](docs/iceberg-duckdb.md)
 - [DuckDB Iceberg REST request trace](docs/iceberg-duckdb-request-trace.md)

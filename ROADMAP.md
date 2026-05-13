@@ -322,17 +322,17 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 #### Phase 14d: Raft Log GC — Managed Mode ✅
 
-- **`--badger-managed-mode`** 플래그 ✅ — opt-in. 활성화 시 `raft:meta:managed=true` 키를 DB에 기록하고, 이후 재시작 시 플래그 불일치를 명확한 오류로 감지 (silent data loss 방지).
+- **Raft 로그 GC 상시 활성** ✅ — `--badger-managed-mode` 플래그 제거 (v0.0.173.0). 관리 모드가 유일한 레이아웃; 비관리 모드로의 복귀 불가.
 - **`QuorumMinMatchIndex()`** ✅ — 클러스터 쿼럼 기준 최고 복제 인덱스 반환. 리더의 GC watermark로 사용.
 - **`TruncateBefore(index)`** ✅ — 배치 처리(1000개/txn)로 `ErrTxnTooBig` 방지.
 - **GC 고루틴 격리** ✅ — `maybeRunLogGC()`를 heartbeat 루프 밖 별도 고루틴으로 실행. `atomic.Bool` 가드로 중복 실행 방지.
 - **스냅샷 게이트** ✅ — 스냅샷 없이 GC 시도 시 skip + warn. 뒤처진 팔로워가 InstallSnapshot으로 복구 가능한 상태를 보장.
 - **`--raft-log-gc-interval`** 플래그 ✅ — GC 주기 설정 (기본 30s, 0=비활성).
-- **운영 문서** ✅ — `docs/badger-managed-mode-rollback.md`: 활성화 방법, Prometheus 검증 쿼리, 롤백 절차, cut-over 체크리스트.
+- **운영 문서** ✅ — `docs/badger-managed-mode-rollback.md`: 상시-활성 동작 설명, 장애 시 wipe-and-rejoin 절차, Prometheus 모니터링 쿼리.
 
 **검증:**
 - `TestIntegration_LogGC_PartitionAndRecovery` — partition → GC → 복구 시나리오
-- `TestBadgerLogStore_ManagedMode_Preflight*` — 포맷 불일치 감지 (4개 케이스)
+- `TestBadgerLogStore_ManagedMode_*` — 관리 모드 옵션 메커니즘, 일관성 재오픈, 레거시 비관리 모드 마이그레이션 에러 검증
 - `TestNode_LogGC_*` — GC skip 조건, watermark 정확성
 
 #### Phase 14d': Adaptive Raft Batching ✅

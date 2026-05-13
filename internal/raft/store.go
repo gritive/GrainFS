@@ -113,12 +113,6 @@ var (
 // BadgerLogStoreOption configures a BadgerLogStore.
 type BadgerLogStoreOption func(*BadgerLogStore)
 
-// WithManagedMode enables Raft log GC mode. The managed-mode flag is
-// persisted in the DB; reopening with a different setting returns an error.
-func WithManagedMode() BadgerLogStoreOption {
-	return func(s *BadgerLogStore) { s.managedMode = true }
-}
-
 // BadgerLogStore implements LogStore using BadgerDB.
 //
 // When `prefix` is non-empty, the store operates in *shared* mode: it views
@@ -126,14 +120,10 @@ func WithManagedMode() BadgerLogStoreOption {
 // is the C2 P0b prototype path — multiple groups share one process-level DB.
 // Close() is a no-op for shared stores; the caller closes the DB.
 type BadgerLogStore struct {
-	db          *badger.DB
-	managedMode bool
-	prefix      []byte // non-nil → shared mode; prepended to every key
-	shared      bool   // true → Close() does not close db
+	db     *badger.DB
+	prefix []byte // non-nil → shared mode; prepended to every key
+	shared bool   // true → Close() does not close db
 }
-
-// IsManagedMode reports whether this store was opened with managed mode.
-func (s *BadgerLogStore) IsManagedMode() bool { return s.managedMode }
 
 // DB returns the underlying BadgerDB handle. Used by callers that need to
 // register the DB with resourcewatch (vlog watcher) — only meaningful for
@@ -223,8 +213,10 @@ func OpenSharedLogStore(db *badger.DB, groupID string, opts ...BadgerLogStoreOpt
 	return s, nil
 }
 
-// checkManagedMode writes (first open) or verifies (subsequent opens) the
-// managed-mode flag persisted in the DB. Mismatch returns a clear error.
+// checkManagedMode ensures the raft:meta:managed key is set to "true" in the
+// DB. On first open it writes the key. On reopen it upgrades a legacy "false"
+// value (written by pre-v0.0.172.0 binaries) to "true" transparently — the
+// log is always intact, enabling GC is safe.
 //
 // On the shared-DB path (C2 P0b) two goroutines opening the same groupID
 // concurrently can race on the get-then-set, producing badger.ErrConflict.
@@ -247,25 +239,16 @@ func (s *BadgerLogStore) checkManagedModeOnce() error {
 			if !errors.Is(err, badger.ErrKeyNotFound) {
 				return err
 			}
-			// First open: record the chosen mode.
-			val := "false"
-			if s.managedMode {
-				val = "true"
-			}
-			return txn.Set(s.keyManagedMode(), []byte(val))
+			// First open: write managed=true.
+			return txn.Set(s.keyManagedMode(), []byte("true"))
 		}
 		return item.Value(func(val []byte) error {
-			stored := string(val) == "true"
-			if stored == s.managedMode {
+			if string(val) == "true" {
 				return nil
 			}
-			if stored {
-				return fmt.Errorf("data dir opened in managed=true; " +
-					"use --badger-managed-mode or start fresh")
-			}
-			return fmt.Errorf("data dir opened in non-managed mode; " +
-				"remove --badger-managed-mode to continue non-managed, " +
-				"or wipe data/raft/ and restart to enable managed mode")
+			// Legacy "false" written by pre-v0.0.172.0 binaries: upgrade in-place.
+			// The log is always complete regardless of prior GC setting — safe to enable.
+			return txn.Set(s.keyManagedMode(), []byte("true"))
 		})
 	})
 }
@@ -631,31 +614,6 @@ func (s *BadgerLogStore) LoadSnapshot() (Snapshot, error) {
 		})
 	})
 	return snap, err
-}
-
-// InspectManagedModeReadOnly reads the persisted managed-mode bit without
-// running NewBadgerLogStore's first-open write path.
-func InspectManagedModeReadOnly(path string) (managed bool, present bool, err error) {
-	db, err := badger.Open(badger.DefaultOptions(path).WithLogger(nil).WithReadOnly(true))
-	if err != nil {
-		return false, false, fmt.Errorf("open raft store read-only: %w", err)
-	}
-	defer db.Close()
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyManagedMode)
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		present = true
-		return item.Value(func(val []byte) error {
-			managed = string(val) == "true"
-			return nil
-		})
-	})
-	return managed, present, err
 }
 
 // InspectSnapshotMetaReadOnly returns snapshot metadata and payload size without

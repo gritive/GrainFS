@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.173.0] - 2026-05-13 — refactor: remove `--badger-managed-mode` flag
+
+### Removed
+
+- `serve --badger-managed-mode` flag and `Config.BadgerManagedMode`. Raft log GC
+  via quorum watermark is now the only mode. GrainFS is pre-1.0 with no
+  deployments using the non-managed (no-GC) layout, so the toggle and the
+  mismatch guard were dead weight.
+- `recover cluster --badger-managed-mode` flag. Recovery always writes a managed
+  store.
+- `cluster.RecoverClusterOptions.BadgerManagedMode` field and the
+  `managed-mode mismatch` check in `BuildRecoverClusterPlan`.
+- `raft.InspectManagedModeReadOnly` — no callers remain.
+
+### Changed
+
+- `--raft-log-gc-interval` (default 30s) is kept as an operational tuning knob.
+- `docs/badger-managed-mode-rollback.md` updated to reflect always-on behaviour.
+- `WithManagedMode()` option and `IsManagedMode()` method removed from `BadgerLogStore` — managed mode is a DB invariant, not a per-open flag.
+- Pre-v0.0.173.0 data directories with persisted `raft:meta:managed=false` are transparently upgraded on first open (no wipe required).
+
 ## [0.0.172.0] - 2026-05-13 — fix: EC reader goroutine drain + mux conn shutdown
 
 ### Fixed

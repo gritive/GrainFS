@@ -21,12 +21,11 @@ var (
 )
 
 type RecoverClusterOptions struct {
-	SourceData        string
-	TargetData        string
-	NewNodeID         string
-	NewRaftAddr       string
-	BadgerManagedMode bool
-	StripJointState   bool
+	SourceData      string
+	TargetData      string
+	NewNodeID       string
+	NewRaftAddr     string
+	StripJointState bool
 }
 
 type RecoverClusterPlan struct {
@@ -43,8 +42,6 @@ type RecoverClusterPlan struct {
 	JointNewVoters       []string
 	JointEnterIndex      uint64
 	JointManagedLearners []string
-	SourceManagedMode    bool
-	ManagedModePresent   bool
 	TargetFresh          bool
 	BlockedReason        string
 }
@@ -81,13 +78,6 @@ func BuildRecoverClusterPlan(opts RecoverClusterOptions) (*RecoverClusterPlan, e
 		return nil, fmt.Errorf("multi-Raft group recovery is not supported in v1: %s exists", filepath.Join(opts.SourceData, "groups"))
 	}
 
-	managed, present, err := raft.InspectManagedModeReadOnly(sourceRaftDir)
-	if err != nil {
-		return nil, err
-	}
-	if present && managed != opts.BadgerManagedMode {
-		return nil, fmt.Errorf("managed-mode mismatch: source managed=%v, requested target managed=%v", managed, opts.BadgerManagedMode)
-	}
 	meta, err := raft.InspectSnapshotMetaReadOnly(sourceRaftDir)
 	if err != nil {
 		return nil, err
@@ -116,8 +106,6 @@ func BuildRecoverClusterPlan(opts RecoverClusterOptions) (*RecoverClusterPlan, e
 		JointNewVoters:       meta.JointNewVoters,
 		JointEnterIndex:      meta.JointEnterIndex,
 		JointManagedLearners: meta.JointManagedLearners,
-		SourceManagedMode:    managed,
-		ManagedModePresent:   present,
 		TargetFresh:          true,
 	}, nil
 }
@@ -164,11 +152,7 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 		return fmt.Errorf("close target meta db: %w", err)
 	}
 
-	var storeOpts []raft.BadgerLogStoreOption
-	if plan.Options.BadgerManagedMode {
-		storeOpts = append(storeOpts, raft.WithManagedMode())
-	}
-	store, err := raft.NewBadgerLogStore(plan.TargetRaftDir, storeOpts...)
+	store, err := raft.NewBadgerLogStore(plan.TargetRaftDir)
 	if err != nil {
 		return fmt.Errorf("open target raft store: %w", err)
 	}

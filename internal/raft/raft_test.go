@@ -773,7 +773,7 @@ func TestQuorumMinMatchIndex_FiveNode_TwoPeersDown(t *testing.T) {
 
 func TestNode_LogGC_TruncatesStoreToWatermark(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewBadgerLogStore(dir, WithManagedMode())
+	store, err := NewBadgerLogStore(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close() })
 
@@ -852,7 +852,7 @@ func TestNode_LogGC_SkipsWhenNotManagedMode(t *testing.T) {
 
 func TestNode_LogGC_SkipsBeforeInterval(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewBadgerLogStore(dir, WithManagedMode())
+	store, err := NewBadgerLogStore(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close() })
 
@@ -909,7 +909,7 @@ func newTestClusterWithStores(t *testing.T, n int) (*testCluster, []*BadgerLogSt
 	stores := make([]*BadgerLogStore, n)
 	for i := range stores {
 		dir := t.TempDir()
-		s, err := NewBadgerLogStore(dir, WithManagedMode())
+		s, err := NewBadgerLogStore(dir)
 		require.NoError(t, err)
 		t.Cleanup(func() { s.Close() })
 		stores[i] = s

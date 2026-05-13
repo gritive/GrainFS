@@ -47,25 +47,10 @@ func TestRecoverClusterPlanRequiresSnapshot(t *testing.T) {
 	require.ErrorIs(t, err, ErrRecoverClusterNoSnapshot)
 }
 
-func TestRecoverClusterPlanRejectsManagedModeMismatch(t *testing.T) {
-	source := t.TempDir()
-	target := t.TempDir()
-	writeRecoverClusterSourceSnapshotWithOptions(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, []raft.BadgerLogStoreOption{raft.WithManagedMode()}, raft.Snapshot{})
-
-	_, err := BuildRecoverClusterPlan(RecoverClusterOptions{
-		SourceData:        source,
-		TargetData:        target,
-		NewNodeID:         "node-recovered",
-		NewRaftAddr:       "127.0.0.1:19000",
-		BadgerManagedMode: false,
-	})
-	require.ErrorContains(t, err, "managed-mode mismatch")
-}
-
 func TestRecoverClusterPlanRejectsJointSnapshotUnlessStripped(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()
-	writeRecoverClusterSourceSnapshotWithOptions(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, nil, raft.Snapshot{
+	writeRecoverClusterSourceSnapshotWithExtra(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, raft.Snapshot{
 		JointPhase:      raft.JointEntering,
 		JointOldVoters:  []string{"old-a", "old-b"},
 		JointNewVoters:  []string{"old-a", "old-c"},
@@ -187,10 +172,10 @@ func TestRecoverClusterPlanRejectsRecoveryMarkerInTarget(t *testing.T) {
 }
 
 func writeRecoverClusterSourceSnapshot(t *testing.T, dataDir string, servers []raft.Server) []byte {
-	return writeRecoverClusterSourceSnapshotWithOptions(t, dataDir, servers, nil, raft.Snapshot{})
+	return writeRecoverClusterSourceSnapshotWithExtra(t, dataDir, servers, raft.Snapshot{})
 }
 
-func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, servers []raft.Server, opts []raft.BadgerLogStoreOption, extra raft.Snapshot) []byte {
+func writeRecoverClusterSourceSnapshotWithExtra(t *testing.T, dataDir string, servers []raft.Server, extra raft.Snapshot) []byte {
 	t.Helper()
 	metaDir := filepath.Join(dataDir, "meta")
 	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
@@ -203,7 +188,7 @@ func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, 
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	store, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "raft"), opts...)
+	store, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "raft"))
 	require.NoError(t, err)
 	snap := extra
 	snap.Index = 12

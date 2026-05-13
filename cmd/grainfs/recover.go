@@ -151,7 +151,6 @@ func addRecoverClusterFlags(cmd *cobra.Command) {
 	cmd.Flags().String("target-data", "", "fresh target GrainFS data directory")
 	cmd.Flags().String("new-node-id", "", "node ID for the recovered single voter")
 	cmd.Flags().String("new-raft-addr", "", "Raft address for the recovered node")
-	cmd.Flags().Bool("badger-managed-mode", false, "open recovered target Raft store in managed mode")
 	cmd.Flags().Bool("strip-joint-state", false, "recover a mid-joint snapshot as a clean single-node cluster")
 }
 
@@ -160,15 +159,13 @@ func recoverClusterOptions(cmd *cobra.Command) (cluster.RecoverClusterOptions, e
 	target, _ := cmd.Flags().GetString("target-data")
 	nodeID, _ := cmd.Flags().GetString("new-node-id")
 	raftAddr, _ := cmd.Flags().GetString("new-raft-addr")
-	managed, _ := cmd.Flags().GetBool("badger-managed-mode")
 	stripJoint, _ := cmd.Flags().GetBool("strip-joint-state")
 	return cluster.RecoverClusterOptions{
-		SourceData:        source,
-		TargetData:        target,
-		NewNodeID:         nodeID,
-		NewRaftAddr:       raftAddr,
-		BadgerManagedMode: managed,
-		StripJointState:   stripJoint,
+		SourceData:      source,
+		TargetData:      target,
+		NewNodeID:       nodeID,
+		NewRaftAddr:     raftAddr,
+		StripJointState: stripJoint,
 	}, nil
 }
 

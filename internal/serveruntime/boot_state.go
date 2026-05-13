@@ -63,12 +63,6 @@ type bootState struct {
 	sharedRaftLogDB *badger.DB           // bootOpenSharedRaftLogDB (optional)
 	sharedFSMDB     *badger.DB           // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
 
-	// storeOpts are the raft.BadgerLogStoreOption set used to open the
-	// meta log store. Captured on bootState so per-data-group shared log
-	// stores opened later (run.go around shared-log fan-out) reuse the
-	// same option set without re-deriving it from cfg.
-	storeOpts []raft.BadgerLogStoreOption
-
 	// Transport (populated by transport phases — bootQUICTransport,
 	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
 	// resolved cluster key (disk > flag > ephemeral). raftAddr is updated

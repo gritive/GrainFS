@@ -46,7 +46,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 
 	// Mirror the run.go raft-node construction: needed by the storage phases.
 	raftCfg := raft.DefaultConfig(state.nodeID, state.peers)
-	raftCfg.ManagedMode = state.cfg.BadgerManagedMode
+	raftCfg.ManagedMode = true
 	raftCfg.LogGCInterval = state.cfg.RaftLogGCInterval
 	node := raft.NewNode(raftCfg, state.logStore)
 	state.node = node

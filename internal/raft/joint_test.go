@@ -1436,7 +1436,7 @@ func TestJointPhase_AfterRestart_CallerCanRecover(t *testing.T) {
 
 	stores := make([]*BadgerLogStore, 3)
 	for i := range stores {
-		s, err := NewBadgerLogStore(t.TempDir(), WithManagedMode())
+		s, err := NewBadgerLogStore(t.TempDir())
 		require.NoError(t, err)
 		t.Cleanup(func() { s.Close() })
 		stores[i] = s

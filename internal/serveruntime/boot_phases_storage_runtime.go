@@ -245,7 +245,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
 			FSMStore:         state.sharedFSMDB,
 		}
-		ls, lerr := raft.OpenSharedLogStore(state.sharedRaftLogDB, entry.ID, state.storeOpts...)
+		ls, lerr := raft.OpenSharedLogStore(state.sharedRaftLogDB, entry.ID)
 		if lerr != nil {
 			return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
 		}

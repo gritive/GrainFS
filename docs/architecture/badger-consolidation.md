@@ -131,8 +131,8 @@ with any group ID character. Recommendation: length prefix (`varuint(len) ||
 groupID || keytail`) — supports arbitrary group IDs and gives O(1) prefix
 extraction during scans.
 
-The `keyManagedMode` flag currently DB-global moves to a process-level marker
-file (`<dataDir>/managed-mode`) since it now applies to a node-shared DB.
+The `keyManagedMode` flag is DB-global. As of v0.0.173.0, managed mode is
+always-on; the per-file marker migration plan is no longer applicable.
 
 ## Required code changes
 
@@ -414,8 +414,7 @@ Code wired in commit `<TBD>`:
   `NumVersionsToKeep=1`). On startup, refuses to proceed when any
   `<dataDir>/groups/*/raft` directory exists from a pre-P0b deployment —
   failing closed instead of silently abandoning the legacy raft state.
-  Forwards `--badger-managed-mode` and other `BadgerLogStoreOption`s into
-  every group's `OpenSharedLogStore`.
+  Forwards `BadgerLogStoreOption`s into every group's `OpenSharedLogStore`.
 - `cmd/grainfs/serve.go`: `InstantiateLocalGroup` call site passes
   `LogStore: raft.OpenSharedLogStore(sharedRaftLogDB, entry.ID)` when shared
   mode is on.

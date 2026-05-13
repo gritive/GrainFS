@@ -38,7 +38,6 @@ func buildClusterConfig(
 		IAMApplier:       iamApplier,
 	}
 
-	cfg.BadgerManagedMode, _ = cmd.Flags().GetBool("badger-managed-mode")
 	cfg.RaftLogGCInterval, _ = cmd.Flags().GetDuration("raft-log-gc-interval")
 	cfg.RaftHeartbeatInterval, _ = cmd.Flags().GetDuration("raft-heartbeat-interval")
 	cfg.RaftElectionTimeout, _ = cmd.Flags().GetDuration("raft-election-timeout")

@@ -368,70 +368,25 @@ func TestBadgerLogStore_TruncateBefore_ExcludesIndex(t *testing.T) {
 
 // ── Phase 14d: managed mode pre-flight tests ─────────────────────────────
 
-func TestBadgerLogStore_ManagedMode_FirstOpen_DefaultIsNonManaged(t *testing.T) {
+// TestBadgerLogStore_ManagedMode_UpgradesLegacyNonManagedDir verifies that a
+// Badger directory whose persisted managed-mode key is "false" (written by a
+// pre-v0.0.172.0 binary) is silently upgraded — the store opens without error.
+func TestBadgerLogStore_ManagedMode_UpgradesLegacyNonManagedDir(t *testing.T) {
 	dir := t.TempDir()
+
+	// Simulate a pre-v0.0.172.0 data directory: open Badger directly and
+	// write raft:meta:managed=false, which the old always-non-managed path used.
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte("raft:meta:managed"), []byte("false"))
+	}))
+	require.NoError(t, db.Close())
+
+	// Must open without error — pre-v0.0.172.0 "false" is a transparent upgrade.
 	store, err := NewBadgerLogStore(dir)
 	require.NoError(t, err)
-	assert.False(t, store.IsManagedMode())
 	require.NoError(t, store.Close())
-}
-
-func TestBadgerLogStore_ManagedMode_FirstOpen_Managed(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	assert.True(t, store.IsManagedMode())
-	require.NoError(t, store.Close())
-}
-
-func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_NoneToManaged(t *testing.T) {
-	dir := t.TempDir()
-	// First open: non-managed (default)
-	s, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	// Reopen with managed → mismatch → error
-	_, err = NewBadgerLogStore(dir, WithManagedMode())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "non-managed mode")
-}
-
-func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_ManagedToNone(t *testing.T) {
-	dir := t.TempDir()
-	// First open: managed
-	s, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	// Reopen without managed → mismatch → error
-	_, err = NewBadgerLogStore(dir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "managed=true")
-}
-
-func TestBadgerLogStore_ManagedMode_ConsistentReopenManaged(t *testing.T) {
-	dir := t.TempDir()
-	s, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	s2, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	defer s2.Close()
-	assert.True(t, s2.IsManagedMode())
-}
-
-func TestBadgerLogStore_ManagedMode_ConsistentReopenNonManaged(t *testing.T) {
-	dir := t.TempDir()
-	s, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	s2, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	defer s2.Close()
-	assert.False(t, s2.IsManagedMode())
 }
 
 func TestMarshalLogEntry_AllocsBounded(t *testing.T) {
