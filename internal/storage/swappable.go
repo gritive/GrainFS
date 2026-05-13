@@ -69,6 +69,15 @@ func (sb *SwappableBackend) PutObject(ctx context.Context, bucket, key string, r
 	return (*sb.inner.Load()).PutObject(ctx, bucket, key, r, contentType)
 }
 
+func (sb *SwappableBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error) {
+	inner := *sb.inner.Load()
+	putter, ok := inner.(UserMetadataPutter)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+}
+
 func (sb *SwappableBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
 	inner := *sb.inner.Load()
 	return putObjectWithACLOnBackend(context.Background(), inner, bucket, key, r, contentType, acl)

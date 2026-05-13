@@ -47,6 +47,8 @@ const (
 	ecShardWriteBackoff  = 250 * time.Millisecond
 )
 
+var distributedWriteAtTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
+
 type readerWithoutWriterTo struct {
 	io.Reader
 }
@@ -1157,6 +1159,10 @@ func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) 
 // --- Object operations ---
 
 func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	return b.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, nil)
+}
+
+func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
 	stageStart := time.Now()
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
@@ -1173,7 +1179,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 
 	versionID := newVersionID()
 	if b.currentECConfig().NumShards() != 0 && b.shardSvc != nil {
-		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType)
+		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata)
 		if handled || err != nil {
 			return obj, err
 		}
@@ -1190,7 +1196,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
-	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
+	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType, userMetadata)
 }
 
 func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
@@ -1198,6 +1204,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	bucket, key, versionID string,
 	r io.Reader,
 	contentType string,
+	userMetadata map[string]string,
 ) (*storage.Object, bool, error) {
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -1251,6 +1258,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		sp,
 		body,
 		contentType,
+		userMetadata,
 		"ec_single_memory",
 		h,
 	)
@@ -1292,7 +1300,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
 		return nil, nil, fmt.Errorf("put object async: EC storage is required")
 	}
-	obj, err := b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
+	obj, err := b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType, nil)
 	return obj, func() error { return nil }, err
 }
 
@@ -1308,10 +1316,20 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
 	}
 
+	var tStart, tStage time.Time
+	if distributedWriteAtTraceEnabled {
+		tStart = time.Now()
+		tStage = tStart
+	}
+
 	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
-	objPath := b.internalObjectPath(bucket, key)
+	objPath := b.currentInternalObjectPath(bucket, key)
 	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
+	}
+	if distributedWriteAtTraceEnabled {
+		log.Debug().Dur("ensure_dir", time.Since(tStage)).Str("bucket", bucket).Msg("Distributed WriteAt trace")
+		tStage = time.Now()
 	}
 
 	f, err := os.OpenFile(objPath.path, os.O_CREATE|os.O_RDWR, 0o644)
@@ -1326,9 +1344,17 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 		return nil, fmt.Errorf("open object: %w", err)
 	}
 	defer f.Close()
+	if distributedWriteAtTraceEnabled {
+		log.Debug().Dur("open", time.Since(tStage)).Msg("Distributed WriteAt trace")
+		tStage = time.Now()
+	}
 
 	if _, err = f.WriteAt(data, int64(offset)); err != nil {
 		return nil, fmt.Errorf("pwrite object: %w", err)
+	}
+	if distributedWriteAtTraceEnabled {
+		log.Debug().Dur("pwrite", time.Since(tStage)).Int("bytes", len(data)).Msg("Distributed WriteAt trace")
+		tStage = time.Now()
 	}
 
 	newSize := int64(offset) + int64(len(data))
@@ -1342,6 +1368,10 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 			return nil, fmt.Errorf("stat object: %w", err)
 		}
 		newSize = fi.Size()
+	}
+	if distributedWriteAtTraceEnabled {
+		log.Debug().Dur("size_lookup", time.Since(tStage)).Int64("object_size", newSize).Msg("Distributed WriteAt trace")
+		tStage = time.Now()
 	}
 	b.internalSizeCache.Store(cacheKey, newSize)
 	now := time.Now().Unix()
@@ -1365,6 +1395,9 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 		return txn.Set(objPath.metaKey, meta)
 	}); err != nil {
 		return nil, fmt.Errorf("update object meta: %w", err)
+	}
+	if distributedWriteAtTraceEnabled {
+		log.Debug().Dur("badger_update", time.Since(tStage)).Dur("total", time.Since(tStart)).Msg("Distributed WriteAt trace")
 	}
 
 	return &storage.Object{
@@ -1405,7 +1438,7 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 		return 0, nil
 	}
 	if storage.IsInternalBucket(bucket) {
-		f, err := os.Open(b.internalObjectPath(bucket, key).path)
+		f, err := os.Open(b.currentInternalObjectPath(bucket, key).path)
 		if err == nil {
 			defer f.Close()
 			return f.ReadAt(buf, offset)
@@ -1466,7 +1499,15 @@ func (b *DistributedBackend) PreferWriteAt(bucket string) bool {
 	if !storage.IsInternalBucket(bucket) {
 		return false
 	}
-	return len(b.liveNodes()) <= 1
+	nodes := b.liveNodes()
+	if len(nodes) <= 1 {
+		return true
+	}
+	unique := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		unique[node] = struct{}{}
+	}
+	return len(unique) <= 1
 }
 
 // Truncate implements the internal-bucket fast path used by NFS SETATTR size.
@@ -1480,7 +1521,7 @@ func (b *DistributedBackend) Truncate(ctx context.Context, bucket, key string, s
 		return fmt.Errorf("truncate: negative size %d", size)
 	}
 	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
-	objPath := b.internalObjectPath(bucket, key)
+	objPath := b.currentInternalObjectPath(bucket, key)
 	if err := b.ensureInternalObjectDir(objPath.dir); err != nil {
 		return fmt.Errorf("create object dir: %w", err)
 	}
@@ -1629,7 +1670,7 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
-func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
+func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string) (*storage.Object, error) {
 	stageStart := time.Now()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -1673,7 +1714,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 
 	selfID := b.currentSelfAddr()
 	if effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType)
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata)
 	}
 
 	if sp.Size <= maxECMemoryShardFastPathBytes {
@@ -1695,6 +1736,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		Placement:        placement,
 		RingVersion:      ringVer,
 		ContentType:      contentType,
+		UserMetadata:     cloneStringMap(userMetadata),
 	}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSpooledShards(ctx, plan, b.ecSpoolDir(), sp)
@@ -1845,6 +1887,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
 	}); merr != nil {
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
@@ -1858,6 +1901,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		ETag:         result.ETag,
 		LastModified: result.ModTime,
 		VersionID:    plan.VersionID,
+		UserMetadata: cloneStringMap(plan.UserMetadata),
 	}, nil
 }
 
@@ -1868,6 +1912,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 	placement []string,
 	sp *spooledObject,
 	contentType string,
+	userMetadata map[string]string,
 ) (*storage.Object, error) {
 	shardKey := key + "/" + versionID
 	stageStart := time.Now()
@@ -1886,6 +1931,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 		sp,
 		body,
 		contentType,
+		userMetadata,
 		"ec_single",
 		nil,
 	)
@@ -1909,6 +1955,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	sp *spooledObject,
 	body io.Reader,
 	contentType string,
+	userMetadata map[string]string,
 	metricPath string,
 	bodyHash hash.Hash,
 ) (*storage.Object, error) {
@@ -1922,6 +1969,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		Placement:        placement,
 		RingVersion:      ringVer,
 		ContentType:      contentType,
+		UserMetadata:     cloneStringMap(userMetadata),
 	}, sp, body, metricPath, bodyHash)
 	if err != nil {
 		return nil, err
@@ -1941,6 +1989,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
+		UserMetadata:     cloneStringMap(userMetadata),
 	}); merr != nil {
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
 		return nil, merr
@@ -1954,6 +2003,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		ETag:         result.ETag,
 		LastModified: result.ModTime,
 		VersionID:    versionID,
+		UserMetadata: cloneStringMap(userMetadata),
 	}, nil
 }
 
@@ -2458,10 +2508,22 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	if b.shardSvc == nil {
 		return fmt.Errorf("shard service unavailable")
 	}
-	oldCfg := oldRec.ECConfigOrFallback(b.currentECConfig())
+
+	obj, meta, err := b.headObjectMeta(ctx, bucket, key)
+	if err != nil {
+		return fmt.Errorf("upgrade head object: %w", err)
+	}
+	resolved, err := b.ResolvePlacement(ctx, bucket, key, meta)
+	if err != nil {
+		return fmt.Errorf("upgrade resolve placement: %w", err)
+	}
+	if len(resolved.Record.Nodes) > 0 {
+		oldRec = resolved.Record
+	}
+	shardKey := resolved.ShardKey
 
 	// Reconstruct original data from old shards.
-	data, err := b.getObjectEC(ctx, bucket, key, "", oldRec)
+	data, err := b.newECObjectReader().ReadObject(ctx, bucket, shardKey, oldRec)
 	if err != nil {
 		return fmt.Errorf("upgrade reconstruct: %w", err)
 	}
@@ -2472,7 +2534,7 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	if err != nil {
 		return fmt.Errorf("upgrade re-split: %w", err)
 	}
-	newPlacement := PlacementForNodes(newCfg, liveNodes, key)
+	newPlacement := PlacementForNodes(newCfg, liveNodes, shardKey)
 	selfID := b.currentSelfAddr()
 
 	var (
@@ -2482,9 +2544,9 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	cleanup := func() {
 		for _, n := range written {
 			if n == selfID {
-				_ = b.shardSvc.DeleteLocalShards(bucket, key)
+				_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
 			} else {
-				_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+				_ = b.shardSvc.DeleteShards(ctx, n, bucket, shardKey)
 			}
 		}
 	}
@@ -2495,11 +2557,11 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		g.Go(func() error {
 			var werr error
 			if node == selfID {
-				werr = b.shardSvc.WriteLocalShard(bucket, key, i, newShards[i])
+				werr = b.shardSvc.WriteLocalShard(bucket, shardKey, i, newShards[i])
 			} else {
 				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
 				defer writeCancel()
-				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, key, i, newShards[i])
+				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, shardKey, i, newShards[i])
 				if b.currentPeerHealth() != nil {
 					if werr != nil {
 						b.currentPeerHealth().MarkUnhealthy(node)
@@ -2522,16 +2584,24 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		return err
 	}
 
-	// Commit updated placement via Raft.
-	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket:  bucket,
-		Key:     key,
-		NodeIDs: newPlacement,
-		K:       newCfg.DataShards,
-		M:       newCfg.ParityShards,
+	// Commit updated EC placement via ObjectMeta. CmdPutShardPlacement is
+	// retained only for legacy decode compatibility and no longer stores rows.
+	if perr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:           bucket,
+		Key:              key,
+		Size:             obj.Size,
+		ContentType:      obj.ContentType,
+		ETag:             obj.ETag,
+		ModTime:          obj.LastModified,
+		VersionID:        obj.VersionID,
+		PlacementGroupID: meta.PlacementGroupID,
+		ECData:           uint8(newCfg.DataShards),
+		ECParity:         uint8(newCfg.ParityShards),
+		NodeIDs:          newPlacement,
+		UserMetadata:     cloneStringMap(obj.UserMetadata),
 	}); perr != nil {
 		cleanup()
-		return fmt.Errorf("upgrade propose placement: %w", perr)
+		return fmt.Errorf("upgrade propose object meta: %w", perr)
 	}
 
 	// Best-effort deletion of old shards from nodes no longer in the new placement.
@@ -2543,11 +2613,10 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		if _, inNew := newSet[n]; inNew {
 			continue
 		}
-		_ = oldCfg.NumShards() // reference to suppress unused warning
 		if n == selfID {
-			_ = b.shardSvc.DeleteLocalShards(bucket, key)
+			_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
 		} else {
-			_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
+			_ = b.shardSvc.DeleteShards(ctx, n, bucket, shardKey)
 		}
 	}
 	return nil
@@ -2585,6 +2654,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 					LastModified: m.LastModified,
 					VersionID:    versionID,
 					ACL:          m.ACL,
+					UserMetadata: cloneStringMap(m.UserMetadata),
 				}
 				placement = PlacementMeta{
 					VersionID:        versionID,
@@ -2717,6 +2787,9 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return "", err
 	}
+	if storage.IsInternalBucket(bucket) {
+		return "", b.deleteInternalObject(bucket, key)
+	}
 	os.Remove(b.objectPath(bucket, key))
 	markerID := newVersionID()
 	if err := b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
@@ -2727,6 +2800,41 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 		return "", err
 	}
 	return markerID, nil
+}
+
+func (b *DistributedBackend) deleteInternalObject(bucket, key string) error {
+	objPath := b.internalObjectPath(bucket, key)
+	_ = os.Remove(objPath.path)
+	b.internalPathCache.Delete(internalObjectCacheKey{bucket: bucket, key: key})
+	b.internalSizeCache.Delete(internalObjectCacheKey{bucket: bucket, key: key})
+	return b.db.Update(func(txn *badger.Txn) error {
+		if item, err := txn.Get(b.ks().LatestKey(bucket, key)); err == nil {
+			if err := item.Value(func(v []byte) error {
+				versionID := string(v)
+				if versionID == "" {
+					return nil
+				}
+				_ = os.Remove(b.objectPathV(bucket, key, versionID))
+				if err := txn.Delete(b.ks().ObjectMetaKeyV(bucket, key, versionID)); err != nil && err != badger.ErrKeyNotFound {
+					return err
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else if err != badger.ErrKeyNotFound {
+			return err
+		}
+		for _, dbKey := range [][]byte{
+			b.ks().LatestKey(bucket, key),
+			b.ks().ObjectMetaKey(bucket, key),
+		} {
+			if err := txn.Delete(dbKey); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -2823,6 +2931,7 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 					ETag:         m.ETag,
 					LastModified: m.LastModified,
 					ACL:          m.ACL,
+					UserMetadata: cloneStringMap(m.UserMetadata),
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -2917,6 +3026,7 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 					ETag:         m.ETag,
 					LastModified: m.LastModified,
 					ACL:          m.ACL,
+					UserMetadata: cloneStringMap(m.UserMetadata),
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3095,7 +3205,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
-		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
+		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType, nil)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")
 	}
@@ -3277,6 +3387,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 				LastModified: m.LastModified,
 				VersionID:    versionID,
 				ACL:          m.ACL,
+				UserMetadata: cloneStringMap(m.UserMetadata),
 			}
 			placement = PlacementMeta{
 				VersionID:        versionID,
@@ -3454,6 +3565,29 @@ func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObje
 	candidate := internalObjectPath{path: path, dir: filepath.Dir(path), metaKey: b.ks().ObjectMetaKey(bucket, key)}
 	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
 	return actual.(internalObjectPath)
+}
+
+func (b *DistributedBackend) currentInternalObjectPath(bucket, key string) internalObjectPath {
+	objPath := b.internalObjectPath(bucket, key)
+	_ = b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.ks().LatestKey(bucket, key))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			versionID := string(v)
+			if versionID == "" {
+				return nil
+			}
+			objPath = internalObjectPath{
+				path:    objPath.path,
+				dir:     objPath.dir,
+				metaKey: b.ks().ObjectMetaKeyV(bucket, key, versionID),
+			}
+			return nil
+		})
+	})
+	return objPath
 }
 
 func (b *DistributedBackend) ensureInternalObjectDir(dir string) error {

@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/clusteradmin"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -476,9 +477,7 @@ func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
 //   - Each group has the expected number of voters for the auto EC profile
 func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
@@ -510,9 +509,7 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 // cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
 // listeners local to each process.
 func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startStaticMRCluster(t, 3)
 
 	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
@@ -548,9 +545,7 @@ func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
 //   - Subsequent CreateBucket on same name is idempotent (no error / 409)
 //   - Spread: 32 buckets all created without error
 func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
 	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 	// the same forward path with try-each-peer reliability.
@@ -609,9 +604,7 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 // Boot, create buckets, SIGTERM all, restart with same dataDirs, verify
 // per-group dirs persist + bucket recreate (idempotent) succeeds.
 func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
@@ -685,9 +678,7 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 // Verify that an object written through the multi-raft data plane survives a
 // clean cluster restart and remains readable through routed S3 GETs.
 func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	// This test must route away from legacy group-0 so the object lands under a
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
@@ -918,9 +909,7 @@ func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 // the correct group leader and persisted. Tests ClusterCoordinator's
 // forward.Send → peer's ForwardReceiver → GroupBackend.PutObject path.
 func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	// Cross-node routing does not require multiple seeded groups; one RF=3 group
 	// is enough to exercise follower-to-leader forwarding.
@@ -955,9 +944,7 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 }
 
 func TestE2E_TopologyDurability_FullTargetWriteGuard(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -1025,9 +1012,7 @@ func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Cli
 // continuity under the new ClusterCoordinator routing (try-each-peer
 // eventually hits the new leader).
 func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	// Failover behavior is independent of group count. Use one group to keep
 	// startup focused on the failover path under test.
@@ -1101,101 +1086,34 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 }
 
 // ----- TestE2E_MultiRaftSharding_NFSv4Smoke ----------------------------
-// Cross-protocol parity: verify that NFSv4 (when enabled) also routes
-// through ClusterCoordinator, so objects written via S3 are readable
-// over NFSv4 mount and vice versa. Linux-only because our NFSv4
-// server binds 0.0.0.0 which requires Linux.
+// Cross-protocol parity: verify that NFSv4 routes through ClusterCoordinator,
+// so objects written via S3 are readable over NFSv4 and vice versa. On Linux
+// the test mounts locally; on macOS it mounts from the Colima Linux VM.
 func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
-	if runtime.GOOS != "linux" {
-		t.Skip("NFSv4 server is Linux-only (binds 0.0.0.0)")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startStaticMRCluster(t, 3)
-
-	// Start a grainfs instance with NFSv4 enabled on a dedicated port.
-	// We reuse the same data dir so it sees the same meta-Raft + per-group state.
-	nfsPort := freePort()
-	nfsDataDir := c.dataDirs[0]
-	nfsProc := exec.Command(getBinary(), "serve",
-		"--data", nfsDataDir,
-		"--port", fmt.Sprintf("%d", freePort()),
-		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--encryption-key-file", c.encKeyFile,
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	require.NoError(t, nfsProc.Start(), "start NFSv4 server")
-	defer func() {
-		_ = nfsProc.Process.Signal(syscall.SIGTERM)
-		_ = nfsProc.Wait()
-		_ = os.RemoveAll(filepath.Join(nfsDataDir, "nfs4-socket"))
-	}()
-
-	// Wait for NFSv4 socket to appear.
-	nfsSocketPath := filepath.Join(nfsDataDir, "nfs4-socket")
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(nfsSocketPath)
-		return err == nil
-	}, 30*time.Second, 500*time.Millisecond, "NFSv4 socket not created")
-
-	// Mount NFSv4 using the system 'mount' command (requires root/nfs-common).
-	// We create a temp mount point and mount 127.0.0.1:{port}:/ {bucket-name}.
-	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
-	require.NoError(t, err)
-	defer func() {
-		_ = exec.Command("umount", mountDir).Run()
-		_ = os.Remove(mountDir)
-	}()
-
-	// Mount with the default NFSv4 options (read/write, hard/intr).
-	mountCmd := exec.Command("mount", "-t", "nfs4",
-		fmt.Sprintf("127.0.0.1:%d:/", nfsPort),
-		mountDir,
-		"-o", "rw,hard,intr,timeo=600,retrans=2",
-	)
-	out, err := mountCmd.CombinedOutput()
-	if err != nil {
-		t.Logf("NFSv4 mount failed (may require sudo): %v\n%s", err, string(out))
-		t.Skip("NFSv4 mount failed — NFSv4 smoke test requires mount permissions; skipping")
-	}
-	defer func() {
-		_ = exec.Command("umount", mountDir).Run()
-	}()
+	waitForPortsParallel(t, []int{c.nfs4Ports[0]}, 45*time.Second)
 
 	// Write object via S3 API.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
-	c.GrantAdminOnBuckets("nfs-smoke")
-	_, err = cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("nfs-smoke")})
-	require.NoError(t, err)
+	c.GrantAdminOnBuckets(storage.NFS4BucketName)
 
 	const s3Body = "written-via-s3"
-	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("nfs-smoke"),
+	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(storage.NFS4BucketName),
 		Key:    aws.String("s3-file.txt"),
 		Body:   bytes.NewReader([]byte(s3Body)),
 	})
 	require.NoError(t, err)
 
-	// Verify via NFSv4 filesystem.
-	nfsFilePath := filepath.Join(mountDir, "nfs-smoke", "s3-file.txt")
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(nfsFilePath)
-		return err == nil && string(data) == s3Body
-	}, 30*time.Second, 500*time.Millisecond, "object not visible via NFSv4")
-
-	// Write via NFSv4 and read via S3 API.
 	const nfsBody = "written-via-nfs"
-	nfsNewFilePath := filepath.Join(mountDir, "nfs-smoke", "nfs-file.txt")
-	err = os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0644)
-	require.NoError(t, err)
+	runNFSv4SmokeClient(t, c.nfs4Ports[0], s3Body, nfsBody)
 
 	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("nfs-smoke"),
+		Bucket: aws.String(storage.NFS4BucketName),
 		Key:    aws.String("nfs-file.txt"),
 	})
 	require.NoError(t, err)
@@ -1207,10 +1125,109 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
 
-func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
+func runNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string) {
+	t.Helper()
+
+	switch runtime.GOOS {
+	case "linux":
+		runLocalNFSv4SmokeClient(t, nfsPort, s3Body, nfsBody)
+	case "darwin":
+		runColimaNFSv4SmokeClient(t, nfsPort, s3Body, nfsBody)
+	default:
+		t.Skipf("NFSv4 smoke requires Linux local mount or Colima VM client; unsupported GOOS=%s", runtime.GOOS)
 	}
+}
+
+func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string) {
+	t.Helper()
+
+	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = exec.Command("umount", mountDir).Run()
+		_ = os.Remove(mountDir)
+	})
+
+	mountCmd := exec.Command("mount", "-t", "nfs4",
+		"-o", "rw,hard,intr,timeo=600,retrans=2",
+		fmt.Sprintf("127.0.0.1:%d:/", nfsPort),
+		mountDir,
+	)
+	out, err := mountCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("NFSv4 mount failed (may require sudo): %v\n%s", err, string(out))
+		t.Skip("NFSv4 smoke requires local NFS mount permissions")
+	}
+
+	nfsFilePath := filepath.Join(mountDir, "s3-file.txt")
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(nfsFilePath)
+		return err == nil && string(data) == s3Body
+	}, 30*time.Second, 500*time.Millisecond, "object not visible via NFSv4")
+
+	nfsNewFilePath := filepath.Join(mountDir, "nfs-file.txt")
+	require.NoError(t, os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0o644))
+}
+
+func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string) {
+	t.Helper()
+
+	if _, err := exec.LookPath("colima"); err != nil {
+		t.Skip("colima not found; macOS NFSv4 smoke requires a Colima Linux VM client")
+	}
+	if out, err := exec.Command("colima", "status").CombinedOutput(); err != nil {
+		t.Skipf("colima not running; macOS NFSv4 smoke requires a Colima Linux VM client: %s", out)
+	}
+
+	hostIP := os.Getenv("HOST_IP")
+	if hostIP == "" {
+		hostIP = "192.168.5.2"
+	}
+
+	name := strings.ReplaceAll(t.Name(), "/", "-")
+	mountDir := "/mnt/grainfs-mr-nfs-" + name
+	runColimaSSH(t, "sudo", "mkdir", "-p", mountDir)
+	t.Cleanup(func() {
+		_ = colimaSSH("sudo", "umount", "-l", mountDir).Run()
+		_ = colimaSSH("sudo", "rmdir", mountDir).Run()
+	})
+
+	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
+		"-o", fmt.Sprintf("vers=4.1,port=%d,rw,hard,intr,timeo=600,retrans=2", nfsPort),
+		fmt.Sprintf("%s:/", hostIP),
+		mountDir,
+	)
+
+	nfsFilePath := mountDir + "/s3-file.txt"
+	require.Eventually(t, func() bool {
+		out, err := colimaSSH("sudo", "cat", nfsFilePath).CombinedOutput()
+		return err == nil && string(out) == s3Body
+	}, 30*time.Second, 500*time.Millisecond, "object not visible via Colima NFSv4 mount")
+
+	nfsNewFilePath := mountDir + "/nfs-file.txt"
+	runColimaSSH(t, "sudo", "bash", "-c",
+		fmt.Sprintf("printf %%s %s > %s", shellQuote(nfsBody), shellQuote(nfsNewFilePath)))
+}
+
+func colimaSSH(args ...string) *exec.Cmd {
+	return exec.Command("colima", append([]string{"ssh", "--"}, args...)...)
+}
+
+func runColimaSSH(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := colimaSSH(args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("colima ssh %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -1244,9 +1261,7 @@ func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
 }
 
 func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

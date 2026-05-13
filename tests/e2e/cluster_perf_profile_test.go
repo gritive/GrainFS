@@ -89,9 +89,7 @@ var (
 // 사이 cleanup이 즉시 풀리지 않아 5 procs × N raft groups 부팅이 누적되며 flake.
 // 한 함수 안에서 명시적 cleanup loop으로 시나리오를 직렬화한다.
 func TestE2E_ClusterPerf_All(t *testing.T) {
-	if testing.Short() {
-		t.Skip("perf profile suite skipped in -short mode")
-	}
+	skipIfShort(t, "perf profile suite skipped in -short mode")
 	if os.Getenv("GRAINFS_PERF") != "1" {
 		t.Skip("set GRAINFS_PERF=1 to run cluster perf profiling")
 	}

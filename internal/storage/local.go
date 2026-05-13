@@ -34,9 +34,10 @@ type LocalBackend struct {
 }
 
 var (
-	_ Backend     = (*LocalBackend)(nil)
-	_ PartialIO   = (*LocalBackend)(nil)
-	_ Truncatable = (*LocalBackend)(nil)
+	_ Backend            = (*LocalBackend)(nil)
+	_ UserMetadataPutter = (*LocalBackend)(nil)
+	_ PartialIO          = (*LocalBackend)(nil)
+	_ Truncatable        = (*LocalBackend)(nil)
 )
 
 // DB exposes the underlying BadgerDB for shared use (lifecycle, events).
@@ -181,6 +182,10 @@ func (b *LocalBackend) ListBuckets(ctx context.Context) ([]string, error) {
 }
 
 func (b *LocalBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
+	return b.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, nil)
+}
+
+func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -256,6 +261,7 @@ func (b *LocalBackend) PutObject(ctx context.Context, bucket, key string, r io.R
 		ContentType:  contentType,
 		ETag:         etag,
 		LastModified: now,
+		UserMetadata: cloneStringMap(userMetadata),
 	}
 
 	meta, err := marshalObject(obj)
@@ -401,9 +407,19 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 // This is O(len(data)) — no full-file copy per write.
 func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error) {
 	_ = ctx
+	var tStart, tStage time.Time
+	if localTraceEnabled {
+		tStart = time.Now()
+		tStage = tStart
+	}
+
 	objPath := b.objectPath(bucket, key)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create dir: %w", err)
+	}
+	if localTraceEnabled {
+		log.Debug().Dur("mkdir", time.Since(tStage)).Str("bucket", bucket).Msg("WriteAt trace")
+		tStage = time.Now()
 	}
 
 	// O_CREATE|O_RDWR: create if new, open in-place if existing.
@@ -412,9 +428,17 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		return nil, fmt.Errorf("open: %w", err)
 	}
 	defer f.Close()
+	if localTraceEnabled {
+		log.Debug().Dur("open", time.Since(tStage)).Msg("WriteAt trace")
+		tStage = time.Now()
+	}
 
 	if _, err := f.WriteAt(data, int64(offset)); err != nil {
 		return nil, fmt.Errorf("pwrite: %w", err)
+	}
+	if localTraceEnabled {
+		log.Debug().Dur("pwrite", time.Since(tStage)).Int("bytes", len(data)).Msg("WriteAt trace")
+		tStage = time.Now()
 	}
 
 	fi, err := f.Stat()
@@ -422,6 +446,10 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		return nil, fmt.Errorf("stat: %w", err)
 	}
 	size := fi.Size()
+	if localTraceEnabled {
+		log.Debug().Dur("stat", time.Since(tStage)).Int64("size", size).Msg("WriteAt trace")
+		tStage = time.Now()
+	}
 
 	// ETag = MD5(file). Required as the corruption-detection oracle for
 	// Volume scrub (which writes via this fast path with offset=0). For
@@ -457,6 +485,10 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		etag = hex.EncodeToString(h.Sum(nil))
 		md5Pool.Put(h)
 	}
+	if localTraceEnabled {
+		log.Debug().Dur("etag", time.Since(tStage)).Msg("WriteAt trace")
+		tStage = time.Now()
+	}
 
 	now := time.Now().Unix()
 	obj := &Object{
@@ -474,6 +506,9 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		return txn.Set(b.objectMetaKey(bucket, key), meta)
 	}); err != nil {
 		return nil, err
+	}
+	if localTraceEnabled {
+		log.Debug().Dur("badger_update", time.Since(tStage)).Dur("total", time.Since(tStart)).Msg("WriteAt trace")
 	}
 	return obj, nil
 }
@@ -600,7 +635,7 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 	}
 	defer rc.Close()
 
-	return b.PutObject(ctx, dstBucket, dstKey, rc, obj.ContentType)
+	return b.PutObjectWithUserMetadata(ctx, dstBucket, dstKey, rc, obj.ContentType, obj.UserMetadata)
 }
 
 func (b *LocalBackend) policyKey(bucket string) []byte {

@@ -53,9 +53,7 @@ import (
 //   - many_unique: 20 unique 5 MB objects, GET each once. Worst case:
 //     all cold. Simulator must report 0% hit at every cache size.
 func TestE2E_ECShardCacheEval(t *testing.T) {
-	if testing.Short() {
-		t.Skip("multi-node EC measurement is too slow for -short mode")
-	}
+	skipIfShort(t, "multi-node EC measurement is too slow for -short mode")
 	if os.Getenv("GRAINFS_EC_SHARDCACHE_EVAL") != "1" {
 		t.Skip("set GRAINFS_EC_SHARDCACHE_EVAL=1 to run EC shard-cache measurement workload")
 	}
@@ -335,9 +333,7 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 // the simulator measured on PR #71 is the upper bound; we leave 10%
 // margin for cold misses and cross-node placement details.
 func TestE2E_ECShardCacheActive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("multi-node EC active-cache test is too slow for -short mode")
-	}
+	skipIfShort(t, "multi-node EC active-cache test is too slow for -short mode")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)

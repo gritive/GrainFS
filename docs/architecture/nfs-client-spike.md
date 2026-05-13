@@ -44,19 +44,18 @@ func testNFSStat(mountPoint, path string) (os.FileInfo, error) {
 
 **Verdict:** No viable Go NFS client libraries. Shell wrapper is safer.
 
-### Option 3: Docker-based NFS Testing
+### Option 3: Colima VM NFS Testing
 
-**Approach:** Run NFS server and client in Docker containers.
+**Approach:** Run the NFS client inside a Colima Linux VM while the server runs on the host.
 
 **Pros:**
-- Isolated test environment
+- Linux client behavior from macOS
 - No root required on host
 - Reproducible across platforms
 
 **Cons:**
 - Complex setup
-- Slower (Docker overhead)
-- May not work on macOS Docker (networking issues)
+- VM networking needs explicit host/guest address handling
 
 ## Recommendation
 

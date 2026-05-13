@@ -49,6 +49,24 @@ func TestSelfAddr_SetBySetShardService(t *testing.T) {
 	assert.True(t, found, "selfAddr must be present in the allNodes slice")
 }
 
+func TestPreferWriteAt_AllowsDuplicateSelfTopology(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	svc := NewShardService(b.root, nil)
+	b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr})
+
+	require.True(t, b.PreferWriteAt("__grainfs_volumes"),
+		"single physical node may appear multiple times for EC topology but still supports local pwrite")
+}
+
+func TestPreferWriteAt_RejectsDistinctPeers(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	svc := NewShardService(b.root, nil)
+	b.SetShardService(svc, []string{b.selfAddr, "peer-1", "peer-2"})
+
+	require.False(t, b.PreferWriteAt("__grainfs_volumes"),
+		"multi-node internal buckets must not use local-only pwrite")
+}
+
 // TestSelfAddr_DifferentFromRaftNodeID confirms that selfAddr (an address like
 // "host:port") differs from the Raft node.ID() (a human-readable string like
 // "test-node"). This is the root cause of the pre-fix bug: if they were equal,

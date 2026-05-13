@@ -9,9 +9,11 @@ package cluster
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSelectECPlacement_NoRing(t *testing.T) {
@@ -61,10 +63,10 @@ func TestSelectECPlacement_RingPartialDead(t *testing.T) {
 	liveNodes := []string{"n0", "n1", "n2", "n3"} // n4, n5 dead
 	ring := NewRing(13, allNodes, 50)
 
-	// 결정론적 비교: ring이 n4/n5를 후보에 포함시키는 키를 선정.
-	// 다양한 키로 시도하여 dead-node를 포함한 placement를 사용한다.
+	// 결정론적 비교: ring이 n4/n5를 후보에 포함시키는 키를 선정한다.
 	var triggerKey string
-	for _, k := range []string{"obj/v1", "alpha/v1", "beta/v1", "gamma/v1", "delta/v1", "echo/v1"} {
+	for i := 0; i < 10_000; i++ {
+		k := "obj/" + strconv.Itoa(i)
 		cand := ring.PlacementForKey(cfg, k)
 		hasDead := false
 		for _, n := range cand {
@@ -78,9 +80,7 @@ func TestSelectECPlacement_RingPartialDead(t *testing.T) {
 			break
 		}
 	}
-	if triggerKey == "" {
-		t.Skip("랜덤 키들이 모두 live 노드만 포함 — 환경/해시 의존")
-	}
+	require.NotEmpty(t, triggerKey, "test ring never selected a dead node candidate")
 
 	placement, ringVer := selectECPlacement(ring, nil, cfg, liveNodes, triggerKey)
 	assert.Equal(t, RingVersion(0), ringVer, "후보에 dead-node 하나라도 있으면 ringVer=0")

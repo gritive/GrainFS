@@ -1,6 +1,7 @@
 package nfs4server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -253,6 +254,102 @@ func TestSeek_HoleWhence(t *testing.T) {
 	assert.Equal(t, uint64(size), resultOffset, "HOLE whence: offset should equal file size")
 }
 
+func TestCopy_UsesOffsetsAndCount(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
+	_, err = backend.PutObject(context.Background(), nfs4Bucket, "src.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), nfs4Bucket, "dst.bin", bytes.NewReader([]byte("abcdefghij")), "application/octet-stream")
+	require.NoError(t, err)
+
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/src.bin",
+		currentPath: "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(2, 4, 3))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	body, _, err := backend.GetObject(context.Background(), nfs4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("abcd234hij"), got)
+
+	r := NewXDRReader(result.Data)
+	callbacks, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Zero(t, callbacks)
+	bytesWritten, err := r.ReadUint64()
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), bytesWritten)
+}
+
+func TestReadDir_ListsFilesCreatedByPartialWrite(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
+	_, err = backend.WriteAt(context.Background(), nfs4Bucket, "dir/file.bin", 0, []byte("payload"))
+	require.NoError(t, err)
+
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		currentPath: "/dir",
+	}
+	d.state.MarkDir("/dir")
+
+	result := d.opReadDir(buildReadDirArgs(1, 4))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	r := NewXDRReader(result.Data)
+	_, err = r.ReadUint64()
+	require.NoError(t, err)
+	valueFollows, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), valueFollows)
+	_, err = r.ReadUint64()
+	require.NoError(t, err)
+	name, err := r.ReadString()
+	require.NoError(t, err)
+	require.Equal(t, "file.bin", name)
+	bitmapLen, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), bitmapLen)
+	word0, err := r.ReadUint32()
+	require.NoError(t, err)
+	_, err = r.ReadUint32()
+	require.NoError(t, err)
+	require.NotZero(t, word0&(1<<1), "READDIR entry should include requested TYPE attr")
+	require.NotZero(t, word0&(1<<4), "READDIR entry should include requested SIZE attr")
+	attrs, err := r.ReadOpaque()
+	require.NoError(t, err)
+	require.NotEmpty(t, attrs)
+}
+
+func TestOpenCreateRefreshesParentDirMtime(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		currentPath: "/dir",
+	}
+	d.state.MarkDir("/dir")
+	before := d.state.DirMtime("/dir")
+	time.Sleep(time.Millisecond)
+
+	result := d.opOpen(buildOpenCreateArgs("file.bin"))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	require.Greater(t, d.state.DirMtime("/dir"), before)
+}
+
 func TestAllocate_NoOp(t *testing.T) {
 	addr, _ := startTestNFS4Server(t)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -331,6 +428,45 @@ func buildAllocateArgs42(offset, length uint64) []byte {
 	w.buf.Write(zero[:]) // stateid
 	w.WriteUint64(offset)
 	w.WriteUint64(length)
+	return w.Bytes()
+}
+
+func buildCopyArgs42(srcOffset, dstOffset, count uint64) []byte {
+	w := &XDRWriter{}
+	var zero [16]byte
+	w.buf.Write(zero[:])
+	w.buf.Write(zero[:])
+	w.WriteUint64(srcOffset)
+	w.WriteUint64(dstOffset)
+	w.WriteUint64(count)
+	return w.Bytes()
+}
+
+func buildReadDirArgs(bits ...uint) []byte {
+	w := &XDRWriter{}
+	w.WriteUint64(0)             // cookie
+	w.buf.Write(make([]byte, 8)) // cookieverf
+	w.WriteUint32(4096)          // dircount
+	w.WriteUint32(65536)         // maxcount
+	var req [2]uint32
+	for _, bit := range bits {
+		if bit < 32 {
+			req[0] |= 1 << bit
+		} else {
+			req[1] |= 1 << (bit - 32)
+		}
+	}
+	w.WriteUint32(2)
+	w.WriteUint32(req[0])
+	w.WriteUint32(req[1])
+	return w.Bytes()
+}
+
+func buildOpenCreateArgs(name string) []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(2) // OPEN4_SHARE_ACCESS_WRITE
+	w.WriteUint32(1) // OPEN4_CREATE
+	w.WriteString(name)
 	return w.Bytes()
 }
 

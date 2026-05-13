@@ -43,6 +43,7 @@ type ecObjectWritePlan struct {
 	Placement        []string
 	RingVersion      RingVersion
 	ContentType      string
+	UserMetadata     map[string]string
 }
 
 type ecObjectWriteResult struct {

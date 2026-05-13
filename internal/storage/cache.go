@@ -178,6 +178,15 @@ func (cb *CachedBackend) PutObject(ctx context.Context, bucket, key string, r io
 	return cb.Backend.PutObject(ctx, bucket, key, r, contentType)
 }
 
+func (cb *CachedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error) {
+	cb.invalidate(bucket, key)
+	putter, ok := cb.Backend.(UserMetadataPutter)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+}
+
 func (cb *CachedBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
 	cb.invalidate(bucket, key)
 	return putObjectWithACLOnBackend(context.Background(), cb.Backend, bucket, key, r, contentType, acl)

@@ -434,6 +434,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 
 	body := bytes.NewReader(rawBody)
 	aclHeader := string(c.GetHeader("x-amz-acl"))
+	userMetadata := copyUserMetadata(c)
 
 	var (
 		result *storage.PutObjectResult
@@ -441,9 +442,9 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	)
 	if aclHeader != "" {
 		acl := s3auth.ParseACLHeader(aclHeader)
-		result, putErr = s.ops.PutObjectWithACLResult(ctx, bucket, key, body, contentType, uint8(acl))
+		result, putErr = s.ops.PutObjectWithACLAndUserMetadataResult(ctx, bucket, key, body, contentType, uint8(acl), userMetadata)
 	} else {
-		result, putErr = s.ops.PutObjectWithResult(ctx, bucket, key, body, contentType)
+		result, putErr = s.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, body, contentType, userMetadata)
 	}
 	if putErr != nil {
 		mapError(c, putErr)
@@ -611,6 +612,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	writeUserMetadataHeaders(c, obj.UserMetadata)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
@@ -909,6 +911,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	writeUserMetadataHeaders(c, obj.UserMetadata)
 	if s.verifier != nil {
 		c.Header("Cache-Control", "private, no-store")
 	} else {
@@ -1911,6 +1914,14 @@ func copyUserMetadata(c *app.RequestContext) map[string]string {
 		metadata[key] = string(v)
 	})
 	return metadata
+}
+
+func writeUserMetadataHeaders(c *app.RequestContext, metadata map[string]string) {
+	for k, v := range metadata {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
+			c.Header(k, v)
+		}
+	}
 }
 
 func copyPreconditions(c *app.RequestContext) (storage.CopyPreconditions, bool) {

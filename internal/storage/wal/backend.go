@@ -52,6 +52,27 @@ func (b *Backend) PutObject(ctx context.Context, bucket, key string, r io.Reader
 	return obj, nil
 }
 
+func (b *Backend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
+	putter, ok := b.Backend.(storage.UserMetadataPutter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	obj, err := putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+	if err != nil {
+		return nil, err
+	}
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      bucket,
+		Key:         key,
+		ETag:        obj.ETag,
+		ContentType: obj.ContentType,
+		Size:        obj.Size,
+		VersionID:   obj.VersionID,
+	})
+	return obj, nil
+}
+
 // PutObjectAsync delegates to the inner backend's write-back path and appends
 // the WAL entry inside the commitFn so PITR records only committed objects.
 func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {

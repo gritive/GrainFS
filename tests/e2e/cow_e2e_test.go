@@ -80,6 +80,19 @@ func cowDeleteSnapshot(t *testing.T, dataDir, volName, snapID string) {
 	require.Equal(t, 0, code, out)
 }
 
+func cowWriteAt(t *testing.T, dataDir, volName string, offset int64, content string) {
+	t.Helper()
+	out, code := runCLI(t, dataDir, "volume", "write-at", volName, "--offset", fmt.Sprintf("%d", offset), "--content", content)
+	require.Equal(t, 0, code, out)
+}
+
+func cowReadAt(t *testing.T, dataDir, volName string, offset, length int64) string {
+	t.Helper()
+	out, code := runCLI(t, dataDir, "volume", "read-at", volName, "--offset", fmt.Sprintf("%d", offset), "--length", fmt.Sprintf("%d", length))
+	require.Equal(t, 0, code, out)
+	return out
+}
+
 // nfsWriteFile writes content to the "default" bucket via S3, simulating an NFS write.
 // path must start with "/" — the leading slash is stripped to form the S3 key.
 func nfsWriteFile(t *testing.T, path string, content []byte) {
@@ -114,44 +127,25 @@ func nfsReadFile(t *testing.T, path string) []byte {
 
 // TestCoW_SnapshotRollbackRestoresData verifies the full snapshot+rollback cycle:
 // write → snapshot → overwrite → rollback → original content restored.
-//
-// Uses the shared "default" NFS volume. Writes to a uniquely-named file so
-// concurrent (sequential) NFS tests don't interfere.
 func TestCoW_SnapshotRollbackRestoresData(t *testing.T) {
-	// TODO: volume snapshot rollback is block-level; S3 object writes are not
-	// reflected by rollback. This test requires block-level write access
-	// (previously via NFSv3, removed in #79). Re-enable once volume snapshot
-	// rollback is wired to the S3/VFS write path.
-	t.Skip("block-level rollback not reflected in S3 object writes — needs investigation")
+	const volSize = 4 * 1024 * 1024
+	volName := fmt.Sprintf("cow-rollback-vol-%d", time.Now().UnixNano())
+	original := "cow-original-content"
+	modified := "cow-modified-content"
 
-	const filePath = "/cow-rollback-test.txt"
-	original := []byte("cow-original-content")
-	modified := []byte("cow-modified-content")
+	cowCreateVolume(t, testServerDataDir, volName, volSize)
+	t.Cleanup(func() { cowCleanupVolume(t, testServerDataDir, volName) })
 
-	// Write original content.
-	nfsWriteFile(t, filePath, original)
-	time.Sleep(50 * time.Millisecond)
+	cowWriteAt(t, testServerDataDir, volName, 0, original)
+	snapID := cowCreateSnapshot(t, testServerDataDir, volName)
 
-	// Create snapshot of the "default" volume.
-	snapID := cowCreateSnapshot(t, testServerDataDir, "default")
+	cowWriteAt(t, testServerDataDir, volName, 0, modified)
+	got := cowReadAt(t, testServerDataDir, volName, 0, int64(len(modified)))
+	require.Equal(t, modified, got)
 
-	// Overwrite with modified content.
-	nfsWriteFile(t, filePath, modified)
-	time.Sleep(50 * time.Millisecond)
-
-	// Verify that modified content is visible.
-	got := nfsReadFile(t, filePath)
-	require.True(t, bytes.Contains(got, modified),
-		"before rollback: expected modified content, got %q", got)
-
-	// Roll back.
-	cowRollback(t, testServerDataDir, "default", snapID)
-	time.Sleep(1200 * time.Millisecond) // wait out the 1s NFS stat cache
-
-	// After rollback, file should contain original content.
-	got = nfsReadFile(t, filePath)
-	require.True(t, bytes.Contains(got, original),
-		"after rollback: expected original content %q, got %q", original, got)
+	cowRollback(t, testServerDataDir, volName, snapID)
+	got = cowReadAt(t, testServerDataDir, volName, 0, int64(len(original)))
+	require.Equal(t, original, got)
 }
 
 // TestCoW_SnapshotListAndDelete verifies snapshot list/delete operations.
@@ -187,13 +181,13 @@ func TestCoW_SnapshotListAndDelete(t *testing.T) {
 // independent at the lifecycle level: deleting one does not delete the other.
 //
 // Note: full block-data independence (write to clone, verify source unchanged)
-// requires NFS access to the cloned volume and is covered in Step 3 (NBD/Docker E2E).
+// requires NFS access to the cloned volume and is covered in Step 3 (NBD E2E).
 func TestCoW_CloneLifecycleIndependence(t *testing.T) {
-	t.Skip("volume clone has a pre-existing visibility bug in the shared e2e server; covered by unit tests")
-
 	const volSize = 4 * 1024 * 1024
 	srcName := fmt.Sprintf("cow-clone-src-%d", time.Now().UnixNano())
 	dstName := fmt.Sprintf("cow-clone-dst-%d", time.Now().UnixNano())
+	original := "clone-original-content"
+	modified := "clone-modified-content"
 
 	cowCreateVolume(t, testServerDataDir, srcName, volSize)
 	srcDeleted := false
@@ -202,17 +196,23 @@ func TestCoW_CloneLifecycleIndependence(t *testing.T) {
 			cowDeleteVolume(t, testServerDataDir, srcName)
 		}
 	})
+	cowWriteAt(t, testServerDataDir, srcName, 0, original)
 
-	// Clone src → dst.
 	out, code := runCLI(t, testServerDataDir, "volume", "clone", srcName, dstName)
 	require.Equal(t, 0, code, out)
+	t.Cleanup(func() { cowCleanupVolume(t, testServerDataDir, dstName) })
 
-	// Delete source; clone must still be accessible.
+	got := cowReadAt(t, testServerDataDir, dstName, 0, int64(len(original)))
+	require.Equal(t, original, got)
+
+	cowWriteAt(t, testServerDataDir, dstName, 0, modified)
+	got = cowReadAt(t, testServerDataDir, srcName, 0, int64(len(original)))
+	require.Equal(t, original, got, "clone writes must not modify source")
+
 	cowDeleteVolume(t, testServerDataDir, srcName)
 	srcDeleted = true
 	out, code = runCLI(t, testServerDataDir, "volume", "info", dstName)
 	require.Equal(t, 0, code, "clone must survive deletion of its source: %s", out)
-
-	// Clean up.
-	t.Cleanup(func() { cowDeleteVolume(t, testServerDataDir, dstName) })
+	got = cowReadAt(t, testServerDataDir, dstName, 0, int64(len(modified)))
+	require.Equal(t, modified, got)
 }

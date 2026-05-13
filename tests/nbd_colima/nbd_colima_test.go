@@ -13,14 +13,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 var (
 	colimaHostIP   = envOrDefault("HOST_IP", "192.168.5.2")
 	colimaNBDPort  = envOrDefault("NBD_PORT", "19810")
 	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
-	nbdVolSize     = envOrDefault("NBD_VOL_SIZE", fmt.Sprintf("%d", 64*1024*1024)) // 64MB
+	nbdVolSize     = envOrDefault("NBD_VOL_SIZE", "64MiB")
 	nbdDev         = envOrDefault("NBD_DEV", "/dev/nbd0")
+	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 )
 
 func envOrDefault(key, def string) string {
@@ -37,9 +40,7 @@ func colimaSSH(args ...string) *exec.Cmd {
 func runColimaSSH(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := colimaSSH(args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("colima ssh %v: %v\n%s", args, err, out)
-	}
+	require.NoErrorf(t, err, "colima ssh %v\n%s", args, out)
 	return strings.TrimSpace(string(out))
 }
 
@@ -103,8 +104,8 @@ func TestMain(m *testing.M) {
 		"--data", dataDir,
 		"--port", colimaHTTPPort,
 		"--nbd-port", colimaNBDPort,
-		"--nbd-volume-size", nbdVolSize,
 		"--nfs4-port", "0",
+		"--cluster-key", clusterKey,
 	}
 
 	cmd := exec.Command(binary, args...)
@@ -121,7 +122,7 @@ func TestMain(m *testing.M) {
 	ready := false
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(healthURL) //nolint:noctx
-		if err == nil && resp.StatusCode == http.StatusOK {
+		if err == nil {
 			resp.Body.Close()
 			ready = true
 			break
@@ -133,6 +134,13 @@ func TestMain(m *testing.M) {
 	}
 	if !ready {
 		fmt.Fprintln(os.Stderr, "grainfs did not become healthy within 10s")
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	adminSock := dataDir + "/admin.sock"
+	if out, err := exec.Command(binary, "volume", "create", "default", "--size", nbdVolSize, "--endpoint", adminSock).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "create default NBD volume failed: %v\n%s\n", err, out)
 		cmd.Process.Kill()
 		os.RemoveAll(dataDir)
 		os.Exit(1)
@@ -187,11 +195,9 @@ func TestNBD_LargeBlock(t *testing.T) {
 		runColimaSSH(t, "sudo", "dd", "if="+dev, "of="+tmpDst, "bs=1M", "count=1")
 
 		sha2 := strings.Fields(runColimaSSH(t, "sha256sum", tmpDst))[0]
-		if sha1 != sha2 {
-			t.Fatalf("sha256 mismatch: written=%s read=%s", sha1, sha2)
-		}
+		require.Equalf(t, sha1, sha2, "sha256 mismatch: written=%s read=%s", sha1, sha2)
 
-		runColimaSSH(t, "rm", "-f", tmpSrc, tmpDst)
+		runColimaSSH(t, "sudo", "rm", "-f", tmpSrc, tmpDst)
 		t.Logf("LargeBlock: PASS sha=%s", sha1)
 	})
 }
@@ -207,9 +213,7 @@ func TestNBD_UnalignedOffset(t *testing.T) {
 		got := runColimaSSH(t, "sudo", "python3", "-c",
 			fmt.Sprintf("fd=open('%s','rb'); fd.seek(100); print(fd.read(31))", dev))
 
-		if !strings.Contains(got, "GRAINFS_NBD_TEST") {
-			t.Fatalf("unaligned read mismatch: %q", got)
-		}
+		require.Contains(t, got, "GRAINFS_NBD_TEST", "unaligned read mismatch")
 		t.Log("UnalignedOffset: PASS")
 	})
 }

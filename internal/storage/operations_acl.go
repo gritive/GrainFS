@@ -11,12 +11,42 @@ func (o *Operations) PutObjectWithACL(ctx context.Context, bucket, key string, r
 }
 
 func (o *Operations) PutObjectWithACLResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, acl uint8) (*PutObjectResult, error) {
+	return o.PutObjectWithACLAndUserMetadataResult(ctx, bucket, key, r, contentType, acl, nil)
+}
+
+func (o *Operations) PutObjectWithACLAndUserMetadataResult(
+	ctx context.Context,
+	bucket, key string,
+	r io.Reader,
+	contentType string,
+	acl uint8,
+	userMetadata map[string]string,
+) (*PutObjectResult, error) {
+	if len(userMetadata) == 0 {
+		previous, err := o.previousObject(ctx, bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		obj, err := o.PutObjectWithACL(ctx, bucket, key, r, contentType, acl)
+		if err != nil {
+			return nil, err
+		}
+		facts, err := mutationObjectFacts("PutObjectWithACL", obj)
+		if err != nil {
+			return nil, err
+		}
+		return &PutObjectResult{Object: facts, Previous: previous}, nil
+	}
+
 	previous, err := o.previousObject(ctx, bucket, key)
 	if err != nil {
 		return nil, err
 	}
-	obj, err := o.PutObjectWithACL(ctx, bucket, key, r, contentType, acl)
+	obj, err := o.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 	if err != nil {
+		return nil, err
+	}
+	if err := o.SetObjectACL(bucket, key, acl); err != nil {
 		return nil, err
 	}
 	facts, err := mutationObjectFacts("PutObjectWithACL", obj)

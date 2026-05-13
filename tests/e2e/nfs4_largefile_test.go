@@ -51,9 +51,7 @@ func testSizeName(size int64) string {
 }
 
 func TestNFSv4LargeFileRead(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
+	skipIfShort(t, "Skipping large file test in short mode")
 
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	if err != nil {
@@ -122,9 +120,7 @@ func TestNFSv4LargeFileRead(t *testing.T) {
 }
 
 func TestNFSv4LargeFileWrite(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
+	skipIfShort(t, "Skipping large file test in short mode")
 
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	if err != nil {
@@ -189,9 +185,7 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 }
 
 func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
+	skipIfShort(t, "Skipping large file test in short mode")
 
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	if err != nil {
@@ -259,9 +253,7 @@ func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
 }
 
 func TestNFSv4BufferPoolNoLeaks(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
+	skipIfShort(t, "Skipping large file test in short mode")
 
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	if err != nil {

@@ -522,6 +522,9 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 	if c.indexWriter == nil {
 		return nil
 	}
+	if storage.IsInternalBucket(bucket) {
+		return nil
+	}
 	entry := buildObjectIndexEntry(group, bucket, key, obj, isDeleteMarker)
 	return c.indexWriter.ProposeObjectIndex(ctx, entry, false)
 }
@@ -847,16 +850,18 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 }
 
 func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
-	if src, ok := c.objectIndexListSource(); ok {
-		if err := c.HeadBucket(ctx, bucket); err != nil {
-			return nil, err
+	if !storage.IsInternalBucket(bucket) {
+		if src, ok := c.objectIndexListSource(); ok {
+			if err := c.HeadBucket(ctx, bucket); err != nil {
+				return nil, err
+			}
+			entries := src.ObjectIndexLatestEntries(bucket, prefix, maxKeys)
+			objects := make([]*storage.Object, 0, len(entries))
+			for _, entry := range entries {
+				objects = append(objects, objectIndexEntryToObject(entry))
+			}
+			return objects, nil
 		}
-		entries := src.ObjectIndexLatestEntries(bucket, prefix, maxKeys)
-		objects := make([]*storage.Object, 0, len(entries))
-		for _, entry := range entries {
-			objects = append(objects, objectIndexEntryToObject(entry))
-		}
-		return objects, nil
 	}
 	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
@@ -972,9 +977,7 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	if err != nil {
 		return nil, err
 	}
-	if c.indexWriter != nil {
-		ctx = contextWithObjectWritePlacement(ctx, group)
-	}
+	ctx = contextWithObjectWritePlacement(ctx, group)
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
@@ -1029,6 +1032,12 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 func (c *ClusterCoordinator) PutObject(
 	ctx context.Context, bucket, key string, r io.Reader, contentType string,
 ) (*storage.Object, error) {
+	return c.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, nil)
+}
+
+func (c *ClusterCoordinator) PutObjectWithUserMetadata(
+	ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string,
+) (*storage.Object, error) {
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -1042,11 +1051,14 @@ func (c *ClusterCoordinator) PutObject(
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		obj, err := gb.PutObject(ctx, bucket, key, r, contentType)
+		obj, err := gb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 		if err != nil {
 			return nil, err
 		}
 		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+	}
+	if len(userMetadata) > 0 {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: storage.UnsupportedReasonNoAdapter}
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter

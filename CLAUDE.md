@@ -7,7 +7,7 @@ make build              # bin/grainfs 빌드
 make test               # unit 테스트 (tests/e2e 제외)
 make test-race          # race detector 포함
 make test-e2e           # E2E (binary 필요, 자동 빌드)
-make test-nbd-docker    # NBD 테스트 (Linux 컨테이너)
+make test-nbd-colima    # NBD 테스트 (colima VM)
 make test-nfs4-colima   # NFSv4 테스트 (colima VM)
 make lint               # golangci-lint
 make fbs                # FlatBuffers (.fbs → .go) 재생성
@@ -78,7 +78,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - `tests/e2e/`: 일반 E2E (Go test)
 - `tests/nbd_interop/`: NBD interop (Linux 필요)
 - `tests/nbd_colima/`, `tests/nfs4_colima/`, `tests/fuse_s3_colima/`: colima VM, 빌드 태그 `colima` 필수
-- NBD unit 테스트는 Docker 안에서 (메모리: "NBD Docker 실행")
+- NBD 테스트는 colima VM에서 실행
 
 ## Coding Behavior Guidelines
 

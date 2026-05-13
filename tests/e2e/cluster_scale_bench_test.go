@@ -172,9 +172,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 // It boots five processes and samples pprof for 30s, so keep it out of the
 // default e2e suite where correctness tests should remain deterministic.
 func TestE2E_ClusterScaleBench_N8(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping scale bench in -short mode")
-	}
+	skipIfShort(t, "skipping scale bench in -short mode")
 	if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
 		t.Skip("set GRAINFS_BENCH_FULL=1 to run scale bench")
 	}
@@ -196,9 +194,7 @@ func TestE2E_ClusterScaleBench_N8(t *testing.T) {
 //   done
 
 func runScaleBenchTest(t *testing.T, n int) {
-	if testing.Short() {
-		t.Skip("skipping scale bench in -short mode")
-	}
+	skipIfShort(t, "skipping scale bench in -short mode")
 	if os.Getenv("GRAINFS_BENCH_FULL") != "1" && n > 8 {
 		t.Skip("set GRAINFS_BENCH_FULL=1 to run N>8 scale bench")
 	}
