@@ -47,6 +47,25 @@ func AdminListBuckets(ctx context.Context, d *Deps) (ListBucketsAdminResp, error
 	return ListBucketsAdminResp{Buckets: out}, nil
 }
 
+// AdminGetBucket returns BucketInfo (name + object count) for a single bucket.
+// CountObjects is O(N objects) — only for interactive use.
+func AdminGetBucket(ctx context.Context, d *Deps, name string) (BucketInfo, error) {
+	if storage.IsInternalBucket(name) {
+		return BucketInfo{}, NewForbidden("cannot access internal bucket")
+	}
+	if err := d.Buckets.HeadBucket(ctx, name); err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			return BucketInfo{}, NewNotFound("bucket not found")
+		}
+		return BucketInfo{}, NewInternal("head bucket: " + err.Error())
+	}
+	count, err := d.Buckets.CountObjects(ctx, name)
+	if err != nil {
+		return BucketInfo{}, NewInternal("count objects: " + err.Error())
+	}
+	return BucketInfo{Name: name, ObjectCount: &count}, nil
+}
+
 // AdminDeleteBucket deletes a bucket. If force is true, all objects are
 // removed first; otherwise the bucket must be empty.
 func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) error {

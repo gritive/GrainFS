@@ -149,6 +149,7 @@ func registerBucket(g router, d *Deps) {
 	}
 	g.POST("/buckets", wrapBody[CreateBucketAdminReq, BucketInfo](d, AdminCreateBucket))
 	g.GET("/buckets", wrapZero(d, AdminListBuckets))
+	g.GET("/buckets/:name", wrapName(d, AdminGetBucket))
 	g.DELETE("/buckets/:name", bucketDeleteHandler(d))
 }
 

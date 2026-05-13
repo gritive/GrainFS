@@ -148,3 +148,37 @@ func (f *fakeBucketOpsNotEmpty) CreateBucket(_ context.Context, _ string) error 
 func (f *fakeBucketOpsNotEmpty) ListBuckets(_ context.Context) ([]string, error) {
 	return nil, nil
 }
+
+func TestAdminGetBucket(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	fake.counts["my-bucket"] = 42
+	d := &admin.Deps{Buckets: fake}
+
+	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "my-bucket", info.Name)
+	require.NotNil(t, info.ObjectCount)
+	assert.Equal(t, int64(42), *info.ObjectCount)
+}
+
+func TestAdminGetBucket_NotFound(t *testing.T) {
+	fake := newFakeBucketOps()
+	d := &admin.Deps{Buckets: fake}
+
+	_, err := admin.AdminGetBucket(context.Background(), d, "missing")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminGetBucket_InternalBucketForbidden(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["__grainfs_internal"] = true
+	d := &admin.Deps{Buckets: fake}
+
+	_, err := admin.AdminGetBucket(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "forbidden", ae.Code)
+}
