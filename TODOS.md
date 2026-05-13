@@ -39,7 +39,6 @@
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
 
-- [ ] **PR-X**: e2e 헬퍼 `tryStartMRCluster` 1→N 시퀀셜 동적화 (`serve` seed → 나머지 `serve --join`) + `--fast-bootstrap` 정적 옵트인 + `TestE2E_TwoNodeAvailabilityTrap`/`TestE2E_DynamicGroupSeeding_1to5` 운영 회귀.
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸). **Depends on:** Voter set lock-free read / `membershipView` quorum snapshot boundary 완료 후 진행 — PR-F는 quorum/election/ReadIndex가 mixed membership state를 보지 않는다는 전제 위에 올라간다.
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - BatchingFSM (FSM apply throughput 한계 도달 시)
