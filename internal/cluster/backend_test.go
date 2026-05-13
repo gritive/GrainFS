@@ -664,6 +664,30 @@ func TestDistributedBackend_CreateBucket_AssignsBeforeStrictRoute(t *testing.T) 
 	require.Equal(t, "group-0", g.ID())
 }
 
+func TestDistributedBackend_CreateBucket_AssignsToWidestECGroup(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-1", []string{"node-0"}))
+	mgr.Add(NewDataGroup("group-8", []string{"node-0", "node-1", "node-2"}))
+	r := NewRouter(mgr)
+	r.SetDefault("group-1")
+	r.SetRequireExplicitAssignments(true)
+
+	b.SetRouter(r)
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"node-0"}},
+		"group-8": {ID: "group-8", PeerIDs: []string{"node-0", "node-1", "node-2"}},
+	}})
+	var assignedGroup string
+	b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
+		assignedGroup = groupID
+		return nil
+	}})
+
+	require.NoError(t, b.CreateBucket(context.Background(), "__grainfs_volumes"))
+	require.Equal(t, "group-8", assignedGroup)
+}
+
 func TestDistributedBackend_CreateBucket_RouterError_Propagates(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
