@@ -253,7 +253,6 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		c.Stop()
 		return nil, err
 	}
-	time.Sleep(2 * time.Second)
 
 	// Followers: write .join-pending before starting so they boot in join mode.
 	for i := 1; i < len(c.procs); i++ {
@@ -268,7 +267,6 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		c.Stop()
 		return nil, err
 	}
-	time.Sleep(4 * time.Second)
 
 	// Bootstrap admin SA via UDS once the cluster has quorum. Try every
 	// node — only the leader's propose succeeds; others return an error

@@ -7,9 +7,10 @@ import (
 )
 
 const (
-	SmallMemTableSize   int64 = 8 << 20
-	SmallBlockCacheSize int64 = 8 << 20
-	SmallNumMemtables         = 2
+	SmallMemTableSize     int64 = 8 << 20
+	SmallBlockCacheSize   int64 = 8 << 20
+	SmallValueLogFileSize int64 = 64 << 20
+	SmallNumMemtables           = 2
 )
 
 // valueThresholdOverride, when > 0, forces every DB opened via SmallOptions
@@ -35,6 +36,7 @@ func SmallOptions(path string) badger.Options {
 		WithLogger(nil).
 		WithMemTableSize(SmallMemTableSize).
 		WithNumMemtables(SmallNumMemtables).
+		WithValueLogFileSize(SmallValueLogFileSize).
 		WithBlockCacheSize(SmallBlockCacheSize).
 		WithNumCompactors(2)
 	if v := valueThresholdOverride.Load(); v > 0 {

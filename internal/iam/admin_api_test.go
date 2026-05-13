@@ -179,6 +179,37 @@ func TestAdminAPI_KeyCreate(t *testing.T) {
 	}
 }
 
+func TestAdminAPI_KeyCreate_PreservesExpiresAt(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	p := &fakeProposer{store: store}
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Nanosecond)
+	body, err := json.Marshal(KeyCreateRequest{ExpiresAt: &expiresAt})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/admin/iam/sa/sa-1/key", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.HandleKeyCreate(w, req, "sa-1")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp KeyCreateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := store.LookupKey(resp.AccessKey)
+	if !ok {
+		t.Fatalf("created key %q was not applied", resp.AccessKey)
+	}
+	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("ExpiresAt = %v, want %v", got.ExpiresAt, expiresAt)
+	}
+}
+
 func TestAdminAPI_KeyCreate_SAMissing(t *testing.T) {
 	api := NewAdminAPI(NewStore(), newFakeProposer(), newTestEncryptor(t))
 	req := httptest.NewRequest("POST", "/admin/iam/sa/missing/key", strings.NewReader("{}"))
