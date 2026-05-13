@@ -14,6 +14,7 @@ E2E_TEST_PATTERN ?= ^Test
 E2E_TEST_TIMEOUT ?= 900s
 E2E_TEST_PARALLEL ?= 1
 E2E_TEST_P ?= 1
+E2E_TEST_JOBS ?= 2
 
 bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
@@ -57,10 +58,12 @@ test-e2e: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -list '$(E2E_TEST_PATTERN)' > $$list_out; \
 	tests=$$(awk '/^Test/ { print $$1 }' $$list_out); \
 	rm -f $$list_out; \
-	for test in $$tests; do \
+	if [ -z "$$tests" ]; then exit 0; fi; \
+	printf '%s\n' $$tests | xargs -P $(E2E_TEST_JOBS) -I {} sh -c '\
+		test="$$1"; \
 		echo "=== RUN SINGLE $$test ==="; \
-		GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -run "^$$test$$" -v -count=1 -timeout $(E2E_TEST_TIMEOUT); \
-	done
+		GRAINFS_BINARY="$(CURDIR)/bin/$(BINARY)" go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -run "^$${test}$$" -v -count=1 -timeout $(E2E_TEST_TIMEOUT); \
+	' sh {}
 
 test-e2e-iceberg: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -tags duckdb_e2e ./tests/e2e/ -run TestIcebergDuckDB -v -count=1 -timeout 5m
