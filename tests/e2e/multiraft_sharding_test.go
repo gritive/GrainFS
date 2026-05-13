@@ -50,11 +50,14 @@ type mrCluster struct {
 	saID          string
 	wildcardAdmin bool
 	leaderIdx     int // last-known leader (set during probe)
+	nodeCount     int // number of currently running nodes (used by addNode)
 }
 
 type mrClusterOptions struct {
-	disableNFS4 bool
-	disableNBD  bool
+	disableNFS4   bool
+	disableNBD    bool
+	FastBootstrap bool // replace time.Sleep(8s) with shard-group polling
+	MaxNodes      int  // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
 }
 
 func startStaticMRCluster(t *testing.T, numNodes int) *mrCluster {
