@@ -5,6 +5,8 @@ import (
 	"hash/fnv"
 	"sort"
 	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/nfsexport"
 )
 
 type exportConfig struct {
@@ -21,6 +23,11 @@ type exportSnap struct {
 }
 
 var emptySnap = &exportSnap{byBucket: map[string]exportConfig{}}
+
+type exportSource interface {
+	Get(bucket string) (nfsexport.Config, bool)
+	List() []string
+}
 
 func buildSnap(rows map[string]exportConfig) *exportSnap {
 	names := make([]string, 0, len(rows))
@@ -45,7 +52,31 @@ func buildSnap(rows map[string]exportConfig) *exportSnap {
 	return &exportSnap{byBucket: copied, sortedNames: names, verifier: h.Sum64()}
 }
 
-func (s *Server) RefreshExports(_ context.Context) error { return nil }
+func (s *Server) SetExportSource(src exportSource) {
+	s.exportSource = src
+	_ = s.RefreshExports(context.Background())
+}
+
+func (s *Server) RefreshExports(_ context.Context) error {
+	if s.exportSource == nil {
+		return nil
+	}
+	rows := make(map[string]exportConfig)
+	for _, bucket := range s.exportSource.List() {
+		cfg, ok := s.exportSource.Get(bucket)
+		if !ok {
+			continue
+		}
+		rows[bucket] = exportConfig{
+			readOnly:   cfg.ReadOnly,
+			fsidMajor:  cfg.FsidMajor,
+			fsidMinor:  cfg.FsidMinor,
+			generation: cfg.Generation,
+		}
+	}
+	s.exports.Store(buildSnap(rows))
+	return nil
+}
 
 func (s *Server) loadExports() *exportSnap {
 	snap := s.exports.Load()

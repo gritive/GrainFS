@@ -116,6 +116,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4/NBD)
 	// are now wired in cluster mode too, not just local.
 	nodeSvc := StartNodeServices(state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, state.distBackend)
+	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	state.AddCleanup(func() { nodeSvc.Close() })
 
 	// Cross-protocol cache coherency: an S3 mutation replicated from another

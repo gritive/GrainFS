@@ -21,6 +21,8 @@ type Server struct {
 	listener net.Listener
 	logger   zerolog.Logger
 	exports  atomic.Pointer[exportSnap]
+
+	exportSource exportSource
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
@@ -96,8 +98,11 @@ func (s *Server) Addr() net.Addr {
 //
 // Phase 0b (D6): the legacy dedicated-bucket filter was removed. Phase 3 will
 // restore export-aware filtering using the active export registry.
-func (s *Server) Invalidate(_ string, key string) {
-	s.state.InvalidateKey(key)
+func (s *Server) Invalidate(bucket string, key string) {
+	if !s.isExportRegistered(bucket) {
+		return
+	}
+	s.state.InvalidateObject(bucket, key)
 }
 
 // connRPCConcurrency caps the number of NFSv4 COMPOUND RPCs processed
