@@ -4,19 +4,9 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
-### Bucket & IAM CLI DX (v0.0.181+ 목표)
+### Bucket & IAM CLI DX
 
-- [ ] **`GRAINFS_ADMIN_SOCKET` env var** — `adminEndpointFromCmd`에서 env var 폴백 추가. `--endpoint` 미지정 시 `$GRAINFS_ADMIN_SOCKET` 참조. bucket/iam 전체에 적용됨.
-- [ ] **`bucket list` 테이블 출력** — 기본 `NAME  OBJECTS` 표, `--json` 플래그로 raw JSON. `--json` 없을 때 빈 목록이면 "(no buckets)" 출력.
-- [ ] **`bucket create` 출력 개선** — `--json` 플래그 없을 때 `Created bucket <name>` 출력.
-- [ ] **`bucket delete` 피드백** — 성공 시 `Deleted bucket <name>` 출력 (현재 무음).
-- [ ] **`bucket info <name>` 신규 커맨드** — `HEAD /v1/buckets/:name` 라우트 추가 + `BucketInfo.ObjectCount int64` 필드 + CLI 테이블 출력.
-- [ ] **`bucket upstream` 출력 개선** — `upstream get/list` 테이블 출력 + `--json` 플래그; `upstream delete` 성공 시 `Removed upstream for bucket <name>`.
-- [ ] **Example 필드 추가** — bucket create/list/delete/info, upstream put/get/list/delete 모든 서브커맨드에 `Example` 필드 추가 (volume 명령 수준 맞춤).
-- [ ] **`iam sa list` 테이블 출력** — 기본 `ID  NAME  DESCRIPTION` 표, `--json` 플래그.
-- [ ] **`iam sa create/get/delete` 출력 개선** — `--json` 플래그, 기본 단행 피드백.
-- [ ] **IAM Example 필드 추가** — iam sa/ak/grant 전 서브커맨드.
-- [ ] **`BucketInfo.Size` (총 사용 바이트)** — 현재 object_count 추가 이후 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
+- [ ] **`BucketInfo.Size` (총 사용 바이트)** — object_count 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
 - [ ] **`BucketInfo.HasUpstream`** — pull-through 설정 여부 표시. bucket info + list 출력에 열 추가.
 - [ ] **`bucket policy` CLI** — `GetBucketPolicy/SetBucketPolicy/DeleteBucketPolicy` 노출. 현재 storage layer만 있고 admin API 미노출.
 - [ ] **`bucket versioning` CLI** — `SetBucketVersioning` admin API 노출.

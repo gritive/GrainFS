@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.182.0] - 2026-05-14 — feat: bucket & IAM CLI DX + security hardening
+
+### Added
+
+- **`grainfs bucket info <name>`** — admin UDS를 통해 버킷 정보(객체 수 포함) 조회. `--json` 플래그로 JSON 출력.
+- **`grainfs bucket upstream` 서브커맨드** — `put / get / list / delete`로 버킷별 pull-through upstream 자격증명 관리.
+- **tabwriter 테이블 출력** — `bucket list`, `bucket info`, `upstream get`, `upstream list`, `iam sa list`가 열 정렬된 테이블로 출력.
+- **`--json` 플래그** — `bucket` 및 `iam` 커맨드에 `--json` persistent flag 추가. 스크립트 파이프라인 지원.
+- **`GRAINFS_ADMIN_SOCKET` 환경변수** — `--endpoint` 생략 시 자동 폴백. 반복 입력 제거.
+- **사용자 피드백 메시지** — `bucket create/delete`, `upstream put/delete`가 성공 시 명확한 확인 메시지 출력.
+- **`iam sa` create/get/delete 출력** — SA 생성 시 access_key/secret_key 테이블 출력; get은 SA 상세 정보 표시.
+
+### Fixed
+
+- **`AdminGetBucket` UI 경로 노출 차단** — `RegisterUI`에서 `registerBucket` 제거. dashboard 토큰 보유자가 `CountObjects` 풀 스캔을 원격 트리거해 Badger 쓰기를 아사시킬 수 있는 취약점 제거. bucket admin ops는 admin UDS 전용.
+- **upstream 라우팅 충돌** — `GET|PUT /v1/buckets/upstream`을 `GET|PUT /v1/upstreams`로 이동. Hertz static-beats-param 규칙으로 `bucket info upstream`이 upstream-list를 반환하던 버그 해소.
+- **CLI 무한 대기** — `iamHTTPClient`에 30초 timeout 추가. 서버 비응답 시 CLI가 무한 대기하던 문제 해소.
+
+### Verification
+
+- `go test -count=1 ./cmd/grainfs/... ./internal/server/admin/... ./internal/serveruntime/...`
+- `go list ./... | grep -v '^github.com/gritive/GrainFS/tests/e2e$' | xargs go test -count=1` — all PASS
+
 ## [0.0.181.0] - 2026-05-14 — fix: ForceDeleteBucket 버그 3종 수정
 
 ### Fixed
