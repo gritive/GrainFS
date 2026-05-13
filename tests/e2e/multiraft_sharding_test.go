@@ -1296,3 +1296,49 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 	require.NoError(t, readErr)
 	require.Contains(t, string(got), `"format-version"`)
 }
+
+// TestE2E_TwoNodeAvailabilityTrap verifies the well-known 2-node quorum trap:
+// with 2 voters in metaRaft (and all data groups), losing one node breaks
+// quorum entirely. This is intentional — 2-node clusters are functionally
+// worse than single-node for availability.
+func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startMRCluster(t, 2, mrClusterOptions{
+		FastBootstrap: true,
+		disableNFS4:   true,
+		disableNBD:    true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	const bucket = "availability-trap-test"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+
+	// Write should succeed with both nodes alive.
+	requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
+
+	// Kill the non-leader node to break metaRaft quorum (needs 2/2).
+	followerIdx := 1 - c.leaderIdx
+	t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
+	require.NotNil(t, c.procs[followerIdx])
+	require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
+	_ = c.procs[followerIdx].Wait()
+	c.procs[followerIdx] = nil
+
+	// Write must now fail — quorum is lost.
+	// In a 2-node raft cluster, the surviving leader blocks waiting for
+	// 2/2 acknowledgment that never arrives, so requests time out rather
+	// than returning a fast 503. Verify any write attempt returns an error.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer writeCancel()
+	_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("after-quorum-loss"),
+		Body:   bytes.NewReader([]byte("blocked")),
+	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
+	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
+}
