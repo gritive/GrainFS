@@ -152,7 +152,7 @@ func ExecuteRecoverClusterPlan(plan *RecoverClusterPlan) error {
 		return fmt.Errorf("close target meta db: %w", err)
 	}
 
-	store, err := raft.NewBadgerLogStore(plan.TargetRaftDir, raft.WithManagedMode())
+	store, err := raft.NewBadgerLogStore(plan.TargetRaftDir)
 	if err != nil {
 		return fmt.Errorf("open target raft store: %w", err)
 	}

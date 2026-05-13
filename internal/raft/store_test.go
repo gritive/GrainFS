@@ -368,41 +368,10 @@ func TestBadgerLogStore_TruncateBefore_ExcludesIndex(t *testing.T) {
 
 // ── Phase 14d: managed mode pre-flight tests ─────────────────────────────
 
-func TestBadgerLogStore_ManagedMode_LibraryDefaultIsNonManaged(t *testing.T) {
-	// The library option default is non-managed. Production always passes
-	// WithManagedMode() — this test verifies the option mechanism itself.
-	dir := t.TempDir()
-	store, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	assert.False(t, store.IsManagedMode())
-	require.NoError(t, store.Close())
-}
-
-func TestBadgerLogStore_ManagedMode_FirstOpen_Managed(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	assert.True(t, store.IsManagedMode())
-	require.NoError(t, store.Close())
-}
-
-func TestBadgerLogStore_ManagedMode_ConsistentReopenManaged(t *testing.T) {
-	dir := t.TempDir()
-	s, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	s2, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	defer s2.Close()
-	assert.True(t, s2.IsManagedMode())
-}
-
-// TestBadgerLogStore_ManagedMode_RejectsLegacyNonManagedDir verifies that a
+// TestBadgerLogStore_ManagedMode_UpgradesLegacyNonManagedDir verifies that a
 // Badger directory whose persisted managed-mode key is "false" (written by a
-// pre-v0.0.172.0 binary) cannot be reopened — the upgrade guard fires and
-// returns the wipe instruction.
-func TestBadgerLogStore_ManagedMode_RejectsLegacyNonManagedDir(t *testing.T) {
+// pre-v0.0.172.0 binary) is silently upgraded — the store opens without error.
+func TestBadgerLogStore_ManagedMode_UpgradesLegacyNonManagedDir(t *testing.T) {
 	dir := t.TempDir()
 
 	// Simulate a pre-v0.0.172.0 data directory: open Badger directly and
@@ -414,9 +383,10 @@ func TestBadgerLogStore_ManagedMode_RejectsLegacyNonManagedDir(t *testing.T) {
 	}))
 	require.NoError(t, db.Close())
 
-	_, err = NewBadgerLogStore(dir, WithManagedMode())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "non-managed mode")
+	// Must open without error — pre-v0.0.172.0 "false" is a transparent upgrade.
+	store, err := NewBadgerLogStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
 }
 
 func TestMarshalLogEntry_AllocsBounded(t *testing.T) {

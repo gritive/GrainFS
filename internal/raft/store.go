@@ -113,13 +113,6 @@ var (
 // BadgerLogStoreOption configures a BadgerLogStore.
 type BadgerLogStoreOption func(*BadgerLogStore)
 
-// WithManagedMode enables Raft log GC mode. The managed-mode flag is persisted
-// in the DB on first open. A store whose DB was created in non-managed mode
-// (pre-v0.0.172.0) cannot be reopened — it returns an error with a wipe instruction.
-func WithManagedMode() BadgerLogStoreOption {
-	return func(s *BadgerLogStore) { s.managedMode = true }
-}
-
 // BadgerLogStore implements LogStore using BadgerDB.
 //
 // When `prefix` is non-empty, the store operates in *shared* mode: it views
@@ -127,14 +120,10 @@ func WithManagedMode() BadgerLogStoreOption {
 // is the C2 P0b prototype path — multiple groups share one process-level DB.
 // Close() is a no-op for shared stores; the caller closes the DB.
 type BadgerLogStore struct {
-	db          *badger.DB
-	managedMode bool
-	prefix      []byte // non-nil → shared mode; prepended to every key
-	shared      bool   // true → Close() does not close db
+	db     *badger.DB
+	prefix []byte // non-nil → shared mode; prepended to every key
+	shared bool   // true → Close() does not close db
 }
-
-// IsManagedMode reports whether this store was opened with managed mode.
-func (s *BadgerLogStore) IsManagedMode() bool { return s.managedMode }
 
 // DB returns the underlying BadgerDB handle. Used by callers that need to
 // register the DB with resourcewatch (vlog watcher) — only meaningful for
@@ -224,8 +213,10 @@ func OpenSharedLogStore(db *badger.DB, groupID string, opts ...BadgerLogStoreOpt
 	return s, nil
 }
 
-// checkManagedMode writes (first open) or verifies (subsequent opens) the
-// managed-mode flag persisted in the DB. Mismatch returns a clear error.
+// checkManagedMode ensures the raft:meta:managed key is set to "true" in the
+// DB. On first open it writes the key. On reopen it upgrades a legacy "false"
+// value (written by pre-v0.0.172.0 binaries) to "true" transparently — the
+// log is always intact, enabling GC is safe.
 //
 // On the shared-DB path (C2 P0b) two goroutines opening the same groupID
 // concurrently can race on the get-then-set, producing badger.ErrConflict.
@@ -248,14 +239,16 @@ func (s *BadgerLogStore) checkManagedModeOnce() error {
 			if !errors.Is(err, badger.ErrKeyNotFound) {
 				return err
 			}
-			// First open: always managed mode.
+			// First open: write managed=true.
 			return txn.Set(s.keyManagedMode(), []byte("true"))
 		}
 		return item.Value(func(val []byte) error {
 			if string(val) == "true" {
 				return nil
 			}
-			return fmt.Errorf("data dir was created in non-managed mode; wipe data/raft/ and restart to migrate")
+			// Legacy "false" written by pre-v0.0.172.0 binaries: upgrade in-place.
+			// The log is always complete regardless of prior GC setting — safe to enable.
+			return txn.Set(s.keyManagedMode(), []byte("true"))
 		})
 	})
 }

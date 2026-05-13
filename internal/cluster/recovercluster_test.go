@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -51,7 +50,7 @@ func TestRecoverClusterPlanRequiresSnapshot(t *testing.T) {
 func TestRecoverClusterPlanRejectsJointSnapshotUnlessStripped(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()
-	writeRecoverClusterSourceSnapshotWithOptions(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, nil, raft.Snapshot{
+	writeRecoverClusterSourceSnapshotWithExtra(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, raft.Snapshot{
 		JointPhase:      raft.JointEntering,
 		JointOldVoters:  []string{"old-a", "old-b"},
 		JointNewVoters:  []string{"old-a", "old-c"},
@@ -96,10 +95,9 @@ func TestRecoverClusterExecuteRewritesMembershipAndMarker(t *testing.T) {
 
 	require.NoError(t, ExecuteRecoverClusterPlan(plan))
 
-	store, err := raft.NewBadgerLogStore(filepath.Join(target, "raft"), raft.WithManagedMode())
+	store, err := raft.NewBadgerLogStore(filepath.Join(target, "raft"))
 	require.NoError(t, err)
 	defer store.Close()
-	assert.True(t, store.IsManagedMode(), "recovered store must always be in managed mode")
 	snap, err := store.LoadSnapshot()
 	require.NoError(t, err)
 	require.Equal(t, []raft.Server{{ID: "node-recovered", Suffrage: raft.Voter}}, snap.Servers)
@@ -174,10 +172,10 @@ func TestRecoverClusterPlanRejectsRecoveryMarkerInTarget(t *testing.T) {
 }
 
 func writeRecoverClusterSourceSnapshot(t *testing.T, dataDir string, servers []raft.Server) []byte {
-	return writeRecoverClusterSourceSnapshotWithOptions(t, dataDir, servers, nil, raft.Snapshot{})
+	return writeRecoverClusterSourceSnapshotWithExtra(t, dataDir, servers, raft.Snapshot{})
 }
 
-func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, servers []raft.Server, opts []raft.BadgerLogStoreOption, extra raft.Snapshot) []byte {
+func writeRecoverClusterSourceSnapshotWithExtra(t *testing.T, dataDir string, servers []raft.Server, extra raft.Snapshot) []byte {
 	t.Helper()
 	metaDir := filepath.Join(dataDir, "meta")
 	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
@@ -190,7 +188,7 @@ func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, 
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	store, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "raft"), opts...)
+	store, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "raft"))
 	require.NoError(t, err)
 	snap := extra
 	snap.Index = 12

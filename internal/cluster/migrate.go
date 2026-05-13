@@ -88,7 +88,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 
 	// Create Raft log store
 	raftDir := filepath.Join(dataDir, "raft")
-	logStore, err := raft.NewBadgerLogStore(raftDir, raft.WithManagedMode())
+	logStore, err := raft.NewBadgerLogStore(raftDir)
 	if err != nil {
 		return fmt.Errorf("create raft store: %w", err)
 	}

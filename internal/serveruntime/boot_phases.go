@@ -198,8 +198,7 @@ func bootValidateTimings(state *bootState) error {
 // raft-log Badger when the store owns it (vs the shared variant where the
 // shared DB phase owns the registration).
 func bootOpenRaftLogStore(state *bootState) error {
-	state.storeOpts = append(state.storeOpts, raft.WithManagedMode())
-	logStore, err := raft.NewBadgerLogStore(state.raftDir, state.storeOpts...)
+	logStore, err := raft.NewBadgerLogStore(state.raftDir)
 	if err != nil {
 		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", state.raftDir, err, state.raftDir)
 	}
