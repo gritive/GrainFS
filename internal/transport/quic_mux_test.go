@@ -22,11 +22,11 @@ func TestQUICTransport_ALPNRouting(t *testing.T) {
 	defer server.Close()
 
 	var muxCalls atomic.Int64
-	server.SetMuxConnHandler(func(conn *quic.Conn) {
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
 		muxCalls.Add(1)
 		// Accept one stream so the dialer's OpenStreamSync returns; no further
 		// processing needed for this test.
-		s, err := conn.AcceptStream(context.Background())
+		s, err := conn.AcceptStream(ctx)
 		if err == nil {
 			_ = s.Close()
 		}
@@ -122,7 +122,7 @@ func TestQUICTransport_PSKMismatch_Mux(t *testing.T) {
 
 	server := MustNewQUICTransport("psk-server")
 	defer server.Close()
-	server.SetMuxConnHandler(func(conn *quic.Conn) {})
+	server.SetMuxConnHandler(func(_ context.Context, _ *quic.Conn) {})
 	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
 
 	client := MustNewQUICTransport("psk-client")

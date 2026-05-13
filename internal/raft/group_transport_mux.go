@@ -208,7 +208,7 @@ func (m *GroupRaftQUICMux) dispatchToLocalGroup(groupID string, args *AppendEntr
 // handleInboundMuxConn owns an accepted mux conn. It wraps the conn in a
 // RaftConn, accepts the dialer's stream pool, and starts the reader loop.
 // The conn lives until either side closes it.
-func (m *GroupRaftQUICMux) handleInboundMuxConn(conn *quic.Conn) {
+func (m *GroupRaftQUICMux) handleInboundMuxConn(ctx context.Context, conn *quic.Conn) {
 	rc := NewRaftConn(conn, RaftConnConfig{
 		PoolSize: m.muxPoolSize,
 		RPCHandler: func(payload []byte) ([]byte, error) {
@@ -220,14 +220,12 @@ func (m *GroupRaftQUICMux) handleInboundMuxConn(conn *quic.Conn) {
 		// Inbound mux conn never receives reply batches (we never initiate
 		// heartbeats from inbound side); reply path is for outbound coalescer.
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	if err := rc.AcceptInboundStreams(ctx); err != nil {
 		_ = rc.Close()
 		return
 	}
 	rc.StartReaders()
-	// Block until the conn breaks; RaftConn handlers do all the work.
+	// Block until the conn breaks or the transport closes (ctx cancelled).
 	_ = rc.Wait(ctx)
 }
 
