@@ -144,19 +144,19 @@ sudo mkdir -p "\$BENCH_DIR"
 
 echo "--- sequential write (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_write --directory="\$BENCH_DIR" --rw=write --bs=128k \
-  --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime=$FIO_RUNTIME --time_based --group_reporting \
+  --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
 echo "--- sequential read (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_read --directory="\$BENCH_DIR" --rw=read --bs=128k \
-  --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime=$FIO_RUNTIME --time_based --group_reporting \
+  --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
 echo "--- random read/write mix (${FIO_RAND_JOBS} threads, 4K blocks, 75% read) ---"
 sudo fio --name=rand_mix --directory="\$BENCH_DIR" --rw=randrw --rwmixread=75 \
-  --bs=4k --size="$FIO_RAND_SIZE" --numjobs="$FIO_RAND_JOBS" --runtime=$FIO_RUNTIME --time_based --group_reporting \
+  --bs=4k --size="$FIO_RAND_SIZE" --numjobs="$FIO_RAND_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 sudo rm -rf "\$BENCH_DIR"
