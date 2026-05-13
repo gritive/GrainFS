@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 3-node Iceberg REST Catalog table API benchmark.
+# Iceberg REST Catalog table API cluster benchmark.
 # Uses the same k6 workload as bench_iceberg_table.sh, changing only topology.
 
 set -euo pipefail
@@ -10,6 +10,7 @@ cd "$REPO_ROOT"
 
 BINARY="${BINARY:-./bin/grainfs}"
 K6="${K6:-k6}"
+NODE_COUNT="${NODE_COUNT:-3}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-iceberg-table-cluster-bench}"
 PROFILE="${PROFILE:-0}"
 VUS="${VUS:-${MAX_VUS:-10}}"
@@ -25,13 +26,25 @@ if [[ "${NO_BUILD:-0}" != "1" ]]; then
 fi
 bench_require_binary "$BINARY"
 
-HTTP0=$(bench_free_port); HTTP1=$(bench_free_port); HTTP2=$(bench_free_port)
-RAFT0=$(bench_free_port); RAFT1=$(bench_free_port); RAFT2=$(bench_free_port)
-PPROF0=$(bench_free_port); PPROF1=$(bench_free_port); PPROF2=$(bench_free_port)
+if [[ "$NODE_COUNT" -lt 2 ]]; then
+  echo "[error] NODE_COUNT must be >= 2 for clustered Iceberg profile" >&2
+  exit 1
+fi
+
+HTTP_PORTS=()
+RAFT_PORTS=()
+PPROF_PORTS=()
+for idx in $(seq 1 "$NODE_COUNT"); do
+  HTTP_PORTS+=("$(bench_free_port)")
+  RAFT_PORTS+=("$(bench_free_port)")
+  PPROF_PORTS+=("$(bench_free_port)")
+done
 
 PIDS=()
 rm -rf "$BENCH_DIR"
-mkdir -p "$BENCH_DIR"/{n0,n1,n2}
+for idx in $(seq 0 $((NODE_COUNT - 1))); do
+  mkdir -p "$BENCH_DIR/n$idx"
+done
 
 cleanup() {
   local status=$?
@@ -49,27 +62,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 raft_addr() {
-  case "$1" in
-    0) echo "127.0.0.1:$RAFT0" ;;
-    1) echo "127.0.0.1:$RAFT1" ;;
-    2) echo "127.0.0.1:$RAFT2" ;;
-  esac
+  echo "127.0.0.1:${RAFT_PORTS[$1]}"
 }
 
 http_port() {
-  case "$1" in
-    0) echo "$HTTP0" ;;
-    1) echo "$HTTP1" ;;
-    2) echo "$HTTP2" ;;
-  esac
+  echo "${HTTP_PORTS[$1]}"
 }
 
 pprof_port() {
-  case "$1" in
-    0) echo "$PPROF0" ;;
-    1) echo "$PPROF1" ;;
-    2) echo "$PPROF2" ;;
-  esac
+  echo "${PPROF_PORTS[$1]}"
 }
 
 start_node() {
@@ -98,13 +99,13 @@ start_node() {
 }
 
 start_node 0
-bench_wait_tcp_port "127.0.0.1" "$HTTP0" "node-0 HTTP" 180 0.2
+bench_wait_tcp_port "127.0.0.1" "$(http_port 0)" "node-0 HTTP" 180 0.2
 if [[ "$PROFILE" == "1" ]]; then
-  bench_wait_tcp_port "127.0.0.1" "$PPROF0" "node-0 pprof" 180 0.2
+  bench_wait_tcp_port "127.0.0.1" "$(pprof_port 0)" "node-0 pprof" 180 0.2
 fi
 bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n0" "bench-iceberg-cluster"
 
-for i in 1 2; do
+for i in $(seq 1 $((NODE_COUNT - 1))); do
   printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
   chmod 600 "$BENCH_DIR/n$i/.join-pending"
   start_node "$i"
@@ -118,7 +119,7 @@ echo "[bench] waiting for leader..."
 LEADER_PORT=""
 LEADER_INDEX=""
 for attempt in $(seq 1 180); do
-  for i in 0 1 2; do
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
     port="$(http_port "$i")"
     status=$(curl -sf "http://127.0.0.1:$port/api/cluster/status" 2>/dev/null || true)
     [[ -z "$status" ]] && continue
@@ -146,7 +147,7 @@ sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 PROFILE_DIR=""
 PPROF_BG_PID=""
 if [[ "$PROFILE" == "1" ]]; then
-  PROFILE_DIR="benchmarks/profiles/iceberg-table-cluster-$(date +%Y%m%d-%H%M%S)"
+  PROFILE_DIR="benchmarks/profiles/iceberg-table-${NODE_COUNT}-node-cluster-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$PROFILE_DIR"
   target_pprof="$(pprof_port "$TARGET_INDEX")"
   curl -sf "http://127.0.0.1:$target_pprof/debug/pprof/heap" \
