@@ -817,13 +817,13 @@ func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *
 }
 
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
-	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 	router := NewRouter(mgr)
-	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	router.AssignBucket("__grainfs_vfs_default", "group-1")
 	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
 	}}
@@ -833,70 +833,70 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, w.Close()) })
 	wrapped := wal.NewBackend(c, w)
-	require.True(t, wrapped.PreferWriteAt(storage.NFS4BucketName))
+	require.True(t, wrapped.PreferWriteAt("__grainfs_vfs_default"))
 	require.False(t, wrapped.PreferWriteAt("photos"))
 
-	require.NoError(t, wrapped.Truncate(context.Background(), storage.NFS4BucketName, "fio/sparse.bin", 12))
+	require.NoError(t, wrapped.Truncate(context.Background(), "__grainfs_vfs_default", "fio/sparse.bin", 12))
 	sparse := make([]byte, 12)
-	n, err := wrapped.ReadAt(context.Background(), storage.NFS4BucketName, "fio/sparse.bin", 0, sparse)
+	n, err := wrapped.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/sparse.bin", 0, sparse)
 	require.NoError(t, err)
 	require.Equal(t, 12, n)
 	require.Equal(t, make([]byte, 12), sparse)
 
-	obj, err := wrapped.WriteAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 4, []byte("data"))
+	obj, err := wrapped.WriteAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 4, []byte("data"))
 	require.NoError(t, err)
 	require.Equal(t, int64(8), obj.Size)
 	require.Empty(t, obj.ETag)
 
-	require.NoError(t, wrapped.Truncate(context.Background(), storage.NFS4BucketName, "fio/file.bin", 6))
+	require.NoError(t, wrapped.Truncate(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 6))
 
 	buf := make([]byte, 8)
-	n, err = wrapped.ReadAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	n, err = wrapped.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 0, buf)
 	require.ErrorIs(t, err, io.EOF)
 	require.Equal(t, 6, n)
 	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
 }
 
 func TestClusterCoordinator_PreferWriteAtFalseForMultiVoterInternalBucket(t *testing.T) {
-	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node", "node-2", "node-3"}, gb))
 	router := NewRouter(mgr)
-	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	router.AssignBucket("__grainfs_vfs_default", "group-1")
 	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		"group-1": {ID: "group-1", PeerIDs: []string{"test-node", "node-2", "node-3"}},
 	}}
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
 
-	require.False(t, c.PreferWriteAt(storage.NFS4BucketName),
+	require.False(t, c.PreferWriteAt("__grainfs_vfs_default"),
 		"multi-voter internal buckets must use PutObject replication, not local-only pwrite")
 }
 
 func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *testing.T) {
-	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 	router := NewRouter(mgr)
-	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	router.AssignBucket("__grainfs_vfs_default", "group-1")
 	meta := NewMetaFSM()
 	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
 		WithObjectIndexProposer(noopObjectIndexProposer{})
 
-	require.NoError(t, c.Truncate(context.Background(), storage.NFS4BucketName, "fio/file.bin", 5))
-	_, err := c.WriteAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 1, []byte("abc"))
+	require.NoError(t, c.Truncate(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 5))
+	_, err := c.WriteAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 1, []byte("abc"))
 	require.NoError(t, err)
 
-	obj, err := c.HeadObject(context.Background(), storage.NFS4BucketName, "fio/file.bin")
+	obj, err := c.HeadObject(context.Background(), "__grainfs_vfs_default", "fio/file.bin")
 	require.NoError(t, err)
 	require.Equal(t, int64(5), obj.Size)
 
 	buf := make([]byte, 5)
-	n, err := c.ReadAt(context.Background(), storage.NFS4BucketName, "fio/file.bin", 0, buf)
+	n, err := c.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 0, buf)
 	require.NoError(t, err)
 	require.Equal(t, 5, n)
 	require.Equal(t, []byte{0, 'a', 'b', 'c', 0}, buf)

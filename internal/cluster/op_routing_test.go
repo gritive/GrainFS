@@ -163,20 +163,20 @@ func TestOpRouter_RouteObjectRead_InternalBucketBypassesIndex(t *testing.T) {
 	r.router = routerWithGroups(t, map[string][]string{
 		"g1": {"node-1", "node-2", "node-3"},
 	})
-	r.router.AssignBucket(storage.NFS4BucketName, "g1")
-	got, entry, err := r.RouteObjectRead(storage.NFS4BucketName, "obj", "")
+	r.router.AssignBucket("__grainfs_vfs_default", "g1")
+	got, entry, err := r.RouteObjectRead("__grainfs_vfs_default", "obj", "")
 	require.NoError(t, err)
 	require.Equal(t, "g1", got.GroupID)
 	require.Equal(t, "g1", entry.PlacementGroupID)
-	require.Equal(t, storage.NFS4BucketName, entry.Bucket)
+	require.Equal(t, "__grainfs_vfs_default", entry.Bucket)
 }
 
 func TestOpRouter_RouteObjectWrite_InternalBucketPreservesGroupPeers(t *testing.T) {
 	probe := &fakeLeaderProbe{}
 	r := routerForTestWithBucket(t, probe)
-	r.router.AssignBucket(storage.NFS4BucketName, "g1")
+	r.router.AssignBucket("__grainfs_vfs_default", "g1")
 
-	target, group, err := r.RouteObjectWrite(storage.NFS4BucketName, "obj")
+	target, group, err := r.RouteObjectWrite("__grainfs_vfs_default", "obj")
 	require.NoError(t, err)
 	require.Equal(t, "g1", target.GroupID)
 	require.Equal(t, "g1", group.ID)
@@ -239,8 +239,8 @@ func TestOpRouter_RouteObjectWrite_PreservesForwardPeersWhenSelfIsLeader(t *test
 
 func TestOpRouter_RouteObjectWrite_InternalBucketUsesBucketRoute(t *testing.T) {
 	r := routerForTestWithECGroups(t, ECConfig{DataShards: 4, ParityShards: 2})
-	r.router.AssignBucket(storage.NFS4BucketName, "g1")
-	target, group, err := r.RouteObjectWrite(storage.NFS4BucketName, "k")
+	r.router.AssignBucket("__grainfs_vfs_default", "g1")
+	target, group, err := r.RouteObjectWrite("__grainfs_vfs_default", "k")
 	require.NoError(t, err)
 	require.Equal(t, "g1", target.GroupID)
 	require.Equal(t, "g1", group.ID)

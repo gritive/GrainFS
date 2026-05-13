@@ -19,7 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/clusteradmin"
-	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1099,11 +1098,11 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
-	c.GrantAdminOnBuckets(storage.NFS4BucketName)
+	c.GrantAdminOnBuckets("__grainfs_nfs4")
 
 	const s3Body = "written-via-s3"
 	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(storage.NFS4BucketName),
+		Bucket: aws.String("__grainfs_nfs4"),
 		Key:    aws.String("s3-file.txt"),
 		Body:   bytes.NewReader([]byte(s3Body)),
 	})
@@ -1113,7 +1112,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	runNFSv4SmokeClient(t, c.nfs4Ports[0], s3Body, nfsBody)
 
 	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(storage.NFS4BucketName),
+		Bucket: aws.String("__grainfs_nfs4"),
 		Key:    aws.String("nfs-file.txt"),
 	})
 	require.NoError(t, err)
