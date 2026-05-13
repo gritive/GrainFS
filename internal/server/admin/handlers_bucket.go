@@ -79,11 +79,15 @@ func AdminGetBucket(ctx context.Context, d *Deps, name string) (BucketInfo, erro
 	if d.IAM != nil {
 		if _, err := d.IAM.GetBucketUpstream(ctx, name); err == nil {
 			info.HasUpstream = true
+		} else if !adminapi.IsCode(err, "not_found") {
+			return BucketInfo{}, NewInternal("get bucket upstream: " + err.Error())
 		}
 	}
 
 	if versioning, err := d.Buckets.GetBucketVersioning(name); err == nil {
 		info.Versioning = versioning
+	} else if !errors.Is(err, storage.ErrUnsupportedOperation) {
+		return BucketInfo{}, NewInternal("get bucket versioning: " + err.Error())
 	}
 
 	return info, nil

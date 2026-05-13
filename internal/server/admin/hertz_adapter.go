@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 
@@ -172,7 +173,7 @@ func bucketSetPolicyHandler(d *Deps) app.HandlerFunc {
 				return
 			}
 		}
-		if req.Policy == nil {
+		if req.Policy == nil || bytes.Equal(req.Policy, []byte("null")) {
 			writeError(c, NewInvalid("policy field is required"))
 			return
 		}
