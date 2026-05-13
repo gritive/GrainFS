@@ -1331,8 +1331,10 @@ func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
 
 	// Write must now fail — quorum is lost.
 	// In a 2-node raft cluster, the surviving leader blocks waiting for
-	// 2/2 acknowledgment that never arrives, so requests time out rather
-	// than returning a fast 503. Verify any write attempt returns an error.
+	// 2/2 acknowledgment that never arrives, so requests time out with
+	// context.DeadlineExceeded rather than a fast 503. A fast 503 preflight
+	// ("not enough voters") would require a separate quorum-check feature.
+	// This test documents the current reality (hang = trap), not a bug.
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer writeCancel()
 	_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
@@ -1379,8 +1381,8 @@ func TestE2E_DynamicGroupSeeding_1to5(t *testing.T) {
 		expectedGroups int
 	}
 	steps := []step{
-		{1, 8},  // initial seed
-		{2, 8},  // no new groups
+		{1, 8}, // initial seed
+		{2, 8}, // no new groups
 		{3, 12},
 		{4, 16},
 		{5, 20},
