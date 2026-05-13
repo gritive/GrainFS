@@ -19,6 +19,7 @@ type router interface {
 	POST(path string, handlers ...app.HandlerFunc) route.IRoutes
 	DELETE(path string, handlers ...app.HandlerFunc) route.IRoutes
 	PUT(path string, handlers ...app.HandlerFunc) route.IRoutes
+	PATCH(path string, handlers ...app.HandlerFunc) route.IRoutes
 }
 
 // RegisterAdmin wires the admin handlers under the `/v1/...` prefix on the
@@ -34,6 +35,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerDashboard(g, d)
 	registerIAM(g, d)
 	registerBucket(g, d)
+	registerNfsExports(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the
@@ -160,6 +162,48 @@ func registerBucket(g router, d *Deps) {
 	g.DELETE("/buckets/:name/policy", bucketDeletePolicyHandler(d))
 	g.GET("/buckets/:name/versioning", wrapName(d, AdminGetBucketVersioning))
 	g.PUT("/buckets/:name/versioning", bucketSetVersioningHandler(d))
+}
+
+func registerNfsExports(g router, d *Deps) {
+	if d.NfsExports == nil {
+		return
+	}
+	g.POST("/nfs/exports", wrapBody[NfsExportUpsertReq, NfsExportInfo](d, AdminNfsExportUpsert))
+	g.GET("/nfs/exports", wrapZero(d, AdminNfsExportList))
+	g.GET("/nfs/exports/:name", wrapName(d, AdminNfsExportGet))
+	g.DELETE("/nfs/exports/:name", nfsExportDeleteHandler(d))
+	g.PATCH("/nfs/exports/:name", nfsExportPatchHandler(d))
+}
+
+func nfsExportDeleteHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		name := c.Param("name")
+		if err := AdminNfsExportDelete(ctx, d, name); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.SetStatusCode(consts.StatusNoContent)
+	}
+}
+
+func nfsExportPatchHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		name := c.Param("name")
+		var req NfsExportUpsertReq
+		body := c.Request.Body()
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
+				return
+			}
+		}
+		resp, err := AdminNfsExportUpdate(ctx, d, name, req)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		writeOK(c, consts.StatusOK, resp)
+	}
 }
 
 func bucketSetPolicyHandler(d *Deps) app.HandlerFunc {

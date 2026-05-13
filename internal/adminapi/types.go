@@ -125,6 +125,23 @@ type VlogSmokeReport struct {
 	Stale []string `json:"stale"`
 }
 
+type NfsExportInfo struct {
+	Bucket     string `json:"bucket"`
+	ReadOnly   bool   `json:"read_only"`
+	FsidMajor  uint64 `json:"fsid_major"`
+	FsidMinor  uint64 `json:"fsid_minor"`
+	Generation uint64 `json:"generation"`
+}
+
+type NfsExportUpsertReq struct {
+	Bucket   string `json:"bucket,omitempty"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+type ListNfsExportsResp struct {
+	Exports []NfsExportInfo `json:"exports"`
+}
+
 // DashboardTokenResp describes the dashboard URL and token shown to operators.
 type DashboardTokenResp struct {
 	URL          string `json:"url"`

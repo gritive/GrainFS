@@ -98,6 +98,21 @@ type BucketOps interface {
 	SetBucketVersioning(bucket, state string) error
 }
 
+type NfsExportService interface {
+	Upsert(ctx context.Context, bucket string, params NfsExportUpsertParams) error
+	Delete(ctx context.Context, bucket string) error
+	Get(bucket string) (NfsExportInfo, bool)
+	List() []NfsExportInfo
+}
+
+type NfsExportUpsertParams struct {
+	ReadOnly bool
+}
+
+type NfsExportInfo = adminapi.NfsExportInfo
+type NfsExportUpsertReq = adminapi.NfsExportUpsertReq
+type ListNfsExportsResp = adminapi.ListNfsExportsResp
+
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
 type IAMService interface {
@@ -129,6 +144,7 @@ type Deps struct {
 	VolumePlacement VolumePlacementSource // optional; nil disables replica/EC volume health signal
 	IAM             IAMService            // optional; nil disables IAM admin endpoints
 	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
+	NfsExports      NfsExportService      // optional; nil disables NFS export admin endpoints
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string
