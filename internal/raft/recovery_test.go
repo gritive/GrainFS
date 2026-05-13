@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -295,6 +297,158 @@ func TestRecovery_HardStatePersistedAcrossElectionVote(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("HandleRequestVote timed out")
 	}
+}
+
+// dropJointTransport is a test-only Transport wrapper that drops any
+// AppendEntries RPC that carries a LogEntryJointConfChange entry when armed.
+// Used to simulate leader crash after Stage-1 commits but before Stage-2
+// (the joint entry) replicates to quorum.
+type dropJointTransport struct {
+	inner   Transport
+	enabled atomic.Bool
+}
+
+func newDropJointTransport(inner Transport) *dropJointTransport {
+	return &dropJointTransport{inner: inner}
+}
+
+func (d *dropJointTransport) enable()  { d.enabled.Store(true) }
+func (d *dropJointTransport) disable() { d.enabled.Store(false) }
+
+func (d *dropJointTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	if d.enabled.Load() {
+		for _, e := range args.Entries {
+			if e.Type == LogEntryJointConfChange {
+				return nil, errors.New("joint entry dropped by test")
+			}
+		}
+	}
+	return d.inner.SendAppendEntries(peer, args)
+}
+
+func (d *dropJointTransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	return d.inner.SendRequestVote(peer, args)
+}
+
+func (d *dropJointTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return d.inner.SendInstallSnapshot(peer, args)
+}
+
+func (d *dropJointTransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return d.inner.SendTimeoutNow(peer, args)
+}
+
+// TestPromoteToVoter_OrphanRecovery pins the M6.0 follow-up: when a leader
+// crashes after Stage-1 (ConfChangePromoteStage1) commits but before Stage-2
+// (the joint AddVoter entry) replicates, the newly elected leader must detect
+// the orphaned target and complete the promotion automatically.
+//
+// Protocol:
+//  1. n1(leader), n2, n3 form a 3-voter cluster; n4 joins as learner.
+//  2. n2/n3 transports are wrapped with dropJointTransport so Stage-2 can
+//     never reach quorum while the filter is armed.
+//  3. PromoteToVoter(n4) fires; Stage-1 commits (n4 leaves learners map)
+//     but Stage-2 hangs waiting for replication.
+//  4. n1 stops (leader crash).
+//  5. Joint filter is disabled; n2 or n3 is elected leader.
+//  6. The new leader's recoverOrphanedPromote fires and dispatches Stage-2.
+//  7. n4 must appear as Voter in the converged configuration.
+func TestPromoteToVoter_OrphanRecovery(t *testing.T) {
+	net := newMemNetwork()
+
+	makeNode := func(id string, peers []string, et time.Duration) *Node {
+		n, err := NewNode(Config{
+			ID:               id,
+			Peers:            peers,
+			ElectionTimeout:  et,
+			HeartbeatTimeout: testHeartbeat,
+		})
+		require.NoError(t, err)
+		n.SetTransport(net.Register(id, n))
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func() {
+			for range n.ApplyCh() {
+			}
+		}()
+		return n
+	}
+
+	n1 := makeNode("n1", []string{"n2", "n3"}, fastElectionTimeout)
+	n2 := makeNode("n2", []string{"n1", "n3"}, slowElectionTimeout)
+	n3 := makeNode("n3", []string{"n1", "n2"}, slowElectionTimeout)
+
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
+		"n1 must become leader")
+
+	// n4 joins as learner and catches up.
+	n4 := makeNode("n4", []string{"n1"}, slowElectionTimeout)
+	require.NoError(t, n1.AddLearner("n4", "n4-addr"))
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		return n1.peerMatchIndexForTest("n4") >= n1.CommittedIndex()
+	}), "n4 must catch up before promote")
+	// Record commitIndex after catch-up; Stage-1 will land at +1.
+	catchupCommit := n1.CommittedIndex()
+
+	// Arm a joint-drop filter on n1 (the leader's sender transport) so
+	// Stage-2 (LogEntryJointConfChange) can never replicate to n2/n3.
+	// memNetwork routes AEs through the SENDER's transport, so wrapping n1
+	// is what prevents Stage-2 from reaching the followers.
+	drop1 := newDropJointTransport(n1.loadTransport())
+	drop1.enable()
+	n1.SetTransport(drop1)
+
+	// Start PromoteToVoter; it will block waiting for Stage-2 to commit.
+	promoteDone := make(chan error, 1)
+	go func() { promoteDone <- n1.PromoteToVoter("n4") }()
+
+	// Wait for Stage-1 to commit: CommittedIndex advances past catchupCommit.
+	// Stage-1 (ConfChangePromoteStage1) is a plain LogEntryConfChange, not a
+	// joint entry, so drop1 lets it through and n2/n3 ACK it.
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		return n1.CommittedIndex() > catchupCommit
+	}), "Stage-1 must commit on n1 (n2/n3 ACK the non-joint AE)")
+
+	// Crash n1. PromoteToVoter returns an error (leader lost); ignore it.
+	n1.Stop()
+	select {
+	case <-promoteDone:
+	case <-time.After(2 * time.Second):
+		// may not have returned yet if n1 stop races with promote goroutine
+	}
+
+	// Disarm the filter — the new leader's transport is the underlying memTransport,
+	// so Stage-2 can now replicate freely once recovery fires it.
+	drop1.disable()
+
+	// One of n2/n3 becomes leader and must recover the orphaned promote.
+	newLeader := func() *Node {
+		for _, n := range []*Node{n2, n3} {
+			if n.IsLeader() {
+				return n
+			}
+		}
+		return nil
+	}
+	require.NoError(t, waitFor(5*time.Second, func() bool { return newLeader() != nil }),
+		"n2 or n3 must elect a new leader")
+
+	// n4 must become Voter in the converged configuration on all surviving nodes.
+	require.NoError(t, waitFor(5*time.Second, func() bool {
+		for _, n := range []*Node{n2, n3, n4} {
+			found := false
+			for _, s := range n.Configuration().Servers {
+				if s.ID == "n4" && s.Suffrage == Voter {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}), "n4 must appear as Voter after orphan recovery")
 }
 
 // TestRecovery_RestartedNodeIsFollower: a single-voter node that was Leader
