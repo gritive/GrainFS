@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/clusteradmin"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -50,11 +51,14 @@ type mrCluster struct {
 	saID          string
 	wildcardAdmin bool
 	leaderIdx     int // last-known leader (set during probe)
+	nodeCount     int // number of currently running nodes (used by addNode)
 }
 
 type mrClusterOptions struct {
-	disableNFS4 bool
-	disableNBD  bool
+	disableNFS4   bool
+	disableNBD    bool
+	FastBootstrap bool // replace time.Sleep(8s) with shard-group polling
+	MaxNodes      int  // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
 }
 
 func startStaticMRCluster(t *testing.T, numNodes int) *mrCluster {
@@ -87,44 +91,54 @@ func startStaticMRClusterWithOptions(t *testing.T, numNodes int, opts mrClusterO
 	return nil
 }
 
-func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+// newMRCluster allocates maxNodes port slots and temp dirs for a multi-raft
+// cluster. It does NOT start any processes. Callers (tryStartStaticMRCluster,
+// tryStartMRCluster) do the actual node startup.
+func newMRCluster(t *testing.T, maxNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	c := &mrCluster{
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
 		encKeyFile: makeSharedEncryptionKeyFile(t),
 	}
-	c.httpPorts = make([]int, numNodes)
-	c.raftPorts = make([]int, numNodes)
-	c.nfs4Ports = make([]int, numNodes)
-	c.nbdPorts = make([]int, numNodes)
-	c.httpURLs = make([]string, numNodes)
-	c.dataDirs = make([]string, numNodes)
-	c.procs = make([]*exec.Cmd, numNodes)
+	c.httpPorts = make([]int, maxNodes)
+	c.raftPorts = make([]int, maxNodes)
+	c.nfs4Ports = make([]int, maxNodes)
+	c.nbdPorts = make([]int, maxNodes)
+	c.httpURLs = make([]string, maxNodes)
+	c.dataDirs = make([]string, maxNodes)
+	c.procs = make([]*exec.Cmd, maxNodes)
 
-	// Allocate every listener port from one de-duplicated pool so HTTP, Raft,
-	// NFSv4 and NBD cannot collide within this cluster attempt.
-	ports := uniqueFreePorts(numNodes * 4)
-	for i := 0; i < numNodes; i++ {
+	ports := uniqueFreePorts(maxNodes * 4)
+	for i := 0; i < maxNodes; i++ {
 		c.httpPorts[i] = ports[i]
-		c.raftPorts[i] = ports[numNodes+i]
+		c.raftPorts[i] = ports[maxNodes+i]
 		if !opts.disableNFS4 {
-			c.nfs4Ports[i] = ports[2*numNodes+i]
+			c.nfs4Ports[i] = ports[2*maxNodes+i]
 		}
 		if !opts.disableNBD {
-			c.nbdPorts[i] = ports[3*numNodes+i]
+			c.nbdPorts[i] = ports[3*maxNodes+i]
 		}
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 
 		d, err := os.MkdirTemp("", fmt.Sprintf("mrshard-%d-*", i))
 		if err != nil {
 			c.Stop()
-			return nil, fmt.Errorf("mkdir tmp: %w", err)
+			return nil, fmt.Errorf("mkdir tmp node %d: %w", i, err)
 		}
 		c.dataDirs[i] = d
 	}
 
 	t.Cleanup(c.Stop)
+	return c, nil
+}
+
+func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+	t.Helper()
+	c, err := newMRCluster(t, numNodes, opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// Start node 0 as seed leader, then let followers join via .join-pending.
 	c.procs[0] = c.startNode(0)
@@ -186,6 +200,112 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 	// Allow the automatic seed loop to complete before exercising routing.
 	time.Sleep(8 * time.Second)
 	return c, nil
+}
+
+// tryStartMRCluster starts numNodes nodes using dynamic sequential join:
+// node 0 (seed) starts first, then nodes 1..numNodes-1 each start after the
+// previous one is HTTP-ready. opts.FastBootstrap replaces the fixed 8-second
+// seed-loop wait with polling on shard-group count via the admin UDS.
+//
+// If opts.MaxNodes > numNodes, port/slice arrays are pre-allocated to MaxNodes
+// so addNode can attach more nodes later without reallocating.
+func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+	t.Helper()
+	maxNodes := opts.MaxNodes
+	if maxNodes < numNodes {
+		maxNodes = numNodes
+	}
+
+	c, err := newMRCluster(t, maxNodes, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Start seed node (node 0).
+	c.procs[0] = c.startNode(0)
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("seed node not ready: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// Bootstrap admin SA on the seed before any followers join.
+	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs[:1], 60*time.Second)
+	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
+	c.saID = admin.SAID
+	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
+	c.nodeCount = 1
+
+	// Start followers sequentially: wait for each before starting next.
+	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
+	for i := 1; i < numNodes; i++ {
+		if err := writeNodeJoinPending(c.dataDirs[i], seedRaftAddr); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
+		}
+		c.procs[i] = c.startNode(i)
+		if err := waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second); err != nil {
+			c.Stop()
+			return nil, fmt.Errorf("node %d not ready: %w", i, err)
+		}
+		c.nodeCount++
+	}
+
+	// Wait for leader.
+	probeBucket := "__mrshard-dyn-leader-probe"
+	c.GrantAdminOnBuckets(probeBucket)
+	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	leaderIdx, err := waitForWritableEndpoint(
+		probeCtx,
+		c.httpURLs[:numNodes],
+		180*time.Second,
+		5*time.Second,
+		time.Second,
+		func(ctx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
+			return tryCreateBucket(ctx, cli, probeBucket)
+		},
+	)
+	if err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("no leader found: %w", err)
+	}
+	c.leaderIdx = leaderIdx
+
+	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
+
+	// Wait for seed loop: dynamic (polling) or static (sleep).
+	// seedGroupCountForClusterSize(n) = max(n*4, 8).
+	expectedGroups := numNodes * 4
+	if expectedGroups < 8 {
+		expectedGroups = 8
+	}
+	if opts.FastBootstrap {
+		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], expectedGroups, 60*time.Second)
+	} else {
+		time.Sleep(8 * time.Second)
+	}
+
+	return c, nil
+}
+
+// startMRCluster retries tryStartMRCluster up to 3 times with fresh ports on
+// transient port-allocation or election-timing failures.
+func startMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) *mrCluster {
+	t.Helper()
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		c, err := tryStartMRCluster(t, numNodes, opts)
+		if err == nil {
+			return c
+		}
+		lastErr = err
+		t.Logf("startMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
+	}
+	require.Failf(t, "startMRCluster failed", "failed after %d attempts: %v", maxAttempts, lastErr)
+	return nil
 }
 
 func (c *mrCluster) startNode(i int) *exec.Cmd {
@@ -265,6 +385,55 @@ func (c *mrCluster) GrantAdminOnBuckets(buckets ...string) {
 	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }
 
+// addNode starts the next pre-allocated node slot and writes .join-pending so
+// it boots directly in join mode. Requires startMRCluster to have been called
+// with MaxNodes > current nodeCount. Blocks until the node is HTTP-ready, then
+// updates c.leaderIdx by probing the seed node's admin UDS.
+func (c *mrCluster) addNode(t *testing.T) {
+	t.Helper()
+	i := c.nodeCount
+	if i >= len(c.procs) {
+		t.Fatalf("addNode: nodeCount %d exceeds pre-allocated MaxNodes %d", i, len(c.procs))
+	}
+	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
+	require.NoError(t, writeNodeJoinPending(c.dataDirs[i], seedRaftAddr),
+		"addNode: write join-pending node %d", i)
+	c.procs[i] = c.startNode(i)
+	require.NoError(t,
+		waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second),
+		"addNode: node %d not ready", i)
+	c.nodeCount++
+
+	// Update leaderIdx by querying the seed node's admin UDS.
+	// Status.LeaderID equals the leader's raftAddr ("127.0.0.1:<raftPort>")
+	// because MetaRaftConfig.RaftID = state.raftAddr (see boot_phases_raft.go).
+	sock := filepath.Join(c.dataDirs[0], "admin.sock")
+	cli := clusteradmin.NewClient(sock)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if status, err := cli.Status(ctx); err == nil && status.LeaderID != "" {
+		t.Logf("addNode: leaderID=%q (nodeCount=%d)", status.LeaderID, c.nodeCount)
+		for j := 0; j < c.nodeCount; j++ {
+			if fmt.Sprintf("127.0.0.1:%d", c.raftPorts[j]) == status.LeaderID {
+				c.leaderIdx = j
+				break
+			}
+		}
+	} else {
+		t.Logf("addNode: Status() unavailable (err=%v), leaderIdx unchanged", err)
+	}
+}
+
+// liveURLs returns the slice of HTTP URLs for nodes that are currently running.
+// When nodeCount == 0 (static clusters set all nodes before setting nodeCount),
+// it falls back to the full httpURLs slice.
+func (c *mrCluster) liveURLs() []string {
+	if c.nodeCount > 0 {
+		return c.httpURLs[:c.nodeCount]
+	}
+	return c.httpURLs
+}
+
 // countGroupDirsAcrossNodes returns the union of group_id directories that
 // exist under any node's {dataDir}/groups/. Used to verify per-group BadgerDB
 // + raft were instantiated.
@@ -283,6 +452,23 @@ func countGroupDirsAcrossNodes(c *mrCluster) map[string]int {
 		}
 	}
 	return out
+}
+
+// waitForShardGroupCount polls GET /v1/cluster/status via the admin UDS on
+// dataDir until at least minGroups shard groups are present or timeout.
+func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout time.Duration) {
+	t.Helper()
+	sock := filepath.Join(dataDir, "admin.sock")
+	cli := clusteradmin.NewClient(sock)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		status, err := cli.Status(ctx)
+		if err != nil {
+			return false
+		}
+		return len(status.ShardGroups) >= minGroups
+	}, timeout, time.Second, "expected >= %d shard groups in %s", minGroups, dataDir)
 }
 
 // ----- TestE2E_MultiRaftSharding_Boot --------------------------------------
@@ -613,7 +799,7 @@ func requireMRPutObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 	var lastNode int
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		for i, endpoint := range c.httpURLs {
+		for i, endpoint := range c.liveURLs() {
 			lastNode = i
 			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
 			versionID, lastErr = tryPutObjectVersioned(ctx, client, bucket, key, data)
@@ -676,7 +862,7 @@ func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrClu
 		if c.leaderIdx >= 0 && tryNode(c.leaderIdx) {
 			return true
 		}
-		for i := range c.httpURLs {
+		for i := range c.liveURLs() {
 			if tryNode(i) {
 				return true
 			}
@@ -703,7 +889,7 @@ func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 	var got []byte
 	var lastNode int
 	require.Eventually(t, func() bool {
-		for i, endpoint := range c.httpURLs {
+		for i, endpoint := range c.liveURLs() {
 			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
 			got, lastErr = getObjectBytes(ctx, client, bucket, key)
 			lastNode = i
@@ -1136,4 +1322,111 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 	}
 	require.NoError(t, readErr)
 	require.Contains(t, string(got), `"format-version"`)
+}
+
+// TestE2E_TwoNodeAvailabilityTrap verifies the well-known 2-node quorum trap:
+// with 2 voters in metaRaft (and all data groups), losing one node breaks
+// quorum entirely. This is intentional — 2-node clusters are functionally
+// worse than single-node for availability.
+func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	c := startMRCluster(t, 2, mrClusterOptions{
+		FastBootstrap: true,
+		disableNFS4:   true,
+		disableNBD:    true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	const bucket = "availability-trap-test"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+
+	// Write should succeed with both nodes alive.
+	requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
+
+	// Kill the non-leader node to break metaRaft quorum (needs 2/2).
+	followerIdx := 1 - c.leaderIdx
+	t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
+	require.NotNil(t, c.procs[followerIdx])
+	require.NotNil(t, c.procs[followerIdx].Process)
+	require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
+	_ = c.procs[followerIdx].Wait()
+	c.procs[followerIdx] = nil
+
+	// Write must now fail — quorum is lost.
+	// In a 2-node raft cluster, the surviving leader blocks waiting for
+	// 2/2 acknowledgment that never arrives, so requests time out with
+	// context.DeadlineExceeded rather than a fast 503. A fast 503 preflight
+	// ("not enough voters") would require a separate quorum-check feature.
+	// This test documents the current reality (hang = trap), not a bug.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer writeCancel()
+	_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("after-quorum-loss"),
+		Body:   bytes.NewReader([]byte("blocked")),
+	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
+	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
+}
+
+// TestE2E_DynamicGroupSeeding_1to5 verifies that each dynamic node join
+// triggers the seed loop to expand shard groups according to
+// seedGroupCountForClusterSize(n) = max(n*4, 8):
+//
+//	1 node  → 8 groups
+//	2 nodes → 8 groups (no change)
+//	3 nodes → 12 groups
+//	4 nodes → 16 groups
+//	5 nodes → 20 groups
+//
+// After each expansion, a PUT (with internal GET round-trip) is verified to
+// confirm routing works.
+func TestE2E_DynamicGroupSeeding_1to5(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	// Start with 1 node; pre-allocate ports for 5.
+	c := startMRCluster(t, 1, mrClusterOptions{
+		FastBootstrap: true,
+		MaxNodes:      5,
+		disableNFS4:   true,
+		disableNBD:    true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	const bucket = "dyn-seed-1to5"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+
+	// Step helper: after each addNode, verify group count and PUT+GET.
+	type step struct {
+		afterNodes     int
+		expectedGroups int
+	}
+	steps := []step{
+		{1, 8}, // initial seed
+		{2, 8}, // no new groups
+		{3, 12},
+		{4, 16},
+		{5, 20},
+	}
+
+	// Verify step 1 (already started).
+	waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], steps[0].expectedGroups, 30*time.Second)
+	requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+		fmt.Sprintf("key-after-%d-nodes", steps[0].afterNodes), []byte("data"))
+
+	// Steps 2–5: add a node then verify.
+	for _, s := range steps[1:] {
+		c.addNode(t)
+		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], s.expectedGroups, 60*time.Second)
+		t.Logf("nodes=%d: shard groups >= %d confirmed", s.afterNodes, s.expectedGroups)
+		requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+			fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
+	}
 }

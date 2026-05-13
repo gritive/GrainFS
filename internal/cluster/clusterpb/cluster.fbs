@@ -328,10 +328,10 @@ enum MetaCmdType : uint8 {
   IAMBucketUpstreamDelete = 33, // IAM: bucket-scoped upstream remove
   BucketLifecyclePut      = 34, // Bucket lifecycle policy upsert (ADR 0011)
   BucketLifecycleDelete   = 35, // Bucket lifecycle policy remove (ADR 0011)
-  ClusterConfigPatch     = 36,
-  MigrationJobStart      = 37,
-  MigrationJobDone       = 38,
-  MigrationJobFailed     = 39,
+  ClusterConfigPatch      = 36,
+  MigrationJobStart       = 37, // Migration job: start
+  MigrationJobDone        = 38, // Migration job: done
+  MigrationJobFailed      = 39, // Migration job: failed
 }
 
 table MetaNodeEntry {
