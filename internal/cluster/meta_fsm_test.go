@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -831,4 +832,52 @@ func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
 	got, err := store.Get("b1")
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+func TestApplyNfsExportUpsert_WritesStore(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+
+	cfg := nfsexport.Config{ReadOnly: true, FsidMajor: 1, FsidMinor: 2, Generation: 3}
+	payload, err := nfsexport.EncodeUpsertPayload("b1", cfg)
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+
+	got, ok := store.Get("b1")
+	require.True(t, ok)
+	require.Equal(t, cfg, got)
+}
+
+func TestApplyNfsExportDelete_Idempotent(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+	require.NoError(t, store.Put("b1", nfsexport.Config{FsidMinor: 1}))
+
+	payload, err := nfsexport.EncodeDeletePayload("b1")
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+	require.NoError(t, f.applyCmd(data))
+
+	_, ok := store.Get("b1")
+	require.False(t, ok)
+}
+
+func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {
+	f := NewMetaFSM()
+	payload, err := nfsexport.EncodeDeletePayload("b1")
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, payload)
+	require.NoError(t, err)
+
+	applyErr := f.applyCmd(data)
+	require.Error(t, applyErr)
+	require.Contains(t, applyErr.Error(), "NFS export store not wired")
 }

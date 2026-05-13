@@ -18,6 +18,7 @@ import (
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -69,6 +70,8 @@ const (
 	MetaCmdTypeIAMBucketUpstreamDelete = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
 	MetaCmdTypeBucketLifecyclePut      = clusterpb.MetaCmdTypeBucketLifecyclePut
 	MetaCmdTypeBucketLifecycleDelete   = clusterpb.MetaCmdTypeBucketLifecycleDelete
+	MetaCmdTypeNfsExportUpsert         = clusterpb.MetaCmdTypeNfsExportUpsert
+	MetaCmdTypeNfsExportDelete         = clusterpb.MetaCmdTypeNfsExportDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -211,6 +214,10 @@ type MetaFSM struct {
 	// an error (not configured).
 	lifecycleStore *lifecycle.Store
 
+	// exportStore is wired via SetExportStore. nil = NFS export commands return
+	// an error (not configured).
+	exportStore *nfsexport.Store
+
 	// migrationStore is wired via SetMigration. nil = migration commands return
 	// an error (not configured).
 	migrationStore *migration.JobStore
@@ -280,6 +287,14 @@ func (f *MetaFSM) SetLifecycle(store *lifecycle.Store) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lifecycleStore = store
+}
+
+// SetExportStore wires the NFS export registry store into the MetaFSM. Must be
+// called before raft Start so apply does not race with replay.
+func (f *MetaFSM) SetExportStore(store *nfsexport.Store) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.exportStore = store
 }
 
 // SetMigration wires the migration job store into the MetaFSM. Must be called
@@ -400,6 +415,10 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyBucketLifecyclePut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketLifecycleDelete:
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeNfsExportUpsert:
+		return f.applyNfsExportUpsert(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeNfsExportDelete:
+		return f.applyNfsExportDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeClusterConfigPatch:
 		return f.applyClusterConfigPatch(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeMigrationJobStart:
@@ -443,6 +462,28 @@ func (f *MetaFSM) applyBucketLifecycleDelete(payload []byte) error {
 		return fmt.Errorf("meta_fsm: BucketLifecycleDelete: %w", err)
 	}
 	return f.lifecycleStore.Delete(bucket)
+}
+
+func (f *MetaFSM) applyNfsExportUpsert(payload []byte) error {
+	if f.exportStore == nil {
+		return fmt.Errorf("meta_fsm: NFS export store not wired")
+	}
+	bucket, cfg, err := nfsexport.DecodeUpsertPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: NfsExportUpsert: %w", err)
+	}
+	return f.exportStore.Put(bucket, cfg)
+}
+
+func (f *MetaFSM) applyNfsExportDelete(payload []byte) error {
+	if f.exportStore == nil {
+		return fmt.Errorf("meta_fsm: NFS export store not wired")
+	}
+	bucket, err := nfsexport.DecodeDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: NfsExportDelete: %w", err)
+	}
+	return f.exportStore.Delete(bucket)
 }
 
 func (f *MetaFSM) applyMigrationJobStart(payload []byte) error {
