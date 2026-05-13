@@ -32,6 +32,7 @@ type MetaTransport interface {
 	SendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
 	SendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)
 	SendInstallSnapshot(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error)
+	SendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error)
 }
 
 // MetaRaftConfig configures a MetaRaft instance.
@@ -182,6 +183,7 @@ func (m *MetaRaft) SetForwarder(fn func(ctx context.Context, data []byte) error)
 func (m *MetaRaft) wireTransport(t MetaTransport) {
 	m.node.SetTransport(t.SendRequestVote, t.SendAppendEntries)
 	m.node.SetInstallSnapshotTransport(t.SendInstallSnapshot)
+	m.node.SetTimeoutNowTransport(t.SendTimeoutNow)
 }
 
 // Bootstrap marks the store as bootstrapped. Idempotent.

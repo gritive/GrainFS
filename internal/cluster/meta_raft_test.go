@@ -62,6 +62,17 @@ func (f *MetaTransportFake) SendInstallSnapshot(peer string, args *raft.InstallS
 	return m.node.HandleInstallSnapshot(args), nil
 }
 
+func (f *MetaTransportFake) SendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
+	f.mu.RLock()
+	m := f.peers[peer]
+	f.mu.RUnlock()
+	if m == nil {
+		return nil, fmt.Errorf("fake transport: peer %s not registered", peer)
+	}
+	m.node.HandleTimeoutNow()
+	return &raft.TimeoutNowReply{}, nil
+}
+
 // newSingleMetaRaft creates a single-node MetaRaft for testing.
 func newSingleMetaRaft(t *testing.T) *MetaRaft {
 	t.Helper()
