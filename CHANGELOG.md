@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.180.1] - 2026-05-13 — fix: RUNBOOK bootstrap 절차 및 snapshot audit log
+
+### Fixed
+
+- **Docker bootstrap** — RUNBOOK Docker 섹션이 named volume 대신 host bind-mount(`-v /var/lib/grainfs:/data`)를 사용하도록 수정. Named volume은 플랫폼에 따라 호스트 파일시스템에 직접 노출되지 않아 `admin.sock`에 접근할 수 없었음. `docker exec` 대안도 안내 추가.
+- **K8s bootstrap** — RUNBOOK K8s 섹션에 최초 배포 후 admin SA 생성 절차(`kubectl exec deploy/grainfs -n grainfs -- grainfs iam sa create admin`) 추가.
+- **snapshot-interval / snapshot-retain audit log 누락** — `ClusterConfigPatch`의 `SnapshotInterval`, `SnapshotRetain` 필드가 FSM에 적용될 때 audit dict에 포함되지 않아 변경 이력 추적이 불가능했던 문제 수정.
+
 ## [0.0.180.0] - 2026-05-13 — feat: bucket & IAM admin API 통합 + CLI bucket 커맨드
 
 ### Added
