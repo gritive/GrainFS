@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-// RepairReplica fetches the named non-EC object from a healthy peer and
+// RepairReplica fetches the named replicated object from a healthy peer and
 // atomically rewrites the local copy. Used by scrubber.BlockVerifier when
 // local verification detects missing or corrupt replicated objects (volume
 // blocks).
@@ -16,8 +16,7 @@ import (
 // Strategy:
 //  1. headObjectMeta → expected ETag, versionID
 //  2. iterate liveNodes() with peerHealth priority
-//  3. shardSvc.ReadShard(peer, bucket, shardKey, 0) — shardKey = key+"/"+versionID
-//     (matches the shape used by replicating writes in putObjectNxSpooled)
+//  3. shardSvc.ReadShard(peer, bucket, shardKey, 0) — shardIdx 0, replicated objects are single-shard
 //  4. compute MD5; require match against meta.ETag
 //  5. atomic write (tmp + fsync + rename) to objectPathV(bucket, key, versionID)
 //  6. error if no peer returned matching bytes
@@ -48,7 +47,6 @@ func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key stri
 // Strategy:
 //  1. iterate b.liveNodes() with peerHealth priority (healthy first)
 //  2. reader.ReadShard(peer, bucket, shardKey, 0) — shardKey = key+"/"+versionID
-//     (matches the shape used by replicating writes in putObjectNxSpooled)
 //  3. compute MD5; require match against expectedETag
 //  4. atomic write (tmp + fsync + rename) to objectPathV(bucket, key, versionID)
 //  5. error if no peer returned matching bytes

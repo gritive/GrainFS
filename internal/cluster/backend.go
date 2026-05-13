@@ -26,7 +26,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
-	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -43,78 +42,13 @@ const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
 const maxECMemoryShardFastPathBytes = 16 << 20
 
 const (
+	ecShardBufferedLimit = 256 * 1024
 	ecShardWriteAttempts = 3
 	ecShardWriteBackoff  = 250 * time.Millisecond
-	ecShardBufferedLimit = 256 * 1024
-
-	// N×replication peer fan-out retry. Tighter than EC because the payload
-	// path is a simple stream copy (no Reed-Solomon reconstruction) and the
-	// failure mode we're absorbing is transient: cold-start QUIC handshake
-	// race (~50ms), brief peer GC pause, single-packet network blip. Worst-
-	// case added latency on permanent failure: 100ms + 200ms = 300ms.
-	replicaWriteAttempts = 3
-	replicaWriteBackoff  = 100 * time.Millisecond
 )
-
-// shardWriter is the minimal interface writeSpooledReplicaShardStream needs.
-// Satisfied by *ShardService. Extracted so the retry helper can be unit-tested
-// without standing up a real QUIC stream service.
-type shardWriter interface {
-	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
-}
-
-type shardBufferedWriter interface {
-	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
-}
 
 type readerWithoutWriterTo struct {
 	io.Reader
-}
-
-// writeSpooledReplicaShardStream writes a spooled object as a non-EC replica
-// to a peer, with bounded retry on transient shard write errors.
-//
-// Why retry: the inline pattern (one shot → MarkUnhealthy on any error) made
-// cold-start QUIC handshake races flap peers into 10s cooldown for the rest
-// of the warmup window, dropping replication factor for blocks written during
-// that window. With retry, transient hiccups are absorbed without quarantining
-// the peer; only persistent failures still trigger MarkUnhealthy.
-//
-// sp.Open returns a fresh *os.File each call, so the body can be re-opened
-// per attempt without repositioning a single reader.
-func (b *DistributedBackend) writeSpooledReplicaShardStream(ctx context.Context, writer shardWriter, peer, bucket, shardKey string, sp *spooledObject) error {
-	var lastErr error
-	for attempt := 1; attempt <= replicaWriteAttempts; attempt++ {
-		body, err := sp.Open()
-		if err != nil {
-			return fmt.Errorf("open spooled object for replication: %w", err)
-		}
-		if bw, ok := writer.(shardBufferedWriter); ok && sp.Size <= ecShardBufferedLimit {
-			var data []byte
-			data, err = io.ReadAll(body)
-			if err == nil {
-				err = bw.WriteShard(ctx, peer, bucket, shardKey, 0, data)
-			}
-		} else {
-			err = writer.WriteShardStream(ctx, peer, bucket, shardKey, 0, body)
-		}
-		_ = body.Close()
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if ctx.Err() != nil || attempt == replicaWriteAttempts {
-			return lastErr
-		}
-		timer := time.NewTimer(time.Duration(attempt) * replicaWriteBackoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return lastErr
-		case <-timer.C:
-		}
-	}
-	return lastErr
 }
 
 // newVersionID returns a fresh UUIDv7 string for use as an object VersionID.
@@ -371,7 +305,7 @@ func (b *DistributedBackend) clusterNodes() []string {
 // after a real node failure, new writes must avoid the dead node and place
 // shards across the surviving nodes. If health-filtering drops below the EC
 // activation threshold, fall back to configured membership so transient startup
-// peerHealth misses do not silently downgrade user writes to N-way replication.
+// peerHealth misses do not silently shrink the EC stripe below the configured width.
 func (b *DistributedBackend) ecWriteNodes() []string {
 	nodes := b.liveNodes()
 	if b.ecConfig.IsActive(len(nodes)) {
@@ -1014,9 +948,6 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	defer sp.Cleanup()
 
 	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
-		if b.shardSvc == nil {
-			return b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, contentType)
-		}
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
@@ -1105,98 +1036,9 @@ func sizedReaderAtSection(r io.Reader, maxBytes int64) (io.Reader, int64, bool) 
 	return io.NewSectionReader(sr, offset, remaining), remaining, true
 }
 
-// clusterTraceEnabled activates per-stage putObjectNx latency logging.
-// Enable with GRAINFS_VOLUME_TRACE=1.
-var clusterTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
-
-func (b *DistributedBackend) putObjectNxSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, error) {
-	var tStart, tStage time.Time
-	if clusterTraceEnabled {
-		tStart = time.Now()
-		tStage = tStart
-	}
-
-	objPath := b.objectPathV(bucket, key, versionID)
-	stageStart := time.Now()
-	rc, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spooled object: %w", err)
-	}
-	if err := writeFileAtomicFromReader(objPath, rc); err != nil {
-		_ = rc.Close()
-		return nil, fmt.Errorf("write object: %w", err)
-	}
-	if err := rc.Close(); err != nil {
-		return nil, fmt.Errorf("close spooled object: %w", err)
-	}
-	observePutStage("nx", "write_file_atomic", stageStart)
-
-	if clusterTraceEnabled {
-		log.Debug().Dur("write_file_atomic", time.Since(tStage)).Str("bucket", bucket).Int64("bytes", sp.Size).Msg("putObjectNx trace")
-		tStage = time.Now()
-	}
-
-	shardKey := key + "/" + versionID
-	if b.shardSvc != nil {
-		for _, peer := range b.liveNodes() {
-			if peer == b.selfAddr {
-				continue
-			}
-			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
-				metrics.ReplicationSkippedTotal.WithLabelValues(peer, bucket).Inc()
-				b.logger.Debug().Str("peer", peer).Str("bucket", bucket).Msg("skipping unhealthy peer for replication")
-				continue
-			}
-			err := b.writeSpooledReplicaShardStream(ctx, b.shardSvc, peer, bucket, shardKey, sp)
-			if err != nil {
-				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed (after retry)")
-				if b.peerHealth != nil && b.peerHealth.MarkUnhealthy(peer) {
-					b.logger.Warn().Str("peer", peer).Dur("cooldown", b.peerHealth.cooldown).Msg("peer transitioned to unhealthy; subsequent replication writes will skip until cooldown expires")
-				}
-			} else if b.peerHealth != nil {
-				if b.peerHealth.MarkHealthy(peer) {
-					b.logger.Info().Str("peer", peer).Msg("peer recovered to healthy")
-				}
-			}
-		}
-	}
-
-	now := time.Now().Unix()
-	stageStart = time.Now()
-	err = b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      bucket,
-		Key:         key,
-		Size:        sp.Size,
-		ContentType: contentType,
-		ETag:        sp.ETag,
-		ModTime:     now,
-		VersionID:   versionID,
-	})
-	if err != nil {
-		os.Remove(objPath)
-		return nil, err
-	}
-	observePutStage("nx", "propose_meta", stageStart)
-
-	if clusterTraceEnabled {
-		log.Debug().Dur("raft_propose", time.Since(tStage)).Dur("total", time.Since(tStart)).Str("bucket", bucket).Msg("putObjectNx trace")
-	}
-
-	return &storage.Object{
-		Key:          key,
-		Size:         sp.Size,
-		ContentType:  contentType,
-		ETag:         sp.ETag,
-		LastModified: now,
-		VersionID:    versionID,
-	}, nil
-}
-
 // PutObjectAsync is the write-back variant of PutObject.
-// It writes data locally and replicates to peers (fast path ~0.3ms), then
-// returns a commitFn that defers the Raft metadata proposal (~2ms).
-// On flush the caller runs all commitFns concurrently so the Raft batcher
-// coalesces them into a single fdatasync.
+// It delegates to putObjectECSpooled and returns a no-op commitFn for API
+// compatibility with callers that batch commitFns (e.g., block_io_executor).
 func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
@@ -1205,110 +1047,13 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			sp.Cleanup()
-		}
-	}()
+	defer sp.Cleanup()
 	versionID := newVersionID()
 	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
-		if _, ok := PlacementGroupFromContext(ctx); !ok && b.shardSvc == nil {
-			obj, commit, err := b.putObjectNxSpooledAsync(ctx, bucket, key, versionID, sp, contentType)
-			if err != nil {
-				return nil, nil, err
-			}
-			cleanup = false
-			return obj, func() error {
-				defer sp.Cleanup()
-				return commit()
-			}, nil
-		}
 		return nil, nil, fmt.Errorf("put object async: EC storage is required")
 	}
 	obj, err := b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
 	return obj, func() error { return nil }, err
-}
-
-func (b *DistributedBackend) putObjectNxSpooledAsync(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string) (*storage.Object, func() error, error) {
-	t0 := time.Now()
-	objPath := b.objectPathV(bucket, key, versionID)
-	rc, err := sp.Open()
-	if err != nil {
-		return nil, nil, fmt.Errorf("open spooled object: %w", err)
-	}
-	if err := writeFileAtomicFromReader(objPath, rc); err != nil {
-		_ = rc.Close()
-		return nil, nil, fmt.Errorf("write object: %w", err)
-	}
-	if err := rc.Close(); err != nil {
-		return nil, nil, fmt.Errorf("close spooled object: %w", err)
-	}
-	wfaDur := time.Since(t0)
-
-	shardKey := key + "/" + versionID
-	if b.shardSvc != nil {
-		for _, peer := range b.liveNodes() {
-			if peer == b.selfAddr {
-				continue
-			}
-			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
-				metrics.ReplicationSkippedTotal.WithLabelValues(peer, bucket).Inc()
-				continue
-			}
-			err := b.writeSpooledReplicaShardStream(ctx, b.shardSvc, peer, bucket, shardKey, sp)
-			if err != nil {
-				b.logger.Warn().Str("peer", peer).Str("bucket", bucket).Str("key", key).Err(err).Msg("data replication failed (after retry)")
-				if b.peerHealth != nil && b.peerHealth.MarkUnhealthy(peer) {
-					b.logger.Warn().Str("peer", peer).Dur("cooldown", b.peerHealth.cooldown).Msg("peer transitioned to unhealthy; subsequent replication writes will skip until cooldown expires")
-				}
-			} else if b.peerHealth != nil {
-				if b.peerHealth.MarkHealthy(peer) {
-					b.logger.Info().Str("peer", peer).Msg("peer recovered to healthy")
-				}
-			}
-		}
-	}
-
-	now := time.Now().Unix()
-	obj := &storage.Object{
-		Key:          key,
-		Size:         sp.Size,
-		ContentType:  contentType,
-		ETag:         sp.ETag,
-		LastModified: now,
-		VersionID:    versionID,
-	}
-	if os.Getenv("GRAINFS_VOLUME_TRACE") == "1" {
-		b.logger.Debug().
-			Str("bucket", bucket).Str("key", key).
-			Dur("write_file_atomic", wfaDur).
-			Msg("putObjectNxAsync trace")
-	}
-	commitFn := func() error {
-		t1 := time.Now()
-		err := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      bucket,
-			Key:         key,
-			Size:        sp.Size,
-			ContentType: contentType,
-			ETag:        sp.ETag,
-			ModTime:     now,
-			VersionID:   versionID,
-		})
-		if err != nil {
-			os.Remove(objPath)
-			return err
-		}
-		if os.Getenv("GRAINFS_VOLUME_TRACE") == "1" {
-			b.logger.Debug().
-				Str("bucket", bucket).Str("key", key).
-				Dur("raft_propose", time.Since(t1)).
-				Msg("putObjectNxAsync commit trace")
-		}
-		return nil
-	}
-	return obj, commitFn, nil
 }
 
 // WriteAt implements a pwrite-based fast path for internal buckets (NFS4 and
@@ -2955,7 +2700,11 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 
 	now := time.Now().Unix()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	if !ok && b.shardSvc != nil {
+	// GroupBackend (bypassBucketCheck=true) always injects a placement-group ID via
+	// context; missing one there is a programming error. Direct DistributedBackend
+	// callers (bypassBucketCheck=false) may omit it — putObjectECSpooled resolves
+	// placement from the stored empty string using the object's bucket assignment.
+	if !ok && b.shardSvc != nil && b.bypassBucketCheck {
 		return nil, fmt.Errorf("create multipart: missing placement_group_id")
 	}
 
@@ -3096,8 +2845,6 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	var obj *storage.Object
 	if b.ecConfig.NumShards() > 0 && b.shardSvc != nil {
 		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
-	} else if b.shardSvc == nil {
-		obj, err = b.putObjectNxSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")
 	}

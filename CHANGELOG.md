@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.179.0] - 2026-05-13 — chore: remove non-EC object write path
+
+### Removed
+
+- **Non-EC write path** (`putObjectNxSpooled`, `putObjectNxSpooledAsync`, `writeSpooledReplicaShardStream`)
+  eliminated. All object writes now go through EC storage exclusively. Clusters that do not have
+  a `ShardService` configured (EC not active) will receive a clear error on write rather than
+  silently falling back to a replication-only path.
+- `ReplicationSkippedTotal` Prometheus metric removed (no remaining callers after Nx path deletion).
+- `shardWriter` and `shardBufferedWriter` interfaces removed along with their only implementations.
+
+### Changed
+
+- `CreateMultipartUpload` guard relaxed for direct `DistributedBackend` callers: missing placement
+  context is now permitted when `bypassBucketCheck` is false (resolves to `group-0` at write time).
+  `GroupBackend` callers with `bypassBucketCheck=true` still receive an error for missing placement.
+- `PutObjectAsync` simplified to a thin wrapper around `putObjectECSpooled`; returned `commitFn` is
+  always a no-op for API compatibility.
+- `PeerUnhealthy` metric help text updated to reflect EC stripe degradation (not N-way replication).
+
 ## [0.0.178.0] - 2026-05-13 — fix: PromoteToVoter orphan recovery in Raft v2 becomeLeader
 
 ### Fixed

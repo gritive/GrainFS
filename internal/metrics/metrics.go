@@ -449,22 +449,13 @@ var (
 	})
 
 	// PeerUnhealthy is 1 while a peer sits in PeerHealth's cooldown window
-	// (recent transport / replication failure), 0 otherwise. Operators alert
-	// on `grainfs_peer_unhealthy > 0` to catch silent N×replication
-	// degradation.
+	// (recent transport or EC shard write failure), 0 otherwise. Operators alert
+	// on `grainfs_peer_unhealthy > 0` to catch EC stripe degradation before
+	// it affects durability.
 	PeerUnhealthy = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_peer_unhealthy",
 		Help: "1 if a peer is currently in PeerHealth cooldown, 0 otherwise.",
 	}, []string{"peer"})
-
-	// ReplicationSkippedTotal counts every N×replication peer-write that was
-	// skipped because PeerHealth marked the peer unhealthy. Counts events,
-	// not bytes; rate > 0 means the cluster is operating with reduced
-	// replication factor.
-	ReplicationSkippedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_replication_skipped_total",
-		Help: "Total replication writes skipped due to unhealthy peer.",
-	}, []string{"peer", "bucket"})
 
 	// FsmKeyspaceLeakTotal counts FSM-state keys observed without the expected
 	// group prefix at a scoped strip-site. A non-zero value means a

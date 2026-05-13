@@ -77,8 +77,7 @@ func TestE2E_VolumeScrub_MultiNodeRepair(t *testing.T) {
 	out, code := runCLI(t, c.dataDirs[0], "volume", "create", "vmrn", "--size", "1Mi")
 	require.Equal(t, 0, code, out)
 	// Cold-start QUIC handshake races used to flap peers into cooldown on first
-	// write. Absorbed product-side by writeSpooledReplicaShardStream's bounded
-	// retry (3 attempts, 100ms backoff) — no test-side sleep needed.
+	// write. The EC shard writer retries transiently — no test-side sleep needed.
 	out, code = runCLI(t, c.dataDirs[0], "volume", "write-at", "vmrn", "--offset", "0", "--content", "MultiNodePayload!")
 	require.Equal(t, 0, code, out)
 

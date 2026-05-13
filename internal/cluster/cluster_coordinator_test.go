@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -392,12 +391,15 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBac
 			return nil, fmt.Errorf("no peers")
 		},
 	)
+	svc := NewShardService(dir+"/shards", nil)
 	gb, err := NewGroupBackend(GroupBackendConfig{
-		ID:      groupID,
-		Root:    dir,
-		DB:      db,
-		Node:    node,
-		PeerIDs: []string{nodeID},
+		ID:       groupID,
+		Root:     dir,
+		DB:       db,
+		Node:     node,
+		PeerIDs:  []string{nodeID},
+		ShardSvc: svc,
+		EC:       ECConfig{DataShards: 1, ParityShards: 0},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -727,10 +729,10 @@ func TestClusterCoordinator_ListAllObjects_TolerantOfUnreadableBlob(t *testing.T
 	v, err := gb.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("hello"), "text/plain")
 	require.NoError(t, err)
 
-	// Delete the on-disk blob so GetObjectVersion fails, while the meta/version
+	// Delete the on-disk shards so GetObjectVersion fails, while the meta/version
 	// record stays. ListAllObjects must still return the object using the
 	// version-listing metadata rather than aborting the whole snapshot.
-	require.NoError(t, os.Remove(gb.objectPathV("photos", "a.txt", v.VersionID)))
+	require.NoError(t, gb.shardSvc.DeleteLocalShards("photos", "a.txt/"+v.VersionID))
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))

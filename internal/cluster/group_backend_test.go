@@ -48,12 +48,15 @@ func newTestGroupBackend(t testing.TB, groupID string) *GroupBackend {
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
+	svc := NewShardService(dir+"/shards", nil)
 	gb, err := NewGroupBackend(GroupBackendConfig{
-		ID:      groupID,
-		Root:    dir,
-		DB:      db,
-		Node:    node,
-		PeerIDs: []string{"test-node"},
+		ID:       groupID,
+		Root:     dir,
+		DB:       db,
+		Node:     node,
+		PeerIDs:  []string{"test-node"},
+		ShardSvc: svc,
+		EC:       ECConfig{DataShards: 1, ParityShards: 0},
 	})
 	require.NoError(t, err)
 
