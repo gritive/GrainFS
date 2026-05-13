@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -45,21 +46,6 @@ func TestRecoverClusterPlanRequiresSnapshot(t *testing.T) {
 		NewRaftAddr: "127.0.0.1:19000",
 	})
 	require.ErrorIs(t, err, ErrRecoverClusterNoSnapshot)
-}
-
-func TestRecoverClusterPlanRejectsManagedModeMismatch(t *testing.T) {
-	source := t.TempDir()
-	target := t.TempDir()
-	writeRecoverClusterSourceSnapshotWithOptions(t, source, []raft.Server{{ID: "old-a", Suffrage: raft.Voter}}, []raft.BadgerLogStoreOption{raft.WithManagedMode()}, raft.Snapshot{})
-
-	_, err := BuildRecoverClusterPlan(RecoverClusterOptions{
-		SourceData:        source,
-		TargetData:        target,
-		NewNodeID:         "node-recovered",
-		NewRaftAddr:       "127.0.0.1:19000",
-		BadgerManagedMode: false,
-	})
-	require.ErrorContains(t, err, "managed-mode mismatch")
 }
 
 func TestRecoverClusterPlanRejectsJointSnapshotUnlessStripped(t *testing.T) {
@@ -110,9 +96,10 @@ func TestRecoverClusterExecuteRewritesMembershipAndMarker(t *testing.T) {
 
 	require.NoError(t, ExecuteRecoverClusterPlan(plan))
 
-	store, err := raft.NewBadgerLogStore(filepath.Join(target, "raft"))
+	store, err := raft.NewBadgerLogStore(filepath.Join(target, "raft"), raft.WithManagedMode())
 	require.NoError(t, err)
 	defer store.Close()
+	assert.True(t, store.IsManagedMode(), "recovered store must always be in managed mode")
 	snap, err := store.LoadSnapshot()
 	require.NoError(t, err)
 	require.Equal(t, []raft.Server{{ID: "node-recovered", Suffrage: raft.Voter}}, snap.Servers)
