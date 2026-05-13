@@ -4,21 +4,6 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
-### raft v2 (M2-M5 follow-ups from M1 adversarial review)
-
-> 2026-05-08 /ship adversarial review on `internal/raft/v2/` (M1 milestone, 0 caller until M5) raised 13 findings. Filed here for M2/M3/M5 work. v2 ships as new code only; not yet exercised in production.
-
-- [ ] **raft/v2: cmdCh backpressure cascade** — slow FSM consumer wedges actor's applyCh send → wedges cmdCh → wedges all incoming RPCs (HandleRequestVote/HandleAppendEntries) → peers election-timeout this node → cascading election storm. Structural fix: make applyCh delivery non-blocking from actor (separate apply goroutine reading from a buffered queue), OR at least give Propose a ctx variant + drop AE on cmdCh-full to keep election alive.
-
-### raft v2 — M5 PR 30 minimal (2026-05-12)
-
-> 2026-05-12 PR 30 implementer audit found that **meta-Raft was never migrated to v2.** `internal/cluster/meta_raft.go` still constructs `raft.NewNode`, `raft.NewBadgerLogStore`, `raft.NewSnapshotManager` directly; serveruntime + recovercluster + migrate paths consume v1-only surfaces (`JointSnapshotState`, `RestoreJointStateFromSnapshot`, `SetInstallSnapshotTransport`, `OpenSharedLogStore`, `MetaRaftQUICTransport`, `SnapshotManager`). The plan §M5 D5 phasing ("cluster → serveruntime → other → v1 deletion") never enumerated meta-Raft. PR 22's `raftfactory.go` flagged this explicitly ("MetaRaft and the migrate path remain v1-only in PR 22 per plan §M4 scope") but the plan body never reflected it. The real PR 30 (v1 deletion + rename `v2`→`raft`) cannot land as written. Minimal PR 30 records the hole in `docs/superpowers/plans/2026-05-08-raft-actor-redesign.md` §Status; full v1 deletion is renamed **PR 30b** and gated on M6.
-
-- [ ] **M6: meta-Raft v2 migration (PR 30b prerequisite)** — Expose v1-only surfaces (`JointSnapshotState`, `RestoreJointStateFromSnapshot`, `SetInstallSnapshotTransport`, joint-state replay) on v2 or its adapter; build v2-native shared log store wrapper for `OpenSharedLogStore`; v2 bridge for `MetaRaftQUICTransport` (analogous to PR 27's per-group QUIC bridge but for the meta-raft control stream); SnapshotManager replacement (v2 owns snapshot lifecycle internally — flip `meta_raft.go` to use it). Estimated 2-3 PRs of protocol work. Once M6 lands, PR 30b is a mechanical delete.
-
-
-- [ ] **PR 30b: delete internal/raft/ v1 package (after M6)** — remove `internal/raft` and rename `internal/raft/v2` → `internal/raft`. Update all imports. v1's sentinels (`raft.ErrNotLeader`, etc.) move to the new `raft` package; v2's `raftv2.*` aliases become unnecessary. Wire codec at `internal/cluster/raftv2_quic_codec.go` becomes the sole encoder (rename the file + symbols, drop the `v2` prefix). Delete `internal/raft/v2compat.go`, the panicking stub fallback for v1 `*raft.Node`. Drop the v1-only test files that PR 29 left `t.Skip`'d (`TestDistributedBackend_SnapshotTriggersAfterThreshold`, `TestDistributedBackend_TriggerRaftSnapshot{Leader,SerializesWithApplyLoop,RejectsFollower}`) plus the v1-only `DistributedBackend.RaftNode()` / `GroupBackend.RaftNode()` accessors that now always return nil.
-
 ### 기타
 
 
