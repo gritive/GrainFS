@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -94,16 +95,21 @@ func (f *fakeECObjectShardFetcher) ReadShardRangeStream(ctx context.Context, pee
 
 // fakeECObjectPeerHealth records mark calls.
 type fakeECObjectPeerHealth struct {
+	mu        sync.Mutex
 	healthy   []string
 	unhealthy []string
 }
 
 func (f *fakeECObjectPeerHealth) MarkHealthy(peer string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.healthy = append(f.healthy, peer)
 	return true
 }
 
 func (f *fakeECObjectPeerHealth) MarkUnhealthy(peer string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.unhealthy = append(f.unhealthy, peer)
 	return true
 }

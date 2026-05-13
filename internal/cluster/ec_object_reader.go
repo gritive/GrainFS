@@ -203,7 +203,7 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		canceled bool   // true if k-of-n early-exit caused the cancellation error
 	}
 
-	applyShardResult := func(res shardResult) bool {
+	markPeerHealth := func(res shardResult) {
 		if res.peer != "" && r.peerHealth != nil && !res.canceled {
 			if res.peerOK {
 				r.peerHealth.MarkHealthy(res.peer)
@@ -211,6 +211,10 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 				r.peerHealth.MarkUnhealthy(res.peer)
 			}
 		}
+	}
+
+	applyShardResult := func(res shardResult) bool {
+		markPeerHealth(res)
 		if res.err != nil || res.data == nil {
 			return false
 		}
@@ -277,13 +281,7 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 				for k := j + 1; k < dispatched; k++ {
 					select {
 					case drained := <-resultCh:
-						if drained.peer != "" && r.peerHealth != nil && !drained.canceled {
-							if drained.peerOK {
-								r.peerHealth.MarkHealthy(drained.peer)
-							} else {
-								r.peerHealth.MarkUnhealthy(drained.peer)
-							}
-						}
+						markPeerHealth(drained)
 					case <-ctx.Done():
 						return
 					}
