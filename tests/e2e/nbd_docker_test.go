@@ -11,6 +11,9 @@ import (
 // with the given shell script. It handles SKIP and PASS/FAIL detection.
 func runNBDDockerTest(t *testing.T, script, passMarker string) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Docker/NBD integration test in short mode")
+	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not found, skipping NBD Docker test")
 	}

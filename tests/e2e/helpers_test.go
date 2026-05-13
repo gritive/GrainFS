@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -179,6 +180,30 @@ func TestWaitForPortsParallelErrWithProcessesReturnsWhenProcessExits(t *testing.
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "process exited")
 	require.Less(t, time.Since(started), time.Second)
+}
+
+func TestCombinedOutputWithWaitDelayReturnsWhenDescendantKeepsPipeOpen(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 5 & wait")
+	started := time.Now()
+	out, err := combinedOutputWithWaitDelay(cmd)
+
+	require.Error(t, err)
+	require.Empty(t, out)
+	require.Less(t, time.Since(started), 2*time.Second)
+}
+
+func TestShortTempDirKeepsAdminSocketPathShort(t *testing.T) {
+	dir := shortTempDir(t)
+	require.Less(t, len(filepath.Join(dir, "admin.sock")), 104)
+	require.Less(t, len(filepath.Join(dir, "rotate.sock")), 104)
+}
+
+func combinedOutputWithWaitDelay(cmd *exec.Cmd) ([]byte, error) {
+	cmd.WaitDelay = time.Second
+	return cmd.CombinedOutput()
 }
 
 // dumpE2EProfiles fetches pprof profiles from the running server and saves them to /tmp.
