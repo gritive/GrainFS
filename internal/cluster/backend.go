@@ -842,12 +842,16 @@ func (b *DistributedBackend) CreateBucket(ctx context.Context, bucket string) er
 		}
 		if groupID == "" && b.shardGroup != nil {
 			entries := b.shardGroup.ShardGroups()
-			ids := make([]string, 0, len(entries))
-			for _, e := range entries {
-				ids = append(ids, e.ID)
+			if group, selErr := SelectObjectPlacementGroup(bucket, "", entries, b.ecConfig); selErr == nil {
+				groupID = group.ID
+			} else {
+				ids := make([]string, 0, len(entries))
+				for _, e := range entries {
+					ids = append(ids, e.ID)
+				}
+				sort.Strings(ids) // deterministic legacy fallback
+				groupID = HashAssign(bucket, ids)
 			}
-			sort.Strings(ids) // deterministic
-			groupID = HashAssign(bucket, ids)
 		}
 		if groupID == "" {
 			if dg, routeErr := b.router.RouteKey(bucket, ""); routeErr == nil {

@@ -828,6 +828,23 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
 }
 
+func TestClusterCoordinator_PreferWriteAtFalseForMultiVoterInternalBucket(t *testing.T) {
+	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
+	gb := newTestGroupBackend(t, "group-1")
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node", "node-2", "node-3"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket(storage.NFS4BucketName, "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node", "node-2", "node-3"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	require.False(t, c.PreferWriteAt(storage.NFS4BucketName),
+		"multi-voter internal buckets must use PutObject replication, not local-only pwrite")
+}
+
 func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *testing.T) {
 	base := &fakeBackend{listResult: []string{storage.NFS4BucketName}}
 	gb := newTestGroupBackend(t, "group-1")

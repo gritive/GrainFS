@@ -1110,10 +1110,12 @@ func (c *ClusterCoordinator) WriteAt(ctx context.Context, bucket, key string, of
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
-		return nil, err
-	} else if gb != nil {
-		return gb.WriteAt(ctx, bucket, key, offset, data)
+	if target.SelfIsOnlyVoter {
+		if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+			return nil, err
+		} else if gb != nil {
+			return gb.WriteAt(ctx, bucket, key, offset, data)
+		}
 	}
 
 	var existing []byte
@@ -1148,10 +1150,12 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 	if err != nil {
 		return err
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
-		return err
-	} else if gb != nil {
-		return gb.Truncate(ctx, bucket, key, size)
+	if target.SelfIsOnlyVoter {
+		if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+			return err
+		} else if gb != nil {
+			return gb.Truncate(ctx, bucket, key, size)
+		}
 	}
 
 	var existing []byte
@@ -1247,6 +1251,9 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 	}
 	target, err := c.opRouter.RouteBucket(bucket)
 	if err != nil {
+		return false
+	}
+	if !target.SelfIsOnlyVoter {
 		return false
 	}
 	gb, err := c.localExec.ResolveWrite(context.Background(), target)
