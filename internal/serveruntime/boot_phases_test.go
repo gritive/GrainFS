@@ -122,7 +122,7 @@ func TestBootValidateTimings_AcceptsValidConfig(t *testing.T) {
 }
 
 // TestBootOpenRaftLogStore_OpensAndAppendsManagedMode — phase opens the raft
-// log store and propagates BadgerManagedMode via state.storeOpts so later
+// log store and propagates WithManagedMode via state.storeOpts so later
 // shared-log opens (run.go fan-out) reuse the same option set.
 func TestBootOpenRaftLogStore_OpensAndAppendsManagedMode(t *testing.T) {
 	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
@@ -130,7 +130,7 @@ func TestBootOpenRaftLogStore_OpensAndAppendsManagedMode(t *testing.T) {
 
 	require.NoError(t, bootOpenRaftLogStore(state))
 	require.NotNil(t, state.logStore)
-	assert.NotEmpty(t, state.storeOpts, "BadgerManagedMode must surface as a storeOpt for fan-out reuse")
+	assert.NotEmpty(t, state.storeOpts, "WithManagedMode must surface as a storeOpt for fan-out reuse")
 
 	// Last decision is the raft-log role; verify ordering invariant.
 	last := state.startupDecisions[len(state.startupDecisions)-1]
