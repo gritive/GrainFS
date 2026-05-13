@@ -103,6 +103,30 @@ func (m *RaftV2MetaQUICTransport) SendAppendEntries(peer string, args *raft.Appe
 	return v2DecodeAppendEntriesReply(data)
 }
 
+// SendTimeoutNow sends a TimeoutNow RPC to the transfer target, triggering an
+// immediate election. Called by the raft node during TransferLeadership.
+func (m *RaftV2MetaQUICTransport) SendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), v2MetaRPCTimeout)
+	defer cancel()
+
+	envelope, err := v2EncodeRPC(v2RPCTypeTimeoutNow, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.transport.Call(ctx, peer, &transport.Message{Type: transport.StreamMetaRaft, Payload: envelope})
+	if err != nil {
+		return nil, fmt.Errorf("meta TimeoutNow to %s: %w", peer, err)
+	}
+	rpcType, _, err := v2DecodeRPC(resp.Payload)
+	if err != nil {
+		return nil, err
+	}
+	if rpcType != v2RPCTypeTimeoutNowReply {
+		return nil, fmt.Errorf("meta TimeoutNow: unexpected reply type %s", rpcType)
+	}
+	return &raft.TimeoutNowReply{}, nil
+}
+
 // SendInstallSnapshot mirrors v1's MetaRaftQUICTransport.SendInstallSnapshot.
 // The 60s timeout accommodates large snapshot payloads.
 func (m *RaftV2MetaQUICTransport) SendInstallSnapshot(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
@@ -162,6 +186,10 @@ func (m *RaftV2MetaQUICTransport) handleRPC(req *transport.Message) *transport.M
 		}
 		reply := m.node.HandleInstallSnapshot(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeInstallSnapshotReply, reply)
+
+	case v2RPCTypeTimeoutNow:
+		m.node.HandleTimeoutNow()
+		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeTimeoutNowReply, nil)
 
 	default:
 		return nil

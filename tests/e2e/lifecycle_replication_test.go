@@ -154,11 +154,8 @@ func TestLifecycle_FollowerPutLeaderGet(t *testing.T) {
 
 // TestLifecycle_LeaderChangePreservesConfig: 리더 교체 이후에도 lifecycle 설정이
 // 새 리더에서 조회 가능해야 한다 (ADR 0011 철칙).
-//
-// 주의: transfer-leader CLI는 devel 브랜치에서 "cluster adapter does not support
-// transfer-leader" 오류로 실패하는 기존 버그가 있다. 이 테스트는 transfer-leader를
-// 사용하지 않고, 리더 프로세스를 SIGKILL로 강제 종료한 뒤 나머지 노드들이 재선거
-// (re-election)를 완료하길 기다리는 방식으로 동일 시나리오를 검증한다.
+// 리더 프로세스를 SIGKILL로 강제 종료한 뒤 나머지 노드들이 재선거(re-election)를
+// 완료하길 기다리는 방식으로 즉각 crash 시나리오를 검증한다.
 func TestLifecycle_LeaderChangePreservesConfig(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
@@ -169,15 +166,9 @@ func TestLifecycle_LeaderChangePreservesConfig(t *testing.T) {
 
 	// lifecycle-interval을 24h로 설정: 서비스와 메타데이터 복제는 활성화하되
 	// 주기적 executor는 거의 실행되지 않도록 함 (0=disable이므로 0이 아닌 값 필요)
-	//
-	// ClusterModeStaticPeers 사용 이유: DynamicJoin 모드에서는 joining 노드가
-	// ConfChange(AddLearner+Promote) 시 자신의 raft 주소를 config.Peers에
-	// 추가하여 cluster quorum이 4가 된다. 리더 사망 후 생존 노드 2개가
-	// quorum(3) 미달로 재선거에 실패한다. StaticPeers는 초기 config.Peers가
-	// 올바르게 설정되어 이 문제를 회피한다.
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
-		Mode:       ClusterModeStaticPeers,
+		Mode:       ClusterModeDynamicJoin,
 		ClusterKey: "E2E-LIFECYCLE-LEADER-CHANGE-KEY",
 		LogPrefix:  "grainfs-lifecycle-leader-change",
 		ExtraArgs:  []string{"--lifecycle-interval=24h"},
@@ -229,8 +220,7 @@ func TestLifecycle_LeaderChangePreservesConfig(t *testing.T) {
 	require.NotEmpty(t, survivorIdxs, "must have at least 2 surviving nodes after leader kill")
 
 	// 리더 프로세스를 SIGKILL로 강제 종료하여 즉각 재선거 유도.
-	// transfer-leader 대신 프로세스 킬을 사용하는 이유: transfer-leader CLI가
-	// 현재 devel 브랜치에서 기존 버그로 실패함 (pre-existing regression).
+	// SIGKILL은 transfer-leader보다 더 극단적인 시나리오(즉각 crash)를 검증한다.
 	t.Logf("killing leader node %d (%s) to trigger re-election", currentLeaderIdx, initialLeader)
 	require.NoError(t, c.procs[currentLeaderIdx].Process.Signal(syscall.SIGKILL))
 	_ = c.procs[currentLeaderIdx].Wait()
