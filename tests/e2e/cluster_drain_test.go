@@ -14,9 +14,7 @@ import (
 // follower (no transfer needed). Verifies the voter set shrinks and the
 // drained node is no longer listed.
 func TestE2E_ClusterDrain_Follower(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

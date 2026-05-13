@@ -4,6 +4,7 @@
 # Examples:
 #   PROFILE=1 ./benchmarks/bench_single_s3_profile.sh
 #   DURATION=15s CONCURRENCY_LIST=1,4 SIZE_KB=4096 ./benchmarks/bench_single_s3_profile.sh
+#   MIX_LIST=write-heavy DURATION=15s ./benchmarks/bench_single_s3_profile.sh
 #   SERVER_ARGS="--shard-cache-size 0" DURATION=15s CONCURRENCY_LIST=32 ./benchmarks/bench_single_s3_profile.sh
 
 set -euo pipefail
@@ -23,6 +24,7 @@ RAMP_DOWN="${RAMP_DOWN:-1s}"
 GRACEFUL_RAMP_DOWN="${GRACEFUL_RAMP_DOWN:-2s}"
 GRACEFUL_STOP="${GRACEFUL_STOP:-5s}"
 CONCURRENCY_LIST="${CONCURRENCY_LIST:-1,4,16,32}"
+MIX_LIST="${MIX_LIST:-write-heavy,read-heavy}"
 SIZE_KB="${SIZE_KB:-4096}"
 OBJECT_COUNT="${OBJECT_COUNT:-16}"
 PROFILE="${PROFILE:-1}"
@@ -95,9 +97,10 @@ echo ""
 echo "=================================================================="
 echo "  GrainFS single-node S3 profile benchmark"
 echo "  target      : http://127.0.0.1:${HTTP_PORT}"
-echo "  object      : ${SIZE_KB}KB x ${OBJECT_COUNT} seed objects"
-echo "  duration    : ${DURATION}"
+  echo "  object      : ${SIZE_KB}KB x ${OBJECT_COUNT} seed objects"
+  echo "  duration    : ${DURATION}"
   echo "  concurrency : ${CONCURRENCY_LIST}"
+  echo "  mix         : ${MIX_LIST}"
   [[ -n "${SERVER_ARGS:-}" ]] && echo "  server args : ${SERVER_ARGS}"
   echo "  output      : ${PROFILE_ROOT}"
 [[ "$PROFILE" == "1" ]] && echo "  pprof       : http://127.0.0.1:${PPROF_PORT}/debug/pprof/"
@@ -230,9 +233,20 @@ PY
 
 FAIL=0
 IFS=',' read -ra CONCURRENCY_VALUES <<<"$CONCURRENCY_LIST"
+IFS=',' read -ra MIX_VALUES <<<"$MIX_LIST"
 for vus in "${CONCURRENCY_VALUES[@]}"; do
-  run_scenario "write-heavy" 90 "$vus" || FAIL=1
-  run_scenario "read-heavy" 10 "$vus" || FAIL=1
+  for mix in "${MIX_VALUES[@]}"; do
+    case "$mix" in
+      write-heavy) run_scenario "write-heavy" 90 "$vus" || FAIL=1 ;;
+      read-heavy) run_scenario "read-heavy" 10 "$vus" || FAIL=1 ;;
+      pure-put) run_scenario "pure-put" 100 "$vus" || FAIL=1 ;;
+      mixed) run_scenario "mixed" 50 "$vus" || FAIL=1 ;;
+      *)
+        echo "[error] unknown MIX_LIST entry: $mix" >&2
+        FAIL=1
+        ;;
+    esac
+  done
 done
 
 cp "$BENCH_DIR/server.log" "$PROFILE_ROOT/server.log" 2>/dev/null || true

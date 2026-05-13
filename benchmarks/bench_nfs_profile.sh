@@ -75,7 +75,7 @@ echo "=== starting grainfs (HTTP=:$HTTP_PORT, NFS4=:$NFS4_PORT, pprof=:$PPROF_PO
   --port "$HTTP_PORT" \
   --nfs4-port "$NFS4_PORT" \
   --nbd-port 0 \
-  --cluster-key "bench-nfs-key" \
+  --cluster-key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
   $(bench_encryption_args) \
   --pprof-port "$PPROF_PORT" \
   --log-level warn \

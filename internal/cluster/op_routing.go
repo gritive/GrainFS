@@ -88,21 +88,22 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 		return RouteTarget{}, ErrUnknownGroup
 	}
 	t := RouteTarget{GroupID: entry.ID}
-	_, t.SelfIsVoter = NewShardGroupPeerSet(entry).MatchLocal(r.selfID, r.selfAliases...)
-	t.SelfIsOnlyVoter = t.SelfIsVoter && len(entry.PeerIDs) == 1
+	peers := NewShardGroupPeerSet(entry)
+	_, t.SelfIsVoter = peers.MatchLocal(r.selfID, r.selfAliases...)
+	t.SelfIsOnlyVoter = t.SelfIsVoter && peers.AllMatchLocal(r.selfID, r.selfAliases...)
 	if t.SelfIsVoter && r.leaderProbe != nil && r.leaderProbe.GroupLeaderIsSelf(entry.ID) {
 		t.SelfIsLeader = true
 		return t, nil
 	}
-	peers := NewShardGroupPeerSet(entry).ForwardOrder(r.selfID, r.selfAliases...)
+	peersForward := peers.ForwardOrder(r.selfID, r.selfAliases...)
 	if r.addr != nil {
-		resolved, err := ResolveNodeAddresses(r.addr, peers)
+		resolved, err := ResolveNodeAddresses(r.addr, peersForward)
 		if err != nil {
 			return RouteTarget{}, err
 		}
-		peers = resolved
+		peersForward = resolved
 	}
-	t.Peers = peers
+	t.Peers = peersForward
 	return t, nil
 }
 

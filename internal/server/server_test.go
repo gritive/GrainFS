@@ -263,6 +263,30 @@ func TestPutGetObject(t *testing.T) {
 	assert.Equal(t, body, string(got))
 }
 
+func TestPutObjectUserMetadataPersistsOnHead(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/file.txt", strings.NewReader("data"))
+	req.Header.Set("x-amz-acl", "public-read")
+	req.Header.Set("x-amz-meta-mtime", "1710000000")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodHead, base+"/b/file.txt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "1710000000", resp.Header.Get("x-amz-meta-mtime"))
+}
+
 func TestGetAndHeadObjectUseReadIndexer(t *testing.T) {
 	ri := &recordingReadIndexer{index: 42}
 	base := setupTestServerWithOptions(t, WithReadIndexer(ri))
@@ -1144,7 +1168,7 @@ func TestCopyObjectParsesEncodedSourceVersionAndReplacesContentType(t *testing.T
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 }
 
-func TestCopyObjectUnsupportedUserMetadataReturnsNotImplemented(t *testing.T) {
+func TestCopyObjectReplaceUserMetadataPersistsOnHead(t *testing.T) {
 	base := setupTestServer(t)
 
 	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
@@ -1161,13 +1185,19 @@ func TestCopyObjectUnsupportedUserMetadataReturnsNotImplemented(t *testing.T) {
 	req.Header.Set("x-amz-copy-source", "/b/src.txt")
 	req.Header.Set("x-amz-metadata-directive", "REPLACE")
 	req.Header.Set("x-amz-meta-owner", "me")
+	req.Header.Set("x-amz-acl", "public-read")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-	require.Contains(t, string(body), "NotImplemented")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodHead, base+"/b/dst.txt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "me", resp.Header.Get("x-amz-meta-owner"))
 }
 
 func TestCopyObjectIfNoneMatchReturnsPreconditionFailed(t *testing.T) {

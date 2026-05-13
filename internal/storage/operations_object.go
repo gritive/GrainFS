@@ -41,11 +41,26 @@ func (o *Operations) PutObject(ctx context.Context, bucket, key string, r io.Rea
 }
 
 func (o *Operations) PutObjectWithResult(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*PutObjectResult, error) {
+	return o.PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, nil)
+}
+
+func (o *Operations) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error) {
+	if len(userMetadata) == 0 {
+		return o.backend.PutObject(ctx, bucket, key, r, contentType)
+	}
+	putter, ok := o.backend.(UserMetadataPutter)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+}
+
+func (o *Operations) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error) {
 	previous, err := o.previousObject(ctx, bucket, key)
 	if err != nil {
 		return nil, err
 	}
-	obj, err := o.backend.PutObject(ctx, bucket, key, r, contentType)
+	obj, err := o.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 	if err != nil {
 		return nil, err
 	}

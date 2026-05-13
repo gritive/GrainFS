@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"sort"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/pool"
@@ -15,6 +16,7 @@ func marshalObject(obj *Object) ([]byte, error) {
 	keyOff := b.CreateString(obj.Key)
 	ctOff := b.CreateString(obj.ContentType)
 	etagOff := b.CreateString(obj.ETag)
+	metadataOff := buildUserMetadataVector(b, obj.UserMetadata)
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -22,6 +24,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	storagepb.ObjectAddEtag(b, etagOff)
 	storagepb.ObjectAddLastModified(b, obj.LastModified)
 	storagepb.ObjectAddAcl(b, obj.ACL)
+	if metadataOff != 0 {
+		storagepb.ObjectAddUserMetadata(b, metadataOff)
+	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -49,7 +54,48 @@ func unmarshalObject(data []byte) (obj *Object, err error) {
 		ETag:         string(t.Etag()),
 		LastModified: t.LastModified(),
 		ACL:          t.Acl(),
+		UserMetadata: readUserMetadata(t.UserMetadataLength(), t.UserMetadata),
 	}, nil
+}
+
+func buildUserMetadataVector(b *flatbuffers.Builder, metadata map[string]string) flatbuffers.UOffsetT {
+	if len(metadata) == 0 {
+		return 0
+	}
+	keys := make([]string, 0, len(metadata))
+	for k := range metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	offsets := make([]flatbuffers.UOffsetT, len(keys))
+	for i, key := range keys {
+		keyOff := b.CreateString(key)
+		valueOff := b.CreateString(metadata[key])
+		storagepb.UserMetadataStart(b)
+		storagepb.UserMetadataAddKey(b, keyOff)
+		storagepb.UserMetadataAddValue(b, valueOff)
+		offsets[i] = storagepb.UserMetadataEnd(b)
+	}
+	storagepb.ObjectStartUserMetadataVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	return b.EndVector(len(offsets))
+}
+
+func readUserMetadata(n int, at func(*storagepb.UserMetadata, int) bool) map[string]string {
+	if n == 0 {
+		return nil
+	}
+	out := make(map[string]string, n)
+	var kv storagepb.UserMetadata
+	for i := 0; i < n; i++ {
+		if !at(&kv, i) {
+			continue
+		}
+		out[string(kv.Key())] = string(kv.Value())
+	}
+	return out
 }
 
 func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {

@@ -38,9 +38,7 @@ func adminUnixHTTPClient(socketPath string) *http.Client {
 // scrubber tests (cluster_scrubber_test.go); here we verify the trigger
 // landing path end-to-end.
 func TestE2E_ECScrubTrigger_FlowsThroughCluster(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping ec scrub trigger e2e in -short mode")
-	}
+	skipIfShort(t, "skipping ec scrub trigger e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes: 3, Mode: ClusterModeStaticPeers, LogPrefix: "ec-scrub-trigger",
 		DisableNFS: true, DisableNBD: true,
@@ -127,9 +125,7 @@ func TestE2E_ECScrubTrigger_FlowsThroughCluster(t *testing.T) {
 // LookupDedup short-circuit: a second identical POST returns the same
 // SessionID with created=false instead of burning a fresh raft entry.
 func TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping ec scrub dedup e2e in -short mode")
-	}
+	skipIfShort(t, "skipping ec scrub dedup e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes: 1, LogPrefix: "ec-scrub-dedup",
 		DisableNFS: true, DisableNBD: true,

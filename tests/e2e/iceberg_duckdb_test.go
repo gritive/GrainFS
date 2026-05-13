@@ -1,3 +1,5 @@
+//go:build duckdb_e2e
+
 package e2e
 
 import (
@@ -19,9 +21,7 @@ import (
 )
 
 func TestIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping DuckDB Iceberg e2e in short mode")
-	}
+	skipIfShort(t, "skipping DuckDB Iceberg e2e in short mode")
 
 	dataDir, err := os.MkdirTemp("", "grainfs-iceberg-duckdb-*")
 	require.NoError(t, err)
@@ -53,9 +53,7 @@ DROP SCHEMA grainfs_iceberg.ns_e2e;
 }
 
 func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping DuckDB Iceberg cluster e2e in short mode")
-	}
+	skipIfShort(t, "skipping DuckDB Iceberg cluster e2e in short mode")
 
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,

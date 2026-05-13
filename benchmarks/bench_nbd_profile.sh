@@ -30,6 +30,7 @@ VOL_SIZE="${VOL_SIZE:-128Mi}"    # volume size accepted by `grainfs volume creat
 FIO_SIZE="${FIO_SIZE:-64m}"      # fio workload size (must fit in VOL_SIZE)
 FIO_RUNTIME="${FIO_RUNTIME:-15}"
 FIO_CASES="${FIO_CASES:-seq-read-4K seq-write-4K seq-read-64K seq-write-64K rand-read-4K rand-write-4K}"
+FIO_DIRECT="${FIO_DIRECT:-0}"    # set 1 to bypass Linux client page cache
 CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-60}"
 PROFILE_DIR="benchmarks/profiles/nbd-single-$(date +%Y%m%d-%H%M%S)"
 DATA_DIR=$(mktemp -d)
@@ -71,7 +72,7 @@ echo "=== NBD GrainFS Benchmark ==="
 echo "binary : $BINARY"
 echo "NBD    : 0.0.0.0:$NBD_PORT (→ Colima sees $HOST_IP:$NBD_PORT)"
 echo "volume : ${VOL_SIZE} bytes"
-echo "fio    : size=$FIO_SIZE, dev=$NBD_DEV"
+echo "fio    : size=$FIO_SIZE, runtime=${FIO_RUNTIME}s, direct=$FIO_DIRECT, dev=$NBD_DEV"
 echo "profile: $PROFILE_DIR"
 echo ""
 
@@ -81,7 +82,7 @@ SERVE_ARGS=(
   --port   "$HTTP_PORT"
   --nbd-port "$NBD_PORT"
   --nfs4-port 0
-  --cluster-key "bench-nbd-key"
+  --cluster-key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   $(bench_encryption_args)
 )
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
@@ -129,6 +130,7 @@ run_fio() {
     --size="$FIO_SIZE" \
     --runtime="$FIO_RUNTIME" \
     --time_based \
+    --direct="$FIO_DIRECT" \
     --output-format=normal \
     "$@" 2>&1 | tee -a "$PROFILE_DIR/fio_output.txt" | grep -E "READ:|WRITE:|iops|bw=|lat"
 }

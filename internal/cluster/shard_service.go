@@ -27,13 +27,16 @@ var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers
 
 const maxShardRangeReplyBytes = 64 << 10
 
+type shardFileWriter func(path string, payload []byte) error
+
 // ShardService handles remote shard storage via QUIC Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
 type ShardService struct {
-	dataDir   string
-	transport *transport.QUICTransport
-	encryptor *encrypt.Encryptor
-	addrBook  NodeAddressBook
+	dataDir      string
+	transport    *transport.QUICTransport
+	encryptor    *encrypt.Encryptor
+	addrBook     NodeAddressBook
+	directWriter shardFileWriter
 	// directIO bypasses the kernel page cache for shard writes when true.
 	// Linux uses O_DIRECT, macOS uses F_NOCACHE. Default false: enable via
 	// WithDirectIO and the --direct-io flag once measurement on the target
@@ -67,8 +70,9 @@ func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 // NewShardService creates a shard service rooted at dataDir/shards/.
 func NewShardService(dataDir string, tr *transport.QUICTransport, opts ...ShardServiceOption) *ShardService {
 	s := &ShardService{
-		dataDir:   filepath.Join(dataDir, "shards"),
-		transport: tr,
+		dataDir:      filepath.Join(dataDir, "shards"),
+		transport:    tr,
+		directWriter: writeDirect,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -683,7 +687,7 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 func (s *ShardService) writeShardFile(path string, payload []byte) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	if s.directIO {
-		if err := writeDirect(tmp, payload); err == nil {
+		if err := s.directWriter(tmp, payload); err == nil {
 			if err := os.Rename(tmp, path); err != nil {
 				os.Remove(tmp)
 				return fmt.Errorf("rename shard: %w", err)
@@ -767,8 +771,8 @@ func writeDirect(tmp string, payload []byte) error {
 
 // isUnsupportedDirectIO recognises filesystem-level rejections of O_DIRECT
 // (EINVAL or "operation not supported") so the caller can fall back to the
-// buffered path silently. A production deploy on overlayfs (Docker default)
-// will hit this; we don't want to crash, just degrade gracefully.
+// buffered path silently. Filesystems that reject direct I/O should degrade
+// gracefully instead of crashing the server.
 func isUnsupportedDirectIO(err error) bool {
 	if err == nil {
 		return false

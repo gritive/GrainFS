@@ -10,6 +10,12 @@ table Object {
   etag:string;
   last_modified:int64;
   acl:uint8;
+  user_metadata:[UserMetadata];
+}
+
+table UserMetadata {
+  key:string;
+  value:string;
 }
 
 table MultipartMeta {

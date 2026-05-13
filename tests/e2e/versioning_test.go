@@ -16,9 +16,7 @@ import (
 // shared DistributedBackend server: put two versions, get by versionId, soft
 // delete (creates delete marker), hard-delete a specific version.
 func TestE2E_Versioning_Full(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping E2E test in short mode")
-	}
+	skipIfShort(t, "skipping E2E test in short mode")
 
 	ctx := context.Background()
 	bucket := "ver-e2e-full"

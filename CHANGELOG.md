@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.185.0] - 2026-05-14 — feat: QUIC mux capability exchange handshake
+## [0.0.186.0] - 2026-05-14 — feat: QUIC mux capability exchange handshake
 
 ### Added
 
@@ -19,6 +19,29 @@
 - `go test ./internal/transport/... -run TestVersionHandshake` PASS
 - `go test ./internal/transport/... -run TestMixedVersion` PASS
 - `go test ./internal/transport/...` PASS (coverage: 73.4%)
+
+## [0.0.185.0] - 2026-05-14 — fix: Colima Linux tests and NBD/NFS fast paths
+
+### Added
+
+- **Colima Linux test integration** — Linux-dependent NBD/NFS/direct I/O coverage now runs through Colima without Docker and is wired into `make test`.
+- **NBD/NFS profiling harness updates** — benchmark scripts run directly against the host binary, support pprof/direct fio options, and record NBD write-path trace data.
+- **S3 user metadata persistence** — storage and cluster object metadata now carry user metadata through PutObject/CopyObject paths.
+
+### Fixed
+
+- **Docker removal** — deleted Docker-based e2e/benchmark scaffolding and updated docs/scripts to use direct host binary + Colima VM clients.
+- **NFSv4 COPY/READDIR/rename behavior** — fixed offset-aware COPY, READDIR attr encoding, parent cache invalidation, and internal-bucket rename writes.
+- **Internal bucket partial I/O routing** — internal buckets bypass user object-index paths and hard-delete internal metadata instead of creating S3 delete markers.
+- **NBD fast path capability propagation** — pull-through now forwards `PartialIO`, `PreferWriteAt`, and async put capabilities so NBD volume writes can use `DistributedBackend.WriteAt`.
+- **Single-node duplicate-self topology** — routing/backend write-at checks treat repeated local peer entries as one physical voter, preserving local pwrite fast paths in single-node EC-shaped topologies.
+
+### Verification
+
+- `go test ./internal/storage/pullthrough ./internal/cluster ./internal/volume -run 'TestPullThrough_ForwardsPartialIOCapabilities|TestOpRouter_RouteBucket_DuplicateSelfIsOnlyVoter|TestPreferWriteAt|TestClusterCoordinator_PreferWriteAt|TestClusterCoordinator_WALWriteAtReadAt'`
+- `go test ./internal/nbd -run 'Test' -timeout 60s`
+- `go test ./internal/volume/dedup -run '^$'`
+- `make build`
 
 ## [0.0.184.0] - 2026-05-14 — feat: bucket policy/versioning admin API + CLI
 
@@ -120,7 +143,7 @@
 
 ### Fixed
 
-- **Docker bootstrap** — RUNBOOK Docker 섹션이 named volume 대신 host bind-mount(`-v /var/lib/grainfs:/data`)를 사용하도록 수정. Named volume은 플랫폼에 따라 호스트 파일시스템에 직접 노출되지 않아 `admin.sock`에 접근할 수 없었음. `docker exec` 대안도 안내 추가.
+- **Bootstrap docs** — RUNBOOK deployment section now documents direct host binary startup and host-side `admin.sock` bootstrap.
 - **K8s bootstrap** — RUNBOOK K8s 섹션에 최초 배포 후 admin SA 생성 절차(`kubectl exec deploy/grainfs -n grainfs -- grainfs iam sa create admin`) 추가.
 - **snapshot-interval / snapshot-retain audit log 누락** — `ClusterConfigPatch`의 `SnapshotInterval`, `SnapshotRetain` 필드가 FSM에 적용될 때 audit dict에 포함되지 않아 변경 이력 추적이 불가능했던 문제 수정.
 

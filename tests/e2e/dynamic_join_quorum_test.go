@@ -17,9 +17,7 @@ import (
 // phantom self-address so currentVoters had 4 strings → quorum 3 → 2 survivors
 // stuck. Regression for TODOS.md "DynamicJoin quorum inflation".
 func TestE2E_DynamicJoinTwoSurvivorReelect(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	if _, err := os.Stat(getBinary()); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", getBinary())
 	}

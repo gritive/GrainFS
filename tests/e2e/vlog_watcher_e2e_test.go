@@ -55,9 +55,7 @@ func scrapeMetric(t *testing.T, endpoint, name, labelSubstr string) float64 {
 // lives in TestE2E_VlogWatcher_FiresOnLeak, which forces vlog growth via
 // --badger-value-threshold.
 func TestE2E_VlogWatcher_MetricsLive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping vlog watcher e2e in -short mode")
-	}
+	skipIfShort(t, "skipping vlog watcher e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
 		LogPrefix:  "vlog-live",
@@ -93,9 +91,7 @@ func TestE2E_VlogWatcher_MetricsLive(t *testing.T) {
 // The metric is wired by gcMetricsRecorder; this regression catches the case
 // where the counter declaration drifts away from the increment site.
 func TestE2E_GCTicker_RecoversAfterDeletion(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping vlog gc e2e in -short mode")
-	}
+	skipIfShort(t, "skipping vlog gc e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
 		LogPrefix:  "vlog-gc",
@@ -125,9 +121,7 @@ func TestE2E_GCTicker_RecoversAfterDeletion(t *testing.T) {
 // before the smoke deferral elapses, then asserts that strict mode either
 // fatally exits the process OR emits a registry_under_populated incident.
 func TestE2E_StrictVlogRegistry_FatalOnMissing(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping strict registry e2e in -short mode")
-	}
+	skipIfShort(t, "skipping strict registry e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
 		LogPrefix:  "vlog-strict",
@@ -185,9 +179,7 @@ func TestE2E_StrictVlogRegistry_FatalOnMissing(t *testing.T) {
 // in the per-DB max-iter cap (gcMaxIterPerDBPerTick) that would let one
 // write-churn DB starve siblings.
 func TestE2E_VlogWatcher_SustainedWriteNoStarvation(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping no-starvation e2e in -short mode")
-	}
+	skipIfShort(t, "skipping no-starvation e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		LogPrefix:  "vlog-nostarve",
@@ -243,9 +235,7 @@ func TestE2E_VlogWatcher_SustainedWriteNoStarvation(t *testing.T) {
 // Level-based fires (ratio ≥ warnRatio) are not gated by MinETAElapsed, so the
 // cold-start suppression window does not affect this path.
 func TestE2E_VlogWatcher_FiresOnLeak(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping vlog leak-fire e2e in -short mode")
-	}
+	skipIfShort(t, "skipping vlog leak-fire e2e in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,
 		LogPrefix:  "vlog-leak",

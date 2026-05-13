@@ -17,9 +17,7 @@ import (
 )
 
 func TestBackup_Restic_BackupAndRestore(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping backup test in short mode")
-	}
+	skipIfShort(t, "skipping backup test in short mode")
 
 	// Skip if restic not installed
 	if _, err := exec.LookPath("restic"); err != nil {

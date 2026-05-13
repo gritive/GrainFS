@@ -104,6 +104,7 @@ table PutObjectMetaCmd {
   preserve_latest:bool = false;
   is_delete_marker:bool = false;
   placement_group_id:string;
+  user_metadata:[KeyValue];
 }
 
 table DeleteObjectCmd {
@@ -179,6 +180,7 @@ table ObjectMeta {
   ec_parity:uint8 = 0;
   node_ids:[string];
   placement_group_id:string;
+  user_metadata:[KeyValue];
 }
 
 table SetBucketVersioningCmd {

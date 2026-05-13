@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-race test-e2e test-e2e-iceberg test-e2e-docker test-jepsen test-smoke test-network-fault test-backup clean run lint lint-keyspace bench bench-cluster bench-profile bench-topology-get bench-topology-get-matrix bench-iceberg-table bench-iceberg-table-cluster build-pgo docker-build test-nbd-docker test-nbd-interop update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima test-raft-v2-chaos
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault test-backup clean run lint lint-keyspace bench bench-cluster bench-profile bench-topology-get bench-topology-get-matrix bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima bench-directio-s3 test-raft-v2-chaos
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -19,9 +19,6 @@ bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
 
 build: bin/$(BINARY)
-
-docker-build:
-	docker build --build-arg VERSION=$(VERSION) -t grainfs:$(VERSION) .
 
 # build-pgo: compile with Profile-Guided Optimization using a previously collected
 # pprof CPU profile (from `make bench-profile`). Typically 5-15% faster on hot paths.
@@ -44,8 +41,12 @@ fbs: $(FBS_STAMPS)
 
 UNIT_PKGS := $(shell go list ./... | grep -v '/tests/e2e')
 
-test:
+test: test-unit test-colima
+
+test-unit:
 	go test $(UNIT_PKGS) -count=1 -cover
+
+test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-nfs4-colima
 
 test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
@@ -62,7 +63,7 @@ test-e2e: bin/$(BINARY)
 	done
 
 test-e2e-iceberg: bin/$(BINARY)
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestIcebergDuckDB -v -count=1 -timeout 5m
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -tags duckdb_e2e ./tests/e2e/ -run TestIcebergDuckDB -v -count=1 -timeout 5m
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
@@ -144,6 +145,9 @@ bench-cluster: bin/$(BINARY)
 bench-profile: bin/$(BINARY)
 	NO_BUILD=1 PROFILE=1 ./benchmarks/bench_profile.sh
 
+bench-directio-s3:
+	./benchmarks/bench_directio_s3.sh
+
 bench-topology-get: bin/$(BINARY)
 	NO_BUILD=1 PROFILE=1 ./benchmarks/bench_topology_get_profile.sh
 
@@ -158,28 +162,13 @@ bench-iceberg-table-cluster: build
 
 NBD_PPROF_DIR ?= $(HOME)/tmp/grainfs-nbd-pprof
 
-test-nbd-docker:
-	@echo "Running NBD E2E tests in Docker..."
-	docker build -t grainfs-nbd-test -f docker/nbd-test.Dockerfile .
-	@mkdir -p $(NBD_PPROF_DIR)
-	docker run --rm --privileged \
-		-v /lib/modules:/lib/modules:ro \
-		-v $(NBD_PPROF_DIR):/tmp \
-		-e GRAINFS_PPROF=$(GRAINFS_PPROF) \
-		grainfs-nbd-test
+# Run Linux-only tests directly inside Colima. The host cross-compiles Linux
+# binaries and test binaries, copies them into the VM, then executes there.
+test-e2e-colima:
+	./scripts/run_colima_linux_tests.sh all
 
-# Run the full host-side E2E suite inside a Linux container. Use this on macOS
-# when you want to exercise platform-specific code paths (NBD kernel module,
-# future O_DIRECT/io_uring) that don't run natively. Mounts the docker socket
-# so tests that themselves invoke docker (TestNBD_*) keep working.
-test-e2e-docker:
-	@echo "Running cross-platform E2E tests in Linux Docker..."
-	docker build -t grainfs-e2e -f docker/e2e.Dockerfile .
-	docker run --rm --privileged \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v /lib/modules:/lib/modules:ro \
-		-e GRAINFS_BINARY=/usr/local/bin/grainfs \
-		grainfs-e2e
+test-directio-linux:
+	./scripts/run_colima_linux_tests.sh directio
 
 update-deps:
 	find . -name "go.mod" -not -path "*/vendor/*" -execdir go get -u ./... \; -execdir go mod tidy \;

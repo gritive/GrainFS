@@ -514,17 +514,12 @@ ss -s
 
 ---
 
-## Container Deployment Procedures
-
-### Docker Deployment
+## Host Deployment Procedures
 
 **Prerequisites:**
 ```bash
-# Install Docker
-# (platform-specific commands)
-
-# Build the image locally from the repo root.
-docker build -t grainfs:latest .
+# Build the binary locally from the repo root.
+make build
 ```
 
 **Deployment:**
@@ -532,43 +527,19 @@ docker build -t grainfs:latest .
 # Create host data directory
 mkdir -p /var/lib/grainfs
 
-# Start GrainFS container (host bind-mount exposes admin.sock on the host)
-docker run -d \
-  --name grainfs \
-  --restart unless-stopped \
-  -p 9000:9000 \
-  -v /var/lib/grainfs:/data \
-  grainfs:latest
+# Start GrainFS directly
+./bin/grainfs serve --data /var/lib/grainfs --port 9000
 ```
 
-After the container starts, bootstrap the admin SA once via the host-side
-admin socket:
+After the server starts, bootstrap the admin SA once via the host-side admin socket:
 ```bash
 grainfs iam sa create admin --endpoint /var/lib/grainfs/admin.sock
 ```
 Export the returned credentials as `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY`
 for subsequent S3 client commands.
 
-> **Note:** Use a host bind-mount (`-v /var/lib/grainfs:/data`) rather than a
-> named Docker volume. Named volumes are not directly accessible on the host
-> filesystem on all platforms, so `admin.sock` inside the volume cannot be
-> reached by host-side `grainfs` commands. If you prefer a named volume,
-> bootstrap inside the container instead:
-> `docker exec grainfs grainfs iam sa create admin --endpoint /data/admin.sock`
-
-The image default command is `serve --data /data --port 9000 --nfs4-port 0 --nbd-port 0`.
-It is intentionally S3-only so the non-root container can start without binding privileged
-NFSv4 port 2049 or opening Linux block devices. To expose NFS or NBD, override the command
-and run with the container privileges required by your platform.
-
 **Health check:**
 ```bash
-# Check container is running
-docker ps | grep grainfs
-
-# Check logs
-docker logs grainfs
-
 # API health check
 aws --endpoint-url http://localhost:9000 \
   --access-key-id $GRAINFS_ACCESS_KEY \
@@ -578,16 +549,8 @@ aws --endpoint-url http://localhost:9000 \
 
 **Rollback:**
 ```bash
-# Stop current container
-docker stop grainfs
-docker rm grainfs
-
-# Start previous version
-docker run -d \
-  --name grainfs \
-  --restart unless-stopped \
-  -p 9000:9000 \
-  -v /var/lib/grainfs:/data \
+# Replace ./bin/grainfs with the previous binary, then restart the service:
+./bin/grainfs serve --data /var/lib/grainfs --port 9000
   grainfs:previous-version \
   serve \
   --data /data \

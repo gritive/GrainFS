@@ -96,9 +96,7 @@ func waitClusterSettled(t *testing.T, leaderURL string) {
 // TestLifecycle_FollowerPutLeaderGet: 팔로워에 PUT한 lifecycle 설정이
 // 리더에서 GET으로 조회 가능해야 한다 (ADR 0011 복제 요건).
 func TestLifecycle_FollowerPutLeaderGet(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	if _, err := os.Stat(getBinary()); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", getBinary())
 	}
@@ -157,9 +155,7 @@ func TestLifecycle_FollowerPutLeaderGet(t *testing.T) {
 // 리더 프로세스를 SIGKILL로 강제 종료한 뒤 나머지 노드들이 재선거(re-election)를
 // 완료하길 기다리는 방식으로 즉각 crash 시나리오를 검증한다.
 func TestLifecycle_LeaderChangePreservesConfig(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
+	skipIfShort(t, "skipping e2e test in -short mode")
 	if _, err := os.Stat(getBinary()); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", getBinary())
 	}

@@ -1,6 +1,11 @@
 package cluster
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,11 +49,29 @@ func TestLookupObjectECShards_ECMode(t *testing.T) {
 	assert.Equal(t, 1, m, "ParityShards=1 기대")
 }
 
-// TestECCluster_Smoke_3Node는 3-node 클러스터에서 EC가 활성화되고
-// 노드 1개 다운 후에도 읽기가 성공하는지 검증한다.
-//
-// TODO: 실제 DistributedBackend 다중 노드 테스트 인프라(newTestCluster, KillNode)
-// 연결 후 t.Skip 제거. Phase 19 per-group QUIC 멀티플렉싱 구현 시 함께 완성.
+// TestECCluster_Smoke_3Node verifies the in-process 3-holder EC path: a 2+1
+// object is readable after one locally held shard disappears. Multi-process
+// node failure is covered by tests/e2e/cluster_ec_test.go.
 func TestECCluster_Smoke_3Node(t *testing.T) {
-	t.Skip("TODO: EC cluster 인프라 연결 필요 (multi-node DistributedBackend harness)")
+	backend := NewSingletonBackendForTest(t)
+	require.NoError(t, backend.CreateBucket(context.Background(), "ec-smoke"))
+	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+
+	svc := NewShardService(backend.root, nil)
+	backend.SetShardService(svc, []string{"self", "self", "self"})
+
+	content := bytes.Repeat([]byte("ec-smoke-3node-"), 4096)
+	obj, err := backend.PutObject(context.Background(), "ec-smoke", "obj", bytes.NewReader(content), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	shardKey := "obj/" + obj.VersionID
+	require.NoError(t, os.Remove(filepath.Join(backend.shardSvc.dataDir, "ec-smoke", shardKey, "shard_0")))
+
+	rc, _, err := backend.GetObject(context.Background(), "ec-smoke", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
 }

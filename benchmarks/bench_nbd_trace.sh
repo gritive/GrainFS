@@ -23,7 +23,10 @@ HTTP_PORT=$(bench_free_port)
 NBD_PORT=$(bench_free_port)
 HOST_IP="192.168.5.2"
 NBD_DEV="/dev/nbd0"
-VOL_SIZE=$((32 * 1024 * 1024))   # 32MB — 작은 볼륨으로 측정 빠르게
+VOL_SIZE="${VOL_SIZE:-32Mi}"     # small volume for fast trace runs
+FIO_SIZE="${FIO_SIZE:-4m}"
+FIO_RUNTIME="${FIO_RUNTIME:-5}"
+FIO_DIRECT="${FIO_DIRECT:-1}"    # trace the real NBD request path by default
 DATA_DIR=$(mktemp -d)
 SERVER_PID=""
 LOG_FILE=$(mktemp /tmp/grainfs-nbd-trace-XXXXXX)
@@ -46,13 +49,12 @@ echo ""
 
 GRAINFS_VOLUME_TRACE=1 "$BINARY" serve \
   --log-level debug \
-  --raft-log-fsync=false \
   --dedup=false \
   --data   "$DATA_DIR" \
   --port   "$HTTP_PORT" \
   --nbd-port "$NBD_PORT" \
-  --nbd-volume-size "$VOL_SIZE" \
   --nfs4-port 0 \
+  --cluster-key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
   $(bench_encryption_args) \
   2>&1 | tee "$LOG_FILE" &
 SERVER_PID=$!
@@ -61,6 +63,12 @@ echo "GrainFS PID=$SERVER_PID"
 if ! bench_wait_http_ready "http://127.0.0.1:${HTTP_PORT}/" "server" 30 1; then
   exit 1
 fi
+bench_wait_admin_socket "$DATA_DIR" 100 0.2
+
+echo ""
+echo "--- Creating NBD export volume ---"
+"$BINARY" volume create default --size "$VOL_SIZE" --endpoint "$DATA_DIR/admin.sock" >/dev/null
+bench_wait_tcp_port "127.0.0.1" "$NBD_PORT" "NBD listener" 50 0.2
 
 echo ""
 echo "--- Connecting nbd-client in Colima ---"
@@ -70,17 +78,17 @@ bench_colima_ssh sudo nbd-client "$HOST_IP" "$NBD_PORT" "$NBD_DEV" -b 4096 -N de
 echo "OK: nbd-client connected"
 
 echo ""
-echo "--- fio: seq-write-4K (5s, 200 blocks) ---"
+echo "--- fio: seq-write-4K (${FIO_RUNTIME}s, direct=$FIO_DIRECT) ---"
 bench_colima_ssh sudo fio \
   --name=trace-write \
   --filename="$NBD_DEV" \
-  --size=4m \
-  --runtime=5 \
+  --size="$FIO_SIZE" \
+  --runtime="$FIO_RUNTIME" \
   --time_based \
+  --direct="$FIO_DIRECT" \
   --ioengine=sync \
   --rw=write \
   --bs=4k \
-  --end_fsync=1 \
   --output-format=normal 2>&1 | grep -E "WRITE:|iops|bw="
 
 echo ""
@@ -126,40 +134,87 @@ else:
 }
 
 echo ""
-echo "--- putObjectNx (SYNC): write_file_atomic (CreateTemp+Write+Close+Rename) ---"
-grep '"putObjectNx trace"' "$LOG_FILE" | parse_field write_file_atomic || true
+echo "--- Volume WriteAtDeferred: total ---"
+grep '"Volume WriteAtDeferred trace"' "$LOG_FILE" | parse_field total || true
 
 echo ""
-echo "--- putObjectNx (SYNC): raft_propose (ProposeWait = Raft log fsync) ---"
-grep '"putObjectNx trace"' "$LOG_FILE" | parse_field raft_propose || true
+echo "--- Volume WriteAt fallback: total ---"
+grep '"Volume WriteAt trace"' "$LOG_FILE" | parse_field total || true
 
 echo ""
-echo "--- putObjectNx (SYNC): total ---"
-grep '"putObjectNx trace"' "$LOG_FILE" | grep '"total"' | parse_field total || true
+echo "--- Dedup WriteBlock: total ---"
+grep '"Dedup WriteBlock trace"' "$LOG_FILE" | parse_field total || true
 
 echo ""
-echo "--- putObjectNxAsync (WRITE-BACK): write_file_atomic ---"
-grep '"putObjectNxAsync trace"' "$LOG_FILE" | parse_field write_file_atomic || true
+echo "--- BlockIO action counts ---"
+printf '  direct=%s dedup=%s cow=%s\n' \
+  "$(grep -c '"BlockIO action direct"' "$LOG_FILE" || true)" \
+  "$(grep -c '"BlockIO action dedup"' "$LOG_FILE" || true)" \
+  "$(grep -c '"BlockIO action cow"' "$LOG_FILE" || true)"
 
 echo ""
-echo "--- putObjectNxAsync (WRITE-BACK): commit raft_propose (on flush) ---"
-grep '"putObjectNxAsync commit trace"' "$LOG_FILE" | parse_field raft_propose || true
+echo "--- BlockIO direct WriteAt / PutObject ---"
+grep '"BlockIO direct WriteAt"' "$LOG_FILE" | parse_field total || true
+grep '"BlockIO direct PutObject"' "$LOG_FILE" | parse_field total || true
+
+echo ""
+echo "--- BlockIO async WriteAt ---"
+grep '"BlockIO async WriteAt"' "$LOG_FILE" | parse_field total || true
+
+echo ""
+echo "--- Distributed WriteAt: ensure_dir ---"
+grep '"Distributed WriteAt trace"' "$LOG_FILE" | parse_field ensure_dir || true
+
+echo ""
+echo "--- Distributed WriteAt: open ---"
+grep '"Distributed WriteAt trace"' "$LOG_FILE" | parse_field open || true
+
+echo ""
+echo "--- Distributed WriteAt: pwrite ---"
+grep '"Distributed WriteAt trace"' "$LOG_FILE" | parse_field pwrite || true
+
+echo ""
+echo "--- Distributed WriteAt: size ---"
+grep '"Distributed WriteAt trace"' "$LOG_FILE" | parse_field size_lookup || true
+
+echo ""
+echo "--- Distributed WriteAt: badger_update / total ---"
+grep '"Distributed WriteAt trace"' "$LOG_FILE" | parse_field badger_update || true
+grep '"Distributed WriteAt trace"' "$LOG_FILE" | parse_field total || true
+
+echo ""
+echo "--- Local WriteAt: mkdir ---"
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field mkdir || true
+
+echo ""
+echo "--- Local WriteAt: open ---"
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field open || true
+
+echo ""
+echo "--- Local WriteAt: pwrite ---"
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field pwrite || true
+
+echo ""
+echo "--- Local WriteAt: stat ---"
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field stat || true
+
+echo ""
+echo "--- Local WriteAt: etag ---"
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field etag || true
+
+echo ""
+echo "--- Local WriteAt: badger_update / total ---"
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field badger_update || true
+grep '"WriteAt trace"' "$LOG_FILE" | parse_field total || true
 
 echo ""
 echo "--- HeadObject: badger_view ---"
 grep '"HeadObject trace"' "$LOG_FILE" | parse_field badger_view || true
 
 echo ""
-echo "--- raftFlush: batch_wait (proposal→flush 대기) ---"
-grep '"raftFlush trace"' "$LOG_FILE" | parse_field batch_wait || true
-
-echo ""
-echo "--- raftFlush: persist_log (BadgerDB AppendEntries = fdatasync) ---"
-grep '"raftFlush trace"' "$LOG_FILE" | parse_field persist_log || true
-
-echo ""
-echo "--- raftFlush: flush_total ---"
-grep '"raftFlush trace"' "$LOG_FILE" | parse_field flush_total || true
+echo "--- PutObject (metadata path): badger_update / total ---"
+grep '"PutObject trace"' "$LOG_FILE" | parse_field badger_update || true
+grep '"PutObject trace"' "$LOG_FILE" | parse_field total || true
 
 echo ""
 echo "Full trace log: $LOG_FILE"

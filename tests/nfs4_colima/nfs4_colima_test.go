@@ -13,12 +13,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 var (
 	colimaHostIP   = envOrDefault("HOST_IP", "192.168.5.2")
 	colimaNFS4Port = envOrDefault("NFS4_PORT", "19249")
 	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
+	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 )
 
 var nfsVersions = []string{"4.0", "4.1", "4.2"}
@@ -37,9 +40,7 @@ func colimaSSH(args ...string) *exec.Cmd {
 func runColimaSSH(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := colimaSSH(args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("colima ssh %v: %v\n%s", args, err, out)
-	}
+	require.NoErrorf(t, err, "colima ssh %v\n%s", args, out)
 	return strings.TrimSpace(string(out))
 }
 
@@ -90,6 +91,7 @@ func TestMain(m *testing.M) {
 		"--port", colimaHTTPPort,
 		"--nfs4-port", colimaNFS4Port,
 		"--nbd-port", "0",
+		"--cluster-key", clusterKey,
 	}
 
 	cmd := exec.Command(binary, args...)
@@ -101,13 +103,14 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// HTTP health 폴링 (최대 10초) — GET / 는 listBuckets(200)로 항상 존재
+	// HTTP health polling: auth may reject GET / before bootstrap, but any
+	// HTTP response means the server is accepting requests.
 	healthURL := fmt.Sprintf("http://127.0.0.1:%s/", colimaHTTPPort)
 	deadline := time.Now().Add(10 * time.Second)
 	ready := false
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(healthURL) //nolint:noctx
-		if err == nil && resp.StatusCode == http.StatusOK {
+		if err == nil {
 			resp.Body.Close()
 			ready = true
 			break
@@ -146,42 +149,28 @@ func testBasicOps(t *testing.T, mnt string) {
 	origHash := strings.Fields(sha)[0]
 
 	lsOut := runColimaSSH(t, "ls", testDir)
-	if !strings.Contains(lsOut, "file.bin") {
-		t.Fatalf("readdir: 'file.bin' not found in %q", lsOut)
-	}
+	require.Contains(t, lsOut, "file.bin", "readdir output")
 
 	renamedPath := testDir + "/renamed.bin"
 	runColimaSSH(t, "sudo", "mv", filePath, renamedPath)
 
 	lsAfter := runColimaSSH(t, "ls", testDir)
-	if !strings.Contains(lsAfter, "renamed.bin") {
-		t.Fatalf("after rename: 'renamed.bin' not found in %q", lsAfter)
-	}
-	if strings.Contains(lsAfter, "file.bin") {
-		t.Fatalf("after rename: 'file.bin' still present in %q", lsAfter)
-	}
+	require.Contains(t, lsAfter, "renamed.bin", "after rename output")
+	require.NotContains(t, lsAfter, "file.bin", "after rename output")
 
 	sha2 := runColimaSSH(t, "sha256sum", renamedPath)
-	if origHash != strings.Fields(sha2)[0] {
-		t.Fatalf("sha256 mismatch after rename: orig=%s got=%s", origHash, strings.Fields(sha2)[0])
-	}
+	require.Equal(t, origHash, strings.Fields(sha2)[0], "sha256 mismatch after rename")
 
 	runColimaSSH(t, "sudo", "chmod", "750", renamedPath)
-	if got := runColimaSSH(t, "stat", "--format=%a", renamedPath); got != "750" {
-		t.Fatalf("expected mode 750 after chmod, got %q", got)
-	}
+	require.Equal(t, "750", runColimaSSH(t, "stat", "--format=%a", renamedPath), "mode after chmod")
 
 	runColimaSSH(t, "sudo", "truncate", "-s", "100", renamedPath)
-	if got := runColimaSSH(t, "stat", "--format=%s", renamedPath); got != "100" {
-		t.Fatalf("expected size 100 after truncate, got %q", got)
-	}
+	require.Equal(t, "100", runColimaSSH(t, "stat", "--format=%s", renamedPath), "size after truncate")
 
 	runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 
 	out, err := colimaSSH("ls", testDir).CombinedOutput()
-	if err == nil {
-		t.Fatalf("testdir should not exist after rm -rf, but got: %s", out)
-	}
+	require.Errorf(t, err, "testdir should not exist after rm -rf, but got: %s", out)
 }
 
 func testSetAttr(t *testing.T, mnt string) {
@@ -196,35 +185,23 @@ func testSetAttr(t *testing.T, mnt string) {
 
 	for _, mode := range []string{"600", "644", "750"} {
 		runColimaSSH(t, "sudo", "chmod", mode, filePath)
-		if got := runColimaSSH(t, "stat", "--format=%a", filePath); got != mode {
-			t.Fatalf("chmod %s: expected %s, got %q", mode, mode, got)
-		}
+		require.Equalf(t, mode, runColimaSSH(t, "stat", "--format=%a", filePath), "chmod %s", mode)
 	}
 
 	runColimaSSH(t, "sudo", "truncate", "-s", "100", filePath)
-	if sz := runColimaSSH(t, "stat", "--format=%s", filePath); sz != "100" {
-		t.Fatalf("truncate 100: expected size 100, got %q", sz)
-	}
+	require.Equal(t, "100", runColimaSSH(t, "stat", "--format=%s", filePath), "truncate 100")
 
 	runColimaSSH(t, "sudo", "truncate", "-s", "8192", filePath)
-	if sz := runColimaSSH(t, "stat", "--format=%s", filePath); sz != "8192" {
-		t.Fatalf("truncate 8192: expected size 8192, got %q", sz)
-	}
+	require.Equal(t, "8192", runColimaSSH(t, "stat", "--format=%s", filePath), "truncate 8192")
 
 	runColimaSSH(t, "sudo", "truncate", "-s", "0", filePath)
-	if sz := runColimaSSH(t, "stat", "--format=%s", filePath); sz != "0" {
-		t.Fatalf("truncate 0: expected size 0, got %q", sz)
-	}
+	require.Equal(t, "0", runColimaSSH(t, "stat", "--format=%s", filePath), "truncate 0")
 
 	mtimeBefore := runColimaSSH(t, "stat", "--format=%Y", filePath)
 	runColimaSSH(t, "sudo", "env", "TZ=UTC", "touch", "-t", "202001010000", filePath)
 	mtimeAfter := runColimaSSH(t, "stat", "--format=%Y", filePath)
-	if mtimeBefore == mtimeAfter {
-		t.Fatalf("mtime unchanged after touch: %q", mtimeAfter)
-	}
-	if mtimeAfter != "1577836800" {
-		t.Fatalf("mtime expected 1577836800 (2020-01-01 UTC), got %q", mtimeAfter)
-	}
+	require.NotEqual(t, mtimeBefore, mtimeAfter, "mtime after touch")
+	require.Equal(t, "1577836800", mtimeAfter, "mtime should be 2020-01-01 UTC")
 
 	runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 }
@@ -246,9 +223,7 @@ func testCommit(t *testing.T, mnt string, vers string) {
 		fmt.Sprintf("%s:/", colimaHostIP), mnt)
 
 	sha2 := strings.Fields(runColimaSSH(t, "sha256sum", filePath))[0]
-	if sha1 != sha2 {
-		t.Fatalf("commit: sha256 mismatch after remount: before=%s after=%s", sha1, sha2)
-	}
+	require.Equal(t, sha1, sha2, "commit sha256 after remount")
 
 	runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 }
@@ -296,16 +271,12 @@ func TestNFS4_Seek(t *testing.T) {
 
 		result := runColimaSSH(t, "sudo", "python3", "-c",
 			fmt.Sprintf("import os; fd=os.open('%s',os.O_RDONLY); print(os.lseek(fd,0,os.SEEK_DATA)); os.close(fd)", filePath))
-		if result != "0" {
-			t.Fatalf("SEEK_DATA expected offset 0, got %q", result)
-		}
+		require.Equal(t, "0", result, "SEEK_DATA offset")
 
 		sz := runColimaSSH(t, "stat", "--format=%s", filePath)
 		holeOffset := runColimaSSH(t, "sudo", "python3", "-c",
 			fmt.Sprintf("import os; fd=os.open('%s',os.O_RDONLY); print(os.lseek(fd,0,os.SEEK_HOLE)); os.close(fd)", filePath))
-		if holeOffset != sz {
-			t.Fatalf("SEEK_HOLE expected %s (file size), got %q", sz, holeOffset)
-		}
+		require.Equal(t, sz, holeOffset, "SEEK_HOLE should return file size")
 
 		runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 	})
@@ -319,9 +290,7 @@ func TestNFS4_Allocate(t *testing.T) {
 
 		runColimaSSH(t, "sudo", "fallocate", "-l", "1M", filePath)
 		sz := runColimaSSH(t, "stat", "--format=%s", filePath)
-		if sz != "1048576" {
-			t.Fatalf("fallocate 1MB: expected size 1048576, got %q", sz)
-		}
+		require.Equal(t, "1048576", sz, "fallocate 1MB size")
 
 		runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 	})
@@ -340,15 +309,11 @@ func TestNFS4_Deallocate(t *testing.T) {
 
 		firstBytes := runColimaSSH(t, "sudo", "python3", "-c",
 			fmt.Sprintf("fd=open('%s','rb'); d=fd.read(4); fd.close(); print(list(d))", filePath))
-		if firstBytes != "[0, 0, 0, 0]" {
-			t.Fatalf("after punch-hole, expected [0,0,0,0] at start, got %q", firstBytes)
-		}
+		require.Equal(t, "[0, 0, 0, 0]", firstBytes, "bytes after punch-hole")
 
 		laterByte := runColimaSSH(t, "sudo", "python3", "-c",
 			fmt.Sprintf("fd=open('%s','rb'); fd.seek(1024); d=fd.read(1); fd.close(); print(d[0])", filePath))
-		if laterByte != "65" {
-			t.Fatalf("byte at offset 1024 should be 'A' (65), got %q", laterByte)
-		}
+		require.Equal(t, "65", laterByte, "byte at offset 1024")
 
 		runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 	})
@@ -366,9 +331,7 @@ func TestNFS4_ServerSideCopy(t *testing.T) {
 
 		runColimaSSH(t, "sudo", "cp", srcPath, dstPath)
 		dstHash := strings.Fields(runColimaSSH(t, "sha256sum", dstPath))[0]
-		if srcHash != dstHash {
-			t.Fatalf("server-side copy sha256 mismatch: src=%s dst=%s", srcHash, dstHash)
-		}
+		require.Equal(t, srcHash, dstHash, "server-side copy sha256")
 
 		runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 	})

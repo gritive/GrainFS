@@ -25,6 +25,7 @@ type Object struct {
 	VersionID      string // non-empty when bucket versioning is Enabled
 	IsDeleteMarker bool   // true when this object is a delete marker
 	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+	UserMetadata   map[string]string
 }
 
 // ACLSetter is an optional interface for backends that support per-object ACL updates.
@@ -36,6 +37,12 @@ type ACLSetter interface {
 // and its ACL atomically in a single transaction.
 type AtomicACLPutter interface {
 	PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error)
+}
+
+// UserMetadataPutter is an optional interface for backends that can persist
+// S3 x-amz-meta-* headers with object metadata.
+type UserMetadataPutter interface {
+	PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error)
 }
 
 // MultipartUpload tracks an in-progress multipart upload.

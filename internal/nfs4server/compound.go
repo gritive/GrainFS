@@ -414,6 +414,7 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 
 	if objType == NF4DIR {
 		d.state.MarkDir(newPath)
+		d.invalidatePath(newPath)
 	}
 	fh := d.state.GetOrCreateFH(newPath)
 	d.currentFH = fh
@@ -444,6 +445,16 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 		}
 	}
 
+	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: d.encodeAttrs(d.currentPath, reqBit)}
+}
+
+func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
+	if reqBit[0] == 0 && reqBit[1] == 0 {
+		w := getXDRWriter()
+		w.WriteUint32(0)
+		w.WriteOpaque(nil)
+		return xdrWriterBytes(w)
+	}
 	hasBit := func(bit uint) bool {
 		if bit < 32 {
 			return reqBit[0]&(1<<bit) != 0
@@ -452,14 +463,14 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 	}
 
 	// Resolve metadata for the current path
-	isDir := d.state.IsDir(d.currentPath)
+	isDir := d.state.IsDir(p)
 	var fileSize uint64
 	var lastModUnix int64
 	var sidecarMode uint32
-	fileid := pathToFileID(d.currentPath)
+	fileid := pathToFileID(p)
 
 	if !isDir && d.backend != nil {
-		key := d.currentPath
+		key := p
 		if len(key) > 0 && key[0] == '/' {
 			key = key[1:]
 		}
@@ -487,7 +498,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 	}
 	if isDir {
 		// Use creation timestamp so CHANGE is non-zero and stable within a session.
-		lastModUnix = d.state.DirMtime(d.currentPath) / 1e9
+		lastModUnix = d.state.DirMtime(p) / 1e9
 	}
 
 	fileType := uint32(NF4REG)
@@ -662,7 +673,7 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 	w.WriteUint32(respBit[0])
 	w.WriteUint32(respBit[1])
 	w.WriteOpaque(attrBytes)
-	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+	return xdrWriterBytes(w)
 }
 
 // pathToFileID returns a stable uint64 file ID for a path using FNV-1a.
@@ -678,6 +689,14 @@ func pathToFileID(p string) uint64 {
 	return h
 }
 
+func (d *Dispatcher) invalidatePath(p string) {
+	key := p
+	if len(key) > 0 && key[0] == '/' {
+		key = key[1:]
+	}
+	d.state.InvalidateKey(key)
+}
+
 func (d *Dispatcher) opAccess(data []byte) OpResult {
 	var requested uint32
 	if len(data) >= 4 {
@@ -689,7 +708,23 @@ func (d *Dispatcher) opAccess(data []byte) OpResult {
 	return OpResult{OpCode: OpAccess, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-func (d *Dispatcher) opReadDir(_ []byte) OpResult {
+func (d *Dispatcher) opReadDir(data []byte) OpResult {
+	var reqBit [2]uint32
+	if len(data) >= 20 {
+		r := NewXDRReader(data)
+		r.ReadUint64() // cookie
+		r.ReadFixed(8) // cookieverf
+		r.ReadUint32() // dircount
+		r.ReadUint32() // maxcount
+		bitmapLen, _ := r.ReadUint32()
+		if bitmapLen >= 1 {
+			reqBit[0], _ = r.ReadUint32()
+		}
+		if bitmapLen >= 2 {
+			reqBit[1], _ = r.ReadUint32()
+		}
+	}
+
 	w := getXDRWriter()
 
 	// cookieverf (8 bytes)
@@ -721,9 +756,7 @@ func (d *Dispatcher) opReadDir(_ []byte) OpResult {
 			w.WriteUint32(1) // value_follows = TRUE
 			w.WriteUint64(cookie)
 			w.WriteString(name)
-			// attrs (minimal — empty bitmap + empty vals)
-			w.WriteUint32(0) // bitmap len = 0
-			w.WriteOpaque(nil)
+			w.buf.Write(d.encodeAttrs(path.Join(d.currentPath, name), reqBit))
 		}
 	}
 
@@ -746,7 +779,6 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	if len(key) > 0 && key[0] == '/' {
 		key = key[1:]
 	}
-
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
 	if ra, ok := partialIOBackend(d.backend); ok {
 		var buf []byte
@@ -914,6 +946,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
 		}
 	}
+	d.state.InvalidateKey(key)
 
 	w := getXDRWriter()
 	w.WriteUint32(uint32(len(writeData))) // count
@@ -960,6 +993,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 					return OpResult{OpCode: OpOpen, Status: NFS4ERR_IO}
 				}
 			}
+			d.state.InvalidateKey(key)
 			log.Debug().Str("key", key).Msg("nfs4: OPEN CREATE created file")
 		}
 	}
@@ -1069,6 +1103,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		}
+		d.state.InvalidateKey(key)
 	}
 
 	meta := d.loadFileMeta(key)
@@ -1112,6 +1147,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		if err := d.saveFileMeta(key, meta); err != nil {
 			return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 		}
+		d.state.InvalidateKey(key)
 	}
 
 	return OpResult{OpCode: OpSetAttr, Status: NFS4_OK, Data: encodeSetAttrResult(bm0, bm1)}
@@ -1174,6 +1210,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 		if d.state.IsDir(targetPath) {
 			d.state.RemoveDir(targetPath)
 			d.state.InvalidateFH(targetPath)
+			d.invalidatePath(targetPath)
 			now := uint64(time.Now().UnixNano())
 			w := getXDRWriter()
 			w.WriteUint32(1)
@@ -1187,6 +1224,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_IO}
 	}
 	d.state.InvalidateFH(targetPath)
+	d.state.InvalidateKey(key)
 
 	w := getXDRWriter()
 	// change_info4: atomic + before + after
@@ -1235,15 +1273,28 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 	if err != nil {
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_NOENT}
 	}
-	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, newKey, rc, "application/octet-stream"); err != nil {
+	if partial, ok := partialIOBackend(d.backend); ok {
+		data, err := io.ReadAll(rc)
 		rc.Close()
-		return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
+		if err != nil {
+			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
+		}
+		if _, err := partial.WriteAt(context.Background(), nfs4Bucket, newKey, 0, data); err != nil {
+			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
+		}
+	} else {
+		if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, newKey, rc, "application/octet-stream"); err != nil {
+			rc.Close()
+			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
+		}
+		rc.Close()
 	}
-	rc.Close()
 	d.backend.DeleteObject(context.Background(), nfs4Bucket, oldKey) //nolint:errcheck
 
 	d.state.InvalidateFH(oldPath)
 	d.state.GetOrCreateFH(newPath)
+	d.state.InvalidateKey(oldKey)
+	d.state.InvalidateKey(newKey)
 
 	now := uint64(time.Now().UnixNano())
 	w := getXDRWriter()

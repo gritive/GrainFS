@@ -17,6 +17,9 @@
 package fuse_s3_colima
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,14 +27,20 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
 )
 
 var (
 	colimaHostIP   = envOrDefault("HOST_IP", "192.168.5.2")
 	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
-	accessKey      = envOrDefault("S3_ACCESS_KEY", "fuse-colima-test-ak")
-	secretKey      = envOrDefault("S3_SECRET_KEY", "fuse-colima-test-sk-1234567890")
+	accessKey      = envOrDefault("S3_ACCESS_KEY", "")
+	secretKey      = envOrDefault("S3_SECRET_KEY", "")
 	bucket         = envOrDefault("S3_BUCKET", "fuse-colima-test")
+	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 )
 
 func envOrDefault(key, def string) string {
@@ -48,9 +57,7 @@ func colimaSSH(args ...string) *exec.Cmd {
 func runColimaSSH(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := colimaSSH(args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("colima ssh %v: %v\n%s", args, err, out)
-	}
+	require.NoErrorf(t, err, "colima ssh %v\n%s", args, out)
 	return strings.TrimSpace(string(out))
 }
 
@@ -59,10 +66,18 @@ func runColimaSSH(t *testing.T, args ...string) string {
 func runColimaShell(t *testing.T, script string) string {
 	t.Helper()
 	out, err := colimaSSH("bash", "-c", script).CombinedOutput()
-	if err != nil {
-		t.Fatalf("colima ssh bash %q: %v\n%s", script, err, out)
-	}
+	require.NoErrorf(t, err, "colima ssh bash %q\n%s", script, out)
 	return strings.TrimSpace(string(out))
+}
+
+func s3Client() *s3.Client {
+	return s3.NewFromConfig(aws.Config{
+		Region:      "us-east-1",
+		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+	}, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String("http://127.0.0.1:" + colimaHTTPPort)
+		o.UsePathStyle = true
+	})
 }
 
 // withRcloneMount configures rclone in the Colima VM, mounts the bucket via
@@ -100,9 +115,7 @@ force_path_style = true
 
 	// Make sure the bucket exists (idempotent — rclone mkdir is a no-op if present).
 	mkdirOut, mkdirErr := colimaSSH("rclone", "--config", cfgPath, "mkdir", "grainfs:"+bucket).CombinedOutput()
-	if mkdirErr != nil {
-		t.Fatalf("rclone mkdir failed: %v\n%s", mkdirErr, mkdirOut)
-	}
+	require.NoErrorf(t, mkdirErr, "rclone mkdir\n%s", mkdirOut)
 
 	// Prepare mountpoint and mount via rclone --daemon (forks into background).
 	runColimaSSH(t, "mkdir", "-p", mnt)
@@ -113,9 +126,7 @@ force_path_style = true
 		"--vfs-cache-mode", "writes",
 		"--dir-cache-time", "1s",
 	).CombinedOutput()
-	if mountErr != nil {
-		t.Fatalf("rclone mount failed: %v\n%s", mountErr, mountOut)
-	}
+	require.NoErrorf(t, mountErr, "rclone mount\n%s", mountOut)
 
 	// Wait for the mount to be ready (mountpoint -q polls /proc/mounts).
 	deadline := time.Now().Add(15 * time.Second)
@@ -126,7 +137,7 @@ force_path_style = true
 		time.Sleep(200 * time.Millisecond)
 	}
 	if err := colimaSSH("mountpoint", "-q", mnt).Run(); err != nil {
-		t.Fatalf("rclone mount did not become ready within 15s: %v", err)
+		require.NoError(t, err, "rclone mount should become ready within 15s")
 	}
 
 	t.Cleanup(func() {
@@ -172,6 +183,7 @@ func TestMain(m *testing.M) {
 		"--port", colimaHTTPPort,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
+		"--cluster-key", clusterKey,
 	}
 
 	cmd := exec.Command(binary, args...)
@@ -183,7 +195,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Wait until the S3 endpoint accepts requests. GET / returns ListBuckets (200).
+	// Wait until the S3 endpoint accepts requests. Auth may reject GET / before
+	// bootstrap, but any HTTP response means the server is up.
 	healthURL := fmt.Sprintf("http://127.0.0.1:%s/", colimaHTTPPort)
 	deadline := time.Now().Add(15 * time.Second)
 	ready := false
@@ -191,11 +204,8 @@ func TestMain(m *testing.M) {
 		resp, err := http.Get(healthURL) //nolint:noctx
 		if err == nil {
 			resp.Body.Close()
-			// Auth is required, so a 403 here also means the server is up.
-			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusForbidden {
-				ready = true
-				break
-			}
+			ready = true
+			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -204,6 +214,28 @@ func TestMain(m *testing.M) {
 		cmd.Process.Kill()
 		os.RemoveAll(dataDir)
 		os.Exit(1)
+	}
+	if accessKey == "" || secretKey == "" {
+		adminSock := dataDir + "/admin.sock"
+		out, err := exec.Command(binary, "iam", "--json", "sa", "create", "fuse-colima-test", "--endpoint", adminSock).CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bootstrap fuse colima credentials failed: %v\n%s\n", err, out)
+			cmd.Process.Kill()
+			os.RemoveAll(dataDir)
+			os.Exit(1)
+		}
+		var creds struct {
+			AccessKey string `json:"access_key"`
+			SecretKey string `json:"secret_key"`
+		}
+		if err := json.Unmarshal(out, &creds); err != nil {
+			fmt.Fprintf(os.Stderr, "parse fuse colima credentials failed: %v\n%s\n", err, out)
+			cmd.Process.Kill()
+			os.RemoveAll(dataDir)
+			os.Exit(1)
+		}
+		accessKey = creds.AccessKey
+		secretKey = creds.SecretKey
 	}
 
 	code := m.Run()
@@ -230,9 +262,7 @@ func TestFUSE_S3_Smoke(t *testing.T) {
 		// rclone --vfs-cache-mode writes flushes on close. sha256sum re-reads via FUSE.
 		dst := strings.Fields(runColimaSSH(t, "sha256sum", filePath))[0]
 		src := runColimaSSH(t, "cat", "/tmp/src.sum")
-		if src != dst {
-			t.Fatalf("checksum mismatch: src=%s dst=%s", src, dst)
-		}
+		require.Equal(t, src, dst, "checksum after FUSE write/read")
 
 		runColimaSSH(t, "rm", "-f", filePath, "/tmp/src.sum")
 	})
@@ -247,9 +277,7 @@ func TestFUSE_S3_Directories(t *testing.T) {
 
 		runColimaShell(t, fmt.Sprintf("echo hello-grainfs > %s/greet.txt", nested))
 		got := runColimaSSH(t, "cat", nested+"/greet.txt")
-		if got != "hello-grainfs" {
-			t.Fatalf("nested file content mismatch: got %q", got)
-		}
+		require.Equal(t, "hello-grainfs", got, "nested file content")
 
 		runColimaSSH(t, "rm", nested+"/greet.txt")
 		// rmdir of S3-prefix dirs is best-effort; ignore failures (some tools leave markers).
@@ -273,13 +301,9 @@ func TestFUSE_S3_Rename(t *testing.T) {
 
 		runColimaSSH(t, "mv", src, dst)
 
-		if err := colimaSSH("test", "-f", src).Run(); err == nil {
-			t.Fatalf("source still exists after rename: %s", src)
-		}
+		require.Error(t, colimaSSH("test", "-f", src).Run(), "source should not exist after rename")
 		dstSum := strings.Fields(runColimaSSH(t, "sha256sum", dst))[0]
-		if srcSum != dstSum {
-			t.Fatalf("rename: checksum mismatch (src=%s dst=%s)", srcSum, dstSum)
-		}
+		require.Equal(t, srcSum, dstSum, "rename checksum")
 
 		runColimaSSH(t, "rm", "-f", dst)
 	})
@@ -291,28 +315,12 @@ func TestFUSE_S3_Rename(t *testing.T) {
 // poll briefly.
 func TestFUSE_S3_CrossProtocol(t *testing.T) {
 	withRcloneMount(t, func(mnt string) {
-		// Write directly via rclone's S3 client from inside the VM (host port 9000
-		// reachable via colimaHostIP). Avoids needing aws-cli on the host.
-		cfgPath := "/tmp/rclone-cross.conf"
-		cfg := fmt.Sprintf(`[grainfs]
-type = s3
-provider = Other
-access_key_id = %s
-secret_access_key = %s
-endpoint = http://%s:%s
-region = us-east-1
-force_path_style = true
-`, accessKey, secretKey, colimaHostIP, colimaHTTPPort)
-		runColimaShell(t, fmt.Sprintf("cat > %s <<'EOF'\n%sEOF", cfgPath, cfg))
-		t.Cleanup(func() { colimaSSH("rm", "-f", cfgPath).Run() }) //nolint:errcheck
-
-		// rclone copyto uploads a single object (PutObject under the hood).
-		runColimaShell(t, "echo from-s3-api > /tmp/cross.txt")
-		out, err := colimaSSH("rclone", "--config", cfgPath, "copyto",
-			"/tmp/cross.txt", "grainfs:"+bucket+"/cross-protocol.txt").CombinedOutput()
-		if err != nil {
-			t.Fatalf("S3 PUT (rclone copyto) failed: %v\n%s", err, out)
-		}
+		_, err := s3Client().PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("cross-protocol.txt"),
+			Body:   bytes.NewReader([]byte("from-s3-api\n")),
+		})
+		require.NoError(t, err, "S3 PUT")
 
 		// Wait for FUSE dir cache to refresh.
 		deadline := time.Now().Add(10 * time.Second)
@@ -324,9 +332,7 @@ force_path_style = true
 		}
 
 		got := runColimaSSH(t, "cat", mnt+"/cross-protocol.txt")
-		if got != "from-s3-api" {
-			t.Fatalf("cross-protocol read: got %q, want %q", got, "from-s3-api")
-		}
+		require.Equal(t, "from-s3-api", got, "cross-protocol read")
 
 		runColimaSSH(t, "rm", "-f", mnt+"/cross-protocol.txt", "/tmp/cross.txt")
 	})

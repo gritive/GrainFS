@@ -234,23 +234,34 @@ func TestService_SubmitJob_ThenWorkerProcesses(t *testing.T) {
 	svc := NewService(store, prop, lead, src, dst, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go svc.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		svc.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		require.Eventually(t, func() bool {
+			select {
+			case <-done:
+				return true
+			default:
+				return false
+			}
+		}, 2*time.Second, 10*time.Millisecond)
+	}()
 
 	// Give worker time to start, then submit (trigger).
 	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, svc.SubmitJob(ctx, "test-bucket"))
 
 	// Wait for ProposeJobDone to be called.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		calls := prop.doneCalls()
-		if len(calls) > 0 {
-			assert.Equal(t, "test-bucket", calls[0].bucket)
-			assert.Equal(t, int64(1), calls[0].copied)
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("ProposeJobDone not called within timeout")
+		return len(calls) > 0
+	}, 2*time.Second, 10*time.Millisecond)
+	calls := prop.doneCalls()
+	require.NotEmpty(t, calls)
+	assert.Equal(t, "test-bucket", calls[0].bucket)
+	assert.Equal(t, int64(1), calls[0].copied)
 }
