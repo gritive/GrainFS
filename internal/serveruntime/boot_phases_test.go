@@ -125,7 +125,7 @@ func TestBootValidateTimings_AcceptsValidConfig(t *testing.T) {
 // log store and propagates BadgerManagedMode via state.storeOpts so later
 // shared-log opens (run.go fan-out) reuse the same option set.
 func TestBootOpenRaftLogStore_OpensAndAppendsManagedMode(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", BadgerManagedMode: true, ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
+	state := newBootState(Config{DataDir: t.TempDir(), NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
 	require.NoError(t, bootValidateConfig(state))
 
 	require.NoError(t, bootOpenRaftLogStore(state))
