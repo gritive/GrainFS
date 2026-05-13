@@ -24,6 +24,11 @@ if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
 fi
 
 WORKLOAD="${WORKLOAD:-streaming}"
+FIO_RUNTIME="${FIO_RUNTIME:-15}"
+FIO_STREAM_SIZE="${FIO_STREAM_SIZE:-256m}"
+FIO_STREAM_JOBS="${FIO_STREAM_JOBS:-4}"
+FIO_RAND_SIZE="${FIO_RAND_SIZE:-64m}"
+FIO_RAND_JOBS="${FIO_RAND_JOBS:-4}"
 case "$WORKLOAD" in
   streaming|metadata|append) ;;
   *)
@@ -70,6 +75,7 @@ echo "=== starting grainfs (HTTP=:$HTTP_PORT, NFS4=:$NFS4_PORT, pprof=:$PPROF_PO
   --port "$HTTP_PORT" \
   --nfs4-port "$NFS4_PORT" \
   --nbd-port 0 \
+  --cluster-key "bench-nfs-key" \
   $(bench_encryption_args) \
   --pprof-port "$PPROF_PORT" \
   --log-level warn \
@@ -105,18 +111,18 @@ FIO_LOG="$PROFILE_DIR/fio_output.txt"
 case "$WORKLOAD" in
   streaming)
     echo ""
-    echo "=== WORKLOAD=streaming: 3 fio scenarios + concurrent 30s CPU profile ==="
-    CPU_PROFILE_SECONDS=30
+    echo "=== WORKLOAD=streaming: 3 fio scenarios + concurrent CPU profile ==="
+    CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-30}"
     ;;
   metadata)
     echo ""
     echo "=== WORKLOAD=metadata: 10K small-file create storm + concurrent 60s CPU profile ==="
-    CPU_PROFILE_SECONDS=60
+    CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-60}"
     ;;
   append)
     echo ""
     echo "=== WORKLOAD=append: 1GB single-thread 4K append + concurrent 60s CPU profile ==="
-    CPU_PROFILE_SECONDS=60
+    CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-60}"
     ;;
 esac
 
@@ -136,21 +142,21 @@ set -e
 BENCH_DIR="${MNT}/fio-bench-\$(date +%s)"
 sudo mkdir -p "\$BENCH_DIR"
 
-echo "--- sequential write (4 threads, 128K blocks) ---"
+echo "--- sequential write (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_write --directory="\$BENCH_DIR" --rw=write --bs=128k \
-  --size=256m --numjobs=4 --runtime=15 --time_based --group_reporting \
+  --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime=$FIO_RUNTIME --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
-echo "--- sequential read (4 threads, 128K blocks) ---"
+echo "--- sequential read (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_read --directory="\$BENCH_DIR" --rw=read --bs=128k \
-  --size=256m --numjobs=4 --runtime=15 --time_based --group_reporting \
+  --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime=$FIO_RUNTIME --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
-echo "--- random read/write mix (4K blocks, 75% read) ---"
+echo "--- random read/write mix (${FIO_RAND_JOBS} threads, 4K blocks, 75% read) ---"
 sudo fio --name=rand_mix --directory="\$BENCH_DIR" --rw=randrw --rwmixread=75 \
-  --bs=4k --size=64m --numjobs=4 --runtime=15 --time_based --group_reporting \
+  --bs=4k --size="$FIO_RAND_SIZE" --numjobs="$FIO_RAND_JOBS" --runtime=$FIO_RUNTIME --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 sudo rm -rf "\$BENCH_DIR"

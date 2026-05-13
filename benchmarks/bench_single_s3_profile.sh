@@ -63,6 +63,7 @@ args=(
   --port "$HTTP_PORT"
   --nfs4-port 0
   --nbd-port 0
+  --cluster-key "bench-single-s3-key"
 )
 
 while IFS= read -r arg; do
@@ -88,8 +89,7 @@ if [[ "$PROFILE" == "1" ]]; then
   bench_wait_tcp_port "127.0.0.1" "$PPROF_PORT" "pprof" 150 0.2
 fi
 
-bench_create_bucket_retry "http://127.0.0.1:${HTTP_PORT}" "$BUCKET" 120 0.5
-bench_put_object_retry "http://127.0.0.1:${HTTP_PORT}" "$BUCKET" ".bench-ready" 120 0.5
+bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/data" "bench-single-s3"
 
 echo ""
 echo "=================================================================="
@@ -156,6 +156,8 @@ run_scenario() {
   k6_exit=0
   "$K6" run "$SCRIPT" \
     --env BASE_URL="http://127.0.0.1:${HTTP_PORT}" \
+    --env ACCESS_KEY="$ACCESS_KEY" \
+    --env SECRET_KEY="$SECRET_KEY" \
     --env BUCKET="$BUCKET" \
     --env OBJECT_SIZE_KB="$SIZE_KB" \
     --env OBJECT_COUNT="$OBJECT_COUNT" \

@@ -5,8 +5,13 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 import { randomString } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';
+import crypto from 'k6/crypto';
 
 const BASE = __ENV.BASE_URL || 'http://127.0.0.1:9000';
+const ACCESS_KEY = __ENV.ACCESS_KEY || '';
+const SECRET_KEY = __ENV.SECRET_KEY || '';
+const REGION = 'us-east-1';
+const SERVICE = 's3';
 const MAX_VUS = parseInt(__ENV.MAX_VUS || '10');
 const BENCH_DURATION = __ENV.DURATION || '30s';
 const RAMP_UP = __ENV.RAMP_UP || '10s';
@@ -51,8 +56,74 @@ export const options = {
   },
 };
 
+function hexToBytes(hex) {
+  const buf = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    buf[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return buf.buffer;
+}
+
+function derivedSigningKey(secretKey, dateStamp) {
+  const kDate = hexToBytes(crypto.hmac('sha256', 'AWS4' + secretKey, dateStamp, 'hex'));
+  const kRegion = hexToBytes(crypto.hmac('sha256', kDate, REGION, 'hex'));
+  const kService = hexToBytes(crypto.hmac('sha256', kRegion, SERVICE, 'hex'));
+  return hexToBytes(crypto.hmac('sha256', kService, 'aws4_request', 'hex'));
+}
+
+function parseURL(url) {
+  let rest = url.replace(/^https?:\/\//, '');
+  const slashIdx = rest.indexOf('/');
+  let host;
+  let pathAndQuery;
+  if (slashIdx === -1) {
+    host = rest;
+    pathAndQuery = '/';
+  } else {
+    host = rest.slice(0, slashIdx);
+    pathAndQuery = rest.slice(slashIdx) || '/';
+  }
+  const qIdx = pathAndQuery.indexOf('?');
+  const path = qIdx === -1 ? pathAndQuery : pathAndQuery.slice(0, qIdx);
+  const query = qIdx === -1 ? '' : pathAndQuery.slice(qIdx + 1);
+  return { host, path, query };
+}
+
+function signS3(method, url, body) {
+  if (!ACCESS_KEY || !SECRET_KEY) {
+    return {};
+  }
+
+  const { host, path, query } = parseURL(url);
+  const now = new Date();
+  const amzdate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+  const dateStamp = amzdate.slice(0, 8);
+  const payload = body || '';
+  const payloadHash = crypto.sha256(payload, 'hex');
+  const hdrMap = {
+    host: host,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzdate,
+  };
+  const sortedKeys = Object.keys(hdrMap).sort();
+  const canonicalHeaders = sortedKeys.map((k) => k + ':' + hdrMap[k]).join('\n') + '\n';
+  const signedHeaders = sortedKeys.join(';');
+  const canonicalReq = [method, path, query || '', canonicalHeaders, signedHeaders, payloadHash].join('\n');
+  const credScope = dateStamp + '/' + REGION + '/' + SERVICE + '/aws4_request';
+  const stringToSign = ['AWS4-HMAC-SHA256', amzdate, credScope, crypto.sha256(canonicalReq, 'hex')].join('\n');
+  const sigKey = derivedSigningKey(SECRET_KEY, dateStamp);
+  const signature = crypto.hmac('sha256', sigKey, stringToSign, 'hex');
+  return {
+    Authorization: `AWS4-HMAC-SHA256 Credential=${ACCESS_KEY}/${credScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzdate,
+  };
+}
+
 export function setup() {
-  const bucketRes = http.put(`${BASE}/grainfs-tables`, null, {
+  const bucketURL = `${BASE}/grainfs-tables`;
+  const bucketRes = http.put(bucketURL, null, {
+    headers: signS3('PUT', bucketURL, ''),
     responseCallback: http.expectedStatuses(200, 409),
   });
   check(bucketRes, { 'warehouse bucket ready': (r) => r.status === 200 || r.status === 409 });

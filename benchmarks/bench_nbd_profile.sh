@@ -26,8 +26,11 @@ NBD_PORT=$(bench_free_port)
 PPROF_PORT=$(bench_free_port)
 HOST_IP="192.168.5.2"      # macOS host as seen from Colima
 NBD_DEV="/dev/nbd0"
-VOL_SIZE=$((128 * 1024 * 1024))  # 128MB volume
-FIO_SIZE="64m"                   # fio workload size (must fit in VOL_SIZE)
+VOL_SIZE="${VOL_SIZE:-128Mi}"    # volume size accepted by `grainfs volume create`
+FIO_SIZE="${FIO_SIZE:-64m}"      # fio workload size (must fit in VOL_SIZE)
+FIO_RUNTIME="${FIO_RUNTIME:-15}"
+FIO_CASES="${FIO_CASES:-seq-read-4K seq-write-4K seq-read-64K seq-write-64K rand-read-4K rand-write-4K}"
+CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-60}"
 DATA_DIR=$(mktemp -d)
 SERVER_PID=""
 
@@ -74,9 +77,8 @@ SERVE_ARGS=(
   --data   "$DATA_DIR"
   --port   "$HTTP_PORT"
   --nbd-port "$NBD_PORT"
-  --nbd-volume-size "$VOL_SIZE"
   --nfs4-port 0
-  --dedup=false
+  --cluster-key "bench-nbd-key"
   $(bench_encryption_args)
 )
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
@@ -91,6 +93,8 @@ echo "GrainFS PID=$SERVER_PID"
 if ! bench_wait_http_ready "http://127.0.0.1:${HTTP_PORT}/" "server" 30 1; then
   exit 1
 fi
+echo "--- Creating NBD export volume ---"
+"$BINARY" volume create default --size "$VOL_SIZE" --endpoint "$DATA_DIR/admin.sock" >/dev/null
 bench_wait_tcp_port "127.0.0.1" "$NBD_PORT" "NBD listener" 50 0.2
 
 # ─── 2. Connect nbd-client in Colima ────────────────────────────────────────
@@ -104,10 +108,10 @@ echo "OK: nbd-client connected ($NBD_DEV)"
 # Start CPU profile *after* NBD handshake so fio workload is captured.
 CPU_PROFILE_PID=""
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
-  curl -sf "http://127.0.0.1:${PPROF_PORT}/debug/pprof/profile?seconds=60" \
+  curl -sf "http://127.0.0.1:${PPROF_PORT}/debug/pprof/profile?seconds=$CPU_PROFILE_SECONDS" \
     -o /tmp/grainfs-nbd-cpu.out &
   CPU_PROFILE_PID=$!
-  echo "CPU profile started (PID=$CPU_PROFILE_PID, 60s window)"
+  echo "CPU profile started (PID=$CPU_PROFILE_PID, ${CPU_PROFILE_SECONDS}s window)"
 fi
 
 # ─── 3. fio workloads ────────────────────────────────────────────────────────
@@ -119,18 +123,26 @@ run_fio() {
     --name="$label" \
     --filename="$NBD_DEV" \
     --size="$FIO_SIZE" \
-    --runtime=15 \
+    --runtime="$FIO_RUNTIME" \
     --time_based \
     --output-format=normal \
     "$@" 2>&1 | grep -E "READ:|WRITE:|iops|bw=|lat"
 }
 
-run_fio "seq-read-4K"   --ioengine=sync --rw=read   --bs=4k
-run_fio "seq-write-4K"  --ioengine=sync --rw=write  --bs=4k
-run_fio "seq-read-64K"  --ioengine=sync --rw=read   --bs=64k
-run_fio "seq-write-64K" --ioengine=sync --rw=write  --bs=64k
-run_fio "rand-read-4K"  --ioengine=sync --rw=randread  --bs=4k
-run_fio "rand-write-4K" --ioengine=sync --rw=randwrite --bs=4k
+for fio_case in $FIO_CASES; do
+  case "$fio_case" in
+    seq-read-4K) run_fio "$fio_case" --ioengine=sync --rw=read --bs=4k ;;
+    seq-write-4K) run_fio "$fio_case" --ioengine=sync --rw=write --bs=4k ;;
+    seq-read-64K) run_fio "$fio_case" --ioengine=sync --rw=read --bs=64k ;;
+    seq-write-64K) run_fio "$fio_case" --ioengine=sync --rw=write --bs=64k ;;
+    rand-read-4K) run_fio "$fio_case" --ioengine=sync --rw=randread --bs=4k ;;
+    rand-write-4K) run_fio "$fio_case" --ioengine=sync --rw=randwrite --bs=4k ;;
+    *)
+      echo "[error] unknown FIO_CASES entry: $fio_case" >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo ""
 echo "=== Benchmark complete ==="
