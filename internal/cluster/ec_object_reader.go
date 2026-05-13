@@ -195,12 +195,26 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 	}
 
 	type shardResult struct {
-		idx  int
-		data []byte
-		err  error
+		idx      int
+		data     []byte
+		err      error
+		peer     string // non-empty for remote reads; empty for local/selfID reads
+		peerOK   bool   // true if remote read succeeded (only valid when peer != "")
+		canceled bool   // true if k-of-n early-exit caused the cancellation error
+	}
+
+	markPeerHealth := func(res shardResult) {
+		if res.peer != "" && r.peerHealth != nil && !res.canceled {
+			if res.peerOK {
+				r.peerHealth.MarkHealthy(res.peer)
+			} else {
+				r.peerHealth.MarkUnhealthy(res.peer)
+			}
+		}
 	}
 
 	applyShardResult := func(res shardResult) bool {
+		markPeerHealth(res)
 		if res.err != nil || res.data == nil {
 			return false
 		}
@@ -236,25 +250,24 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 			go func() {
 				var data []byte
 				var err error
+				var peer string
+				var peerOK, canceled bool
 				if node == selfID {
 					data, err = r.shards.ReadLocalShard(bucket, shardKey, i)
 				} else {
+					peer = node
 					shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
 					defer shardCancel()
 					data, err = r.shards.ReadShard(shardCtx, node, bucket, shardKey, i)
-					if r.peerHealth != nil {
-						if err != nil {
-							if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
-								// k-of-n early exit cancelled this goroutine — not a peer failure.
-							} else {
-								r.peerHealth.MarkUnhealthy(node)
-							}
-						} else {
-							r.peerHealth.MarkHealthy(node)
+					if err != nil {
+						if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
+							canceled = true
 						}
+					} else {
+						peerOK = true
 					}
 				}
-				resultCh <- shardResult{idx: i, data: data, err: err}
+				resultCh <- shardResult{idx: i, data: data, err: err, peer: peer, peerOK: peerOK, canceled: canceled}
 			}()
 		}
 		if dispatched == 0 {
@@ -267,7 +280,8 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 				cancel()
 				for k := j + 1; k < dispatched; k++ {
 					select {
-					case <-resultCh:
+					case drained := <-resultCh:
+						markPeerHealth(drained)
 					case <-ctx.Done():
 						return
 					}

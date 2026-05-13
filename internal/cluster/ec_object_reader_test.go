@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -94,16 +95,21 @@ func (f *fakeECObjectShardFetcher) ReadShardRangeStream(ctx context.Context, pee
 
 // fakeECObjectPeerHealth records mark calls.
 type fakeECObjectPeerHealth struct {
+	mu        sync.Mutex
 	healthy   []string
 	unhealthy []string
 }
 
 func (f *fakeECObjectPeerHealth) MarkHealthy(peer string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.healthy = append(f.healthy, peer)
 	return true
 }
 
 func (f *fakeECObjectPeerHealth) MarkUnhealthy(peer string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.unhealthy = append(f.unhealthy, peer)
 	return true
 }
@@ -212,6 +218,31 @@ func TestECObjectReader_ReadObject_MarksUnhealthyPeerOnFetchError(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 	require.Contains(t, health.unhealthy, "node-b")
+}
+
+func TestECObjectReader_ReadObject_MarksHealthyPeerOnSuccess(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	data := []byte("peer health happy path")
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	health := &fakeECObjectPeerHealth{}
+	r := ecObjectReader{
+		selfID:     "node-a",
+		shards:     fetcher,
+		peerHealth: health,
+		ecConfig:   cfg,
+	}
+	// shard 0 = node-b (remote, succeeds); shards 1 and 2 = node-a (local)
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	require.Contains(t, health.healthy, "node-b")
+	require.Empty(t, health.unhealthy)
 }
 
 func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
