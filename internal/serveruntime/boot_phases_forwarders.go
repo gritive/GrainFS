@@ -49,10 +49,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	// Seed data groups from cluster size only. Operators no longer choose this:
 	// group count is placement headroom, not a durability policy.
 	clusterSize := 1 + len(state.peers)
-	seedGroups := clusterSize * 4
-	if seedGroups < 8 {
-		seedGroups = 8
-	}
+	seedGroups := seedGroupCountForClusterSize(clusterSize)
 	state.seedGroups = seedGroups
 
 	// v0.0.7.1 PR-D: Live multi-raft routing — ClusterCoordinator + ForwardSender/Receiver.
@@ -212,6 +209,24 @@ func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembe
 }
 
 func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeID string) error {
+	nodes := state.metaRaft.FSM().Nodes()
+	missingGroups := MissingSeedShardGroups(
+		state.nodeID,
+		state.raftAddr,
+		nodes,
+		state.metaRaft.FSM().ShardGroups(),
+		cluster.AutoECConfigForClusterSize(len(nodes)).NumShards(),
+	)
+	for _, group := range missingGroups {
+		if err := state.metaRaft.ProposeShardGroup(ctx, group); err != nil {
+			return fmt.Errorf("expand shard groups for joined node %q: propose seed group %s: %w", nodeID, group.ID, err)
+		}
+	}
+	if len(missingGroups) > 0 {
+		state.seedGroups = seedGroupCountForClusterSize(len(nodes))
+		log.Info().Str("node_id", nodeID).Int("groups", len(missingGroups)).Int("seed_groups", state.seedGroups).Msg("seeded shard groups for joined node count")
+	}
+
 	groups := state.metaRaft.FSM().ShardGroups()
 	targets := make([]cluster.ShardGroupEntry, 0, len(groups))
 	for _, group := range groups {

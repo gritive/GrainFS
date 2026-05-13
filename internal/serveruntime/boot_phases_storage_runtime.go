@@ -30,10 +30,7 @@ import (
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
 	clusterSize := 1 + len(state.peers)
-	seedGroups := clusterSize * 4
-	if seedGroups < 8 {
-		seedGroups = 8
-	}
+	seedGroups := seedGroupCountForClusterSize(clusterSize)
 	state.effectiveEC = cluster.AutoECConfigForClusterSize(clusterSize)
 	if !state.effectiveEC.IsActive(clusterSize) {
 		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)

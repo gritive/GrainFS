@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -68,5 +69,36 @@ func TestSeedShardGroupVoters_NonZeroGroupUsesEffectiveECWidth(t *testing.T) {
 	got2 := SeedShardGroupVoters("node-a", "10.0.0.1:7000", peers, nodes, "group-7", 4)
 	if !reflect.DeepEqual(got, got2) {
 		t.Fatalf("PickVoters not deterministic: %v vs %v", got, got2)
+	}
+}
+
+func TestMissingSeedShardGroups_GrowsToJoinedNodeCount(t *testing.T) {
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "10.0.0.1:7000"},
+		{ID: "node-b", Address: "10.0.0.2:7000"},
+		{ID: "node-c", Address: "10.0.0.3:7000"},
+	}
+	existing := make([]cluster.ShardGroupEntry, 0, 8)
+	for i := 0; i < 8; i++ {
+		existing = append(existing, cluster.ShardGroupEntry{ID: fmt.Sprintf("group-%d", i), PeerIDs: []string{"node-a"}})
+	}
+
+	got := MissingSeedShardGroups("node-a", "10.0.0.1:7000", nodes, existing, 2)
+	wantIDs := []string{"group-8", "group-9", "group-10", "group-11"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("got %d missing groups (%v), want %d", len(got), got, len(wantIDs))
+	}
+	for i, group := range got {
+		if group.ID != wantIDs[i] {
+			t.Fatalf("group %d: got ID %q want %q", i, group.ID, wantIDs[i])
+		}
+		if len(group.PeerIDs) != 2 {
+			t.Fatalf("group %s: got voters %v, want 2 voters", group.ID, group.PeerIDs)
+		}
+		for _, voter := range group.PeerIDs {
+			if voter != "node-a" && voter != "node-b" && voter != "node-c" {
+				t.Fatalf("group %s: unexpected voter %q in %v", group.ID, voter, group.PeerIDs)
+			}
+		}
 	}
 }

@@ -10,6 +10,17 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 )
 
+func seedGroupCountForClusterSize(clusterSize int) int {
+	if clusterSize < 1 {
+		clusterSize = 1
+	}
+	seedGroups := clusterSize * 4
+	if seedGroups < 8 {
+		seedGroups = 8
+	}
+	return seedGroups
+}
+
 // SeedInitialShardGroups proposes group-0..N-1 ShardGroup entries via meta-raft.
 // Solo (peers=0) and bootstrap-leader paths use this to populate the FSM with
 // initial shard placement so per-group raft instantiation can begin.
@@ -76,6 +87,53 @@ func SeedShardGroupVoters(
 		return clusterPeers
 	}
 	return cluster.PickVoters(groupID, clusterPeers, replicationFactor)
+}
+
+func MissingSeedShardGroups(
+	selfNodeID string,
+	selfAddr string,
+	nodes []cluster.MetaNodeEntry,
+	existing []cluster.ShardGroupEntry,
+	replicationFactor int,
+) []cluster.ShardGroupEntry {
+	clusterSize := len(nodes)
+	if clusterSize < 1 {
+		clusterSize = 1
+	}
+	want := seedGroupCountForClusterSize(clusterSize)
+	seen := make(map[string]bool, len(existing))
+	for _, group := range existing {
+		seen[group.ID] = true
+	}
+	peers := seedShardGroupPeerAddrsFromNodes(selfNodeID, selfAddr, nodes)
+	out := make([]cluster.ShardGroupEntry, 0)
+	for i := 0; i < want; i++ {
+		groupID := fmt.Sprintf("group-%d", i)
+		if seen[groupID] {
+			continue
+		}
+		voters := SeedShardGroupVoters(selfNodeID, selfAddr, peers, nodes, groupID, replicationFactor)
+		out = append(out, cluster.ShardGroupEntry{ID: groupID, PeerIDs: voters})
+	}
+	return out
+}
+
+func seedShardGroupPeerAddrsFromNodes(selfNodeID string, selfAddr string, nodes []cluster.MetaNodeEntry) []string {
+	out := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node.ID == "" && node.Address == "" {
+			continue
+		}
+		if node.ID == selfNodeID || node.Address == selfAddr {
+			continue
+		}
+		if node.Address != "" {
+			out = append(out, node.Address)
+			continue
+		}
+		out = append(out, node.ID)
+	}
+	return out
 }
 
 // seedShardGroupPeerIDs converts a list of dialable peer addresses into
