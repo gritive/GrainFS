@@ -478,9 +478,18 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 	var lastModUnix int64
 	var sidecarMode uint32
 	fileid := pathToFileID(p)
+	bucket, key := extractBucketAndKey(p)
+	isPseudoRoot := p == "/"
+	fsidMajor, fsidMinor := uint64(1), uint64(0)
+	if !isPseudoRoot && d.server != nil && bucket != "" {
+		fsidMajor, fsidMinor = d.server.exportFSID(bucket)
+	}
+	fhExpireType := uint32(0x00000001) // FH4_VOLATILE_ANY
 
-	if !isDir && d.backend != nil {
-		bucket, key := extractBucketAndKey(p)
+	if isPseudoRoot {
+		isDir = true
+		fileSize = 4096
+	} else if !isDir && d.backend != nil {
 		obj, err := d.backend.HeadObject(context.Background(), bucket, key)
 		if err == nil {
 			isDir = false
@@ -547,10 +556,10 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 		setBit(1)
 		attrW.WriteUint32(fileType)
 	}
-	// Bit 2: FH_EXPIRE_TYPE — FH4_PERSISTENT = 0
+	// Bit 2: FH_EXPIRE_TYPE
 	if hasBit(2) {
 		setBit(2)
-		attrW.WriteUint32(0)
+		attrW.WriteUint32(fhExpireType)
 	}
 	// Bit 3: CHANGE — uint64
 	if hasBit(3) {
@@ -580,8 +589,8 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 	// Bit 8: FSID — {major:uint64, minor:uint64}
 	if hasBit(8) {
 		setBit(8)
-		attrW.WriteUint64(0)
-		attrW.WriteUint64(1)
+		attrW.WriteUint64(fsidMajor)
+		attrW.WriteUint64(fsidMinor)
 	}
 	// Bit 9: UNIQUE_HANDLES — bool
 	if hasBit(9) {
@@ -669,7 +678,11 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 	// Bit 55 (word1 bit 23): MOUNTED_ON_FILEID — uint64
 	if hasBit(55) {
 		setBit(55)
-		attrW.WriteUint64(fileid)
+		if !isPseudoRoot && bucket != "" && key == "" {
+			attrW.WriteUint64(pathToFileID("/"))
+		} else {
+			attrW.WriteUint64(fileid)
+		}
 	}
 
 	attrBytes := xdrWriterBytes(attrW)
