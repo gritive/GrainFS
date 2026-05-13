@@ -98,7 +98,7 @@ echo "OK: Original pattern (0xAA x 4096) written"
 # Create snapshot via HTTP
 echo ""
 echo "--- Creating snapshot ---"
-SNAP_RESP=$(grainfs volume snapshot create default --data "$DATA_DIR" --json)
+SNAP_RESP=$(grainfs volume snapshot create default --endpoint "$DATA_DIR/admin.sock" --format json)
 SNAP_ID=$(echo "$SNAP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 echo "OK: Snapshot created: $SNAP_ID"
 
@@ -122,7 +122,7 @@ print('OK: Modified pattern (0xBB) verified before rollback')
 # Rollback via HTTP
 echo ""
 echo "--- Rolling back to snapshot ---"
-grainfs volume rollback default "$SNAP_ID" --data "$DATA_DIR" >/dev/null
+grainfs volume rollback default "$SNAP_ID" --endpoint "$DATA_DIR/admin.sock" >/dev/null
 echo "OK: Rollback request sent"
 
 # Disconnect and reconnect nbd-client to flush kernel page cache

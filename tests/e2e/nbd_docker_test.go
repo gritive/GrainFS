@@ -70,6 +70,13 @@ func TestNBDDockerScriptsUseCurrentServeFlags(t *testing.T) {
 			strings.Contains(string(body), `volume create default --size "$NBD_SIZE" --data`) {
 			t.Fatalf("%s still passes removed volume CLI flag --data; use --endpoint \"$DATA_DIR/admin.sock\"", script)
 		}
+		if strings.Contains(string(body), `volume snapshot create default --data`) ||
+			strings.Contains(string(body), `volume rollback default "$SNAP_ID" --data`) {
+			t.Fatalf("%s still passes removed snapshot CLI flag --data; use --endpoint \"$DATA_DIR/admin.sock\"", script)
+		}
+		if strings.Contains(string(body), `volume snapshot create default --endpoint "$DATA_DIR/admin.sock" --json`) {
+			t.Fatalf("%s still passes removed volume CLI flag --json; use --format json", script)
+		}
 		if !strings.Contains(string(body), "--cluster-key") {
 			t.Fatalf("%s does not pass required serve flag --cluster-key", script)
 		}
