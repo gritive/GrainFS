@@ -464,14 +464,13 @@ func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
 
 	// Start seed node, then let followers join sequentially via .join-pending.
 	procs[0] = startNode(0)
-	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
+	require.NoError(t, waitForPortsParallelErrWithProcesses(httpPorts[:1], procs[:1], 60*time.Second))
 	time.Sleep(2 * time.Second)
 	for i := 1; i < numNodes; i++ {
 		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
 		procs[i] = startNode(i)
-		time.Sleep(150 * time.Millisecond)
+		require.NoError(t, waitForPortsParallelErrWithProcesses(httpPorts[i:i+1], procs[i:i+1], 90*time.Second))
 	}
-	waitForPortsParallel(t, httpPorts, 60*time.Second)
 	time.Sleep(4 * time.Second)
 	for i, port := range httpPorts {
 		t.Logf("node %d up (http :%d)", i, port)
