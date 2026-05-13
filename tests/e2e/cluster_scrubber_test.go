@@ -9,12 +9,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -38,101 +35,25 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 		t.Skip("skipping multi-node e2e in -short mode")
 	}
 
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
-	}
-
 	const (
-		clusterKey = "E2E-CLUSTER-SCRUBBER-KEY"
 		bucketName = "sc-bucket"
 		keyName    = "sc-obj"
 		numNodes   = 3
 	)
-	var accessKey, secretKey string
-
-	httpPorts := make([]int, numNodes)
-	raftPorts := make([]int, numNodes)
-	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
-	ports := uniqueFreePorts(numNodes * 4)
-	for i := range numNodes {
-		httpPorts[i] = ports[i]
-		raftPorts[i] = ports[numNodes+i]
-		nfs4Ports[i] = ports[2*numNodes+i]
-		nbdPorts[i] = ports[3*numNodes+i]
-	}
-
-	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
-	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-	peersFor := func(i int) string {
-		var out []string
-		for j := range raftPorts {
-			if j == i {
-				continue
-			}
-			out = append(out, raftAddr(j))
-		}
-		return strings.Join(out, ",")
-	}
-
-	dataDirs := make([]string, numNodes)
-	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-scrub-%d-*", i))
-		require.NoError(t, err)
-		dataDirs[i] = d
-		t.Cleanup(func() { _ = os.RemoveAll(d) })
-	}
-	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	// Scrub interval kept tight so the test doesn't wait minutes for a
 	// cycle. ShardPlacementMonitor piggybacks on this interval.
-	const scrubInterval = "2s"
-
-	procs := make([]*exec.Cmd, numNodes)
-	for i := 0; i < numNodes; i++ {
-		cmd := exec.Command(binary, "serve",
-			"--data", dataDirs[i],
-			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", raftAddr(i),
-			"--raft-addr", raftAddr(i),
-			"--peers", peersFor(i),
-			"--cluster-key", clusterKey,
-			"--encryption-key-file", encKeyFile,
-			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
-			"--scrub-interval", scrubInterval,
-			"--lifecycle-interval", "0",
-		)
-		if testing.Verbose() {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-		}
-		require.NoError(t, cmd.Start(), "start node %d", i)
-		procs[i] = cmd
-	}
-	t.Cleanup(func() {
-		for _, p := range procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Kill()
-				_, _ = p.Process.Wait()
-			}
-		}
+	cluster := startE2ECluster(t, e2eClusterOptions{
+		Nodes:         numNodes,
+		Mode:          ClusterModeDynamicJoin,
+		LogPrefix:     "grainfs-scrubber",
+		ScrubInterval: "2s",
 	})
-
-	for i := range procs {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
-	time.Sleep(4 * time.Second)
-
-	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+	cluster.GrantAdminOnBuckets(bucketName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-	endpoints := make([]string, numNodes)
-	for i := range endpoints {
-		endpoints[i] = httpURL(i)
-	}
+	endpoints := append([]string(nil), cluster.httpURLs...)
 
 	leaderIdx, err := waitForWritableEndpoint(
 		ctx,
@@ -141,12 +62,12 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 		5*time.Second,
 		1*time.Second,
 		func(attemptCtx context.Context, endpoint string) error {
-			c := ecS3Client(endpoint, accessKey, secretKey)
+			c := ecS3Client(endpoint, cluster.accessKey, cluster.secretKey)
 			return tryCreateBucket(attemptCtx, c, bucketName)
 		},
 	)
 	require.NoError(t, err, "no leader ready")
-	client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
+	client := cluster.S3Client(leaderIdx)
 
 	// PUT a random object large enough to exercise all 5 shards.
 	payload := make([]byte, 256*1024)
@@ -167,7 +88,7 @@ func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
 	var victimNode int
 	var victimShard string
 	for i := 0; i < numNodes; i++ {
-		root := filepath.Join(dataDirs[i], "shards", bucketName, keyName)
+		root := filepath.Join(cluster.dataDirs[i], "shards", bucketName, keyName)
 		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, _ error) error {
 			if d == nil || d.IsDir() {
 				return nil
