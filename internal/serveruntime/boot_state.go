@@ -56,12 +56,10 @@ type bootState struct {
 	roleRegistry     badgerrole.Registry
 	startupDecisions []badgerrole.Decision
 
-	// Open DBs and log stores. Each phase that opens one of these also
+	// Open DBs. Each phase that opens one of these also
 	// registers the matching teardown via AddCleanup.
-	db              *badger.DB           // bootOpenMetaDB
-	logStore        *raft.BadgerLogStore // bootOpenRaftLogStore
-	sharedRaftLogDB *badger.DB           // bootOpenSharedRaftLogDB (optional)
-	sharedFSMDB     *badger.DB           // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
+	db          *badger.DB // bootOpenMetaDB
+	sharedFSMDB *badger.DB // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
 
 	// Transport (populated by transport phases — bootQUICTransport,
 	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
@@ -93,12 +91,10 @@ type bootState struct {
 	// raft instantiation, and EC config. effectiveEC is captured here so
 	// downstream phases (PR 6: balancer, healreceipt) can re-read the
 	// resolved EC profile without re-deriving from cluster size.
-	// node is the data-plane Raft node. cluster.RaftNode interface (not
-	// *raft.Node) so M5 PR 26 can swap in the v2 adapter behind
-	// GRAINFS_RAFT_V2=serveruntime. v1 (*raft.Node) and v2 (*raftV2Node)
-	// both satisfy.
+	// node is the data-plane Raft node exposed through the cluster.RaftNode
+	// interface.
 	node             cluster.RaftNode
-	rpcTransport     *raft.QUICRPCTransport
+	rpcTransport     *cluster.RaftQUICRPCTransport
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend

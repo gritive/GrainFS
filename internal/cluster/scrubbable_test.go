@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
@@ -222,6 +223,21 @@ func TestShardPaths_MatchesShardServiceLayout(t *testing.T) {
 	assert.Equal(t, "payload", string(decoded))
 }
 
+func TestShardPaths_UsesSharedShardServiceRoot(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	shardRoot := t.TempDir()
+	svc := NewShardService(shardRoot, nil)
+	b.SetShardService(svc, []string{"test-node"})
+	require.NoError(t, svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload")))
+
+	paths := b.ShardPaths("bkt", "key", "01VID", 1)
+	data, err := os.ReadFile(paths[0])
+	require.NoError(t, err, "group backends must read shards from the shared ShardService root")
+	decoded, err := eccodec.DecodeShard(data)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(decoded))
+}
+
 func TestWriteShard_ReadShard_RoundTrip(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	dir := t.TempDir()
@@ -247,6 +263,21 @@ func TestReadShardIntegrity_EncodedVerified(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, scrubber.ShardIntegrityVerified, got.Status)
 	assert.Equal(t, payload, got.Payload)
+}
+
+func TestReadShardIntegrity_EncryptedShardServiceShardVerified(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{7}, 32))
+	require.NoError(t, err)
+	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc))
+	b.SetShardService(svc, []string{"test-node"})
+	require.NoError(t, svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload")))
+
+	path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
+	got, err := b.ReadShardIntegrity("bkt", "key", path)
+	require.NoError(t, err)
+	assert.Equal(t, scrubber.ShardIntegrityVerified, got.Status)
+	assert.Equal(t, "payload", string(got.Payload))
 }
 
 func TestReadShardIntegrity_LegacyRawUnverifiedButReadShardCompatible(t *testing.T) {

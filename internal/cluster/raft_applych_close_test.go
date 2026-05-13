@@ -79,6 +79,7 @@ func (s *applyChCloseStubNode) CreateSnapshot(uint64, []byte) error { panic("unu
 func (s *applyChCloseStubNode) SnapshotStatus() (raft.SnapshotStatus, error) {
 	return raft.SnapshotStatus{}, nil
 }
+func (s *applyChCloseStubNode) LatestSnapshot() (*raft.Snapshot, error) { return nil, nil }
 
 // TestRunApplyLoop_ExitsOnApplyChClose asserts that DistributedBackend.RunApplyLoop
 // returns promptly when the underlying RaftNode's ApplyCh is closed, instead of

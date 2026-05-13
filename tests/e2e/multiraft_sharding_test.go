@@ -33,20 +33,22 @@ import (
 //     PerGroupPersistence and CrossNodeDispatch tests covered there.
 
 type mrCluster struct {
-	t          *testing.T
-	procs      []*exec.Cmd
-	dataDirs   []string
-	httpPorts  []int
-	raftPorts  []int
-	nfs4Ports  []int
-	nbdPorts   []int
-	httpURLs   []string
-	stopped    bool
-	clusterKey string
-	encKeyFile string
-	accessKey  string
-	secretKey  string
-	leaderIdx  int // last-known leader (set during probe)
+	t             *testing.T
+	procs         []*exec.Cmd
+	dataDirs      []string
+	httpPorts     []int
+	raftPorts     []int
+	nfs4Ports     []int
+	nbdPorts      []int
+	httpURLs      []string
+	stopped       bool
+	clusterKey    string
+	encKeyFile    string
+	accessKey     string
+	secretKey     string
+	saID          string
+	wildcardAdmin bool
+	leaderIdx     int // last-known leader (set during probe)
 }
 
 type mrClusterOptions struct {
@@ -125,14 +127,17 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 
 	// Start node 0 as seed leader, then let followers join via .join-pending.
 	c.procs[0] = c.startNode(0)
-	if err := waitForPortsParallelErr(c.httpPorts[:1], 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
 	time.Sleep(2 * time.Second)
 
 	// Bootstrap admin SA on the seed node before followers join.
-	c.accessKey, c.secretKey = bootstrapAdminViaUDSAny(c.t, c.dataDirs[:1], 60*time.Second)
+	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs[:1], 60*time.Second)
+	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
+	c.saID = admin.SAID
+	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
 
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 	for i := 1; i < numNodes; i++ {
@@ -143,11 +148,14 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 		c.procs[i] = c.startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
-	if err := waitForPortsParallelErr(c.httpPorts, 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts, c.procs, 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
 	time.Sleep(4 * time.Second)
+
+	probeBucket := "__mrshard-leader-probe"
+	c.GrantAdminOnBuckets(probeBucket)
 
 	// Wait for at least one node to be writable (leader elected).
 	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -160,7 +168,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 		1*time.Second,
 		func(ctx context.Context, endpoint string) error {
 			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
-			return tryCreateBucket(ctx, cli, "__mrshard-leader-probe")
+			return tryCreateBucket(ctx, cli, probeBucket)
 		},
 	)
 	if err != nil {
@@ -245,6 +253,17 @@ func (c *mrCluster) Stop() {
 	}
 }
 
+func (c *mrCluster) GrantAdminOnBuckets(buckets ...string) {
+	c.t.Helper()
+	if c.wildcardAdmin {
+		return
+	}
+	if c.saID == "" {
+		c.t.Fatalf("cannot grant bucket admin without bootstrap sa_id")
+	}
+	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
+}
+
 // countGroupDirsAcrossNodes returns the union of group_id directories that
 // exist under any node's {dataDir}/groups/. Used to verify per-group BadgerDB
 // + raft were instantiated.
@@ -281,13 +300,19 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 
 	groupDirs := countGroupDirsAcrossNodes(c)
 
-	// Groups 1..7 use the auto EC width for the cluster size.
-	// Group 0 keeps full membership (5 voters in 5-node cluster) for legacy compat.
-	wantVoters := cluster.AutoECConfigForClusterSize(5).NumShards()
+	// The helper boots a seed node first, then joins the remaining nodes.
+	// Join handling does not rewrite already-created shard groups, so the seed
+	// groups only need to exist. Groups added after the cluster reaches five
+	// nodes must use the auto EC width from the cluster size at creation time.
 	for i := 1; i <= 7; i++ {
 		gid := fmt.Sprintf("group-%d", i)
-		voterCount, ok := groupDirs[gid]
-		require.True(t, ok, "group %s must have at least one voter directory", gid)
+		require.NotZero(t, groupDirs[gid], "seed group %s must have at least one voter directory", gid)
+	}
+	for i := 8; i < 20; i++ {
+		gid := fmt.Sprintf("group-%d", i)
+		creationClusterSize := i/4 + 1
+		wantVoters := cluster.AutoECConfigForClusterSize(creationClusterSize).NumShards()
+		voterCount := groupDirs[gid]
 		require.Equal(t, wantVoters, voterCount,
 			"group %s expected %d voter dirs, got %d", gid, wantVoters, voterCount)
 	}
@@ -313,6 +338,7 @@ func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
 	for i, endpoint := range c.httpURLs {
 		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
 		bucket := fmt.Sprintf("all-node-s3-%d", i)
+		c.GrantAdminOnBuckets(bucket)
 		var lastErr error
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
@@ -351,6 +377,7 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 	// Use the leader index discovered during cluster probe — single-shot per
 	// CreateBucket. Falls back to iterating if leader changes.
 	createBucket := func(name string) error {
+		c.GrantAdminOnBuckets(name)
 		// Try the known leader first.
 		tryNode := func(i int) error {
 			cli := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
@@ -438,6 +465,7 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	// logged its listener; the S3 write probe is the readiness signal this test
 	// actually needs.
 	probeBucket := fmt.Sprintf("__post-restart-probe-%d", time.Now().UnixNano())
+	c.GrantAdminOnBuckets(probeBucket)
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer probeCancel()
 	leaderIdx, err := waitForWritableEndpoint(
@@ -642,6 +670,7 @@ func tryPutObjectVersioned(parent context.Context, client *s3.Client, bucket, ke
 
 func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket string) {
 	t.Helper()
+	c.GrantAdminOnBuckets(bucket)
 	var lastErr error
 	tryNode := func(i int) bool {
 		client := ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
@@ -847,6 +876,7 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	defer newLeaderCancel()
 	newLeaderIdx := -1
 	var lastProbeErr error
+	c.GrantAdminOnBuckets("failover-test-probe")
 	deadline := time.Now().Add(55 * time.Second)
 	for time.Now().Before(deadline) && newLeaderIdx == -1 {
 		for i := range c.procs {
@@ -872,43 +902,16 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	require.NotEqual(t, killIdx, newLeaderIdx, "new leader must be different from killed leader")
 	t.Logf("new leader emerged: node %d", newLeaderIdx)
 
-	// Verify PUT/GET work via new leader.
-	// Retry: after a node failure the DegradedMonitor may briefly suspend
-	// writes until it confirms quorum is still healthy.
+	// Original object should still be readable after re-election.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer readCancel()
+	requireMRGetObjectFromAnyNodeEventually(t, readCtx, c, "failover-test", "failover-key", []byte(body))
+
+	// With full-target placement, losing one of three placement targets must
+	// block new writes instead of silently accepting under-replicated data.
 	newCLI := ecS3Client(c.httpURLs[newLeaderIdx], c.accessKey, c.secretKey)
-	const body2 = "post-failover-data"
-	require.Eventually(t, func() bool {
-		putCtx, putCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer putCancel()
-		_, putErr := newCLI.PutObject(putCtx, &s3.PutObjectInput{
-			Bucket: aws.String("failover-test"),
-			Key:    aws.String("failover-key-2"),
-			Body:   bytes.NewReader([]byte(body2)),
-		})
-		return putErr == nil
-	}, 60*time.Second, 3*time.Second, "PutObject failed after leader failover")
-
-	getOut, err := newCLI.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("failover-test"),
-		Key:    aws.String("failover-key-2"),
-	})
-	require.NoError(t, err)
-	defer getOut.Body.Close()
-	readBody, err := io.ReadAll(getOut.Body)
-	require.NoError(t, err)
-	require.Equal(t, body2, string(readBody))
-
-	// Original object should still be readable (persistence survived failover).
-	getOut2, err := newCLI.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("failover-test"),
-		Key:    aws.String("failover-key"),
-	})
-	require.NoError(t, err)
-	defer getOut2.Body.Close()
-	readBody2, err := io.ReadAll(getOut2.Body)
-	require.NoError(t, err)
-	require.Equal(t, body, string(readBody2))
-	t.Log("group leader failover ok: new leader elected, data persisted, PUT/GET work")
+	requireS3PutEventually503(t, readCtx, newCLI, "failover-test", "failover-key-2")
+	t.Log("group leader failover ok: new leader elected, committed data readable, new writes blocked while target is missing")
 }
 
 // ----- TestE2E_MultiRaftSharding_NFSv4Smoke ----------------------------
@@ -980,6 +983,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
+	c.GrantAdminOnBuckets("nfs-smoke")
 	_, err = cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("nfs-smoke")})
 	require.NoError(t, err)
 
@@ -1030,18 +1034,20 @@ func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
-	if err != nil && !strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
-		require.NoError(t, err)
-	}
+	c.GrantAdminOnBuckets("__grainfs_volumes")
+	require.Eventually(t, func() bool {
+		err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
+		return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
+	}, 30*time.Second, 500*time.Millisecond, "__grainfs_volumes bucket grant did not become writable")
+	ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
 
 	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
 	defer client.Close()
 
 	body := []byte("nbd-through-cluster-coordinator")
 	client.WriteAt(t, 0, body)
-	got := client.ReadAt(t, 0, uint32(len(body)))
-	require.Equal(t, body, got)
+	client.Flush(t)
+	requireNBDReadEventually(t, client, 0, body)
 
 	out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String("__grainfs_volumes"),
@@ -1065,7 +1071,11 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	require.NoError(t, tryCreateBucket(ctx, c.S3Client(0), "grainfs-tables"))
+	c.GrantAdminOnBuckets("grainfs-tables")
+	require.Eventually(t, func() bool {
+		err := tryCreateBucket(ctx, c.S3Client(0), "grainfs-tables")
+		return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
+	}, 30*time.Second, 500*time.Millisecond, "grainfs-tables bucket grant did not become writable")
 
 	req := bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`))
 	resp, err := http.Post(c.httpURLs[1]+"/iceberg/v1/namespaces", "application/json", req)

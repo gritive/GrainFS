@@ -53,6 +53,35 @@ func TestReceiptGossipSender_BroadcastsToAllPeers(t *testing.T) {
 	}
 }
 
+func TestReceiptGossipSender_UsesLatestPeerProvider(t *testing.T) {
+	tr := newMockTransport()
+	provider := &fakeReceiptProvider{ids: []string{"rcpt-1"}}
+	peers := []string{"peer-c:9000"}
+	sender := NewReceiptGossipSenderWithPeerProvider("node-self:9000", func() []string {
+		return append([]string(nil), peers...)
+	}, tr, provider, 10*time.Millisecond, 50)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	sender.Run(ctx)
+
+	require.NotEmpty(t, tr.SentTo("peer-c:9000"))
+}
+
+func TestReceiptGossipSender_ConnectsDynamicPeerBeforeSend(t *testing.T) {
+	tr := newMockTransport()
+	provider := &fakeReceiptProvider{ids: []string{"rcpt-1"}}
+	sender := NewReceiptGossipSenderWithPeerProvider("node-self:9000", func() []string {
+		return []string{"peer-c:9000"}
+	}, tr, provider, 10*time.Millisecond, 50)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	sender.Run(ctx)
+
+	require.True(t, tr.ConnectedTo("peer-c:9000"))
+}
+
 func TestReceiptGossipSender_PayloadDecodesToExpectedIDs(t *testing.T) {
 	tr := newMockTransport()
 	provider := &fakeReceiptProvider{ids: []string{"alpha", "beta", "gamma"}}

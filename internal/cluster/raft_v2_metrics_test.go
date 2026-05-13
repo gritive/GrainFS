@@ -28,7 +28,7 @@ func newV2NodeForMetricsTest(t *testing.T) RaftNode {
 	t.Helper()
 
 	rcfg := raft.DefaultConfig("metrics-node-1", nil)
-	node, _, err := newRaftNode(rcfg, nil, "")
+	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRVMetrics, noopAEMetrics)
 	node.Start()
@@ -117,7 +117,7 @@ func TestRaftV2Metrics_BootstrapOutcomeIncremented(t *testing.T) {
 // RaftV2StopCount. We create a dedicated node for this test and call Close explicitly.
 func TestRaftV2Metrics_StopCountIncremented(t *testing.T) {
 	rcfg := raft.DefaultConfig("stop-test-node", nil)
-	node, _, err := newRaftNode(rcfg, nil, "")
+	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRVMetrics, noopAEMetrics)
 	node.Start()

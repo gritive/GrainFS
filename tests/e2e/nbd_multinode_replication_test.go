@@ -33,25 +33,23 @@ func TestE2E_NBDMultiNode_ByteLevelReplication(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
-	if err != nil && !strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou") {
-		require.NoError(t, err)
-	}
+	c.GrantAdminOnBuckets("__grainfs_volumes")
+	require.Eventually(t, func() bool {
+		err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
+		return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
+	}, 30*time.Second, 500*time.Millisecond, "__grainfs_volumes bucket grant did not become writable")
+	ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
 
-	// Cold-start QUIC handshake races used to flap peers into cooldown on first
-	// write. Absorbed product-side by writeSpooledReplicaShardStream's bounded
-	// retry (3 attempts, 100ms backoff) — no test-side sleep needed.
 	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
 	defer client.Close()
 
 	body := []byte("nbd-byte-level-replication-payload")
 	client.WriteAt(t, 0, body)
-	got := client.ReadAt(t, 0, uint32(len(body)))
-	require.Equal(t, body, got, "NBD round-trip must succeed before checking replication")
+	client.Flush(t)
+	requireNBDReadEventually(t, client, 0, body)
 
-	// Poll up to 10s for replication fan-out. putObjectNxSpooledAsync may
-	// hand bytes to peers asynchronously; the NBD WriteAt reply only
-	// guarantees the leader has committed.
+	// Poll up to 10s for replication fan-out. FLUSH commits the write-back
+	// mutation, but peer fan-out can still settle asynchronously.
 	var (
 		holders     int
 		perNodeHits []int

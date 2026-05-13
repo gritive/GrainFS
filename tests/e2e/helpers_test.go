@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -166,6 +167,18 @@ func TestMain(m *testing.M) {
 		}
 	}
 	os.Exit(code)
+}
+
+func TestWaitForPortsParallelErrWithProcessesReturnsWhenProcessExits(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 7")
+	require.NoError(t, cmd.Start())
+
+	started := time.Now()
+	err := waitForPortsParallelErrWithProcesses([]int{freePort()}, []*exec.Cmd{cmd}, 5*time.Second)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "process exited")
+	require.Less(t, time.Since(started), time.Second)
 }
 
 // dumpE2EProfiles fetches pprof profiles from the running server and saves them to /tmp.
@@ -373,11 +386,19 @@ func waitForPortsParallel(t testing.TB, ports []int, timeout time.Duration) {
 // Used by retry-aware test helpers (e.g., mrCluster) that need to recover
 // from transient bind failures rather than abort the whole test.
 func waitForPortsParallelErr(ports []int, timeout time.Duration) error {
+	return waitForPortsParallelErrWithProcesses(ports, nil, timeout)
+}
+
+func waitForPortsParallelErrWithProcesses(ports []int, procs []*exec.Cmd, timeout time.Duration) error {
 	var wg sync.WaitGroup
-	failed := make(chan int, len(ports))
-	for _, port := range ports {
+	failed := make(chan error, len(ports))
+	for idx, port := range ports {
+		var proc *exec.Cmd
+		if idx < len(procs) {
+			proc = procs[idx]
+		}
 		wg.Add(1)
-		go func(p int) {
+		go func(p int, cmd *exec.Cmd) {
 			defer wg.Done()
 			deadline := time.Now().Add(timeout)
 			for time.Now().Before(deadline) {
@@ -386,17 +407,46 @@ func waitForPortsParallelErr(ports []int, timeout time.Duration) error {
 					conn.Close()
 					return
 				}
+				if exited, detail := processExited(cmd); exited {
+					failed <- fmt.Errorf("server process exited before port %d became ready: %s", p, detail)
+					return
+				}
 				time.Sleep(100 * time.Millisecond)
 			}
-			failed <- p
-		}(port)
+			failed <- fmt.Errorf("server did not start on port %d within %v", p, timeout)
+		}(port, proc)
 	}
 	wg.Wait()
 	close(failed)
-	for p := range failed {
-		return fmt.Errorf("server did not start on port %d within %v", p, timeout)
+	for err := range failed {
+		return err
 	}
 	return nil
+}
+
+func processExited(cmd *exec.Cmd) (bool, string) {
+	if cmd == nil || cmd.Process == nil {
+		return false, ""
+	}
+	var status syscall.WaitStatus
+	var usage syscall.Rusage
+	pid, err := syscall.Wait4(cmd.Process.Pid, &status, syscall.WNOHANG, &usage)
+	if pid == 0 {
+		return false, ""
+	}
+	if err != nil {
+		if errors.Is(err, syscall.ECHILD) {
+			return true, "already reaped"
+		}
+		return false, ""
+	}
+	if status.Exited() {
+		return true, fmt.Sprintf("exit status %d", status.ExitStatus())
+	}
+	if status.Signaled() {
+		return true, fmt.Sprintf("signal %s", status.Signal())
+	}
+	return true, fmt.Sprintf("wait status %d", status)
 }
 
 // waitForPortM is the TestMain variant of waitForPort — no *testing.T available there.

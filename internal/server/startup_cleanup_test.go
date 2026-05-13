@@ -35,6 +35,8 @@ func (c *captureSrvEmitter) Emit(ev scrubber.HealEvent) {
 	c.events = append(c.events, ev)
 }
 
+type noMultipartSweepBackend struct{ storage.Backend }
+
 func TestStartupRecovery_DeletesOldTmpFiles(t *testing.T) {
 	root := t.TempDir()
 
@@ -122,6 +124,32 @@ func TestStartupRecovery_DeletesOldMultipartParts(t *testing.T) {
 		}
 	}
 	require.True(t, hasMultipart, "expected an orphan_multipart HealEvent")
+}
+
+func TestStartupRecovery_DeletesOldMultipartPartsWhenOpsCannotReachSweeper(t *testing.T) {
+	root := t.TempDir()
+
+	oldUpload := filepath.Join(root, "parts", "abandoned-upload-id")
+	require.NoError(t, os.MkdirAll(oldUpload, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(oldUpload, "00001"), []byte("part1"), 0o644))
+	past := time.Now().Add(-25 * time.Hour)
+	require.NoError(t, os.Chtimes(oldUpload, past, past))
+
+	local, err := storage.NewLocalBackend(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = local.Close() })
+
+	cap := &captureSrvEmitter{}
+	ops := storage.NewOperations(noMultipartSweepBackend{Backend: local})
+	res, err := RunStartupRecovery(context.Background(), root, ops, cap)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, res.OrphanMultipartRemoved)
+	require.NoFileExists(t, oldUpload, "abandoned upload dir should be gone even when ops cannot unwrap to the local sweeper")
+
+	require.NotEmpty(t, cap.events)
+	require.Equal(t, "orphan_multipart", cap.events[0].ErrCode)
+	require.Equal(t, scrubber.PhaseStartup, cap.events[0].Phase)
 }
 
 func TestStartupRecovery_NothingToCleanEmitsNoEvents(t *testing.T) {

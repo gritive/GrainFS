@@ -54,7 +54,10 @@ func (s backendBlockObjectStore) ReadAt(ctx context.Context, bucket, key string,
 	if !ok {
 		return 0, false
 	}
-	n, _ := partial.ReadAt(ctx, bucket, key, offset, buf)
+	n, err := partial.ReadAt(ctx, bucket, key, offset, buf)
+	if err != nil {
+		return n, false
+	}
 	return n, true
 }
 

@@ -1,44 +1,37 @@
 package raft
 
-import (
-	"fmt"
-	"sync"
-
-	"github.com/rs/zerolog/log"
-)
-
-// FSMSnapshotFormatVersion is the format version stamped into every snapshot's
-// store-meta record (C2 P3). FSM implementations that care (see
-// cluster.FSM.Restore) refuse a restore whose meta carries any other value.
-const FSMSnapshotFormatVersion uint8 = 2
-
-// Snapshotter creates and restores state machine snapshots. Restore receives the
-// snapshot's store-meta record (carrying FormatVersion) so the implementation can
-// reject an incompatible payload before mutating any state.
-type Snapshotter interface {
-	Snapshot() ([]byte, error)
-	Restore(meta SnapshotMeta, data []byte) error
+// Snapshot is the immutable state snapshot at a particular log index. It
+// captures the FSM state (caller-provided opaque bytes) plus the metadata
+// needed to validate a peer's progress (last included index/term + cluster
+// configuration at the time of snapshot).
+//
+// Raft §7: a snapshot represents the system state through LastIncludedIndex.
+// After a snapshot is durable, log entries up to and including LastIncludedIndex
+// can be discarded (CompactBefore on the LogStore).
+type Snapshot struct {
+	LastIncludedIndex    uint64
+	LastIncludedTerm     uint64
+	Index                uint64
+	Term                 uint64
+	Servers              []Server
+	FormatVersion        uint8
+	JointPhase           JointPhase
+	JointOldVoters       []string
+	JointNewVoters       []string
+	JointEnterIndex      uint64
+	JointManagedLearners []string
+	// Configuration at snapshot time. Voter ID list only — learners ride
+	// in Learners (added M6.0). Empty/nil for tests that don't care about
+	// config recovery.
+	Configuration []string
+	// Learners are non-voting observers at snapshot time. id → address.
+	// Nil/empty when no learners. Added M6.0 (Path B); pre-M6.0 snapshots
+	// decode with Learners == nil and the schema gate refuses the store.
+	Learners map[string]string
+	// Data is opaque FSM state bytes provided by the caller of CreateSnapshot.
+	Data []byte
 }
 
-// SnapshotConfig controls when automatic snapshots are taken.
-type SnapshotConfig struct {
-	// Threshold is the number of applied entries since the last snapshot
-	// before a new snapshot is triggered.
-	Threshold uint64
-
-	// TrailingLogs is the number of log entries to retain on disk after
-	// a snapshot is taken. 0 = remove all (original behavior).
-	TrailingLogs uint64
-}
-
-// SnapshotResult reports a snapshot that was successfully created.
-type SnapshotResult struct {
-	Index     uint64
-	Term      uint64
-	SizeBytes int
-}
-
-// SnapshotStatus reports the latest snapshot persisted in the LogStore.
 type SnapshotStatus struct {
 	Available bool
 	Index     uint64
@@ -46,192 +39,120 @@ type SnapshotStatus struct {
 	SizeBytes int
 }
 
-// JointStateProvider returns the §4.3 joint consensus state at snapshot trigger
-// time. Phase is the int8 form of jointPhase (0=None, 1=Entering). Empty slices /
-// zero index when JointPhase is None. managedLearners is the set of learner IDs
-// added by ChangeMembership (PR-K3); nil when none.
-type JointStateProvider func() (phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string)
+const FSMSnapshotFormatVersion uint8 = 2
 
-// JointStateRestorer is called by SnapshotManager.Restore with the joint state
-// stored alongside the snapshot. The implementation should adopt those fields
-// onto the Node (typically Node.RestoreJointStateFromSnapshot).
-type JointStateRestorer func(phase int8, jointOldVoters, jointNewVoters []string, jointEnterIndex uint64, managedLearners []string)
-
-// SnapshotManager handles automatic snapshot creation, log compaction,
-// and snapshot restoration on startup.
-type SnapshotManager struct {
-	mu            sync.Mutex
-	store         LogStore
-	snapshotter   Snapshotter
-	config        SnapshotConfig
-	lastSnapIndex uint64
-
-	// Optional joint state hooks. nil providers / restorers leave joint fields
-	// at zero, which is correct for callers that never enter joint consensus.
-	jointStateProvider JointStateProvider
-	jointStateRestorer JointStateRestorer
+type SnapshotMeta struct {
+	Index                uint64
+	Term                 uint64
+	Servers              []Server
+	FormatVersion        uint8
+	JointPhase           JointPhase
+	JointOldVoters       []string
+	JointNewVoters       []string
+	JointEnterIndex      uint64
+	JointManagedLearners []string
 }
 
-// NewSnapshotManager creates a snapshot manager.
-func NewSnapshotManager(store LogStore, snap Snapshotter, config SnapshotConfig) *SnapshotManager {
-	return &SnapshotManager{
-		store:       store,
-		snapshotter: snap,
-		config:      config,
-	}
+type SnapshotResult struct {
+	Index     uint64
+	Term      uint64
+	SizeBytes int
 }
 
-// SetJointStateProvider wires the §4.3 capture hook used during MaybeTrigger.
-// Pass Node.JointSnapshotState (or equivalent). Safe to leave unset for callers
-// that never enter joint consensus.
-func (m *SnapshotManager) SetJointStateProvider(fn JointStateProvider) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.jointStateProvider = fn
+type JointPhase uint8
+
+const (
+	JointNone JointPhase = iota
+	JointEntering
+	JointLeaving
+)
+
+// SnapshotStore manages the durable snapshot. PR 15 keeps "at most one
+// snapshot at a time" — Save replaces the prior. Multi-snapshot retention
+// (for incremental sends, etc.) is out of scope. Single-goroutine access
+// from the actor; impls do not need to be thread-safe.
+type SnapshotStore interface {
+	// Latest returns the most recent snapshot, or (nil, nil) if none.
+	Latest() (*Snapshot, error)
+	// Save persists snap durably; returns once on disk (post-fsync).
+	// Replaces any prior snapshot atomically.
+	Save(snap *Snapshot) error
 }
 
-// SetJointStateRestorer wires the §4.3 apply hook used during Restore.
-func (m *SnapshotManager) SetJointStateRestorer(fn JointStateRestorer) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.jointStateRestorer = fn
+// memSnapshotStore is an in-memory SnapshotStore for tests / non-persistent
+// nodes. Single-goroutine access from the actor — no locking required.
+type memSnapshotStore struct {
+	snap *Snapshot
 }
 
-// MaybeTrigger checks if a snapshot should be taken based on the number of
-// applied entries since the last snapshot. Returns true if a snapshot was taken.
-func (m *SnapshotManager) MaybeTrigger(appliedIndex, appliedTerm uint64, servers []Server) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func newMemSnapshotStore() *memSnapshotStore { return &memSnapshotStore{} }
 
-	if m.config.Threshold == 0 {
-		return false
+func (s *memSnapshotStore) Latest() (*Snapshot, error) { return s.snap, nil }
+
+func (s *memSnapshotStore) Save(snap *Snapshot) error {
+	// Defensive copy of the Configuration and Data slices so a caller mutating
+	// them after Save cannot corrupt the stored snapshot.
+	if snap == nil {
+		s.snap = nil
+		return nil
 	}
-
-	if appliedIndex <= m.lastSnapIndex {
-		return false
+	cp := normalizedSnapshot(*snap)
+	if len(snap.Configuration) > 0 {
+		cp.Configuration = make([]string, len(snap.Configuration))
+		copy(cp.Configuration, snap.Configuration)
 	}
-
-	entriesSinceSnap := appliedIndex - m.lastSnapIndex
-	if entriesSinceSnap < m.config.Threshold {
-		return false
-	}
-
-	if _, err := m.createSnapshotLocked(appliedIndex, appliedTerm, servers); err != nil {
-		log.Error().Err(err).Msg("snapshot: trigger failed")
-		return false
-	}
-	return true
-}
-
-// Trigger forces a snapshot at the caller-provided applied index, regardless of
-// the automatic threshold. It is intended for operator/admin flows.
-func (m *SnapshotManager) Trigger(appliedIndex, appliedTerm uint64, servers []Server) (SnapshotResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.createSnapshotLocked(appliedIndex, appliedTerm, servers)
-}
-
-// Status reports the latest persisted snapshot without mutating state.
-func (m *SnapshotManager) Status() (SnapshotStatus, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	snap, err := m.store.LoadSnapshot()
-	if err != nil {
-		return SnapshotStatus{}, err
-	}
-	if snap.Index == 0 {
-		return SnapshotStatus{}, nil
-	}
-	return SnapshotStatus{
-		Available: true,
-		Index:     snap.Index,
-		Term:      snap.Term,
-		SizeBytes: len(snap.Data),
-	}, nil
-}
-
-func (m *SnapshotManager) createSnapshotLocked(appliedIndex, appliedTerm uint64, servers []Server) (SnapshotResult, error) {
-	if appliedIndex == 0 {
-		return SnapshotResult{}, fmt.Errorf("snapshot: applied index is zero")
-	}
-
-	data, err := m.snapshotter.Snapshot()
-	if err != nil {
-		return SnapshotResult{}, fmt.Errorf("snapshot: create: %w", err)
-	}
-
-	// §4.3 joint state at snapshot point. Provider returns zero values when
-	// not in a joint cycle; legacy callers without a provider also get zeros.
-	var jPhase int8
-	var jOld, jNew []string
-	var jIdx uint64
-	var jManaged []string
-	if m.jointStateProvider != nil {
-		jPhase, jOld, jNew, jIdx, jManaged = m.jointStateProvider()
-	}
-
-	if err := m.store.SaveSnapshot(Snapshot{
-		Index:                appliedIndex,
-		Term:                 appliedTerm,
-		Data:                 data,
-		Servers:              servers,
-		JointPhase:           jointPhase(jPhase),
-		JointOldVoters:       jOld,
-		JointNewVoters:       jNew,
-		JointEnterIndex:      jIdx,
-		JointManagedLearners: jManaged,
-		FormatVersion:        FSMSnapshotFormatVersion,
-	}); err != nil {
-		return SnapshotResult{}, fmt.Errorf("snapshot: save: %w", err)
-	}
-
-	if m.config.TrailingLogs == 0 {
-		// Original behavior: remove all log entries.
-		if err := m.store.TruncateAfter(0); err != nil {
-			log.Warn().Err(err).Msg("snapshot: disk log compaction failed")
-		}
-	} else if appliedIndex+1 > m.config.TrailingLogs {
-		keepFrom := appliedIndex + 1 - m.config.TrailingLogs
-		if err := m.store.TruncateBefore(keepFrom); err != nil {
-			log.Warn().Err(err).Msg("snapshot: disk log compaction failed")
+	if len(snap.Learners) > 0 {
+		cp.Learners = make(map[string]string, len(snap.Learners))
+		for k, v := range snap.Learners {
+			cp.Learners[k] = v
 		}
 	}
-
-	m.lastSnapIndex = appliedIndex
-	return SnapshotResult{Index: appliedIndex, Term: appliedTerm, SizeBytes: len(data)}, nil
+	if len(snap.Data) > 0 {
+		cp.Data = make([]byte, len(snap.Data))
+		copy(cp.Data, snap.Data)
+	}
+	s.snap = &cp
+	return nil
 }
 
-// Restore loads the latest snapshot from the store and applies it to the
-// state machine. Returns the snapshot index (0 if no snapshot exists).
-func (m *SnapshotManager) Restore() (uint64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	snap, err := m.store.LoadSnapshot()
-	if err != nil {
-		return 0, err
+func normalizedSnapshot(snap Snapshot) Snapshot {
+	if snap.LastIncludedIndex == 0 {
+		snap.LastIncludedIndex = snap.Index
 	}
-
-	// Index == 0 means no snapshot has been saved (Raft indices are 1-based).
+	if snap.LastIncludedTerm == 0 {
+		snap.LastIncludedTerm = snap.Term
+	}
 	if snap.Index == 0 {
-		return 0, nil
+		snap.Index = snap.LastIncludedIndex
 	}
-
-	if err := m.snapshotter.Restore(SnapshotMeta{
-		Index:         snap.Index,
-		Term:          snap.Term,
-		FormatVersion: snap.FormatVersion,
-	}, snap.Data); err != nil {
-		return 0, err
+	if snap.Term == 0 {
+		snap.Term = snap.LastIncludedTerm
 	}
-
-	// §4.3 joint state restoration. Triggered after FSM restore so any leader
-	// promotion that follows has the correct phase to drive checkJointAdvance.
-	if m.jointStateRestorer != nil {
-		m.jointStateRestorer(int8(snap.JointPhase), snap.JointOldVoters, snap.JointNewVoters, snap.JointEnterIndex, snap.JointManagedLearners)
+	if len(snap.Configuration) == 0 && len(snap.Servers) > 0 {
+		snap.Configuration = make([]string, 0, len(snap.Servers))
+		if snap.Learners == nil {
+			snap.Learners = make(map[string]string)
+		}
+		for _, srv := range snap.Servers {
+			switch srv.Suffrage {
+			case Voter:
+				snap.Configuration = append(snap.Configuration, srv.ID)
+			case NonVoter:
+				snap.Learners[srv.ID] = srv.ID
+			}
+		}
 	}
-
-	m.lastSnapIndex = snap.Index
-	return snap.Index, nil
+	if len(snap.Servers) == 0 && (len(snap.Configuration) > 0 || len(snap.Learners) > 0) {
+		snap.Servers = make([]Server, 0, len(snap.Configuration)+len(snap.Learners))
+		for _, id := range snap.Configuration {
+			snap.Servers = append(snap.Servers, Server{ID: id, Suffrage: Voter})
+		}
+		for id := range snap.Learners {
+			snap.Servers = append(snap.Servers, Server{ID: id, Suffrage: NonVoter})
+		}
+	}
+	if snap.FormatVersion == 0 {
+		snap.FormatVersion = FSMSnapshotFormatVersion
+	}
+	return snap
 }

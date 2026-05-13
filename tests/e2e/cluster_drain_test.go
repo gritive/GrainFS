@@ -50,13 +50,14 @@ func TestE2E_ClusterDrain_Follower(t *testing.T) {
 		return len(voters) == 2 && containsString(voters, followerID)
 	}, 90*time.Second, 500*time.Millisecond, "cluster must settle with follower as a voter")
 
+	beforeDrain := getStatusJSON(t, leaderURL)
 	binary := getBinary()
 	leaderSock := filepath.Join(c.dataDirs[leaderIdx], "admin.sock")
 	out, err := exec.Command(binary, "cluster",
 		"--endpoint", leaderSock,
 		"drain", followerID, "--yes", "--timeout", "30s",
 	).CombinedOutput()
-	require.NoError(t, err, "drain follower must succeed; out=%s", out)
+	require.NoError(t, err, "drain follower must succeed; status=%+v out=%s", beforeDrain, out)
 
 	output := string(out)
 	assert.Contains(t, output, "is leader: false", "follower drain must not transfer")

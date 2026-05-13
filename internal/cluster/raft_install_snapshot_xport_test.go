@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
-	raftv2 "github.com/gritive/GrainFS/internal/raft/v2"
 )
 
 // TestRaftNode_SetInstallSnapshotTransport_V2 asserts the setter is reachable
@@ -15,7 +14,7 @@ import (
 // adapter. Behavioral coverage is in raftv2_meta_quic_test.go (M6.2.2).
 func TestRaftNode_SetInstallSnapshotTransport_V2(t *testing.T) {
 	rcfg := raft.DefaultConfig("n1", nil)
-	node, closeFn, err := newRaftNode(rcfg, nil, t.TempDir())
+	node, closeFn, err := newRaftNode(rcfg, t.TempDir())
 	require.NoError(t, err)
 	node.SetTransport(
 		func(string, *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) { return nil, nil },
@@ -38,7 +37,7 @@ func TestRaftNode_SetInstallSnapshotTransport_V2(t *testing.T) {
 }
 
 func TestV2TransportBridge_SendInstallSnapshotPreservesLearnerSuffrage(t *testing.T) {
-	bridge := &v2TransportBridge{}
+	bridge := &raftTransportBridge{}
 	fn := installSnapshotFn(func(peer string, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
 		require.Equal(t, "n2", peer)
 		require.ElementsMatch(t, []raft.Server{
@@ -49,7 +48,7 @@ func TestV2TransportBridge_SendInstallSnapshotPreservesLearnerSuffrage(t *testin
 	})
 	bridge.sendIS.Store(&fn)
 
-	reply, err := bridge.SendInstallSnapshot("n2", &raftv2.InstallSnapshotArgs{
+	reply, err := bridge.SendInstallSnapshot("n2", &raft.InstallSnapshotArgs{
 		Term:          7,
 		LeaderID:      "n1",
 		Configuration: []string{"n1"},
@@ -60,9 +59,9 @@ func TestV2TransportBridge_SendInstallSnapshotPreservesLearnerSuffrage(t *testin
 }
 
 func TestRaftV2Node_HandleInstallSnapshotPreservesLearnerSuffrage(t *testing.T) {
-	inner, err := raftv2.NewNode(raftv2.Config{ID: "n1", Peers: []string{"n2"}})
+	inner, err := raft.NewNode(raft.Config{ID: "n1", Peers: []string{"n2"}})
 	require.NoError(t, err)
-	node := newRaftV2Node(inner)
+	node := newRaftNodeAdapter(inner)
 	node.Start()
 	t.Cleanup(node.Close)
 	go func() {

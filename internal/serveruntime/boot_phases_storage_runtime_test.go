@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -32,10 +33,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootAutoMigrate(state))
 	require.NoError(t, bootOpenMetaDB(state))
 	require.NoError(t, bootValidateTimings(state))
-	require.NoError(t, bootOpenRaftLogStore(state))
-	require.NoError(t, bootOpenSharedRaftLogDB(state))
 	require.NoError(t, bootOpenSharedFSMDB(state))
-	t.Cleanup(state.Cleanup)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -48,9 +46,16 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	raftCfg := raft.DefaultConfig(state.nodeID, state.peers)
 	raftCfg.ManagedMode = true
 	raftCfg.LogGCInterval = state.cfg.RaftLogGCInterval
-	node := raft.NewNode(raftCfg, state.logStore)
+	node, closeNode, err := cluster.NewRaftV2NodeForServeruntime(raftCfg, state.raftDir)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeNode != nil {
+			_ = closeNode()
+		}
+	})
+	t.Cleanup(state.Cleanup)
 	state.node = node
-	state.rpcTransport = raft.NewQUICRPCTransport(state.quicTransport, node)
+	state.rpcTransport = cluster.NewRaftQUICRPCTransport(state.quicTransport, node)
 	state.rpcTransport.SetTransport()
 
 	require.NoError(t, bootMetaRaftWiring(state))
@@ -71,6 +76,25 @@ func TestBootShardService_ComputesEffectiveEC(t *testing.T) {
 	// Single-node cluster → 1+0 auto profile.
 	assert.Equal(t, 1, state.effectiveEC.DataShards)
 	assert.Equal(t, 0, state.effectiveEC.ParityShards)
+}
+
+func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
+	require.NoError(t, WaitForMetaRaftLeader(ctx, state.metaRaft, 5*time.Second))
+	require.NoError(t, state.metaRaft.ProposeShardGroup(ctx, cluster.ShardGroupEntry{
+		ID:      "group-1",
+		PeerIDs: []string{"n1", "n2", "n3"},
+	}))
+	require.Eventually(t, func() bool {
+		group, ok := state.metaRaft.FSM().ShardGroup("group-1")
+		return ok && assert.ObjectsAreEqual([]string{"n1", "n2", "n3"}, group.PeerIDs)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, bootShardService(ctx, state))
+
+	group, ok := state.metaRaft.FSM().ShardGroup("group-1")
+	require.True(t, ok)
+	assert.Equal(t, []string{"n1", "n2", "n3"}, group.PeerIDs)
 }
 
 // TestBootStreamRouter_RegistersHandlersAndStartsNode — bootStreamRouter wires

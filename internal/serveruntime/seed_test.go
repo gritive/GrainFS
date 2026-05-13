@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -68,5 +69,108 @@ func TestSeedShardGroupVoters_NonZeroGroupUsesEffectiveECWidth(t *testing.T) {
 	got2 := SeedShardGroupVoters("node-a", "10.0.0.1:7000", peers, nodes, "group-7", 4)
 	if !reflect.DeepEqual(got, got2) {
 		t.Fatalf("PickVoters not deterministic: %v vs %v", got, got2)
+	}
+}
+
+func TestMissingSeedShardGroups_GrowsToJoinedNodeCount(t *testing.T) {
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "10.0.0.1:7000"},
+		{ID: "node-b", Address: "10.0.0.2:7000"},
+		{ID: "node-c", Address: "10.0.0.3:7000"},
+	}
+	existing := make([]cluster.ShardGroupEntry, 0, 8)
+	for i := 0; i < 8; i++ {
+		existing = append(existing, cluster.ShardGroupEntry{ID: fmt.Sprintf("group-%d", i), PeerIDs: []string{"node-a"}})
+	}
+
+	got := MissingSeedShardGroups("node-a", "10.0.0.1:7000", nodes, existing, 2)
+	wantIDs := []string{"group-8", "group-9", "group-10", "group-11"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("got %d missing groups (%v), want %d", len(got), got, len(wantIDs))
+	}
+	for i, group := range got {
+		if group.ID != wantIDs[i] {
+			t.Fatalf("group %d: got ID %q want %q", i, group.ID, wantIDs[i])
+		}
+		if len(group.PeerIDs) != 2 {
+			t.Fatalf("group %s: got voters %v, want 2 voters", group.ID, group.PeerIDs)
+		}
+		for _, voter := range group.PeerIDs {
+			if voter != "node-a" && voter != "node-b" && voter != "node-c" {
+				t.Fatalf("group %s: unexpected voter %q in %v", group.ID, voter, group.PeerIDs)
+			}
+		}
+	}
+}
+
+func TestMissingSeedShardGroups_DoesNotExpandExistingGroupsAfterJoin(t *testing.T) {
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "10.0.0.1:7000"},
+		{ID: "node-b", Address: "10.0.0.2:7000"},
+		{ID: "node-c", Address: "10.0.0.3:7000"},
+		{ID: "node-d", Address: "10.0.0.4:7000"},
+		{ID: "node-e", Address: "10.0.0.5:7000"},
+	}
+	existing := []cluster.ShardGroupEntry{
+		{ID: "group-0", PeerIDs: []string{"node-a"}},
+		{ID: "group-1", PeerIDs: []string{"node-a"}},
+	}
+
+	got := MissingSeedShardGroups("node-a", "10.0.0.1:7000", nodes, existing, 5)
+
+	if len(got) != 18 {
+		t.Fatalf("got %d missing groups (%v), want 18", len(got), got)
+	}
+	for _, group := range got {
+		if group.ID == "group-0" || group.ID == "group-1" {
+			t.Fatalf("existing group %s must not be returned for expansion", group.ID)
+		}
+		if len(group.PeerIDs) != 5 {
+			t.Fatalf("new group %s: got voters %v, want 5 voters", group.ID, group.PeerIDs)
+		}
+	}
+}
+
+func TestMissingSeedShardGroups_SequentialJoinKeepsCreationEpochWidths(t *testing.T) {
+	existing := make([]cluster.ShardGroupEntry, 0, 20)
+	for i := 0; i < 8; i++ {
+		existing = append(existing, cluster.ShardGroupEntry{ID: fmt.Sprintf("group-%d", i), PeerIDs: []string{"node-a"}})
+	}
+
+	nodes3 := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "10.0.0.1:7000"},
+		{ID: "node-b", Address: "10.0.0.2:7000"},
+		{ID: "node-c", Address: "10.0.0.3:7000"},
+	}
+	grownTo3 := MissingSeedShardGroups("node-a", "10.0.0.1:7000", nodes3, existing, 3)
+	if len(grownTo3) != 4 {
+		t.Fatalf("3-node join: got %d missing groups (%v), want 4", len(grownTo3), grownTo3)
+	}
+	for _, group := range grownTo3 {
+		if len(group.PeerIDs) != 3 {
+			t.Fatalf("3-node group %s: got voters %v, want 3 voters", group.ID, group.PeerIDs)
+		}
+	}
+	existing = append(existing, grownTo3...)
+
+	nodes5 := []cluster.MetaNodeEntry{
+		{ID: "node-a", Address: "10.0.0.1:7000"},
+		{ID: "node-b", Address: "10.0.0.2:7000"},
+		{ID: "node-c", Address: "10.0.0.3:7000"},
+		{ID: "node-d", Address: "10.0.0.4:7000"},
+		{ID: "node-e", Address: "10.0.0.5:7000"},
+	}
+	grownTo5 := MissingSeedShardGroups("node-a", "10.0.0.1:7000", nodes5, existing, 5)
+	if len(grownTo5) != 8 {
+		t.Fatalf("5-node join: got %d missing groups (%v), want 8", len(grownTo5), grownTo5)
+	}
+	threeNodeGroups := map[string]bool{"group-8": true, "group-9": true, "group-10": true, "group-11": true}
+	for _, group := range grownTo5 {
+		if threeNodeGroups[group.ID] {
+			t.Fatalf("existing 3-node group %s must not be returned for expansion", group.ID)
+		}
+		if len(group.PeerIDs) != 5 {
+			t.Fatalf("5-node group %s: got voters %v, want 5 voters", group.ID, group.PeerIDs)
+		}
 	}
 }

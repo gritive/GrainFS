@@ -162,8 +162,6 @@ type DistributedBackend struct {
 	lastAppliedTerm  atomic.Uint64
 	snapRequests     chan raftSnapshotRequest
 	onApply          OnApplyFunc
-	snapMgr          *raft.SnapshotManager
-	snapNode         *raft.Node // node for CompactLog after snapshot
 	shardSvc         *ShardService
 	allNodes         []string // all node addresses (including self) for shard placement
 	selfAddr         string   // this node's raft address (matches entries in allNodes)
@@ -382,18 +380,6 @@ func (b *DistributedBackend) ecWriteNodes() []string {
 	return b.clusterNodes()
 }
 
-// SetSnapshotManager configures automatic snapshot creation after N applied entries.
-// Must be called before RunApplyLoop.
-func (b *DistributedBackend) SetSnapshotManager(mgr *raft.SnapshotManager, node *raft.Node) {
-	b.snapMgr = mgr
-	b.snapNode = node
-	if mgr != nil && node != nil {
-		// §4.3 joint state persistence: capture on snapshot, restore on load.
-		mgr.SetJointStateProvider(node.JointSnapshotState)
-		mgr.SetJointStateRestorer(node.RestoreJointStateFromSnapshot)
-	}
-}
-
 // TriggerRaftSnapshot forces a Raft FSM snapshot on the current leader.
 // As of M5 PR 29 v2 owns snapshot lifecycle exclusively; the apply loop
 // forwards through RaftNode.CreateSnapshot (formerly the RaftV2Snapshotter
@@ -498,24 +484,29 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 				b.logger.Debug().Msg("apply loop: ApplyCh closed; exiting")
 				return
 			}
-			if err := b.fsm.Apply(entry.Command); err != nil {
-				b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
+			switch entry.Type {
+			case raft.LogEntryCommand:
+				if err := b.fsm.Apply(entry.Command); err != nil {
+					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
+				}
+				// Notify cache invalidators and legacy metrics callback.
+				b.notifyOnApply(entry.Command)
+			case raft.LogEntrySnapshot:
+				meta := raft.SnapshotMeta{
+					Index:         entry.Index,
+					Term:          entry.Term,
+					Servers:       b.node.Configuration().Servers,
+					FormatVersion: raft.FSMSnapshotFormatVersion,
+				}
+				if err := b.fsm.Restore(meta, entry.Command); err != nil {
+					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm restore snapshot error")
+				}
+			default:
+				continue
 			}
 			b.lastApplied.Store(entry.Index)
 			b.lastAppliedTerm.Store(entry.Term)
 
-			// Notify cache invalidators and legacy metrics callback.
-			b.notifyOnApply(entry.Command)
-
-			// Check if snapshot should be taken
-			if b.snapMgr != nil {
-				if b.snapMgr.MaybeTrigger(entry.Index, entry.Term, b.snapNode.Configuration().Servers) {
-					b.logger.Info().Uint64("index", entry.Index).Uint64("term", entry.Term).Msg("snapshot taken")
-					if b.snapNode != nil {
-						b.snapNode.CompactLog(entry.Index)
-					}
-				}
-			}
 		}
 	}
 }
@@ -702,9 +693,23 @@ func (b *DistributedBackend) ReadIndex(ctx context.Context) (uint64, error) {
 	}
 }
 
-// WaitApplied blocks until the node's FSM has applied at least index or ctx is done.
+// WaitApplied blocks until this backend's FSM has applied at least index or ctx is done.
 func (b *DistributedBackend) WaitApplied(ctx context.Context, index uint64) error {
-	return b.node.WaitApplied(ctx, index)
+	if index == 0 {
+		return nil
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if b.lastApplied.Load() >= index {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
@@ -736,7 +741,7 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	// know the seed/join peer address and must try it instead of failing early.
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	peers := b.node.Peers()
+	peers := proposalForwardPeers(b.node.Peers(), b.allNodes, b.selfAddr)
 	if len(peers) == 0 {
 		return raft.ErrNotLeader
 	}
@@ -747,6 +752,23 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		}
 	}
 	return lastErr
+}
+
+func proposalForwardPeers(raftPeers, allNodes []string, selfAddr string) []string {
+	if len(raftPeers) > 0 {
+		return append([]string(nil), raftPeers...)
+	}
+	if len(allNodes) == 0 {
+		return nil
+	}
+	peers := make([]string, 0, len(allNodes))
+	for _, node := range allNodes {
+		if node == "" || node == selfAddr {
+			continue
+		}
+		peers = append(peers, node)
+	}
+	return peers
 }
 
 // Close closes the metadata database. When shared is true the DB is owned by
@@ -1395,11 +1417,13 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	}
 	if storage.IsInternalBucket(bucket) {
 		f, err := os.Open(b.internalObjectPath(bucket, key).path)
-		if err != nil {
+		if err == nil {
+			defer f.Close()
+			return f.ReadAt(buf, offset)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
 			return 0, err
 		}
-		defer f.Close()
-		return f.ReadAt(buf, offset)
 	}
 
 	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -1651,6 +1675,11 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
 	}
+	if topologyWrite {
+		if err := b.checkTopologyPlacementHealth(topologyGroup, effectiveCfg, placement); err != nil {
+			return nil, err
+		}
+	}
 	observePutStage("ec", "placement", stageStart)
 
 	selfID := b.selfAddr
@@ -1660,6 +1689,9 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 
 	if sp.Size <= maxECMemoryShardFastPathBytes {
 		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType)
+		if err != nil && topologyWrite {
+			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
+		}
 		if handled || err != nil {
 			return obj, err
 		}
@@ -1679,22 +1711,49 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	result, err := writer.writeSpooledShards(ctx, plan, b.ecSpoolDir(), sp)
 	if err != nil {
 		if topologyWrite {
-			var shardErr *ecObjectShardWriteError
-			if errors.As(err, &shardErr) {
-				return nil, &ErrInsufficientPlacementTargets{
-					Operation:     "put_object",
-					GroupID:       topologyGroup.ID,
-					Desired:       effectiveCfg,
-					Configured:    cloneStringSlice(topologyGroup.PeerIDs),
-					Unavailable:   []string{shardErr.node},
-					FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
-				}
-			}
+			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
 		return nil, err
 	}
 
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
+}
+
+func topologyShardWriteError(group ShardGroupEntry, cfg ECConfig, err error) error {
+	var shardErr *ecObjectShardWriteError
+	if !errors.As(err, &shardErr) {
+		return err
+	}
+	return &ErrInsufficientPlacementTargets{
+		Operation:     "put_object",
+		GroupID:       group.ID,
+		Desired:       cfg,
+		Configured:    cloneStringSlice(group.PeerIDs),
+		Unavailable:   []string{shardErr.node},
+		FailureReason: fmt.Sprintf("ec write shard %d failed: %v", shardErr.shardIdx, shardErr.err),
+	}
+}
+
+func (b *DistributedBackend) checkTopologyPlacementHealth(group ShardGroupEntry, cfg ECConfig, placement []string) error {
+	if b.peerHealth == nil {
+		return nil
+	}
+	for _, node := range placement {
+		if node == b.selfAddr {
+			continue
+		}
+		if !b.peerHealth.IsHealthy(node) {
+			return &ErrInsufficientPlacementTargets{
+				Operation:     "put_object",
+				GroupID:       group.ID,
+				Desired:       cfg,
+				Configured:    cloneStringSlice(group.PeerIDs),
+				Unavailable:   []string{node},
+				FailureReason: "known unhealthy placement target",
+			}
+		}
+	}
+	return nil
 }
 
 func (b *DistributedBackend) tryPutObjectECMemoryShards(
@@ -2537,11 +2596,12 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 					ACL:          m.ACL,
 				}
 				placement = PlacementMeta{
-					VersionID:   versionID,
-					RingVersion: RingVersion(m.RingVersion),
-					ECData:      m.ECData,
-					ECParity:    m.ECParity,
-					NodeIDs:     m.NodeIDs,
+					VersionID:        versionID,
+					RingVersion:      RingVersion(m.RingVersion),
+					ECData:           m.ECData,
+					ECParity:         m.ECParity,
+					NodeIDs:          m.NodeIDs,
+					PlacementGroupID: m.PlacementGroupID,
 				}
 				return nil
 			})
@@ -2551,7 +2611,19 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		// most recent version. Falls back to the legacy single-key read when
 		// no lat: pointer exists (e.g., legacy replay).
 		if storage.IsInternalBucket(bucket) {
+			versionID := ""
 			metaKeyBytes := b.internalObjectPath(bucket, key).metaKey
+			if latItem, lerr := txn.Get(b.ks().LatestKey(bucket, key)); lerr == nil {
+				_ = latItem.Value(func(v []byte) error {
+					versionID = string(v)
+					return nil
+				})
+				if versionID != "" {
+					metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
+				}
+			} else if lerr != badger.ErrKeyNotFound {
+				return lerr
+			}
 			item, err := txn.Get(metaKeyBytes)
 			if err == badger.ErrKeyNotFound {
 				return storage.ErrObjectNotFound
@@ -2559,7 +2631,10 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			if err != nil {
 				return err
 			}
-			return decodeMeta(item, "current")
+			if versionID == "" {
+				versionID = "current"
+			}
+			return decodeMeta(item, versionID)
 		}
 
 		metaKeyBytes := b.ks().ObjectMetaKey(bucket, key)
@@ -3202,11 +3277,12 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 				ACL:          m.ACL,
 			}
 			placement = PlacementMeta{
-				VersionID:   versionID,
-				RingVersion: RingVersion(m.RingVersion),
-				ECData:      m.ECData,
-				ECParity:    m.ECParity,
-				NodeIDs:     m.NodeIDs,
+				VersionID:        versionID,
+				RingVersion:      RingVersion(m.RingVersion),
+				ECData:           m.ECData,
+				ECParity:         m.ECParity,
+				NodeIDs:          m.NodeIDs,
+				PlacementGroupID: m.PlacementGroupID,
 			}
 			return nil
 		})
@@ -3429,17 +3505,5 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
 }
 
-// RaftNode returns the underlying *raft.Node via type assertion. Since M5 PR
-// 29 removed the GRAINFS_RAFT_V2 flag, b.node is always *raftV2Node in
-// production and this returns nil. PR 30 deletes the v1 raft package and
-// this method outright; kept here so existing nil-checking callers
-// (DataGroupPlanExecutor) compile.
-func (b *DistributedBackend) RaftNode() *raft.Node {
-	v1, _ := b.node.(*raft.Node)
-	return v1
-}
-
-// Node returns the RaftNode interface for v1/v2-agnostic access (State,
-// observer registration, leadership queries). Prefer this over RaftNode() in
-// code that must work under raft v2 (M5 PR 28 serveruntime default-on).
+// Node returns the RaftNode interface for leadership and raft control.
 func (b *DistributedBackend) Node() RaftNode { return b.node }

@@ -92,6 +92,23 @@ func TestMetaRaft_Bootstrap_SingleNode(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond, "single node must become leader")
 }
 
+func TestMetaRaft_JoinModeDoesNotSelfElectBeforeJoin(t *testing.T) {
+	m, err := NewMetaRaft(MetaRaftConfig{
+		NodeID:   "node-joiner",
+		RaftID:   "node-joiner-addr",
+		JoinMode: true,
+		DataDir:  t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Start(context.Background()))
+
+	require.Never(t, func() bool {
+		return m.node.IsLeader()
+	}, 300*time.Millisecond, 20*time.Millisecond, "join-mode meta raft must wait for cluster membership instead of forming a solo cluster")
+}
+
 func TestMetaRaft_Join_AddsLearnerThenVoter(t *testing.T) {
 	dir0 := t.TempDir()
 	dir1 := t.TempDir()
@@ -167,6 +184,42 @@ func TestMetaRaft_ProposeAddNode_CommitToFSM(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "ProposeAddNode must commit to FSM")
+}
+
+func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
+	require.NoError(t, err)
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, m.ProposeAddNode(ctx, MetaNodeEntry{ID: "node-1", Address: "addr-1", Role: 0}))
+
+	idx := m.lastApplied.Load()
+	require.Greater(t, idx, uint64(0))
+	data, err := m.fsm.Snapshot()
+	require.NoError(t, err)
+	require.NoError(t, m.node.CreateSnapshot(idx, data))
+	require.NoError(t, m.Close())
+
+	restarted, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = restarted.Close() })
+	require.NoError(t, restarted.Start(context.Background()))
+
+	require.Eventually(t, func() bool {
+		for _, n := range restarted.FSM().Nodes() {
+			if n.ID == "node-1" && n.Address == "addr-1" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 func TestMetaRaft_Close_StopsApplyLoop(t *testing.T) {

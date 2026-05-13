@@ -124,6 +124,11 @@ type s3Error struct {
 	Message string   `xml:"Message"`
 }
 
+const (
+	readAfterWriteRetryTimeout  = 500 * time.Millisecond
+	readAfterWriteRetryInterval = 10 * time.Millisecond
+)
+
 func writeXMLError(c *app.RequestContext, status int, code, message string) {
 	c.SetContentType("application/xml")
 	data, _ := xml.Marshal(s3Error{Code: code, Message: message})
@@ -480,6 +485,53 @@ func recordObjectDeleteMetrics(previous storage.PreviousObject) {
 	applyObjectMetricDelta(objectDeleteMetricDelta(previous))
 }
 
+func (s *Server) getObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	deadline := time.Now().Add(readAfterWriteRetryTimeout)
+	var lastErr error
+	for {
+		rc, obj, err := s.ops.GetObject(ctx, bucket, key)
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return rc, obj, err
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, nil, lastErr
+		}
+		if !sleepReadAfterWriteRetry(ctx) {
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+func (s *Server) headObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	deadline := time.Now().Add(readAfterWriteRetryTimeout)
+	var lastErr error
+	for {
+		obj, err := s.ops.HeadObject(ctx, bucket, key)
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return obj, err
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		if !sleepReadAfterWriteRetry(ctx) {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func sleepReadAfterWriteRetry(ctx context.Context) bool {
+	timer := time.NewTimer(readAfterWriteRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if ri := s.readIndexer; ri != nil {
 		readIdx, err := ri.ReadIndex(ctx)
@@ -518,7 +570,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		rc, obj, err = s.ops.GetObjectVersion(bucket, key, versionID)
 	} else {
-		rc, obj, err = s.ops.GetObject(ctx, bucket, key)
+		rc, obj, err = s.getObjectWithReadAfterWriteRetry(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -691,7 +743,7 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 		return false
 	}
 
-	obj, err := s.ops.HeadObject(ctx, bucket, key)
+	obj, err := s.headObjectWithReadAfterWriteRetry(ctx, bucket, key)
 	if err != nil {
 		mapError(c, err)
 		return true
@@ -817,7 +869,7 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 	if versionID != "" {
 		obj, err = s.ops.HeadObjectVersion(bucket, key, versionID)
 	} else {
-		obj, err = s.ops.HeadObject(ctx, bucket, key)
+		obj, err = s.headObjectWithReadAfterWriteRetry(ctx, bucket, key)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrMethodNotAllowed) {
@@ -987,7 +1039,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	key := keys[0]
 
-	// Validate POST policy if authentication is enabled and policy is present
+	// Validate POST policy if authentication is enabled.
 	if s.verifier != nil {
 		policyB64 := ""
 		if ps := form.Value["policy"]; len(ps) > 0 {
@@ -997,53 +1049,54 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 		if ss := form.Value["X-Amz-Signature"]; len(ss) > 0 {
 			sig = ss[0]
 		}
+		if policyB64 == "" || sig == "" {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "missing POST policy signature")
+			return
+		}
 
-		if policyB64 != "" {
-			// Validate expiration
-			if err := s3auth.ValidatePostPolicyExpiration(policyB64); err != nil {
-				writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
-				return
-			}
+		// Validate expiration
+		if err := s3auth.ValidatePostPolicyExpiration(policyB64); err != nil {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
+			return
+		}
 
-			// Validate conditions
-			formFields := map[string]string{
-				"bucket": bucket,
-				"key":    key,
+		// Validate conditions
+		formFields := map[string]string{
+			"bucket": bucket,
+			"key":    key,
+		}
+		for k, vs := range form.Value {
+			if len(vs) > 0 {
+				formFields[k] = vs[0]
 			}
-			for k, vs := range form.Value {
-				if len(vs) > 0 {
-					formFields[k] = vs[0]
-				}
-			}
-			if err := s3auth.ValidatePostPolicyConditions(policyB64, formFields); err != nil {
-				writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
-				return
-			}
+		}
+		if err := s3auth.ValidatePostPolicyConditions(policyB64, formFields); err != nil {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
+			return
+		}
 
-			// Validate signature
-			if sig != "" {
-				credential := ""
-				if cs := form.Value["X-Amz-Credential"]; len(cs) > 0 {
-					credential = cs[0]
-				}
-				// credential format: AKID/20260416/us-east-1/s3/aws4_request
-				parts := strings.SplitN(credential, "/", 5)
-				if len(parts) == 5 {
-					accessKey := parts[0]
-					date := parts[1]
-					region := parts[2]
-					service := parts[3]
-					secretKey := s.verifier.LookupSecret(accessKey)
-					if secretKey == "" {
-						writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid access key")
-						return
-					}
-					if err := s3auth.VerifyPostPolicy(policyB64, sig, secretKey, date, region, service); err != nil {
-						writeXMLError(c, consts.StatusForbidden, "SignatureDoesNotMatch", err.Error())
-						return
-					}
-				}
-			}
+		credential := ""
+		if cs := form.Value["X-Amz-Credential"]; len(cs) > 0 {
+			credential = cs[0]
+		}
+		// credential format: AKID/20260416/us-east-1/s3/aws4_request
+		parts := strings.SplitN(credential, "/", 5)
+		if len(parts) != 5 {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid credential")
+			return
+		}
+		accessKey := parts[0]
+		date := parts[1]
+		region := parts[2]
+		service := parts[3]
+		secretKey := s.verifier.LookupSecret(accessKey)
+		if secretKey == "" {
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "invalid access key")
+			return
+		}
+		if err := s3auth.VerifyPostPolicy(policyB64, sig, secretKey, date, region, service); err != nil {
+			writeXMLError(c, consts.StatusForbidden, "SignatureDoesNotMatch", err.Error())
+			return
 		}
 	}
 
@@ -1676,9 +1729,38 @@ func (s *Server) evaluateRemovePeerPreflight(id string) (cluster.RemovePeerPrefl
 	}
 	return cluster.EvaluateRemovePeerPreflight(cluster.RemovePeerPreflightInput{
 		TargetID: id,
-		Voters:   s.cluster.Peers(),
+		Voters:   removePeerPreflightVoters(s.cluster.Peers(), snapshot),
 		Snapshot: snapshot,
 	}), true
+}
+
+func removePeerPreflightVoters(voters []string, snapshot []cluster.PeerLivenessRow) []string {
+	if len(voters) == 0 || len(snapshot) == 0 {
+		return voters
+	}
+	byAddr := make(map[string]string, len(snapshot))
+	byID := make(map[string]string, len(snapshot))
+	for _, row := range snapshot {
+		if row.IdentityState == cluster.PeerIdentitySelf || row.PeerID == "" {
+			continue
+		}
+		byID[row.PeerID] = row.PeerID
+		if row.RaftAddr != "" {
+			byAddr[row.RaftAddr] = row.PeerID
+		}
+	}
+	out := make([]string, len(voters))
+	for i, voter := range voters {
+		switch {
+		case byID[voter] != "":
+			out[i] = byID[voter]
+		case byAddr[voter] != "":
+			out[i] = byAddr[voter]
+		default:
+			out[i] = voter
+		}
+	}
+	return out
 }
 
 func writeRemovePeerSnapshotUnavailable(c *app.RequestContext) {

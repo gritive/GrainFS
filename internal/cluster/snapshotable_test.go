@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -80,6 +81,138 @@ func TestRestoreObjects_StaleBlob(t *testing.T) {
 	require.Len(t, stale, 1)
 	assert.Equal(t, "stale", stale[0].Bucket)
 	assert.Equal(t, "missing.bin", stale[0].Key)
+}
+
+func TestRestoreObjects_ResolvesEmptyVersionIDBeforeDeletingCurrentMetadata(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "legacy-wal"))
+	obj, err := b.PutObject(context.Background(), "legacy-wal", "inc.txt", strings.NewReader("included"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	snap := []storage.SnapshotObject{{
+		Bucket:      "legacy-wal",
+		Key:         "inc.txt",
+		ETag:        obj.ETag,
+		Size:        obj.Size,
+		ContentType: obj.ContentType,
+		Modified:    obj.LastModified,
+		IsLatest:    true,
+	}}
+
+	count, stale, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+	require.Empty(t, stale)
+	require.Equal(t, 1, count)
+
+	versions, err := b.ListObjectVersions("legacy-wal", "inc.txt", 10)
+	require.NoError(t, err)
+	require.Len(t, versions, 1)
+	require.Equal(t, obj.VersionID, versions[0].VersionID)
+}
+
+func TestRestoreObjects_ResolvesMismatchedVersionIDWhenBucketRowIsMissing(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "wal-replay"))
+	obj, err := b.PutObject(context.Background(), "wal-replay", "inc.txt", strings.NewReader("included"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(b.ks().BucketKey("wal-replay"))
+	}))
+
+	snap := []storage.SnapshotObject{{
+		Bucket:      "wal-replay",
+		Key:         "inc.txt",
+		ETag:        obj.ETag,
+		Size:        obj.Size,
+		ContentType: obj.ContentType,
+		Modified:    obj.LastModified,
+		VersionID:   "wal-version-id",
+		IsLatest:    true,
+	}}
+
+	count, stale, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+	require.Empty(t, stale)
+	require.Equal(t, 1, count)
+
+	var latestVersionID string
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.ks().LatestKey("wal-replay", "inc.txt"))
+		if err != nil {
+			return err
+		}
+		if err := item.Value(func(v []byte) error {
+			latestVersionID = string(v)
+			return nil
+		}); err != nil {
+			return err
+		}
+		item, err = txn.Get(b.ks().ObjectMetaKeyV("wal-replay", "inc.txt", latestVersionID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			meta, err := unmarshalObjectMeta(v)
+			require.NoError(t, err)
+			require.Equal(t, obj.ETag, meta.ETag)
+			require.Equal(t, obj.Size, meta.Size)
+			return nil
+		})
+	}))
+	require.Equal(t, obj.VersionID, latestVersionID)
+}
+
+func TestRestoreObjects_PreservesCurrentECPlacementMetadata(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "ec"))
+	createBlob(t, b, "ec", "k", "v1")
+	require.NoError(t, b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:           "ec",
+		Key:              "k",
+		Size:             3,
+		ContentType:      "text/plain",
+		ETag:             "etag",
+		ModTime:          123,
+		VersionID:        "v1",
+		RingVersion:      42,
+		ECData:           1,
+		ECParity:         0,
+		NodeIDs:          []string{"node-a"},
+		PlacementGroupID: "group-2",
+	}))
+
+	count, stale, err := b.RestoreObjects([]storage.SnapshotObject{{
+		Bucket:      "ec",
+		Key:         "k",
+		ETag:        "etag",
+		Size:        3,
+		ContentType: "text/plain",
+		Modified:    123,
+		VersionID:   "v1",
+		IsLatest:    true,
+	}})
+	require.NoError(t, err)
+	require.Empty(t, stale)
+	require.Equal(t, 1, count)
+
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.ks().ObjectMetaKeyV("ec", "k", "v1"))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			meta, err := unmarshalObjectMeta(v)
+			require.NoError(t, err)
+			require.Equal(t, uint64(42), meta.RingVersion)
+			require.Equal(t, uint8(1), meta.ECData)
+			require.Equal(t, uint8(0), meta.ECParity)
+			require.Equal(t, []string{"node-a"}, meta.NodeIDs)
+			require.Equal(t, "group-2", meta.PlacementGroupID)
+			return nil
+		})
+	}))
 }
 
 func TestRestoreObjects_RemovesExtraObjects(t *testing.T) {

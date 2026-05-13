@@ -2,717 +2,395 @@ package raft
 
 import (
 	"context"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRestoreConfigFromServers_VoterLearnerSplit(t *testing.T) {
-	servers := []Server{
-		{ID: "self", Suffrage: Voter},
-		{ID: "peer-1", Suffrage: Voter},
-		{ID: "peer-2", Suffrage: Voter},
-		{ID: "learner-1", Suffrage: NonVoter},
-	}
-	peers, learners := restoreConfigFromServers(servers, "self")
-	assert.ElementsMatch(t, []string{"peer-1", "peer-2"}, peers, "voters excluding self")
-	_, ok := learners["learner-1"]
-	assert.True(t, ok, "learner-1 must be in learners map")
-	_, ok = learners["peer-1"]
-	assert.False(t, ok, "voter must not be in learners")
-}
-
-func TestRestoreConfigFromServers_EmptyServers(t *testing.T) {
-	peers, learners := restoreConfigFromServers(nil, "self")
-	assert.Empty(t, peers)
-	assert.Empty(t, learners)
-}
-
-func TestRebuildConfigFromLog_WithBase(t *testing.T) {
-	n := &Node{
-		log: []LogEntry{
-			{Index: 3, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-3", Address: "addr-3", ManagedByJoint: false})},
-		},
-		nextIndex:  map[string]uint64{},
-		matchIndex: map[string]uint64{},
-	}
-	basePeers := []string{"peer-1", "peer-2"}
-	baseLearners := map[string]string{}
-	n.rebuildConfigFromLog(0, basePeers, baseLearners)
-	require.Contains(t, n.config.Peers, "peer-1")
-	require.Contains(t, n.config.Peers, "peer-2")
-	require.Contains(t, n.config.Peers, "addr-3")
-}
-
-func TestRebuildConfigFromLog_SkipsBeforeStartIndex(t *testing.T) {
-	n := &Node{
-		log: []LogEntry{
-			{Index: 2, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-old", Address: "addr-old", ManagedByJoint: false})},
-			{Index: 5, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "peer-new", Address: "addr-new", ManagedByJoint: false})},
-		},
-		nextIndex:  map[string]uint64{},
-		matchIndex: map[string]uint64{},
-	}
-	n.rebuildConfigFromLog(3, []string{"peer-base"}, map[string]string{})
-	assert.NotContains(t, n.config.Peers, "addr-old", "entry at index 2 must be skipped")
-	assert.Contains(t, n.config.Peers, "addr-new", "entry at index 5 must be applied")
-}
-
-func TestCheckLearnerCatchup_NoLearners(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.commitIndex = 100
-	n.mu.Unlock()
-
-	n.mu.Lock()
-	n.checkLearnerCatchup()
-	n.mu.Unlock()
-
-	select {
-	case p := <-n.proposalCh:
-		t.Fatalf("unexpected proposal: %v", p)
-	default:
-	}
-}
-
-func TestCheckLearnerCatchup_PendingConfChange(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.commitIndex = 100
-	n.learnerIDs["learner-1"] = "learner-1"
-	n.matchIndex["learner-1"] = 100
-	n.pendingConfChangeIndex = 50
-	n.mu.Unlock()
-
-	n.mu.Lock()
-	n.checkLearnerCatchup()
-	n.mu.Unlock()
-
-	select {
-	case p := <-n.proposalCh:
-		t.Fatalf("watcher must not propose while pending: %v", p)
-	default:
-	}
-}
-
-func TestCheckLearnerCatchup_StateNotLeader(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Follower
-	n.commitIndex = 100
-	n.learnerIDs["learner-1"] = "learner-1"
-	n.matchIndex["learner-1"] = 100
-	n.mu.Unlock()
-
-	n.mu.Lock()
-	n.checkLearnerCatchup()
-	n.mu.Unlock()
-
-	select {
-	case p := <-n.proposalCh:
-		t.Fatalf("watcher must not propose when not leader: %v", p)
-	default:
-	}
-}
-
-func TestCheckLearnerCatchup_Threshold(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	cfg.LearnerCatchupThreshold = 10
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.commitIndex = 100
-	n.learnerIDs["learner-far"] = "learner-far"
-	n.matchIndex["learner-far"] = 80
-	n.learnerIDs["learner-near"] = "learner-near"
-	n.matchIndex["learner-near"] = 95
-	n.mu.Unlock()
-
-	n.mu.Lock()
-	n.checkLearnerCatchup()
-	n.mu.Unlock()
-
-	select {
-	case p := <-n.proposalCh:
-		cc := decodeConfChange(p.command)
-		require.Equal(t, ConfChangePromote, cc.Op)
-		require.Equal(t, "learner-near", cc.ID)
-	default:
-		t.Fatal("watcher must propose for caught-up learner")
-	}
-}
-
-// TestCheckLearnerCatchup_SkipsDuringJoint — Sub-project 3 PR-K1 regression
-// guard. While JointEntering, auto-promote watcher must not propose because
-// the joint will atomically promote new voters via C_new.
-func TestCheckLearnerCatchup_SkipsDuringJoint(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.commitIndex = 100
-	n.learnerIDs["learner-1"] = "learner-1"
-	n.matchIndex["learner-1"] = 100
-	n.jointPhase = JointEntering // joint in flight
-	n.mu.Unlock()
-
-	n.mu.Lock()
-	n.checkLearnerCatchup()
-	n.mu.Unlock()
-
-	select {
-	case p := <-n.proposalCh:
-		t.Fatalf("watcher must not propose during JointEntering: %v", p)
-	default:
-	}
-}
-
-// TestCheckLearnerCatchup_SkipsJointManaged — Sub-project 3 PR-K1 regression
-// guard. ChangeMembership-managed learners must not be auto-promoted during
-// the pre-joint catch-up window.
-func TestCheckLearnerCatchup_SkipsJointManaged(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.commitIndex = 100
-	n.learnerIDs["managed"] = "managed"
-	n.matchIndex["managed"] = 100
-	n.learnerIDs["unmanaged"] = "unmanaged"
-	n.matchIndex["unmanaged"] = 100
-	n.jointManagedLearners["managed"] = struct{}{}
-	n.mu.Unlock()
-
-	n.mu.Lock()
-	n.checkLearnerCatchup()
-	n.mu.Unlock()
-
-	select {
-	case p := <-n.proposalCh:
-		cc := decodeConfChange(p.command)
-		require.Equal(t, ConfChangePromote, cc.Op)
-		require.Equal(t, "unmanaged", cc.ID,
-			"only the non-managed learner should be promoted")
-	default:
-		t.Fatal("watcher must propose for unmanaged caught-up learner")
-	}
-}
-
-func TestApplyLoopClosesPromoteCh(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.Start()
-	defer n.Stop()
-
-	n.mu.Lock()
-	n.learnerIDs["learner-1"] = "learner-1"
-	ch := make(chan struct{})
-	n.learnerPromoteCh["learner-1"] = ch
-	cmd := encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "learner-1", Address: "", ManagedByJoint: false})
-	entry := LogEntry{Term: 1, Index: 1, Command: cmd, Type: LogEntryConfChange}
-	n.log = append(n.log, entry)
-	n.firstIndex = 1
-	n.commitIndex = 1
-	n.lastApplied = 0
-	n.mu.Unlock()
-
-	n.signalCommit()
-
-	select {
-	case <-ch:
-		// PASS
-	case <-time.After(1 * time.Second):
-		t.Fatal("promoteCh not closed after promote commit")
-	}
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	_, exists := n.learnerPromoteCh["learner-1"]
-	require.False(t, exists, "promoteCh entry must be deleted after close")
-}
-
-func TestAddVoter_Idempotent_AlreadyVoter(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"existing-voter"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.mu.Unlock()
-
-	err := n.AddVoter("existing-voter", "existing-voter")
-	require.NoError(t, err, "already-voter must return nil idempotently")
-
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	_, isLearner := n.learnerIDs["existing-voter"]
-	require.False(t, isLearner, "voter must not be demoted to learner")
-}
-
-func TestAddVoter_NotLeader(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-
-	err := n.AddVoter("new-node", "new-node")
-	require.ErrorIs(t, err, ErrNotLeader)
-}
-
-func TestAddVoter_MixedVersion(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.mu.Unlock()
-	n.SetMixedVersion(true)
-
-	err := n.AddVoter("new-node", "new-node")
-	require.ErrorIs(t, err, ErrMixedVersionNoMembershipChange)
-}
-
-func TestAddVoter_Concurrent_ReturnsErr(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.pendingConfChangeIndex = 50
-	n.mu.Unlock()
-
-	err := n.AddVoter("new-node", "new-node")
-	require.ErrorIs(t, err, ErrConfChangeInProgress)
-}
-
-func TestAddVoter_CtxTimeout_LearnerRemains(t *testing.T) {
-	// Verifies the ctx-timeout path of AddVoterCtx. Without Start() the batcher
-	// is not consuming proposalCh, so AddLearner ConfChange never commits and
-	// the proposeConfChangeWait inside AddVoter respects ctx.Done() and returns.
-	// The learnerIDs map is checked manually to confirm no spurious side effects.
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	err := n.AddVoterCtx(ctx, "slow-learner", "slow-learner")
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-
-	// Since no apply loop ran, no learner was added — but if it had been added,
-	// the iron rule says it must remain on ctx timeout. Both states satisfy
-	// "learner not promoted to voter" for this test.
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for _, p := range n.config.Peers {
-		require.NotEqual(t, "slow-learner", p, "must not be voter on ctx timeout")
-	}
-}
-
-func TestAddVoter_Idempotent_AlreadyLearner(t *testing.T) {
-	// Verifies that a node already in learnerIDs is not in config.Peers,
-	// so the pre-check doesn't short-circuit. (Full re-call behavior covered E2E.)
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.state = Leader
-	n.learnerIDs["existing-learner"] = "existing-learner"
-	mu := false
-	for _, p := range n.config.Peers {
-		if p == "existing-learner" {
-			mu = true
-		}
-	}
-	n.mu.Unlock()
-	require.False(t, mu, "learner must not be in config.Peers")
-}
-
-// TestInitLeaderState_InitializesLearnerReplicationState is a regression test
-// for a bug where a node elected leader after a learner had been added in a
-// previous term would have unset nextIndex/matchIndex for that learner.
-// Without this initialization, the catch-up watcher reads matchIndex=0 from
-// an absent map entry, replicateToAll's learner replication starts from
-// nextIdx=0 (snapshot mode unintentionally), and learner promotion stalls.
-func TestInitLeaderState_InitializesLearnerReplicationState(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"voter-1"})
-	n := NewNode(cfg)
-
-	// Simulate state after a learner was added in a previous term while this
-	// node was a follower (applyConfigChangeLocked added it to learnerIDs but
-	// did not touch nextIndex/matchIndex — those are leader-only state).
-	n.mu.Lock()
-	n.learnerIDs["learner-1"] = "learner-addr"
-	// Simulate some entries in the log
-	n.log = []LogEntry{
-		{Term: 1, Index: 1, Command: []byte("e1")},
-		{Term: 1, Index: 2, Command: []byte("e2")},
-	}
-	n.firstIndex = 1
-
-	// Now this node becomes leader.
-	n.initLeaderState()
-	defer n.mu.Unlock()
-
-	// Both voter and learner must have nextIndex set to lastLogIdx+1.
-	expectedNext := uint64(3) // lastLogIdx (2) + 1
-	require.Equal(t, expectedNext, n.nextIndex["voter-1"], "voter nextIndex must be initialized")
-	require.Equal(t, expectedNext, n.nextIndex["learner-addr"], "learner nextIndex must be initialized")
-	require.Equal(t, uint64(0), n.matchIndex["learner-addr"], "learner matchIndex must start at 0")
-}
-
-func TestConfChangePayload_ManagedByJointRoundtrip(t *testing.T) {
-	original := ConfChangePayload{
-		Op:             ConfChangeAddLearner,
-		ID:             "learner-1",
-		Address:        "addr-1",
-		ManagedByJoint: true,
-	}
-
-	cmd := encodeConfChange(original)
-	decoded := decodeConfChange(cmd)
-
-	if decoded.Op != original.Op {
-		t.Errorf("Op mismatch: got %v, want %v", decoded.Op, original.Op)
-	}
-	if decoded.ID != original.ID {
-		t.Errorf("ID mismatch: got %s, want %s", decoded.ID, original.ID)
-	}
-	if decoded.Address != original.Address {
-		t.Errorf("Address mismatch: got %s, want %s", decoded.Address, original.Address)
-	}
-	if decoded.ManagedByJoint != original.ManagedByJoint {
-		t.Errorf("ManagedByJoint mismatch: got %v, want %v", decoded.ManagedByJoint, original.ManagedByJoint)
-	}
-}
-
-func TestEncodeConfChange_OmitManagedByJointDefaultsToFalse(t *testing.T) {
-	// Go zero value for bool is false - test that omitted field defaults to false
-	payload := ConfChangePayload{
-		Op:      ConfChangeAddLearner,
-		ID:      "learner-1",
-		Address: "addr-1",
-		// ManagedByJoint omitted - should default to false
-	}
-
-	cmd := encodeConfChange(payload)
-	decoded := decodeConfChange(cmd)
-
-	if decoded.ManagedByJoint != false {
-		t.Errorf("ManagedByJoint should default to false when omitted, got %v", decoded.ManagedByJoint)
-	}
-}
-
-func TestDecodeConfChange_ExtractsManagedByJoint(t *testing.T) {
-	testCases := []struct {
-		name           string
-		managedByJoint bool
-	}{
-		{"managed by joint", true},
-		{"not managed", false},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			payload := ConfChangePayload{
-				Op:             ConfChangeAddLearner,
-				ID:             "learner-1",
-				Address:        "addr-1",
-				ManagedByJoint: tc.managedByJoint,
-			}
-
-			cmd := encodeConfChange(payload)
-			decoded := decodeConfChange(cmd)
-
-			if decoded.ManagedByJoint != tc.managedByJoint {
-				t.Errorf("ManagedByJoint mismatch: got %v, want %v", decoded.ManagedByJoint, tc.managedByJoint)
-			}
-		})
-	}
-}
-
-// Stage 2: Apply path — ManagedByJoint registration in jointManagedLearners.
-
-func TestApplyConfChange_ManagedByJoint_RegistersInSet(t *testing.T) {
-	tests := []struct {
-		name      string
-		managed   bool
-		wantInSet bool
-	}{
-		{"managed=true registers", true, true},
-		{"managed=false skips", false, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := DefaultConfig("self", []string{"peer-1"})
-			n := NewNode(cfg)
-			n.mu.Lock()
-			entry := LogEntry{
-				Index: 1, Term: 1, Type: LogEntryConfChange,
-				Command: encodeConfChange(ConfChangePayload{
-					Op: ConfChangeAddLearner, ID: "learner-1", Address: "addr-1",
-					ManagedByJoint: tc.managed,
-				}),
-			}
-			n.applyConfigChangeLocked(entry)
-			_, inSet := n.jointManagedLearners["learner-1"]
-			n.mu.Unlock()
-			require.Equal(t, tc.wantInSet, inSet)
-		})
-	}
-}
-
-// Stage 2: Replay path — rebuildConfigFromLog restores jointManagedLearners.
-
-func TestRebuildConfigFromLog_ManagedByJoint_RestoresState(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.log = []LogEntry{
-		{Index: 1, Term: 1, Type: LogEntryConfChange,
-			Command: encodeConfChange(ConfChangePayload{
-				Op: ConfChangeAddLearner, ID: "managed", Address: "addr-m", ManagedByJoint: true,
-			})},
-		{Index: 2, Term: 1, Type: LogEntryConfChange,
-			Command: encodeConfChange(ConfChangePayload{
-				Op: ConfChangeAddLearner, ID: "unmanaged", Address: "addr-u", ManagedByJoint: false,
-			})},
-	}
-	n.firstIndex = 1
-	n.rebuildConfigFromLog(0, nil, nil)
-	_, managedInSet := n.jointManagedLearners["managed"]
-	_, unmanagedInSet := n.jointManagedLearners["unmanaged"]
-	n.mu.Unlock()
-
-	require.True(t, managedInSet, "managed learner must be in jointManagedLearners after rebuild")
-	require.False(t, unmanagedInSet, "unmanaged learner must not be in jointManagedLearners after rebuild")
-}
-
-func TestRebuildConfigFromLog_JointLeave_ClearsManaged(t *testing.T) {
-	cfg := DefaultConfig("self", []string{"peer-1"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	n.log = []LogEntry{
-		{Index: 1, Term: 1, Type: LogEntryConfChange,
-			Command: encodeConfChange(ConfChangePayload{
-				Op: ConfChangeAddLearner, ID: "managed-1", Address: "addr-m", ManagedByJoint: true,
-			})},
-		{Index: 2, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op: JointOpLeave,
-				NewServers: []ServerEntry{
-					{ID: "self", Address: "self", Suffrage: Voter},
-					{ID: "managed-1", Address: "addr-m", Suffrage: Voter},
-				},
-			})},
-	}
-	n.firstIndex = 1
-	n.rebuildConfigFromLog(0, nil, nil)
-	_, inSet := n.jointManagedLearners["managed-1"]
-	n.mu.Unlock()
-
-	require.False(t, inSet, "managed learner must be cleared from jointManagedLearners after JointOpLeave")
-}
-
-// TestJointOpAbort_ManagedLearnerCleared is the unit test for Bug 1: after
-// JointOpAbort applies, managed learner IDs must be removed from learnerIDs.
-// Without the fix, checkLearnerCatchup sees them as ordinary learners and
-// auto-promotes them into the wrong voter set.
-func TestJointOpAbort_ManagedLearnerCleared(t *testing.T) {
-	n := &Node{
-		id:                   "n1",
-		matchIndex:           make(map[string]uint64),
-		nextIndex:            make(map[string]uint64),
-		learnerIDs:           map[string]string{"n4": "n4-addr"},
-		learnerPromoteCh:     make(map[string]chan struct{}),
-		jointManagedLearners: map[string]struct{}{"n4": {}},
-	}
-
-	oldServers := []ServerEntry{
-		{ID: "n1", Address: "n1", Suffrage: Voter},
-		{ID: "n2", Address: "n2", Suffrage: Voter},
-		{ID: "n3", Address: "n3", Suffrage: Voter},
-	}
-	newServers := []ServerEntry{
-		{ID: "n1", Address: "n1", Suffrage: Voter},
-		{ID: "n2", Address: "n2", Suffrage: Voter},
-		{ID: "n3", Address: "n3", Suffrage: Voter},
-		{ID: "n4", Address: "n4-addr", Suffrage: Voter},
-	}
-
-	// Simulate JointOpEnter (sets jointPhase = JointEntering).
-	n.applyJointConfChangeLocked(LogEntry{
-		Index: 1, Term: 1, Type: LogEntryJointConfChange,
-		Command: encodeJointConfChange(JointConfChange{
-			Op: JointOpEnter, OldServers: oldServers, NewServers: newServers,
-		}),
-	})
-	require.Equal(t, JointEntering, n.jointPhase)
-
-	// Apply JointOpAbort — n4 must be removed from learnerIDs.
-	n.applyJointConfChangeLocked(LogEntry{
-		Index: 2, Term: 1, Type: LogEntryJointConfChange,
-		Command: encodeJointConfChange(JointConfChange{
-			Op: JointOpAbort, OldServers: oldServers, NewServers: newServers,
-		}),
-	})
-
-	require.Equal(t, JointNone, n.jointPhase)
-	require.NotContains(t, n.LearnerIDs(), "n4",
-		"JointOpAbort must remove managed learner from learnerIDs to prevent spurious auto-promote")
-	require.Nil(t, n.jointManagedLearners, "jointManagedLearners must be nil after abort")
-}
-
-// TestRebuildConfigFromLog_AbortThenLeave_LeaveIsSkipped verifies that when the log
-// contains JointOpAbort followed by a stale JointOpLeave (both in the same joint
-// cycle), rebuildConfigFromLog skips the JointOpLeave so config stays at C_old.
-// This is the log-replay counterpart to applyJointConfChangeLocked's idempotency guard.
-func TestRebuildConfigFromLog_AbortThenLeave_LeaveIsSkipped(t *testing.T) {
-	cfg := DefaultConfig("n1", []string{"n2", "n3"})
-	n := NewNode(cfg)
-	n.mu.Lock()
-	// C_old = {n1, n2, n3}, C_new = {n1, n4, n5}
-	n.log = []LogEntry{
-		{Index: 1, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpEnter,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
-			})},
-		{Index: 2, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpAbort,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
-			})},
-		// Stale JointOpLeave proposed before the abort committed.
-		{Index: 3, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpLeave,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
-			})},
-	}
-	n.firstIndex = 1
-	n.rebuildConfigFromLog(0, nil, nil)
-	peers := n.config.Peers
-	phase := n.jointPhase
-	n.mu.Unlock()
-
-	require.Equal(t, JointNone, phase, "phase must be JointNone after abort+leave sequence")
-	require.Equal(t, []string{"n2", "n3"}, peers,
-		"peers must be C_old after abort; stale JointOpLeave must not switch to C_new")
-}
-
-// TestRebuildConfigFromLog_AbortThenEnterThenLeave verifies that a second joint
-// cycle that follows an aborted first cycle is replayed correctly. The jAborted
-// flag must be cleared on JointOpEnter so the second cycle's JointOpLeave is not
-// mistakenly skipped.
+// startMembershipCluster builds a cluster with the given IDs all wired through
+// a shared memNetwork. The first ID gets the fast election timeout so it
+// wins term 1 deterministically. Unlike startCapturingCluster this helper
+// supports any number of nodes, allows pre-Start configuration overrides
+// (peers list per node), and drains ApplyCh in the background like
+// startCluster.
 //
-// Sequence: Enter(C_old→C_new1) → Abort → Enter(C_old→C_new2) → Leave(C_new2)
-// Expected: config.Peers == C_new2, jointPhase == JointNone.
-func TestRebuildConfigFromLog_AbortThenEnterThenLeave(t *testing.T) {
-	n := &Node{
-		id:                   "n1",
-		matchIndex:           map[string]uint64{},
-		nextIndex:            map[string]uint64{},
-		learnerIDs:           map[string]string{},
-		learnerPromoteCh:     map[string]chan struct{}{},
-		jointManagedLearners: map[string]struct{}{},
-	}
-	n.mu.Lock()
-	n.log = []LogEntry{
-		{Index: 1, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpEnter,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
-			})},
-		{Index: 2, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpAbort,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n4"}, {ID: "n5"}},
-			})},
-		// Second cycle: new C_new = {n1, n6, n7}.
-		{Index: 3, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpEnter,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n6"}, {ID: "n7"}},
-			})},
-		{Index: 4, Term: 1, Type: LogEntryJointConfChange,
-			Command: encodeJointConfChange(JointConfChange{
-				Op:         JointOpLeave,
-				OldServers: []ServerEntry{{ID: "n1"}, {ID: "n2"}, {ID: "n3"}},
-				NewServers: []ServerEntry{{ID: "n1"}, {ID: "n6"}, {ID: "n7"}},
-			})},
-	}
-	n.firstIndex = 1
-	n.rebuildConfigFromLog(0, nil, nil)
-	peers := n.config.Peers
-	phase := n.jointPhase
-	n.mu.Unlock()
-
-	require.Equal(t, JointNone, phase, "second cycle committed: phase must be JointNone")
-	require.Equal(t, []string{"n6", "n7"}, peers,
-		"second cycle Leave must apply; jAborted from first cycle must not bleed over")
+// The function returns the nodes (in the same order as ids) and the shared
+// memNetwork so tests can register additional nodes (the AddVoter happy
+// path needs a node to exist on the network at the time the leader's
+// joint AE arrives).
+type membershipFixture struct {
+	nodes []*Node
+	net   *memNetwork
+	wg    sync.WaitGroup
 }
 
-// TestApplyConfChange_DoesNotAddSelfAsVoter: a joining node, in DynamicJoin,
-// replays its own AddLearner+Promote ConfChanges. It must NOT add its own
-// address to config.Peers — doing so inflates currentVoters (n.id ++
-// config.Peers) and breaks quorum.
-func TestApplyConfChange_DoesNotAddSelfAsVoter(t *testing.T) {
-	n := NewNode(DefaultConfig("A", []string{"B-addr", "C-addr"}))
-	n.mu.Lock()
-	defer n.mu.Unlock()
+func startMembershipCluster(t *testing.T, ids []string) *membershipFixture {
+	t.Helper()
+	require.NotEmpty(t, ids)
+	fix := &membershipFixture{net: newMemNetwork()}
 
-	// AddLearner(self): must not put self into learnerIDs.
-	add := LogEntry{Index: 10, Term: 1, Type: LogEntryConfChange,
-		Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "A", Address: "A-addr"})}
-	n.applyConfChangeLocked(add)
-	_, selfIsLearner := n.learnerIDs["A"]
-	assert.False(t, selfIsLearner, "self must not be recorded as a learner")
+	for i, id := range ids {
+		peers := make([]string, 0, len(ids)-1)
+		for _, p := range ids {
+			if p != id {
+				peers = append(peers, p)
+			}
+		}
+		electionTimeout := slowElectionTimeout
+		if i == 0 {
+			electionTimeout = fastElectionTimeout
+		}
+		n, err := NewNode(Config{
+			ID:               id,
+			Peers:            peers,
+			ElectionTimeout:  electionTimeout,
+			HeartbeatTimeout: testHeartbeat,
+		})
+		require.NoError(t, err)
+		fix.nodes = append(fix.nodes, n)
+	}
 
-	// Promote(self): must be a no-op for config.Peers.
-	prom := LogEntry{Index: 11, Term: 1, Type: LogEntryConfChange,
-		Command: encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "A", Address: "A-addr"})}
-	n.applyConfChangeLocked(prom)
-	assert.ElementsMatch(t, []string{"B-addr", "C-addr"}, n.config.Peers, "self must not be appended to config.Peers")
-
-	// AddVoter(self) directly: also a no-op.
-	addV := LogEntry{Index: 12, Term: 1, Type: LogEntryConfChange,
-		Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "A", Address: "A-addr"})}
-	n.applyConfChangeLocked(addV)
-	assert.ElementsMatch(t, []string{"B-addr", "C-addr"}, n.config.Peers)
-
-	// Sanity: a real remote AddVoter still works.
-	addD := LogEntry{Index: 13, Term: 1, Type: LogEntryConfChange,
-		Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "D", Address: "D-addr"})}
-	n.applyConfChangeLocked(addD)
-	assert.ElementsMatch(t, []string{"B-addr", "C-addr", "D-addr"}, n.config.Peers)
+	for _, n := range fix.nodes {
+		n.SetTransport(fix.net.Register(n.cfg.ID, n))
+	}
+	for _, n := range fix.nodes {
+		n.Start()
+		t.Cleanup(n.Stop)
+		fix.wg.Add(1)
+		go func(n *Node) {
+			defer fix.wg.Done()
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+	return fix
 }
 
-// TestRebuildConfigFromLog_ExcludesSelf: a node restarting replays its own
-// AddLearner+Promote entries from the log; rebuildConfigFromLog must not
-// resurrect the phantom self-entry (the restart twin of
-// TestApplyConfChange_DoesNotAddSelfAsVoter).
-func TestRebuildConfigFromLog_ExcludesSelf(t *testing.T) {
-	n := NewNode(DefaultConfig("A", nil)) // n.id="A", empty starting peers
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.log = []LogEntry{
-		{Index: 1, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "B", Address: "B-addr"})},
-		{Index: 2, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddLearner, ID: "A", Address: "A-addr"})},
-		{Index: 3, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangePromote, ID: "A", Address: "A-addr"})},
-		{Index: 4, Term: 1, Type: LogEntryConfChange, Command: encodeConfChange(ConfChangePayload{Op: ConfChangeAddVoter, ID: "C", Address: "C-addr"})},
+// addNode brings a fresh Node up on the network with the given ID. The
+// Node's seed peers are the current member set (so if the leader installs
+// a snapshot to it later, the seed is harmless). The Node is started and
+// registered with the shared memNetwork.
+func (f *membershipFixture) addNode(t *testing.T, id string, seedPeers []string, electionTimeout time.Duration) *Node {
+	t.Helper()
+	if electionTimeout == 0 {
+		electionTimeout = slowElectionTimeout
 	}
-	n.rebuildConfigFromLog(0, nil, nil)
-	assert.ElementsMatch(t, []string{"B-addr", "C-addr"}, n.config.Peers, "self (A-addr) must not be in rebuilt config.Peers")
-	_, selfLearner := n.learnerIDs["A"]
-	assert.False(t, selfLearner, "self must not be recorded as a learner on replay")
+	n, err := NewNode(Config{
+		ID:               id,
+		Peers:            seedPeers,
+		ElectionTimeout:  electionTimeout,
+		HeartbeatTimeout: testHeartbeat,
+	})
+	require.NoError(t, err)
+	n.SetTransport(f.net.Register(id, n))
+	n.Start()
+	t.Cleanup(n.Stop)
+	f.wg.Add(1)
+	go func() {
+		defer f.wg.Done()
+		for range n.ApplyCh() {
+		}
+	}()
+	f.nodes = append(f.nodes, n)
+	return n
+}
+
+func sortedVoterIDs(c Configuration) []string {
+	out := make([]string, 0, len(c.Servers))
+	for _, s := range c.Servers {
+		out = append(out, s.ID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestMembership_AddVoterHappyPath grows a 3-voter cluster to 4 voters and
+// verifies that all members observe the new configuration after AddVoter
+// returns. The added node is brought up on the network BEFORE AddVoter
+// fires so the joint entry can replicate to it on the leader's first
+// dispatch (the leader's nextIndex for n4 starts at lastLogIndex+1, but
+// any conflict hint will pull it back to 1 — n4 is allowed to start
+// empty).
+func TestMembership_AddVoterHappyPath(t *testing.T) {
+	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
+	leader := fix.nodes[0]
+
+	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }),
+		"n1 did not become leader")
+
+	// Bring n4 up before AddVoter so it can receive the joint entry.
+	// Its seed Peers must reference the current cluster (so the followers
+	// lookup table sees the same network handle), but currentConfig will
+	// be overwritten by the joint entry the leader sends.
+	fix.addNode(t, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, leader.AddVoterCtx(ctx, "n4", "n4-addr"))
+
+	// Configuration on every member must include n4 — and only n4 — added.
+	want := []string{"n1", "n2", "n3", "n4"}
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		for _, n := range fix.nodes {
+			got := sortedVoterIDs(n.Configuration())
+			if len(got) != len(want) {
+				return false
+			}
+			for i, id := range want {
+				if got[i] != id {
+					return false
+				}
+			}
+		}
+		return true
+	}), "configuration did not converge to {n1..n4}")
+}
+
+// TestMembership_AddVoterRejectsDuplicate verifies the leader rejects
+// adding an existing voter with a clean error rather than appending a
+// no-op joint entry.
+func TestMembership_AddVoterRejectsDuplicate(t *testing.T) {
+	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
+	leader := fix.nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
+
+	err := leader.AddVoter("n2", "addr")
+	require.Error(t, err)
+}
+
+// TestMembership_RemoveVoterHappyPath shrinks a 4-voter cluster to 3 voters.
+// After RemoveVoter returns, every remaining member's Configuration drops
+// the removed ID.
+func TestMembership_RemoveVoterHappyPath(t *testing.T) {
+	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
+	leader := fix.nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
+	fix.addNode(t, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, leader.AddVoterCtx(ctx, "n4", "n4-addr"))
+
+	// Now remove n3.
+	require.NoError(t, leader.RemoveVoter("n3"))
+
+	want := []string{"n1", "n2", "n4"}
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		// Skip n3 — it's been ejected and may eventually time out / step
+		// back to follower; the remaining live members must converge.
+		for _, n := range fix.nodes {
+			if n.cfg.ID == "n3" {
+				continue
+			}
+			got := sortedVoterIDs(n.Configuration())
+			if len(got) != len(want) {
+				return false
+			}
+			for i, id := range want {
+				if got[i] != id {
+					return false
+				}
+			}
+		}
+		return true
+	}), "configuration did not converge to {n1, n2, n4}")
+}
+
+// TestMembership_AddVoterRejectsConcurrent: two AddVoter calls at the same
+// time — only one is allowed to be in flight; the second sees
+// ErrConfChangeInFlight.
+func TestMembership_AddVoterRejectsConcurrent(t *testing.T) {
+	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
+	leader := fix.nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
+	fix.addNode(t, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+	fix.addNode(t, "n5", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+
+	// Spin up a goroutine for the first change; the second should see
+	// ErrConfChangeInFlight if it lands while the first is still mid-flight.
+	// Because the joint commit is fast (memNetwork), we issue them as fast
+	// as possible and accept that occasionally the second succeeds — but
+	// at least ONE of the next-voter slots must produce ErrConfChangeInFlight
+	// for this assertion to be meaningful. We retry until we observe it.
+	require.Eventually(t, func() bool {
+		errCh := make(chan error, 2)
+		go func() { errCh <- leader.AddVoter("n4", "addr") }()
+		go func() { errCh <- leader.AddVoter("n5", "addr") }()
+		var sawInFlight bool
+		for i := 0; i < 2; i++ {
+			err := <-errCh
+			if err == ErrConfChangeInFlight {
+				sawInFlight = true
+			}
+		}
+		// If the AddVoters are now both committed, reset for the next try.
+		// (Idempotent — RemoveVoter for n4/n5 if they made it in, ignore
+		// errors.)
+		_ = leader.RemoveVoter("n4")
+		_ = leader.RemoveVoter("n5")
+		return sawInFlight
+	}, 5*time.Second, 50*time.Millisecond, "expected at least one concurrent AddVoter to see ErrConfChangeInFlight")
+}
+
+// TestMembership_TruncateAfterRevertsConfig: a follower with a config entry
+// in its log gets that suffix truncated by a conflicting AE; effective
+// config must revert to whatever was active just before the dropped
+// config entry. Direct unit test on truncateAndRevertConfig.
+func TestMembership_TruncateAfterRevertsConfig(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	require.NoError(t, err)
+	// Seed the log with a normal entry, then a joint entry, then a final
+	// entry. currentConfig should track to the final state.
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+	}})
+	require.True(t, n.st.currentConfig.joint)
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 3, Type: LogEntryConfChange,
+		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
+	}})
+	require.False(t, n.st.currentConfig.joint)
+	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
+	require.Equal(t, uint64(3), n.st.appendedConfigIndex)
+	require.Len(t, n.st.configHistory, 2)
+
+	// Truncate past index 1 — drops both config entries; revert to the
+	// pre-history config (the original {n1,n2,n3}).
+	n.truncateAndRevertConfig(1)
+	require.False(t, n.st.currentConfig.joint)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.st.currentConfig.voters)
+	require.Equal(t, uint64(0), n.st.appendedConfigIndex)
+	require.Empty(t, n.st.configHistory)
+	require.Equal(t, uint64(1), n.st.log.LastIndex())
+}
+
+// TestMembership_TruncateRevertsToJoint: truncate past only the FINAL entry
+// (idx 2) so the joint entry survives. Effective config must end up in
+// joint state.
+func TestMembership_TruncateRevertsToJoint(t *testing.T) {
+	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+	require.NoError(t, err)
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+	}})
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 3, Type: LogEntryConfChange,
+		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
+	}})
+
+	n.truncateAndRevertConfig(2) // drops idx 3 only
+	require.True(t, n.st.currentConfig.joint, "after truncating final, must be back in joint state")
+	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
+	require.Equal(t, []string{"n1", "n2", "n3"}, n.st.currentConfig.oldVoters)
+	require.Equal(t, uint64(2), n.st.appendedConfigIndex)
+	require.Len(t, n.st.configHistory, 1)
+}
+
+// TestMembership_InstallSnapshotResetsConfig: a follower whose live config
+// is in the joint state receives an InstallSnapshot RPC carrying a
+// post-joint Cnew. Its effective config must reset to the snapshot's
+// voter set (non-joint).
+func TestMembership_InstallSnapshotResetsConfig(t *testing.T) {
+	n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}})
+	require.NoError(t, err)
+
+	// Force the follower into a joint state via direct state manipulation
+	// (pre-Start so the actor goroutine is not running). Append a joint
+	// entry to the log and update tracking.
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"leader", "follower"}, []string{"leader", "follower", "newcomer"}),
+	}})
+	require.True(t, n.st.currentConfig.joint)
+	require.Equal(t, uint64(2), n.st.appendedConfigIndex)
+
+	n.Start()
+	t.Cleanup(n.Stop)
+	go func() {
+		for range n.ApplyCh() {
+		}
+	}()
+
+	// Inject a snapshot whose Configuration is post-joint Cnew.
+	reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
+		Term:              1,
+		LeaderID:          "leader",
+		LastIncludedIndex: 5,
+		LastIncludedTerm:  1,
+		Configuration:     []string{"leader", "follower", "newcomer"},
+		Data:              []byte("snap"),
+	})
+	require.NotNil(t, reply)
+
+	// Configuration must reset to the snapshot's voter set.
+	require.NoError(t, waitFor(time.Second, func() bool {
+		got := sortedVoterIDs(n.Configuration())
+		return len(got) == 3 && got[0] == "follower" && got[1] == "leader" && got[2] == "newcomer"
+	}), "Configuration did not reset to snapshot voters")
+
+	rs := n.rs.Load()
+	require.False(t, rs.config.joint, "must exit joint state after snapshot install")
+}
+
+// TestMembership_SelfRemovedLeaderStepsDown: 3-voter cluster, leader
+// removes itself. After the final ConfChange entry commits, the leader
+// must step down to Follower and one of the remaining voters must
+// eventually win the next election.
+func TestMembership_SelfRemovedLeaderStepsDown(t *testing.T) {
+	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
+	leader := fix.nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
+
+	require.NoError(t, leader.RemoveVoter("n1"))
+
+	// Leader steps down once Cnew (excluding n1) commits.
+	require.NoError(t, waitFor(3*time.Second, func() bool {
+		return !leader.IsLeader() && leader.State() == Follower
+	}), "self-removed leader did not step down")
+
+	// One of the remaining voters must take over (election may take a
+	// few hundred milliseconds because n2 and n3 use slowElectionTimeout).
+	require.NoError(t, waitFor(5*time.Second, func() bool {
+		return fix.nodes[1].IsLeader() || fix.nodes[2].IsLeader()
+	}), "no successor leader after self-removal")
+}
+
+// TestMembership_ColdOnlyVoterCanElect: per Raft §4.3, a server in Cold but
+// not in Cnew is still a legitimate voter during the joint period — "any
+// server from either configuration may serve as leader." Concrete scenario:
+// 2→1 shrink (Cold={a,b}, Cnew={b}). If b is partitioned mid-joint, a must
+// be allowed to call an election to drive the joint forward; the
+// onElectionTimeout guard must consult Cold ∪ Cnew, not Cnew alone.
+func TestMembership_ColdOnlyVoterCanElect(t *testing.T) {
+	n, err := NewNode(Config{ID: "a", Peers: []string{"b"}})
+	require.NoError(t, err)
+	// Drive the node into a joint state with Cold={a,b} and Cnew={b}.
+	// Pre-Start state manipulation, mirroring TestMembership_TruncateAfterRevertsConfig.
+	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
+	n.appendAndTrackConfig([]LogEntry{{
+		Term: 1, Index: 2, Type: LogEntryJointConfChange,
+		Command: encodeJointConfChange([]string{"a", "b"}, []string{"b"}),
+	}})
+	require.True(t, n.st.currentConfig.joint)
+	require.False(t, n.st.currentConfig.containsVoter("a"), "a is in Cold but not Cnew")
+
+	startTerm := n.st.currentTerm
+	require.Equal(t, Follower, n.st.state)
+
+	// onElectionTimeout must NOT short-circuit a Cold-only voter — it must
+	// transition to Candidate and bump the term so the joint can make
+	// progress. Pre-Start: transport is nil so RV broadcasts no-op safely;
+	// stable store is in-memory so persistHardState is non-blocking.
+	n.onElectionTimeout()
+
+	require.Equal(t, Candidate, n.st.state, "Cold-only voter must be allowed to become Candidate during joint state")
+	require.Equal(t, startTerm+1, n.st.currentTerm, "becomeCandidate must bump term")
 }

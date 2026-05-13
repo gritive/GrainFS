@@ -70,7 +70,7 @@ func TestNewRaftV2NodeForServeruntime_DurableStoresAtSubdir(t *testing.T) {
 
 	// The constructed node must be the v2 adapter, not a v1 *raft.Node.
 	// (Type assertion via the cluster.RaftNode interface.)
-	_, isV1 := node.(*raft.Node)
+	_, isV1 := any(node).(*raft.Node)
 	require.False(t, isV1, "serveruntime v2 entry point must not return *raft.Node")
 }
 

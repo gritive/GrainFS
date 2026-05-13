@@ -20,11 +20,12 @@ const (
 )
 
 type PlacementMeta struct {
-	VersionID   string
-	RingVersion RingVersion
-	ECData      uint8
-	ECParity    uint8
-	NodeIDs     []string
+	VersionID        string
+	RingVersion      RingVersion
+	ECData           uint8
+	ECParity         uint8
+	NodeIDs          []string
+	PlacementGroupID string
 }
 
 type ResolvedPlacement struct {

@@ -9,7 +9,6 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -28,7 +27,6 @@ type GroupBackend struct {
 	*DistributedBackend
 	groupID         string
 	peerIDs         []string
-	logStore        raft.LogStore               // owned: closed on GroupBackend.Close (nil if wrapped)
 	vlogEntry       *resourcewatch.RegisteredDB // owned: deregistered on Close (nil if wrapped)
 	v2StoreClose    func() error                // owned: invoked on Close (nil when v2 not in use)
 	wrapped         bool                        // true → Close is no-op (caller owns lifecycle)
@@ -45,8 +43,7 @@ type raftLeaderProbe interface {
 }
 
 // leaderProbe returns the IsLeader source for ResolveWrite. Exists to allow
-// tests to inject a fake via testLeaderProbe; production callers should use
-// RaftNode() directly.
+// tests to inject a fake via testLeaderProbe; production callers use Node().
 func (g *GroupBackend) leaderProbe() raftLeaderProbe {
 	if g.testLeaderProbe != nil {
 		return g.testLeaderProbe
@@ -72,14 +69,13 @@ type GroupBackendConfig struct {
 	Root      string
 	DB        *badger.DB
 	Node      RaftNode
-	LogStore  raft.LogStore               // optional — owned by GroupBackend (closed on Close)
 	VlogEntry *resourcewatch.RegisteredDB // optional — owned by GroupBackend (deregistered on Close)
 	ShardSvc  *ShardService               // may be nil for in-process / single-node tests
 	PeerIDs   []string                    // EC node pool = group voter set
 	EC        ECConfig
 	// V2StoreClose, if non-nil, is invoked on Close to release the per-group
 	// Badger DB that backs the v2 LogStore + StableStore + SnapshotStore
-	// trio. Nil for v1 paths (the BadgerLogStore field is the v1 closer).
+	// trio.
 	V2StoreClose func() error
 	Keyspace     *stateKeyspace // nil → identity keyspace (newStateKeyspaceEmpty)
 	Shared       bool           // true → Close does not close the DB (caller owns lifecycle)
@@ -90,8 +86,7 @@ type GroupBackendConfig struct {
 // DataGroupManager without doubly-opening a BadgerDB.
 //
 // The wrapped DistributedBackend's lifecycle is owned by the caller — Close()
-// on this GroupBackend will NOT close the wrapped instance (logStore=nil,
-// closeOnce protects against double-close on the embedded type).
+// on this GroupBackend will NOT close the wrapped instance.
 func WrapDistributedBackend(groupID string, b *DistributedBackend) *GroupBackend {
 	return &GroupBackend{
 		DistributedBackend: b,
@@ -134,7 +129,6 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 		DistributedBackend: dist,
 		groupID:            cfg.ID,
 		peerIDs:            cloneStringSlice(cfg.PeerIDs),
-		logStore:           cfg.LogStore,
 		vlogEntry:          cfg.VlogEntry,
 		v2StoreClose:       cfg.V2StoreClose,
 	}, nil
@@ -185,18 +179,8 @@ func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	return g.DistributedBackend.CompleteMultipartUpload(g.placementContext(ctx), bucket, key, uploadID, parts)
 }
 
-// Node returns the RaftNode interface for this group. Prefer this over
-// RaftNode() for membership operations; it works for both v1 and v2.
+// Node returns the RaftNode interface for this group.
 func (g *GroupBackend) Node() RaftNode { return g.node }
-
-// RaftNode returns the underlying *raft.Node via type assertion. Always
-// returns nil in production as of M5 PR 29 (the v1 path is unreachable now
-// that the GRAINFS_RAFT_V2 flag is gone). Kept for source-compat with
-// v1-specific callers until PR 30 deletes the v1 raft package.
-func (g *GroupBackend) RaftNode() *raft.Node {
-	v1, _ := g.node.(*raft.Node)
-	return v1
-}
 
 // Close shuts down BadgerDB and raft.Node. Idempotent — safe to call multiple
 // times. The wrapped DistributedBackend.Close() handles BadgerDB; we close
@@ -213,11 +197,6 @@ func (g *GroupBackend) Close() error {
 			g.node.Close()
 		}
 		err = g.DistributedBackend.Close() // closes meta BadgerDB
-		if g.logStore != nil {
-			if cErr := g.logStore.Close(); cErr != nil && err == nil {
-				err = cErr
-			}
-		}
 		if g.v2StoreClose != nil {
 			if cErr := g.v2StoreClose(); cErr != nil && err == nil {
 				err = cErr

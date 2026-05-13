@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
-	raftv2 "github.com/gritive/GrainFS/internal/raft/v2"
 )
 
 // newV2LeaderForMembership builds a single-node v2 RaftNode (via raftV2Node
@@ -19,7 +18,7 @@ func newV2LeaderForMembership(t *testing.T) RaftNode {
 	t.Helper()
 
 	rcfg := raft.DefaultConfig("membership-n1", nil)
-	node, _, err := newRaftNode(rcfg, nil, "")
+	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRV, noopAE)
 	node.Start()
@@ -29,7 +28,7 @@ func newV2LeaderForMembership(t *testing.T) RaftNode {
 		}
 	}()
 
-	if err := node.Bootstrap(); err != nil && !errors.Is(err, raftv2.ErrAlreadyBootstrapped) {
+	if err := node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
@@ -54,7 +53,7 @@ func newV2FollowerForMembership(t *testing.T) RaftNode {
 
 	// Supply a peer so the node is NOT a solo voter (solo voters auto-elect).
 	rcfg := raft.DefaultConfig("membership-follower", []string{"membership-peer"})
-	node, _, err := newRaftNode(rcfg, nil, "")
+	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 	node.SetTransport(noopRV, noopAE)
 	node.Start()
@@ -126,7 +125,7 @@ func TestRaftV2Membership_PromoteToVoter_RejectsNonLearner(t *testing.T) {
 	err := node.PromoteToVoter("n2")
 	require.Error(t, err, "PromoteToVoter on a non-learner must return an error")
 	assert.True(t,
-		errors.Is(err, raftv2.ErrNotALearner),
+		errors.Is(err, raft.ErrNotALearner),
 		"expected ErrNotALearner, got: %v", err)
 }
 

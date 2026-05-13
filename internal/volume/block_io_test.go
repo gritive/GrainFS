@@ -3,6 +3,7 @@ package volume
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -10,6 +11,22 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type readAtFailBackend struct {
+	storage.Backend
+}
+
+func (b readAtFailBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	return b.Backend.(storage.PartialIO).WriteAt(ctx, bucket, key, offset, data)
+}
+
+func (b readAtFailBackend) ReadAt(context.Context, string, string, int64, []byte) (int, error) {
+	return 0, errors.New("readat unavailable")
+}
+
+func (b readAtFailBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	return b.Backend.(storage.PartialIO).Truncate(ctx, bucket, key, size)
+}
 
 func TestBlockIOReadCacheHitRecordsMeterAndAvoidsStore(t *testing.T) {
 	store := newFakeBlockStore()
@@ -30,6 +47,27 @@ func TestBlockIOReadCacheHitRecordsMeterAndAvoidsStore(t *testing.T) {
 	require.Equal(t, []byte("bcd"), dst)
 	require.Empty(t, store.gets)
 	require.Equal(t, []string{"phys-0"}, meter.keys)
+}
+
+func TestBackendBlockObjectStoreReadAtErrorFallsBackToGetObject(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), volumeBucketName))
+	_, err = local.PutObject(context.Background(), volumeBucketName, "blk", bytes.NewReader([]byte("payload")), "application/octet-stream")
+	require.NoError(t, err)
+
+	store := backendBlockObjectStore{backend: readAtFailBackend{Backend: local}}
+	buf := make([]byte, 4)
+	n, ok := store.ReadAt(context.Background(), volumeBucketName, "blk", 0, buf)
+	require.False(t, ok)
+	require.Zero(t, n)
+
+	rc, _, err := store.GetObject(context.Background(), volumeBucketName, "blk")
+	require.NoError(t, err)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), body)
 }
 
 func TestBlockIOWriteFullBlockSelectsDirectKeyAndReportsAllocation(t *testing.T) {

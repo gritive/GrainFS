@@ -16,9 +16,10 @@ import (
 
 // mockTransport implements transport.Transport for gossip tests.
 type mockTransport struct {
-	mu   sync.Mutex
-	sent []sentMsg
-	recv chan *transport.ReceivedMessage
+	mu        sync.Mutex
+	sent      []sentMsg
+	connected []string
+	recv      chan *transport.ReceivedMessage
 }
 
 type sentMsg struct {
@@ -30,8 +31,13 @@ func newMockTransport() *mockTransport {
 	return &mockTransport{recv: make(chan *transport.ReceivedMessage, 64)}
 }
 
-func (m *mockTransport) Listen(_ context.Context, _ string) error   { return nil }
-func (m *mockTransport) Connect(_ context.Context, _ string) error  { return nil }
+func (m *mockTransport) Listen(_ context.Context, _ string) error { return nil }
+func (m *mockTransport) Connect(_ context.Context, addr string) error {
+	m.mu.Lock()
+	m.connected = append(m.connected, addr)
+	m.mu.Unlock()
+	return nil
+}
 func (m *mockTransport) Close() error                               { return nil }
 func (m *mockTransport) Receive() <-chan *transport.ReceivedMessage { return m.recv }
 
@@ -60,6 +66,17 @@ func (m *mockTransport) AllSent() []sentMsg {
 	out := make([]sentMsg, len(m.sent))
 	copy(out, m.sent)
 	return out
+}
+
+func (m *mockTransport) ConnectedTo(addr string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, got := range m.connected {
+		if got == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // inject simulates an incoming message from a remote node.

@@ -31,9 +31,15 @@ type fakeRaftNode struct {
 	changeMembershipCalls int
 	lastAdds              []raft.ServerEntry
 	lastRemoves           []string
+	isLeaderFn            func() bool
 }
 
-func (f *fakeRaftNode) IsLeader() bool         { return f.isLeader }
+func (f *fakeRaftNode) IsLeader() bool {
+	if f.isLeaderFn != nil {
+		return f.isLeaderFn()
+	}
+	return f.isLeader
+}
 func (f *fakeRaftNode) CommittedIndex() uint64 { return f.committed }
 func (f *fakeRaftNode) TransferLeadership() error {
 	if f.transferFn != nil {
@@ -116,12 +122,16 @@ type fakeAddrBook struct{ nodes []cluster.MetaNodeEntry }
 func (f *fakeAddrBook) Nodes() []cluster.MetaNodeEntry { return f.nodes }
 
 type fakeSGUpdater struct {
-	proposed []cluster.ShardGroupEntry
-	err      error
+	proposed   []cluster.ShardGroupEntry
+	err        error
+	errForCall []error
 }
 
 func (f *fakeSGUpdater) ProposeShardGroup(_ context.Context, sg cluster.ShardGroupEntry) error {
 	f.proposed = append(f.proposed, sg)
+	if len(f.errForCall) >= len(f.proposed) {
+		return f.errForCall[len(f.proposed)-1]
+	}
 	return f.err
 }
 
@@ -166,6 +176,165 @@ func TestMoveReplica_HappyPath(t *testing.T) {
 	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
 	require.Contains(t, sgUpdater.proposed[0].PeerIDs, "node-3")
 	require.NotContains(t, sgUpdater.proposed[0].PeerIDs, "node-0")
+}
+
+func TestAddReplica_HappyPath(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, fakeNode.lastAdds, 1)
+	require.Equal(t, "node-1", fakeNode.lastAdds[0].ID)
+	require.Equal(t, "10.0.0.1:9001", fakeNode.lastAdds[0].Address)
+	require.Equal(t, raft.Voter, fakeNode.lastAdds[0].Suffrage)
+	require.Empty(t, fakeNode.lastRemoves)
+
+	require.Len(t, sgUpdater.proposed, 2)
+	require.Equal(t, "group-0", sgUpdater.proposed[0].ID)
+	require.Equal(t, []string{"node-0", "node-1"}, sgUpdater.proposed[0].PeerIDs)
+	require.Equal(t, []string{"node-0", "node-1"}, exec.DGMgr().Get("group-0").PeerIDs())
+}
+
+func TestAddReplica_PrePublishesDesiredPeersBeforeChangeMembership(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	proposalsBeforeChange := -1
+	fakeNode.changeMembershipFn = func(_ context.Context, _ []raft.ServerEntry, _ []string) error {
+		proposalsBeforeChange = len(sgUpdater.proposed)
+		return nil
+	}
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+
+	require.Equal(t, 1, proposalsBeforeChange, "desired peers must be published before raft membership change so the joining node starts the group")
+	require.GreaterOrEqual(t, len(sgUpdater.proposed), 2)
+	require.Equal(t, []string{"node-0", "node-1"}, sgUpdater.proposed[0].PeerIDs)
+}
+
+func TestAddReplica_NotLocalLeaderIsTypedAndDoesNotPublishDesiredPeers(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: false, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	err := exec.AddReplica(ctx, "group-0", "node-1")
+	require.ErrorIs(t, err, cluster.ErrDataGroupNotLocalLeader)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Empty(t, sgUpdater.proposed)
+}
+
+func TestAddReplica_PrePublishErrorDoesNotChangeMembership(t *testing.T) {
+	sgErr := errors.New("meta apply timeout")
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	addrBook := &fakeAddrBook{nodes: nodes}
+	sgUpdater := &fakeSGUpdater{err: sgErr}
+	dgMgr := cluster.NewDataGroupManager()
+	exec := cluster.NewDataGroupPlanExecutorForTest("local-node", dgMgr, addrBook, sgUpdater, func(dg *cluster.DataGroup) cluster.DataRaftNode {
+		return fakeNode
+	})
+	dgMgr.Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.ErrorIs(t, err, sgErr)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Equal(t, []string{"node-0"}, dgMgr.Get("group-0").PeerIDs())
+}
+
+func TestAddReplica_ChangeMembershipErrorRollsBackPrePublishedPeers(t *testing.T) {
+	cmErr := errors.New("configuration change already in flight")
+	fakeNode := &fakeRaftNode{
+		isLeader:    true,
+		committed:   10,
+		autoCatchup: true,
+		changeMembershipFn: func(context.Context, []raft.ServerEntry, []string) error {
+			return cmErr
+		},
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.ErrorIs(t, err, cmErr)
+
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, sgUpdater.proposed, 2)
+	require.Equal(t, []string{"node-0", "node-1"}, sgUpdater.proposed[0].PeerIDs)
+	require.Equal(t, []string{"node-0"}, sgUpdater.proposed[1].PeerIDs)
+	require.Equal(t, []string{"node-0"}, exec.DGMgr().Get("group-0").PeerIDs())
+}
+
+func TestAddReplica_SkipsExistingVoter(t *testing.T) {
+	fakeNode := &fakeRaftNode{isLeader: true, committed: 10, autoCatchup: true}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0", "node-1"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+	require.Equal(t, 0, fakeNode.changeMembershipCalls)
+	require.Empty(t, sgUpdater.proposed)
+}
+
+func TestAddReplica_WaitsForLocalLeadership(t *testing.T) {
+	checks := 0
+	fakeNode := &fakeRaftNode{committed: 10, autoCatchup: true}
+	fakeNode.isLeaderFn = func() bool {
+		checks++
+		return checks >= 3
+	}
+	nodes := []cluster.MetaNodeEntry{
+		{ID: "node-0", Address: "10.0.0.0:9000"},
+		{ID: "node-1", Address: "10.0.0.1:9001"},
+	}
+	exec, sgUpdater := newTestExecutor(t, fakeNode, nodes)
+	exec.DGMgr().Add(cluster.NewDataGroupWithBackend("group-0",
+		[]string{"node-0"}, nil))
+
+	err := exec.AddReplica(context.Background(), "group-0", "node-1")
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, checks, 3)
+	require.Equal(t, 1, fakeNode.changeMembershipCalls)
+	require.Len(t, sgUpdater.proposed, 2)
+	require.Equal(t, []string{"node-0", "node-1"}, sgUpdater.proposed[0].PeerIDs)
 }
 
 func TestMoveReplica_NotLeader(t *testing.T) {

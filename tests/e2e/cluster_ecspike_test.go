@@ -25,6 +25,7 @@ type ecspikeNode struct {
 	dataDir  string
 	cmd      *exec.Cmd
 	ak, sk   string
+	logFile  *os.File
 }
 
 func (n *ecspikeNode) kill() {
@@ -69,20 +70,36 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 			"--nbd-port", fmt.Sprintf("%d", freePort()),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
+			"--cluster-key", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		}
 		cmd := exec.Command(binary, args...)
+		logFile, err := os.CreateTemp("", fmt.Sprintf("ecspike-node-%d-*.log", i))
+		if err != nil {
+			cleanup()
+			require.NoErrorf(t, err, "create node %d log", i)
+		}
+		cmd.Stderr = logFile
 		// Assign before Start so cleanup() can remove dir even if Start fails.
 		nodes[i] = &ecspikeNode{
 			port:     port,
 			endpoint: fmt.Sprintf("http://127.0.0.1:%d", port),
 			dataDir:  dir,
 			cmd:      cmd,
+			logFile:  logFile,
 		}
+		t.Cleanup(func() {
+			_ = logFile.Close()
+			if keepE2EArtifacts() {
+				t.Logf("ECSpike node %d stderr saved to %s", i, logFile.Name())
+			}
+		})
 		if err := cmd.Start(); err != nil {
 			cleanup()
 			require.NoErrorf(t, err, "start node %d", i)
 		}
-		waitForPort(t, port, 30*time.Second)
+		require.NoErrorf(t,
+			waitForPortsParallelErrWithProcesses([]int{port}, []*exec.Cmd{cmd}, 30*time.Second),
+			"server did not start on port %d; stderr saved to %s", port, logFile.Name())
 		ak, sk := bootstrapAdminViaUDS(t, dir)
 		nodes[i].ak = ak
 		nodes[i].sk = sk

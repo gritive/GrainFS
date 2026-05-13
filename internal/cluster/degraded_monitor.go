@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -127,13 +128,16 @@ func (m *DegradedMonitor) checkQuorum() {
 }
 
 func (m *DegradedMonitor) check() {
-	// Guard 1: EC not configured at all (DataShards == 0) — solo deploy.
+	nodes := m.configuredPlacementNodes()
+	minRequired := m.minRequiredShards()
+
+	// Guard 1: EC not configured at all — solo deploy.
 	// Guard 2: EC configured but this deployment was never large enough to
 	// actually erasure-code (e.g. single node with k=4 m=2). Use the static
 	// configured node set here, not ECActive()/liveNodes(): liveNodes depends on
 	// peerHealth, and after peer I/O marks nodes unhealthy this monitor must
 	// still be able to enter degraded mode instead of short-circuiting healthy.
-	if m.backend.ecConfig.DataShards == 0 || !m.backend.ecConfig.IsActive(len(m.backend.allNodes)) {
+	if minRequired == 0 || !m.hasTopologyEC() && !m.backend.ecConfig.IsActive(len(nodes)) {
 		m.tracker.Report(false, "", "")
 		return
 	}
@@ -143,7 +147,6 @@ func (m *DegradedMonitor) check() {
 	// Degraded when the cluster can no longer place the configured EC stripe.
 	// For the 1+0 single-node profile this threshold is 1: it has no redundancy,
 	// but it still uses the EC object pipeline.
-	minRequired := m.backend.ecConfig.NumShards()
 	degraded := liveCount < minRequired
 
 	if degraded {
@@ -152,6 +155,50 @@ func (m *DegradedMonitor) check() {
 	} else {
 		m.tracker.Report(false, "", "")
 	}
+}
+
+func (m *DegradedMonitor) hasTopologyEC() bool {
+	return m.backend != nil && m.backend.shardGroup != nil && len(m.backend.shardGroup.ShardGroups()) > 0
+}
+
+func (m *DegradedMonitor) minRequiredShards() int {
+	minRequired := m.backend.ecConfig.NumShards()
+	if m.backend.shardGroup == nil {
+		return minRequired
+	}
+	for _, group := range m.backend.shardGroup.ShardGroups() {
+		if len(group.PeerIDs) == 0 {
+			continue
+		}
+		if n := DesiredECConfigForGroup(group).NumShards(); n > minRequired {
+			minRequired = n
+		}
+	}
+	return minRequired
+}
+
+func (m *DegradedMonitor) configuredPlacementNodes() []string {
+	seen := make(map[string]struct{}, len(m.backend.allNodes))
+	for _, node := range m.backend.allNodes {
+		if node != "" {
+			seen[node] = struct{}{}
+		}
+	}
+	if m.backend.shardGroup != nil {
+		for _, group := range m.backend.shardGroup.ShardGroups() {
+			for _, peer := range group.PeerIDs {
+				if peer != "" {
+					seen[peer] = struct{}{}
+				}
+			}
+		}
+	}
+	nodes := make([]string, 0, len(seen))
+	for node := range seen {
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+	return nodes
 }
 
 // countLiveNodes probes all configured nodes and returns the count of nodes
@@ -164,7 +211,7 @@ func (m *DegradedMonitor) check() {
 // startup shard I/O can mark a not-yet-ready peer unhealthy, so the existing
 // cooldown must expire before an ambiguous UDP timeout is counted live again.
 func (m *DegradedMonitor) countLiveNodes() int {
-	nodes := m.backend.allNodes
+	nodes := m.configuredPlacementNodes()
 	if len(nodes) == 0 {
 		return 0
 	}

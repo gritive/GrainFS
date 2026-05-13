@@ -20,7 +20,7 @@ func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
 	tmp := t.TempDir()
 	rcfg := raft.DefaultConfig("node-A", nil)
 
-	node, closeFn, err := newRaftNode(rcfg, nil, tmp)
+	node, closeFn, err := newRaftNode(rcfg, tmp)
 	require.NoError(t, err)
 	require.NotNil(t, node)
 	require.NotNil(t, closeFn, "v2 path with non-empty store dir must return a closeFn for the Badger DB")
@@ -39,7 +39,7 @@ func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
 	require.True(t, info.IsDir(), "v2 store path must be a directory")
 
 	// Verify it's the v2 adapter, not v1 (PR 30 deletes the v1 package).
-	_, isV1 := node.(*raft.Node)
+	_, isV1 := any(node).(*raft.Node)
 	require.False(t, isV1, "expected v2 adapter (v1 path was removed in PR 29)")
 }
 
@@ -59,7 +59,7 @@ func TestNewRaftNode_V2DurableStoresSurviveRestart(t *testing.T) {
 		firstTerm uint64
 	)
 	func() {
-		node, closeFn, err := newRaftNode(rcfg, nil, tmp)
+		node, closeFn, err := newRaftNode(rcfg, tmp)
 		require.NoError(t, err)
 		defer func() {
 			node.Close()
@@ -93,7 +93,7 @@ func TestNewRaftNode_V2DurableStoresSurviveRestart(t *testing.T) {
 	// HardState restores Term (Raft §5.4.1 safety); the LogStore restores
 	// the log so CommittedIndex picks up where we left off after the actor
 	// settles.
-	node2, closeFn2, err := newRaftNode(rcfg, nil, tmp)
+	node2, closeFn2, err := newRaftNode(rcfg, tmp)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		node2.Close()
@@ -133,7 +133,7 @@ func TestNewRaftNode_V2DurableStoresSurviveRestart(t *testing.T) {
 // stores (matches PR 22 behaviour for tests that never pass a directory).
 func TestNewRaftNode_V2EmptyDirFallsBackToMemoryStore(t *testing.T) {
 	rcfg := raft.DefaultConfig("node-A", nil)
-	node, closeFn, err := newRaftNode(rcfg, nil, "")
+	node, closeFn, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 	require.NotNil(t, node)
 	require.Nil(t, closeFn, "memory store path must not allocate a closeFn")

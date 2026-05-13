@@ -373,6 +373,29 @@ func TestRemovePeer_HappyPath(t *testing.T) {
 	assert.Equal(t, []string{"n3"}, mem.called(), "engine RemoveVoter must be invoked exactly once with target id")
 }
 
+func TestRemovePeer_PreflightCanonicalizesLegacyRaftAddressVoters(t *testing.T) {
+	ci := &fakeClusterInfo{
+		nodeID:   "n1",
+		state:    "Leader",
+		leaderID: "n1",
+		// Dynamic-join Raft internals may still expose remote voters by raft
+		// address while the peer snapshot has already resolved canonical node
+		// IDs for the public admin API.
+		peers: []string{"10.0.0.2:7001", "10.0.0.3:7001"},
+		snapshot: []cluster.PeerLivenessRow{
+			{PeerID: "n1", IdentityState: cluster.PeerIdentitySelf, LivenessState: cluster.PeerLivenessLive, Reason: "self"},
+			{PeerID: "n2", RaftAddr: "10.0.0.2:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
+			{PeerID: "n3", RaftAddr: "10.0.0.3:7001", IdentityState: cluster.PeerIdentityResolved, LivenessState: cluster.PeerLivenessLive, Reason: "probe_live"},
+		},
+	}
+	mem := &fakeMembership{}
+	h := setupRemovePeerServer(t, ci, mem)
+
+	status, body := postRemovePeer(t, h.baseURL, "n2", false)
+	assert.Equal(t, http.StatusOK, status, "resolved node ID remove must pass preflight, body=%v", body)
+	assert.Equal(t, []string{"n2"}, mem.called(), "membership adapter receives the requested canonical node ID")
+}
+
 func TestRemovePeer_PeerNotInCluster_Returns404(t *testing.T) {
 	ci := &fakeClusterInfo{
 		nodeID:    "n1",

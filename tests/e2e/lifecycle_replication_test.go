@@ -135,6 +135,7 @@ func TestLifecycle_FollowerPutLeaderGet(t *testing.T) {
 
 	// 버킷 생성 (리더 노드의 S3 클라이언트 사용)
 	const bucket = "lc-follower-put"
+	c.GrantAdminOnBuckets(bucket)
 	createBucketWithClient(t, c.S3Client(leaderIdx), bucket)
 
 	ls := newLifecycleSigner(c.accessKey, c.secretKey)
@@ -209,6 +210,7 @@ func TestLifecycle_LeaderChangePreservesConfig(t *testing.T) {
 
 	// 버킷 생성 후 현재 리더에 lifecycle 설정 PUT
 	const bucket = "lc-leader-change"
+	c.GrantAdminOnBuckets(bucket)
 	createBucketWithClient(t, c.S3Client(currentLeaderIdx), bucket)
 
 	ls := newLifecycleSigner(c.accessKey, c.secretKey)

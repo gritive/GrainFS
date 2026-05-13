@@ -24,8 +24,7 @@ type GroupLifecycleConfig struct {
 	DataDir   string
 	ShardSvc  *ShardService // may be nil for in-process / single-node tests
 	EC        ECConfig
-	LogStore  raft.LogStore // required — the group's Raft log store (production: a shared-log view via raft.OpenSharedLogStore; tests: raft.NewBadgerLogStore)
-	FSMStore  *badger.DB    // required — the per-node shared FSM-state DB; each group gets a prefixed view (C2 P3)
+	FSMStore  *badger.DB // required — the per-node shared FSM-state DB; each group gets a prefixed view (C2 P3)
 	Transport groupTransport
 	AddrBook  NodeAddressBook
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
@@ -88,9 +87,6 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("instantiateLocalGroup: empty NodeID")
 	}
-	if cfg.LogStore == nil {
-		return nil, fmt.Errorf("instantiateLocalGroup: nil LogStore")
-	}
 	if cfg.FSMStore == nil {
 		return nil, fmt.Errorf("instantiateLocalGroup: nil FSMStore")
 	}
@@ -125,9 +121,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	}
 	rcfg.ElectionPriorityKey = entry.ID
 
-	logStore := cfg.LogStore
-
-	node, v2Close, err := newRaftNode(rcfg, logStore, groupDir)
+	node, v2Close, err := newRaftNode(rcfg, groupDir)
 	if err != nil {
 		return nil, fmt.Errorf("group %s: newRaftNode: %w", entry.ID, err)
 	}
@@ -165,7 +159,6 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 		Root:         groupDir,
 		DB:           cfg.FSMStore,
 		Node:         node,
-		LogStore:     logStore,
 		ShardSvc:     cfg.ShardSvc,
 		PeerIDs:      peerIDsSelfFirst,
 		EC:           cfg.EC,

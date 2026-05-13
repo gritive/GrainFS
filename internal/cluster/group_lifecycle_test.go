@@ -13,17 +13,6 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// openTestGroupLogStore opens a per-group BadgerLogStore at the same path the
-// (now-removed) instantiateLocalGroup fallback used. Tests must supply a
-// LogStore explicitly now that GroupLifecycleConfig.LogStore is required.
-func openTestGroupLogStore(t *testing.T, dataDir, groupID string) raft.LogStore {
-	t.Helper()
-	ls, err := raft.NewBadgerLogStore(filepath.Join(dataDir, "groups", groupID, "raft"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ls.Close() })
-	return ls
-}
-
 // openTestFSMStore opens the per-node shared FSM-state BadgerDB at
 // <dataDir>/shared-fsm/. Tests must supply it now that
 // GroupLifecycleConfig.FSMStore is required; in shared mode GroupBackend.Close
@@ -57,7 +46,6 @@ func TestInstantiateLocalGroup_Success(t *testing.T) {
 		NodeID:  "self",
 		DataDir: dir,
 	}
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-x")
 	cfg.FSMStore = openTestFSMStore(t, dir)
 	entry := ShardGroupEntry{ID: "group-x", PeerIDs: []string{"self"}}
 	gb, err := instantiateLocalGroup(cfg, entry)
@@ -65,9 +53,9 @@ func TestInstantiateLocalGroup_Success(t *testing.T) {
 	require.NotNil(t, gb)
 	require.Equal(t, "group-x", gb.ID())
 
-	// blobs stays per-group; raft is the per-group log dir; FSM state is in
+	// blobs stays per-group; raft-v2 is the per-group log dir; FSM state is in
 	// the shared DB now, so no per-group groups/<id>/badger dir.
-	require.DirExists(t, filepath.Join(dir, "groups", "group-x", "raft"))
+	require.DirExists(t, filepath.Join(dir, "groups", "group-x", "raft-v2"))
 	require.DirExists(t, filepath.Join(dir, "groups", "group-x", "blobs"))
 	require.NoDirExists(t, filepath.Join(dir, "groups", "group-x", "badger"))
 
@@ -80,13 +68,11 @@ func TestInstantiateLocalGroup_Idempotent_Recovery(t *testing.T) {
 	cfg.FSMStore = openTestFSMStore(t, dir)
 	entry := ShardGroupEntry{ID: "group-y", PeerIDs: []string{"self"}}
 
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-y")
 	gb1, err := instantiateLocalGroup(cfg, entry)
 	require.NoError(t, err)
 	require.NoError(t, shutdownLocalGroup(context.Background(), gb1, 5*time.Second))
 
 	// Re-instantiate using the same dataDir (recovery path). Must succeed.
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-y")
 	gb2, err := instantiateLocalGroup(cfg, entry)
 	require.NoError(t, err)
 	require.Equal(t, "group-y", gb2.ID())
@@ -96,7 +82,6 @@ func TestInstantiateLocalGroup_Idempotent_Recovery(t *testing.T) {
 func TestInstantiateLocalGroup_NilFSMStore_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-nofsm")
 	_, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-nofsm", PeerIDs: []string{"self"}})
 	require.Error(t, err)
 }
@@ -131,7 +116,6 @@ func (s *slowGroupCloser) Close() error {
 func TestShutdownLocalGroup_Timeout_Ungraceful(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GroupLifecycleConfig{NodeID: "self", DataDir: dir}
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-slow")
 	cfg.FSMStore = openTestFSMStore(t, dir)
 	gb, err := instantiateLocalGroup(cfg, ShardGroupEntry{ID: "group-slow", PeerIDs: []string{"self"}})
 	require.NoError(t, err)
@@ -160,7 +144,6 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 	// "node-b" sorts between "node-a" and "node-c" — PickVoters would place it
 	// second in the alphabetically-sorted PeerIDs slice.
 	cfg := GroupLifecycleConfig{NodeID: "node-b", DataDir: dir}
-	cfg.LogStore = openTestGroupLogStore(t, dir, "group-selfaddr")
 	cfg.FSMStore = openTestFSMStore(t, dir)
 	entry := ShardGroupEntry{
 		ID:      "group-selfaddr",

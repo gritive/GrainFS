@@ -14,6 +14,10 @@ import (
 // itself: it transfers leadership first, then the caller retries on the new leader.
 var ErrLeadershipTransferred = errors.New("leadership transferred to another voter")
 
+// ErrDataGroupNotLocalLeader is returned when an operation requires the local
+// process to lead a data group but leadership is elsewhere or not established.
+var ErrDataGroupNotLocalLeader = errors.New("data group not led locally")
+
 // NodeAddressBook resolves cluster nodeIDs to their QUIC addresses.
 // *MetaFSM implements this interface.
 type NodeAddressBook interface {
@@ -97,6 +101,62 @@ func (e *DataGroupPlanExecutor) resolveAddr(nodeID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("data_group_executor: node %q not found in address book", nodeID)
+}
+
+// AddReplica adds toNode as a voter in groupID without removing existing voters.
+//
+// This is used when a new cluster node joins after shard groups were initially
+// seeded from a single bootstrap voter. Must be called from the data-group Raft
+// leader only.
+func (e *DataGroupPlanExecutor) AddReplica(ctx context.Context, groupID, toNode string) error {
+	dg := e.dgMgr.Get(groupID)
+	if dg == nil {
+		return fmt.Errorf("data_group_executor: group %q not found", groupID)
+	}
+	if slices.Contains(dg.PeerIDs(), toNode) {
+		return nil
+	}
+
+	node := e.nodeFor(dg)
+	if err := e.waitForLocalLeader(ctx, groupID, node); err != nil {
+		return err
+	}
+
+	for _, peer := range ResolveShardGroupPeers(e.addrBook, ShardGroupEntry{ID: groupID, PeerIDs: dg.PeerIDs()}) {
+		if peer.Unresolved {
+			return fmt.Errorf("data_group_executor: group %q has unresolved legacy peer %q", groupID, peer.Input)
+		}
+	}
+
+	toAddr, err := e.resolveAddr(toNode)
+	if err != nil {
+		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
+	}
+
+	originalPeers := slices.Clone(dg.PeerIDs())
+	newPeers := append(slices.Clone(originalPeers), toNode)
+	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
+		return fmt.Errorf("data_group_executor: ProposeShardGroup desired peers: %w", err)
+	}
+
+	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	defer cancel()
+	if err := node.ChangeMembership(addCtx,
+		[]raft.ServerEntry{{ID: toNode, Address: toAddr, Suffrage: raft.Voter}},
+		nil,
+	); err != nil {
+		if rollbackErr := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: originalPeers}); rollbackErr != nil {
+			return fmt.Errorf("data_group_executor: ChangeMembership: %w; rollback desired peers: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("data_group_executor: ChangeMembership: %w", err)
+	}
+
+	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
+		return fmt.Errorf("data_group_executor: ProposeShardGroup: %w", err)
+	}
+
+	e.dgMgr.Add(NewDataGroupWithBackend(groupID, newPeers, dg.Backend()))
+	return nil
 }
 
 // MoveReplica migrates a Raft voter in groupID from fromNode to toNode using a
@@ -225,6 +285,26 @@ func (e *DataGroupPlanExecutor) waitForLeadershipTransferTarget(
 	}
 }
 
+func (e *DataGroupPlanExecutor) waitForLocalLeader(ctx context.Context, groupID string, node dataRaftNode) error {
+	waitCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if node.IsLeader() {
+			return nil
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("data_group_executor: not leader of group %q: %w: %w", groupID, ErrDataGroupNotLocalLeader, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
 func (e *DataGroupPlanExecutor) peerCaughtUp(node dataRaftNode, peerID string, committed uint64) bool {
 	peerKey := peerID
 	if addr, err := e.resolveAddr(peerID); err == nil && addr != "" {
@@ -241,8 +321,8 @@ func (e *DataGroupPlanExecutor) peerCaughtUp(node dataRaftNode, peerID string, c
 	return false
 }
 
-// compile-time check: *raft.Node must satisfy dataRaftNode.
-var _ dataRaftNode = (*raft.Node)(nil)
+// compile-time check: the production adapter must satisfy dataRaftNode.
+var _ dataRaftNode = (*raftNodeAdapter)(nil)
 
 // DataRaftNode is the exported alias of dataRaftNode for test injection.
 type DataRaftNode = dataRaftNode

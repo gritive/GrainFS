@@ -27,13 +27,14 @@ type ReceiptProvider interface {
 // Other nodes route `/api/receipts/:id` queries using these windows; IDs
 // older than the window fall through to a cluster broadcast fallback.
 type ReceiptGossipSender struct {
-	nodeID   string
-	peers    []string
-	tr       transport.Transport
-	provider ReceiptProvider
-	interval time.Duration
-	maxIDs   int
-	logger   zerolog.Logger
+	nodeID       string
+	peers        []string
+	peerProvider func() []string
+	tr           transport.Transport
+	provider     ReceiptProvider
+	interval     time.Duration
+	maxIDs       int
+	logger       zerolog.Logger
 }
 
 // NewReceiptGossipSender creates a sender. interval is how often to broadcast;
@@ -55,6 +56,32 @@ func NewReceiptGossipSender(
 		maxIDs:   maxIDs,
 		logger:   log.With().Str("component", "receipt-gossip").Logger(),
 	}
+}
+
+func NewReceiptGossipSenderWithPeerProvider(
+	nodeID string,
+	peerProvider func() []string,
+	tr transport.Transport,
+	provider ReceiptProvider,
+	interval time.Duration,
+	maxIDs int,
+) *ReceiptGossipSender {
+	return &ReceiptGossipSender{
+		nodeID:       nodeID,
+		peerProvider: peerProvider,
+		tr:           tr,
+		provider:     provider,
+		interval:     interval,
+		maxIDs:       maxIDs,
+		logger:       log.With().Str("component", "receipt-gossip").Logger(),
+	}
+}
+
+func (s *ReceiptGossipSender) snapshotPeers() []string {
+	if s.peerProvider != nil {
+		return s.peerProvider()
+	}
+	return append([]string(nil), s.peers...)
 }
 
 // Run starts the broadcast loop. Blocks until ctx is cancelled.
@@ -82,7 +109,11 @@ func (s *ReceiptGossipSender) broadcastOnce(ctx context.Context) {
 
 	payload := encodeReceiptGossip(s.nodeID, ids)
 	msg := &transport.Message{Type: transport.StreamReceipt, Payload: payload}
-	for _, peer := range s.peers {
+	for _, peer := range s.snapshotPeers() {
+		if err := s.tr.Connect(ctx, peer); err != nil {
+			s.logger.Warn().Str("peer", peer).Err(err).Msg("receipt-gossip: connect failed")
+			continue
+		}
 		if err := s.tr.Send(ctx, peer, msg); err != nil {
 			s.logger.Warn().Str("peer", peer).Err(err).Msg("receipt-gossip: send failed")
 		}

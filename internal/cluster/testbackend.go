@@ -32,7 +32,7 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 	}
 
 	cfg := raft.DefaultConfig("test-node", nil)
-	node, closeFn, err := newRaftNode(cfg, nil, dir)
+	node, closeFn, err := newRaftNode(cfg, dir)
 	if err != nil {
 		db.Close()
 		t.Fatalf("newRaftNode: %v", err)

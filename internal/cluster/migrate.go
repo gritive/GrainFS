@@ -86,17 +86,17 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 
 	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("metadata scan complete")
 
-	// Create Raft log store
 	raftDir := filepath.Join(dataDir, "raft")
-	logStore, err := raft.NewBadgerLogStore(raftDir)
-	if err != nil {
-		return fmt.Errorf("create raft store: %w", err)
-	}
-	defer logStore.Close()
-
-	// Create a single-node Raft cluster and propose all entries
 	cfg := raft.DefaultConfig(nodeID, nil) // no peers = legacy bootstrap
-	node := raft.NewNode(cfg, logStore)
+	node, closeRaft, err := NewRaftV2NodeForServeruntime(cfg, raftDir)
+	if err != nil {
+		return fmt.Errorf("create raft node: %w", err)
+	}
+	defer func() {
+		if closeRaft != nil {
+			_ = closeRaft()
+		}
+	}()
 
 	// For a legacy node, set transport stubs (no peers to communicate with)
 	node.SetTransport(
@@ -110,7 +110,7 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 
 	// Start the node — it will become leader since it's the only voter
 	node.Start()
-	defer node.Stop()
+	defer node.Close()
 
 	// Wait for leadership (legacy node should become leader within a few election timeouts)
 	for range 200 {

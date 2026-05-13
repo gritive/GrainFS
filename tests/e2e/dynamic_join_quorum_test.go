@@ -49,7 +49,7 @@ func TestE2E_DynamicJoinTwoSurvivorReelect(t *testing.T) {
 	// Find and SIGKILL the leader.
 	leaderIdx := -1
 	for i := range c.procs {
-		if c.nodeID(i) == leaderID {
+		if c.nodeID(i) == leaderID || c.raftAddr(i) == leaderID {
 			leaderIdx = i
 			break
 		}

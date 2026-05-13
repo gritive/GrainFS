@@ -133,6 +133,7 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 // metadata for every snapshot version. Delete markers do not require blobs.
 func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
 	ctx := context.Background()
+	objects = b.resolveRestoreObjectVersionIDs(objects)
 	// Index snapshot objects by bucket+key+version.
 	want := make(map[string]storage.SnapshotObject, len(objects))
 	for _, o := range objects {
@@ -183,7 +184,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 	var stale []storage.StaleBlob
 	var count int
 	for _, snap := range objects {
-		if !snap.IsDeleteMarker && !b.blobExists(snap.Bucket, snap.Key, snap.VersionID) {
+		if !snap.IsDeleteMarker && snap.VersionID != "" && !b.blobExistsForRestore(snap) {
 			stale = append(stale, storage.StaleBlob{
 				Bucket:       snap.Bucket,
 				Key:          snap.Key,
@@ -191,23 +192,113 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			})
 			continue
 		}
+		placement := b.restorePlacementMeta(snap)
 		preserveLatest := snap.VersionID != "" && !snap.IsLatest
 		if err := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:         snap.Bucket,
-			Key:            snap.Key,
-			Size:           snap.Size,
-			ContentType:    snap.ContentType,
-			ETag:           snap.ETag,
-			ModTime:        snap.Modified,
-			VersionID:      snap.VersionID,
-			PreserveLatest: preserveLatest,
-			IsDeleteMarker: snap.IsDeleteMarker,
+			Bucket:           snap.Bucket,
+			Key:              snap.Key,
+			Size:             snap.Size,
+			ContentType:      snap.ContentType,
+			ETag:             snap.ETag,
+			ModTime:          snap.Modified,
+			VersionID:        snap.VersionID,
+			RingVersion:      placement.RingVersion,
+			ECData:           placement.ECData,
+			ECParity:         placement.ECParity,
+			NodeIDs:          placement.NodeIDs,
+			PlacementGroupID: placement.PlacementGroupID,
+			PreserveLatest:   preserveLatest,
+			IsDeleteMarker:   snap.IsDeleteMarker,
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore meta %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
 		count++
 	}
 	return count, stale, nil
+}
+
+func (b *DistributedBackend) resolveRestoreObjectVersionIDs(objects []storage.SnapshotObject) []storage.SnapshotObject {
+	out := make([]storage.SnapshotObject, len(objects))
+	copy(out, objects)
+	for i, obj := range out {
+		if obj.IsDeleteMarker {
+			continue
+		}
+		if current, err := b.HeadObject(context.Background(), obj.Bucket, obj.Key); err == nil && current != nil {
+			if current.ETag == obj.ETag && current.Size == obj.Size && current.VersionID != "" {
+				out[i].VersionID = current.VersionID
+				continue
+			}
+		}
+		if versionID := b.latestMatchingObjectVersionID(obj); versionID != "" {
+			out[i].VersionID = versionID
+			continue
+		}
+		if obj.VersionID != "" {
+			continue
+		}
+	}
+	return out
+}
+
+func (b *DistributedBackend) restorePlacementMeta(snap storage.SnapshotObject) PlacementMeta {
+	if snap.IsDeleteMarker || snap.VersionID == "" {
+		return PlacementMeta{}
+	}
+	obj, placement, err := b.headObjectMetaV(snap.Bucket, snap.Key, snap.VersionID)
+	if err != nil || obj == nil {
+		return PlacementMeta{}
+	}
+	if obj.ETag != snap.ETag || obj.Size != snap.Size {
+		return PlacementMeta{}
+	}
+	return placement
+}
+
+func (b *DistributedBackend) latestMatchingObjectVersionID(obj storage.SnapshotObject) string {
+	versionID := ""
+	_ = b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.ks().LatestKey(obj.Bucket, obj.Key))
+		if err != nil {
+			return nil
+		}
+		if err := item.Value(func(v []byte) error {
+			versionID = string(v)
+			return nil
+		}); err != nil {
+			versionID = ""
+			return nil
+		}
+		if versionID == "" {
+			return nil
+		}
+		item, err = txn.Get(b.ks().ObjectMetaKeyV(obj.Bucket, obj.Key, versionID))
+		if err != nil {
+			versionID = ""
+			return nil
+		}
+		return item.Value(func(v []byte) error {
+			meta, err := unmarshalObjectMeta(v)
+			if err != nil {
+				versionID = ""
+				return nil
+			}
+			if meta.ETag != obj.ETag || meta.Size != obj.Size {
+				versionID = ""
+			}
+			return nil
+		})
+	})
+	return versionID
+}
+
+func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) bool {
+	if obj, err := b.HeadObject(context.Background(), snap.Bucket, snap.Key); err == nil && obj != nil {
+		if obj.ETag == snap.ETag && obj.Size == snap.Size {
+			return true
+		}
+	}
+	return b.blobExists(snap.Bucket, snap.Key, snap.VersionID)
 }
 
 // blobExists checks whether the blob for the given object version exists on
@@ -228,6 +319,12 @@ func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 				return nil
 			})
 		})
+	}
+	if versionID != "" {
+		if rc, _, err := b.GetObjectVersion(bucket, key, versionID); err == nil {
+			_ = rc.Close()
+			return true
+		}
 	}
 	// Versioned N× path.
 	if versionID != "" {

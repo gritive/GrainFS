@@ -27,6 +27,22 @@ func TestSelectObjectPlacementGroup_FiltersECIncapableGroups(t *testing.T) {
 	require.Equal(t, "group-2", got.ID)
 }
 
+func TestSelectObjectPlacementGroup_UsesOnlyWidestTopologyGroups(t *testing.T) {
+	groups := []ShardGroupEntry{
+		{ID: "group-1", PeerIDs: []string{"n1"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3", "n4", "n5"}},
+		{ID: "group-4", PeerIDs: []string{"n1", "n2", "n3", "n4", "n5"}},
+	}
+
+	for _, key := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		got, err := SelectObjectPlacementGroup("bucket", key, groups, ECConfig{DataShards: 3, ParityShards: 2})
+		require.NoError(t, err)
+		require.Contains(t, []string{"group-3", "group-4"}, got.ID)
+		require.Len(t, got.PeerIDs, 5)
+	}
+}
+
 func TestSelectObjectPlacementGroup_FallsBackToGroup0WhenNoDataGroupsExist(t *testing.T) {
 	got, err := SelectObjectPlacementGroup("b", "k", []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},

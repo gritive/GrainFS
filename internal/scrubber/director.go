@@ -3,6 +3,7 @@ package scrubber
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -257,7 +258,7 @@ func (d *Director) workerLoop(ctx context.Context) {
 }
 
 func (d *Director) runSession(ctx context.Context, sess *liveSession) {
-	srcName := d.routeSource(sess.bucket)
+	srcName := d.routeSource(sess.bucket, sess.keyPrefix)
 	d.mu.Lock()
 	src := d.sources[srcName]
 	ver := d.verifiers[srcName]
@@ -374,11 +375,13 @@ func (d *Director) markDone(sess *liveSession) {
 	}
 }
 
-// routeSource maps a bucket to a registered source name. Replication-stored
-// internal buckets route to "replication"; everything else falls through to
-// the EC scrub source. Per-object routing (placement-record-aware) is a
-// follow-up — see TODOS.md for the EC/replication mixed-bucket case.
-func (d *Director) routeSource(bucket string) string {
+// routeSource maps a scrub request to a registered source name. Most internal
+// buckets are still full-object replicated, but volume data blocks are written
+// through the EC data path and must be verified as shards.
+func (d *Director) routeSource(bucket, keyPrefix string) string {
+	if bucket == "__grainfs_volumes" && strings.Contains(keyPrefix, "/blk_") {
+		return "ec"
+	}
 	if storage.IsInternalBucket(bucket) {
 		return "replication"
 	}

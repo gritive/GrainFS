@@ -48,10 +48,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	// Seed data groups from cluster size only. Operators no longer choose this:
 	// group count is placement headroom, not a durability policy.
 	clusterSize := 1 + len(state.peers)
-	seedGroups := clusterSize * 4
-	if seedGroups < 8 {
-		seedGroups = 8
-	}
+	seedGroups := seedGroupCountForClusterSize(clusterSize)
 	state.seedGroups = seedGroups
 
 	// v0.0.7.1 PR-D: Live multi-raft routing — ClusterCoordinator + ForwardSender/Receiver.
@@ -90,6 +87,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	state.forwardSender = cluster.NewForwardSender(forwardDialer).
 		WithStreamDialer(forwardStreamDialer).
 		WithReadStreamDialer(forwardReadStreamDialer).
+		WithReadinessRetry(5 * time.Second).
 		WithLeaderHintResolver(func(hint string) string {
 			if addr, ok := cluster.ResolveNodeAddress(metaRaft.FSM(), hint); ok {
 				return addr
@@ -125,7 +123,12 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	}))
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
-	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft)
+	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
+		if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
+			return err
+		}
+		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
+	})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
 	metaReadDialer := func(peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
@@ -163,5 +166,66 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	}
 
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
+	return nil
+}
+
+type legacyDataRaftMembership interface {
+	ID() string
+	Peers() []string
+	AddVoterCtx(ctx context.Context, id, addr string) error
+}
+
+func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembership, nodes []cluster.MetaNodeEntry, nodeID string) error {
+	if node == nil || nodeID == "" || nodeID == node.ID() {
+		return nil
+	}
+	addr := ""
+	for _, n := range nodes {
+		if n.ID == nodeID {
+			addr = n.Address
+			break
+		}
+	}
+	if addr == "" {
+		return fmt.Errorf("add joined node to legacy data raft: node %q not found in meta membership", nodeID)
+	}
+	// Legacy group-0 data raft uses voter IDs directly as QUIC dial targets;
+	// v2 AddVoterCtx currently ignores its addr parameter. Only auto-extend
+	// this raft when the node ID is already the dialable raft address. Stable
+	// node IDs continue through the per-group/meta paths until this legacy
+	// transport can resolve node IDs via the address book.
+	if nodeID != addr {
+		return nil
+	}
+	for _, peer := range node.Peers() {
+		if peer == nodeID || peer == addr {
+			return nil
+		}
+	}
+	if err := node.AddVoterCtx(ctx, nodeID, addr); err != nil {
+		return fmt.Errorf("add joined node %q to legacy data raft: %w", nodeID, err)
+	}
+	return nil
+}
+
+func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeID string) error {
+	nodes := state.metaRaft.FSM().Nodes()
+	missingGroups := MissingSeedShardGroups(
+		state.nodeID,
+		state.raftAddr,
+		nodes,
+		state.metaRaft.FSM().ShardGroups(),
+		cluster.AutoECConfigForClusterSize(len(nodes)).NumShards(),
+	)
+	for _, group := range missingGroups {
+		if err := state.metaRaft.ProposeShardGroup(ctx, group); err != nil {
+			return fmt.Errorf("expand shard groups for joined node %q: propose seed group %s: %w", nodeID, group.ID, err)
+		}
+	}
+	if len(missingGroups) > 0 {
+		state.seedGroups = seedGroupCountForClusterSize(len(nodes))
+		log.Info().Str("node_id", nodeID).Int("groups", len(missingGroups)).Int("seed_groups", state.seedGroups).Msg("seeded shard groups for joined node count")
+	}
+
 	return nil
 }

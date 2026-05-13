@@ -106,6 +106,8 @@ func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
 	waitForPortsParallel(t, httpPorts, 60*time.Second)
 	time.Sleep(4 * time.Second)
 
+	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 

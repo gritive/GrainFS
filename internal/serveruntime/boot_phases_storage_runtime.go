@@ -12,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
-	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -31,17 +30,23 @@ import (
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
 	clusterSize := 1 + len(state.peers)
-	seedGroups := clusterSize * 4
-	if seedGroups < 8 {
-		seedGroups = 8
-	}
+	seedGroups := seedGroupCountForClusterSize(clusterSize)
 	state.effectiveEC = cluster.AutoECConfigForClusterSize(clusterSize)
 	if !state.effectiveEC.IsActive(clusterSize) {
 		return fmt.Errorf("no effective EC profile for cluster size %d", clusterSize)
 	}
 	normalGroupVoters := state.effectiveEC.NumShards()
 
-	if !state.joinMode {
+	if committed := state.metaRaft.Node().CommittedIndex(); committed > 0 {
+		replayCtx, replayCancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := state.metaRaft.WaitApplied(replayCtx, committed); err != nil {
+			replayCancel()
+			return fmt.Errorf("wait for meta-raft replay before shard bootstrap: %w", err)
+		}
+		replayCancel()
+	}
+
+	if !state.joinMode && len(state.metaRaft.FSM().ShardGroups()) == 0 {
 		if err := WaitForMetaRaftLeader(ctx, state.metaRaft, 15*time.Second); err != nil {
 			return err
 		}
@@ -92,23 +97,13 @@ func bootShardService(ctx context.Context, state *bootState) error {
 // applied entries flow.
 func bootStreamRouter(state *bootState) error {
 	state.streamRouter = transport.NewStreamRouter()
-	if state.rpcTransport != nil {
-		// v1 path: register the v1 RPC handler on StreamControl. The
-		// parallel v2 handler is deferred to PR 27 (the cluster-side
-		// raftv2 QUIC bridge). Without it, GRAINFS_RAFT_V2=serveruntime
-		// produces a v2 node whose inbound Raft RPCs are not handled —
-		// acceptable for the PR 26 smoke milestone (opt-in flag).
-		state.streamRouter.Handle(transport.StreamControl, state.rpcTransport.Handler())
-	}
 	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
 	state.quicTransport.SetStreamHandler(state.streamRouter.Dispatch)
 	state.quicTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
 	state.quicTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
 
 	state.node.Start()
-	// state.node.Close() goes through the cluster.RaftNode interface:
-	// for v1 this maps to raft.Node.Close (Stop + wg.Wait); for v2
-	// (raftV2Node) it maps to raftv2.Node.Stop (drains the actor).
+	// state.node.Close() goes through the cluster.RaftNode interface.
 	state.AddCleanup(func() { state.node.Close() })
 	return nil
 }
@@ -245,11 +240,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
 			FSMStore:         state.sharedFSMDB,
 		}
-		ls, lerr := raft.OpenSharedLogStore(state.sharedRaftLogDB, entry.ID)
-		if lerr != nil {
-			return fmt.Errorf("group %s: open shared log store: %w", entry.ID, lerr)
-		}
-		glc.LogStore = ls
 		gb, err := cluster.InstantiateLocalGroup(glc, entry)
 		if err != nil {
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
@@ -284,6 +274,9 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		}()
 	}
 
+	state.metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
+		scheduleOwnedInstantiation(entry)
+	})
 	for _, entry := range state.metaRaft.FSM().ShardGroups() {
 		if err := instantiateOwnedIfNeeded(entry); err != nil {
 			recordStartupDecision(badgerrole.Decision{
@@ -296,9 +289,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			})
 		}
 	}
-	state.metaRaft.FSM().SetOnShardGroupAdded(func(entry cluster.ShardGroupEntry) {
-		scheduleOwnedInstantiation(entry)
-	})
 
 	state.AddCleanup(func() {
 		state.metaRaft.FSM().SetOnShardGroupAdded(nil)

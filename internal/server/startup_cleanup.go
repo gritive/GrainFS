@@ -64,8 +64,9 @@ type StartupRecoveryResult struct {
 // via emit (a NoopEmitter is acceptable; nil is also accepted for tests).
 //
 // ops carries the storage operations facade so the multipart-orphan sweep
-// flows through the storage capability plan (ADR 0001) instead of
-// duplicating the LocalBackend filesystem layout here. nil ops disables
+// first flows through the storage capability plan (ADR 0001). A direct
+// dataRoot/parts fallback then catches runtime backend chains whose local
+// sweeper is hidden behind non-unwrappable routing wrappers. nil ops disables
 // the multipart sweep — useful for tests that only exercise tmp cleanup.
 //
 // The scan is bounded by ctx so a slow shutdown does not block the next
@@ -84,7 +85,7 @@ func RunStartupRecovery(ctx context.Context, dataRoot string, ops *storage.Opera
 	if err := sweepOrphanTmp(ctx, dataRoot, emit, &res); err != nil {
 		return res, err
 	}
-	if err := sweepOrphanMultiparts(ctx, ops, emit, &res); err != nil {
+	if err := sweepOrphanMultiparts(ctx, dataRoot, ops, emit, &res); err != nil {
 		return res, err
 	}
 
@@ -171,12 +172,12 @@ func shouldSkipStartupRecoveryDir(root, path string) bool {
 }
 
 // sweepOrphanMultiparts delegates the parts/<uploadID> sweep to the storage
-// operations facade so the LocalBackend filesystem layout knowledge stays
-// inside the storage package (per ADR 0001 capability plan). The age policy
-// (multipartOrphanAge) and HealEvent emission stay here because they are
-// operator-facing: the sweep cutoff is observability tuning and the dashboard
-// wants per-removal events even when the filesystem walk happens elsewhere.
-func sweepOrphanMultiparts(ctx context.Context, ops *storage.Operations, emit scrubber.Emitter, res *StartupRecoveryResult) error {
+// operations facade, then scans dataRoot/parts directly for any leftovers. The
+// direct pass is intentionally a fallback instead of the primary path: normal
+// storage backends should own their staging layout, but startup recovery must
+// still clean the configured data directory when runtime routing wrappers hide
+// the LocalBackend capability from Operations.
+func sweepOrphanMultiparts(ctx context.Context, dataRoot string, ops *storage.Operations, emit scrubber.Emitter, res *StartupRecoveryResult) error {
 	if ops == nil {
 		return nil
 	}
@@ -189,6 +190,58 @@ func sweepOrphanMultiparts(ctx context.Context, ops *storage.Operations, emit sc
 		res.Errors = append(res.Errors, err.Error())
 		return nil
 	}
+	recordMultipartSweep(sweep, emit, res)
+
+	fallback, err := sweepOrphanMultipartsFromDataRoot(ctx, dataRoot, cutoff)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if err != nil {
+		res.Errors = append(res.Errors, err.Error())
+		return nil
+	}
+	recordMultipartSweep(fallback, emit, res)
+	return nil
+}
+
+func sweepOrphanMultipartsFromDataRoot(ctx context.Context, dataRoot string, cutoff time.Time) (storage.OrphanMultipartSweepResult, error) {
+	var res storage.OrphanMultipartSweepResult
+	partsRoot := filepath.Join(dataRoot, "parts")
+	entries, err := os.ReadDir(partsRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return res, nil
+	}
+	if err != nil {
+		res.Errors = append(res.Errors, err.Error())
+		return res, nil
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		full := filepath.Join(partsRoot, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			res.Errors = append(res.Errors, err.Error())
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(full); err != nil {
+			res.Errors = append(res.Errors, err.Error())
+			continue
+		}
+		res.Removed++
+		res.RemovedPaths = append(res.RemovedPaths, full)
+	}
+	return res, nil
+}
+
+func recordMultipartSweep(sweep storage.OrphanMultipartSweepResult, emit scrubber.Emitter, res *StartupRecoveryResult) {
 	res.OrphanMultipartRemoved += sweep.Removed
 	res.Errors = append(res.Errors, sweep.Errors...)
 	for _, path := range sweep.RemovedPaths {
@@ -197,7 +250,6 @@ func sweepOrphanMultiparts(ctx context.Context, ops *storage.Operations, emit sc
 	for _, msg := range sweep.Errors {
 		emitStartup(emit, msg, "orphan_multipart", scrubber.OutcomeFailed)
 	}
-	return nil
 }
 
 // emitStartup builds a HealEvent for a single startup-recovery action.

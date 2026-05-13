@@ -79,6 +79,11 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			return
 		}
 
+		if isBucketFormPost(c) {
+			c.Next(ctx)
+			return
+		}
+
 		bucket := c.Param("bucket")
 		key := strings.TrimPrefix(c.Param("key"), "/")
 

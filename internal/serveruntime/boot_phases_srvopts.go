@@ -153,8 +153,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		GossipInterval: cfg.HealReceiptGossipInterval,
 		WindowSize:     cfg.HealReceiptWindow,
 	}
-	newSrvOpts, receiptWiring, err := SetupClusterReceipt(
-		ctx, rcptOpts, dataDir, nodeID, peers,
+	receiptPeerProvider := func() []string {
+		return receiptPeerAddresses(nodeID, state.raftAddr, peers, metaRaft.FSM().Nodes())
+	}
+	newSrvOpts, receiptWiring, err := SetupClusterReceiptWithPeerProvider(
+		ctx, rcptOpts, dataDir, nodeID, receiptPeerProvider,
 		state.quicTransport, state.streamRouter, state.gossipReceiver, srvOpts,
 	)
 	if err != nil {

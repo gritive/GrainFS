@@ -25,13 +25,13 @@ var noopAE = func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntrie
 // removed). PR 30 deletes the v1 raft package outright.
 func TestRaftV2Smoke_DefaultClusterIsV2(t *testing.T) {
 	rcfg := raft.DefaultConfig("node-1", nil)
-	node, _, err := newRaftNode(rcfg, nil, "")
+	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 
-	_, isV1 := node.(*raft.Node)
+	_, isV1 := any(node).(*raft.Node)
 	assert.False(t, isV1, "expected v2 adapter (v1 path was removed in PR 29)")
-	_, isV2 := node.(*raftV2Node)
-	assert.True(t, isV2, "expected *raftV2Node adapter")
+	_, isV2 := node.(*raftNodeAdapter)
+	assert.True(t, isV2, "expected *raftNodeAdapter adapter")
 
 	node.SetTransport(noopRV, noopAE)
 	node.Start()
@@ -44,7 +44,7 @@ func TestRaftV2Smoke_DefaultClusterIsV2(t *testing.T) {
 // path: bootstrap → elect self → ProposeWait commits.
 func TestRaftV2Smoke_BootstrapProposeRoundtrip(t *testing.T) {
 	rcfg := raft.DefaultConfig("node-1", nil)
-	node, _, err := newRaftNode(rcfg, nil, "")
+	node, _, err := newRaftNode(rcfg, "")
 	require.NoError(t, err)
 
 	node.SetTransport(noopRV, noopAE)

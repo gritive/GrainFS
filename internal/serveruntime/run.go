@@ -42,12 +42,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootValidateTimings(state); err != nil {
 		return err
 	}
-	if err := bootOpenRaftLogStore(state); err != nil {
-		return err
-	}
-	if err := bootOpenSharedRaftLogDB(state); err != nil {
-		return err
-	}
 	if err := bootOpenSharedFSMDB(state); err != nil {
 		return err
 	}

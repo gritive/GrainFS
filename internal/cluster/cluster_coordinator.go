@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"sync"
@@ -48,10 +49,10 @@ func (p dataGroupManagerLeaderProbe) GroupLeaderIsSelf(groupID string) bool {
 		return false
 	}
 	b := dg.Backend()
-	if b == nil || b.RaftNode() == nil {
+	if b == nil || b.Node() == nil {
 		return false
 	}
-	return b.RaftNode().IsLeader()
+	return b.Node().IsLeader()
 }
 
 // dataGroupManagerLocalBackend adapts *DataGroupManager to LocalExecution's
@@ -221,6 +222,12 @@ func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (R
 		return c.opRouter.RouteBucket(bucket)
 	}
 	target, _, err := c.opRouter.RouteObjectRead(bucket, key, versionID)
+	if errors.Is(err, storage.ErrObjectNotFound) {
+		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
+		if fallbackErr == nil {
+			return fallback, nil
+		}
+	}
 	return target, err
 }
 
@@ -236,6 +243,20 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 		return target, ShardGroupEntry{ID: target.GroupID}, err
 	}
 	return c.opRouter.RouteObjectWrite(bucket, key)
+}
+
+func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
+	if storage.IsInternalBucket(bucket) || c.base == nil {
+		return nil
+	}
+	err := c.base.HeadBucket(ctx, bucket)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, storage.ErrBucketNotFound) && c.bucketAssigned(bucket) {
+		return nil
+	}
+	return err
 }
 
 func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
@@ -416,7 +437,7 @@ func (c *ClusterCoordinator) RestoreObjects(objects []storage.SnapshotObject) (i
 
 	byGroup := make(map[string][]storage.SnapshotObject)
 	for _, obj := range objects {
-		target, err := c.opRouter.RouteBucket(obj.Bucket)
+		target, _, err := c.routeWriteOrBucket(obj.Bucket, obj.Key)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -485,6 +506,24 @@ func contextWithObjectWritePlacement(ctx context.Context, group ShardGroupEntry)
 		return ContextWithPlacementGroup(ctx, group.ID)
 	}
 	return ContextWithPlacementGroupEntry(ctx, group)
+}
+
+func topologyForwardWriteError(group ShardGroupEntry, err error) error {
+	if err == nil || !errors.Is(err, ErrNoReachablePeer) || len(group.PeerIDs) == 0 {
+		return err
+	}
+	cfg := DesiredECConfigForGroup(group)
+	if cfg.NumShards() == 0 || len(group.PeerIDs) < cfg.NumShards() {
+		return err
+	}
+	return &ErrInsufficientPlacementTargets{
+		Operation:     "put_object",
+		GroupID:       group.ID,
+		Desired:       cfg,
+		Configured:    cloneStringSlice(group.PeerIDs),
+		Unavailable:   cloneStringSlice(group.PeerIDs),
+		FailureReason: fmt.Sprintf("forward target unavailable: %v", err),
+	}
 }
 
 func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
@@ -688,16 +727,25 @@ func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key strin
 
 func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	ctx := context.Background()
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return "", err
+	}
 	var (
 		target RouteTarget
-		entry  ObjectIndexEntry
+		group  ShardGroupEntry
 		err    error
 	)
 	if c.indexWriter == nil {
 		target, err = c.opRouter.RouteBucket(bucket)
-		entry = ObjectIndexEntry{Bucket: bucket, Key: key, PlacementGroupID: target.GroupID}
+		group = ShardGroupEntry{ID: target.GroupID}
 	} else {
+		var entry ObjectIndexEntry
 		target, entry, err = c.opRouter.RouteObjectRead(bucket, key, "")
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			target, group, err = c.routeWriteOrBucket(bucket, key)
+		} else {
+			group = ShardGroupEntry{ID: entry.PlacementGroupID, PeerIDs: entry.NodeIDs}
+		}
 	}
 	if err != nil {
 		return "", err
@@ -710,7 +758,7 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 			return "", err
 		}
 		marker := &storage.Object{Key: key, VersionID: markerID, LastModified: time.Now().Unix()}
-		if err := c.commitObjectIndex(ctx, bucket, key, marker, ShardGroupEntry{ID: target.GroupID, PeerIDs: entry.NodeIDs}, true); err != nil {
+		if err := c.commitObjectIndex(ctx, bucket, key, marker, group, true); err != nil {
 			return "", err
 		}
 		return markerID, nil
@@ -880,6 +928,9 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 }
 
 func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -904,6 +955,9 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 }
 
 func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -928,12 +982,19 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 	if err != nil {
 		return nil, err
 	}
-	return objectFromReply(reply)
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		return nil, err
+	}
+	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 }
 
 func (c *ClusterCoordinator) PutObject(
 	ctx context.Context, bucket, key string, r io.Reader, contentType string,
 ) (*storage.Object, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -960,9 +1021,13 @@ func (c *ClusterCoordinator) PutObject(
 		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
 		reply, err := c.forward.SendStream(streamCtx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, r)
 		if err != nil {
+			return nil, topologyForwardWriteError(group, err)
+		}
+		obj, err := objectFromReply(reply)
+		if err != nil {
 			return nil, err
 		}
-		return objectFromReply(reply)
+		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
@@ -975,7 +1040,7 @@ func (c *ClusterCoordinator) PutObject(
 	args := buildPutObjectArgs(bucket, key, contentType, body)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpPutObject, args)
 	if err != nil {
-		return nil, err
+		return nil, topologyForwardWriteError(group, err)
 	}
 	obj, err := objectFromReply(reply)
 	if err != nil {
@@ -984,7 +1049,57 @@ func (c *ClusterCoordinator) PutObject(
 	if obj.Size != int64(len(body)) {
 		return nil, ErrForwardBodySizeMismatch
 	}
+	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+}
+
+func (c *ClusterCoordinator) PutObjectWithACL(
+	bucket, key string, r io.Reader, contentType string, acl uint8,
+) (*storage.Object, error) {
+	ctx := context.Background()
+	obj, err := c.PutObject(ctx, bucket, key, r, contentType)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.SetObjectACL(bucket, key, acl); err != nil {
+		if obj == nil || obj.VersionID == "" {
+			return nil, fmt.Errorf("%w: acl error: %v; rollback error: missing version id",
+				storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonRollbackFailed},
+				err,
+			)
+		}
+		if rollbackErr := c.DeleteObjectVersion(bucket, key, obj.VersionID); rollbackErr != nil {
+			return nil, fmt.Errorf("%w: acl error: %v; rollback error: %v",
+				storage.UnsupportedOperationError{Op: "PutObjectWithACL", Reason: storage.UnsupportedReasonRollbackFailed},
+				err,
+				rollbackErr,
+			)
+		}
+		return nil, err
+	}
+	obj.ACL = acl
 	return obj, nil
+}
+
+func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
+	ctx := context.Background()
+	target, err := c.routeReadOrBucket(bucket, key, "")
+	if err != nil {
+		return err
+	}
+	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
+		return gb.SetObjectACL(bucket, key, acl)
+	}
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildSetObjectACLArgs(bucket, key, acl)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpSetObjectACL, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as
@@ -1144,6 +1259,9 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 func (c *ClusterCoordinator) UploadPart(
 	ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader,
 ) (*storage.Part, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
@@ -1213,6 +1331,9 @@ func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return err
+	}
 	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return err

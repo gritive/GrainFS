@@ -13,7 +13,6 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -190,58 +189,6 @@ func bootValidateTimings(state *bootState) error {
 	if cfg.QUICMuxEnabled && cfg.QUICMuxFlushWindow > 0 && cfg.QUICMuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
 		return fmt.Errorf("--quic-mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", cfg.QUICMuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
 	}
-	return nil
-}
-
-// bootOpenRaftLogStore opens the raft log BadgerDB. Registers logStore.Close
-// as a cleanup. Also registers a resourcewatch entry for the underlying
-// raft-log Badger when the store owns it (vs the shared variant where the
-// shared DB phase owns the registration).
-func bootOpenRaftLogStore(state *bootState) error {
-	logStore, err := raft.NewBadgerLogStore(state.raftDir)
-	if err != nil {
-		return fmt.Errorf("open raft store at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK)", state.raftDir, err, state.raftDir)
-	}
-	state.logStore = logStore
-	state.AddCleanup(func() { logStore.Close() })
-	if !logStore.IsShared() && logStore.DB() != nil {
-		raftLogVlogEntry := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, logStore.DB())
-		state.AddCleanup(func() { resourcewatch.DeregisterDB(raftLogVlogEntry) })
-	}
-	state.startupDecisions = append(state.startupDecisions, badgerrole.Decision{
-		Role:   badgerrole.RoleMetaRaftLog,
-		Path:   state.raftDir,
-		Status: badgerrole.DecisionOK,
-		Action: badgerrole.RecoveryActionNone,
-	})
-	return nil
-}
-
-// bootOpenSharedRaftLogDB opens the per-node shared raft-log BadgerDB at
-// <dataDir>/shared-raft-log/. Every data group's Raft log is a key-prefixed
-// view of this one DB (C2 P0b — see docs/architecture/badger-consolidation.md).
-// Registers the DB's Close as a cleanup and a resourcewatch entry.
-func bootOpenSharedRaftLogDB(state *bootState) error {
-	cfg := state.cfg
-	sharedDir := filepath.Join(cfg.DataDir, "shared-raft-log")
-	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir shared raft-log dir: %w", err)
-	}
-	sharedDB, err := badger.Open(badgerutil.RaftLogOptions(sharedDir, true))
-	if err != nil {
-		return fmt.Errorf("open shared raft-log badger at %s: %w", sharedDir, err)
-	}
-	state.sharedRaftLogDB = sharedDB
-	state.AddCleanup(func() { sharedDB.Close() })
-	sharedVlog := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedRaftLog, sharedDB)
-	state.AddCleanup(func() { resourcewatch.DeregisterDB(sharedVlog) })
-	state.startupDecisions = append(state.startupDecisions, badgerrole.Decision{
-		Role:   badgerrole.RoleSharedRaftLog,
-		Path:   sharedDir,
-		Status: badgerrole.DecisionOK,
-		Action: badgerrole.RecoveryActionNone,
-	})
-	log.Info().Str("dir", sharedDir).Msg("shared raft-log DB opened")
 	return nil
 }
 

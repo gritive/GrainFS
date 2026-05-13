@@ -311,10 +311,16 @@ func NewRaftClusterInfo(node cluster.RaftNode, peers []string, backend *cluster.
 	return &RaftClusterInfo{node: node, peers: peers, backend: backend, addrBook: addrBook}
 }
 
-func (r *RaftClusterInfo) NodeID() string   { return r.node.ID() }
-func (r *RaftClusterInfo) State() string    { return r.node.State().String() }
-func (r *RaftClusterInfo) Term() uint64     { return r.node.Term() }
-func (r *RaftClusterInfo) LeaderID() string { return r.node.LeaderID() }
+func (r *RaftClusterInfo) NodeID() string { return r.node.ID() }
+func (r *RaftClusterInfo) State() string  { return r.node.State().String() }
+func (r *RaftClusterInfo) Term() uint64   { return r.node.Term() }
+func (r *RaftClusterInfo) LeaderID() string {
+	leaderID := r.node.LeaderID()
+	if resolved := cluster.ResolveShardGroupPeer(r.addrBook, leaderID); resolved.NodeID != "" {
+		return resolved.NodeID
+	}
+	return leaderID
+}
 func (r *RaftClusterInfo) Peers() []string {
 	return nilToEmpty(r.normalizePeerIDs(r.node.Peers()))
 }
@@ -388,16 +394,34 @@ func (r *RaftClusterInfo) PeerStates() map[string]string {
 }
 
 func (r *RaftClusterInfo) PeerSnapshot() []cluster.PeerLivenessRow {
-	var evidence []raft.PeerReplicationEvidence
+	var probes []cluster.PeerProbeResult
 	if source, ok := any(r.node).(peerReplicationEvidenceSource); ok {
-		evidence = source.PeerReplicationEvidence()
+		probes = freshReplicationProbeResults(source.PeerReplicationEvidence(), r.addrBook, time.Now(), cluster.MetaRaftLivenessFreshnessWindow)
+	} else {
+		probes = raftLivePeerProbeResults(r.normalizePeerIDs(r.node.Peers()), time.Now())
 	}
 	return cluster.BuildPeerLivenessSnapshot(cluster.PeerLivenessInput{
 		SelfID:       r.node.ID(),
 		Voters:       r.node.Peers(),
 		AddressBook:  r.addrBook,
-		ProbeResults: freshReplicationProbeResults(evidence, r.addrBook, time.Now(), cluster.MetaRaftLivenessFreshnessWindow),
+		ProbeResults: probes,
 	})
+}
+
+func raftLivePeerProbeResults(peers []string, observedAt time.Time) []cluster.PeerProbeResult {
+	out := make([]cluster.PeerProbeResult, 0, len(peers))
+	for _, peer := range peers {
+		if peer == "" {
+			continue
+		}
+		out = append(out, cluster.PeerProbeResult{
+			PeerID:     peer,
+			Live:       true,
+			ObservedAt: observedAt,
+			Reason:     "raft_live_peer",
+		})
+	}
+	return out
 }
 
 func freshReplicationProbeResults(evidence []raft.PeerReplicationEvidence, addrBook cluster.NodeAddressBook, now time.Time, freshness time.Duration) []cluster.PeerProbeResult {

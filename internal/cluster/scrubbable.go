@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -139,7 +140,11 @@ func (b *DistributedBackend) ObjectExists(bucket, key string) (bool, error) {
 // root/shards/; putObjectEC composes shardKey as `key/versionID` before
 // handing it to ShardService, so the physical path includes the version.
 func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShards int) []string {
-	base := filepath.Join(b.root, "shards", bucket, key, versionID)
+	shardRoot := filepath.Join(b.root, "shards")
+	if b.shardSvc != nil {
+		shardRoot = b.shardSvc.dataDir
+	}
+	base := filepath.Join(shardRoot, bucket, key, versionID)
 	paths := make([]string, totalShards)
 	for i := 0; i < totalShards; i++ {
 		paths[i] = filepath.Join(base, fmt.Sprintf("shard_%d", i))
@@ -156,6 +161,19 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrub
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: %w", err)
+	}
+	if b.shardSvc != nil {
+		if shardKey, shardIdx, ok := b.shardServiceKeyFromPath(bucket, path); ok {
+			data, err := b.shardSvc.ReadLocalShard(bucket, shardKey, shardIdx)
+			if err != nil {
+				return scrubber.ShardIntegrityResult{}, err
+			}
+			status := scrubber.ShardIntegrityUnverifiedLegacy
+			if eccodec.IsEncodedShard(raw) || eccodec.IsEncryptedShard(raw) {
+				status = scrubber.ShardIntegrityVerified
+			}
+			return scrubber.ShardIntegrityResult{Payload: data, Status: status}, nil
+		}
 	}
 	status := scrubber.ShardIntegrityUnverifiedLegacy
 	data := raw
@@ -174,6 +192,25 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrub
 		}
 	}
 	return scrubber.ShardIntegrityResult{Payload: data, Status: status}, nil
+}
+
+func (b *DistributedBackend) shardServiceKeyFromPath(bucket, path string) (string, int, bool) {
+	if b.shardSvc == nil {
+		return "", 0, false
+	}
+	rel, err := filepath.Rel(filepath.Join(b.shardSvc.dataDir, bucket), path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", 0, false
+	}
+	base := filepath.Base(rel)
+	if !strings.HasPrefix(base, "shard_") {
+		return "", 0, false
+	}
+	idx, err := strconv.Atoi(strings.TrimPrefix(base, "shard_"))
+	if err != nil {
+		return "", 0, false
+	}
+	return filepath.ToSlash(filepath.Dir(rel)), idx, true
 }
 
 func (b *DistributedBackend) ReadShard(bucket, key, path string) ([]byte, error) {

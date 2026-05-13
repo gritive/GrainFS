@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -425,4 +426,59 @@ func TestECScrubSource_Iter_DifferentBucketsResolveToDifferentBackends(t *testin
 	require.NoError(t, err)
 	_, open := <-ch2
 	require.False(t, open, "unmapped bucket must yield empty channel")
+}
+
+func TestECScrubVerifier_UsesResolvedGroupBackend(t *testing.T) {
+	healthyGroup := newMockBackend()
+	healthyGroup.records["b"] = []scrubber.ObjectRecord{
+		{Bucket: "b", Key: "k", DataShards: 1, ParityShards: 0, VersionID: "v1"},
+	}
+	healthyGroup.shards["b/k/0"] = []byte("ok")
+	wrongGroup := newMockBackend()
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(healthyGroup), "node-A")
+
+	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "b", "")
+	require.NoError(t, err)
+	blk := <-ch
+
+	ver := scrubber.NewECScrubVerifier(
+		wrongGroup,
+		scrubber.NewShardVerifier(wrongGroup, scrubber.WithVerifyRetryDelay(0)),
+		rate.NewLimiter(rate.Inf, 1),
+		&recorderEmitter{},
+		"node-A",
+		src,
+	)
+	st, err := ver.Verify(context.Background(), blk)
+	require.NoError(t, err)
+	require.True(t, st.Healthy, "verifier must inspect the group backend that produced the record, got %+v", st)
+}
+
+func TestECScrubVerifier_RepairsCorruptShardAfterQuarantine(t *testing.T) {
+	backend := newOwnerBackend("node-A")
+	rec := scrubber.ObjectRecord{Bucket: "b", Key: "k", DataShards: 1, ParityShards: 1, VersionID: "v1"}
+	backend.records["b"] = []scrubber.ObjectRecord{rec}
+	backend.ownedByKey["b/k"] = []int{0}
+	backend.shards["b/k/0"] = []byte("bad")
+	backend.shardErr["b/k/0"] = fmt.Errorf("crc mismatch")
+	src := scrubber.NewECScrubSource(scrubber.SingleBackendResolver(backend), "node-A")
+
+	ch, err := src.Iter(context.Background(), scrubber.ScopeFull, "b", "")
+	require.NoError(t, err)
+	blk := <-ch
+	ver := scrubber.NewECScrubVerifier(
+		backend,
+		scrubber.NewShardVerifier(backend, scrubber.WithVerifyRetryDelay(0)),
+		rate.NewLimiter(rate.Inf, 1),
+		&recorderEmitter{},
+		"node-A",
+		src,
+	)
+	st, err := ver.Verify(context.Background(), blk)
+	require.NoError(t, err)
+	require.True(t, st.Corrupt, "setup must detect a corrupt owned shard")
+
+	require.NoError(t, ver.Repair(context.Background(), blk))
+	require.Len(t, backend.quarantined, 1)
+	require.Len(t, backend.repairedCalls(), 1, "corrupt shards must be reconstructed after quarantine")
 }
