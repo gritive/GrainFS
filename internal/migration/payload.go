@@ -67,7 +67,11 @@ func DecodeJobDonePayload(buf []byte) (bucket string, copied, errors, updatedAt 
 }
 
 // EncodeJobFailedPayload encodes [4-byte bucket-len][bucket][4-byte reason-len][reason][8-byte errors][8-byte updatedAt unix-nano].
+// reason is silently truncated to maxReasonLen so the paired Decode always succeeds.
 func EncodeJobFailedPayload(bucket, reason string, errors, updatedAt int64) []byte {
+	if len(reason) > maxReasonLen {
+		reason = reason[:maxReasonLen]
+	}
 	b := make([]byte, 4+len(bucket)+4+len(reason)+16)
 	binary.BigEndian.PutUint32(b[:4], uint32(len(bucket)))
 	copy(b[4:], bucket)
