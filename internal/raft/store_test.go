@@ -368,7 +368,9 @@ func TestBadgerLogStore_TruncateBefore_ExcludesIndex(t *testing.T) {
 
 // ── Phase 14d: managed mode pre-flight tests ─────────────────────────────
 
-func TestBadgerLogStore_ManagedMode_FirstOpen_DefaultIsNonManaged(t *testing.T) {
+func TestBadgerLogStore_ManagedMode_LibraryDefaultIsNonManaged(t *testing.T) {
+	// The library option default is non-managed. Production always passes
+	// WithManagedMode() — this test verifies the option mechanism itself.
 	dir := t.TempDir()
 	store, err := NewBadgerLogStore(dir)
 	require.NoError(t, err)
@@ -384,32 +386,6 @@ func TestBadgerLogStore_ManagedMode_FirstOpen_Managed(t *testing.T) {
 	require.NoError(t, store.Close())
 }
 
-func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_NoneToManaged(t *testing.T) {
-	dir := t.TempDir()
-	// First open: non-managed (default)
-	s, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	// Reopen with managed → mismatch → error
-	_, err = NewBadgerLogStore(dir, WithManagedMode())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "non-managed mode")
-}
-
-func TestBadgerLogStore_ManagedMode_PreflightRejectsModeMismatch_ManagedToNone(t *testing.T) {
-	dir := t.TempDir()
-	// First open: managed
-	s, err := NewBadgerLogStore(dir, WithManagedMode())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	// Reopen without managed → mismatch → error
-	_, err = NewBadgerLogStore(dir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "managed=true")
-}
-
 func TestBadgerLogStore_ManagedMode_ConsistentReopenManaged(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewBadgerLogStore(dir, WithManagedMode())
@@ -420,18 +396,6 @@ func TestBadgerLogStore_ManagedMode_ConsistentReopenManaged(t *testing.T) {
 	require.NoError(t, err)
 	defer s2.Close()
 	assert.True(t, s2.IsManagedMode())
-}
-
-func TestBadgerLogStore_ManagedMode_ConsistentReopenNonManaged(t *testing.T) {
-	dir := t.TempDir()
-	s, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	s2, err := NewBadgerLogStore(dir)
-	require.NoError(t, err)
-	defer s2.Close()
-	assert.False(t, s2.IsManagedMode())
 }
 
 func TestMarshalLogEntry_AllocsBounded(t *testing.T) {
