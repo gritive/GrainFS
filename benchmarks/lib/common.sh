@@ -116,6 +116,29 @@ PY
   chmod 600 "$key_file"
 }
 
+bench_copy_node_logs() {
+  local src_dir="$1"
+  local dst_dir="$2"
+
+  [[ -d "$src_dir" && -n "$dst_dir" ]] || return 0
+
+  local log_dir="$dst_dir/logs"
+  mkdir -p "$log_dir"
+
+  local copied=0
+  local f
+  shopt -s nullglob
+  for f in "$src_dir"/*.log; do
+    cp "$f" "$log_dir/"
+    copied=1
+  done
+  shopt -u nullglob
+
+  if [[ "$copied" == "1" ]]; then
+    echo "  node logs saved to $log_dir"
+  fi
+}
+
 bench_wait_admin_socket() {
   local data_dir="$1"
   local attempts="${2:-100}"

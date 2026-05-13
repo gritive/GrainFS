@@ -56,6 +56,9 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
   done
   wait 2>/dev/null || true
+  if [[ -n "${PROFILE_DIR:-}" ]]; then
+    bench_copy_node_logs "$BENCH_DIR" "$PROFILE_DIR"
+  fi
   if [[ "$status" == "0" && "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
     rm -rf "$BENCH_DIR"
   else

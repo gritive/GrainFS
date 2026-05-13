@@ -82,6 +82,7 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
   done
   wait 2>/dev/null || true
+  bench_copy_node_logs "$BENCH_DIR" "$PROFILE_ROOT"
   echo "[bench] stopped"
 }
 trap cleanup EXIT INT TERM
