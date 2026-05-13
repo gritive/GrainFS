@@ -490,3 +490,14 @@ func TestAdminSetBucketVersioning_InternalForbidden(t *testing.T) {
 	require.ErrorAs(t, err, &ae)
 	assert.Equal(t, "forbidden", ae.Code)
 }
+
+func TestAdminGetBucket_VersioningEnabled(t *testing.T) {
+	fake := newFakeBucketOpsWithVersioning()
+	fake.buckets["my-bucket"] = true
+	fake.versioning["my-bucket"] = "Enabled"
+	d := &admin.Deps{Buckets: fake}
+
+	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", info.Versioning)
+}
