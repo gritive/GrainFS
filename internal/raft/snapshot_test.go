@@ -428,11 +428,11 @@ func (s *snapshotCountingTransport) SendTimeoutNow(peer string, args *TimeoutNow
 }
 
 // TestInstallSnapshot_LeaderSendsWhenFollowerBehind: 3-voter cluster. n1 is
-// leader; n2 starts late (its transport is wired before Start, but the node
-// is started AFTER n1 has built up a log AND compacted past the early
-// indices). When n2 starts and the leader heartbeats it, n1's nextIndex[n2]
-// (initialised to last+1) falls below FirstIndex after the next AE-reject
-// cycle — at which point dispatchOne picks InstallSnapshot.
+// leader; n2 starts late and is not registered in memNetwork until it starts,
+// matching a truly offline peer. After n1 builds up a log and compacts past
+// the early indices, n2 joins empty. When the leader heartbeats it, n1's
+// nextIndex[n2] (initialised to last+1) falls below FirstIndex after the next
+// AE-reject cycle — at which point dispatchOne picks InstallSnapshot.
 //
 // Asserts:
 //   - SendInstallSnapshot fired to n2 (load-bearing — proves dispatchOne's
@@ -465,14 +465,16 @@ func TestInstallSnapshot_LeaderSendsWhenFollowerBehind(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Wire transports. n1's outbound goes through a counting wrapper so we
-	// can detect SendInstallSnapshot calls.
+	// Wire transports for the online nodes. n1's outbound goes through a
+	// counting wrapper so we can detect SendInstallSnapshot calls. n2 is
+	// intentionally not registered yet: registering before Start allows
+	// memTransport to enqueue pre-compaction AppendEntries into n2.cmdCh,
+	// which is not how a real offline peer behaves.
 	snapTr := &snapshotCountingTransport{
 		inner: net.Register("n1", n1),
 		count: make(map[string]int),
 	}
 	n1.SetTransport(snapTr)
-	n2.SetTransport(net.Register("n2", n2))
 	n3.SetTransport(net.Register("n3", n3))
 
 	// Start n1 and n3 first so n1 can win the election and replicate to n3
@@ -514,6 +516,7 @@ func TestInstallSnapshot_LeaderSendsWhenFollowerBehind(t *testing.T) {
 			n2applied <- e
 		}
 	}()
+	n2.SetTransport(net.Register("n2", n2))
 	n2.Start()
 	t.Cleanup(n2.Stop)
 

@@ -6,9 +6,10 @@ package raft
 //
 //	go test -bench=. -benchmem -benchtime=2s -count=3 -run '^$' ./internal/raft/v2
 //
-// For the 1 GiB snapshot bench, use -benchtime=1x because setup dominates:
+// For the 1 GiB snapshot bench, opt in explicitly and use -benchtime=1x
+// because setup dominates:
 //
-//	go test -bench=BenchmarkInstallSnapshot_1GiB -benchtime=1x -count=1 -run '^$' ./internal/raft/v2
+//	GRAINFS_BENCH_FULL=1 go test -bench=BenchmarkInstallSnapshot_1GiB -benchtime=1x -count=1 -run '^$' ./internal/raft/v2
 //
 // v1 vs v2 comparison: deferred. The redesign goal was safety/maintainability,
 // not throughput (see plan §Driver). Absolute v2 numbers are recorded in
@@ -17,6 +18,7 @@ package raft
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -190,7 +192,7 @@ func BenchmarkProposeAndCommit_3Voter(b *testing.B) {
 // creation dominate; repeating N>1 times adds no additional signal and
 // exhausts memory on constrained machines.
 //
-//	go test -bench=BenchmarkInstallSnapshot_1GiB -benchtime=1x -count=1 -run '^$' ./internal/raft/v2
+//	GRAINFS_BENCH_FULL=1 go test -bench=BenchmarkInstallSnapshot_1GiB -benchtime=1x -count=1 -run '^$' ./internal/raft/v2
 //
 // Methodology: set up a 3-voter cluster (n1 fast leader, n3 follower, n2
 // offline). Propose 10 entries to build a log on {n1, n3}. Leader compacts
@@ -198,6 +200,10 @@ func BenchmarkProposeAndCommit_3Voter(b *testing.B) {
 // with a 1 GiB Data payload. Start n2 and wait for LogEntrySnapshot on its
 // ApplyCh. b.SetBytes reports throughput in MB/s.
 func BenchmarkInstallSnapshot_1GiB(b *testing.B) {
+	if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
+		b.Skip("set GRAINFS_BENCH_FULL=1 to run the 1 GiB snapshot benchmark")
+	}
+
 	const snapSize = 1 << 30 // 1 GiB
 
 	net := newMemNetwork()

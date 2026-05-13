@@ -40,6 +40,7 @@ echo "Starting GrainFS (data dir: $DATA_DIR)..."
   --port "$BASE_PORT" \
   --nfs4-port 0 \
   --nbd-port 0 \
+  --cluster-key "bench-baseline-key" \
   $(bench_encryption_args) \
   > /dev/null 2>&1 &
 
@@ -56,6 +57,20 @@ if ! ps -p $GRAINFS_PID > /dev/null 2>&1; then
 fi
 
 bench_wait_tcp_port "127.0.0.1" "$BASE_PORT" "GrainFS HTTP" 50 0.2
+
+ADMIN_SOCK="$DATA_DIR/admin.sock"
+echo "Bootstrapping benchmark IAM credentials..."
+for _ in $(seq 1 50); do
+  [[ -S "$ADMIN_SOCK" ]] && break
+  sleep 0.2
+done
+if [[ ! -S "$ADMIN_SOCK" ]]; then
+  echo "ERROR: admin socket did not become ready: $ADMIN_SOCK" >&2
+  exit 1
+fi
+BOOTSTRAP_JSON=$("$BINARY" iam sa create bench --endpoint "$ADMIN_SOCK")
+ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["access_key"])' <<<"$BOOTSTRAP_JSON")
+SECRET_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["secret_key"])' <<<"$BOOTSTRAP_JSON")
 
 echo ""
 echo "Running k6 benchmark..."
