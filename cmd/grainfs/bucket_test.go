@@ -235,3 +235,78 @@ func TestBucketCreateCmd_TextFeedback(t *testing.T) {
 		t.Errorf("output %q missing create feedback", buf.String())
 	}
 }
+
+func TestBucketInfoCmd_Table(t *testing.T) {
+	count := int64(42)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/my-bucket", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"name":"my-bucket","object_count":%d}`, count)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "info", "my-bucket"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "NAME") || !strings.Contains(out, "OBJECTS") {
+		t.Errorf("output %q missing table headers", out)
+	}
+	if !strings.Contains(out, "my-bucket") || !strings.Contains(out, "42") {
+		t.Errorf("output %q missing bucket info", out)
+	}
+}
+
+func TestBucketInfoCmd_JSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/my-bucket", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"my-bucket","object_count":7}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "--json", "info", "my-bucket"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
+		t.Errorf("output is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+}
+
+func TestBucketInfoCmd_NotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets/missing", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"code":"not_found","message":"bucket not found"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{"bucket", "--endpoint", sock, "info", "missing"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected error for not_found, got none; output: %s", buf.String())
+	}
+}
