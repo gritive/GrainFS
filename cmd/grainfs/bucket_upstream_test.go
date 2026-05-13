@@ -155,7 +155,7 @@ func TestBucketUpstreamListCmd_Table(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"upstreams":[{"bucket":"b1","upstream_url":"http://minio:9000","access_key":"AK1","created_at":"2026-01-01T00:00:00Z"}]}`)
+		fmt.Fprint(w, `[{"bucket":"b1","upstream_url":"http://minio:9000","access_key":"AK1","created_at":"2026-01-01T00:00:00Z"}]`)
 	})
 	sock := startFakeAdminUDS(t, mux)
 
@@ -181,7 +181,7 @@ func TestBucketUpstreamListCmd_JSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/upstreams", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"upstreams":[{"bucket":"b1"}]}`)
+		fmt.Fprint(w, `[{"bucket":"b1"}]`)
 	})
 	sock := startFakeAdminUDS(t, mux)
 
@@ -194,7 +194,7 @@ func TestBucketUpstreamListCmd_JSON(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
 	}
-	var parsed map[string]any
+	var parsed any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
 		t.Errorf("output is not valid JSON: %v\noutput: %s", err, buf.String())
 	}

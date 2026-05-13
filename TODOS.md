@@ -4,13 +4,6 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
-### Bucket & IAM CLI DX
-
-- [ ] **`BucketInfo.Size` (총 사용 바이트)** — object_count 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
-- [ ] **`BucketInfo.HasUpstream`** — pull-through 설정 여부 표시. bucket info + list 출력에 열 추가.
-- [ ] **`bucket policy` CLI** — `GetBucketPolicy/SetBucketPolicy/DeleteBucketPolicy` 노출. 현재 storage layer만 있고 admin API 미노출.
-- [ ] **`bucket versioning` CLI** — `SetBucketVersioning` admin API 노출.
-
 ### Bucket Admin API
 
 - [ ] **ForceDeleteBucket: Badger MVCC 홀드 해소** — `WalkObjects` 콜백 내에서 Raft propose를 호출하면 db.View 트랜잭션이 N×RTT 동안 열려 있어 Badger GC가 블록됨. 수정: View 내에서 키 목록만 수집 후 View를 닫고, 루프 밖에서 delete 수행. PR #334 adversarial review 식별.
@@ -18,8 +11,6 @@
 - [ ] **ForceDeleteBucket: TOCTOU 오류 메시지** — force=true 중 concurrent write로 `ErrBucketNotEmpty` 발생 시 "use --force" 라는 오해를 주는 메시지 반환. force=true 경우는 별도 메시지(503 retry) 필요. PR #334 adversarial review 식별.
 
 ### 기타
-
-
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation

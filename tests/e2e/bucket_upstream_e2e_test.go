@@ -64,7 +64,7 @@ func TestBucketUpstream_CLIRoundtrip(t *testing.T) {
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, binary, "bucket", "upstream", "get", "shared",
+		out, err := exec.CommandContext(ctx, binary, "bucket", "--json", "upstream", "get", "shared",
 			"--endpoint", sock,
 		).CombinedOutput()
 		require.NoError(t, err, "get: %s", string(out))
@@ -79,7 +79,7 @@ func TestBucketUpstream_CLIRoundtrip(t *testing.T) {
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, binary, "bucket", "upstream", "list",
+		out, err := exec.CommandContext(ctx, binary, "bucket", "--json", "upstream", "list",
 			"--endpoint", sock,
 		).CombinedOutput()
 		require.NoError(t, err, "list: %s", string(out))

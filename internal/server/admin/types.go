@@ -82,7 +82,7 @@ type VolumePlacementSource interface {
 }
 
 // BucketOps is the slim interface bucket admin handlers need from storage.
-// Satisfied by *storage.Operations (and storage.Backend after ForceDeleteBucket was added).
+// Satisfied by *storage.Operations.
 type BucketOps interface {
 	CreateBucket(ctx context.Context, bucket string) error
 	HeadBucket(ctx context.Context, bucket string) error
@@ -90,6 +90,12 @@ type BucketOps interface {
 	ListBuckets(ctx context.Context) ([]string, error)
 	ForceDeleteBucket(ctx context.Context, bucket string) error
 	CountObjects(ctx context.Context, bucket string) (int64, error)
+	// Policy and versioning — no ctx, matching *storage.Operations signatures.
+	GetBucketPolicy(bucket string) ([]byte, error)
+	SetBucketPolicy(bucket string, policyJSON []byte) error
+	DeleteBucketPolicy(bucket string) error
+	GetBucketVersioning(bucket string) (string, error)
+	SetBucketVersioning(bucket, state string) error
 }
 
 // IAMService is the slim interface the IAM admin handlers need.
@@ -153,6 +159,10 @@ type ScrubVolumeResp = adminapi.ScrubVolumeResp
 type ScrubJobInfo = adminapi.ScrubJobInfo
 type ListScrubJobsResp = adminapi.ListScrubJobsResp
 type VolumeInfo = adminapi.VolumeInfo
+type BucketPolicyResp = adminapi.BucketPolicyResp
+type BucketPolicySetReq = adminapi.BucketPolicySetReq
+type BucketVersioningResp = adminapi.BucketVersioningResp
+type BucketVersioningSetReq = adminapi.BucketVersioningSetReq
 
 func toVolumeInfo(v *volume.Volume) VolumeInfo {
 	return VolumeInfo{

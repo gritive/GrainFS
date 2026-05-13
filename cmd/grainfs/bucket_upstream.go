@@ -131,20 +131,18 @@ func bucketUpstreamCmd() *cobra.Command {
 				fmt.Fprintln(c.OutOrStdout(), string(out))
 				return nil
 			}
-			var resp struct {
-				Upstreams []struct {
-					Bucket      string    `json:"bucket"`
-					UpstreamURL string    `json:"upstream_url"`
-					AccessKey   string    `json:"access_key"`
-					CreatedAt   time.Time `json:"created_at"`
-				} `json:"upstreams"`
+			var items []struct {
+				Bucket      string    `json:"bucket"`
+				UpstreamURL string    `json:"upstream_url"`
+				AccessKey   string    `json:"access_key"`
+				CreatedAt   time.Time `json:"created_at"`
 			}
-			if err := json.Unmarshal(out, &resp); err != nil {
+			if err := json.Unmarshal(out, &items); err != nil {
 				return fmt.Errorf("parse response: %w", err)
 			}
 			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "BUCKET\tURL\tACCESS KEY\tCREATED AT")
-			for _, u := range resp.Upstreams {
+			for _, u := range items {
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 					u.Bucket, u.UpstreamURL, u.AccessKey, u.CreatedAt.Format(time.RFC3339))
 			}
