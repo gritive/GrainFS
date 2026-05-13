@@ -552,7 +552,7 @@ func iamSADelete(t *testing.T, sock, saID string) {
 }
 
 // iamPutBucketUpstream registers a bucket-upstream record via admin UDS.
-// Wire format: PUT /v1/buckets/upstream with bucket field in JSON body.
+// Wire format: PUT /v1/upstreams with bucket field in JSON body.
 //
 // Per /plan-eng-review override A9, the JSON wire key is "upstream_url"
 // (matches the CLI flag --upstream-url and server-side struct field UpstreamURL).
@@ -564,7 +564,7 @@ func iamPutBucketUpstream(t *testing.T, sock, bucket, upstreamURL, ak, sk string
 		"access_key":   ak,
 		"secret_key":   sk,
 	}
-	iamDo(t, sock, "PUT", "/v1/buckets/upstream", body, nil)
+	iamDo(t, sock, "PUT", "/v1/upstreams", body, nil)
 }
 
 // iamGrantPut PUTs an explicit grant (Role: Read|Write|Admin, exact bucket).
