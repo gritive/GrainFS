@@ -45,6 +45,15 @@ func (n *Node) handleCreateSnapshot(cmd command) {
 		cmd.csReply <- fmt.Errorf("raftv2: CreateSnapshot: cannot snapshot during joint configuration; retry after final ConfChange commits")
 		return
 	}
+	// Refuse to compact past the Stage-1 (ConfChangePromoteStage1) entry while a
+	// PromoteToVoter is in-flight. Stage-1 must stay in the live log so that a
+	// newly elected leader can run recoverOrphanedPromote if this leader crashes
+	// before Stage-2 (the joint AddVoter entry) commits. Same rationale as the
+	// joint guard above: the window is short (two AE round-trips) so retry is cheap.
+	if n.st.pendingPromote != nil && cmd.csIndex >= n.st.appendedConfigIndex {
+		cmd.csReply <- fmt.Errorf("raftv2: CreateSnapshot: cannot compact past index %d while PromoteToVoter is in-flight; retry after the joint-AddVoter entry commits", n.st.appendedConfigIndex)
+		return
+	}
 	cfgVoters := make([]string, len(n.st.currentConfig.voters))
 	copy(cfgVoters, n.st.currentConfig.voters)
 	cfgLearners := n.st.currentConfig.cloneLearners()

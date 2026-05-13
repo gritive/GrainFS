@@ -345,8 +345,9 @@ func (d *dropJointTransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (
 //
 // Protocol:
 //  1. n1(leader), n2, n3 form a 3-voter cluster; n4 joins as learner.
-//  2. n2/n3 transports are wrapped with dropJointTransport so Stage-2 can
-//     never reach quorum while the filter is armed.
+//  2. n1's transport is wrapped with dropJointTransport so Stage-2 sent by
+//     n1 is dropped before reaching n2/n3 (memNetwork routes AEs through the
+//     sender's transport).
 //  3. PromoteToVoter(n4) fires; Stage-1 commits (n4 leaves learners map)
 //     but Stage-2 hangs waiting for replication.
 //  4. n1 stops (leader crash).
@@ -411,10 +412,11 @@ func TestPromoteToVoter_OrphanRecovery(t *testing.T) {
 
 	// Crash n1. PromoteToVoter returns an error (leader lost); ignore it.
 	n1.Stop()
+	// n1.Stop() closes stopCh, which unblocks the PromoteToVoter goroutine
+	// immediately; drain the channel to prevent goroutine leak.
 	select {
 	case <-promoteDone:
 	case <-time.After(2 * time.Second):
-		// may not have returned yet if n1 stop races with promote goroutine
 	}
 
 	// Disarm the filter — the new leader's transport is the underlying memTransport,
