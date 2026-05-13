@@ -62,6 +62,11 @@ func (f *fakeBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	f.record(fmt.Sprintf("DeleteBucket:%s", bucket))
 	return f.deleteErr
 }
+func (f *fakeBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	_ = ctx
+	f.record(fmt.Sprintf("ForceDeleteBucket:%s", bucket))
+	return f.deleteErr
+}
 func (f *fakeBackend) ListBuckets(ctx context.Context) ([]string, error) {
 	_ = ctx
 	f.record("ListBuckets")

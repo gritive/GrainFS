@@ -345,9 +345,10 @@ type allocateTruncateBackend struct {
 	truncateSize   int64
 }
 
-func (b *allocateTruncateBackend) CreateBucket(context.Context, string) error { return nil }
-func (b *allocateTruncateBackend) HeadBucket(context.Context, string) error   { return nil }
-func (b *allocateTruncateBackend) DeleteBucket(context.Context, string) error { return nil }
+func (b *allocateTruncateBackend) CreateBucket(context.Context, string) error      { return nil }
+func (b *allocateTruncateBackend) HeadBucket(context.Context, string) error        { return nil }
+func (b *allocateTruncateBackend) DeleteBucket(context.Context, string) error      { return nil }
+func (b *allocateTruncateBackend) ForceDeleteBucket(context.Context, string) error { return nil }
 func (b *allocateTruncateBackend) ListBuckets(context.Context) ([]string, error) {
 	return nil, nil
 }
