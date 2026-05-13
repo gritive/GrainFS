@@ -199,6 +199,29 @@ func TestRegisterIAMAdminRoutes_SAGetAndDelete(t *testing.T) {
 	}
 }
 
+// TestRegisterIAMAdminRoutes_WildcardGrantForbidden verifies that PUT /v1/iam/grant
+// with bucket:"*" on a non-default SA returns 403 (not 500).
+// Regression: statusForCode was missing the "forbidden" case and fell through to 500.
+func TestRegisterIAMAdminRoutes_WildcardGrantForbidden(t *testing.T) {
+	api, _ := newAdminAPIWithStore(t)
+	cli := startIAMAdminTestServer(t, api)
+
+	sa := createSAViaAPI(t, cli, "nondefault")
+
+	body, _ := json.Marshal(iam.GrantPutRequest{SAID: sa.SAID, Bucket: "*", Role: "Admin"})
+	req, _ := http.NewRequest("PUT", "http://unix/v1/iam/grant", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := cli.Do(req)
+	if err != nil {
+		t.Fatalf("grant put wildcard: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for wildcard grant on non-default SA, got %d", resp.StatusCode)
+	}
+}
+
 func TestRegisterIAMAdminRoutes_GrantListQuery(t *testing.T) {
 	api, _ := newAdminAPIWithStore(t)
 	cli := startIAMAdminTestServer(t, api)

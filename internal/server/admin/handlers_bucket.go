@@ -33,7 +33,7 @@ func AdminListBuckets(ctx context.Context, d *Deps) (ListBucketsAdminResp, error
 	if err != nil {
 		return ListBucketsAdminResp{}, NewInternal("list buckets: " + err.Error())
 	}
-	filtered := names[:0]
+	filtered := make([]string, 0, len(names))
 	for _, n := range names {
 		if !storage.IsInternalBucket(n) {
 			filtered = append(filtered, n)

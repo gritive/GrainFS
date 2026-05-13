@@ -299,6 +299,8 @@ func statusForCode(c string) int {
 		return consts.StatusUnprocessableEntity
 	case "unauthorized":
 		return consts.StatusUnauthorized
+	case "forbidden":
+		return consts.StatusForbidden
 	default:
 		return consts.StatusInternalServerError
 	}
