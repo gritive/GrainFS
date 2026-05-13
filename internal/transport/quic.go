@@ -411,7 +411,12 @@ func (t *QUICTransport) acceptLoop() {
 			go func() {
 				if err := t.handleCapabilityExchange(conn); err != nil {
 					log.Warn().Err(err).Str("peer", conn.RemoteAddr().String()).Msg("capability exchange failed")
-					_ = conn.CloseWithError(quicAppErrCode, "capability exchange failed")
+					// Delay connection close so the peer can drain the error
+					// response written by handleCapabilityExchange before the
+					// CONNECTION_CLOSE frame interrupts stream reads.
+					time.AfterFunc(200*time.Millisecond, func() {
+						_ = conn.CloseWithError(quicAppErrCode, "capability exchange failed")
+					})
 					return
 				}
 				h(t.ctx, conn)
