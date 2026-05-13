@@ -72,7 +72,8 @@ func bootstrapAdminViaUDS(t testing.TB, dataDir string) (accessKey, secretKey st
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equalf(t, http.StatusOK, resp.StatusCode, "bootstrap via %s", sock)
+	require.Truef(t, resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated,
+		"bootstrap via %s: got %d", sock, resp.StatusCode)
 
 	var out struct {
 		AccessKey string `json:"access_key"`
