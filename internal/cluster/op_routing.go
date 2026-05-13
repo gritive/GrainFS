@@ -93,9 +93,6 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 	if t.SelfIsVoter && r.leaderProbe != nil && r.leaderProbe.GroupLeaderIsSelf(entry.ID) {
 		t.SelfIsLeader = true
 	}
-	if t.SelfIsLeader {
-		return t, nil
-	}
 	peers := NewShardGroupPeerSet(entry).ForwardOrder(r.selfID, r.selfAliases...)
 	if r.addr != nil {
 		resolved, err := ResolveNodeAddresses(r.addr, peers)

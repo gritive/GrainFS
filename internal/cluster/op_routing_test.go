@@ -204,6 +204,21 @@ func TestOpRouter_RouteObjectWrite_PicksECCapableGroup(t *testing.T) {
 	require.GreaterOrEqual(t, len(group.PeerIDs), 6)
 }
 
+func TestOpRouter_RouteObjectWrite_PreservesForwardPeersWhenSelfIsLeader(t *testing.T) {
+	r := routerForTestWithECGroups(t, ECConfig{DataShards: 4, ParityShards: 2})
+	r.leaderProbe = &fakeLeaderProbe{leaderGroups: map[string]bool{
+		"g1": true,
+		"g2": true,
+	}}
+
+	target, _, err := r.RouteObjectWrite("b1", "key-1")
+
+	require.NoError(t, err)
+	require.True(t, target.SelfIsLeader)
+	require.NotEmpty(t, target.Peers, "forward candidates must survive route-to-execute leadership races")
+	require.NotContains(t, target.Peers[:len(target.Peers)-1], "10.0.0.2:7000")
+}
+
 func TestOpRouter_RouteObjectWrite_InternalBucketUsesBucketRoute(t *testing.T) {
 	r := routerForTestWithECGroups(t, ECConfig{DataShards: 4, ParityShards: 2})
 	r.router.AssignBucket(storage.NFS4BucketName, "g1")

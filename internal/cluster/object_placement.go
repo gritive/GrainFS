@@ -23,6 +23,7 @@ func ValidatePlacementGroupID(groupID string) error {
 func SelectObjectPlacementGroup(bucket, key string, groups []ShardGroupEntry, cfg ECConfig) (ShardGroupEntry, error) {
 	candidates := make([]ShardGroupEntry, 0, len(groups))
 	legacyCandidates := make([]ShardGroupEntry, 0, 1)
+	maxPeerCount := 0
 	for _, group := range groups {
 		if group.ID == "" {
 			continue
@@ -40,12 +41,25 @@ func SelectObjectPlacementGroup(bucket, key string, groups []ShardGroupEntry, cf
 			continue
 		}
 		candidates = append(candidates, candidate)
+		if len(candidate.PeerIDs) > maxPeerCount {
+			maxPeerCount = len(candidate.PeerIDs)
+		}
 	}
 	if len(candidates) == 0 && len(legacyCandidates) > 0 {
 		candidates = legacyCandidates
+		maxPeerCount = len(candidates[0].PeerIDs)
 	}
 	if len(candidates) == 0 {
 		return ShardGroupEntry{}, fmt.Errorf("no EC-capable object placement group")
+	}
+	if maxPeerCount > 0 {
+		widest := candidates[:0]
+		for _, candidate := range candidates {
+			if len(candidate.PeerIDs) == maxPeerCount {
+				widest = append(widest, candidate)
+			}
+		}
+		candidates = widest
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].ID < candidates[j].ID

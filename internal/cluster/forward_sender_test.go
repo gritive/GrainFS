@@ -136,6 +136,67 @@ func TestForwardSender_AllPeersDown_ReturnsErrNoReachable(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoReachablePeer)
 }
 
+func TestForwardSender_RetriesPeerSweepWithinCallerDeadline(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			return nil, errors.New("connection refused")
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(dialer)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	reply, err := s.Send(ctx, []string{"a", "b"}, "g",
+		raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "b", "k"))
+
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
+func TestForwardSender_RetriesNotLeaderWithoutHintWithinCallerDeadline(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), nil
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(dialer)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	reply, err := s.Send(ctx, []string{"a", "b"}, "g",
+		raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "b", "k"))
+
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
+func TestForwardSender_ReadinessRetryAddsDeadlineForBackgroundCaller(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), nil
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(dialer).WithReadinessRetry(500 * time.Millisecond)
+
+	reply, err := s.Send(context.Background(), []string{"a", "b"}, "g",
+		raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "b", "k"))
+
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
 // TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply verifies that
 // when the hint dial also fails, we don't loop forever — we return the original
 // NotLeader reply and let the caller retry from a fresh node.
@@ -281,6 +342,82 @@ func TestForwardSender_SendStream_NotLeaderWithoutRewindDoesNotRetryBody(t *test
 	require.Equal(t, 1, calls)
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+}
+
+func TestForwardSender_SendStreamRetriesPeerSweepWithinCallerDeadline(t *testing.T) {
+	var connected []string
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			_, _ = io.Copy(io.Discard, body)
+			return nil, errors.New("connection refused")
+		}
+		got, err := io.ReadAll(body)
+		require.NoError(t, err)
+		require.Equal(t, []byte("payload"), got)
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	reply, err := s.SendStream(ctx, []string{"a", "b"}, "g",
+		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), bytes.NewReader([]byte("payload")))
+
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
+func TestForwardSender_SendStreamRetriesNotLeaderWithoutHintWithinCallerDeadline(t *testing.T) {
+	var connected []string
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		connected = append(connected, peer)
+		_, _ = io.Copy(io.Discard, body)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), nil
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	reply, err := s.SendStream(ctx, []string{"a", "b"}, "g",
+		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), bytes.NewReader([]byte("payload")))
+
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
+func TestForwardSender_SendStreamReadinessRetryAddsDeadlineForBackgroundCaller(t *testing.T) {
+	var connected []string
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		connected = append(connected, peer)
+		_, _ = io.Copy(io.Discard, body)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), nil
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer).WithReadinessRetry(500 * time.Millisecond)
+
+	reply, err := s.SendStream(context.Background(), []string{"a", "b"}, "g",
+		raftpb.ForwardOpPutObject, buildPutObjectArgs("b", "k", "text/plain", nil), bytes.NewReader([]byte("payload")))
+
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.Equal(t, []string{"a", "b", "a"}, connected)
 }
 
 func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {

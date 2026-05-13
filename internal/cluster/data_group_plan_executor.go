@@ -14,6 +14,10 @@ import (
 // itself: it transfers leadership first, then the caller retries on the new leader.
 var ErrLeadershipTransferred = errors.New("leadership transferred to another voter")
 
+// ErrDataGroupNotLocalLeader is returned when an operation requires the local
+// process to lead a data group but leadership is elsewhere or not established.
+var ErrDataGroupNotLocalLeader = errors.New("data group not led locally")
+
 // NodeAddressBook resolves cluster nodeIDs to their QUIC addresses.
 // *MetaFSM implements this interface.
 type NodeAddressBook interface {
@@ -129,16 +133,24 @@ func (e *DataGroupPlanExecutor) AddReplica(ctx context.Context, groupID, toNode 
 		return fmt.Errorf("data_group_executor: resolve toNode: %w", err)
 	}
 
+	originalPeers := slices.Clone(dg.PeerIDs())
+	newPeers := append(slices.Clone(originalPeers), toNode)
+	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
+		return fmt.Errorf("data_group_executor: ProposeShardGroup desired peers: %w", err)
+	}
+
 	addCtx, cancel := context.WithTimeout(ctx, e.catchUpTimeout)
 	defer cancel()
 	if err := node.ChangeMembership(addCtx,
 		[]raft.ServerEntry{{ID: toNode, Address: toAddr, Suffrage: raft.Voter}},
 		nil,
 	); err != nil {
+		if rollbackErr := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: originalPeers}); rollbackErr != nil {
+			return fmt.Errorf("data_group_executor: ChangeMembership: %w; rollback desired peers: %w", err, rollbackErr)
+		}
 		return fmt.Errorf("data_group_executor: ChangeMembership: %w", err)
 	}
 
-	newPeers := append(slices.Clone(dg.PeerIDs()), toNode)
 	if err := e.sgUpdater.ProposeShardGroup(ctx, ShardGroupEntry{ID: groupID, PeerIDs: newPeers}); err != nil {
 		return fmt.Errorf("data_group_executor: ProposeShardGroup: %w", err)
 	}
@@ -287,7 +299,7 @@ func (e *DataGroupPlanExecutor) waitForLocalLeader(ctx context.Context, groupID 
 
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("data_group_executor: not leader of group %q: %w", groupID, waitCtx.Err())
+			return fmt.Errorf("data_group_executor: not leader of group %q: %w: %w", groupID, ErrDataGroupNotLocalLeader, waitCtx.Err())
 		case <-ticker.C:
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"slices"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -88,6 +87,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	state.forwardSender = cluster.NewForwardSender(forwardDialer).
 		WithStreamDialer(forwardStreamDialer).
 		WithReadStreamDialer(forwardReadStreamDialer).
+		WithReadinessRetry(5 * time.Second).
 		WithLeaderHintResolver(func(hint string) string {
 			if addr, ok := cluster.ResolveNodeAddress(metaRaft.FSM(), hint); ok {
 				return addr
@@ -227,30 +227,5 @@ func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeI
 		log.Info().Str("node_id", nodeID).Int("groups", len(missingGroups)).Int("seed_groups", state.seedGroups).Msg("seeded shard groups for joined node count")
 	}
 
-	groups := state.metaRaft.FSM().ShardGroups()
-	targets := make([]cluster.ShardGroupEntry, 0, len(groups))
-	for _, group := range groups {
-		if group.ID == "group-0" || slices.Contains(group.PeerIDs, nodeID) {
-			continue
-		}
-		expanded := cluster.ShardGroupEntry{
-			ID:      group.ID,
-			PeerIDs: append(slices.Clone(group.PeerIDs), nodeID),
-		}
-		if err := state.metaRaft.ProposeShardGroup(ctx, expanded); err != nil {
-			return fmt.Errorf("expand shard groups for joined node %q: propose desired peers for %s: %w", nodeID, group.ID, err)
-		}
-		targets = append(targets, group)
-	}
-
-	executor := cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft)
-	for _, group := range targets {
-		if err := executor.AddReplica(ctx, group.ID, nodeID); err != nil {
-			return fmt.Errorf("expand shard groups for joined node %q: add data voter to %s: %w", nodeID, group.ID, err)
-		}
-	}
-	if len(targets) > 0 {
-		log.Info().Str("node_id", nodeID).Int("groups", len(targets)).Msg("expanded shard groups for joined node")
-	}
 	return nil
 }

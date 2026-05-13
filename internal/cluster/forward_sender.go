@@ -47,6 +47,7 @@ type ForwardSender struct {
 	readDialer         forwardReadStreamDialer
 	leaderHintResolver func(string) string
 	timeout            time.Duration
+	readinessRetry     time.Duration
 	streamSlots        chan struct{}
 	readSlots          chan struct{}
 }
@@ -79,6 +80,11 @@ func (s *ForwardSender) WithReadStreamDialer(d forwardReadStreamDialer) *Forward
 
 func (s *ForwardSender) WithLeaderHintResolver(resolve func(string) string) *ForwardSender {
 	s.leaderHintResolver = resolve
+	return s
+}
+
+func (s *ForwardSender) WithReadinessRetry(d time.Duration) *ForwardSender {
+	s.readinessRetry = d
 	return s
 }
 
@@ -150,6 +156,13 @@ func (s *ForwardSender) Send(
 	ctx context.Context, peers []string, groupID string,
 	op raftpb.ForwardOp, fbsArgs []byte,
 ) ([]byte, error) {
+	_, callerHasDeadline := ctx.Deadline()
+	if !callerHasDeadline && s.readinessRetry > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.readinessRetry)
+		defer cancel()
+		callerHasDeadline = true
+	}
 	if s.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)
@@ -157,32 +170,59 @@ func (s *ForwardSender) Send(
 	}
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
 
-	var lastDialErr error
-	for _, peer := range peers {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		reply, err := s.dialer(ctx, peer, payload)
-		if err != nil {
-			lastDialErr = err
-			continue // try next peer
-		}
-		if isNotLeaderReply(reply) {
-			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
-				r2, err2 := s.dialer(ctx, hint, payload)
-				if err2 == nil {
-					return r2, nil
+	for {
+		var lastDialErr error
+		retryableNotLeader := false
+		for _, peer := range peers {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			reply, err := s.dialer(ctx, peer, payload)
+			if err != nil {
+				lastDialErr = err
+				continue // try next peer
+			}
+			if isNotLeaderReply(reply) {
+				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+					r2, err2 := s.dialer(ctx, hint, payload)
+					if err2 == nil {
+						return r2, nil
+					}
+					if callerHasDeadline {
+						retryableNotLeader = true
+						continue
+					}
+					// Hint dial failed; fall through to return original NotLeader
+					// reply so caller can retry from a fresh node.
+					return reply, nil
 				}
-				// Hint dial failed; fall through to return original NotLeader
-				// reply so caller can retry from a fresh node.
+				if callerHasDeadline {
+					retryableNotLeader = true
+					continue
+				}
+			}
+			return reply, nil
+		}
+		if lastDialErr == nil && !retryableNotLeader {
+			return nil, ErrNoReachablePeer
+		}
+		if !callerHasDeadline {
+			return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastDialErr == nil {
+				return nil, ErrNoReachablePeer
+			}
+			return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 		}
-		return reply, nil
 	}
-	if lastDialErr != nil {
-		return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
-	}
-	return nil, ErrNoReachablePeer
 }
 
 // ResolveLeaderPeers probes the candidate list with a safe HeadObject request
@@ -247,6 +287,13 @@ func (s *ForwardSender) SendStream(
 		return nil, storage.ErrForwardBackpressure
 	}
 
+	_, callerHasDeadline := ctx.Deadline()
+	if !callerHasDeadline && s.readinessRetry > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.readinessRetry)
+		defer cancel()
+		callerHasDeadline = true
+	}
 	if s.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)
@@ -254,45 +301,72 @@ func (s *ForwardSender) SendStream(
 	}
 
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
-	var lastDialErr error
-	for _, peer := range peers {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := rewindForwardBody(body); err != nil {
-			return nil, err
-		}
-		reply, err := s.streamDialer(ctx, peer, payload, body)
-		if err != nil {
-			lastDialErr = err
-			if !canRewindForwardBody(body) {
+	for {
+		var lastDialErr error
+		retryableNotLeader := false
+		for _, peer := range peers {
+			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			continue
-		}
-		if isNotLeaderReply(reply) {
-			if !canRewindForwardBody(body) {
-				return reply, nil
+			if err := rewindForwardBody(body); err != nil {
+				return nil, err
 			}
-			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
-				if err := rewindForwardBody(body); err != nil {
+			reply, err := s.streamDialer(ctx, peer, payload, body)
+			if err != nil {
+				lastDialErr = err
+				if !canRewindForwardBody(body) {
 					return nil, err
 				}
-				r2, err2 := s.streamDialer(ctx, hint, payload, body)
-				if err2 == nil {
-					return r2, nil
-				}
+				continue
+			}
+			if isNotLeaderReply(reply) {
 				if !canRewindForwardBody(body) {
 					return reply, nil
 				}
+				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+					if err := rewindForwardBody(body); err != nil {
+						return nil, err
+					}
+					r2, err2 := s.streamDialer(ctx, hint, payload, body)
+					if err2 == nil {
+						return r2, nil
+					}
+					if !canRewindForwardBody(body) {
+						return reply, nil
+					}
+					if callerHasDeadline {
+						retryableNotLeader = true
+						continue
+					}
+					return reply, nil
+				}
+				if callerHasDeadline {
+					retryableNotLeader = true
+					continue
+				}
+			}
+			return reply, nil
+		}
+		if lastDialErr == nil && !retryableNotLeader {
+			return nil, ErrNoReachablePeer
+		}
+		if !callerHasDeadline {
+			return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastDialErr == nil {
+				return nil, ErrNoReachablePeer
+			}
+			return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
+		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 		}
-		return reply, nil
 	}
-	if lastDialErr != nil {
-		return nil, fmt.Errorf("%w (last dial error: %v)", ErrNoReachablePeer, lastDialErr)
-	}
-	return nil, ErrNoReachablePeer
 }
 
 func (s *ForwardSender) SendReadStream(
