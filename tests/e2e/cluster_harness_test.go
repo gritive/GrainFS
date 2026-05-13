@@ -214,7 +214,7 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 
 func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 	c.procs[0] = c.startNode(c.t, 0)
-	if err := waitForPortsParallelErr(c.httpPorts[:1], 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 			return nil, err
 		}
 		c.procs[i] = c.startNode(c.t, i)
-		if err := waitForPortsParallelErr(c.httpPorts[i:i+1], 90*time.Second); err != nil {
+		if err := waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second); err != nil {
 			c.Stop()
 			return nil, err
 		}
@@ -249,7 +249,7 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 	// Bootstrap node 0 as the seed leader.
 	c.procs[0] = c.startNode(c.t, 0)
-	if err := waitForPortsParallelErr(c.httpPorts[:1], 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
@@ -264,7 +264,7 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		c.procs[i] = c.startNode(c.t, i)
 		time.Sleep(150 * time.Millisecond)
 	}
-	if err := waitForPortsParallelErr(c.httpPorts, 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts, c.procs, 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}

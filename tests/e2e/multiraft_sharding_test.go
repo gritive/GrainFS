@@ -127,7 +127,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 
 	// Start node 0 as seed leader, then let followers join via .join-pending.
 	c.procs[0] = c.startNode(0)
-	if err := waitForPortsParallelErr(c.httpPorts[:1], 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 		c.procs[i] = c.startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
-	if err := waitForPortsParallelErr(c.httpPorts, 60*time.Second); err != nil {
+	if err := waitForPortsParallelErrWithProcesses(c.httpPorts, c.procs, 60*time.Second); err != nil {
 		c.Stop()
 		return nil, err
 	}
