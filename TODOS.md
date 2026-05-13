@@ -4,6 +4,23 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### Bucket & IAM CLI DX (v0.0.181+ 목표)
+
+- [ ] **`GRAINFS_ADMIN_SOCKET` env var** — `adminEndpointFromCmd`에서 env var 폴백 추가. `--endpoint` 미지정 시 `$GRAINFS_ADMIN_SOCKET` 참조. bucket/iam 전체에 적용됨.
+- [ ] **`bucket list` 테이블 출력** — 기본 `NAME  OBJECTS` 표, `--json` 플래그로 raw JSON. `--json` 없을 때 빈 목록이면 "(no buckets)" 출력.
+- [ ] **`bucket create` 출력 개선** — `--json` 플래그 없을 때 `Created bucket <name>` 출력.
+- [ ] **`bucket delete` 피드백** — 성공 시 `Deleted bucket <name>` 출력 (현재 무음).
+- [ ] **`bucket info <name>` 신규 커맨드** — `HEAD /v1/buckets/:name` 라우트 추가 + `BucketInfo.ObjectCount int64` 필드 + CLI 테이블 출력.
+- [ ] **`bucket upstream` 출력 개선** — `upstream get/list` 테이블 출력 + `--json` 플래그; `upstream delete` 성공 시 `Removed upstream for bucket <name>`.
+- [ ] **Example 필드 추가** — bucket create/list/delete/info, upstream put/get/list/delete 모든 서브커맨드에 `Example` 필드 추가 (volume 명령 수준 맞춤).
+- [ ] **`iam sa list` 테이블 출력** — 기본 `ID  NAME  DESCRIPTION` 표, `--json` 플래그.
+- [ ] **`iam sa create/get/delete` 출력 개선** — `--json` 플래그, 기본 단행 피드백.
+- [ ] **IAM Example 필드 추가** — iam sa/ak/grant 전 서브커맨드.
+- [ ] **`BucketInfo.Size` (총 사용 바이트)** — 현재 object_count 추가 이후 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
+- [ ] **`BucketInfo.HasUpstream`** — pull-through 설정 여부 표시. bucket info + list 출력에 열 추가.
+- [ ] **`bucket policy` CLI** — `GetBucketPolicy/SetBucketPolicy/DeleteBucketPolicy` 노출. 현재 storage layer만 있고 admin API 미노출.
+- [ ] **`bucket versioning` CLI** — `SetBucketVersioning` admin API 노출.
+
 ### Bucket Admin API
 
 - [ ] **ForceDeleteBucket: Badger MVCC 홀드 해소** — `WalkObjects` 콜백 내에서 Raft propose를 호출하면 db.View 트랜잭션이 N×RTT 동안 열려 있어 Badger GC가 블록됨. 수정: View 내에서 키 목록만 수집 후 View를 닫고, 루프 밖에서 delete 수행. PR #334 adversarial review 식별.
@@ -32,8 +49,7 @@
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
 
-- [ ] **PR-E**: Cluster dynamic join (1→N sequential bootstrap). `serve --join <leader>` 단일 진입점 + `MetaTransport.SendJoin` admin RPC + `Node.AddVoterCtx` 기반 catch-up 보장 + `MetaRaft.AddShardGroupVoter` add-only voter primitive + balancer가 PendingNodes/ReadyNodes 처리 (voter 보강 + 그룹 동적 확장, N≥3 가드). Design: [docs/cluster-dynamic-join.md](docs/cluster-dynamic-join.md). **Depends on:** PR-D.
-- [ ] **PR-X**: e2e 헬퍼 `tryStartMRCluster` 1→N 시퀀셜 동적화 (`serve` seed → 나머지 `serve --join`) + `--fast-bootstrap` 정적 옵트인 + `TestE2E_TwoNodeAvailabilityTrap`/`TestE2E_DynamicGroupSeeding_1to5` 운영 회귀. **Depends on:** PR-E.
+- [ ] **PR-X**: e2e 헬퍼 `tryStartMRCluster` 1→N 시퀀셜 동적화 (`serve` seed → 나머지 `serve --join`) + `--fast-bootstrap` 정적 옵트인 + `TestE2E_TwoNodeAvailabilityTrap`/`TestE2E_DynamicGroupSeeding_1to5` 운영 회귀.
 - [ ] **PR-F**: §4.3 joint consensus atomic multi-server replacement (Tier 3-1 Sub-project 3에서 다룸). **Depends on:** Voter set lock-free read / `membershipView` quorum snapshot boundary 완료 후 진행 — PR-F는 quorum/election/ReadIndex가 mixed membership state를 보지 않는다는 전제 위에 올라간다.
 - [ ] **raft-ehn Tier 2** (raft-ehn 범위 밖, 트리거 조건 도달 시 별도 design):
   - BatchingFSM (FSM apply throughput 한계 도달 시)
