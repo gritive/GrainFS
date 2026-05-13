@@ -409,7 +409,7 @@ func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 		return iamSAResult{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		buf, _ := io.ReadAll(resp.Body)
 		return iamSAResult{}, fmt.Errorf("bootstrap %s -> %d: %s", sock, resp.StatusCode, string(buf))
 	}
