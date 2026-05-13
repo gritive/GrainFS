@@ -7,13 +7,8 @@
 ### Bucket & IAM CLI DX
 
 - [ ] **`BucketInfo.Size` (총 사용 바이트)** — object_count 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
-- [ ] **`BucketInfo.HasUpstream`** — pull-through 설정 여부 표시. bucket info + list 출력에 열 추가.
-- [ ] **`bucket policy` CLI** — `GetBucketPolicy/SetBucketPolicy/DeleteBucketPolicy` 노출. 현재 storage layer만 있고 admin API 미노출.
-- [ ] **`bucket versioning` CLI** — `SetBucketVersioning` admin API 노출.
 
 ### 기타
-
-
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
 - [ ] Memory usage validation

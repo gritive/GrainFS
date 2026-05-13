@@ -403,6 +403,8 @@ type TransferLeaderResult struct {
 type BucketInfo struct {
 	Name        string `json:"name"`
 	ObjectCount *int64 `json:"object_count,omitempty"`
+	HasUpstream bool   `json:"has_upstream"`
+	Versioning  string `json:"versioning,omitempty"`
 }
 
 // ListBucketsAdminResp is returned by GET /v1/buckets.
@@ -413,4 +415,24 @@ type ListBucketsAdminResp struct {
 // CreateBucketAdminReq is the body for POST /v1/buckets.
 type CreateBucketAdminReq struct {
 	Name string `json:"name"`
+}
+
+// BucketPolicyResp is the JSON body returned by GET /v1/buckets/:name/policy.
+type BucketPolicyResp struct {
+	Policy json.RawMessage `json:"policy"`
+}
+
+// BucketPolicySetReq is the body for PUT /v1/buckets/:name/policy.
+type BucketPolicySetReq struct {
+	Policy json.RawMessage `json:"policy"`
+}
+
+// BucketVersioningResp is the JSON body returned by GET /v1/buckets/:name/versioning.
+type BucketVersioningResp struct {
+	Status string `json:"status"`
+}
+
+// BucketVersioningSetReq is the body for PUT /v1/buckets/:name/versioning.
+type BucketVersioningSetReq struct {
+	Status string `json:"status"`
 }
