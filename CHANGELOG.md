@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.176.0] - 2026-05-13 — fix: RouteObjectWrite preserves forward peers when self is leader
+
+### Fixed
+
+- `OpRouter.RouteObjectWrite` now populates `RouteTarget.Peers` even when
+  `SelfIsLeader` is true. Previously, `routeGroup` short-circuited and left
+  `Peers` empty, so if leadership changed between routing and execution the
+  write had no forward candidates. `RouteBucket` still uses the short-circuit
+  path (peers empty on leader) — only the object-write path resolves peers.
+
+### Verification
+
+- `go test -count=3 ./internal/cluster/ -run TestOpRouter_Route` — all PASS
+- `go test -count=1 ./internal/cluster/` — all PASS
+
 ## [0.0.175.0] - 2026-05-13 — fix: eliminate peerHealth race in ecObjectReader goroutine drain
 
 ### Fixed
