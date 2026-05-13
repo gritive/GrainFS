@@ -1342,3 +1342,61 @@ func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
 	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
 	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
 }
+
+// TestE2E_DynamicGroupSeeding_1to5 verifies that each dynamic node join
+// triggers the seed loop to expand shard groups according to
+// seedGroupCountForClusterSize(n) = max(n*4, 8):
+//
+//	1 node  → 8 groups
+//	2 nodes → 8 groups (no change)
+//	3 nodes → 12 groups
+//	4 nodes → 16 groups
+//	5 nodes → 20 groups
+//
+// After each expansion, a PUT (with internal GET round-trip) is verified to
+// confirm routing works.
+func TestE2E_DynamicGroupSeeding_1to5(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e")
+	}
+
+	// Start with 1 node; pre-allocate ports for 5.
+	c := startMRCluster(t, 1, mrClusterOptions{
+		FastBootstrap: true,
+		MaxNodes:      5,
+		disableNFS4:   true,
+		disableNBD:    true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	const bucket = "dyn-seed-1to5"
+	requireMRCreateBucketEventually(t, ctx, c, bucket)
+
+	// Step helper: after each addNode, verify group count and PUT+GET.
+	type step struct {
+		afterNodes     int
+		expectedGroups int
+	}
+	steps := []step{
+		{1, 8},  // initial seed
+		{2, 8},  // no new groups
+		{3, 12},
+		{4, 16},
+		{5, 20},
+	}
+
+	// Verify step 1 (already started).
+	waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], steps[0].expectedGroups, 30*time.Second)
+	requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+		fmt.Sprintf("key-after-%d-nodes", steps[0].afterNodes), []byte("data"))
+
+	// Steps 2–5: add a node then verify.
+	for _, s := range steps[1:] {
+		c.addNode(t)
+		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], s.expectedGroups, 60*time.Second)
+		t.Logf("nodes=%d: shard groups >= %d confirmed", s.afterNodes, s.expectedGroups)
+		requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+			fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
+	}
+}
