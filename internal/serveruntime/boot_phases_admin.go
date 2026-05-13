@@ -65,6 +65,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}),
 		VolumePlacement: NewVolumePlacementAdapter(state.metaRaft),
 		IAM:             state.iamAdminAPI,
+		Buckets:         state.backend,
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
