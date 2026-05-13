@@ -92,6 +92,21 @@ bench_encryption_args() {
   fi
 }
 
+bench_wait_admin_socket() {
+  local data_dir="$1"
+  local attempts="${2:-100}"
+  local sleep_seconds="${3:-0.2}"
+  local admin_sock="${data_dir}/admin.sock"
+
+  for _ in $(seq 1 "$attempts"); do
+    [[ -S "$admin_sock" ]] && return 0
+    sleep "$sleep_seconds"
+  done
+
+  echo "admin socket did not become ready: $admin_sock" >&2
+  return 1
+}
+
 bench_bootstrap_iam_credentials() {
   local binary="$1"
   local data_dir="$2"
@@ -100,14 +115,7 @@ bench_bootstrap_iam_credentials() {
   local bootstrap_json
 
   echo "  bootstrapping IAM credentials..."
-  for _ in $(seq 1 100); do
-    [[ -S "$admin_sock" ]] && break
-    sleep 0.2
-  done
-  if [[ ! -S "$admin_sock" ]]; then
-    echo "admin socket did not become ready: $admin_sock" >&2
-    return 1
-  fi
+  bench_wait_admin_socket "$data_dir" 100 0.2
 
   bootstrap_json=$("$binary" iam sa create "$name" --endpoint "$admin_sock")
   ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["access_key"])' <<<"$bootstrap_json")

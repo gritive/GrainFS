@@ -93,6 +93,7 @@ echo "GrainFS PID=$SERVER_PID"
 if ! bench_wait_http_ready "http://127.0.0.1:${HTTP_PORT}/" "server" 30 1; then
   exit 1
 fi
+bench_wait_admin_socket "$DATA_DIR" 100 0.2
 echo "--- Creating NBD export volume ---"
 "$BINARY" volume create default --size "$VOL_SIZE" --endpoint "$DATA_DIR/admin.sock" >/dev/null
 bench_wait_tcp_port "127.0.0.1" "$NBD_PORT" "NBD listener" 50 0.2
