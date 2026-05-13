@@ -149,6 +149,18 @@ func NewUnsupported(msg string, details map[string]any) *Error {
 	return &Error{Code: "unsupported", Message: msg, Details: raw}
 }
 func NewRetry(msg string) *Error { return &Error{Code: "retry", Message: msg} }
+func NewBucketNotFound(bucket string) *Error {
+	return (&Error{Code: "bucket_not_found", Message: "bucket '" + bucket + "' does not exist"}).
+		WithParam("bucket").
+		WithHelp("Create the bucket first with 'grainfs bucket create " + bucket + "', then re-run.").
+		WithDocs("https://github.com/gritive/GrainFS/docs/nfs-export-lifecycle.md#bucket-not-found")
+}
+func NewExportNotFound(bucket string) *Error {
+	return (&Error{Code: "export_not_found", Message: "NFS export '" + bucket + "' is not registered"}).
+		WithParam("bucket").
+		WithHelp("List existing exports with 'grainfs nfs export list'.").
+		WithDocs("https://github.com/gritive/GrainFS/docs/nfs-export-lifecycle.md#export-not-found")
+}
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq
 type WriteAtVolumeResp = adminapi.WriteAtVolumeResp
