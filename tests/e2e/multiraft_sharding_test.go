@@ -1098,11 +1098,16 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
-	c.GrantAdminOnBuckets("__grainfs_nfs4")
+	const legacyNFS4Bucket = "__grainfs_nfs4"
+	c.GrantAdminOnBuckets(legacyNFS4Bucket)
+	_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(legacyNFS4Bucket),
+	})
+	require.NoError(t, err)
 
 	const s3Body = "written-via-s3"
-	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("__grainfs_nfs4"),
+	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(legacyNFS4Bucket),
 		Key:    aws.String("s3-file.txt"),
 		Body:   bytes.NewReader([]byte(s3Body)),
 	})
@@ -1112,7 +1117,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	runNFSv4SmokeClient(t, c.nfs4Ports[0], s3Body, nfsBody)
 
 	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("__grainfs_nfs4"),
+		Bucket: aws.String(legacyNFS4Bucket),
 		Key:    aws.String("nfs-file.txt"),
 	})
 	require.NoError(t, err)
