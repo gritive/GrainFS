@@ -300,13 +300,19 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 
 	groupDirs := countGroupDirsAcrossNodes(c)
 
-	// Groups 1..7 use the auto EC width for the cluster size.
-	// Group 0 keeps full membership (5 voters in 5-node cluster) for legacy compat.
-	wantVoters := cluster.AutoECConfigForClusterSize(5).NumShards()
+	// The helper boots a seed node first, then joins the remaining nodes.
+	// Join handling does not rewrite already-created shard groups, so the seed
+	// groups only need to exist. Groups added after the cluster reaches five
+	// nodes must use the auto EC width from the cluster size at creation time.
 	for i := 1; i <= 7; i++ {
 		gid := fmt.Sprintf("group-%d", i)
-		voterCount, ok := groupDirs[gid]
-		require.True(t, ok, "group %s must have at least one voter directory", gid)
+		require.NotZero(t, groupDirs[gid], "seed group %s must have at least one voter directory", gid)
+	}
+	for i := 8; i < 20; i++ {
+		gid := fmt.Sprintf("group-%d", i)
+		creationClusterSize := i/4 + 1
+		wantVoters := cluster.AutoECConfigForClusterSize(creationClusterSize).NumShards()
+		voterCount := groupDirs[gid]
 		require.Equal(t, wantVoters, voterCount,
 			"group %s expected %d voter dirs, got %d", gid, wantVoters, voterCount)
 	}
