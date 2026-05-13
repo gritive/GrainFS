@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.180.0] - 2026-05-13 — feat: bucket & IAM admin API 통합 + CLI bucket 커맨드
+
+### Added
+
+- **Bucket admin API** — admin UDS를 통해 버킷 생성(`POST /v1/buckets`), 목록 조회(`GET /v1/buckets`), 삭제(`DELETE /v1/buckets/:name?force=true`)를 수행할 수 있는 REST 엔드포인트 추가. `--force` 플래그로 비어있지 않은 버킷도 강제 삭제 가능.
+- **`grainfs bucket create/list/delete` CLI 커맨드** — 운영자가 admin UDS를 통해 버킷을 직접 관리. `grainfs bucket delete --force <name>`으로 모든 오브젝트 삭제 후 버킷 제거.
+- **IAM admin 핸들러를 volume 패턴으로 통합** — 기존 `iam_admin.go` / `bucket_admin.go`가 hertz_adapter의 `registerIAM` / `registerBucket`으로 대체됨. 순수 함수 핸들러 + thin adapter 구조로 단위 테스트 용이.
+- **`IAMService` / `BucketOps` 인터페이스** — `admin.Deps`가 구체 타입 대신 인터페이스를 참조. 테스트에서 fake 구현으로 대체 가능.
+- **`ForceDeleteBucket`** — `Backend` 인터페이스에 추가. 모든 구현체(LocalBackend, Operations, DistributedBackend, SwappableBackend, PackedBackend, RecoveryWriteGate)에 구현.
+
+### Fixed
+
+- **S3 ListBuckets에서 내부 버킷 노출 차단** — `__grainfs_*` 접두사 버킷이 S3 ListBuckets 응답에 포함되던 버그 수정.
+- **admin HTTP 403 복원** — `statusForCode("forbidden")` 누락으로 wildcard grant 거부 시 500을 반환하던 버그 수정 → 403으로 복원.
+
+### Changed
+
+- `POST /v1/iam/sa` 등 생성 엔드포인트가 200 대신 **201 Created** 반환 (RFC 9110 준수).
+
 ## [0.0.179.0] - 2026-05-13 — chore: remove non-EC object write path
 
 ### Removed
