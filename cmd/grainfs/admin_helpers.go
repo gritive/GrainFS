@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -84,8 +85,11 @@ func adminEndpointFromCmd(cmd *cobra.Command) (string, error) {
 	ep, _ := cmd.Flags().GetString("endpoint")
 	ep = strings.TrimSpace(ep)
 	if ep == "" {
+		ep = strings.TrimSpace(os.Getenv("GRAINFS_ADMIN_SOCKET"))
+	}
+	if ep == "" {
 		return "", fmt.Errorf("admin endpoint not configured.\n" +
-			"  Hint: use --endpoint <data-dir>/admin.sock")
+			"  Hint: set GRAINFS_ADMIN_SOCKET=<data-dir>/admin.sock or use --endpoint")
 	}
 	if strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") {
 		return "", fmt.Errorf("admin endpoint must be a UDS socket path; got %q.\n"+

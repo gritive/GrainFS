@@ -227,3 +227,29 @@ func TestCLI_KeyCreate_NoBucketFlag(t *testing.T) {
 		t.Fatalf("body should not contain \"buckets\" key when --bucket not used; got %v", gotBody)
 	}
 }
+
+func TestAdminEndpointFromCmd_EnvVar(t *testing.T) {
+	t.Setenv("GRAINFS_ADMIN_SOCKET", "/tmp/env.sock")
+	cmd := &cobra.Command{}
+	cmd.Flags().String("endpoint", "", "")
+	got, err := adminEndpointFromCmd(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/tmp/env.sock" {
+		t.Errorf("got %q, want /tmp/env.sock", got)
+	}
+}
+
+func TestAdminEndpointFromCmd_FlagOverridesEnv(t *testing.T) {
+	t.Setenv("GRAINFS_ADMIN_SOCKET", "/tmp/env.sock")
+	cmd := &cobra.Command{}
+	cmd.Flags().String("endpoint", "/tmp/flag.sock", "")
+	got, err := adminEndpointFromCmd(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/tmp/flag.sock" {
+		t.Errorf("got %q, want /tmp/flag.sock", got)
+	}
+}
