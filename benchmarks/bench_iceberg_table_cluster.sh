@@ -48,14 +48,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-peers_for() {
-  case "$1" in
-    0) echo "127.0.0.1:$RAFT1,127.0.0.1:$RAFT2" ;;
-    1) echo "127.0.0.1:$RAFT0,127.0.0.1:$RAFT2" ;;
-    2) echo "127.0.0.1:$RAFT0,127.0.0.1:$RAFT1" ;;
-  esac
-}
-
 raft_addr() {
   case "$1" in
     0) echo "127.0.0.1:$RAFT0" ;;
@@ -80,7 +72,8 @@ pprof_port() {
   esac
 }
 
-for i in 0 1 2; do
+start_node() {
+  local i="$1"
   extra=()
   if [[ "$PROFILE" == "1" ]]; then
     extra+=(--pprof-port "$(pprof_port "$i")")
@@ -91,7 +84,6 @@ for i in 0 1 2; do
     --port "$(http_port "$i")" \
     --node-id "bench-iceberg-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
-    --peers "$(peers_for "$i")" \
     --cluster-key "bench-iceberg-cluster-key" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
@@ -103,6 +95,23 @@ for i in 0 1 2; do
     > "$BENCH_DIR/n$i.log" 2>&1 &
   PIDS+=($!)
   echo "[bench] node-$i HTTP=:$(http_port "$i") Raft=$(raft_addr "$i") pid=${PIDS[-1]}"
+}
+
+start_node 0
+bench_wait_tcp_port "127.0.0.1" "$HTTP0" "node-0 HTTP" 180 0.2
+if [[ "$PROFILE" == "1" ]]; then
+  bench_wait_tcp_port "127.0.0.1" "$PPROF0" "node-0 pprof" 180 0.2
+fi
+bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n0" "bench-iceberg-cluster"
+
+for i in 1 2; do
+  printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
+  chmod 600 "$BENCH_DIR/n$i/.join-pending"
+  start_node "$i"
+  bench_wait_tcp_port "127.0.0.1" "$(http_port "$i")" "node-$i HTTP" 180 0.2
+  if [[ "$PROFILE" == "1" ]]; then
+    bench_wait_tcp_port "127.0.0.1" "$(pprof_port "$i")" "node-$i pprof" 180 0.2
+  fi
 done
 
 echo "[bench] waiting for leader..."
@@ -129,27 +138,8 @@ if [[ -z "$LEADER_PORT" ]]; then
   exit 1
 fi
 echo "[bench] leader node-$LEADER_INDEX on :$LEADER_PORT"
-
-TARGET_INDEX=""
-TARGET_PORT=""
-for _ in $(seq 1 60); do
-  for i in 0 1 2; do
-    port="$(http_port "$i")"
-    if BENCH_QUIET=1 bench_create_bucket_retry "http://127.0.0.1:$port" "grainfs-tables" 1 0.1 &&
-      BENCH_QUIET=1 bench_put_object_retry "http://127.0.0.1:$port" "grainfs-tables" ".bench-ready" 1 0.1; then
-      TARGET_INDEX="$i"
-      TARGET_PORT="$port"
-      break 2
-    fi
-  done
-  sleep 0.5
-done
-
-if [[ -z "$TARGET_PORT" ]]; then
-  echo "[error] no writable Iceberg table API endpoint found" >&2
-  tail -40 "$BENCH_DIR"/n*.log >&2
-  exit 1
-fi
+TARGET_INDEX="$LEADER_INDEX"
+TARGET_PORT="$LEADER_PORT"
 echo "[bench] writable target node-$TARGET_INDEX on :$TARGET_PORT"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
@@ -164,7 +154,7 @@ if [[ "$PROFILE" == "1" ]]; then
   (
     sleep 5
     echo "[pprof] collecting CPU profile..."
-    curl -sf "http://127.0.0.1:$target_pprof/debug/pprof/profile?seconds=30" \
+    curl -sf "http://127.0.0.1:$target_pprof/debug/pprof/profile?seconds=${CPU_PROFILE_SECONDS:-30}" \
       -o "$PROFILE_DIR/cpu.pb.gz" && echo "[pprof] cpu.pb.gz saved" || echo "[pprof] CPU profile failed"
   ) &
   PPROF_BG_PID=$!
@@ -172,6 +162,8 @@ fi
 
 "$K6" run "$BENCHMARKS_DIR/iceberg_table_bench.js" \
   --env BASE_URL="http://127.0.0.1:$TARGET_PORT" \
+  --env ACCESS_KEY="$ACCESS_KEY" \
+  --env SECRET_KEY="$SECRET_KEY" \
   --env MAX_VUS="$VUS" \
   --env DURATION="$DURATION" \
   --env RAMP_UP="$RAMP_UP" \
