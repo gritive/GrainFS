@@ -5,8 +5,6 @@ import (
 	"context"
 	"io"
 	"math"
-
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 const (
@@ -100,7 +98,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
-	if tr, ok := d.backend.(storage.Truncatable); ok {
+	if tr, ok := truncatableBackend(d.backend); ok {
 		if err := tr.Truncate(context.Background(), nfs4Bucket, key, required); err != nil {
 			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 		}

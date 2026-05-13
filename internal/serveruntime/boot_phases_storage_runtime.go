@@ -108,6 +108,68 @@ func bootStreamRouter(state *bootState) error {
 	return nil
 }
 
+func runtimeTopologyNodes(selfNodeID, selfAddr string, seedPeers []string, nodes []cluster.MetaNodeEntry) []string {
+	if len(nodes) == 0 {
+		return append([]string{selfAddr}, seedPeers...)
+	}
+
+	out := make([]string, 0, len(nodes)+1)
+	seen := make(map[string]struct{}, len(nodes)+1)
+	add := func(addr string) {
+		if addr == "" {
+			return
+		}
+		if _, ok := seen[addr]; ok {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	add(selfAddr)
+	for _, node := range nodes {
+		if node.ID == selfNodeID {
+			add(selfAddr)
+			continue
+		}
+		add(node.Address)
+	}
+	if len(out) == 0 {
+		return append([]string{selfAddr}, seedPeers...)
+	}
+	return out
+}
+
+func ecConfigForShardGroup(entry cluster.ShardGroupEntry, fallback cluster.ECConfig) cluster.ECConfig {
+	cfg := cluster.DesiredECConfigForGroup(entry)
+	if cfg.IsActive(len(entry.PeerIDs)) {
+		return cfg
+	}
+	return fallback
+}
+
+func refreshRuntimeTopologyFromMetaNodes(state *bootState, nodes []cluster.MetaNodeEntry) {
+	clusterSize := len(nodes)
+	if clusterSize < 1 {
+		clusterSize = 1
+	}
+	cfg := cluster.AutoECConfigForClusterSize(clusterSize)
+	if cfg.IsActive(clusterSize) {
+		state.effectiveEC = cfg
+		if state.distBackend != nil {
+			allNodes := runtimeTopologyNodes(state.nodeID, state.raftAddr, state.peers, nodes)
+			state.distBackend.SetClusterTopology(allNodes, cfg)
+		}
+		if state.clusterCoord != nil {
+			state.clusterCoord.WithECConfig(cfg)
+		}
+		log.Info().
+			Int("cluster_size", clusterSize).
+			Int("effective_k", cfg.DataShards).
+			Int("effective_m", cfg.ParityShards).
+			Msg("cluster EC refreshed from meta topology")
+	}
+}
+
 // ownedGroupsState is the per-group multi-raft tracking struct. Held outside
 // bootOwnedGroupsAndEC because the shutdown hook (registered via AddCleanup
 // inside the phase) needs to access it after the phase returns.
@@ -156,7 +218,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	}
 	state.distBackend = distBackend
 
-	allNodes := append([]string{state.raftAddr}, state.peers...)
+	allNodes := runtimeTopologyNodes(state.nodeID, state.raftAddr, state.peers, state.metaRaft.FSM().Nodes())
 	distBackend.SetShardService(state.shardSvc, allNodes)
 
 	state.shardCache = shardcache.New(state.cfg.ShardCacheSize)
@@ -235,7 +297,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			ShardSvc:         state.shardSvc,
 			Transport:        state.groupRaftMux.ForGroup(entry.ID),
 			AddrBook:         state.metaRaft.FSM(),
-			EC:               state.effectiveEC,
+			EC:               ecConfigForShardGroup(entry, state.effectiveEC),
 			ElectionTimeout:  state.cfg.RaftElectionTimeout,
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
 			FSMStore:         state.sharedFSMDB,

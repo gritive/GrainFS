@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -50,6 +51,27 @@ func TestMetaProposer_DispatchesCorrectCmdTypes(t *testing.T) {
 		if captured[i] != w {
 			t.Errorf("idx %d: got %v, want %v", i, captured[i], w)
 		}
+	}
+}
+
+func TestBuildKeyCreatePayloadDoesNotContainPlaintextSecret(t *testing.T) {
+	enc := newTestEncryptor(t)
+	const secret = "plain-secret-that-must-never-be-persisted"
+	wrapped, err := WrapSecret(enc, "sa-1", secret)
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+
+	payload := buildKeyCreatePayload(AccessKey{
+		AccessKey:    "AK",
+		SAID:         "sa-1",
+		SecretKey:    secret,
+		SecretKeyEnc: wrapped,
+		CreatedAt:    time.Unix(1, 0),
+	})
+
+	if bytes.Contains(payload, []byte(secret)) {
+		t.Fatal("plaintext secret found in IAM key-create raft payload")
 	}
 }
 

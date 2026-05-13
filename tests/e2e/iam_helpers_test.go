@@ -454,6 +454,7 @@ type iamGrant struct {
 func iamUDSClient(sock string) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", sock)
@@ -797,6 +798,7 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 		Region:       "us-east-1",
 		Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
 		UsePathStyle: true,
+		HTTPClient:   e2eNoKeepAliveHTTPClient(0),
 	})
 }
 

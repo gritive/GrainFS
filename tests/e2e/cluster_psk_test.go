@@ -2,8 +2,8 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -49,8 +49,8 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 	keyA := strings.Repeat("a", 64)
 	keyB := strings.Repeat("b", 64)
 
-	leaderDataDir := t.TempDir()
-	joinerDataDir := t.TempDir()
+	leaderDataDir := shortTempDir(t)
+	joinerDataDir := shortTempDir(t)
 
 	leaderHTTP := freePort()
 	leaderRaft := freePort()
@@ -75,7 +75,14 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 	}
 	leaderLog, err := os.CreateTemp("", "leader-*.log")
 	require.NoError(t, err)
-	t.Cleanup(func() { os.Remove(leaderLog.Name()) })
+	t.Cleanup(func() {
+		if t.Failed() {
+			if b, err := os.ReadFile(leaderLog.Name()); err == nil {
+				t.Logf("leader log:\n%s", b)
+			}
+		}
+		os.Remove(leaderLog.Name())
+	})
 
 	leader := exec.CommandContext(leaderCtx, getBinary(), leaderArgs...)
 	leader.Stdout = leaderLog
@@ -86,16 +93,7 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		_ = leader.Wait()
 	})
 
-	// Wait for leader's HTTP port to be reachable.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", leaderHTTP), 1*time.Second)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	waitForPort(t, leaderHTTP, 15*time.Second)
 
 	// Joiner with keyB: write .join-pending pointing to leader, then boot.
 	// Must fail (SPKI mismatch on QUIC handshake; cluster join cannot complete).
@@ -103,7 +101,7 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		fmt.Sprintf("%s/%s", joinerDataDir, joinPendingFile),
 		[]byte(fmt.Sprintf("127.0.0.1:%d", leaderRaft)), 0o600))
 
-	joinerCtx, joinerCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	joinerCtx, joinerCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer joinerCancel()
 
 	joinerArgs := []string{
@@ -120,7 +118,9 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		"--lifecycle-interval", "0",
 	}
 	joiner := exec.CommandContext(joinerCtx, getBinary(), joinerArgs...)
-	out, joinErr := joiner.CombinedOutput()
+	out, joinErr := combinedOutputWithWaitDelay(joiner)
 
 	require.Error(t, joinErr, "joiner with mismatched --cluster-key must not succeed. out: %s", string(out))
+	require.False(t, errors.Is(joinerCtx.Err(), context.DeadlineExceeded), "joiner must fail from PSK rejection, not from test timeout. out: %s", string(out))
+	require.Contains(t, string(out), "peer cert SPKI", "joiner should surface the PSK/SPKI rejection. out: %s", string(out))
 }

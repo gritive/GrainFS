@@ -8,6 +8,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -108,12 +109,19 @@ type ClusterCoordinator struct {
 	selfAliases []string
 	addr        NodeAddressBook
 	ecConfig    ECConfig
+	runtime     atomic.Pointer[clusterCoordinatorRuntime]
 	indexWriter objectIndexProposer
 
 	opRouter  *OpRouter
 	localExec *LocalExecution
 
 	maxBody int64
+}
+
+type clusterCoordinatorRuntime struct {
+	opRouter  *OpRouter
+	localExec *LocalExecution
+	ecConfig  ECConfig
 }
 
 type objectIndexSource interface {
@@ -200,7 +208,7 @@ func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *Clu
 // NewClusterCoordinator. Keeping the modules embedded rather than passed
 // per-call avoids per-request allocations on the hot path.
 func (c *ClusterCoordinator) rebuild() {
-	c.opRouter = NewOpRouter(
+	opRouter := NewOpRouter(
 		c.router,
 		c.meta,
 		metaObjectIndexAdapter(c.meta),
@@ -210,7 +218,27 @@ func (c *ClusterCoordinator) rebuild() {
 		c.selfID,
 		c.selfAliases,
 	)
-	c.localExec = NewLocalExecution(dataGroupManagerLocalBackend{m: c.groups})
+	localExec := NewLocalExecution(dataGroupManagerLocalBackend{m: c.groups})
+	if c.runtime.Load() == nil {
+		c.opRouter = opRouter
+		c.localExec = localExec
+	}
+	c.runtime.Store(&clusterCoordinatorRuntime{
+		opRouter:  opRouter,
+		localExec: localExec,
+		ecConfig:  c.ecConfig,
+	})
+}
+
+func (c *ClusterCoordinator) runtimeState() clusterCoordinatorRuntime {
+	if state := c.runtime.Load(); state != nil {
+		return *state
+	}
+	return clusterCoordinatorRuntime{
+		opRouter:  c.opRouter,
+		localExec: c.localExec,
+		ecConfig:  c.ecConfig,
+	}
 }
 
 // routeReadOrBucket picks RouteObjectRead when an object index is configured
@@ -218,10 +246,11 @@ func (c *ClusterCoordinator) rebuild() {
 // without an objectIndexProposer / objectIndexSource). Preserves the legacy
 // routeObjectLatest/Version dispatch behavior that callers depended on.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
+	state := c.runtimeState()
 	if c.indexWriter == nil {
-		return c.opRouter.RouteBucket(bucket)
+		return state.opRouter.RouteBucket(bucket)
 	}
-	target, _, err := c.opRouter.RouteObjectRead(bucket, key, versionID)
+	target, _, err := state.opRouter.RouteObjectRead(bucket, key, versionID)
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
 		if fallbackErr == nil {
@@ -238,11 +267,12 @@ func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (R
 //
 //	indexWriter == nil && ecConfig.NumShards() == 0 → routeBucket
 func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
-	if c.indexWriter == nil && c.ecConfig.NumShards() == 0 {
-		target, err := c.opRouter.RouteBucket(bucket)
+	state := c.runtimeState()
+	if c.indexWriter == nil && state.ecConfig.NumShards() == 0 {
+		target, err := state.opRouter.RouteBucket(bucket)
 		return target, ShardGroupEntry{ID: target.GroupID}, err
 	}
-	return c.opRouter.RouteObjectWrite(bucket, key)
+	return state.opRouter.RouteObjectWrite(bucket, key)
 }
 
 func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
@@ -596,7 +626,7 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, nil, err
 	} else if gb != nil {
 		return gb.GetObject(ctx, bucket, key)
@@ -636,7 +666,7 @@ func (c *ClusterCoordinator) GetObjectVersion(
 	if err != nil {
 		return nil, nil, err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, nil, err
 	} else if gb != nil {
 		return gb.GetObjectVersion(bucket, key, versionID)
@@ -711,7 +741,7 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.HeadObject(ctx, bucket, key)
@@ -743,11 +773,11 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 		err    error
 	)
 	if c.indexWriter == nil {
-		target, err = c.opRouter.RouteBucket(bucket)
+		target, err = c.runtimeState().opRouter.RouteBucket(bucket)
 		group = ShardGroupEntry{ID: target.GroupID}
 	} else {
 		var entry ObjectIndexEntry
-		target, entry, err = c.opRouter.RouteObjectRead(bucket, key, "")
+		target, entry, err = c.runtimeState().opRouter.RouteObjectRead(bucket, key, "")
 		if errors.Is(err, storage.ErrObjectNotFound) {
 			target, group, err = c.routeWriteOrBucket(bucket, key)
 		} else {
@@ -757,7 +787,7 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 	if err != nil {
 		return "", err
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return "", err
 	} else if gb != nil {
 		markerID, err := gb.DeleteObjectReturningMarker(bucket, key)
@@ -794,7 +824,7 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 	if err != nil {
 		return err
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		if err := gb.DeleteObjectVersion(bucket, key, versionID); err != nil {
@@ -828,11 +858,11 @@ func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix str
 		}
 		return objects, nil
 	}
-	target, err := c.opRouter.RouteBucket(bucket)
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.ListObjects(ctx, bucket, prefix, maxKeys)
@@ -869,11 +899,11 @@ func (c *ClusterCoordinator) ListObjectVersions(
 		}
 		return versions, nil
 	}
-	target, err := c.opRouter.RouteBucket(bucket)
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.ListObjectVersions(bucket, prefix, maxKeys)
@@ -905,11 +935,11 @@ func (c *ClusterCoordinator) WalkObjects(ctx context.Context, bucket, prefix str
 		}
 		return nil
 	}
-	target, err := c.opRouter.RouteBucket(bucket)
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		return gb.WalkObjects(ctx, bucket, prefix, fn)
@@ -945,7 +975,7 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.CreateMultipartUpload(ctx, bucket, key, contentType)
@@ -972,7 +1002,7 @@ func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		obj, err := gb.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
@@ -1009,7 +1039,7 @@ func (c *ClusterCoordinator) PutObject(
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		obj, err := gb.PutObject(ctx, bucket, key, r, contentType)
@@ -1093,7 +1123,7 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 	if err != nil {
 		return err
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		return gb.SetObjectACL(bucket, key, acl)
@@ -1113,12 +1143,12 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 // NFSv4. WAL exposes WriteAt to NFS, so the coordinator must either pass it to
 // the local group leader or provide a correct routed fallback.
 func (c *ClusterCoordinator) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
-	target, err := c.opRouter.RouteBucket(bucket)
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return nil, err
 	}
 	if target.SelfIsOnlyVoter {
-		if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 			return nil, err
 		} else if gb != nil {
 			return gb.WriteAt(ctx, bucket, key, offset, data)
@@ -1153,12 +1183,12 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 	if size < 0 {
 		return storage.ErrEntityTooLarge
 	}
-	target, err := c.opRouter.RouteBucket(bucket)
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return err
 	}
 	if target.SelfIsOnlyVoter {
-		if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+		if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 			return err
 		} else if gb != nil {
 			return gb.Truncate(ctx, bucket, key, size)
@@ -1198,7 +1228,7 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	if err != nil {
 		return 0, err
 	}
-	if gb, err := c.localExec.ResolveRead(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return 0, err
 	} else if gb != nil {
 		return gb.ReadAt(ctx, bucket, key, offset, buf)
@@ -1256,14 +1286,14 @@ func (c *ClusterCoordinator) PreferWriteAt(bucket string) bool {
 	if !storage.IsInternalBucket(bucket) {
 		return false
 	}
-	target, err := c.opRouter.RouteBucket(bucket)
+	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
 		return false
 	}
 	if !target.SelfIsOnlyVoter {
 		return false
 	}
-	gb, err := c.localExec.ResolveWrite(context.Background(), target)
+	gb, err := c.runtimeState().localExec.ResolveWrite(context.Background(), target)
 	if err != nil || gb == nil {
 		return false
 	}
@@ -1283,7 +1313,7 @@ func (c *ClusterCoordinator) UploadPart(
 	if c.indexWriter != nil {
 		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
@@ -1355,7 +1385,7 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 	if c.indexWriter != nil {
 		ctx = ContextWithPlacementGroup(ctx, target.GroupID)
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		return gb.AbortMultipartUpload(ctx, bucket, key, uploadID)
@@ -1390,7 +1420,7 @@ func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadI
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.ListParts(ctx, bucket, key, uploadID, maxParts)

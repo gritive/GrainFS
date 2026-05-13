@@ -65,8 +65,8 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		return ch, nil
 	}
 
-	dataShards := b.ecConfig.DataShards
-	parityShards := b.ecConfig.ParityShards
+	dataShards := b.currentECConfig().DataShards
+	parityShards := b.currentECConfig().ParityShards
 
 	go func() {
 		defer close(ch)
@@ -294,7 +294,7 @@ func shardAAD(bucket, key, path string) []byte {
 // that state, which is safe because production always calls SetShardService
 // before starting the scrubber).
 func (b *DistributedBackend) NodeID() string {
-	return b.selfAddr
+	return b.currentSelfAddr()
 }
 
 // RaftNodeID returns this node's Raft node name (b.node.ID()). This is the

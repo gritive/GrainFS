@@ -549,27 +549,32 @@ func (s *badgerLogStore) EntriesFrom(startIdx uint64, maxEntries int) ([]LogEntr
 		return nil, nil
 	}
 
-	var result []LogEntry
-	wantLen := len(s.keyPrefix) + 8
+	limit := last - startIdx + 1
+	if maxEntries > 0 && uint64(maxEntries) < limit {
+		limit = uint64(maxEntries)
+	}
+	resultCap := int(limit)
+	if uint64(resultCap) != limit {
+		resultCap = math.MaxInt
+	}
+	result := make([]LogEntry, 0, resultCap)
 	err := s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		startKey := s.makeKey(startIdx)
-		for it.Seek(startKey); it.ValidForPrefix(s.keyPrefix); it.Next() {
-			if maxEntries > 0 && len(result) >= maxEntries {
-				break
-			}
-			key := it.Item().Key()
-			if len(key) != wantLen {
-				continue // meta key — skip
+		key := make([]byte, len(s.keyPrefix)+8)
+		copy(key, s.keyPrefix)
+		for idx := startIdx; idx < startIdx+limit; idx++ {
+			binary.BigEndian.PutUint64(key[len(s.keyPrefix):], idx)
+			item, err := txn.Get(key)
+			if err != nil {
+				return fmt.Errorf("missing log entry %d: %w", idx, err)
 			}
 			var entry LogEntry
-			if err := it.Item().Value(func(val []byte) error {
+			if err := item.Value(func(val []byte) error {
 				e, err := decodeEntry(val)
 				if err != nil {
 					return err
+				}
+				if e.Index != idx {
+					return fmt.Errorf("encoded Index (%d) disagrees with requested index (%d)", e.Index, idx)
 				}
 				entry = e
 				return nil

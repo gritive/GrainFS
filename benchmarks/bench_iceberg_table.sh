@@ -45,6 +45,7 @@ SERVE_ARGS=(
   --port "$BASE_PORT"
   --nfs4-port 0
   --nbd-port 0
+  --cluster-key "bench-iceberg-table-key"
   $(bench_encryption_args)
   --lifecycle-interval 0
   --log-level warn
@@ -66,8 +67,7 @@ if ! bench_wait_http_ready "http://127.0.0.1:$BASE_PORT/iceberg/v1/config?wareho
   exit 1
 fi
 bench_wait_cluster_leader "http://127.0.0.1:$BASE_PORT" 120 0.5
-bench_create_bucket_retry "http://127.0.0.1:$BASE_PORT" "grainfs-tables" 60 0.5
-bench_put_object_retry "http://127.0.0.1:$BASE_PORT" "grainfs-tables" ".bench-ready" 60 0.5
+bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR" "bench-iceberg-table"
 
 PPROF_BG_PID=""
 if [[ "$PROFILE" == "1" ]]; then
@@ -84,6 +84,8 @@ fi
 
 "$K6" run "$BENCHMARKS_DIR/iceberg_table_bench.js" \
   --env BASE_URL="http://127.0.0.1:$BASE_PORT" \
+  --env ACCESS_KEY="$ACCESS_KEY" \
+  --env SECRET_KEY="$SECRET_KEY" \
   --env MAX_VUS="$VUS" \
   --env DURATION="$DURATION" \
   --env RAMP_UP="$RAMP_UP" \

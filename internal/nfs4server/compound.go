@@ -748,7 +748,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	}
 
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
-	if ra, ok := d.backend.(storage.PartialIO); ok {
+	if ra, ok := partialIOBackend(d.backend); ok {
 		var buf []byte
 		var pooled bool
 		if count <= nfsMaxReadBlock {
@@ -875,7 +875,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	release := d.state.LockPath(key)
 	defer release()
 
-	if wa, ok := d.backend.(storage.PartialIO); ok {
+	if wa, ok := partialIOBackend(d.backend); ok {
 		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
 		if _, err = wa.WriteAt(context.Background(), nfs4Bucket, key, offset, writeData); err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -948,7 +948,7 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 		_, headErr := d.backend.HeadObject(context.Background(), nfs4Bucket, key)
 		if headErr != nil {
 			created := false
-			if tr, ok := d.backend.(storage.Truncatable); ok {
+			if tr, ok := truncatableBackend(d.backend); ok {
 				if truncErr := tr.Truncate(context.Background(), nfs4Bucket, key, 0); truncErr == nil {
 					created = true
 				} else {
@@ -1048,7 +1048,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		size, _ := ar.ReadUint64()
 		release := d.state.LockPath(key)
 		defer release()
-		if tr, ok := d.backend.(storage.Truncatable); ok {
+		if tr, ok := truncatableBackend(d.backend); ok {
 			if err := tr.Truncate(context.Background(), nfs4Bucket, key, int64(size)); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}

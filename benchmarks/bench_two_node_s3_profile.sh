@@ -59,6 +59,9 @@ mkdir -p "$PROFILE_ROOT"
 for idx in $(seq 1 "$NODE_COUNT"); do
   mkdir -p "$BENCH_DIR/n${idx}"
 done
+BENCH_ENCRYPTION_KEY_FILE="${BENCH_ENCRYPTION_KEY_FILE:-$BENCH_DIR/encryption.key}"
+export BENCH_ENCRYPTION_KEY_FILE
+bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
 
 HTTP_PORTS=()
 RAFT_PORTS=()
@@ -79,6 +82,7 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
   done
   wait 2>/dev/null || true
+  bench_copy_node_logs "$BENCH_DIR" "$PROFILE_ROOT"
   echo "[bench] stopped"
 }
 trap cleanup EXIT INT TERM
@@ -94,24 +98,16 @@ start_node() {
   local http_port="${HTTP_PORTS[$idx]}"
   local raft_port="${RAFT_PORTS[$idx]}"
   local logfile="$BENCH_DIR/n$((idx + 1)).log"
-  local peers=()
-  local j
-  for j in $(seq 0 $((NODE_COUNT - 1))); do
-    if [[ "$j" != "$idx" ]]; then
-      peers+=("127.0.0.1:${RAFT_PORTS[$j]}")
-    fi
-  done
-  local peer_csv
-  peer_csv=$(IFS=,; echo "${peers[*]}")
   local args=(
     "$BINARY" serve
     --data "$BENCH_DIR/n$((idx + 1))"
     --port "$http_port"
+    --node-id "n$((idx + 1))"
     --raft-addr "127.0.0.1:${raft_port}"
-    --peers "$peer_csv"
     --cluster-key "bench-${NODE_COUNT}-node-key"
     --nfs4-port 0
     --nbd-port 0
+    --lifecycle-interval 0
   )
   while IFS= read -r arg; do
     [[ -n "$arg" ]] && args+=("$arg")
@@ -126,11 +122,18 @@ start_node() {
   echo "[bench] node$((idx + 1)) started http=:${http_port} raft=:${raft_port} pid=${PIDS[-1]}"
 }
 
-for i in $(seq 0 $((NODE_COUNT - 1))); do
-  start_node "$i"
-done
+start_node 0
+bench_wait_tcp_port "127.0.0.1" "${HTTP_PORTS[0]}" "node1 S3" 180 0.2
+if [[ "$PROFILE" == "1" ]]; then
+  bench_wait_tcp_port "127.0.0.1" "${PPROF_PORTS[0]}" "node1 pprof" 180 0.2
+fi
 
-for i in $(seq 0 $((NODE_COUNT - 1))); do
+bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n1" "bench-${NODE_COUNT}-node-s3"
+
+for i in $(seq 1 $((NODE_COUNT - 1))); do
+  printf '%s' "127.0.0.1:${RAFT_PORTS[0]}" >"$BENCH_DIR/n$((i + 1))/.join-pending"
+  chmod 600 "$BENCH_DIR/n$((i + 1))/.join-pending"
+  start_node "$i"
   bench_wait_tcp_port "127.0.0.1" "${HTTP_PORTS[$i]}" "node$((i + 1)) S3" 180 0.2
   if [[ "$PROFILE" == "1" ]]; then
     bench_wait_tcp_port "127.0.0.1" "${PPROF_PORTS[$i]}" "node$((i + 1)) pprof" 180 0.2
@@ -166,8 +169,6 @@ if [[ -z "$LEADER_URL" ]]; then
 fi
 BASE_URL_1="$LEADER_URL"
 
-bench_create_bucket_retry "$BASE_URL_1" "$BUCKET" 120 0.5
-bench_put_object_retry "$BASE_URL_1" "$BUCKET" ".bench-ready" 120 0.5
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
 summary_md="$PROFILE_ROOT/summary.md"
@@ -246,6 +247,8 @@ run_scenario() {
     --env BASE_URL="$BASE_URL_1" \
     --env BASE_URLS="$BASE_URLS" \
     --env SEED_URL="$LEADER_URL" \
+    --env ACCESS_KEY="$ACCESS_KEY" \
+    --env SECRET_KEY="$SECRET_KEY" \
     --env INGRESS="$ingress" \
     --env BUCKET="$BUCKET" \
     --env OBJECT_SIZE_KB="$SIZE_KB" \
@@ -374,6 +377,8 @@ for vus in "${CONCURRENCY_VALUES[@]}"; do
   done
 done
 
+"$BINARY" cluster placement "$BUCKET" --endpoint "$BENCH_DIR/n1/admin.sock" \
+  >"$PROFILE_ROOT/placement.txt" 2>"$PROFILE_ROOT/placement.err" || true
 cp "$BENCH_DIR"/n*.log "$PROFILE_ROOT"/ 2>/dev/null || true
 
 echo ""

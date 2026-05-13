@@ -89,7 +89,85 @@ bench_wait_tcp_port() {
 bench_encryption_args() {
   if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
     printf '%s\n' "--no-encryption"
+  elif [[ -n "${BENCH_ENCRYPTION_KEY_FILE:-}" ]]; then
+    printf '%s\n' "--encryption-key-file"
+    printf '%s\n' "$BENCH_ENCRYPTION_KEY_FILE"
   fi
+}
+
+bench_generate_encryption_key_file() {
+  local key_file="$1"
+
+  if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  python3 - "$key_file" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+parent = os.path.dirname(path)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+with open(path, "wb") as f:
+    f.write(os.urandom(32))
+PY
+  chmod 600 "$key_file"
+}
+
+bench_copy_node_logs() {
+  local src_dir="$1"
+  local dst_dir="$2"
+
+  [[ -d "$src_dir" && -n "$dst_dir" ]] || return 0
+
+  local log_dir="$dst_dir/logs"
+  mkdir -p "$log_dir"
+
+  local copied=0
+  local f
+  shopt -s nullglob
+  for f in "$src_dir"/*.log; do
+    cp "$f" "$log_dir/"
+    copied=1
+  done
+  shopt -u nullglob
+
+  if [[ "$copied" == "1" ]]; then
+    echo "  node logs saved to $log_dir"
+  fi
+}
+
+bench_wait_admin_socket() {
+  local data_dir="$1"
+  local attempts="${2:-100}"
+  local sleep_seconds="${3:-0.2}"
+  local admin_sock="${data_dir}/admin.sock"
+
+  for _ in $(seq 1 "$attempts"); do
+    [[ -S "$admin_sock" ]] && return 0
+    sleep "$sleep_seconds"
+  done
+
+  echo "admin socket did not become ready: $admin_sock" >&2
+  return 1
+}
+
+bench_bootstrap_iam_credentials() {
+  local binary="$1"
+  local data_dir="$2"
+  local name="${3:-bench}"
+  local admin_sock="${data_dir}/admin.sock"
+  local bootstrap_json
+
+  echo "  bootstrapping IAM credentials..."
+  bench_wait_admin_socket "$data_dir" 100 0.2
+
+  bootstrap_json=$("$binary" iam sa create "$name" --endpoint "$admin_sock")
+  ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["access_key"])' <<<"$bootstrap_json")
+  SECRET_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["secret_key"])' <<<"$bootstrap_json")
+  export ACCESS_KEY SECRET_KEY
 }
 
 bench_wait_cluster_leader() {

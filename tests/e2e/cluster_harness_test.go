@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -253,7 +252,6 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		c.Stop()
 		return nil, err
 	}
-	time.Sleep(2 * time.Second)
 
 	// Followers: write .join-pending before starting so they boot in join mode.
 	for i := 1; i < len(c.procs); i++ {
@@ -268,7 +266,6 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		c.Stop()
 		return nil, err
 	}
-	time.Sleep(4 * time.Second)
 
 	// Bootstrap admin SA via UDS once the cluster has quorum. Try every
 	// node — only the leader's propose succeeds; others return an error
@@ -377,26 +374,7 @@ func (c *e2eCluster) Stop() {
 	}
 	c.stopped = true
 	for _, p := range c.procs {
-		if p != nil && p.Process != nil {
-			_ = p.Process.Signal(syscall.SIGTERM)
-		}
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for _, p := range c.procs {
-		if p == nil || p.Process == nil {
-			continue
-		}
-		done := make(chan struct{})
-		go func(p *exec.Cmd) {
-			_ = p.Wait()
-			close(done)
-		}(p)
-		select {
-		case <-done:
-		case <-time.After(time.Until(deadline)):
-			_ = p.Process.Kill()
-			<-done
-		}
+		terminateProcess(p)
 	}
 	for _, dir := range c.dataDirs {
 		_ = os.RemoveAll(dir)

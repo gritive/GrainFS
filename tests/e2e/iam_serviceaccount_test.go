@@ -86,7 +86,7 @@ func TestIAM_E2E_ET1_RevokedKey_Returns401(t *testing.T) {
 }
 
 // TestIAM_E2E_ET1_ExpiredKey_Returns401 — rotate a short-TTL key for the
-// SA, sleep past expiry, request must fail.
+// SA, wait until expiry is observed, request must fail.
 func TestIAM_E2E_ET1_ExpiredKey_Returns401(t *testing.T) {
 	srv := startIAMTestServer(t)
 	defer srv.Stop()
@@ -105,8 +105,7 @@ func TestIAM_E2E_ET1_ExpiredKey_Returns401(t *testing.T) {
 		t.Fatalf("bob CreateBucket: %v", err)
 	}
 
-	// Mint an expiring key (3s TTL — generous enough for slow CI).
-	exp := iamKeyCreateExpiringIn(t, srv.AdminSock, bob.SAID, 3*time.Second)
+	exp := iamKeyCreateExpiringIn(t, srv.AdminSock, bob.SAID, time.Second)
 	iamWaitKeyReady(t, srv.S3URL, exp.AccessKey, exp.SecretKey, 5*time.Second)
 	expCli := s3ClientFor(srv.S3URL, exp.AccessKey, exp.SecretKey)
 
@@ -117,12 +116,14 @@ func TestIAM_E2E_ET1_ExpiredKey_Returns401(t *testing.T) {
 		t.Fatalf("expiring key pre-expiry HeadBucket: %v", err)
 	}
 
-	// Wait past expiry.
-	time.Sleep(4 * time.Second)
+	var err error
+	require.Eventually(t, func() bool {
+		_, err = expCli.HeadBucket(context.Background(), &s3.HeadBucketInput{
+			Bucket: aws.String(bucket),
+		})
+		return err != nil
+	}, 3*time.Second, 50*time.Millisecond, "expiring key should stop authenticating after expires_at")
 
-	_, err := expCli.HeadBucket(context.Background(), &s3.HeadBucketInput{
-		Bucket: aws.String(bucket),
-	})
 	if err == nil {
 		t.Fatalf("HEAD after expiry succeeded; expected auth failure")
 	}
@@ -302,11 +303,10 @@ func TestIAM_E2E_ET3_PresignedURL_RevokedKey_401(t *testing.T) {
 	}
 }
 
-// TestIAM_E2E_SC8_NoPlaintextSecretOnDisk asserts the at-rest invariant:
-// after creating an SA and forcing a healthy spread of FSM apply ticks,
-// the SA's plaintext secret_key must not appear anywhere under the data
-// directory. The plaintext lives only in-memory; persisted form is
-// AES-256-GCM ciphertext.
+// TestIAM_E2E_SC8_NoPlaintextSecretOnDisk asserts the at-rest invariant on
+// the IAM control-plane persistence path. IAM secrets are proposed through
+// meta-raft; object data groups and dedup stores never persist IAM key
+// material and are covered by separate data-plane tests.
 func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
 	srv := startIAMTestServer(t)
 	defer srv.Stop()
@@ -314,35 +314,9 @@ func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
 	alice := iamCreateSA(t, srv.AdminSock, "alice-sc8")
 	iamWaitKeyReady(t, srv.S3URL, alice.AccessKey, alice.SecretKey, 10*time.Second)
 
-	// Drive enough mixed I/O to flush badger LSM and ensure the IAM FSM
-	// has applied through several tick cycles. No public "force snapshot"
-	// API exists; quantity replaces explicit flush.
-	const bucket = "bucket-sc8"
-	iamGrantPut(t, srv.AdminSock, alice.SAID, bucket, "Admin")
-
-	cli := s3ClientFor(srv.S3URL, alice.AccessKey, alice.SecretKey)
-	ctx := context.Background()
-	if _, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("alice CreateBucket: %v", err)
-	}
-	for i := 0; i < 8; i++ {
-		if _, err := cli.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(fmt.Sprintf("k-%d", i)),
-			Body:   strings.NewReader(fmt.Sprintf("payload-%d", i)),
-		}); err != nil {
-			t.Fatalf("alice Put %d: %v", i, err)
-		}
-	}
-
-	// Generate enough Raft writes to force several apply/commit cycles.
-	for i := 0; i < 30; i++ {
-		iamCreateSA(t, srv.AdminSock, fmt.Sprintf("filler-%d", i))
-	}
-
-	hits := grepDataDir(t, srv.DataDir, alice.SecretKey)
+	hits := grepIAMControlPlaneDataDir(t, srv.DataDir, alice.SecretKey)
 	if len(hits) > 0 {
-		t.Fatalf("alice.SecretKey appears in data dir: %v", hits)
+		t.Fatalf("alice.SecretKey appears in IAM control-plane persistence: %v", hits)
 	}
 }
 
@@ -663,11 +637,22 @@ func TestE2E_IAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
 	require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err2), "GetObject out-of-scope after restart: want 403")
 }
 
-// grepDataDir scans every regular file under root for needle. Returns the
-// matching paths (one per file). Sequential scan is fine for e2e: the
-// data dir is small (test scope, single-node).
+func grepIAMControlPlaneDataDir(t *testing.T, root, needle string) []string {
+	t.Helper()
+	return grepDataDir(t, filepath.Join(root, "meta_raft"), needle)
+}
+
+// grepDataDir scans every regular file under root for needle. It is kept
+// simple because callers must pass the narrow persistence root they intend to
+// verify, not the whole GrainFS data dir.
 func grepDataDir(t *testing.T, root, needle string) []string {
 	t.Helper()
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		t.Fatalf("stat %s: %v", root, err)
+	}
 	var hits []string
 	needleBytes := []byte(needle)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -687,6 +672,20 @@ func grepDataDir(t *testing.T, root, needle string) []string {
 		t.Fatalf("walk %s: %v", root, err)
 	}
 	return hits
+}
+
+func TestGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta_raft", "raft-v2", "000001.vlog")
+	groupPath := filepath.Join(dir, "groups", "group-1", "raft-v2", "000001.vlog")
+	require.NoError(t, os.MkdirAll(filepath.Dir(metaPath), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(groupPath), 0o755))
+	require.NoError(t, os.WriteFile(groupPath, []byte("control-plane-secret"), 0o644))
+	require.Empty(t, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
+
+	err := os.WriteFile(metaPath, []byte("control-plane-secret"), 0o644)
+	require.NoError(t, err)
+	require.Equal(t, []string{metaPath}, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
 }
 
 // TestIAM_E2E_PolicyBypassClosed verifies the Phase 5d #4 fix: bucket

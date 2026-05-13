@@ -210,6 +210,7 @@ func addJoinedNodeToLegacyDataRaft(ctx context.Context, node legacyDataRaftMembe
 
 func expandShardGroupsForJoinedNode(ctx context.Context, state *bootState, nodeID string) error {
 	nodes := state.metaRaft.FSM().Nodes()
+	refreshRuntimeTopologyFromMetaNodes(state, nodes)
 	missingGroups := MissingSeedShardGroups(
 		state.nodeID,
 		state.raftAddr,

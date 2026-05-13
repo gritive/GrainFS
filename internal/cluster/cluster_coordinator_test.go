@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +44,27 @@ func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
 		PeerIDs: []string{"127.0.0.1:9001", "127.0.0.1:9002", "node-a"},
 	}).ForwardOrder(c.selfID, c.selfAliases...)
 	require.Equal(t, []string{"127.0.0.1:9002", "127.0.0.1:9001", "node-a"}, peers)
+}
+
+func TestClusterCoordinator_WithECConfigConcurrentRouting(t *testing.T) {
+	c := NewClusterCoordinator(&fakeBackend{}, nil, nil, nil, "self")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			c.WithECConfig(AutoECConfigForClusterSize(3 + i%3))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_, _, _ = c.routeWriteOrBucket("bucket", "key")
+			_, _ = c.routeReadOrBucket("bucket", "key", "")
+		}
+	}()
+	wg.Wait()
 }
 
 func (f *fakeBackend) record(call string) { f.calls = append(f.calls, call) }

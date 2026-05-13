@@ -88,7 +88,7 @@ func (b *DistributedBackend) localRepairTargetReadable(ctx context.Context, buck
 	if err != nil || shardIdx < 0 || shardIdx >= len(resolved.Record.Nodes) {
 		return false
 	}
-	if resolved.Record.Nodes[shardIdx] != b.selfAddr {
+	if resolved.Record.Nodes[shardIdx] != b.currentSelfAddr() {
 		return false
 	}
 	_, err = b.shardSvc.ReadLocalShard(bucket, resolved.ShardKey, shardIdx)

@@ -100,8 +100,11 @@ type DistributedBackend struct {
 	allNodes         []string // all node addresses (including self) for shard placement
 	selfAddr         string   // this node's raft address (matches entries in allNodes)
 	peerHealth       *PeerHealth
-	registry         *Registry                           // cache invalidators (VFS instances)
-	ecConfig         ECConfig                            // Phase 18: erasure coding config (k+m shard parameters)
+	topologySnapshot atomic.Pointer[backendTopology]
+	registry         *Registry // cache invalidators (VFS instances)
+	ecConfig         ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
+	ecConfigSnapshot atomic.Pointer[ECConfig]
+	runtimeSnapshot  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 	incidentRecorder IncidentRecorder                    // nil disables zero-ops incident recording
 
@@ -124,6 +127,17 @@ type DistributedBackend struct {
 	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
 	internalDirCache  sync.Map // map[string]struct{}
 	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
+}
+
+type backendTopology struct {
+	allNodes   []string
+	selfAddr   string
+	peerHealth *PeerHealth
+}
+
+type backendRuntimeSnapshot struct {
+	topology backendTopology
+	ecConfig ECConfig
 }
 
 type internalObjectCacheKey struct {
@@ -224,7 +238,13 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 // PutObject/GetObject. Call before serving traffic. The configured profile must
 // fit the active write node set; invalid profiles make EC writes fail fast.
 func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
-	b.ecConfig = cfg
+	if b.ecConfigSnapshot.Load() == nil {
+		b.ecConfig = cfg
+	}
+	cfgCopy := cfg
+	b.ecConfigSnapshot.Store(&cfgCopy)
+	topology := b.currentTopology()
+	b.publishRuntimeSnapshot(topology, cfg)
 }
 
 // SetShardService configures the distributed shard service for fan-out.
@@ -232,28 +252,127 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 // expected so the self address can be cached before the slice is sorted).
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
+	topology := newBackendTopology(allNodes)
+	b.selfAddr = topology.selfAddr
+	b.allNodes = append([]string(nil), topology.allNodes...)
+	b.peerHealth = topology.peerHealth
+	b.topologySnapshot.Store(topology)
+	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
+}
+
+// SetClusterNodes refreshes the configured placement node set without
+// replacing the ShardService. Runtime join paths use this after meta-raft
+// membership grows so new writes do not stay pinned to boot-time topology.
+func (b *DistributedBackend) SetClusterNodes(allNodes []string) {
+	topology := newBackendTopology(allNodes)
+	b.topologySnapshot.Store(topology)
+	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
+}
+
+// SetClusterTopology publishes membership and EC config as one immutable
+// snapshot. Runtime join paths use this so a request never observes a widened
+// placement set with the old shard profile, or vice versa.
+func (b *DistributedBackend) SetClusterTopology(allNodes []string, cfg ECConfig) {
+	topology := newBackendTopology(allNodes)
+	cfgCopy := cfg
+	b.topologySnapshot.Store(topology)
+	b.ecConfigSnapshot.Store(&cfgCopy)
+	b.publishRuntimeSnapshot(*topology, cfg)
+}
+
+func newBackendTopology(allNodes []string) *backendTopology {
 	// Cache self address BEFORE sorting so per-request self-skip checks can
 	// compare raft addresses (node.ID() returns a UUID, not the address).
+	selfAddr := ""
 	if len(allNodes) > 0 {
-		b.selfAddr = allNodes[0]
+		selfAddr = allNodes[0]
 	}
-	b.allNodes = append([]string(nil), allNodes...)
-	sort.Strings(b.allNodes)
+	sortedNodes := append([]string(nil), allNodes...)
+	sort.Strings(sortedNodes)
 	// Build peer list (excluding self) for health tracking
 	var peers []string
 	for _, n := range allNodes {
-		if n != b.selfAddr {
+		if n != selfAddr {
 			peers = append(peers, n)
 		}
 	}
-	b.peerHealth = NewPeerHealth(peers, 10*time.Second)
+	peerHealth := NewPeerHealth(peers, 10*time.Second)
+
+	return &backendTopology{
+		allNodes:   sortedNodes,
+		selfAddr:   selfAddr,
+		peerHealth: peerHealth,
+	}
+}
+
+func (b *DistributedBackend) currentTopology() backendTopology {
+	if snapshot := b.runtimeSnapshot.Load(); snapshot != nil {
+		if legacy, ok := b.legacyTopologyOverride(snapshot.topology); ok {
+			return legacy
+		}
+		return snapshot.topology
+	}
+	if snapshot := b.topologySnapshot.Load(); snapshot != nil {
+		// Some older unit tests configure private topology fields directly.
+		// Production runtime updates only publish snapshots, so prefer the
+		// legacy fields only when they clearly carry extra test topology.
+		if legacy, ok := b.legacyTopologyOverride(*snapshot); ok {
+			return legacy
+		}
+		return *snapshot
+	}
+	return backendTopology{
+		allNodes:   append([]string(nil), b.allNodes...),
+		selfAddr:   b.selfAddr,
+		peerHealth: b.peerHealth,
+	}
+}
+
+func (b *DistributedBackend) legacyTopologyOverride(snapshot backendTopology) (backendTopology, bool) {
+	if len(b.allNodes) <= len(snapshot.allNodes) && !(snapshot.selfAddr == "" && b.selfAddr != "") {
+		return backendTopology{}, false
+	}
+	return backendTopology{
+		allNodes:   append([]string(nil), b.allNodes...),
+		selfAddr:   b.selfAddr,
+		peerHealth: b.peerHealth,
+	}, true
+}
+
+func (b *DistributedBackend) currentSelfAddr() string {
+	return b.currentTopology().selfAddr
+}
+
+func (b *DistributedBackend) currentPeerHealth() *PeerHealth {
+	return b.currentTopology().peerHealth
+}
+
+func (b *DistributedBackend) configuredNodeList() []string {
+	return append([]string(nil), b.currentTopology().allNodes...)
+}
+
+func (b *DistributedBackend) currentECConfig() ECConfig {
+	if snapshot := b.runtimeSnapshot.Load(); snapshot != nil {
+		return snapshot.ecConfig
+	}
+	if cfg := b.ecConfigSnapshot.Load(); cfg != nil {
+		return *cfg
+	}
+	return b.ecConfig
+}
+
+func (b *DistributedBackend) publishRuntimeSnapshot(topology backendTopology, cfg ECConfig) {
+	b.runtimeSnapshot.Store(&backendRuntimeSnapshot{
+		topology: topology,
+		ecConfig: cfg,
+	})
 }
 
 // PeerHealth returns the backend's peer-health tracker, or nil if SetShardService
 // has not been called yet. Exposed so admin endpoints can surface peer state to
 // operators without reaching into private fields.
 func (b *DistributedBackend) PeerHealth() *PeerHealth {
-	return b.peerHealth
+	return b.currentPeerHealth()
 }
 
 // liveNodes returns the current cluster node list for placement decisions.
@@ -265,11 +384,11 @@ func (b *DistributedBackend) liveNodes() []string {
 	if b.node != nil {
 		if peers := b.node.Peers(); len(peers) > 0 {
 			nodes := make([]string, 0, len(peers)+1)
-			if b.selfAddr != "" {
-				nodes = append(nodes, b.selfAddr)
+			if b.currentSelfAddr() != "" {
+				nodes = append(nodes, b.currentSelfAddr())
 			}
 			for _, p := range peers {
-				if b.peerHealth == nil || b.peerHealth.IsHealthy(p) {
+				if b.currentPeerHealth() == nil || b.currentPeerHealth().IsHealthy(p) {
 					nodes = append(nodes, p)
 				}
 			}
@@ -277,7 +396,7 @@ func (b *DistributedBackend) liveNodes() []string {
 			return nodes
 		}
 	}
-	return b.allNodes
+	return b.configuredNodeList()
 }
 
 // clusterNodes returns the configured membership without peer-health filtering.
@@ -288,15 +407,15 @@ func (b *DistributedBackend) clusterNodes() []string {
 	if b.node != nil {
 		if peers := b.node.Peers(); len(peers) > 0 {
 			nodes := make([]string, 0, len(peers)+1)
-			if b.selfAddr != "" {
-				nodes = append(nodes, b.selfAddr)
+			if b.currentSelfAddr() != "" {
+				nodes = append(nodes, b.currentSelfAddr())
 			}
 			nodes = append(nodes, peers...)
 			sort.Strings(nodes)
 			return nodes
 		}
 	}
-	return append([]string(nil), b.allNodes...)
+	return append([]string(nil), b.configuredNodeList()...)
 }
 
 // ecWriteNodes returns the node set used for new EC object placement.
@@ -308,7 +427,7 @@ func (b *DistributedBackend) clusterNodes() []string {
 // peerHealth misses do not silently shrink the EC stripe below the configured width.
 func (b *DistributedBackend) ecWriteNodes() []string {
 	nodes := b.liveNodes()
-	if b.ecConfig.IsActive(len(nodes)) {
+	if b.currentECConfig().IsActive(len(nodes)) {
 		return nodes
 	}
 	return b.clusterNodes()
@@ -675,7 +794,7 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	// know the seed/join peer address and must try it instead of failing early.
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	peers := proposalForwardPeers(b.node.Peers(), b.allNodes, b.selfAddr)
+	peers := proposalForwardPeers(b.node.Peers(), b.configuredNodeList(), b.currentSelfAddr())
 	if len(peers) == 0 {
 		return raft.ErrNotLeader
 	}
@@ -776,7 +895,7 @@ func (b *DistributedBackend) CreateBucket(ctx context.Context, bucket string) er
 		}
 		if groupID == "" && b.shardGroup != nil {
 			entries := b.shardGroup.ShardGroups()
-			if group, selErr := SelectObjectPlacementGroup(bucket, "", entries, b.ecConfig); selErr == nil {
+			if group, selErr := SelectObjectPlacementGroup(bucket, "", entries, b.currentECConfig()); selErr == nil {
 				groupID = group.ID
 			} else {
 				ids := make([]string, 0, len(entries))
@@ -946,7 +1065,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	observePutStage("distributed", "quarantine_check", stageStart)
 
 	versionID := newVersionID()
-	if b.ecConfig.NumShards() != 0 && b.shardSvc != nil {
+	if b.currentECConfig().NumShards() != 0 && b.shardSvc != nil {
 		obj, handled, err := b.tryPutObjectSingleLocalShardInMemory(ctx, bucket, key, versionID, r, contentType)
 		if handled || err != nil {
 			return obj, err
@@ -961,7 +1080,7 @@ func (b *DistributedBackend) PutObject(ctx context.Context, bucket, key string, 
 	observePutStage("distributed", "spool_object", stageStart)
 	defer sp.Cleanup()
 
-	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
+	if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
 		return nil, fmt.Errorf("put object: EC storage is required")
 	}
 	return b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
@@ -981,7 +1100,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		placementGroupID = "group-0"
 	}
 	liveNodes := b.ecWriteNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
@@ -999,7 +1118,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
 		return nil, false, nil
 	}
-	if len(placement) != 1 || placement[0] != b.selfAddr {
+	if len(placement) != 1 || placement[0] != b.currentSelfAddr() {
 		return nil, false, nil
 	}
 
@@ -1063,7 +1182,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	}
 	defer sp.Cleanup()
 	versionID := newVersionID()
-	if b.ecConfig.NumShards() == 0 || b.shardSvc == nil {
+	if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
 		return nil, nil, fmt.Errorf("put object async: EC storage is required")
 	}
 	obj, err := b.putObjectECSpooled(ctx, bucket, key, versionID, sp, contentType)
@@ -1369,7 +1488,7 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
 
 	liveNodes := b.ecWriteNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 
 	// ShardService's key parameter carries the versionID as a suffix so shards
 	// for different versions land at different paths without changing the API.
@@ -1395,7 +1514,7 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 		RingVersion: ringVer,
 		ContentType: contentType,
 	}
-	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeDataShards(ctx, plan, data)
 	if err != nil {
 		return nil, err
@@ -1413,7 +1532,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		placementGroupID = "group-0"
 	}
 	liveNodes := b.ecWriteNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
@@ -1445,7 +1564,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	}
 	observePutStage("ec", "placement", stageStart)
 
-	selfID := b.selfAddr
+	selfID := b.currentSelfAddr()
 	if effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
 		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType)
 	}
@@ -1470,7 +1589,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		RingVersion:      ringVer,
 		ContentType:      contentType,
 	}
-	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSpooledShards(ctx, plan, b.ecSpoolDir(), sp)
 	if err != nil {
 		if topologyWrite {
@@ -1498,14 +1617,14 @@ func topologyShardWriteError(group ShardGroupEntry, cfg ECConfig, err error) err
 }
 
 func (b *DistributedBackend) checkTopologyPlacementHealth(group ShardGroupEntry, cfg ECConfig, placement []string) error {
-	if b.peerHealth == nil {
+	if b.currentPeerHealth() == nil {
 		return nil
 	}
 	for _, node := range placement {
-		if node == b.selfAddr {
+		if node == b.currentSelfAddr() {
 			continue
 		}
-		if !b.peerHealth.IsHealthy(node) {
+		if !b.currentPeerHealth().IsHealthy(node) {
 			return &ErrInsufficientPlacementTargets{
 				Operation:     "put_object",
 				GroupID:       group.ID,
@@ -1528,7 +1647,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	sp *spooledObject,
 	contentType string,
 ) (*storage.Object, bool, error) {
-	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
 		Bucket:           bucket,
 		Key:              key,
@@ -1572,7 +1691,7 @@ func (b *DistributedBackend) putObjectECShardReaders(
 	openShard func(idx int) (io.Reader, error),
 	metricPath string,
 ) (*storage.Object, error) {
-	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeShardReaders(ctx, ecObjectWritePlan{
 		Bucket:           bucket,
 		Key:              key,
@@ -1686,7 +1805,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	metricPath string,
 	bodyHash hash.Hash,
 ) (*storage.Object, error) {
-	writer := newECObjectWriter(b.selfAddr, b.shardSvc, b.peerHealth)
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSingleLocalReader(ecObjectWritePlan{
 		Bucket:           bucket,
 		Key:              key,
@@ -1739,7 +1858,7 @@ func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string
 	// learn the object is gone (or at least re-fetch fresh placement).
 	b.invalidateShardCache(bucket, shardKey, len(placement))
 	for _, node := range placement {
-		if node == b.selfAddr {
+		if node == b.currentSelfAddr() {
 			_ = b.shardSvc.DeleteLocalShards(bucket, shardKey)
 		} else {
 			_ = b.shardSvc.DeleteShards(context.Background(), node, bucket, shardKey)
@@ -1808,35 +1927,35 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 
 		// Try healthy peers first
 		for _, peer := range b.liveNodes() {
-			if peer == b.selfAddr {
+			if peer == b.currentSelfAddr() {
 				continue
 			}
-			if b.peerHealth != nil && !b.peerHealth.IsHealthy(peer) {
+			if b.currentPeerHealth() != nil && !b.currentPeerHealth().IsHealthy(peer) {
 				continue
 			}
 			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
 			if fetchErr == nil && data != nil {
-				if b.peerHealth != nil {
-					b.peerHealth.MarkHealthy(peer)
+				if b.currentPeerHealth() != nil {
+					b.currentPeerHealth().MarkHealthy(peer)
 				}
 				return io.NopCloser(bytes.NewReader(data)), obj, nil
 			}
-			if fetchErr != nil && b.peerHealth != nil {
-				b.peerHealth.MarkUnhealthy(peer)
+			if fetchErr != nil && b.currentPeerHealth() != nil {
+				b.currentPeerHealth().MarkUnhealthy(peer)
 			}
 		}
 		// Fallback: try unhealthy peers (they may have recovered)
-		if b.peerHealth != nil {
+		if b.currentPeerHealth() != nil {
 			for _, peer := range b.clusterNodes() {
-				if peer == b.selfAddr {
+				if peer == b.currentSelfAddr() {
 					continue
 				}
-				if b.peerHealth.IsHealthy(peer) {
+				if b.currentPeerHealth().IsHealthy(peer) {
 					continue // already tried
 				}
 				data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
 				if fetchErr == nil && data != nil {
-					b.peerHealth.MarkHealthy(peer)
+					b.currentPeerHealth().MarkHealthy(peer)
 					return io.NopCloser(bytes.NewReader(data)), obj, nil
 				}
 			}
@@ -1905,7 +2024,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 	}
 	ecRec := resolved.Record
 	shardKey := resolved.ShardKey
-	recCfg := ecRec.ECConfigOrFallback(b.ecConfig)
+	recCfg := ecRec.ECConfigOrFallback(b.currentECConfig())
 	if shardIdx < 0 || shardIdx >= len(ecRec.Nodes) {
 		return fmt.Errorf("shardIdx %d out of range [0,%d)", shardIdx, len(ecRec.Nodes))
 	}
@@ -1913,7 +2032,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		return fmt.Errorf("placement length %d != k+m %d", len(ecRec.Nodes), recCfg.NumShards())
 	}
 
-	selfID := b.selfAddr
+	selfID := b.currentSelfAddr()
 	shards := make([][]byte, len(ecRec.Nodes))
 	available := 0
 
@@ -1988,12 +2107,14 @@ func (b *DistributedBackend) LiveNodes() []string { return b.liveNodes() }
 
 // ECActive reports whether Phase 18 cluster EC will be applied to the next
 // PutObject call (EC enabled + enough nodes for k+m split).
-func (b *DistributedBackend) ECActive() bool { return b.ecConfig.IsActive(len(b.ecWriteNodes())) }
+func (b *DistributedBackend) ECActive() bool {
+	return b.currentECConfig().IsActive(len(b.ecWriteNodes()))
+}
 
 // EffectiveECConfig returns the ECConfig proportionally scaled to the current
 // cluster size. Used by ReshardManager to determine the target k,m for upgrades.
 func (b *DistributedBackend) EffectiveECConfig() ECConfig {
-	return EffectiveConfig(len(b.ecWriteNodes()), b.ecConfig)
+	return EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
 }
 
 // CurrentRingVersion returns the version of the current ring (0 if none).
@@ -2022,7 +2143,7 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 		return nil // already up to date
 	}
 
-	cfg := EffectiveConfig(len(b.ecWriteNodes()), b.ecConfig)
+	cfg := EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
 
 	placementMeta.RingVersion = oldRingVer
 	if placementMeta.ECData == 0 {
@@ -2060,7 +2181,7 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 // last writer wins per normal PUT semantics.
 func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key string) error {
 	liveNodes := b.ecWriteNodes()
-	effectiveCfg := EffectiveConfig(len(liveNodes), b.ecConfig)
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if !effectiveCfg.IsActive(len(liveNodes)) || b.shardSvc == nil {
 		return fmt.Errorf("ec not active: cluster_size=%d shard_svc=%v",
 			len(liveNodes), b.shardSvc != nil)
@@ -2099,7 +2220,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	// ConvertObjectToEC is a legacy-to-EC migration path for pre-versioned objects,
 	// so placement uses bare key (no versionID suffix).
 	placement := PlacementForNodes(effectiveCfg, liveNodes, key)
-	selfID := b.selfAddr
+	selfID := b.currentSelfAddr()
 	written := make([]string, 0, len(shards))
 	rollbackShards := func() {
 		for _, n := range written {
@@ -2189,12 +2310,12 @@ func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versi
 }
 
 func (b *DistributedBackend) newECObjectReader() ecObjectReader {
-	r := ecObjectReader{selfID: b.selfAddr, shards: b.shardSvc, ecConfig: b.ecConfig}
+	r := ecObjectReader{selfID: b.currentSelfAddr(), shards: b.shardSvc, ecConfig: b.currentECConfig()}
 	if b.shardCache != nil {
 		r.cache = b.shardCache
 	}
-	if b.peerHealth != nil {
-		r.peerHealth = b.peerHealth
+	if b.currentPeerHealth() != nil {
+		r.peerHealth = b.currentPeerHealth()
 	}
 	return r
 }
@@ -2230,7 +2351,7 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 	if b.shardSvc == nil {
 		return fmt.Errorf("shard service unavailable")
 	}
-	oldCfg := oldRec.ECConfigOrFallback(b.ecConfig)
+	oldCfg := oldRec.ECConfigOrFallback(b.currentECConfig())
 
 	// Reconstruct original data from old shards.
 	data, err := b.getObjectEC(ctx, bucket, key, "", oldRec)
@@ -2245,7 +2366,7 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		return fmt.Errorf("upgrade re-split: %w", err)
 	}
 	newPlacement := PlacementForNodes(newCfg, liveNodes, key)
-	selfID := b.selfAddr
+	selfID := b.currentSelfAddr()
 
 	var (
 		writtenMu sync.Mutex
@@ -2272,11 +2393,11 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 				writeCtx, writeCancel := context.WithTimeout(gctx, shardRPCTimeout)
 				defer writeCancel()
 				werr = b.shardSvc.WriteShard(writeCtx, node, bucket, key, i, newShards[i])
-				if b.peerHealth != nil {
+				if b.currentPeerHealth() != nil {
 					if werr != nil {
-						b.peerHealth.MarkUnhealthy(node)
+						b.currentPeerHealth().MarkUnhealthy(node)
 					} else {
-						b.peerHealth.MarkHealthy(node)
+						b.currentPeerHealth().MarkHealthy(node)
 					}
 				}
 			}
@@ -2857,7 +2978,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	sp.ETag = hex.EncodeToString(h.Sum(nil))
 
 	var obj *storage.Object
-	if b.ecConfig.NumShards() > 0 && b.shardSvc != nil {
+	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
 		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")

@@ -333,8 +333,8 @@ func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 		}
 	}
 	// EC shard path: presence of shard_0 is sufficient evidence.
-	if b.ecConfig.IsActive(len(b.allNodes)) && versionID != "" {
-		paths := b.ShardPaths(bucket, key, versionID, b.ecConfig.NumShards())
+	if b.currentECConfig().IsActive(len(b.configuredNodeList())) && versionID != "" {
+		paths := b.ShardPaths(bucket, key, versionID, b.currentECConfig().NumShards())
 		if len(paths) > 0 {
 			if _, err := os.Stat(paths[0]); err == nil {
 				return true

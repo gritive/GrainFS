@@ -14,8 +14,10 @@ func TestSmallOptionsReduceDefaultArenaBudget(t *testing.T) {
 	require.Equal(t, SmallMemTableSize, opts.MemTableSize)
 	require.Equal(t, SmallNumMemtables, opts.NumMemtables)
 	require.Equal(t, SmallBlockCacheSize, opts.BlockCacheSize)
+	require.Equal(t, SmallValueLogFileSize, opts.ValueLogFileSize)
 	require.LessOrEqual(t, opts.MemTableSize, defaults.MemTableSize/8)
 	require.Less(t, opts.BlockCacheSize, defaults.BlockCacheSize)
+	require.Less(t, opts.ValueLogFileSize, defaults.ValueLogFileSize)
 }
 
 func TestRaftLogOptionsPreserveDurabilityAndVersionSettings(t *testing.T) {
@@ -24,4 +26,5 @@ func TestRaftLogOptionsPreserveDurabilityAndVersionSettings(t *testing.T) {
 	require.True(t, opts.SyncWrites)
 	require.Equal(t, 1, opts.NumVersionsToKeep)
 	require.Equal(t, SmallMemTableSize, opts.MemTableSize)
+	require.Equal(t, SmallValueLogFileSize, opts.ValueLogFileSize)
 }
