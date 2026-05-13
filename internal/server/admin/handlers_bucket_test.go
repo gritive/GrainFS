@@ -255,3 +255,31 @@ func TestAdminGetBucket_VersioningUnsupported(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", info.Versioning)
 }
+
+func TestAdminListBuckets_HasUpstream(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["a"] = true
+	fake.buckets["b"] = true
+	iamFake := &fakeIAMUpstream{
+		upstreams: []iam.BucketUpstreamItem{{Bucket: "a"}},
+	}
+	d := &admin.Deps{Buckets: fake, IAM: iamFake}
+
+	resp, err := admin.AdminListBuckets(context.Background(), d)
+	require.NoError(t, err)
+	require.Len(t, resp.Buckets, 2)
+	// sorted: a, b
+	assert.True(t, resp.Buckets[0].HasUpstream)  // "a" has upstream
+	assert.False(t, resp.Buckets[1].HasUpstream) // "b" does not
+}
+
+func TestAdminListBuckets_NilIAM(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["a"] = true
+	d := &admin.Deps{Buckets: fake} // IAM is nil
+
+	resp, err := admin.AdminListBuckets(context.Background(), d)
+	require.NoError(t, err)
+	require.Len(t, resp.Buckets, 1)
+	assert.False(t, resp.Buckets[0].HasUpstream)
+}

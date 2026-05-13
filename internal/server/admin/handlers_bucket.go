@@ -40,9 +40,19 @@ func AdminListBuckets(ctx context.Context, d *Deps) (ListBucketsAdminResp, error
 		}
 	}
 	sort.Strings(filtered)
+
+	hasUpstream := map[string]bool{}
+	if d.IAM != nil {
+		if upstreams, err := d.IAM.ListBucketUpstreams(ctx); err == nil {
+			for _, u := range upstreams {
+				hasUpstream[u.Bucket] = true
+			}
+		}
+	}
+
 	out := make([]BucketInfo, len(filtered))
 	for i, n := range filtered {
-		out[i] = BucketInfo{Name: n}
+		out[i] = BucketInfo{Name: n, HasUpstream: hasUpstream[n]}
 	}
 	return ListBucketsAdminResp{Buckets: out}, nil
 }
