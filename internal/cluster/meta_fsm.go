@@ -17,6 +17,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -210,6 +211,10 @@ type MetaFSM struct {
 	// an error (not configured).
 	lifecycleStore *lifecycle.Store
 
+	// migrationStore is wired via SetMigration. nil = migration commands return
+	// an error (not configured).
+	migrationStore *migration.JobStore
+
 	// clusterCfg holds the cluster-wide policy snapshot. Initialised to an
 	// empty ClusterConfig (defaults) in NewMetaFSM; mutated only from the FSM
 	// apply goroutine via applyClusterConfigPatch / Restore. Consumers read
@@ -275,6 +280,14 @@ func (f *MetaFSM) SetLifecycle(store *lifecycle.Store) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lifecycleStore = store
+}
+
+// SetMigration wires the migration job store into the MetaFSM. Must be called
+// before raft Start so apply does not race with replay.
+func (f *MetaFSM) SetMigration(store *migration.JobStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.migrationStore = store
 }
 
 // Rotation returns the rotation sub-FSM. State is decoupled from the rest of
@@ -389,6 +402,12 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeClusterConfigPatch:
 		return f.applyClusterConfigPatch(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMigrationJobStart:
+		return f.applyMigrationJobStart(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMigrationJobDone:
+		return f.applyMigrationJobDone(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMigrationJobFailed:
+		return f.applyMigrationJobFailed(cmd.DataBytes())
 	default:
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
 		return nil
@@ -424,6 +443,67 @@ func (f *MetaFSM) applyBucketLifecycleDelete(payload []byte) error {
 		return fmt.Errorf("meta_fsm: BucketLifecycleDelete: %w", err)
 	}
 	return f.lifecycleStore.Delete(bucket)
+}
+
+func (f *MetaFSM) applyMigrationJobStart(payload []byte) error {
+	if f.migrationStore == nil {
+		return fmt.Errorf("meta_fsm: migration store not wired")
+	}
+	bucket, startedAt, err := migration.DecodeJobStartPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MigrationJobStart: %w", err)
+	}
+	ts := time.Unix(0, startedAt)
+	return f.migrationStore.SaveJob(&migration.JobState{
+		Bucket:    bucket,
+		Status:    migration.StatusRunning,
+		StartedAt: ts,
+		UpdatedAt: ts,
+	})
+}
+
+func (f *MetaFSM) applyMigrationJobDone(payload []byte) error {
+	if f.migrationStore == nil {
+		return fmt.Errorf("meta_fsm: migration store not wired")
+	}
+	bucket, copied, errors, updatedAt, err := migration.DecodeJobDonePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MigrationJobDone: %w", err)
+	}
+	job, err := f.migrationStore.GetJob(bucket)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MigrationJobDone: get job: %w", err)
+	}
+	if job == nil {
+		job = &migration.JobState{Bucket: bucket}
+	}
+	job.Status = migration.StatusComplete
+	job.Copied = copied
+	job.Errors = errors
+	job.UpdatedAt = time.Unix(0, updatedAt)
+	return f.migrationStore.SaveJob(job)
+}
+
+func (f *MetaFSM) applyMigrationJobFailed(payload []byte) error {
+	if f.migrationStore == nil {
+		return fmt.Errorf("meta_fsm: migration store not wired")
+	}
+	bucket, reason, errors, updatedAt, err := migration.DecodeJobFailedPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MigrationJobFailed: %w", err)
+	}
+	job, err := f.migrationStore.GetJob(bucket)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MigrationJobFailed: get job: %w", err)
+	}
+	if job == nil {
+		job = &migration.JobState{Bucket: bucket}
+	}
+	job.Status = migration.StatusFailed
+	job.Reason = reason
+	job.Errors = errors
+	job.UpdatedAt = time.Unix(0, updatedAt)
+	return f.migrationStore.SaveJob(job)
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {

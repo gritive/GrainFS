@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
@@ -216,6 +217,14 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			cfg.LifecycleInterval,
 		)
 		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
+	}
+
+	mstore := migration.NewJobStore(state.distBackend.FSMDB())
+	state.metaRaft.FSM().SetMigration(mstore)
+	if cfg.MigrationInterval > 0 {
+		mprop := &cluster.MigrationProposer{Propose: state.metaRaft.Propose}
+		mlead := &cluster.RaftLeadership{Node: state.distBackend.Node()}
+		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}
 
 	volMgr, blockCache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{DedupEnabled: cfg.DedupEnabled, BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)

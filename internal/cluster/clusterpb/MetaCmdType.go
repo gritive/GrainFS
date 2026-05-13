@@ -44,6 +44,9 @@ const (
 	MetaCmdTypeBucketLifecyclePut      MetaCmdType = 34
 	MetaCmdTypeBucketLifecycleDelete   MetaCmdType = 35
 	MetaCmdTypeClusterConfigPatch      MetaCmdType = 36
+	MetaCmdTypeMigrationJobStart       MetaCmdType = 37
+	MetaCmdTypeMigrationJobDone        MetaCmdType = 38
+	MetaCmdTypeMigrationJobFailed      MetaCmdType = 39
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -84,6 +87,9 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeBucketLifecyclePut:      "BucketLifecyclePut",
 	MetaCmdTypeBucketLifecycleDelete:   "BucketLifecycleDelete",
 	MetaCmdTypeClusterConfigPatch:      "ClusterConfigPatch",
+	MetaCmdTypeMigrationJobStart:       "MigrationJobStart",
+	MetaCmdTypeMigrationJobDone:        "MigrationJobDone",
+	MetaCmdTypeMigrationJobFailed:      "MigrationJobFailed",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -124,6 +130,9 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"BucketLifecyclePut":      MetaCmdTypeBucketLifecyclePut,
 	"BucketLifecycleDelete":   MetaCmdTypeBucketLifecycleDelete,
 	"ClusterConfigPatch":      MetaCmdTypeClusterConfigPatch,
+	"MigrationJobStart":       MetaCmdTypeMigrationJobStart,
+	"MigrationJobDone":        MetaCmdTypeMigrationJobDone,
+	"MigrationJobFailed":      MetaCmdTypeMigrationJobFailed,
 }
 
 func (v MetaCmdType) String() string {

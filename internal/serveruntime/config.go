@@ -65,6 +65,7 @@ type Config struct {
 
 	// Lifecycle / dedup / cache
 	LifecycleInterval time.Duration
+	MigrationInterval time.Duration
 	DedupEnabled      bool
 	BlockCacheSize    int64
 

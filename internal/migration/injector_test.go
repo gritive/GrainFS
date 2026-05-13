@@ -2,6 +2,7 @@ package migration_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -23,12 +24,15 @@ type stubObject struct{ key, content, ct string }
 
 func (s *stubSource) ListBuckets() ([]string, error) { return s.buckets, nil }
 
-func (s *stubSource) ListObjects(bucket string) ([]string, error) {
+func (s *stubSource) ListObjectsPage(bucket, cursor string) ([]string, string, error) {
+	if cursor != "" {
+		return nil, "", nil // stub delivers all objects in the first call
+	}
 	var keys []string
 	for _, o := range s.objects[bucket] {
 		keys = append(keys, o.key)
 	}
-	return keys, nil
+	return keys, "", nil
 }
 
 func (s *stubSource) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
@@ -134,4 +138,46 @@ func TestInjector_MultipleBuckets(t *testing.T) {
 		rc.Close()
 		assert.Equal(t, tc.want, string(b))
 	}
+}
+
+// pagedSource simulates a source with multiple pages of objects.
+type pagedSource struct {
+	buckets []string
+	pages   map[string][][]string // bucket → []page of keys
+}
+
+func (s *pagedSource) ListBuckets() ([]string, error) { return s.buckets, nil }
+
+func (s *pagedSource) ListObjectsPage(bucket, cursor string) ([]string, string, error) {
+	pages := s.pages[bucket]
+	idx := 0
+	if cursor != "" {
+		fmt.Sscanf(cursor, "page:%d", &idx)
+	}
+	if idx >= len(pages) {
+		return nil, "", nil
+	}
+	next := ""
+	if idx+1 < len(pages) {
+		next = fmt.Sprintf("page:%d", idx+1)
+	}
+	return pages[idx], next, nil
+}
+
+func (s *pagedSource) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	return io.NopCloser(strings.NewReader("data")), &storage.Object{Key: key}, nil
+}
+
+func TestInjector_Pagination_MultiPage(t *testing.T) {
+	src := &pagedSource{
+		buckets: []string{"b"},
+		pages: map[string][][]string{
+			"b": {{"a.txt", "b.txt"}, {"c.txt"}},
+		},
+	}
+	dst := newLocalBackend(t)
+	inj := migration.NewInjector(src, dst)
+	stats, err := inj.Run()
+	require.NoError(t, err)
+	assert.Equal(t, 3, stats.Copied)
 }
