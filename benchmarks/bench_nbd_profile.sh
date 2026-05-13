@@ -31,8 +31,10 @@ FIO_SIZE="${FIO_SIZE:-64m}"      # fio workload size (must fit in VOL_SIZE)
 FIO_RUNTIME="${FIO_RUNTIME:-15}"
 FIO_CASES="${FIO_CASES:-seq-read-4K seq-write-4K seq-read-64K seq-write-64K rand-read-4K rand-write-4K}"
 CPU_PROFILE_SECONDS="${CPU_PROFILE_SECONDS:-60}"
+PROFILE_DIR="benchmarks/profiles/nbd-single-$(date +%Y%m%d-%H%M%S)"
 DATA_DIR=$(mktemp -d)
 SERVER_PID=""
+mkdir -p "$PROFILE_DIR"
 
 cleanup() {
   echo ""
@@ -43,19 +45,19 @@ cleanup() {
   if [[ -n "${CPU_PROFILE_PID:-}" ]]; then
     echo "Waiting for CPU profile..."
     wait "$CPU_PROFILE_PID" 2>/dev/null \
-      && echo "pprof saved: /tmp/grainfs-nbd-cpu.out" \
+      && echo "pprof saved: $PROFILE_DIR/cpu.pb.gz" \
       || echo "cpu profile collection failed"
   fi
 
   if [[ -n "$SERVER_PID" ]]; then
     if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
       echo "--- Collecting pprof profiles ---"
-      BENCH_PPROF_PREFIX=grainfs-nbd bench_collect_pprof "$PPROF_PORT" /tmp mutex allocs heap goroutine
+      bench_collect_pprof "$PPROF_PORT" "$PROFILE_DIR" mutex allocs heap goroutine
       echo ""
       echo "Analyse:"
-      echo "  go tool pprof -top /tmp/grainfs-nbd-cpu.out    # CPU hotspots"
-      echo "  go tool pprof -top /tmp/grainfs-nbd-mutex.out  # lock contention"
-      echo "  go tool pprof -top /tmp/grainfs-nbd-allocs.out # alloc hotspots"
+      echo "  go tool pprof -top $PROFILE_DIR/cpu.pb.gz    # CPU hotspots"
+      echo "  go tool pprof -top $PROFILE_DIR/mutex.pb.gz  # lock contention"
+      echo "  go tool pprof -top $PROFILE_DIR/allocs.pb.gz # alloc hotspots"
     fi
     kill "$SERVER_PID" 2>/dev/null || true
   fi
@@ -70,6 +72,7 @@ echo "binary : $BINARY"
 echo "NBD    : 0.0.0.0:$NBD_PORT (→ Colima sees $HOST_IP:$NBD_PORT)"
 echo "volume : ${VOL_SIZE} bytes"
 echo "fio    : size=$FIO_SIZE, dev=$NBD_DEV"
+echo "profile: $PROFILE_DIR"
 echo ""
 
 SERVE_ARGS=(
@@ -110,7 +113,7 @@ echo "OK: nbd-client connected ($NBD_DEV)"
 CPU_PROFILE_PID=""
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
   curl -sf "http://127.0.0.1:${PPROF_PORT}/debug/pprof/profile?seconds=$CPU_PROFILE_SECONDS" \
-    -o /tmp/grainfs-nbd-cpu.out &
+    -o "$PROFILE_DIR/cpu.pb.gz" &
   CPU_PROFILE_PID=$!
   echo "CPU profile started (PID=$CPU_PROFILE_PID, ${CPU_PROFILE_SECONDS}s window)"
 fi
@@ -127,7 +130,7 @@ run_fio() {
     --runtime="$FIO_RUNTIME" \
     --time_based \
     --output-format=normal \
-    "$@" 2>&1 | grep -E "READ:|WRITE:|iops|bw=|lat"
+    "$@" 2>&1 | tee -a "$PROFILE_DIR/fio_output.txt" | grep -E "READ:|WRITE:|iops|bw=|lat"
 }
 
 for fio_case in $FIO_CASES; do
@@ -147,3 +150,9 @@ done
 
 echo ""
 echo "=== Benchmark complete ==="
+if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then
+  echo ""
+  echo "=== CPU top-10 (go tool pprof) ==="
+  go tool pprof -top -nodecount=10 "$PROFILE_DIR/cpu.pb.gz" 2>/dev/null || echo "  pprof analysis failed"
+fi
+echo "PROFILE_DIR=$PROFILE_DIR"
