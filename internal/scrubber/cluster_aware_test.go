@@ -24,6 +24,7 @@ type ownerBackend struct {
 	nodeID       string
 	ownedByKey   map[string][]int // "bucket/key" → owned shard indices
 	repaired     []repairCall
+	quarantined  []repairCall
 	repairedLock sync.Mutex
 	repairErr    error
 }
@@ -61,6 +62,14 @@ func (o *ownerBackend) RepairShardLocal(bucket, key, versionID string, shardIdx 
 	o.mu.Lock()
 	o.shards[fmt.Sprintf("%s/%s/%d", bucket, key, shardIdx)] = []byte("reconstructed")
 	o.mu.Unlock()
+	return nil
+}
+
+func (o *ownerBackend) QuarantineCorruptShardLocal(bucket, key, versionID string, shardIdx int, reason string) error {
+	o.repairedLock.Lock()
+	o.quarantined = append(o.quarantined, repairCall{bucket, key, versionID, shardIdx})
+	o.repairedLock.Unlock()
+	_ = reason
 	return nil
 }
 

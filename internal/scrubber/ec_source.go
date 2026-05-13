@@ -157,6 +157,22 @@ func NewECScrubVerifier(backend Scrubbable, ver *ShardVerifier, lim *rate.Limite
 	}
 }
 
+func (v *ECScrubVerifier) backendFor(bucket string) Scrubbable {
+	if v.src != nil && v.src.resolve != nil {
+		if backend, ok := v.src.resolve(bucket); ok && backend != nil {
+			return backend
+		}
+	}
+	return v.backend
+}
+
+func (v *ECScrubVerifier) shardVerifierFor(backend Scrubbable) *ShardVerifier {
+	if backend == v.backend {
+		return v.verifier
+	}
+	return NewShardVerifier(backend, WithVerifyRetryDelay(v.verifier.retryDelay))
+}
+
 func (v *ECScrubVerifier) Verify(ctx context.Context, blk Block) (BlockStatus, error) {
 	if err := v.limiter.Wait(ctx); err != nil {
 		return BlockStatus{}, err
@@ -169,11 +185,13 @@ func (v *ECScrubVerifier) Verify(ctx context.Context, blk Block) (BlockStatus, e
 	if !ok {
 		return BlockStatus{Skipped: true, Detail: "ObjectRecord cache miss"}, nil
 	}
+	backend := v.backendFor(blk.Bucket)
+	verifier := v.shardVerifierFor(backend)
 	var indices []int
-	if owner, ok := v.backend.(ShardOwner); ok {
+	if owner, ok := backend.(ShardOwner); ok {
 		indices = owner.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, v.nodeID)
 	}
-	status := v.verifier.VerifyIndices(rec, indices)
+	status := verifier.VerifyIndices(rec, indices)
 	if status.IsHealthy() {
 		v.src.deleteRecord(blk.Bucket, blk.Key, blk.VersionID)
 		return BlockStatus{Healthy: true}, nil
@@ -213,23 +231,24 @@ func (v *ECScrubVerifier) Repair(ctx context.Context, blk Block) error {
 		correlationID = newCorrelationID()
 	}
 	var indices []int
-	if owner, ok := v.backend.(ShardOwner); ok {
+	backend := v.backendFor(blk.Bucket)
+	verifier := v.shardVerifierFor(backend)
+	if owner, ok := backend.(ShardOwner); ok {
 		indices = owner.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, v.nodeID)
 	}
-	status := v.verifier.VerifyIndices(rec, indices)
+	status := verifier.VerifyIndices(rec, indices)
 	if status.IsHealthy() {
 		return nil
 	}
-	repairer, _ := v.backend.(ShardRepairer)
+	repairer, _ := backend.(ShardRepairer)
 	if repairer == nil {
-		eng := NewRepairEngine(v.backend, WithRepairEmitter(v.emitter))
+		eng := NewRepairEngine(backend, WithRepairEmitter(v.emitter))
 		return eng.RepairWithCorrelation(rec, status, correlationID)
 	}
 	if quarantiner, ok := repairer.(CorruptShardQuarantiner); ok && len(status.Corrupt) > 0 {
 		for _, idx := range status.Corrupt {
 			_ = quarantiner.QuarantineCorruptShardLocal(rec.Bucket, rec.Key, rec.VersionID, idx, "CRC mismatch (CLI scrub)")
 		}
-		status.Corrupt = nil
 	}
 	damaged := append(append([]int{}, status.Missing...), status.Corrupt...)
 	var firstErr error

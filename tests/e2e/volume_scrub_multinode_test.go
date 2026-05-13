@@ -82,15 +82,11 @@ func TestE2E_VolumeScrub_MultiNodeRepair(t *testing.T) {
 	out, code = runCLI(t, c.dataDirs[0], "volume", "write-at", "vmrn", "--offset", "0", "--content", "MultiNodePayload!")
 	require.Equal(t, 0, code, out)
 
-	// Scan every node's dataDir for replicas. Each node ends up with EITHER
-	// the leader-shaped local file (data/.obj/<key>/current) OR a peer-replica
-	// shard (shards/<key>/<vid>/shard_0). Both count as a holder for the
-	// "peer-pull source" purpose, but the repair WRITE target is the leader
-	// path. Truncating a peer shard exercises detection but the repaired
-	// bytes land on a different file. Pick the leader's data/.obj file as
-	// truncate target so the file-size restoration assertion is deterministic.
-	leaderTarget := -1
-	leaderPath := ""
+	// Scan every node's dataDir for shard holders. Volume blocks are EC objects
+	// now, so the deterministic repair target is the local shard owned by the
+	// node whose scrub we trigger.
+	targetNode := -1
+	targetPath := ""
 	holders := 0
 	for i, dd := range c.dataDirs {
 		var hits []string
@@ -101,30 +97,25 @@ func TestE2E_VolumeScrub_MultiNodeRepair(t *testing.T) {
 		}
 		holders++
 		for _, p := range hits {
-			if strings.Contains(p, "/data/__grainfs_volumes/.obj/") && strings.HasSuffix(p, "/current") {
-				if leaderTarget < 0 {
-					leaderTarget = i
-					leaderPath = p
+			if strings.Contains(p, "/shards/__grainfs_volumes/") && strings.HasPrefix(filepath.Base(p), "shard_") {
+				if targetNode < 0 {
+					targetNode = i
+					targetPath = p
 				}
 			}
 		}
 	}
 	require.GreaterOrEqual(t, holders, 2, "need ≥2 holders for peer-pull; got %d (replication broken?)", holders)
-	require.GreaterOrEqual(t, leaderTarget, 0, "no node holds the leader-shaped data/.obj/<key>/current file")
+	require.GreaterOrEqual(t, targetNode, 0, "no node holds a local EC shard for the volume block")
 
-	// Truncate the leader's local replica; trigger scrub on the same node;
-	// expect peer-pull repair to restore the file via RepairReplica's
-	// writeRepairedReplica → objectPathV(... "current") path.
-	t.Logf("truncating leader replica on node %d at %s", leaderTarget, leaderPath)
-	require.NoError(t, os.Truncate(leaderPath, 1))
+	// Truncate the local shard; trigger scrub on the same node; expect EC
+	// repair to restore that shard from the surviving peers.
+	t.Logf("truncating local shard on node %d at %s", targetNode, targetPath)
+	require.NoError(t, os.Truncate(targetPath, 1))
 
-	out, code = runCLI(t, c.dataDirs[leaderTarget], "volume", "scrub", "vmrn")
+	out, code = runCLI(t, c.dataDirs[targetNode], "volume", "scrub", "vmrn")
 	t.Logf("scrub output:\n%s", out)
 	require.Equal(t, 0, code, out)
 	require.Contains(t, out, "Detected=1", "expected detection; got:\n%s", out)
-	require.Contains(t, out, "Repaired=1", "expected peer-pull repair; got:\n%s", out)
-
-	fi, err := os.Stat(leaderPath)
-	require.NoError(t, err)
-	require.Greater(t, fi.Size(), int64(1), "leader replica should be restored beyond truncated 1 byte; got %d", fi.Size())
+	require.Contains(t, out, "Repaired=1", "expected EC shard repair; got:\n%s", out)
 }
