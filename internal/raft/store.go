@@ -113,8 +113,9 @@ var (
 // BadgerLogStoreOption configures a BadgerLogStore.
 type BadgerLogStoreOption func(*BadgerLogStore)
 
-// WithManagedMode enables Raft log GC mode. The managed-mode flag is
-// persisted in the DB; reopening with a different setting returns an error.
+// WithManagedMode enables Raft log GC mode. The managed-mode flag is persisted
+// in the DB on first open. A store whose DB was created in non-managed mode
+// (pre-v0.0.172.0) cannot be reopened — it returns an error with a wipe instruction.
 func WithManagedMode() BadgerLogStoreOption {
 	return func(s *BadgerLogStore) { s.managedMode = true }
 }

@@ -131,8 +131,8 @@ with any group ID character. Recommendation: length prefix (`varuint(len) ||
 groupID || keytail`) — supports arbitrary group IDs and gives O(1) prefix
 extraction during scans.
 
-The `keyManagedMode` flag currently DB-global moves to a process-level marker
-file (`<dataDir>/managed-mode`) since it now applies to a node-shared DB.
+The `keyManagedMode` flag is DB-global. As of v0.0.172.0, managed mode is
+always-on; the per-file marker migration plan is no longer applicable.
 
 ## Required code changes
 

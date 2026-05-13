@@ -398,6 +398,27 @@ func TestBadgerLogStore_ManagedMode_ConsistentReopenManaged(t *testing.T) {
 	assert.True(t, s2.IsManagedMode())
 }
 
+// TestBadgerLogStore_ManagedMode_RejectsLegacyNonManagedDir verifies that a
+// Badger directory whose persisted managed-mode key is "false" (written by a
+// pre-v0.0.172.0 binary) cannot be reopened — the upgrade guard fires and
+// returns the wipe instruction.
+func TestBadgerLogStore_ManagedMode_RejectsLegacyNonManagedDir(t *testing.T) {
+	dir := t.TempDir()
+
+	// Simulate a pre-v0.0.172.0 data directory: open Badger directly and
+	// write raft:meta:managed=false, which the old always-non-managed path used.
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte("raft:meta:managed"), []byte("false"))
+	}))
+	require.NoError(t, db.Close())
+
+	_, err = NewBadgerLogStore(dir, WithManagedMode())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-managed mode")
+}
+
 func TestMarshalLogEntry_AllocsBounded(t *testing.T) {
 	entry := LogEntry{Term: 1, Index: 42, Command: []byte("test-command")}
 	// warmup: populate pool

@@ -8,13 +8,13 @@ log store at `data/raft/`. GC only runs when a snapshot covering the watermark
 exists (so lagging followers can recover via InstallSnapshot if needed).
 
 The GC interval is controlled by `--raft-log-gc-interval` (default 30s).
-Set to `0` to disable future GC runs without requiring a restart (but this
-disables GC permanently until the next restart).
+Set to `0` to disable GC; takes effect after the next restart.
 
 ## On-Disk Format
 
-Every Raft log store is opened with `raft:meta:managed=true`. Attempting to open
-a managed store without the managed-mode option will fail with a clear error.
+Every Raft log store records `raft:meta:managed=true` on first open. A store
+created by a pre-v0.0.172.0 binary with managed mode disabled (stored value
+`"false"`) cannot be reopened — the attempt fails with a wipe instruction.
 
 ## If a Node Has Corrupted Post-GC State
 

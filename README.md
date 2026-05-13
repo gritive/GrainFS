@@ -296,7 +296,7 @@ Badger role startup recovery는 metadata, raft-log, group-state, receipt, dedup,
 - [Production runbook](docs/RUNBOOK.md)
 - [SLI/SLO](docs/SLI_SLO.md)
 - [RecoverCluster drill](docs/recover-cluster.md)
-- [Badger managed mode rollback](docs/badger-managed-mode-rollback.md)
+- [Raft log GC (managed mode, always active)](docs/badger-managed-mode-rollback.md)
 - [Protocol layering contract](docs/architecture/protocol-layering.md)
 - [DuckDB Iceberg REST Catalog](docs/iceberg-duckdb.md)
 - [DuckDB Iceberg REST request trace](docs/iceberg-duckdb-request-trace.md)
