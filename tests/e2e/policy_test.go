@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,34 +28,29 @@ func TestE2E_BucketPolicy_SetAndGet(t *testing.T) {
 		}]
 	}`
 
-	// PUT bucket policy
-	req, _ := http.NewRequest(http.MethodPut, testServerURL+"/policy-test?policy", bytes.NewReader([]byte(policy)))
-	resp, err := http.DefaultClient.Do(req)
+	_, err := testS3Client.PutBucketPolicy(context.Background(), &s3.PutBucketPolicyInput{
+		Bucket: aws.String("policy-test"),
+		Policy: aws.String(policy),
+	})
 	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 
-	// GET bucket policy
-	req, _ = http.NewRequest(http.MethodGet, testServerURL+"/policy-test?policy", nil)
-	resp, err = http.DefaultClient.Do(req)
+	got, err := testS3Client.GetBucketPolicy(context.Background(), &s3.GetBucketPolicyInput{
+		Bucket: aws.String("policy-test"),
+	})
 	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), "s3:GetObject")
+	require.NotNil(t, got.Policy)
+	assert.Contains(t, *got.Policy, "s3:GetObject")
 
-	// DELETE bucket policy
-	req, _ = http.NewRequest(http.MethodDelete, testServerURL+"/policy-test?policy", nil)
-	resp, err = http.DefaultClient.Do(req)
+	_, err = testS3Client.DeleteBucketPolicy(context.Background(), &s3.DeleteBucketPolicyInput{
+		Bucket: aws.String("policy-test"),
+	})
 	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
 func TestE2E_BucketPolicy_InvalidJSON(t *testing.T) {
 	createBucket(t, "policy-invalid")
 
-	req, _ := http.NewRequest(http.MethodPut, testServerURL+"/policy-invalid?policy", bytes.NewReader([]byte(`{invalid`)))
+	req := signedPolicyRequest(t, http.MethodPut, "policy-invalid", bytes.NewReader([]byte(`{invalid`)))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -83,7 +79,7 @@ func TestE2E_BucketPolicy_DenyAction(t *testing.T) {
 		}]
 	}`
 
-	req, _ := http.NewRequest(http.MethodPut, testServerURL+"/policy-deny?policy", bytes.NewReader([]byte(policy)))
+	req := signedPolicyRequest(t, http.MethodPut, "policy-deny", bytes.NewReader([]byte(policy)))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -95,4 +91,13 @@ func TestE2E_BucketPolicy_DenyAction(t *testing.T) {
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func signedPolicyRequest(t *testing.T, method, bucket string, body io.Reader) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, testServerURL+"/"+bucket+"?policy", body)
+	require.NoError(t, err)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, testAccessKey, testSecretKey, "us-east-1")
+	return req
 }

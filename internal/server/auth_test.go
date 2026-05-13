@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -69,6 +70,52 @@ func TestAuthAcceptsValidSignature(t *testing.T) {
 	require.NoError(t, err, "put")
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestAuthBucketPolicyCRUDRequiresSignature(t *testing.T) {
+	base := setupAuthServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/policy-bucket", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "create bucket")
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::policy-bucket/*"]}]}`
+	req, _ = http.NewRequest(http.MethodPut, base+"/policy-bucket?policy", bytes.NewReader([]byte(policy)))
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "unsigned put policy")
+	resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/policy-bucket?policy", bytes.NewReader([]byte(policy)))
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "signed put policy")
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodGet, base+"/policy-bucket?policy", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "signed get policy")
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, string(body), "s3:GetObject")
+
+	req, _ = http.NewRequest(http.MethodDelete, base+"/policy-bucket?policy", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err, "signed delete policy")
+	resp.Body.Close()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
 func TestAuthAcceptsSignedPostPolicyFormUpload(t *testing.T) {
