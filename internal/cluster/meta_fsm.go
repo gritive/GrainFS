@@ -199,6 +199,7 @@ type MetaFSM struct {
 	onShardGroupAdded func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
 	onIcebergResult   func(string, error)              // requestID, typed catalog result; must not block
 	onScrubTrigger    func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
+	onNfsExportChange func()                           // fired after NFS export registry apply; must not block
 
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
@@ -472,7 +473,11 @@ func (f *MetaFSM) applyNfsExportUpsert(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: NfsExportUpsert: %w", err)
 	}
-	return f.exportStore.Put(bucket, cfg)
+	if err := f.exportStore.Put(bucket, cfg); err != nil {
+		return err
+	}
+	f.publishNfsExportChange()
+	return nil
 }
 
 func (f *MetaFSM) applyNfsExportDelete(payload []byte) error {
@@ -483,7 +488,11 @@ func (f *MetaFSM) applyNfsExportDelete(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: NfsExportDelete: %w", err)
 	}
-	return f.exportStore.Delete(bucket)
+	if err := f.exportStore.Delete(bucket); err != nil {
+		return err
+	}
+	f.publishNfsExportChange()
+	return nil
 }
 
 func (f *MetaFSM) applyMigrationJobStart(payload []byte) error {
@@ -1171,6 +1180,23 @@ func (f *MetaFSM) SetOnIcebergApplyResult(fn func(requestID string, err error)) 
 	f.mu.Lock()
 	f.onIcebergResult = fn
 	f.mu.Unlock()
+}
+
+// SetOnNfsExportChange registers a callback fired after each NFS export
+// registry upsert/delete is applied. The callback must not block.
+func (f *MetaFSM) SetOnNfsExportChange(fn func()) {
+	f.mu.Lock()
+	f.onNfsExportChange = fn
+	f.mu.Unlock()
+}
+
+func (f *MetaFSM) publishNfsExportChange() {
+	f.mu.RLock()
+	cb := f.onNfsExportChange
+	f.mu.RUnlock()
+	if cb != nil {
+		cb()
+	}
 }
 
 func (f *MetaFSM) publishIcebergResult(requestID string, err error) {

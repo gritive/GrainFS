@@ -125,6 +125,12 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	// (fileMeta, parent-dir mtimes) stay stale until the next backend stat
 	// re-fetches.
 	if nfs := nodeSvc.NFS4(); nfs != nil {
+		state.metaRaft.FSM().SetOnNfsExportChange(func() {
+			if err := nfs.RefreshExports(context.Background()); err != nil {
+				log.Warn().Err(err).Msg("nfs4: refresh exports after registry apply failed")
+			}
+		})
+		state.AddCleanup(func() { state.metaRaft.FSM().SetOnNfsExportChange(nil) })
 		state.distBackend.RegisterCacheInvalidator("nfs4", cluster.CacheInvalidatorFunc(nfs.Invalidate))
 	}
 	return nil

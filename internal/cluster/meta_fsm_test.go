@@ -852,6 +852,31 @@ func TestApplyNfsExportUpsert_WritesStore(t *testing.T) {
 	require.Equal(t, cfg, got)
 }
 
+func TestApplyNfsExport_ChangeCallback(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+
+	var calls int
+	f.SetOnNfsExportChange(func() { calls++ })
+
+	cfg := nfsexport.Config{FsidMajor: 1, FsidMinor: 2, Generation: 3}
+	upsertPayload, err := nfsexport.EncodeUpsertPayload("b1", cfg)
+	require.NoError(t, err)
+	upsertData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, upsertPayload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(upsertData))
+
+	deletePayload, err := nfsexport.EncodeDeletePayload("b1")
+	require.NoError(t, err)
+	deleteData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, deletePayload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(deleteData))
+
+	require.Equal(t, 2, calls)
+}
+
 func TestApplyNfsExportDelete_Idempotent(t *testing.T) {
 	f := NewMetaFSM()
 	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
