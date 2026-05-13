@@ -322,7 +322,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 
 #### Phase 14d: Raft Log GC — Managed Mode ✅
 
-- **Raft 로그 GC 상시 활성** ✅ — `--badger-managed-mode` 플래그 제거 (v0.0.172.0). 관리 모드가 유일한 레이아웃; 비관리 모드로의 복귀 불가.
+- **Raft 로그 GC 상시 활성** ✅ — `--badger-managed-mode` 플래그 제거 (v0.0.173.0). 관리 모드가 유일한 레이아웃; 비관리 모드로의 복귀 불가.
 - **`QuorumMinMatchIndex()`** ✅ — 클러스터 쿼럼 기준 최고 복제 인덱스 반환. 리더의 GC watermark로 사용.
 - **`TruncateBefore(index)`** ✅ — 배치 처리(1000개/txn)로 `ErrTxnTooBig` 방지.
 - **GC 고루틴 격리** ✅ — `maybeRunLogGC()`를 heartbeat 루프 밖 별도 고루틴으로 실행. `atomic.Bool` 가드로 중복 실행 방지.

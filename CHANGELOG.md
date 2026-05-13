@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.172.0] - 2026-05-13 — refactor: remove `--badger-managed-mode` flag
+## [0.0.173.0] - 2026-05-13 — refactor: remove `--badger-managed-mode` flag
 
 ### Removed
 

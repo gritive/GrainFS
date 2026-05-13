@@ -1,4 +1,4 @@
-# BadgerDB Managed Mode — Always Active (v0.0.172.0+)
+# BadgerDB Managed Mode — Always Active (v0.0.173.0+)
 
 ## What It Does
 
@@ -13,7 +13,7 @@ Set to `0` to disable GC; takes effect after the next restart.
 ## On-Disk Format
 
 Every Raft log store records `raft:meta:managed=true` on first open. A store
-created by a pre-v0.0.172.0 binary with managed mode disabled (stored value
+created by a pre-v0.0.173.0 binary with managed mode disabled (stored value
 `"false"`) cannot be reopened — the attempt fails with a wipe instruction.
 
 ## If a Node Has Corrupted Post-GC State
