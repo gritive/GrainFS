@@ -913,7 +913,9 @@ func TestCE_Counter_EmitsOnFailure(t *testing.T) {
 		Type:    StreamCapabilityExchange,
 		Payload: []byte{0x02, 0x00},
 	}))
-	_, _ = codec.Decode(stream)
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status)
 
 	require.Eventually(t, func() bool {
 		return testutil.ToFloat64(metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonVersionMismatch))) == acceptorBefore+1

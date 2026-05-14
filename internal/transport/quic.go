@@ -721,7 +721,10 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 		_ = stream.SetDeadline(dl)
 	}
 
-	msg, err := t.codec.Decode(stream)
+	// ceDecodeMaxPayload caps the CE frame allocation before the 2-byte length
+	// check runs, preventing a compromised peer from forcing a 64 MB allocation.
+	const ceDecodeMaxPayload = 16
+	msg, err := t.codec.DecodeCapped(stream, ceDecodeMaxPayload)
 	if err != nil {
 		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ioOrTimeoutReason(err))).Inc()
 		return fmt.Errorf("decode CE: %w", err)
