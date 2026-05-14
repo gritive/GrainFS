@@ -52,6 +52,10 @@ func (m *mockIAMProposer) ProposeBucketUpstreamDelete(_ context.Context, _ strin
 	return nil
 }
 
+func (m *mockIAMProposer) ProposeBucketUpstreamCutover(_ context.Context, _ string) error {
+	return nil
+}
+
 func TestIssueCreatorGrant(t *testing.T) {
 	tests := []struct {
 		name         string
