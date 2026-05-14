@@ -95,7 +95,7 @@ sleep "$NFS_SERVER_WARMUP_SLEEP"
 echo ""
 echo "=== preparing bucket export ($BUCKET) ==="
 bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR"
-bench_create_bucket_retry "http://127.0.0.1:$HTTP_PORT" "$BUCKET"
+bench_create_bucket_admin_retry "$BINARY" "$DATA_DIR" "$BUCKET"
 "$BINARY" nfs export add "$BUCKET" --endpoint "$DATA_DIR/admin.sock" || true
 
 echo ""

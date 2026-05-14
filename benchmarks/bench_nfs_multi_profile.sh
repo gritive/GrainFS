@@ -65,7 +65,7 @@ bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR"
 echo "=== creating buckets and exports ==="
 for i in $(seq 1 "$NUM_BUCKETS"); do
   bucket="bench-$i"
-  bench_create_bucket_retry "http://127.0.0.1:$HTTP_PORT" "$bucket"
+  bench_create_bucket_admin_retry "$BINARY" "$DATA_DIR" "$bucket"
   "$BINARY" nfs export add "$bucket" --endpoint "$DATA_DIR/admin.sock"
 done
 
@@ -128,7 +128,11 @@ echo "=== Pseudo-root READDIR latency (${READDIR_SAMPLES} samples, ms) ===" | te
 LAT_FILE="$PROFILE_DIR/pseudo_root_lat_ms.txt"
 : > "$LAT_FILE"
 for _ in $(seq 1 "$READDIR_SAMPLES"); do
-  t_s=$(bench_colima_ssh "TIMEFORMAT='%R'; { time ls /mnt/grainfs-nfs-pseudo >/dev/null; } 2>&1" | tail -1)
+  t_s=$(bench_colima_ssh bash -lc "TIMEFORMAT='%R'; { time ls /mnt/grainfs-nfs-pseudo >/dev/null; } 2>&1" | tail -1)
+  if [[ ! "$t_s" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "pseudo-root latency sample failed: $t_s" >&2
+    exit 1
+  fi
   awk "BEGIN { printf \"%.1f\\n\", ${t_s} * 1000 }" >> "$LAT_FILE"
 done
 p50=$(sort -n "$LAT_FILE" | awk -v n="$READDIR_SAMPLES" 'NR==int(n*0.50){print; exit}')
