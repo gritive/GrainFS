@@ -229,15 +229,17 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	)
 	{
 		h, release := hashForBucket(bucket)
-		defer release()
 		w := io.MultiWriter(tmp, h)
 		size, cerr = io.Copy(w, r)
+		if cerr == nil {
+			etag = etagFromHash(h)
+		}
+		release()
 		tmp.Close()
 		if cerr != nil {
 			cleanupTmp()
 			return nil, fmt.Errorf("write object: %w", cerr)
 		}
-		etag = etagFromHash(h)
 	}
 
 	if localTraceEnabled {
