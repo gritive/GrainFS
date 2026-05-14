@@ -1,15 +1,24 @@
 # Changelog
 
-## Unreleased
+## [0.0.191.0] - 2026-05-14 — feat: NFS multi-export DX and benchmarks
 
-### NFS multi-bucket export
+### Added
 
-- **NEW**: `grainfs nfs debug <bucket>` reports export registry state, backend bucket existence, recent pseudo-root LOOKUPs, and best-effort propagation/client diagnostics.
-- **NEW**: Prometheus metrics `grainfs_nfs_exports_total`, `grainfs_nfs_export_propagation_seconds`, `grainfs_nfs_lookup_unknown_export_total`, and `grainfs_nfs_revoked_stateids_total`.
-- **NEW**: Grafana sample dashboard at `docs/observability/nfs-multi-export.json`.
-- **FIX**: NFS export admin errors now return HTTP status codes matching their domain codes: `bucket_not_found` and `export_not_found` return 404, `export_already_exists` returns 409, and `export_propagation_timeout` returns 504.
-- **CHANGE**: `grainfs nfs export` commands use `--json`, matching bucket/IAM conventions, and reject `--quiet --json`.
-- **Docs**: Added NFS export lifecycle and debug runbooks.
+- **NFS export diagnostics** — `grainfs nfs debug <bucket>` reports registry state, backend bucket existence, recent pseudo-root LOOKUPs, and available client diagnostics in text or JSON.
+- **NFS multi-export observability** — Prometheus now exposes export totals, propagation latency, unknown export LOOKUPs, and revoked stateid counters, with a sample Grafana dashboard in `docs/observability/nfs-multi-export.json`.
+- **NFS profiling benchmarks** — `make bench-nfs-multi` runs a bounded multi-bucket Colima/fio workload with pprof capture, per-bucket throughput, and pseudo-root READDIR latency output.
+
+### Changed
+
+- **NFS export CLI JSON flags** — `grainfs nfs export` commands now use `--json`, matching bucket and IAM commands, and reject `--quiet --json`.
+- **Benchmark defaults** — NFS profiling workloads now use bounded default sizes and `--fallocate=none` so local profiling completes and produces usable pprof data by default.
+- **NFS runbooks** — README, RUNBOOK, `docs/nfs-export-lifecycle.md`, and `docs/nfs-debug.md` now document export lifecycle, debugging, and benchmark workflows.
+
+### Fixed
+
+- **NFS export admin errors** — `bucket_not_found` and `export_not_found` return 404, `export_already_exists` returns 409, and propagation timeouts return 504.
+- **NFS write lock isolation** — writes and truncates for the same object key in different buckets no longer share one lock.
+- **NFS debug truthfulness** — debug output no longer claims unavailable propagation/client state as healthy, applies admin timeouts, and keeps the NFS hint sweeper closed during runtime shutdown.
 
 ## [0.0.190.1] - 2026-05-14 — feat: rolling upgrade CI compat lane (Slice 1)
 
