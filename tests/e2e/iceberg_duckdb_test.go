@@ -262,11 +262,9 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 
 	// Query audit.s3 via DuckDB — expect at least numPuts rows for bucket test-audit.
 	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
-		fmt.Sprintf(`
-SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
+		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
 FROM grainfs_iceberg.audit.s3
-WHERE bucket = 'test-audit' AND method = 'PutObject';
-`),
+WHERE bucket = 'test-audit' AND method = 'PutObject';`,
 		fmt.Sprintf("%d", numPuts),
 	)
 }

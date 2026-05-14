@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -125,6 +126,12 @@ func (c *Committer) commit(ctx context.Context, events []S3Event) error {
 	ident := icebergcatalog.Identifier{Namespace: []string{Namespace}, Name: TableS3}
 
 	tbl, err := c.cfg.Catalog.LoadTable(ctx, ident)
+	if errors.Is(err, icebergcatalog.ErrTableNotFound) {
+		if bootErr := Bootstrap(ctx, c.cfg.Catalog, c.cfg.Backend); bootErr != nil {
+			return fmt.Errorf("lazy bootstrap: %w", bootErr)
+		}
+		tbl, err = c.cfg.Catalog.LoadTable(ctx, ident)
+	}
 	if err != nil {
 		return fmt.Errorf("load audit.s3 table: %w", err)
 	}

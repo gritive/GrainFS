@@ -284,52 +284,52 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	if cfg.AuditIceberg {
 		auditEmitter := audit.NewEmitter(nodeID)
 		srvOpts = append(srvOpts, server.WithAuditEmitter(auditEmitter))
+		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
 		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
-			log.Warn().Err(err).Msg("audit bootstrap failed; audit subsystem disabled")
-		} else {
-			interval := cfg.AuditCommitInterval
-			if interval == 0 {
-				interval = 60 * time.Second
-			}
-			shipFn := func(ctx context.Context, events []audit.S3Event) error {
-				payload, err := audit.EncodeS3Batch(events)
-				if err != nil {
-					return err
-				}
-				targets := MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
-				if len(targets) == 0 {
-					return nil
-				}
-				return state.quicTransport.Send(ctx, targets[0], &transport.Message{
-					Type:    transport.StreamAuditShip,
-					Payload: payload,
-				})
-			}
-			committer := audit.NewCommitter(audit.CommitterConfig{
-				Emitter:      auditEmitter,
-				Catalog:      metaCatalog,
-				Backend:      state.backend,
-				IsLeader:     func() bool { return metaRaft.IsLeader() },
-				ShipToLeader: shipFn,
-				NodeID:       nodeID,
-				Interval:     interval,
-			})
-			state.streamRouter.Handle(transport.StreamAuditShip, func(req *transport.Message) *transport.Message {
-				events, err := audit.DecodeS3Batch(req.Payload)
-				if err != nil {
-					return transport.NewErrorResponse(req, transport.StatusError, err)
-				}
-				committer.AppendFromFollower(events)
-				return transport.NewResponse(req, nil)
-			})
-			commitCtx, commitCancel := context.WithCancel(ctx)
-			state.AddCleanup(commitCancel)
-			go committer.Run(commitCtx)
-			log.Info().
-				Str("table", audit.Namespace+"."+audit.TableS3).
-				Str("commit_interval", interval.String()).
-				Msg("audit subsystem enabled")
+			log.Debug().Err(err).Msg("audit bootstrap deferred to first commit cycle")
 		}
+		interval := cfg.AuditCommitInterval
+		if interval == 0 {
+			interval = 60 * time.Second
+		}
+		shipFn := func(ctx context.Context, events []audit.S3Event) error {
+			payload, err := audit.EncodeS3Batch(events)
+			if err != nil {
+				return err
+			}
+			targets := MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
+			if len(targets) == 0 {
+				return nil
+			}
+			return state.quicTransport.Send(ctx, targets[0], &transport.Message{
+				Type:    transport.StreamAuditShip,
+				Payload: payload,
+			})
+		}
+		committer := audit.NewCommitter(audit.CommitterConfig{
+			Emitter:      auditEmitter,
+			Catalog:      metaCatalog,
+			Backend:      state.backend,
+			IsLeader:     func() bool { return metaRaft.IsLeader() },
+			ShipToLeader: shipFn,
+			NodeID:       nodeID,
+			Interval:     interval,
+		})
+		state.streamRouter.Handle(transport.StreamAuditShip, func(req *transport.Message) *transport.Message {
+			events, err := audit.DecodeS3Batch(req.Payload)
+			if err != nil {
+				return transport.NewErrorResponse(req, transport.StatusError, err)
+			}
+			committer.AppendFromFollower(events)
+			return transport.NewResponse(req, nil)
+		})
+		commitCtx, commitCancel := context.WithCancel(ctx)
+		state.AddCleanup(commitCancel)
+		go committer.Run(commitCtx)
+		log.Info().
+			Str("table", audit.Namespace+"."+audit.TableS3).
+			Str("commit_interval", interval.String()).
+			Msg("audit subsystem enabled")
 	}
 
 	state.srvOpts = srvOpts
