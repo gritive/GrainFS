@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 const (
@@ -25,8 +27,9 @@ const (
 	// fileVersionV2 adds VersionID to each entry so PITR can replay
 	// object-level version history across Put/Delete/DeleteVersion.
 	fileVersionV2 = uint32(2)
-	// fileVersion is the version written by new segments.
-	fileVersion = fileVersionV2
+	// fileVersionV3 stores seq/timestamp in a plaintext frame and encrypts
+	// the mutation body.
+	fileVersionV3 = uint32(3)
 
 	OpPut           = byte(0)
 	OpDelete        = byte(1)
@@ -67,18 +70,34 @@ type WAL struct {
 	done chan struct{}
 	wg   sync.WaitGroup
 
-	lastSeq atomic.Uint64
+	lastSeq   atomic.Uint64
+	encryptor *encrypt.Encryptor
+	version   uint32
 }
 
 // Open opens (or creates) a WAL in dir. Starts the background writer.
 func Open(dir string) (*WAL, error) {
+	return open(dir, nil, fileVersionV2)
+}
+
+// OpenEncrypted opens (or creates) a WAL that encrypts mutation bodies.
+func OpenEncrypted(dir string, enc *encrypt.Encryptor) (*WAL, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypted WAL requires encryptor")
+	}
+	return open(dir, enc, fileVersionV3)
+}
+
+func open(dir string, enc *encrypt.Encryptor, version uint32) (*WAL, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
 	w := &WAL{
-		dir:  dir,
-		ch:   make(chan Entry, chanCap),
-		done: make(chan struct{}),
+		dir:       dir,
+		ch:        make(chan Entry, chanCap),
+		done:      make(chan struct{}),
+		encryptor: enc,
+		version:   version,
 	}
 	// Seed lastSeq from existing files
 	maxSeq, err := w.scanMaxSeq()
@@ -175,7 +194,7 @@ func (w *WAL) writeEntry(e Entry) error {
 			return err
 		}
 	}
-	n, err := marshalEntry(w.file, e)
+	n, err := marshalEntry(w.file, e, w.encryptor)
 	if err != nil {
 		return err
 	}
@@ -202,7 +221,7 @@ func (w *WAL) rotate(firstSeq uint64) error {
 	// Write header only if new file
 	fi, _ := f.Stat()
 	if fi.Size() == 0 {
-		if err := writeHeader(f); err != nil {
+		if err := writeHeader(f, w.version); err != nil {
 			f.Close()
 			return err
 		}
@@ -259,6 +278,18 @@ func walFilename(name string) bool {
 // Replay reads WAL entries with seq > fromSeq and timestamp <= targetTime,
 // calling fn for each. Returns the number of entries processed.
 func Replay(dir string, fromSeq uint64, targetTime time.Time, fn func(Entry)) (int, error) {
+	return replay(dir, fromSeq, targetTime, nil, false, fn)
+}
+
+// ReplayEncrypted reads WAL entries written by OpenEncrypted.
+func ReplayEncrypted(dir string, fromSeq uint64, targetTime time.Time, enc *encrypt.Encryptor, fn func(Entry)) (int, error) {
+	if enc == nil {
+		return 0, fmt.Errorf("encrypted WAL replay requires encryptor")
+	}
+	return replay(dir, fromSeq, targetTime, enc, true, fn)
+}
+
+func replay(dir string, fromSeq uint64, targetTime time.Time, enc *encrypt.Encryptor, strict bool, fn func(Entry)) (int, error) {
 	target := targetTime.UnixNano()
 	files, err := segmentFiles(dir)
 	if err != nil {
@@ -266,9 +297,12 @@ func Replay(dir string, fromSeq uint64, targetTime time.Time, fn func(Entry)) (i
 	}
 	var count int
 	for _, path := range files {
-		n, err := replayFile(path, fromSeq, target, fn)
+		n, err := replayFile(path, fromSeq, target, enc, fn)
 		count += n
 		if err != nil {
+			if strict {
+				return count, err
+			}
 			log.Warn().Str("file", path).Err(err).Msg("wal: replay file error")
 			// Continue with next file
 		}
@@ -276,7 +310,7 @@ func Replay(dir string, fromSeq uint64, targetTime time.Time, fn func(Entry)) (i
 	return count, nil
 }
 
-func replayFile(path string, fromSeq uint64, targetNs int64, fn func(Entry)) (int, error) {
+func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryptor, fn func(Entry)) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -290,7 +324,7 @@ func replayFile(path string, fromSeq uint64, targetNs int64, fn func(Entry)) (in
 
 	var count int
 	for {
-		e, err := unmarshalEntry(f, ver)
+		e, body, err := readEntryFrame(f, ver)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
@@ -302,6 +336,15 @@ func replayFile(path string, fromSeq uint64, targetNs int64, fn func(Entry)) (in
 		}
 		if e.Timestamp > targetNs {
 			continue
+		}
+		if ver == fileVersionV3 {
+			if enc == nil {
+				return count, fmt.Errorf("wal: encrypted entry requires encryptor")
+			}
+			e, err = decryptEntryBody(e, body, enc)
+			if err != nil {
+				return count, err
+			}
 		}
 		fn(e)
 		count++
@@ -321,7 +364,7 @@ func lastSeqInFile(path string) (uint64, error) {
 	}
 	var lastSeq uint64
 	for {
-		e, err := unmarshalEntry(f, ver)
+		e, _, err := readEntryFrame(f, ver)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
@@ -335,10 +378,10 @@ func lastSeqInFile(path string) (uint64, error) {
 
 // --- Binary format ---
 
-func writeHeader(w io.Writer) error {
+func writeHeader(w io.Writer, version uint32) error {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint32(buf[0:4], fileMagic)
-	binary.BigEndian.PutUint32(buf[4:8], fileVersion)
+	binary.BigEndian.PutUint32(buf[4:8], version)
 	_, err := w.Write(buf)
 	return err
 }
@@ -354,17 +397,41 @@ func readHeader(r io.Reader) (uint32, error) {
 		return 0, fmt.Errorf("wal: invalid magic")
 	}
 	v := binary.BigEndian.Uint32(buf[4:8])
-	if v != fileVersionV1 && v != fileVersionV2 {
+	if v != fileVersionV1 && v != fileVersionV2 && v != fileVersionV3 {
 		return 0, fmt.Errorf("wal: unsupported version %d", v)
 	}
 	return v, nil
 }
 
 // marshalEntry writes an entry in binary format and returns bytes written.
+func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
+	if enc == nil {
+		return marshalPlainEntry(w, e)
+	}
+	body := marshalEntryBody(e, true)
+	sealed, err := enc.SealValue("wal:record", body)
+	if err != nil {
+		return 0, fmt.Errorf("wal: encrypt entry body: %w", err)
+	}
+	buf := make([]byte, 8+8+4+len(sealed))
+	off := 0
+	binary.BigEndian.PutUint64(buf[off:], e.Seq)
+	off += 8
+	binary.BigEndian.PutUint64(buf[off:], uint64(e.Timestamp))
+	off += 8
+	binary.BigEndian.PutUint32(buf[off:], uint32(len(sealed)))
+	off += 4
+	copy(buf[off:], sealed)
+	n, err := w.Write(buf)
+	clear(body)
+	clear(sealed)
+	return n, err
+}
+
+// marshalPlainEntry writes the legacy plaintext v2 record format.
 // Format (v1): [8:seq][8:ts][1:op][2:bucket_len][bucket][2:key_len][key][2:etag_len][etag][2:ct_len][ct][8:size]
 // Format (v2): v1 fields + [2:versionid_len][versionid]
-// New segments always use v2.
-func marshalEntry(w io.Writer, e Entry) (int, error) {
+func marshalPlainEntry(w io.Writer, e Entry) (int, error) {
 	bucket := []byte(e.Bucket)
 	key := []byte(e.Key)
 	etag := []byte(e.ETag)
@@ -407,9 +474,87 @@ func marshalEntry(w io.Writer, e Entry) (int, error) {
 	return n, err
 }
 
-// unmarshalEntry reads an entry in the given wire version.
+func marshalEntryBody(e Entry, includeVersionID bool) []byte {
+	bucket := []byte(e.Bucket)
+	key := []byte(e.Key)
+	etag := []byte(e.ETag)
+	ct := []byte(e.ContentType)
+	vid := []byte(e.VersionID)
+
+	size := 1 + 2 + len(bucket) + 2 + len(key) + 2 + len(etag) + 2 + len(ct) + 8
+	if includeVersionID {
+		size += 2 + len(vid)
+	}
+	buf := make([]byte, size)
+	off := 0
+	buf[off] = e.Op
+	off++
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(bucket)))
+	off += 2
+	copy(buf[off:], bucket)
+	off += len(bucket)
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(key)))
+	off += 2
+	copy(buf[off:], key)
+	off += len(key)
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(etag)))
+	off += 2
+	copy(buf[off:], etag)
+	off += len(etag)
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(ct)))
+	off += 2
+	copy(buf[off:], ct)
+	off += len(ct)
+	binary.BigEndian.PutUint64(buf[off:], uint64(e.Size))
+	off += 8
+	if includeVersionID {
+		binary.BigEndian.PutUint16(buf[off:], uint16(len(vid)))
+		off += 2
+		copy(buf[off:], vid)
+	}
+	return buf
+}
+
+func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
+	if wireVer == fileVersionV3 {
+		var fixed [8 + 8 + 4]byte
+		if _, err := io.ReadFull(r, fixed[:]); err != nil {
+			return Entry{}, nil, err
+		}
+		bodyLen := binary.BigEndian.Uint32(fixed[16:20])
+		body := make([]byte, bodyLen)
+		if bodyLen > 0 {
+			if _, err := io.ReadFull(r, body); err != nil {
+				return Entry{}, nil, err
+			}
+		}
+		return Entry{
+			Seq:       binary.BigEndian.Uint64(fixed[0:8]),
+			Timestamp: int64(binary.BigEndian.Uint64(fixed[8:16])),
+		}, body, nil
+	}
+	e, err := readPlainEntry(r, wireVer)
+	return e, nil, err
+}
+
+func decryptEntryBody(frame Entry, encryptedBody []byte, enc *encrypt.Encryptor) (Entry, error) {
+	body, err := enc.OpenValue("wal:record", encryptedBody)
+	if err != nil {
+		return Entry{}, fmt.Errorf("wal: decrypt entry body: %w", err)
+	}
+	e, err := unmarshalEntryBody(body, true)
+	clear(body)
+	if err != nil {
+		return Entry{}, err
+	}
+	e.Seq = frame.Seq
+	e.Timestamp = frame.Timestamp
+	return e, nil
+}
+
+// readPlainEntry reads a legacy plaintext entry in the given wire version.
 // v1 returns empty VersionID; v2 reads the trailing VersionID field.
-func unmarshalEntry(r io.Reader, wireVer uint32) (Entry, error) {
+func readPlainEntry(r io.Reader, wireVer uint32) (Entry, error) {
 	var fixed [8 + 8 + 1]byte
 	if _, err := io.ReadFull(r, fixed[:]); err != nil {
 		return Entry{}, err
@@ -457,6 +602,51 @@ func unmarshalEntry(r io.Reader, wireVer uint32) (Entry, error) {
 	e.Size = int64(binary.BigEndian.Uint64(sizeBuf[:]))
 
 	if wireVer >= fileVersionV2 {
+		if e.VersionID, err = readStr(); err != nil {
+			return e, err
+		}
+	}
+	return e, nil
+}
+
+func unmarshalEntryBody(body []byte, includeVersionID bool) (Entry, error) {
+	if len(body) < 1 {
+		return Entry{}, io.ErrUnexpectedEOF
+	}
+	e := Entry{Op: body[0]}
+	off := 1
+	readStr := func() (string, error) {
+		if len(body[off:]) < 2 {
+			return "", io.ErrUnexpectedEOF
+		}
+		l := int(binary.BigEndian.Uint16(body[off:]))
+		off += 2
+		if len(body[off:]) < l {
+			return "", io.ErrUnexpectedEOF
+		}
+		s := string(body[off : off+l])
+		off += l
+		return s, nil
+	}
+	var err error
+	if e.Bucket, err = readStr(); err != nil {
+		return e, err
+	}
+	if e.Key, err = readStr(); err != nil {
+		return e, err
+	}
+	if e.ETag, err = readStr(); err != nil {
+		return e, err
+	}
+	if e.ContentType, err = readStr(); err != nil {
+		return e, err
+	}
+	if len(body[off:]) < 8 {
+		return e, io.ErrUnexpectedEOF
+	}
+	e.Size = int64(binary.BigEndian.Uint64(body[off:]))
+	off += 8
+	if includeVersionID {
 		if e.VersionID, err = readStr(); err != nil {
 			return e, err
 		}

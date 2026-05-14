@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -21,6 +22,7 @@ func StartAutoSnapshotterWhenReady(
 	dataDir, walDir string,
 	backend storage.Backend,
 	cfg *cluster.ClusterConfig,
+	enc *encrypt.Encryptor,
 	readinessTimeout time.Duration,
 ) error {
 	snapshotable, ok := backend.(storage.Snapshotable)
@@ -31,7 +33,7 @@ func StartAutoSnapshotterWhenReady(
 	if err := waitForSnapshotBackendReady(ctx, snapshotable, readinessTimeout); err != nil {
 		return err
 	}
-	objSnapMgr, err := snapshot.NewManager(filepath.Join(dataDir, "snapshots"), snapshotable, walDir)
+	objSnapMgr, err := snapshot.NewManagerWithEncryptor(filepath.Join(dataDir, "snapshots"), snapshotable, walDir, enc)
 	if err != nil {
 		return err
 	}

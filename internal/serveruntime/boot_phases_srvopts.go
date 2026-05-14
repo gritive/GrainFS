@@ -124,6 +124,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithEventStore(eventstore.New(state.db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
+		server.WithSnapshotEncryptor(state.cfg.Encryptor),
 	}
 	var metaCatalog *cluster.MetaCatalog
 	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.joinMode {
