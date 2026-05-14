@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.205.1] - 2026-05-15 — fix: encrypted benchmark allocation hotspots
+
+### Added
+
+- **9P benchmark coverage** — single-node and clustered 9P benchmark scripts now mount bucket exports in Colima, run fio workloads, and collect pprof profiles alongside the existing S3, NFS, NBD, and Iceberg benchmark lanes.
+- **9P directory creation** — 9P bucket directories can now be created and removed through directory marker objects, with mode metadata and collision checks for files, sidecar namespaces, and existing directories.
+
+### Changed
+
+- **Encrypted shard reads** — full-shard and range reads now stream/decrypt from files with pooled chunk buffers instead of allocating full encrypted copies or MiB-scale buffers per range read.
+- **NFS fallback writes** — non-`WriteAt` backends now rebuild partial writes as streams instead of reading the whole object into memory, while rejecting unsafe huge sparse offsets.
+- **Encrypted spool reads** — cluster spool encryption now reuses plaintext and ciphertext buffers across records.
+- **NBD request buffers** — 128 KiB NBD requests now use the buffer pool instead of allocating per request.
+
+### Fixed
+
+- **NFS cluster benchmark mount** — the clustered NFS benchmark now creates the target bucket/export and mounts the bucket path instead of the pseudo-root.
+- **9P directory correctness** — file rename and child mutation paths now respect directory marker locks, directory mode metadata, and existing directory collisions.
+- **9P server close race** — closing an already-stopped listener no longer reports a spurious `use of closed network connection` error.
+
+### Verification
+
+- `make test-unit`
+- `git diff --check origin/master && bash -n benchmarks/bench_9p_profile.sh benchmarks/bench_9p_cluster_profile.sh benchmarks/bench_nfs_cluster_profile.sh benchmarks/bench_nbd_profile.sh benchmarks/bench_nbd_cluster_profile.sh benchmarks/bench_iceberg_table.sh benchmarks/bench_iceberg_table_cluster.sh benchmarks/bench_two_node_s3_profile.sh && make bin/grainfs`
+- Benchmarks run across S3, NFS, NBD, Iceberg, and 9P single/cluster profiles under `benchmarks/profiles/`
+
 ## [0.0.205.0] - 2026-05-15 — feat: searchable durable audit lake
 
 ### Added

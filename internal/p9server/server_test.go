@@ -252,6 +252,97 @@ func TestBucketFile_Create_RejectsSidecarNamespace(t *testing.T) {
 	require.ErrorIs(t, err, syscall.EPERM)
 }
 
+func TestBucketFile_Mkdir_CreatesEmptyDirectory(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	qid, err := bf.Mkdir("dir", 0700, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, p9.TypeDir, qid.Type)
+
+	dirents, err := bf.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Len(t, dirents, 1)
+	require.Equal(t, "dir", dirents[0].Name)
+	require.Equal(t, p9.TypeDir, dirents[0].Type)
+
+	qids, file, err := bf.Walk([]string{"dir"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	child, ok := file.(*bucketFile)
+	require.True(t, ok)
+	dirents, err = child.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Empty(t, dirents)
+	_, _, attr, err := child.GetAttr(p9.AttrMask{Mode: true})
+	require.NoError(t, err)
+	require.Equal(t, p9.ModeDirectory|0700, attr.Mode)
+}
+
+func TestBucketFile_Mkdir_ExistingDirectoryFails(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	_, err := bf.Mkdir("dir", 0755, 0, 0)
+	require.NoError(t, err)
+	_, err = bf.Mkdir("dir", 0755, 0, 0)
+	require.ErrorIs(t, err, syscall.EEXIST)
+	_, _, _, err = bf.Create("dir", p9.WriteOnly, 0644, 0, 0)
+	require.ErrorIs(t, err, syscall.EISDIR)
+}
+
+func TestBucketFile_Mkdir_ExistingFileFailsAndPreservesBytes(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "file.txt", strings.NewReader("keep"), "text/plain")
+	require.NoError(t, err)
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	_, err = bf.Mkdir("file.txt", 0755, 0, 0)
+	require.ErrorIs(t, err, syscall.EEXIST)
+	require.Equal(t, []byte("keep"), readObjectBytes(t, backend, "bkt", "file.txt"))
+}
+
+func TestBucketFile_Mkdir_RejectsSidecarNamespace(t *testing.T) {
+	backend := newTestBackend(t)
+	require.NoError(t, backend.CreateBucket(context.Background(), "bkt"))
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	_, err := bf.Mkdir("__meta", 0755, 0, 0)
+	require.ErrorIs(t, err, syscall.EPERM)
+}
+
+func TestBucketFile_ChildCreateSharesParentDirectoryLock(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	locks := newObjectLocks()
+	child := &bucketFile{backend: backend, locks: locks, bucket: "bkt", prefix: "dir/"}
+
+	unlock := locks.lock("bkt", "dir/")
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := child.Create("file.txt", p9.WriteOnly, 0644, 0, 0)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		require.NoError(t, err)
+		t.Fatal("child create completed while parent directory lock was held")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	unlock()
+	require.NoError(t, <-done)
+}
+
 func TestBucketFile_UnlinkAt_DeletesFileAndMetadata(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
@@ -283,6 +374,35 @@ func TestBucketFile_UnlinkAt_RejectsReserved(t *testing.T) {
 	require.ErrorIs(t, err, syscall.EPERM)
 }
 
+func TestBucketFile_UnlinkAt_RemovesEmptyDirectory(t *testing.T) {
+	const atRemovedir = 0x200
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	_, err := bf.Mkdir("dir", 0755, 0, 0)
+	require.NoError(t, err)
+	require.NoError(t, bf.UnlinkAt("dir", atRemovedir))
+	_, _, err = bf.Walk([]string{"dir"})
+	require.ErrorIs(t, err, syscall.ENOENT)
+	_, err = backend.HeadObject(ctx, "bkt", p9MetaSidecarKey("dir/"))
+	require.Error(t, err)
+}
+
+func TestBucketFile_UnlinkAt_NonEmptyDirectoryFails(t *testing.T) {
+	const atRemovedir = 0x200
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "dir/file.txt", strings.NewReader("x"), "text/plain")
+	require.NoError(t, err)
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	err = bf.UnlinkAt("dir", atRemovedir)
+	require.ErrorIs(t, err, syscall.ENOTEMPTY)
+}
+
 func TestBucketFile_RenameAt_SameBucketFilePreservesMetadata(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
@@ -312,6 +432,26 @@ func TestBucketFile_RenameAt_SamePathIsNoop(t *testing.T) {
 	require.NoError(t, bf.RenameAt("same.txt", bf, "same.txt"))
 	require.Equal(t, []byte("data"), readObjectBytes(t, backend, "bkt", "same.txt"))
 	require.Equal(t, uint32(0600), loadP9FileMeta(ctx, backend, "bkt", "same.txt").Mode)
+}
+
+func TestBucketFile_RenameAt_ExistingDirectoryFails(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "file.txt", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+	_, err = bf.Mkdir("dir", 0755, 0, 0)
+	require.NoError(t, err)
+
+	err = bf.RenameAt("file.txt", bf, "dir")
+	require.ErrorIs(t, err, syscall.EISDIR)
+	require.Equal(t, []byte("data"), readObjectBytes(t, backend, "bkt", "file.txt"))
+	qids, file, err := bf.Walk([]string{"dir"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	_, ok := file.(*bucketFile)
+	require.True(t, ok)
 }
 
 func TestBucketFile_RenameAt_CrossBucketEXDEVAndReservedRejected(t *testing.T) {
