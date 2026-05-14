@@ -633,6 +633,26 @@ func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, f
 	})
 }
 
+// WalkObjectKeys iterates object keys without unmarshalling object metadata.
+func (b *LocalBackend) WalkObjectKeys(ctx context.Context, bucket, prefix string, fn func(string) error) error {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	return b.db.View(func(txn *badger.Txn) error {
+		rawBucketPfx := []byte("obj:" + bucket + "/")
+		pfx := []byte("obj:" + bucket + "/" + prefix)
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			key := string(it.Item().Key()[len(rawBucketPfx):])
+			if err := fn(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // CopyObject copies an object by reading the source and writing to the destination.
 func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error) {
 	ctx := context.Background()

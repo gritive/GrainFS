@@ -1,11 +1,23 @@
 # Changelog
 
-## [0.0.190.2] - 2026-05-14 — feat: unknown MetaCmd telemetry
+## [0.0.192.1] - 2026-05-14 — feat: unknown MetaCmd telemetry
 
 ### Added
 
 - **Unknown MetaCmd visibility** — operators now get `grainfs_unknown_metacmd_total{type}` when a node ignores a raft metadata command it does not recognize or handle.
 - **Rolling-upgrade alerting** — Prometheus rule `GrainFSUnknownMetaCmdIgnored` warns on ignored MetaCmd events, including first-seen counter series, and the runbook explains the version-skew response path.
+
+## [0.0.192.0] - 2026-05-14 — feat: read-only 9P2000.L server
+
+### Added
+
+- **Read-only 9P2000.L server** — `grainfs serve --9p-port` can expose buckets and objects over 9P for Linux/Colima clients while remaining disabled by default.
+- **9P directory and object coverage** — unit tests cover bucket listing, object reads, nested slash-containing object keys via synthetic directories, aname bucket roots, and paged Readdir behavior.
+- **Colima 9P harness** — `make test-9p-colima` adds an opt-in Linux mount/read smoke test lane.
+
+### Changed
+
+- **Fast object-key walking** — local storage now provides `WalkObjectKeys` so 9P directory listing can iterate keys without unmarshalling object metadata.
 
 ## [0.0.190.1] - 2026-05-14 — feat: rolling upgrade CI compat lane (Slice 1)
 
