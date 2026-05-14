@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/hugelgupf/p9/p9"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -111,4 +112,64 @@ func TestBucketFile_Readdir_ListsObjects(t *testing.T) {
 	}
 	require.Contains(t, names, "a.txt")
 	require.Contains(t, names, "b.txt")
+}
+
+// Task 4: objectFile tests
+
+func TestObjectFile_GetAttr_SizeAndMtime(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	_, valid, attr, err := of.GetAttr(p9.AttrMask{Size: true, MTime: true})
+	require.NoError(t, err)
+	require.True(t, valid.Size)
+	require.True(t, valid.MTime)
+	require.Equal(t, uint64(11), attr.Size)
+	require.Equal(t, uint64(obj.LastModified), attr.MTimeSeconds)
+}
+
+func TestObjectFile_ReadAt_FullContent(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	buf := make([]byte, 11)
+	n, err := of.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, 11, n)
+	require.Equal(t, "hello world", string(buf))
+}
+
+func TestObjectFile_ReadAt_WithOffset(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	buf := make([]byte, 5)
+	n, err := of.ReadAt(buf, 6)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, "world", string(buf))
+}
+
+func TestObjectFile_Open_WriteMode_EROFS(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	_, _, err = of.Open(p9.WriteOnly)
+	require.ErrorIs(t, err, syscall.EROFS)
 }

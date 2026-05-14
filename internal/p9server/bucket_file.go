@@ -69,13 +69,3 @@ func (f *bucketFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
 	}
 	return out, nil
 }
-
-// objectFile stub — full implementation in Task 4 (object_file.go).
-// Needed here so bucket_file.go compiles before Task 4 is executed.
-type objectFile struct {
-	noopFile
-	backend storage.Backend
-	bucket  string
-	key     string
-	meta    *storage.Object
-}
