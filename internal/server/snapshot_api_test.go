@@ -1,7 +1,6 @@
 package server
 
 import (
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -18,13 +17,14 @@ import (
 
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestRestoreSnapshotUnsupportedFormatReturnsConflict(t *testing.T) {
 	dataDir := t.TempDir()
 	snapshotDir := filepath.Join(dataDir, "snapshots")
 	require.NoError(t, os.MkdirAll(snapshotDir, 0o755))
-	writeFutureSnapshotAPIFile(t, filepath.Join(snapshotDir, "snapshot-1.json.gz"))
+	writeFutureSnapshotAPIFile(t, filepath.Join(snapshotDir, "snapshot-1.json.zst"))
 
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
@@ -63,9 +63,10 @@ func writeFutureSnapshotAPIFile(t *testing.T, path string) {
 	require.NoError(t, binary.Write(f, binary.BigEndian, uint32(2)))
 	require.NoError(t, binary.Write(f, binary.BigEndian, time.Now().UnixNano()))
 
-	gz := gzip.NewWriter(f)
-	require.NoError(t, json.NewEncoder(gz).Encode(&snapshot.Snapshot{Seq: 1}))
-	require.NoError(t, gz.Close())
+	zw, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(zw).Encode(&snapshot.Snapshot{Seq: 1}))
+	require.NoError(t, zw.Close())
 	require.NoError(t, f.Close())
 }
 
