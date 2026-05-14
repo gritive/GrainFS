@@ -112,48 +112,71 @@ When a node detects a StateHash mismatch via gossip:
 
 ---
 
-## Feature 3: Snapshot Version Header
+## Feature 3: Snapshot Format Header
 
 ### Problem
 
-Scenario 7 (`TestHeadSnapshotReject`) is currently stubbed. The risk: an N+1 snapshot
-contains fields unknown to N, and N silently ignores them, causing data loss on restore.
+Scenario 7 (`TestHeadSnapshotReject`) proves that an older binary must not silently
+restore a snapshot written by a newer binary. The risk: an N+1 snapshot contains fields
+unknown to N, and N silently ignores them, causing data loss on restore.
 
 ### Design
 
-Add a `SnapshotHeader` FlatBuffers table prepended to every snapshot blob:
+New snapshots use a fixed binary envelope before the existing gzip JSON payload:
 
-```fbs
-table SnapshotHeader {
-    min_compatible_version: uint32;  // minimum binary minor version that can restore this
-    written_by_version: string;      // e.g. "0.0.189.0"
-    written_at: int64;               // unix nanos
-}
-```
+| Field | Encoding |
+|-------|----------|
+| magic | 8-byte ASCII `GFSNAP01` |
+| min_reader_format | `uint32` big-endian |
+| writer_format | `uint32` big-endian |
+| written_at_unix_nano | `int64` big-endian |
+| payload | existing gzip JSON snapshot |
+
+Compatibility is controlled by snapshot format integers, not GrainFS binary semver.
+The current writer and reader format are both `1`.
 
 Restore path:
 
 ```go
-func (m *Manager) Restore(seq uint64) error {
-    hdr, err := readSnapshotHeader(seq)
-    if err != nil { return err }
-    cur := currentMinorVersion()
-    if cur < hdr.MinCompatibleVersion {
-        return fmt.Errorf("snapshot requires binary >= 0.0.%d.0 (have 0.0.%d.0)",
-            hdr.MinCompatibleVersion, cur)
+func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
+    br := bufio.NewReader(r)
+    prefix, err := br.Peek(2)
+    if err != nil {
+        return nil, err
     }
-    // ... proceed with restore
+    if bytes.Equal(prefix, []byte{0x1f, 0x8b}) {
+        return decodeSnapshotGzip(br) // legacy gzip-only snapshot
+    }
+
+    header, err := br.Peek(snapshotHeaderLen)
+    if err != nil {
+        return nil, err
+    }
+    if !bytes.Equal(header[:8], snapshotMagic[:]) {
+        return nil, ErrUnsupportedSnapshotFormat
+    }
+    minReader := binary.BigEndian.Uint32(header[8:12])
+    if minReader > currentSnapshotReaderFormat {
+        return nil, ErrUnsupportedSnapshotFormat
+    }
+    br.Discard(snapshotHeaderLen)
+    return decodeSnapshotGzip(br)
 }
 ```
 
-When `min_compatible_version` is set in the header, an older binary will refuse to restore
-with a clear error instead of silently corrupting state.
+When `min_reader_format` is greater than the current reader format, restore fails with
+`ErrUnsupportedSnapshotFormat` before any backend mutation. The admin restore API maps
+that error to `409 Conflict` with an operator-readable hint.
+
+Unknown envelopes are also rejected. Legacy snapshots remain readable because gzip-only
+files are detected by gzip magic before header parsing.
 
 ### Rollout
 
-The header is written starting from the first binary that includes this feature.
-Old binaries (pre-feature) don't write the header, so they can still be restored by
-any binary that handles the "missing header" case gracefully (treat as `min_compatible_version = 0`).
+The envelope is written starting from the first binary that includes this feature.
+Old binaries do not write the envelope, so current binaries keep reading gzip-only legacy
+snapshots. Old binaries presented with an envelope fail gzip parsing and return non-200
+from restore; this is intentional because downgrade restore is unsupported.
 
 ---
 
@@ -194,8 +217,8 @@ entries, so rollback from a finalized N+1 cluster is still possible if N can rea
 |------|------|------------|
 | 4.1 | `GET /admin/version` endpoint | Low |
 | 4.2 | `grainfs upgrade finalize` CLI + test | Medium |
-| 4.3 | `SnapshotHeader` FlatBuffers + write path | Medium |
-| 4.4 | Restore-path version check | Low |
+| 4.3 | `GFSNAP01` snapshot envelope + write path | Medium |
+| 4.4 | Restore-path format check | Low |
 | 4.5 | Enable `TestHeadSnapshotReject` (remove t.Skip) | Low |
 | 4.6 | `MetaFSM.StateHash()` implementation | High |
 | 4.7 | StateHash gossip + divergence detection | High |
@@ -208,7 +231,7 @@ entries, so rollback from a finalized N+1 cluster is still possible if N can rea
 1. **StateHash scope**: should ephemeral fields (activePlan, rotation state) be excluded?
    They affect cluster behavior but may differ legitimately between nodes.
 2. **Hash frequency**: per-snapshot-install only, or also at Raft heartbeat (expensive)?
-3. **min_compatible_version policy**: do we bump it on every breaking FSM change, or only
-   on major format revisions?
+3. **min_reader_format policy**: do we bump it on every breaking snapshot payload change,
+   or only on major format revisions?
 4. **Rollback support window**: how many versions back should rollback be supported?
    Current proposal: N-1 only (matches the compat test policy).

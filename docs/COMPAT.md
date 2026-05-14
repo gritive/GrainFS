@@ -1,6 +1,6 @@
 # GrainFS Rolling Upgrade Compatibility Policy
 
-> **Status:** Slice 1 — CI compat lane shipped
+> **Status:** Slice 4 — snapshot format header and older-binary restore rejection shipped
 
 ## Policy
 
@@ -46,7 +46,7 @@ The second entry is the previous version. If parsing fails or only one version e
 | 3 | `TestSnapshotForwardCompat` | N-1 creates snapshot; N restores it; data intact | live |
 | 5 | `TestInstallSnapshotPath` | N-1 cluster runs; N node joins and receives InstallSnapshot RPC | live |
 | 6 | `TestRestartToOlderBinary` | Canary: documents behavior when N-1 binary reads N-format data | live |
-| 7 | `TestHeadSnapshotReject` | HEAD-format snapshot rejected by older binary via version header | stubbed (Slice 3) |
+| 7 | `TestHeadSnapshotReject` | HEAD-format snapshot with `GFSNAP01` envelope is rejected by older binary with non-200 restore response | live |
 
 > Scenario 4 (FSM divergence detection via StateHash) is deferred to a separate PR (Slice 2+).
 
@@ -72,6 +72,22 @@ Add a compat test whenever you change any of the following in a way that existin
 
 A new binary (N) **must** be able to read and operate on data written by the previous binary (N-1).
 It does **not** need to write data readable by N-1 (downgrade is unsupported).
+
+### Snapshot format compatibility
+
+New snapshots are written as a small binary envelope followed by the existing gzip JSON payload:
+
+| Field | Encoding |
+|-------|----------|
+| magic | 8-byte ASCII `GFSNAP01` |
+| min_reader_format | `uint32` big-endian |
+| writer_format | `uint32` big-endian |
+| written_at_unix_nano | `int64` big-endian |
+| payload | existing gzip JSON snapshot |
+
+Readers still accept legacy gzip-only snapshots whose first bytes are gzip magic `0x1f 0x8b`.
+Readers reject future envelopes when `min_reader_format` is greater than the current reader
+format, before restore mutates backend state.
 
 ### Rolling upgrade procedure (production)
 

@@ -137,6 +137,10 @@ func (s *Server) restoreSnapshotHandler(ctx context.Context, c *app.RequestConte
 			))
 			return
 		}
+		if errors.Is(err, snapshot.ErrUnsupportedSnapshotFormat) {
+			c.JSON(consts.StatusConflict, apiError("unsupported snapshot format", err.Error()))
+			return
+		}
 		c.JSON(consts.StatusInternalServerError, apiError("restore failed", err.Error()))
 		return
 	}
