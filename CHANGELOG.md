@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.190.1] - 2026-05-14 — feat: rolling upgrade CI compat lane (Slice 1)
+
+### Added
+
+- **Rolling upgrade compat test lane** — `tests/compat/` package with 6 live cross-version scenarios and 1 stubbed placeholder for the snapshot version header (Slice 3). Run with `make test-compat`; tests skip gracefully when `COMPAT_PREV_BIN` is not set.
+- **Compat policy document** — `docs/COMPAT.md` defines the N → N+1 rolling upgrade policy, scenario table, and developer guide for adding new compat tests.
+- **Slice 4 design document** — `docs/upgrade-finalize-machinery-design.md` covers the `upgrade finalize` command, StateHash FSM divergence detection, snapshot version header, and drain/rollback procedure.
+
 ## [0.0.190.0] - 2026-05-14 — feat: NFSv4.1 RFC 8881 audit
 
 ### Added
