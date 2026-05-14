@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 // BlobLocation identifies where an entry lives within a blob file.
@@ -35,6 +37,7 @@ type BlobStore struct {
 	activeOff int64
 	nextID    atomic.Uint64
 	compress  bool
+	encryptor *encrypt.Encryptor
 	lockFile  *os.File // held for the lifetime of this BlobStore (flock on unix)
 }
 
@@ -45,6 +48,23 @@ func (bs *BlobStore) EnableCompression() {
 
 // NewBlobStore creates a blob store rooted at dir.
 func NewBlobStore(dir string, maxSize int64) (*BlobStore, error) {
+	return newBlobStore(dir, maxSize)
+}
+
+// NewEncryptedBlobStore creates a blob store that encrypts entry payloads.
+func NewEncryptedBlobStore(dir string, maxSize int64, enc *encrypt.Encryptor) (*BlobStore, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypted blob store requires encryptor")
+	}
+	bs, err := newBlobStore(dir, maxSize)
+	if err != nil {
+		return nil, err
+	}
+	bs.encryptor = enc
+	return bs, nil
+}
+
+func newBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create blob dir: %w", err)
 	}
@@ -98,6 +118,16 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 			flags = flagCompressed
 		}
 	}
+	storedPayload := payload
+
+	offset := bs.activeOff
+	if bs.encryptor != nil {
+		sealed, err := bs.encryptor.SealValue(bs.entryDomain(bs.activeID, uint64(offset)), storedPayload)
+		if err != nil {
+			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
+		}
+		payload = sealed
+	}
 
 	entrySize := int64(entryOverhead + len(key) + len(payload))
 
@@ -106,9 +136,16 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 		if err := bs.rotate(); err != nil {
 			return BlobLocation{}, err
 		}
+		offset = bs.activeOff
+		if bs.encryptor != nil {
+			sealed, err := bs.encryptor.SealValue(bs.entryDomain(bs.activeID, uint64(offset)), storedPayload)
+			if err != nil {
+				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
+			}
+			payload = sealed
+			entrySize = int64(entryOverhead + len(key) + len(payload))
+		}
 	}
-
-	offset := bs.activeOff
 
 	// Write: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
 	header := make([]byte, 4)
@@ -217,6 +254,10 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
 	}
 
+	payload, err = bs.decodePayload(loc.BlobID, loc.Offset, payload)
+	if err != nil {
+		return nil, err
+	}
 	if flags&flagCompressed != 0 {
 		return decompress(payload)
 	}
@@ -275,10 +316,12 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 	const maxEntrySize = 256 * 1024 * 1024 // 256MB sanity cap against corrupt blobs
 	var header [4]byte
 	var flagBuf [1]byte
+	var offset int64
 	for {
 		if _, err := io.ReadFull(f, header[:]); err != nil {
 			break
 		}
+		entryOffset := offset
 		keyLen := binary.BigEndian.Uint32(header[:])
 		if keyLen > maxEntrySize {
 			break
@@ -308,17 +351,27 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 			}
 		}
 
-		// Skip CRC
 		if _, err := io.ReadFull(f, header[:]); err != nil {
 			break
 		}
+		expectedCRC := binary.BigEndian.Uint32(header[:])
+		offset += int64(entryOverhead + int(keyLen) + int(dataLen))
 
 		if !tombstones[string(key)] {
-			// Decompress before re-appending (Append will re-compress if needed)
-			data := payload
+			h := crc32.NewIEEE()
+			h.Write(key)
+			h.Write(payload)
+			if h.Sum32() != expectedCRC {
+				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", blobID, entryOffset)
+			}
+			data, err := bs.decodePayload(blobID, uint64(entryOffset), payload)
+			if err != nil {
+				return nil, err
+			}
 			if flags&flagCompressed != 0 {
-				if dec, err := decompress(payload); err == nil {
-					data = dec
+				data, err = decompress(data)
+				if err != nil {
+					return nil, err
 				}
 			}
 			entries = append(entries, rawEntry{key: string(key), data: data})
@@ -354,6 +407,21 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 
 func (bs *BlobStore) blobPath(id uint64) string {
 	return filepath.Join(bs.dir, fmt.Sprintf("blob_%016x.blob", id))
+}
+
+func (bs *BlobStore) entryDomain(blobID uint64, offset uint64) string {
+	return fmt.Sprintf("packblob:%016x:%d", blobID, offset)
+}
+
+func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, payload []byte) ([]byte, error) {
+	if bs.encryptor == nil {
+		return payload, nil
+	}
+	plain, err := bs.encryptor.OpenValue(bs.entryDomain(blobID, offset), payload)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt blob entry: %w", err)
+	}
+	return plain, nil
 }
 
 // ScanAll scans all blob files and returns the last known location for each key.

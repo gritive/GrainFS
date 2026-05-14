@@ -2,8 +2,10 @@ package packblob
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,4 +101,50 @@ func TestBlobStore_EmptyData(t *testing.T) {
 	got, err := bs.Read(loc)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+func TestEncryptedBlobStoreHidesPayload(t *testing.T) {
+	enc := newPackblobTestEncryptor(t)
+
+	dir := t.TempDir()
+	bs, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	plaintext := []byte("packed-sensitive-payload")
+	loc, err := bs.Append("bucket/key", plaintext)
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(bs.blobPath(loc.BlobID))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), string(plaintext))
+
+	got, err := bs.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+func TestEncryptedBlobStoreCompressionRoundTrip(t *testing.T) {
+	enc := newPackblobTestEncryptor(t)
+
+	bs, err := NewEncryptedBlobStore(t.TempDir(), 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer bs.Close()
+	bs.EnableCompression()
+
+	plaintext := bytes.Repeat([]byte("compressible-packed-sensitive-payload-"), 1024)
+	loc, err := bs.Append("bucket/key", plaintext)
+	require.NoError(t, err)
+
+	got, err := bs.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {
+	t.Helper()
+	key := bytes.Repeat([]byte{0x66}, 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+	return enc
 }
