@@ -236,7 +236,7 @@ func hasPresignedAlgorithm(r *http.Request) bool {
 	for raw != "" {
 		part, rest, found := strings.Cut(raw, "&")
 		key, _, _ := strings.Cut(part, "=")
-		if key == "X-Amz-Algorithm" || unescapesTo(key, "X-Amz-Algorithm") {
+		if queryPartHasNonEmptyValue(part) && (key == "X-Amz-Algorithm" || unescapesTo(key, "X-Amz-Algorithm")) {
 			return true
 		}
 		if !found {
@@ -245,6 +245,11 @@ func hasPresignedAlgorithm(r *http.Request) bool {
 		raw = rest
 	}
 	return false
+}
+
+func queryPartHasNonEmptyValue(part string) bool {
+	_, value, ok := strings.Cut(part, "=")
+	return ok && value != ""
 }
 
 func unescapesTo(s, want string) bool {

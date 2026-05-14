@@ -99,6 +99,23 @@ func TestVerifier_HeaderAuthIgnoresPresignMarkerInQueryValue(t *testing.T) {
 	require.Equal(t, "testkey", key)
 }
 
+func TestVerifier_HeaderAuthIgnoresEmptyPresignMarker(t *testing.T) {
+	v := newTestVerifier(t)
+	for _, rawQuery := range []string{
+		"X-Amz-Algorithm",
+		"X-Amz-Algorithm=",
+		"X%2dAmz-Algorithm=",
+	} {
+		req := httptest.NewRequest("GET", "http://localhost/mybucket/mykey?"+rawQuery, nil)
+		SignRequest(req, "testkey", "testsecret", "us-east-1")
+
+		key, err := v.Verify(req)
+		require.NoError(t, err, rawQuery)
+		require.Equal(t, "testkey", key, rawQuery)
+		require.False(t, hasPresignedAlgorithm(req), rawQuery)
+	}
+}
+
 func TestHasPresignedAlgorithmAcceptsEscapedQueryKey(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://localhost/mybucket/mykey?X%2dAmz-Algorithm=AWS4-HMAC-SHA256", nil)
 	require.True(t, hasPresignedAlgorithm(req))
