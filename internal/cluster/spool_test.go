@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 type failingReader struct {
@@ -20,11 +22,12 @@ func (r failingReader) Read([]byte) (int, error) {
 }
 
 func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello")), true)
+	data := []byte("hello")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_volumes")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(5), sp.Size)
-	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", sp.ETag)
+	require.Equal(t, storage.InternalETag(data), sp.ETag) // xxhash3 for internal buckets
 
 	rc, err := sp.Open()
 	require.NoError(t, err)
@@ -36,7 +39,7 @@ func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
 
 func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 	dir := t.TempDir()
-	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, true)
+	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_volumes")
 	require.ErrorContains(t, err, "spool object")
 	entries, readErr := os.ReadDir(dir)
 	require.NoError(t, readErr)
@@ -44,7 +47,7 @@ func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), true)
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_volumes")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -67,7 +70,7 @@ func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), true)
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_volumes")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
