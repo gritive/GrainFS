@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -318,4 +319,36 @@ func TestForwardReceiver_HandleDeleteObjectVersion_ProposeError_ReturnsInternal(
 	require.NotNil(t, reply)
 	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
 	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeDeleteObjectIndex failure must return Internal")
+}
+
+func TestForwardReceiver_HandlePutObjectStreamRecordsTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	proposer := &recordingObjectIndexProposer{}
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(proposer)
+
+	args := buildPutObjectArgs("bucket", "stream-trace-key", "text/plain", nil)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, bytes.NewReader([]byte("streamed body")))
+	require.NotNil(t, reply)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageForwardReceiverDispatch)
+	requirePutTraceStage(t, events, PutTraceStageReceiverBackendPut)
+	requirePutTraceStage(t, events, PutTraceStageDataRaftProposeMeta)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexPropose)
+	var meta PutTraceEvent
+	for _, ev := range events {
+		if ev.Stage == PutTraceStageMetaIndexPropose {
+			meta = ev
+		}
+	}
+	require.Equal(t, "receiver", meta.MetaProposeSite)
+	require.Equal(t, 1, meta.MetaProposeCount)
 }

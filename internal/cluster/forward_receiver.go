@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync/atomic"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -259,36 +260,74 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
 	key := string(pa.Key())
-	ctx := contextForForwardedGroup(context.Background(), dg)
+	ctx := ContextWithPutTrace(contextForForwardedGroup(context.Background(), dg), PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		GroupID:     dg.ID(),
+		Ingress:     PutTraceIngressReceiver,
+		SizeClass:   putTraceSizeClass(int64(len(pa.BodyBytes())), DefaultMaxForwardBodyBytes),
+		ForwardMode: PutTraceForwardFrame,
+	})
+	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
+	stageStart := time.Now()
 	obj, err := dg.Backend().PutObject(ctx, bucket, key, bytes.NewReader(pa.BodyBytes()), string(pa.ContentType()))
+	fields := PutTraceStageFields{Bytes: int64(len(pa.BodyBytes()))}
 	if err != nil {
+		fields.Error = err.Error()
+		ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
 		return statusReply(mapErrorToStatus(err))
 	}
+	ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
 	if r.indexProposer != nil {
 		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
-		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+		stageStart := time.Now()
+		err := r.indexProposer.ProposeObjectIndex(ctx, entry, false)
+		fields := PutTraceStageFields{MetaProposeSite: "receiver", MetaProposeCount: 1}
+		if err != nil {
+			fields.Error = err.Error()
+			ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
 			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
 			return statusReply(raftpb.ForwardStatusInternal)
 		}
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
 	}
 	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
-	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
 	key := string(pa.Key())
+	ctx := ContextWithPutTrace(contextForForwardedGroup(context.Background(), dg), PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		GroupID:     dg.ID(),
+		Ingress:     PutTraceIngressReceiver,
+		SizeClass:   PutTraceSizeLarge,
+		ForwardMode: PutTraceForwardStream,
+	})
+	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
+	stageStart := time.Now()
 	obj, err := dg.Backend().PutObject(ctx, bucket, key, body, string(pa.ContentType()))
+	fields := PutTraceStageFields{}
 	if err != nil {
+		fields.Error = err.Error()
+		ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
 		return statusReply(mapErrorToStatus(err))
 	}
+	ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
 	if r.indexProposer != nil {
 		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
-		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+		stageStart := time.Now()
+		err := r.indexProposer.ProposeObjectIndex(ctx, entry, false)
+		fields := PutTraceStageFields{MetaProposeSite: "receiver", MetaProposeCount: 1}
+		if err != nil {
+			fields.Error = err.Error()
+			ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
 			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
 			return statusReply(raftpb.ForwardStatusInternal)
 		}
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
 	}
 	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }

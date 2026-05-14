@@ -1904,9 +1904,11 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		NodeIDs:          result.Placement,
 		UserMetadata:     cloneStringMap(plan.UserMetadata),
 	}); merr != nil {
+		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
 	}
+	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage(metricPath, "propose_meta", stageStart)
 
 	return &storage.Object{
@@ -2006,9 +2008,11 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		NodeIDs:          result.Placement,
 		UserMetadata:     cloneStringMap(userMetadata),
 	}); merr != nil {
+		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
 		return nil, merr
 	}
+	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage("ec_single", "propose_meta", stageStart)
 
 	return &storage.Object{
