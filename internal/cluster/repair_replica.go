@@ -6,6 +6,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // RepairReplica fetches the named replicated object from a healthy peer and
@@ -103,8 +105,17 @@ func (b *DistributedBackend) tryRepairFromPeer(ctx context.Context, reader peerR
 		}
 		return nil, false
 	}
-	h := md5.Sum(data)
-	if hex.EncodeToString(h[:]) != expectedETag {
+	var computed string
+	switch len(expectedETag) {
+	case 32: // MD5
+		h := md5.Sum(data)
+		computed = hex.EncodeToString(h[:])
+	case 16: // xxhash3
+		computed = storage.InternalETag(data)
+	default:
+		return nil, false
+	}
+	if computed != expectedETag {
 		return nil, false
 	}
 	if b.currentPeerHealth() != nil {
