@@ -107,7 +107,7 @@ func nfsExportUpdateCmd() *cobra.Command {
 }
 
 func nfsExportListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List NFSv4 exports",
 		Args:  cobra.NoArgs,
@@ -115,11 +115,14 @@ func nfsExportListCmd() *cobra.Command {
 			return nfsadmin.RunList(cmd.Context(), nfsadmin.ListExportOptions{BaseOptions: nfsBaseOptions(cmd)})
 		},
 	}
+	cmd.Flags().Bool("json", false, "emit machine-readable JSON output")
+	return cmd
 }
 
 func addStandardExportFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("dry-run", false, "validate only; do not propose change")
 	cmd.Flags().Bool("quiet", false, "suppress stdout on success")
+	cmd.Flags().Bool("json", false, "emit machine-readable JSON output")
 }
 
 func nfsBaseOptions(cmd *cobra.Command) nfsadmin.BaseOptions {
@@ -130,7 +133,7 @@ func nfsBaseOptions(cmd *cobra.Command) nfsadmin.BaseOptions {
 	return nfsadmin.BaseOptions{
 		Endpoint: endpoint,
 		Timeout:  adminTimeoutFromCmd(cmd),
-		JSONOut:  jsonOut(cmd),
+		JSONOut:  nfsJSONOut(cmd),
 		Quiet:    flagBool(cmd, "quiet"),
 		Stdout:   cmd.OutOrStdout(),
 		Stderr:   cmd.ErrOrStderr(),
@@ -143,8 +146,12 @@ func flagBool(cmd *cobra.Command, name string) bool {
 }
 
 func validateMutationFormatFlags(cmd *cobra.Command) error {
-	if jsonOut(cmd) && flagBool(cmd, "quiet") {
-		return fmt.Errorf("--quiet cannot be used with --format json")
+	if nfsJSONOut(cmd) && flagBool(cmd, "quiet") {
+		return fmt.Errorf("--quiet cannot be used with --json")
 	}
 	return nil
+}
+
+func nfsJSONOut(cmd *cobra.Command) bool {
+	return flagBool(cmd, "json")
 }
