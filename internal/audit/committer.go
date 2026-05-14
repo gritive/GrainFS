@@ -101,7 +101,7 @@ func (c *Committer) Run(ctx context.Context) {
 				}
 				start := time.Now()
 				if err := c.commit(ctx, c.batch); err != nil {
-					log.Error().Err(err).Msg("audit committer: commit failed; events retained in zerolog")
+					log.Error().Err(err).Msg("audit committer: commit failed; events retained in zerolog — check audit_committer_state and audit_drops_total metrics")
 				} else {
 					auditCommitLagSeconds.WithLabelValues(nodeID).Observe(time.Since(start).Seconds())
 				}
@@ -113,7 +113,7 @@ func (c *Committer) Run(ctx context.Context) {
 					continue
 				}
 				if err := c.cfg.ShipToLeader(ctx, c.batch); err != nil {
-					log.Warn().Err(err).Int("events", len(c.batch)).Msg("audit committer: ship to leader failed; events in zerolog")
+					log.Warn().Err(err).Int("events", len(c.batch)).Msg("audit committer: ship to leader failed; events counted in audit_drops_total — transient during election, investigate if persists")
 					auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
 				}
 				c.batch = c.batch[:0]
@@ -144,7 +144,7 @@ func (c *Committer) commit(ctx context.Context, events []S3Event) error {
 	dt := time.Now().UTC().Format("2006-01-02")
 	snapshotID := time.Now().UnixNano()
 	fileUUID := uuid.New().String()
-	parquetKey := fmt.Sprintf("data/dt=%s/%s.parquet", dt, fileUUID)
+	parquetKey := fmt.Sprintf("data/%s/%s.parquet", dt, fileUUID)
 
 	obj, err := c.cfg.Backend.PutObject(ctx, BucketName, parquetKey,
 		bytes.NewReader(parquetBytes), "application/octet-stream")
@@ -386,7 +386,7 @@ func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestL
 		`{"name":"added_rows_count","type":"long","field-id":512},` +
 		`{"name":"existing_rows_count","type":"long","field-id":513},` +
 		`{"name":"deleted_rows_count","type":"long","field-id":514},` +
-		`{"name":"partitions","type":{"type":"array","items":{"type":"record","name":"r508","fields":[` +
+		`{"name":"partitions","type":{"type":"array","element-id":508,"items":{"type":"record","name":"r508","fields":[` +
 		`{"name":"contains_null","type":"boolean","field-id":509},` +
 		`{"name":"contains_nan","type":["null","boolean"],"default":null,"field-id":518},` +
 		`{"name":"lower_bound","type":["null","bytes"],"default":null,"field-id":510},` +
@@ -410,14 +410,11 @@ func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestL
 	appendAvroLong(&rec, 0)          // deleted_rows_count
 	appendAvroLong(&rec, 0)          // partitions: empty array (block count = 0)
 
-	return buildAvroContainer(schema, rec.Bytes()), nil
+	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata()), nil
 }
 
 // encodeManifest creates an Iceberg manifest Avro file with one data file entry.
 func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, rowCount int64, dt string) ([]byte, error) {
-	dtTime, _ := time.Parse("2006-01-02", dt)
-	julianDay := int32(dtTime.Unix() / 86400)
-
 	schema := `{"type":"record","name":"manifest_entry","fields":[` +
 		`{"name":"status","type":"int","field-id":0},` +
 		`{"name":"snapshot_id","type":["null","long"],"default":null,"field-id":1},` +
@@ -427,20 +424,18 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 		`{"name":"content","type":"int","field-id":134},` +
 		`{"name":"file_path","type":"string","field-id":100},` +
 		`{"name":"file_format","type":"string","field-id":101},` +
-		`{"name":"partition","type":{"type":"record","name":"r102","fields":[` +
-		`{"name":"dt","type":["null","int"],"default":null,"field-id":1000}` +
-		`]},"field-id":102},` +
+		`{"name":"partition","type":{"type":"record","name":"r102","fields":[]},"field-id":102},` +
 		`{"name":"record_count","type":"long","field-id":103},` +
 		`{"name":"file_size_in_bytes","type":"long","field-id":104},` +
-		`{"name":"column_sizes","type":["null",{"type":"array","items":{"type":"record","name":"k81v81","fields":[{"name":"key","type":"int","field-id":117},{"name":"value","type":"long","field-id":118}]}}],"default":null,"field-id":108},` +
-		`{"name":"value_counts","type":["null",{"type":"array","items":{"type":"record","name":"k81v81_2","fields":[{"name":"key","type":"int","field-id":119},{"name":"value","type":"long","field-id":120}]}}],"default":null,"field-id":109},` +
-		`{"name":"null_value_counts","type":["null",{"type":"array","items":{"type":"record","name":"k81v81_3","fields":[{"name":"key","type":"int","field-id":121},{"name":"value","type":"long","field-id":122}]}}],"default":null,"field-id":110},` +
-		`{"name":"nan_value_counts","type":["null",{"type":"array","items":{"type":"record","name":"k81v81_4","fields":[{"name":"key","type":"int","field-id":138},{"name":"value","type":"long","field-id":139}]}}],"default":null,"field-id":137},` +
-		`{"name":"lower_bounds","type":["null",{"type":"array","items":{"type":"record","name":"k81v81_5","fields":[{"name":"key","type":"int","field-id":126},{"name":"value","type":"bytes","field-id":127}]}}],"default":null,"field-id":125},` +
-		`{"name":"upper_bounds","type":["null",{"type":"array","items":{"type":"record","name":"k81v81_6","fields":[{"name":"key","type":"int","field-id":129},{"name":"value","type":"bytes","field-id":130}]}}],"default":null,"field-id":128},` +
+		`{"name":"column_sizes","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k117_v118","fields":[{"name":"key","type":"int","field-id":117},{"name":"value","type":"long","field-id":118}]}}],"default":null,"field-id":108},` +
+		`{"name":"value_counts","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k119_v120","fields":[{"name":"key","type":"int","field-id":119},{"name":"value","type":"long","field-id":120}]}}],"default":null,"field-id":109},` +
+		`{"name":"null_value_counts","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k121_v122","fields":[{"name":"key","type":"int","field-id":121},{"name":"value","type":"long","field-id":122}]}}],"default":null,"field-id":110},` +
+		`{"name":"nan_value_counts","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k138_v139","fields":[{"name":"key","type":"int","field-id":138},{"name":"value","type":"long","field-id":139}]}}],"default":null,"field-id":137},` +
+		`{"name":"lower_bounds","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k126_v127","fields":[{"name":"key","type":"int","field-id":126},{"name":"value","type":"bytes","field-id":127}]}}],"default":null,"field-id":125},` +
+		`{"name":"upper_bounds","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k129_v130","fields":[{"name":"key","type":"int","field-id":129},{"name":"value","type":"bytes","field-id":130}]}}],"default":null,"field-id":128},` +
 		`{"name":"key_metadata","type":["null","bytes"],"default":null,"field-id":131},` +
-		`{"name":"split_offsets","type":["null",{"type":"array","items":"long"}],"default":null,"field-id":132},` +
-		`{"name":"equality_ids","type":["null",{"type":"array","items":"int"}],"default":null,"field-id":135},` +
+		`{"name":"split_offsets","type":["null",{"type":"array","element-id":133,"items":"long"}],"default":null,"field-id":132},` +
+		`{"name":"equality_ids","type":["null",{"type":"array","element-id":136,"items":"int"}],"default":null,"field-id":135},` +
 		`{"name":"sort_order_id","type":["null","int"],"default":null,"field-id":140}` +
 		`]},"field-id":2}` +
 		`]}`
@@ -459,32 +454,37 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 	appendAvroInt(&rec, 0) // content=DATA
 	appendAvroString(&rec, parquetPath)
 	appendAvroString(&rec, "PARQUET")
-	// partition: dt field = union[null(0), int(1)] → 1 + julianDay
-	appendAvroInt(&rec, 1)
-	appendAvroInt(&rec, julianDay)
 	appendAvroLong(&rec, rowCount)
 	appendAvroLong(&rec, parquetSize)
-	// optional map fields: all null (union index 0), 8 fields
-	for i := 0; i < 8; i++ {
+	// optional metrics/key/split/equality/sort fields: all null (union index 0).
+	for i := 0; i < 10; i++ {
 		appendAvroInt(&rec, 0)
 	}
 
-	return buildAvroContainer(schema, rec.Bytes()), nil
+	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata()), nil
 }
 
 // buildAvroContainer creates a single-record Avro Object Container File.
 func buildAvroContainer(schema string, datum []byte) []byte {
+	return buildAvroContainerWithMetadata(schema, datum, nil)
+}
+
+func buildAvroContainerWithMetadata(schema string, datum []byte, metadata map[string]string) []byte {
 	sync := [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
 
 	var hdr bytes.Buffer
 	hdr.Write([]byte{'O', 'b', 'j', 0x01})
 
-	appendAvroLong(&hdr, 2) // 2 map entries
+	appendAvroLong(&hdr, int64(2+len(metadata)))
 	appendAvroString(&hdr, "avro.schema")
 	appendAvroBytes(&hdr, []byte(schema))
 	appendAvroString(&hdr, "avro.codec")
 	appendAvroBytes(&hdr, []byte("null"))
+	for k, v := range metadata {
+		appendAvroString(&hdr, k)
+		appendAvroBytes(&hdr, []byte(v))
+	}
 	appendAvroLong(&hdr, 0) // end of map
 	hdr.Write(sync[:])
 
@@ -498,6 +498,17 @@ func buildAvroContainer(schema string, datum []byte) []byte {
 	out.Write(hdr.Bytes())
 	out.Write(block.Bytes())
 	return out.Bytes()
+}
+
+func icebergManifestMetadata() map[string]string {
+	return map[string]string{
+		"schema":            auditIcebergSchemaJSON,
+		"schema-id":         "0",
+		"partition-spec":    "[]",
+		"partition-spec-id": "0",
+		"format-version":    "2",
+		"content":           "data",
+	}
 }
 
 func appendAvroLong(buf *bytes.Buffer, v int64) {

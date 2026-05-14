@@ -2,7 +2,9 @@
 
 GrainFS ships a built-in audit subsystem that captures S3 API events
 (PutObject, GetObject, DeleteObject, CreateBucket, …) and persists them as an
-Apache Iceberg v2 table partitioned by day. The table is stored inside GrainFS
+Apache Iceberg v2 table. Data files are written under day-based directories
+for operational browsing, while the Iceberg table itself remains unpartitioned
+for DuckDB compatibility. The table is stored inside GrainFS
 itself — no external data warehouse required.
 
 ## Quick Start
@@ -10,10 +12,16 @@ itself — no external data warehouse required.
 Audit is **enabled by default**. No flags are required for a fresh cluster.
 
 ```bash
-# Start a single node (audit on, 60-second commit interval)
+# 1. Start a single node (audit on, 60-second commit interval)
 ./bin/grainfs serve --data ./data --port 9000
 
-# Verify the audit table exists after the first commit cycle
+# 2. Bootstrap an IAM service account (needed for S3 API access)
+./bin/grainfs iam sa create admin --endpoint ./data/admin.sock
+# → prints ACCESS_KEY and SECRET_KEY; export them:
+export AWS_ACCESS_KEY_ID=<access-key-from-above>
+export AWS_SECRET_ACCESS_KEY=<secret-key-from-above>
+
+# 3. Verify the audit table exists after the first commit cycle (~60s)
 aws --endpoint-url http://localhost:9000 s3 ls s3://grainfs-audit/metadata/s3/
 ```
 
@@ -37,7 +45,7 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://grainfs-audit/metadata/s3/
 ```
 grainfs-audit/                      ← dedicated bucket, auto-created
   data/
-    dt=2025-01-15/                  ← day partition
+    2025-01-15/                     ← day-based data directory
       <uuid>.parquet
   metadata/s3/
     00000-<uuid>.metadata.json      ← initial snapshot
@@ -48,7 +56,7 @@ grainfs-audit/                      ← dedicated bucket, auto-created
 
 ## Schema
 
-Table: `audit.s3` (Iceberg v2, partitioned by `day(ts)`)
+Table: `audit.s3` (Iceberg v2)
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -57,7 +65,7 @@ Table: `audit.s3` (Iceberg v2, partitioned by `day(ts)`)
 | `request_id` | `string` | Unique request ID |
 | `sa_id` | `string` | IAM service account ID |
 | `source_ip` | `string` | Client IP address |
-| `method` | `string` | S3 operation (e.g. `PutObject`) |
+| `method` | `string` | HTTP method (e.g. `PUT`) |
 | `bucket` | `string` | Target bucket |
 | `key` | `string` | Object key |
 | `http_status` | `int` | HTTP response status code |
@@ -69,9 +77,11 @@ Table: `audit.s3` (Iceberg v2, partitioned by `day(ts)`)
 ## Querying with DuckDB
 
 ```sql
+-- Wait up to --audit-commit-interval (default 60s) for the first batch to appear.
 INSTALL httpfs; INSTALL iceberg;
 LOAD httpfs; LOAD iceberg;
 
+-- Replace with the access_key/secret_key from `grainfs iam sa create`.
 CREATE OR REPLACE SECRET grainfs (
     TYPE s3,
     KEY_ID 'YOUR_ACCESS_KEY',
@@ -79,7 +89,7 @@ CREATE OR REPLACE SECRET grainfs (
     REGION 'us-east-1',
     ENDPOINT 'localhost:9000',
     URL_STYLE 'path',
-    USE_SSL false
+    USE_SSL false  -- set to true in TLS-enabled deployments
 );
 
 ATTACH 'grainfs' AS grainfs_iceberg (
@@ -107,10 +117,16 @@ ORDER BY ops DESC;
   the next tick. Events in the ring buffer survive leader transitions up to the
   ring capacity (65 536 events ≈ 60 s × 1 000 req/s).
 
+## Schema Stability
+
+The `audit.s3` schema is stable in Phase 2. No breaking changes are planned.
+If a future GrainFS release alters the schema, a migration guide will be published
+in the release changelog before the change ships.
+
 ## Prometheus Metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `audit_drops_total{node}` | Counter | Events dropped due to ring overflow |
-| `audit_commit_lag_seconds{node}` | Histogram | Time from event creation to Iceberg commit |
-| `audit_committer_state{node}` | Gauge | 1 = leader (committing), 0 = follower (shipping) |
+| `audit_drops_total{node="<node-id>"}` | Counter | Events dropped due to ring overflow — alert if > 0 in steady state |
+| `audit_commit_lag_seconds{node="<node-id>"}` | Histogram | Time from event creation to Iceberg commit |
+| `audit_committer_state{node="<node-id>"}` | Gauge | 1 = leader (committing), 0 = follower (shipping) |
