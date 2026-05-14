@@ -38,6 +38,11 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if err != nil {
 		return fmt.Errorf("9p listen %s: %w", addr, err)
 	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve accepts 9P connections from an already-open listener.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.cancel = cancel
@@ -52,7 +57,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 		s.mu.Unlock()
 		cancel()
 	}()
-	log.Info().Str("addr", addr).Msg("9p server started")
+	log.Info().Str("addr", ln.Addr().String()).Msg("9p server started")
 	return s.p9srv.ServeContext(ctx, &trackingListener{Listener: ln, server: s})
 }
 

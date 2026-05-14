@@ -173,6 +173,35 @@ type ExportDebugResp struct {
 	ActiveMountClients []string               `json:"active_mount_clients,omitempty"`
 }
 
+type StorageBucketNFSExport struct {
+	Registered bool   `json:"registered"`
+	ReadOnly   bool   `json:"read_only"`
+	Generation uint64 `json:"generation,omitempty"`
+}
+
+type StorageBucketSummary struct {
+	Name        string                  `json:"name"`
+	HasUpstream bool                    `json:"has_upstream"`
+	NFSExport   *StorageBucketNFSExport `json:"nfs_export,omitempty"`
+}
+
+type ListStorageBucketsResp struct {
+	Buckets []StorageBucketSummary `json:"buckets"`
+}
+
+type ProtocolEndpointStatus struct {
+	Enabled bool   `json:"enabled"`
+	Bind    string `json:"bind,omitempty"`
+	Port    int    `json:"port,omitempty"`
+	Warning string `json:"warning,omitempty"`
+}
+
+type StorageProtocolStatusResp struct {
+	NFS4 ProtocolEndpointStatus `json:"nfs4"`
+	NBD  ProtocolEndpointStatus `json:"nbd"`
+	P9   ProtocolEndpointStatus `json:"p9"`
+}
+
 // DashboardTokenResp describes the dashboard URL and token shown to operators.
 type DashboardTokenResp struct {
 	URL          string `json:"url"`

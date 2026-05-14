@@ -3,8 +3,10 @@ package admin
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -12,6 +14,10 @@ import (
 
 type NfsExportServiceAdapter struct {
 	Svc *nfsexport.ExportService
+}
+
+func (a *NfsExportServiceAdapter) Create(ctx context.Context, bucket string, p NfsExportUpsertParams) error {
+	return a.Svc.Create(ctx, bucket, nfsexport.UpsertParams{ReadOnly: p.ReadOnly})
 }
 
 func (a *NfsExportServiceAdapter) Upsert(ctx context.Context, bucket string, p NfsExportUpsertParams) error {
@@ -87,12 +93,22 @@ func AdminNfsExportUpsert(ctx context.Context, d *Deps, req NfsExportUpsertReq) 
 		}
 		return NfsExportInfo{}, NewInternal("head bucket: " + err.Error())
 	}
-	if err := d.NfsExports.Upsert(ctx, req.Bucket, NfsExportUpsertParams{ReadOnly: req.ReadOnly}); err != nil {
+	if err := d.NfsExports.Create(ctx, req.Bucket, NfsExportUpsertParams{ReadOnly: req.ReadOnly}); err != nil {
 		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
 			return NfsExportInfo{}, NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
 		}
 		if errors.Is(err, nfsexport.ErrPropagationTimeout) {
 			return NfsExportInfo{}, NewExportPropagationTimeout(req.Bucket)
+		}
+		if errors.Is(err, nfsexport.ErrExportExists) || strings.Contains(err.Error(), nfsexport.ErrExportExists.Error()) {
+			return NfsExportInfo{}, NewConflict("NFS export already registered; use update to change mode", nil)
+		}
+		var gateErr *compat.GateRejectError
+		if errors.As(err, &gateErr) {
+			return NfsExportInfo{}, NewUnsupported(gateErr.PublicMessage(), nil)
+		}
+		if errors.Is(err, compat.ErrCapabilityRejected) {
+			return NfsExportInfo{}, NewUnsupported("NFS export create requires every meta-raft member to advertise nfs_export_create_v1; finish the rolling upgrade before retrying", nil)
 		}
 		return NfsExportInfo{}, NewInternal("upsert NFS export: " + err.Error())
 	}

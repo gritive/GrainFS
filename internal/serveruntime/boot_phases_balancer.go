@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -27,9 +28,12 @@ import (
 func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 	ccfg := state.metaRaft.FSM().ClusterConfig()
+	gossipPeerProvider := func() []string {
+		return receiptPeerAddresses(state.nodeID, state.raftAddr, state.peers, state.metaRaft.FSM().Nodes())
+	}
 	if ccfg.BalancerEnabled() {
 		statsStore := cluster.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
-		bp, gr, err := StartBalancer(ctx, state.nodeID, cfg.DataDir, statsStore, state.node, state.peers, state.fsm, state.quicTransport, state.shardSvc, state.effectiveEC.NumShards(), ccfg, ccfg)
+		bp, gr, err := StartBalancer(ctx, state.nodeID, cfg.DataDir, statsStore, state.node, state.peers, state.fsm, state.quicTransport, state.shardSvc, state.effectiveEC.NumShards(), ccfg, ccfg, state.capabilityGate, state.metaRaft.FSM(), state.metaRaft.FSM(), gossipPeerProvider)
 		if err != nil {
 			log.Warn().Err(err).Msg("balancer start failed")
 		}
@@ -37,13 +41,31 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 		state.gossipReceiver = gr
 	}
 
-	// When balancer is off but heal-receipt is on, create a bare receiver;
-	// its NodeStatsStore is unused in this path but required by the ctor.
-	if state.gossipReceiver == nil && cfg.HealReceiptEnabled {
+	needsCapabilityGossip := state.capabilityGate != nil
+
+	// When balancer is off but heal-receipt or capability evidence needs
+	// gossip, create a bare receiver; its NodeStatsStore is unused by receipt
+	// but required by the ctor.
+	if state.gossipReceiver == nil && (cfg.HealReceiptEnabled || needsCapabilityGossip) {
 		standaloneStats := cluster.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
-		state.gossipReceiver = cluster.NewGossipReceiver(state.quicTransport, standaloneStats)
+		state.gossipReceiver = cluster.NewGossipReceiver(state.quicTransport, standaloneStats).
+			WithCapabilityGate(state.capabilityGate).
+			WithNodeAddressBook(state.metaRaft.FSM())
 		go state.gossipReceiver.Run(ctx)
-		log.Info().Str("component", "gossip").Msg("gossip receiver started (receipt-only, balancer disabled)")
+		log.Info().Str("component", "gossip").Msg("gossip receiver started")
+	}
+	if state.gossipReceiver != nil {
+		state.gossipReceiver.SetCapabilityGate(state.capabilityGate)
+		state.gossipReceiver.SetNodeAddressBook(state.metaRaft.FSM())
+	}
+	if needsCapabilityGossip && !ccfg.BalancerEnabled() {
+		statsStore := cluster.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
+		statsStore.Set(cluster.NodeStats{NodeID: state.nodeID, JoinedAt: time.Now()})
+		sender := cluster.NewGossipSender(state.nodeID, state.peers, state.quicTransport, statsStore, ccfg.BalancerGossipInterval()).
+			WithPeerProvider(gossipPeerProvider).
+			WithCapabilityEvidenceSource(state.metaRaft.FSM())
+		go sender.Run(ctx)
+		log.Info().Str("component", "gossip").Msg("capability evidence gossip sender started")
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"sync"
 	"time"
@@ -30,10 +31,10 @@ func NewCapabilityGate(registry *compat.Registry, ttl time.Duration) *Capability
 	}
 }
 
-func (g *CapabilityGate) SetMetaRaftSnapshot(configID uint64, cfg raft.Configuration) {
+func (g *CapabilityGate) SetMetaRaftSnapshot(_ uint64, cfg raft.Configuration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.configID = configID
+	g.configID = raftConfigurationID(cfg)
 	g.config = cfg
 }
 
@@ -99,4 +100,19 @@ func (g *CapabilityGate) ValidatePlanStillCurrent(plan compat.GatePlan) error {
 		return fmt.Errorf("compat: gate plan config changed from %d to %d", plan.ConfigID, g.configID)
 	}
 	return nil
+}
+
+func raftConfigurationID(cfg raft.Configuration) uint64 {
+	servers := append([]raft.Server(nil), cfg.Servers...)
+	sort.Slice(servers, func(i, j int) bool {
+		if servers[i].ID == servers[j].ID {
+			return servers[i].Suffrage < servers[j].Suffrage
+		}
+		return servers[i].ID < servers[j].ID
+	})
+	h := fnv.New64a()
+	for _, srv := range servers {
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00", srv.ID, srv.Suffrage)
+	}
+	return h.Sum64()
 }

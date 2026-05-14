@@ -608,11 +608,11 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		resp := catchAll(msg)
 		if resp != nil {
 			_ = t.codec.Encode(stream, resp)
+			return
 		}
-		return
 	}
 
-	// No handler: fire-and-forget mode (put in inbox).
+	// No handler, or catch-all declined the message: fire-and-forget mode.
 	select {
 	case t.inbox <- &ReceivedMessage{From: from, Message: msg}:
 	case <-t.ctx.Done():

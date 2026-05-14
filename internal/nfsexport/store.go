@@ -168,6 +168,48 @@ func (s *Store) ApplyUpsert(bucket string, readOnly bool, fsidMajor uint64) (Con
 	return cfg, nil
 }
 
+func (s *Store) ApplyCreate(bucket string, readOnly bool, fsidMajor uint64) (Config, error) {
+	if bucket == "" {
+		return Config{}, fmt.Errorf("bucket is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var cfg Config
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		if _, exists, err := getConfigTxn(txn, bucket); err != nil {
+			return err
+		} else if exists {
+			return ErrExportExists
+		}
+		next, err := getAllocatorTxn(txn)
+		if err != nil {
+			return err
+		}
+		next++
+		cfg = Config{
+			ReadOnly:   readOnly,
+			FsidMajor:  fsidMajor,
+			FsidMinor:  next,
+			Generation: 1,
+		}
+		payload, err := EncodeUpsertPayload(bucket, cfg)
+		if err != nil {
+			return err
+		}
+		if err := setAllocatorTxn(txn, next); err != nil {
+			return err
+		}
+		return txn.Set([]byte(KeyPrefix+bucket), payload)
+	}); err != nil {
+		return Config{}, err
+	}
+	next := cloneSnapshotMap(s.Snapshot())
+	next[bucket] = cfg
+	s.snap.Store(newSnapshot(next))
+	return cfg, nil
+}
+
 func (s *Store) Delete(bucket string) error {
 	if bucket == "" {
 		return nil

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,10 +9,13 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+var metaForwardRequestMagic = []byte("GFSMFWD1")
 
 type MetaForwardDialer func(peer string, payload []byte) ([]byte, error)
 
@@ -29,12 +33,20 @@ func (s *MetaProposeForwardSender) Send(ctx context.Context, peers []string, com
 }
 
 func (s *MetaProposeForwardSender) SendWithIndex(ctx context.Context, peers []string, command []byte) (uint64, error) {
+	return s.sendPayloadWithIndex(ctx, peers, command)
+}
+
+func (s *MetaProposeForwardSender) SendWithGate(ctx context.Context, peers []string, command []byte, plan compat.GatePlan) (uint64, error) {
+	return s.sendPayloadWithIndex(ctx, peers, encodeMetaForwardRequest(command, &plan))
+}
+
+func (s *MetaProposeForwardSender) sendPayloadWithIndex(ctx context.Context, peers []string, payload []byte) (uint64, error) {
 	if len(peers) == 0 {
 		return 0, icebergcatalog.ErrServiceUnavailable
 	}
 	var lastErr error
 	for _, peer := range peers {
-		reply, err := s.dialer(peer, command)
+		reply, err := s.dialer(peer, payload)
 		if err != nil {
 			lastErr = err
 			continue
@@ -52,12 +64,23 @@ func (s *MetaProposeForwardSender) SendWithIndex(ctx context.Context, peers []st
 	return 0, icebergcatalog.ErrServiceUnavailable
 }
 
+type metaForwardRequest struct {
+	Command  []byte           `json:"command"`
+	GatePlan *compat.GatePlan `json:"gate_plan,omitempty"`
+}
+
 type MetaProposeForwardReceiver struct {
-	meta *MetaRaft
+	meta        *MetaRaft
+	gateRefresh func()
 }
 
 func NewMetaProposeForwardReceiver(meta *MetaRaft) *MetaProposeForwardReceiver {
 	return &MetaProposeForwardReceiver{meta: meta}
+}
+
+func (r *MetaProposeForwardReceiver) WithGateRefresh(fn func()) *MetaProposeForwardReceiver {
+	r.gateRefresh = fn
+	return r
 }
 
 func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.Message {
@@ -65,14 +88,54 @@ func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.M
 	defer cancel()
 	var err error
 	var idx uint64
-	if !r.meta.IsLeader() {
+	command, plan, framed, decodeErr := decodeMetaForwardRequest(req.Payload)
+	if decodeErr != nil {
+		err = decodeErr
+	} else if framed && plan == nil {
+		err = fmt.Errorf("meta forward: framed request missing gate plan")
+	} else if !r.meta.IsLeader() {
 		err = raft.ErrNotLeader
-	} else if isIcebergMetaCommand(req.Payload) {
-		err = r.meta.ProposeMetaCommand(ctx, req.Payload)
+	} else if plan != nil {
+		if r.gateRefresh != nil {
+			r.gateRefresh()
+		}
+		idx, err = r.meta.ProposeMetaCommandWithGate(ctx, *plan, command)
+	} else if capability, operation, ok := metaCommandGateRequirement(command); ok {
+		err = compat.Reject(compat.GatePlan{
+			Capability: capability,
+			Scope:      compat.ScopeMetaRaft,
+			Severity:   compat.SeverityHard,
+			Operation:  operation,
+			Unknown:    []compat.NodeID{"gate_plan"},
+		})
+	} else if isIcebergMetaCommand(command) {
+		err = r.meta.ProposeMetaCommand(ctx, command)
 	} else {
-		idx, err = r.meta.ProposeMetaCommandWithIndex(ctx, req.Payload)
+		idx, err = r.meta.ProposeMetaCommandWithIndex(ctx, command)
 	}
 	return &transport.Message{Type: transport.StreamMetaProposeForward, Payload: encodeMetaForwardReplyWithIndex(idx, err)}
+}
+
+func encodeMetaForwardRequest(command []byte, plan *compat.GatePlan) []byte {
+	body, _ := json.Marshal(metaForwardRequest{Command: command, GatePlan: plan})
+	out := make([]byte, 0, len(metaForwardRequestMagic)+len(body))
+	out = append(out, metaForwardRequestMagic...)
+	out = append(out, body...)
+	return out
+}
+
+func decodeMetaForwardRequest(payload []byte) (command []byte, plan *compat.GatePlan, framed bool, err error) {
+	if !bytes.HasPrefix(payload, metaForwardRequestMagic) {
+		return payload, nil, false, nil
+	}
+	var req metaForwardRequest
+	if err := json.Unmarshal(payload[len(metaForwardRequestMagic):], &req); err != nil {
+		return nil, nil, true, fmt.Errorf("%w: invalid gated forward request: %v", icebergcatalog.ErrServiceUnavailable, err)
+	}
+	if len(req.Command) == 0 {
+		return nil, nil, true, fmt.Errorf("%w: empty gated forward command", icebergcatalog.ErrServiceUnavailable)
+	}
+	return req.Command, req.GatePlan, true, nil
 }
 
 type metaForwardReply struct {
@@ -134,9 +197,22 @@ func isIcebergMetaCommand(data []byte) bool {
 	}
 }
 
+func metaCommandGateRequirement(data []byte) (string, compat.Operation, bool) {
+	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
+	switch cmd.Type() {
+	case MetaCmdTypeNfsExportCreate:
+		return compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, true
+	default:
+		return "", "", false
+	}
+}
+
 func metaForwardErrorType(err error) string {
 	if errors.Is(err, raft.ErrNotLeader) {
 		return "not-leader"
+	}
+	if errors.Is(err, compat.ErrCapabilityRejected) {
+		return "capability-rejected"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
@@ -196,6 +272,8 @@ func errorFromIcebergType(errorType, message string) error {
 		return icebergcatalog.ErrCommitFailed
 	case "not-leader":
 		return raft.ErrNotLeader
+	case "capability-rejected":
+		return fmt.Errorf("%w: %s", compat.ErrCapabilityRejected, message)
 	case "timeout":
 		return context.DeadlineExceeded
 	case "canceled":

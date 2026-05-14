@@ -43,6 +43,36 @@ func TestQUICTransport_SendReceive(t *testing.T) {
 	}
 }
 
+func TestQUICTransport_CatchAllMissFallsThroughToInbox(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	router := NewStreamRouter()
+	router.Handle(StreamData, func(req *Message) *Message {
+		return NewResponse(req, []byte("handled"))
+	})
+	server.SetStreamHandler(router.Dispatch)
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	msg := &Message{Type: StreamAdmin, Payload: []byte("capability-gossip")}
+	require.NoError(t, client.Send(ctx, server.LocalAddr(), msg))
+
+	select {
+	case recv := <-server.Receive():
+		assert.Equal(t, StreamAdmin, recv.Message.Type)
+		assert.Equal(t, "capability-gossip", string(recv.Message.Payload))
+	case <-time.After(2 * time.Second):
+		t.Fatal("unhandled catch-all message did not reach inbox")
+	}
+}
+
 func TestQUICTransport_StreamTypeMultiplexing(t *testing.T) {
 	ctx := context.Background()
 

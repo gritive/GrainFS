@@ -121,6 +121,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
 		state.adminDeps.NFSDiag = nodeSvc.NFS4()
+		state.adminDeps.Protocols = nodeSvc.ProtocolStatus(cfg)
 	}
 	state.AddCleanup(func() { nodeSvc.Close() })
 	startNfsExportBucketDeleteCleanup(ctx, state.nfsExportSvc, state.distBackend)

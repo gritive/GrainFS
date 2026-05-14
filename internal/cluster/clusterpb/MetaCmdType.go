@@ -52,6 +52,7 @@ const (
 	MetaCmdTypeNfsExportBucketDeleteCascade MetaCmdType = 42
 	MetaCmdTypeCapabilityActivate           MetaCmdType = 43
 	MetaCmdTypeMigrationCutover             MetaCmdType = 44
+	MetaCmdTypeNfsExportCreate              MetaCmdType = 45
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -100,6 +101,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeNfsExportBucketDeleteCascade: "NfsExportBucketDeleteCascade",
 	MetaCmdTypeCapabilityActivate:           "CapabilityActivate",
 	MetaCmdTypeMigrationCutover:             "MigrationCutover",
+	MetaCmdTypeNfsExportCreate:              "NfsExportCreate",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -148,6 +150,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"NfsExportBucketDeleteCascade": MetaCmdTypeNfsExportBucketDeleteCascade,
 	"CapabilityActivate":           MetaCmdTypeCapabilityActivate,
 	"MigrationCutover":             MetaCmdTypeMigrationCutover,
+	"NfsExportCreate":              MetaCmdTypeNfsExportCreate,
 }
 
 func (v MetaCmdType) String() string {

@@ -12,7 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -183,6 +185,129 @@ func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 	defer cancel()
 	require.NoError(t, sender.Send(ctx, []string{"follower", "leader"}, command))
 	require.Equal(t, "group-0", leader.FSM().BucketAssignments()["photos"])
+}
+
+func TestMetaForwardReceiverRejectsRawGatedCommand(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	payload, err := nfsexport.EncodeUpsertPayload("photos", nfsexport.Config{})
+	require.NoError(t, err)
+	command, err := encodeMetaCmd(MetaCmdTypeNfsExportCreate, payload)
+	require.NoError(t, err)
+
+	reply := NewMetaProposeForwardReceiver(leader).Handle(&transport.Message{Payload: command})
+	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+}
+
+func TestMetaForwardReceiverAllowsLegacyRawMigrationCutover(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	payload := encodeMigrationCutoverPayload("photos", time.Unix(100, 0).UnixNano())
+	command, err := encodeMetaCmd(MetaCmdTypeMigrationCutover, payload)
+	require.NoError(t, err)
+
+	reply := NewMetaProposeForwardReceiver(leader).Handle(&transport.Message{Payload: command})
+	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, compat.ErrCapabilityRejected)
+}
+
+func TestMetaForwardReceiverRevalidatesGateOnLeader(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	cfg := raft.Configuration{Servers: []raft.Server{
+		{ID: "node-a", Suffrage: raft.Voter},
+		{ID: "node-b", Suffrage: raft.Voter},
+	}}
+	gate.SetMetaRaftSnapshot(2, cfg)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-a"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: time.Now(),
+		Ready:    true,
+	})
+	leader.SetCapabilityGate(gate)
+
+	payload, err := nfsexport.EncodeUpsertPayload("photos", nfsexport.Config{})
+	require.NoError(t, err)
+	command, err := encodeMetaCmd(MetaCmdTypeNfsExportCreate, payload)
+	require.NoError(t, err)
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityNfsExportCreateV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationNfsExportCreate,
+		ConfigID:   raftConfigurationID(cfg),
+	}
+
+	reply := NewMetaProposeForwardReceiver(leader).Handle(&transport.Message{
+		Payload: encodeMetaForwardRequest(command, &plan),
+	})
+	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+}
+
+func TestMetaForwardReceiverRefreshesGateBeforeGatedProposal(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-a", Suffrage: raft.Voter}}}
+	gate.SetMetaRaftSnapshot(1, cfg)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-a"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: time.Now(),
+		Ready:    true,
+	})
+	leader.SetCapabilityGate(gate)
+
+	command, err := encodeMetaCmd(MetaCmdTypeNoOp, nil)
+	require.NoError(t, err)
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityNfsExportCreateV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationNfsExportCreate,
+		ConfigID:   raftConfigurationID(cfg),
+	}
+
+	reply := NewMetaProposeForwardReceiver(leader).
+		WithGateRefresh(func() {
+			gate.SetMetaRaftSnapshot(2, cfg)
+		}).
+		Handle(&transport.Message{Payload: encodeMetaForwardRequest(command, &plan)})
+	_, err = decodeMetaForwardReplyWithIndex(reply.Payload)
+	require.NoError(t, err)
 }
 
 func TestMetaForwardReplyPreservesNonIcebergApplyError(t *testing.T) {

@@ -1,6 +1,7 @@
 package nfsexport
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -54,6 +55,22 @@ func TestStorePutAdvancesAllocator(t *testing.T) {
 	cfg, err := store.ApplyUpsert("next", false, 1)
 	require.NoError(t, err)
 	require.Equal(t, uint64(8), cfg.FsidMinor)
+}
+
+func TestStoreApplyCreateRejectsExistingExport(t *testing.T) {
+	db, store := openTestStore(t, t.TempDir())
+	defer db.Close()
+
+	created, err := store.ApplyCreate("bucket", false, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), created.Generation)
+
+	_, err = store.ApplyCreate("bucket", true, 1)
+	require.True(t, errors.Is(err, ErrExportExists), "err = %v", err)
+
+	got, ok := store.Get("bucket")
+	require.True(t, ok)
+	require.Equal(t, created, got)
 }
 
 func TestStoreReopenRehydratesSnapshot(t *testing.T) {
