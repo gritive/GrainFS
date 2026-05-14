@@ -184,10 +184,6 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
-	s.handleCompoundIntoFrom(data, w, "")
-}
-
 func (s *Server) handleCompoundIntoFrom(data []byte, w *XDRWriter, clientAddr string) {
 	req := compoundReqPool.Get()
 	req.Tag = ""

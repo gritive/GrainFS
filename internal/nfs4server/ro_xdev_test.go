@@ -17,7 +17,7 @@ func newDispatcherWithExports(t *testing.T, rows map[string]exportConfig) *Dispa
 	}
 	srv := NewServer(backend)
 	srv.SetExportsForTest(buildSnap(rows))
-	d := getDispatcher(srv.backend, srv.state, srv)
+	d := getDispatcherWithClient(srv.backend, srv.state, srv, "", nil)
 	t.Cleanup(func() {
 		putDispatcher(d)
 		backend.Close()

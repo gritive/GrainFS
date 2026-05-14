@@ -46,10 +46,6 @@ func putCompoundResponse(resp *CompoundResponse) {
 
 var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
-func getDispatcher(backend storage.Backend, state *StateManager, server *Server) *Dispatcher {
-	return getDispatcherWithClient(backend, state, server, "", nil)
-}
-
 func getDispatcherWithClient(backend storage.Backend, state *StateManager, server *Server, clientAddr string, hinter *unknownExportHinter) *Dispatcher {
 	d := dispatcherPool.Get()
 	d.backend = backend

@@ -25,13 +25,13 @@ func TestCompound_PUTROOTFH_GETATTR_AllocsPerRun(t *testing.T) {
 	// Warm up pools.
 	for i := 0; i < 10; i++ {
 		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
+		srv.handleCompoundIntoFrom(data, w, "")
 		putXDRWriter(w)
 	}
 
 	allocs := testing.AllocsPerRun(100, func() {
 		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
+		srv.handleCompoundIntoFrom(data, w, "")
 		putXDRWriter(w)
 	})
 	// PUTROOTFH+GETATTR: attrvals + result buffers only. Bitmap args use the fixed-size op pool.
@@ -49,13 +49,13 @@ func TestCompound_PUTROOTFH_READDIR_AllocsPerRun(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
+		srv.handleCompoundIntoFrom(data, w, "")
 		putXDRWriter(w)
 	}
 
 	allocs := testing.AllocsPerRun(100, func() {
 		w := getXDRWriter()
-		srv.handleCompoundInto(data, w)
+		srv.handleCompoundIntoFrom(data, w, "")
 		putXDRWriter(w)
 	})
 	// PUTROOTFH+READDIR: only unavoidable alloc is ReadDir arg encoding (xdrWriterBytes). Target ≤3.
