@@ -28,6 +28,7 @@ PROFILE_DIR="$REPO_ROOT/benchmarks/profiles/nfs-multi-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$PROFILE_DIR"
 SUMMARY="$PROFILE_DIR/summary.txt"
 DATA_DIR=$(mktemp -d "grainfs-nfs-multi-bench-XXXX" -p /tmp)
+RUN_ID="$(date +%Y%m%d%H%M%S)-$$"
 
 cleanup() {
   local i
@@ -35,6 +36,7 @@ cleanup() {
   for i in $(seq 1 "$NUM_BUCKETS"); do
     bench_colima_ssh sudo umount -l "/mnt/grainfs-nfs-b$i" 2>/dev/null || true
     bench_colima_ssh sudo rmdir "/mnt/grainfs-nfs-b$i" 2>/dev/null || true
+    bench_colima_ssh sudo rm -f "/tmp/grainfs-nfs-multi-b$i-$RUN_ID.json" 2>/dev/null || true
   done
   bench_colima_ssh sudo umount -l /mnt/grainfs-nfs-pseudo 2>/dev/null || true
   bench_colima_ssh sudo rmdir /mnt/grainfs-nfs-pseudo 2>/dev/null || true
@@ -84,16 +86,19 @@ start_t=$(date +%s)
 PIDS=()
 for i in $(seq 1 "$NUM_BUCKETS"); do
   (
-    log="$PROFILE_DIR/fio_b$i.log"
-    bench_colima_ssh bash -s <<SCRIPT > "$log" 2>&1
+    err_log="$PROFILE_DIR/fio_b$i.stderr.log"
+    bench_colima_ssh bash -s <<SCRIPT > "$err_log" 2>&1
 set -euo pipefail
 BENCH_DIR="/mnt/grainfs-nfs-b$i/fio-\$(date +%s)"
+FIO_OUT="/tmp/grainfs-nfs-multi-b$i-$RUN_ID.json"
 sudo mkdir -p "\$BENCH_DIR"
+echo "running fio for bench-$i: dir=\$BENCH_DIR output=\$FIO_OUT" >&2
 sudo fio --name=mixed --directory="\$BENCH_DIR" --rw=randrw --rwmixread=70 \
   --fallocate=none \
   --bs=64k --size="$FIO_SIZE" --numjobs="$FIO_WORKERS_PER_BUCKET" \
   --ramp_time="$FIO_RAMP" --runtime="$FIO_RUNTIME" --time_based \
-  --group_reporting --output-format=json
+  --group_reporting --output-format=json --output="\$FIO_OUT"
+sudo ls -l "\$FIO_OUT" >&2
 SCRIPT
   ) &
   PIDS+=($!)
@@ -105,6 +110,11 @@ curl -sS "http://127.0.0.1:${PPROF_PORT}/debug/pprof/heap" > "$PROFILE_DIR/heap.
 
 for pid in "${PIDS[@]}"; do
   wait "$pid"
+done
+for i in $(seq 1 "$NUM_BUCKETS"); do
+  remote_log="/tmp/grainfs-nfs-multi-b$i-$RUN_ID.json"
+  bench_colima_ssh sudo cat "$remote_log" > "$PROFILE_DIR/fio_b$i.log"
+  bench_colima_ssh sudo rm -f "$remote_log"
 done
 end_t=$(date +%s)
 echo "Total elapsed: $((end_t - start_t))s" | tee -a "$SUMMARY"
@@ -118,6 +128,10 @@ for i in $(seq 1 "$NUM_BUCKETS"); do
   if command -v jq >/dev/null 2>&1; then
     read_kb=$(jq -r '.jobs[0].read.bw // "?"' "$log" 2>/dev/null || echo "?")
     write_kb=$(jq -r '.jobs[0].write.bw // "?"' "$log" 2>/dev/null || echo "?")
+    if [[ ! "$read_kb" =~ ^[0-9]+$ || ! "$write_kb" =~ ^[0-9]+$ ]]; then
+      echo "invalid fio throughput in $log (read=$read_kb write=$write_kb)" >&2
+      exit 1
+    fi
     if [[ "$read_kb" =~ ^[0-9]+$ ]]; then
       total_read_kb=$((total_read_kb + read_kb))
     fi
@@ -147,8 +161,8 @@ for _ in $(seq 1 "$READDIR_SAMPLES"); do
   fi
   awk "BEGIN { printf \"%.1f\\n\", ${t_s} * 1000 }" >> "$LAT_FILE"
 done
-p50=$(sort -n "$LAT_FILE" | awk -v n="$READDIR_SAMPLES" 'NR==int(n*0.50){print; exit}')
-p99=$(sort -n "$LAT_FILE" | awk -v n="$READDIR_SAMPLES" 'NR==int(n*0.99){print; exit}')
+p50=$(sort -n "$LAT_FILE" | awk -v n="$READDIR_SAMPLES" 'BEGIN { idx=int(n*0.50); if (idx < 1) idx=1 } NR==idx{print; exit}')
+p99=$(sort -n "$LAT_FILE" | awk -v n="$READDIR_SAMPLES" 'BEGIN { idx=int(n*0.99); if (idx < 1) idx=1 } NR==idx{print; exit}')
 echo "  p50=${p50}ms p99=${p99}ms" | tee -a "$SUMMARY"
 
 echo "Results: $PROFILE_DIR"
