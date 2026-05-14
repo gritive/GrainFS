@@ -1,0 +1,440 @@
+package p9server
+
+import (
+	"context"
+	"io"
+	"strings"
+	"syscall"
+	"testing"
+
+	"bytes"
+	"fmt"
+	"time"
+
+	"github.com/hugelgupf/p9/p9"
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
+func newTestBackend(t *testing.T) storage.Backend {
+	t.Helper()
+	b, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	return b
+}
+
+// Task 2: rootFile tests
+
+func TestRootFile_Walk_EmptyReturnsClone(t *testing.T) {
+	root := &rootFile{backend: newTestBackend(t)}
+	qids, file, err := root.Walk(nil)
+	require.NoError(t, err)
+	require.Empty(t, qids)
+	require.NotNil(t, file)
+	_, ok := file.(*rootFile)
+	require.True(t, ok)
+}
+
+func TestRootFile_Walk_UnknownBucket_ENOENT(t *testing.T) {
+	root := &rootFile{backend: newTestBackend(t)}
+	_, _, err := root.Walk([]string{"no-such-bucket"})
+	require.ErrorIs(t, err, syscall.ENOENT)
+}
+
+func TestRootFile_Walk_ExistingBucket_ReturnsBucketFile(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "my-bucket"))
+
+	root := &rootFile{backend: backend}
+	qids, file, err := root.Walk([]string{"my-bucket"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	_, ok := file.(*bucketFile)
+	require.True(t, ok)
+}
+
+func TestRootFile_Readdir_ListsBuckets(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "alpha"))
+	require.NoError(t, backend.CreateBucket(ctx, "beta"))
+
+	root := &rootFile{backend: backend}
+	dirents, err := root.Readdir(0, 100)
+	require.NoError(t, err)
+	names := make([]string, len(dirents))
+	for i, d := range dirents {
+		names[i] = d.Name
+	}
+	require.Contains(t, names, "alpha")
+	require.Contains(t, names, "beta")
+}
+
+// Task 3: bucketFile tests
+
+func TestBucketFile_Walk_UnknownKey_ENOENT(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	_, _, err := bf.Walk([]string{"no-such-key.txt"})
+	require.ErrorIs(t, err, syscall.ENOENT)
+}
+
+func TestBucketFile_Walk_ExistingKey_ReturnsObjectFile(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	qids, file, err := bf.Walk([]string{"hello.txt"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	_, ok := file.(*objectFile)
+	require.True(t, ok)
+}
+
+func TestBucketFile_Walk_NestedKeyReturnsObjectFile(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "obj/000001.bin", strings.NewReader("hi"), "application/octet-stream")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	qids, file, err := bf.Walk([]string{"obj", "000001.bin"})
+	require.NoError(t, err)
+	require.Len(t, qids, 2)
+	_, ok := file.(*objectFile)
+	require.True(t, ok)
+}
+
+func TestBucketFile_Readdir_ListsObjects(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "a.txt", strings.NewReader("a"), "text/plain")
+	require.NoError(t, err)
+	_, err = backend.PutObject(ctx, "bkt", "b.txt", strings.NewReader("b"), "text/plain")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 100)
+	require.NoError(t, err)
+	names := make([]string, len(dirents))
+	for i, d := range dirents {
+		names[i] = d.Name
+	}
+	require.Contains(t, names, "a.txt")
+	require.Contains(t, names, "b.txt")
+}
+
+func TestBucketFile_Readdir_ListsSyntheticDirectories(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "obj/000001.bin", strings.NewReader("x"), "application/octet-stream")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Len(t, dirents, 1)
+	require.Equal(t, "obj", dirents[0].Name)
+	require.Equal(t, p9.TypeDir, dirents[0].Type)
+
+	qids, file, err := bf.Walk([]string{"obj"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	child, ok := file.(*bucketFile)
+	require.True(t, ok)
+
+	dirents, err = child.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Len(t, dirents, 1)
+	require.Equal(t, "000001.bin", dirents[0].Name)
+	require.Equal(t, p9.TypeRegular, dirents[0].Type)
+}
+
+func TestBucketFile_Readdir_StopsAfterCount(t *testing.T) {
+	backend := &countingWalkBackend{objects: make([]*storage.Object, 1000)}
+	for i := range backend.objects {
+		backend.objects[i] = &storage.Object{Key: fmt.Sprintf("obj-%04d", i)}
+	}
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 10)
+	require.NoError(t, err)
+	require.Len(t, dirents, 10)
+	require.Equal(t, 10, backend.walked)
+}
+
+func TestBucketFile_Readdir_UsesKeyWalker(t *testing.T) {
+	backend := &keyWalkingBackend{
+		keys: []string{"a.txt", "b.txt"},
+	}
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 10)
+	require.NoError(t, err)
+	require.Len(t, dirents, 2)
+	require.Equal(t, 2, backend.keysWalked)
+	require.Equal(t, 0, backend.objectsWalked)
+}
+
+// Task 4: objectFile tests
+
+func TestObjectFile_GetAttr_SizeAndMtime(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	_, valid, attr, err := of.GetAttr(p9.AttrMask{Size: true, MTime: true})
+	require.NoError(t, err)
+	require.True(t, valid.Size)
+	require.True(t, valid.MTime)
+	require.Equal(t, uint64(11), attr.Size)
+	require.Equal(t, uint64(obj.LastModified), attr.MTimeSeconds)
+}
+
+func TestObjectFile_ReadAt_FullContent(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	buf := make([]byte, 11)
+	n, err := of.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, 11, n)
+	require.Equal(t, "hello world", string(buf))
+}
+
+func TestObjectFile_ReadAt_WithOffset(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello world"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	buf := make([]byte, 5)
+	n, err := of.ReadAt(buf, 6)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, "world", string(buf))
+}
+
+func TestObjectFile_Open_WriteMode_EROFS(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
+	_, _, err = of.Open(p9.WriteOnly)
+	require.ErrorIs(t, err, syscall.EROFS)
+}
+
+// Task 5: Server / Attacher tests
+
+func TestAttacher_AttachReturnsRootFile(t *testing.T) {
+	backend := newTestBackend(t)
+	att := &attacher{backend: backend}
+	file, err := att.Attach()
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	_, ok := file.(*rootFile)
+	require.True(t, ok)
+}
+
+func TestServer_ListenAndServe_Starts(t *testing.T) {
+	backend := newTestBackend(t)
+	srv := NewServer(backend)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := srv.ListenAndServe(ctx, "127.0.0.1:0")
+	if err != nil {
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+}
+
+// Task 9: Benchmarks
+
+// prepareBench9P creates a LocalBackend with one object of objSize bytes.
+// Returns ready-to-use objectFile, bucketFile, rootFile pointing at "bench"/"bench.bin".
+func prepareBench9P(b *testing.B, objSize int) (*objectFile, *bucketFile, *rootFile) {
+	b.Helper()
+	backend, err := storage.NewLocalBackend(b.TempDir())
+	require.NoError(b, err)
+
+	require.NoError(b, backend.CreateBucket(context.Background(), "bench"))
+	data := make([]byte, objSize)
+	obj, err := backend.PutObject(context.Background(), "bench", "bench.bin",
+		bytes.NewReader(data), "application/octet-stream")
+	require.NoError(b, err)
+
+	root := &rootFile{backend: backend}
+	bf := &bucketFile{backend: backend, bucket: "bench"}
+	of := &objectFile{backend: backend, bucket: "bench", key: "bench.bin", meta: obj}
+	return of, bf, root
+}
+
+// BenchmarkObjectFile_ReadAt measures PartialIO-backed random read throughput.
+// LocalBackend implements storage.PartialIO so this exercises the fast path.
+func BenchmarkObjectFile_ReadAt(b *testing.B) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"4KiB", 4 << 10},
+		{"64KiB", 64 << 10},
+		{"1MiB", 1 << 20},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			of, _, _ := prepareBench9P(b, tc.size)
+			buf := make([]byte, tc.size)
+			b.SetBytes(int64(tc.size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, _ = of.ReadAt(buf, 0)
+			}
+		})
+	}
+}
+
+// BenchmarkBucketFile_Readdir measures directory listing cost at various scales.
+func BenchmarkBucketFile_Readdir(b *testing.B) {
+	cases := []struct {
+		name  string
+		n     int
+		count uint32
+		key   func(int) string
+	}{
+		{"100objs", 100, 100, func(i int) string { return fmt.Sprintf("obj-%06d.bin", i) }},
+		{"1000objs", 1000, 1000, func(i int) string { return fmt.Sprintf("obj-%06d.bin", i) }},
+		{"1000objs_page100", 1000, 100, func(i int) string { return fmt.Sprintf("obj-%06d.bin", i) }},
+		{"1000nested_one_dir", 1000, 100, func(i int) string { return fmt.Sprintf("obj/%06d.bin", i) }},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			backend, err := storage.NewLocalBackend(b.TempDir())
+			require.NoError(b, err)
+			require.NoError(b, backend.CreateBucket(context.Background(), "bench"))
+			for i := range tc.n {
+				_, err := backend.PutObject(context.Background(), "bench",
+					tc.key(i), strings.NewReader("x"), "application/octet-stream")
+				require.NoError(b, err)
+			}
+			bf := &bucketFile{backend: backend, bucket: "bench"}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				_, _ = bf.Readdir(0, tc.count)
+			}
+		})
+	}
+}
+
+// BenchmarkRootFile_Walk_Bucket measures bucket lookup latency (HeadBucket + QID alloc).
+func BenchmarkRootFile_Walk_Bucket(b *testing.B) {
+	_, _, root := prepareBench9P(b, 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, file, _ := root.Walk([]string{"bench"})
+		if file != nil {
+			_ = file.Close()
+		}
+	}
+}
+
+type countingWalkBackend struct {
+	objects []*storage.Object
+	walked  int
+}
+
+func (b *countingWalkBackend) CreateBucket(context.Context, string) error { return nil }
+func (b *countingWalkBackend) HeadBucket(context.Context, string) error   { return nil }
+func (b *countingWalkBackend) DeleteBucket(context.Context, string) error { return nil }
+func (b *countingWalkBackend) ForceDeleteBucket(context.Context, string) error {
+	return nil
+}
+func (b *countingWalkBackend) ListBuckets(context.Context) ([]string, error) { return nil, nil }
+func (b *countingWalkBackend) PutObject(context.Context, string, string, io.Reader, string) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	return nil, nil, nil
+}
+func (b *countingWalkBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) DeleteObject(context.Context, string, string) error { return nil }
+func (b *countingWalkBackend) ListObjects(context.Context, string, string, int) ([]*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) WalkObjects(_ context.Context, _, _ string, fn func(*storage.Object) error) error {
+	for _, obj := range b.objects {
+		b.walked++
+		if err := fn(obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (b *countingWalkBackend) CreateMultipartUpload(context.Context, string, string, string) (*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*storage.Part, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) CompleteMultipartUpload(context.Context, string, string, string, []storage.Part) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) AbortMultipartUpload(context.Context, string, string, string) error {
+	return nil
+}
+func (b *countingWalkBackend) ListMultipartUploads(context.Context, string, string, int) ([]*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) ListParts(context.Context, string, string, string, int) ([]storage.Part, error) {
+	return nil, nil
+}
+
+type keyWalkingBackend struct {
+	countingWalkBackend
+	keys          []string
+	keysWalked    int
+	objectsWalked int
+}
+
+func (b *keyWalkingBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	b.objectsWalked++
+	return b.countingWalkBackend.WalkObjects(ctx, bucket, prefix, fn)
+}
+
+func (b *keyWalkingBackend) WalkObjectKeys(_ context.Context, _, _ string, fn func(string) error) error {
+	for _, key := range b.keys {
+		b.keysWalked++
+		if err := fn(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -117,7 +117,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4/NBD)
 	// are now wired in cluster mode too, not just local.
-	nodeSvc := StartNodeServices(state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, state.distBackend)
+	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Port, state.distBackend)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	state.AddCleanup(func() { nodeSvc.Close() })
 	startNfsExportBucketDeleteCleanup(ctx, state.nfsExportSvc, state.distBackend)
