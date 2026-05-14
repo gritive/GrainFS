@@ -52,6 +52,13 @@ func (r *cachedObjectReader) Read(p []byte) (int, error) {
 	return r.st.r.Read(p)
 }
 
+func (r *cachedObjectReader) WriteTo(w io.Writer) (int64, error) {
+	if r.st == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return r.st.r.WriteTo(w)
+}
+
 func (r *cachedObjectReader) Close() error {
 	st := r.st
 	if st == nil {
@@ -74,8 +81,9 @@ type CacheStats struct {
 type CacheOption func(*CachedBackend)
 
 var (
-	_ Backend   = (*CachedBackend)(nil)
-	_ PartialIO = (*CachedBackend)(nil)
+	_ Backend     = (*CachedBackend)(nil)
+	_ PartialIO   = (*CachedBackend)(nil)
+	_ io.WriterTo = (*cachedObjectReader)(nil)
 )
 
 // WithMaxCacheBytes sets the total maximum bytes for cached object content.

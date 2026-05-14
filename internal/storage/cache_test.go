@@ -83,6 +83,20 @@ func TestCachedObjectReaderCloseIsIdempotentAfterReuse(t *testing.T) {
 	require.Equal(t, "xyz", string(body2))
 }
 
+func TestCachedObjectReaderPreservesWriterTo(t *testing.T) {
+	rc := newCachedObjectReader([]byte("abc"))
+	defer rc.Close()
+
+	wt, ok := any(rc).(io.WriterTo)
+	require.True(t, ok)
+
+	var dst strings.Builder
+	n, err := wt.WriteTo(&dst)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n)
+	require.Equal(t, "abc", dst.String())
+}
+
 func TestCachedBackend_HeadObjectCacheHit(t *testing.T) {
 	cb, _ := newTestCachedBackend(t)
 
