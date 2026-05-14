@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.205.0] - 2026-05-15 — feat: searchable durable audit lake
+
+### Added
+
+- **Durable S3 audit outbox** — S3 request attempts and final outcomes are persisted locally before being committed to the Iceberg audit table.
+- **Searchable audit schema** — audit rows now include request ID, service account, source IP, operation, auth status, error reason, version/upload/copy context, and day partition metadata for DuckDB queries.
+- **Audit health and search APIs** — localhost dashboard endpoints expose outbox health and bounded S3 audit search backed by DuckDB/Iceberg.
+- **Dashboard audit view** — the web UI now surfaces audit lake health and recent S3 audit events.
+
+### Changed
+
+- **Audit commit safety** — follower-shipped events are durably accepted by the leader, oversized wire fields are rejected/truncated before encoding, and stale provisional attempts can later be corrected by a final request outcome.
+- **Internal audit bucket reads** — Iceberg artifacts remain blocked for normal S3 access except for the generated local audit reader credential or IAM-authorized artifact reads.
+- **Audit docs** — `docs/audit-iceberg.md` now documents retention, query examples, dashboard behavior, and the operational guarantees.
+
+### Verification
+
+- `go test ./internal/audit ./internal/server ./internal/serveruntime ./internal/badgerrole -count=1`
+- `make bin/grainfs && GRAINFS_BINARY=$(pwd)/bin/grainfs go test -tags duckdb_e2e ./tests/e2e -run TestAuditIcebergSingleDuckDB -count=1 -v -timeout 5m`
+
 ## [0.0.204.0] - 2026-05-15 — feat: storage operations console
 
 ### Added

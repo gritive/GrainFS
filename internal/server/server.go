@@ -90,6 +90,10 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
+type auditSearcher interface {
+	SearchS3(ctx context.Context, f audit.SearchFilter) ([]audit.SearchRow, error)
+}
+
 // RaftSnapshotter exposes operator-triggered Raft FSM snapshots.
 type RaftSnapshotter interface {
 	TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error)
@@ -125,26 +129,31 @@ type Server struct {
 	// iamProposer issues IAM mutations through Raft (P5). nil before the
 	// meta-FSM is ready or in anonymous mode; CreateBucket falls back to
 	// no-op auto-grant when nil.
-	iamProposer    iam.Proposer
-	hertz          *server.Hertz
-	hub            *Hub
-	volMgr         *volume.Manager
-	policyStore    *CompiledPolicyStore
-	lifecycle      *lifecycle.Service
-	icebergCatalog icebergcatalog.Catalog
-	auditEmitter   *audit.Emitter
-	cluster        ClusterInfo       // nil in no-peers mode
-	membership     ClusterMembership // nil = remove-peer endpoint returns 503
-	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
-	balancer       BalancerInfo      // nil if balancer not enabled
-	evStore        *eventstore.Store // nil if event store not configured
-	alerts         *AlertsState      // nil if alerts not wired
-	receiptAPI     *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
-	incidentStore  incident.StateStore
-	mutationGate   *MutationGate
-	degradedFlag   atomic.Bool       // true when EC degraded mode is active
-	blockCache     *blockcache.Cache // nil 또는 비활성. /api/cache/status가 노출.
-	shardCache     *shardcache.Cache // nil 또는 비활성. EC shard cache, /api/cache/status에 함께 노출.
+	iamProposer            iam.Proposer
+	hertz                  *server.Hertz
+	hub                    *Hub
+	volMgr                 *volume.Manager
+	policyStore            *CompiledPolicyStore
+	lifecycle              *lifecycle.Service
+	icebergCatalog         icebergcatalog.Catalog
+	auditEmitter           *audit.Emitter
+	auditOutbox            *audit.Outbox
+	auditSearcher          auditSearcher
+	auditNodeID            string
+	auditInternalAccessKey string
+	auditInternalVerifier  *s3auth.CachingVerifier
+	cluster                ClusterInfo       // nil in no-peers mode
+	membership             ClusterMembership // nil = remove-peer endpoint returns 503
+	joinCluster            JoinClusterFunc   // nil if not in no-peers mode or already clustered
+	balancer               BalancerInfo      // nil if balancer not enabled
+	evStore                *eventstore.Store // nil if event store not configured
+	alerts                 *AlertsState      // nil if alerts not wired
+	receiptAPI             *receipt.API      // nil when heal-receipt API disabled (Phase 16 Slice 2)
+	incidentStore          incident.StateStore
+	mutationGate           *MutationGate
+	degradedFlag           atomic.Bool       // true when EC degraded mode is active
+	blockCache             *blockcache.Cache // nil 또는 비활성. /api/cache/status가 노출.
+	shardCache             *shardcache.Cache // nil 또는 비활성. EC shard cache, /api/cache/status에 함께 노출.
 
 	// Bounded event queue + single worker. Decouples request handlers from
 	// BadgerDB write latency and prevents unbounded goroutine growth.
@@ -399,6 +408,38 @@ func WithAuditEmitter(e *audit.Emitter) Option {
 	}
 }
 
+// WithAuditOutbox enables durable audit event capture.
+func WithAuditOutbox(outbox *audit.Outbox) Option {
+	return func(s *Server) {
+		s.auditOutbox = outbox
+	}
+}
+
+func WithAuditNodeID(nodeID string) Option {
+	return func(s *Server) {
+		s.auditNodeID = nodeID
+	}
+}
+
+func WithAuditSearcher(searcher auditSearcher) Option {
+	return func(s *Server) {
+		s.auditSearcher = searcher
+	}
+}
+
+func WithAuditInternalCredentials(accessKey, secretKey string) Option {
+	return func(s *Server) {
+		if accessKey == "" || secretKey == "" {
+			return
+		}
+		s.auditInternalAccessKey = accessKey
+		s.auditInternalVerifier = s3auth.NewCachingVerifier(s3auth.NewVerifier([]s3auth.Credentials{{
+			AccessKey: accessKey,
+			SecretKey: secretKey,
+		}}), 128, 5*time.Minute)
+	}
+}
+
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	policyStore := NewCompiledPolicyStore()
@@ -478,6 +519,7 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		h.Use(s.authMiddleware())
 	}
 
+	h.Use(s.auditEnvelopeMiddleware())
 	h.Use(s.authzMiddleware())
 
 	if s.volMgr == nil {
@@ -545,6 +587,16 @@ func isBucketFormPost(c *app.RequestContext) bool {
 		strings.HasPrefix(string(c.GetHeader("Content-Type")), "multipart/form-data")
 }
 
+func s3PathBucketKey(path string) (string, string) {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || strings.HasPrefix(path, "api/") || strings.HasPrefix(path, "admin/") ||
+		strings.HasPrefix(path, "iceberg/") || strings.HasPrefix(path, "ui/") {
+		return "", ""
+	}
+	bucket, key, _ := strings.Cut(path, "/")
+	return bucket, key
+}
+
 // HertzEngine exposes the underlying Hertz instance so callers (serve.go) can
 // install additional middleware and routes (e.g. /ui/api/* admin endpoints,
 // dashboard token auth) before Run is called. Must be invoked before Run.
@@ -563,6 +615,9 @@ func (s *Server) Operations() *storage.Operations { return s.ops }
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)
 	s.stopEventWorker()
+	if closer, ok := s.auditSearcher.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
 	if s.alerts != nil {
 		s.alerts.Close()
 	}
@@ -579,6 +634,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			path == "/api/incidents" || strings.HasPrefix(path, "/api/incidents/") ||
 			path == "/api/cluster/status" || path == "/api/cluster/remove-peer" ||
 			path == "/api/health" ||
+			path == "/api/audit/health" || path == "/api/audit/s3" ||
 			path == "/api/cache/status" ||
 			strings.HasPrefix(path, "/iceberg/") {
 			c.Next(ctx)
@@ -605,6 +661,21 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// methods always require authentication — checked via RawQuery == "".
 		method := string(c.Method())
 		key := strings.TrimPrefix(c.Param("key"), "/")
+		bucket := c.Param("bucket")
+		if bucket == "" {
+			bucket, key = s3PathBucketKey(path)
+		}
+		if s.auditInternalVerifier != nil && auditInternalObjectRequest(bucket, key, method, c.RemoteAddr().String()) {
+			if accessKey, err := s.auditInternalVerifier.Verify(r); err == nil && accessKey == s.auditInternalAccessKey {
+				ctx = WithAccessKey(ctx, accessKey)
+				c.Next(ctx)
+				return
+			}
+		}
+		if auditInternalObjectReadAllowed(bucket, key, method, c.RemoteAddr().String(), AccessKeyFromContext(ctx), s.auditInternalAccessKey) {
+			c.Next(ctx)
+			return
+		}
 		isObjectRead := (method == "GET" || method == "HEAD") && key != "" && r.URL.RawQuery == ""
 		if isObjectRead && r.Header.Get("Authorization") == "" {
 			ctx = WithAccessKey(ctx, "")
@@ -615,6 +686,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// Check both header auth and query-string presigned auth
 		accessKey, err := s.verifier.Verify(r)
 		if err != nil {
+			s.recordAuditAuthFailure(ctx, c, consts.StatusForbidden, "authn")
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", err.Error())
 			c.Abort()
 			return
@@ -628,6 +700,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		if s.iamStore != nil {
 			k, saID, ok := iam.ResolveSA(s.iamStore, accessKey)
 			if !ok {
+				s.recordAuditAuthFailure(ctx, c, consts.StatusUnauthorized, "invalid_access_key")
 				writeXMLError(c, consts.StatusUnauthorized, "InvalidAccessKeyId", "")
 				c.Abort()
 				return
@@ -775,6 +848,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Event log query API
 	s.registerEventsAPI(h)
+
+	// Audit lake health and query API.
+	s.registerAuditAPI(h)
 
 	// Phase 16 Week 4: alerts status + force-resend (no-op if alerts not wired).
 	s.registerAlertsAPI(h)

@@ -97,12 +97,25 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
-		// Internal system buckets are never accessible via the S3 API.
+		// Internal audit artifacts are read-only through S3 so Iceberg/DuckDB can
+		// fetch metadata and data files returned by the REST catalog. Mutations,
+		// bucket-level reads, and listing remain blocked.
 		if bucket == audit.BucketName {
-			s.iamAudit.RecordDeny(ctx, iam.PrincipalFromContext(ctx), bucket, key, action, "internal_bucket")
-			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access denied to internal bucket")
-			c.Abort()
-			return
+			method := string(c.Method())
+			if auditInternalObjectReadAllowed(bucket, key, method, c.RemoteAddr().String(), accessKey, s.auditInternalAccessKey) {
+				c.Next(ctx)
+				return
+			}
+			signedObjectRead := s.iamStore != nil && auditObjectReadRequest(bucket, key, method) && accessKey != ""
+			if !signedObjectRead {
+				s.iamAudit.RecordDeny(ctx, iam.PrincipalFromContext(ctx), bucket, key, action, "internal_bucket")
+				c.Set(auditErrReasonKey, "internal_bucket")
+				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access denied to internal bucket")
+				c.Abort()
+				return
+			}
+			// Signed callers still pass through the normal IAM/policy/ACL checks
+			// below so ad hoc DuckDB analysis can read Iceberg files.
 		}
 
 		// Layer 0: AccessKey bucket scope (always-on; previously gated on
@@ -115,6 +128,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			if !iam.ScopeAllows(scope, bucket) {
 				saID := iam.PrincipalFromContext(ctx)
 				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "key_scope_mismatch")
+				c.Set(auditErrReasonKey, "key_scope_mismatch")
 				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access key scope denies this bucket")
 				c.Abort()
 				return
@@ -137,6 +151,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			case "policy_deny":
 				msg = "bucket policy denies this action"
 			}
+			c.Set(auditErrReasonKey, decision.Reason)
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", msg)
 			c.Abort()
 			return
@@ -144,6 +159,18 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 
 		c.Next(ctx)
 	}
+}
+
+func auditInternalObjectRequest(bucket, key, method, remoteAddr string) bool {
+	return auditObjectReadRequest(bucket, key, method) && isLocalhostAddr(remoteAddr)
+}
+
+func auditObjectReadRequest(bucket, key, method string) bool {
+	return bucket == audit.BucketName && key != "" && (method == "GET" || method == "HEAD")
+}
+
+func auditInternalObjectReadAllowed(bucket, key, method, remoteAddr, accessKey, internalAccessKey string) bool {
+	return internalAccessKey != "" && accessKey == internalAccessKey && auditInternalObjectRequest(bucket, key, method, remoteAddr)
 }
 
 // mustAuthorize evaluates the request at PhasePreLoad. On deny it writes an
@@ -160,6 +187,7 @@ func (s *Server) mustAuthorize(ctx context.Context, c *app.RequestContext, bucke
 	if s.authz.Decide(ctx, in, s3auth.PhasePreLoad).Allow {
 		return false
 	}
+	c.Set(auditErrReasonKey, "cross_bucket_deny")
 	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
 	return true
 }
@@ -170,6 +198,9 @@ func (s *Server) mustAuthorize(ctx context.Context, c *app.RequestContext, bucke
 // loading the object's metadata; the same request was already pre-load gated
 // by authzMiddleware (or, for cross-bucket reads, by mustAuthorize).
 func (s *Server) mustAuthorizePostLoad(ctx context.Context, c *app.RequestContext, bucket, key string, action s3auth.S3Action, aclByte uint8) (denied bool) {
+	if auditInternalObjectReadAllowed(bucket, key, string(c.Method()), c.RemoteAddr().String(), AccessKeyFromContext(ctx), s.auditInternalAccessKey) {
+		return false
+	}
 	in := s3auth.PermCheckInput{
 		Principal: s3auth.Principal{AccessKey: AccessKeyFromContext(ctx)},
 		Resource:  s3auth.ResourceRef{Bucket: bucket, Key: key},
@@ -179,6 +210,7 @@ func (s *Server) mustAuthorizePostLoad(ctx context.Context, c *app.RequestContex
 	if s.authz.Decide(ctx, in, s3auth.PhasePostLoad).Allow {
 		return false
 	}
+	c.Set(auditErrReasonKey, "object_acl_deny")
 	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
 	return true
 }
