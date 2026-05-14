@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -181,6 +183,26 @@ func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 	defer cancel()
 	require.NoError(t, sender.Send(ctx, []string{"follower", "leader"}, command))
 	require.Equal(t, "group-0", leader.FSM().BucketAssignments()["photos"])
+}
+
+func TestMetaForwardReplyPreservesNonIcebergApplyError(t *testing.T) {
+	_, err := decodeMetaForwardReplyWithIndex(encodeMetaForwardReplyWithIndex(7, fmt.Errorf("meta_fsm: apply failed")))
+	require.Error(t, err)
+	var applyErr MetaForwardApplyError
+	require.ErrorAs(t, err, &applyErr)
+	require.Equal(t, "meta_fsm: apply failed", applyErr.Error())
+	require.False(t, errors.Is(err, icebergcatalog.ErrServiceUnavailable))
+}
+
+func TestMetaForwardReplyPreservesContextErrors(t *testing.T) {
+	_, err := decodeMetaForwardReplyWithIndex(encodeMetaForwardReplyWithIndex(7, context.DeadlineExceeded))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	var applyErr MetaForwardApplyError
+	require.False(t, errors.As(err, &applyErr))
+
+	_, err = decodeMetaForwardReplyWithIndex(encodeMetaForwardReplyWithIndex(7, context.Canceled))
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, errors.As(err, &applyErr))
 }
 
 func TestForwardingBucketAssignerForwardsFromFollower(t *testing.T) {

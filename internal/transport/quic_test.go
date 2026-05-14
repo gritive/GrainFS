@@ -11,9 +11,12 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 func TestQUICTransport_SendReceive(t *testing.T) {
@@ -658,7 +661,7 @@ func TestMixedVersionRejection(t *testing.T) {
 	resp, err := codec.Decode(stream)
 	require.NoError(t, err)
 	assert.NotEqual(t, StatusOK, resp.Status, "server must reject CE version mismatch")
-	assert.Contains(t, string(resp.Payload), "upgrade required")
+	assert.Contains(t, string(resp.Payload), string(ceReasonVersionMismatch))
 
 	// Mux handler must NOT be called
 	select {
@@ -760,5 +763,251 @@ func TestCapabilityWrongFirstStream(t *testing.T) {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after CE stream type rejection")
 	case <-time.After(time.Second):
+	}
+}
+
+// TestCE_ShortPayload_Rejected verifies that a CE payload shorter than 2 bytes
+// is rejected with payload_length reason (F1).
+func TestCE_ShortPayload_Rejected(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+
+	handlerCalled := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(handlerCalled)
+		<-ctx.Done()
+	})
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	raw := MustNewQUICTransport("test-cluster-psk")
+	defer raw.Close()
+
+	tlsConf := raw.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{server.muxALPN()}
+	conn, err := quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "test done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+
+	codec := &BinaryCodec{}
+	// Send CE with only 1 byte payload (features byte missing).
+	require.NoError(t, codec.Encode(stream, &Message{
+		Type:    StreamCapabilityExchange,
+		Payload: []byte{ceVersion},
+	}))
+
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status, "server must reject short CE payload")
+	assert.Contains(t, string(resp.Payload), string(ceReasonPayloadLength))
+
+	// Mux handler must NOT be called.
+	select {
+	case <-handlerCalled:
+		t.Fatal("mux handler should not be called after CE payload rejection")
+	case <-time.After(time.Second):
+	}
+}
+
+// TestCE_VersionMismatch_DistinctReason verifies the error payload contains
+// the reason token version_mismatch (F3).
+func TestCE_VersionMismatch_DistinctReason(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) { <-ctx.Done() })
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	raw := MustNewQUICTransport("test-cluster-psk")
+	defer raw.Close()
+
+	tlsConf := raw.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{server.muxALPN()}
+	conn, err := quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "test done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+
+	codec := &BinaryCodec{}
+	require.NoError(t, codec.Encode(stream, &Message{
+		Type:    StreamCapabilityExchange,
+		Payload: []byte{0xff, 0x00}, // bad version, valid length
+	}))
+
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status)
+	assert.Contains(t, string(resp.Payload), string(ceReasonVersionMismatch),
+		"error payload must contain the reason token version_mismatch")
+}
+
+// TestCE_Counter_EmitsOnSuccess verifies grainfs_transport_ce_total increments
+// for both dialer and acceptor on a successful handshake (F7).
+func TestCE_Counter_EmitsOnSuccess(t *testing.T) {
+	ctx := context.Background()
+
+	dialerBefore := testutil.ToFloat64(
+		metrics.TransportCECounter.WithLabelValues("dialer", "success", ""))
+	acceptorBefore := testutil.ToFloat64(
+		metrics.TransportCECounter.WithLabelValues("acceptor", "success", ""))
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	connReady := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(connReady)
+		<-ctx.Done()
+	})
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+
+	_, err := client.GetOrConnectMux(ctx, server.LocalAddr())
+	require.NoError(t, err)
+	<-connReady
+
+	assert.Equal(t, dialerBefore+1,
+		testutil.ToFloat64(metrics.TransportCECounter.WithLabelValues("dialer", "success", "")),
+		"dialer success counter must increment by 1")
+	assert.Equal(t, acceptorBefore+1,
+		testutil.ToFloat64(metrics.TransportCECounter.WithLabelValues("acceptor", "success", "")),
+		"acceptor success counter must increment by 1")
+}
+
+// TestCE_Counter_EmitsOnFailure verifies grainfs_transport_ce_total records a
+// failure with the correct reason label when the peer sends a wrong version (F7).
+func TestCE_Counter_EmitsOnFailure(t *testing.T) {
+	ctx := context.Background()
+
+	acceptorBefore := testutil.ToFloat64(
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonVersionMismatch)))
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) { <-ctx.Done() })
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	raw := MustNewQUICTransport("test-cluster-psk")
+	defer raw.Close()
+
+	tlsConf := raw.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{server.muxALPN()}
+	conn, err := quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "test done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+
+	codec := &BinaryCodec{}
+	require.NoError(t, codec.Encode(stream, &Message{
+		Type:    StreamCapabilityExchange,
+		Payload: []byte{0x02, 0x00},
+	}))
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status)
+
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonVersionMismatch))) == acceptorBefore+1
+	}, 2*time.Second, 10*time.Millisecond, "acceptor version_mismatch failure counter must increment by 1")
+}
+
+// TestCE_FeatureBit_Unsupported_Rejected verifies that a peer sending a
+// reserved feature bit is rejected with feature_unsupported reason (F2).
+func TestCE_FeatureBit_Unsupported_Rejected(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+
+	handlerCalled := make(chan struct{})
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		close(handlerCalled)
+		<-ctx.Done()
+	})
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	raw := MustNewQUICTransport("test-cluster-psk")
+	defer raw.Close()
+
+	tlsConf := raw.buildClientTLSConfig()
+	tlsConf.NextProtos = []string{server.muxALPN()}
+	conn, err := quic.DialAddr(ctx, server.LocalAddr(), tlsConf, defaultQUICConfig())
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "test done")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+
+	codec := &BinaryCodec{}
+	// features=0x80 — reserved bit set.
+	require.NoError(t, codec.Encode(stream, &Message{
+		Type:    StreamCapabilityExchange,
+		Payload: []byte{ceVersion, 0x80},
+	}))
+
+	resp, err := codec.Decode(stream)
+	require.NoError(t, err)
+	assert.NotEqual(t, StatusOK, resp.Status, "server must reject unsupported feature bits")
+	assert.Contains(t, string(resp.Payload), string(ceReasonFeatureUnsup))
+
+	select {
+	case <-handlerCalled:
+		t.Fatal("mux handler should not be called after feature rejection")
+	case <-time.After(time.Second):
+	}
+}
+
+// TestCE_ConcurrentDial_Dedup verifies that N concurrent GetOrConnectMux calls
+// to the same address return the same cached connection (F6).
+func TestCE_ConcurrentDial_Dedup(t *testing.T) {
+	ctx := context.Background()
+
+	var handlerCalls atomic.Int32
+	server := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	server.SetMuxConnHandler(func(ctx context.Context, conn *quic.Conn) {
+		handlerCalls.Add(1)
+		<-ctx.Done()
+	})
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer client.Close()
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+
+	addr := server.LocalAddr()
+	const N = 8
+	conns := make([]*quic.Conn, N)
+	errs := make([]error, N)
+
+	var wg sync.WaitGroup
+	for i := range N {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			conns[i], errs[i] = client.GetOrConnectMux(ctx, addr)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := range N {
+		require.NoError(t, errs[i], "goroutine %d must not error", i)
+	}
+
+	// All goroutines must get back the same conn pointer.
+	first := conns[0]
+	for i := 1; i < N; i++ {
+		assert.Equal(t, first, conns[i], "goroutine %d returned a different conn", i)
 	}
 }
