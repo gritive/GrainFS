@@ -4,6 +4,13 @@
 > 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
 > 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
 
+### Audit Log Lake — Phase 2 (Task 4)
+
+- [ ] **`--audit-iceberg` 플래그** — `cmd/grainfs/serve.go` + `serveruntime.Config.AuditIceberg`. `boot_phases_srvopts.go`에서 Emitter + Committer 생성 및 wiring (`grainfs-audit` 버킷 bootstrap 포함).
+- [ ] **Prometheus metrics** — `internal/audit/metrics.go`: `audit_drops_total`, `audit_commit_lag_seconds`, `audit_committer_state` 3개 메트릭.
+- [ ] **E2E 테스트** — `tests/e2e/iceberg_duckdb_test.go`에 `TestAuditIcebergClusterDuckDB` 추가.
+- [ ] **`docs/audit-iceberg.md`** — Quick Start 3줄 + 파라미터 레퍼런스.
+
 ### Bucket & IAM CLI DX
 
 - [ ] **`BucketInfo.Size` (총 사용 바이트)** — object_count 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
