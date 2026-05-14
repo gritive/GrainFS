@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -19,6 +21,104 @@ func setupManager(t *testing.T) *Manager {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 	return NewManager(backend)
+}
+
+type blockingPartialBackend struct {
+	storage.Backend
+	storage.PartialIO
+
+	blockKey string
+	enabled  atomic.Bool
+	entered  chan struct{}
+	release  chan struct{}
+
+	beforeReadAt atomic.Bool
+}
+
+func newBlockingPartialBackend(inner *storage.LocalBackend, blockKey string) *blockingPartialBackend {
+	return &blockingPartialBackend{
+		Backend:   inner,
+		PartialIO: inner,
+		blockKey:  blockKey,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+}
+
+func (b *blockingPartialBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	if b.enabled.Load() && bucket == volumeBucketName && key == b.blockKey {
+		if b.beforeReadAt.Load() {
+			close(b.entered)
+			select {
+			case <-b.release:
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+		n, err := b.PartialIO.ReadAt(ctx, bucket, key, offset, buf)
+		if !b.beforeReadAt.Load() {
+			close(b.entered)
+			select {
+			case <-b.release:
+			case <-ctx.Done():
+				return n, ctx.Err()
+			}
+		}
+		return n, err
+	}
+	return b.PartialIO.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+func (b *blockingPartialBackend) PreferReadAt(bucket string) bool {
+	return bucket == volumeBucketName
+}
+
+func TestReadAtSerializesWithConcurrentWriteAt(t *testing.T) {
+	dir := t.TempDir()
+	local, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { local.Close() })
+
+	const name = "read-write-lock"
+	backend := newBlockingPartialBackend(local, blockKey(name, 0))
+	mgr := NewManager(backend)
+	_, err = mgr.Create(name, int64(DefaultBlockSize))
+	require.NoError(t, err)
+	_, err = mgr.WriteAt(name, []byte("old-value"), 0)
+	require.NoError(t, err)
+
+	backend.enabled.Store(true)
+	backend.beforeReadAt.Store(true)
+	got := make([]byte, len("old-value"))
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.ReadAt(name, got, 0)
+		readDone <- err
+	}()
+
+	select {
+	case <-backend.entered:
+	case <-time.After(time.Second):
+		t.Fatal("ReadAt did not reach backend I/O")
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.WriteAt(name, []byte("new-value"), 0)
+		writeDone <- err
+	}()
+
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+		t.Fatal("WriteAt completed while ReadAt backend I/O was still blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(backend.release)
+	require.NoError(t, <-readDone)
+	require.Equal(t, "old-value", string(got))
+	require.NoError(t, <-writeDone)
 }
 
 func TestCreateVolume(t *testing.T) {
