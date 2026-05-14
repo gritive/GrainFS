@@ -13,6 +13,68 @@
 
 ### 기타
 
+## NFSv4 RFC 8881 audit follow-ups (Phase 6 2026-05-14)
+
+### REQUIRED gaps
+
+- [ ] [nfs-audit] bit 11 rdattr_error [P0] [Skipped]: READDIR does not emit per-entry attribute errors; operation-level errors only (~80 LOC) — owner: TBD
+
+### RECOMMENDED gaps
+
+- [ ] [nfs-audit] bit 12 acl [P2] [Skipped]: NFS ACL payloads are not implemented (~1-2 days with tests) — owner: TBD
+- [ ] [nfs-audit] bit 14 archive [P2] [Skipped]: deprecated archive flag is not tracked (~30 LOC if policy is desired) — owner: TBD
+- [ ] [nfs-audit] bit 16 case_insensitive [P2] [Skipped]: S3 keys are case-sensitive but the boolean is not returned (~10 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 17 case_preserving [P2] [Skipped]: S3 preserves key case but the boolean is not returned (~10 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 18 chown_restricted [P2] [Skipped]: ownership model and root-only restriction are not surfaced (~20 LOC after uid/gid policy) — owner: TBD
+- [ ] [nfs-audit] bit 21 files_avail [P2] [Skipped]: no inode-style available-file accounting (~50 LOC if synthetic capacity policy is defined) — owner: TBD
+- [ ] [nfs-audit] bit 22 files_free [P2] [Skipped]: no inode-style free-file accounting (~50 LOC if synthetic capacity policy is defined) — owner: TBD
+- [ ] [nfs-audit] bit 23 files_total [P2] [Skipped]: no inode-style total-file accounting (~50 LOC if synthetic capacity policy is defined) — owner: TBD
+- [ ] [nfs-audit] bit 24 fs_locations [P2] [Skipped]: referrals and NFS4ERR_MOVED flows are not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 25 hidden [P2] [Skipped]: hidden-file mapping for S3 keys is undefined (~30 LOC after policy) — owner: TBD
+- [ ] [nfs-audit] bit 26 homogeneous [P2] [Skipped]: exports are homogeneous but the attribute is not returned (~10 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 28 maxlink [P2] [Skipped]: hard links are unsupported; return maxlink=1 if desired (~10 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 29 maxname [P2] [Skipped]: S3 component/key limits are not surfaced (~20 LOC after component policy) — owner: TBD
+- [ ] [nfs-audit] bit 32 mimetype [P2] [Skipped]: S3 Content-Type is not mapped into NFS attrs (~60 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 34 no_trunc [P2] [Skipped]: name truncation policy is not surfaced (~10 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 36 owner [P1] [Partial]: hardcoded `root`; no idmap or authenticated user mapping (design required) — owner: TBD
+- [ ] [nfs-audit] bit 37 owner_group [P1] [Partial]: hardcoded `root`; no idmap or group mapping (design required) — owner: TBD
+- [ ] [nfs-audit] bit 38 quota_avail_hard [P2] [Skipped]: NFS quota accounting is not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 39 quota_avail_soft [P2] [Skipped]: NFS quota accounting is not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 40 quota_used [P2] [Skipped]: NFS quota accounting is not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 41 rawdev [P2] [Skipped]: device nodes are not represented (~20 LOC if create policy exists) — owner: TBD
+- [ ] [nfs-audit] bit 42 space_avail [P2] [Skipped]: filesystem capacity is not surfaced via NFS (~80 LOC after capacity source selection) — owner: TBD
+- [ ] [nfs-audit] bit 43 space_free [P2] [Skipped]: filesystem capacity is not surfaced via NFS (~80 LOC after capacity source selection) — owner: TBD
+- [ ] [nfs-audit] bit 44 space_total [P2] [Skipped]: filesystem capacity is not surfaced via NFS (~80 LOC after capacity source selection) — owner: TBD
+- [ ] [nfs-audit] bit 46 system [P2] [Skipped]: system-file flag is not modeled (~10 LOC if policy is needed) — owner: TBD
+- [ ] [nfs-audit] bit 48 time_access_set [P1] [Partial]: SETATTR consumes atime but does not persist it (~40 LOC sidecar expansion) — owner: TBD
+- [ ] [nfs-audit] bit 49 time_backup [P2] [Skipped]: backup time is not tracked (~50 LOC if mapped to metadata) — owner: TBD
+- [ ] [nfs-audit] bit 50 time_create [P2] [Skipped]: create time is not tracked separately (~50 LOC sidecar expansion) — owner: TBD
+- [ ] [nfs-audit] bit 51 time_delta [P2] [Skipped]: timestamp precision is not surfaced (~10 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 56 dir_notif_delay [P2] [Skipped]: directory notifications are not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 57 dirent_notif_delay [P2] [Skipped]: directory-entry notifications are not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 58 dacl [P2] [Skipped]: NFS DACL support is not implemented (design required with ACL model) — owner: TBD
+- [ ] [nfs-audit] bit 59 sacl [P2] [Skipped]: NFS SACL support is not implemented (design required with ACL/audit model) — owner: TBD
+- [ ] [nfs-audit] bit 60 change_policy [P2] [Skipped]: change policy is not surfaced (~30 LOC after policy definition) — owner: TBD
+- [ ] [nfs-audit] bit 61 fs_status [P2] [Skipped]: filesystem status is not surfaced (~50 LOC after health source selection) — owner: TBD
+- [ ] [nfs-audit] bit 62 fs_layout_type [P2] [Skipped]: pNFS is not implemented (out of scope) — owner: TBD
+- [ ] [nfs-audit] bit 63 layout_hint [P2] [Skipped]: pNFS is not implemented (out of scope) — owner: TBD
+- [ ] [nfs-audit] bit 64 layout_type [P2] [Skipped]: pNFS is not implemented (out of scope) — owner: TBD
+- [ ] [nfs-audit] bit 65 layout_blksize [P2] [Skipped]: pNFS is not implemented (out of scope) — owner: TBD
+- [ ] [nfs-audit] bit 66 layout_alignment [P2] [Skipped]: pNFS is not implemented (out of scope) — owner: TBD
+- [ ] [nfs-audit] bit 67 fs_locations_info [P2] [Skipped]: advanced filesystem location metadata is not implemented (design required) — owner: TBD
+- [ ] [nfs-audit] bit 68 mdsthreshold [P2] [Skipped]: pNFS metadata thresholds are not implemented (out of scope) — owner: TBD
+- [ ] [nfs-audit] bit 69 retention_get [P2] [Skipped]: NFS retention metadata is not mapped to object-lock state (design required) — owner: TBD
+- [ ] [nfs-audit] bit 70 retention_set [P2] [Skipped]: NFS retention setting is not mapped to object-lock state (design required) — owner: TBD
+- [ ] [nfs-audit] bit 71 retentevt_get [P2] [Skipped]: NFS retention event metadata is not mapped (design required) — owner: TBD
+- [ ] [nfs-audit] bit 72 retentevt_set [P2] [Skipped]: NFS retention event setting is not mapped (design required) — owner: TBD
+- [ ] [nfs-audit] bit 73 retention_hold [P2] [Skipped]: NFS retention hold is not mapped (design required) — owner: TBD
+- [ ] [nfs-audit] bit 74 mode_set_masked [P2] [Skipped]: masked mode SETATTR is not implemented (~50 LOC) — owner: TBD
+- [ ] [nfs-audit] bit 76 fs_charset_cap [P2] [Skipped]: charset capability flags are not surfaced (~30 LOC after UTF-8 policy) — owner: TBD
+
+### Conformance follow-ups
+
+- [ ] [nfs-conformance] pynfs-nightly [P1] [Skipped]: run pynfs basic suite on a scheduled Linux/Colima host and review `results/summary.json` failures (infra owner needed) — owner: TBD
+- [ ] [nfs-conformance] nfstest-runner [P2] [Skipped]: add nfstest as a second external conformance source after pynfs stabilizes (follow-up PR) — owner: TBD
 
 
 - [ ] **Thin pool quota (cross-volume)** — 여러 볼륨이 공유하는 물리 용량 예산 풀. 볼륨별 `PoolQuota` 옵션(Phase A)보다 정교한 전체 클러스터 수준 quota 관리. Phase A 완료 이후.
