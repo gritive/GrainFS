@@ -106,7 +106,7 @@ type SnapshotInfo struct {
 // Manager manages volumes on top of a storage.Backend.
 type Manager struct {
 	backend   storage.Backend
-	mu        sync.Mutex                  // 단일 뮤텍스: read-modify-write 원자성 보장. lock-free actor 검토 — Manager는 메타·dedup·live_map 다중 자료구조의 cross-volume 원자성을 요구하고, 모든 read/write/snapshot operations이 통과하므로 channel-based actor는 핫패스 round-trip 비용 + 메타 RMW 시퀀싱 복잡도가 mutex보다 큼. 추후 sharded mutex 분리 검토 가능.
+	mu        sync.Mutex                  // mutation mutex: protects volume metadata cache, live_map RMW, and ReadAt/WriteAt block-object consistency. Splitting this requires per-volume/per-block immutable versions or transactions.
 	volumes   map[string]*Volume          // 인메모리 캐시
 	liveMaps  map[string]map[int64]string // cache: absent=未読み込み, nil entry=live_map 없음
 	dedup     dedup.DedupIndex            // nil = dedup 비활성화

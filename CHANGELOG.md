@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.197.0] - 2026-05-14 — fix: lock-free storage cache audit
+
+### Changed
+
+- **Storage read cache locking** — `CachedBackend` now publishes immutable cache snapshots with atomic compare-and-swap instead of protecting cache state with a mutex, keeping cache hits lock-free while preserving write invalidation.
+- **Lock-free audit documentation** — added a production mutex inventory and review rule that explains which locks are justified, which should stay off read hot paths, and which storage locks remain acceptable.
+
+### Fixed
+
+- **Volume read/write serialization** — documented `Manager.mu` as a justified mutation boundary and added regression coverage proving `ReadAt` remains serialized with concurrent `WriteAt` for block-object consistency.
+
 ## [0.0.196.0] - 2026-05-14 — feat: 9P read-write support
 
 ### Added

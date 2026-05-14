@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sync"
 	"sync/atomic"
 )
 
@@ -46,31 +45,30 @@ func WithMaxObjectCacheBytes(n int64) CacheOption {
 	return func(cb *CachedBackend) { cb.maxObjBytes = n }
 }
 
-// CachedBackend wraps a Backend with an LRU read cache for object content
-// and metadata. Writes invalidate the corresponding cache entries.
+// CachedBackend wraps a Backend with a bounded read cache for object content
+// and metadata. Cache state is published as immutable atomic snapshots:
+// reads do not take locks, while writes clone and CAS the next snapshot.
+// Writes invalidate the corresponding cache entries.
 type CachedBackend struct {
 	Backend // embedded, all methods delegated by default
 
 	maxBytes    int64
 	maxObjBytes int64
 
-	mu        sync.RWMutex
-	entries   map[string]*lruNode
-	head      *lruNode // most recently used
-	tail      *lruNode // least recently used
-	usedBytes int64
+	state atomic.Pointer[cacheState]
 
 	hits      atomic.Int64
 	misses    atomic.Int64
 	evictions atomic.Int64
 }
 
-// lruNode is a doubly-linked list node for LRU eviction.
-type lruNode struct {
-	key  string
-	val  cacheEntry
-	prev *lruNode
-	next *lruNode
+// cacheState is immutable after publication through CachedBackend.state.
+// Readers load and inspect it without locks; writers clone, mutate, and publish
+// with CompareAndSwap.
+type cacheState struct {
+	entries   map[string]cacheEntry
+	order     []string // oldest -> newest
+	usedBytes int64
 }
 
 // NewCachedBackend creates a caching wrapper around the given backend.
@@ -79,8 +77,8 @@ func NewCachedBackend(backend Backend, opts ...CacheOption) *CachedBackend {
 		Backend:     backend,
 		maxBytes:    defaultMaxCacheBytes,
 		maxObjBytes: defaultMaxObjectCacheBytes,
-		entries:     make(map[string]*lruNode),
 	}
+	cb.state.Store(emptyCacheState())
 	for _, o := range opts {
 		o(cb)
 	}
@@ -98,23 +96,22 @@ func (cb *CachedBackend) Stats() CacheStats {
 
 func cacheKey(bucket, key string) string { return bucket + "/" + key }
 
+func emptyCacheState() *cacheState {
+	return &cacheState{entries: make(map[string]cacheEntry)}
+}
+
 // GetObject returns a cached reader on hit, or fetches from the underlying
 // backend and caches the content on miss.
 func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
 	ck := cacheKey(bucket, key)
 
-	// Fast path: cache hit — hold write lock to safely read node data and update LRU
-	cb.mu.Lock()
-	node, ok := cb.entries[ck]
+	// Fast path: cache hit from immutable atomic snapshot.
+	entry, ok := cb.getCached(ck)
 	if ok {
-		cb.moveToFront(node)
-		data := node.val.data
-		obj := node.val.obj // copy
-		cb.mu.Unlock()
 		cb.hits.Add(1)
-		return io.NopCloser(bytes.NewReader(data)), &obj, nil
+		obj := entry.obj // copy
+		return io.NopCloser(bytes.NewReader(entry.data)), &obj, nil
 	}
-	cb.mu.Unlock()
 
 	// Cache miss: check size before buffering
 	meta, err := cb.Backend.HeadObject(ctx, bucket, key)
@@ -150,15 +147,11 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 func (cb *CachedBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
 	ck := cacheKey(bucket, key)
 
-	cb.mu.Lock()
-	node, ok := cb.entries[ck]
+	entry, ok := cb.getCached(ck)
 	if ok {
-		cb.moveToFront(node)
-		obj := node.val.obj // copy
-		cb.mu.Unlock()
+		obj := entry.obj // copy
 		return &obj, nil
 	}
-	cb.mu.Unlock()
 
 	return cb.Backend.HeadObject(ctx, bucket, key)
 }
@@ -222,14 +215,10 @@ func (cb *CachedBackend) WriteAt(ctx context.Context, bucket, key string, offset
 // For large objects (not cached), bypasses GetObject/Seek overhead entirely.
 func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	ck := cacheKey(bucket, key)
-	cb.mu.Lock()
-	node, ok := cb.entries[ck]
+	entry, ok := cb.getCached(ck)
 	if ok {
-		data := node.val.data
-		cb.mu.Unlock()
-		return bytes.NewReader(data).ReadAt(buf, offset)
+		return bytes.NewReader(entry.data).ReadAt(buf, offset)
 	}
-	cb.mu.Unlock()
 
 	ra, ok := cb.Backend.(PartialIO)
 	if !ok {
@@ -329,11 +318,7 @@ func (cb *CachedBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleB
 	if snap, ok := cb.Backend.(Snapshotable); ok {
 		count, stale, err := snap.RestoreObjects(objects)
 		if err == nil {
-			cb.mu.Lock()
-			cb.entries = make(map[string]*lruNode)
-			cb.head, cb.tail = nil, nil
-			cb.usedBytes = 0
-			cb.mu.Unlock()
+			cb.state.Store(emptyCacheState())
 		}
 		return count, stale, err
 	}
@@ -365,82 +350,98 @@ func (cb *CachedBackend) InvalidateKey(bucket, key string) {
 // invalidate removes a key from the cache.
 func (cb *CachedBackend) invalidate(bucket, key string) {
 	ck := cacheKey(bucket, key)
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	if node, ok := cb.entries[ck]; ok {
-		cb.removeNode(node)
-		delete(cb.entries, ck)
-		cb.usedBytes -= node.val.size
+	for {
+		cur := cb.state.Load()
+		if _, ok := cur.entries[ck]; !ok {
+			return
+		}
+		next := cur.cloneWithout(ck)
+		if cb.state.CompareAndSwap(cur, next) {
+			return
+		}
 	}
 }
 
-// put adds an entry to the cache, evicting LRU entries if necessary.
+// put adds an entry to the cache, evicting the oldest published entries if necessary.
 func (cb *CachedBackend) put(key string, entry cacheEntry) {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	// If already exists, update
-	if node, ok := cb.entries[key]; ok {
-		cb.usedBytes -= node.val.size
-		node.val = entry
-		cb.usedBytes += entry.size
-		cb.moveToFront(node)
+	if entry.size > cb.maxBytes {
 		return
 	}
-
-	// Evict until we have room
-	for cb.usedBytes+entry.size > cb.maxBytes && cb.tail != nil {
-		cb.evictLRU()
-	}
-
-	node := &lruNode{key: key, val: entry}
-	cb.entries[key] = node
-	cb.usedBytes += entry.size
-	cb.addToFront(node)
-}
-
-func (cb *CachedBackend) evictLRU() {
-	if cb.tail == nil {
-		return
-	}
-	victim := cb.tail
-	cb.removeNode(victim)
-	delete(cb.entries, victim.key)
-	cb.usedBytes -= victim.val.size
-	cb.evictions.Add(1)
-}
-
-func (cb *CachedBackend) addToFront(node *lruNode) {
-	node.prev = nil
-	node.next = cb.head
-	if cb.head != nil {
-		cb.head.prev = node
-	}
-	cb.head = node
-	if cb.tail == nil {
-		cb.tail = node
+	for {
+		cur := cb.state.Load()
+		next, evicted := cur.cloneWith(key, entry, cb.maxBytes)
+		if cb.state.CompareAndSwap(cur, next) {
+			if evicted > 0 {
+				cb.evictions.Add(evicted)
+			}
+			return
+		}
 	}
 }
 
-func (cb *CachedBackend) removeNode(node *lruNode) {
-	if node.prev != nil {
-		node.prev.next = node.next
-	} else {
-		cb.head = node.next
+func (cb *CachedBackend) getCached(key string) (cacheEntry, bool) {
+	st := cb.state.Load()
+	if st == nil {
+		return cacheEntry{}, false
 	}
-	if node.next != nil {
-		node.next.prev = node.prev
-	} else {
-		cb.tail = node.prev
-	}
-	node.prev = nil
-	node.next = nil
+	entry, ok := st.entries[key]
+	return entry, ok
 }
 
-func (cb *CachedBackend) moveToFront(node *lruNode) {
-	if cb.head == node {
-		return
+func (s *cacheState) cloneWithout(key string) *cacheState {
+	next := &cacheState{
+		entries:   make(map[string]cacheEntry, len(s.entries)-1),
+		order:     make([]string, 0, len(s.order)),
+		usedBytes: s.usedBytes,
 	}
-	cb.removeNode(node)
-	cb.addToFront(node)
+	for k, v := range s.entries {
+		if k == key {
+			next.usedBytes -= v.size
+			continue
+		}
+		next.entries[k] = v
+	}
+	for _, k := range s.order {
+		if k != key {
+			next.order = append(next.order, k)
+		}
+	}
+	return next
+}
+
+func (s *cacheState) cloneWith(key string, entry cacheEntry, maxBytes int64) (*cacheState, int64) {
+	next := &cacheState{
+		entries:   make(map[string]cacheEntry, len(s.entries)+1),
+		order:     make([]string, 0, len(s.order)+1),
+		usedBytes: s.usedBytes,
+	}
+	for k, v := range s.entries {
+		next.entries[k] = v
+	}
+	for _, k := range s.order {
+		if k != key {
+			next.order = append(next.order, k)
+		}
+	}
+	if old, ok := next.entries[key]; ok {
+		next.usedBytes -= old.size
+	}
+	next.entries[key] = entry
+	next.order = append(next.order, key)
+	next.usedBytes += entry.size
+
+	var evicted int64
+	for next.usedBytes > maxBytes && len(next.order) > 0 {
+		victim := next.order[0]
+		next.order = next.order[1:]
+		if victim == key && len(next.order) == 0 {
+			break
+		}
+		if old, ok := next.entries[victim]; ok {
+			delete(next.entries, victim)
+			next.usedBytes -= old.size
+			evicted++
+		}
+	}
+	return next, evicted
 }

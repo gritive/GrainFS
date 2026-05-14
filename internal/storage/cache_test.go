@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,16 @@ func newTestCachedBackend(t *testing.T, opts ...CacheOption) (*CachedBackend, *L
 
 	cached := NewCachedBackend(backend, opts...)
 	return cached, backend
+}
+
+func TestCachedBackend_DoesNotUseMutexForCacheState(t *testing.T) {
+	typ := reflect.TypeOf(CachedBackend{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.Type.PkgPath() == "sync" && (field.Type.Name() == "Mutex" || field.Type.Name() == "RWMutex") {
+			t.Fatalf("CachedBackend cache state must be lock-free; found %s %s", field.Name, field.Type)
+		}
+	}
 }
 
 func TestCachedBackend_GetObjectCacheHit(t *testing.T) {
