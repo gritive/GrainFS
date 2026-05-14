@@ -299,7 +299,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			}
 			targets := MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
 			if len(targets) == 0 {
-				return nil
+				return fmt.Errorf("audit ship: no leader elected")
 			}
 			return state.quicTransport.Send(ctx, targets[0], &transport.Message{
 				Type:    transport.StreamAuditShip,

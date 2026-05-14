@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // Bootstrap ensures the grainfs-audit bucket, audit namespace, and audit.s3 Iceberg
@@ -18,8 +19,10 @@ import (
 // Call once at startup before starting the Committer.
 func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend auditBackend) error {
 	if err := backend.CreateBucket(ctx, BucketName); err != nil {
-		// ignore "already exists" from the backend layer
-		log.Debug().Err(err).Str("bucket", BucketName).Msg("audit bootstrap: create bucket (may already exist)")
+		if !errors.Is(err, storage.ErrBucketAlreadyExists) {
+			return fmt.Errorf("audit bootstrap: create bucket %q: %w", BucketName, err)
+		}
+		log.Debug().Str("bucket", BucketName).Msg("audit bootstrap: bucket already exists")
 	}
 
 	if err := catalog.CreateNamespace(ctx, []string{Namespace}, nil); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceExists) {
