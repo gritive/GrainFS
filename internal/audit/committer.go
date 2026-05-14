@@ -23,6 +23,8 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+const maxBatchSize = 65536
+
 // auditBackend is the storage subset required by the committer.
 type auditBackend interface {
 	PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error)
@@ -69,7 +71,8 @@ func NewCommitter(cfg CommitterConfig) *Committer {
 func (c *Committer) AppendFromFollower(events []S3Event) {
 	select {
 	case c.followerIn <- events:
-	default: // channel full; events already captured in follower zerolog
+	default: // channel full; events dropped — count them so audit_drops_total stays accurate
+		auditDropsTotal.WithLabelValues(c.cfg.NodeID).Add(float64(len(events)))
 	}
 }
 
@@ -86,12 +89,15 @@ func (c *Committer) Run(ctx context.Context) {
 			if c.cfg.IsLeader() {
 				auditCommitterState.WithLabelValues(nodeID).Set(1)
 				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
-				// drain follower mailbox
+				// drain follower mailbox (capped to avoid unbounded memory growth)
 			followerDrain:
 				for {
 					select {
 					case extra := <-c.followerIn:
 						c.batch = append(c.batch, extra...)
+						if len(c.batch) >= maxBatchSize {
+							break followerDrain
+						}
 					default:
 						break followerDrain
 					}
@@ -101,7 +107,7 @@ func (c *Committer) Run(ctx context.Context) {
 				}
 				start := time.Now()
 				if err := c.commit(ctx, c.batch); err != nil {
-					log.Error().Err(err).Msg("audit committer: commit failed; events retained in zerolog — check audit_committer_state and audit_drops_total metrics")
+					log.Error().Err(err).Msg("audit committer: commit failed; events in this batch are dropped — check audit_committer_state metric")
 				} else {
 					auditCommitLagSeconds.WithLabelValues(nodeID).Observe(time.Since(start).Seconds())
 				}

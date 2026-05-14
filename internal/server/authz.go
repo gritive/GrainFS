@@ -7,6 +7,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -95,6 +96,14 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		hasPolicy := c.QueryArgs().Has("policy")
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
+
+		// Internal system buckets are never accessible via the S3 API.
+		if bucket == audit.BucketName {
+			s.iamAudit.RecordDeny(ctx, iam.PrincipalFromContext(ctx), bucket, key, action, "internal_bucket")
+			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access denied to internal bucket")
+			c.Abort()
+			return
+		}
 
 		// Layer 0: AccessKey bucket scope (always-on; previously gated on
 		// the now-removed sticky `auth_enabled` bit). Bucket-scoped keys

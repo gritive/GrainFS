@@ -286,7 +286,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithAuditEmitter(auditEmitter))
 		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
 		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
-			log.Debug().Err(err).Msg("audit bootstrap deferred to first commit cycle")
+			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
 		}
 		interval := cfg.AuditCommitInterval
 		if interval == 0 {

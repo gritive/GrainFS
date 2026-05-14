@@ -36,6 +36,8 @@ func EncodeS3Batch(events []S3Event) ([]byte, error) {
 	return buf, nil
 }
 
+const maxDecodeBatchSize = 65536
+
 // DecodeS3Batch decodes bytes produced by EncodeS3Batch into S3Events.
 func DecodeS3Batch(data []byte) ([]S3Event, error) {
 	r := &byteReader{data: data}
@@ -44,6 +46,9 @@ func DecodeS3Batch(data []byte) ([]S3Event, error) {
 		return nil, err
 	}
 	count := binary.LittleEndian.Uint32(countBytes)
+	if count > maxDecodeBatchSize {
+		return nil, fmt.Errorf("decode: batch count %d exceeds maximum %d", count, maxDecodeBatchSize)
+	}
 	out := make([]S3Event, 0, count)
 	for i := uint32(0); i < count; i++ {
 		var e S3Event

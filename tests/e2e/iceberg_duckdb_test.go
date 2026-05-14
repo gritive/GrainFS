@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -131,14 +132,10 @@ func TestAuditIcebergSingleDuckDB(t *testing.T) {
 	}
 	writeElapsed := time.Since(writeStart)
 
-	time.Sleep(commitInterval + 4*time.Second)
-
 	queryStart := time.Now()
-	runDuckDBIcebergSQLWithCreds(t, server.endpoint, ak, sk,
-		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
-FROM grainfs_iceberg.audit.s3
-WHERE bucket = 'test-audit-single' AND method = 'PUT';`,
-		fmt.Sprintf("%d", numPuts),
+	countAuditRows(t, server.endpoint, ak, sk,
+		"bucket = 'test-audit-single' AND method = 'PUT'",
+		numPuts, 30*time.Second,
 	)
 	t.Logf("audit_iceberg_single_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
 		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
@@ -321,16 +318,10 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 	}
 	writeElapsed := time.Since(writeStart)
 
-	// Wait for at least one commit cycle to run.
-	time.Sleep(commitInterval + 4*time.Second)
-
-	// Query audit.s3 via DuckDB — expect at least numPuts rows for bucket test-audit.
 	queryStart := time.Now()
-	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
-		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
-FROM grainfs_iceberg.audit.s3
-WHERE bucket = 'test-audit' AND method = 'PUT';`,
-		fmt.Sprintf("%d", numPuts),
+	countAuditRows(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
+		"bucket = 'test-audit' AND method = 'PUT'",
+		numPuts, 30*time.Second,
 	)
 	t.Logf("audit_iceberg_cluster_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
 		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
@@ -378,14 +369,10 @@ func TestAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
 	}
 	writeElapsed := time.Since(writeStart)
 
-	time.Sleep(commitInterval + 4*time.Second)
-
 	queryStart := time.Now()
-	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
-		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
-FROM grainfs_iceberg.audit.s3
-WHERE bucket = 'test-audit-follower' AND method = 'PUT';`,
-		fmt.Sprintf("%d", numPuts),
+	countAuditRows(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
+		"bucket = 'test-audit-follower' AND method = 'PUT'",
+		numPuts, 30*time.Second,
 	)
 	t.Logf("audit_iceberg_cluster_follower_ship_duckdb puts=%d follower_idx=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
 		numPuts, followerIdx, writeElapsed, time.Since(queryStart), time.Since(start))
@@ -433,9 +420,6 @@ func TestAuditIcebergClusterLeaderFlap(t *testing.T) {
 		_ = leaderProc.Process.Signal(syscall.SIGTERM)
 	}
 
-	// Wait for re-election and commit.
-	time.Sleep(commitInterval + 10*time.Second)
-
 	// Find a surviving node.
 	var survivorEndpoint string
 	for i, url := range cluster.httpURLs {
@@ -445,11 +429,35 @@ func TestAuditIcebergClusterLeaderFlap(t *testing.T) {
 		}
 	}
 
-	// At least the pre-flap event should appear.
-	runDuckDBIcebergSQLWithCreds(t, survivorEndpoint, cluster.accessKey, cluster.secretKey,
-		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt FROM grainfs_iceberg.audit.s3 WHERE bucket = 'flap-bucket';`,
-		"1",
+	// Poll until re-election and commit complete.
+	countAuditRows(t, survivorEndpoint, cluster.accessKey, cluster.secretKey,
+		"bucket = 'flap-bucket'",
+		1, 45*time.Second,
 	)
+}
+
+// countAuditRows polls the audit.s3 Iceberg table via DuckDB until the expected
+// count is reached or the timeout expires. Using require.Eventually avoids fixed
+// sleeps that are flaky on slow CI machines.
+func countAuditRows(t *testing.T, endpoint, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		db, err := sql.Open("duckdb", "")
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		q := fmt.Sprintf(`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt FROM grainfs_iceberg.audit.s3 WHERE %s`, whereClause)
+		row := db.QueryRowContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, q))
+		var got string
+		if err := row.Scan(&got); err != nil {
+			return false
+		}
+		n, err := strconv.Atoi(got)
+		return err == nil && n >= want
+	}, timeout, 500*time.Millisecond, "audit rows not committed within %s", timeout)
 }
 
 func duckDBIcebergSQL(endpoint, accessKey, secretKey, query string) string {
