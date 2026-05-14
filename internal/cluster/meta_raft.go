@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
@@ -70,6 +71,8 @@ type MetaRaft struct {
 	// forwardFnWithIndex is used by callers that must wait on the committed
 	// raft index after forwarding through a non-leader.
 	forwardFnWithIndex func(ctx context.Context, data []byte) (uint64, error)
+
+	capabilityGate *CapabilityGate
 
 	// lastApplied is read atomically from waitApplied (hot path).
 	// applyNotifyMu protects applyNotify channel swaps only.
@@ -192,6 +195,10 @@ func (m *MetaRaft) SetForwarder(fn func(ctx context.Context, data []byte) error)
 // callers that need the committed raft index from the leader.
 func (m *MetaRaft) SetForwarderWithIndex(fn func(ctx context.Context, data []byte) (uint64, error)) {
 	m.forwardFnWithIndex = fn
+}
+
+func (m *MetaRaft) SetCapabilityGate(gate *CapabilityGate) {
+	m.capabilityGate = gate
 }
 
 func (m *MetaRaft) wireTransport(t MetaTransport) {
@@ -547,6 +554,14 @@ func (m *MetaRaft) ProposeWithIndex(ctx context.Context, cmdType MetaCmdType, pa
 	return m.proposeOrForwardWithIndex(ctx, m.node, data)
 }
 
+func (m *MetaRaft) ProposeWithGate(ctx context.Context, plan compat.GatePlan, cmdType MetaCmdType, payload []byte) (uint64, error) {
+	data, err := encodeMetaCmd(cmdType, payload)
+	if err != nil {
+		return 0, fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	return m.proposeOrForwardWithGate(ctx, m.node, plan, data)
+}
+
 // proposeOrForward submits data to the local raft node when this node is the
 // leader, otherwise forwards it via the configured forwardFn. Extracted so it
 // can be unit-tested without a real raft node.
@@ -580,6 +595,16 @@ func (m *MetaRaft) proposeOrForwardWithIndex(ctx context.Context, node metaPropo
 		return 0, fmt.Errorf("meta_raft: forward to leader: %w", err)
 	}
 	return 0, nil
+}
+
+func (m *MetaRaft) proposeOrForwardWithGate(ctx context.Context, node metaProposerNode, plan compat.GatePlan, data []byte) (uint64, error) {
+	if m.capabilityGate == nil {
+		return 0, fmt.Errorf("meta_raft: capability gate not configured for %s", plan.Capability)
+	}
+	if err := m.capabilityGate.ValidatePlanStillCurrent(plan); err != nil {
+		return 0, err
+	}
+	return m.proposeOrForwardWithIndex(ctx, node, data)
 }
 
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {
