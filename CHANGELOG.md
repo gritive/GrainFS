@@ -11,6 +11,7 @@
 ### Changed
 
 - **9P write safety** — object mutations now use per-object locks, recovery write-gate protection, backend capability preferences, bounded full-object fallbacks, same-path rename protection, and service shutdown cleanup.
+- **9P fallback write performance** — user-bucket writes now coalesce per-fid `WriteAt` calls and flush once on `FSync`/`Close`, avoiding full-object read-modify-write on every 4 KiB write.
 - **9P serving warning** — `--9p-port` now documents that the 9P endpoint is unauthenticated and should be kept behind a trusted network boundary.
 
 ### Fixed

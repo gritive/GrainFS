@@ -42,7 +42,7 @@ func colimaSSH(args ...string) *exec.Cmd {
 	return exec.Command("colima", append([]string{"ssh", "--"}, args...)...)
 }
 
-func runColimaSSH(t *testing.T, args ...string) string {
+func runColimaSSH(t testing.TB, args ...string) string {
 	t.Helper()
 	out, err := colimaSSH(args...).CombinedOutput()
 	require.NoErrorf(t, err, "colima ssh %v\n%s", args, out)
@@ -99,13 +99,27 @@ func with9PBucketMount(t *testing.T, fn func(mnt string)) {
 	with9PMountAname(t, "/"+colima9PBucket, fn)
 }
 
+func with9PBucketMountB(b *testing.B, fn func(mnt string)) {
+	b.Helper()
+	name := strings.ReplaceAll(b.Name(), "/", "-")
+	mnt := "/mnt/grainfs-9p-" + name
+	runColimaSSH(b, "sudo", "mkdir", "-p", mnt)
+	runColimaSSH(b, "sudo", "mount", "-t", "9p",
+		"-o", fmt.Sprintf("trans=tcp,port=%s,version=9p2000.L,msize=262144,aname=/%s", colima9PPort, colima9PBucket),
+		colimaHostIP, mnt)
+	b.Cleanup(func() {
+		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
+	})
+	fn(mnt)
+}
+
 func with9PMountAname(t *testing.T, aname string, fn func(mnt string)) {
 	t.Helper()
 	name := strings.ReplaceAll(t.Name(), "/", "-")
 	mnt := "/mnt/grainfs-9p-" + name
 	runColimaSSH(t, "sudo", "mkdir", "-p", mnt)
 	runColimaSSH(t, "sudo", "mount", "-t", "9p",
-		"-o", fmt.Sprintf("trans=tcp,port=%s,version=9p2000.L,aname=%s", colima9PPort, aname),
+		"-o", fmt.Sprintf("trans=tcp,port=%s,version=9p2000.L,msize=262144,aname=%s", colima9PPort, aname),
 		colimaHostIP, mnt)
 	t.Cleanup(func() {
 		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
@@ -324,4 +338,28 @@ func Test9P_RenameAndUnlinkVisibleThroughHTTP(t *testing.T) {
 		status, _ := httpGetObject(t, "rename-dst.txt")
 		require.NotEqual(t, http.StatusOK, status)
 	})
+}
+
+func Benchmark9P_Write1MiB(b *testing.B) {
+	const bytesPerRun = 1 << 20
+	cases := []struct {
+		name  string
+		bs    string
+		count string
+	}{
+		{"4KiB_chunks", "4k", "256"},
+		{"64KiB_chunks", "64k", "16"},
+		{"1MiB_chunk", "1M", "1"},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			with9PBucketMountB(b, func(mnt string) {
+				b.SetBytes(bytesPerRun)
+				b.ResetTimer()
+				script := fmt.Sprintf("set -e; for i in $(seq 0 %d); do dd if=/dev/zero of=%s/bench-$i.bin bs=%s count=%s conv=fsync status=none; done",
+					b.N-1, shellQuote(mnt), tc.bs, tc.count)
+				runColimaSSH(b, "sudo", "sh", "-c", script)
+			})
+		})
+	}
 }

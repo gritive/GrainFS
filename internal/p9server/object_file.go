@@ -21,6 +21,10 @@ type objectFile struct {
 	bucket  string
 	key     string
 	meta    *storage.Object
+
+	dirtyLoaded bool
+	dirty       bool
+	dirtyData   []byte
 }
 
 const maxFallbackObjectSize = 64 << 20
@@ -46,6 +50,15 @@ func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 
 func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
 	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}
+	if f.dirtyLoaded {
+		fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
+		valid := p9.AttrMask{Mode: true, Size: true, MTime: true}
+		attr := p9.Attr{
+			Mode: p9.ModeRegular | p9.FileMode(fileMeta.Mode),
+			Size: uint64(len(f.dirtyData)),
+		}
+		return qid, valid, attr, nil
+	}
 	obj, err := f.backend.HeadObject(context.Background(), f.bucket, f.key)
 	if err != nil {
 		return qid, p9.AttrMask{}, p9.Attr{}, syscall.ENOENT
@@ -153,6 +166,9 @@ func (f *objectFile) resize(ctx context.Context, size int64) error {
 }
 
 func (f *objectFile) ReadAt(buf []byte, offset int64) (int, error) {
+	if f.dirtyLoaded {
+		return bytes.NewReader(f.dirtyData).ReadAt(buf, offset)
+	}
 	ctx := context.Background()
 	if pio, ok := partialIOBackend(f.backend); ok && preferReadAt(f.backend, f.bucket) {
 		return pio.ReadAt(ctx, f.bucket, f.key, offset, buf)
@@ -204,46 +220,108 @@ func (f *objectFile) WriteAt(buf []byte, offset int64) (int, error) {
 	if end > maxFallbackObjectSize {
 		return 0, syscall.EFBIG
 	}
-	var existing []byte
-	if obj, err := f.backend.HeadObject(ctx, f.bucket, f.key); err == nil {
-		if obj.Size > maxFallbackObjectSize {
+	if err := f.loadDirty(ctx, offset == 0); err != nil {
+		if errors.Is(err, syscall.EFBIG) {
 			return 0, syscall.EFBIG
 		}
-	} else if !errors.Is(err, storage.ErrObjectNotFound) {
 		return 0, syscall.EIO
 	}
-	rc, _, err := f.backend.GetObject(ctx, f.bucket, f.key)
-	if err != nil {
-		if !errors.Is(err, storage.ErrObjectNotFound) {
+	if int64(len(f.dirtyData)) < end {
+		f.dirtyData = append(f.dirtyData, make([]byte, end-int64(len(f.dirtyData)))...)
+	}
+	copy(f.dirtyData[offset:end], buf)
+	f.dirty = true
+	if isRecoveryWriteGate(f.backend) {
+		if err := f.flush(ctx); err != nil {
 			return 0, syscall.EIO
 		}
-	} else {
-		existing, err = io.ReadAll(io.LimitReader(rc, maxFallbackObjectSize+1))
-		rc.Close()
-		if err != nil {
-			return 0, syscall.EIO
-		}
-		if len(existing) > maxFallbackObjectSize {
-			return 0, syscall.EFBIG
-		}
 	}
-	if int64(len(existing)) < end {
-		existing = append(existing, make([]byte, end-int64(len(existing)))...)
-	}
-	copy(existing[offset:end], buf)
-	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(existing), "application/octet-stream")
-	if err != nil {
-		return 0, syscall.EIO
-	}
-	f.meta = obj
 	return len(buf), nil
 }
 
+func (f *objectFile) loadDirty(ctx context.Context, allowMissing bool) error {
+	if f.dirtyLoaded {
+		return nil
+	}
+	obj, err := f.backend.HeadObject(ctx, f.bucket, f.key)
+	if err != nil {
+		if allowMissing && errors.Is(err, storage.ErrObjectNotFound) {
+			f.dirtyLoaded = true
+			f.dirtyData = nil
+			return nil
+		}
+		return err
+	}
+	if obj.Size > maxFallbackObjectSize {
+		return syscall.EFBIG
+	}
+	rc, _, err := f.backend.GetObject(ctx, f.bucket, f.key)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, maxFallbackObjectSize+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > maxFallbackObjectSize {
+		return syscall.EFBIG
+	}
+	f.dirtyLoaded = true
+	f.dirtyData = data
+	return nil
+}
+
+func isRecoveryWriteGate(backend storage.Backend) bool {
+	for backend != nil {
+		if _, ok := backend.(*storage.RecoveryWriteGate); ok {
+			return true
+		}
+		unwrapper, ok := backend.(backendUnwrapper)
+		if !ok {
+			return false
+		}
+		next := unwrapper.Unwrap()
+		if next == backend {
+			return false
+		}
+		backend = next
+	}
+	return false
+}
+
+func (f *objectFile) flush(ctx context.Context) error {
+	if !f.dirty {
+		return nil
+	}
+	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(f.dirtyData), "application/octet-stream")
+	if err != nil {
+		return err
+	}
+	f.meta = obj
+	f.dirty = false
+	return nil
+}
+
 func (f *objectFile) FSync() error {
+	unlock := f.locks.lock(f.bucket, f.key)
+	defer unlock()
+	if err := f.flush(context.Background()); err != nil {
+		return syscall.EIO
+	}
 	if syncable, ok := f.backend.(storage.Syncable); ok {
 		if err := syncable.Sync(f.bucket, f.key); err != nil {
 			return syscall.EIO
 		}
+	}
+	return nil
+}
+
+func (f *objectFile) Close() error {
+	unlock := f.locks.lock(f.bucket, f.key)
+	defer unlock()
+	if err := f.flush(context.Background()); err != nil {
+		return syscall.EIO
 	}
 	return nil
 }

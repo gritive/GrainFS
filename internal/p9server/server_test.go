@@ -226,6 +226,7 @@ func TestBucketFile_Create_CreatesEmptyObjectAndReturnsWritableFile(t *testing.T
 	require.Equal(t, p9.TypeRegular, qid.Type)
 	_, err = file.(*objectFile).WriteAt([]byte("hello"), 0)
 	require.NoError(t, err)
+	require.NoError(t, file.Close())
 	require.Equal(t, []byte("hello"), readObjectBytes(t, backend, "bkt", "new.txt"))
 	require.Equal(t, uint32(0640), loadP9FileMeta(ctx, backend, "bkt", "new.txt").Mode)
 }
@@ -537,10 +538,17 @@ func TestObjectFile_WriteAt_OverwritesAndExtends(t *testing.T) {
 	n, err := of.WriteAt([]byte("XY"), 2)
 	require.NoError(t, err)
 	require.Equal(t, 2, n)
+	buf := make([]byte, 6)
+	readN, err := of.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, 6, readN)
+	require.Equal(t, []byte("abXYef"), buf)
+	require.NoError(t, of.FSync())
 	require.Equal(t, []byte("abXYef"), readObjectBytes(t, backend, "bkt", "file.bin"))
 	n, err = of.WriteAt([]byte("Z"), 8)
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
+	require.NoError(t, of.Close())
 	require.Equal(t, []byte{'a', 'b', 'X', 'Y', 'e', 'f', 0, 0, 'Z'}, readObjectBytes(t, backend, "bkt", "file.bin"))
 }
 
@@ -565,6 +573,7 @@ func TestObjectFile_WriteAt_FallsBackWhenPartialIOIsNotPreferred(t *testing.T) {
 	n, err := of.WriteAt([]byte("Z"), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
+	require.NoError(t, of.Close())
 	require.Equal(t, []byte("aZc"), readObjectBytes(t, backend, "bkt", "file.txt"))
 	require.False(t, backend.writeAtCalled)
 }
@@ -760,6 +769,43 @@ func BenchmarkObjectFile_ReadAt(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				_, _ = of.ReadAt(buf, 0)
+			}
+		})
+	}
+}
+
+func BenchmarkObjectFile_SequentialWriteAt(b *testing.B) {
+	cases := []struct {
+		name   string
+		bucket string
+	}{
+		{"fast_internal_bucket", "__grainfs_vfs_default"},
+		{"fallback_user_bucket", "bench"},
+	}
+	const (
+		chunkSize = 4 << 10
+		chunks    = 256
+	)
+	payload := bytes.Repeat([]byte("x"), chunkSize)
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(chunkSize * chunks)
+			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				backend, err := storage.NewLocalBackend(b.TempDir())
+				require.NoError(b, err)
+				require.NoError(b, backend.CreateBucket(context.Background(), tc.bucket))
+				obj, err := backend.PutObject(context.Background(), tc.bucket, "bench.bin",
+					bytes.NewReader(nil), "application/octet-stream")
+				require.NoError(b, err)
+				of := &objectFile{backend: backend, locks: newObjectLocks(), bucket: tc.bucket, key: "bench.bin", meta: obj}
+				b.StartTimer()
+				for i := range chunks {
+					_, err := of.WriteAt(payload, int64(i*chunkSize))
+					require.NoError(b, err)
+				}
+				require.NoError(b, of.Close())
 			}
 		})
 	}
