@@ -79,14 +79,14 @@ func parseAuditSearchFilter(c *app.RequestContext) (audit.SearchFilter, error) {
 		Limit: audit.MaxSearchLimit,
 	}
 	if since := queryString(c, "since"); since != "" {
-		ts, err := time.Parse(time.RFC3339, since)
+		ts, err := time.Parse(time.RFC3339Nano, since)
 		if err != nil {
 			return audit.SearchFilter{}, fmt.Errorf("invalid since")
 		}
 		filter.Since = ts
 	}
 	if until := queryString(c, "until"); until != "" {
-		ts, err := time.Parse(time.RFC3339, until)
+		ts, err := time.Parse(time.RFC3339Nano, until)
 		if err != nil {
 			return audit.SearchFilter{}, fmt.Errorf("invalid until")
 		}
