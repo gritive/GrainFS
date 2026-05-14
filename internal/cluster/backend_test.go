@@ -108,16 +108,16 @@ func TestDistributedBackend_CreateAndHeadBucket(t *testing.T) {
 func TestDistributedBackend_TruncateInternalBucketUpdatesPartialWriteObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, storage.NFS4BucketName))
-	_, err := b.WriteAt(ctx, storage.NFS4BucketName, "dir/file.bin", 0, []byte("0123456789"))
+	require.NoError(t, b.CreateBucket(ctx, "__grainfs_vfs_default"))
+	_, err := b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("0123456789"))
 	require.NoError(t, err)
 
-	require.NoError(t, b.Truncate(ctx, storage.NFS4BucketName, "dir/file.bin", 4))
+	require.NoError(t, b.Truncate(ctx, "__grainfs_vfs_default", "dir/file.bin", 4))
 
-	obj, err := b.HeadObject(ctx, storage.NFS4BucketName, "dir/file.bin")
+	obj, err := b.HeadObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
 	require.NoError(t, err)
 	require.EqualValues(t, 4, obj.Size)
-	body, _, err := b.GetObject(ctx, storage.NFS4BucketName, "dir/file.bin")
+	body, _, err := b.GetObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
 	require.NoError(t, err)
 	defer body.Close()
 	got, err := io.ReadAll(body)
@@ -128,14 +128,14 @@ func TestDistributedBackend_TruncateInternalBucketUpdatesPartialWriteObject(t *t
 func TestDistributedBackend_DeleteInternalBucketHardDeletesMetadata(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, storage.NFS4BucketName))
-	_, err := b.WriteAt(ctx, storage.NFS4BucketName, "dir/file.bin", 0, []byte("old"))
+	require.NoError(t, b.CreateBucket(ctx, "__grainfs_vfs_default"))
+	_, err := b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("old"))
 	require.NoError(t, err)
-	require.NoError(t, b.DeleteObject(ctx, storage.NFS4BucketName, "dir/file.bin"))
-	_, err = b.WriteAt(ctx, storage.NFS4BucketName, "dir/file.bin", 0, []byte("new"))
+	require.NoError(t, b.DeleteObject(ctx, "__grainfs_vfs_default", "dir/file.bin"))
+	_, err = b.WriteAt(ctx, "__grainfs_vfs_default", "dir/file.bin", 0, []byte("new"))
 	require.NoError(t, err)
 
-	obj, err := b.HeadObject(ctx, storage.NFS4BucketName, "dir/file.bin")
+	obj, err := b.HeadObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
 	require.NoError(t, err)
 	require.EqualValues(t, 3, obj.Size)
 }

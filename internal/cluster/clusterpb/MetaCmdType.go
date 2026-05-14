@@ -47,6 +47,8 @@ const (
 	MetaCmdTypeMigrationJobStart       MetaCmdType = 37
 	MetaCmdTypeMigrationJobDone        MetaCmdType = 38
 	MetaCmdTypeMigrationJobFailed      MetaCmdType = 39
+	MetaCmdTypeNfsExportUpsert         MetaCmdType = 40
+	MetaCmdTypeNfsExportDelete         MetaCmdType = 41
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -90,6 +92,8 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeMigrationJobStart:       "MigrationJobStart",
 	MetaCmdTypeMigrationJobDone:        "MigrationJobDone",
 	MetaCmdTypeMigrationJobFailed:      "MigrationJobFailed",
+	MetaCmdTypeNfsExportUpsert:         "NfsExportUpsert",
+	MetaCmdTypeNfsExportDelete:         "NfsExportDelete",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -133,6 +137,8 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"MigrationJobStart":       MetaCmdTypeMigrationJobStart,
 	"MigrationJobDone":        MetaCmdTypeMigrationJobDone,
 	"MigrationJobFailed":      MetaCmdTypeMigrationJobFailed,
+	"NfsExportUpsert":         MetaCmdTypeNfsExportUpsert,
+	"NfsExportDelete":         MetaCmdTypeNfsExportDelete,
 }
 
 func (v MetaCmdType) String() string {

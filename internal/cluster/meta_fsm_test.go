@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -206,7 +207,7 @@ func TestMetaFSM_OnShardGroupAdded_AsyncCallbackDoesNotBlockApply(t *testing.T) 
 		select {
 		case <-asyncDone:
 		case <-time.After(2 * time.Second):
-			t.Fatalf("async callback %d did not complete", i)
+			require.Failf(t, "async callback did not complete", "callback index %d", i)
 		}
 	}
 }
@@ -801,6 +802,13 @@ func newTestLifecycleDB(t *testing.T) *badger.DB {
 	return db
 }
 
+func openTestBadgerAt(t *testing.T, dir string) *badger.DB {
+	t.Helper()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	return db
+}
+
 func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
 	f := NewMetaFSM()
 	store := lifecycle.NewStore(newTestLifecycleDB(t))
@@ -831,4 +839,133 @@ func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
 	got, err := store.Get("b1")
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+func TestApplyNfsExportUpsert_WritesStore(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+
+	cfg := nfsexport.Config{ReadOnly: true}
+	payload, err := nfsexport.EncodeUpsertPayload("b1", cfg)
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+
+	got, ok := store.Get("b1")
+	require.True(t, ok)
+	require.Equal(t, nfsexport.Config{ReadOnly: true, FsidMajor: 1, FsidMinor: 1, Generation: 1}, got)
+}
+
+func TestApplyNfsExport_ChangeCallback(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+
+	var calls int
+	f.SetOnNfsExportChange(func() { calls++ })
+
+	cfg := nfsexport.Config{FsidMajor: 1, FsidMinor: 2, Generation: 3}
+	upsertPayload, err := nfsexport.EncodeUpsertPayload("b1", cfg)
+	require.NoError(t, err)
+	upsertData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, upsertPayload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(upsertData))
+
+	deletePayload, err := nfsexport.EncodeDeletePayload("b1")
+	require.NoError(t, err)
+	deleteData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, deletePayload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(deleteData))
+
+	require.Equal(t, 2, calls)
+}
+
+func TestApplyNfsExportUpsert_AllocatorMonotonic(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+
+	for i := 1; i <= 100; i++ {
+		payload, err := nfsexport.EncodeUpsertPayload(fmt.Sprintf("b-%03d", i), nfsexport.Config{})
+		require.NoError(t, err)
+		data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
+		require.NoError(t, err)
+		require.NoError(t, f.applyCmd(data))
+		cfg, ok := store.Get(fmt.Sprintf("b-%03d", i))
+		require.True(t, ok)
+		require.Equal(t, uint64(i), cfg.FsidMinor)
+		require.Equal(t, uint64(1), cfg.Generation)
+	}
+}
+
+func TestApplyNfsExportUpsert_DeleteThenReuse(t *testing.T) {
+	dir := t.TempDir()
+	db := openTestBadgerAt(t, dir)
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	f := NewMetaFSM()
+	f.SetExportStore(store)
+	for _, bucket := range []string{"a", "b", "c"} {
+		payload, err := nfsexport.EncodeUpsertPayload(bucket, nfsexport.Config{})
+		require.NoError(t, err)
+		data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
+		require.NoError(t, err)
+		require.NoError(t, f.applyCmd(data))
+	}
+	deletePayload, err := nfsexport.EncodeDeletePayload("c")
+	require.NoError(t, err)
+	deleteData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, deletePayload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(deleteData))
+	require.NoError(t, db.Close())
+
+	db = openTestBadgerAt(t, dir)
+	defer db.Close()
+	store, err = nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	f = NewMetaFSM()
+	f.SetExportStore(store)
+	payload, err := nfsexport.EncodeUpsertPayload("d", nfsexport.Config{})
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+	cfg, ok := store.Get("d")
+	require.True(t, ok)
+	require.Equal(t, uint64(4), cfg.FsidMinor)
+}
+
+func TestApplyNfsExportDelete_Idempotent(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+	require.NoError(t, store.Put("b1", nfsexport.Config{FsidMinor: 1}))
+
+	payload, err := nfsexport.EncodeDeletePayload("b1")
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+	require.NoError(t, f.applyCmd(data))
+
+	_, ok := store.Get("b1")
+	require.False(t, ok)
+}
+
+func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {
+	f := NewMetaFSM()
+	payload, err := nfsexport.EncodeDeletePayload("b1")
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, payload)
+	require.NoError(t, err)
+
+	applyErr := f.applyCmd(data)
+	require.Error(t, applyErr)
+	require.Contains(t, applyErr.Error(), "NFS export store not wired")
 }

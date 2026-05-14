@@ -8,6 +8,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -49,6 +50,18 @@ func bootMetaRaftWiring(state *bootState) error {
 	// wired before any meta heartbeat hits the wire.
 	state.metaTransport = cluster.NewMetaTransportQUICMux(state.quicTransport, metaRaft.Node(), state.groupRaftMux)
 	metaRaft.SetTransport(state.metaTransport)
+
+	exportStore, err := nfsexport.OpenStore(state.db)
+	if err != nil {
+		return fmt.Errorf("open NFS export store: %w", err)
+	}
+	metaRaft.FSM().SetExportStore(exportStore)
+	metaRaft.FSM().SetExportFsidMajor(1)
+	state.nfsExportSvc = nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:            exportStore,
+		Proposer:         &cluster.NfsExportProposer{Propose: metaRaft.Propose},
+		ClusterNodeCount: func() int { return len(metaRaft.FSM().Nodes()) },
+	})
 
 	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
 	// SetIAM is nil-safe for iamApplier (--no-encryption mode).

@@ -123,6 +123,16 @@ func decodeShardHeader(data []byte) (origSize int64, body []byte, err error) {
 // ECSplit encodes object data into k+m shards ready for per-node storage.
 // Each returned shard already contains the size header. Result length == cfg.NumShards().
 func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
+	if len(data) == 0 {
+		header := encodeShardHeader(0)
+		out := make([][]byte, cfg.NumShards())
+		for i := range out {
+			payload := make([]byte, shardHeaderSize)
+			copy(payload, header[:])
+			out[i] = payload
+		}
+		return out, nil
+	}
 	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec encoder: %w", err)

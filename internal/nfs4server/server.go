@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -19,20 +20,28 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	logger   zerolog.Logger
+	exports  atomic.Pointer[exportSnap]
+
+	exportSource exportSource
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
-// It ensures the NFS storage bucket exists.
+//
+// Phase 0b (D6): boot-time auto-creation of "__grainfs_nfs4" has been removed.
+// Operators must explicitly create buckets and register them as NFS exports
+// (Phase 1+: grainfs nfs export add <bucket>). Legacy data recovery:
+//
+//	grainfs bucket create __grainfs_nfs4
+//	grainfs nfs export add __grainfs_nfs4
 func NewServer(backend storage.Backend) *Server {
 	s := &Server{
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 	}
-	if err := backend.HeadBucket(context.Background(), nfs4Bucket); err != nil {
-		if err := backend.CreateBucket(context.Background(), nfs4Bucket); err != nil {
-			s.logger.Warn().Err(err).Str("bucket", nfs4Bucket).Msg("nfs4: could not create storage bucket")
-		}
+	s.exports.Store(emptySnap)
+	if err := s.RefreshExports(context.Background()); err != nil {
+		s.logger.Warn().Err(err).Msg("nfs4: initial RefreshExports failed; running with empty export set")
 	}
 	return s
 }
@@ -87,13 +96,13 @@ func (s *Server) Addr() net.Addr {
 // so internal/nfs4server does not import internal/cluster. The Server is
 // registered in serveruntime.Run after StartNodeServices returns.
 //
-// Buckets other than nfs4Bucket are no-ops because NFS only ever serves
-// out of its dedicated bucket.
-func (s *Server) Invalidate(bucket, key string) {
-	if bucket != nfs4Bucket {
+// Phase 0b (D6): the legacy dedicated-bucket filter was removed. Phase 3 will
+// restore export-aware filtering using the active export registry.
+func (s *Server) Invalidate(bucket string, key string) {
+	if !s.isExportRegistered(bucket) {
 		return
 	}
-	s.state.InvalidateKey(key)
+	s.state.InvalidateObject(bucket, key)
 }
 
 // connRPCConcurrency caps the number of NFSv4 COMPOUND RPCs processed
@@ -188,7 +197,7 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 		e.Uint32("minorver", req.MinorVer).Ints("ops", ops).Msg("nfs4: COMPOUND")
 	}
 
-	d := getDispatcher(s.backend, s.state)
+	d := getDispatcher(s.backend, s.state, s)
 	defer putDispatcher(d)
 
 	resp := compoundRespPool.Get()
@@ -213,4 +222,33 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 	} else {
 		encodeCompoundResponseInto(w, resp)
 	}
+}
+
+func (s *Server) isExportReadOnly(bucket string) bool {
+	if bucket == "" {
+		return false
+	}
+	cfg, ok := s.loadExports().byBucket[bucket]
+	return ok && cfg.readOnly
+}
+
+func (s *Server) isExportRegistered(bucket string) bool {
+	if bucket == "" {
+		return false
+	}
+	_, ok := s.loadExports().byBucket[bucket]
+	return ok
+}
+
+func (s *Server) exportGeneration(bucket string) uint64 {
+	cfg, ok := s.loadExports().byBucket[bucket]
+	if !ok {
+		return 0
+	}
+	return cfg.generation
+}
+
+func (s *Server) exportFSID(bucket string) (uint64, uint64) {
+	cfg := s.loadExports().byBucket[bucket]
+	return cfg.fsidMajor, cfg.fsidMinor
 }

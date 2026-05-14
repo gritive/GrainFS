@@ -332,6 +332,8 @@ enum MetaCmdType : uint8 {
   MigrationJobStart       = 37, // Migration job: start
   MigrationJobDone        = 38, // Migration job: done
   MigrationJobFailed      = 39, // Migration job: failed
+  NfsExportUpsert         = 40, // NFSv4 multi-export: registry upsert (Phase 1)
+  NfsExportDelete         = 41, // NFSv4 multi-export: registry delete (Phase 1)
 }
 
 table MetaNodeEntry {
@@ -512,6 +514,26 @@ table MetaRotateKeyDropCmd {
 table MetaRotateKeyAbortCmd {
   rotation_id:[ubyte];
   reason:string;                // "operator" 등
+}
+
+// NFSv4 multi-export registry. Per design doc D2/D3/D5.
+// fsid_major = cluster namespace; fsid_minor = monotonic export id;
+// generation increments on every Upsert so Phase 3 FHs from a prior
+// epoch are auto-stale after remove/re-add.
+table NfsExportConfig {
+  read_only:bool = false;
+  fsid_major:uint64 = 0;
+  fsid_minor:uint64 = 0;
+  generation:uint64 = 0;
+}
+
+table NfsExportUpsertCmd {
+  bucket:string;
+  config:NfsExportConfig;
+}
+
+table NfsExportDeleteCmd {
+  bucket:string;
 }
 
 table MetaStateSnapshot {

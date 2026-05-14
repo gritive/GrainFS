@@ -7,6 +7,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -33,6 +34,12 @@ func (n *NodeServices) Close() {
 // (port 0). Exposed so the runtime can register the server's cache
 // invalidator with the cluster registry after StartNodeServices returns.
 func (n *NodeServices) NFS4() *nfs4server.Server { return n.nfs4Srv }
+
+func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
+	if n.nfs4Srv != nil {
+		n.nfs4Srv.SetExportSource(src)
+	}
+}
 
 // StartNodeServices spawns NFSv4 and NBD servers if their respective ports
 // are > 0. Returns the handle for shutdown. ri is an optional ReadIndexer

@@ -39,7 +39,7 @@ func writeFileVia41(t *testing.T, conn net.Conn, sid SessionID, baseXID uint32, 
 		return w.Bytes()
 	}
 
-	// LOOKUP for each path component (assumes single-level path like "filename")
+	// LOOKUP for one path component.
 	lookupOp := func(name string) []byte {
 		w := &XDRWriter{}
 		w.WriteUint32(OpLookup)
@@ -73,7 +73,7 @@ func writeFileVia41(t *testing.T, conn net.Conn, sid SessionID, baseXID uint32, 
 	}
 
 	seqOp := buildSequenceOp(sid, 1, 0, 0, false)
-	compound := buildCompound41(seqOp, putrootOp(), createOp(filePath), writeOp(data))
+	compound := buildCompound41(seqOp, putrootOp(), lookupOp(legacyNFS4Bucket), createOp(filePath), writeOp(data))
 	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(baseXID, compound)))
 	reply, err := readRPCFrame(conn)
 	require.NoError(t, err)
@@ -82,7 +82,7 @@ func writeFileVia41(t *testing.T, conn net.Conn, sid SessionID, baseXID uint32, 
 
 	// LOOKUP to verify the file exists now
 	seqOp2 := buildSequenceOp(sid, 2, 0, 0, false)
-	compound2 := buildCompound41(seqOp2, putrootOp(), lookupOp(filePath))
+	compound2 := buildCompound41(seqOp2, putrootOp(), lookupOp(legacyNFS4Bucket), lookupOp(filePath))
 	require.NoError(t, writeRPCFrame(conn, buildRPCCallFrame(baseXID+1, compound2)))
 	reply2, err := readRPCFrame(conn)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func writeFileVia41(t *testing.T, conn net.Conn, sid SessionID, baseXID uint32, 
 	require.Equal(t, uint32(NFS4_OK), status2, "lookup after write failed")
 }
 
-// buildPutRootFHLookup42 builds PUTROOTFH + LOOKUP chain for a single filename in v4.2.
+// buildPutRootFHLookup42 builds PUTROOTFH + LOOKUP(export) + LOOKUP(file) in v4.2.
 func buildPutRootFHLookup42Ops(name string) [][]byte {
 	putrootOp := func() []byte {
 		w := &XDRWriter{}
@@ -103,7 +103,7 @@ func buildPutRootFHLookup42Ops(name string) [][]byte {
 		w.WriteString(n)
 		return w.Bytes()
 	}
-	return [][]byte{putrootOp(), lookupOp(name)}
+	return [][]byte{putrootOp(), lookupOp(legacyNFS4Bucket), lookupOp(name)}
 }
 
 func buildSeekOp42(offset uint64, whence uint32) []byte {
@@ -180,7 +180,11 @@ func TestSeek_DataWhence(t *testing.T) {
 	r.ReadUint32()
 	r.ReadUint32()
 
-	// Skip LOOKUP result
+	// Skip LOOKUP export result
+	r.ReadUint32()
+	r.ReadUint32()
+
+	// Skip LOOKUP file result
 	r.ReadUint32()
 	r.ReadUint32()
 
@@ -239,7 +243,11 @@ func TestSeek_HoleWhence(t *testing.T) {
 	r.ReadUint32()
 	r.ReadUint32()
 
-	// Skip LOOKUP
+	// Skip LOOKUP export
+	r.ReadUint32()
+	r.ReadUint32()
+
+	// Skip LOOKUP file
 	r.ReadUint32()
 	r.ReadUint32()
 
@@ -257,23 +265,23 @@ func TestSeek_HoleWhence(t *testing.T) {
 func TestCopy_UsesOffsetsAndCount(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
-	_, err = backend.PutObject(context.Background(), nfs4Bucket, "src.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
 	require.NoError(t, err)
-	_, err = backend.PutObject(context.Background(), nfs4Bucket, "dst.bin", bytes.NewReader([]byte("abcdefghij")), "application/octet-stream")
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("abcdefghij")), "application/octet-stream")
 	require.NoError(t, err)
 
 	d := &Dispatcher{
 		backend:     backend,
 		state:       NewStateManager(),
-		savedPath:   "/src.bin",
-		currentPath: "/dst.bin",
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
 	}
 
 	result := d.opCopy(buildCopyArgs42(2, 4, 3))
 
 	require.Equal(t, NFS4_OK, result.Status)
-	body, _, err := backend.GetObject(context.Background(), nfs4Bucket, "dst.bin")
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
 	require.NoError(t, err)
 	defer body.Close()
 	got, err := io.ReadAll(body)
@@ -292,16 +300,16 @@ func TestCopy_UsesOffsetsAndCount(t *testing.T) {
 func TestReadDir_ListsFilesCreatedByPartialWrite(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
-	_, err = backend.WriteAt(context.Background(), nfs4Bucket, "dir/file.bin", 0, []byte("payload"))
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.WriteAt(context.Background(), legacyNFS4Bucket, "dir/file.bin", 0, []byte("payload"))
 	require.NoError(t, err)
 
 	d := &Dispatcher{
 		backend:     backend,
 		state:       NewStateManager(),
-		currentPath: "/dir",
+		currentPath: "/" + legacyNFS4Bucket + "/dir",
 	}
-	d.state.MarkDir("/dir")
+	d.state.MarkDir("/" + legacyNFS4Bucket + "/dir")
 
 	result := d.opReadDir(buildReadDirArgs(1, 4))
 
@@ -334,20 +342,20 @@ func TestReadDir_ListsFilesCreatedByPartialWrite(t *testing.T) {
 func TestOpenCreateRefreshesParentDirMtime(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), nfs4Bucket))
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
 	d := &Dispatcher{
 		backend:     backend,
 		state:       NewStateManager(),
-		currentPath: "/dir",
+		currentPath: "/" + legacyNFS4Bucket + "/dir",
 	}
-	d.state.MarkDir("/dir")
-	before := d.state.DirMtime("/dir")
+	d.state.MarkDir("/" + legacyNFS4Bucket + "/dir")
+	before := d.state.DirMtime("/" + legacyNFS4Bucket + "/dir")
 	time.Sleep(time.Millisecond)
 
 	result := d.opOpen(buildOpenCreateArgs("file.bin"))
 
 	require.Equal(t, NFS4_OK, result.Status)
-	require.Greater(t, d.state.DirMtime("/dir"), before)
+	require.Greater(t, d.state.DirMtime("/"+legacyNFS4Bucket+"/dir"), before)
 }
 
 func TestAllocate_NoOp(t *testing.T) {
@@ -381,14 +389,14 @@ func TestAllocate_UsesTruncateBackend(t *testing.T) {
 	d := &Dispatcher{
 		backend:     backend,
 		state:       NewStateManager(),
-		currentPath: "/alloc-fast.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/alloc-fast.bin",
 	}
 
 	result := d.opAllocate(buildAllocateArgs42(0, 4096))
 
 	require.Equal(t, NFS4_OK, result.Status)
 	require.Equal(t, 1, backend.truncateCalls)
-	assert.Equal(t, nfs4Bucket, backend.truncateBucket)
+	assert.Equal(t, legacyNFS4Bucket, backend.truncateBucket)
 	assert.Equal(t, "alloc-fast.bin", backend.truncateKey)
 	assert.Equal(t, int64(4096), backend.truncateSize)
 	assert.Zero(t, backend.getCalls, "ALLOCATE with Truncatable backend should not read the object")

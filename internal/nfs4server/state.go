@@ -15,6 +15,11 @@ import (
 // Uses UUID generation (not path-based) to prevent stale handle attacks.
 type FileHandle [16]byte
 
+type stateBinding struct {
+	bucket     string
+	generation uint64
+}
+
 // String returns hex representation.
 func (fh FileHandle) String() string {
 	return hex.EncodeToString(fh[:])
@@ -67,6 +72,7 @@ type StateManager struct {
 	fhMu     sync.RWMutex
 	fhToPath map[FileHandle]string
 	pathToFH map[string]FileHandle
+	fhBind   map[FileHandle]stateBinding
 
 	nextClientID atomic.Uint64
 	clients      sync.Map // map[uint64]*ClientState — lock-free reads
@@ -89,7 +95,7 @@ type StateManager struct {
 	// Value type is chan struct{} (buffered 1).
 	writeGates pool.SyncMap[string, chan struct{}]
 
-	// fileMeta caches NFS-specific sidecar metadata by object key.
+	// fileMeta caches NFS-specific sidecar metadata by bucket/object key.
 	fileMeta pool.SyncMap[string, nfsFileMeta]
 
 	// WriteVerf is the 8-byte write verifier returned in COMMIT responses.
@@ -102,6 +108,7 @@ func NewStateManager() *StateManager {
 	sm := &StateManager{
 		fhToPath: make(map[FileHandle]string),
 		pathToFH: make(map[string]FileHandle),
+		fhBind:   make(map[FileHandle]stateBinding),
 	}
 	sm.nextClientID.Store(1)
 	sm.nextStateID.Store(1)
@@ -116,6 +123,22 @@ func NewStateManager() *StateManager {
 	sm.dirs.Store("/", time.Now().UnixNano())
 
 	return sm
+}
+
+func (sm *StateManager) BindFHGeneration(fh FileHandle, bucket string, generation uint64) {
+	if bucket == "" {
+		return
+	}
+	sm.fhMu.Lock()
+	defer sm.fhMu.Unlock()
+	sm.fhBind[fh] = stateBinding{bucket: bucket, generation: generation}
+}
+
+func (sm *StateManager) FHBinding(fh FileHandle) (stateBinding, bool) {
+	sm.fhMu.RLock()
+	defer sm.fhMu.RUnlock()
+	b, ok := sm.fhBind[fh]
+	return b, ok
 }
 
 // MarkDir records path as a known directory with current timestamp.
@@ -202,6 +225,15 @@ func (sm *StateManager) InvalidateKey(key string) {
 	}
 }
 
+func (sm *StateManager) InvalidateObject(bucket, key string) {
+	sm.fileMeta.Delete(fileMetaCacheKey(bucket, key))
+	for _, parent := range []string{pathPkg.Dir("/" + bucket + "/" + key), pathPkg.Dir("/" + key)} {
+		if _, ok := sm.dirs.Load(parent); ok {
+			sm.dirs.Store(parent, time.Now().UnixNano())
+		}
+	}
+}
+
 // InvalidateFH removes the filehandle mapping (e.g., after delete).
 func (sm *StateManager) InvalidateFH(path string) {
 	sm.fhMu.Lock()
@@ -212,6 +244,7 @@ func (sm *StateManager) InvalidateFH(path string) {
 	}
 	delete(sm.fhToPath, fh)
 	delete(sm.pathToFH, path)
+	delete(sm.fhBind, fh)
 }
 
 // RootFH returns the root filehandle.

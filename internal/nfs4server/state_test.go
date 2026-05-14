@@ -95,20 +95,21 @@ func TestStateManager_InvalidateKey_UntrackedParentSkipped(t *testing.T) {
 	assert.False(t, sm.IsDir("/dir"), "InvalidateKey must not synthesize untracked parent dirs")
 }
 
-func TestServer_Invalidate_BucketScoping(t *testing.T) {
+func TestServer_Invalidate_OnlyInvalidatesRegisteredExport(t *testing.T) {
 	// Server.Invalidate is the duck-typed cluster.CacheInvalidator entry.
-	// Different bucket → no-op; matching bucket → InvalidateKey runs.
 	sm := NewStateManager()
-	sm.fileMeta.Store("file.txt", nfsFileMeta{Mode: 0644})
+	sm.fileMeta.Store(fileMetaCacheKey("exported", "file.txt"), nfsFileMeta{Mode: 0644})
+	sm.fileMeta.Store(fileMetaCacheKey("other-bucket", "file.txt"), nfsFileMeta{Mode: 0644})
 	srv := &Server{state: sm}
+	srv.exports.Store(buildSnap(map[string]exportConfig{"exported": {generation: 1}}))
 
 	srv.Invalidate("other-bucket", "file.txt")
-	_, ok := sm.fileMeta.Load("file.txt")
-	assert.True(t, ok, "non-NFS bucket must be ignored")
+	_, ok := sm.fileMeta.Load(fileMetaCacheKey("other-bucket", "file.txt"))
+	assert.True(t, ok, "unregistered export invalidation must be ignored")
 
-	srv.Invalidate(nfs4Bucket, "file.txt")
-	_, ok = sm.fileMeta.Load("file.txt")
-	assert.False(t, ok, "matching bucket must drop fileMeta")
+	srv.Invalidate("exported", "file.txt")
+	_, ok = sm.fileMeta.Load(fileMetaCacheKey("exported", "file.txt"))
+	assert.False(t, ok, "registered export invalidation must drop fileMeta")
 }
 
 func TestStateManager_SetClientID(t *testing.T) {

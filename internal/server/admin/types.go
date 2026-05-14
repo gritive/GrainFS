@@ -98,6 +98,21 @@ type BucketOps interface {
 	SetBucketVersioning(bucket, state string) error
 }
 
+type NfsExportService interface {
+	Upsert(ctx context.Context, bucket string, params NfsExportUpsertParams) error
+	Delete(ctx context.Context, bucket string) error
+	Get(bucket string) (NfsExportInfo, bool)
+	List() []NfsExportInfo
+}
+
+type NfsExportUpsertParams struct {
+	ReadOnly bool
+}
+
+type NfsExportInfo = adminapi.NfsExportInfo
+type NfsExportUpsertReq = adminapi.NfsExportUpsertReq
+type ListNfsExportsResp = adminapi.ListNfsExportsResp
+
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
 type IAMService interface {
@@ -129,6 +144,7 @@ type Deps struct {
 	VolumePlacement VolumePlacementSource // optional; nil disables replica/EC volume health signal
 	IAM             IAMService            // optional; nil disables IAM admin endpoints
 	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
+	NfsExports      NfsExportService      // optional; nil disables NFS export admin endpoints
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string
@@ -149,6 +165,18 @@ func NewUnsupported(msg string, details map[string]any) *Error {
 	return &Error{Code: "unsupported", Message: msg, Details: raw}
 }
 func NewRetry(msg string) *Error { return &Error{Code: "retry", Message: msg} }
+func NewBucketNotFound(bucket string) *Error {
+	return (&Error{Code: "bucket_not_found", Message: "bucket '" + bucket + "' does not exist"}).
+		WithParam("bucket").
+		WithHelp("Create the bucket first with 'grainfs bucket create " + bucket + "', then re-run.").
+		WithDocs("https://github.com/gritive/GrainFS/docs/nfs-export-lifecycle.md#bucket-not-found")
+}
+func NewExportNotFound(bucket string) *Error {
+	return (&Error{Code: "export_not_found", Message: "NFS export '" + bucket + "' is not registered"}).
+		WithParam("bucket").
+		WithHelp("List existing exports with 'grainfs nfs export list'.").
+		WithDocs("https://github.com/gritive/GrainFS/docs/nfs-export-lifecycle.md#export-not-found")
+}
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq
 type WriteAtVolumeResp = adminapi.WriteAtVolumeResp

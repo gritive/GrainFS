@@ -144,6 +144,24 @@ func TestForwardReceiver_ReadAtRead_StreamsOnlyRequestedRange(t *testing.T) {
 	require.Equal(t, body[10:10+8192], got)
 }
 
+func TestForwardReceiver_ReadAt_AllowsShortEOFReply(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	body := []byte("short")
+	_, err := gb.PutObject(context.Background(), "bk", "small", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "small", 0, 128))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+	require.NotNil(t, reply)
+	require.NoError(t, parseReplyStatus(reply.Payload))
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, body, fr.ReadBodyBytes())
+}
+
 func TestForwardReceiver_ListObjectVersions_DispatchesToBackend(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
 	gb := newTestGroupBackend(t, "g1")

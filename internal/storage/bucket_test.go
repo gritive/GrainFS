@@ -34,7 +34,9 @@ func TestIsInternalBucket(t *testing.T) {
 		bucket string
 		want   bool
 	}{
-		{"__grainfs_nfs4", true},
+		// Phase 0b (D6): __grainfs_nfs4 hard-removed from internal namespace.
+		// Now treated as a regular bucket name so admin API can manage it.
+		{"__grainfs_nfs4", false},
 		{"__grainfs_vfs_default", true},
 		{"__grainfs_volumes", true},
 		{"my-bucket", false},

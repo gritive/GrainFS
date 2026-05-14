@@ -99,6 +99,14 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 	if storage.IsInternalBucket(name) {
 		return NewForbidden("cannot delete internal bucket")
 	}
+	if d.NfsExports != nil {
+		if _, ok := d.NfsExports.Get(name); ok {
+			return NewConflict("bucket has an NFS export; remove the export first", map[string]any{
+				"bucket": name,
+				"hint":   "grainfs nfs export remove " + name,
+			})
+		}
+	}
 	var err error
 	if force {
 		err = d.Buckets.ForceDeleteBucket(ctx, name)

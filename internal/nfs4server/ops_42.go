@@ -33,10 +33,10 @@ func (d *Dispatcher) opSeek(data []byte) OpResult {
 		return OpResult{OpCode: OpSeek, Status: NFS4ERR_NOFILEHANDLE}
 	}
 
-	key := pathToKey(d.currentPath)
+	bucket, key := extractBucketAndKey(d.currentPath)
 	var fileSize int64
 	if d.backend != nil {
-		if info, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err == nil {
+		if info, err := d.backend.HeadObject(context.Background(), bucket, key); err == nil {
 			fileSize = info.Size
 		}
 	}
@@ -77,7 +77,10 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	offset, _ := r.ReadUint64()
 	length, _ := r.ReadUint64()
 
-	key := pathToKey(d.currentPath)
+	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.server != nil && d.server.isExportReadOnly(bucket) {
+		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_ROFS}
+	}
 	if d.backend == nil {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
@@ -94,20 +97,20 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 
 	// Recheck size inside the lock to avoid TOCTOU: another writer may have
 	// extended the file between an earlier HeadObject and now.
-	if info, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err == nil && info.Size >= required {
+	if info, err := d.backend.HeadObject(context.Background(), bucket, key); err == nil && info.Size >= required {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
 	if tr, ok := truncatableBackend(d.backend); ok {
-		if err := tr.Truncate(context.Background(), nfs4Bucket, key, required); err != nil {
+		if err := tr.Truncate(context.Background(), bucket, key, required); err != nil {
 			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 		}
-		d.state.InvalidateKey(key)
+		d.state.InvalidateObject(bucket, key)
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
 	var existing []byte
-	if body, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, key); err == nil {
+	if body, _, err := d.backend.GetObject(context.Background(), bucket, key); err == nil {
 		existing, err = io.ReadAll(body)
 		body.Close()
 		if err != nil {
@@ -117,10 +120,10 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 	if int64(len(existing)) < required {
 		existing = append(existing, make([]byte, required-int64(len(existing)))...)
 	}
-	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+	if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 	}
-	d.state.InvalidateKey(key)
+	d.state.InvalidateObject(bucket, key)
 	return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 }
 
@@ -138,19 +141,22 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 	offset, _ := r.ReadUint64()
 	length, _ := r.ReadUint64()
 
-	key := pathToKey(d.currentPath)
+	bucket, key := extractBucketAndKey(d.currentPath)
+	if d.server != nil && d.server.isExportReadOnly(bucket) {
+		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_ROFS}
+	}
 	if d.backend == nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 	}
 
-	if info, err := d.backend.HeadObject(context.Background(), nfs4Bucket, key); err == nil && info.Size > maxObjectBytes {
+	if info, err := d.backend.HeadObject(context.Background(), bucket, key); err == nil && info.Size > maxObjectBytes {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_NOTSUPP}
 	}
 
 	release := d.state.LockPath(d.currentPath)
 	defer release()
 
-	body, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, key)
+	body, _, err := d.backend.GetObject(context.Background(), bucket, key)
 	if err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
 	}
@@ -173,10 +179,10 @@ func (d *Dispatcher) opDeallocate(data []byte) OpResult {
 		copy(current[offset:end], zeros)
 	}
 
-	if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
+	if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(current), "application/octet-stream"); err != nil {
 		return OpResult{OpCode: OpDeallocate, Status: NFS4ERR_IO}
 	}
-	d.state.InvalidateKey(key)
+	d.state.InvalidateObject(bucket, key)
 	return OpResult{OpCode: OpDeallocate, Status: NFS4_OK}
 }
 
@@ -196,15 +202,23 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	dstOffset, _ := r.ReadUint64()
 	count, _ := r.ReadUint64()
 
-	srcKey := pathToKey(d.savedPath)
-	dstKey := pathToKey(d.currentPath)
+	srcPath := d.savedPath
+	dstPath := d.currentPath
+	srcBucket, srcKey := extractBucketAndKey(srcPath)
+	dstBucket, dstKey := extractBucketAndKey(dstPath)
+	if srcBucket != dstBucket {
+		return OpResult{OpCode: OpCopy, Status: NFS4ERR_XDEV}
+	}
+	if d.server != nil && d.server.isExportReadOnly(dstBucket) {
+		return OpResult{OpCode: OpCopy, Status: NFS4ERR_ROFS}
+	}
 
 	if d.backend == nil {
 		return OpResult{OpCode: OpCopy, Status: NFS4_OK}
 	}
 
 	releaseSrc := d.state.LockPath(d.savedPath)
-	srcBody, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, srcKey)
+	srcBody, _, err := d.backend.GetObject(context.Background(), srcBucket, srcKey)
 	if err != nil {
 		releaseSrc()
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
@@ -229,12 +243,12 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	release := d.state.LockPath(d.currentPath)
 	defer release()
 	if partial, ok := partialIOBackend(d.backend); ok {
-		if _, err := partial.WriteAt(context.Background(), nfs4Bucket, dstKey, dstOffset, srcData); err != nil {
+		if _, err := partial.WriteAt(context.Background(), dstBucket, dstKey, dstOffset, srcData); err != nil {
 			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 		}
 	} else {
 		var dstData []byte
-		if dstBody, _, err := d.backend.GetObject(context.Background(), nfs4Bucket, dstKey); err == nil {
+		if dstBody, _, err := d.backend.GetObject(context.Background(), dstBucket, dstKey); err == nil {
 			dstData, err = io.ReadAll(dstBody)
 			dstBody.Close()
 			if err != nil {
@@ -249,11 +263,11 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 			dstData = append(dstData, make([]byte, int(endOffset)-len(dstData))...)
 		}
 		copy(dstData[dstOffset:endOffset], srcData)
-		if _, err := d.backend.PutObject(context.Background(), nfs4Bucket, dstKey, bytes.NewReader(dstData), "application/octet-stream"); err != nil {
+		if _, err := d.backend.PutObject(context.Background(), dstBucket, dstKey, bytes.NewReader(dstData), "application/octet-stream"); err != nil {
 			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 		}
 	}
-	d.state.InvalidateKey(dstKey)
+	d.state.InvalidateObject(dstBucket, dstKey)
 
 	// RFC 7862 §15.2: return COPY4resok { write_response4, cr_consecutive, cr_synchronous }
 	// write_response4: wr_callback_id<1>=[] + wr_bytes_written + wr_stable + wr_writeverf(8)
@@ -277,12 +291,4 @@ func (d *Dispatcher) opIOAdvise(_ []byte) OpResult {
 	w.WriteUint32(1) // bitmap length = 1
 	w.WriteUint32(0) // no hints honored
 	return OpResult{OpCode: OpIOAdvise, Status: NFS4_OK, Data: xdrWriterBytes(w)}
-}
-
-// pathToKey strips the leading "/" from NFS paths to form storage keys.
-func pathToKey(p string) string {
-	if len(p) > 0 && p[0] == '/' {
-		return p[1:]
-	}
-	return p
 }

@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.187.0] - 2026-05-14 — feat: NFSv4 multi-export registry and routing
+
+### Added
+
+- **NFS export registry** — cluster metadata now stores NFS export registrations with stable fsid/generation fields, and the admin API plus `grainfs nfs export` CLI can add, update, list, and remove exports.
+- **NFSv4 pseudo-root multi-export routing** — NFS clients can browse registered buckets under the pseudo-root and route file operations to the selected bucket instead of the legacy fixed bucket.
+- **Read-only export enforcement** — write, create, remove, rename, setattr, allocate, deallocate, and copy operations now reject mutations against read-only exports.
+- **Export lifecycle E2E coverage** — CLI lifecycle tests cover export add/update/remove JSON output, missing-bucket rejection, and fsid/generation fields.
+- **Fail-closed export lifecycle** — bucket deletion now rejects exported buckets instead of best-effort cascading the export first, and multi-node clusters reject NFS export mutations until a full propagation barrier is wired.
+- **`GRAINFS_LOG_LEVEL` fallback** — `grainfs --log-level` still wins when explicitly provided, otherwise the CLI uses `GRAINFS_LOG_LEVEL` before falling back to `info`.
+
+### Changed
+
+- **NFSv4 legacy bucket hard removal** — `__grainfs_nfs4` is no longer an internal bucket and the NFSv4 server no longer auto-creates or routes through it.
+- **E2E parallelism control** — `make test-e2e` now runs per-test invocations in parallel via `E2E_TEST_JOBS` (default `2`; set `E2E_TEST_JOBS=1` for serial execution).
+- **NFS metadata cache keys** — NFSv4 metadata invalidation and file metadata cache entries are now bucket-aware.
+
+### Fixed
+
+- **Forwarded short reads** — cluster `ReadAt` forwarding now preserves short EOF reads instead of converting them to internal errors.
+- **Empty EC objects** — EC-backed user buckets now accept zero-byte object writes, matching create/truncate flows used by NFS clients.
+- **Deterministic export fsid allocation** — NFS export fsid minor and generation values are now assigned during meta-Raft apply, avoiding stale local-service allocation decisions.
+- **Cross-export guards** — NFSv4 rename/copy across different exports now returns `NFS4ERR_XDEV`, and destination writes use the destination bucket.
+- **Stale export handles** — filehandles bound to an older export generation now expire with `NFS4ERR_FHEXPIRED`; removed exports return `NFS4ERR_ADMIN_REVOKED`.
+- **Live export refresh** — Raft-applied export registry changes now refresh the running NFSv4 server snapshot instead of requiring restart.
+
 ## [0.0.186.1] - 2026-05-14 — docs: DX polish — NFS/NBD/Iceberg Quick Start
 
 ### Added

@@ -38,6 +38,7 @@ func readFileBytes(t *testing.T, conn net.Conn, xid uint32, name string, offset 
 	t.Helper()
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp(name),
 		buildReadOp(offset, count),
 	)
@@ -50,7 +51,9 @@ func readFileBytes(t *testing.T, conn net.Conn, xid uint32, name string, offset 
 	r.ReadUint32()
 	r.ReadUint32() // PUTROOTFH
 	r.ReadUint32()
-	r.ReadUint32() // LOOKUP
+	r.ReadUint32() // LOOKUP export
+	r.ReadUint32()
+	r.ReadUint32() // LOOKUP file
 	r.ReadUint32()
 	r.ReadUint32() // READ opcode+status
 	r.ReadUint32() // eof
@@ -63,6 +66,7 @@ func writeAt(t *testing.T, conn net.Conn, xid uint32, name string, offset uint64
 	t.Helper()
 	compound := buildCompound40(
 		buildPutRootFHOp(),
+		buildLookupOp(legacyNFS4Bucket),
 		buildLookupOp(name),
 		buildWriteOp(offset, data),
 	)

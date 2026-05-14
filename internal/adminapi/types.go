@@ -18,6 +18,9 @@ type Error struct {
 	Code    string          `json:"code"`
 	Message string          `json:"error"`
 	Details json.RawMessage `json:"details,omitempty"`
+	Param   string          `json:"param,omitempty"`
+	Help    string          `json:"help,omitempty"`
+	DocsURL string          `json:"docs_url,omitempty"`
 
 	// Status mirrors the HTTP status code. Not serialized.
 	Status int `json:"-"`
@@ -42,6 +45,24 @@ func (e *Error) Unwrap() error { return e.cause }
 func (e *Error) WithCause(cause error) *Error {
 	copy := *e
 	copy.cause = cause
+	return &copy
+}
+
+func (e *Error) WithParam(p string) *Error {
+	copy := *e
+	copy.Param = p
+	return &copy
+}
+
+func (e *Error) WithHelp(h string) *Error {
+	copy := *e
+	copy.Help = h
+	return &copy
+}
+
+func (e *Error) WithDocs(u string) *Error {
+	copy := *e
+	copy.DocsURL = u
 	return &copy
 }
 
@@ -102,6 +123,23 @@ type VlogCategoryBytes struct {
 type VlogSmokeReport struct {
 	Live  []string `json:"live"`
 	Stale []string `json:"stale"`
+}
+
+type NfsExportInfo struct {
+	Bucket     string `json:"bucket"`
+	ReadOnly   bool   `json:"read_only"`
+	FsidMajor  uint64 `json:"fsid_major"`
+	FsidMinor  uint64 `json:"fsid_minor"`
+	Generation uint64 `json:"generation"`
+}
+
+type NfsExportUpsertReq struct {
+	Bucket   string `json:"bucket,omitempty"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+type ListNfsExportsResp struct {
+	Exports []NfsExportInfo `json:"exports"`
 }
 
 // DashboardTokenResp describes the dashboard URL and token shown to operators.

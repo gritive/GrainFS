@@ -1273,8 +1273,11 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		body := fr.ReadBodyBytes()
 		n := copy(buf, body)
-		if n != len(buf) || n != len(body) {
+		if n != len(body) {
 			return n, ErrForwardBodySizeMismatch
+		}
+		if n < len(buf) {
+			return n, io.EOF
 		}
 		return n, nil
 	}

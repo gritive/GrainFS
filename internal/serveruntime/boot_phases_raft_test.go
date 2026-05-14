@@ -39,6 +39,7 @@ func TestBootMetaRaftWiring_PopulatesState(t *testing.T) {
 	require.NoError(t, bootMetaRaftWiring(state))
 	require.NotNil(t, state.metaRaft, "state.metaRaft populated")
 	require.NotNil(t, state.metaTransport, "state.metaTransport populated")
+	require.NotNil(t, state.nfsExportSvc, "NFS export service populated")
 	// Wiring phase has no callbacks; downstream phases register them.
 	assert.Nil(t, state.dgMgr, "DataGroupManager not yet constructed")
 	assert.Nil(t, state.clusterRouter, "Router not yet constructed")

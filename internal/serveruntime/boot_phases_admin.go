@@ -67,6 +67,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		VolumePlacement: NewVolumePlacementAdapter(state.metaRaft),
 		IAM:             state.iamAdminAPI,
 		Buckets:         storage.NewOperations(state.backend),
+		NfsExports:      &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
