@@ -164,7 +164,7 @@ func shouldSkipStartupRecoveryDir(root, path string) bool {
 		first = rel[:i]
 	}
 	switch first {
-	case "groups", "shared-raft-log":
+	case ".recovery", "groups", "shared-raft-log":
 		return true
 	default:
 		return false

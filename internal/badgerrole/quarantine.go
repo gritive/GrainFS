@@ -1,7 +1,6 @@
 package badgerrole
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,12 +47,8 @@ func QuarantineRole(req QuarantineRequest) (QuarantineResult, error) {
 		Reason:         req.Reason,
 		CommittedAt:    req.Now,
 	}
-	body, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return QuarantineResult{}, fmt.Errorf("quarantine %s: marshal manifest: %w", req.Role, err)
-	}
 	manifestPath := filepath.Join(dst, "recovery-manifest.json")
-	if err := os.WriteFile(manifestPath, append(body, '\n'), 0o644); err != nil {
+	if err := writeJSONFileAtomic(manifestPath, result, 0o644); err != nil {
 		return QuarantineResult{}, fmt.Errorf("quarantine %s: write manifest: %w", req.Role, err)
 	}
 	if err := syncDir(dst); err != nil {

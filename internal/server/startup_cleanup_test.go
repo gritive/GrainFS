@@ -77,6 +77,7 @@ func TestStartupRecovery_SkipsRaftBadgerInternalDirs(t *testing.T) {
 	for _, p := range []string{
 		filepath.Join(root, "groups", "group-1", "raft", "000001.sst.tmp"),
 		filepath.Join(root, "shared-raft-log", "000002.sst.tmp"),
+		filepath.Join(root, ".recovery", "entries", "entry-1.tmp"),
 	} {
 		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 		require.NoError(t, os.WriteFile(p, []byte("badger-internal"), 0o644))
@@ -89,6 +90,7 @@ func TestStartupRecovery_SkipsRaftBadgerInternalDirs(t *testing.T) {
 	require.NoFileExists(t, oldShardTmp)
 	require.FileExists(t, filepath.Join(root, "groups", "group-1", "raft", "000001.sst.tmp"))
 	require.FileExists(t, filepath.Join(root, "shared-raft-log", "000002.sst.tmp"))
+	require.FileExists(t, filepath.Join(root, ".recovery", "entries", "entry-1.tmp"))
 }
 
 func TestStartupRecovery_DeletesOldMultipartParts(t *testing.T) {
