@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.190.1] - 2026-05-14 — spike: Iceberg/DuckDB audit round-trip spike
+
+### Added
+
+- **Audit Iceberg spike** — `internal/audit/spike_test.go` (`//go:build spike`) validates that `storage.LocalBackend` + `icebergcatalog.NewStore` + `apache/iceberg-go` + `pqarrow` can produce a valid Iceberg v2 table that DuckDB `iceberg_scan` reads back via local file path. Passes 100% with DuckDB v1.5.2.
+- **ADR 2026-05-14** — `docs/adr/2026-05-14-audit-iceberg-spike-results.md` documents five findings (API usability, catalog semantics, `LocalBackend` path convention, DuckDB `allow_moved_paths` bug workaround, metadata.json direct-build pattern) and decisions D-SP-1..5 for the production audit committer plan.
+- **Dependencies** — `apache/iceberg-go v0.5.0`, `apache/arrow-go/v18 v18.6.0`, `hamba/avro/v2 v2.31.0` added to support the spike test and future production audit committer work.
+
 ## [0.0.190.0] - 2026-05-14 — feat: NFSv4.1 RFC 8881 audit
 
 ### Added
