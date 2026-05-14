@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -73,4 +75,22 @@ func TestCapabilityGateRejectsAfterConfigEpochChange(t *testing.T) {
 	plan := compat.GatePlan{ConfigID: 11}
 	g.SetMetaRaftSnapshot(12, cfg)
 	require.Error(t, g.ValidatePlanStillCurrent(plan))
+}
+
+func TestMetaFSMCapabilityEvidenceRequiresMigrationAndIAMWiring(t *testing.T) {
+	f := NewMetaFSM()
+	ev := f.CapabilityEvidence("node-1", time.Unix(10, 0))
+	if ev.Capabilities[compat.CapabilityMigrationCutoverV1] {
+		t.Fatal("migration_cutover_v1 must not be advertised before IAM and migration are wired")
+	}
+}
+
+func TestMetaFSMCapabilityEvidenceAdvertisesAfterWiring(t *testing.T) {
+	f := NewMetaFSM()
+	iamStore := iam.NewStore()
+	f.SetIAM(iamStore, iam.NewApplier(iamStore, nil))
+	f.SetMigration(migration.NewJobStore(newMigrationTestDB(t)))
+	ev := f.CapabilityEvidence("node-1", time.Unix(10, 0))
+	require.True(t, ev.Capabilities[compat.CapabilityMigrationCutoverV1])
+	require.True(t, ev.Ready)
 }

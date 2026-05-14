@@ -613,6 +613,21 @@ func (f *MetaFSM) ActiveFeatures() compat.ActiveFeatures {
 	return f.activeFeatures
 }
 
+func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Evidence {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	caps := map[string]bool{}
+	if f.iamApplier != nil && f.migrationStore != nil {
+		caps[compat.CapabilityMigrationCutoverV1] = true
+	}
+	return compat.Evidence{
+		NodeID:       compat.NodeID(nodeID),
+		Capabilities: caps,
+		LastSeen:     now,
+		Ready:        true,
+	}
+}
+
 func (f *MetaFSM) applyCapabilityActivate(payload []byte) error {
 	cmd := clusterpb.GetRootAsMetaCapabilityActivateCmd(payload, 0)
 	capability := string(cmd.Capability())
