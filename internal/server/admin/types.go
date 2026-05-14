@@ -101,6 +101,7 @@ type BucketOps interface {
 type NfsExportService interface {
 	Upsert(ctx context.Context, bucket string, params NfsExportUpsertParams) error
 	Delete(ctx context.Context, bucket string) error
+	DeleteAfterBucketDelete(ctx context.Context, bucket string, force bool) error
 	Get(bucket string) (NfsExportInfo, bool)
 	List() []NfsExportInfo
 }

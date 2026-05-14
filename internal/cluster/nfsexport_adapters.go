@@ -26,3 +26,11 @@ func (p *NfsExportProposer) ProposeDelete(ctx context.Context, bucket string) (u
 	}
 	return p.Propose(ctx, clusterpb.MetaCmdTypeNfsExportDelete, payload)
 }
+
+func (p *NfsExportProposer) ProposeBucketDeleteCascade(ctx context.Context, bucket string, force bool) (uint64, error) {
+	payload, err := nfsexport.EncodeBucketDeleteCascadePayload(bucket, force)
+	if err != nil {
+		return 0, err
+	}
+	return p.Propose(ctx, clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade, payload)
+}

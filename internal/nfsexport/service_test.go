@@ -14,6 +14,7 @@ type fakeProposer struct {
 	err       error
 	upserts   []Config
 	deletes   []string
+	cascades  []string
 	fsidMajor uint64
 }
 
@@ -48,6 +49,12 @@ func (p *indexedFakeProposer) ProposeDelete(_ context.Context, bucket string) (u
 	return p.nextIndex, p.store.Delete(bucket)
 }
 
+func (p *indexedFakeProposer) ProposeBucketDeleteCascade(_ context.Context, bucket string, _ bool) (uint64, error) {
+	p.nextIndex++
+	p.deletes = append(p.deletes, bucket)
+	return p.nextIndex, p.store.Delete(bucket)
+}
+
 func (p *fakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) (uint64, error) {
 	if p.err != nil {
 		return 0, p.err
@@ -63,6 +70,14 @@ func (p *fakeProposer) ProposeDelete(_ context.Context, bucket string) (uint64, 
 	}
 	p.deletes = append(p.deletes, bucket)
 	return uint64(len(p.upserts) + len(p.deletes)), p.store.Delete(bucket)
+}
+
+func (p *fakeProposer) ProposeBucketDeleteCascade(_ context.Context, bucket string, _ bool) (uint64, error) {
+	if p.err != nil {
+		return 0, p.err
+	}
+	p.cascades = append(p.cascades, bucket)
+	return uint64(len(p.upserts) + len(p.deletes) + len(p.cascades)), p.store.Delete(bucket)
 }
 
 func newTestService(t *testing.T) (*badger.DB, *Store, *fakeProposer, *ExportService) {

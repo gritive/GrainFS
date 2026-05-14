@@ -20,6 +20,10 @@ func (a *NfsExportServiceAdapter) Delete(ctx context.Context, bucket string) err
 	return a.Svc.Delete(ctx, bucket)
 }
 
+func (a *NfsExportServiceAdapter) DeleteAfterBucketDelete(ctx context.Context, bucket string, force bool) error {
+	return a.Svc.DeleteAfterBucketDelete(ctx, bucket, force)
+}
+
 func (a *NfsExportServiceAdapter) Get(bucket string) (NfsExportInfo, bool) {
 	cfg, ok := a.Svc.Get(bucket)
 	if !ok {

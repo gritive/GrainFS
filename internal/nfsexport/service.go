@@ -11,6 +11,7 @@ var ErrPropagationBarrierRequired = errors.New("nfsexport: propagation barrier r
 type Proposer interface {
 	ProposeUpsert(ctx context.Context, bucket string, cfg Config) (uint64, error)
 	ProposeDelete(ctx context.Context, bucket string) (uint64, error)
+	ProposeBucketDeleteCascade(ctx context.Context, bucket string, force bool) (uint64, error)
 }
 
 type PropagationBarrier interface {
@@ -77,6 +78,23 @@ func (s *ExportService) Delete(ctx context.Context, bucket string) error {
 		return err
 	}
 	idx, err := s.proposer.ProposeDelete(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	return s.waitApplied(ctx, idx)
+}
+
+func (s *ExportService) DeleteAfterBucketDelete(ctx context.Context, bucket string, force bool) error {
+	if bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	if s.proposer == nil {
+		return fmt.Errorf("nfsexport: proposer not configured")
+	}
+	if err := s.ensurePropagationSupported(); err != nil {
+		return err
+	}
+	idx, err := s.proposer.ProposeBucketDeleteCascade(ctx, bucket, force)
 	if err != nil {
 		return err
 	}

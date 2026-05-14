@@ -25,6 +25,10 @@ func (p *fakeNfsExportProposer) ProposeDelete(_ context.Context, bucket string) 
 	return 1, p.store.Delete(bucket)
 }
 
+func (p *fakeNfsExportProposer) ProposeBucketDeleteCascade(_ context.Context, bucket string, _ bool) (uint64, error) {
+	return 1, p.store.Delete(bucket)
+}
+
 type recordingNfsBarrier struct{ indexes []uint64 }
 
 func (b *recordingNfsBarrier) WaitApplied(_ context.Context, index uint64) error {
@@ -113,20 +117,42 @@ func TestAdminNfsExportUpdateMissing(t *testing.T) {
 	require.Equal(t, "export_not_found", ae.Code)
 }
 
-func TestAdminDeleteBucketRejectsExportedBucket(t *testing.T) {
+func TestAdminDeleteBucketCascadesNfsExportAfterBucketDelete(t *testing.T) {
 	d, buckets := newAdminTestDepsWithNfs(t)
 	buckets.buckets["b1"] = true
 	ctx := context.Background()
 	_, err := admin.AdminNfsExportUpsert(ctx, d, admin.NfsExportUpsertReq{Bucket: "b1"})
 	require.NoError(t, err)
 
-	err = admin.AdminDeleteBucket(ctx, d, "b1", true)
+	require.NoError(t, admin.AdminDeleteBucket(ctx, d, "b1", true))
+	_, ok := d.NfsExports.Get("b1")
+	require.False(t, ok)
+	require.False(t, buckets.buckets["b1"])
+}
+
+func TestAdminDeleteBucketDoesNotRemoveExportWhenBucketDeleteFails(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: &fakeNfsExportProposer{store: store},
+	})
+	d := &admin.Deps{
+		Buckets:    &fakeBucketOpsNotEmpty{},
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	require.NoError(t, err)
+
+	err = admin.AdminDeleteBucket(context.Background(), d, "b1", false)
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
 	require.Equal(t, "conflict", ae.Code)
 	_, ok := d.NfsExports.Get("b1")
 	require.True(t, ok)
-	require.True(t, buckets.buckets["b1"])
 }
 
 func TestAdminNfsExportAllowsMultiNodeWhenBarrierIsWired(t *testing.T) {
