@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.196.0] - 2026-05-14 — feat: 9P read-write support
+
+### Added
+
+- **9P read-write objects** — Linux v9fs clients can create, overwrite, truncate, chmod/touch, rename, unlink, and fsync bucket objects through `grainfs serve --9p-port`.
+- **9P metadata sidecars** — mode and mtime are stored under a protected `__meta/` namespace that is hidden from 9P directory listings and rejected for direct 9P access.
+- **Colima read-write coverage** — `tests/9p_colima` verifies mounted 9P writes, signed HTTP visibility, stale-tail truncation, metadata operations, rename, unlink, and fsync.
+
+### Changed
+
+- **9P write safety** — object mutations now use per-object locks, recovery write-gate protection, backend capability preferences, bounded full-object fallbacks, same-path rename protection, and service shutdown cleanup.
+- **9P fallback write performance** — user-bucket writes now coalesce per-fid `WriteAt` calls and flush once on `FSync`/`Close`, avoiding full-object read-modify-write on every 4 KiB write.
+- **9P serving warning** — `--9p-port` now documents that the 9P endpoint is unauthenticated and should be kept behind a trusted network boundary.
+
+### Fixed
+
+- **9P user-bucket read fast path** — read capability preference is separate from write preference, preserving partial reads when partial writes are disabled for user buckets.
+
 ## [0.0.195.0] - 2026-05-14 — feat: rolling upgrade capability gates
 
 ### Added

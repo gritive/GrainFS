@@ -27,6 +27,11 @@ type NodeServices struct {
 
 // Close shuts down any started services. Safe to call on the zero value.
 func (n *NodeServices) Close() {
+	if n.p9Srv != nil {
+		if err := n.p9Srv.Close(); err != nil {
+			log.Warn().Err(err).Msg("9p server close error")
+		}
+	}
 	if n.nbdSrv != nil {
 		if err := n.nbdSrv.Close(); err != nil {
 			log.Warn().Err(err).Msg("nbd server close error")
@@ -54,7 +59,7 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 // are > 0. Returns the handle for shutdown. ri is an optional ReadIndexer
 // for linearizable NBD reads (nil = no gate).
 func StartNodeServices(ctx context.Context, backend storage.Backend,
-	volMgr *volume.Manager, nfs4Port, nbdPort, p9Port int, ri nbd.ReadIndexer,
+	volMgr *volume.Manager, nfs4Port, nbdPort int, p9Bind string, p9Port int, ri nbd.ReadIndexer,
 ) *NodeServices {
 	svc := &NodeServices{}
 
@@ -84,7 +89,10 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 	if p9Port > 0 {
 		svc.p9Srv = p9server.NewServer(backend)
 		go func() {
-			addr := fmt.Sprintf(":%d", p9Port)
+			if p9Bind == "" {
+				p9Bind = "127.0.0.1"
+			}
+			addr := net.JoinHostPort(p9Bind, fmt.Sprintf("%d", p9Port))
 			if err := svc.p9Srv.ListenAndServe(ctx, addr); err != nil && ctx.Err() == nil {
 				log.Error().Err(err).Msg("9p server error")
 			}

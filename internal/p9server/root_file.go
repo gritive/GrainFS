@@ -12,18 +12,19 @@ import (
 type rootFile struct {
 	noopFile
 	backend storage.Backend
+	locks   *objectLocks
 }
 
 func (f *rootFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &rootFile{backend: f.backend}, nil
+		return nil, &rootFile{backend: f.backend, locks: f.locks}, nil
 	}
 	bucket := names[0]
 	if err := f.backend.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, nil, syscall.ENOENT
 	}
 	bqid := p9.QID{Type: p9.TypeDir, Path: qidPath(bucket)}
-	bf := &bucketFile{backend: f.backend, bucket: bucket}
+	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: bucket}
 	if len(names) == 1 {
 		return []p9.QID{bqid}, bf, nil
 	}
