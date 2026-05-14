@@ -9,10 +9,12 @@ import (
 
 // EncodeS3Batch serializes a slice of S3Events to binary.
 // Wire format: [4B count LE][events...]
-// Each event: [8B Ts][2B+str NodeID][2B+str RequestID][2B+str SAID][2B+str SourceIP]
+// Each event: [8B Ts][2B+str EventID][2B+str NodeID][2B+str RequestID][2B+str SAID][2B+str SourceIP]
 //
-//	[1B+str Method][2B+str Bucket][2B+str Key]
-//	[4B Status][8B BytesIn][8B BytesOut][4B LatencyMs][2B+str ErrClass]
+//	[2B+str UserAgent][1B+str Method][2B+str Operation][2B+str Bucket][2B+str Key][2B+str Subresource]
+//	[4B Status][2B+str AuthStatus][8B BytesIn][8B BytesOut][4B LatencyMs]
+//	[2B+str ErrClass][2B+str ErrReason][2B+str VersionID][2B+str UploadID]
+//	[2B+str CopySourceBucket][2B+str CopySourceKey]
 func EncodeS3Batch(events []S3Event) ([]byte, error) {
 	buf := make([]byte, 0, len(events)*128)
 	var hdr [4]byte
@@ -20,18 +22,28 @@ func EncodeS3Batch(events []S3Event) ([]byte, error) {
 	buf = append(buf, hdr[:]...)
 	for _, e := range events {
 		buf = appendInt64LE(buf, e.Ts)
+		buf = appendString16(buf, e.EventID)
 		buf = appendString16(buf, e.NodeID)
 		buf = appendString16(buf, e.RequestID)
 		buf = appendString16(buf, e.SAID)
 		buf = appendString16(buf, e.SourceIP)
+		buf = appendString16(buf, e.UserAgent)
 		buf = appendString8(buf, e.Method)
+		buf = appendString16(buf, e.Operation)
 		buf = appendString16(buf, e.Bucket)
 		buf = appendString16(buf, e.Key)
+		buf = appendString16(buf, e.Subresource)
 		buf = appendInt32LE(buf, e.Status)
+		buf = appendString16(buf, e.AuthStatus)
 		buf = appendInt64LE(buf, e.BytesIn)
 		buf = appendInt64LE(buf, e.BytesOut)
 		buf = appendInt32LE(buf, e.LatencyMs)
 		buf = appendString16(buf, e.ErrClass)
+		buf = appendString16(buf, e.ErrReason)
+		buf = appendString16(buf, e.VersionID)
+		buf = appendString16(buf, e.UploadID)
+		buf = appendString16(buf, e.CopySourceBucket)
+		buf = appendString16(buf, e.CopySourceKey)
 	}
 	return buf, nil
 }
@@ -55,6 +67,9 @@ func DecodeS3Batch(data []byte) ([]S3Event, error) {
 		if e.Ts, err = r.readInt64LE(); err != nil {
 			return nil, fmt.Errorf("event %d ts: %w", i, err)
 		}
+		if e.EventID, err = r.readString16(); err != nil {
+			return nil, err
+		}
 		if e.NodeID, err = r.readString16(); err != nil {
 			return nil, err
 		}
@@ -67,7 +82,13 @@ func DecodeS3Batch(data []byte) ([]S3Event, error) {
 		if e.SourceIP, err = r.readString16(); err != nil {
 			return nil, err
 		}
+		if e.UserAgent, err = r.readString16(); err != nil {
+			return nil, err
+		}
 		if e.Method, err = r.readString8(); err != nil {
+			return nil, err
+		}
+		if e.Operation, err = r.readString16(); err != nil {
 			return nil, err
 		}
 		if e.Bucket, err = r.readString16(); err != nil {
@@ -76,7 +97,13 @@ func DecodeS3Batch(data []byte) ([]S3Event, error) {
 		if e.Key, err = r.readString16(); err != nil {
 			return nil, err
 		}
+		if e.Subresource, err = r.readString16(); err != nil {
+			return nil, err
+		}
 		if e.Status, err = r.readInt32LE(); err != nil {
+			return nil, err
+		}
+		if e.AuthStatus, err = r.readString16(); err != nil {
 			return nil, err
 		}
 		if e.BytesIn, err = r.readInt64LE(); err != nil {
@@ -89,6 +116,21 @@ func DecodeS3Batch(data []byte) ([]S3Event, error) {
 			return nil, err
 		}
 		if e.ErrClass, err = r.readString16(); err != nil {
+			return nil, err
+		}
+		if e.ErrReason, err = r.readString16(); err != nil {
+			return nil, err
+		}
+		if e.VersionID, err = r.readString16(); err != nil {
+			return nil, err
+		}
+		if e.UploadID, err = r.readString16(); err != nil {
+			return nil, err
+		}
+		if e.CopySourceBucket, err = r.readString16(); err != nil {
+			return nil, err
+		}
+		if e.CopySourceKey, err = r.readString16(); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

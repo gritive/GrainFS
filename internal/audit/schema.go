@@ -11,19 +11,29 @@ const (
 // S3Event is one row of the audit.s3 Iceberg table.
 // Ts is Unix microseconds (Iceberg TIMESTAMPTZ → int64 μs since epoch).
 type S3Event struct {
-	Ts        int64
-	NodeID    string
-	RequestID string
-	SAID      string
-	SourceIP  string
-	Method    string
-	Bucket    string
-	Key       string
-	Status    int32
-	BytesIn   int64
-	BytesOut  int64
-	LatencyMs int32
-	ErrClass  string
+	Ts               int64
+	EventID          string
+	NodeID           string
+	RequestID        string
+	SAID             string
+	SourceIP         string
+	UserAgent        string
+	Method           string
+	Operation        string
+	Bucket           string
+	Key              string
+	Subresource      string
+	Status           int32
+	AuthStatus       string
+	BytesIn          int64
+	BytesOut         int64
+	LatencyMs        int32
+	ErrClass         string
+	ErrReason        string
+	VersionID         string
+	UploadID         string
+	CopySourceBucket string
+	CopySourceKey    string
 }
 
 // S3InitialMetadata is the Iceberg v2 metadata.json for an empty audit.s3 table.
