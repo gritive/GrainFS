@@ -176,6 +176,8 @@ curl -s http://localhost:9000/api/incidents | jq '.[] | select(.cause | startswi
 grep -E "badger role startup probe|badger startup recovery|optional badger role disabled" /var/log/grainfs/production.log
 ```
 
+Failures that happen before the incident-state DB opens are also written under `<data>/.recovery/entries/`. Do not delete that directory during triage; the next boot that can open incident-state imports pending entries and marks them under `<data>/.recovery/imported/`.
+
 - `badger_startup_blocked` or `badger_open_failed` with `block_startup`: restore the named Badger role from a clean snapshot, or fix the disk, lock, or permission error before retrying startup.
 - `badger_read_only_admitted` or log message `badger startup recovery read-only gate enabled`: read paths remain available, but storage writes and mutating admin APIs return HTTP 503 with code `RecoveryReadOnly`. Repair or restore the failed group-state role, then restart and verify normal writes.
 - `disable_feature`: the server started without the optional role. Receipts, dedup, or incident-state behavior may be unavailable until the role directory is repaired and the process restarts.

@@ -189,6 +189,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.AddCleanup(func() { resourcewatch.DeregisterDB(incidentVlogEntry) })
 		incidentStore := badgerstore.New(incidentDB)
 		incidentRecorder = incident.NewRecorder(incidentStore, incident.NewReducer())
+		if imported, err := importBadgerRecoveryJournal(ctx, incidentStore, dataDir); err != nil {
+			log.Warn().Err(err).Msg("badger recovery journal import failed")
+		} else if imported > 0 {
+			log.Info().Int("imported", imported).Msg("badger recovery journal imported")
+		}
 		state.distBackend.SetIncidentRecorder(incidentRecorder)
 		srvOpts = append(srvOpts, server.WithIncidentStore(incidentStore))
 		guardDeps := resourceguard.Deps{
