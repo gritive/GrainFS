@@ -128,7 +128,7 @@ func (m *Manager) List() ([]*Snapshot, error) {
 	}
 	var snaps []*Snapshot
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.gz") {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.zst") {
 			continue
 		}
 		snap, err := readSnapshot(filepath.Join(m.dir, e.Name()))
@@ -179,7 +179,7 @@ func (m *Manager) Delete(seq uint64) error {
 }
 
 func (m *Manager) path(seq uint64) string {
-	return filepath.Join(m.dir, "snapshot-"+strconv.FormatUint(seq, 10)+".json.gz")
+	return filepath.Join(m.dir, "snapshot-"+strconv.FormatUint(seq, 10)+".json.zst")
 }
 
 // ErrNotFound indicates the snapshot does not exist.
