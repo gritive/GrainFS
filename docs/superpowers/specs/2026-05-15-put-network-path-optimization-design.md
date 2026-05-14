@@ -38,7 +38,7 @@ The existing shape is sound: Raft and Meta-Raft carry control and metadata, not 
 
 ## Phase A: Measurement
 
-Extend the existing PUT stage instrumentation, reusing `observePutStage` where possible. Add only missing attribution points.
+Add benchmark-only per-request PUT trace attribution. Do not add new Prometheus metrics, labels, or dashboards in Phase A. Existing `observePutStage` metrics may remain as supporting signals, but the Phase A report source of truth is the JSONL trace emitted during benchmark runs.
 
 Coordinator measurements:
 
@@ -74,6 +74,19 @@ Success criteria:
 - Benchmark output can identify the dominant p95/p99 stage for small objects and large objects.
 - The report distinguishes local leader path from forwarded path.
 - Phase B changes are not started until this attribution exists.
+
+Required report fields:
+
+- `ingress`: `local_leader` or `forwarded_non_leader`.
+- `size_class`: `small` or `large`.
+- `forward_mode`: `none`, `frame`, or `stream`.
+- `group_id`.
+- `forward_attempts`.
+- `leader_hint_used`, `not_leader_retries`.
+- `forwarded_bytes`.
+- `slowest_shard_p99_ms`.
+- `meta_index_propose_count_p99`, split by `receiver` and `coordinator` trace events.
+- dominant per-request stage at p95/p99.
 
 ## Phase B: Conservative Optimizations
 
