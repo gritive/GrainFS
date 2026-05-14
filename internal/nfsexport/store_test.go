@@ -42,6 +42,20 @@ func TestStoreDeleteIdempotent(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestStorePutAdvancesAllocator(t *testing.T) {
+	db, store := openTestStore(t, t.TempDir())
+	defer db.Close()
+
+	require.NoError(t, store.Put("seed", Config{FsidMajor: 1, FsidMinor: 7, Generation: 1}))
+	got, err := store.GetAllocator()
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), got)
+
+	cfg, err := store.ApplyUpsert("next", false, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(8), cfg.FsidMinor)
+}
+
 func TestStoreReopenRehydratesSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	db, store := openTestStore(t, dir)

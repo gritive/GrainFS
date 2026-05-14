@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type fakeRoute struct {
@@ -70,30 +71,18 @@ func TestRunAddHappyDryRunAndQuiet(t *testing.T) {
 	}})
 	defer srv.Close()
 	base, out, _ := optsForServer(srv)
-	if err := RunAdd(context.Background(), AddExportOptions{BaseOptions: base, Bucket: "b1"}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !strings.Contains(out.String(), `added NFS export "b1"`) {
-		t.Fatalf("unexpected output: %s", out.String())
-	}
+	require.NoError(t, RunAdd(context.Background(), AddExportOptions{BaseOptions: base, Bucket: "b1"}))
+	require.Contains(t, out.String(), `added NFS export "b1"`)
 
 	out.Reset()
-	if err := RunAdd(context.Background(), AddExportOptions{BaseOptions: BaseOptions{Stdout: out}, Bucket: "b1", DryRun: true}); err != nil {
-		t.Fatalf("dry-run err: %v", err)
-	}
-	if !strings.Contains(out.String(), "would add") {
-		t.Fatalf("unexpected dry-run output: %s", out.String())
-	}
+	require.NoError(t, RunAdd(context.Background(), AddExportOptions{BaseOptions: BaseOptions{Stdout: out}, Bucket: "b1", DryRun: true}))
+	require.Contains(t, out.String(), "Would add export 'b1' (rw)")
 
 	out.Reset()
 	quietBase := base
 	quietBase.Quiet = true
-	if err := RunAdd(context.Background(), AddExportOptions{BaseOptions: quietBase, Bucket: "b1"}); err != nil {
-		t.Fatalf("quiet err: %v", err)
-	}
-	if out.Len() != 0 {
-		t.Fatalf("quiet wrote output: %s", out.String())
-	}
+	require.NoError(t, RunAdd(context.Background(), AddExportOptions{BaseOptions: quietBase, Bucket: "b1"}))
+	require.Empty(t, out.String())
 }
 
 func TestRunAddBucketNotFound(t *testing.T) {
@@ -104,12 +93,9 @@ func TestRunAddBucketNotFound(t *testing.T) {
 	defer srv.Close()
 	base, _, errBuf := optsForServer(srv)
 	err := RunAdd(context.Background(), AddExportOptions{BaseOptions: base, Bucket: "missing"})
-	if !IsBucketNotFound(err) {
-		t.Fatalf("expected bucket_not_found, got %v", err)
-	}
-	if !strings.Contains(errBuf.String(), "Hint:") || !strings.Contains(errBuf.String(), "Docs:") {
-		t.Fatalf("expected rendered help/docs, got %s", errBuf.String())
-	}
+	require.Truef(t, IsBucketNotFound(err), "expected bucket_not_found, got %v", err)
+	require.Contains(t, errBuf.String(), "Hint:")
+	require.Contains(t, errBuf.String(), "Docs:")
 }
 
 func TestRunListJSONAndText(t *testing.T) {
@@ -119,28 +105,19 @@ func TestRunListJSONAndText(t *testing.T) {
 	}})
 	defer srv.Close()
 	base, out, _ := optsForServer(srv)
-	if err := RunList(context.Background(), ListExportOptions{BaseOptions: base}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !strings.Contains(out.String(), "BUCKET") || !strings.Contains(out.String(), "1.2") {
-		t.Fatalf("unexpected text: %s", out.String())
-	}
+	require.NoError(t, RunList(context.Background(), ListExportOptions{BaseOptions: base}))
+	require.Contains(t, out.String(), "BUCKET")
+	require.Contains(t, out.String(), "1.2")
 
 	out.Reset()
 	base.JSONOut = true
-	if err := RunList(context.Background(), ListExportOptions{BaseOptions: base}); err != nil {
-		t.Fatalf("json err: %v", err)
-	}
-	if !strings.Contains(out.String(), `"bucket": "b1"`) {
-		t.Fatalf("unexpected json: %s", out.String())
-	}
+	require.NoError(t, RunList(context.Background(), ListExportOptions{BaseOptions: base}))
+	require.Contains(t, out.String(), `"bucket": "b1"`)
 }
 
 func TestRunRemove204(t *testing.T) {
 	srv := newFakeServer(t, []fakeRoute{{method: "DELETE", path: "/v1/nfs/exports/b1", status: 204}})
 	defer srv.Close()
 	base, _, _ := optsForServer(srv)
-	if err := RunRemove(context.Background(), RemoveExportOptions{BaseOptions: base, Bucket: "b1"}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	require.NoError(t, RunRemove(context.Background(), RemoveExportOptions{BaseOptions: base, Bucket: "b1"}))
 }

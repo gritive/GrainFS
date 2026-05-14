@@ -37,7 +37,7 @@ func RunAdd(ctx context.Context, opts AddExportOptions) error {
 	}
 	if opts.DryRun {
 		if !opts.Quiet {
-			fmt.Fprintf(stdout(opts.BaseOptions), "would add NFS export %q\n", opts.Bucket)
+			fmt.Fprintf(stdout(opts.BaseOptions), "Would add export '%s' (%s)\n", opts.Bucket, modeWord(opts.ReadOnly))
 		}
 		return nil
 	}
@@ -63,7 +63,7 @@ func RunUpdate(ctx context.Context, opts UpdateExportOptions) error {
 	}
 	if opts.DryRun {
 		if !opts.Quiet {
-			fmt.Fprintf(stdout(opts.BaseOptions), "would update NFS export %q\n", opts.Bucket)
+			fmt.Fprintf(stdout(opts.BaseOptions), "Would update export '%s' (%s)\n", opts.Bucket, modeWord(opts.ReadOnly))
 		}
 		return nil
 	}
@@ -89,7 +89,7 @@ func RunRemove(ctx context.Context, opts RemoveExportOptions) error {
 	}
 	if opts.DryRun {
 		if !opts.Quiet {
-			fmt.Fprintf(stdout(opts.BaseOptions), "would remove NFS export %q\n", opts.Bucket)
+			fmt.Fprintf(stdout(opts.BaseOptions), "Would remove export '%s'\n", opts.Bucket)
 		}
 		return nil
 	}
@@ -136,4 +136,11 @@ func renderMutation(opts BaseOptions, quiet bool, verb string, info NfsExportInf
 	_, err := fmt.Fprintf(stdout(opts), "%s NFS export %q (%s, fsid=%d.%d, gen=%d)\n",
 		verb, info.Bucket, mode, info.FsidMajor, info.FsidMinor, info.Generation)
 	return err
+}
+
+func modeWord(readOnly bool) string {
+	if readOnly {
+		return "ro"
+	}
+	return "rw"
 }

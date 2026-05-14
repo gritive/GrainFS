@@ -3,8 +3,6 @@ package nfsexport
 import (
 	"context"
 	"fmt"
-	"sync"
-	"sync/atomic"
 )
 
 type Proposer interface {
@@ -17,10 +15,9 @@ type PropagationBarrier interface {
 }
 
 type ServiceConfig struct {
-	Store     *Store
-	Proposer  Proposer
-	Barrier   PropagationBarrier
-	FsidMajor uint64
+	Store    *Store
+	Proposer Proposer
+	Barrier  PropagationBarrier
 }
 
 type UpsertParams struct {
@@ -28,31 +25,17 @@ type UpsertParams struct {
 }
 
 type ExportService struct {
-	store     *Store
-	proposer  Proposer
-	barrier   PropagationBarrier
-	fsidMajor uint64
-	nextMinor atomic.Uint64
-	mu        sync.Mutex
+	store    *Store
+	proposer Proposer
+	barrier  PropagationBarrier
 }
 
 func NewExportService(cfg ServiceConfig) *ExportService {
 	s := &ExportService{
-		store:     cfg.Store,
-		proposer:  cfg.Proposer,
-		barrier:   cfg.Barrier,
-		fsidMajor: cfg.FsidMajor,
+		store:    cfg.Store,
+		proposer: cfg.Proposer,
+		barrier:  cfg.Barrier,
 	}
-	var maxMinor uint64
-	if cfg.Store != nil {
-		snap := cfg.Store.Snapshot()
-		for _, name := range snap.SortedNames() {
-			if cfg, ok := snap.Get(name); ok && cfg.FsidMinor > maxMinor {
-				maxMinor = cfg.FsidMinor
-			}
-		}
-	}
-	s.nextMinor.Store(maxMinor)
 	return s
 }
 
@@ -66,19 +49,7 @@ func (s *ExportService) Upsert(ctx context.Context, bucket string, p UpsertParam
 	if s.proposer == nil {
 		return fmt.Errorf("nfsexport: proposer not configured")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	prev, exists := s.store.Get(bucket)
-	cfg := Config{
-		ReadOnly:   p.ReadOnly,
-		FsidMajor:  s.fsidMajor,
-		FsidMinor:  prev.FsidMinor,
-		Generation: prev.Generation + 1,
-	}
-	if !exists || cfg.FsidMinor == 0 {
-		cfg.FsidMinor = s.nextMinor.Add(1)
-	}
+	cfg := Config{ReadOnly: p.ReadOnly}
 	if err := s.proposer.ProposeUpsert(ctx, bucket, cfg); err != nil {
 		return err
 	}
@@ -92,8 +63,6 @@ func (s *ExportService) Delete(ctx context.Context, bucket string) error {
 	if s.proposer == nil {
 		return fmt.Errorf("nfsexport: proposer not configured")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.proposer.ProposeDelete(ctx, bucket); err != nil {
 		return err
 	}

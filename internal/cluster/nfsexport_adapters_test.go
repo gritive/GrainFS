@@ -19,7 +19,7 @@ func TestNfsExportProposerProposeUpsert(t *testing.T) {
 		return nil
 	}}
 
-	cfg := nfsexport.Config{ReadOnly: true, FsidMajor: 1, FsidMinor: 2, Generation: 3}
+	cfg := nfsexport.Config{ReadOnly: true}
 	require.NoError(t, p.ProposeUpsert(context.Background(), "b1", cfg))
 	require.Equal(t, clusterpb.MetaCmdTypeNfsExportUpsert, gotType)
 	bucket, gotCfg, err := nfsexport.DecodeUpsertPayload(gotPayload)

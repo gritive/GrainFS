@@ -10,10 +10,11 @@ import (
 )
 
 type fakeProposer struct {
-	store   *Store
-	err     error
-	upserts []Config
-	deletes []string
+	store     *Store
+	err       error
+	upserts   []Config
+	deletes   []string
+	fsidMajor uint64
 }
 
 func (p *fakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) error {
@@ -21,7 +22,8 @@ func (p *fakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Confi
 		return p.err
 	}
 	p.upserts = append(p.upserts, cfg)
-	return p.store.Put(bucket, cfg)
+	_, err := p.store.ApplyUpsert(bucket, cfg.ReadOnly, p.fsidMajor)
+	return err
 }
 
 func (p *fakeProposer) ProposeDelete(_ context.Context, bucket string) error {
@@ -35,8 +37,8 @@ func (p *fakeProposer) ProposeDelete(_ context.Context, bucket string) error {
 func newTestService(t *testing.T) (*badger.DB, *Store, *fakeProposer, *ExportService) {
 	t.Helper()
 	db, store := openTestStore(t, t.TempDir())
-	p := &fakeProposer{store: store}
-	svc := NewExportService(ServiceConfig{Store: store, Proposer: p, FsidMajor: 7})
+	p := &fakeProposer{store: store, fsidMajor: 7}
+	svc := NewExportService(ServiceConfig{Store: store, Proposer: p})
 	return db, store, p, svc
 }
 
@@ -50,7 +52,7 @@ func TestExportServiceUpsertAssignsMinorAndGeneration(t *testing.T) {
 	require.Equal(t, uint64(7), cfg.FsidMajor)
 	require.NotZero(t, cfg.FsidMinor)
 	require.Equal(t, uint64(1), cfg.Generation)
-	require.Equal(t, cfg, p.upserts[0])
+	require.Equal(t, Config{}, p.upserts[0])
 }
 
 func TestExportServiceUpsertKeepsMinorAndBumpsGeneration(t *testing.T) {

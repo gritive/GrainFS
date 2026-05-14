@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 func buildTestNfsRoot() *cobra.Command {
@@ -41,15 +41,11 @@ func TestNfsExportAddCmdHappyPath(t *testing.T) {
 	root.SetContext(context.Background())
 	root.SetArgs([]string{"nfs", "--endpoint", sock, "export", "add", "my-data"})
 
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\n%s", err, out.String())
-	}
-	if gotMethod != "POST" || gotBody["bucket"] != "my-data" || gotBody["read_only"] != false {
-		t.Fatalf("unexpected request: method=%s body=%v", gotMethod, gotBody)
-	}
-	if !strings.Contains(out.String(), `added NFS export "my-data"`) {
-		t.Fatalf("unexpected output: %s", out.String())
-	}
+	require.NoError(t, root.Execute(), out.String())
+	require.Equal(t, "POST", gotMethod)
+	require.Equal(t, "my-data", gotBody["bucket"])
+	require.Equal(t, false, gotBody["read_only"])
+	require.Contains(t, out.String(), `added NFS export "my-data"`)
 }
 
 func TestNfsExportAddCmdDryRun(t *testing.T) {
@@ -58,12 +54,8 @@ func TestNfsExportAddCmdDryRun(t *testing.T) {
 	root.SetOut(&out)
 	root.SetContext(context.Background())
 	root.SetArgs([]string{"nfs", "export", "add", "my-data", "--dry-run"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if !strings.Contains(out.String(), `would add NFS export "my-data"`) {
-		t.Fatalf("unexpected output: %s", out.String())
-	}
+	require.NoError(t, root.Execute())
+	require.Contains(t, out.String(), `Would add export 'my-data' (rw)`)
 }
 
 func TestNfsExportRemoveCmdHappyPath(t *testing.T) {
@@ -79,15 +71,9 @@ func TestNfsExportRemoveCmdHappyPath(t *testing.T) {
 	root.SetOut(&out)
 	root.SetContext(context.Background())
 	root.SetArgs([]string{"nfs", "--endpoint", sock, "export", "remove", "my-data"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if gotMethod != "DELETE" {
-		t.Fatalf("method=%s", gotMethod)
-	}
-	if !strings.Contains(out.String(), `removed NFS export "my-data"`) {
-		t.Fatalf("unexpected output: %s", out.String())
-	}
+	require.NoError(t, root.Execute())
+	require.Equal(t, "DELETE", gotMethod)
+	require.Contains(t, out.String(), `removed NFS export "my-data"`)
 }
 
 func TestNfsExportUpdateCmdRO(t *testing.T) {
@@ -106,42 +92,41 @@ func TestNfsExportUpdateCmdRO(t *testing.T) {
 	root.SetOut(&out)
 	root.SetContext(context.Background())
 	root.SetArgs([]string{"nfs", "--endpoint", sock, "export", "update", "my-data", "--ro"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if gotMethod != "PATCH" || gotBody["read_only"] != true {
-		t.Fatalf("unexpected request: %s %v", gotMethod, gotBody)
-	}
-	if !strings.Contains(out.String(), `updated NFS export "my-data"`) {
-		t.Fatalf("unexpected output: %s", out.String())
-	}
+	require.NoError(t, root.Execute())
+	require.Equal(t, "PATCH", gotMethod)
+	require.Equal(t, true, gotBody["read_only"])
+	require.Contains(t, out.String(), `updated NFS export "my-data"`)
 }
 
 func TestNfsExportUpdateCmdRequiresMode(t *testing.T) {
 	root := buildTestNfsRoot()
 	root.SetArgs([]string{"nfs", "export", "update", "my-data"})
 	err := root.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--ro or --rw") {
-		t.Fatalf("expected mode error, got %v", err)
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--ro or --rw")
+}
+
+func TestNfsExportUpdateCmdRejectsQuiesceWaitWithRW(t *testing.T) {
+	root := buildTestNfsRoot()
+	root.SetArgs([]string{"nfs", "export", "update", "my-data", "--rw", "--quiesce-wait", "5s"})
+	err := root.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--quiesce-wait only applies")
 }
 
 func TestNfsExportUpdateCmdMutexRoRw(t *testing.T) {
 	root := buildTestNfsRoot()
 	root.SetArgs([]string{"nfs", "export", "update", "my-data", "--ro", "--rw"})
 	err := root.Execute()
-	if err == nil {
-		t.Fatal("expected mutually exclusive flag error")
-	}
+	require.Error(t, err)
 }
 
 func TestNfsExportQuietRejectsJSON(t *testing.T) {
 	root := buildTestNfsRoot()
 	root.SetArgs([]string{"nfs", "export", "add", "my-data", "--dry-run", "--quiet", "--format", "json"})
 	err := root.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--quiet") {
-		t.Fatalf("expected quiet/json error, got %v", err)
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--quiet")
 }
 
 func TestNfsExportListCmd(t *testing.T) {
@@ -156,10 +141,7 @@ func TestNfsExportListCmd(t *testing.T) {
 	root.SetOut(&out)
 	root.SetContext(context.Background())
 	root.SetArgs([]string{"nfs", "--endpoint", sock, "export", "list"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if !strings.Contains(out.String(), "BUCKET") || !strings.Contains(out.String(), "b1") {
-		t.Fatalf("unexpected output: %s", out.String())
-	}
+	require.NoError(t, root.Execute())
+	require.Contains(t, out.String(), "BUCKET")
+	require.Contains(t, out.String(), "b1")
 }

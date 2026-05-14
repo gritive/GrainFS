@@ -17,7 +17,8 @@ type fakeNfsExportProposer struct {
 }
 
 func (p *fakeNfsExportProposer) ProposeUpsert(_ context.Context, bucket string, cfg nfsexport.Config) error {
-	return p.store.Put(bucket, cfg)
+	_, err := p.store.ApplyUpsert(bucket, cfg.ReadOnly, 1)
+	return err
 }
 
 func (p *fakeNfsExportProposer) ProposeDelete(_ context.Context, bucket string) error {
@@ -32,9 +33,8 @@ func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
 	store, err := nfsexport.OpenStore(db)
 	require.NoError(t, err)
 	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
-		Store:     store,
-		Proposer:  &fakeNfsExportProposer{store: store},
-		FsidMajor: 1,
+		Store:    store,
+		Proposer: &fakeNfsExportProposer{store: store},
 	})
 	buckets := newFakeBucketOps()
 	return &admin.Deps{

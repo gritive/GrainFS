@@ -217,7 +217,8 @@ type MetaFSM struct {
 
 	// exportStore is wired via SetExportStore. nil = NFS export commands return
 	// an error (not configured).
-	exportStore *nfsexport.Store
+	exportStore     *nfsexport.Store
+	exportFsidMajor uint64
 
 	// migrationStore is wired via SetMigration. nil = migration commands return
 	// an error (not configured).
@@ -296,6 +297,17 @@ func (f *MetaFSM) SetExportStore(store *nfsexport.Store) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.exportStore = store
+	if f.exportFsidMajor == 0 {
+		f.exportFsidMajor = 1
+	}
+}
+
+// SetExportFsidMajor sets the cluster-wide fsid namespace used when the
+// MetaFSM assigns fsid minors during NFS export upsert apply.
+func (f *MetaFSM) SetExportFsidMajor(v uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.exportFsidMajor = v
 }
 
 // SetMigration wires the migration job store into the MetaFSM. Must be called
@@ -473,7 +485,7 @@ func (f *MetaFSM) applyNfsExportUpsert(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: NfsExportUpsert: %w", err)
 	}
-	if err := f.exportStore.Put(bucket, cfg); err != nil {
+	if _, err := f.exportStore.ApplyUpsert(bucket, cfg.ReadOnly, f.exportFsidMajor); err != nil {
 		return err
 	}
 	f.publishNfsExportChange()
