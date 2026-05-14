@@ -43,7 +43,7 @@ The second entry is the previous version. If parsing fails or only one version e
 |---|-----------------|-------------|--------|
 | 1 | `TestForwardRead` | N-1 writes data; N reads it back after in-place restart | live |
 | 2 | `TestMixedClusterRolling` | 2-node cluster: node 0 = N-1, node 1 = N; write on N-1, read on N | live |
-| 3 | `TestSnapshotForwardCompat` | N-1 creates snapshot; N restores it; data intact | live |
+| 3 | `TestSnapshotLegacyGzipRejectedByCurrent` | N-1 creates gzip snapshot; N rejects restore after the zstd snapshot cutover | live |
 | 5 | `TestInstallSnapshotPath` | N-1 cluster runs; N node joins and receives InstallSnapshot RPC | live |
 | 6 | `TestRestartToOlderBinary` | Canary: documents behavior when N-1 binary reads N-format data | live |
 | 7 | `TestHeadSnapshotReject` | HEAD-format snapshot with `GFSNAP01` envelope is rejected by older binary with non-200 restore response | live |
@@ -70,12 +70,13 @@ Add a compat test whenever you change any of the following in a way that existin
 
 ### What "forward-compat" means
 
-A new binary (N) **must** be able to read and operate on data written by the previous binary (N-1).
+A new binary (N) **must** be able to read and operate on data written by the previous binary (N-1),
+except for deprecated gzip snapshot archives during the zstd snapshot cutover.
 It does **not** need to write data readable by N-1 (downgrade is unsupported).
 
 ### Snapshot format compatibility
 
-New snapshots are written as a small binary envelope followed by the existing gzip JSON payload:
+New snapshots are written as a small binary envelope followed by a zstd-compressed JSON payload:
 
 | Field | Encoding |
 |-------|----------|
@@ -83,9 +84,9 @@ New snapshots are written as a small binary envelope followed by the existing gz
 | min_reader_format | `uint32` big-endian |
 | writer_format | `uint32` big-endian |
 | written_at_unix_nano | `int64` big-endian |
-| payload | existing gzip JSON snapshot |
+| payload | zstd-compressed JSON snapshot |
 
-Readers still accept legacy gzip-only snapshots whose first bytes are gzip magic `0x1f 0x8b`.
+Readers reject legacy gzip-only snapshots whose first bytes are gzip magic `0x1f 0x8b`.
 Readers reject future envelopes when `min_reader_format` is greater than the current reader
 format, before restore mutates backend state.
 
