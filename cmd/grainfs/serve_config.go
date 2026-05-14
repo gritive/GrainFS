@@ -73,6 +73,9 @@ func buildClusterConfig(
 	cfg.DataGroupRefreshInterval, _ = cmd.Flags().GetDuration("datagroup-refresh-interval")
 	cfg.DegradedInterval, _ = cmd.Flags().GetDuration("degraded-check-interval")
 
+	cfg.AuditIceberg, _ = cmd.Flags().GetBool("audit-iceberg")
+	cfg.AuditCommitInterval, _ = cmd.Flags().GetDuration("audit-commit-interval")
+
 	cfg.NFS4Port, _ = cmd.Flags().GetInt("nfs4-port")
 	cfg.NBDPort, _ = cmd.Flags().GetInt("nbd-port")
 	cfg.P9Bind, _ = cmd.Flags().GetString("9p-bind")

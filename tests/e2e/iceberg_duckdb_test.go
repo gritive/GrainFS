@@ -218,6 +218,120 @@ func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey,
 	require.NoError(t, err)
 }
 
+// TestAuditIcebergClusterDuckDB starts a 3-node cluster with audit enabled and a
+// short commit interval, performs S3 PUTs, waits for the committer to flush,
+// then verifies the audit.s3 Iceberg table contains the expected rows via DuckDB.
+func TestAuditIcebergClusterDuckDB(t *testing.T) {
+	skipIfShort(t, "skipping audit Iceberg DuckDB e2e in short mode")
+
+	const commitInterval = 8 * time.Second
+	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+		ExtraArgs: []string{
+			"--audit-iceberg=true",
+			"--audit-commit-interval", commitInterval.String(),
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables", "test-audit")
+	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
+	require.NoError(t, err)
+	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-audit")})
+	require.NoError(t, err)
+	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
+
+	// Emit a few S3 events via PutObject so the ring buffer has events to commit.
+	const numPuts = 5
+	for i := 0; i < numPuts; i++ {
+		key := fmt.Sprintf("audit-test-obj-%d", i)
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("test-audit"),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("hello audit"),
+		})
+		require.NoError(t, err)
+	}
+
+	// Wait for at least one commit cycle to run.
+	time.Sleep(commitInterval + 4*time.Second)
+
+	// Query audit.s3 via DuckDB — expect at least numPuts rows for bucket test-audit.
+	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
+		fmt.Sprintf(`
+SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
+FROM grainfs_iceberg.audit.s3
+WHERE bucket = 'test-audit' AND method = 'PutObject';
+`),
+		fmt.Sprintf("%d", numPuts),
+	)
+}
+
+// TestAuditIcebergClusterLeaderFlap verifies that audit events captured on followers
+// are forwarded and committed after leader re-election.
+func TestAuditIcebergClusterLeaderFlap(t *testing.T) {
+	skipIfShort(t, "skipping audit Iceberg leader-flap e2e in short mode")
+
+	const commitInterval = 8 * time.Second
+	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+		ExtraArgs: []string{
+			"--audit-iceberg=true",
+			"--audit-commit-interval", commitInterval.String(),
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables", "flap-bucket")
+	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
+	require.NoError(t, err)
+	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("flap-bucket")})
+	require.NoError(t, err)
+	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
+
+	// Write on a follower so events need shipping.
+	followerIdx := (cluster.leaderIdx + 1) % 3
+	followerClient := ecS3Client(cluster.httpURLs[followerIdx], cluster.accessKey, cluster.secretKey)
+	_, err = followerClient.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("flap-bucket"),
+		Key:    aws.String("before-flap"),
+		Body:   strings.NewReader("pre-flap data"),
+	})
+	require.NoError(t, err)
+
+	// Kill the leader to force re-election.
+	leaderProc := cluster.procs[cluster.leaderIdx]
+	if leaderProc != nil && leaderProc.Process != nil {
+		_ = leaderProc.Process.Signal(syscall.SIGTERM)
+	}
+
+	// Wait for re-election and commit.
+	time.Sleep(commitInterval + 10*time.Second)
+
+	// Find a surviving node.
+	var survivorEndpoint string
+	for i, url := range cluster.httpURLs {
+		if i != cluster.leaderIdx {
+			survivorEndpoint = url
+			break
+		}
+	}
+
+	// At least the pre-flap event should appear.
+	runDuckDBIcebergSQLWithCreds(t, survivorEndpoint, cluster.accessKey, cluster.secretKey,
+		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt FROM grainfs_iceberg.audit.s3 WHERE bucket = 'flap-bucket';`,
+		"1",
+	)
+}
+
 func duckDBIcebergSQL(endpoint, accessKey, secretKey, query string) string {
 	endpointHost := strings.TrimPrefix(endpoint, "http://")
 	return fmt.Sprintf(`

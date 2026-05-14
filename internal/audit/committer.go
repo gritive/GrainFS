@@ -74,6 +74,7 @@ func (c *Committer) AppendFromFollower(events []S3Event) {
 
 // Run runs the committer loop until ctx is cancelled.
 func (c *Committer) Run(ctx context.Context) {
+	nodeID := c.cfg.NodeID
 	ticker := time.NewTicker(c.cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -82,6 +83,7 @@ func (c *Committer) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if c.cfg.IsLeader() {
+				auditCommitterState.WithLabelValues(nodeID).Set(1)
 				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
 				// drain follower mailbox
 			followerDrain:
@@ -96,17 +98,22 @@ func (c *Committer) Run(ctx context.Context) {
 				if len(c.batch) == 0 {
 					continue
 				}
+				start := time.Now()
 				if err := c.commit(ctx, c.batch); err != nil {
 					log.Error().Err(err).Msg("audit committer: commit failed; events retained in zerolog")
+				} else {
+					auditCommitLagSeconds.WithLabelValues(nodeID).Observe(time.Since(start).Seconds())
 				}
 				c.batch = c.batch[:0]
 			} else if c.cfg.ShipToLeader != nil {
+				auditCommitterState.WithLabelValues(nodeID).Set(0)
 				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
 				if len(c.batch) == 0 {
 					continue
 				}
 				if err := c.cfg.ShipToLeader(ctx, c.batch); err != nil {
 					log.Warn().Err(err).Int("events", len(c.batch)).Msg("audit committer: ship to leader failed; events in zerolog")
+					auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
 				}
 				c.batch = c.batch[:0]
 			}

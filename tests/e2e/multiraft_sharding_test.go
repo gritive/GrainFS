@@ -49,15 +49,17 @@ type mrCluster struct {
 	secretKey     string
 	saID          string
 	wildcardAdmin bool
-	leaderIdx     int // last-known leader (set during probe)
-	nodeCount     int // number of currently running nodes (used by addNode)
+	leaderIdx     int      // last-known leader (set during probe)
+	nodeCount     int      // number of currently running nodes (used by addNode)
+	extraArgs     []string // extra serve flags from mrClusterOptions.ExtraArgs
 }
 
 type mrClusterOptions struct {
 	disableNFS4   bool
 	disableNBD    bool
-	FastBootstrap bool // replace time.Sleep(8s) with shard-group polling
-	MaxNodes      int  // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
+	FastBootstrap bool     // replace time.Sleep(8s) with shard-group polling
+	MaxNodes      int      // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
+	ExtraArgs     []string // extra flags appended to each node's serve command
 }
 
 func startStaticMRCluster(t *testing.T, numNodes int) *mrCluster {
@@ -99,6 +101,7 @@ func newMRCluster(t *testing.T, maxNodes int, opts mrClusterOptions) (*mrCluster
 		t:          t,
 		clusterKey: "E2E-MR-SHARDING-KEY",
 		encKeyFile: makeSharedEncryptionKeyFile(t),
+		extraArgs:  opts.ExtraArgs,
 	}
 	c.httpPorts = make([]int, maxNodes)
 	c.raftPorts = make([]int, maxNodes)
@@ -322,7 +325,8 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 			_ = os.Remove(logFile.Name())
 		}
 	})
-	cmd := exec.Command(binary, "serve",
+	args := []string{
+		"serve",
 		"--data", c.dataDirs[i],
 		"--port", fmt.Sprintf("%d", c.httpPorts[i]),
 		"--node-id", raftAddr,
@@ -333,7 +337,9 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-	)
+	}
+	args = append(args, c.extraArgs...)
+	cmd := exec.Command(binary, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	require.NoError(t, cmd.Start(), "start node %d", i)
