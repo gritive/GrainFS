@@ -16,10 +16,10 @@ NFS4_PORT=$(bench_free_port)
 PPROF_PORT=$(bench_free_port)
 HOST_IP="${HOST_IP:-192.168.5.2}"
 NUM_BUCKETS="${NUM_BUCKETS:-4}"
-FIO_WORKERS_PER_BUCKET="${FIO_WORKERS_PER_BUCKET:-4}"
+FIO_WORKERS_PER_BUCKET="${FIO_WORKERS_PER_BUCKET:-1}"
 FIO_RUNTIME="${FIO_RUNTIME:-30}"
 FIO_RAMP="${FIO_RAMP:-5}"
-FIO_SIZE="${FIO_SIZE:-128m}"
+FIO_SIZE="${FIO_SIZE:-4m}"
 READDIR_SAMPLES="${READDIR_SAMPLES:-100}"
 NFS_VERS="${NFS_VERS:-4.1}"
 MOUNT_OPTS="vers=${NFS_VERS},proto=tcp,port=${NFS4_PORT},rsize=131072,wsize=131072,hard,intr"
@@ -90,10 +90,10 @@ set -euo pipefail
 BENCH_DIR="/mnt/grainfs-nfs-b$i/fio-\$(date +%s)"
 sudo mkdir -p "\$BENCH_DIR"
 sudo fio --name=mixed --directory="\$BENCH_DIR" --rw=randrw --rwmixread=70 \
+  --fallocate=none \
   --bs=64k --size="$FIO_SIZE" --numjobs="$FIO_WORKERS_PER_BUCKET" \
   --ramp_time="$FIO_RAMP" --runtime="$FIO_RUNTIME" --time_based \
   --group_reporting --output-format=json
-sudo rm -rf "\$BENCH_DIR"
 SCRIPT
   ) &
   PIDS+=($!)

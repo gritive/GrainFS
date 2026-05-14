@@ -25,8 +25,8 @@ make bench-nfs-multi
 # results: benchmarks/profiles/nfs-multi-<timestamp>/
 ```
 
-The multi-export run creates four buckets by default and runs four fio workers
-per bucket, for 16 total fio workers. It records:
+The multi-export run creates four buckets by default and runs one fio worker
+per bucket, for four total fio workers. It records:
 
 - `summary.txt`
 - `fio_b<i>.log`

@@ -25,9 +25,9 @@ fi
 
 WORKLOAD="${WORKLOAD:-streaming}"
 FIO_RUNTIME="${FIO_RUNTIME:-15}"
-FIO_STREAM_SIZE="${FIO_STREAM_SIZE:-256m}"
+FIO_STREAM_SIZE="${FIO_STREAM_SIZE:-16m}"
 FIO_STREAM_JOBS="${FIO_STREAM_JOBS:-4}"
-FIO_RAND_SIZE="${FIO_RAND_SIZE:-64m}"
+FIO_RAND_SIZE="${FIO_RAND_SIZE:-1m}"
 FIO_RAND_JOBS="${FIO_RAND_JOBS:-4}"
 case "$WORKLOAD" in
   streaming|metadata|append) ;;
@@ -151,18 +151,21 @@ sudo mkdir -p "\$BENCH_DIR"
 
 echo "--- sequential write (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_write --directory="\$BENCH_DIR" --rw=write --bs=128k \
+  --fallocate=none \
   --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
 echo "--- sequential read (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_read --directory="\$BENCH_DIR" --rw=read --bs=128k \
+  --fallocate=none \
   --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
 echo "--- random read/write mix (${FIO_RAND_JOBS} threads, 4K blocks, 75% read) ---"
 sudo fio --name=rand_mix --directory="\$BENCH_DIR" --rw=randrw --rwmixread=75 \
+  --fallocate=none \
   --bs=4k --size="$FIO_RAND_SIZE" --numjobs="$FIO_RAND_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
@@ -215,6 +218,7 @@ sudo fio \
   --name=append \
   --filename="\$BENCH_DIR/file" \
   --rw=write \
+  --fallocate=none \
   --bs=4k \
   --size=1g \
   --numjobs=1 \
