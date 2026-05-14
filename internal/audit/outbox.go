@@ -16,6 +16,11 @@ type Outbox struct {
 	db *badger.DB
 }
 
+type OutboxStats struct {
+	Backlog         int   `json:"backlog"`
+	OldestPendingUS int64 `json:"oldest_pending_us"`
+}
+
 // OpenOutbox opens or creates a local durable audit outbox.
 func OpenOutbox(dir string) (*Outbox, error) {
 	opts := badger.DefaultOptions(dir).WithLogger(nil)
@@ -128,6 +133,23 @@ func (o *Outbox) Ack(ctx context.Context, eventIDs []string) error {
 		}
 		return nil
 	})
+}
+
+func (o *Outbox) Stats(ctx context.Context) (OutboxStats, error) {
+	events, err := o.Pending(ctx, 100000)
+	if err != nil {
+		return OutboxStats{}, err
+	}
+	var oldest int64
+	for _, ev := range events {
+		if ev.Ts != 0 && (oldest == 0 || ev.Ts < oldest) {
+			oldest = ev.Ts
+		}
+	}
+	stats := OutboxStats{Backlog: len(events), OldestPendingUS: oldest}
+	auditOutboxBacklog.Set(float64(stats.Backlog))
+	auditOutboxOldestPendingUS.Set(float64(stats.OldestPendingUS))
+	return stats, nil
 }
 
 func outboxKey(eventID string) []byte {

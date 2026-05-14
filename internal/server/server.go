@@ -785,6 +785,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	// Event log query API
 	s.registerEventsAPI(h)
 
+	// Audit lake health and query API.
+	s.registerAuditAPI(h)
+
 	// Phase 16 Week 4: alerts status + force-resend (no-op if alerts not wired).
 	s.registerAlertsAPI(h)
 

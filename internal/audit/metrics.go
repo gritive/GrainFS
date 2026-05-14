@@ -24,4 +24,14 @@ var (
 		Name: "audit_committer_state",
 		Help: "1=leader (committing), 0=follower (shipping). Per node.",
 	}, []string{"node"})
+
+	auditOutboxBacklog = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "audit_outbox_backlog",
+		Help: "Number of durable audit events pending commit.",
+	})
+
+	auditOutboxOldestPendingUS = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "audit_outbox_oldest_pending_us",
+		Help: "Oldest pending durable audit event timestamp in Unix microseconds.",
+	})
 )
