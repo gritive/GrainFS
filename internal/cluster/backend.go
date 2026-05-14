@@ -1186,7 +1186,7 @@ func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, buck
 	}
 
 	stageStart = time.Now()
-	sp, err := spoolObject(ctx, b.spoolDir(), r, shouldHashBucket(bucket))
+	sp, err := spoolObject(ctx, b.spoolDir(), r, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -1291,7 +1291,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
 	}
-	sp, err := spoolObject(ctx, b.spoolDir(), r, shouldHashBucket(bucket))
+	sp, err := spoolObject(ctx, b.spoolDir(), r, bucket)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1410,19 +1410,18 @@ func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, of
 	}, nil
 }
 
-// writeAtETag computes a cheap MD5 ETag when a WriteAt call overwrites the
+// writeAtETag computes an xxhash3 ETag when a WriteAt call overwrites the
 // whole object. Partial writes return an empty ETag so scrubber skips the
 // object instead of forcing every NFS/NBD write to re-read the full file.
 //
 // Empty ETag contract: scrubber's ReplicationVerifier reports such blocks as
-// Skipped (not Corrupt) — see internal/scrubber/replication.go:106-113 and
+// Skipped (not Corrupt) — see internal/scrubber/replication.go and
 // TestReplicationVerifier_LegacyETagSkipped. Trade-off: files that have only
-// ever been touched via partial writes lose the per-block MD5 oracle; EC
+// ever been touched via partial writes lose the per-block oracle; EC
 // parity still detects shard-level corruption on read.
 func writeAtETag(data []byte, offset uint64, size int64) string {
 	if offset == 0 && int64(len(data)) == size {
-		h := md5.Sum(data)
-		return hex.EncodeToString(h[:])
+		return storage.InternalETag(data)
 	}
 	return ""
 }
@@ -2317,8 +2316,18 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 	}
 
 	// EC 디코딩 결과가 원본과 일치하는지 검증 (Reed-Solomon은 무손실이어야 함).
-	h := md5.Sum(oldData)
-	if computedETag := hex.EncodeToString(h[:]); computedETag != obj.ETag {
+	// ETag 길이로 알고리즘 선택: 32=MD5 (S3 user bucket), 16=xxhash3 (internal bucket).
+	var computedETag string
+	switch len(obj.ETag) {
+	case 32: // MD5
+		h := md5.Sum(oldData)
+		computedETag = hex.EncodeToString(h[:])
+	case 16: // xxhash3
+		computedETag = storage.InternalETag(oldData)
+	default:
+		return fmt.Errorf("reshard: unknown ETag format for %s/%s: %q", bucket, key, obj.ETag)
+	}
+	if computedETag != obj.ETag {
 		return fmt.Errorf("reshard: ETag mismatch after EC reconstruction for %s/%s: got %s, want %s",
 			bucket, key, computedETag, obj.ETag)
 	}

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 const spoolCopyBufferSize = 1 << 20
@@ -27,7 +30,7 @@ type spooledObject struct {
 	ETag string
 }
 
-func spoolObject(ctx context.Context, dir string, r io.Reader, hash bool) (*spooledObject, error) {
+func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*spooledObject, error) {
 	stageStart := time.Now()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
@@ -54,10 +57,23 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, hash bool) (*spoo
 		spoolCopyBufferPool.Put(bufp)
 	}()
 	stageStart = time.Now()
-	if hash {
-		h := md5.New()
-		size, err = io.CopyBuffer(tmp, io.TeeReader(reader, h), *bufp)
-		etag = hex.EncodeToString(h.Sum(nil))
+	if bucket != "" {
+		if storage.IsInternalBucket(bucket) {
+			xh := storage.GetXXH3Hasher()
+			size, err = io.CopyBuffer(tmp, io.TeeReader(reader, xh), *bufp)
+			if err == nil {
+				var buf [8]byte
+				binary.BigEndian.PutUint64(buf[:], xh.Sum64())
+				etag = hex.EncodeToString(buf[:])
+			}
+			storage.PutXXH3Hasher(xh)
+		} else {
+			h := md5.New()
+			size, err = io.CopyBuffer(tmp, io.TeeReader(reader, h), *bufp)
+			if err == nil {
+				etag = hex.EncodeToString(h.Sum(nil))
+			}
+		}
 	} else {
 		size, err = io.CopyBuffer(tmp, reader, *bufp)
 	}
@@ -131,15 +147,6 @@ func writeFileAtomicFromReader(path string, r io.Reader) error {
 
 func (b *DistributedBackend) spoolDir() string {
 	return filepath.Join(b.root, "tmp", "put-spool")
-}
-
-// shouldHashBucket reports whether spool writes should compute MD5 for the
-// bucket. Always true: hash is the corruption-detection oracle for both EC
-// scrub and volume scrub. Future BLAKE3/xxhash3 swap is tracked in TODOS.md
-// (Storage Hashing 성능 검토).
-func shouldHashBucket(bucket string) bool {
-	_ = bucket
-	return true
 }
 
 type readerWithContext struct {

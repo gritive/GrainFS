@@ -6,6 +6,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // RepairReplica fetches the named replicated object from a healthy peer and
@@ -17,7 +19,7 @@ import (
 //  1. headObjectMeta → expected ETag, versionID
 //  2. iterate liveNodes() with peerHealth priority
 //  3. shardSvc.ReadShard(peer, bucket, shardKey, 0) — shardIdx 0, replicated objects are single-shard
-//  4. compute MD5; require match against meta.ETag
+//  4. verify ETag (MD5 or xxhash3 by length); require match against meta.ETag
 //  5. atomic write (tmp + fsync + rename) to objectPathV(bucket, key, versionID)
 //  6. error if no peer returned matching bytes
 //
@@ -42,12 +44,12 @@ func (b *DistributedBackend) RepairReplica(ctx context.Context, bucket, key stri
 
 // repairReplicaWith runs the orchestration that RepairReplica wraps after the
 // HEAD lookup. Split out so unit tests can exercise the full guard +
-// peer-iteration + MD5 verify + write path without hitting BadgerDB or QUIC.
+// peer-iteration + ETag verify (MD5/xxhash3) + write path without hitting BadgerDB or QUIC.
 //
 // Strategy:
 //  1. iterate b.liveNodes() with peerHealth priority (healthy first)
 //  2. reader.ReadShard(peer, bucket, shardKey, 0) — shardKey = key+"/"+versionID
-//  3. compute MD5; require match against expectedETag
+//  3. verify ETag (MD5 or xxhash3 by length); require match against expectedETag
 //  4. atomic write (tmp + fsync + rename) to objectPathV(bucket, key, versionID)
 //  5. error if no peer returned matching bytes
 //
@@ -103,8 +105,17 @@ func (b *DistributedBackend) tryRepairFromPeer(ctx context.Context, reader peerR
 		}
 		return nil, false
 	}
-	h := md5.Sum(data)
-	if hex.EncodeToString(h[:]) != expectedETag {
+	var computed string
+	switch len(expectedETag) {
+	case 32: // MD5
+		h := md5.Sum(data)
+		computed = hex.EncodeToString(h[:])
+	case 16: // xxhash3
+		computed = storage.InternalETag(data)
+	default:
+		return nil, false
+	}
+	if computed != expectedETag {
 		return nil, false
 	}
 	if b.currentPeerHealth() != nil {
