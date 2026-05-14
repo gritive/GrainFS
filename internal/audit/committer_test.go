@@ -149,7 +149,11 @@ func TestCommitter_AppendFromFollower(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go c.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run(ctx)
+	}()
 
 	require.Eventually(t, func() bool {
 		catalog.mu.Lock()
@@ -167,6 +171,56 @@ func TestCommitter_AppendFromFollower(t *testing.T) {
 	}
 	backend.mu.Unlock()
 	require.NotEmpty(t, parquetData, "committer must write a .parquet file")
+	cancel()
+	<-done
+}
+
+func TestCommitter_CommitsOutboxAndAcks(t *testing.T) {
+	catalog := newFakeCatalog()
+	backend := newFakeBackend()
+	outbox, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer outbox.Close()
+
+	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
+	_, err = catalog.CreateTable(context.Background(), icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace},
+		Name:      audit.TableS3,
+	}, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-test.metadata.json",
+		Metadata:         json.RawMessage(initMeta),
+	})
+	require.NoError(t, err)
+	_, _ = backend.PutObject(context.Background(), audit.BucketName, "metadata/s3/00000-test.metadata.json", strings.NewReader(initMeta), "application/json")
+
+	require.NoError(t, outbox.AppendAttempt(context.Background(), audit.S3Event{
+		EventID: "evt-1", RequestID: "req-1", Ts: time.Now().UnixMicro(),
+		Bucket: "b", Key: "k", Method: "PUT", Operation: "PutObject", Status: 200,
+	}))
+
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Outbox:   outbox,
+		Catalog:  catalog,
+		Backend:  backend,
+		IsLeader: func() bool { return true },
+		NodeID:   "leader-1",
+		Interval: 50 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		pending, _ := outbox.Pending(context.Background(), 10)
+		return len(pending) == 0
+	}, 2*time.Second, 50*time.Millisecond, "committed events must be acked from outbox")
+	cancel()
+	<-done
 }
 
 func TestCommitter_FollowerShipsToLeader(t *testing.T) {
@@ -194,7 +248,11 @@ func TestCommitter_FollowerShipsToLeader(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	go c.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run(ctx)
+	}()
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -211,6 +269,50 @@ func TestCommitter_FollowerShipsToLeader(t *testing.T) {
 	mu.Unlock()
 	require.True(t, methods["GET"], "shipped events must include GET")
 	require.True(t, methods["PUT"], "shipped events must include PUT")
+	cancel()
+	<-done
+}
+
+func TestCommitter_FollowerShipsOutboxAndAcks(t *testing.T) {
+	var shipped []audit.S3Event
+	var mu sync.Mutex
+	outbox, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer outbox.Close()
+	require.NoError(t, outbox.AppendAttempt(context.Background(), audit.S3Event{
+		EventID: "evt-follower-1", Bucket: "b", Method: "PUT", Key: "k", Status: 200,
+	}))
+
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Outbox:   outbox,
+		IsLeader: func() bool { return false },
+		ShipToLeader: func(_ context.Context, events []audit.S3Event) error {
+			mu.Lock()
+			shipped = append(shipped, events...)
+			mu.Unlock()
+			return nil
+		},
+		NodeID:   "follower-1",
+		Interval: 50 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		pending, _ := outbox.Pending(context.Background(), 10)
+		mu.Lock()
+		n := len(shipped)
+		mu.Unlock()
+		return n == 1 && len(pending) == 0
+	}, 2*time.Second, 50*time.Millisecond, "follower must ack outbox only after shipping")
+	cancel()
+	<-done
 }
 
 func TestCommitter_AppendFromFollower_DropWhenFull(t *testing.T) {

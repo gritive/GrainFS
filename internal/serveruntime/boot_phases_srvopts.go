@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -286,8 +287,12 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	srvOpts = append(srvOpts, server.WithMutationGate(state.mutationGate))
 
 	if cfg.AuditIceberg {
-		auditEmitter := audit.NewEmitter(nodeID)
-		srvOpts = append(srvOpts, server.WithAuditEmitter(auditEmitter))
+		auditOutbox, err := audit.OpenOutbox(filepath.Join(cfg.DataDir, "audit-outbox"))
+		if err != nil {
+			return fmt.Errorf("audit outbox: %w", err)
+		}
+		state.AddCleanup(func() { _ = auditOutbox.Close() })
+		srvOpts = append(srvOpts, server.WithAuditOutbox(auditOutbox))
 		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
 		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
 			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
@@ -311,7 +316,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			})
 		}
 		committer := audit.NewCommitter(audit.CommitterConfig{
-			Emitter:      auditEmitter,
+			Outbox:       auditOutbox,
 			Catalog:      metaCatalog,
 			Backend:      state.backend,
 			IsLeader:     func() bool { return metaRaft.IsLeader() },

@@ -35,6 +35,7 @@ type auditBackend interface {
 // CommitterConfig holds the dependencies for a Committer.
 type CommitterConfig struct {
 	Emitter  *Emitter
+	Outbox   *Outbox
 	Catalog  icebergcatalog.Catalog
 	Backend  auditBackend
 	IsLeader func() bool
@@ -86,9 +87,23 @@ func (c *Committer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 			if c.cfg.IsLeader() {
 				auditCommitterState.WithLabelValues(nodeID).Set(1)
-				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				var err error
+				if c.cfg.Outbox != nil {
+					c.batch, err = c.readOutbox(ctx)
+					if err != nil {
+						log.Error().Err(err).Msg("audit committer: read outbox failed")
+						continue
+					}
+				} else if c.cfg.Emitter != nil {
+					c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				} else {
+					c.batch = c.batch[:0]
+				}
 				// drain follower mailbox (capped to avoid unbounded memory growth)
 			followerDrain:
 				for {
@@ -107,24 +122,65 @@ func (c *Committer) Run(ctx context.Context) {
 				}
 				start := time.Now()
 				if err := c.commit(ctx, c.batch); err != nil {
-					log.Error().Err(err).Msg("audit committer: commit failed; events in this batch are dropped — check audit_committer_state metric")
+					log.Error().Err(err).Msg("audit committer: commit failed; durable outbox events remain pending")
 				} else {
 					auditCommitLagSeconds.WithLabelValues(nodeID).Observe(time.Since(start).Seconds())
+					if c.cfg.Outbox != nil {
+						c.ackOutbox(c.batch)
+					}
 				}
 				c.batch = c.batch[:0]
 			} else if c.cfg.ShipToLeader != nil {
 				auditCommitterState.WithLabelValues(nodeID).Set(0)
-				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				var err error
+				if c.cfg.Outbox != nil {
+					c.batch, err = c.readOutbox(ctx)
+					if err != nil {
+						log.Error().Err(err).Msg("audit committer: read outbox failed")
+						continue
+					}
+				} else if c.cfg.Emitter != nil {
+					c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				} else {
+					c.batch = c.batch[:0]
+				}
 				if len(c.batch) == 0 {
 					continue
 				}
 				if err := c.cfg.ShipToLeader(ctx, c.batch); err != nil {
 					log.Warn().Err(err).Int("events", len(c.batch)).Msg("audit committer: ship to leader failed; events counted in audit_drops_total — transient during election, investigate if persists")
-					auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
+					if c.cfg.Outbox == nil {
+						auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
+					}
+				} else if c.cfg.Outbox != nil {
+					c.ackOutbox(c.batch)
 				}
 				c.batch = c.batch[:0]
 			}
 		}
+	}
+}
+
+func (c *Committer) readOutbox(ctx context.Context) ([]S3Event, error) {
+	events, err := c.cfg.Outbox.Pending(ctx, maxBatchSize)
+	if err != nil {
+		return nil, err
+	}
+	return append(c.batch[:0], events...), nil
+}
+
+func (c *Committer) ackOutbox(events []S3Event) {
+	ids := make([]string, 0, len(events))
+	for _, ev := range events {
+		if ev.EventID != "" {
+			ids = append(ids, ev.EventID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if err := c.cfg.Outbox.Ack(context.Background(), ids); err != nil {
+		log.Error().Err(err).Int("events", len(ids)).Msg("audit committer: ack outbox failed")
 	}
 }
 
