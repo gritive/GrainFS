@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.194.0] - 2026-05-14 — feat: S3 audit log lake — Phase 1 (Iceberg + Parquet)
+
+### Added
+
+- **S3 audit event schema** — `internal/audit` 패키지: `S3Event` struct (13개 필드: ts/node_id/request_id/sa_id/source_ip/method/bucket/key/http_status/bytes_in/bytes_out/latency_ms/err_class), `BucketName = "grainfs-audit"`, `TableS3 = "s3"`, Namespace 상수, Iceberg initial metadata JSON 템플릿.
+- **Lock-free ring buffer** — channel 기반 bounded ring (cap=65536): `Put` (non-blocking, drop+count), `DrainInto` (zero-alloc preallocated path / allocating nil-dst path), `Drops`/`Len` 조회. Fix: `DrainInto(nil)`이 올바르게 모든 이벤트를 drain하도록 수정.
+- **Emitter with recursion guard** — `audit.Emitter`: `EmitS3` 호출 시 zerolog stdout 이중 sink + ring.Put. `grainfs-audit` 버킷 또는 `system:audit` SA의 이벤트는 ring에 넣지 않아 무한 재귀 차단.
+- **S3 핸들러 emit hooks** — PUT/GET/DELETE/LIST 4곳에 `WithAuditEmitter` 서버 옵션으로 활성화. `auditEmitter` nil 시 no-op (panic 없음).
+- **Follower→Leader 바이너리 인코더** — `wire.go`: `EncodeS3Batch`/`DecodeS3Batch`; JSON 미사용, LittleEndian 바이너리 포맷.
+- **Cluster committer** — `audit.Committer`: leader가 ring drain + follower 이벤트를 Parquet으로 인코딩 후 Iceberg snapshot 커밋 (`CommitTable` CAS). Follower는 `ShipToLeader` 콜백으로 이벤트 전달. `followerIn chan []S3Event`(cap=256) non-blocking.
+- **Parquet encoder** — Arrow-go v18 + pqarrow: Snappy 압축, 13컬럼 Iceberg field ID 메타데이터 포함. DuckDB `read_parquet()` 직독 검증 완료.
+- **Minimal Avro encoder** — Iceberg manifest + manifest list를 외부 라이브러리 없이 직접 Avro Object Container File 포맷으로 생성.
+- **StreamAuditShip = 0x13** — `internal/transport/transport.go`에 follower→leader audit ship QUIC stream type 등록.
+
+### Fixed
+
+- **iceberg_api.go stale 에러 텍스트** — `--audit-iceberg` 플래그 없이 Iceberg REST Catalog 접근 시 반환되는 에러 메시지를 실제 조건에 맞게 수정.
+
 ## [0.0.193.0] - 2026-05-14 — feat: NFS multi-export DX and benchmarks
 
 ### Added
