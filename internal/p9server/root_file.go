@@ -88,11 +88,3 @@ func qidPath(parts ...string) uint64 {
 	}
 	return h.Sum64()
 }
-
-// bucketFile stub — full implementation in Task 3 (bucket_file.go).
-// Needed here so root_file.go compiles before Task 3 is executed.
-type bucketFile struct {
-	noopFile
-	backend storage.Backend
-	bucket  string
-}
