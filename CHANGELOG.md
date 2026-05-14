@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.189.0] - 2026-05-14 — fix: meta-Raft apply result delivery
 
 ### Transport
 
@@ -18,6 +18,13 @@
 - **TEST**: Concurrent mux dial dedup race coverage added. (F6)
 - **DOC**: `docs/transport-mux-versioning.md` — wire format, feature registry,
   version bump policy, v1 baseline rationale. (F5)
+
+### Fixed
+
+- **Meta-Raft apply errors** — proposals now return FSM apply failures after the committed index applies, so callers do not report success when the replicated metadata write failed.
+- **Forwarded proposal visibility** — follower-forwarded writes now wait for bounded follower-local apply before returning, preserving local read-after-write behavior without tying latency to the full caller timeout.
+- **Forwarded apply error types** — non-Iceberg FSM errors now cross the follower-to-leader forwarding boundary as `MetaForwardApplyError` instead of being collapsed into service-unavailable.
+- **Raft-over-QUIC test setup** — raft QUIC cluster tests now retry connection setup with shorter per-attempt dial deadlines and a wider outer retry budget, reducing full-suite connection flakes without making each failed dial stall.
 
 ## [0.0.188.0] - 2026-05-14 — feat: NFS export propagation follow-up
 

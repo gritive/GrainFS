@@ -25,6 +25,7 @@ const (
 	MetaRaftHeartbeatInterval       = 150 * time.Millisecond
 	MetaRaftElectionTimeout         = 750 * time.Millisecond
 	MetaRaftLivenessFreshnessWindow = 3 * MetaRaftElectionTimeout
+	metaForwardLocalApplyTimeout    = 5 * time.Second
 )
 
 // MetaTransport abstracts RPC delivery for the meta-Raft group.
@@ -75,6 +76,8 @@ type MetaRaft struct {
 	lastApplied   atomic.Uint64
 	applyNotifyMu sync.Mutex
 	applyNotify   chan struct{} // closed each time an entry is applied; replaced atomically
+	applyResultMu sync.Mutex
+	applyErrs     map[uint64]error
 
 	icebergMu      sync.Mutex
 	icebergWaiters map[string]chan error
@@ -124,6 +127,7 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 		cfg:            cfg,
 		done:           make(chan struct{}),
 		applyNotify:    make(chan struct{}),
+		applyErrs:      make(map[uint64]error),
 		icebergWaiters: make(map[string]chan error),
 	}
 	fsm.SetOnIcebergApplyResult(m.publishIcebergResult)
@@ -279,7 +283,7 @@ func (m *MetaRaft) ProposeAddNode(ctx context.Context, entry MetaNodeEntry) erro
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeBucketAssignment encodes a PutBucketAssignment command and proposes it to
@@ -297,7 +301,7 @@ func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID 
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeObjectIndex encodes a PutObjectIndex command and proposes it to the
@@ -315,7 +319,7 @@ func (m *MetaRaft) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntr
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeDeleteObjectIndex removes one object-index version row and updates
@@ -333,7 +337,7 @@ func (m *MetaRaft) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, ve
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
@@ -354,7 +358,7 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeLoadSnapshot encodes a SetLoadSnapshot command and proposes it to the
@@ -372,7 +376,7 @@ func (m *MetaRaft) ProposeLoadSnapshot(ctx context.Context, entries []LoadStatEn
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeRebalancePlan encodes a ProposeRebalancePlan command and proposes it to the
@@ -390,7 +394,7 @@ func (m *MetaRaft) ProposeRebalancePlan(ctx context.Context, plan RebalancePlan)
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeScrubTrigger encodes a ScrubTrigger command and proposes it to the
@@ -411,7 +415,7 @@ func (m *MetaRaft) ProposeScrubTrigger(ctx context.Context, entry scrubber.Scrub
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 // ProposeAbortPlan encodes an AbortPlan command and proposes it to the cluster,
@@ -429,7 +433,7 @@ func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string, reason c
 	if err != nil {
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
-	return m.waitApplied(ctx, idx)
+	return m.waitAppliedResult(ctx, idx)
 }
 
 func (m *MetaRaft) ProposeIcebergCreateNamespace(ctx context.Context, cmd IcebergCreateNamespaceCmd) error {
@@ -516,7 +520,7 @@ func (m *MetaRaft) ProposeMetaCommandWithIndex(ctx context.Context, data []byte)
 		if err != nil {
 			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
 		}
-		return idx, m.waitApplied(ctx, idx)
+		return idx, m.waitAppliedResult(ctx, idx)
 	}
 }
 
@@ -557,14 +561,17 @@ func (m *MetaRaft) proposeOrForwardWithIndex(ctx context.Context, node metaPropo
 		if err != nil {
 			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
 		}
-		return idx, m.waitApplied(ctx, idx)
+		return idx, m.waitAppliedResult(ctx, idx)
 	}
 	if m.forwardFnWithIndex != nil {
 		idx, err := m.forwardFnWithIndex(ctx, data)
 		if err != nil {
 			return 0, fmt.Errorf("meta_raft: forward to leader: %w", err)
 		}
-		return idx, nil
+		if idx == 0 {
+			return idx, nil
+		}
+		return idx, m.waitForwardedAppliedResult(ctx, idx)
 	}
 	if m.forwardFn == nil {
 		return 0, fmt.Errorf("meta_raft: not leader and no forwarder configured")
@@ -677,6 +684,54 @@ func (m *MetaRaft) waitApplied(ctx context.Context, idx uint64) error {
 	}
 }
 
+func (m *MetaRaft) waitAppliedResult(ctx context.Context, idx uint64) error {
+	if err := m.waitApplied(ctx, idx); err != nil {
+		return err
+	}
+	if err := m.applyError(idx); err != nil {
+		return fmt.Errorf("meta_raft: FSM apply error at index %d: %w", idx, err)
+	}
+	return nil
+}
+
+func (m *MetaRaft) waitForwardedAppliedResult(ctx context.Context, idx uint64) error {
+	localCtx, cancel := context.WithTimeout(ctx, metaForwardLocalApplyTimeout)
+	defer cancel()
+	if err := m.waitAppliedResult(localCtx, idx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			log.Warn().Err(err).Uint64("index", idx).Msg("meta_raft: forwarded command committed but local apply is still pending")
+			return nil
+		}
+		return fmt.Errorf("meta_raft: forwarded local apply: %w", err)
+	}
+	return nil
+}
+
+func (m *MetaRaft) recordApplyResult(index uint64, err error) {
+	if err == nil {
+		return
+	}
+	m.applyResultMu.Lock()
+	if m.applyErrs == nil {
+		m.applyErrs = make(map[uint64]error)
+	}
+	m.applyErrs[index] = err
+	for oldIndex := range m.applyErrs {
+		if oldIndex+1024 < index {
+			delete(m.applyErrs, oldIndex)
+		}
+	}
+	m.applyResultMu.Unlock()
+}
+
+func (m *MetaRaft) applyError(index uint64) error {
+	m.applyResultMu.Lock()
+	err := m.applyErrs[index]
+	delete(m.applyErrs, index)
+	m.applyResultMu.Unlock()
+	return err
+}
+
 // runApplyLoop reads committed entries from the node's apply channel and
 // applies them to the FSM. Exits when ctx is cancelled.
 func (m *MetaRaft) runApplyLoop(ctx context.Context) {
@@ -695,6 +750,7 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 				}
 				if err := m.fsm.applyCmd(entry.Command); err != nil {
 					log.Error().Err(err).Uint64("index", entry.Index).Msg("meta_raft: FSM apply error")
+					m.recordApplyResult(entry.Index, err)
 				}
 				m.maybeCreateSnapshot(entry.Index)
 			case raft.LogEntrySnapshot:

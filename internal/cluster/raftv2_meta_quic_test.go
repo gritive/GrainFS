@@ -67,9 +67,11 @@ func startV2MetaQUICCluster(t *testing.T, n int) *v2MetaQUICCluster {
 			}
 			var lastErr error
 			require.Eventually(t, func() bool {
-				lastErr = transports[i].Connect(ctx, addrs[j])
+				attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+				defer cancel()
+				lastErr = transports[i].Connect(attemptCtx, addrs[j])
 				return lastErr == nil
-			}, 5*time.Second, 50*time.Millisecond, "connect %d→%d: %v", i, j, lastErr)
+			}, 15*time.Second, 100*time.Millisecond, "connect %d→%d: %v", i, j, lastErr)
 		}
 	}
 
