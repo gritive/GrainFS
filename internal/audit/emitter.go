@@ -29,6 +29,7 @@ func (e *Emitter) EmitS3(ev S3Event) {
 		Int32("status", ev.Status).
 		Int32("latency_ms", ev.LatencyMs).
 		Msg("audit")
+	ev.NodeID = e.nodeID
 	e.ring.Put(ev)
 }
 

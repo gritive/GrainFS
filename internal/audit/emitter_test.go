@@ -31,4 +31,5 @@ func TestEmitterNormalEvent(t *testing.T) {
 	got := e.Ring().DrainInto(buf)
 	require.Len(t, got, 1)
 	require.Equal(t, "PUT", got[0].Method)
+	require.Equal(t, "node-1", got[0].NodeID)
 }
