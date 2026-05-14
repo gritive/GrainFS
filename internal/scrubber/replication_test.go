@@ -130,6 +130,23 @@ func (f *fakeRepairer) RepairReplica(ctx context.Context, bucket, key string) er
 	return nil
 }
 
+// TestReplicationVerifier_MultipartETagSkipped — objects with composite multipart
+// ETags (e.g. "abc-5", len>32) cannot be verified locally. The verifier must
+// report Skipped (not Corrupt) to avoid exhausting the repair queue.
+func TestReplicationVerifier_MultipartETagSkipped(t *testing.T) {
+	b, root := setupBackend(t)
+	v := NewReplicationVerifier(localOpener(root), &fakeRepairer{})
+	_ = b
+	st, err := v.Verify(context.Background(), Block{
+		Bucket:       "__grainfs_volumes",
+		Key:          "__vol/v1/blk_000000000000",
+		ExpectedETag: "d8e8fca2dc0f896fd7cb4cb0031ba249-5", // composite multipart ETag
+	})
+	require.NoError(t, err)
+	require.True(t, st.Skipped, "multipart ETag must be Skipped, got %+v", st)
+	require.False(t, st.Corrupt)
+}
+
 // TestReplicationVerifier_LegacyETagSkipped — blocks written before the
 // MD5-oracle restoration have ExpectedETag="". The verifier must report
 // Skipped (not Corrupt) so the first-deploy of this code does not mass-flag

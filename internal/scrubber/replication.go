@@ -109,6 +109,12 @@ func (v *ReplicationVerifier) Verify(ctx context.Context, b Block) (BlockStatus,
 	if b.ExpectedETag == "" {
 		return BlockStatus{Skipped: true, Detail: "no ETag oracle (legacy block)"}, nil
 	}
+	// ETags we can verify: 32 chars = MD5, 16 chars = xxhash3. Anything else
+	// (multipart composite ETags, future formats) cannot be verified locally —
+	// skip rather than misreport as corrupt, which would exhaust the repair queue.
+	if n := len(b.ExpectedETag); n != 32 && n != 16 {
+		return BlockStatus{Skipped: true, Detail: fmt.Sprintf("unrecognized ETag format (len=%d)", n)}, nil
+	}
 	rc, err := v.open(b.Bucket, b.Key)
 	if err != nil {
 		if os.IsNotExist(err) {
