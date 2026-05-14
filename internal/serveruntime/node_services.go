@@ -1,6 +1,7 @@
 package serveruntime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/p9server"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -20,6 +22,7 @@ import (
 type NodeServices struct {
 	nfs4Srv *nfs4server.Server
 	nbdSrv  *nbd.Server
+	p9Srv   *p9server.Server
 }
 
 // Close shuts down any started services. Safe to call on the zero value.
@@ -47,11 +50,11 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 	}
 }
 
-// StartNodeServices spawns NFSv4 and NBD servers if their respective ports
+// StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
 // are > 0. Returns the handle for shutdown. ri is an optional ReadIndexer
 // for linearizable NBD reads (nil = no gate).
-func StartNodeServices(backend storage.Backend,
-	volMgr *volume.Manager, nfs4Port, nbdPort int, ri nbd.ReadIndexer,
+func StartNodeServices(ctx context.Context, backend storage.Backend,
+	volMgr *volume.Manager, nfs4Port, nbdPort, p9Port int, ri nbd.ReadIndexer,
 ) *NodeServices {
 	svc := &NodeServices{}
 
@@ -76,6 +79,16 @@ func StartNodeServices(backend storage.Backend,
 		} else {
 			svc.nbdSrv = nbdSrv
 		}
+	}
+
+	if p9Port > 0 {
+		svc.p9Srv = p9server.NewServer(backend)
+		go func() {
+			addr := fmt.Sprintf(":%d", p9Port)
+			if err := svc.p9Srv.ListenAndServe(ctx, addr); err != nil && ctx.Err() == nil {
+				log.Error().Err(err).Msg("9p server error")
+			}
+		}()
 	}
 
 	return svc

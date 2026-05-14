@@ -304,6 +304,8 @@ grainfs serve \
 
 > **Rolling-upgrade ordering:** `bucket-upstream` records propagate via a new MetaCmdType (IDs 32/33) introduced in v0.0.123.0. While a cluster is mid-upgrade — some nodes still on v0.0.122 or earlier — DO NOT issue `grainfs bucket upstream put/delete` commands. Pre-v0.0.123 followers will silently no-op the raft entry on apply (rolling-upgrade safety design). The records are recovered correctly via snapshot replay on next snapshot install, but during the apply gap the follower's view is inconsistent. Wait until every node reports v0.0.123.0+ before configuring bucket upstreams. The CLI/admin path was relocated in v0.0.133.0 (see ADR 0010); FSM/snapshot format is unchanged so v0.0.122 ↔ v0.0.133 raft compatibility is preserved.
 
+> **Unknown MetaCmd alert:** `grainfs_unknown_metacmd_total{type}` increments when a node ignores a raft metadata command it does not recognize or handle. Treat `GrainFSUnknownMetaCmdIgnored` as a version-skew or implementation-gap warning: confirm every node's version, pause use of the newly introduced feature, and finish the rolling upgrade before relying on state from that MetaCmd. Transport capability-exchange rejections are tracked separately by `grainfs_transport_ce_total{role,outcome,reason}`.
+
 If migrating from another S3-compatible source, register the upstream per
 bucket via the admin UDS. The `--upstream*` cmdline flags were removed in
 v0.0.123.0; the IAM-managed approach replaces them.

@@ -87,6 +87,7 @@ type Config struct {
 	// Node services
 	NFS4Port int
 	NBDPort  int
+	P9Port   int
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool
