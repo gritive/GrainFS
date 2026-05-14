@@ -6,10 +6,7 @@
 
 ### Audit Log Lake — Phase 2 (Task 4)
 
-- [ ] **`--audit-iceberg` 플래그** — `cmd/grainfs/serve.go` + `serveruntime.Config.AuditIceberg`. `boot_phases_srvopts.go`에서 Emitter + Committer 생성 및 wiring (`grainfs-audit` 버킷 bootstrap 포함).
-- [ ] **Prometheus metrics** — `internal/audit/metrics.go`: `audit_drops_total`, `audit_commit_lag_seconds`, `audit_committer_state` 3개 메트릭.
-- [ ] **E2E 테스트** — `tests/e2e/iceberg_duckdb_test.go`에 `TestAuditIcebergClusterDuckDB` 추가.
-- [ ] **`docs/audit-iceberg.md`** — Quick Start 3줄 + 파라미터 레퍼런스.
+- [ ] **Audit Iceberg `day(ts)` partition 재도입** — 현재 `audit.s3` Iceberg table은 DuckDB 호환성을 위해 unpartitioned로 유지하고, 물리 경로만 `data/YYYY-MM-DD/*.parquet`로 날짜별 정리한다. 후속에서 hidden partition `day(ts)`를 되살리려면 manifest partition tuple/field summary encoding, metadata partition spec, DuckDB single/cluster/follower-ship SELECT e2e, 빠른 artifact contract test를 먼저 추가/갱신한다.
 
 ### Bucket & IAM CLI DX
 
@@ -149,7 +146,6 @@
 - [ ] TSDB (Time Series DB) — Metric 저장 및 쿼리 지원
 - [ ] **AppendObject API (minio-go 클라이언트 호환)** — minio-go SDK의 `AppendObject` 메서드 (`client.AppendObject(ctx, bucket, key, reader, size, opts)`) 와 호환되는 서버 구현. S3 Express One Zone의 `write-offset-bytes` 헤더 시멘틱 따름. 객체 부재 시 신규 생성, 존재 시 끝에 append. **유스케이스:** 감사 로그, 이벤트 스트림, PITR WAL 등 append-only 워크로드. **참고:** AWS S3 Standard/GCP/오픈소스 MinIO는 미지원, Azure Append Blob/AIStor만 네이티브 지원 — minio-go 클라이언트 라이브러리는 메서드를 제공하므로 GrainFS가 서버만 구현하면 클라이언트 변경 없이 동작. **설계 쟁점:** (a) S3 `PUT` + offset 헤더 기반 vs 별도 endpoint, (b) 내부 저장소 구조 (packblob append 재활용 vs WAL-style native append), (c) 동시 append 직렬화 보장, (d) 최대 크기 정책. **Re-open trigger:** 로그 수집/이벤트 스트림 유스케이스가 구체화되거나 minio-go 호환 append 요구가 들어올 때.
 
-- [x] **9P 프로토콜 서버 (`internal/p9server/`)** — Linux v9fs TCP 마운트 타겟. `mount -t 9p -o trans=tcp,aname=/my-bucket grainfs-host:9564 /mnt` 패러다임. 2026-05-14 `feat/9p-read-write`에서 bucket/per-bucket aname, read/write, create, setattr mode/mtime/size, rename/unlink, fsync, protected `__meta/` sidecar, recovery write gate, signed HTTP cross-protocol Colima e2e까지 shipped. **Completed:** v0.0.196.0 (2026-05-14).
 - [ ] **9P/NFS shared write-back layer** — 9P read/write가 실사용 가치 있음을 확인했으므로, NFS와 9P가 따로 RMW/metadata/locking 정책을 키우기 전에 shared helper 후보를 별도 설계한다. 범위: capability unwrapping + `PreferWriteAt`, sidecar metadata schema, object lock namespace, truncate/write fallback limits, cross-protocol cache staleness policy. **Re-open trigger:** NFS/9P 중 한쪽에 write-path bugfix가 추가되거나 metadata schema 확장이 필요해질 때.
 
 - [ ] **NFSv4 + 9P 인증/접근 제어** — 현재 두 프로토콜 모두 LAN 신뢰 모델(인증 없음). 방화벽/네트워크 경계에 위임. **문제:** S3 IAM은 S3 경로에만 효력; NFSv4/9P 경로는 인증 우회 가능. 신뢰되지 않는 네트워크에 노출 시 보안 공백. 9P는 파일 metadata를 reserved `__meta/` object namespace에 저장하므로, 인증/exports 설계 시 해당 prefix 예약 정책도 같이 명시해야 한다. **설계 옵션:** (a) IP/CIDR allowlist per export — 가장 단순, 운영자 친화적, 토큰 노출 없음. (b) Kerberos (NFSv4 표준) — 엔터프라이즈 환경에서 표준이지만 KDC 운영 부담. 9P는 자체 인증 메커니즘이 빈약해 SSH tunnel/mTLS 권장. (c) GrainFS SA 토큰 인증 — 이미 admin UDS로 부트스트랩하는 SA 인증 체계를 NFS/9P aname/export 권한으로 매핑. S3 IAM과 일관성 유지. (d) mTLS via TLS-wrapped 9P/NFS — TLS 핸드셰이크에서 클라이언트 cert SPKI를 SA에 매핑. **선행 조건:** (i) export별 권한 모델 명확화 (read-only/read-write/admin), (ii) 사용자 ↔ POSIX uid/gid 매핑 정책 (현재 9P 설계는 모두 uid=0 root 스푸핑 — 인증 도입 시 SA → uid 매핑 필요), (iii) 9P aname에 SA 토큰 임베드 vs 별도 인증 핸드셰이크. **Re-open trigger:** (1) 신뢰되지 않는 네트워크 노출 요구 발생, (2) 멀티 테넌트 환경에서 export별 권한 분리 필요, (3) compliance 요구사항 (HIPAA/GDPR 등)에서 파일 접근 감사 필수일 때, (4) 9P/NFS 사용자가 S3 IAM과 동일한 권한 모델을 기대할 때.

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.199.0] - 2026-05-15 — feat: S3 audit log lake — Phase 2 (bootstrap + metrics + --audit-iceberg flag + e2e)
+
+### Added
+
+- **`--audit-iceberg` flag** — `cmd/grainfs serve` 에 `--audit-iceberg` (bool, default `true`) 및 `--audit-commit-interval` (duration, default `60s`) 추가. `serveruntime.Config.AuditIceberg` / `AuditCommitInterval` 필드 연동.
+- **Idempotent bootstrap** — `internal/audit.Bootstrap(ctx, catalog, backend)`: startup 시 `grainfs-audit` 버킷, `audit` namespace, `audit.s3` Iceberg 테이블을 없으면 생성. 이미 존재하는 경우 all-OK.
+- **Prometheus metrics** — `audit_drops_total{node}` (Counter), `audit_commit_lag_seconds{node}` (Histogram), `audit_committer_state{node}` (Gauge). `Committer.Run` 내에서 리더/팔로워 상태 전환 시 자동 업데이트.
+- **Subsystem wiring** — `boot_phases_srvopts.go`: `metaCatalog` 스코프 수정 (if/else 전에 선언), `cfg.AuditIceberg` 시 Emitter + Bootstrap + Committer + `StreamAuditShip` QUIC handler 자동 연결. leader ship 함수는 `MetaProposalTargets`로 타겟 결정.
+- **grainfs-audit 접근 차단** — `authzMiddleware`에 내부 버킷(`grainfs-audit`) 하드코딩 deny 추가; 모든 테넌트의 S3 API 접근 403으로 차단.
+- **docs/audit-iceberg.md** — Quick Start, flag 레퍼런스, 스토리지 레이아웃, 스키마, DuckDB 쿼리 예제, 클러스터 동작 설명, Prometheus 메트릭 문서.
+- **e2e 테스트** — `TestAuditIcebergSingleDuckDB`, `TestAuditIcebergClusterDuckDB`, `TestAuditIcebergClusterFollowerShipDuckDB`, `TestAuditIcebergClusterLeaderFlap`. 빌드 태그 `duckdb_e2e`. sleep 대신 `require.Eventually` 폴링.
+- **`mrClusterOptions.ExtraArgs`** — e2e harness에 `ExtraArgs []string` 추가로 개별 serve 플래그 주입 가능.
+
+### Fixed
+
+- **audit drop 카운터** — 리더 측 followerIn 채널 오버플로 시 `audit_drops_total` 미증가 버그 수정.
+- **배치 캡** — follower drain 루프 최대 65536 이벤트로 제한; `DecodeS3Batch` count > 65536 거부로 OOM 방어.
+- **오해 유발 로그** — commit 실패 시 "events retained in zerolog" → "events in this batch are dropped" 수정.
+- **부트스트랩 에러 레벨** — 감사 부트스트랩 에러 `Debug` → `Warn` 격상.
+- **snapshot retain 경쟁 조건** — `AutoSnapshotter.takeAndPrune()`이 스냅샷 생성 전 (retain-1)개로 먼저 prune하여 순간적으로 retain 한도를 초과하는 문제 수정; 생성 후 재-prune으로 생성 중 retain 감소 케이스도 처리.
+
 ## [0.0.198.0] - 2026-05-15 — perf: xxhash3 ETag for internal buckets (~37× faster than MD5)
 
 ### Changed

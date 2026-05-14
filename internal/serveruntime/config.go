@@ -84,6 +84,10 @@ type Config struct {
 	DataGroupRefreshInterval time.Duration
 	DegradedInterval         time.Duration
 
+	// Audit Iceberg log lake
+	AuditIceberg        bool
+	AuditCommitInterval time.Duration
+
 	// Node services
 	NFS4Port int
 	NBDPort  int

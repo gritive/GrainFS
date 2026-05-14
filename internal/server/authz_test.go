@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	auditpkg "github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/iampb"
@@ -345,4 +346,33 @@ func TestListBuckets_ScopedKey_FiltersToScope(t *testing.T) {
 		names = append(names, b.Name)
 	}
 	assert.Equal(t, []string{"alpha"}, names, "scoped key must only see buckets in its scope")
+}
+
+// TestAuthz_InternalAuditBucket_Denied verifies that any request targeting the
+// internal grainfs-audit bucket is rejected with 403 and reason "internal_bucket",
+// even when the principal holds a wildcard Admin grant.
+func TestAuthz_InternalAuditBucket_Denied(t *testing.T) {
+	cap := &captureAuditEmitter{}
+	iamAudit := iam.NewAuditLogger(cap)
+
+	h := newIAMTestHelper(t)
+	h.applySACreate(t, "sa-admin")
+	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
+	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
+
+	base := setupTestServerWithOptions(t,
+		WithIAMStore(h.store),
+		WithIAMAudit(iamAudit),
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
+	)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/"+auditpkg.BucketName, nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, "internal_bucket", cap.lastReason())
 }

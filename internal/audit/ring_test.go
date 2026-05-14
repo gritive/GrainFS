@@ -2,9 +2,12 @@
 package audit_test
 
 import (
+	"io"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,6 +41,10 @@ func TestRingDrainInto(t *testing.T) {
 }
 
 func BenchmarkAuditEmit(b *testing.B) {
+	prev := log.Logger
+	log.Logger = zerolog.New(io.Discard)
+	defer func() { log.Logger = prev }()
+
 	e := audit.NewEmitter("bench-node")
 	ev := audit.S3Event{Method: "PUT", Bucket: "data", Key: "obj", Status: 200}
 	b.ResetTimer()

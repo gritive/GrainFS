@@ -94,11 +94,19 @@ func (a *AutoSnapshotter) Wait() {
 }
 
 func (a *AutoSnapshotter) takeAndPrune() {
+	retain := int(a.policy.SnapshotRetain())
+	// Prune to (retain-1) before creating so the count never transiently exceeds retain.
+	makeRoom := retain - 1
+	if makeRoom < 0 {
+		makeRoom = 0
+	}
+	a.pruneOld(makeRoom)
 	if _, err := a.mgr.Create("auto"); err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot failed")
 		return
 	}
-	a.pruneOld(int(a.policy.SnapshotRetain()))
+	// Re-prune handles retain=0 and the case where retain was lowered while creating.
+	a.pruneOld(retain)
 }
 
 // pruneOld deletes auto-created snapshots beyond maxRetain. Manual snapshots

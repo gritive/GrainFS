@@ -28,9 +28,7 @@ type S3Event struct {
 
 // S3InitialMetadata is the Iceberg v2 metadata.json for an empty audit.s3 table.
 // Use fmt.Sprintf(S3InitialMetadata, tableUUID, s3Location, nowMs) to create.
-const S3InitialMetadata = `{"format-version":2,"table-uuid":%q,"location":%q,` +
-	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":13,` +
-	`"current-schema-id":0,"schemas":[{"type":"struct","schema-id":0,"fields":[` +
+const auditIcebergSchemaJSON = `{"type":"struct","schema-id":0,"fields":[` +
 	`{"id":1,"name":"ts","required":true,"type":"timestamptz"},` +
 	`{"id":2,"name":"node_id","required":true,"type":"string"},` +
 	`{"id":3,"name":"request_id","required":false,"type":"string"},` +
@@ -44,9 +42,12 @@ const S3InitialMetadata = `{"format-version":2,"table-uuid":%q,"location":%q,` +
 	`{"id":11,"name":"bytes_out","required":false,"type":"long"},` +
 	`{"id":12,"name":"latency_ms","required":false,"type":"int"},` +
 	`{"id":13,"name":"err_class","required":false,"type":"string"}` +
-	`]}],"partition-specs":[{"spec-id":0,"fields":[` +
-	`{"name":"dt","transform":"day","source-id":1,"field-id":1000}` +
-	`]}],"default-spec-id":0,"last-partition-id":1000,` +
+	`]}`
+
+const S3InitialMetadata = `{"format-version":2,"table-uuid":%q,"location":%q,` +
+	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":13,` +
+	`"current-schema-id":0,"schemas":[` + auditIcebergSchemaJSON + `],` +
+	`"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":999,` +
 	`"default-sort-order-id":0,"sort-orders":[{"order-id":0,"fields":[]}],` +
 	`"properties":{},"current-snapshot-id":-1,"snapshots":[],` +
 	`"snapshot-log":[],"metadata-log":[]}`

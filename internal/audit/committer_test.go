@@ -213,6 +213,67 @@ func TestCommitter_FollowerShipsToLeader(t *testing.T) {
 	require.True(t, methods["PUT"], "shipped events must include PUT")
 }
 
+func TestCommitter_AppendFromFollower_DropWhenFull(t *testing.T) {
+	// followerIn channel capacity is 256. Sending 300 batches without a reader
+	// must complete quickly — AppendFromFollower must never block the caller.
+	emitter := audit.NewEmitter("leader-drop")
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Emitter:  emitter,
+		Catalog:  newFakeCatalog(),
+		Backend:  newFakeBackend(),
+		IsLeader: func() bool { return true },
+		NodeID:   "leader-drop",
+		Interval: 10 * time.Second, // long interval so Run() is not draining
+	})
+
+	const total = 300
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < total; i++ {
+			c.AppendFromFollower([]audit.S3Event{{Bucket: "b", Method: "GET", Key: "k", Status: 200}})
+		}
+	}()
+
+	select {
+	case <-done:
+		// all 300 sends completed without blocking
+	case <-time.After(time.Second):
+		t.Fatal("AppendFromFollower blocked >1s — must be non-blocking when channel is full")
+	}
+}
+
+func TestCommitter_LazyBootstrap(t *testing.T) {
+	// Start with an empty catalog (no table pre-created).
+	// The committer must call Bootstrap() on the first ErrTableNotFound
+	// and then commit successfully.
+	catalog := newFakeCatalog()
+	backend := newFakeBackend()
+	emitter := audit.NewEmitter("leader-lazy")
+
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Emitter:  emitter,
+		Catalog:  catalog,
+		Backend:  backend,
+		IsLeader: func() bool { return true },
+		NodeID:   "leader-lazy",
+		Interval: 50 * time.Millisecond,
+	})
+
+	emitter.EmitS3(audit.S3Event{Bucket: "b", Method: "PUT", Key: "k", Status: 200})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go c.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		catalog.mu.Lock()
+		n := catalog.commits
+		catalog.mu.Unlock()
+		return n >= 1
+	}, 3*time.Second, 50*time.Millisecond, "lazy bootstrap must create table and commit")
+}
+
 func TestCommitter_FlushesRingToIceberg(t *testing.T) {
 	catalog := newFakeCatalog()
 	backend := newFakeBackend()
@@ -262,6 +323,8 @@ func TestCommitter_FlushesRingToIceberg(t *testing.T) {
 	for k := range backend.objects {
 		if strings.HasSuffix(k, ".parquet") {
 			hasParquet = true
+			require.Contains(t, k, "/data/")
+			require.NotContains(t, k, "dt=", "DuckDB httpfs percent-encodes '=' and breaks S3 signature validation")
 		}
 	}
 	backend.mu.Unlock()

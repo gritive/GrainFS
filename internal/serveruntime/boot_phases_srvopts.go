@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -22,6 +23,7 @@ import (
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // bootSrvOptsAndReceipt assembles the slice of server.Option that will be
@@ -123,13 +125,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
 	}
+	var metaCatalog *cluster.MetaCatalog
 	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.joinMode {
 		legacyStore := icebergcatalog.NewStore(state.db, "s3://grainfs-tables/warehouse")
-		metaCatalog := cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
+		metaCatalog = cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
 		if err := MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, state.backend); err != nil {
 			return fmt.Errorf("migrate singleton Iceberg catalog: %w", err)
 		}
-		srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
 	} else {
 		metaForward := func(ctx context.Context, command []byte) error {
 			return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
@@ -137,8 +139,9 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		metaReadTargets := func() []string {
 			return MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
 		}
-		srvOpts = append(srvOpts, server.WithIcebergCatalog(cluster.NewMetaCatalogWithForwarders(metaRaft, state.backend, "s3://grainfs-tables/warehouse", metaForward, state.metaReadSender, metaReadTargets)))
+		metaCatalog = cluster.NewMetaCatalogWithForwarders(metaRaft, state.backend, "s3://grainfs-tables/warehouse", metaForward, state.metaReadSender, metaReadTargets)
 	}
+	srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
 	if state.balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(NewBalancerInfoAdapter(state.balancerProposer)))
@@ -277,6 +280,57 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.mutationGate.SetBlocked(storage.ErrRecoveryWriteDisabled)
 	}
 	srvOpts = append(srvOpts, server.WithMutationGate(state.mutationGate))
+
+	if cfg.AuditIceberg {
+		auditEmitter := audit.NewEmitter(nodeID)
+		srvOpts = append(srvOpts, server.WithAuditEmitter(auditEmitter))
+		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
+		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
+			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
+		}
+		interval := cfg.AuditCommitInterval
+		if interval == 0 {
+			interval = 60 * time.Second
+		}
+		shipFn := func(ctx context.Context, events []audit.S3Event) error {
+			payload, err := audit.EncodeS3Batch(events)
+			if err != nil {
+				return err
+			}
+			targets := MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
+			if len(targets) == 0 {
+				return fmt.Errorf("audit ship: no leader elected")
+			}
+			return state.quicTransport.Send(ctx, targets[0], &transport.Message{
+				Type:    transport.StreamAuditShip,
+				Payload: payload,
+			})
+		}
+		committer := audit.NewCommitter(audit.CommitterConfig{
+			Emitter:      auditEmitter,
+			Catalog:      metaCatalog,
+			Backend:      state.backend,
+			IsLeader:     func() bool { return metaRaft.IsLeader() },
+			ShipToLeader: shipFn,
+			NodeID:       nodeID,
+			Interval:     interval,
+		})
+		state.streamRouter.Handle(transport.StreamAuditShip, func(req *transport.Message) *transport.Message {
+			events, err := audit.DecodeS3Batch(req.Payload)
+			if err != nil {
+				return transport.NewErrorResponse(req, transport.StatusError, err)
+			}
+			committer.AppendFromFollower(events)
+			return transport.NewResponse(req, nil)
+		})
+		commitCtx, commitCancel := context.WithCancel(ctx)
+		state.AddCleanup(commitCancel)
+		go committer.Run(commitCtx)
+		log.Info().
+			Str("table", audit.Namespace+"."+audit.TableS3).
+			Str("commit_interval", interval.String()).
+			Msg("audit subsystem enabled")
+	}
 
 	state.srvOpts = srvOpts
 	return nil
