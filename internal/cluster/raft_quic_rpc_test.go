@@ -20,6 +20,19 @@ type v2QUICCluster struct {
 	rpcs       []*RaftQUICRPCTransport
 }
 
+type timeoutNowObservingNode struct {
+	RaftNode
+	handled chan<- string
+}
+
+func (n timeoutNowObservingNode) HandleTimeoutNow() {
+	n.RaftNode.HandleTimeoutNow()
+	select {
+	case n.handled <- n.ID():
+	default:
+	}
+}
+
 // newV2QUICCluster creates an N-node cluster with optional election timeout
 // override (default 200ms). Pass a custom duration as the third argument when
 // the test needs to distinguish TimeoutNow from natural election (e.g. 5s).
@@ -185,23 +198,48 @@ func TestV2QUICCluster_ThreeNode_Propose_Replicate(t *testing.T) {
 // sends TimeoutNow over QUIC and a different node becomes leader within one
 // election cycle — proving SendTimeoutNow is wired end-to-end.
 //
-// ElectionTimeout is set to 5s so that a new leader appearing within 1s can
-// only be explained by TimeoutNow (not natural election).
+// The test observes TimeoutNow at the receiver-side handler, then separately
+// waits for the cluster to converge on a new leader.
 func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
-	// ET=5s: natural election takes [5s, 10s). TimeoutNow delivers within ~100ms.
-	cluster := newV2QUICCluster(t, 3, 5*time.Second)
+	const transferDeadline = 2 * time.Second
+
+	cluster := newV2QUICCluster(t, 3, 2500*time.Millisecond)
+	timeoutNowHandled := make(chan string, 1)
+	for _, rpc := range cluster.rpcs {
+		rpc.node = timeoutNowObservingNode{
+			RaftNode: rpc.node,
+			handled:  timeoutNowHandled,
+		}
+	}
 	cluster.startAll()
 
-	// Initial leader election: with ET=5s the window is [5s, 10s); allow 15s.
-	leader := cluster.waitForLeader(15 * time.Second)
+	// Initial leader election: with ET=2500ms the window is [2500ms, 5000ms);
+	// allow extra room for scheduler noise and QUIC setup.
+	leader := cluster.waitForLeader(7 * time.Second)
 	require.NotNil(t, leader, "initial leader required")
 
-	err := leader.TransferLeadership()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := leader.ProposeWait(ctx, []byte("v2-quic-transfer-barrier"))
 	require.NoError(t, err)
 
-	// A new leader within 2s proves TimeoutNow fired; without it the next
-	// natural election takes [5s, 10s) and the 2s window would expire.
-	// 2s (not 1s) gives GC and scheduling slack on loaded CI runners.
+	transferStarted := time.Now()
+	err = leader.TransferLeadership()
+	require.NoError(t, err)
+
+	select {
+	case nodeID := <-timeoutNowHandled:
+		require.NotEmpty(t, nodeID, "TimeoutNow receiver")
+	case <-time.After(transferDeadline):
+		t.Fatal("TimeoutNow must be handled over QUIC during TransferLeadership")
+	}
+
+	remaining := transferDeadline - time.Since(transferStarted)
+	require.Positive(t, remaining, "TimeoutNow must be handled before the transfer deadline")
+
+	// TimeoutNow was already observed at the receiver. Requiring the new leader
+	// within the original transfer window keeps natural election outside the pass
+	// condition: ET=2500ms, transferDeadline=2s.
 	require.Eventually(t, func() bool {
 		for _, n := range cluster.nodes {
 			if n != leader && n.IsLeader() {
@@ -209,5 +247,5 @@ func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
 			}
 		}
 		return false
-	}, 2*time.Second, 20*time.Millisecond, "a new leader must emerge after TransferLeadership")
+	}, remaining, 20*time.Millisecond, "a new leader must emerge after TransferLeadership")
 }

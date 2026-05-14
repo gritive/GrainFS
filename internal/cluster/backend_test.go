@@ -67,11 +67,11 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 	node.Start()
 	require.NoError(t, node.Bootstrap())
 
-	for range 200 {
+	for range 2000 {
 		if node.IsLeader() {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
