@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -75,6 +76,8 @@ const (
 	MetaCmdTypeNfsExportUpsert              = clusterpb.MetaCmdTypeNfsExportUpsert
 	MetaCmdTypeNfsExportDelete              = clusterpb.MetaCmdTypeNfsExportDelete
 	MetaCmdTypeNfsExportBucketDeleteCascade = clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade
+	MetaCmdTypeCapabilityActivate           = clusterpb.MetaCmdTypeCapabilityActivate
+	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -226,6 +229,7 @@ type MetaFSM struct {
 	// migrationStore is wired via SetMigration. nil = migration commands return
 	// an error (not configured).
 	migrationStore *migration.JobStore
+	activeFeatures compat.ActiveFeatures
 
 	// clusterCfg holds the cluster-wide policy snapshot. Initialised to an
 	// empty ClusterConfig (defaults) in NewMetaFSM; mutated only from the FSM
@@ -252,6 +256,7 @@ func NewMetaFSM() *MetaFSM {
 		icebergTables:     make(map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
 		iamStore:          iam.NewStore(),
+		activeFeatures:    compat.NewActiveFeatures(),
 		clusterCfg:        NewClusterConfig(),
 	}
 }
@@ -445,6 +450,10 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyMigrationJobDone(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeMigrationJobFailed:
 		return f.applyMigrationJobFailed(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeCapabilityActivate:
+		return f.applyCapabilityActivate(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMigrationCutover:
+		return f.applyMigrationCutover(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
@@ -596,6 +605,49 @@ func (f *MetaFSM) applyMigrationJobFailed(payload []byte) error {
 	job.Errors = errors
 	job.UpdatedAt = time.Unix(0, updatedAt)
 	return f.migrationStore.SaveJob(job)
+}
+
+func (f *MetaFSM) ActiveFeatures() compat.ActiveFeatures {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.activeFeatures
+}
+
+func (f *MetaFSM) applyCapabilityActivate(payload []byte) error {
+	cmd := clusterpb.GetRootAsMetaCapabilityActivateCmd(payload, 0)
+	capability := string(cmd.Capability())
+	if capability == "" {
+		return fmt.Errorf("meta_fsm: CapabilityActivate missing capability")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activeFeatures = f.activeFeatures.With(capability)
+	return nil
+}
+
+func (f *MetaFSM) applyMigrationCutover(payload []byte) error {
+	if f.migrationStore == nil {
+		return fmt.Errorf("meta_fsm: migration store not wired")
+	}
+	if f.iamApplier == nil {
+		return fmt.Errorf("meta_fsm: IAM applier not configured")
+	}
+	cmd := clusterpb.GetRootAsMetaMigrationCutoverCmd(payload, 0)
+	bucket := string(cmd.Bucket())
+	if bucket == "" {
+		return fmt.Errorf("meta_fsm: MigrationCutover missing bucket")
+	}
+	if err := f.iamApplier.ApplyBucketUpstreamStatusSet(bucket, iam.BucketUpstreamStatusCutover); err != nil {
+		return fmt.Errorf("meta_fsm: MigrationCutover upstream status: %w", err)
+	}
+	f.mu.Lock()
+	f.activeFeatures = f.activeFeatures.With(compat.CapabilityMigrationCutoverV1)
+	f.mu.Unlock()
+	return f.migrationStore.SaveJob(&migration.JobState{
+		Bucket:    bucket,
+		Status:    migration.StatusComplete,
+		UpdatedAt: time.Unix(0, cmd.UpdatedAtUnixNs()),
+	})
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {
@@ -2071,6 +2123,15 @@ func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
 	clusterpb.MetaRemoveNodeCmdStart(b)
 	clusterpb.MetaRemoveNodeCmdAddNodeId(b, idOff)
 	return fbFinish(b, clusterpb.MetaRemoveNodeCmdEnd(b)), nil
+}
+
+func buildMetaCapabilityActivatePayload(capability string) []byte {
+	b := flatbuffers.NewBuilder(128)
+	capOff := b.CreateString(capability)
+	clusterpb.MetaCapabilityActivateCmdStart(b)
+	clusterpb.MetaCapabilityActivateCmdAddCapability(b, capOff)
+	root := clusterpb.MetaCapabilityActivateCmdEnd(b)
+	return fbFinish(b, root)
 }
 
 func encodeMetaIcebergCreateNamespaceCmd(c IcebergCreateNamespaceCmd) ([]byte, error) {

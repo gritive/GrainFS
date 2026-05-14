@@ -463,6 +463,67 @@ func TestApplyBucketUpstreamPut_RoundTripDecryptsSecret(t *testing.T) {
 	}
 }
 
+func TestApplyBucketUpstreamPut_RoundTripsStatus(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+	wrapped, err := WrapSecret(enc, "bucket-upstream:shared", "sk")
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+	u := BucketUpstream{
+		Bucket:       "shared",
+		Endpoint:     "http://minio:9000",
+		AccessKey:    "ak",
+		SecretKeyEnc: wrapped,
+		CreatedAt:    time.Unix(100, 0),
+		CreatedBy:    "admin",
+		Status:       BucketUpstreamStatusCutover,
+	}
+	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(u)); err != nil {
+		t.Fatalf("ApplyBucketUpstreamPut: %v", err)
+	}
+	got, ok := s.LookupBucketUpstream("shared")
+	if !ok {
+		t.Fatal("LookupBucketUpstream(shared) returned ok=false after Apply")
+	}
+	if got.Status != BucketUpstreamStatusCutover {
+		t.Fatalf("Status = %q, want %q", got.Status, BucketUpstreamStatusCutover)
+	}
+}
+
+func TestApplyBucketUpstreamStatusSet(t *testing.T) {
+	s := NewStore()
+	enc := newTestEncryptor(t)
+	ap := NewApplier(s, enc)
+	wrapped, err := WrapSecret(enc, "bucket-upstream:shared", "sk")
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+	u := BucketUpstream{
+		Bucket:       "shared",
+		Endpoint:     "http://minio:9000",
+		AccessKey:    "ak",
+		SecretKeyEnc: wrapped,
+		CreatedAt:    time.Unix(100, 0),
+		CreatedBy:    "admin",
+		Status:       BucketUpstreamStatusActive,
+	}
+	if err := ap.ApplyBucketUpstreamPut(buildBucketUpstreamPutPayload(u)); err != nil {
+		t.Fatalf("ApplyBucketUpstreamPut: %v", err)
+	}
+	if err := ap.ApplyBucketUpstreamStatusSet("shared", BucketUpstreamStatusCutover); err != nil {
+		t.Fatalf("ApplyBucketUpstreamStatusSet: %v", err)
+	}
+	got, ok := s.LookupBucketUpstream("shared")
+	if !ok {
+		t.Fatal("LookupBucketUpstream(shared) returned ok=false after status set")
+	}
+	if got.Status != BucketUpstreamStatusCutover {
+		t.Fatalf("Status = %q, want %q", got.Status, BucketUpstreamStatusCutover)
+	}
+}
+
 func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
 	s := NewStore()
 	enc := newTestEncryptor(t)

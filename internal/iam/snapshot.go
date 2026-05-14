@@ -363,6 +363,11 @@ func buildBucketUpstreamPutPayload(u BucketUpstream) []byte {
 	akOff := b.CreateString(u.AccessKey)
 	encVec := b.CreateByteVector(u.SecretKeyEnc)
 	cbOff := b.CreateString(u.CreatedBy)
+	status := string(u.Status)
+	if status == "" {
+		status = string(BucketUpstreamStatusActive)
+	}
+	statusOff := b.CreateString(status)
 	iampb.BucketUpstreamPutPayloadStart(b)
 	iampb.BucketUpstreamPutPayloadAddBucket(b, bucketOff)
 	iampb.BucketUpstreamPutPayloadAddEndpoint(b, endpointOff)
@@ -370,6 +375,7 @@ func buildBucketUpstreamPutPayload(u BucketUpstream) []byte {
 	iampb.BucketUpstreamPutPayloadAddSecretKeyEnc(b, encVec)
 	iampb.BucketUpstreamPutPayloadAddCreatedAtUnixNs(b, u.CreatedAt.UnixNano())
 	iampb.BucketUpstreamPutPayloadAddCreatedBy(b, cbOff)
+	iampb.BucketUpstreamPutPayloadAddStatus(b, statusOff)
 	b.Finish(iampb.BucketUpstreamPutPayloadEnd(b))
 	return b.FinishedBytes()
 }

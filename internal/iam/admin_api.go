@@ -456,11 +456,12 @@ type BucketUpstreamPutRequest struct {
 // SecretKey is intentionally absent — only access_key, upstream_url, and
 // metadata leave the server.
 type BucketUpstreamItem struct {
-	Bucket      string    `json:"bucket"`
-	UpstreamURL string    `json:"upstream_url"`
-	AccessKey   string    `json:"access_key"`
-	CreatedAt   time.Time `json:"created_at"`
-	CreatedBy   string    `json:"created_by,omitempty"`
+	Bucket      string               `json:"bucket"`
+	UpstreamURL string               `json:"upstream_url"`
+	AccessKey   string               `json:"access_key"`
+	CreatedAt   time.Time            `json:"created_at"`
+	CreatedBy   string               `json:"created_by,omitempty"`
+	Status      BucketUpstreamStatus `json:"status"`
 }
 
 func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutRequest) error {
@@ -528,7 +529,11 @@ func (a *AdminAPI) GetBucketUpstream(_ context.Context, bucket string) (BucketUp
 	if !ok {
 		return BucketUpstreamItem{}, &adminapi.Error{Code: "not_found", Message: "not found"}
 	}
-	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy}, nil
+	status := u.Status
+	if status == "" {
+		status = BucketUpstreamStatusActive
+	}
+	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status}, nil
 }
 
 func (a *AdminAPI) HandleBucketUpstreamGet(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -545,7 +550,11 @@ func (a *AdminAPI) ListBucketUpstreams(_ context.Context) ([]BucketUpstreamItem,
 	st := a.store.snapshot()
 	out := make([]BucketUpstreamItem, 0, len(st.bucketUpstreams))
 	for _, u := range st.bucketUpstreams {
-		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy})
+		status := u.Status
+		if status == "" {
+			status = BucketUpstreamStatusActive
+		}
+		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status})
 	}
 	return out, nil
 }

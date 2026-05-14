@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/migration"
 )
 
@@ -76,6 +78,31 @@ func TestMetaFSM_MigrationJobStart(t *testing.T) {
 	err = f.applyCmd(badCmd)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MigrationJobStart")
+}
+
+func TestApplyMigrationCutoverSetsUpstreamStatusAndActiveFeature(t *testing.T) {
+	f := NewMetaFSM()
+	iamStore := iam.NewStore()
+	enc := newIAMTestEncryptor(t)
+	iamApplier := iam.NewApplier(iamStore, enc)
+	f.SetIAM(iamStore, iamApplier)
+	f.SetMigration(migration.NewJobStore(newMigrationTestDB(t)))
+	iamStore.ApplyBucketUpstreamForTest(iam.BucketUpstream{
+		Bucket:    "shared",
+		Endpoint:  "http://minio:9000",
+		AccessKey: "ak",
+		Status:    iam.BucketUpstreamStatusActive,
+	})
+
+	payload := encodeMigrationCutoverPayload("shared", time.Unix(100, 0).UnixNano())
+	cmd, err := encodeMetaCmd(clusterpb.MetaCmdTypeMigrationCutover, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(cmd))
+
+	got, ok := iamStore.LookupBucketUpstream("shared")
+	require.True(t, ok)
+	require.Equal(t, iam.BucketUpstreamStatusCutover, got.Status)
+	require.True(t, f.ActiveFeatures().Has(compat.CapabilityMigrationCutoverV1))
 }
 
 // TestMetaFSM_MigrationJobDone verifies status transition to Complete and job==nil path.

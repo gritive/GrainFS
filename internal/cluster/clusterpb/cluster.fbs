@@ -335,6 +335,8 @@ enum MetaCmdType : uint8 {
   NfsExportUpsert         = 40, // NFSv4 multi-export: registry upsert (Phase 1)
   NfsExportDelete         = 41, // NFSv4 multi-export: registry delete (Phase 1)
   NfsExportBucketDeleteCascade = 42, // NFSv4 multi-export: bucket delete cascade marker
+  CapabilityActivate      = 43, // Rolling-upgrade capability: active persisted feature marker
+  MigrationCutover        = 44, // Migration job: mark bucket upstream cutover semantics active
 }
 
 table MetaNodeEntry {
@@ -354,6 +356,15 @@ table MetaAddNodeCmd {
 
 table MetaRemoveNodeCmd {
   node_id:string;
+}
+
+table MetaCapabilityActivateCmd {
+  capability:string;
+}
+
+table MetaMigrationCutoverCmd {
+  bucket:string;
+  updated_at_unix_ns:int64;
 }
 
 // PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.
