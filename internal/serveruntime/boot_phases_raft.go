@@ -58,9 +58,9 @@ func bootMetaRaftWiring(state *bootState) error {
 	metaRaft.FSM().SetExportStore(exportStore)
 	metaRaft.FSM().SetExportFsidMajor(1)
 	state.nfsExportSvc = nfsexport.NewExportService(nfsexport.ServiceConfig{
-		Store:            exportStore,
-		Proposer:         &cluster.NfsExportProposer{Propose: metaRaft.Propose},
-		ClusterNodeCount: func() int { return len(metaRaft.FSM().Nodes()) },
+		Store:    exportStore,
+		Proposer: &cluster.NfsExportProposer{Propose: metaRaft.ProposeWithIndex},
+		Barrier:  metaRaft,
 	})
 
 	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.

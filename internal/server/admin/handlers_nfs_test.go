@@ -16,13 +16,20 @@ type fakeNfsExportProposer struct {
 	store *nfsexport.Store
 }
 
-func (p *fakeNfsExportProposer) ProposeUpsert(_ context.Context, bucket string, cfg nfsexport.Config) error {
+func (p *fakeNfsExportProposer) ProposeUpsert(_ context.Context, bucket string, cfg nfsexport.Config) (uint64, error) {
 	_, err := p.store.ApplyUpsert(bucket, cfg.ReadOnly, 1)
-	return err
+	return 1, err
 }
 
-func (p *fakeNfsExportProposer) ProposeDelete(_ context.Context, bucket string) error {
-	return p.store.Delete(bucket)
+func (p *fakeNfsExportProposer) ProposeDelete(_ context.Context, bucket string) (uint64, error) {
+	return 1, p.store.Delete(bucket)
+}
+
+type recordingNfsBarrier struct{ indexes []uint64 }
+
+func (b *recordingNfsBarrier) WaitApplied(_ context.Context, index uint64) error {
+	b.indexes = append(b.indexes, index)
+	return nil
 }
 
 func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
@@ -122,15 +129,17 @@ func TestAdminDeleteBucketRejectsExportedBucket(t *testing.T) {
 	require.True(t, buckets.buckets["b1"])
 }
 
-func TestAdminNfsExportRejectsMultiNodeWithoutPropagationBarrier(t *testing.T) {
+func TestAdminNfsExportAllowsMultiNodeWhenBarrierIsWired(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
 	require.NoError(t, err)
+	barrier := &recordingNfsBarrier{}
 	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
 		Store:            store,
 		Proposer:         &fakeNfsExportProposer{store: store},
+		Barrier:          barrier,
 		ClusterNodeCount: func() int { return 2 },
 	})
 	buckets := newFakeBucketOps()
@@ -141,7 +150,6 @@ func TestAdminNfsExportRejectsMultiNodeWithoutPropagationBarrier(t *testing.T) {
 	}
 
 	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
-	var ae *adminapi.Error
-	require.ErrorAs(t, err, &ae)
-	require.Equal(t, "unsupported", ae.Code)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1}, barrier.indexes)
 }
