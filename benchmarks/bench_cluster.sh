@@ -41,6 +41,11 @@ SIZE_KB="${SIZE_KB:-64}"
 PROFILE="${PROFILE:-0}"
 PPROF_PORT="${PPROF_PORT:-6060}"
 SCRIPT="$BENCHMARKS_DIR/s3_bench.js"
+PUT_TRACE="${PUT_TRACE:-0}"
+PUT_MATRIX="${PUT_MATRIX:-0}"
+PUT_SMALL_KB="${PUT_SMALL_KB:-64}"
+PUT_LARGE_KB="${PUT_LARGE_KB:-8192}"
+PUT_MATRIX_ITERATIONS="${PUT_MATRIX_ITERATIONS:-25}"
 
 # ── 의존성 확인 ────────────────────────────────────────────────────────────────
 bench_require_command "$K6" "brew install k6"
@@ -80,8 +85,12 @@ start_node() {
   local peers="$4"      # 쉼표 구분 raft 주소 목록 (자신 제외)
   local extra="${5:-}"  # 추가 플래그 (--pprof-port 등)
   local logfile="$BENCH_DIR/n${idx}.log"
+  local trace_env=()
+  if [[ "$PUT_TRACE" == "1" ]]; then
+    trace_env=(env "GRAINFS_PUT_TRACE_FILE=$BENCH_DIR/n${idx}/put-trace.jsonl" "GRAINFS_NODE_ID=node${idx}")
+  fi
 
-  "$BINARY" serve \
+  "${trace_env[@]}" "$BINARY" serve \
     --data "$BENCH_DIR/n${idx}" \
     --port "$s3_port" \
     --raft-addr "127.0.0.1:${raft_port}" \
@@ -188,6 +197,34 @@ if [[ -z "$TARGET_PORT" ]]; then
 fi
 echo "[bench] writable target on port ${TARGET_PORT}"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
+
+if [[ "$PUT_MATRIX" == "1" ]]; then
+  MATRIX_SCRIPT="$BENCHMARKS_DIR/put_matrix_bench.js"
+  echo "[bench] running PUT matrix with trace=${PUT_TRACE}"
+
+  run_put_matrix_cell() {
+    local cell="$1"
+    local port="$2"
+    local size_kb="$3"
+    "$K6" run "$MATRIX_SCRIPT" \
+      --env BASE_URL="http://127.0.0.1:${port}" \
+      --env BUCKET="bench" \
+      --env OBJECT_SIZE_KB="$size_kb" \
+      --env MATRIX_CELL="$cell" \
+      --env ITERATIONS="$PUT_MATRIX_ITERATIONS" \
+      --env VUS="1"
+  }
+
+  for port in 9100 9101 9102; do
+    run_put_matrix_cell "port${port}-small" "$port" "$PUT_SMALL_KB"
+    run_put_matrix_cell "port${port}-large" "$port" "$PUT_LARGE_KB"
+  done
+
+  if [[ "$PUT_TRACE" == "1" ]]; then
+    node "$BENCHMARKS_DIR/put_trace_report.js" "$BENCH_DIR"/n*/put-trace.jsonl
+  fi
+  exit 0
+fi
 
 # ── 프로파일: 벤치마크 전 heap 수집 ─────────────────────────────────────────
 if [[ "$PROFILE" == "1" ]]; then
