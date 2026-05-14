@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.200.1] - 2026-05-15 — test: faster cluster unit test timing
+
+### Changed
+
+- **Cluster single-voter test setup** — backend and group backend helpers now poll leadership every 1ms while preserving the existing 2s cap, removing avoidable 10ms sleeps across many unit tests.
+- **QUIC leadership transfer test** — reduced the special election timeout from 5s to 2.5s and added receiver-side TimeoutNow observation plus a 2s transfer deadline, keeping natural election outside the pass condition.
+
+### Verification
+
+- `go test -count=10 ./internal/cluster -run '^TestV2QUICCluster_ThreeNode_TransferLeadership$'`
+- `go test -count=1 ./internal/cluster`
+
 ## [0.0.200.0] - 2026-05-15 — perf: zero-alloc SigV4, storage cache, and NBD reply hot paths
 
 ### Changed
