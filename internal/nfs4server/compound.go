@@ -47,10 +47,16 @@ func putCompoundResponse(resp *CompoundResponse) {
 var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
 func getDispatcher(backend storage.Backend, state *StateManager, server *Server) *Dispatcher {
+	return getDispatcherWithClient(backend, state, server, "", nil)
+}
+
+func getDispatcherWithClient(backend storage.Backend, state *StateManager, server *Server, clientAddr string, hinter *unknownExportHinter) *Dispatcher {
 	d := dispatcherPool.Get()
 	d.backend = backend
 	d.state = state
 	d.server = server
+	d.clientAddr = clientAddr
+	d.hinter = hinter
 	d.currentFH = FileHandle{}
 	d.currentPath = ""
 	d.savedFH = FileHandle{}
@@ -65,6 +71,8 @@ func putDispatcher(d *Dispatcher) {
 	d.backend = nil
 	d.state = nil
 	d.server = nil
+	d.clientAddr = ""
+	d.hinter = nil
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
 	dispatcherPool.Put(d)
@@ -219,6 +227,8 @@ type Dispatcher struct {
 	backend          storage.Backend
 	state            *StateManager
 	server           *Server
+	clientAddr       string
+	hinter           *unknownExportHinter
 	currentFH        FileHandle
 	currentPath      string
 	savedFH          FileHandle
@@ -424,6 +434,13 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 	exists := d.state.IsDir(childPath)
 	if !exists && d.currentPath == "/" && childKey == "" && d.server != nil {
 		exists = d.server.isExportRegistered(childBucket)
+		if !exists {
+			if d.hinter != nil {
+				d.hinter.emit(d.clientAddr, childBucket)
+			}
+			log.Debug().Str("name", name).Str("child", childPath).Bool("exists", false).Msg("nfs4: LOOKUP")
+			return OpResult{OpCode: OpLookup, Status: NFS4ERR_NOENT}
+		}
 	}
 	if !exists && d.backend != nil {
 		_, err := d.backend.HeadObject(context.Background(), childBucket, childKey)

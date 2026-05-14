@@ -21,6 +21,7 @@ type Server struct {
 	listener net.Listener
 	logger   zerolog.Logger
 	exports  atomic.Pointer[exportSnap]
+	hinter   *unknownExportHinter
 
 	exportSource exportSource
 }
@@ -38,6 +39,7 @@ func NewServer(backend storage.Backend) *Server {
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
+		hinter:  newUnknownExportHinter(hinterTTL),
 	}
 	s.exports.Store(emptySnap)
 	if err := s.RefreshExports(context.Background()); err != nil {
@@ -72,6 +74,9 @@ func (s *Server) ListenAndServe(addr string) error {
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.hinter != nil {
+		s.hinter.Close()
+	}
 	if s.listener != nil {
 		return s.listener.Close()
 	}
@@ -156,7 +161,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			w.WriteUint32(0)        // ACCEPT_SUCCESS
 
 			if header.Program == rpcProgNFS && header.ProgVers == rpcVersNFS4 && header.Procedure == 1 {
-				s.handleCompoundInto(args, w)
+				s.handleCompoundIntoFrom(args, w, conn.RemoteAddr().String())
 			} else {
 				s.logger.Debug().
 					Uint32("prog", header.Program).
@@ -177,6 +182,10 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
+	s.handleCompoundIntoFrom(data, w, "")
+}
+
+func (s *Server) handleCompoundIntoFrom(data []byte, w *XDRWriter, clientAddr string) {
 	req := compoundReqPool.Get()
 	req.Tag = ""
 	req.MinorVer = 0
@@ -197,7 +206,7 @@ func (s *Server) handleCompoundInto(data []byte, w *XDRWriter) {
 		e.Uint32("minorver", req.MinorVer).Ints("ops", ops).Msg("nfs4: COMPOUND")
 	}
 
-	d := getDispatcher(s.backend, s.state, s)
+	d := getDispatcherWithClient(s.backend, s.state, s, clientAddr, s.hinter)
 	defer putDispatcher(d)
 
 	resp := compoundRespPool.Get()
