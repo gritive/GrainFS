@@ -4,6 +4,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,7 +324,7 @@ func (c *Committer) writeManifestList(
 	listKey := fmt.Sprintf("metadata/s3/snap-%d-%s.avro", snapshotID, uuid.New().String())
 	listPath := fmt.Sprintf("s3://%s/%s", BucketName, listKey)
 
-	listBytes, err := encodeManifestList(snapshotID, seqNum, manifestPath, int64(len(manifestBytes)), rowCount)
+	listBytes, err := encodeManifestList(snapshotID, seqNum, manifestPath, int64(len(manifestBytes)), rowCount, dt)
 	if err != nil {
 		return "", 0, fmt.Errorf("encode manifest list: %w", err)
 	}
@@ -378,6 +379,26 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"12"})},
 		{Name: "err_class", Type: arrow.BinaryTypes.LargeString,
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"13"})},
+		{Name: "event_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"14"})},
+		{Name: "user_agent", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"15"})},
+		{Name: "operation", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"16"})},
+		{Name: "subresource", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"17"})},
+		{Name: "auth_status", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"18"})},
+		{Name: "err_reason", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"19"})},
+		{Name: "version_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"20"})},
+		{Name: "upload_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"21"})},
+		{Name: "copy_source_bucket", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"22"})},
+		{Name: "copy_source_key", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"23"})},
 	}, nil)
 
 	builder := array.NewRecordBuilder(pool, arrowSchema)
@@ -396,6 +417,16 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 	boutB := builder.Field(10).(*array.Int64Builder)
 	latB := builder.Field(11).(*array.Int32Builder)
 	errB := builder.Field(12).(*array.LargeStringBuilder)
+	eventIDB := builder.Field(13).(*array.LargeStringBuilder)
+	userAgentB := builder.Field(14).(*array.LargeStringBuilder)
+	opB := builder.Field(15).(*array.LargeStringBuilder)
+	subresourceB := builder.Field(16).(*array.LargeStringBuilder)
+	authStatusB := builder.Field(17).(*array.LargeStringBuilder)
+	errReasonB := builder.Field(18).(*array.LargeStringBuilder)
+	versionIDB := builder.Field(19).(*array.LargeStringBuilder)
+	uploadIDB := builder.Field(20).(*array.LargeStringBuilder)
+	copySourceBucketB := builder.Field(21).(*array.LargeStringBuilder)
+	copySourceKeyB := builder.Field(22).(*array.LargeStringBuilder)
 
 	for _, e := range events {
 		tsB.Append(arrow.Timestamp(e.Ts))
@@ -411,6 +442,16 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 		boutB.Append(e.BytesOut)
 		latB.Append(e.LatencyMs)
 		errB.Append(e.ErrClass)
+		eventIDB.Append(e.EventID)
+		userAgentB.Append(e.UserAgent)
+		opB.Append(e.Operation)
+		subresourceB.Append(e.Subresource)
+		authStatusB.Append(e.AuthStatus)
+		errReasonB.Append(e.ErrReason)
+		versionIDB.Append(e.VersionID)
+		uploadIDB.Append(e.UploadID)
+		copySourceBucketB.Append(e.CopySourceBucket)
+		copySourceKeyB.Append(e.CopySourceKey)
 	}
 
 	rec := builder.NewRecord()
@@ -433,7 +474,7 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 }
 
 // encodeManifestList creates an Iceberg manifest list Avro file with one manifest entry.
-func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestLen, rowCount int64) ([]byte, error) {
+func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestLen, rowCount int64, dt string) ([]byte, error) {
 	schema := `{"type":"record","name":"manifest_file","fields":[` +
 		`{"name":"manifest_path","type":"string","field-id":500},` +
 		`{"name":"manifest_length","type":"long","field-id":501},` +
@@ -470,7 +511,19 @@ func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestL
 	appendAvroLong(&rec, rowCount)   // added_rows_count
 	appendAvroLong(&rec, 0)          // existing_rows_count
 	appendAvroLong(&rec, 0)          // deleted_rows_count
-	appendAvroLong(&rec, 0)          // partitions: empty array (block count = 0)
+	day, err := partitionDay(dt)
+	if err != nil {
+		return nil, err
+	}
+	bounds := partitionIntBytes(day)
+	appendAvroLong(&rec, 1)     // partitions: one summary
+	appendAvroBool(&rec, false) // contains_null
+	appendAvroInt(&rec, 0)      // contains_nan: null
+	appendAvroInt(&rec, 1)      // lower_bound: bytes
+	appendAvroBytes(&rec, bounds)
+	appendAvroInt(&rec, 1) // upper_bound: bytes
+	appendAvroBytes(&rec, bounds)
+	appendAvroLong(&rec, 0) // partitions: end array
 
 	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata()), nil
 }
@@ -486,7 +539,7 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 		`{"name":"content","type":"int","field-id":134},` +
 		`{"name":"file_path","type":"string","field-id":100},` +
 		`{"name":"file_format","type":"string","field-id":101},` +
-		`{"name":"partition","type":{"type":"record","name":"r102","fields":[]},"field-id":102},` +
+		`{"name":"partition","type":{"type":"record","name":"r102","fields":[{"name":"ts_day","type":["null","int"],"default":null,"field-id":1000}]},"field-id":102},` +
 		`{"name":"record_count","type":"long","field-id":103},` +
 		`{"name":"file_size_in_bytes","type":"long","field-id":104},` +
 		`{"name":"column_sizes","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k117_v118","fields":[{"name":"key","type":"int","field-id":117},{"name":"value","type":"long","field-id":118}]}}],"default":null,"field-id":108},` +
@@ -516,6 +569,12 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 	appendAvroInt(&rec, 0) // content=DATA
 	appendAvroString(&rec, parquetPath)
 	appendAvroString(&rec, "PARQUET")
+	day, err := partitionDay(dt)
+	if err != nil {
+		return nil, err
+	}
+	appendAvroInt(&rec, 1) // partition.ts_day: int
+	appendAvroInt(&rec, day)
 	appendAvroLong(&rec, rowCount)
 	appendAvroLong(&rec, parquetSize)
 	// optional metrics/key/split/equality/sort fields: all null (union index 0).
@@ -566,7 +625,7 @@ func icebergManifestMetadata() map[string]string {
 	return map[string]string{
 		"schema":            auditIcebergSchemaJSON,
 		"schema-id":         "0",
-		"partition-spec":    "[]",
+		"partition-spec":    auditPartitionSpecJSON,
 		"partition-spec-id": "0",
 		"format-version":    "2",
 		"content":           "data",
@@ -584,6 +643,14 @@ func appendAvroLong(buf *bytes.Buffer, v int64) {
 
 func appendAvroInt(buf *bytes.Buffer, v int32) { appendAvroLong(buf, int64(v)) }
 
+func appendAvroBool(buf *bytes.Buffer, v bool) {
+	if v {
+		buf.WriteByte(1)
+		return
+	}
+	buf.WriteByte(0)
+}
+
 func appendAvroString(buf *bytes.Buffer, s string) {
 	appendAvroLong(buf, int64(len(s)))
 	buf.WriteString(s)
@@ -592,4 +659,18 @@ func appendAvroString(buf *bytes.Buffer, s string) {
 func appendAvroBytes(buf *bytes.Buffer, b []byte) {
 	appendAvroLong(buf, int64(len(b)))
 	buf.Write(b)
+}
+
+func partitionDay(dt string) (int32, error) {
+	t, err := time.Parse("2006-01-02", dt)
+	if err != nil {
+		return 0, fmt.Errorf("partition day: %w", err)
+	}
+	return int32(t.Unix() / 86400), nil
+}
+
+func partitionIntBytes(v int32) []byte {
+	out := make([]byte, 4)
+	binary.LittleEndian.PutUint32(out, uint32(v))
+	return out
 }
