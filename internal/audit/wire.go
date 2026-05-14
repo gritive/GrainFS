@@ -22,28 +22,65 @@ func EncodeS3Batch(events []S3Event) ([]byte, error) {
 	buf = append(buf, hdr[:]...)
 	for _, e := range events {
 		buf = appendInt64LE(buf, e.Ts)
-		buf = appendString16(buf, e.EventID)
-		buf = appendString16(buf, e.NodeID)
-		buf = appendString16(buf, e.RequestID)
-		buf = appendString16(buf, e.SAID)
-		buf = appendString16(buf, e.SourceIP)
-		buf = appendString16(buf, e.UserAgent)
-		buf = appendString8(buf, e.Method)
-		buf = appendString16(buf, e.Operation)
-		buf = appendString16(buf, e.Bucket)
-		buf = appendString16(buf, e.Key)
-		buf = appendString16(buf, e.Subresource)
+		var err error
+		if buf, err = appendString16(buf, "event_id", e.EventID); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "node_id", e.NodeID); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "request_id", e.RequestID); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "sa_id", e.SAID); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "source_ip", e.SourceIP); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "user_agent", e.UserAgent); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString8(buf, "method", e.Method); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "operation", e.Operation); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "bucket", e.Bucket); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "key", e.Key); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "subresource", e.Subresource); err != nil {
+			return nil, err
+		}
 		buf = appendInt32LE(buf, e.Status)
-		buf = appendString16(buf, e.AuthStatus)
+		if buf, err = appendString16(buf, "auth_status", e.AuthStatus); err != nil {
+			return nil, err
+		}
 		buf = appendInt64LE(buf, e.BytesIn)
 		buf = appendInt64LE(buf, e.BytesOut)
 		buf = appendInt32LE(buf, e.LatencyMs)
-		buf = appendString16(buf, e.ErrClass)
-		buf = appendString16(buf, e.ErrReason)
-		buf = appendString16(buf, e.VersionID)
-		buf = appendString16(buf, e.UploadID)
-		buf = appendString16(buf, e.CopySourceBucket)
-		buf = appendString16(buf, e.CopySourceKey)
+		if buf, err = appendString16(buf, "err_class", e.ErrClass); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "err_reason", e.ErrReason); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "version_id", e.VersionID); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "upload_id", e.UploadID); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "copy_source_bucket", e.CopySourceBucket); err != nil {
+			return nil, err
+		}
+		if buf, err = appendString16(buf, "copy_source_key", e.CopySourceKey); err != nil {
+			return nil, err
+		}
 	}
 	return buf, nil
 }
@@ -150,16 +187,22 @@ func appendInt32LE(buf []byte, v int32) []byte {
 	return append(buf, b[:]...)
 }
 
-func appendString16(buf []byte, s string) []byte {
+func appendString16(buf []byte, field, s string) ([]byte, error) {
+	if len(s) > 0xffff {
+		return nil, fmt.Errorf("%s length %d exceeds maximum 65535", field, len(s))
+	}
 	var b [2]byte
 	binary.LittleEndian.PutUint16(b[:], uint16(len(s)))
 	buf = append(buf, b[:]...)
-	return append(buf, s...)
+	return append(buf, s...), nil
 }
 
-func appendString8(buf []byte, s string) []byte {
+func appendString8(buf []byte, field, s string) ([]byte, error) {
+	if len(s) > 0xff {
+		return nil, fmt.Errorf("%s length %d exceeds maximum 255", field, len(s))
+	}
 	buf = append(buf, byte(len(s)))
-	return append(buf, s...)
+	return append(buf, s...), nil
 }
 
 type byteReader struct {

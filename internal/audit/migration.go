@@ -30,13 +30,15 @@ func MigrateMetadataToCurrent(raw json.RawMessage, nowMs int64) (json.RawMessage
 		needsPartition = len(fields) == 0
 	}
 	if needsPartition {
-		meta["partition-specs"] = []any{map[string]any{
-			"spec-id": float64(0),
+		newSpecID := nextPartitionSpecID(specs)
+		specs = append(specs, map[string]any{
+			"spec-id": float64(newSpecID),
 			"fields": []any{map[string]any{
 				"name": "ts_day", "transform": "day", "source-id": float64(1), "field-id": float64(1000),
 			}},
-		}}
-		meta["default-spec-id"] = float64(0)
+		})
+		meta["partition-specs"] = specs
+		meta["default-spec-id"] = float64(newSpecID)
 		meta["last-partition-id"] = float64(1000)
 		changed = true
 	}
@@ -47,4 +49,18 @@ func MigrateMetadataToCurrent(raw json.RawMessage, nowMs int64) (json.RawMessage
 	meta["last-updated-ms"] = float64(nowMs)
 	out, err := json.Marshal(meta)
 	return json.RawMessage(out), true, err
+}
+
+func nextPartitionSpecID(specs []any) int64 {
+	var max int64 = -1
+	for _, raw := range specs {
+		spec, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id := getInt64(spec, "spec-id"); id > max {
+			max = id
+		}
+	}
+	return max + 1
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestAuditHealthAPI(t *testing.T) {
@@ -36,7 +40,7 @@ func TestAuditHealthAPIReportsBacklog(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	require.NoError(t, outbox.AppendAttempt(context.Background(), audit.S3Event{
+	require.NoError(t, outbox.AppendFinalized(context.Background(), audit.S3Event{
 		EventID: "evt-1",
 		Ts:      123,
 	}))
@@ -54,6 +58,22 @@ func TestAuditHealthAPIReportsBacklog(t *testing.T) {
 	require.Equal(t, "ok", got.GuaranteeState)
 	require.Equal(t, 1, got.OutboxBacklog)
 	require.Equal(t, int64(123), got.OldestPendingUS)
+}
+
+func TestAuditHealthAPIAllowsUnsignedLocalDashboardWithS3AuthEnabled(t *testing.T) {
+	outbox, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer outbox.Close()
+
+	base := setupTestServerWithOptions(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK", SecretKey: "secret"}}),
+		WithAuditOutbox(outbox),
+	)
+
+	resp, err := http.Get(base + "/api/audit/health")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 func TestAuditSearchS3API(t *testing.T) {
@@ -119,6 +139,29 @@ func TestAuditSearchS3APIRunnerError(t *testing.T) {
 	require.Equal(t, "duckdb unavailable", got["error"])
 }
 
+func TestAuditSearcherClosedOnShutdown(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	defer backend.Close()
+
+	searcher := &closingAuditSearcher{}
+	port := freePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	srv := New(addr, backend, WithAuditSearcher(searcher))
+	go srv.Run() //nolint:errcheck
+	for i := 0; i < 50; i++ {
+		conn, err := net.Dial("tcp", addr)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	require.NoError(t, srv.Shutdown(context.Background()))
+	require.True(t, searcher.closed)
+}
+
 type fakeAuditSearcher struct {
 	filter audit.SearchFilter
 	rows   []audit.SearchRow
@@ -128,4 +171,17 @@ type fakeAuditSearcher struct {
 func (f *fakeAuditSearcher) SearchS3(_ context.Context, filter audit.SearchFilter) ([]audit.SearchRow, error) {
 	f.filter = filter
 	return f.rows, f.err
+}
+
+type closingAuditSearcher struct {
+	closed bool
+}
+
+func (c *closingAuditSearcher) SearchS3(context.Context, audit.SearchFilter) ([]audit.SearchRow, error) {
+	return nil, nil
+}
+
+func (c *closingAuditSearcher) Close() error {
+	c.closed = true
+	return nil
 }

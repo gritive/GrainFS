@@ -145,7 +145,7 @@ func TestCommitter_AppendFromFollower(t *testing.T) {
 		{Bucket: "follower-bkt", Method: "PUT", Key: "f1", Status: 200},
 		{Bucket: "follower-bkt", Method: "PUT", Key: "f2", Status: 200},
 	}
-	c.AppendFromFollower(followerEvents)
+	require.NoError(t, c.AppendFromFollower(context.Background(), followerEvents))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -193,7 +193,7 @@ func TestCommitter_CommitsOutboxAndAcks(t *testing.T) {
 	require.NoError(t, err)
 	_, _ = backend.PutObject(context.Background(), audit.BucketName, "metadata/s3/00000-test.metadata.json", strings.NewReader(initMeta), "application/json")
 
-	require.NoError(t, outbox.AppendAttempt(context.Background(), audit.S3Event{
+	require.NoError(t, outbox.AppendFinalized(context.Background(), audit.S3Event{
 		EventID: "evt-1", RequestID: "req-1", Ts: time.Now().UnixMicro(),
 		Bucket: "b", Key: "k", Method: "PUT", Operation: "PutObject", Status: 200,
 	}))
@@ -279,7 +279,7 @@ func TestCommitter_FollowerShipsOutboxAndAcks(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	require.NoError(t, outbox.AppendAttempt(context.Background(), audit.S3Event{
+	require.NoError(t, outbox.AppendFinalized(context.Background(), audit.S3Event{
 		EventID: "evt-follower-1", Bucket: "b", Method: "PUT", Key: "k", Status: 200,
 	}))
 
@@ -315,9 +315,9 @@ func TestCommitter_FollowerShipsOutboxAndAcks(t *testing.T) {
 	<-done
 }
 
-func TestCommitter_AppendFromFollower_DropWhenFull(t *testing.T) {
-	// followerIn channel capacity is 256. Sending 300 batches without a reader
-	// must complete quickly — AppendFromFollower must never block the caller.
+func TestCommitter_AppendFromFollower_ReturnsBackpressureWhenFull(t *testing.T) {
+	// followerIn channel capacity is 256. Once full, AppendFromFollower must
+	// return an error so the follower keeps its durable outbox pending.
 	emitter := audit.NewEmitter("leader-drop")
 	c := audit.NewCommitter(audit.CommitterConfig{
 		Emitter:  emitter,
@@ -328,21 +328,89 @@ func TestCommitter_AppendFromFollower_DropWhenFull(t *testing.T) {
 		Interval: 10 * time.Second, // long interval so Run() is not draining
 	})
 
-	const total = 300
+	for i := 0; i < 256; i++ {
+		require.NoError(t, c.AppendFromFollower(context.Background(), []audit.S3Event{{Bucket: "b", Method: "GET", Key: "k", Status: 200}}))
+	}
+	require.ErrorIs(t, c.AppendFromFollower(context.Background(), []audit.S3Event{{Bucket: "b", Method: "GET", Key: "k", Status: 200}}), audit.ErrLeaderAuditBackpressure)
+}
+
+func TestCommitter_AppendFromFollower_PersistsToLeaderOutbox(t *testing.T) {
+	outbox, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer outbox.Close()
+
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Outbox:   outbox,
+		IsLeader: func() bool { return true },
+		NodeID:   "leader-1",
+	})
+
+	require.NoError(t, c.AppendFromFollower(context.Background(), []audit.S3Event{{
+		EventID: "evt-from-follower", Bucket: "b", Method: "GET", Key: "k", Status: 200,
+	}}))
+
+	pending, err := outbox.Pending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "evt-from-follower", pending[0].EventID)
+}
+
+func TestCommitter_UsesEventDayForParquetPath(t *testing.T) {
+	catalog := newFakeCatalog()
+	backend := newFakeBackend()
+	outbox, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer outbox.Close()
+
+	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
+	_, err = catalog.CreateTable(context.Background(), icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace},
+		Name:      audit.TableS3,
+	}, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-test.metadata.json",
+		Metadata:         json.RawMessage(initMeta),
+	})
+	require.NoError(t, err)
+	_, _ = backend.PutObject(context.Background(), audit.BucketName, "metadata/s3/00000-test.metadata.json", strings.NewReader(initMeta), "application/json")
+
+	require.NoError(t, outbox.AppendFinalized(context.Background(), audit.S3Event{
+		EventID: "evt-day-1", Ts: time.Date(2026, 5, 14, 23, 59, 0, 0, time.UTC).UnixMicro(),
+		Bucket: "b", Key: "old", Method: "PUT", Operation: "PutObject", Status: 200,
+	}))
+	require.NoError(t, outbox.AppendFinalized(context.Background(), audit.S3Event{
+		EventID: "evt-day-2", Ts: time.Date(2026, 5, 15, 0, 1, 0, 0, time.UTC).UnixMicro(),
+		Bucket: "b", Key: "new", Method: "PUT", Operation: "PutObject", Status: 200,
+	}))
+
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Outbox:   outbox,
+		Catalog:  catalog,
+		Backend:  backend,
+		IsLeader: func() bool { return true },
+		NodeID:   "leader-1",
+		Interval: 50 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < total; i++ {
-			c.AppendFromFollower([]audit.S3Event{{Bucket: "b", Method: "GET", Key: "k", Status: 200}})
-		}
+		c.Run(ctx)
 	}()
 
-	select {
-	case <-done:
-		// all 300 sends completed without blocking
-	case <-time.After(time.Second):
-		t.Fatal("AppendFromFollower blocked >1s — must be non-blocking when channel is full")
-	}
+	require.Eventually(t, func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		var saw14, saw15 bool
+		for key := range backend.objects {
+			saw14 = saw14 || strings.Contains(key, "data/2026-05-14/")
+			saw15 = saw15 || strings.Contains(key, "data/2026-05-15/")
+		}
+		return saw14 && saw15
+	}, 2*time.Second, 50*time.Millisecond)
+	cancel()
+	<-done
 }
 
 func TestCommitter_LazyBootstrap(t *testing.T) {

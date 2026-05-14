@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -389,6 +390,36 @@ func TestAuthz_InternalAuditBucket_ReadArtifactAllowed(t *testing.T) {
 		WithIAMStore(h.store),
 		WithIAMAudit(iamAudit),
 		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
+		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
+	)
+	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
+	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "AK-audit-internal", "auditSecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+}
+
+func TestAuthz_InternalAuditBucket_AuthorizedSignedReadArtifactAllowed(t *testing.T) {
+	iamAudit := iam.NewAuditLogger(&captureAuditEmitter{})
+
+	h := newIAMTestHelper(t)
+	h.applySACreate(t, "sa-admin")
+	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
+	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
+
+	base, backend := setupTestServerWithBackend(t,
+		WithIAMStore(h.store),
+		WithIAMAudit(iamAudit),
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
+		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
 	)
 	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
 	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
@@ -400,6 +431,74 @@ func TestAuthz_InternalAuditBucket_ReadArtifactAllowed(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+}
+
+func TestAuthz_InternalAuditBucket_RejectsUnsignedLocalRead(t *testing.T) {
+	iamAudit := iam.NewAuditLogger(&captureAuditEmitter{})
+
+	h := newIAMTestHelper(t)
+	h.applySACreate(t, "sa-admin")
+	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
+	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
+
+	base, backend := setupTestServerWithBackend(t,
+		WithIAMStore(h.store),
+		WithIAMAudit(iamAudit),
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
+		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
+	)
+	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
+	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestAuthz_InternalAuditBucket_RejectsRegularSignedReadWithoutIAM(t *testing.T) {
+	base, backend := setupTestServerWithBackend(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK", SecretKey: "secret"}}),
+		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
+	)
+	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
+	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
+	require.NoError(t, err)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "AK", "secret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestAuditInternalObjectReadAllowed_LocalhostOnly(t *testing.T) {
+	assert.True(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodGet, "127.0.0.1:9000", "AK-audit-internal", "AK-audit-internal"))
+	assert.True(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "data/2026-05-15/file.parquet", http.MethodHead, "[::1]:9000", "AK-audit-internal", "AK-audit-internal"))
+
+	assert.False(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodGet, "127.0.0.1:9000", "", "AK-audit-internal"))
+	assert.False(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodGet, "127.0.0.1:9000", "AK-admin", "AK-audit-internal"))
+	assert.False(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodGet, "203.0.113.10:50000", "AK-audit-internal", "AK-audit-internal"))
+	assert.False(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "", http.MethodGet, "127.0.0.1:9000", "AK-audit-internal", "AK-audit-internal"))
+	assert.False(t, auditInternalObjectReadAllowed("user-bucket", "metadata/s3/file.avro", http.MethodGet, "127.0.0.1:9000", "AK-audit-internal", "AK-audit-internal"))
+	assert.False(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodPut, "127.0.0.1:9000", "AK-audit-internal", "AK-audit-internal"))
+}
+
+func TestAuditObjectReadRequest_AllowsSignedRemoteAuthorizationPath(t *testing.T) {
+	assert.True(t, auditObjectReadRequest(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodGet))
+	assert.True(t, auditObjectReadRequest(auditpkg.BucketName, "data/2026-05-15/file.parquet", http.MethodHead))
+
+	assert.False(t, auditObjectReadRequest(auditpkg.BucketName, "", http.MethodGet))
+	assert.False(t, auditObjectReadRequest(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodPut))
+	assert.False(t, auditObjectReadRequest("user-bucket", "metadata/s3/file.avro", http.MethodGet))
 }

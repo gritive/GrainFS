@@ -651,6 +651,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		length := end - start + 1
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
 		c.Header("Content-Length", strconv.FormatInt(length, 10))
+		c.Set(auditBytesOutKey, length)
 		c.Response.SetBodyStream(io.NopCloser(io.LimitReader(rc, length)), int(length))
 		c.Status(consts.StatusPartialContent)
 		rc = nil
@@ -658,6 +659,7 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Zero-copy for large non-range requests
+	c.Set(auditBytesOutKey, obj.Size)
 	if obj.Size > 16*1024 {
 		c.Response.SetBodyStream(rc, int(obj.Size))
 		c.Status(consts.StatusOK)
@@ -794,6 +796,7 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionGet, Bucket: bucket, Key: key, Size: obj.Size})
 	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
 	c.Header("Content-Length", strconv.FormatInt(length, 10))
+	c.Set(auditBytesOutKey, length)
 	c.Response.SetBodyStream(&readAtRangeReader{
 		ctx:     ctx,
 		backend: reader,
@@ -1052,6 +1055,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 		return
 	}
 	key := keys[0]
+	c.Set(auditObjectKeyKey, key)
 
 	// Validate POST policy if authentication is enabled.
 	if s.verifier != nil {

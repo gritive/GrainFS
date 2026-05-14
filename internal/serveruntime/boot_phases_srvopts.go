@@ -3,9 +3,12 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"net"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
@@ -292,7 +295,24 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			return fmt.Errorf("audit outbox: %w", err)
 		}
 		state.AddCleanup(func() { _ = auditOutbox.Close() })
-		srvOpts = append(srvOpts, server.WithAuditOutbox(auditOutbox))
+		auditAccessKey := "AKGFAUDIT" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		auditSecretKey := uuid.NewString() + uuid.NewString()
+		srvOpts = append(srvOpts,
+			server.WithAuditOutbox(auditOutbox),
+			server.WithAuditNodeID(nodeID),
+			server.WithAuditInternalCredentials(auditAccessKey, auditSecretKey),
+		)
+		if endpoint := auditSearchEndpoint(cfg.Addr); endpoint != "" {
+			searcher := audit.NewDuckDBSearcher(audit.DuckDBSearchConfig{
+				Endpoint:  endpoint,
+				AccessKey: auditAccessKey,
+				SecretKey: auditSecretKey,
+			})
+			srvOpts = append(srvOpts, server.WithAuditSearcher(searcher))
+			state.auditSearchWarmup = searcher.Warmup
+		} else {
+			log.Warn().Str("addr", cfg.Addr).Msg("audit search disabled: HTTP address does not resolve to a stable local endpoint")
+		}
 		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
 		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
 			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
@@ -329,7 +349,9 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			if err != nil {
 				return transport.NewErrorResponse(req, transport.StatusError, err)
 			}
-			committer.AppendFromFollower(events)
+			if err := committer.AppendFromFollower(context.Background(), events); err != nil {
+				return transport.NewErrorResponse(req, transport.StatusError, err)
+			}
 			return transport.NewResponse(req, nil)
 		})
 		commitCtx, commitCancel := context.WithCancel(ctx)
@@ -343,4 +365,16 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 
 	state.srvOpts = srvOpts
 	return nil
+}
+
+func auditSearchEndpoint(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	switch strings.Trim(host, "[]") {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }

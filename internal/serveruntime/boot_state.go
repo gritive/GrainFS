@@ -145,14 +145,15 @@ type bootState struct {
 	diskCollector    *cluster.DiskCollector
 
 	// bootSrvOptsAndReceipt
-	srvOpts          []server.Option
-	clusterAlerts    *server.AlertsState
-	receiptWiring    *HealReceiptWiring
-	incidentRecorder *incident.Recorder
-	lifecycleSvc     *lifecycle.Service
-	migrationSvc     *migration.Service
-	mutationGate     *server.MutationGate
-	volMgr           *volume.Manager
+	srvOpts           []server.Option
+	clusterAlerts     *server.AlertsState
+	receiptWiring     *HealReceiptWiring
+	incidentRecorder  *incident.Recorder
+	lifecycleSvc      *lifecycle.Service
+	migrationSvc      *migration.Service
+	mutationGate      *server.MutationGate
+	volMgr            *volume.Manager
+	auditSearchWarmup func(context.Context) error
 
 	// bootHTTPServerAndAdmin
 	srv        *server.Server

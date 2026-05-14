@@ -21,7 +21,12 @@ func TestMigrateMetadataV1ToCurrent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got, &meta))
 	require.Equal(t, float64(23), meta["last-column-id"])
 	require.Equal(t, float64(1000), meta["last-partition-id"])
-	require.NotEmpty(t, meta["partition-specs"])
+	specs := meta["partition-specs"].([]any)
+	require.Len(t, specs, 2)
+	require.Equal(t, float64(0), specs[0].(map[string]any)["spec-id"])
+	require.Empty(t, specs[0].(map[string]any)["fields"], "legacy unpartitioned spec must remain readable")
+	require.Equal(t, float64(1), specs[1].(map[string]any)["spec-id"])
+	require.Equal(t, float64(1), meta["default-spec-id"])
 }
 
 func TestMigrateMetadataCurrentNoop(t *testing.T) {

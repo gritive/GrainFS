@@ -31,7 +31,7 @@ func TestAuditIcebergArtifactContract(t *testing.T) {
 	require.Equal(t, "ts_day", specFields[0].(map[string]any)["name"])
 	require.Equal(t, "day", specFields[0].(map[string]any)["transform"])
 
-	manifestList, err := encodeManifestList(101, 1, "s3://grainfs-audit/metadata/s3/101-manifest.avro", 456, 123, "2026-05-14")
+	manifestList, err := encodeManifestList(101, 1, "s3://grainfs-audit/metadata/s3/101-manifest.avro", 456, 123, "2026-05-14", 0)
 	require.NoError(t, err)
 	listSchema, listMetadata, _ := parseAvroContainerForTest(t, manifestList)
 	require.Equal(t, auditIcebergSchemaJSON, listMetadata["schema"])
@@ -40,7 +40,7 @@ func TestAuditIcebergArtifactContract(t *testing.T) {
 	partitionArray := partitions["type"].(map[string]any)
 	require.Equal(t, float64(508), partitionArray["element-id"])
 
-	manifest, err := encodeManifest(101, 1, "s3://grainfs-audit/data/2026-05-14/file.parquet", 456, 123, "2026-05-14")
+	manifest, err := encodeManifest(101, 1, "s3://grainfs-audit/data/2026-05-14/file.parquet", 456, 123, "2026-05-14", 0)
 	require.NoError(t, err)
 	manifestSchema, manifestMetadata, datum := parseAvroContainerForTest(t, manifest)
 	require.Equal(t, auditIcebergSchemaJSON, manifestMetadata["schema"])
@@ -106,6 +106,23 @@ func TestAuditSchemaV2HasSearchFieldsAndDayPartition(t *testing.T) {
 	for _, name := range []string{"event_id", "user_agent", "operation", "auth_status", "err_reason", "version_id", "upload_id", "copy_source_bucket", "copy_source_key"} {
 		require.True(t, names[name], "schema must include %s", name)
 	}
+}
+
+func TestManifestArtifactsUseDefaultPartitionSpecID(t *testing.T) {
+	manifestList, err := encodeManifestList(101, 1, "s3://grainfs-audit/metadata/s3/101-manifest.avro", 456, 123, "2026-05-14", 1)
+	require.NoError(t, err)
+	_, listMetadata, listDatum := parseAvroContainerForTest(t, manifestList)
+	require.Equal(t, "1", listMetadata["partition-spec-id"])
+
+	r := bytes.NewReader(listDatum)
+	require.Equal(t, "s3://grainfs-audit/metadata/s3/101-manifest.avro", readAvroStringForTest(t, r))
+	require.Equal(t, int64(456), readAvroLongForTest(t, r))
+	require.Equal(t, int64(1), readAvroLongForTest(t, r), "manifest list partition_spec_id must match table default")
+
+	manifest, err := encodeManifest(101, 1, "s3://grainfs-audit/data/2026-05-14/file.parquet", 456, 123, "2026-05-14", 1)
+	require.NoError(t, err)
+	_, manifestMetadata, _ := parseAvroContainerForTest(t, manifest)
+	require.Equal(t, "1", manifestMetadata["partition-spec-id"])
 }
 
 func TestEncodeParquetReadback(t *testing.T) {

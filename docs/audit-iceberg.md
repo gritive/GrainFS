@@ -48,8 +48,9 @@ grainfs-audit/
 ```
 
 `grainfs-audit` is an internal bucket. S3 writes, bucket-level reads, and
-listing remain blocked. Object-level `GET` and `HEAD` are allowed so DuckDB can
-fetch Iceberg metadata and data files returned by the REST catalog.
+listing remain blocked. Object-level `GET` and `HEAD` are allowed only for the
+server's loopback DuckDB reader when it signs requests with the generated
+internal audit credential.
 
 ## Schema
 
@@ -74,7 +75,7 @@ Table: `audit.s3` (Iceberg v2)
 | `user_agent` | `string` | Request user agent. |
 | `operation` | `string` | Classified S3 operation, for example `PutObject`. |
 | `subresource` | `string` | Relevant S3 subresource, for example `uploads`. |
-| `auth_status` | `string` | `allow`, `deny`, or request-envelope status. |
+| `auth_status` | `string` | `allow`, `deny`, `error`, `incomplete`, or request-envelope status. |
 | `err_reason` | `string` | Internal reason such as `internal_bucket` or authz denial reason. |
 | `version_id` | `string` | Object version id when available. |
 | `upload_id` | `string` | Multipart upload id when available. |
@@ -105,11 +106,13 @@ APIs:
 Supported `/api/audit/s3` filters include `since`, `until`, `bucket`,
 `key_prefix`, `sa_id`, `operation`, `status`, `status_class`, `err_class`,
 `request_id`, and `limit`. `limit` is clamped to 500 and query execution uses a
-10 second context timeout.
+10 second context timeout. The audit API is localhost-only and is intended for
+the bundled dashboard or local operator tooling.
 
 The search endpoint requires a configured audit searcher. Unit tests use a mock
 searcher; production wiring should provide a DuckDB searcher with an endpoint
-and credentials that can read `grainfs-audit` object paths through the S3 API.
+and internal credentials that can read `grainfs-audit` object paths through the
+local S3 API.
 Without that wiring, the endpoint returns `503` and the dashboard marks search
 as unavailable while health cards still work.
 

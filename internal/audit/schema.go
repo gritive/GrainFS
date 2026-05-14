@@ -13,6 +13,7 @@ const (
 type S3Event struct {
 	Ts               int64
 	EventID          string
+	Finalized        bool
 	NodeID           string
 	RequestID        string
 	SAID             string

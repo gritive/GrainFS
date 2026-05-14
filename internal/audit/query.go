@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -49,6 +50,8 @@ type DuckDBSearchConfig struct {
 
 type DuckDBSearcher struct {
 	cfg DuckDBSearchConfig
+	mu  sync.Mutex
+	db  *sql.DB
 }
 
 func NewDuckDBSearcher(cfg DuckDBSearchConfig) *DuckDBSearcher {
@@ -79,8 +82,8 @@ func BuildSearchSQL(f SearchFilter) (string, []any) {
 		args = append(args, f.Bucket)
 	}
 	if f.KeyPrefix != "" {
-		clauses = append(clauses, "key LIKE ?")
-		args = append(args, f.KeyPrefix+"%")
+		clauses = append(clauses, "starts_with(COALESCE(key, ''), ?)")
+		args = append(args, f.KeyPrefix)
 	}
 	if f.SAID != "" {
 		clauses = append(clauses, "sa_id = ?")
@@ -106,7 +109,7 @@ func BuildSearchSQL(f SearchFilter) (string, []any) {
 		clauses = append(clauses, "request_id = ?")
 		args = append(args, f.RequestID)
 	}
-	q := fmt.Sprintf(`SELECT ts, request_id, sa_id, source_ip, user_agent, operation, bucket, key, http_status, err_class, err_reason, latency_ms
+	q := fmt.Sprintf(`SELECT ts, COALESCE(request_id, ''), COALESCE(sa_id, ''), COALESCE(source_ip, ''), COALESCE(user_agent, ''), COALESCE(operation, ''), COALESCE(bucket, ''), COALESCE(key, ''), http_status, COALESCE(err_class, ''), COALESCE(err_reason, ''), COALESCE(latency_ms, 0)
 FROM grainfs_iceberg.audit.s3
 WHERE %s
 ORDER BY ts DESC
@@ -118,13 +121,8 @@ func (s *DuckDBSearcher) SearchS3(ctx context.Context, f SearchFilter) ([]Search
 	if s == nil || s.cfg.Endpoint == "" {
 		return nil, fmt.Errorf("audit searcher is not configured")
 	}
-	db, err := sql.Open("duckdb", "")
+	db, err := s.open(ctx)
 	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	if _, err := db.ExecContext(ctx, s.setupSQL()); err != nil {
 		return nil, err
 	}
 
@@ -157,6 +155,49 @@ func (s *DuckDBSearcher) SearchS3(ctx context.Context, f SearchFilter) ([]Search
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+func (s *DuckDBSearcher) Warmup(ctx context.Context) error {
+	_, err := s.open(ctx)
+	return err
+}
+
+func (s *DuckDBSearcher) open(ctx context.Context) (*sql.DB, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db != nil {
+		return s.db, nil
+	}
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		return nil, err
+	}
+	configureDuckDBConnectionPool(db)
+	if _, err := db.ExecContext(ctx, s.setupSQL()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s.db = db
+	return db, nil
+}
+
+func (s *DuckDBSearcher) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+func configureDuckDBConnectionPool(db *sql.DB) {
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 }
 
 func (s *DuckDBSearcher) setupSQL() string {

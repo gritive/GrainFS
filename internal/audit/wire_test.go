@@ -22,6 +22,16 @@ func TestDecodeS3Batch_RejectsBatchExceedingMax(t *testing.T) {
 	require.Contains(t, err.Error(), "exceeds maximum")
 }
 
+func TestEncodeS3BatchRejectsOversizedFields(t *testing.T) {
+	_, err := audit.EncodeS3Batch([]audit.S3Event{{
+		EventID:   "evt-oversize",
+		UserAgent: strings.Repeat("a", 65536),
+		Method:    "GET",
+	}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "user_agent")
+}
+
 func TestWireRoundtrip(t *testing.T) {
 	full := audit.S3Event{
 		Ts:        1716000000000000,
@@ -72,7 +82,7 @@ func TestWireRoundtrip(t *testing.T) {
 			LatencyMs:        12,
 			ErrClass:         "",
 			ErrReason:        "",
-			VersionID:         "v2",
+			VersionID:        "v2",
 			UploadID:         "",
 			CopySourceBucket: "src",
 			CopySourceKey:    "source.txt",

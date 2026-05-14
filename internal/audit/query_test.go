@@ -24,12 +24,22 @@ func TestBuildSearchSQL(t *testing.T) {
 
 	require.Contains(t, q, "FROM grainfs_iceberg.audit.s3")
 	require.Contains(t, q, "bucket = ?")
-	require.Contains(t, q, "key LIKE ?")
+	require.Contains(t, q, "starts_with(COALESCE(key, ''), ?)")
+	require.Contains(t, q, "COALESCE(user_agent, '')")
+	require.Contains(t, q, "COALESCE(latency_ms, 0)")
 	require.Contains(t, q, "http_status >= ? AND http_status < ?")
 	require.Contains(t, q, "LIMIT 25")
 	require.Equal(t, []any{
-		time.Unix(100, 0), time.Unix(200, 0), "photos", "2026/%", "sa-1", "GetObject", 400, 500, "req-1",
+		time.Unix(100, 0), time.Unix(200, 0), "photos", "2026/", "sa-1", "GetObject", 400, 500, "req-1",
 	}, args)
+}
+
+func TestBuildSearchSQLTreatsKeyPrefixAsLiteral(t *testing.T) {
+	q, args := audit.BuildSearchSQL(audit.SearchFilter{KeyPrefix: "foo_%", Limit: 1})
+
+	require.Contains(t, q, "starts_with(COALESCE(key, ''), ?)")
+	require.NotContains(t, q, "LIKE")
+	require.Equal(t, []any{"foo_%"}, args)
 }
 
 func TestBuildSearchSQLClampsLimit(t *testing.T) {
