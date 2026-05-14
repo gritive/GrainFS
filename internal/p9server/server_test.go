@@ -6,6 +6,8 @@ import (
 	"syscall"
 	"testing"
 
+	"time"
+
 	"github.com/hugelgupf/p9/p9"
 	"github.com/stretchr/testify/require"
 
@@ -172,4 +174,29 @@ func TestObjectFile_Open_WriteMode_EROFS(t *testing.T) {
 	of := &objectFile{backend: backend, bucket: "bkt", key: "hello.txt", meta: obj}
 	_, _, err = of.Open(p9.WriteOnly)
 	require.ErrorIs(t, err, syscall.EROFS)
+}
+
+// Task 5: Server / Attacher tests
+
+func TestAttacher_AttachReturnsRootFile(t *testing.T) {
+	backend := newTestBackend(t)
+	att := &attacher{backend: backend}
+	file, err := att.Attach()
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	_, ok := file.(*rootFile)
+	require.True(t, ok)
+}
+
+func TestServer_ListenAndServe_Starts(t *testing.T) {
+	backend := newTestBackend(t)
+	srv := NewServer(backend)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := srv.ListenAndServe(ctx, "127.0.0.1:0")
+	if err != nil {
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
 }
