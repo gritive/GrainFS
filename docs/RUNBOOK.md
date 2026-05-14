@@ -306,6 +306,8 @@ grainfs serve \
 
 > **Unknown MetaCmd alert:** `grainfs_unknown_metacmd_total{type}` increments when a node ignores a raft metadata command it does not recognize or handle. Treat `GrainFSUnknownMetaCmdIgnored` as a version-skew or implementation-gap warning: confirm every node's version, pause use of the newly introduced feature, and finish the rolling upgrade before relying on state from that MetaCmd. Transport capability-exchange rejections are tracked separately by `grainfs_transport_ce_total{role,outcome,reason}`.
 
+> **Capability gate rejection:** `grainfs_capability_reject_total{capability,scope,severity,operation,forced}` increments when an admin/API path tries to use a feature that not every required Raft member can apply. For hard persisted features, do not force the operation. Finish the rolling upgrade, confirm every required node advertises the capability, then retry. Admin UDS errors include missing/stale node IDs; public data-plane errors intentionally do not expose node topology.
+
 If migrating from another S3-compatible source, register the upstream per
 bucket via the admin UDS. The `--upstream*` cmdline flags were removed in
 v0.0.123.0; the IAM-managed approach replaces them.

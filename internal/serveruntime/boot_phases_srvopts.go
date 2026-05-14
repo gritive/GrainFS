@@ -230,7 +230,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	gate := cluster.NewCapabilityGate(compat.DefaultRegistry, 15*time.Second)
 	refreshGate := func() {
 		gate.SetMetaRaftSnapshot(state.metaRaft.Node().CommittedIndex(), state.metaRaft.Node().Configuration())
-		gate.ReportEvidence(state.metaRaft.FSM().CapabilityEvidence(state.nodeID, time.Now()))
+		gate.ReportEvidence(state.metaRaft.FSM().CapabilityEvidence(state.metaRaft.Node().ID(), time.Now()))
 	}
 	refreshGate()
 	state.metaRaft.SetCapabilityGate(gate)

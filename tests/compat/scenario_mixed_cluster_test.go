@@ -5,6 +5,7 @@ package compat
 import (
 	"context"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -46,4 +47,19 @@ func TestMixedClusterRolling(t *testing.T) {
 	got, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 	require.Equal(t, wantBody, string(got))
+}
+
+func TestMixedClusterRejectsMigrationCutoverUntilAllNodesCapable(t *testing.T) {
+	prev := prevBinary(t)
+	cur := getBinary()
+	c := startCompatCluster(t, []string{prev, cur, cur})
+	t.Cleanup(func() { c.Stop() })
+
+	body := []byte(`{"bucket":"compat-cutover","upstream_url":"http://127.0.0.1:9000","access_key":"ak","secret_key":"sk"}`)
+	status, resp := putCompatAdminJSON(t, c.AdminSock(1), "/v1/upstreams", body)
+	require.Equal(t, http.StatusNoContent, status, resp)
+
+	status, resp = postCompatAdminJSON(t, c.AdminSock(1), "/v1/migration/cutover", []byte(`{"bucket":"compat-cutover"}`))
+	require.Equal(t, http.StatusConflict, status, resp)
+	require.Contains(t, resp, "migration_cutover_v1")
 }
