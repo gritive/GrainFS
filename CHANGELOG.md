@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.198.0] - 2026-05-15 — perf: xxhash3 ETag for internal buckets (~37× faster than MD5)
+
+### Changed
+
+- **Internal bucket write speed** — ETag computation on `__grainfs_*` write paths (WriteAt, PutObject, spool, cluster repair) now uses xxhash3 (~25 GB/s) instead of MD5 (~650 MB/s), a ~37× improvement. S3 user buckets are unaffected and continue using MD5.
+- **Hash pool reuse** — `multipart.go` upload/complete/list paths now reuse a `sync.Pool`-backed MD5 hasher, eliminating per-operation allocations.
+- **Algorithm-aware ETag verification** — `VerifyETag`, `ReplicationVerifier`, and `tryRepairFromPeer` detect the algorithm from ETag length (32 chars = MD5, 16 chars = xxhash3). Existing MD5 ETags verify correctly without migration.
+
+### Fixed
+
+- **Scrubber repair queue exhaustion** — `ReplicationVerifier` previously misreported objects with unrecognized ETag formats (e.g. multipart composite ETags) as `Corrupt`, which could exhaust the repair queue. These are now reported as `Skipped`.
+- **Hasher pool lifetime** — `PutObjectWithUserMetadata` now returns the hash pool object immediately after computing the ETag rather than holding it for the duration of the rename + metadata write.
+
 ## [0.0.197.0] - 2026-05-14 — fix: lock-free storage cache audit
 
 ### Changed
