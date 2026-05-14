@@ -2,6 +2,23 @@
 
 ## [0.0.189.0] - 2026-05-14 — fix: meta-Raft apply result delivery
 
+### Transport
+
+- **FIX**: Capability exchange now enforces strict 2-byte payload length;
+  truncated frames are rejected with `payload_length` reason. (F1)
+- **FIX**: CE failure modes now produce distinguishable peer-visible errors
+  (`version_mismatch`, `wrong_first_stream`, `payload_length`,
+  `feature_unsupported`, `timeout`, `io_error`). Replaces single generic
+  "capability exchange failed" close message. (F3)
+- **NEW**: Prometheus metric `grainfs_transport_ce_total{role,outcome,reason}`
+  emitted on every CE attempt. (F7)
+- **NEW**: CE features byte has an explicit reserved-bit policy — unknown bits
+  in `features` reject with `feature_unsupported`. Registry at
+  `docs/transport-mux-versioning.md`. (F2)
+- **TEST**: Concurrent mux dial dedup race coverage added. (F6)
+- **DOC**: `docs/transport-mux-versioning.md` — wire format, feature registry,
+  version bump policy, v1 baseline rationale. (F5)
+
 ### Fixed
 
 - **Meta-Raft apply errors** — proposals now return FSM apply failures after the committed index applies, so callers do not report success when the replicated metadata write failed.
