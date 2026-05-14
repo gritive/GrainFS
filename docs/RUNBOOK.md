@@ -435,6 +435,20 @@ export ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
 
 ---
 
+## NFSv4 Conformance Testing
+
+GrainFS tracks NFSv4.1 RFC 8881 attribute coverage in `docs/nfsv4-compliance.md`. Update the matrix in the same PR as any NFS attribute behavior change.
+
+The external pynfs suite is advisory and non-blocking:
+
+```bash
+make test-pynfs-colima
+```
+
+The runner clones the pinned upstream pynfs commit, starts a local GrainFS server, creates a test bucket/export, and writes results to `tests/conformance/results/summary.json` plus a timestamped log. Failures should be copied into `TODOS.md` follow-ups; they do not block ordinary PRs unless a PR explicitly changes NFS protocol behavior.
+
+---
+
 ## Monitoring Setup
 
 ### Prometheus Alerts

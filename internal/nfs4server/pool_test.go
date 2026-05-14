@@ -245,6 +245,22 @@ func TestReadOpArgs_ReadUsesPooledFixedBuffer_NoAllocs(t *testing.T) {
 	assert.Equal(t, 0.0, allocs, "OpRead args should reuse a fixed buffer")
 }
 
+func TestReadOpArgs_ReadDirRejectsOversizedBitmap(t *testing.T) {
+	w := getXDRWriter()
+	w.WriteUint64(0) // cookie
+	w.WriteUint64(0) // cookieverf
+	w.WriteUint32(4096)
+	w.WriteUint32(4096)
+	w.WriteUint32(uint32(len(attrBitmap{}) + 1))
+	raw := append([]byte(nil), w.Bytes()...)
+	putXDRWriter(w)
+
+	data, pk, err := readOpArgs(NewXDRReader(raw), OpReadDir)
+	require.ErrorContains(t, err, "READDIR bitmap too large")
+	require.Nil(t, data)
+	require.Zero(t, pk)
+}
+
 func TestReadOpArgs_SetAttr(t *testing.T) {
 	// OpSetAttr: stateid(16) + bitmap[2] + attrVals encoded as:
 	// output = stateid(16) + bm0(4) + bm1(4) + attrVals(opaque)

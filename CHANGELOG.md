@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.190.0] - 2026-05-14 — feat: NFSv4.1 RFC 8881 audit
+
+### Added
+
+- **NFSv4.1 compliance matrix** — operators can now inspect RFC 8881 Section 5.8 attribute coverage in `docs/nfsv4-compliance.md`, including Done, Partial, and Skipped rows with code citations and follow-up gaps.
+- **pynfs conformance scaffold** — `tests/conformance/run_pynfs.sh`, `make test-pynfs-colima`, and the conformance README provide an advisory path for running external NFSv4.1 checks against a local GrainFS export.
+- **NFS standards documentation** — README and runbook entries now point to the compliance matrix, conformance runner, and operational expectations for advisory pynfs results.
+
+### Fixed
+
+- **GETATTR attribute bitmaps** — NFSv4 GETATTR now supports the third attribute bitmap word, including RFC 8881 bit 75 `suppattr_exclcreat`.
+- **NFS attribute truthfulness** — `cansettime` is advertised on bit 15 instead of the deprecated archive bit, and link/symlink support attributes now report unsupported operations accurately.
+- **READDIR requested attrs** — real COMPOUND READDIR requests now preserve and honor requested entry attributes instead of dropping the bitmap during XDR argument decoding.
+- **Colima conformance binary** — the pynfs Colima target now builds `grainfs` inside the Linux VM so macOS host binaries are not executed in Colima.
+
 ## [0.0.189.1] - 2026-05-14 — fix: bucket policy/versioning handler correctness
 
 ### Fixed

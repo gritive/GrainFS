@@ -159,6 +159,29 @@ const (
 	maxCompoundOps = 64
 )
 
+type attrBitmap [3]uint32
+
+func readAttrBitmap(r *XDRReader) attrBitmap {
+	var bm attrBitmap
+	bitmapLen, _ := r.ReadUint32()
+	for i := uint32(0); i < bitmapLen; i++ {
+		word, _ := r.ReadUint32()
+		if i < uint32(len(bm)) {
+			bm[i] = word
+		}
+	}
+	return bm
+}
+
+func attrBitmapLen(bm attrBitmap) uint32 {
+	for i := len(bm) - 1; i >= 0; i-- {
+		if bm[i] != 0 {
+			return uint32(i + 1)
+		}
+	}
+	return 0
+}
+
 // NFS file types
 const (
 	NF4REG = 1
@@ -462,33 +485,31 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 
 func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 	// Parse client's requested bitmap (GETATTR4args.attr_request = bitmap4<>)
-	var reqBit [2]uint32
+	var reqBit attrBitmap
 	if len(data) >= 4 {
-		r := NewXDRReader(data)
-		bitmapLen, _ := r.ReadUint32()
-		if bitmapLen >= 1 {
-			reqBit[0], _ = r.ReadUint32()
-		}
-		if bitmapLen >= 2 {
-			reqBit[1], _ = r.ReadUint32()
-		}
+		reqBit = readAttrBitmap(NewXDRReader(data))
 	}
 
 	return OpResult{OpCode: OpGetAttr, Status: NFS4_OK, Data: d.encodeAttrs(d.currentPath, reqBit)}
 }
 
-func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
-	if reqBit[0] == 0 && reqBit[1] == 0 {
+func (d *Dispatcher) encodeAttrs(p string, reqBit attrBitmap) []byte {
+	return d.encodeAttrsWithObject(p, reqBit, nil)
+}
+
+func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedObj *storage.Object) []byte {
+	if attrBitmapLen(reqBit) == 0 {
 		w := getXDRWriter()
 		w.WriteUint32(0)
 		w.WriteOpaque(nil)
 		return xdrWriterBytes(w)
 	}
 	hasBit := func(bit uint) bool {
-		if bit < 32 {
-			return reqBit[0]&(1<<bit) != 0
+		word := bit / 32
+		if word >= uint(len(reqBit)) {
+			return false
 		}
-		return reqBit[1]&(1<<(bit-32)) != 0
+		return reqBit[word]&(1<<(bit%32)) != 0
 	}
 
 	// Resolve metadata for the current path
@@ -508,6 +529,16 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 	if isPseudoRoot {
 		isDir = true
 		fileSize = 4096
+	} else if listedObj != nil {
+		isDir = false
+		fileSize = uint64(listedObj.Size)
+		lastModUnix = listedObj.LastModified
+
+		meta := d.loadFileMeta(bucket, key)
+		sidecarMode = meta.Mode
+		if meta.Mtime > 0 {
+			lastModUnix = meta.Mtime / 1e9
+		}
 	} else if !isDir && d.backend != nil {
 		obj, err := d.backend.HeadObject(context.Background(), bucket, key)
 		if err == nil {
@@ -550,13 +581,12 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 
 	// Build attrvals in RFC 7530 §5 ascending bit order, track which bits we set.
 	attrW := getXDRWriter()
-	var respBit [2]uint32
+	var respBit attrBitmap
 
 	setBit := func(bit uint) {
-		if bit < 32 {
-			respBit[0] |= 1 << bit
-		} else {
-			respBit[1] |= 1 << (bit - 32)
+		word := bit / 32
+		if word < uint(len(respBit)) {
+			respBit[word] |= 1 << (bit % 32)
 		}
 	}
 
@@ -564,11 +594,13 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 	if hasBit(0) {
 		setBit(0)
 		supW0 := uint32(1<<0 | 1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5 | 1<<6 |
-			1<<7 | 1<<8 | 1<<9 | 1<<10 | 1<<13 | 1<<14 | 1<<20 | 1<<27 | 1<<30 | 1<<31)
+			1<<7 | 1<<8 | 1<<9 | 1<<10 | 1<<13 | 1<<15 | 1<<20 | 1<<27 | 1<<30 | 1<<31)
 		supW1 := uint32(1<<1 | 1<<3 | 1<<4 | 1<<5 | 1<<13 | 1<<15 | 1<<16 | 1<<20 | 1<<21 | 1<<22 | 1<<23)
-		attrW.WriteUint32(2)
+		supW2 := uint32(1 << (75 - 64))
+		attrW.WriteUint32(3)
 		attrW.WriteUint32(supW0)
 		attrW.WriteUint32(supW1)
+		attrW.WriteUint32(supW2)
 	}
 	// Bit 1: TYPE — ftype4
 	if hasBit(1) {
@@ -593,12 +625,12 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 	// Bit 5: LINK_SUPPORT — bool
 	if hasBit(5) {
 		setBit(5)
-		attrW.WriteUint32(1)
+		attrW.WriteUint32(0)
 	}
 	// Bit 6: SYMLINK_SUPPORT — bool
 	if hasBit(6) {
 		setBit(6)
-		attrW.WriteUint32(1)
+		attrW.WriteUint32(0)
 	}
 	// Bit 7: NAMED_ATTR — bool
 	if hasBit(7) {
@@ -626,9 +658,9 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 		setBit(13)
 		attrW.WriteUint32(0)
 	}
-	// Bit 14: CANSETTIME — bool
-	if hasBit(14) {
-		setBit(14)
+	// Bit 15: CANSETTIME — bool
+	if hasBit(15) {
+		setBit(15)
 		attrW.WriteUint32(1)
 	}
 	// Bit 20: FILEID — uint64
@@ -703,14 +735,24 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit [2]uint32) []byte {
 			attrW.WriteUint64(fileid)
 		}
 	}
+	// Bit 75 (word2 bit 11): SUPPATTR_EXCLCREAT — bitmap4
+	if hasBit(75) {
+		setBit(75)
+		attrW.WriteUint32(0)
+	}
 
 	attrBytes := xdrWriterBytes(attrW)
 
 	// GETATTR4resok: bitmap4 attrmask + attrlist4 attr_vals
 	w := getXDRWriter()
-	w.WriteUint32(2)
-	w.WriteUint32(respBit[0])
-	w.WriteUint32(respBit[1])
+	respLen := attrBitmapLen(respBit)
+	if respLen > 0 && respLen < 2 {
+		respLen = 2
+	}
+	w.WriteUint32(respLen)
+	for i := uint32(0); i < respLen; i++ {
+		w.WriteUint32(respBit[i])
+	}
 	w.WriteOpaque(attrBytes)
 	return xdrWriterBytes(w)
 }
@@ -753,19 +795,17 @@ func (d *Dispatcher) opAccess(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opReadDir(data []byte) OpResult {
-	var reqBit [2]uint32
-	if len(data) >= 20 {
-		r := NewXDRReader(data)
-		r.ReadUint64() // cookie
-		r.ReadFixed(8) // cookieverf
-		r.ReadUint32() // dircount
-		r.ReadUint32() // maxcount
-		bitmapLen, _ := r.ReadUint32()
-		if bitmapLen >= 1 {
-			reqBit[0], _ = r.ReadUint32()
-		}
-		if bitmapLen >= 2 {
-			reqBit[1], _ = r.ReadUint32()
+	var reqBit attrBitmap
+	if len(data) >= 28 {
+		bitmapLen := binary.BigEndian.Uint32(data[24:28])
+		for i := uint32(0); i < bitmapLen; i++ {
+			off := 28 + int(i)*4
+			if off+4 > len(data) {
+				break
+			}
+			if i < uint32(len(reqBit)) {
+				reqBit[i] = binary.BigEndian.Uint32(data[off : off+4])
+			}
 		}
 	}
 
@@ -813,7 +853,7 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 			w.WriteUint32(1) // value_follows = TRUE
 			w.WriteUint64(cookie)
 			w.WriteString(name)
-			w.buf.Write(d.encodeAttrs(path.Join(d.currentPath, name), reqBit))
+			w.buf.Write(d.encodeAttrsWithObject(path.Join(d.currentPath, name), reqBit, obj))
 		}
 	}
 
