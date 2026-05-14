@@ -428,6 +428,9 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		maxcount, _ := r.ReadUint32()
 		// bitmap for attr request
 		bitmapLen, _ := r.ReadUint32()
+		if bitmapLen > uint32(len(attrBitmap{})) {
+			return nil, 0, fmt.Errorf("READDIR bitmap too large: %d", bitmapLen)
+		}
 		if bitmapLen <= 1 {
 			b := getOpArg32()
 			binary.BigEndian.PutUint64(b[:8], cookie)

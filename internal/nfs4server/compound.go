@@ -494,6 +494,10 @@ func (d *Dispatcher) opGetAttr(data []byte) OpResult {
 }
 
 func (d *Dispatcher) encodeAttrs(p string, reqBit attrBitmap) []byte {
+	return d.encodeAttrsWithObject(p, reqBit, nil)
+}
+
+func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedObj *storage.Object) []byte {
 	if attrBitmapLen(reqBit) == 0 {
 		w := getXDRWriter()
 		w.WriteUint32(0)
@@ -525,6 +529,16 @@ func (d *Dispatcher) encodeAttrs(p string, reqBit attrBitmap) []byte {
 	if isPseudoRoot {
 		isDir = true
 		fileSize = 4096
+	} else if listedObj != nil {
+		isDir = false
+		fileSize = uint64(listedObj.Size)
+		lastModUnix = listedObj.LastModified
+
+		meta := d.loadFileMeta(bucket, key)
+		sidecarMode = meta.Mode
+		if meta.Mtime > 0 {
+			lastModUnix = meta.Mtime / 1e9
+		}
 	} else if !isDir && d.backend != nil {
 		obj, err := d.backend.HeadObject(context.Background(), bucket, key)
 		if err == nil {
@@ -839,7 +853,7 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 			w.WriteUint32(1) // value_follows = TRUE
 			w.WriteUint64(cookie)
 			w.WriteString(name)
-			w.buf.Write(d.encodeAttrs(path.Join(d.currentPath, name), reqBit))
+			w.buf.Write(d.encodeAttrsWithObject(path.Join(d.currentPath, name), reqBit, obj))
 		}
 	}
 
