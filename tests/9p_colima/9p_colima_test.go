@@ -6,7 +6,9 @@
 package p9_colima
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,6 +27,8 @@ var (
 	clusterKey      = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 	colimaAdminSock string
 	colima9PBucket  = "colima-9p-test"
+	colimaAccessKey string
+	colimaSecretKey string
 )
 
 func envOrDefault(key, def string) string {
@@ -42,6 +47,48 @@ func runColimaSSH(t *testing.T, args ...string) string {
 	out, err := colimaSSH(args...).CombinedOutput()
 	require.NoErrorf(t, err, "colima ssh %v\n%s", args, out)
 	return strings.TrimSpace(string(out))
+}
+
+func httpObjectURL(key string) string {
+	return fmt.Sprintf("http://127.0.0.1:%s/%s/%s", colimaHTTPPort, colima9PBucket, key)
+}
+
+func httpPutObject(t *testing.T, key, body string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, httpObjectURL(key), strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "text/plain")
+	s3auth.SignRequest(req, colimaAccessKey, colimaSecretKey, "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func httpGetObject(t *testing.T, key string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, httpObjectURL(key), nil)
+	require.NoError(t, err)
+	s3auth.SignRequest(req, colimaAccessKey, colimaSecretKey, "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(body)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func p9Path(mnt, name string) string {
+	return mnt + "/" + name
+}
+
+func writeMountedFile(t *testing.T, path, body string) {
+	t.Helper()
+	runColimaSSH(t, "sudo", "sh", "-c", fmt.Sprintf("printf %%s %s > %s", shellQuote(body), shellQuote(path)))
 }
 
 func with9PMount(t *testing.T, fn func(mnt string)) {
@@ -99,6 +146,7 @@ func TestMain(m *testing.M) {
 		"--port", colimaHTTPPort,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
+		"--9p-bind", "0.0.0.0",
 		"--9p-port", colima9PPort,
 		"--cluster-key", clusterKey,
 	}
@@ -146,6 +194,35 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	saArgs := []string{"iam", "--endpoint", colimaAdminSock, "--json", "sa", "create", "colima-9p-e2e"}
+	out, err := exec.Command(binary, saArgs...).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "iam sa create failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	var saResp struct {
+		SAID      string `json:"sa_id"`
+		AccessKey string `json:"access_key"`
+		SecretKey string `json:"secret_key"`
+	}
+	if err := json.Unmarshal(out, &saResp); err != nil {
+		fmt.Fprintf(os.Stderr, "iam sa create parse failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	grantArgs := []string{"iam", "--endpoint", colimaAdminSock, "grant", "put", saResp.SAID, colima9PBucket, "Admin"}
+	if out, err := exec.Command(binary, grantArgs...).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "iam grant put failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	colimaAccessKey = saResp.AccessKey
+	colimaSecretKey = saResp.SecretKey
+
 	exitCode := m.Run()
 
 	cmd.Process.Kill()
@@ -162,13 +239,7 @@ func Test9P_ListBuckets(t *testing.T) {
 
 func Test9P_ListObjects(t *testing.T) {
 	// Upload a test object via HTTP PUT using grainfs S3-compatible API.
-	uploadURL := fmt.Sprintf("http://127.0.0.1:%s/%s/test-file.txt", colimaHTTPPort, colima9PBucket)
-	req, _ := http.NewRequest(http.MethodPut, uploadURL, strings.NewReader("hello 9p"))
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	httpPutObject(t, "test-file.txt", "hello 9p")
 
 	with9PMount(t, func(mnt string) {
 		out := runColimaSSH(t, "ls", fmt.Sprintf("%s/%s", mnt, colima9PBucket))
@@ -181,6 +252,76 @@ func Test9P_ListObjects(t *testing.T) {
 	})
 }
 
-// Test9P_ReadObject: S3 PUT requires IAM service account setup.
-// Deferred to next spike — object reads are verified in unit tests (TestObjectFile_ReadAt_*).
-// Add here when grainfs gets a public-rw bucket ACL CLI or object-put admin command.
+func Test9P_WriteReadAndHTTPVisibility(t *testing.T) {
+	with9PBucketMount(t, func(mnt string) {
+		writeMountedFile(t, p9Path(mnt, "write-read.txt"), "hello from 9p")
+
+		out := runColimaSSH(t, "sudo", "cat", p9Path(mnt, "write-read.txt"))
+		require.Equal(t, "hello from 9p", out)
+
+		status, body := httpGetObject(t, "write-read.txt")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "hello from 9p", body)
+	})
+}
+
+func Test9P_OverwriteTruncatesStaleTail(t *testing.T) {
+	httpPutObject(t, "overwrite.txt", "longer original content")
+
+	with9PBucketMount(t, func(mnt string) {
+		writeMountedFile(t, p9Path(mnt, "overwrite.txt"), "short")
+
+		out := runColimaSSH(t, "sudo", "cat", p9Path(mnt, "overwrite.txt"))
+		require.Equal(t, "short", out)
+
+		status, body := httpGetObject(t, "overwrite.txt")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "short", body)
+	})
+}
+
+func Test9P_TruncateUpdatesHTTPObject(t *testing.T) {
+	httpPutObject(t, "truncate.txt", "truncate-me")
+
+	with9PBucketMount(t, func(mnt string) {
+		runColimaSSH(t, "sudo", "truncate", "-s", "4", p9Path(mnt, "truncate.txt"))
+
+		out := runColimaSSH(t, "sudo", "cat", p9Path(mnt, "truncate.txt"))
+		require.Equal(t, "trun", out)
+
+		status, body := httpGetObject(t, "truncate.txt")
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "trun", body)
+	})
+}
+
+func Test9P_ChmodTouchStatAndHideMetadata(t *testing.T) {
+	with9PBucketMount(t, func(mnt string) {
+		writeMountedFile(t, p9Path(mnt, "metadata.txt"), "metadata")
+		runColimaSSH(t, "sudo", "chmod", "600", p9Path(mnt, "metadata.txt"))
+		runColimaSSH(t, "sudo", "touch", "-m", "-d", "@1704067200", p9Path(mnt, "metadata.txt"))
+
+		stat := runColimaSSH(t, "sudo", "stat", "-c", "%a %Y", p9Path(mnt, "metadata.txt"))
+		require.Equal(t, "600 1704067200", stat)
+
+		out := runColimaSSH(t, "ls", "-a", mnt)
+		require.NotContains(t, out, "__meta")
+	})
+}
+
+func Test9P_RenameAndUnlinkVisibleThroughHTTP(t *testing.T) {
+	with9PBucketMount(t, func(mnt string) {
+		writeMountedFile(t, p9Path(mnt, "rename-src.txt"), "rename body")
+		runColimaSSH(t, "sudo", "mv", p9Path(mnt, "rename-src.txt"), p9Path(mnt, "rename-dst.txt"))
+
+		srcStatus, _ := httpGetObject(t, "rename-src.txt")
+		require.NotEqual(t, http.StatusOK, srcStatus)
+		dstStatus, dstBody := httpGetObject(t, "rename-dst.txt")
+		require.Equal(t, http.StatusOK, dstStatus)
+		require.Equal(t, "rename body", dstBody)
+
+		runColimaSSH(t, "sudo", "rm", p9Path(mnt, "rename-dst.txt"))
+		status, _ := httpGetObject(t, "rename-dst.txt")
+		require.NotEqual(t, http.StatusOK, status)
+	})
+}

@@ -1,10 +1,12 @@
 package p9server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hugelgupf/p9/p9"
 
@@ -20,20 +22,27 @@ type objectKeyWalker interface {
 type bucketFile struct {
 	noopFile
 	backend storage.Backend
+	locks   *objectLocks
 	bucket  string
 	prefix  string
 }
 
 func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &bucketFile{backend: f.backend, bucket: f.bucket, prefix: f.prefix}, nil
+		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix}, nil
 	}
 	name := names[0]
+	if isP9ReservedName(name) {
+		return nil, nil, syscall.ENOENT
+	}
 	key := f.childKey(name)
+	if isP9ReservedKey(key) {
+		return nil, nil, syscall.ENOENT
+	}
 	if len(names) == 1 {
 		if obj, err := f.backend.HeadObject(context.Background(), f.bucket, key); err == nil {
 			oqid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
-			of := &objectFile{backend: f.backend, bucket: f.bucket, key: key, meta: obj}
+			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}
 			return []p9.QID{oqid}, of, nil
 		}
 	}
@@ -41,7 +50,7 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 		return nil, nil, syscall.ENOENT
 	}
 	bqid := p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, key)}
-	bf := &bucketFile{backend: f.backend, bucket: f.bucket, prefix: key + "/"}
+	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: key + "/"}
 	if len(names) == 1 {
 		return []p9.QID{bqid}, bf, nil
 	}
@@ -63,6 +72,147 @@ func (f *bucketFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 	return qid, valid, attr, nil
 }
 
+func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.File, p9.QID, uint32, error) {
+	if isP9ReservedName(name) {
+		return nil, p9.QID{}, 0, syscall.EPERM
+	}
+	switch flags.Mode() {
+	case p9.ReadOnly, p9.WriteOnly, p9.ReadWrite:
+	default:
+		return nil, p9.QID{}, 0, syscall.EINVAL
+	}
+	key := f.childKey(name)
+	if isP9ReservedKey(key) {
+		return nil, p9.QID{}, 0, syscall.EPERM
+	}
+	unlock := f.locks.lock(f.bucket, key)
+	defer unlock()
+
+	ctx := context.Background()
+	if _, err := f.backend.HeadObject(ctx, f.bucket, key); err == nil {
+		return nil, p9.QID{}, 0, syscall.EEXIST
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return nil, p9.QID{}, 0, syscall.EIO
+	}
+	obj, err := f.backend.PutObject(ctx, f.bucket, key, bytes.NewReader(nil), "application/octet-stream")
+	if err != nil {
+		return nil, p9.QID{}, 0, syscall.EIO
+	}
+	meta := p9FileMeta{
+		Mode:  uint32(permissions) & 0777,
+		Mtime: time.Now().UnixNano(),
+	}
+	if err := saveP9FileMeta(ctx, f.backend, f.bucket, key, meta); err != nil {
+		_ = f.backend.DeleteObject(ctx, f.bucket, key)
+		return nil, p9.QID{}, 0, syscall.EIO
+	}
+	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
+	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}, qid, 0, nil
+}
+
+func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
+	if flags != 0 {
+		return syscall.EINVAL
+	}
+	if !validObjectName(name) {
+		return syscall.EINVAL
+	}
+	if isP9ReservedName(name) {
+		return syscall.EPERM
+	}
+	key := f.childKey(name)
+	if isP9ReservedKey(key) {
+		return syscall.EPERM
+	}
+	unlock := f.locks.lockMany(
+		objectLockKey{bucket: f.bucket, key: key},
+		objectLockKey{bucket: f.bucket, key: p9MetaSidecarKey(key)},
+	)
+	defer unlock()
+
+	ctx := context.Background()
+	if _, err := f.backend.HeadObject(ctx, f.bucket, key); err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return syscall.ENOENT
+		}
+		return syscall.EIO
+	}
+	if err := f.backend.DeleteObject(ctx, f.bucket, key); err != nil {
+		return syscall.EIO
+	}
+	_ = f.backend.DeleteObject(ctx, f.bucket, p9MetaSidecarKey(key))
+	return nil
+}
+
+// RenameAt performs a best-effort object rename. Object stores do not provide
+// crash-atomic rename, so this copies destination data and metadata before
+// deleting the source.
+func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) error {
+	dst, ok := newDir.(*bucketFile)
+	if !ok {
+		return syscall.EXDEV
+	}
+	if dst.bucket != f.bucket {
+		return syscall.EXDEV
+	}
+	if !validObjectName(oldName) || !validObjectName(newName) {
+		return syscall.EINVAL
+	}
+	if isP9ReservedName(oldName) || isP9ReservedName(newName) {
+		return syscall.EPERM
+	}
+	oldKey := f.childKey(oldName)
+	newKey := dst.childKey(newName)
+	if isP9ReservedKey(oldKey) || isP9ReservedKey(newKey) {
+		return syscall.EPERM
+	}
+	unlock := f.locks.lockMany(
+		objectLockKey{bucket: f.bucket, key: oldKey},
+		objectLockKey{bucket: f.bucket, key: newKey},
+		objectLockKey{bucket: f.bucket, key: p9MetaSidecarKey(oldKey)},
+		objectLockKey{bucket: f.bucket, key: p9MetaSidecarKey(newKey)},
+	)
+	defer unlock()
+
+	ctx := context.Background()
+	obj, err := f.backend.HeadObject(ctx, f.bucket, oldKey)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return syscall.ENOENT
+		}
+		return syscall.EIO
+	}
+	if obj.IsDeleteMarker {
+		return syscall.ENOENT
+	}
+	if oldKey == newKey {
+		return nil
+	}
+	if copier, ok := f.backend.(storage.Copier); ok {
+		if _, err := copier.CopyObject(f.bucket, oldKey, f.bucket, newKey); err != nil {
+			return syscall.EIO
+		}
+	} else {
+		rc, _, err := f.backend.GetObject(ctx, f.bucket, oldKey)
+		if err != nil {
+			return syscall.EIO
+		}
+		if _, err := f.backend.PutObject(ctx, f.bucket, newKey, rc, obj.ContentType); err != nil {
+			rc.Close()
+			return syscall.EIO
+		}
+		rc.Close()
+	}
+	if err := saveP9FileMeta(ctx, f.backend, f.bucket, newKey, loadP9FileMeta(ctx, f.backend, f.bucket, oldKey)); err != nil {
+		return syscall.EIO
+	}
+	if err := f.backend.DeleteObject(ctx, f.bucket, oldKey); err != nil {
+		return syscall.EIO
+	}
+	_ = f.backend.DeleteObject(ctx, f.bucket, p9MetaSidecarKey(oldKey))
+	return nil
+}
+
 func (f *bucketFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
 	if count == 0 {
 		return nil, nil
@@ -71,6 +221,9 @@ func (f *bucketFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
 	idx := uint64(0)
 	seen := make(map[string]struct{})
 	emit := func(key string) error {
+		if isP9ReservedKey(key) {
+			return nil
+		}
 		rest := strings.TrimPrefix(key, f.prefix)
 		if rest == "" {
 			return nil
@@ -125,9 +278,16 @@ func (f *bucketFile) childKey(name string) string {
 	return f.prefix + name
 }
 
+func validObjectName(name string) bool {
+	return name != "" && !strings.Contains(name, "/")
+}
+
 func (f *bucketFile) hasPrefix(prefix string) bool {
 	found := false
 	walk := func(key string) error {
+		if isP9ReservedKey(key) {
+			return nil
+		}
 		found = true
 		return errStopReaddir
 	}
