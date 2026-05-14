@@ -75,6 +75,7 @@ func buildClusterConfig(
 
 	cfg.NFS4Port, _ = cmd.Flags().GetInt("nfs4-port")
 	cfg.NBDPort, _ = cmd.Flags().GetInt("nbd-port")
+	cfg.P9Port, _ = cmd.Flags().GetInt("9p-port")
 
 	cfg.FDWatchEnabled = fdWatchEnabled(cmd)
 	cfg.FDOpts = fdOptionsFromCmd(cmd)
