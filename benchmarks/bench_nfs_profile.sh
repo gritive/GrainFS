@@ -40,7 +40,8 @@ esac
 HTTP_PORT=$(bench_free_port)
 NFS4_PORT=$(bench_free_port)
 PPROF_PORT=$(bench_free_port)
-HOST_IP="192.168.5.2"   # macOS host IP as seen from Colima VM
+HOST_IP="${HOST_IP:-192.168.5.2}"   # macOS host IP as seen from Colima VM
+BUCKET="${BUCKET:-benchnfs}"
 MNT="/mnt/grainfs-bench-nfs"
 NFS_VERS="${NFS_VERS:-4.0}"
 NFS_SERVER_WARMUP_SLEEP="${NFS_SERVER_WARMUP_SLEEP:-3}"
@@ -92,11 +93,17 @@ echo "  waiting ${NFS_SERVER_WARMUP_SLEEP}s for raft group leadership..."
 sleep "$NFS_SERVER_WARMUP_SLEEP"
 
 echo ""
+echo "=== preparing bucket export ($BUCKET) ==="
+bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR"
+bench_create_bucket_retry "http://127.0.0.1:$HTTP_PORT" "$BUCKET"
+"$BINARY" nfs export add "$BUCKET" --endpoint "$DATA_DIR/admin.sock" || true
+
+echo ""
 echo "=== mounting NFS inside Colima (vers=$NFS_VERS host=$HOST_IP port=$NFS4_PORT) ==="
 bench_colima_ssh sudo mkdir -p "$MNT"
 bench_colima_ssh sudo mount -t nfs4 \
   -o "vers=$NFS_VERS,port=$NFS4_PORT,rsize=131072,wsize=131072,hard,intr" \
-  "${HOST_IP}:/" "$MNT"
+  "${HOST_IP}:/${BUCKET}" "$MNT"
 
 echo "  mount OK — checking df:"
 bench_colima_ssh df -h "$MNT" || true
