@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -96,18 +95,22 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 		return nil, fmt.Errorf("create part file: %w", err)
 	}
 
-	h := md5.New()
+	h := md5Pool.Get()
+	h.Reset()
 	w := io.MultiWriter(f, h)
 	size, err := io.Copy(w, r)
 	f.Close()
 	if err != nil {
+		md5Pool.Put(h)
 		os.Remove(partFile)
 		return nil, fmt.Errorf("write part: %w", err)
 	}
+	etag := hex.EncodeToString(h.Sum(nil))
+	md5Pool.Put(h)
 
 	return &Part{
 		PartNumber: partNumber,
-		ETag:       hex.EncodeToString(h.Sum(nil)),
+		ETag:       etag,
 		Size:       size,
 	}, nil
 }
@@ -152,7 +155,8 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		return nil, fmt.Errorf("create final object: %w", err)
 	}
 
-	h := md5.New()
+	h := md5Pool.Get()
+	h.Reset()
 	w := io.MultiWriter(out, h)
 	var totalSize int64
 
@@ -161,6 +165,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		f, err := os.Open(partFile)
 		if err != nil {
 			out.Close()
+			md5Pool.Put(h)
 			os.Remove(objPath)
 			return nil, fmt.Errorf("open part %d: %w", p.PartNumber, err)
 		}
@@ -168,6 +173,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		f.Close()
 		if err != nil {
 			out.Close()
+			md5Pool.Put(h)
 			os.Remove(objPath)
 			return nil, fmt.Errorf("copy part %d: %w", p.PartNumber, err)
 		}
@@ -176,6 +182,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	out.Close()
 
 	etag := hex.EncodeToString(h.Sum(nil))
+	md5Pool.Put(h)
 	now := time.Now().Unix()
 
 	obj := &Object{
@@ -300,15 +307,19 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 		if err != nil {
 			return nil, fmt.Errorf("open part %d: %w", partNumber, err)
 		}
-		h := md5.New()
+		h := md5Pool.Get()
+		h.Reset()
 		size, err := io.Copy(h, f)
 		f.Close()
 		if err != nil {
+			md5Pool.Put(h)
 			return nil, fmt.Errorf("hash part %d: %w", partNumber, err)
 		}
+		partETag := hex.EncodeToString(h.Sum(nil))
+		md5Pool.Put(h)
 		out = append(out, Part{
 			PartNumber: partNumber,
-			ETag:       hex.EncodeToString(h.Sum(nil)),
+			ETag:       partETag,
 			Size:       size,
 		})
 	}
