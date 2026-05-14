@@ -26,6 +26,11 @@ var bytesReaderPool = pool.New(func() *bytes.Reader { return new(bytes.Reader) }
 // Pooling at this size eliminates per-call allocs in the ReadAt fast path.
 const nfsMaxReadBlock = 131072
 
+const (
+	maxInt64Uint             = uint64(1<<63 - 1)
+	nfsMaxFallbackSparseSize = 1 << 30
+)
+
 var opReadAtBufPool = pool.New(func() []byte { return make([]byte, nfsMaxReadBlock) })
 
 var compoundReqPool = pool.New(func() *CompoundRequest {
@@ -1039,7 +1044,14 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		if obj, herr := d.backend.HeadObject(context.Background(), bucket, key); herr == nil {
 			existingSize = uint64(obj.Size)
 		}
-		end := offset + uint64(len(writeData))
+		writeLen := uint64(len(writeData))
+		if offset > maxInt64Uint || writeLen > maxInt64Uint-offset {
+			return OpResult{OpCode: OpWrite, Status: NFS4ERR_FBIG}
+		}
+		end := offset + writeLen
+		if offset > existingSize && end > nfsMaxFallbackSparseSize {
+			return OpResult{OpCode: OpWrite, Status: NFS4ERR_FBIG}
+		}
 
 		br := bytesReaderPool.Get()
 		defer bytesReaderPool.Put(br)
@@ -1048,20 +1060,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			br.Reset(writeData)
 			_, err = d.backend.PutObject(context.Background(), bucket, key, br, "application/octet-stream")
 		} else {
-			var existing []byte
-			if rc, _, rerr := d.backend.GetObject(context.Background(), bucket, key); rerr == nil {
-				existing, err = io.ReadAll(rc)
-				rc.Close()
-				if err != nil {
-					return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
-				}
-			}
-			if uint64(len(existing)) < end {
-				existing = append(existing, make([]byte, end-uint64(len(existing)))...)
-			}
-			copy(existing[offset:], writeData)
-			br.Reset(existing)
-			_, err = d.backend.PutObject(context.Background(), bucket, key, br, "application/octet-stream")
+			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize)
 		}
 		if err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1074,6 +1073,65 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	w.WriteUint32(2)                      // committed = FILE_SYNC
 	w.WriteUint64(0)                      // writeverf (8 bytes)
 	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+}
+
+func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64) error {
+	var (
+		rc      io.ReadCloser
+		readers []io.Reader
+	)
+	if existingSize > 0 {
+		var err error
+		rc, _, err = d.backend.GetObject(ctx, bucket, key)
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		prefixLen := min(offset, existingSize)
+		if prefixLen > 0 {
+			readers = append(readers, io.LimitReader(rc, int64(prefixLen)))
+		}
+		if offset > existingSize {
+			readers = append(readers, io.LimitReader(zeroReader{}, int64(offset-existingSize)))
+		}
+	} else if offset > 0 {
+		readers = append(readers, io.LimitReader(zeroReader{}, int64(offset)))
+	}
+
+	readers = append(readers, bytes.NewReader(writeData))
+	end := offset + uint64(len(writeData))
+	if rc != nil && end < existingSize {
+		readers = append(readers, &skipThenReader{r: rc, n: int64(end - min(offset, existingSize))})
+	}
+	_, err := d.backend.PutObject(ctx, bucket, key, io.MultiReader(readers...), "application/octet-stream")
+	return err
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+type skipThenReader struct {
+	r io.Reader
+	n int64
+}
+
+func (r *skipThenReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for r.n > 0 {
+		toSkip := min(int64(len(p)), r.n)
+		n, err := r.r.Read(p[:toSkip])
+		r.n -= int64(n)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return r.r.Read(p)
 }
 
 func (d *Dispatcher) opOpen(data []byte) OpResult {

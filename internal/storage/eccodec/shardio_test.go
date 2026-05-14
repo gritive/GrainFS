@@ -200,6 +200,74 @@ func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {
 	assert.Equal(t, data[offset:offset+length], got)
 }
 
+func TestReadEncryptedShardRangeAt_DoesNotReadSkippedChunks(t *testing.T) {
+	enc := testEncryptor(t)
+	data := bytes.Repeat([]byte("0123456789abcdef"), 512)
+	aad := []byte("v2/bucket/key/3")
+	const chunkSize = 1024
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, chunkSize))
+
+	offset := int64(3*chunkSize + 17)
+	length := 193
+	firstChunkCipherOffset := int64(encryptedHeaderLen) + 3*int64(encryptedChunkHeaderLen+chunkSize+enc.AEADOverhead())
+	spy := &rangeGuardReaderAt{
+		data:              encoded.Bytes(),
+		allowBeforeData:   encryptedHeaderLen,
+		minDataReadOffset: firstChunkCipherOffset,
+	}
+
+	got := make([]byte, length)
+	n, err := ReadEncryptedShardRangeAt(spy, enc, aad, offset, got)
+	require.NoError(t, err)
+	require.Equal(t, length, n)
+	assert.Equal(t, data[offset:offset+int64(length)], got)
+}
+
+func TestReadEncryptedShardRangeAt_CrossesChunkBoundary(t *testing.T) {
+	enc := testEncryptor(t)
+	data := bytes.Repeat([]byte("0123456789abcdef"), 256)
+	aad := []byte("v2/bucket/key/3")
+	const chunkSize = 1024
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, chunkSize))
+
+	offset := int64(chunkSize - 13)
+	got := make([]byte, 64)
+	n, err := ReadEncryptedShardRangeAt(bytes.NewReader(encoded.Bytes()), enc, aad, offset, got)
+	require.NoError(t, err)
+	require.Equal(t, len(got), n)
+	assert.Equal(t, data[offset:offset+int64(len(got))], got)
+}
+
+func TestReadEncryptedShardRangeAt_WrongAADFails(t *testing.T) {
+	enc := testEncryptor(t)
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader([]byte("payload")), enc, []byte("aad-a"), 1024))
+
+	got := make([]byte, 4)
+	n, err := ReadEncryptedShardRangeAt(bytes.NewReader(encoded.Bytes()), enc, []byte("aad-b"), 0, got)
+	require.Error(t, err)
+	require.Equal(t, 0, n)
+	assert.Contains(t, err.Error(), "decrypt")
+}
+
+func TestReadEncryptedShardRangeAt_PartialPastEOF(t *testing.T) {
+	enc := testEncryptor(t)
+	data := []byte("payload")
+	aad := []byte("aad")
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, 1024))
+
+	got := make([]byte, len(data)+3)
+	n, err := ReadEncryptedShardRangeAt(bytes.NewReader(encoded.Bytes()), enc, aad, 0, got)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.Equal(t, len(data), n)
+	assert.Equal(t, data, got[:n])
+}
+
 func TestEncryptedShardStream_WrongAADFails(t *testing.T) {
 	enc := testEncryptor(t)
 	var encoded bytes.Buffer

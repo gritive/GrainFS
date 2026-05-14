@@ -253,6 +253,118 @@ func NewEncryptedShardRangeReader(r io.ReaderAt, enc *encrypt.Encryptor, aadBase
 	}, nil
 }
 
+// ReadEncryptedShardRangeAt decrypts plaintext bytes from an encrypted shard
+// directly into dst. It still authenticates full encrypted chunks, but reuses
+// pooled chunk buffers to avoid per-ReadAt MiB-scale allocation churn.
+func ReadEncryptedShardRangeAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, offset int64, dst []byte) (int, error) {
+	if enc == nil {
+		return 0, fmt.Errorf("encrypted shard decode requires encryptor")
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("negative encrypted shard offset %d", offset)
+	}
+	if len(dst) == 0 {
+		return 0, nil
+	}
+	var header [encryptedHeaderLen]byte
+	if _, err := r.ReadAt(header[:], 0); err != nil {
+		return 0, fmt.Errorf("read encrypted shard header: %w", err)
+	}
+	if !IsEncryptedShard(header[:]) {
+		return 0, fmt.Errorf("not an encrypted shard")
+	}
+	chunkSize := binary.LittleEndian.Uint32(header[len(encryptedShardMagic):])
+	if chunkSize == 0 || chunkSize > maxEncryptedChunkSize {
+		return 0, fmt.Errorf("invalid encrypted shard chunk size: %d", chunkSize)
+	}
+	var noncePrefix [encryptedNoncePrefixLen]byte
+	copy(noncePrefix[:], header[len(encryptedShardMagic)+4:])
+
+	plainPtr := encryptedPlainChunkPool.Get().(*[]byte)
+	cipherPtr := encryptedCipherChunkPool.Get().(*[]byte)
+	plainBuf := *plainPtr
+	cipherBuf := *cipherPtr
+	defer func() {
+		if cap(plainBuf) > 0 {
+			clear(plainBuf[:cap(plainBuf)])
+		}
+		*plainPtr = plainBuf[:0]
+		encryptedPlainChunkPool.Put(plainPtr)
+		*cipherPtr = cipherBuf[:0]
+		encryptedCipherChunkPool.Put(cipherPtr)
+	}()
+
+	done := 0
+	pos := offset
+	for done < len(dst) {
+		n, err := readEncryptedShardChunkAt(r, enc, aadBase, noncePrefix, chunkSize, pos, dst[done:], &plainBuf, &cipherBuf)
+		done += n
+		pos += int64(n)
+		if err != nil {
+			if done > 0 && errors.Is(err, io.EOF) {
+				return done, io.ErrUnexpectedEOF
+			}
+			return done, err
+		}
+	}
+	return done, nil
+}
+
+func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []byte, noncePrefix [encryptedNoncePrefixLen]byte, chunkSize uint32, pos int64, dst []byte, plainBuf, cipherBuf *[]byte) (int, error) {
+	chunkSize64 := int64(chunkSize)
+	chunkIdx64 := pos / chunkSize64
+	if chunkIdx64 > int64(^uint32(0)) {
+		return 0, fmt.Errorf("encrypted shard chunk index too large: %d", chunkIdx64)
+	}
+	chunkIdx := uint32(chunkIdx64)
+	inChunk := int(pos % chunkSize64)
+	fullCipherLen := int64(chunkSize) + int64(enc.AEADOverhead())
+	chunkFileOffset := int64(encryptedHeaderLen) + chunkIdx64*(int64(encryptedChunkHeaderLen)+fullCipherLen)
+
+	var chunkHeader [encryptedChunkHeaderLen]byte
+	if _, err := r.ReadAt(chunkHeader[:], chunkFileOffset); err != nil {
+		return 0, fmt.Errorf("read encrypted shard chunk header: %w", err)
+	}
+	plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
+	cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
+	if plainLen > chunkSize {
+		return 0, fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", chunkIdx, plainLen, chunkSize)
+	}
+	if cipherLen < plainLen || cipherLen > plainLen+uint32(enc.AEADOverhead()) {
+		return 0, fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", chunkIdx, cipherLen, plainLen)
+	}
+	if inChunk >= int(plainLen) {
+		return 0, io.EOF
+	}
+
+	if cap(*cipherBuf) < int(cipherLen) {
+		*cipherBuf = make([]byte, cipherLen)
+	}
+	ciphertext := (*cipherBuf)[:cipherLen]
+	if _, err := r.ReadAt(ciphertext, chunkFileOffset+encryptedChunkHeaderLen); err != nil {
+		return 0, fmt.Errorf("read encrypted shard chunk: %w", err)
+	}
+	nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
+	aad := encryptedChunkAAD(aadBase, chunkIdx)
+	if cap(*plainBuf) < int(plainLen) {
+		*plainBuf = make([]byte, plainLen)
+	}
+	plaintext, err := enc.OpenWithNonceAAD((*plainBuf)[:0], nonce[:], ciphertext, aad)
+	if err != nil {
+		return 0, fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+	}
+	if uint32(len(plaintext)) != plainLen {
+		return 0, fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+	}
+	*plainBuf = plaintext
+
+	end := len(plaintext)
+	if max := inChunk + len(dst); max < end {
+		end = max
+	}
+	return copy(dst, plaintext[inChunk:end]), nil
+}
+
 type encryptedShardReader struct {
 	r           io.Reader
 	enc         *encrypt.Encryptor

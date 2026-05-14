@@ -22,32 +22,37 @@ func TestAuditIcebergArtifactContract(t *testing.T) {
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal([]byte(metaJSON), &meta))
 	require.Equal(t, float64(2), meta["format-version"])
-	require.Equal(t, float64(999), meta["last-partition-id"])
+	require.Equal(t, float64(1000), meta["last-partition-id"])
 	specs := meta["partition-specs"].([]any)
 	require.Len(t, specs, 1)
 	spec := specs[0].(map[string]any)
-	require.Empty(t, spec["fields"], "audit.s3 stays unpartitioned for DuckDB compatibility")
+	specFields := spec["fields"].([]any)
+	require.Len(t, specFields, 1)
+	require.Equal(t, "ts_day", specFields[0].(map[string]any)["name"])
+	require.Equal(t, "day", specFields[0].(map[string]any)["transform"])
 
-	manifestList, err := encodeManifestList(101, 1, "s3://grainfs-audit/metadata/s3/101-manifest.avro", 456, 123)
+	manifestList, err := encodeManifestList(101, 1, "s3://grainfs-audit/metadata/s3/101-manifest.avro", 456, 123, "2026-05-14", 0)
 	require.NoError(t, err)
 	listSchema, listMetadata, _ := parseAvroContainerForTest(t, manifestList)
 	require.Equal(t, auditIcebergSchemaJSON, listMetadata["schema"])
-	require.Equal(t, "[]", listMetadata["partition-spec"])
+	require.Equal(t, auditPartitionSpecJSON, listMetadata["partition-spec"])
 	partitions := avroFieldForTest(t, listSchema, "partitions")
 	partitionArray := partitions["type"].(map[string]any)
 	require.Equal(t, float64(508), partitionArray["element-id"])
 
-	manifest, err := encodeManifest(101, 1, "s3://grainfs-audit/data/2026-05-14/file.parquet", 456, 123, "2026-05-14")
+	manifest, err := encodeManifest(101, 1, "s3://grainfs-audit/data/2026-05-14/file.parquet", 456, 123, "2026-05-14", 0)
 	require.NoError(t, err)
 	manifestSchema, manifestMetadata, datum := parseAvroContainerForTest(t, manifest)
 	require.Equal(t, auditIcebergSchemaJSON, manifestMetadata["schema"])
-	require.Equal(t, "[]", manifestMetadata["partition-spec"])
+	require.Equal(t, auditPartitionSpecJSON, manifestMetadata["partition-spec"])
 
 	dataFile := avroFieldForTest(t, manifestSchema, "data_file")
 	dataFileFields := dataFile["type"].(map[string]any)["fields"].([]any)
 	require.Len(t, dataFileFields, 16)
 	partition := avroFieldFromFieldsForTest(t, dataFileFields, "partition")
-	require.Empty(t, partition["type"].(map[string]any)["fields"])
+	partitionFields := partition["type"].(map[string]any)["fields"].([]any)
+	require.Len(t, partitionFields, 1)
+	require.Equal(t, "ts_day", partitionFields[0].(map[string]any)["name"])
 	for _, name := range []string{"column_sizes", "value_counts", "null_value_counts", "nan_value_counts", "lower_bounds", "upper_bounds"} {
 		field := avroFieldFromFieldsForTest(t, dataFileFields, name)
 		union := field["type"].([]any)
@@ -66,12 +71,58 @@ func TestAuditIcebergArtifactContract(t *testing.T) {
 	appendAvroInt(&expected, 0)
 	appendAvroString(&expected, "s3://grainfs-audit/data/2026-05-14/file.parquet")
 	appendAvroString(&expected, "PARQUET")
+	day, err := partitionDay("2026-05-14")
+	require.NoError(t, err)
+	appendAvroInt(&expected, 1)
+	appendAvroInt(&expected, day)
 	appendAvroLong(&expected, 123)
 	appendAvroLong(&expected, 456)
 	for i := 0; i < 10; i++ {
 		appendAvroInt(&expected, 0)
 	}
 	require.Equal(t, expected.Bytes(), datum, "manifest datum must encode all 10 optional data_file tail fields")
+}
+
+func TestAuditSchemaV2HasSearchFieldsAndDayPartition(t *testing.T) {
+	metaJSON := fmt.Sprintf(S3InitialMetadata, "test-uuid", "s3://grainfs-audit", int64(1770000000000))
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal([]byte(metaJSON), &meta))
+
+	require.Equal(t, float64(23), meta["last-column-id"])
+	specs := meta["partition-specs"].([]any)
+	require.Len(t, specs, 1)
+	fields := specs[0].(map[string]any)["fields"].([]any)
+	require.Len(t, fields, 1)
+	require.Equal(t, "day", fields[0].(map[string]any)["transform"])
+	require.Equal(t, float64(1), fields[0].(map[string]any)["source-id"])
+
+	rawSchemas := meta["schemas"].([]any)
+	schema := rawSchemas[0].(map[string]any)
+	rawFields := schema["fields"].([]any)
+	names := map[string]bool{}
+	for _, raw := range rawFields {
+		names[raw.(map[string]any)["name"].(string)] = true
+	}
+	for _, name := range []string{"event_id", "user_agent", "operation", "auth_status", "err_reason", "version_id", "upload_id", "copy_source_bucket", "copy_source_key"} {
+		require.True(t, names[name], "schema must include %s", name)
+	}
+}
+
+func TestManifestArtifactsUseDefaultPartitionSpecID(t *testing.T) {
+	manifestList, err := encodeManifestList(101, 1, "s3://grainfs-audit/metadata/s3/101-manifest.avro", 456, 123, "2026-05-14", 1)
+	require.NoError(t, err)
+	_, listMetadata, listDatum := parseAvroContainerForTest(t, manifestList)
+	require.Equal(t, "1", listMetadata["partition-spec-id"])
+
+	r := bytes.NewReader(listDatum)
+	require.Equal(t, "s3://grainfs-audit/metadata/s3/101-manifest.avro", readAvroStringForTest(t, r))
+	require.Equal(t, int64(456), readAvroLongForTest(t, r))
+	require.Equal(t, int64(1), readAvroLongForTest(t, r), "manifest list partition_spec_id must match table default")
+
+	manifest, err := encodeManifest(101, 1, "s3://grainfs-audit/data/2026-05-14/file.parquet", 456, 123, "2026-05-14", 1)
+	require.NoError(t, err)
+	_, manifestMetadata, _ := parseAvroContainerForTest(t, manifest)
+	require.Equal(t, "1", manifestMetadata["partition-spec-id"])
 }
 
 func TestEncodeParquetReadback(t *testing.T) {
@@ -99,7 +150,7 @@ func TestEncodeParquetReadback(t *testing.T) {
 	defer tbl.Release()
 
 	require.Equal(t, int64(len(events)), tbl.NumRows(), "row count must match")
-	require.Equal(t, 13, int(tbl.NumCols()), "must have 13 columns")
+	require.Equal(t, 23, int(tbl.NumCols()), "must have 23 columns")
 
 	// Verify column names match schema
 	schema := tbl.Schema()
@@ -107,6 +158,8 @@ func TestEncodeParquetReadback(t *testing.T) {
 		"ts", "node_id", "request_id", "sa_id", "source_ip",
 		"method", "bucket", "key", "http_status",
 		"bytes_in", "bytes_out", "latency_ms", "err_class",
+		"event_id", "user_agent", "operation", "subresource", "auth_status",
+		"err_reason", "version_id", "upload_id", "copy_source_bucket", "copy_source_key",
 	}
 	for i, name := range wantCols {
 		require.Equal(t, name, schema.Field(i).Name, "column %d name", i)

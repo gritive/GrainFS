@@ -3,8 +3,12 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"net"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
@@ -286,8 +290,29 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	srvOpts = append(srvOpts, server.WithMutationGate(state.mutationGate))
 
 	if cfg.AuditIceberg {
-		auditEmitter := audit.NewEmitter(nodeID)
-		srvOpts = append(srvOpts, server.WithAuditEmitter(auditEmitter))
+		auditOutbox, err := audit.OpenOutbox(filepath.Join(cfg.DataDir, "audit-outbox"))
+		if err != nil {
+			return fmt.Errorf("audit outbox: %w", err)
+		}
+		state.AddCleanup(func() { _ = auditOutbox.Close() })
+		auditAccessKey := "AKGFAUDIT" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		auditSecretKey := uuid.NewString() + uuid.NewString()
+		srvOpts = append(srvOpts,
+			server.WithAuditOutbox(auditOutbox),
+			server.WithAuditNodeID(nodeID),
+			server.WithAuditInternalCredentials(auditAccessKey, auditSecretKey),
+		)
+		if endpoint := auditSearchEndpoint(cfg.Addr); endpoint != "" {
+			searcher := audit.NewDuckDBSearcher(audit.DuckDBSearchConfig{
+				Endpoint:  endpoint,
+				AccessKey: auditAccessKey,
+				SecretKey: auditSecretKey,
+			})
+			srvOpts = append(srvOpts, server.WithAuditSearcher(searcher))
+			state.auditSearchWarmup = searcher.Warmup
+		} else {
+			log.Warn().Str("addr", cfg.Addr).Msg("audit search disabled: HTTP address does not resolve to a stable local endpoint")
+		}
 		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
 		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
 			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
@@ -311,7 +336,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			})
 		}
 		committer := audit.NewCommitter(audit.CommitterConfig{
-			Emitter:      auditEmitter,
+			Outbox:       auditOutbox,
 			Catalog:      metaCatalog,
 			Backend:      state.backend,
 			IsLeader:     func() bool { return metaRaft.IsLeader() },
@@ -324,7 +349,9 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			if err != nil {
 				return transport.NewErrorResponse(req, transport.StatusError, err)
 			}
-			committer.AppendFromFollower(events)
+			if err := committer.AppendFromFollower(context.Background(), events); err != nil {
+				return transport.NewErrorResponse(req, transport.StatusError, err)
+			}
 			return transport.NewResponse(req, nil)
 		})
 		commitCtx, commitCancel := context.WithCancel(ctx)
@@ -338,4 +365,16 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 
 	state.srvOpts = srvOpts
 	return nil
+}
+
+func auditSearchEndpoint(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	switch strings.Trim(host, "[]") {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }

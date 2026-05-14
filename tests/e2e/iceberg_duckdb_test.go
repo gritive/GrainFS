@@ -5,8 +5,10 @@ package e2e
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -19,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 func TestIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
@@ -137,8 +141,46 @@ func TestAuditIcebergSingleDuckDB(t *testing.T) {
 		"bucket = 'test-audit-single' AND method = 'PUT'",
 		numPuts, 30*time.Second,
 	)
+	countAuditRows(t, server.endpoint, ak, sk,
+		"ts >= NOW() - INTERVAL 1 DAY AND operation = 'PutObject' AND bucket = 'test-audit-single'",
+		numPuts, 30*time.Second,
+	)
+	requireAuditSearchAPIRows(t, server.endpoint, ak, sk, "test-audit-single", numPuts, 30*time.Second)
 	t.Logf("audit_iceberg_single_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
 		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
+}
+
+func requireAuditSearchAPIRows(t *testing.T, endpoint, accessKey, secretKey, bucket string, want int, timeout time.Duration) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		req, err := http.NewRequest(http.MethodGet, endpoint+"/api/audit/s3?bucket="+bucket+"&operation=PutObject&limit=20", nil)
+		require.NoError(t, err)
+		req.Host = req.URL.Host
+		s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return false
+		}
+		var rows []struct {
+			Bucket    string `json:"bucket"`
+			Operation string `json:"operation"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+			return false
+		}
+		var got int
+		for _, row := range rows {
+			if row.Bucket == bucket && row.Operation == "PutObject" {
+				got++
+			}
+		}
+		return got >= want
+	}, timeout, 500*time.Millisecond, "audit search API must return committed PutObject rows")
 }
 
 func requireIcebergClusterS3Ready(t *testing.T, cluster *mrCluster, bucket string) {

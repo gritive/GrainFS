@@ -83,6 +83,7 @@ tbody tr:last-child td{border-bottom:none}
     <button data-tab="volumes">Volumes</button>
     <button data-tab="snapshots">Snapshots</button>
     <button data-tab="events">Events</button>
+    <button data-tab="audit">Audit</button>
     <button data-tab="dashboard">Dashboard</button>
     <button data-tab="cluster">Cluster</button>
   </nav>
@@ -404,6 +405,43 @@ tbody tr:last-child td{border-bottom:none}
   </div>
 </div>
 
+<!-- Audit Tab -->
+<div class="content hidden" id="tab-audit">
+  <div class="toolbar">
+    <div class="breadcrumb"><span>Audit</span></div>
+    <div class="actions" style="gap:0.5rem">
+      <button class="btn" id="btn-audit-refresh">Refresh</button>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat-card"><div class="label">Guarantee</div><div class="value" id="audit-guarantee">-</div></div>
+    <div class="stat-card"><div class="label">Backlog</div><div class="value" id="audit-backlog">-</div></div>
+    <div class="stat-card"><div class="label">Oldest Pending</div><div class="value" id="audit-oldest">-</div></div>
+    <div class="stat-card"><div class="label">Search</div><div class="value" id="audit-search-state">-</div></div>
+  </div>
+  <div class="toolbar">
+    <div class="actions" style="margin-left:0;gap:0.5rem;flex-wrap:wrap">
+      <input id="audit-filter-bucket" placeholder="bucket" style="padding:0.35rem 0.6rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem;width:150px">
+      <input id="audit-filter-key" placeholder="key prefix" style="padding:0.35rem 0.6rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem;width:170px">
+      <input id="audit-filter-sa" placeholder="sa_id" style="padding:0.35rem 0.6rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem;width:140px">
+      <input id="audit-filter-request" placeholder="request id" style="padding:0.35rem 0.6rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem;width:180px">
+      <select id="audit-filter-status" style="padding:0.35rem 0.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:0.8125rem">
+        <option value="">All status</option>
+        <option value="200">2xx</option>
+        <option value="400">4xx</option>
+        <option value="500">5xx</option>
+      </select>
+      <button class="btn primary" id="btn-audit-search">Search</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Time</th><th>Status</th><th>Operation</th><th>SA</th><th>Bucket</th><th>Key</th><th>Reason</th><th>Request</th></tr></thead>
+      <tbody id="audit-list"></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- Modals -->
 <div class="modal-overlay hidden" id="modal-bucket">
   <div class="modal">
@@ -551,6 +589,7 @@ tbody tr:last-child td{border-bottom:none}
       if (btn.dataset.tab === 'volumes') loadVolumes();
       if (btn.dataset.tab === 'snapshots') loadSnapshots();
       if (btn.dataset.tab === 'events') loadEvents();
+      if (btn.dataset.tab === 'audit') loadAudit();
       if (btn.dataset.tab === 'dashboard') { refreshDashboard(); startSSE(); startHealSSE(); loadIncidents(); pollAlertsStatus(); }
       if (btn.dataset.tab === 'cluster') loadCluster();
     });
@@ -1439,6 +1478,68 @@ tbody tr:last-child td{border-bottom:none}
   document.getElementById('btn-ev-refresh').addEventListener('click', loadEvents);
   document.getElementById('ev-type-filter').addEventListener('change', loadEvents);
   document.getElementById('ev-since-filter').addEventListener('change', loadEvents);
+
+  // Audit
+  function loadAuditHealth() {
+    fetch(baseURL + '/api/audit/health').then(function(r) { return r.json(); }).then(function(h) {
+      document.getElementById('audit-guarantee').textContent = h.guarantee_state || 'unknown';
+      document.getElementById('audit-backlog').textContent = String(h.outbox_backlog || 0);
+      document.getElementById('audit-oldest').textContent = h.oldest_pending_us ? new Date(Math.floor(h.oldest_pending_us / 1000)).toLocaleString() : '-';
+    }).catch(function() {
+      document.getElementById('audit-guarantee').textContent = 'error';
+    });
+  }
+
+  function loadAuditRows() {
+    var params = new URLSearchParams();
+    params.set('since', new Date(Date.now() - 3600 * 1000).toISOString());
+    params.set('limit', '100');
+    var bucket = document.getElementById('audit-filter-bucket').value;
+    var key = document.getElementById('audit-filter-key').value;
+    var sa = document.getElementById('audit-filter-sa').value;
+    var req = document.getElementById('audit-filter-request').value;
+    var status = document.getElementById('audit-filter-status').value;
+    if (bucket) params.set('bucket', bucket);
+    if (key) params.set('key_prefix', key);
+    if (sa) params.set('sa_id', sa);
+    if (req) params.set('request_id', req);
+    if (status) params.set('status_class', status);
+    fetch(baseURL + '/api/audit/s3?' + params.toString()).then(function(r) {
+      document.getElementById('audit-search-state').textContent = r.ok ? 'ready' : 'unavailable';
+      if (!r.ok) return [];
+      return r.json();
+    }).then(function(rows) {
+      var tbody = document.getElementById('audit-list');
+      clearChildren(tbody);
+      if (!rows || rows.length === 0) {
+        tbody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '8', className: 'empty-state', textContent: 'No audit rows match this filter.' })]));
+        return;
+      }
+      rows.forEach(function(e) {
+        tbody.appendChild(mkEl('tr', null, [
+          mkTd(e.ts ? new Date(e.ts).toLocaleString() : '', 'date-cell'),
+          mkTd(String(e.http_status || ''), 'size-cell'),
+          mkTd(e.operation || ''),
+          mkTd(e.sa_id || ''),
+          mkTd(e.bucket || ''),
+          mkTd(e.key || ''),
+          mkTd(e.err_reason || e.err_class || ''),
+          mkTd(e.request_id || '')
+        ]));
+      });
+    }).catch(function() {
+      document.getElementById('audit-search-state').textContent = 'error';
+      document.getElementById('audit-list').innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load audit rows.</td></tr>';
+    });
+  }
+
+  function loadAudit() {
+    loadAuditHealth();
+    loadAuditRows();
+  }
+
+  document.getElementById('btn-audit-refresh').addEventListener('click', loadAudit);
+  document.getElementById('btn-audit-search').addEventListener('click', loadAuditRows);
 
   // Stats bar refresh
   function refreshStats() {

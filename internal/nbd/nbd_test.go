@@ -96,6 +96,24 @@ func TestServerClosesConnectionWhenConfiguredVolumeMissing(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 }
 
+func TestServerBuffersPoolCommonRequestSizes(t *testing.T) {
+	srv := NewServer(nil, "")
+
+	for _, size := range []uint32{nbdPoolBufSize, nbdLargePoolBufSize, nbdHugePoolBufSize} {
+		buf := srv.getBuf(size)
+		require.Len(t, buf, int(size))
+		srv.putBuf(buf)
+
+		reused := srv.getBuf(size)
+		require.Len(t, reused, int(size))
+		srv.putBuf(reused)
+	}
+
+	odd := srv.getBuf(12345)
+	require.Len(t, odd, 12345)
+	srv.putBuf(odd)
+}
+
 type fakeReadIndexer struct {
 	readCalls atomic.Int32
 	waitCalls atomic.Int32

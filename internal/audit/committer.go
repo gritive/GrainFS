@@ -4,10 +4,12 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -25,6 +27,8 @@ import (
 
 const maxBatchSize = 65536
 
+var ErrLeaderAuditBackpressure = errors.New("audit leader backpressure")
+
 // auditBackend is the storage subset required by the committer.
 type auditBackend interface {
 	PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error)
@@ -35,6 +39,7 @@ type auditBackend interface {
 // CommitterConfig holds the dependencies for a Committer.
 type CommitterConfig struct {
 	Emitter  *Emitter
+	Outbox   *Outbox
 	Catalog  icebergcatalog.Catalog
 	Backend  auditBackend
 	IsLeader func() bool
@@ -66,13 +71,25 @@ func NewCommitter(cfg CommitterConfig) *Committer {
 	}
 }
 
-// AppendFromFollower adds events shipped by a follower to the leader queue.
-// Called from the QUIC stream handler goroutine; non-blocking to avoid back-pressure.
-func (c *Committer) AppendFromFollower(events []S3Event) {
+// AppendFromFollower accepts events shipped by a follower. When the leader has
+// a durable outbox, the stream is acknowledged only after those events are
+// persisted locally; otherwise the bounded in-memory mailbox reports
+// backpressure instead of silently dropping.
+func (c *Committer) AppendFromFollower(ctx context.Context, events []S3Event) error {
+	if c.cfg.Outbox != nil {
+		for _, ev := range events {
+			if err := c.cfg.Outbox.AppendFinalized(ctx, ev); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	select {
 	case c.followerIn <- events:
+		return nil
 	default: // channel full; events dropped — count them so audit_drops_total stays accurate
 		auditDropsTotal.WithLabelValues(c.cfg.NodeID).Add(float64(len(events)))
+		return ErrLeaderAuditBackpressure
 	}
 }
 
@@ -86,9 +103,23 @@ func (c *Committer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 			if c.cfg.IsLeader() {
 				auditCommitterState.WithLabelValues(nodeID).Set(1)
-				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				var err error
+				if c.cfg.Outbox != nil {
+					c.batch, err = c.readOutbox(ctx)
+					if err != nil {
+						log.Error().Err(err).Msg("audit committer: read outbox failed")
+						continue
+					}
+				} else if c.cfg.Emitter != nil {
+					c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				} else {
+					c.batch = c.batch[:0]
+				}
 				// drain follower mailbox (capped to avoid unbounded memory growth)
 			followerDrain:
 				for {
@@ -106,21 +137,41 @@ func (c *Committer) Run(ctx context.Context) {
 					continue
 				}
 				start := time.Now()
-				if err := c.commit(ctx, c.batch); err != nil {
-					log.Error().Err(err).Msg("audit committer: commit failed; events in this batch are dropped — check audit_committer_state metric")
-				} else {
+				committed, err := c.commit(ctx, c.batch)
+				if err != nil {
+					log.Error().Err(err).Msg("audit committer: commit failed; durable outbox events remain pending")
+				}
+				if len(committed) > 0 {
 					auditCommitLagSeconds.WithLabelValues(nodeID).Observe(time.Since(start).Seconds())
+					if c.cfg.Outbox != nil {
+						c.ackOutbox(committed)
+					}
 				}
 				c.batch = c.batch[:0]
 			} else if c.cfg.ShipToLeader != nil {
 				auditCommitterState.WithLabelValues(nodeID).Set(0)
-				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				var err error
+				if c.cfg.Outbox != nil {
+					c.batch, err = c.readOutbox(ctx)
+					if err != nil {
+						log.Error().Err(err).Msg("audit committer: read outbox failed")
+						continue
+					}
+				} else if c.cfg.Emitter != nil {
+					c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
+				} else {
+					c.batch = c.batch[:0]
+				}
 				if len(c.batch) == 0 {
 					continue
 				}
 				if err := c.cfg.ShipToLeader(ctx, c.batch); err != nil {
 					log.Warn().Err(err).Int("events", len(c.batch)).Msg("audit committer: ship to leader failed; events counted in audit_drops_total — transient during election, investigate if persists")
-					auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
+					if c.cfg.Outbox == nil {
+						auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
+					}
+				} else if c.cfg.Outbox != nil {
+					c.ackOutbox(c.batch)
 				}
 				c.batch = c.batch[:0]
 			}
@@ -128,7 +179,72 @@ func (c *Committer) Run(ctx context.Context) {
 	}
 }
 
-func (c *Committer) commit(ctx context.Context, events []S3Event) error {
+func (c *Committer) readOutbox(ctx context.Context) ([]S3Event, error) {
+	events, err := c.cfg.Outbox.Pending(ctx, maxBatchSize)
+	if err != nil {
+		return nil, err
+	}
+	return append(c.batch[:0], events...), nil
+}
+
+func (c *Committer) ackOutbox(events []S3Event) {
+	ids := make([]string, 0, len(events))
+	for _, ev := range events {
+		if ev.EventID != "" {
+			ids = append(ids, ev.EventID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if err := c.cfg.Outbox.AckEvents(context.Background(), events); err != nil {
+		log.Error().Err(err).Int("events", len(ids)).Msg("audit committer: ack outbox failed")
+	}
+}
+
+func (c *Committer) commit(ctx context.Context, events []S3Event) ([]S3Event, error) {
+	groups := groupEventsByDay(events, time.Now().UTC())
+	committed := make([]S3Event, 0, len(events))
+	for _, group := range groups {
+		if err := c.commitDay(ctx, group.day, group.events); err != nil {
+			return committed, err
+		}
+		committed = append(committed, group.events...)
+	}
+	return committed, nil
+}
+
+type eventDayGroup struct {
+	day    string
+	events []S3Event
+}
+
+func groupEventsByDay(events []S3Event, fallback time.Time) []eventDayGroup {
+	byDay := make(map[string][]S3Event)
+	for _, ev := range events {
+		day := eventPartitionDay(ev, fallback)
+		byDay[day] = append(byDay[day], ev)
+	}
+	days := make([]string, 0, len(byDay))
+	for day := range byDay {
+		days = append(days, day)
+	}
+	sort.Strings(days)
+	groups := make([]eventDayGroup, 0, len(days))
+	for _, day := range days {
+		groups = append(groups, eventDayGroup{day: day, events: byDay[day]})
+	}
+	return groups
+}
+
+func eventPartitionDay(ev S3Event, fallback time.Time) string {
+	if ev.Ts > 0 {
+		return time.UnixMicro(ev.Ts).UTC().Format("2006-01-02")
+	}
+	return fallback.UTC().Format("2006-01-02")
+}
+
+func (c *Committer) commitDay(ctx context.Context, dt string, events []S3Event) error {
 	ident := icebergcatalog.Identifier{Namespace: []string{Namespace}, Name: TableS3}
 
 	tbl, err := c.cfg.Catalog.LoadTable(ctx, ident)
@@ -147,7 +263,6 @@ func (c *Committer) commit(ctx context.Context, events []S3Event) error {
 		return fmt.Errorf("encode parquet: %w", err)
 	}
 
-	dt := time.Now().UTC().Format("2006-01-02")
 	snapshotID := time.Now().UnixNano()
 	fileUUID := uuid.New().String()
 	parquetKey := fmt.Sprintf("data/%s/%s.parquet", dt, fileUUID)
@@ -193,8 +308,9 @@ func (c *Committer) buildNewMetadata(
 
 	nowMs := time.Now().UnixMilli()
 	seqNum := getInt64(meta, "last-sequence-number") + 1
+	partitionSpecID := getInt64(meta, "default-spec-id")
 
-	manifestListPath, _, err := c.writeManifestList(ctx, snapshotID, seqNum, parquetPath, parquetSize, rowCount, dt)
+	manifestListPath, _, err := c.writeManifestList(ctx, snapshotID, seqNum, parquetPath, parquetSize, rowCount, dt, partitionSpecID)
 	if err != nil {
 		return nil, "", fmt.Errorf("write manifest list: %w", err)
 	}
@@ -251,11 +367,12 @@ func (c *Committer) writeManifestList(
 	snapshotID, seqNum int64,
 	parquetPath string, parquetSize, rowCount int64,
 	dt string,
+	partitionSpecID int64,
 ) (manifestListPath string, manifestListSize int64, _ error) {
 	manifestKey := fmt.Sprintf("metadata/s3/%d-%s-manifest.avro", snapshotID, uuid.New().String())
 	manifestPath := fmt.Sprintf("s3://%s/%s", BucketName, manifestKey)
 
-	manifestBytes, err := encodeManifest(snapshotID, seqNum, parquetPath, parquetSize, rowCount, dt)
+	manifestBytes, err := encodeManifest(snapshotID, seqNum, parquetPath, parquetSize, rowCount, dt, partitionSpecID)
 	if err != nil {
 		return "", 0, fmt.Errorf("encode manifest: %w", err)
 	}
@@ -267,7 +384,7 @@ func (c *Committer) writeManifestList(
 	listKey := fmt.Sprintf("metadata/s3/snap-%d-%s.avro", snapshotID, uuid.New().String())
 	listPath := fmt.Sprintf("s3://%s/%s", BucketName, listKey)
 
-	listBytes, err := encodeManifestList(snapshotID, seqNum, manifestPath, int64(len(manifestBytes)), rowCount)
+	listBytes, err := encodeManifestList(snapshotID, seqNum, manifestPath, int64(len(manifestBytes)), rowCount, dt, partitionSpecID)
 	if err != nil {
 		return "", 0, fmt.Errorf("encode manifest list: %w", err)
 	}
@@ -322,6 +439,26 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"12"})},
 		{Name: "err_class", Type: arrow.BinaryTypes.LargeString,
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"13"})},
+		{Name: "event_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"14"})},
+		{Name: "user_agent", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"15"})},
+		{Name: "operation", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"16"})},
+		{Name: "subresource", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"17"})},
+		{Name: "auth_status", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"18"})},
+		{Name: "err_reason", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"19"})},
+		{Name: "version_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"20"})},
+		{Name: "upload_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"21"})},
+		{Name: "copy_source_bucket", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"22"})},
+		{Name: "copy_source_key", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"23"})},
 	}, nil)
 
 	builder := array.NewRecordBuilder(pool, arrowSchema)
@@ -340,6 +477,16 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 	boutB := builder.Field(10).(*array.Int64Builder)
 	latB := builder.Field(11).(*array.Int32Builder)
 	errB := builder.Field(12).(*array.LargeStringBuilder)
+	eventIDB := builder.Field(13).(*array.LargeStringBuilder)
+	userAgentB := builder.Field(14).(*array.LargeStringBuilder)
+	opB := builder.Field(15).(*array.LargeStringBuilder)
+	subresourceB := builder.Field(16).(*array.LargeStringBuilder)
+	authStatusB := builder.Field(17).(*array.LargeStringBuilder)
+	errReasonB := builder.Field(18).(*array.LargeStringBuilder)
+	versionIDB := builder.Field(19).(*array.LargeStringBuilder)
+	uploadIDB := builder.Field(20).(*array.LargeStringBuilder)
+	copySourceBucketB := builder.Field(21).(*array.LargeStringBuilder)
+	copySourceKeyB := builder.Field(22).(*array.LargeStringBuilder)
 
 	for _, e := range events {
 		tsB.Append(arrow.Timestamp(e.Ts))
@@ -355,6 +502,16 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 		boutB.Append(e.BytesOut)
 		latB.Append(e.LatencyMs)
 		errB.Append(e.ErrClass)
+		eventIDB.Append(e.EventID)
+		userAgentB.Append(e.UserAgent)
+		opB.Append(e.Operation)
+		subresourceB.Append(e.Subresource)
+		authStatusB.Append(e.AuthStatus)
+		errReasonB.Append(e.ErrReason)
+		versionIDB.Append(e.VersionID)
+		uploadIDB.Append(e.UploadID)
+		copySourceBucketB.Append(e.CopySourceBucket)
+		copySourceKeyB.Append(e.CopySourceKey)
 	}
 
 	rec := builder.NewRecord()
@@ -377,7 +534,7 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 }
 
 // encodeManifestList creates an Iceberg manifest list Avro file with one manifest entry.
-func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestLen, rowCount int64) ([]byte, error) {
+func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestLen, rowCount int64, dt string, partitionSpecID int64) ([]byte, error) {
 	schema := `{"type":"record","name":"manifest_file","fields":[` +
 		`{"name":"manifest_path","type":"string","field-id":500},` +
 		`{"name":"manifest_length","type":"long","field-id":501},` +
@@ -403,24 +560,36 @@ func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestL
 	var rec bytes.Buffer
 	appendAvroString(&rec, manifestPath)
 	appendAvroLong(&rec, manifestLen)
-	appendAvroInt(&rec, 0)           // partition_spec_id
-	appendAvroInt(&rec, 0)           // content=DATA
-	appendAvroLong(&rec, seqNum)     // sequence_number
-	appendAvroLong(&rec, seqNum)     // min_sequence_number
-	appendAvroLong(&rec, snapshotID) // added_snapshot_id
-	appendAvroInt(&rec, 1)           // added_files_count
-	appendAvroInt(&rec, 0)           // existing_files_count
-	appendAvroInt(&rec, 0)           // deleted_files_count
-	appendAvroLong(&rec, rowCount)   // added_rows_count
-	appendAvroLong(&rec, 0)          // existing_rows_count
-	appendAvroLong(&rec, 0)          // deleted_rows_count
-	appendAvroLong(&rec, 0)          // partitions: empty array (block count = 0)
+	appendAvroInt(&rec, int32(partitionSpecID)) // partition_spec_id
+	appendAvroInt(&rec, 0)                      // content=DATA
+	appendAvroLong(&rec, seqNum)                // sequence_number
+	appendAvroLong(&rec, seqNum)                // min_sequence_number
+	appendAvroLong(&rec, snapshotID)            // added_snapshot_id
+	appendAvroInt(&rec, 1)                      // added_files_count
+	appendAvroInt(&rec, 0)                      // existing_files_count
+	appendAvroInt(&rec, 0)                      // deleted_files_count
+	appendAvroLong(&rec, rowCount)              // added_rows_count
+	appendAvroLong(&rec, 0)                     // existing_rows_count
+	appendAvroLong(&rec, 0)                     // deleted_rows_count
+	day, err := partitionDay(dt)
+	if err != nil {
+		return nil, err
+	}
+	bounds := partitionIntBytes(day)
+	appendAvroLong(&rec, 1)     // partitions: one summary
+	appendAvroBool(&rec, false) // contains_null
+	appendAvroInt(&rec, 0)      // contains_nan: null
+	appendAvroInt(&rec, 1)      // lower_bound: bytes
+	appendAvroBytes(&rec, bounds)
+	appendAvroInt(&rec, 1) // upper_bound: bytes
+	appendAvroBytes(&rec, bounds)
+	appendAvroLong(&rec, 0) // partitions: end array
 
-	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata()), nil
+	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata(partitionSpecID)), nil
 }
 
 // encodeManifest creates an Iceberg manifest Avro file with one data file entry.
-func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, rowCount int64, dt string) ([]byte, error) {
+func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, rowCount int64, dt string, partitionSpecID int64) ([]byte, error) {
 	schema := `{"type":"record","name":"manifest_entry","fields":[` +
 		`{"name":"status","type":"int","field-id":0},` +
 		`{"name":"snapshot_id","type":["null","long"],"default":null,"field-id":1},` +
@@ -430,7 +599,7 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 		`{"name":"content","type":"int","field-id":134},` +
 		`{"name":"file_path","type":"string","field-id":100},` +
 		`{"name":"file_format","type":"string","field-id":101},` +
-		`{"name":"partition","type":{"type":"record","name":"r102","fields":[]},"field-id":102},` +
+		`{"name":"partition","type":{"type":"record","name":"r102","fields":[{"name":"ts_day","type":["null","int"],"default":null,"field-id":1000}]},"field-id":102},` +
 		`{"name":"record_count","type":"long","field-id":103},` +
 		`{"name":"file_size_in_bytes","type":"long","field-id":104},` +
 		`{"name":"column_sizes","type":["null",{"type":"array","logicalType":"map","items":{"type":"record","name":"k117_v118","fields":[{"name":"key","type":"int","field-id":117},{"name":"value","type":"long","field-id":118}]}}],"default":null,"field-id":108},` +
@@ -460,6 +629,12 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 	appendAvroInt(&rec, 0) // content=DATA
 	appendAvroString(&rec, parquetPath)
 	appendAvroString(&rec, "PARQUET")
+	day, err := partitionDay(dt)
+	if err != nil {
+		return nil, err
+	}
+	appendAvroInt(&rec, 1) // partition.ts_day: int
+	appendAvroInt(&rec, day)
 	appendAvroLong(&rec, rowCount)
 	appendAvroLong(&rec, parquetSize)
 	// optional metrics/key/split/equality/sort fields: all null (union index 0).
@@ -467,7 +642,7 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 		appendAvroInt(&rec, 0)
 	}
 
-	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata()), nil
+	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata(partitionSpecID)), nil
 }
 
 // buildAvroContainer creates a single-record Avro Object Container File.
@@ -506,12 +681,12 @@ func buildAvroContainerWithMetadata(schema string, datum []byte, metadata map[st
 	return out.Bytes()
 }
 
-func icebergManifestMetadata() map[string]string {
+func icebergManifestMetadata(partitionSpecID int64) map[string]string {
 	return map[string]string{
 		"schema":            auditIcebergSchemaJSON,
 		"schema-id":         "0",
-		"partition-spec":    "[]",
-		"partition-spec-id": "0",
+		"partition-spec":    auditPartitionSpecJSON,
+		"partition-spec-id": fmt.Sprintf("%d", partitionSpecID),
 		"format-version":    "2",
 		"content":           "data",
 	}
@@ -528,6 +703,14 @@ func appendAvroLong(buf *bytes.Buffer, v int64) {
 
 func appendAvroInt(buf *bytes.Buffer, v int32) { appendAvroLong(buf, int64(v)) }
 
+func appendAvroBool(buf *bytes.Buffer, v bool) {
+	if v {
+		buf.WriteByte(1)
+		return
+	}
+	buf.WriteByte(0)
+}
+
 func appendAvroString(buf *bytes.Buffer, s string) {
 	appendAvroLong(buf, int64(len(s)))
 	buf.WriteString(s)
@@ -536,4 +719,18 @@ func appendAvroString(buf *bytes.Buffer, s string) {
 func appendAvroBytes(buf *bytes.Buffer, b []byte) {
 	appendAvroLong(buf, int64(len(b)))
 	buf.Write(b)
+}
+
+func partitionDay(dt string) (int32, error) {
+	t, err := time.Parse("2006-01-02", dt)
+	if err != nil {
+		return 0, fmt.Errorf("partition day: %w", err)
+	}
+	return int32(t.Unix() / 86400), nil
+}
+
+func partitionIntBytes(v int32) []byte {
+	out := make([]byte, 4)
+	binary.LittleEndian.PutUint32(out, uint32(v))
+	return out
 }

@@ -62,6 +62,109 @@ func TestOpWriteHonorsPreferWriteAtFalse(t *testing.T) {
 	require.Equal(t, "payload", string(got))
 }
 
+func TestOpWriteFallbackStreamsPartialOverwrite(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+	require.NoError(t, local.CreateBucket(context.Background(), "user-bucket"))
+	_, err = local.PutObject(context.Background(), "user-bucket", "file.bin", strings.NewReader("hello"), "application/octet-stream")
+	require.NoError(t, err)
+
+	backend := &preferPutObjectBackend{Backend: local}
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
+	t.Cleanup(func() { putDispatcher(d) })
+	d.currentPath = "/user-bucket/file.bin"
+
+	w := &XDRWriter{}
+	w.buf.Write(make([]byte, 16)) // stateid
+	w.WriteUint64(2)
+	w.WriteUint32(2)
+	w.WriteOpaque([]byte("YY"))
+
+	res := d.opWrite(w.Bytes())
+	require.Equal(t, NFS4_OK, res.Status)
+	require.False(t, backend.writeAtCalled)
+
+	rc, _, err := local.GetObject(context.Background(), "user-bucket", "file.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "heYYo", string(got))
+}
+
+func TestOpWriteFallbackStreamsSparseGap(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+	require.NoError(t, local.CreateBucket(context.Background(), "user-bucket"))
+
+	backend := &preferPutObjectBackend{Backend: local}
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
+	t.Cleanup(func() { putDispatcher(d) })
+	d.currentPath = "/user-bucket/file.bin"
+
+	w := &XDRWriter{}
+	w.buf.Write(make([]byte, 16)) // stateid
+	w.WriteUint64(3)
+	w.WriteUint32(2)
+	w.WriteOpaque([]byte("x"))
+
+	res := d.opWrite(w.Bytes())
+	require.Equal(t, NFS4_OK, res.Status)
+
+	rc, _, err := local.GetObject(context.Background(), "user-bucket", "file.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0, 0, 0, 'x'}, got)
+}
+
+func TestOpWriteFallbackRejectsOffsetPastInt64(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+	require.NoError(t, local.CreateBucket(context.Background(), "user-bucket"))
+
+	backend := &preferPutObjectBackend{Backend: local}
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
+	t.Cleanup(func() { putDispatcher(d) })
+	d.currentPath = "/user-bucket/file.bin"
+
+	w := &XDRWriter{}
+	w.buf.Write(make([]byte, 16)) // stateid
+	w.WriteUint64(maxInt64Uint + 1)
+	w.WriteUint32(2)
+	w.WriteOpaque([]byte("x"))
+
+	res := d.opWrite(w.Bytes())
+	require.Equal(t, NFS4ERR_FBIG, res.Status)
+}
+
+func TestOpWriteFallbackRejectsHugeSparseGap(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+	require.NoError(t, local.CreateBucket(context.Background(), "user-bucket"))
+
+	backend := &preferPutObjectBackend{Backend: local}
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
+	t.Cleanup(func() { putDispatcher(d) })
+	d.currentPath = "/user-bucket/file.bin"
+
+	w := &XDRWriter{}
+	w.buf.Write(make([]byte, 16)) // stateid
+	w.WriteUint64(nfsMaxFallbackSparseSize + 1)
+	w.WriteUint32(2)
+	w.WriteOpaque([]byte("x"))
+
+	res := d.opWrite(w.Bytes())
+	require.Equal(t, NFS4ERR_FBIG, res.Status)
+	_, _, err = local.GetObject(context.Background(), "user-bucket", "file.bin")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
 func TestSetAttrSizeHonorsPreferWriteAtFalse(t *testing.T) {
 	local, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)

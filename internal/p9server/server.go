@@ -2,6 +2,7 @@ package p9server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -74,7 +75,9 @@ func (s *Server) Close() error {
 		_ = conn.Close()
 	}
 	if ln != nil {
-		return ln.Close()
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 	return nil
 }

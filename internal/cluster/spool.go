@@ -214,16 +214,18 @@ type encryptedSpoolRecordWriter struct {
 	enc    *encrypt.Encryptor
 	domain string
 	record uint64
+	blob   []byte
 }
 
 func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 	if uint64(len(p)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("encrypted spool record too large: %d", len(p))
 	}
-	blob, err := w.enc.SealValue(spoolEncryptedRecordAAD(w.domain, w.record), p)
+	blob, err := w.enc.SealValueAADTo(w.blob[:0], []byte(spoolEncryptedRecordAAD(w.domain, w.record)), p)
 	if err != nil {
 		return 0, err
 	}
+	w.blob = blob
 	if uint64(len(blob)) > uint64(^uint32(0)) {
 		clear(blob)
 		return 0, fmt.Errorf("encrypted spool blob too large: %d", len(blob))
@@ -265,6 +267,8 @@ type encryptedSpoolRecordReader struct {
 	domain string
 	record uint64
 	buf    []byte
+	plain  []byte
+	blob   []byte
 	err    error
 }
 
@@ -288,11 +292,17 @@ func (r *encryptedSpoolRecordReader) Close() error {
 	if len(r.buf) > 0 {
 		clear(r.buf)
 	}
+	if len(r.plain) > 0 {
+		clear(r.plain)
+	}
+	if len(r.blob) > 0 {
+		clear(r.blob)
+	}
 	return r.f.Close()
 }
 
 func (r *encryptedSpoolRecordReader) loadNext() error {
-	plain, done, err := readSpoolEncryptedRecord(r.f, r.enc, r.domain, r.record)
+	plain, blob, done, err := readSpoolEncryptedRecordTo(r.f, r.enc, r.domain, r.record, r.plain[:0], r.blob[:0])
 	if err != nil {
 		return err
 	}
@@ -300,40 +310,50 @@ func (r *encryptedSpoolRecordReader) loadNext() error {
 		return io.EOF
 	}
 	r.record++
+	r.plain = plain
+	r.blob = blob
 	r.buf = plain
 	return nil
 }
 
 func readSpoolEncryptedRecord(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64) ([]byte, bool, error) {
+	plain, _, done, err := readSpoolEncryptedRecordTo(r, enc, domain, record, nil, nil)
+	return plain, done, err
+}
+
+func readSpoolEncryptedRecordTo(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64, plainBuf, blobBuf []byte) ([]byte, []byte, bool, error) {
 	var header [8]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		if err == io.EOF {
-			return nil, true, nil
+			return nil, blobBuf, true, nil
 		}
-		return nil, false, fmt.Errorf("read encrypted spool header: %w", err)
+		return nil, blobBuf, false, fmt.Errorf("read encrypted spool header: %w", err)
 	}
 	plainLen := binary.BigEndian.Uint32(header[:4])
 	blobLen := binary.BigEndian.Uint32(header[4:])
 	if blobLen == 0 {
-		return nil, false, fmt.Errorf("read encrypted spool record: empty blob")
+		return nil, blobBuf, false, fmt.Errorf("read encrypted spool record: empty blob")
 	}
 	if blobLen > maxEncryptedSpoolBlobBytes {
-		return nil, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
+		return nil, blobBuf, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
 	}
-	blob := make([]byte, blobLen)
+	if cap(blobBuf) < int(blobLen) {
+		blobBuf = make([]byte, blobLen)
+	}
+	blob := blobBuf[:blobLen]
 	if _, err := io.ReadFull(r, blob); err != nil {
-		return nil, false, fmt.Errorf("read encrypted spool blob: %w", err)
+		return nil, blobBuf, false, fmt.Errorf("read encrypted spool blob: %w", err)
 	}
-	plain, err := enc.OpenValue(spoolEncryptedRecordAAD(domain, record), blob)
+	plain, err := enc.OpenValueAADTo(plainBuf, []byte(spoolEncryptedRecordAAD(domain, record)), blob)
 	clear(blob)
 	if err != nil {
-		return nil, false, fmt.Errorf("open encrypted spool record: %w", err)
+		return nil, blobBuf, false, fmt.Errorf("open encrypted spool record: %w", err)
 	}
 	if len(plain) != int(plainLen) {
 		clear(plain)
-		return nil, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
+		return nil, blobBuf, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
 	}
-	return plain, false, nil
+	return plain, blobBuf, false, nil
 }
 
 func spoolEncryptedRecordAAD(domain string, record uint64) string {

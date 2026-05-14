@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -30,8 +31,39 @@ func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend audi
 	}
 
 	ident := icebergcatalog.Identifier{Namespace: []string{Namespace}, Name: TableS3}
-	if _, err := catalog.LoadTable(ctx, ident); err == nil {
-		// table exists — nothing to do
+	if tbl, err := catalog.LoadTable(ctx, ident); err == nil {
+		migrated, changed, err := MigrateMetadataToCurrent(tbl.Metadata, time.Now().UnixMilli())
+		if err != nil {
+			return fmt.Errorf("audit bootstrap: migrate metadata: %w", err)
+		}
+		if changed {
+			metaKey := fmt.Sprintf("metadata/s3/%05d-%s.metadata.json", getInt64FromMetadata(migrated, "last-sequence-number"), uuid.New().String())
+			metaLocation := fmt.Sprintf("s3://%s/%s", BucketName, metaKey)
+			if _, err := backend.PutObject(ctx, BucketName, metaKey, bytes.NewReader(migrated), "application/json"); err != nil {
+				return fmt.Errorf("audit bootstrap: write migrated metadata.json: %w", err)
+			}
+			if _, err := catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+				ExpectedMetadataLocation: tbl.MetadataLocation,
+				NewMetadataLocation:      metaLocation,
+				Metadata:                 migrated,
+			}); err != nil {
+				if errors.Is(err, icebergcatalog.ErrCommitFailed) {
+					latest, loadErr := catalog.LoadTable(ctx, ident)
+					if loadErr == nil {
+						_, stillChanged, migrateErr := MigrateMetadataToCurrent(latest.Metadata, time.Now().UnixMilli())
+						if migrateErr != nil {
+							return fmt.Errorf("audit bootstrap: recheck migrated metadata: %w", migrateErr)
+						}
+						if !stillChanged {
+							log.Info().Str("table", Namespace+"."+TableS3).Msg("audit bootstrap: metadata migrated by another node")
+							return nil
+						}
+					}
+				}
+				return fmt.Errorf("audit bootstrap: commit migrated metadata: %w", err)
+			}
+			log.Info().Str("table", Namespace+"."+TableS3).Msg("audit bootstrap: metadata migrated")
+		}
 		log.Debug().Str("table", Namespace+"."+TableS3).Msg("audit bootstrap: table exists, skipping")
 		return nil
 	} else if !errors.Is(err, icebergcatalog.ErrTableNotFound) {
@@ -59,4 +91,12 @@ func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend audi
 
 	log.Info().Str("table", Namespace+"."+TableS3).Str("location", s3Location).Msg("audit bootstrap: table created")
 	return nil
+}
+
+func getInt64FromMetadata(raw []byte, key string) int64 {
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return 0
+	}
+	return getInt64(meta, key)
 }

@@ -789,23 +789,52 @@ func isUnsupportedDirectIO(err error) bool {
 // (downgrade guard).
 func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
 	path := filepath.Join(s.dataDir, bucket, key, fmt.Sprintf("shard_%d", shardIdx))
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	var prefix [8]byte
+	_, peekErr := io.ReadFull(f, prefix[:])
+	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
+		if s.encryptor == nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
+		}
+		info, statErr := f.Stat()
+		if statErr != nil {
+			_ = f.Close()
+			return nil, statErr
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		var decoded bytes.Buffer
+		if size := info.Size(); size > 0 {
+			maxInt := int(^uint(0) >> 1)
+			if size <= int64(maxInt) {
+				decoded.Grow(int(size))
+			}
+		}
+		if err := eccodec.DecodeEncryptedShard(&decoded, f, s.encryptor, aad); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("decrypt shard: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return decoded.Bytes(), nil
+	}
+	_ = f.Close()
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	data := raw
 	decodedEncoded := false
-	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
-	if eccodec.IsEncryptedShard(raw) {
-		if s.encryptor == nil {
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
-		}
-		var decoded bytes.Buffer
-		if err := eccodec.DecodeEncryptedShard(&decoded, bytes.NewReader(raw), s.encryptor, aad); err != nil {
-			return nil, fmt.Errorf("decrypt shard: %w", err)
-		}
-		return decoded.Bytes(), nil
-	}
 	if eccodec.IsEncodedShard(raw) {
 		data, err = eccodec.DecodeShard(raw)
 		if err != nil {
@@ -902,11 +931,11 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 		if s.encryptor == nil {
 			return 0, fmt.Errorf("shard is encrypted but encryption is disabled; start server with --encryption-key-file")
 		}
-		r, err := eccodec.NewEncryptedShardRangeReader(f, s.encryptor, aad, offset, int64(len(buf)))
+		n, err := eccodec.ReadEncryptedShardRangeAt(f, s.encryptor, aad, offset, buf)
 		if err != nil {
-			return 0, fmt.Errorf("decrypt shard range: %w", err)
+			return n, fmt.Errorf("decrypt shard range: %w", err)
 		}
-		return io.ReadFull(r, buf)
+		return n, nil
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		info, err := f.Stat()
