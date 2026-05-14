@@ -38,7 +38,7 @@ func (s *Server) registerIcebergAPI(h *server.Hertz) {
 
 func (s *Server) requireIceberg(c *app.RequestContext) (icebergcatalog.Catalog, bool) {
 	if s.icebergCatalog == nil {
-		writeIcebergError(c, consts.StatusNotImplemented, "NotImplementedException", "Iceberg REST Catalog is only supported for local Badger-backed servers in this release")
+		writeIcebergError(c, consts.StatusNotImplemented, "NotImplementedException", "Iceberg REST Catalog is not available: server started without --audit-iceberg or catalog initialization failed")
 		return nil, false
 	}
 	return s.icebergCatalog, true

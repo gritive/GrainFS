@@ -20,6 +20,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -129,6 +130,7 @@ type Server struct {
 	policyStore    *CompiledPolicyStore
 	lifecycle      *lifecycle.Service
 	icebergCatalog icebergcatalog.Catalog
+	auditEmitter   *audit.Emitter
 	cluster        ClusterInfo       // nil in no-peers mode
 	membership     ClusterMembership // nil = remove-peer endpoint returns 503
 	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
@@ -379,6 +381,13 @@ func WithIcebergCatalog(catalog icebergcatalog.Catalog) Option {
 // explicitly-managed local catalog store.
 func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {
 	return WithIcebergCatalog(store)
+}
+
+// WithAuditEmitter enables audit event emission to the ring buffer.
+func WithAuditEmitter(e *audit.Emitter) Option {
+	return func(s *Server) {
+		s.auditEmitter = e
+	}
 }
 
 // New creates a new S3 API server.
