@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
@@ -103,8 +104,15 @@ func bootValidateConfig(state *bootState) error {
 
 	state.metaDir = filepath.Join(cfg.DataDir, "meta")
 	state.raftDir = filepath.Join(cfg.DataDir, "raft")
+	state.bootID = uuid.NewString()
 	state.roleRegistry = badgerrole.DefaultRegistry()
 	state.startupDecisions = make([]badgerrole.Decision, 0, 8)
+	state.recoveryJournal = badgerrole.NewJournalWriter(badgerrole.JournalOptions{
+		DataDir:       cfg.DataDir,
+		NodeID:        state.nodeID,
+		BootID:        state.bootID,
+		BinaryVersion: cfg.Version,
+	})
 
 	return nil
 }
@@ -151,10 +159,26 @@ func bootAutoMigrate(state *bootState) error {
 // surface a structured operator message.
 func bootOpenMetaDB(state *bootState) error {
 	if err := os.MkdirAll(state.metaDir, 0o755); err != nil {
+		recordBadgerStartupDecision(state, badgerrole.Decision{
+			Role:   badgerrole.RoleMeta,
+			Path:   state.metaDir,
+			Status: badgerrole.DecisionOpenFailed,
+			Action: badgerrole.RecoveryActionBlockStart,
+			Reason: err.Error(),
+			Err:    err,
+		})
 		return fmt.Errorf("create meta dir at %s: %w\n  recovery: check that the parent directory exists and the user has write permission", state.metaDir, err)
 	}
 	db, err := badger.Open(badgerutil.SmallOptions(state.metaDir))
 	if err != nil {
+		recordBadgerStartupDecision(state, badgerrole.Decision{
+			Role:   badgerrole.RoleMeta,
+			Path:   state.metaDir,
+			Status: badgerrole.DecisionOpenFailed,
+			Action: badgerrole.RecoveryActionBlockStart,
+			Reason: err.Error(),
+			Err:    err,
+		})
 		return fmt.Errorf("open metadata db at %s: %w\n  recovery: check disk free space, confirm no other grainfs process holds the lock (lsof %s/LOCK), see README#badger-troubleshooting", state.metaDir, err, state.metaDir)
 	}
 	state.db = db
@@ -164,7 +188,7 @@ func bootOpenMetaDB(state *bootState) error {
 
 	// Phase 16 Week 3: cluster mode preflight. Same reasoning as local.
 	decision := badgerrole.ProbeWritable(db, badgerrole.RoleMeta, "", state.metaDir)
-	state.startupDecisions = append(state.startupDecisions, decision)
+	recordBadgerStartupDecision(state, decision)
 	if decision.Status != badgerrole.DecisionOK {
 		return server.PreflightBadger(db, state.metaDir, nil)
 	}
@@ -202,17 +226,33 @@ func bootOpenSharedFSMDB(state *bootState) error {
 	cfg := state.cfg
 	sharedDir := filepath.Join(cfg.DataDir, "shared-fsm")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		recordBadgerStartupDecision(state, badgerrole.Decision{
+			Role:   badgerrole.RoleSharedFSM,
+			Path:   sharedDir,
+			Status: badgerrole.DecisionOpenFailed,
+			Action: badgerrole.RecoveryActionBlockStart,
+			Reason: err.Error(),
+			Err:    err,
+		})
 		return fmt.Errorf("mkdir shared FSM-state dir: %w", err)
 	}
 	sharedDB, err := badger.Open(badgerutil.SmallOptions(sharedDir))
 	if err != nil {
+		recordBadgerStartupDecision(state, badgerrole.Decision{
+			Role:   badgerrole.RoleSharedFSM,
+			Path:   sharedDir,
+			Status: badgerrole.DecisionOpenFailed,
+			Action: badgerrole.RecoveryActionBlockStart,
+			Reason: err.Error(),
+			Err:    err,
+		})
 		return fmt.Errorf("open shared FSM-state badger at %s: %w", sharedDir, err)
 	}
 	state.sharedFSMDB = sharedDB
 	state.AddCleanup(func() { sharedDB.Close() })
 	sharedVlog := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedFSM, sharedDB)
 	state.AddCleanup(func() { resourcewatch.DeregisterDB(sharedVlog) })
-	state.startupDecisions = append(state.startupDecisions, badgerrole.Decision{
+	recordBadgerStartupDecision(state, badgerrole.Decision{
 		Role:   badgerrole.RoleSharedFSM,
 		Path:   sharedDir,
 		Status: badgerrole.DecisionOK,

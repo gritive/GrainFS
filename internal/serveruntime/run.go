@@ -130,7 +130,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	recordStartupDecision := func(decision badgerrole.Decision) {
-		state.startupDecisions = append(state.startupDecisions, decision)
+		recordBadgerStartupDecision(state, decision)
 	}
 
 	// PR 5: storage runtime.

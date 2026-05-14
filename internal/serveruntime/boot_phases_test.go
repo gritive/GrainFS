@@ -1,15 +1,20 @@
 package serveruntime
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
+	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 )
 
 // TestBootValidateConfig_AutogeneratesNodeID exercises the path where cfg has
@@ -84,6 +89,45 @@ func TestBootOpenMetaDB_CreatesAndOpens(t *testing.T) {
 	state.Cleanup()
 }
 
+func TestBootOpenMetaDB_RecordsJournalOnOpenFailure(t *testing.T) {
+	dir := t.TempDir()
+	state := newBootState(Config{DataDir: dir, NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
+	require.NoError(t, bootValidateConfig(state))
+	require.NoError(t, os.WriteFile(state.metaDir, []byte("not-a-dir"), 0o644))
+
+	err := bootOpenMetaDB(state)
+	require.Error(t, err)
+
+	pending, journalErr := badgerrole.PendingJournalEntries(dir)
+	require.NoError(t, journalErr)
+	require.Len(t, pending, 1)
+	require.Equal(t, badgerrole.RoleMeta, pending[0].Decision.Role)
+	require.Equal(t, badgerrole.DecisionOpenFailed, pending[0].Decision.Status)
+	require.Equal(t, badgerrole.RecoveryActionBlockStart, pending[0].Decision.Action)
+	require.Equal(t, "meta", pending[0].Decision.Path)
+	require.NotEmpty(t, pending[0].BootID)
+}
+
+func TestRecordBadgerStartupDecisionResolvesMissingRolePath(t *testing.T) {
+	dir := t.TempDir()
+	state := newBootState(Config{DataDir: dir, NodeID: "n1", ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"})
+	require.NoError(t, bootValidateConfig(state))
+
+	recordBadgerStartupDecision(state, badgerrole.Decision{
+		Role:    badgerrole.RoleGroupState,
+		GroupID: "group-a",
+		Status:  badgerrole.DecisionOpenFailed,
+		Action:  badgerrole.RecoveryActionStartReadOnly,
+		Reason:  "open failed",
+	})
+
+	pending, err := badgerrole.PendingJournalEntries(dir)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "groups/group-a/badger", pending[0].Decision.Path)
+	require.Equal(t, filepath.Join(dir, "groups", "group-a", "badger"), state.startupDecisions[0].Path)
+}
+
 // TestBootValidateTimings_RejectsTooFastElection — election timeout below
 // 3× heartbeat is rejected (Raft §5.2 timing requirement).
 func TestBootValidateTimings_RejectsTooFastElection(t *testing.T) {
@@ -153,6 +197,103 @@ func TestBootOpenSharedFSMDB_IgnoresLegacyPerGroupDir(t *testing.T) {
 	assert.Equal(t, badgerrole.RoleSharedFSM, last.Role)
 
 	state.Cleanup()
+}
+
+func TestImportBadgerRecoveryJournalRecordsIncidentAndMarksImported(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	writer := badgerrole.NewJournalWriter(badgerrole.JournalOptions{
+		DataDir: dataDir,
+		NodeID:  "n1",
+		Now:     func() time.Time { return time.Date(2026, 5, 15, 1, 2, 3, 0, time.UTC) },
+	})
+	entry, err := writer.Record(badgerrole.Decision{
+		Role:   badgerrole.RoleSharedFSM,
+		Path:   filepath.Join(dataDir, "shared-fsm"),
+		Status: badgerrole.DecisionOpenFailed,
+		Action: badgerrole.RecoveryActionBlockStart,
+		Reason: "open shared FSM-state badger: disk full",
+	}, badgerrole.StartupModeBlocked)
+	require.NoError(t, err)
+
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
+	require.NoError(t, err)
+	defer db.Close()
+	store := badgerstore.New(db)
+
+	imported, err := importBadgerRecoveryJournal(ctx, store, dataDir)
+	require.NoError(t, err)
+	require.Equal(t, 1, imported)
+
+	state, ok, err := store.Get(ctx, entry.IncidentID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, incident.CauseBadgerOpenFailed, state.Cause)
+	require.Equal(t, incident.ActionBlockStartup, state.Action)
+	require.Equal(t, incident.ScopeBadgerRole, state.Scope.Kind)
+	require.Equal(t, string(badgerrole.RoleSharedFSM), state.Scope.BadgerRole)
+	require.Equal(t, "shared-fsm", state.Scope.Path)
+	require.Contains(t, state.Decision, "disk full")
+
+	pending, err := badgerrole.PendingJournalEntries(dataDir)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+
+	imported, err = importBadgerRecoveryJournal(ctx, store, dataDir)
+	require.NoError(t, err)
+	require.Equal(t, 0, imported)
+}
+
+func TestImportBadgerRecoveryJournalDoesNotRegressExistingIncident(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	observed := time.Date(2026, 5, 15, 1, 2, 3, 0, time.UTC)
+	writer := badgerrole.NewJournalWriter(badgerrole.JournalOptions{
+		DataDir: dataDir,
+		NodeID:  "n1",
+		Now:     func() time.Time { return observed },
+	})
+	entry, err := writer.Record(badgerrole.Decision{
+		Role:   badgerrole.RoleMeta,
+		Path:   filepath.Join(dataDir, "meta"),
+		Status: badgerrole.DecisionOpenFailed,
+		Action: badgerrole.RecoveryActionBlockStart,
+		Reason: "open failed",
+	}, badgerrole.StartupModeBlocked)
+	require.NoError(t, err)
+
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
+	require.NoError(t, err)
+	defer db.Close()
+	store := badgerstore.New(db)
+	existing := incident.IncidentState{
+		ID:          entry.IncidentID,
+		State:       incident.StateFixed,
+		Severity:    incident.SeverityInfo,
+		Cause:       incident.CauseBadgerOpenFailed,
+		Action:      incident.ActionBlockStartup,
+		Scope:       incident.Scope{Kind: incident.ScopeBadgerRole, BadgerRole: string(badgerrole.RoleMeta), Path: "meta"},
+		Proof:       incident.Proof{Status: incident.ProofNotRequired},
+		NextAction:  "No action needed.",
+		ObservedAt:  observed.Add(-time.Hour),
+		UpdatedAt:   observed.Add(-time.Minute),
+		CompletedAt: observed.Add(-time.Minute),
+	}
+	require.NoError(t, store.Put(ctx, existing))
+
+	imported, err := importBadgerRecoveryJournal(ctx, store, dataDir)
+	require.NoError(t, err)
+	require.Equal(t, 0, imported)
+
+	got, ok, err := store.Get(ctx, entry.IncidentID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, incident.StateFixed, got.State)
+	require.Equal(t, existing.UpdatedAt, got.UpdatedAt)
+
+	pending, err := badgerrole.PendingJournalEntries(dataDir)
+	require.NoError(t, err)
+	require.Empty(t, pending)
 }
 
 // TestBootMetaDB_PreflightRejectsCorruptDB — when the BadgerDB on disk fails

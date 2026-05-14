@@ -51,11 +51,13 @@ type bootState struct {
 	joinAddr string
 	metaDir  string
 	raftDir  string
+	bootID   string
 
 	// Storage role tracking (populated incrementally by storage phases;
 	// readers in run.go body use these for the boot decision summary).
 	roleRegistry     badgerrole.Registry
 	startupDecisions []badgerrole.Decision
+	recoveryJournal  *badgerrole.JournalWriter
 
 	// Open DBs. Each phase that opens one of these also
 	// registers the matching teardown via AddCleanup.
