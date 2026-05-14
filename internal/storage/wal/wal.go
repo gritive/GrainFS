@@ -331,12 +331,6 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 		if err != nil {
 			return count, fmt.Errorf("wal: read entry: %w", err)
 		}
-		if e.Seq <= fromSeq {
-			continue
-		}
-		if e.Timestamp > targetNs {
-			continue
-		}
 		if ver == fileVersionV3 {
 			if enc == nil {
 				return count, fmt.Errorf("wal: encrypted entry requires encryptor")
@@ -345,6 +339,12 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 			if err != nil {
 				return count, err
 			}
+		}
+		if e.Seq <= fromSeq {
+			continue
+		}
+		if e.Timestamp > targetNs {
+			continue
 		}
 		fn(e)
 		count++
@@ -409,7 +409,7 @@ func marshalEntry(w io.Writer, e Entry, enc *encrypt.Encryptor) (int, error) {
 		return marshalPlainEntry(w, e)
 	}
 	body := marshalEntryBody(e, true)
-	sealed, err := enc.SealValue("wal:record", body)
+	sealed, err := enc.SealValueAADTo(nil, walRecordAAD(e.Seq, e.Timestamp), body)
 	if err != nil {
 		return 0, fmt.Errorf("wal: encrypt entry body: %w", err)
 	}
@@ -538,7 +538,7 @@ func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
 }
 
 func decryptEntryBody(frame Entry, encryptedBody []byte, enc *encrypt.Encryptor) (Entry, error) {
-	body, err := enc.OpenValue("wal:record", encryptedBody)
+	body, err := enc.OpenValueAAD(walRecordAAD(frame.Seq, frame.Timestamp), encryptedBody)
 	if err != nil {
 		return Entry{}, fmt.Errorf("wal: decrypt entry body: %w", err)
 	}
@@ -550,6 +550,14 @@ func decryptEntryBody(frame Entry, encryptedBody []byte, enc *encrypt.Encryptor)
 	e.Seq = frame.Seq
 	e.Timestamp = frame.Timestamp
 	return e, nil
+}
+
+func walRecordAAD(seq uint64, timestamp int64) []byte {
+	var aad [len("wal:record:v3") + 8 + 8]byte
+	copy(aad[:], "wal:record:v3")
+	binary.BigEndian.PutUint64(aad[len("wal:record:v3"):], seq)
+	binary.BigEndian.PutUint64(aad[len("wal:record:v3")+8:], uint64(timestamp))
+	return aad[:]
 }
 
 // readPlainEntry reads a legacy plaintext entry in the given wire version.

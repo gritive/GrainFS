@@ -146,6 +146,10 @@ func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]
 }
 
 func (e *Encryptor) OpenValue(domain string, blob []byte) ([]byte, error) {
+	return e.OpenValueAAD([]byte(domain), blob)
+}
+
+func (e *Encryptor) OpenValueAAD(aad []byte, blob []byte) ([]byte, error) {
 	if !IsEncryptedValue(blob) {
 		return nil, fmt.Errorf("not an encrypted value")
 	}
@@ -155,7 +159,7 @@ func (e *Encryptor) OpenValue(domain string, blob []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 	nonce, ciphertext := inner[:nonceSize], inner[nonceSize:]
-	plaintext, err := e.aead.Open(nil, nonce, ciphertext, []byte(domain))
+	plaintext, err := e.aead.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt value: %w", err)
 	}

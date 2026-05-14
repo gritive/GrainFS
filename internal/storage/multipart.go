@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -169,18 +168,10 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	var etag string
 
 	if b.encryptor != nil {
-		readers := make([]io.Reader, 0, len(parts))
-		for _, p := range parts {
-			partFile := b.partPath(uploadID, p.PartNumber)
-			plain, err := readEncryptedObjectFile(partFile, b.encryptor, b.multipartPartDomain(uploadID, p.PartNumber))
-			if err != nil {
-				os.Remove(objPath)
-				return nil, fmt.Errorf("open encrypted part %d: %w", p.PartNumber, err)
-			}
-			readers = append(readers, bytes.NewReader(plain))
-		}
+		partReader := &encryptedMultipartPartsReader{backend: b, uploadID: uploadID, parts: parts}
+		defer partReader.Close()
 		h, release := hashForBucket(bucket)
-		totalSize, etag, err = writeEncryptedObjectFileWithHash(objPath, b.encryptor, encryptedObjectFileDomain(objPath), io.MultiReader(readers...), h)
+		totalSize, etag, err = writeEncryptedObjectFileWithHash(objPath, b.encryptor, encryptedObjectFileDomain(objPath), partReader, h)
 		release()
 		if err != nil {
 			os.Remove(objPath)
@@ -246,6 +237,64 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	return obj, nil
 }
 
+type encryptedMultipartPartsReader struct {
+	backend  *LocalBackend
+	uploadID string
+	parts    []Part
+	idx      int
+	current  io.ReadCloser
+}
+
+func (r *encryptedMultipartPartsReader) Read(p []byte) (int, error) {
+	for {
+		if r.current == nil {
+			if r.idx >= len(r.parts) {
+				return 0, io.EOF
+			}
+			part := r.parts[r.idx]
+			partPath := r.backend.partPath(r.uploadID, part.PartNumber)
+			size := part.Size
+			if size <= 0 {
+				var err error
+				size, err = encryptedObjectFilePlainSize(partPath)
+				if err != nil {
+					return 0, fmt.Errorf("size encrypted part %d: %w", part.PartNumber, err)
+				}
+			}
+			rc, err := openEncryptedObjectFile(
+				partPath,
+				r.backend.encryptor,
+				r.backend.multipartPartDomain(r.uploadID, part.PartNumber),
+				size,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("open encrypted part %d: %w", part.PartNumber, err)
+			}
+			r.current = rc
+		}
+		n, err := r.current.Read(p)
+		if err == io.EOF {
+			_ = r.current.Close()
+			r.current = nil
+			r.idx++
+			if n > 0 {
+				return n, nil
+			}
+			continue
+		}
+		return n, err
+	}
+}
+
+func (r *encryptedMultipartPartsReader) Close() error {
+	if r.current == nil {
+		return nil
+	}
+	err := r.current.Close()
+	r.current = nil
+	return err
+}
+
 // ListMultipartUploads scans the multipart-meta keyspace and returns uploads
 // matching bucket and prefix. The scan is metadata-only (no part files) so
 // the cost is bounded by the number of in-progress uploads, not their byte
@@ -262,8 +311,10 @@ func (b *LocalBackend) ListMultipartUploads(ctx context.Context, bucket, prefix 
 		defer it.Close()
 		mpuPrefix := []byte("mpu:")
 		for it.Seek(mpuPrefix); it.ValidForPrefix(mpuPrefix); it.Next() {
-			err := it.Item().Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainMultipart, val)
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
+			err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainMultipart, itemKey, val)
 				if err != nil {
 					return err
 				}
@@ -331,7 +382,7 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 	if err != nil {
 		return nil, fmt.Errorf("read part dir: %w", err)
 	}
-	out := make([]Part, 0, len(entries))
+	partNumbers := make([]int, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -341,8 +392,18 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 		if parseErr != nil || partNumber <= 0 {
 			continue
 		}
+		partNumbers = append(partNumbers, partNumber)
+	}
+	sort.Ints(partNumbers)
+	if maxParts > 0 && len(partNumbers) > maxParts {
+		partNumbers = partNumbers[:maxParts]
+	}
+
+	out := make([]Part, 0, len(partNumbers))
+	for _, partNumber := range partNumbers {
 		h, release := hashForBucket(bucket)
 		var size int64
+		name := fmt.Sprintf("%05d", partNumber)
 		if b.encryptor != nil {
 			plain, err := readEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.encryptor, b.multipartPartDomain(uploadID, partNumber))
 			if err != nil {
@@ -372,12 +433,6 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 			ETag:       partETag,
 			Size:       size,
 		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].PartNumber < out[j].PartNumber
-	})
-	if maxParts > 0 && len(out) > maxParts {
-		out = out[:maxParts]
 	}
 	return out, nil
 }

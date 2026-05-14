@@ -119,6 +119,27 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
 }
 
+func TestEncryptedObjectFileReadAtRejectsCorruptRequestedChunk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	domain := "local-object:physical-readat-corrupt"
+	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
+
+	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	require.NoError(t, err)
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	firstBodyOffset := int64(len(encryptedObjectMagic) + 8)
+	_, err = f.WriteAt([]byte{0x00}, firstBodyOffset)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	buf := make([]byte, 32)
+	_, err = readAtEncryptedObjectFile(path, enc, domain, size, 0, buf)
+	require.Error(t, err)
+}
+
 func countEncryptedObjectRecords(t *testing.T, path string) int {
 	t.Helper()
 

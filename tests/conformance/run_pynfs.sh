@@ -112,8 +112,7 @@ trap cleanup EXIT
   --port "${S3_PORT}" \
   --admin-socket "${ADMIN_SOCK}" \
   --nfs4-port "${NFS_PORT}" \
-  --nbd-port 0 \
-  --no-encryption >/tmp/grainfs-pynfs-server.log 2>&1 &
+  --nbd-port 0 >/tmp/grainfs-pynfs-server.log 2>&1 &
 GRAINFS_PID=$!
 
 for _ in $(seq 1 30); do

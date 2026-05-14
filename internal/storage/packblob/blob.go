@@ -122,7 +122,7 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 
 	offset := bs.activeOff
 	if bs.encryptor != nil {
-		sealed, err := bs.encryptor.SealValue(bs.entryDomain(bs.activeID, uint64(offset)), storedPayload)
+		sealed, err := bs.encryptor.SealValueAADTo(nil, bs.entryAAD(bs.activeID, uint64(offset), key, flags), storedPayload)
 		if err != nil {
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 		}
@@ -138,7 +138,7 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 		}
 		offset = bs.activeOff
 		if bs.encryptor != nil {
-			sealed, err := bs.encryptor.SealValue(bs.entryDomain(bs.activeID, uint64(offset)), storedPayload)
+			sealed, err := bs.encryptor.SealValueAADTo(nil, bs.entryAAD(bs.activeID, uint64(offset), key, flags), storedPayload)
 			if err != nil {
 				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 			}
@@ -254,7 +254,7 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
 	}
 
-	payload, err = bs.decodePayload(loc.BlobID, loc.Offset, payload)
+	payload, err = bs.decodePayload(loc.BlobID, loc.Offset, string(key), flags, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +364,7 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 			if h.Sum32() != expectedCRC {
 				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", blobID, entryOffset)
 			}
-			data, err := bs.decodePayload(blobID, uint64(entryOffset), payload)
+			data, err := bs.decodePayload(blobID, uint64(entryOffset), string(key), flags, payload)
 			if err != nil {
 				return nil, err
 			}
@@ -409,15 +409,28 @@ func (bs *BlobStore) blobPath(id uint64) string {
 	return filepath.Join(bs.dir, fmt.Sprintf("blob_%016x.blob", id))
 }
 
-func (bs *BlobStore) entryDomain(blobID uint64, offset uint64) string {
-	return fmt.Sprintf("packblob:%016x:%d", blobID, offset)
+func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags byte) []byte {
+	keyBytes := []byte(key)
+	aad := make([]byte, len("packblob:v2:")+8+8+1+4+len(keyBytes))
+	copy(aad, "packblob:v2:")
+	off := len("packblob:v2:")
+	binary.BigEndian.PutUint64(aad[off:], blobID)
+	off += 8
+	binary.BigEndian.PutUint64(aad[off:], offset)
+	off += 8
+	aad[off] = flags
+	off++
+	binary.BigEndian.PutUint32(aad[off:], uint32(len(keyBytes)))
+	off += 4
+	copy(aad[off:], keyBytes)
+	return aad
 }
 
-func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, payload []byte) ([]byte, error) {
+func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, payload []byte) ([]byte, error) {
 	if bs.encryptor == nil {
 		return payload, nil
 	}
-	plain, err := bs.encryptor.OpenValue(bs.entryDomain(blobID, offset), payload)
+	plain, err := bs.encryptor.OpenValueAAD(bs.entryAAD(blobID, offset, key, flags), payload)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt blob entry: %w", err)
 	}

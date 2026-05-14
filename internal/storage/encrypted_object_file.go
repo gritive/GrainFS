@@ -215,7 +215,7 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 
 		needEnd := offset + int64(len(buf))
 		if chunkEnd <= offset || chunkStart >= needEnd {
-			if _, err := io.CopyN(io.Discard, f, int64(blobLen)); err != nil {
+			if _, err := f.Seek(int64(blobLen), io.SeekCurrent); err != nil {
 				return copied, fmt.Errorf("skip encrypted object record body: %w", err)
 			}
 			plainPos += int64(plainLen)
@@ -340,6 +340,42 @@ func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string)
 		chunk++
 	}
 	return out.Bytes(), nil
+}
+
+func encryptedObjectFilePlainSize(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	magic := make([]byte, len(encryptedObjectMagic))
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return 0, fmt.Errorf("read encrypted object magic: %w", err)
+	}
+	if string(magic) != encryptedObjectMagic {
+		return 0, fmt.Errorf("invalid encrypted object magic")
+	}
+
+	var size int64
+	var hdr [8]byte
+	for {
+		if _, err := io.ReadFull(f, hdr[:]); err != nil {
+			if err == io.EOF {
+				return size, nil
+			}
+			return 0, fmt.Errorf("read encrypted object record header: %w", err)
+		}
+		plainLen := binary.BigEndian.Uint32(hdr[0:4])
+		blobLen := binary.BigEndian.Uint32(hdr[4:8])
+		if blobLen > 256*1024*1024 {
+			return 0, fmt.Errorf("encrypted object record too large")
+		}
+		if _, err := f.Seek(int64(blobLen), io.SeekCurrent); err != nil {
+			return 0, fmt.Errorf("skip encrypted object record body: %w", err)
+		}
+		size += int64(plainLen)
+	}
 }
 
 func writeEncryptedObjectRecord(w io.Writer, plainLen uint32, sealed []byte) error {

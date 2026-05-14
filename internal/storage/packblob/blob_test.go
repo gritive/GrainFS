@@ -2,6 +2,8 @@ package packblob
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"os"
 	"testing"
 
@@ -139,6 +141,44 @@ func TestEncryptedBlobStoreCompressionRoundTrip(t *testing.T) {
 	got, err := bs.Read(loc)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
+}
+
+func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
+	enc := newPackblobTestEncryptor(t)
+
+	dir := t.TempDir()
+	bs, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	loc, err := bs.Append("bucket/key", []byte("packed-sensitive-payload"))
+	require.NoError(t, err)
+
+	path := bs.blobPath(loc.BlobID)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	keyLen := binary.BigEndian.Uint32(raw[loc.Offset:])
+	keyStart := int(loc.Offset) + 4
+	keyEnd := keyStart + int(keyLen)
+	require.Equal(t, "bucket/key", string(raw[keyStart:keyEnd]))
+	copy(raw[keyStart:keyEnd], []byte("bucket/kex"))
+
+	flagsOff := keyEnd
+	dataLenOff := flagsOff + 1
+	dataLen := binary.BigEndian.Uint32(raw[dataLenOff:])
+	payloadStart := dataLenOff + 4
+	payloadEnd := payloadStart + int(dataLen)
+	crcOff := payloadEnd
+
+	h := crc32.NewIEEE()
+	h.Write(raw[keyStart:keyEnd])
+	h.Write(raw[payloadStart:payloadEnd])
+	binary.BigEndian.PutUint32(raw[crcOff:], h.Sum32())
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
+
+	_, err = bs.Read(loc)
+	require.Error(t, err)
 }
 
 func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {

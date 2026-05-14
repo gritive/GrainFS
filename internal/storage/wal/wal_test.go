@@ -229,6 +229,39 @@ func TestWAL_EncryptedReplayRejectsWrongKey(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestWAL_EncryptedReplayRejectsFrameMetadataTamper(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	var walPath string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasPrefix(filepath.Base(path), "wal-") && strings.HasSuffix(filepath.Base(path), ".bin") {
+			walPath = path
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, walPath)
+
+	raw, err := os.ReadFile(walPath)
+	require.NoError(t, err)
+	raw[15] ^= 0x01 // header(8) + seq field's last byte
+	require.NoError(t, os.WriteFile(walPath, raw, 0o644))
+
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {})
+	require.Error(t, err)
+}
+
 func TestWAL_NonexistentDirReturnsError(t *testing.T) {
 	// dir with no write permission → Open should fail to MkdirAll
 	// Use a file path as dir (can't MkdirAll over a regular file)

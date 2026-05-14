@@ -59,3 +59,38 @@ func TestEncryptedBadgerValueRejectsWrongDomain(t *testing.T) {
 		return nil
 	}))
 }
+
+func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	defer db.Close()
+
+	enc := testEncryptor(t)
+	keyA := []byte("obj:bkt/a")
+	keyB := []byte("obj:bkt/b")
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		if err := setBadgerValue(txn, enc, "badger:meta:object", keyA, []byte("secret-a")); err != nil {
+			return err
+		}
+		return setBadgerValue(txn, enc, "badger:meta:object", keyB, []byte("secret-b"))
+	}))
+
+	var rawA []byte
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(keyA)
+		require.NoError(t, err)
+		return item.Value(func(val []byte) error {
+			rawA = append([]byte(nil), val...)
+			return nil
+		})
+	}))
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(keyB, rawA)
+	}))
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := getBadgerValue(txn, enc, "badger:meta:object", keyB)
+		require.Error(t, err)
+		return nil
+	}))
+}

@@ -666,9 +666,11 @@ func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, m
 			if count >= maxKeys {
 				break
 			}
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
 			var obj Object
-			err := it.Item().Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, val)
+			err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
 				if err != nil {
 					return err
 				}
@@ -699,9 +701,11 @@ func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, f
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
 			var obj Object
-			if err := it.Item().Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, val)
+			if err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
 				if err != nil {
 					return err
 				}
@@ -813,9 +817,11 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 			bucket := rest[:slashIdx]
 			key := rest[slashIdx+1:]
 
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
 			var obj Object
-			if err := it.Item().Value(func(val []byte) error {
-				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, val)
+			if err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
 				if err != nil {
 					return err
 				}
