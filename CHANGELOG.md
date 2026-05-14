@@ -20,6 +20,7 @@
 
 - **Forwarded short reads** — cluster `ReadAt` forwarding now preserves short EOF reads instead of converting them to internal errors.
 - **Empty EC objects** — EC-backed user buckets now accept zero-byte object writes, matching create/truncate flows used by NFS clients.
+- **Deterministic export fsid allocation** — NFS export fsid minor and generation values are now assigned during meta-Raft apply, avoiding stale local-service allocation decisions.
 - **Cross-export guards** — NFSv4 rename/copy across different exports now returns `NFS4ERR_XDEV`, and destination writes use the destination bucket.
 - **Stale export handles** — filehandles bound to an older export generation now expire with `NFS4ERR_FHEXPIRED`; removed exports return `NFS4ERR_ADMIN_REVOKED`.
 - **Live export refresh** — Raft-applied export registry changes now refresh the running NFSv4 server snapshot instead of requiring restart.
