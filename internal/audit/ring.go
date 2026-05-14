@@ -25,9 +25,20 @@ func (r *Ring) Put(e S3Event) {
 	}
 }
 
-// DrainInto drains events from the ring into the caller-provided slice.
-// dst must be pre-allocated by the caller (make([]S3Event, N)). No heap allocation.
+// DrainInto drains all buffered events into dst.
+// When dst is nil or has zero capacity, events are appended without bound (allocates).
+// When dst has a positive capacity, at most cap(dst) events are drained (no allocation).
 func (r *Ring) DrainInto(dst []S3Event) []S3Event {
+	if cap(dst) == 0 {
+		for {
+			select {
+			case e := <-r.ch:
+				dst = append(dst, e)
+			default:
+				return dst
+			}
+		}
+	}
 	dst = dst[:0]
 	for len(dst) < cap(dst) {
 		select {
