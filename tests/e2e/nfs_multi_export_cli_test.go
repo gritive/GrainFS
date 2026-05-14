@@ -59,8 +59,13 @@ func runNfsExportJSON(t *testing.T, verb, bucket string, flags ...string) e2eNfs
 	args = append(args, flags...)
 	out, code := runCLI(t, testServerDataDir, args...)
 	require.Equalf(t, 0, code, "%s", out)
+	return parseSingleNfsExport(t, out)
+}
+
+func parseSingleNfsExport(t *testing.T, raw string) e2eNfsExport {
+	t.Helper()
 	var resp e2eNfsExportList
-	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out)), &resp))
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp))
 	require.Len(t, resp.Exports, 1)
 	return resp.Exports[0]
 }
@@ -69,8 +74,13 @@ func listNfsExports(t *testing.T) []e2eNfsExport {
 	t.Helper()
 	out, code := runCLI(t, testServerDataDir, "nfs", "export", "list", "--format", "json")
 	require.Equalf(t, 0, code, "%s", out)
+	return parseNfsExportList(t, out)
+}
+
+func parseNfsExportList(t *testing.T, raw string) []e2eNfsExport {
+	t.Helper()
 	var resp e2eNfsExportList
-	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out)), &resp))
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp))
 	return resp.Exports
 }
 
