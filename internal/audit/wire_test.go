@@ -9,6 +9,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDecodeS3Batch_RejectsBatchExceedingMax(t *testing.T) {
+	// Craft a payload whose 4-byte count header claims 65537 events (maxDecodeBatchSize+1).
+	// DecodeS3Batch must reject it before allocating event storage.
+	var hdr [4]byte
+	hdr[0] = 0x01 // 65537 in little-endian: 0x00010001 → bytes [01, 00, 01, 00]
+	hdr[1] = 0x00
+	hdr[2] = 0x01
+	hdr[3] = 0x00
+	_, err := audit.DecodeS3Batch(hdr[:])
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds maximum")
+}
+
 func TestWireRoundtrip(t *testing.T) {
 	full := audit.S3Event{
 		Ts:        1716000000000000,
