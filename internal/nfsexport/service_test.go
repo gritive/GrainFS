@@ -17,21 +17,52 @@ type fakeProposer struct {
 	fsidMajor uint64
 }
 
-func (p *fakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) error {
+type recordingBarrier struct {
+	indexes []uint64
+	err     error
+}
+
+func (b *recordingBarrier) WaitApplied(_ context.Context, index uint64) error {
+	b.indexes = append(b.indexes, index)
+	return b.err
+}
+
+type indexedFakeProposer struct {
+	store     *Store
+	fsidMajor uint64
+	nextIndex uint64
+	upserts   []Config
+	deletes   []string
+}
+
+func (p *indexedFakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) (uint64, error) {
+	p.nextIndex++
+	p.upserts = append(p.upserts, cfg)
+	_, err := p.store.ApplyUpsert(bucket, cfg.ReadOnly, p.fsidMajor)
+	return p.nextIndex, err
+}
+
+func (p *indexedFakeProposer) ProposeDelete(_ context.Context, bucket string) (uint64, error) {
+	p.nextIndex++
+	p.deletes = append(p.deletes, bucket)
+	return p.nextIndex, p.store.Delete(bucket)
+}
+
+func (p *fakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) (uint64, error) {
 	if p.err != nil {
-		return p.err
+		return 0, p.err
 	}
 	p.upserts = append(p.upserts, cfg)
 	_, err := p.store.ApplyUpsert(bucket, cfg.ReadOnly, p.fsidMajor)
-	return err
+	return uint64(len(p.upserts) + len(p.deletes)), err
 }
 
-func (p *fakeProposer) ProposeDelete(_ context.Context, bucket string) error {
+func (p *fakeProposer) ProposeDelete(_ context.Context, bucket string) (uint64, error) {
 	if p.err != nil {
-		return p.err
+		return 0, p.err
 	}
 	p.deletes = append(p.deletes, bucket)
-	return p.store.Delete(bucket)
+	return uint64(len(p.upserts) + len(p.deletes)), p.store.Delete(bucket)
 }
 
 func newTestService(t *testing.T) (*badger.DB, *Store, *fakeProposer, *ExportService) {
@@ -117,4 +148,17 @@ func TestExportServiceRejectsMultiNodeWithoutPropagationBarrier(t *testing.T) {
 
 	require.ErrorIs(t, svc.Delete(context.Background(), "b1"), ErrPropagationBarrierRequired)
 	require.Empty(t, p.deletes)
+}
+
+func TestExportServiceWaitsForCommittedIndex(t *testing.T) {
+	db, store := openTestStore(t, t.TempDir())
+	defer db.Close()
+	p := &indexedFakeProposer{store: store, fsidMajor: 7}
+	barrier := &recordingBarrier{}
+	svc := NewExportService(ServiceConfig{Store: store, Proposer: p, Barrier: barrier})
+
+	require.NoError(t, svc.Upsert(context.Background(), "b1", UpsertParams{}))
+	require.Equal(t, []uint64{1}, barrier.indexes)
+	require.NoError(t, svc.Delete(context.Background(), "b1"))
+	require.Equal(t, []uint64{1, 2}, barrier.indexes)
 }
