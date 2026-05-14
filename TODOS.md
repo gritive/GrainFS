@@ -1,8 +1,106 @@
 # TODOS
 
-> **Design principle — Zero Config, Zero Ops.** 기본 설정으로 잘 돌아가고, 잘 운영되며,
-> 크리티컬한 문제는 사용자에게 알려서 선제대응하게 만든다.
-> 각 Phase 항목에 "— *zero config*" / "— *zero ops*" 표시가 있는 것들이 이 원칙에 해당.
+## Current Priority Lens — Operator Trust
+
+> **Design principle — Safe defaults, explicit escape hatches, observable operations.**
+> 기존 Zero Config / Zero Ops 원칙은 "운영자가 아무것도 몰라도 된다"가 아니라,
+> 기본값은 안전하고, 위험한 운영에는 명시적 escape hatch가 있으며,
+> recovery / drain / rebalance / upgrade 상태가 관측 가능해야 한다는 뜻으로 해석한다.
+
+Source of truth: `/Users/whitekid/.gstack/projects/gritive-grains/whitekid-master-design-20260515-020022-operator-trust-roadmap.md`
+
+이 상단 섹션은 실행 우선순위 렌즈다. 아래 `Source Backlog Memory`는 기존 측정값,
+deferred decision, re-open trigger를 보존한다. 측정 근거가 있는 항목은 삭제하지 말고,
+active work로 승격할 때만 code/API surface를 먼저 읽은 뒤 별도 plan을 작성한다.
+
+### Now: Operator Trust Blockers
+
+순서 있는 우선순위다. 동시에 진행하지 않는다. 하나를 고르고 code/API surface를 읽은 뒤
+구체적인 engineering plan으로 승격한다.
+
+1. [x] **BadgerDB pre-server recovery journal** — *operator trust / zero ops*
+   - `trust-risk`: metadata recovery가 invisible/incomplete이면 상위 S3/NFS/9P 기능 전부가 불신 상태가 된다.
+   - `failure-mode`: incident-state DB가 열리기 전 failure가 stderr-only로 사라지고, 재시작 후 operator가 무엇이 결정됐는지 모른다.
+   - `operator-visible-signal`: `<data>/.recovery/` 아래 durable recovery manifest/journal, incident/API/UI에서 읽을 수 있는 decision record.
+   - `verification`: pre-server failure crash/restart test, fsync+rename atomicity test, restart-readable journal contract.
+   - `source`: 기존 Phase 17 항목 `BadgerDB pre-server recovery journal`.
+
+2. [ ] **BadgerDB atomic auto-recovery design** — *operator trust / design next*
+   - `trust-risk`: 복구 가능한 Badger state도 outage 중 수동 intervention에 묶인다.
+   - `failure-mode`: log replay / snapshot restore 판단이 ad hoc 운영 절차로 남아 operator가 압박 상황에서 복구 path를 직접 조립한다.
+   - `operator-visible-signal`: recovery plan, applied action, skipped action, explicit reason.
+   - `verification`: corrupted/partial Badger state replay + snapshot restore tests.
+   - `boundary`: 구현 next가 아니라 design next. pre-server recovery journal decision structs가 안정된 뒤 구현한다.
+
+3. [ ] **Rolling upgrade remaining safety slices** — *operator trust / zero ops*
+   - `trust-risk`: mixed-version cluster가 schema/config/capability divergence를 숨긴 채 healthy로 보일 수 있다.
+   - `failure-mode`: 구 노드가 새 cluster config key를 무시하거나 snapshot policy가 노드별로 달라진다.
+   - `operator-visible-signal`: compatibility gates, upgrade status, snapshot-config compatibility status, explicit warning/safe rejection/degraded state.
+   - `verification`: `tests/compat/`, mixed-cluster tests, snapshot-config forward policy tests.
+   - `source`: `Rolling upgrade safety`, `snapshot-config v1.1 rolling-upgrade gap`.
+
+4. [ ] **Object placement/index orphan and stale reconcile** — *operator trust / data integrity*
+   - `trust-risk`: hot bucket object-level placement이 dual-write failure mode를 만든다.
+   - `failure-mode`: data group에는 EC object/shard가 있지만 global index가 없거나, global index가 missing/corrupt shard를 가리킨다.
+   - `operator-visible-signal`: reconcile report, repair/quarantine counters, non-silent failure.
+   - `verification`: index commit failure injection, orphan data, stale index, missing shard, corrupt shard tests.
+   - `source`: `Hot bucket object-level placement`, `Object index orphan/stale reconcile`.
+
+5. [ ] **Cluster health data-group raft progress** — *operator trust / day-2 visibility*
+   - `trust-risk`: operator가 어떤 data group이 unhealthy/lagging인지 모른다.
+   - `failure-mode`: metaRaft는 정상으로 보이지만 data group은 leaderless/lagging 상태다.
+   - `operator-visible-signal`: per-group leader/term/lag, drain/transfer state.
+   - `verification`: induced lag, leader transfer, multi-group cluster health e2e.
+   - `source`: `Cluster health 데이터 그룹 raft progress 통합`.
+
+6. [ ] **NFSv4 + 9P auth/access-control correctness** — *conditional now*
+   - `trust-risk`: S3 IAM이 NFS/9P 경로에는 효력을 갖지 않아 auth bypass가 된다.
+   - `failure-mode`: trusted-LAN assumption이 깨진 배포에서 file protocol export가 인증 없이 노출된다.
+   - `operator-visible-signal`: export-level policy, auth mode, denied access events.
+   - `verification`: cross-protocol auth tests, reserved `__meta/` namespace tests.
+   - `do-not-promote-until`: 신뢰되지 않는 네트워크 노출, 멀티테넌시, compliance, 또는 S3 IAM과 동일한 권한 모델 기대가 실제 요구로 확인될 때. 그 전에는 `Next`로 둔다.
+
+### Next: Protocol Correctness And Admin Safety
+
+- [ ] **NFS `rdattr_error` required gap** — READDIR per-entry attribute error semantics. 현재 P0 audit gap.
+- [ ] **pynfs/nfstest conformance matrix** — nightly/basic suite 결과를 pass/fail matrix로 운영 가능하게 만든다.
+- [ ] **`cluster remove-peer` negative liveness signal** — dead-peer 자동 감지/표시 설계. 현재는 positive AppendEntries evidence 중심.
+- [ ] **Hot reload drift detection** — disk config와 runtime config 불일치 감지 + 명확한 에러.
+- [ ] **Migration mirror/cutover correctness** — dashboard/progress polish보다 mirror/cutover/status correctness를 먼저 확정.
+- [ ] **Bucket/object-lock/retention mapping** — semantics가 명확한 경우에만 NFS retention/object-lock mapping으로 승격.
+- [ ] **NFSv4 + 9P auth/access-control correctness** — conditional `Now` trigger가 아직 안 터졌다면 여기 둔다.
+
+### Deferred / Triggered Only
+
+측정값과 re-open trigger를 보존하되 active priority와 경쟁시키지 않는다. 아래 목록은 non-exhaustive다.
+분류되지 않은 TODO는 삭제하지 말고 `Source Backlog Memory`에 보존한다.
+
+- [ ] **S3 Range GET residual p95/p99** — reopen only when Range GET p95 < 25ms / p99 < 35ms target이 product/SLO로 필요하거나 FUSE/s3fs/goofys random read에서 EC read amplification이 재현될 때.
+- [ ] **S3 Range GET 1MiB full-width residual bottleneck** — shard-side encrypted range decrypt / QUIC syscall 비용은 새 pprof 증거가 있을 때만 재오픈.
+- [ ] **NBD per-block file open ceiling / direct-write residual bottleneck** — direct I/O NBD write SLO가 필요해지거나 trace-off profile에서 per-block open/pwrite가 p95 병목으로 재확인될 때.
+- [ ] **Iceberg REST high-concurrency raft ceiling** — production high-concurrency catalog SLO 침범 또는 PutObjectMeta/ObjectIndex consistency spec이 명확해질 때.
+- [ ] **Volume CLI measurement-triggered follow-ups** — export/import, policy, attach/detach, rename은 server-side lifecycle 요구가 구체화될 때.
+- [ ] **Scrub scope reintroduction / EC scrub rebalance race / group dir cleanup / PeerHealth threshold** — 기존 telemetry/re-open trigger가 fired될 때.
+- [ ] **Incident store scope index / ScanObjects prefix signature** — 기존 measured margin 또는 concrete caller 조건이 깨질 때.
+
+### Parked
+
+현재 operator-trust work가 아니다. 구체 사용자, SLO, 또는 trigger가 생기면 별도 design으로 재평가한다.
+아래 목록은 non-exhaustive이며, 여기에 없다고 삭제해도 된다는 뜻이 아니다.
+
+- [ ] Redis protocol
+- [ ] TSDB
+- [ ] io_uring
+- [ ] SPDK
+- [ ] SIMD
+- [ ] SoA
+- [ ] control plane / data plane split
+- [ ] AppendObject API, unless log/event-stream demand becomes concrete.
+- [ ] 9P/NFS shared write-back layer, unless a caller or conformance gap forces it.
+- [ ] Blame Mode v2, PagerDuty native webhook mapping.
+- [ ] go-billy Direct File I/O / O_DIRECT, hot/cold auto tiering, io-based auto rebalancing.
+
+## Source Backlog Memory (Preserved)
 
 ### Audit Log Lake — Phase 2 (Task 4)
 
@@ -92,7 +190,7 @@
 ## Phase 17: Scale-Out
 
 - [ ] **BadgerDB atomic auto-recovery** — 이전 Phase 16에서 이연. log-based replay + snapshot restore 자체 구현 (단순 `badger.Open` 내장 복구를 넘어서는 원자적 복구 레이어)
-- [ ] **BadgerDB pre-server recovery journal** — *zero ops* — `<data>/.recovery/` 아래에 incident-state DB가 열리기 전 발생한 Badger role decision을 원자적 JSONL/manifest로 남긴다. 현재 Badger role-scoped recovery 첫 slice는 pre-server failure를 stderr-only로 수용한다. 이후 `internal/badgerrole` decision struct가 안정되면 fsync+rename 규칙으로 durable journal을 추가해 startup-blocking failure도 재시작 후 incident/API/UI에서 추적 가능하게 만든다. **Depends on:** Badger role decision structs.
+- [x] **BadgerDB pre-server recovery journal** — *zero ops* — `<data>/.recovery/` 아래에 incident-state DB가 열리기 전 발생한 Badger role decision을 원자적 JSONL/manifest로 남긴다. 현재 Badger role-scoped recovery 첫 slice는 pre-server failure를 stderr-only로 수용한다. 이후 `internal/badgerrole` decision struct가 안정되면 fsync+rename 규칙으로 durable journal을 추가해 startup-blocking failure도 재시작 후 incident/API/UI에서 추적 가능하게 만든다. **Depends on:** Badger role decision structs.
 - [ ] **Blame Mode v2 — shard-level 시각적 replay** — Phase 16은 텍스트 타임라인 + JSON download만, v2에서 shard 재생 UI
 - [ ] **PagerDuty 네이티브 webhook 매핑** — Phase 16은 Slack-compatible JSON + docs 매핑만
 
