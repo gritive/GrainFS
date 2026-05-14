@@ -137,6 +137,10 @@ func TestAuditIcebergSingleDuckDB(t *testing.T) {
 		"bucket = 'test-audit-single' AND method = 'PUT'",
 		numPuts, 30*time.Second,
 	)
+	countAuditRows(t, server.endpoint, ak, sk,
+		"ts >= NOW() - INTERVAL 1 DAY AND operation = 'PutObject' AND bucket = 'test-audit-single'",
+		numPuts, 30*time.Second,
+	)
 	t.Logf("audit_iceberg_single_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
 		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
 }

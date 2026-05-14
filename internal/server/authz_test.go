@@ -376,3 +376,30 @@ func TestAuthz_InternalAuditBucket_Denied(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	assert.Equal(t, "internal_bucket", cap.lastReason())
 }
+
+func TestAuthz_InternalAuditBucket_ReadArtifactAllowed(t *testing.T) {
+	iamAudit := iam.NewAuditLogger(&captureAuditEmitter{})
+
+	h := newIAMTestHelper(t)
+	h.applySACreate(t, "sa-admin")
+	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
+	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
+
+	base, backend := setupTestServerWithBackend(t,
+		WithIAMStore(h.store),
+		WithIAMAudit(iamAudit),
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
+	)
+	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
+	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}

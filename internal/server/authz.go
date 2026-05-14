@@ -97,8 +97,15 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		action := s3ActionEnum(string(c.Method()), path, key != "", hasPolicy)
 		accessKey := AccessKeyFromContext(ctx)
 
-		// Internal system buckets are never accessible via the S3 API.
+		// Internal audit artifacts are read-only through S3 so Iceberg/DuckDB can
+		// fetch metadata and data files returned by the REST catalog. Mutations,
+		// bucket-level reads, and listing remain blocked.
 		if bucket == audit.BucketName {
+			method := string(c.Method())
+			if key != "" && (method == "GET" || method == "HEAD") {
+				c.Next(ctx)
+				return
+			}
 			s.iamAudit.RecordDeny(ctx, iam.PrincipalFromContext(ctx), bucket, key, action, "internal_bucket")
 			c.Set(auditErrReasonKey, "internal_bucket")
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access denied to internal bucket")
