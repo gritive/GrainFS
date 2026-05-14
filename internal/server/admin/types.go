@@ -7,11 +7,13 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/volume"
 )
@@ -116,6 +118,13 @@ type NfsExportUpsertParams struct {
 type NfsExportInfo = adminapi.NfsExportInfo
 type NfsExportUpsertReq = adminapi.NfsExportUpsertReq
 type ListNfsExportsResp = adminapi.ListNfsExportsResp
+type ExportDebugResp = adminapi.ExportDebugResp
+type ExportDebugLookup = adminapi.ExportDebugLookup
+
+type NFSDiag interface {
+	RecentLookups(bucket string, window time.Duration) []nfs4server.LookupRecord
+	ActiveMountClients(bucket string) []string
+}
 
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
@@ -149,6 +158,7 @@ type Deps struct {
 	IAM             IAMService            // optional; nil disables IAM admin endpoints
 	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
 	NfsExports      NfsExportService      // optional; nil disables NFS export admin endpoints
+	NFSDiag         NFSDiag               // optional; nil disables live NFS lookup/client diagnostics
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string

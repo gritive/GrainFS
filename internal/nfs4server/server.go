@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -22,6 +23,7 @@ type Server struct {
 	logger   zerolog.Logger
 	exports  atomic.Pointer[exportSnap]
 	hinter   *unknownExportHinter
+	lookups  *LookupRing
 
 	exportSource exportSource
 }
@@ -40,6 +42,7 @@ func NewServer(backend storage.Backend) *Server {
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 		hinter:  newUnknownExportHinter(hinterTTL),
+		lookups: NewLookupRing(1024),
 	}
 	s.exports.Store(emptySnap)
 	if err := s.RefreshExports(context.Background()); err != nil {
@@ -260,4 +263,15 @@ func (s *Server) exportGeneration(bucket string) uint64 {
 func (s *Server) exportFSID(bucket string) (uint64, uint64) {
 	cfg := s.loadExports().byBucket[bucket]
 	return cfg.fsidMajor, cfg.fsidMinor
+}
+
+func (s *Server) RecentLookups(bucket string, window time.Duration) []LookupRecord {
+	if s == nil {
+		return nil
+	}
+	return s.lookups.Snapshot(bucket, window)
+}
+
+func (s *Server) ActiveMountClients(bucket string) []string {
+	return nil
 }

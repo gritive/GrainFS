@@ -119,6 +119,9 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	// are now wired in cluster mode too, not just local.
 	nodeSvc := StartNodeServices(state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, state.distBackend)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
+	if state.adminDeps != nil {
+		state.adminDeps.NFSDiag = nodeSvc.NFS4()
+	}
 	state.AddCleanup(func() { nodeSvc.Close() })
 	startNfsExportBucketDeleteCleanup(ctx, state.nfsExportSvc, state.distBackend)
 

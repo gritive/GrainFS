@@ -170,6 +170,7 @@ func registerNfsExports(g router, d *Deps) {
 	}
 	g.POST("/nfs/exports", wrapBody[NfsExportUpsertReq, NfsExportInfo](d, AdminNfsExportUpsert))
 	g.GET("/nfs/exports", wrapZero(d, AdminNfsExportList))
+	g.GET("/nfs/exports/:name/debug", wrapName(d, AdminNfsExportDebug))
 	g.GET("/nfs/exports/:name", wrapName(d, AdminNfsExportGet))
 	g.DELETE("/nfs/exports/:name", nfsExportDeleteHandler(d))
 	g.PATCH("/nfs/exports/:name", nfsExportPatchHandler(d))

@@ -142,6 +142,37 @@ type ListNfsExportsResp struct {
 	Exports []NfsExportInfo `json:"exports"`
 }
 
+type ExportDebugLookup struct {
+	Client string `json:"client,omitempty"`
+	Bucket string `json:"bucket"`
+	Result string `json:"result"`
+	AtUnix int64  `json:"at_unix"`
+}
+
+type ExportDebugPropagation struct {
+	AppliedNodes  []string `json:"applied_nodes"`
+	TotalNodes    int      `json:"total_nodes"`
+	LastApplyUnix int64    `json:"last_apply_unix,omitempty"`
+}
+
+type ExportDebugBackend struct {
+	Exists      bool  `json:"exists"`
+	ObjectCount int64 `json:"object_count"`
+}
+
+type ExportDebugResp struct {
+	Bucket             string                 `json:"bucket"`
+	Registered         bool                   `json:"registered"`
+	ReadOnly           bool                   `json:"read_only,omitempty"`
+	FsidMajor          uint64                 `json:"fsid_major,omitempty"`
+	FsidMinor          uint64                 `json:"fsid_minor,omitempty"`
+	Generation         uint64                 `json:"generation,omitempty"`
+	RecentLookups      []ExportDebugLookup    `json:"recent_lookups,omitempty"`
+	Propagation        ExportDebugPropagation `json:"propagation"`
+	BackendBucket      ExportDebugBackend     `json:"backend_bucket"`
+	ActiveMountClients []string               `json:"active_mount_clients,omitempty"`
+}
+
 // DashboardTokenResp describes the dashboard URL and token shown to operators.
 type DashboardTokenResp struct {
 	URL          string `json:"url"`

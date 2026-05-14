@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
@@ -47,6 +49,19 @@ type recordingNfsBarrier struct{ indexes []uint64 }
 func (b *recordingNfsBarrier) WaitApplied(_ context.Context, index uint64) error {
 	b.indexes = append(b.indexes, index)
 	return nil
+}
+
+type fakeNFSDiag struct {
+	lookups []nfs4server.LookupRecord
+	clients []string
+}
+
+func (f *fakeNFSDiag) RecentLookups(_ string, _ time.Duration) []nfs4server.LookupRecord {
+	return f.lookups
+}
+
+func (f *fakeNFSDiag) ActiveMountClients(_ string) []string {
+	return f.clients
 }
 
 func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
@@ -102,6 +117,33 @@ func TestExportGet_NotFound_Returns404(t *testing.T) {
 	var e adminapi.Error
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&e))
 	require.Equal(t, "export_not_found", e.Code)
+}
+
+func TestAdminNfsExportDebug_Registered(t *testing.T) {
+	d, buckets := newAdminTestDepsWithNfs(t)
+	buckets.buckets["my-data"] = true
+	buckets.counts["my-data"] = 1234
+	d.NodeID = "node-a"
+	d.NFSDiag = &fakeNFSDiag{
+		lookups: []nfs4server.LookupRecord{{
+			Client: "10.0.0.5:2049",
+			Bucket: "my-data",
+			Result: "ok",
+			At:     time.Unix(100, 0),
+		}},
+		clients: []string{"10.0.0.5:2049"},
+	}
+	_, err := admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "my-data"})
+	require.NoError(t, err)
+
+	resp, err := admin.AdminNfsExportDebug(context.Background(), d, "my-data")
+	require.NoError(t, err)
+	require.True(t, resp.Registered)
+	require.True(t, resp.BackendBucket.Exists)
+	require.EqualValues(t, 1234, resp.BackendBucket.ObjectCount)
+	require.Equal(t, []string{"node-a"}, resp.Propagation.AppliedNodes)
+	require.Equal(t, []string{"10.0.0.5:2049"}, resp.ActiveMountClients)
+	require.Len(t, resp.RecentLookups, 1)
 }
 
 func TestAdminNfsExportUpsertValidation(t *testing.T) {

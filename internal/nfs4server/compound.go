@@ -435,11 +435,25 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 	if !exists && d.currentPath == "/" && childKey == "" && d.server != nil {
 		exists = d.server.isExportRegistered(childBucket)
 		if !exists {
+			if d.server.lookups != nil {
+				d.server.lookups.Record(LookupRecord{
+					Client: d.clientAddr,
+					Bucket: childBucket,
+					Result: "unknown_bucket",
+				})
+			}
 			if d.hinter != nil {
 				d.hinter.emit(d.clientAddr, childBucket)
 			}
 			log.Debug().Str("name", name).Str("child", childPath).Bool("exists", false).Msg("nfs4: LOOKUP")
 			return OpResult{OpCode: OpLookup, Status: NFS4ERR_NOENT}
+		}
+		if d.server.lookups != nil {
+			d.server.lookups.Record(LookupRecord{
+				Client: d.clientAddr,
+				Bucket: childBucket,
+				Result: "ok",
+			})
 		}
 	}
 	if !exists && d.backend != nil {

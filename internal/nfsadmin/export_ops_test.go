@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
 type fakeRoute struct {
@@ -113,6 +115,28 @@ func TestRunListJSONAndText(t *testing.T) {
 	base.JSONOut = true
 	require.NoError(t, RunList(context.Background(), ListExportOptions{BaseOptions: base}))
 	require.Contains(t, out.String(), `"bucket": "b1"`)
+}
+
+func TestClientExportDebug(t *testing.T) {
+	srv := newFakeServer(t, []fakeRoute{{
+		method: "GET",
+		path:   "/v1/nfs/exports/my-data/debug",
+		body: ExportDebugResp{
+			Bucket:     "my-data",
+			Registered: true,
+			BackendBucket: adminapi.ExportDebugBackend{
+				Exists:      true,
+				ObjectCount: 7,
+			},
+		},
+	}})
+	defer srv.Close()
+
+	c := NewClientForURL(srv.URL)
+	resp, err := c.ExportDebug(context.Background(), "my-data")
+	require.NoError(t, err)
+	require.True(t, resp.Registered)
+	require.EqualValues(t, 7, resp.BackendBucket.ObjectCount)
 }
 
 func TestRunRemove204(t *testing.T) {
