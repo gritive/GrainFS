@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/binary"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -25,9 +27,12 @@ var spoolCopyBufferPool = sync.Pool{
 }
 
 type spooledObject struct {
-	Path string
-	Size int64
-	ETag string
+	Path      string
+	Size      int64
+	ETag      string
+	encrypted bool
+	encryptor *encrypt.Encryptor
+	domain    string
 }
 
 func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*spooledObject, error) {
@@ -91,12 +96,213 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*
 	return &spooledObject{Path: path, Size: size, ETag: etag}, nil
 }
 
-func (s *spooledObject) Open() (*os.File, error) {
+func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket string, enc *encrypt.Encryptor, domain string) (*spooledObject, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypt spool object: nil encryptor")
+	}
+	if domain == "" {
+		return nil, fmt.Errorf("encrypt spool object: empty domain")
+	}
+	stageStart := time.Now()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create spool dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".put-spool-*")
+	if err != nil {
+		return nil, fmt.Errorf("create spool file: %w", err)
+	}
+	observePutStage("spool_object", "create_temp", stageStart)
+	path := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(path)
+	}
+
+	var (
+		size int64
+		etag string
+	)
+	reader := readerWithContext{ctx: ctx, r: r}
+	bufp := spoolCopyBufferPool.Get().(*[]byte)
+	defer func() {
+		clear(*bufp)
+		spoolCopyBufferPool.Put(bufp)
+	}()
+	writer := &encryptedSpoolRecordWriter{w: tmp, enc: enc, domain: domain}
+	hashWriter, etagFunc, releaseHash := spoolHashForBucket(bucket)
+	defer releaseHash()
+	stageStart = time.Now()
+	for {
+		n, readErr := reader.Read(*bufp)
+		if n > 0 {
+			plain := (*bufp)[:n]
+			if hashWriter != nil {
+				_, _ = hashWriter.Write(plain)
+			}
+			if _, err := writer.Write(plain); err != nil {
+				cleanup()
+				return nil, fmt.Errorf("spool object: %w", err)
+			}
+			size += int64(n)
+			clear(plain)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("spool object: %w", readErr)
+		}
+	}
+	if etagFunc != nil {
+		etag = etagFunc()
+	}
+	observePutStage("spool_object", "copy_hash", stageStart)
+	stageStart = time.Now()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("close spool file: %w", err)
+	}
+	observePutStage("spool_object", "close", stageStart)
+	return &spooledObject{
+		Path:      path,
+		Size:      size,
+		ETag:      etag,
+		encrypted: true,
+		encryptor: enc,
+		domain:    domain,
+	}, nil
+}
+
+func (s *spooledObject) Open() (io.ReadCloser, error) {
+	if s.encrypted {
+		return openSpoolEncryptedRecordFile(s.Path, s.encryptor, s.domain)
+	}
 	return os.Open(s.Path)
 }
 
 func (s *spooledObject) Cleanup() {
 	_ = os.Remove(s.Path)
+}
+
+func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, r io.Reader) (*spooledObject, error) {
+	if b.shardSvc != nil && b.shardSvc.encryptor != nil {
+		domain := fmt.Sprintf("cluster-spool:%d", time.Now().UnixNano())
+		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.encryptor, domain)
+	}
+	return spoolObject(ctx, b.spoolDir(), r, bucket)
+}
+
+func spoolHashForBucket(bucket string) (io.Writer, func() string, func()) {
+	if bucket == "" {
+		return nil, nil, func() {}
+	}
+	if storage.IsInternalBucket(bucket) {
+		xh := storage.GetXXH3Hasher()
+		return xh, func() string {
+			var buf [8]byte
+			binary.BigEndian.PutUint64(buf[:], xh.Sum64())
+			return hex.EncodeToString(buf[:])
+		}, func() { storage.PutXXH3Hasher(xh) }
+	}
+	h := md5.New()
+	return h, func() string { return hex.EncodeToString(h.Sum(nil)) }, func() {}
+}
+
+type encryptedSpoolRecordWriter struct {
+	w      io.Writer
+	enc    *encrypt.Encryptor
+	domain string
+	record uint64
+}
+
+func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
+	if uint64(len(p)) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("encrypted spool record too large: %d", len(p))
+	}
+	blob, err := w.enc.SealValue(spoolEncryptedRecordAAD(w.domain, w.record), p)
+	if err != nil {
+		return 0, err
+	}
+	if uint64(len(blob)) > uint64(^uint32(0)) {
+		clear(blob)
+		return 0, fmt.Errorf("encrypted spool blob too large: %d", len(blob))
+	}
+	var header [8]byte
+	binary.BigEndian.PutUint32(header[:4], uint32(len(p)))
+	binary.BigEndian.PutUint32(header[4:], uint32(len(blob)))
+	if _, err := w.w.Write(header[:]); err != nil {
+		clear(blob)
+		return 0, err
+	}
+	if _, err := w.w.Write(blob); err != nil {
+		clear(blob)
+		return 0, err
+	}
+	clear(blob)
+	w.record++
+	return len(p), nil
+}
+
+func openSpoolEncryptedRecordFile(path string, enc *encrypt.Encryptor, domain string) (io.ReadCloser, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("open encrypted spool: nil encryptor")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out bytes.Buffer
+	for record := uint64(0); ; record++ {
+		plain, done, err := readSpoolEncryptedRecord(f, enc, domain, record)
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			break
+		}
+		if _, err := out.Write(plain); err != nil {
+			clear(plain)
+			return nil, err
+		}
+		clear(plain)
+	}
+	return io.NopCloser(bytes.NewReader(out.Bytes())), nil
+}
+
+func readSpoolEncryptedRecord(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64) ([]byte, bool, error) {
+	var header [8]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		if err == io.EOF {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("read encrypted spool header: %w", err)
+	}
+	plainLen := binary.BigEndian.Uint32(header[:4])
+	blobLen := binary.BigEndian.Uint32(header[4:])
+	if blobLen == 0 {
+		return nil, false, fmt.Errorf("read encrypted spool record: empty blob")
+	}
+	blob := make([]byte, blobLen)
+	if _, err := io.ReadFull(r, blob); err != nil {
+		return nil, false, fmt.Errorf("read encrypted spool blob: %w", err)
+	}
+	plain, err := enc.OpenValue(spoolEncryptedRecordAAD(domain, record), blob)
+	clear(blob)
+	if err != nil {
+		return nil, false, fmt.Errorf("open encrypted spool record: %w", err)
+	}
+	if len(plain) != int(plainLen) {
+		clear(plain)
+		return nil, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
+	}
+	return plain, false, nil
+}
+
+func spoolEncryptedRecordAAD(domain string, record uint64) string {
+	return fmt.Sprintf("%s:%d", domain, record)
 }
 
 func writeFileAtomicFromReader(path string, r io.Reader) error {

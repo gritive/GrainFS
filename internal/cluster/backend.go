@@ -1186,7 +1186,7 @@ func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, buck
 	}
 
 	stageStart = time.Now()
-	sp, err := spoolObject(ctx, b.spoolDir(), r, bucket)
+	sp, err := b.spoolPutObject(ctx, bucket, r)
 	if err != nil {
 		return nil, err
 	}
@@ -1291,7 +1291,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
 	}
-	sp, err := spoolObject(ctx, b.spoolDir(), r, bucket)
+	sp, err := b.spoolPutObject(ctx, bucket, r)
 	if err != nil {
 		return nil, nil, err
 	}

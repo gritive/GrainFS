@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/klauspost/reedsolomon"
 )
 
@@ -18,8 +19,12 @@ const (
 )
 
 type spooledECShards struct {
-	paths    []string
-	origSize int64
+	paths     []string
+	sizes     []int64
+	origSize  int64
+	encrypted bool
+	encryptor *encrypt.Encryptor
+	domains   []string
 }
 
 func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObject) (*spooledECShards, error) {
@@ -36,8 +41,12 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		return nil, fmt.Errorf("ec stream encoder: %w", err)
 	}
 	out := &spooledECShards{
-		paths:    make([]string, cfg.NumShards()),
-		origSize: sp.Size,
+		paths:     make([]string, cfg.NumShards()),
+		sizes:     make([]int64, cfg.NumShards()),
+		origSize:  sp.Size,
+		encrypted: sp.encrypted,
+		encryptor: sp.encryptor,
+		domains:   make([]string, cfg.NumShards()),
 	}
 	cleanup := func() {
 		out.Cleanup()
@@ -50,6 +59,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 				return nil, fmt.Errorf("create empty ec shard: %w", err)
 			}
 			out.paths[i] = f.Name()
+			out.domains[i] = ecSpoolShardDomain(i)
 			if err := f.Close(); err != nil {
 				cleanup()
 				return nil, fmt.Errorf("close empty ec shard: %w", err)
@@ -67,8 +77,13 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 			return nil, fmt.Errorf("create ec data shard: %w", err)
 		}
 		out.paths[i] = f.Name()
+		out.domains[i] = ecSpoolShardDomain(i)
 		dataFiles[i] = f
-		dataWriters[i] = f
+		var writer io.Writer = f
+		if out.encrypted {
+			writer = &encryptedSpoolRecordWriter{w: f, enc: out.encryptor, domain: out.domains[i]}
+		}
+		dataWriters[i] = &countingWriter{w: writer, n: &out.sizes[i]}
 	}
 	observePutStage("ec_spool_shards", "create_data_files", stageStart)
 
@@ -99,19 +114,19 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 
 	stageStart = time.Now()
 	dataReaders := make([]io.Reader, cfg.DataShards)
-	dataReadFiles := make([]*os.File, cfg.DataShards)
-	for i, path := range out.paths[:cfg.DataShards] {
-		f, err := os.Open(path)
+	dataReadClosers := make([]io.Closer, cfg.DataShards)
+	for i := range out.paths[:cfg.DataShards] {
+		rc, err := out.openPayload(i)
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("open ec data shard: %w", err)
 		}
-		dataReadFiles[i] = f
-		dataReaders[i] = f
+		dataReadClosers[i] = rc
+		dataReaders[i] = rc
 	}
 	defer func() {
-		for _, f := range dataReadFiles {
-			_ = f.Close()
+		for _, rc := range dataReadClosers {
+			_ = rc.Close()
 		}
 	}()
 
@@ -125,8 +140,13 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 			return nil, fmt.Errorf("create ec parity shard: %w", err)
 		}
 		out.paths[idx] = f.Name()
+		out.domains[idx] = ecSpoolShardDomain(idx)
 		parityFiles[i] = f
-		parityWriters[i] = f
+		var writer io.Writer = f
+		if out.encrypted {
+			writer = &encryptedSpoolRecordWriter{w: f, enc: out.encryptor, domain: out.domains[idx]}
+		}
+		parityWriters[i] = &countingWriter{w: writer, n: &out.sizes[idx]}
 	}
 	observePutStage("ec_spool_shards", "open_data_create_parity", stageStart)
 	stageStart = time.Now()
@@ -161,18 +181,21 @@ func ecStreamBlockSize(cfg ECConfig, objectSize int64) int {
 }
 
 func (s *spooledECShards) OpenShard(idx int) (io.ReadCloser, error) {
-	f, err := os.Open(s.paths[idx])
+	payload, err := s.openPayload(idx)
 	if err != nil {
 		return nil, err
 	}
 	header := encodeShardHeader(s.origSize)
 	return &multiReadCloser{
-		Reader: io.MultiReader(bytes.NewReader(header[:]), f),
-		close:  f.Close,
+		Reader: io.MultiReader(bytes.NewReader(header[:]), payload),
+		close:  payload.Close,
 	}, nil
 }
 
 func (s *spooledECShards) ShardSize(idx int) (int64, error) {
+	if s.sizes != nil {
+		return int64(shardHeaderSize) + s.sizes[idx], nil
+	}
 	info, err := os.Stat(s.paths[idx])
 	if err != nil {
 		return 0, err
@@ -186,6 +209,28 @@ func (s *spooledECShards) Cleanup() {
 			_ = os.Remove(path)
 		}
 	}
+}
+
+func (s *spooledECShards) openPayload(idx int) (io.ReadCloser, error) {
+	if s.encrypted {
+		return openSpoolEncryptedRecordFile(s.paths[idx], s.encryptor, s.domains[idx])
+	}
+	return os.Open(s.paths[idx])
+}
+
+func ecSpoolShardDomain(idx int) string {
+	return fmt.Sprintf("cluster-ec-spool:%d:%d", time.Now().UnixNano(), idx)
+}
+
+type countingWriter struct {
+	w io.Writer
+	n *int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	*w.n += int64(n)
+	return n, err
 }
 
 func (b *DistributedBackend) ecSpoolDir() string {
