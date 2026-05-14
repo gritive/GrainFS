@@ -15,6 +15,17 @@
 - **READDIR requested attrs** — real COMPOUND READDIR requests now preserve and honor requested entry attributes instead of dropping the bitmap during XDR argument decoding.
 - **Colima conformance binary** — the pynfs Colima target now builds `grainfs` inside the Linux VM so macOS host binaries are not executed in Colima.
 
+## [0.0.189.1] - 2026-05-14 — fix: bucket policy/versioning handler correctness
+
+### Fixed
+
+- **Bucket existence pre-check** — policy and versioning admin endpoints (`GET/PUT/DELETE /v1/buckets/{name}/policy`, `GET/PUT /v1/buckets/{name}/versioning`) now return `404 not_found` instead of a storage-layer error when the bucket does not exist. A `checkBucketExists` helper is called after the internal-bucket guard and before the storage operation.
+- **Policy `ErrBucketNotFound` → 404** — `GetBucketPolicy` now maps `storage.ErrBucketNotFound` (returned by `LocalBackend` when no policy key is present) to `404 not_found` instead of `500 internal`.
+- **Policy structure validation** — `AdminSetBucketPolicy` now rejects non-JSON and structurally invalid policies (e.g., top-level string instead of object) at the handler layer via `policy.ParsePolicy`, before any storage write.
+- **Effect case validation** — `policy.ParsePolicy` now rejects `Effect` values other than `"Allow"` or `"Deny"`, preventing silently inoperative policies caused by case typos (`"DENY"`, `"allow"`, etc.).
+- **Ghost policy on bucket delete** — `LocalBackend.DeleteBucket` now also deletes the `policy:<bucket>` BadgerDB key, so a recreated bucket with the same name does not inherit the previous bucket's policy.
+- **Backward-compatible policy cache warm-up** — `Operations.GetBucketPolicy` no longer propagates `CompiledPolicyStore.Set` errors to callers; a pre-existing policy with a non-conforming `Effect` is still returned as raw bytes via the admin API while being skipped for S3 authorization (default deny), allowing operators to read and fix it.
+
 ## [0.0.189.0] - 2026-05-14 — fix: meta-Raft apply result delivery
 
 ### Transport

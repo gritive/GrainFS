@@ -142,7 +142,14 @@ func (b *LocalBackend) DeleteBucket(ctx context.Context, bucket string) error {
 		if err := os.RemoveAll(b.bucketDir(bucket)); err != nil {
 			return fmt.Errorf("remove bucket dir: %w", err)
 		}
-		return txn.Delete(bk)
+		if err := txn.Delete(bk); err != nil {
+			return err
+		}
+		// Delete policy key if present; bucket recreation must not inherit a stale policy.
+		if err := txn.Delete(b.policyKey(bucket)); err != nil && err != badger.ErrKeyNotFound {
+			return fmt.Errorf("delete policy key: %w", err)
+		}
+		return nil
 	})
 }
 

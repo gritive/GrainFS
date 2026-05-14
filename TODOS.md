@@ -7,9 +7,6 @@
 ### Bucket & IAM CLI DX
 
 - [ ] **`BucketInfo.Size` (총 사용 바이트)** — object_count 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
-- [ ] **`BucketInfo.HasUpstream`** — pull-through 설정 여부 표시. bucket info + list 출력에 열 추가.
-- [ ] **`bucket policy` CLI** — `GetBucketPolicy/SetBucketPolicy/DeleteBucketPolicy` 노출. 현재 storage layer만 있고 admin API 미노출.
-- [ ] **`bucket versioning` CLI** — `SetBucketVersioning` admin API 노출.
 
 ### 기타
 
@@ -107,7 +104,9 @@
 - [ ] Migration: NBD block proxying
 - [ ] **Migration: bucket-level server-side injection (Phase 2+)** — **Phase 1 (credentials) shipped v0.0.123.0. Phase 2 import seam shipped v0.0.171.0** (`JobStore`+`Worker`+`Service`+FSM apply+`MigrationProposer`; `Source.ListObjectsPage` pagination seam; per-page cursor in BadgerDB). **Remaining work:** (2) `mirror` mode — deferred (role overlap with Resolver unresolved); (3) cutover verb + `status` field on `BucketUpstream`; (4) progress tracking + dashboard surface; (5) `List`/`Head`/`CopyObject` upstream ops; (6) S3-native admin verbs / CLI integration (src+dst wiring in `NewService` currently nil); (7) `Source.ListObjectsPage/GetObject` add `ctx` parameter for clean cancellation on leadership loss; (8) leader-flip `totalCopied/totalErrors` counter continuity (seed from persisted `job.Copied` on resume).
 - [ ] nbd over internet for edge computing (powered by wireguard)
-- [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음 (schema migration 자동, snapshot forward-compat 보장)
+- [ ] **Rolling upgrade safety** — *zero ops* — 버전 간 binary 교체로 downtime/데이터 손실 없음. **Design doc shipped**: `~/.gstack/projects/gritive-grains/whitekid-devel-design-20260514-143737-rolling-upgrade-safety.md` (v2, 2026-05-14 Codex review 반영). N→N+1 단방향 + Approach B (Compat Fabric sliced). Slice 1 → 4 → (2 ‖ 3) → 5 순서. **Tracking 항목**:
+  - [ ] **Slice 4 design doc spin-off** — `upgrade-finalize-machinery-design.md`. upgrade.state 머신 + 5개 preflight + 4 MetaCmd + voter version durable records. Slice 1 ship 후 착수.
+  - [ ] **Unknown MetaCmd / capability rejection telemetry (production backstop)** — `grainfs_unknown_metacmd_total` counter + `grainfs_capability_reject_total` counter + alert. Slice 3와 독립 — production gap이 silent 가지 않도록 운영 가시성 확보. Slice 3 시작 시 같이 검토.
 
 ## Phase 18: FUSE-over-S3 (외부 도구 호환성 보증)
 
@@ -191,7 +190,7 @@
 
 ## Cluster Day-2 Operations
 
-`docs/superpowers/specs/2026-05-07-cluster-day2-ops-design.md` (예정) Phase 1 (metaRaft 한정 5명령: transfer-leader, drain, health, placement, balancer status) 이후 단계. Phase 1 PR이 명시적으로 metaRaft scope로 제한했기 때문에 아래 항목은 후속 spec 필요.
+`docs/superpowers/specs/2026-05-07-cluster-day2-ops-design.md` Phase 1 (metaRaft 한정 5명령: transfer-leader, drain, health, placement, balancer status) shipped. Phase 1 PR이 명시적으로 metaRaft scope로 제한했기 때문에 아래 항목은 후속 spec 필요.
 
 - [ ] **Per-data-group leader transfer / drain (multi-raft scope)** — Phase 1 의 `cluster transfer-leader` / `cluster drain`은 metaRaft에만 동작. 운영 시나리오 "node-N 무중단 업그레이드"는 node-N이 leader인 모든 raft 그룹(metaRaft + 데이터 그룹들)에서 leadership을 옮겨야 진정한 graceful — 안 그러면 데이터 그룹 leader가 동시에 사라져 election 폭주. **설계 쟁점:** (a) per-group fan-out (모든 그룹 순회 vs 병렬), (b) ordering (metaRaft 먼저 vs 마지막), (c) partial failure (일부 그룹은 transfer 성공, 일부는 timeout) 처리 정책, (d) drain의 경우 데이터 그룹에서 voter 제거는 ChangeMembership joint consensus 필요 + EC quorum 영향 평가. **Depends on:** Cluster Day-2 Operations Phase 1 shipped + 운영 데이터로 multi-raft transfer 필요성 측정. **Re-open trigger:** node 점검 시 데이터 그룹 election 폭주가 운영 incident로 관찰되거나, "graceful node maintenance" 요구가 명시적으로 들어올 때.
 

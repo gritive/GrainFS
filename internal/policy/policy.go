@@ -62,6 +62,11 @@ func ParsePolicy(data []byte) (*BucketPolicy, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parse policy: %w", err)
 	}
+	for i, stmt := range p.Statement {
+		if stmt.Effect != "Allow" && stmt.Effect != "Deny" {
+			return nil, fmt.Errorf("statement[%d]: Effect must be \"Allow\" or \"Deny\", got %q", i, stmt.Effect)
+		}
+	}
 	return &p, nil
 }
 
