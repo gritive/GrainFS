@@ -5,18 +5,15 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/stretchr/testify/require"
 )
 
 func newDispatcherWithExports(t *testing.T, rows map[string]exportConfig) *Dispatcher {
 	t.Helper()
 	backend, err := storage.NewLocalBackend(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	for bucket := range rows {
-		if err := backend.CreateBucket(context.Background(), bucket); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, backend.CreateBucket(context.Background(), bucket))
 	}
 	srv := NewServer(backend)
 	srv.SetExportsForTest(buildSnap(rows))
@@ -131,9 +128,7 @@ func TestReadOnlyExportMutationGuards(t *testing.T) {
 				"ro": {readOnly: true, generation: 1},
 			})
 			tc.setup(d)
-			if got := tc.invoke(d).Status; got != NFS4ERR_ROFS {
-				t.Fatalf("status = %d, want NFS4ERR_ROFS", got)
-			}
+			require.Equal(t, NFS4ERR_ROFS, tc.invoke(d).Status)
 		})
 	}
 }
@@ -149,15 +144,11 @@ func TestCrossExportRenameAndCopyReturnXDEV(t *testing.T) {
 	renameArgs := &XDRWriter{}
 	renameArgs.WriteString("old.bin")
 	renameArgs.WriteString("new.bin")
-	if got := d.opRename(renameArgs.Bytes()).Status; got != NFS4ERR_XDEV {
-		t.Fatalf("rename status = %d, want NFS4ERR_XDEV", got)
-	}
+	require.Equal(t, NFS4ERR_XDEV, d.opRename(renameArgs.Bytes()).Status)
 
 	d.savedPath = "/a/src.bin"
 	d.currentPath = "/b/dst.bin"
-	if got := d.opCopy(buildCopyArgs42(0, 0, 1)).Status; got != NFS4ERR_XDEV {
-		t.Fatalf("copy status = %d, want NFS4ERR_XDEV", got)
-	}
+	require.Equal(t, NFS4ERR_XDEV, d.opCopy(buildCopyArgs42(0, 0, 1)).Status)
 }
 
 func mustSizeAttr(size uint64) []byte {

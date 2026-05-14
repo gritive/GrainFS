@@ -1,6 +1,10 @@
 package nfs4server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestPseudoRootGetAttrUsesReservedFSIDAndVolatileFH(t *testing.T) {
 	d := newDispatcherWithExports(t, map[string]exportConfig{
@@ -12,21 +16,12 @@ func TestPseudoRootGetAttrUsesReservedFSIDAndVolatileFH(t *testing.T) {
 		1<<1 | 1<<2 | 1<<8,
 		1<<(33-32) | 1<<(55-32),
 	}))
-	if got.typ != NF4DIR {
-		t.Fatalf("type = %d, want NF4DIR", got.typ)
-	}
-	if got.fhExpire != 1 {
-		t.Fatalf("fh_expire_type = %d, want FH4_VOLATILE_ANY", got.fhExpire)
-	}
-	if got.fsidMajor != 1 || got.fsidMinor != 0 {
-		t.Fatalf("fsid = (%d,%d), want (1,0)", got.fsidMajor, got.fsidMinor)
-	}
-	if got.mode != 0755 {
-		t.Fatalf("mode = %#o, want 0755", got.mode)
-	}
-	if got.mountedOnFileID != pathToFileID("/") {
-		t.Fatalf("mounted_on_fileid = %d, want root fileid", got.mountedOnFileID)
-	}
+	require.Equal(t, uint32(NF4DIR), got.typ)
+	require.Equal(t, uint32(1), got.fhExpire)
+	require.Equal(t, uint64(1), got.fsidMajor)
+	require.Equal(t, uint64(0), got.fsidMinor)
+	require.Equal(t, uint32(0755), got.mode)
+	require.Equal(t, pathToFileID("/"), got.mountedOnFileID)
 }
 
 func TestExportRootGetAttrUsesExportFSIDAndRootMountedOnFileID(t *testing.T) {
@@ -40,12 +35,9 @@ func TestExportRootGetAttrUsesExportFSIDAndRootMountedOnFileID(t *testing.T) {
 		1<<1 | 1<<2 | 1<<8,
 		1<<(33-32) | 1<<(55-32),
 	}))
-	if got.fsidMajor != 1 || got.fsidMinor != 9 {
-		t.Fatalf("fsid = (%d,%d), want (1,9)", got.fsidMajor, got.fsidMinor)
-	}
-	if got.mountedOnFileID != pathToFileID("/") {
-		t.Fatalf("mounted_on_fileid = %d, want root fileid", got.mountedOnFileID)
-	}
+	require.Equal(t, uint64(1), got.fsidMajor)
+	require.Equal(t, uint64(9), got.fsidMinor)
+	require.Equal(t, pathToFileID("/"), got.mountedOnFileID)
 }
 
 type pseudoRootAttr struct {
@@ -61,37 +53,26 @@ func decodeAttrsForPseudoRootTest(t *testing.T, data []byte) pseudoRootAttr {
 	t.Helper()
 	r := NewXDRReader(data)
 	bitmapLen, err := r.ReadUint32()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	for i := uint32(0); i < bitmapLen; i++ {
-		if _, err := r.ReadUint32(); err != nil {
-			t.Fatal(err)
-		}
+		_, err := r.ReadUint32()
+		require.NoError(t, err)
 	}
 	attrBytes, err := r.ReadOpaque()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	ar := NewXDRReader(attrBytes)
 	var got pseudoRootAttr
-	if got.typ, err = ar.ReadUint32(); err != nil {
-		t.Fatal(err)
-	}
-	if got.fhExpire, err = ar.ReadUint32(); err != nil {
-		t.Fatal(err)
-	}
-	if got.fsidMajor, err = ar.ReadUint64(); err != nil {
-		t.Fatal(err)
-	}
-	if got.fsidMinor, err = ar.ReadUint64(); err != nil {
-		t.Fatal(err)
-	}
-	if got.mode, err = ar.ReadUint32(); err != nil {
-		t.Fatal(err)
-	}
-	if got.mountedOnFileID, err = ar.ReadUint64(); err != nil {
-		t.Fatal(err)
-	}
+	got.typ, err = ar.ReadUint32()
+	require.NoError(t, err)
+	got.fhExpire, err = ar.ReadUint32()
+	require.NoError(t, err)
+	got.fsidMajor, err = ar.ReadUint64()
+	require.NoError(t, err)
+	got.fsidMinor, err = ar.ReadUint64()
+	require.NoError(t, err)
+	got.mode, err = ar.ReadUint32()
+	require.NoError(t, err)
+	got.mountedOnFileID, err = ar.ReadUint64()
+	require.NoError(t, err)
 	return got
 }

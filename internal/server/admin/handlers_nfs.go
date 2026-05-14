@@ -65,6 +65,9 @@ func AdminNfsExportUpsert(ctx context.Context, d *Deps, req NfsExportUpsertReq) 
 		return NfsExportInfo{}, NewInternal("head bucket: " + err.Error())
 	}
 	if err := d.NfsExports.Upsert(ctx, req.Bucket, NfsExportUpsertParams{ReadOnly: req.ReadOnly}); err != nil {
+		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
+			return NfsExportInfo{}, NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
+		}
 		return NfsExportInfo{}, NewInternal("upsert NFS export: " + err.Error())
 	}
 	info, _ := d.NfsExports.Get(req.Bucket)
@@ -79,6 +82,9 @@ func AdminNfsExportUpdate(ctx context.Context, d *Deps, bucket string, req NfsEx
 		return NfsExportInfo{}, NewExportNotFound(bucket)
 	}
 	if err := d.NfsExports.Upsert(ctx, bucket, NfsExportUpsertParams{ReadOnly: req.ReadOnly}); err != nil {
+		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
+			return NfsExportInfo{}, NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
+		}
 		return NfsExportInfo{}, NewInternal("update NFS export: " + err.Error())
 	}
 	info, _ := d.NfsExports.Get(bucket)
@@ -107,5 +113,11 @@ func AdminNfsExportDelete(ctx context.Context, d *Deps, bucket string) error {
 	if d.NfsExports == nil {
 		return NewUnsupported("NFS export admin not configured on this node", nil)
 	}
-	return d.NfsExports.Delete(ctx, bucket)
+	if err := d.NfsExports.Delete(ctx, bucket); err != nil {
+		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
+			return NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
+		}
+		return NewInternal("delete NFS export: " + err.Error())
+	}
+	return nil
 }

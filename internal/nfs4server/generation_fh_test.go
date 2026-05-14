@@ -1,6 +1,10 @@
 package nfs4server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestPutFHGenerationDriftReturnsFHExpired(t *testing.T) {
 	d := newDispatcherWithExports(t, map[string]exportConfig{
@@ -14,9 +18,7 @@ func TestPutFHGenerationDriftReturnsFHExpired(t *testing.T) {
 		"bucket": {generation: 2},
 	}))
 
-	if got := d.opPutFH(fh[:]).Status; got != NFS4ERR_FHEXPIRED {
-		t.Fatalf("status = %d, want NFS4ERR_FHEXPIRED", got)
-	}
+	require.Equal(t, NFS4ERR_FHEXPIRED, d.opPutFH(fh[:]).Status)
 }
 
 func TestPutFHRemovedExportReturnsAdminRevoked(t *testing.T) {
@@ -29,7 +31,5 @@ func TestPutFHRemovedExportReturnsAdminRevoked(t *testing.T) {
 
 	d.server.SetExportsForTest(buildSnap(nil))
 
-	if got := d.opPutFH(fh[:]).Status; got != NFS4ERR_ADMIN_REVOKED {
-		t.Fatalf("status = %d, want NFS4ERR_ADMIN_REVOKED", got)
-	}
+	require.Equal(t, NFS4ERR_ADMIN_REVOKED, d.opPutFH(fh[:]).Status)
 }

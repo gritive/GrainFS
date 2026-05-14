@@ -8,6 +8,7 @@
 - **NFSv4 pseudo-root multi-export routing** — NFS clients can browse registered buckets under the pseudo-root and route file operations to the selected bucket instead of the legacy fixed bucket.
 - **Read-only export enforcement** — write, create, remove, rename, setattr, allocate, deallocate, and copy operations now reject mutations against read-only exports.
 - **Export lifecycle E2E coverage** — CLI lifecycle tests cover export add/update/remove JSON output, missing-bucket rejection, and fsid/generation fields.
+- **Fail-closed export lifecycle** — bucket deletion now rejects exported buckets instead of best-effort cascading the export first, and multi-node clusters reject NFS export mutations until a full propagation barrier is wired.
 - **`GRAINFS_LOG_LEVEL` fallback** — `grainfs --log-level` still wins when explicitly provided, otherwise the CLI uses `GRAINFS_LOG_LEVEL` before falling back to `info`.
 
 ### Changed

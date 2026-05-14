@@ -106,14 +106,42 @@ func TestAdminNfsExportUpdateMissing(t *testing.T) {
 	require.Equal(t, "export_not_found", ae.Code)
 }
 
-func TestAdminDeleteBucketCascadesNfsExport(t *testing.T) {
+func TestAdminDeleteBucketRejectsExportedBucket(t *testing.T) {
 	d, buckets := newAdminTestDepsWithNfs(t)
 	buckets.buckets["b1"] = true
 	ctx := context.Background()
 	_, err := admin.AdminNfsExportUpsert(ctx, d, admin.NfsExportUpsertReq{Bucket: "b1"})
 	require.NoError(t, err)
 
-	require.NoError(t, admin.AdminDeleteBucket(ctx, d, "b1", true))
+	err = admin.AdminDeleteBucket(ctx, d, "b1", true)
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "conflict", ae.Code)
 	_, ok := d.NfsExports.Get("b1")
-	require.False(t, ok)
+	require.True(t, ok)
+	require.True(t, buckets.buckets["b1"])
+}
+
+func TestAdminNfsExportRejectsMultiNodeWithoutPropagationBarrier(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:            store,
+		Proposer:         &fakeNfsExportProposer{store: store},
+		ClusterNodeCount: func() int { return 2 },
+	})
+	buckets := newFakeBucketOps()
+	buckets.buckets["b1"] = true
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "unsupported", ae.Code)
 }

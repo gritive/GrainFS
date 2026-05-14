@@ -102,3 +102,19 @@ func TestExportServiceProposerErrorPropagates(t *testing.T) {
 	p.err = want
 	require.ErrorIs(t, svc.Upsert(context.Background(), "b1", UpsertParams{}), want)
 }
+
+func TestExportServiceRejectsMultiNodeWithoutPropagationBarrier(t *testing.T) {
+	db, store, p, _ := newTestService(t)
+	defer db.Close()
+	svc := NewExportService(ServiceConfig{
+		Store:            store,
+		Proposer:         p,
+		ClusterNodeCount: func() int { return 2 },
+	})
+
+	require.ErrorIs(t, svc.Upsert(context.Background(), "b1", UpsertParams{}), ErrPropagationBarrierRequired)
+	require.Empty(t, p.upserts)
+
+	require.ErrorIs(t, svc.Delete(context.Background(), "b1"), ErrPropagationBarrierRequired)
+	require.Empty(t, p.deletes)
+}

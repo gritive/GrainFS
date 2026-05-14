@@ -101,9 +101,10 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 	}
 	if d.NfsExports != nil {
 		if _, ok := d.NfsExports.Get(name); ok {
-			if err := d.NfsExports.Delete(ctx, name); err != nil {
-				return NewInternal("cascade delete NFS export: " + err.Error())
-			}
+			return NewConflict("bucket has an NFS export; remove the export first", map[string]any{
+				"bucket": name,
+				"hint":   "grainfs nfs export remove " + name,
+			})
 		}
 	}
 	var err error
