@@ -145,6 +145,13 @@ const (
 	nbdLargePoolBufSize = 64 * 1024
 )
 
+var (
+	nbdReplyHeaderPool           = sync.Pool{New: func() any { return new([16]byte) }}
+	nbdStructuredReplyHeaderPool = sync.Pool{
+		New: func() any { return new([20]byte) },
+	}
+)
+
 // Server serves a single volume over NBD protocol.
 type Server struct {
 	mgr          *volume.Manager
@@ -395,7 +402,9 @@ func (s *Server) writeZeroes(offset uint64, length uint32, pending *[]pendingMut
 }
 
 func (s *Server) sendReply(conn net.Conn, handle []byte, errCode uint32, data []byte) error {
-	hdr := make([]byte, 16)
+	hdrp := nbdReplyHeaderPool.Get().(*[16]byte)
+	defer nbdReplyHeaderPool.Put(hdrp)
+	hdr := hdrp[:]
 	binary.BigEndian.PutUint32(hdr[0:4], nbdReplyMagic)
 	binary.BigEndian.PutUint32(hdr[4:8], errCode)
 	copy(hdr[8:16], handle)

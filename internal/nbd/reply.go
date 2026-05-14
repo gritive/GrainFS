@@ -56,12 +56,14 @@ func (s *Server) sendStructuredChunk(conn net.Conn, handle []byte, flags, typ ui
 }
 
 func writeStructuredHeader(conn net.Conn, handle []byte, flags, typ uint16, length uint32) error {
-	var hdr [20]byte
+	hdrp := nbdStructuredReplyHeaderPool.Get().(*[20]byte)
+	defer nbdStructuredReplyHeaderPool.Put(hdrp)
+	hdr := hdrp[:]
 	binary.BigEndian.PutUint32(hdr[0:4], nbdStructuredReplyMagic)
 	binary.BigEndian.PutUint16(hdr[4:6], flags)
 	binary.BigEndian.PutUint16(hdr[6:8], typ)
 	copy(hdr[8:16], handle)
 	binary.BigEndian.PutUint32(hdr[16:20], length)
-	_, err := conn.Write(hdr[:])
+	_, err := conn.Write(hdr)
 	return err
 }
