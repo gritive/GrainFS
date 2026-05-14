@@ -307,6 +307,13 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("iam: BucketUpstreamPut decrypt: %w", err)
 	}
+	status := BucketUpstreamStatus(string(p.Status()))
+	if status == "" {
+		status = BucketUpstreamStatusActive
+	}
+	if status != BucketUpstreamStatusActive && status != BucketUpstreamStatusCutover {
+		return fmt.Errorf("iam: BucketUpstreamPut invalid status %q", status)
+	}
 	a.store.applyBucketUpstreamPut(BucketUpstream{
 		Bucket:       bucket,
 		Endpoint:     string(p.Endpoint()),
@@ -315,7 +322,24 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 		SecretKeyEnc: encBytes,
 		CreatedAt:    time.Unix(0, p.CreatedAtUnixNs()),
 		CreatedBy:    string(p.CreatedBy()),
+		Status:       status,
 	})
+	return nil
+}
+
+func (a *Applier) ApplyBucketUpstreamStatusSet(bucket string, status BucketUpstreamStatus) error {
+	if bucket == "" {
+		return fmt.Errorf("iam: BucketUpstreamStatusSet missing bucket")
+	}
+	if status != BucketUpstreamStatusActive && status != BucketUpstreamStatusCutover {
+		return fmt.Errorf("iam: BucketUpstreamStatusSet invalid status %q", status)
+	}
+	u, ok := a.store.LookupBucketUpstream(bucket)
+	if !ok {
+		return fmt.Errorf("iam: BucketUpstreamStatusSet upstream %q not found", bucket)
+	}
+	u.Status = status
+	a.store.applyBucketUpstreamPut(*u)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
@@ -17,6 +18,7 @@ type ProposeFunc func(ctx context.Context, cmdType clusterpb.MetaCmdType, payloa
 // — caller context is enough).
 type MetaProposer struct {
 	Propose ProposeFunc
+	Cutover func(ctx context.Context, bucket string) error
 }
 
 func (m *MetaProposer) ProposeSACreate(ctx context.Context, sa ServiceAccount) error {
@@ -65,4 +67,11 @@ func (m *MetaProposer) ProposeBucketUpstreamPut(ctx context.Context, u BucketUps
 
 func (m *MetaProposer) ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamDelete, buildBucketUpstreamDeletePayload(bucket))
+}
+
+func (m *MetaProposer) ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error {
+	if m.Cutover == nil {
+		return fmt.Errorf("iam: bucket upstream cutover proposer not configured")
+	}
+	return m.Cutover(ctx, bucket)
 }

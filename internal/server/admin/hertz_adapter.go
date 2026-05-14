@@ -295,6 +295,7 @@ func registerIAM(g router, d *Deps) {
 	g.GET("/upstreams", wrapZero(d, ListBucketUpstreams))
 	g.GET("/buckets/:bucket/upstream", iamGetBucketUpstreamHandler(d))
 	g.DELETE("/buckets/:bucket/upstream", iamDeleteBucketUpstreamHandler(d))
+	g.POST("/migration/cutover", iamBucketUpstreamCutoverHandler(d))
 }
 
 func iamGetSAHandler(d *Deps) app.HandlerFunc {
@@ -316,6 +317,24 @@ func iamGetBucketUpstreamHandler(d *Deps) app.HandlerFunc {
 			return
 		}
 		writeOK(c, consts.StatusOK, resp)
+	}
+}
+
+func iamBucketUpstreamCutoverHandler(d *Deps) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var req iam.BucketUpstreamCutoverRequest
+		body := c.Request.Body()
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeError(c, NewInvalid("invalid JSON body: "+err.Error()))
+				return
+			}
+		}
+		if err := CutoverBucketUpstream(ctx, d, req.Bucket); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.SetStatusCode(consts.StatusNoContent)
 	}
 }
 

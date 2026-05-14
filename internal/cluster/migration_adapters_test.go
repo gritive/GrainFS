@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/migration"
 )
 
@@ -77,4 +78,27 @@ func TestMigrationProposer_ProposeError_Propagates(t *testing.T) {
 	assert.ErrorIs(t, p.ProposeJobStart(context.Background(), "b"), propErr)
 	assert.ErrorIs(t, p.ProposeJobDone(context.Background(), "b", 0, 0), propErr)
 	assert.ErrorIs(t, p.ProposeJobFailed(context.Background(), "b", "err", 0), propErr)
+}
+
+func TestMigrationProposerCutoverUsesGate(t *testing.T) {
+	var gotPlan compat.GatePlan
+	var gotType clusterpb.MetaCmdType
+	p := &MigrationProposer{
+		ProposeWithGate: func(_ context.Context, plan compat.GatePlan, cmdType clusterpb.MetaCmdType, payload []byte) error {
+			gotPlan = plan
+			gotType = cmdType
+			require.NotEmpty(t, payload)
+			return nil
+		},
+	}
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityMigrationCutoverV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationMigrationCutover,
+		ConfigID:   7,
+	}
+	require.NoError(t, p.ProposeCutover(context.Background(), plan, "bucket-a"))
+	require.Equal(t, plan, gotPlan)
+	require.Equal(t, clusterpb.MetaCmdTypeMigrationCutover, gotType)
 }

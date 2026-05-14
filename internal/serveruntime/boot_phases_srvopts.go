@@ -3,12 +3,15 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
@@ -224,8 +227,28 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 
 	mstore := migration.NewJobStore(state.distBackend.FSMDB())
 	state.metaRaft.FSM().SetMigration(mstore)
+	gate := cluster.NewCapabilityGate(compat.DefaultRegistry, 15*time.Second)
+	refreshGate := func() {
+		gate.SetMetaRaftSnapshot(state.metaRaft.Node().CommittedIndex(), state.metaRaft.Node().Configuration())
+		gate.ReportEvidence(state.metaRaft.FSM().CapabilityEvidence(state.metaRaft.Node().ID(), time.Now()))
+	}
+	refreshGate()
+	state.metaRaft.SetCapabilityGate(gate)
+	mprop := &cluster.MigrationProposer{
+		Propose: state.metaRaft.Propose,
+		ProposeWithGate: func(ctx context.Context, plan compat.GatePlan, cmdType clusterpb.MetaCmdType, payload []byte) error {
+			_, err := state.metaRaft.ProposeWithGate(ctx, plan, cmdType, payload)
+			return err
+		},
+		GatePlan: func(operation compat.Operation) (compat.GatePlan, error) {
+			refreshGate()
+			return gate.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, operation, time.Now())
+		},
+	}
+	if state.iamProposer != nil {
+		state.iamProposer.Cutover = mprop.ProposeBucketUpstreamCutover
+	}
 	if cfg.MigrationInterval > 0 {
-		mprop := &cluster.MigrationProposer{Propose: state.metaRaft.Propose}
 		mlead := &cluster.RaftLeadership{Node: state.distBackend.Node()}
 		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}

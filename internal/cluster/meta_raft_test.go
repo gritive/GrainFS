@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -625,4 +626,45 @@ func TestMetaRaftProposeWithIndexFollowerLocalApplyTimeoutStillReturnsCommittedI
 	require.Equal(t, uint64(42), got)
 	require.NoError(t, err)
 	require.Equal(t, 0, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithGateRejectsStalePlan(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	gate := NewCapabilityGate(nil, time.Second)
+	gate.SetMetaRaftSnapshot(2, raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}})
+	m.capabilityGate = gate
+	node := &fakeProposerNode{isLeader: true, proposeIdx: 3}
+
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityMigrationCutoverV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationMigrationCutover,
+		ConfigID:   1,
+	}
+	_, err := m.proposeOrForwardWithGate(context.Background(), node, plan, []byte("cmd"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "gate plan config changed")
+	require.Equal(t, 0, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithGateAllowsCurrentPlan(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	m.lastApplied.Store(3)
+	gate := NewCapabilityGate(nil, time.Second)
+	gate.SetMetaRaftSnapshot(2, raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}})
+	m.capabilityGate = gate
+	node := &fakeProposerNode{isLeader: true, proposeIdx: 3}
+
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityMigrationCutoverV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationMigrationCutover,
+		ConfigID:   2,
+	}
+	got, err := m.proposeOrForwardWithGate(context.Background(), node, plan, []byte("cmd"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), got)
+	require.Equal(t, 1, node.proposeCalls)
 }

@@ -176,6 +176,30 @@ func (c *compatCluster) AdminSock(i int) string {
 	return filepath.Join(c.dataDirs[i], "admin.sock")
 }
 
+func putCompatAdminJSON(t *testing.T, sock, path string, body []byte) (int, string) {
+	t.Helper()
+	return doCompatAdminJSON(t, sock, http.MethodPut, path, body)
+}
+
+func postCompatAdminJSON(t *testing.T, sock, path string, body []byte) (int, string) {
+	t.Helper()
+	return doCompatAdminJSON(t, sock, http.MethodPost, path, body)
+}
+
+func doCompatAdminJSON(t *testing.T, sock, method, path string, body []byte) (int, string) {
+	t.Helper()
+	client := iamUDSClient(sock)
+	req, err := http.NewRequest(method, "http://unix"+path, bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(raw)
+}
+
 // CreateSnapshot POSTs to /admin/snapshots on node nodeIdx and returns the seq number.
 func (c *compatCluster) CreateSnapshot(t *testing.T, nodeIdx int) int {
 	t.Helper()

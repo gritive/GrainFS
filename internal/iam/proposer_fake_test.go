@@ -35,10 +35,12 @@ type fakeProposer struct {
 	keyCreateErr   error     // if non-nil, ProposeKeyCreate returns this
 	wildcardPutErr error     // if non-nil, ProposeGrantWildcardPut returns this
 
-	bucketUpstreamPuts      []BucketUpstream
-	bucketUpstreamDeletes   []string
-	bucketUpstreamPutErr    error
-	bucketUpstreamDeleteErr error
+	bucketUpstreamPuts       []BucketUpstream
+	bucketUpstreamDeletes    []string
+	bucketUpstreamCutovers   []string
+	bucketUpstreamPutErr     error
+	bucketUpstreamDeleteErr  error
+	bucketUpstreamCutoverErr error
 }
 
 func newFakeProposer() *fakeProposer { return &fakeProposer{} }
@@ -187,6 +189,12 @@ func (f *fakeProposer) ProposeBucketUpstreamDelete(_ context.Context, bucket str
 	f.bucketUpstreamDeletes = append(f.bucketUpstreamDeletes, bucket)
 	f.dispatched = append(f.dispatched, "BucketUpstreamDelete")
 	return f.bucketUpstreamDeleteErr
+}
+
+func (f *fakeProposer) ProposeBucketUpstreamCutover(_ context.Context, bucket string) error {
+	f.calls = append(f.calls, "BucketUpstreamCutover:"+bucket)
+	f.bucketUpstreamCutovers = append(f.bucketUpstreamCutovers, bucket)
+	return f.bucketUpstreamCutoverErr
 }
 
 func equalSlices(a, b []string) bool {

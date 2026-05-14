@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -456,11 +457,12 @@ type BucketUpstreamPutRequest struct {
 // SecretKey is intentionally absent — only access_key, upstream_url, and
 // metadata leave the server.
 type BucketUpstreamItem struct {
-	Bucket      string    `json:"bucket"`
-	UpstreamURL string    `json:"upstream_url"`
-	AccessKey   string    `json:"access_key"`
-	CreatedAt   time.Time `json:"created_at"`
-	CreatedBy   string    `json:"created_by,omitempty"`
+	Bucket      string               `json:"bucket"`
+	UpstreamURL string               `json:"upstream_url"`
+	AccessKey   string               `json:"access_key"`
+	CreatedAt   time.Time            `json:"created_at"`
+	CreatedBy   string               `json:"created_by,omitempty"`
+	Status      BucketUpstreamStatus `json:"status"`
 }
 
 func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutRequest) error {
@@ -528,7 +530,11 @@ func (a *AdminAPI) GetBucketUpstream(_ context.Context, bucket string) (BucketUp
 	if !ok {
 		return BucketUpstreamItem{}, &adminapi.Error{Code: "not_found", Message: "not found"}
 	}
-	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy}, nil
+	status := u.Status
+	if status == "" {
+		status = BucketUpstreamStatusActive
+	}
+	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status}, nil
 }
 
 func (a *AdminAPI) HandleBucketUpstreamGet(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -545,7 +551,11 @@ func (a *AdminAPI) ListBucketUpstreams(_ context.Context) ([]BucketUpstreamItem,
 	st := a.store.snapshot()
 	out := make([]BucketUpstreamItem, 0, len(st.bucketUpstreams))
 	for _, u := range st.bucketUpstreams {
-		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy})
+		status := u.Status
+		if status == "" {
+			status = BucketUpstreamStatusActive
+		}
+		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status})
 	}
 	return out, nil
 }
@@ -568,6 +578,40 @@ func (a *AdminAPI) DeleteBucketUpstream(ctx context.Context, bucket string) erro
 
 func (a *AdminAPI) HandleBucketUpstreamDelete(w http.ResponseWriter, r *http.Request, bucket string) {
 	if err := a.DeleteBucketUpstream(r.Context(), bucket); err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type BucketUpstreamCutoverRequest struct {
+	Bucket string `json:"bucket"`
+}
+
+func (a *AdminAPI) CutoverBucketUpstream(ctx context.Context, bucket string) error {
+	if bucket == "" {
+		return &adminapi.Error{Code: "invalid", Message: "bucket required"}
+	}
+	if _, ok := a.store.LookupBucketUpstream(bucket); !ok {
+		return &adminapi.Error{Code: "not_found", Message: "not found"}
+	}
+	if err := a.proposer.ProposeBucketUpstreamCutover(ctx, bucket); err != nil {
+		var gateErr *compat.GateRejectError
+		if errors.As(err, &gateErr) {
+			return &adminapi.Error{Code: "conflict", Message: gateErr.PublicMessage()}
+		}
+		return &adminapi.Error{Code: "internal", Message: "propose cutover: " + err.Error()}
+	}
+	return nil
+}
+
+func (a *AdminAPI) HandleBucketUpstreamCutover(w http.ResponseWriter, r *http.Request) {
+	var req BucketUpstreamCutoverRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := a.CutoverBucketUpstream(r.Context(), req.Bucket); err != nil {
 		writeAdminError(w, err)
 		return
 	}

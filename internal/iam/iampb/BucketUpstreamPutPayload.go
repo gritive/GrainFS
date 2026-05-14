@@ -119,8 +119,16 @@ func (rcv *BucketUpstreamPutPayload) CreatedBy() []byte {
 	return nil
 }
 
+func (rcv *BucketUpstreamPutPayload) Status() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func BucketUpstreamPutPayloadStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(7)
 }
 func BucketUpstreamPutPayloadAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -142,6 +150,9 @@ func BucketUpstreamPutPayloadAddCreatedAtUnixNs(builder *flatbuffers.Builder, cr
 }
 func BucketUpstreamPutPayloadAddCreatedBy(builder *flatbuffers.Builder, createdBy flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(createdBy), 0)
+}
+func BucketUpstreamPutPayloadAddStatus(builder *flatbuffers.Builder, status flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(status), 0)
 }
 func BucketUpstreamPutPayloadEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

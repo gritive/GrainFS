@@ -24,6 +24,7 @@ type Proposer interface {
 	ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error
 	ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error
 	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
+	ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error
 }
 
 // Role is the 3-tier permission level for a (SA, Bucket) grant.
@@ -100,6 +101,13 @@ type Grant struct {
 	CreatedBy string // sa_id of creator
 }
 
+type BucketUpstreamStatus string
+
+const (
+	BucketUpstreamStatusActive  BucketUpstreamStatus = "active"
+	BucketUpstreamStatusCutover BucketUpstreamStatus = "cutover"
+)
+
 // BucketUpstream stores per-bucket pull-through upstream credentials. Created
 // and rotated through the admin UDS API; persisted via meta-FSM so all nodes
 // see the same record. SecretKey holds plaintext only in-memory after Apply;
@@ -113,6 +121,7 @@ type BucketUpstream struct {
 	SecretKeyEnc []byte // AES-256-GCM ciphertext, AAD = "bucket-upstream:"+bucket
 	CreatedAt    time.Time
 	CreatedBy    string // sa_id of admin that issued the put
+	Status       BucketUpstreamStatus
 }
 
 // RoleAllows reports whether `role` permits `action` on the target bucket.
