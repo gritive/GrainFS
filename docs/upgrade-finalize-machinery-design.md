@@ -122,7 +122,7 @@ unknown to N, and N silently ignores them, causing data loss on restore.
 
 ### Design
 
-New snapshots use a fixed binary envelope before the existing gzip JSON payload:
+New snapshots use a fixed binary envelope before a zstd-compressed JSON payload:
 
 | Field | Encoding |
 |-------|----------|
@@ -130,7 +130,7 @@ New snapshots use a fixed binary envelope before the existing gzip JSON payload:
 | min_reader_format | `uint32` big-endian |
 | writer_format | `uint32` big-endian |
 | written_at_unix_nano | `int64` big-endian |
-| payload | existing gzip JSON snapshot |
+| payload | zstd-compressed JSON snapshot |
 
 Compatibility is controlled by snapshot format integers, not GrainFS binary semver.
 The current writer and reader format are both `1`.
@@ -142,15 +142,15 @@ func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
     br := bufio.NewReader(r)
     prefix, err := br.Peek(2)
     if err != nil {
-        return nil, err
+        return nil, ErrUnsupportedSnapshotFormat
     }
     if bytes.Equal(prefix, []byte{0x1f, 0x8b}) {
-        return decodeSnapshotGzip(br) // legacy gzip-only snapshot
+        return nil, ErrUnsupportedSnapshotFormat
     }
 
     header, err := br.Peek(snapshotHeaderLen)
     if err != nil {
-        return nil, err
+        return nil, ErrUnsupportedSnapshotFormat
     }
     if !bytes.Equal(header[:8], snapshotMagic[:]) {
         return nil, ErrUnsupportedSnapshotFormat
@@ -160,7 +160,7 @@ func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
         return nil, ErrUnsupportedSnapshotFormat
     }
     br.Discard(snapshotHeaderLen)
-    return decodeSnapshotGzip(br)
+    return decodeSnapshotZstd(br)
 }
 ```
 
@@ -168,15 +168,16 @@ When `min_reader_format` is greater than the current reader format, restore fail
 `ErrUnsupportedSnapshotFormat` before any backend mutation. The admin restore API maps
 that error to `409 Conflict` with an operator-readable hint.
 
-Unknown envelopes are also rejected. Legacy snapshots remain readable because gzip-only
-files are detected by gzip magic before header parsing.
+Unknown envelopes are also rejected. Legacy gzip-only snapshots are detected by gzip
+magic before header parsing and rejected with `ErrUnsupportedSnapshotFormat`.
 
 ### Rollout
 
 The envelope is written starting from the first binary that includes this feature.
-Old binaries do not write the envelope, so current binaries keep reading gzip-only legacy
-snapshots. Old binaries presented with an envelope fail gzip parsing and return non-200
-from restore; this is intentional because downgrade restore is unsupported.
+Old binaries do not write the envelope, and current binaries intentionally reject
+gzip-only legacy snapshots after the zstd conversion. Old binaries presented with
+an envelope fail gzip parsing and return non-200 from restore; this is intentional
+because downgrade restore is unsupported.
 
 ---
 

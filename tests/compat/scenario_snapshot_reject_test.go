@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHeadSnapshotReject(t *testing.T) {
+func TestHeadSnapshotInvisibleToOlderBinary(t *testing.T) {
 	prev := prevBinary(t)
 	cur := getBinary()
 
@@ -57,7 +57,7 @@ func TestHeadSnapshotReject(t *testing.T) {
 
 	status, body := restoreSnapshotStatus(t, prevHTTP2, snapOut.Seq)
 	require.NotEqual(t, http.StatusOK, status, "old binary must not restore head snapshot body=%s", body)
-	require.True(t, strings.Contains(strings.ToLower(body), "restore") || strings.Contains(strings.ToLower(body), "gzip"), body)
+	require.Contains(t, strings.ToLower(body), "snapshot")
 }
 
 func restoreSnapshotStatus(t *testing.T, httpPort int, seq uint64) (int, string) {

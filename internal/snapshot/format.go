@@ -3,7 +3,6 @@ package snapshot
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Snapshot is the on-disk representation of a metadata snapshot.
@@ -63,15 +63,19 @@ func writeSnapshot(path string, snap *Snapshot) error {
 		return err
 	}
 
-	gz := gzip.NewWriter(f)
-	enc := json.NewEncoder(gz)
-	enc.SetIndent("", "")
-	if err := enc.Encode(snap); err != nil {
-		gz.Close()
+	zw, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
 		f.Close()
 		return err
 	}
-	if err := gz.Close(); err != nil {
+	enc := json.NewEncoder(zw)
+	enc.SetIndent("", "")
+	if err := enc.Encode(snap); err != nil {
+		zw.Close()
+		f.Close()
+		return err
+	}
+	if err := zw.Close(); err != nil {
 		f.Close()
 		return err
 	}
@@ -92,15 +96,15 @@ func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
 
 	prefix, err := br.Peek(2)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: short snapshot envelope", ErrUnsupportedSnapshotFormat)
 	}
 	if bytes.Equal(prefix, []byte{0x1f, 0x8b}) {
-		return decodeSnapshotGzip(br)
+		return nil, fmt.Errorf("%w: gzip snapshot payloads are no longer supported", ErrUnsupportedSnapshotFormat)
 	}
 
 	header, err := br.Peek(snapshotHeaderLen)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: short snapshot envelope", ErrUnsupportedSnapshotFormat)
 	}
 	if !bytes.Equal(header[:8], snapshotMagic[:]) {
 		return nil, fmt.Errorf("%w: unknown snapshot envelope", ErrUnsupportedSnapshotFormat)
@@ -114,16 +118,16 @@ func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
 	if _, err := br.Discard(snapshotHeaderLen); err != nil {
 		return nil, err
 	}
-	return decodeSnapshotGzip(br)
+	return decodeSnapshotZstd(br)
 }
 
-func decodeSnapshotGzip(r io.Reader) (*Snapshot, error) {
-	gz, err := gzip.NewReader(r)
+func decodeSnapshotZstd(r io.Reader) (*Snapshot, error) {
+	zr, err := zstd.NewReader(r)
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
-	data, err := io.ReadAll(gz)
+	defer zr.Close()
+	data, err := io.ReadAll(zr)
 	if err != nil {
 		return nil, err
 	}

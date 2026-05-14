@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.206.0] - 2026-05-15 — feat: write metadata snapshots with zstd
+
+### Added
+
+- **Snapshot zstd benchmark coverage** — snapshot compression benchmarks now compare gzip and zstd encode/decode behavior on representative snapshot payloads.
+
+### Changed
+
+- **Zstd metadata snapshots** — newly written metadata snapshots now keep the `GFSNAP01` envelope and store the JSON payload with zstd in `snapshot-<seq>.json.zst` files.
+- **Snapshot compatibility policy** — legacy `.json.gz` snapshot archives are now intentionally unsupported by restore flows after the zstd cutover.
+- **Rolling-upgrade docs** — compatibility docs now describe the zstd payload, `.json.zst` suffix, and older-binary suffix-level invisibility.
+
+### Fixed
+
+- **Legacy snapshot restore response** — direct restore of an existing `.json.gz` snapshot now returns an unsupported-format conflict instead of looking like a missing snapshot.
+- **Snapshot sequence safety** — upgraded nodes seed new snapshot sequence numbers from legacy `.json.gz` filenames as well as current `.json.zst` files, avoiding sequence reuse after upgrade.
+
+### Verification
+
+- `make test-unit`
+- `go test ./internal/snapshot -count=1`
+- `go test ./internal/server -run 'TestRestore(SnapshotUnsupportedFormat|LegacyGzipSnapshot)ReturnsConflict' -count=1`
+- `go test -tags compat ./tests/compat -run 'TestSnapshot(LegacyGzipRejectedByCurrent|HeadSnapshotInvisibleToOlderBinary)' -count=1`
+
 ## [0.0.205.1] - 2026-05-15 — fix: encrypted benchmark allocation hotspots
 
 ### Added
