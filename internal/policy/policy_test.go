@@ -194,3 +194,21 @@ func TestPrincipalUnmarshal_InvalidAWSField(t *testing.T) {
 	_, err := ParsePolicy([]byte(raw))
 	assert.Error(t, err)
 }
+
+func TestParsePolicy_InvalidEffect(t *testing.T) {
+	cases := []struct{ effect, name string }{
+		{"DENY", "uppercase"},
+		{"deny", "lowercase"},
+		{"ALLOW", "uppercase allow"},
+		{"allow", "lowercase allow"},
+		{"invalid", "arbitrary string"},
+		{"", "empty string"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"Version":"2012-10-17","Statement":[{"Effect":"` + tc.effect + `","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::b/*"]}]}`
+			_, err := ParsePolicy([]byte(raw))
+			assert.Error(t, err, "effect %q should be rejected", tc.effect)
+		})
+	}
+}

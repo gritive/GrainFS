@@ -325,7 +325,9 @@ func TestAdminGetBucketPolicy(t *testing.T) {
 }
 
 func TestAdminGetBucketPolicy_Unsupported(t *testing.T) {
-	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
 	_, err := admin.AdminGetBucketPolicy(context.Background(), d, "my-bucket")
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
@@ -374,7 +376,9 @@ func TestAdminGetBucketPolicy_InternalForbidden(t *testing.T) {
 }
 
 func TestAdminSetBucketPolicy_Unsupported(t *testing.T) {
-	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
 	err := admin.AdminSetBucketPolicy(context.Background(), d, "my-bucket",
 		admin.BucketPolicySetReq{Policy: json.RawMessage(`{}`)})
 	var ae *adminapi.Error
@@ -392,7 +396,9 @@ func TestAdminSetBucketPolicy_InternalForbidden(t *testing.T) {
 }
 
 func TestAdminDeleteBucketPolicy_Unsupported(t *testing.T) {
-	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
 	err := admin.AdminDeleteBucketPolicy(context.Background(), d, "my-bucket")
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
@@ -439,7 +445,9 @@ func TestAdminGetBucketVersioning(t *testing.T) {
 }
 
 func TestAdminGetBucketVersioning_Unsupported(t *testing.T) {
-	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
 	_, err := admin.AdminGetBucketVersioning(context.Background(), d, "my-bucket")
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
@@ -457,7 +465,9 @@ func TestAdminSetBucketVersioning_Enabled(t *testing.T) {
 }
 
 func TestAdminSetBucketVersioning_InvalidStatus(t *testing.T) {
-	d := &admin.Deps{Buckets: newFakeBucketOpsWithVersioning()}
+	fake := newFakeBucketOpsWithVersioning()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
 	err := admin.AdminSetBucketVersioning(context.Background(), d, "my-bucket", admin.BucketVersioningSetReq{Status: "BadValue"})
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
@@ -474,7 +484,9 @@ func TestAdminGetBucketVersioning_InternalForbidden(t *testing.T) {
 
 func TestAdminSetBucketVersioning_Unsupported(t *testing.T) {
 	// fakeBucketOps.SetBucketVersioning는 UnsupportedOperationError를 반환한다.
-	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	fake := newFakeBucketOps()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
 	err := admin.AdminSetBucketVersioning(context.Background(), d, "my-bucket",
 		admin.BucketVersioningSetReq{Status: "Enabled"})
 	var ae *adminapi.Error
@@ -500,4 +512,86 @@ func TestAdminGetBucket_VersioningEnabled(t *testing.T) {
 	info, err := admin.AdminGetBucket(context.Background(), d, "my-bucket")
 	require.NoError(t, err)
 	assert.Equal(t, "Enabled", info.Versioning)
+}
+
+// fakePolicyErrBucketNotFound는 GetBucketPolicy가 ErrBucketNotFound를 반환하는
+// LocalBackend 동작을 시뮬레이션한다. policy key가 없을 때 LocalBackend가 이 에러를 반환한다.
+type fakePolicyErrBucketNotFound struct {
+	*fakeBucketOps
+}
+
+func (f *fakePolicyErrBucketNotFound) GetBucketPolicy(bucket string) ([]byte, error) {
+	return nil, storage.ErrBucketNotFound
+}
+func (f *fakePolicyErrBucketNotFound) SetBucketPolicy(bucket string, policyJSON []byte) error {
+	return storage.UnsupportedOperationError{Op: "SetBucketPolicy", Reason: storage.UnsupportedReasonNoAdapter}
+}
+func (f *fakePolicyErrBucketNotFound) DeleteBucketPolicy(bucket string) error {
+	return storage.UnsupportedOperationError{Op: "DeleteBucketPolicy", Reason: storage.UnsupportedReasonNoAdapter}
+}
+
+func TestAdminGetBucketPolicy_BucketNotFound(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	_, err := admin.AdminGetBucketPolicy(context.Background(), d, "ghost")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminSetBucketPolicy_BucketNotFound(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminSetBucketPolicy(context.Background(), d, "ghost",
+		admin.BucketPolicySetReq{Policy: json.RawMessage(`{"Version":"2012-10-17","Statement":[]}`)})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminDeleteBucketPolicy_BucketNotFound(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminDeleteBucketPolicy(context.Background(), d, "ghost")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminGetBucketVersioning_BucketNotFound(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	_, err := admin.AdminGetBucketVersioning(context.Background(), d, "ghost")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminSetBucketVersioning_BucketNotFound(t *testing.T) {
+	d := &admin.Deps{Buckets: newFakeBucketOps()}
+	err := admin.AdminSetBucketVersioning(context.Background(), d, "ghost",
+		admin.BucketVersioningSetReq{Status: "Enabled"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
+}
+
+func TestAdminSetBucketPolicy_InvalidPolicyStructure(t *testing.T) {
+	// JSON이지만 object가 아닌 string을 전달하면 "invalid"를 반환해야 한다.
+	fake := newFakeBucketOpsWithPolicy()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
+	err := admin.AdminSetBucketPolicy(context.Background(), d, "my-bucket",
+		admin.BucketPolicySetReq{Policy: json.RawMessage(`"not-a-policy-object"`)})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "invalid", ae.Code)
+}
+
+func TestAdminGetBucketPolicy_StorageErrBucketNotFound(t *testing.T) {
+	// LocalBackend가 policy key 없음을 ErrBucketNotFound로 반환할 때 500이 아닌 404를 반환해야 한다.
+	base := newFakeBucketOps()
+	base.buckets["my-bucket"] = true
+	fake := &fakePolicyErrBucketNotFound{fakeBucketOps: base}
+	d := &admin.Deps{Buckets: fake}
+	_, err := admin.AdminGetBucketPolicy(context.Background(), d, "my-bucket")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "not_found", ae.Code)
 }
