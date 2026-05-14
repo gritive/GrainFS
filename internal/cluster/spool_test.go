@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -87,6 +88,36 @@ func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, rc.Close())
 	require.Equal(t, payload, got)
+}
+
+func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testing.T) {
+	enc := newClusterTestEncryptor(t)
+	payload := append(bytes.Repeat([]byte("a"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), spoolCopyBufferSize)...)
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", enc, "cluster-spool:stream")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	f, err := os.OpenFile(sp.Path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	var hdr [8]byte
+	_, err = f.ReadAt(hdr[:], 0)
+	require.NoError(t, err)
+	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
+	secondBodyOffset := int64(8 + int(firstBlobLen) + 8)
+	_, err = f.Seek(secondBodyOffset, io.SeekStart)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0x00})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	defer rc.Close()
+	buf := make([]byte, 32)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
 }
 
 func TestSpoolECShardsReconstructsOriginal(t *testing.T) {

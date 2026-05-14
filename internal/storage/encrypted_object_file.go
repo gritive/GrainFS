@@ -66,14 +66,90 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 }
 
 func openEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, size int64) (io.ReadCloser, error) {
-	plain, err := readEncryptedObjectFile(path, enc, domain)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(plain)) > size {
-		plain = plain[:size]
+
+	magic := make([]byte, len(encryptedObjectMagic))
+	if _, err := io.ReadFull(f, magic); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("read encrypted object magic: %w", err)
 	}
-	return io.NopCloser(bytes.NewReader(plain)), nil
+	if string(magic) != encryptedObjectMagic {
+		_ = f.Close()
+		return nil, fmt.Errorf("invalid encrypted object magic")
+	}
+	return &encryptedObjectReader{
+		f:         f,
+		enc:       enc,
+		domain:    domain,
+		remaining: size,
+	}, nil
+}
+
+type encryptedObjectReader struct {
+	f         *os.File
+	enc       *encrypt.Encryptor
+	domain    string
+	chunk     uint64
+	remaining int64
+	buf       []byte
+	err       error
+}
+
+func (r *encryptedObjectReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for len(r.buf) == 0 && r.err == nil {
+		r.err = r.loadNext()
+	}
+	if len(r.buf) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.buf)
+	clear(r.buf[:n])
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+func (r *encryptedObjectReader) Close() error {
+	if len(r.buf) > 0 {
+		clear(r.buf)
+	}
+	return r.f.Close()
+}
+
+func (r *encryptedObjectReader) loadNext() error {
+	if r.remaining <= 0 {
+		return io.EOF
+	}
+	plainLen, sealed, err := readEncryptedObjectRecord(r.f)
+	if err != nil {
+		if err == io.EOF {
+			return io.EOF
+		}
+		return err
+	}
+	plain, err := r.enc.OpenValue(encryptedChunkAAD(r.domain, r.chunk), sealed)
+	clear(sealed)
+	if err != nil {
+		return fmt.Errorf("decrypt object chunk %d: %w", r.chunk, err)
+	}
+	if len(plain) != int(plainLen) {
+		clear(plain)
+		return fmt.Errorf("encrypted object chunk %d length mismatch", r.chunk)
+	}
+	if int64(len(plain)) > r.remaining {
+		keep := int(r.remaining)
+		clear(plain[keep:])
+		plain = plain[:keep]
+	}
+	r.remaining -= int64(len(plain))
+	r.chunk++
+	r.buf = plain
+	return nil
 }
 
 func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, size int64, offset int64, buf []byte) (int, error) {
@@ -83,18 +159,86 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 	if offset >= size {
 		return 0, io.EOF
 	}
-	plain, err := readEncryptedObjectFile(path, enc, domain)
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	if int64(len(plain)) > size {
-		plain = plain[:size]
+	defer f.Close()
+
+	magic := make([]byte, len(encryptedObjectMagic))
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return 0, fmt.Errorf("read encrypted object magic: %w", err)
 	}
-	n := copy(buf, plain[offset:])
-	if n < len(buf) {
-		return n, io.EOF
+	if string(magic) != encryptedObjectMagic {
+		return 0, fmt.Errorf("invalid encrypted object magic")
 	}
-	return n, nil
+
+	var (
+		copied   int
+		chunk    uint64
+		plainPos int64
+	)
+	for copied < len(buf) && plainPos < size {
+		var hdr [8]byte
+		if _, err := io.ReadFull(f, hdr[:]); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return copied, fmt.Errorf("read encrypted object record header: %w", err)
+		}
+		plainLen := binary.BigEndian.Uint32(hdr[0:4])
+		blobLen := binary.BigEndian.Uint32(hdr[4:8])
+		if blobLen > 256*1024*1024 {
+			return copied, fmt.Errorf("encrypted object record too large")
+		}
+		chunkStart := plainPos
+		chunkEnd := plainPos + int64(plainLen)
+		if chunkEnd > size {
+			chunkEnd = size
+		}
+
+		needEnd := offset + int64(len(buf))
+		if chunkEnd <= offset || chunkStart >= needEnd {
+			if _, err := io.CopyN(io.Discard, f, int64(blobLen)); err != nil {
+				return copied, fmt.Errorf("skip encrypted object record body: %w", err)
+			}
+			plainPos += int64(plainLen)
+			chunk++
+			continue
+		}
+
+		sealed := make([]byte, blobLen)
+		if _, err := io.ReadFull(f, sealed); err != nil {
+			return copied, fmt.Errorf("read encrypted object record body: %w", err)
+		}
+		plain, err := enc.OpenValue(encryptedChunkAAD(domain, chunk), sealed)
+		clear(sealed)
+		if err != nil {
+			return copied, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
+		}
+		if len(plain) != int(plainLen) {
+			clear(plain)
+			return copied, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
+		}
+		readStart := offset
+		if readStart < chunkStart {
+			readStart = chunkStart
+		}
+		readEnd := needEnd
+		if readEnd > chunkEnd {
+			readEnd = chunkEnd
+		}
+		srcStart := int(readStart - chunkStart)
+		srcEnd := int(readEnd - chunkStart)
+		copied += copy(buf[copied:], plain[srcStart:srcEnd])
+		clear(plain)
+		plainPos += int64(plainLen)
+		chunk++
+	}
+	if copied < len(buf) {
+		return copied, io.EOF
+	}
+	return copied, nil
 }
 
 func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, offset uint64, data []byte, currentSize int64) (int64, string, error) {

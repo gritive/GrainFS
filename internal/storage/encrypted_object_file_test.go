@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -72,4 +73,67 @@ func TestEncryptedObjectFileReadAtWriteAtAndTruncate(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, "ABCDE---", string(got))
+}
+
+func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	domain := "local-object:physical-readat"
+	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
+
+	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	require.NoError(t, err)
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	var hdr [8]byte
+	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	require.NoError(t, err)
+	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
+	// Corrupt the second encrypted record body. A ReadAt contained in the first
+	// chunk should not need to authenticate or decrypt this record.
+	secondBodyOffset := int64(len(encryptedObjectMagic) + 8 + int(firstBlobLen) + 8)
+	_, err = f.Seek(secondBodyOffset, io.SeekStart)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0x00})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	buf := make([]byte, 32)
+	n, err := readAtEncryptedObjectFile(path, enc, domain, size, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
+}
+
+func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	domain := "local-object:physical-stream"
+	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
+
+	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	require.NoError(t, err)
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	var hdr [8]byte
+	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	require.NoError(t, err)
+	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
+	secondBodyOffset := int64(len(encryptedObjectMagic) + 8 + int(firstBlobLen) + 8)
+	_, err = f.Seek(secondBodyOffset, io.SeekStart)
+	require.NoError(t, err)
+	_, err = f.Write([]byte{0x00})
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	rc, err := openEncryptedObjectFile(path, enc, domain, size)
+	require.NoError(t, err)
+	defer rc.Close()
+	buf := make([]byte, 32)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
 }

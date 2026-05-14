@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/binary"
@@ -252,24 +251,56 @@ func openSpoolEncryptedRecordFile(path string, enc *encrypt.Encryptor, domain st
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	return &encryptedSpoolRecordReader{
+		f:      f,
+		enc:    enc,
+		domain: domain,
+	}, nil
+}
 
-	var out bytes.Buffer
-	for record := uint64(0); ; record++ {
-		plain, done, err := readSpoolEncryptedRecord(f, enc, domain, record)
-		if err != nil {
-			return nil, err
-		}
-		if done {
-			break
-		}
-		if _, err := out.Write(plain); err != nil {
-			clear(plain)
-			return nil, err
-		}
-		clear(plain)
+type encryptedSpoolRecordReader struct {
+	f      *os.File
+	enc    *encrypt.Encryptor
+	domain string
+	record uint64
+	buf    []byte
+	err    error
+}
+
+func (r *encryptedSpoolRecordReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
 	}
-	return io.NopCloser(bytes.NewReader(out.Bytes())), nil
+	for len(r.buf) == 0 && r.err == nil {
+		r.err = r.loadNext()
+	}
+	if len(r.buf) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.buf)
+	clear(r.buf[:n])
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+func (r *encryptedSpoolRecordReader) Close() error {
+	if len(r.buf) > 0 {
+		clear(r.buf)
+	}
+	return r.f.Close()
+}
+
+func (r *encryptedSpoolRecordReader) loadNext() error {
+	plain, done, err := readSpoolEncryptedRecord(r.f, r.enc, r.domain, r.record)
+	if err != nil {
+		return err
+	}
+	if done {
+		return io.EOF
+	}
+	r.record++
+	r.buf = plain
+	return nil
 }
 
 func readSpoolEncryptedRecord(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64) ([]byte, bool, error) {
