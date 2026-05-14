@@ -54,6 +54,25 @@ func TestStateManager_InvalidateForBucket(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestObjectLockKey_IsolatesBuckets(t *testing.T) {
+	sm := NewStateManager()
+	release := sm.LockPath(objectLockKey("bucket-a", "same/key"))
+	defer release()
+
+	acquired := make(chan struct{})
+	go func() {
+		releaseOther := sm.LockPath(objectLockKey("bucket-b", "same/key"))
+		releaseOther()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("same object key in a different bucket must not share the write lock")
+	}
+}
+
 func TestStateManager_InvalidateFH(t *testing.T) {
 	sm := NewStateManager()
 

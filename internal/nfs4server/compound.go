@@ -1025,7 +1025,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 
 	// Serialise all writes to the same path. Without this, an offset=0
 	// PutObject can run concurrently with an offset>0 RMW, clobbering data.
-	release := d.state.LockPath(key)
+	release := d.state.LockPath(objectLockKey(bucket, key))
 	defer release()
 
 	if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
@@ -1205,7 +1205,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 	// FATTR4_SIZE (word0 bit 4)
 	if bm0&(1<<4) != 0 {
 		size, _ := ar.ReadUint64()
-		release := d.state.LockPath(key)
+		release := d.state.LockPath(objectLockKey(bucket, key))
 		defer release()
 		if tr, ok := truncatableBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 			if err := tr.Truncate(context.Background(), bucket, key, int64(size)); err != nil {

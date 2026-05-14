@@ -111,17 +111,29 @@ echo "Total elapsed: $((end_t - start_t))s" | tee -a "$SUMMARY"
 
 echo "" | tee -a "$SUMMARY"
 echo "=== Per-bucket throughput (KB/s) ===" | tee -a "$SUMMARY"
+total_read_kb=0
+total_write_kb=0
 for i in $(seq 1 "$NUM_BUCKETS"); do
   log="$PROFILE_DIR/fio_b$i.log"
   if command -v jq >/dev/null 2>&1; then
     read_kb=$(jq -r '.jobs[0].read.bw // "?"' "$log" 2>/dev/null || echo "?")
     write_kb=$(jq -r '.jobs[0].write.bw // "?"' "$log" 2>/dev/null || echo "?")
+    if [[ "$read_kb" =~ ^[0-9]+$ ]]; then
+      total_read_kb=$((total_read_kb + read_kb))
+    fi
+    if [[ "$write_kb" =~ ^[0-9]+$ ]]; then
+      total_write_kb=$((total_write_kb + write_kb))
+    fi
   else
     read_kb="? (jq missing)"
     write_kb="?"
   fi
   echo "  bench-$i: read=${read_kb}KB/s write=${write_kb}KB/s" | tee -a "$SUMMARY"
 done
+avg_read_kb=$((total_read_kb / NUM_BUCKETS))
+avg_write_kb=$((total_write_kb / NUM_BUCKETS))
+echo "  total: read=${total_read_kb}KB/s write=${total_write_kb}KB/s" | tee -a "$SUMMARY"
+echo "  average_per_bucket: read=${avg_read_kb}KB/s write=${avg_write_kb}KB/s" | tee -a "$SUMMARY"
 
 echo "" | tee -a "$SUMMARY"
 echo "=== Pseudo-root READDIR latency (${READDIR_SAMPLES} samples, ms) ===" | tee -a "$SUMMARY"

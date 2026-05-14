@@ -21,3 +21,7 @@ func extractBucketAndKey(p string) (bucket, key string) {
 	}
 	return p[:slash], p[slash+1:]
 }
+
+func objectLockKey(bucket, key string) string {
+	return bucket + "\x00" + key
+}
