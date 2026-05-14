@@ -93,6 +93,18 @@ func AdminGetBucket(ctx context.Context, d *Deps, name string) (BucketInfo, erro
 	return info, nil
 }
 
+// checkBucketExists는 bucket이 존재하지 않으면 not_found, 그 외 에러는 internal을 반환한다.
+// IsInternalBucket 체크 이후에 호출해야 한다.
+func checkBucketExists(ctx context.Context, d *Deps, name string) error {
+	if err := d.Buckets.HeadBucket(ctx, name); err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			return NewNotFound("bucket not found")
+		}
+		return NewInternal("head bucket: " + err.Error())
+	}
+	return nil
+}
+
 // AdminDeleteBucket deletes a bucket. If force is true, all objects are
 // removed first; otherwise the bucket must be empty.
 func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) error {
@@ -164,10 +176,16 @@ func AdminGetBucketPolicy(ctx context.Context, d *Deps, name string) (BucketPoli
 	if storage.IsInternalBucket(name) {
 		return BucketPolicyResp{}, NewForbidden("cannot access internal bucket")
 	}
+	if err := checkBucketExists(ctx, d, name); err != nil {
+		return BucketPolicyResp{}, err
+	}
 	data, err := d.Buckets.GetBucketPolicy(name)
 	if err != nil {
 		if errors.Is(err, storage.ErrUnsupportedOperation) {
 			return BucketPolicyResp{}, NewUnsupported("bucket policy not supported in this configuration", nil)
+		}
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			return BucketPolicyResp{}, NewNotFound("no bucket policy set")
 		}
 		return BucketPolicyResp{}, NewInternal("get bucket policy: " + err.Error())
 	}
@@ -180,6 +198,9 @@ func AdminGetBucketPolicy(ctx context.Context, d *Deps, name string) (BucketPoli
 func AdminSetBucketPolicy(ctx context.Context, d *Deps, name string, req BucketPolicySetReq) error {
 	if storage.IsInternalBucket(name) {
 		return NewForbidden("cannot access internal bucket")
+	}
+	if err := checkBucketExists(ctx, d, name); err != nil {
+		return err
 	}
 	if err := d.Buckets.SetBucketPolicy(name, []byte(req.Policy)); err != nil {
 		if errors.Is(err, storage.ErrUnsupportedOperation) {
@@ -194,6 +215,9 @@ func AdminDeleteBucketPolicy(ctx context.Context, d *Deps, name string) error {
 	if storage.IsInternalBucket(name) {
 		return NewForbidden("cannot access internal bucket")
 	}
+	if err := checkBucketExists(ctx, d, name); err != nil {
+		return err
+	}
 	if err := d.Buckets.DeleteBucketPolicy(name); err != nil {
 		if errors.Is(err, storage.ErrUnsupportedOperation) {
 			return NewUnsupported("bucket policy not supported in this configuration", nil)
@@ -206,6 +230,9 @@ func AdminDeleteBucketPolicy(ctx context.Context, d *Deps, name string) error {
 func AdminGetBucketVersioning(ctx context.Context, d *Deps, name string) (BucketVersioningResp, error) {
 	if storage.IsInternalBucket(name) {
 		return BucketVersioningResp{}, NewForbidden("cannot access internal bucket")
+	}
+	if err := checkBucketExists(ctx, d, name); err != nil {
+		return BucketVersioningResp{}, err
 	}
 	status, err := d.Buckets.GetBucketVersioning(name)
 	if err != nil {
@@ -220,6 +247,9 @@ func AdminGetBucketVersioning(ctx context.Context, d *Deps, name string) (Bucket
 func AdminSetBucketVersioning(ctx context.Context, d *Deps, name string, req BucketVersioningSetReq) error {
 	if storage.IsInternalBucket(name) {
 		return NewForbidden("cannot access internal bucket")
+	}
+	if err := checkBucketExists(ctx, d, name); err != nil {
+		return err
 	}
 	if req.Status != "Enabled" && req.Status != "Suspended" {
 		return NewInvalid(`status must be "Enabled" or "Suspended"`)
