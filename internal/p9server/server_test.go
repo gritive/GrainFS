@@ -2,6 +2,7 @@ package p9server
 
 import (
 	"context"
+	"io"
 	"strings"
 	"syscall"
 	"testing"
@@ -98,6 +99,21 @@ func TestBucketFile_Walk_ExistingKey_ReturnsObjectFile(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestBucketFile_Walk_NestedKeyReturnsObjectFile(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "obj/000001.bin", strings.NewReader("hi"), "application/octet-stream")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	qids, file, err := bf.Walk([]string{"obj", "000001.bin"})
+	require.NoError(t, err)
+	require.Len(t, qids, 2)
+	_, ok := file.(*objectFile)
+	require.True(t, ok)
+}
+
 func TestBucketFile_Readdir_ListsObjects(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
@@ -116,6 +132,59 @@ func TestBucketFile_Readdir_ListsObjects(t *testing.T) {
 	}
 	require.Contains(t, names, "a.txt")
 	require.Contains(t, names, "b.txt")
+}
+
+func TestBucketFile_Readdir_ListsSyntheticDirectories(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "obj/000001.bin", strings.NewReader("x"), "application/octet-stream")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Len(t, dirents, 1)
+	require.Equal(t, "obj", dirents[0].Name)
+	require.Equal(t, p9.TypeDir, dirents[0].Type)
+
+	qids, file, err := bf.Walk([]string{"obj"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	child, ok := file.(*bucketFile)
+	require.True(t, ok)
+
+	dirents, err = child.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Len(t, dirents, 1)
+	require.Equal(t, "000001.bin", dirents[0].Name)
+	require.Equal(t, p9.TypeRegular, dirents[0].Type)
+}
+
+func TestBucketFile_Readdir_StopsAfterCount(t *testing.T) {
+	backend := &countingWalkBackend{objects: make([]*storage.Object, 1000)}
+	for i := range backend.objects {
+		backend.objects[i] = &storage.Object{Key: fmt.Sprintf("obj-%04d", i)}
+	}
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 10)
+	require.NoError(t, err)
+	require.Len(t, dirents, 10)
+	require.Equal(t, 10, backend.walked)
+}
+
+func TestBucketFile_Readdir_UsesKeyWalker(t *testing.T) {
+	backend := &keyWalkingBackend{
+		keys: []string{"a.txt", "b.txt"},
+	}
+
+	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 10)
+	require.NoError(t, err)
+	require.Len(t, dirents, 2)
+	require.Equal(t, 2, backend.keysWalked)
+	require.Equal(t, 0, backend.objectsWalked)
 }
 
 // Task 4: objectFile tests
@@ -252,11 +321,15 @@ func BenchmarkObjectFile_ReadAt(b *testing.B) {
 // BenchmarkBucketFile_Readdir measures directory listing cost at various scales.
 func BenchmarkBucketFile_Readdir(b *testing.B) {
 	cases := []struct {
-		name string
-		n    int
+		name  string
+		n     int
+		count uint32
+		key   func(int) string
 	}{
-		{"100objs", 100},
-		{"1000objs", 1000},
+		{"100objs", 100, 100, func(i int) string { return fmt.Sprintf("obj-%06d.bin", i) }},
+		{"1000objs", 1000, 1000, func(i int) string { return fmt.Sprintf("obj-%06d.bin", i) }},
+		{"1000objs_page100", 1000, 100, func(i int) string { return fmt.Sprintf("obj-%06d.bin", i) }},
+		{"1000nested_one_dir", 1000, 100, func(i int) string { return fmt.Sprintf("obj/%06d.bin", i) }},
 	}
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
@@ -265,14 +338,14 @@ func BenchmarkBucketFile_Readdir(b *testing.B) {
 			require.NoError(b, backend.CreateBucket(context.Background(), "bench"))
 			for i := range tc.n {
 				_, err := backend.PutObject(context.Background(), "bench",
-					fmt.Sprintf("obj/%06d.bin", i), strings.NewReader("x"), "application/octet-stream")
+					tc.key(i), strings.NewReader("x"), "application/octet-stream")
 				require.NoError(b, err)
 			}
 			bf := &bucketFile{backend: backend, bucket: "bench"}
 			b.ResetTimer()
 			b.ReportAllocs()
 			for b.Loop() {
-				_, _ = bf.Readdir(0, uint32(tc.n))
+				_, _ = bf.Readdir(0, tc.count)
 			}
 		})
 	}
@@ -289,4 +362,79 @@ func BenchmarkRootFile_Walk_Bucket(b *testing.B) {
 			_ = file.Close()
 		}
 	}
+}
+
+type countingWalkBackend struct {
+	objects []*storage.Object
+	walked  int
+}
+
+func (b *countingWalkBackend) CreateBucket(context.Context, string) error { return nil }
+func (b *countingWalkBackend) HeadBucket(context.Context, string) error   { return nil }
+func (b *countingWalkBackend) DeleteBucket(context.Context, string) error { return nil }
+func (b *countingWalkBackend) ForceDeleteBucket(context.Context, string) error {
+	return nil
+}
+func (b *countingWalkBackend) ListBuckets(context.Context) ([]string, error) { return nil, nil }
+func (b *countingWalkBackend) PutObject(context.Context, string, string, io.Reader, string) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	return nil, nil, nil
+}
+func (b *countingWalkBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) DeleteObject(context.Context, string, string) error { return nil }
+func (b *countingWalkBackend) ListObjects(context.Context, string, string, int) ([]*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) WalkObjects(_ context.Context, _, _ string, fn func(*storage.Object) error) error {
+	for _, obj := range b.objects {
+		b.walked++
+		if err := fn(obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (b *countingWalkBackend) CreateMultipartUpload(context.Context, string, string, string) (*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*storage.Part, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) CompleteMultipartUpload(context.Context, string, string, string, []storage.Part) (*storage.Object, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) AbortMultipartUpload(context.Context, string, string, string) error {
+	return nil
+}
+func (b *countingWalkBackend) ListMultipartUploads(context.Context, string, string, int) ([]*storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (b *countingWalkBackend) ListParts(context.Context, string, string, string, int) ([]storage.Part, error) {
+	return nil, nil
+}
+
+type keyWalkingBackend struct {
+	countingWalkBackend
+	keys          []string
+	keysWalked    int
+	objectsWalked int
+}
+
+func (b *keyWalkingBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	b.objectsWalked++
+	return b.countingWalkBackend.WalkObjects(ctx, bucket, prefix, fn)
+}
+
+func (b *keyWalkingBackend) WalkObjectKeys(_ context.Context, _, _ string, fn func(string) error) error {
+	for _, key := range b.keys {
+		b.keysWalked++
+		if err := fn(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }

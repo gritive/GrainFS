@@ -2,7 +2,6 @@ package p9server
 
 import (
 	"context"
-	"hash/fnv"
 	"syscall"
 
 	"github.com/hugelgupf/p9/p9"
@@ -51,7 +50,7 @@ func (f *rootFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
 	if err != nil {
 		return nil, syscall.EIO
 	}
-	var out p9.Dirents
+	out := make(p9.Dirents, 0, direntCap(count))
 	for i, name := range buckets {
 		if uint64(i) < offset {
 			continue
@@ -79,12 +78,20 @@ func (f *rootFile) StatFS() (p9.FSStat, error) {
 
 // qidPath computes a stable uint64 QID path from path components.
 func qidPath(parts ...string) uint64 {
-	h := fnv.New64a()
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
 	for i, p := range parts {
 		if i > 0 {
-			h.Write([]byte{':'})
+			h ^= ':'
+			h *= prime64
 		}
-		h.Write([]byte(p))
+		for j := 0; j < len(p); j++ {
+			h ^= uint64(p[j])
+			h *= prime64
+		}
 	}
-	return h.Sum64()
+	return h
 }

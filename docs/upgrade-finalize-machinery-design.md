@@ -1,0 +1,214 @@
+# Rolling Upgrade Slice 4 — Finalize Machinery Design
+
+> **Status:** Design document (pre-implementation)
+> **Parent:** Slice 1 shipped CI compat lane (`tests/compat/`)
+> **Scope:** finalize command, StateHash FSM divergence detection, snapshot version headers
+
+## Motivation
+
+Slice 1 ships the compat test lane and a forward-read/mixed-cluster safety net.
+Slice 4 closes the remaining gaps needed for production-grade rolling upgrades:
+
+1. **`upgrade finalize` command** — operator-initiated gate that confirms all nodes are on N+1
+2. **StateHash** — Raft FSM state fingerprint for divergence detection (Scenario 4)
+3. **Snapshot version header** — prevents older binaries from silently restoring incompatible snapshots (Scenario 7)
+4. **Drain/rollback procedure** — documented runbook for partial upgrade rollback
+
+---
+
+## Feature 1: `upgrade finalize` Command
+
+### Problem
+
+After a rolling upgrade completes, there is no operator-visible signal that all nodes have
+successfully upgraded and the cluster is "clean". Operators must check individually.
+
+### Design
+
+Add a new CLI subcommand `grainfs upgrade finalize` that:
+
+1. Contacts every peer via the admin API to query its binary version
+2. Asserts all nodes report the same minor version (`0.0.X.*`)
+3. If unanimous: writes a `ClusterVersionFinalized` Raft log entry (no-op FSM action,
+   but visible in audit log)
+4. Returns 0 on success, non-zero with a detailed error on failure
+
+```
+$ grainfs upgrade finalize --data ./data --endpoint http://127.0.0.1:9000
+Checking 3 nodes...
+  n1: 0.0.189.0 ✓
+  n2: 0.0.189.0 ✓
+  n3: 0.0.189.0 ✓
+Upgrade finalized at version 0.0.189.0
+```
+
+### Admin API additions needed
+
+`GET /admin/version` — returns `{"version":"0.0.189.0","node_id":"n1"}` (admin UDS only).
+
+### Raft log entry
+
+```go
+// FinalizeMigration records that all nodes have converged to the same version.
+// It is a no-op from the FSM's perspective but creates an audit trail.
+type FinalizeMigration struct {
+    Version string
+    At      time.Time
+}
+```
+
+### Rollout gates (future)
+
+`finalize` can optionally reject if any node reports an error or lagging Raft log.
+A `--min-apply-lag 0` flag would enforce this.
+
+---
+
+## Feature 2: StateHash — FSM Divergence Detection (Scenario 4)
+
+### Problem
+
+If two nodes apply the same Raft entries but produce different FSM states (e.g., due to
+non-deterministic map iteration), silent divergence goes undetected until a read diverges.
+
+### Design
+
+After each snapshot installation and at regular heartbeat intervals, each node computes
+a `StateHash` of its FSM state and gossips it via Raft heartbeat extensions.
+
+#### Hash computation
+
+The `MetaFSM` exposes a `StateHash() (string, error)` method:
+
+```go
+func (f *MetaFSM) StateHash() (string, error) {
+    h := sha256.New()
+    // Sort-then-hash each sub-state:
+    if err := hashBuckets(h, f.buckets); err != nil { return "", err }
+    if err := hashObjects(h, f.objectLatest); err != nil { return "", err }
+    if err := hashIAM(h, f.iamStore); err != nil { return "", err }
+    // ... other stable sub-states
+    return hex.EncodeToString(h.Sum(nil)), nil
+}
+```
+
+Each `hash*` function iterates its keys in sorted order to ensure determinism.
+
+#### Why deferred from Slice 1
+
+- `MetaFSM` fields (`buckets`, `objectLatest`, etc.) use `map[string]T` which requires
+  explicit sorted iteration — easy to miss a field and produce non-deterministic hashes.
+- Some fields (e.g. `activePlan`, `loadSnapshot`) are ephemeral and must be excluded.
+- Requires a complete inventory of "stable" vs "ephemeral" FSM fields first.
+- A bad hash implementation would produce false positives, disrupting healthy clusters.
+
+#### Detection + alerting
+
+When a node detects a StateHash mismatch via gossip:
+1. Logs `WARN fsm_divergence node_id=X expected=<hash> got=<hash>`
+2. Emits a `grainfs_fsm_divergence_total` Prometheus counter
+3. Does NOT self-fence (would cause cascading failures)
+4. Operator must investigate and potentially do a full snapshot restore
+
+---
+
+## Feature 3: Snapshot Version Header
+
+### Problem
+
+Scenario 7 (`TestHeadSnapshotReject`) is currently stubbed. The risk: an N+1 snapshot
+contains fields unknown to N, and N silently ignores them, causing data loss on restore.
+
+### Design
+
+Add a `SnapshotHeader` FlatBuffers table prepended to every snapshot blob:
+
+```fbs
+table SnapshotHeader {
+    min_compatible_version: uint32;  // minimum binary minor version that can restore this
+    written_by_version: string;      // e.g. "0.0.189.0"
+    written_at: int64;               // unix nanos
+}
+```
+
+Restore path:
+
+```go
+func (m *Manager) Restore(seq uint64) error {
+    hdr, err := readSnapshotHeader(seq)
+    if err != nil { return err }
+    cur := currentMinorVersion()
+    if cur < hdr.MinCompatibleVersion {
+        return fmt.Errorf("snapshot requires binary >= 0.0.%d.0 (have 0.0.%d.0)",
+            hdr.MinCompatibleVersion, cur)
+    }
+    // ... proceed with restore
+}
+```
+
+When `min_compatible_version` is set in the header, an older binary will refuse to restore
+with a clear error instead of silently corrupting state.
+
+### Rollout
+
+The header is written starting from the first binary that includes this feature.
+Old binaries (pre-feature) don't write the header, so they can still be restored by
+any binary that handles the "missing header" case gracefully (treat as `min_compatible_version = 0`).
+
+---
+
+## Feature 4: Drain/Rollback Procedure
+
+### Problem
+
+If an upgrade is partially complete (e.g., 2 of 3 nodes upgraded) and a critical bug is
+discovered in the new binary, the operator needs a safe rollback path.
+
+### Procedure
+
+**Partial rollback (mixed cluster → all old)**
+
+1. Stop all N+1 nodes
+2. For each stopped N+1 node, restart with the N binary — it will replay Raft entries
+   written by N+1 nodes (forward entries must be N-compatible, enforced by compat tests)
+3. If any node fails to restart: restore from the last N-era snapshot
+
+**Full rollback (all N+1 → all N)**
+
+Only safe if no N+1-only data format was committed to the Raft log.
+The `upgrade finalize` command (Feature 1) deliberately does NOT write any incompatible
+entries, so rollback from a finalized N+1 cluster is still possible if N can read N+1 data.
+
+**Rollback gate**
+
+`grainfs upgrade rollback --to-version 0.0.188.0` (future):
+1. Checks all nodes still have N-era data (no irrecoverable N+1 entries)
+2. If safe: prints rollback steps
+3. If not safe: prints what N+1-only entries exist and why rollback is blocked
+
+---
+
+## Implementation Order (Slice 4)
+
+| Step | Task | Complexity |
+|------|------|------------|
+| 4.1 | `GET /admin/version` endpoint | Low |
+| 4.2 | `grainfs upgrade finalize` CLI + test | Medium |
+| 4.3 | `SnapshotHeader` FlatBuffers + write path | Medium |
+| 4.4 | Restore-path version check | Low |
+| 4.5 | Enable `TestHeadSnapshotReject` (remove t.Skip) | Low |
+| 4.6 | `MetaFSM.StateHash()` implementation | High |
+| 4.7 | StateHash gossip + divergence detection | High |
+| 4.8 | Drain/rollback CLI skeleton | Medium |
+
+---
+
+## Open Questions
+
+1. **StateHash scope**: should ephemeral fields (activePlan, rotation state) be excluded?
+   They affect cluster behavior but may differ legitimately between nodes.
+2. **Hash frequency**: per-snapshot-install only, or also at Raft heartbeat (expensive)?
+3. **min_compatible_version policy**: do we bump it on every breaking FSM change, or only
+   on major format revisions?
+4. **Rollback support window**: how many versions back should rollback be supported?
+   Current proposal: N-1 only (matches the compat test policy).

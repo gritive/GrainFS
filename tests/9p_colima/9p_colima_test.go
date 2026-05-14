@@ -45,12 +45,20 @@ func runColimaSSH(t *testing.T, args ...string) string {
 }
 
 func with9PMount(t *testing.T, fn func(mnt string)) {
+	with9PMountAname(t, "/", fn)
+}
+
+func with9PBucketMount(t *testing.T, fn func(mnt string)) {
+	with9PMountAname(t, "/"+colima9PBucket, fn)
+}
+
+func with9PMountAname(t *testing.T, aname string, fn func(mnt string)) {
 	t.Helper()
 	name := strings.ReplaceAll(t.Name(), "/", "-")
 	mnt := "/mnt/grainfs-9p-" + name
 	runColimaSSH(t, "sudo", "mkdir", "-p", mnt)
 	runColimaSSH(t, "sudo", "mount", "-t", "9p",
-		"-o", fmt.Sprintf("trans=tcp,port=%s,version=9p2000.L", colima9PPort),
+		"-o", fmt.Sprintf("trans=tcp,port=%s,version=9p2000.L,aname=%s", colima9PPort, aname),
 		colimaHostIP, mnt)
 	t.Cleanup(func() {
 		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
@@ -165,6 +173,11 @@ func Test9P_ListObjects(t *testing.T) {
 	with9PMount(t, func(mnt string) {
 		out := runColimaSSH(t, "ls", fmt.Sprintf("%s/%s", mnt, colima9PBucket))
 		require.Contains(t, out, "test-file.txt", "uploaded object should appear in 9P directory listing")
+	})
+
+	with9PBucketMount(t, func(mnt string) {
+		out := runColimaSSH(t, "ls", mnt)
+		require.Contains(t, out, "test-file.txt", "uploaded object should appear at bucket aname root")
 	})
 }
 
