@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.201.0] - 2026-05-15 — feat: Badger startup recovery journal
+
+### Added
+
+- **Badger startup recovery journal** — startup-mode decisions that happen before the incident store is available are now written under `<data>/.recovery/entries/` with node, boot, binary version, role, group, path, status, action, and scrubbed reason metadata.
+- **Incident import on next healthy boot** — once the incident store opens, pending recovery journal entries are imported as deterministic Badger startup incidents and marked imported without duplicating or regressing existing incident state.
+- **Recovery journal coverage** — tests now cover relative journal paths, imported markers, reason scrubbing, pre-incident meta/group startup failures, idempotent import, and startup cleanup preserving `.recovery`.
+
+### Changed
+
+- **Quarantine manifest writes** — recovery journal entries and quarantine manifests now share the same atomic JSON write helper.
+- **Runbook guidance** — Badger startup recovery documentation now calls out `.recovery` as the pre-incident journal that should be preserved for post-boot import.
+
 ## [0.0.200.1] - 2026-05-15 — test: faster cluster unit test timing
 
 ### Changed
