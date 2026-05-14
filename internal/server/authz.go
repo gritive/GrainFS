@@ -100,6 +100,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 		// Internal system buckets are never accessible via the S3 API.
 		if bucket == audit.BucketName {
 			s.iamAudit.RecordDeny(ctx, iam.PrincipalFromContext(ctx), bucket, key, action, "internal_bucket")
+			c.Set(auditErrReasonKey, "internal_bucket")
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access denied to internal bucket")
 			c.Abort()
 			return
@@ -115,6 +116,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			if !iam.ScopeAllows(scope, bucket) {
 				saID := iam.PrincipalFromContext(ctx)
 				s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "key_scope_mismatch")
+				c.Set(auditErrReasonKey, "key_scope_mismatch")
 				writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access key scope denies this bucket")
 				c.Abort()
 				return
@@ -137,6 +139,7 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			case "policy_deny":
 				msg = "bucket policy denies this action"
 			}
+			c.Set(auditErrReasonKey, decision.Reason)
 			writeXMLError(c, consts.StatusForbidden, "AccessDenied", msg)
 			c.Abort()
 			return
@@ -160,6 +163,7 @@ func (s *Server) mustAuthorize(ctx context.Context, c *app.RequestContext, bucke
 	if s.authz.Decide(ctx, in, s3auth.PhasePreLoad).Allow {
 		return false
 	}
+	c.Set(auditErrReasonKey, "cross_bucket_deny")
 	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
 	return true
 }
@@ -179,6 +183,7 @@ func (s *Server) mustAuthorizePostLoad(ctx context.Context, c *app.RequestContex
 	if s.authz.Decide(ctx, in, s3auth.PhasePostLoad).Allow {
 		return false
 	}
+	c.Set(auditErrReasonKey, "object_acl_deny")
 	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access Denied")
 	return true
 }

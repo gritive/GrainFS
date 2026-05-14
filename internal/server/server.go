@@ -133,6 +133,7 @@ type Server struct {
 	lifecycle      *lifecycle.Service
 	icebergCatalog icebergcatalog.Catalog
 	auditEmitter   *audit.Emitter
+	auditOutbox    *audit.Outbox
 	cluster        ClusterInfo       // nil in no-peers mode
 	membership     ClusterMembership // nil = remove-peer endpoint returns 503
 	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
@@ -399,6 +400,13 @@ func WithAuditEmitter(e *audit.Emitter) Option {
 	}
 }
 
+// WithAuditOutbox enables durable audit event capture.
+func WithAuditOutbox(outbox *audit.Outbox) Option {
+	return func(s *Server) {
+		s.auditOutbox = outbox
+	}
+}
+
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {
 	policyStore := NewCompiledPolicyStore()
@@ -478,6 +486,7 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		h.Use(s.authMiddleware())
 	}
 
+	h.Use(s.auditEnvelopeMiddleware())
 	h.Use(s.authzMiddleware())
 
 	if s.volMgr == nil {

@@ -20,7 +20,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
@@ -380,21 +379,10 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 	}
 
 	data, _ := xml.Marshal(result)
-	if s.auditEmitter != nil {
-		s.auditEmitter.EmitS3(audit.S3Event{
-			Ts:       time.Now().UnixMicro(),
-			SAID:     iam.PrincipalFromContext(ctx),
-			SourceIP: c.ClientIP(),
-			Method:   "LIST",
-			Bucket:   bucket,
-			Status:   200,
-		})
-	}
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 
 func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
-	start := time.Now()
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -465,19 +453,6 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	obj := result.Object
 
 	s.mutations.OnObjectWrite(ctx, bucket, key, result)
-	if s.auditEmitter != nil {
-		s.auditEmitter.EmitS3(audit.S3Event{
-			Ts:        start.UnixMicro(),
-			SAID:      iam.PrincipalFromContext(ctx),
-			SourceIP:  c.ClientIP(),
-			Method:    "PUT",
-			Bucket:    bucket,
-			Key:       key,
-			Status:    200,
-			BytesIn:   int64(len(rawBody)),
-			LatencyMs: int32(time.Since(start).Milliseconds()),
-		})
-	}
 
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
@@ -570,7 +545,6 @@ func sleepReadAfterWriteRetry(ctx context.Context) bool {
 }
 
 func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
-	start := time.Now()
 	if ri := s.readIndexer; ri != nil {
 		readIdx, err := ri.ReadIndex(ctx)
 		if err == nil {
@@ -632,19 +606,6 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if s.auditEmitter != nil {
-		s.auditEmitter.EmitS3(audit.S3Event{
-			Ts:        start.UnixMicro(),
-			SAID:      iam.PrincipalFromContext(ctx),
-			SourceIP:  c.ClientIP(),
-			Method:    "GET",
-			Bucket:    bucket,
-			Key:       key,
-			Status:    200,
-			BytesOut:  obj.Size,
-			LatencyMs: int32(time.Since(start).Milliseconds()),
-		})
-	}
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionGet, Bucket: bucket, Key: key, Size: obj.Size})
 	etag := fmt.Sprintf("\"%s\"", obj.ETag)
 	c.Header("Content-Type", obj.ContentType)
@@ -999,7 +960,6 @@ func checkConditionals(c *app.RequestContext, etag string, lastModifiedUnix int6
 }
 
 func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
-	start := time.Now()
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -1040,18 +1000,6 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 		c.Header("x-amz-version-id", result.Deleted.VersionID)
 	}
 	s.mutations.OnObjectDelete(ctx, bucket, key, result)
-	if s.auditEmitter != nil {
-		s.auditEmitter.EmitS3(audit.S3Event{
-			Ts:        time.Now().UnixMicro(),
-			SAID:      iam.PrincipalFromContext(ctx),
-			SourceIP:  c.ClientIP(),
-			Method:    "DELETE",
-			Bucket:    bucket,
-			Key:       key,
-			Status:    204,
-			LatencyMs: int32(time.Since(start).Milliseconds()),
-		})
-	}
 	c.Status(consts.StatusNoContent)
 }
 
