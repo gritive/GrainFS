@@ -428,13 +428,38 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		maxcount, _ := r.ReadUint32()
 		// bitmap for attr request
 		bitmapLen, _ := r.ReadUint32()
+		if bitmapLen > uint32(len(attrBitmap{})) {
+			return nil, 0, fmt.Errorf("READDIR bitmap too large: %d", bitmapLen)
+		}
+		if bitmapLen <= 1 {
+			b := getOpArg32()
+			binary.BigEndian.PutUint64(b[:8], cookie)
+			copy(b[8:16], cookieVerf[:])
+			binary.BigEndian.PutUint32(b[16:20], dircount)
+			binary.BigEndian.PutUint32(b[20:24], maxcount)
+			binary.BigEndian.PutUint32(b[24:28], bitmapLen)
+			if bitmapLen == 1 {
+				word, _ := r.ReadUint32()
+				binary.BigEndian.PutUint32(b[28:32], word)
+				return b[:32], 32, nil
+			}
+			return b[:28], 32, nil
+		}
+
+		bitmapWords := make([]uint32, 0, bitmapLen)
 		for i := uint32(0); i < bitmapLen; i++ {
-			r.ReadUint32()
+			word, _ := r.ReadUint32()
+			bitmapWords = append(bitmapWords, word)
 		}
 		w := getXDRWriter()
 		w.WriteUint64(cookie)
+		w.buf.Write(cookieVerf[:])
 		w.WriteUint32(dircount)
 		w.WriteUint32(maxcount)
+		w.WriteUint32(bitmapLen)
+		for _, word := range bitmapWords {
+			w.WriteUint32(word)
+		}
 		return xdrWriterBytes(w), 0, nil
 
 	case OpRead:

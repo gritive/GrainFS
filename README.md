@@ -49,6 +49,12 @@ aws --endpoint-url http://localhost:9000 \
 | Monitoring         | Prometheus 메트릭 + 대시보드                                  |
 | Zero-Ops Incidents | missing shard repair / corrupt shard quarantine / Badger startup recovery 상태와 proof 표시 |
 
+## Standards Compliance
+
+- **S3**: AWS Signature Version 4 (HMAC-SHA256) 호환
+- **NFSv4.1**: RFC 8881 coverage matrix: [`docs/nfsv4-compliance.md`](docs/nfsv4-compliance.md)
+- **Conformance tests**: `tests/conformance/run_pynfs.sh` (pynfs, advisory)
+
 ## CLI Options
 
 ```

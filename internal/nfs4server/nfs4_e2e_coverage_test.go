@@ -164,6 +164,74 @@ func TestE2E_ReadDir(t *testing.T) {
 	assert.Contains(t, names, "gamma.txt")
 }
 
+func TestE2E_ReadDir_PropagatesRequestedAttrs(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	c := newNFS4Client(t, addr)
+
+	content := []byte("hello readdir attrs")
+	c.writeTestFile("with-attrs.txt", content)
+
+	ops := &XDRWriter{}
+	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
+	ops.WriteUint32(uint32(OpReadDir))
+	ops.WriteUint64(0)    // cookie = 0 (start)
+	ops.WriteUint64(0)    // cookieverf (8 bytes)
+	ops.WriteUint32(4096) // dircount
+	ops.WriteUint32(4096) // maxcount
+	ops.WriteUint32(2)    // attr bitmap len
+	ops.WriteUint32(1<<1 | 1<<4)
+	ops.WriteUint32(0)
+
+	reply := c.sendCompound(ops.Bytes(), 3)
+	status, r := c.parseCompoundReply(reply)
+	require.Equal(t, uint32(NFS4_OK), status)
+
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+
+	readDirOp, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpReadDir), readDirOp)
+	readDirStatus, _ := r.ReadUint32()
+	require.Equal(t, uint32(NFS4_OK), readDirStatus)
+	r.ReadUint64() // cookieverf
+
+	for {
+		follows, err := r.ReadUint32()
+		require.NoError(t, err)
+		if follows == 0 {
+			break
+		}
+		r.ReadUint64() // cookie
+		name, _ := r.ReadString()
+		bitmapLen, _ := r.ReadUint32()
+		var word0 uint32
+		for i := uint32(0); i < bitmapLen; i++ {
+			word, _ := r.ReadUint32()
+			if i == 0 {
+				word0 = word
+			}
+		}
+		attrVals, err := r.ReadOpaque()
+		require.NoError(t, err)
+		if name != "with-attrs.txt" {
+			continue
+		}
+
+		require.NotZero(t, word0&(1<<1), "READDIR entry should include requested TYPE attr")
+		require.NotZero(t, word0&(1<<4), "READDIR entry should include requested SIZE attr")
+		ar := NewXDRReader(attrVals)
+		fileType, _ := ar.ReadUint32()
+		fileSize, _ := ar.ReadUint64()
+		require.Equal(t, uint32(NF4REG), fileType)
+		require.Equal(t, uint64(len(content)), fileSize)
+		return
+	}
+	require.Fail(t, "READDIR did not return with-attrs.txt")
+}
+
 // TestE2E_GetAttr_File verifies that GETATTR returns correct type and size.
 func TestE2E_GetAttr_File(t *testing.T) {
 	addr, _ := startTestNFS4Server(t)

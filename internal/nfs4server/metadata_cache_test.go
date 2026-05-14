@@ -23,8 +23,28 @@ func TestLoadFileMeta_CachesMissingSidecar(t *testing.T) {
 	assert.Equal(t, 1, backend.getCalls, "missing sidecar should be cached after first lookup")
 }
 
+func TestReadDirAttrsUseListedObjectMetadata(t *testing.T) {
+	backend := &fileMetaCacheBackend{
+		objects: []*storage.Object{{
+			Key:          "listed.txt",
+			Size:         42,
+			LastModified: 123,
+		}},
+	}
+	d := &Dispatcher{backend: backend, state: NewStateManager()}
+	d.currentPath = "/bucket"
+	d.state.MarkDir("/bucket")
+
+	result := d.opReadDir(buildReadDirArgs(1, 4))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	require.Zero(t, backend.headCalls, "READDIR attrs should reuse ListObjects metadata instead of per-entry HeadObject")
+}
+
 type fileMetaCacheBackend struct {
-	getCalls int
+	getCalls  int
+	headCalls int
+	objects   []*storage.Object
 }
 
 func (b *fileMetaCacheBackend) CreateBucket(context.Context, string) error      { return nil }
@@ -42,11 +62,12 @@ func (b *fileMetaCacheBackend) GetObject(context.Context, string, string) (io.Re
 	return nil, nil, errors.New("missing sidecar")
 }
 func (b *fileMetaCacheBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	b.headCalls++
 	return &storage.Object{}, nil
 }
 func (b *fileMetaCacheBackend) DeleteObject(context.Context, string, string) error { return nil }
 func (b *fileMetaCacheBackend) ListObjects(context.Context, string, string, int) ([]*storage.Object, error) {
-	return nil, nil
+	return b.objects, nil
 }
 func (b *fileMetaCacheBackend) WalkObjects(context.Context, string, string, func(*storage.Object) error) error {
 	return nil

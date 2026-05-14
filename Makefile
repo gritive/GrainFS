@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault test-backup clean run lint lint-keyspace bench bench-cluster bench-profile bench-topology-get bench-topology-get-matrix bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima bench-directio-s3 test-raft-v2-chaos
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault test-backup clean run lint lint-keyspace bench bench-cluster bench-profile bench-topology-get bench-topology-get-matrix bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-cluster test-fuse-s3-colima bench-fuse-s3-colima bench-directio-s3 test-raft-v2-chaos
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -70,6 +70,11 @@ test-e2e-iceberg: bin/$(BINARY)
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
+
+test-pynfs-colima:
+	@echo "Running pynfs conformance in Colima VM (advisory)"
+	tests/conformance/run_pynfs.sh --colima --suite basic
+	@echo "Summary: tests/conformance/results/summary.json"
 
 test-nbd-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
