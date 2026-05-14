@@ -28,6 +28,7 @@ const (
 	StreamShardWriteBody      StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
 	StreamShardReadBody       StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
 	StreamCapabilityExchange  StreamType = 0x12 // protocol version handshake; first stream on every mux QUIC conn
+	StreamAuditShip           StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
 )
 
 type StreamClass byte
