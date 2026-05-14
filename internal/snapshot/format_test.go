@@ -151,3 +151,16 @@ func TestManagerUsesZstdSuffixAndIgnoresGzipSnapshots(t *testing.T) {
 	require.Len(t, snaps, 1)
 	require.Equal(t, snap.Seq, snaps[0].Seq)
 }
+
+func TestRestoreLegacyGzipSnapshotIsUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	backend := &formatTestBackend{}
+	mgr, err := NewManager(dir, backend, "")
+	require.NoError(t, err)
+	writeLegacyGzipSnapshotFile(t, filepath.Join(dir, "snapshot-1.json.gz"), testSnapshot(1))
+
+	_, _, err = mgr.Restore(1)
+	require.ErrorIs(t, err, ErrUnsupportedSnapshotFormat)
+	require.False(t, backend.restoreObjectsCalled)
+	require.False(t, backend.restoreBucketsCalled)
+}

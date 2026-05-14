@@ -152,6 +152,9 @@ func (m *Manager) Restore(seq uint64) (restoredCount int, staleBlobs []storage.S
 	snap, err := readSnapshot(m.path(seq))
 	if err != nil {
 		if os.IsNotExist(err) {
+			if _, legacyErr := os.Stat(m.legacyPath(seq)); legacyErr == nil {
+				return 0, nil, ErrUnsupportedSnapshotFormat
+			}
 			return 0, nil, ErrNotFound
 		}
 		return 0, nil, fmt.Errorf("read snapshot %d: %w", seq, err)
@@ -180,6 +183,10 @@ func (m *Manager) Delete(seq uint64) error {
 
 func (m *Manager) path(seq uint64) string {
 	return filepath.Join(m.dir, "snapshot-"+strconv.FormatUint(seq, 10)+".json.zst")
+}
+
+func (m *Manager) legacyPath(seq uint64) string {
+	return filepath.Join(m.dir, "snapshot-"+strconv.FormatUint(seq, 10)+".json.gz")
 }
 
 // ErrNotFound indicates the snapshot does not exist.

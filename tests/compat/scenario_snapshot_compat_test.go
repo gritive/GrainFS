@@ -62,6 +62,11 @@ func TestSnapshotLegacyGzipRejectedByCurrent(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&snapOut))
 	seq := snapOut.Seq
+	legacyPath := fmt.Sprintf("%s/snapshots/snapshot-%d.json.gz", dataDir, seq)
+	if _, err := os.Stat(legacyPath); err != nil {
+		terminateProcess(cmd1)
+		t.Skip("previous binary no longer writes legacy gzip snapshots")
+	}
 
 	terminateProcess(cmd1)
 
@@ -78,10 +83,6 @@ func TestSnapshotLegacyGzipRejectedByCurrent(t *testing.T) {
 	defer resp2.Body.Close()
 	body, err := io.ReadAll(resp2.Body)
 	require.NoError(t, err)
-	require.NotEqual(t, http.StatusOK, resp2.StatusCode, "legacy gzip snapshot must not restore body=%s", body)
-	require.True(t,
-		strings.Contains(strings.ToLower(string(body)), "snapshot") ||
-			strings.Contains(strings.ToLower(string(body)), "unsupported"),
-		string(body),
-	)
+	require.Equal(t, http.StatusConflict, resp2.StatusCode, "legacy gzip snapshot must not restore body=%s", body)
+	require.Contains(t, strings.ToLower(string(body)), "unsupported snapshot format")
 }
