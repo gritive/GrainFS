@@ -37,7 +37,7 @@ func TestE2E_NFSMultiExportPropagation_MultiNode(t *testing.T) {
 
 func runNfsExportJSONOnDataDir(t *testing.T, dataDir, verb, bucket string, flags ...string) e2eNfsExport {
 	t.Helper()
-	args := []string{"nfs", "export", verb, bucket, "--format", "json"}
+	args := []string{"nfs", "export", verb, bucket, "--json"}
 	args = append(args, flags...)
 	out, code := runCLI(t, dataDir, args...)
 	require.Equalf(t, 0, code, "%s", out)
@@ -46,7 +46,7 @@ func runNfsExportJSONOnDataDir(t *testing.T, dataDir, verb, bucket string, flags
 
 func jsonExportListContains(t *testing.T, dataDir, bucket string, minGeneration uint64) bool {
 	t.Helper()
-	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--format", "json")
+	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--json")
 	if code != 0 {
 		return false
 	}
