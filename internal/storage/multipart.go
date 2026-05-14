@@ -65,7 +65,7 @@ func (b *LocalBackend) CreateMultipartUpload(ctx context.Context, bucket, key, c
 	}
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.multipartKey(uploadID), data)
+		return setBadgerValue(txn, b.encryptor, badgerDomainMultipart, b.multipartKey(uploadID), data)
 	})
 	if err != nil {
 		return nil, err
@@ -137,21 +137,19 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	_ = ctx
 	var meta multipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.multipartKey(uploadID))
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainMultipart, b.multipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
 			return ErrUploadNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			decoded, err := unmarshalMultipartMeta(val)
-			if err != nil {
-				return err
-			}
-			meta = *decoded
-			return nil
-		})
+		decoded, err := unmarshalMultipartMeta(val)
+		if err != nil {
+			return err
+		}
+		meta = *decoded
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -233,7 +231,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	objMeta, _ := marshalObject(obj)
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(b.objectMetaKey(bucket, key), objMeta); err != nil {
+		if err := setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), objMeta); err != nil {
 			return err
 		}
 		return txn.Delete(b.multipartKey(uploadID))

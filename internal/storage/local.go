@@ -125,7 +125,7 @@ func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 		if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
 			return fmt.Errorf("create bucket dir: %w", err)
 		}
-		return txn.Set(bk, []byte(`{}`))
+		return setBadgerValue(txn, b.encryptor, badgerDomainBucket, bk, []byte(`{}`))
 	})
 }
 
@@ -307,7 +307,7 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	}
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.objectMetaKey(bucket, key), meta)
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
 	})
 	if err != nil {
 		return nil, err
@@ -360,21 +360,19 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 
 	var obj Object
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.objectMetaKey(bucket, key))
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key))
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			decoded, err := unmarshalObject(val)
-			if err != nil {
-				return err
-			}
-			obj = *decoded
-			return nil
-		})
+		decoded, err := unmarshalObject(val)
+		if err != nil {
+			return err
+		}
+		obj = *decoded
+		return nil
 	})
 
 	if localTraceEnabled {
@@ -391,25 +389,23 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(mk)
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			obj, merr := unmarshalObject(val)
-			if merr != nil {
-				return merr
-			}
-			obj.ACL = acl
-			newVal, merr := marshalObject(obj)
-			if merr != nil {
-				return merr
-			}
-			return txn.Set(mk, newVal)
-		})
+		obj, err := unmarshalObject(val)
+		if err != nil {
+			return err
+		}
+		obj.ACL = acl
+		newVal, err := marshalObject(obj)
+		if err != nil {
+			return err
+		}
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
 	})
 }
 
@@ -434,25 +430,23 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 	}
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(mk)
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			obj, merr := unmarshalObject(val)
-			if merr != nil {
-				return merr
-			}
-			obj.Size = size
-			newVal, merr := marshalObject(obj)
-			if merr != nil {
-				return merr
-			}
-			return txn.Set(mk, newVal)
-		})
+		obj, err := unmarshalObject(val)
+		if err != nil {
+			return err
+		}
+		obj.Size = size
+		newVal, err := marshalObject(obj)
+		if err != nil {
+			return err
+		}
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
 	})
 }
 
@@ -503,7 +497,7 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 			return nil, fmt.Errorf("marshal metadata: %w", err)
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Set(b.objectMetaKey(bucket, key), meta)
+			return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
 		}); err != nil {
 			return nil, err
 		}
@@ -587,7 +581,7 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.objectMetaKey(bucket, key), meta)
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
 	}); err != nil {
 		return nil, err
 	}
@@ -758,18 +752,15 @@ func (b *LocalBackend) policyKey(bucket string) []byte {
 func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 	var data []byte
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.policyKey(bucket))
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainPolicy, b.policyKey(bucket))
 		if err == badger.ErrKeyNotFound {
 			return ErrBucketNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			data = make([]byte, len(val))
-			copy(data, val)
-			return nil
-		})
+		data = val
+		return nil
 	})
 	return data, err
 }
@@ -777,7 +768,7 @@ func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 // SetBucketPolicy stores the raw policy JSON for a bucket.
 func (b *LocalBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
 	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.policyKey(bucket), policyJSON)
+		return setBadgerValue(txn, b.encryptor, badgerDomainPolicy, b.policyKey(bucket), policyJSON)
 	})
 }
 
@@ -891,7 +882,7 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Set(b.objectMetaKey(snap.Bucket, snap.Key), meta)
+			return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(snap.Bucket, snap.Key), meta)
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
 		}

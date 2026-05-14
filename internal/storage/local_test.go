@@ -7,6 +7,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -100,14 +102,25 @@ func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	plaintext := []byte("sensitive object payload")
-	_, err = b.PutObject(context.Background(), "bkt", "key", bytes.NewReader(plaintext), "text/plain")
+	key := "sensitive-meta-key"
+	_, err = b.PutObject(context.Background(), "bkt", key, bytes.NewReader(plaintext), "text/plain")
 	require.NoError(t, err)
 
-	raw, err := os.ReadFile(b.objectPath("bkt", "key"))
+	raw, err := os.ReadFile(b.objectPath("bkt", key))
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), string(plaintext))
 
-	rc, _, err := b.GetObject(context.Background(), "bkt", "key")
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.objectMetaKey("bkt", key))
+		require.NoError(t, err)
+		return item.Value(func(val []byte) error {
+			require.True(t, encrypt.IsEncryptedValue(val))
+			require.NotContains(t, string(val), key)
+			return nil
+		})
+	}))
+
+	rc, _, err := b.GetObject(context.Background(), "bkt", key)
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
