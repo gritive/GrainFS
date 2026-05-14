@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 var ErrPropagationBarrierRequired = errors.New("nfsexport: propagation barrier required")
@@ -157,7 +160,12 @@ func (s *ExportService) waitApplied(ctx context.Context, index uint64) error {
 	if s.barrier == nil {
 		return nil
 	}
-	return s.barrier.WaitApplied(ctx, index)
+	start := time.Now()
+	if err := s.barrier.WaitApplied(ctx, index); err != nil {
+		return err
+	}
+	metrics.NFSExportPropagationSeconds.Observe(time.Since(start).Seconds())
+	return nil
 }
 
 func (s *ExportService) ensurePropagationSupported() error {

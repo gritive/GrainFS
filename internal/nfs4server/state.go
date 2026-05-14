@@ -141,6 +141,23 @@ func (sm *StateManager) FHBinding(fh FileHandle) (stateBinding, bool) {
 	return b, ok
 }
 
+func (sm *StateManager) InvalidateForBucket(bucket string) int {
+	if bucket == "" {
+		return 0
+	}
+	sm.fhMu.Lock()
+	defer sm.fhMu.Unlock()
+	var n int
+	for fh, binding := range sm.fhBind {
+		if binding.bucket != bucket {
+			continue
+		}
+		delete(sm.fhBind, fh)
+		n++
+	}
+	return n
+}
+
 // MarkDir records path as a known directory with current timestamp.
 func (sm *StateManager) MarkDir(p string) {
 	sm.dirs.Store(p, time.Now().UnixNano())
