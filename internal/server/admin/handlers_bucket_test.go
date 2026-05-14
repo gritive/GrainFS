@@ -572,6 +572,18 @@ func TestAdminSetBucketVersioning_BucketNotFound(t *testing.T) {
 	assert.Equal(t, "not_found", ae.Code)
 }
 
+func TestAdminSetBucketPolicy_InvalidPolicyStructure(t *testing.T) {
+	// JSON이지만 object가 아닌 string을 전달하면 "invalid"를 반환해야 한다.
+	fake := newFakeBucketOpsWithPolicy()
+	fake.buckets["my-bucket"] = true
+	d := &admin.Deps{Buckets: fake}
+	err := admin.AdminSetBucketPolicy(context.Background(), d, "my-bucket",
+		admin.BucketPolicySetReq{Policy: json.RawMessage(`"not-a-policy-object"`)})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	assert.Equal(t, "invalid", ae.Code)
+}
+
 func TestAdminGetBucketPolicy_StorageErrBucketNotFound(t *testing.T) {
 	// LocalBackend가 policy key 없음을 ErrBucketNotFound로 반환할 때 500이 아닌 404를 반환해야 한다.
 	base := newFakeBucketOps()

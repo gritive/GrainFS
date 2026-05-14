@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/policy"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -201,6 +202,9 @@ func AdminSetBucketPolicy(ctx context.Context, d *Deps, name string, req BucketP
 	}
 	if err := checkBucketExists(ctx, d, name); err != nil {
 		return err
+	}
+	if _, err := policy.ParsePolicy(req.Policy); err != nil {
+		return NewInvalid("invalid bucket policy: " + err.Error())
 	}
 	if err := d.Buckets.SetBucketPolicy(name, []byte(req.Policy)); err != nil {
 		if errors.Is(err, storage.ErrUnsupportedOperation) {
