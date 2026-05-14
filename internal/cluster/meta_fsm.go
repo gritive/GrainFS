@@ -488,8 +488,17 @@ func (f *MetaFSM) applyNfsExportUpsert(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: NfsExportUpsert: %w", err)
 	}
-	if _, err := f.exportStore.ApplyUpsert(bucket, cfg.ReadOnly, f.exportFsidMajor); err != nil {
-		return err
+	if cfg.FsidMinor != 0 || cfg.Generation != 0 {
+		if cfg.FsidMajor == 0 {
+			cfg.FsidMajor = f.exportFsidMajor
+		}
+		if err := f.exportStore.Put(bucket, cfg); err != nil {
+			return err
+		}
+	} else {
+		if _, err := f.exportStore.ApplyUpsert(bucket, cfg.ReadOnly, f.exportFsidMajor); err != nil {
+			return err
+		}
 	}
 	f.publishNfsExportChange()
 	return nil
@@ -1582,7 +1591,13 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for _, entry := range f.icebergTables {
 		icebergTables = append(icebergTables, cloneIcebergTableEntry(entry))
 	}
+	exportStore := f.exportStore
 	f.mu.RUnlock()
+
+	nfsExports := map[string]nfsexport.Config(nil)
+	if exportStore != nil {
+		nfsExports = exportStore.Snapshot().Entries()
+	}
 
 	b := clusterBuilderPool.Get()
 
@@ -1686,6 +1701,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	icebergNamespaceVec := buildIcebergNamespaceEntriesVector(b, icebergNamespaces)
 	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
 	objectIndexVec := buildMetaObjectIndexEntriesVector(b, objectEntries)
+	nfsExportVec := buildNfsExportEntriesVector(b, nfsExports)
 
 	// ClusterConfig: serialize the wrapper's current snap into a stand-alone
 	// FBS buffer and embed it as a [ubyte] vector. Always emit — the inner
@@ -1706,6 +1722,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
+	clusterpb.MetaStateSnapshotAddNfsExports(b, nfsExportVec)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -1906,6 +1923,26 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
+	hasNfsExports := snap.NfsExportsPresent()
+	newNfsExports := make(map[string]nfsexport.Config, snap.NfsExportsLength())
+	var exportFB clusterpb.NfsExportUpsertCmd
+	for i := 0; i < snap.NfsExportsLength(); i++ {
+		if !snap.NfsExports(&exportFB, i) {
+			return fmt.Errorf("meta_fsm: Restore: NFS export %d decode failed", i)
+		}
+		bucket := string(exportFB.Bucket())
+		cfgFB := exportFB.Config(nil)
+		if bucket == "" || cfgFB == nil {
+			return fmt.Errorf("meta_fsm: Restore: NFS export %d missing bucket/config", i)
+		}
+		newNfsExports[bucket] = nfsexport.Config{
+			ReadOnly:   cfgFB.ReadOnly(),
+			FsidMajor:  cfgFB.FsidMajor(),
+			FsidMinor:  cfgFB.FsidMinor(),
+			Generation: cfgFB.Generation(),
+		}
+	}
+
 	// ClusterConfig: decode the embedded FBS blob and atomically swap into
 	// f.clusterCfg via ReplaceSnap so the outer *ClusterConfig handle held
 	// by consumers (e.g. balancer, alerts, disk monitor) stays valid across
@@ -1935,6 +1972,18 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 
 	if newClusterCfgSnap != nil {
 		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
+	}
+	restoredNfsExports := false
+	if f.exportStore != nil && hasNfsExports {
+		if err := f.exportStore.ReplaceAll(newNfsExports); err != nil {
+			return fmt.Errorf("meta_fsm: Restore: NFS exports: %w", err)
+		}
+		restoredNfsExports = true
+	} else if f.exportStore == nil && len(newNfsExports) > 0 {
+		return fmt.Errorf("meta_fsm: Restore: snapshot contains NFS exports but export store is not wired")
+	}
+	if restoredNfsExports {
+		f.publishNfsExportChange()
 	}
 	if cb != nil {
 		for bucket, groupID := range newBucketAssignments {
@@ -2292,6 +2341,35 @@ func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndex
 		NodeIDs:          readStringVector(entry.NodeIdsLength(), entry.NodeIds),
 		IsDeleteMarker:   entry.IsDeleteMarker(),
 	}
+}
+
+func buildNfsExportEntriesVector(b *flatbuffers.Builder, entries map[string]nfsexport.Config) flatbuffers.UOffsetT {
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	offsets := make([]flatbuffers.UOffsetT, len(names))
+	for i := len(names) - 1; i >= 0; i-- {
+		bucket := names[i]
+		cfg := entries[bucket]
+		bucketOff := b.CreateString(bucket)
+		clusterpb.NfsExportConfigStart(b)
+		clusterpb.NfsExportConfigAddReadOnly(b, cfg.ReadOnly)
+		clusterpb.NfsExportConfigAddFsidMajor(b, cfg.FsidMajor)
+		clusterpb.NfsExportConfigAddFsidMinor(b, cfg.FsidMinor)
+		clusterpb.NfsExportConfigAddGeneration(b, cfg.Generation)
+		cfgOff := clusterpb.NfsExportConfigEnd(b)
+		clusterpb.NfsExportUpsertCmdStart(b)
+		clusterpb.NfsExportUpsertCmdAddBucket(b, bucketOff)
+		clusterpb.NfsExportUpsertCmdAddConfig(b, cfgOff)
+		offsets[i] = clusterpb.NfsExportUpsertCmdEnd(b)
+	}
+	clusterpb.MetaStateSnapshotStartNfsExportsVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	return b.EndVector(len(offsets))
 }
 
 func encodeMetaSetLoadSnapshotCmd(entries []LoadStatEntry) ([]byte, error) {

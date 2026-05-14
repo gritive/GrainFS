@@ -84,7 +84,7 @@ func (s *ExportService) Delete(ctx context.Context, bucket string) error {
 	return s.waitApplied(ctx, idx)
 }
 
-func (s *ExportService) DeleteAfterBucketDelete(ctx context.Context, bucket string, force bool) error {
+func (s *ExportService) DeleteForBucketDelete(ctx context.Context, bucket string, force bool) error {
 	if bucket == "" {
 		return fmt.Errorf("bucket is required")
 	}
@@ -99,6 +99,44 @@ func (s *ExportService) DeleteAfterBucketDelete(ctx context.Context, bucket stri
 		return err
 	}
 	return s.waitApplied(ctx, idx)
+}
+
+func (s *ExportService) RestoreForBucketDelete(ctx context.Context, bucket string, cfg Config) error {
+	if bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	if s.proposer == nil {
+		return fmt.Errorf("nfsexport: proposer not configured")
+	}
+	if err := s.ensurePropagationSupported(); err != nil {
+		return err
+	}
+	idx, err := s.proposer.ProposeUpsert(ctx, bucket, cfg)
+	if err != nil {
+		return err
+	}
+	return s.waitApplied(ctx, idx)
+}
+
+func (s *ExportService) MarkBucketDeleteCleanup(bucket string) error {
+	if s.store == nil {
+		return fmt.Errorf("nfsexport: store not configured")
+	}
+	return s.store.MarkBucketDeleteCleanup(bucket)
+}
+
+func (s *ExportService) ClearBucketDeleteCleanup(bucket string) error {
+	if s.store == nil {
+		return fmt.Errorf("nfsexport: store not configured")
+	}
+	return s.store.ClearBucketDeleteCleanup(bucket)
+}
+
+func (s *ExportService) PendingBucketDeleteCleanups() ([]string, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("nfsexport: store not configured")
+	}
+	return s.store.PendingBucketDeleteCleanups()
 }
 
 func (s *ExportService) Get(bucket string) (Config, bool) {

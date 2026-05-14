@@ -552,6 +552,7 @@ table MetaStateSnapshot {
   iceberg_tables:[IcebergTableEntry];
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
+  nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

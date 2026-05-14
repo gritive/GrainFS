@@ -228,8 +228,28 @@ func (rcv *MetaStateSnapshot) MutateClusterConfig(j int, n byte) bool {
 	return false
 }
 
+func (rcv *MetaStateSnapshot) NfsExports(obj *NfsExportUpsertCmd, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) NfsExportsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -281,6 +301,12 @@ func MetaStateSnapshotAddClusterConfig(builder *flatbuffers.Builder, clusterConf
 }
 func MetaStateSnapshotStartClusterConfigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
+}
+func MetaStateSnapshotAddNfsExports(builder *flatbuffers.Builder, nfsExports flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(nfsExports), 0)
+}
+func MetaStateSnapshotStartNfsExportsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

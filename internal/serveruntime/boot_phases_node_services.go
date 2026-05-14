@@ -2,11 +2,13 @@ package serveruntime
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // bootResharderAndDegraded starts the per-group ReshardManager loop, the
@@ -118,6 +120,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	nodeSvc := StartNodeServices(state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, state.distBackend)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	state.AddCleanup(func() { nodeSvc.Close() })
+	startNfsExportBucketDeleteCleanup(ctx, state.nfsExportSvc, state.distBackend)
 
 	// Cross-protocol cache coherency: an S3 mutation replicated from another
 	// cluster node lands here as an FSM apply that fans out via
@@ -134,6 +137,56 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 		state.distBackend.RegisterCacheInvalidator("nfs4", cluster.CacheInvalidatorFunc(nfs.Invalidate))
 	}
 	return nil
+}
+
+func startNfsExportBucketDeleteCleanup(ctx context.Context, svc interface {
+	PendingBucketDeleteCleanups() ([]string, error)
+	DeleteForBucketDelete(context.Context, string, bool) error
+	ClearBucketDeleteCleanup(string) error
+}, backend storage.Backend) {
+	if svc == nil || backend == nil {
+		return
+	}
+	run := func() {
+		buckets, err := svc.PendingBucketDeleteCleanups()
+		if err != nil {
+			log.Warn().Err(err).Msg("nfs export cleanup: list pending bucket deletes failed")
+			return
+		}
+		for _, bucket := range buckets {
+			if ctx.Err() != nil {
+				return
+			}
+			err := backend.HeadBucket(ctx, bucket)
+			if err == nil {
+				continue
+			}
+			if !errors.Is(err, storage.ErrBucketNotFound) {
+				log.Warn().Err(err).Str("bucket", bucket).Msg("nfs export cleanup: head bucket failed")
+				continue
+			}
+			if err := svc.DeleteForBucketDelete(ctx, bucket, true); err != nil {
+				log.Warn().Err(err).Str("bucket", bucket).Msg("nfs export cleanup: cascade delete failed")
+				continue
+			}
+			if err := svc.ClearBucketDeleteCleanup(bucket); err != nil {
+				log.Warn().Err(err).Str("bucket", bucket).Msg("nfs export cleanup: clear marker failed")
+			}
+		}
+	}
+	run()
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				run()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // bootShutdownDrain blocks on ctx.Done(), then runs the ordered drain

@@ -13,10 +13,15 @@ import (
 )
 
 type fakeNfsExportProposer struct {
-	store *nfsexport.Store
+	store      *nfsexport.Store
+	cascadeErr error
+	cascades   int
 }
 
 func (p *fakeNfsExportProposer) ProposeUpsert(_ context.Context, bucket string, cfg nfsexport.Config) (uint64, error) {
+	if cfg.FsidMinor != 0 || cfg.Generation != 0 {
+		return 1, p.store.Put(bucket, cfg)
+	}
 	_, err := p.store.ApplyUpsert(bucket, cfg.ReadOnly, 1)
 	return 1, err
 }
@@ -26,6 +31,10 @@ func (p *fakeNfsExportProposer) ProposeDelete(_ context.Context, bucket string) 
 }
 
 func (p *fakeNfsExportProposer) ProposeBucketDeleteCascade(_ context.Context, bucket string, _ bool) (uint64, error) {
+	if p.cascadeErr != nil {
+		return 0, p.cascadeErr
+	}
+	p.cascades++
 	return 1, p.store.Delete(bucket)
 }
 
@@ -130,6 +139,33 @@ func TestAdminDeleteBucketCascadesNfsExportAfterBucketDelete(t *testing.T) {
 	require.False(t, buckets.buckets["b1"])
 }
 
+func TestAdminDeleteBucketCleansExportWhenBucketAlreadyMissing(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: &fakeNfsExportProposer{store: store},
+	})
+	buckets := newFakeBucketOps()
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+	ctx := context.Background()
+	_, err = store.ApplyUpsert("b1", false, 1)
+	require.NoError(t, err)
+
+	err = admin.AdminDeleteBucket(ctx, d, "b1", true)
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "not_found", ae.Code)
+	_, ok := d.NfsExports.Get("b1")
+	require.False(t, ok)
+}
+
 func TestAdminDeleteBucketDoesNotRemoveExportWhenBucketDeleteFails(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
 	require.NoError(t, err)
@@ -146,14 +182,135 @@ func TestAdminDeleteBucketDoesNotRemoveExportWhenBucketDeleteFails(t *testing.T)
 	}
 	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
 	require.NoError(t, err)
+	before, ok := d.NfsExports.Get("b1")
+	require.True(t, ok)
 
 	err = admin.AdminDeleteBucket(context.Background(), d, "b1", false)
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
 	require.Equal(t, "conflict", ae.Code)
+	restored, ok := d.NfsExports.Get("b1")
+	require.True(t, ok)
+	require.Equal(t, before, restored)
+	pending, err := svc.PendingBucketDeleteCleanups()
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
+type fakeBucketOpsConcurrentExportReadd struct {
+	*fakeBucketOps
+	readd func()
+}
+
+func (f *fakeBucketOpsConcurrentExportReadd) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	err := f.fakeBucketOps.ForceDeleteBucket(ctx, bucket)
+	if err == nil && f.readd != nil {
+		f.readd()
+	}
+	return err
+}
+
+func TestAdminDeleteBucketClearsConcurrentExportReadd(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	proposer := &fakeNfsExportProposer{store: store}
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: proposer,
+	})
+	buckets := &fakeBucketOpsConcurrentExportReadd{
+		fakeBucketOps: newFakeBucketOps(),
+		readd: func() {
+			_, err := store.ApplyUpsert("b1", false, 1)
+			require.NoError(t, err)
+		},
+	}
+	buckets.buckets["b1"] = true
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	require.NoError(t, err)
+	require.NoError(t, admin.AdminDeleteBucket(context.Background(), d, "b1", true))
+	_, ok := d.NfsExports.Get("b1")
+	require.False(t, ok)
+	require.Equal(t, 1, proposer.cascades)
+}
+
+func TestAdminDeleteBucketClearsExportAddedDuringDelete(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	proposer := &fakeNfsExportProposer{store: store}
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: proposer,
+	})
+	buckets := &fakeBucketOpsConcurrentExportReadd{
+		fakeBucketOps: newFakeBucketOps(),
+		readd: func() {
+			_, err := store.ApplyUpsert("b1", false, 1)
+			require.NoError(t, err)
+		},
+	}
+	buckets.buckets["b1"] = true
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+
+	require.NoError(t, admin.AdminDeleteBucket(context.Background(), d, "b1", true))
+	_, ok := d.NfsExports.Get("b1")
+	require.False(t, ok)
+	require.Equal(t, 1, proposer.cascades)
+	pending, err := svc.PendingBucketDeleteCleanups()
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
+func TestAdminDeleteBucketLeavesCleanupMarkerWhenCascadeFailsAfterBucketDelete(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	proposer := &fakeNfsExportProposer{store: store}
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: proposer,
+	})
+	buckets := newFakeBucketOps()
+	buckets.buckets["b1"] = true
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	require.NoError(t, err)
+	proposer.cascadeErr = assertAnError{}
+
+	err = admin.AdminDeleteBucket(context.Background(), d, "b1", true)
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "internal", ae.Code)
+	require.False(t, buckets.buckets["b1"])
 	_, ok := d.NfsExports.Get("b1")
 	require.True(t, ok)
+	pending, err := svc.PendingBucketDeleteCleanups()
+	require.NoError(t, err)
+	require.Equal(t, []string{"b1"}, pending)
 }
+
+type assertAnError struct{}
+
+func (assertAnError) Error() string { return "raft unavailable" }
 
 func TestAdminNfsExportAllowsMultiNodeWhenBarrierIsWired(t *testing.T) {
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
