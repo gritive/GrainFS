@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.202.0] - 2026-05-15 — feat: require local at-rest encryption
+
+### Added
+
+- **Mandatory local at-rest encryption** — local object files, multipart staging, cluster spool files, packed blobs, WAL mutation bodies, Badger metadata, and replicated FSM values are now written through the GrainFS encryption layer.
+- **Encryption key bootstrap guardrails** — solo nodes can auto-create the local key, while cluster and join mode now require an explicit shared key file to avoid accidental split-key clusters.
+- **Encrypted storage coverage** — tests now cover key bootstrap policy, hidden plaintext checks, wrong-key failures, metadata tampering, WAL tail handling, packblob downgrade resistance, and encrypted object `WriteAt`/`Truncate` atomic rewrites.
+
+### Changed
+
+- **Packblob and WAL compatibility** — encrypted records remain backward-compatible with existing plaintext records, while encrypted flags and metadata are authenticated to reject downgrade or tamper attempts.
+- **Local object mutation safety** — encrypted random writes and truncates now rewrite through a temporary file with durable rename semantics instead of partially mutating ciphertext in place.
+- **Smoke and benchmark bounds** — Colima/NFS smoke scripts and encryption benchmarks were adjusted for the encrypted storage path.
+
 ## [0.0.201.0] - 2026-05-15 — feat: Badger startup recovery journal
 
 ### Added
