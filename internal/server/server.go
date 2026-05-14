@@ -90,6 +90,10 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
+type auditSearcher interface {
+	SearchS3(ctx context.Context, f audit.SearchFilter) ([]audit.SearchRow, error)
+}
+
 // RaftSnapshotter exposes operator-triggered Raft FSM snapshots.
 type RaftSnapshotter interface {
 	TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error)
@@ -134,6 +138,7 @@ type Server struct {
 	icebergCatalog icebergcatalog.Catalog
 	auditEmitter   *audit.Emitter
 	auditOutbox    *audit.Outbox
+	auditSearcher  auditSearcher
 	cluster        ClusterInfo       // nil in no-peers mode
 	membership     ClusterMembership // nil = remove-peer endpoint returns 503
 	joinCluster    JoinClusterFunc   // nil if not in no-peers mode or already clustered
@@ -404,6 +409,12 @@ func WithAuditEmitter(e *audit.Emitter) Option {
 func WithAuditOutbox(outbox *audit.Outbox) Option {
 	return func(s *Server) {
 		s.auditOutbox = outbox
+	}
+}
+
+func WithAuditSearcher(searcher auditSearcher) Option {
+	return func(s *Server) {
+		s.auditSearcher = searcher
 	}
 }
 
