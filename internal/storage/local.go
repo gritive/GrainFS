@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -453,39 +454,35 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		tStage = time.Now()
 	}
 
-	// ETag = MD5(file). Required as the corruption-detection oracle for
-	// Volume scrub (which writes via this fast path with offset=0). For
-	// partial writes (offset>0 or len(data)<size) we re-read the file so
-	// the stored ETag matches on-disk bytes. NFS4 partial writes pay an
-	// extra read here; tracked in TODOS.md (Storage Hashing 성능 검토).
+	// ETag = xxhash3(file). Corruption-detection oracle for Volume scrub.
+	// Internal buckets (WriteAt callers) use xxhash3 (~37x faster than MD5).
+	// For partial writes (offset>0 or len(data)<size) we re-read the file so
+	// the stored ETag matches on-disk bytes.
 	var etag string
 	if offset == 0 && int64(len(data)) == size {
-		h := md5Pool.Get()
-		h.Reset()
-		_, _ = h.Write(data)
-		etag = hex.EncodeToString(h.Sum(nil))
-		md5Pool.Put(h)
+		etag = InternalETag(data)
 	} else {
-		h := md5Pool.Get()
-		h.Reset()
+		xh := GetXXH3Hasher()
 		buf := make([]byte, 64*1024)
 		var off int64
 		for off < size {
 			n, rerr := f.ReadAt(buf, off)
 			if n > 0 {
-				_, _ = h.Write(buf[:n])
+				_, _ = xh.Write(buf[:n])
 				off += int64(n)
 			}
 			if rerr == io.EOF {
 				break
 			}
 			if rerr != nil {
-				md5Pool.Put(h)
-				return nil, fmt.Errorf("md5 readback: %w", rerr)
+				PutXXH3Hasher(xh)
+				return nil, fmt.Errorf("xxh3 readback: %w", rerr)
 			}
 		}
-		etag = hex.EncodeToString(h.Sum(nil))
-		md5Pool.Put(h)
+		var hbuf [8]byte
+		binary.BigEndian.PutUint64(hbuf[:], xh.Sum64())
+		etag = hex.EncodeToString(hbuf[:])
+		PutXXH3Hasher(xh)
 	}
 	if localTraceEnabled {
 		log.Debug().Dur("etag", time.Since(tStage)).Msg("WriteAt trace")
