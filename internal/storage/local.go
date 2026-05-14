@@ -2,11 +2,9 @@ package storage
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,14 +16,11 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
-	"github.com/gritive/GrainFS/internal/pool"
 )
 
 // localTraceEnabled activates per-stage PutObject/HeadObject latency logging.
 // Enable with GRAINFS_VOLUME_TRACE=1.
 var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
-
-var md5Pool = pool.New(func() hash.Hash { return md5.New() })
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
