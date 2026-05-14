@@ -958,6 +958,24 @@ func TestApplyNfsExportDelete_Idempotent(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestApplyNfsExportBucketDeleteCascadeDeletesExportAfterBucket(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+	_, err = store.ApplyUpsert("b1", false, 1)
+	require.NoError(t, err)
+
+	payload, err := nfsexport.EncodeBucketDeleteCascadePayload("b1", true)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade, payload)
+	require.NoError(t, err)
+
+	require.NoError(t, f.applyCmd(cmd))
+	_, ok := store.Get("b1")
+	require.False(t, ok)
+}
+
 func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {
 	f := NewMetaFSM()
 	payload, err := nfsexport.EncodeDeletePayload("b1")

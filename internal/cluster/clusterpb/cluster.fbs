@@ -334,6 +334,7 @@ enum MetaCmdType : uint8 {
   MigrationJobFailed      = 39, // Migration job: failed
   NfsExportUpsert         = 40, // NFSv4 multi-export: registry upsert (Phase 1)
   NfsExportDelete         = 41, // NFSv4 multi-export: registry delete (Phase 1)
+  NfsExportBucketDeleteCascade = 42, // NFSv4 multi-export: bucket delete cascade marker
 }
 
 table MetaNodeEntry {
@@ -534,6 +535,11 @@ table NfsExportUpsertCmd {
 
 table NfsExportDeleteCmd {
   bucket:string;
+}
+
+table NfsExportBucketDeleteCascadeCmd {
+  bucket:string;
+  force:bool = false;
 }
 
 table MetaStateSnapshot {

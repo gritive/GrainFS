@@ -87,3 +87,33 @@ func DecodeDeletePayload(buf []byte) (bucket string, err error) {
 	}
 	return bucket, nil
 }
+
+func EncodeBucketDeleteCascadePayload(bucket string, force bool) ([]byte, error) {
+	if bucket == "" {
+		return nil, fmt.Errorf("bucket is required")
+	}
+	b := flatbuffers.NewBuilder(64)
+	bucketOff := b.CreateString(bucket)
+	clusterpb.NfsExportBucketDeleteCascadeCmdStart(b)
+	clusterpb.NfsExportBucketDeleteCascadeCmdAddBucket(b, bucketOff)
+	clusterpb.NfsExportBucketDeleteCascadeCmdAddForce(b, force)
+	b.Finish(clusterpb.NfsExportBucketDeleteCascadeCmdEnd(b))
+	return append([]byte(nil), b.FinishedBytes()...), nil
+}
+
+func DecodeBucketDeleteCascadePayload(buf []byte) (bucket string, force bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid flatbuffer: %v", r)
+		}
+	}()
+	if len(buf) == 0 {
+		return "", false, fmt.Errorf("empty data")
+	}
+	cmd := clusterpb.GetRootAsNfsExportBucketDeleteCascadeCmd(buf, 0)
+	bucket = string(cmd.Bucket())
+	if bucket == "" {
+		return "", false, fmt.Errorf("bucket is required")
+	}
+	return bucket, cmd.Force(), nil
+}
