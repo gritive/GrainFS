@@ -420,10 +420,14 @@ grainfs nfs export list                  # 활성 export 목록
 grainfs nfs export add mydata --ro       # 읽기 전용으로 공개
 grainfs nfs export update mydata --rw    # 읽기/쓰기로 변경
 grainfs nfs debug mydata                 # 연결 상태 진단
+grainfs nfs debug mydata --json          # 자동화/런북용 JSON 출력
 ```
 
 > **주의:** NFS 서버는 `--nfs4-port 0`으로 비활성화할 수 있다.
 > 컨테이너에서 비루트 사용자로 실행할 때는 `--nfs4-port 0`으로 비활성화하거나 적절한 권한을 부여해야 한다.
+
+운영 문제 해결은 [`docs/nfs-debug.md`](docs/nfs-debug.md)와
+[`docs/nfs-export-lifecycle.md`](docs/nfs-export-lifecycle.md)를 참고한다.
 
 ### NBD Quick Start (Linux 전용)
 

@@ -1,0 +1,43 @@
+{
+  "title": "GrainFS NFS Multi-Export",
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "NFS exports by state",
+      "targets": [
+        {
+          "expr": "grainfs_nfs_exports_total"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Export propagation p99",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(grainfs_nfs_export_propagation_seconds_bucket[5m])) by (le))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Unknown export LOOKUP rate",
+      "targets": [
+        {
+          "expr": "rate(grainfs_nfs_lookup_unknown_export_total[5m])"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Revoked NFS state",
+      "targets": [
+        {
+          "expr": "sum by (reason)(rate(grainfs_nfs_revoked_stateids_total[5m]))"
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### NFS multi-bucket export
+
+- **NEW**: `grainfs nfs debug <bucket>` reports export registry state, backend bucket existence, recent pseudo-root LOOKUPs, and best-effort propagation/client diagnostics.
+- **NEW**: Prometheus metrics `grainfs_nfs_exports_total`, `grainfs_nfs_export_propagation_seconds`, `grainfs_nfs_lookup_unknown_export_total`, and `grainfs_nfs_revoked_stateids_total`.
+- **NEW**: Grafana sample dashboard at `docs/observability/nfs-multi-export.json`.
+- **FIX**: NFS export admin errors now return HTTP status codes matching their domain codes: `bucket_not_found` and `export_not_found` return 404, `export_already_exists` returns 409, and `export_propagation_timeout` returns 504.
+- **CHANGE**: `grainfs nfs export` commands use `--json`, matching bucket/IAM conventions, and reject `--quiet --json`.
+- **Docs**: Added NFS export lifecycle and debug runbooks.
+
 ## [0.0.190.0] - 2026-05-14 — feat: NFSv4.1 RFC 8881 audit
 
 ### Added
