@@ -8,12 +8,14 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -788,10 +790,13 @@ func TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp(t *testing.T) {
 	f := NewMetaFSM()
 	cmd, err := encodeMetaCmd(MetaCmdType(99), nil)
 	require.NoError(t, err)
+	before := testutil.ToFloat64(metrics.UnknownMetaCmdTotal.WithLabelValues("99"))
 
 	// Unknown types must be silently ignored — no error, no panic.
 	require.NoError(t, f.applyCmd(cmd), "unknown cmd must not fail (rolling-upgrade gate)")
 	assert.Empty(t, f.Nodes(), "unknown cmd must not mutate state")
+	after := testutil.ToFloat64(metrics.UnknownMetaCmdTotal.WithLabelValues("99"))
+	assert.Equal(t, before+1, after, "unknown cmd must increment the rolling-upgrade telemetry counter")
 }
 
 func newTestLifecycleDB(t *testing.T) *badger.DB {

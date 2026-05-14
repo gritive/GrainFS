@@ -70,6 +70,18 @@ groups:
           summary: "GrainFS peer unhealthy"
           description: "Peer {{ $labels.peer }} has been unhealthy for more than 5 minutes."
 
+      - alert: GrainFSUnknownMetaCmdIgnored
+        expr: |
+          increase(grainfs_unknown_metacmd_total[5m]) > 0
+          or
+          (grainfs_unknown_metacmd_total > 0 unless grainfs_unknown_metacmd_total offset 5m)
+        labels:
+          severity: warning
+          tier: sev2
+        annotations:
+          summary: "GrainFS unhandled MetaCmd ignored"
+          description: "GrainFS ignored unknown or unhandled MetaCmd type {{ $labels.type }}. Check cluster version skew and pause use of newly introduced raft metadata features until every node is upgraded."
+
       # SEV3: Address within 1 hour
       - alert: GrainFSDiskSpaceHigh
         expr: grainfs_disk_usage_percent > 80
