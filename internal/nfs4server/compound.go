@@ -782,13 +782,17 @@ func (d *Dispatcher) opAccess(data []byte) OpResult {
 
 func (d *Dispatcher) opReadDir(data []byte) OpResult {
 	var reqBit attrBitmap
-	if len(data) >= 20 {
-		r := NewXDRReader(data)
-		r.ReadUint64() // cookie
-		r.ReadFixed(8) // cookieverf
-		r.ReadUint32() // dircount
-		r.ReadUint32() // maxcount
-		reqBit = readAttrBitmap(r)
+	if len(data) >= 28 {
+		bitmapLen := binary.BigEndian.Uint32(data[24:28])
+		for i := uint32(0); i < bitmapLen; i++ {
+			off := 28 + int(i)*4
+			if off+4 > len(data) {
+				break
+			}
+			if i < uint32(len(reqBit)) {
+				reqBit[i] = binary.BigEndian.Uint32(data[off : off+4])
+			}
+		}
 	}
 
 	w := getXDRWriter()

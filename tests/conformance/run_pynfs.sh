@@ -50,7 +50,9 @@ if [[ "${COLIMA}" -eq 1 ]]; then
     echo "ERROR: colima not found" >&2
     exit 1
   fi
-  exec colima ssh -- bash -lc "cd '${ROOT}' && '${SCRIPT_REL}' --suite '${SUITE}'"
+  ROOT_Q="$(printf '%q' "${ROOT}")"
+  SUITE_Q="$(printf '%q' "${SUITE}")"
+  exec colima ssh -- bash -lc "cd ${ROOT_Q} && make build && ${SCRIPT_REL} --suite ${SUITE_Q}"
 fi
 
 if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then

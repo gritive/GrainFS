@@ -71,7 +71,7 @@ test-e2e-iceberg: bin/$(BINARY)
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
 
-test-pynfs-colima: build
+test-pynfs-colima:
 	@echo "Running pynfs conformance in Colima VM (advisory)"
 	tests/conformance/run_pynfs.sh --colima --suite basic
 	@echo "Summary: tests/conformance/results/summary.json"
