@@ -1,8 +1,13 @@
 package snapshot
 
 import (
+	"bufio"
+	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -25,11 +30,39 @@ type Snapshot struct {
 	BucketMeta []storage.SnapshotBucket `json:"bucket_meta,omitempty"`
 }
 
+var ErrUnsupportedSnapshotFormat = errors.New("unsupported snapshot format")
+
+var snapshotMagic = [8]byte{'G', 'F', 'S', 'N', 'A', 'P', '0', '1'}
+
+const (
+	currentSnapshotWriterFormat uint32 = 1
+	currentSnapshotReaderFormat uint32 = 1
+	snapshotHeaderLen                  = 8 + 4 + 4 + 8
+)
+
 func writeSnapshot(path string, snap *Snapshot) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
+
+	if _, err := f.Write(snapshotMagic[:]); err != nil {
+		f.Close()
+		return err
+	}
+	if err := binary.Write(f, binary.BigEndian, currentSnapshotReaderFormat); err != nil {
+		f.Close()
+		return err
+	}
+	if err := binary.Write(f, binary.BigEndian, currentSnapshotWriterFormat); err != nil {
+		f.Close()
+		return err
+	}
+	if err := binary.Write(f, binary.BigEndian, time.Now().UnixNano()); err != nil {
+		f.Close()
+		return err
+	}
+
 	gz := gzip.NewWriter(f)
 	enc := json.NewEncoder(gz)
 	enc.SetIndent("", "")
@@ -51,7 +84,41 @@ func readSnapshot(path string) (*Snapshot, error) {
 		return nil, err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	return readSnapshotFromReader(f)
+}
+
+func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
+	br := bufio.NewReader(r)
+
+	prefix, err := br.Peek(2)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(prefix, []byte{0x1f, 0x8b}) {
+		return decodeSnapshotGzip(br)
+	}
+
+	header, err := br.Peek(snapshotHeaderLen)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(header[:8], snapshotMagic[:]) {
+		return nil, fmt.Errorf("%w: unknown snapshot envelope", ErrUnsupportedSnapshotFormat)
+	}
+
+	minReader := binary.BigEndian.Uint32(header[8:12])
+	if minReader > currentSnapshotReaderFormat {
+		return nil, fmt.Errorf("%w: min reader format %d exceeds current reader format %d", ErrUnsupportedSnapshotFormat, minReader, currentSnapshotReaderFormat)
+	}
+
+	if _, err := br.Discard(snapshotHeaderLen); err != nil {
+		return nil, err
+	}
+	return decodeSnapshotGzip(br)
+}
+
+func decodeSnapshotGzip(r io.Reader) (*Snapshot, error) {
+	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, err
 	}
