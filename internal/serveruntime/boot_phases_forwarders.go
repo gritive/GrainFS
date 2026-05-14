@@ -38,7 +38,7 @@ import (
 // through the wal.Backend).
 func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	state.walDir = filepath.Join(state.cfg.DataDir, "wal")
-	w, err := wal.Open(state.walDir)
+	w, err := wal.OpenEncrypted(state.walDir, state.cfg.Encryptor)
 	if err != nil {
 		return fmt.Errorf("open WAL: %w", err)
 	}

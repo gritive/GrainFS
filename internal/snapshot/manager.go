@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -25,16 +26,23 @@ type Manager struct {
 	backend storage.Snapshotable
 	nextSeq atomic.Uint64
 	walDir  string // optional: path to WAL directory for PITR
+	walEnc  *encrypt.Encryptor
 }
 
 // NewManager creates a Manager backed by the given snapshotable backend.
 // snapshotDir is the directory where snapshot files are stored.
 // walDir is optional: if non-empty, enables PITR via WAL replay.
 func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string) (*Manager, error) {
+	return NewManagerWithEncryptor(snapshotDir, backend, walDir, nil)
+}
+
+// NewManagerWithEncryptor creates a Manager that can replay encrypted WAL
+// entries during PITR when walDir is configured.
+func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, walDir string, enc *encrypt.Encryptor) (*Manager, error) {
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
-	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir}
+	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir, walEnc: enc}
 	// Seed nextSeq from existing snapshots
 	snaps, err := m.List()
 	if err != nil {

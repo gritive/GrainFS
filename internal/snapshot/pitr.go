@@ -49,7 +49,13 @@ func (m *Manager) PITRRestore(targetTime time.Time) (*PITRResult, error) {
 	// Replay WAL entries if WAL directory is configured
 	walReplayed := 0
 	if m.walDir != "" {
-		walReplayed, err = wal.Replay(m.walDir, base.WALOffset, targetTime, func(e wal.Entry) {
+		replayFn := wal.Replay
+		if m.walEnc != nil {
+			replayFn = func(dir string, fromSeq uint64, targetTime time.Time, fn func(wal.Entry)) (int, error) {
+				return wal.ReplayEncrypted(dir, fromSeq, targetTime, m.walEnc, fn)
+			}
+		}
+		walReplayed, err = replayFn(m.walDir, base.WALOffset, targetTime, func(e wal.Entry) {
 			switch e.Op {
 			case wal.OpPut:
 				objects[snapshotObjectKey(e.Bucket, e.Key, e.VersionID)] = storage.SnapshotObject{

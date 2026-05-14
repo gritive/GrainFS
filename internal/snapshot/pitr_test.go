@@ -1,11 +1,13 @@
 package snapshot_test
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/wal"
@@ -68,6 +70,30 @@ func TestPITRRestore_ReplaysVersionHistoryAndDeleteMarker(t *testing.T) {
 	require.False(t, byVersion["v2"].IsLatest)
 	require.True(t, byVersion["del-v3"].IsLatest)
 	require.True(t, byVersion["del-v3"].IsDeleteMarker)
+}
+
+func TestPITRRestore_ReplaysEncryptedWAL(t *testing.T) {
+	snapDir := t.TempDir()
+	walDir := t.TempDir()
+	backend := &pitrMockBackend{}
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	mgr, err := snapshot.NewManagerWithEncryptor(snapDir, backend, walDir, enc)
+	require.NoError(t, err)
+	_, err = mgr.Create("base")
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(walDir, enc)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "secret-key", ETag: "secret-etag", Size: 2, VersionID: "v1"})
+	require.NoError(t, w.Close())
+
+	_, err = mgr.PITRRestore(time.Now().Add(time.Second))
+	require.NoError(t, err)
+	require.Len(t, backend.objects, 1)
+	require.Equal(t, "secret-key", backend.objects[0].Key)
+	require.Equal(t, "secret-etag", backend.objects[0].ETag)
 }
 
 func TestPITRRestore_DropsDeletedHistoryForUnversionedBuckets(t *testing.T) {

@@ -89,11 +89,12 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 					return nil
 				}
 				var meta objectMeta
-				if err := metaItem.Value(func(v []byte) error {
-					var derr error
-					meta, derr = unmarshalObjectMeta(v)
-					return derr
-				}); err != nil {
+				v, err := b.itemValueCopy(metaItem)
+				if err != nil {
+					return nil
+				}
+				meta, err = unmarshalObjectMeta(v)
+				if err != nil {
 					return nil
 				}
 				if meta.ETag == deleteMarkerETag {

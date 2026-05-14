@@ -90,11 +90,11 @@ func TestMetaFSM_Apply_ClusterConfigPatch_ResetKeys(t *testing.T) {
 
 // TestMetaFSM_Apply_ClusterConfigPatch_RejectsSecretWithoutEncryptor verifies
 // that a patch carrying a wrapped webhook secret is rejected when the FSM has
-// no encryptor (e.g. --no-encryption mode). The error must mention
+// no encryptor. The error must mention
 // "encryption disabled" so the HTTP handler (Task 10) can map it to 403.
 func TestMetaFSM_Apply_ClusterConfigPatch_RejectsSecretWithoutEncryptor(t *testing.T) {
 	f := NewMetaFSM()
-	// f.encryptor stays nil (no-encryption mode)
+	// f.encryptor stays nil.
 
 	patch := ClusterConfigPatch{
 		AlertWebhook:              ptrString("https://hooks.example/x"),

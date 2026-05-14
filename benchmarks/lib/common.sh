@@ -88,7 +88,8 @@ bench_wait_tcp_port() {
 
 bench_encryption_args() {
   if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
-    printf '%s\n' "--no-encryption"
+    echo "[error] encryption is mandatory; do not set NO_ENCRYPTION=1" >&2
+    return 1
   elif [[ -n "${BENCH_ENCRYPTION_KEY_FILE:-}" ]]; then
     printf '%s\n' "--encryption-key-file"
     printf '%s\n' "$BENCH_ENCRYPTION_KEY_FILE"
@@ -99,7 +100,8 @@ bench_generate_encryption_key_file() {
   local key_file="$1"
 
   if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
-    return 0
+    echo "[error] encryption is mandatory; do not set NO_ENCRYPTION=1" >&2
+    return 1
   fi
 
   python3 - "$key_file" <<'PY'

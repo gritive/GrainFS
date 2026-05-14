@@ -114,6 +114,61 @@ func (e *Encryptor) DecryptWithAAD(data, aad []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+const (
+	valueMagic0   = byte(0xAE)
+	valueMagic1   = byte(0xE2)
+	valueVersion1 = byte(0x01)
+)
+
+func IsEncryptedValue(data []byte) bool {
+	return len(data) >= 3 && data[0] == valueMagic0 && data[1] == valueMagic1 && data[2] == valueVersion1
+}
+
+func (e *Encryptor) SealValue(domain string, plaintext []byte) ([]byte, error) {
+	return e.SealValueAADTo(nil, []byte(domain), plaintext)
+}
+
+func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]byte, error) {
+	headerLen := 3 + e.aead.NonceSize()
+	outLen := headerLen + len(plaintext) + e.aead.Overhead()
+	if cap(dst) < outLen {
+		dst = make([]byte, 0, outLen)
+	}
+	out := dst[:headerLen]
+	out[0] = valueMagic0
+	out[1] = valueMagic1
+	out[2] = valueVersion1
+	nonce := out[3 : 3+e.aead.NonceSize()]
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	return e.aead.Seal(out, nonce, plaintext, aad), nil
+}
+
+func (e *Encryptor) OpenValue(domain string, blob []byte) ([]byte, error) {
+	return e.OpenValueAAD([]byte(domain), blob)
+}
+
+func (e *Encryptor) OpenValueAAD(aad []byte, blob []byte) ([]byte, error) {
+	if !IsEncryptedValue(blob) {
+		return nil, fmt.Errorf("not an encrypted value")
+	}
+	nonceSize := e.aead.NonceSize()
+	inner := blob[3:]
+	if len(inner) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := inner[:nonceSize], inner[nonceSize:]
+	plaintext, err := e.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt value: %w", err)
+	}
+	if plaintext == nil {
+		plaintext = []byte{}
+	}
+	return plaintext, nil
+}
+
 // SealWithNonceAAD encrypts plaintext with a caller-provided nonce and AAD.
 // Callers must guarantee nonce uniqueness for a given key.
 func (e *Encryptor) SealWithNonceAAD(dst, nonce, plaintext, aad []byte) ([]byte, error) {

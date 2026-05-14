@@ -254,6 +254,9 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 // expected so the self address can be cached before the slice is sorted).
 func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []string) {
 	b.shardSvc = svc
+	if b.fsm != nil && svc != nil {
+		b.fsm.SetEncryptor(svc.encryptor)
+	}
 	topology := newBackendTopology(allNodes)
 	b.selfAddr = topology.selfAddr
 	b.allNodes = append([]string(nil), topology.allNodes...)
@@ -1186,7 +1189,7 @@ func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, buck
 	}
 
 	stageStart = time.Now()
-	sp, err := spoolObject(ctx, b.spoolDir(), r, bucket)
+	sp, err := b.spoolPutObject(ctx, bucket, r)
 	if err != nil {
 		return nil, err
 	}
@@ -1291,7 +1294,7 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
 	}
-	sp, err := spoolObject(ctx, b.spoolDir(), r, bucket)
+	sp, err := b.spoolPutObject(ctx, bucket, r)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1314,6 +1317,9 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 func (b *DistributedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
 	if !storage.IsInternalBucket(bucket) {
 		return nil, fmt.Errorf("WriteAt not supported for user bucket %q", bucket)
+	}
+	if b.encryptedShardStorage() {
+		return nil, fmt.Errorf("WriteAt not supported for encrypted shard storage")
 	}
 
 	var tStart, tStage time.Time
@@ -1498,6 +1504,9 @@ func (b *DistributedBackend) PreferWriteAt(bucket string) bool {
 	if !storage.IsInternalBucket(bucket) {
 		return false
 	}
+	if b.encryptedShardStorage() {
+		return false
+	}
 	nodes := b.liveNodes()
 	if len(nodes) <= 1 {
 		return true
@@ -1515,6 +1524,9 @@ func (b *DistributedBackend) PreferWriteAt(bucket string) bool {
 func (b *DistributedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	if !storage.IsInternalBucket(bucket) {
 		return fmt.Errorf("Truncate not supported for user bucket %q", bucket)
+	}
+	if b.encryptedShardStorage() {
+		return fmt.Errorf("Truncate not supported for encrypted shard storage")
 	}
 	if size < 0 {
 		return fmt.Errorf("truncate: negative size %d", size)
@@ -1550,6 +1562,10 @@ func (b *DistributedBackend) Truncate(ctx context.Context, bucket, key string, s
 	return b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(objPath.metaKey, meta)
 	})
+}
+
+func (b *DistributedBackend) encryptedShardStorage() bool {
+	return b.shardSvc != nil && b.shardSvc.encryptor != nil
 }
 
 // selectECPlacement decides where each shard for shardKey should land.
@@ -2645,36 +2661,38 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 	var placement PlacementMeta
 	err := b.db.View(func(txn *badger.Txn) error {
 		decodeMeta := func(item *badger.Item, versionID string) error {
-			return item.Value(func(val []byte) error {
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				// Tombstone markers aren't observable via HeadObject — callers use
-				// HeadObjectVersion / ListObjectVersions to see them explicitly.
-				if m.ETag == deleteMarkerETag {
-					return storage.ErrObjectNotFound
-				}
-				obj = storage.Object{
-					Key:          m.Key,
-					Size:         m.Size,
-					ContentType:  m.ContentType,
-					ETag:         m.ETag,
-					LastModified: m.LastModified,
-					VersionID:    versionID,
-					ACL:          m.ACL,
-					UserMetadata: cloneStringMap(m.UserMetadata),
-				}
-				placement = PlacementMeta{
-					VersionID:        versionID,
-					RingVersion:      RingVersion(m.RingVersion),
-					ECData:           m.ECData,
-					ECParity:         m.ECParity,
-					NodeIDs:          m.NodeIDs,
-					PlacementGroupID: m.PlacementGroupID,
-				}
-				return nil
-			})
+			val, err := b.itemValueCopy(item)
+			if err != nil {
+				return err
+			}
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			// Tombstone markers aren't observable via HeadObject — callers use
+			// HeadObjectVersion / ListObjectVersions to see them explicitly.
+			if m.ETag == deleteMarkerETag {
+				return storage.ErrObjectNotFound
+			}
+			obj = storage.Object{
+				Key:          m.Key,
+				Size:         m.Size,
+				ContentType:  m.ContentType,
+				ETag:         m.ETag,
+				LastModified: m.LastModified,
+				VersionID:    versionID,
+				ACL:          m.ACL,
+				UserMetadata: cloneStringMap(m.UserMetadata),
+			}
+			placement = PlacementMeta{
+				VersionID:        versionID,
+				RingVersion:      RingVersion(m.RingVersion),
+				ECData:           m.ECData,
+				ECParity:         m.ECParity,
+				NodeIDs:          m.NodeIDs,
+				PlacementGroupID: m.PlacementGroupID,
+			}
+			return nil
 		}
 
 		// Resolve via latest-version pointer when present so callers see the
@@ -2747,17 +2765,19 @@ func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) Pl
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			meta.RingVersion = RingVersion(m.RingVersion)
-			meta.ECData = m.ECData
-			meta.ECParity = m.ECParity
-			meta.NodeIDs = m.NodeIDs
-			return nil
-		})
+		val, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalObjectMeta(val)
+		if err != nil {
+			return err
+		}
+		meta.RingVersion = RingVersion(m.RingVersion)
+		meta.ECData = m.ECData
+		meta.ECParity = m.ECParity
+		meta.NodeIDs = m.NodeIDs
+		return nil
 	})
 	return meta
 }
@@ -2925,14 +2945,15 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 			}
 
 			var obj storage.Object
-			err := it.Item().Value(func(val []byte) error {
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				if m.ETag == deleteMarkerETag {
-					return nil // tombstone — don't emit
-				}
+			val, err := b.itemValueCopy(it.Item())
+			if err != nil {
+				return err
+			}
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			if m.ETag != deleteMarkerETag {
 				obj = storage.Object{
 					Key:          m.Key,
 					Size:         m.Size,
@@ -2945,8 +2966,7 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
 				}
-				return nil
-			})
+			}
 			if err != nil {
 				return err
 			}
@@ -3020,14 +3040,15 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 			}
 
 			var obj storage.Object
-			if err := it.Item().Value(func(val []byte) error {
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				if m.ETag == deleteMarkerETag {
-					return nil
-				}
+			val, err := b.itemValueCopy(it.Item())
+			if err != nil {
+				return err
+			}
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			if m.ETag != deleteMarkerETag {
 				obj = storage.Object{
 					Key:          m.Key,
 					Size:         m.Size,
@@ -3040,9 +3061,6 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
 				}
-				return nil
-			}); err != nil {
-				return err
 			}
 			if obj.Key == "" {
 				continue
@@ -3121,7 +3139,15 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	}
 
 	h := md5.New()
-	w := io.MultiWriter(f, h)
+	var partWriter io.Writer = f
+	if b.encryptedShardStorage() {
+		partWriter = &encryptedSpoolRecordWriter{
+			w:      f,
+			enc:    b.shardSvc.encryptor,
+			domain: clusterMultipartPartDomain(uploadID, partNumber),
+		}
+	}
+	w := io.MultiWriter(partWriter, h)
 	size, err := io.Copy(w, r)
 	f.Close()
 	if err != nil {
@@ -3147,14 +3173,16 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalClusterMultipartMeta(val)
-			if err != nil {
-				return err
-			}
-			meta = m
-			return nil
-		})
+		val, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalClusterMultipartMeta(val)
+		if err != nil {
+			return err
+		}
+		meta = m
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -3187,14 +3215,20 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, fmt.Errorf("create multipart spool: %w", err)
 	}
 	sp := &spooledObject{Path: out.Name()}
+	var spoolWriter io.Writer = out
+	if b.encryptedShardStorage() {
+		sp.encrypted = true
+		sp.encryptor = b.shardSvc.encryptor
+		sp.domain = clusterMultipartSpoolDomain(uploadID, versionID)
+		spoolWriter = &encryptedSpoolRecordWriter{w: out, enc: sp.encryptor, domain: sp.domain}
+	}
 	defer sp.Cleanup()
 
 	h := md5.New()
-	mw := io.MultiWriter(out, h)
+	mw := io.MultiWriter(spoolWriter, h)
 
 	for _, p := range parts {
-		partFile := b.partPath(uploadID, p.PartNumber)
-		f, err := os.Open(partFile)
+		f, err := b.openMultipartPart(uploadID, p.PartNumber)
 		if err != nil {
 			out.Close()
 			return nil, fmt.Errorf("open part %d: %w", p.PartNumber, err)
@@ -3306,8 +3340,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 		if parseErr != nil || partNumber <= 0 {
 			continue
 		}
-		full := filepath.Join(b.partDir(uploadID), entry.Name())
-		f, err := os.Open(full)
+		f, err := b.openMultipartPart(uploadID, partNumber)
 		if err != nil {
 			return nil, fmt.Errorf("open part %d: %w", partNumber, err)
 		}
@@ -3328,6 +3361,22 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 		out = out[:maxParts]
 	}
 	return out, nil
+}
+
+func (b *DistributedBackend) openMultipartPart(uploadID string, partNumber int) (io.ReadCloser, error) {
+	full := b.partPath(uploadID, partNumber)
+	if b.encryptedShardStorage() {
+		return openSpoolEncryptedRecordFile(full, b.shardSvc.encryptor, clusterMultipartPartDomain(uploadID, partNumber))
+	}
+	return os.Open(full)
+}
+
+func clusterMultipartPartDomain(uploadID string, partNumber int) string {
+	return fmt.Sprintf("cluster-multipart-part:%s:%d", uploadID, partNumber)
+}
+
+func clusterMultipartSpoolDomain(uploadID, versionID string) string {
+	return fmt.Sprintf("cluster-multipart-spool:%s:%s", uploadID, versionID)
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
@@ -3380,34 +3429,36 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			if m.ETag == deleteMarkerETag {
-				return storage.ErrMethodNotAllowed
-			}
-			obj = storage.Object{
-				Key:          m.Key,
-				Size:         m.Size,
-				ContentType:  m.ContentType,
-				ETag:         m.ETag,
-				LastModified: m.LastModified,
-				VersionID:    versionID,
-				ACL:          m.ACL,
-				UserMetadata: cloneStringMap(m.UserMetadata),
-			}
-			placement = PlacementMeta{
-				VersionID:        versionID,
-				RingVersion:      RingVersion(m.RingVersion),
-				ECData:           m.ECData,
-				ECParity:         m.ECParity,
-				NodeIDs:          m.NodeIDs,
-				PlacementGroupID: m.PlacementGroupID,
-			}
-			return nil
-		})
+		val, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalObjectMeta(val)
+		if err != nil {
+			return err
+		}
+		if m.ETag == deleteMarkerETag {
+			return storage.ErrMethodNotAllowed
+		}
+		obj = storage.Object{
+			Key:          m.Key,
+			Size:         m.Size,
+			ContentType:  m.ContentType,
+			ETag:         m.ETag,
+			LastModified: m.LastModified,
+			VersionID:    versionID,
+			ACL:          m.ACL,
+			UserMetadata: cloneStringMap(m.UserMetadata),
+		}
+		placement = PlacementMeta{
+			VersionID:        versionID,
+			RingVersion:      RingVersion(m.RingVersion),
+			ECData:           m.ECData,
+			ECParity:         m.ECParity,
+			NodeIDs:          m.NodeIDs,
+			PlacementGroupID: m.PlacementGroupID,
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, PlacementMeta{}, err
@@ -3520,24 +3571,22 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 				continue
 			}
 			latestVID := latestMap[key]
-			var v storage.ObjectVersion
-			if err := it.Item().Value(func(val []byte) error {
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				v = storage.ObjectVersion{
-					Key:            key,
-					VersionID:      vid,
-					IsLatest:       vid == latestVID,
-					IsDeleteMarker: m.ETag == deleteMarkerETag,
-					LastModified:   m.LastModified,
-					ETag:           m.ETag,
-					Size:           m.Size,
-				}
-				return nil
-			}); err != nil {
+			val, err := b.itemValueCopy(it.Item())
+			if err != nil {
 				return err
+			}
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			v := storage.ObjectVersion{
+				Key:            key,
+				VersionID:      vid,
+				IsLatest:       vid == latestVID,
+				IsDeleteMarker: m.ETag == deleteMarkerETag,
+				LastModified:   m.LastModified,
+				ETag:           m.ETag,
+				Size:           m.Size,
 			}
 			versions = append(versions, &v)
 		}

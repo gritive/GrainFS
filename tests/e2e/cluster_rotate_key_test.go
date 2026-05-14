@@ -31,6 +31,7 @@ func TestE2E_RotateKey_HappyPath(t *testing.T) {
 	httpPort := freePort()
 	raftPort := freePort()
 	oldKey := strings.Repeat("a", 64)
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -44,7 +45,7 @@ func TestE2E_RotateKey_HappyPath(t *testing.T) {
 		"--cluster-key", oldKey,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -110,6 +111,7 @@ func TestE2E_RotateKey_StatusOnlyOnSoloMode(t *testing.T) {
 	dir := shortTempDir(t)
 	httpPort := freePort()
 	raftPort := freePort()
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -123,7 +125,7 @@ func TestE2E_RotateKey_StatusOnlyOnSoloMode(t *testing.T) {
 		"--cluster-key", strings.Repeat("c", 64),
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
