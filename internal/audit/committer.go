@@ -46,9 +46,9 @@ type CommitterConfig struct {
 // On leader nodes it writes Parquet + Iceberg metadata. On follower nodes it ships
 // events to the leader via ShipToLeader.
 type Committer struct {
-	cfg         CommitterConfig
-	batch       []S3Event
-	leaderExtra []S3Event
+	cfg        CommitterConfig
+	batch      []S3Event
+	followerIn chan []S3Event // lock-free mailbox for events shipped by followers
 }
 
 // NewCommitter creates a Committer.
@@ -57,16 +57,19 @@ func NewCommitter(cfg CommitterConfig) *Committer {
 		cfg.Interval = 60 * time.Second
 	}
 	return &Committer{
-		cfg:         cfg,
-		batch:       make([]S3Event, 0, ringCap),
-		leaderExtra: make([]S3Event, 0, ringCap),
+		cfg:        cfg,
+		batch:      make([]S3Event, 0, ringCap),
+		followerIn: make(chan []S3Event, 256),
 	}
 }
 
 // AppendFromFollower adds events shipped by a follower to the leader queue.
-// Called from the QUIC stream handler.
+// Called from the QUIC stream handler goroutine; non-blocking to avoid back-pressure.
 func (c *Committer) AppendFromFollower(events []S3Event) {
-	c.leaderExtra = append(c.leaderExtra, events...)
+	select {
+	case c.followerIn <- events:
+	default: // channel full; events already captured in follower zerolog
+	}
 }
 
 // Run runs the committer loop until ctx is cancelled.
@@ -80,8 +83,16 @@ func (c *Committer) Run(ctx context.Context) {
 		case <-ticker.C:
 			if c.cfg.IsLeader() {
 				c.batch = c.cfg.Emitter.Ring().DrainInto(c.batch)
-				c.batch = append(c.batch, c.leaderExtra...)
-				c.leaderExtra = c.leaderExtra[:0]
+				// drain follower mailbox
+			followerDrain:
+				for {
+					select {
+					case extra := <-c.followerIn:
+						c.batch = append(c.batch, extra...)
+					default:
+						break followerDrain
+					}
+				}
 				if len(c.batch) == 0 {
 					continue
 				}
@@ -161,13 +172,13 @@ func (c *Committer) buildNewMetadata(
 	}
 
 	nowMs := time.Now().UnixMilli()
+	seqNum := getInt64(meta, "last-sequence-number") + 1
 
-	manifestListPath, _, err := c.writeManifestList(ctx, snapshotID, parquetPath, parquetSize, rowCount, dt)
+	manifestListPath, _, err := c.writeManifestList(ctx, snapshotID, seqNum, parquetPath, parquetSize, rowCount, dt)
 	if err != nil {
 		return nil, "", fmt.Errorf("write manifest list: %w", err)
 	}
 
-	seqNum := getInt64(meta, "last-sequence-number") + 1
 	snapshot := map[string]any{
 		"snapshot-id":     snapshotID,
 		"timestamp-ms":    nowMs,
@@ -217,14 +228,14 @@ func (c *Committer) buildNewMetadata(
 // Uses minimal Avro Object Container File format directly (avro container format spec §5).
 func (c *Committer) writeManifestList(
 	ctx context.Context,
-	snapshotID int64,
+	snapshotID, seqNum int64,
 	parquetPath string, parquetSize, rowCount int64,
 	dt string,
 ) (manifestListPath string, manifestListSize int64, _ error) {
 	manifestKey := fmt.Sprintf("metadata/s3/%d-%s-manifest.avro", snapshotID, uuid.New().String())
 	manifestPath := fmt.Sprintf("s3://%s/%s", BucketName, manifestKey)
 
-	manifestBytes, err := encodeManifest(snapshotID, parquetPath, parquetSize, rowCount, dt)
+	manifestBytes, err := encodeManifest(snapshotID, seqNum, parquetPath, parquetSize, rowCount, dt)
 	if err != nil {
 		return "", 0, fmt.Errorf("encode manifest: %w", err)
 	}
@@ -236,7 +247,7 @@ func (c *Committer) writeManifestList(
 	listKey := fmt.Sprintf("metadata/s3/snap-%d-%s.avro", snapshotID, uuid.New().String())
 	listPath := fmt.Sprintf("s3://%s/%s", BucketName, listKey)
 
-	listBytes, err := encodeManifestList(snapshotID, manifestPath, int64(len(manifestBytes)), rowCount)
+	listBytes, err := encodeManifestList(snapshotID, seqNum, manifestPath, int64(len(manifestBytes)), rowCount)
 	if err != nil {
 		return "", 0, fmt.Errorf("encode manifest list: %w", err)
 	}
@@ -346,7 +357,7 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 }
 
 // encodeManifestList creates an Iceberg manifest list Avro file with one manifest entry.
-func encodeManifestList(snapshotID int64, manifestPath string, manifestLen, rowCount int64) ([]byte, error) {
+func encodeManifestList(snapshotID, seqNum int64, manifestPath string, manifestLen, rowCount int64) ([]byte, error) {
 	schema := `{"type":"record","name":"manifest_file","fields":[` +
 		`{"name":"manifest_path","type":"string","field-id":500},` +
 		`{"name":"manifest_length","type":"long","field-id":501},` +
@@ -374,8 +385,8 @@ func encodeManifestList(snapshotID int64, manifestPath string, manifestLen, rowC
 	appendAvroLong(&rec, manifestLen)
 	appendAvroInt(&rec, 0)           // partition_spec_id
 	appendAvroInt(&rec, 0)           // content=DATA
-	appendAvroLong(&rec, 1)          // sequence_number
-	appendAvroLong(&rec, 1)          // min_sequence_number
+	appendAvroLong(&rec, seqNum)     // sequence_number
+	appendAvroLong(&rec, seqNum)     // min_sequence_number
 	appendAvroLong(&rec, snapshotID) // added_snapshot_id
 	appendAvroInt(&rec, 1)           // added_files_count
 	appendAvroInt(&rec, 0)           // existing_files_count
@@ -389,7 +400,7 @@ func encodeManifestList(snapshotID int64, manifestPath string, manifestLen, rowC
 }
 
 // encodeManifest creates an Iceberg manifest Avro file with one data file entry.
-func encodeManifest(snapshotID int64, parquetPath string, parquetSize, rowCount int64, dt string) ([]byte, error) {
+func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, rowCount int64, dt string) ([]byte, error) {
 	dtTime, _ := time.Parse("2006-01-02", dt)
 	julianDay := int32(dtTime.Unix() / 86400)
 
@@ -427,7 +438,7 @@ func encodeManifest(snapshotID int64, parquetPath string, parquetSize, rowCount 
 	appendAvroLong(&rec, snapshotID)
 	// sequence_number: union → 1 + value
 	appendAvroInt(&rec, 1)
-	appendAvroLong(&rec, 1)
+	appendAvroLong(&rec, seqNum)
 	// file_sequence_number: null (index 0)
 	appendAvroInt(&rec, 0)
 	// data_file record
