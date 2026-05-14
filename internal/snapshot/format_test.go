@@ -4,11 +4,13 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -46,15 +48,16 @@ func writeFutureSnapshotFile(t *testing.T, path string, snap *Snapshot, minReade
 	require.NoError(t, binary.Write(f, binary.BigEndian, minReader))
 	require.NoError(t, binary.Write(f, binary.BigEndian, uint32(999)))
 	require.NoError(t, binary.Write(f, binary.BigEndian, time.Now().UnixNano()))
-	gz := gzip.NewWriter(f)
-	require.NoError(t, json.NewEncoder(gz).Encode(snap))
-	require.NoError(t, gz.Close())
+	zw, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(zw).Encode(snap))
+	require.NoError(t, zw.Close())
 	require.NoError(t, f.Close())
 }
 
 func TestWriteSnapshotAddsHeaderAndRoundTrips(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "snapshot-00000000000000000001.json.gz")
+	path := filepath.Join(dir, "snapshot-00000000000000000001.json.zst")
 	snap := testSnapshot(1)
 
 	require.NoError(t, writeSnapshot(path, snap))
@@ -70,16 +73,13 @@ func TestWriteSnapshotAddsHeaderAndRoundTrips(t *testing.T) {
 	require.Equal(t, snap.WALOffset, got.WALOffset)
 }
 
-func TestReadLegacyGzipSnapshotStillRestores(t *testing.T) {
+func TestReadLegacyGzipSnapshotIsUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snapshot-00000000000000000001.json.gz")
-	snap := testSnapshot(1)
-	writeLegacyGzipSnapshotFile(t, path, snap)
+	writeLegacyGzipSnapshotFile(t, path, testSnapshot(1))
 
-	got, err := readSnapshot(path)
-	require.NoError(t, err)
-	require.Equal(t, snap.Seq, got.Seq)
-	require.Equal(t, snap.WALOffset, got.WALOffset)
+	_, err := readSnapshot(path)
+	require.ErrorIs(t, err, ErrUnsupportedSnapshotFormat)
 }
 
 type formatTestBackend struct {
@@ -128,4 +128,26 @@ func TestListSkipsUnknownSnapshotEnvelope(t *testing.T) {
 	snaps, err := mgr.List()
 	require.NoError(t, err)
 	require.Empty(t, snaps)
+}
+
+func TestManagerUsesZstdSuffixAndIgnoresGzipSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	backend := &formatTestBackend{}
+	mgr, err := NewManager(dir, backend, "")
+	require.NoError(t, err)
+
+	snap, err := mgr.Create("suffix")
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(dir, "snapshot-1.json.zst"))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dir, "snapshot-1.json.gz"))
+	require.True(t, errors.Is(err, os.ErrNotExist))
+
+	writeLegacyGzipSnapshotFile(t, filepath.Join(dir, "snapshot-99.json.gz"), testSnapshot(99))
+
+	snaps, err := mgr.List()
+	require.NoError(t, err)
+	require.Len(t, snaps, 1)
+	require.Equal(t, snap.Seq, snaps[0].Seq)
 }
