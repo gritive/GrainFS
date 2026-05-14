@@ -46,6 +46,25 @@ const (
 	// ceRejectionCloseDelay gives the peer time to read the CE error response
 	// before CONNECTION_CLOSE interrupts stream reads.
 	ceRejectionCloseDelay = 200 * time.Millisecond
+
+	// ceFeaturesSupportedMask is the set of feature bits this node accepts.
+	// Any bit in the peer's features byte that is NOT in this mask triggers a
+	// feature_unsupported rejection. Add bits here when new features land and
+	// update docs/transport-mux-versioning.md.
+	ceFeaturesSupportedMask = byte(0x00)
+)
+
+// ceFailReason is the canonical token embedded in CE rejection payloads and
+// metric labels so operators and peers can distinguish failure modes.
+type ceFailReason string
+
+const (
+	ceReasonVersionMismatch  ceFailReason = "version_mismatch"
+	ceReasonWrongFirstStream ceFailReason = "wrong_first_stream"
+	ceReasonPayloadLength    ceFailReason = "payload_length"
+	ceReasonFeatureUnsup     ceFailReason = "feature_unsupported"
+	ceReasonTimeout          ceFailReason = "timeout"
+	ceReasonIOError          ceFailReason = "io_error"
 )
 
 var quicStreamCopyBufferPool = sync.Pool{
@@ -417,12 +436,13 @@ func (t *QUICTransport) acceptLoop() {
 					// Delay connection close so the peer can drain the error
 					// response written by handleCapabilityExchange before the
 					// CONNECTION_CLOSE frame interrupts stream reads.
+					closeMsg := "capability exchange failed: " + err.Error()
 					go func() {
 						select {
 						case <-time.After(ceRejectionCloseDelay):
 						case <-t.ctx.Done():
 						}
-						_ = conn.CloseWithError(quicAppErrCode, "capability exchange failed")
+						_ = conn.CloseWithError(quicAppErrCode, closeMsg)
 					}()
 					return
 				}
@@ -621,6 +641,11 @@ func (t *QUICTransport) doCapabilityExchangeDial(ctx context.Context, conn *quic
 
 	stream, err := conn.OpenStreamSync(ceCtx)
 	if err != nil {
+		reason := ceReasonIOError
+		if isDeadlineErr(err) {
+			reason = ceReasonTimeout
+		}
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(reason)).Inc()
 		return fmt.Errorf("open CE stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
@@ -633,17 +658,49 @@ func (t *QUICTransport) doCapabilityExchangeDial(ctx context.Context, conn *quic
 		Type:    StreamCapabilityExchange,
 		Payload: []byte{ceVersion, ceFeatures},
 	}); err != nil {
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(ceReasonIOError)).Inc()
 		return fmt.Errorf("encode CE: %w", err)
 	}
 
 	resp, err := t.codec.Decode(stream)
 	if err != nil {
+		reason := ceReasonIOError
+		if isDeadlineErr(err) {
+			reason = ceReasonTimeout
+		}
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(reason)).Inc()
 		return fmt.Errorf("decode CE response: %w", err)
 	}
 	if resp.Status != StatusOK {
-		return fmt.Errorf("CE rejected by peer: %s", string(resp.Payload))
+		reason := parseCEReason(string(resp.Payload))
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", reason).Inc()
+		return fmt.Errorf("CE rejected by peer (%s): %s", reason, string(resp.Payload))
 	}
+	metrics.TransportCECounter.WithLabelValues("dialer", "success", "").Inc()
 	return nil
+}
+
+// parseCEReason extracts the reason token from a CE rejection payload of the
+// form "<reason>: <detail>". Returns "io_error" if the format is not recognised.
+func parseCEReason(payload string) string {
+	for _, r := range []ceFailReason{
+		ceReasonVersionMismatch, ceReasonWrongFirstStream, ceReasonPayloadLength,
+		ceReasonFeatureUnsup, ceReasonTimeout, ceReasonIOError,
+	} {
+		if len(payload) >= len(r) && payload[:len(r)] == string(r) {
+			return string(r)
+		}
+	}
+	return string(ceReasonIOError)
+}
+
+// isDeadlineErr returns true if err is a network timeout or context deadline.
+func isDeadlineErr(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne interface{ Timeout() bool }
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // handleCapabilityExchange performs the server-side capability exchange on an
@@ -654,6 +711,11 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
+		reason := ceReasonIOError
+		if isDeadlineErr(err) {
+			reason = ceReasonTimeout
+		}
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(reason)).Inc()
 		return fmt.Errorf("accept CE stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
@@ -664,22 +726,38 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 
 	msg, err := t.codec.Decode(stream)
 	if err != nil {
+		reason := ceReasonIOError
+		if isDeadlineErr(err) {
+			reason = ceReasonTimeout
+		}
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(reason)).Inc()
 		return fmt.Errorf("decode CE: %w", err)
 	}
 	if msg.Type != StreamCapabilityExchange {
 		_ = t.codec.Encode(stream, NewErrorResponse(msg, StatusError,
-			fmt.Errorf("expected StreamCapabilityExchange (0x12), got 0x%02x", byte(msg.Type))))
-		return fmt.Errorf("unexpected CE stream type 0x%02x", byte(msg.Type))
+			fmt.Errorf("%s: type=0x%02x, want 0x%02x", ceReasonWrongFirstStream, byte(msg.Type), byte(StreamCapabilityExchange))))
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonWrongFirstStream)).Inc()
+		return fmt.Errorf("CE wrong first stream type 0x%02x", byte(msg.Type))
 	}
-	peerVer := byte(0)
-	if len(msg.Payload) > 0 {
-		peerVer = msg.Payload[0]
-	}
-	if peerVer != ceVersion {
+	if len(msg.Payload) != 2 {
 		_ = t.codec.Encode(stream, NewErrorResponse(msg, StatusError,
-			fmt.Errorf("peer version %d, our version %d, upgrade required", peerVer, ceVersion)))
-		return fmt.Errorf("CE version mismatch: peer=%d ours=%d", peerVer, ceVersion)
+			fmt.Errorf("%s: len=%d, want 2", ceReasonPayloadLength, len(msg.Payload))))
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonPayloadLength)).Inc()
+		return fmt.Errorf("CE payload length %d, want 2", len(msg.Payload))
 	}
+	if msg.Payload[0] != ceVersion {
+		_ = t.codec.Encode(stream, NewErrorResponse(msg, StatusError,
+			fmt.Errorf("%s: peer=%d local=%d", ceReasonVersionMismatch, msg.Payload[0], ceVersion)))
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonVersionMismatch)).Inc()
+		return fmt.Errorf("CE version mismatch: peer=%d ours=%d", msg.Payload[0], ceVersion)
+	}
+	if msg.Payload[1]&^ceFeaturesSupportedMask != 0 {
+		_ = t.codec.Encode(stream, NewErrorResponse(msg, StatusError,
+			fmt.Errorf("%s: bits=0x%02x", ceReasonFeatureUnsup, msg.Payload[1])))
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonFeatureUnsup)).Inc()
+		return fmt.Errorf("CE unsupported feature bits 0x%02x", msg.Payload[1])
+	}
+	metrics.TransportCECounter.WithLabelValues("acceptor", "success", "").Inc()
 	return t.codec.Encode(stream, NewResponse(msg, []byte{ceVersion, ceFeatures}))
 }
 
