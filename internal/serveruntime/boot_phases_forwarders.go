@@ -117,6 +117,9 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	metaRaft.SetForwarder(func(ctx context.Context, data []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data)
 	})
+	metaRaft.SetForwarderWithIndex(func(ctx context.Context, data []byte) (uint64, error) {
+		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data)
+	})
 
 	state.distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)

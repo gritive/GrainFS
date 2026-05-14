@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -23,8 +24,13 @@ func NewMetaProposeForwardSender(d MetaForwardDialer) *MetaProposeForwardSender 
 }
 
 func (s *MetaProposeForwardSender) Send(ctx context.Context, peers []string, command []byte) error {
+	_, err := s.SendWithIndex(ctx, peers, command)
+	return err
+}
+
+func (s *MetaProposeForwardSender) SendWithIndex(ctx context.Context, peers []string, command []byte) (uint64, error) {
 	if len(peers) == 0 {
-		return icebergcatalog.ErrServiceUnavailable
+		return 0, icebergcatalog.ErrServiceUnavailable
 	}
 	var lastErr error
 	for _, peer := range peers {
@@ -33,17 +39,17 @@ func (s *MetaProposeForwardSender) Send(ctx context.Context, peers []string, com
 			lastErr = err
 			continue
 		}
-		err = decodeMetaForwardReply(reply)
+		idx, err := decodeMetaForwardReplyWithIndex(reply)
 		if errors.Is(err, raft.ErrNotLeader) {
 			lastErr = err
 			continue
 		}
-		return err
+		return idx, err
 	}
 	if lastErr != nil {
-		return fmt.Errorf("%w: %v", icebergcatalog.ErrServiceUnavailable, lastErr)
+		return 0, fmt.Errorf("%w: %v", icebergcatalog.ErrServiceUnavailable, lastErr)
 	}
-	return icebergcatalog.ErrServiceUnavailable
+	return 0, icebergcatalog.ErrServiceUnavailable
 }
 
 type MetaProposeForwardReceiver struct {
@@ -58,21 +64,29 @@ func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.M
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var err error
+	var idx uint64
 	if !r.meta.IsLeader() {
 		err = raft.ErrNotLeader
-	} else {
+	} else if isIcebergMetaCommand(req.Payload) {
 		err = r.meta.ProposeMetaCommand(ctx, req.Payload)
+	} else {
+		idx, err = r.meta.ProposeMetaCommandWithIndex(ctx, req.Payload)
 	}
-	return &transport.Message{Type: transport.StreamMetaProposeForward, Payload: encodeMetaForwardReply(err)}
+	return &transport.Message{Type: transport.StreamMetaProposeForward, Payload: encodeMetaForwardReplyWithIndex(idx, err)}
 }
 
 type metaForwardReply struct {
+	Index        uint64 `json:"index,omitempty"`
 	ErrorType    string `json:"error_type,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 func encodeMetaForwardReply(err error) []byte {
-	reply := metaForwardReply{}
+	return encodeMetaForwardReplyWithIndex(0, err)
+}
+
+func encodeMetaForwardReplyWithIndex(index uint64, err error) []byte {
+	reply := metaForwardReply{Index: index}
 	if err != nil {
 		reply.ErrorType = icebergErrorType(err)
 		reply.ErrorMessage = err.Error()
@@ -82,14 +96,33 @@ func encodeMetaForwardReply(err error) []byte {
 }
 
 func decodeMetaForwardReply(data []byte) error {
+	_, err := decodeMetaForwardReplyWithIndex(data)
+	return err
+}
+
+func decodeMetaForwardReplyWithIndex(data []byte) (uint64, error) {
 	var reply metaForwardReply
 	if err := json.Unmarshal(data, &reply); err != nil {
-		return fmt.Errorf("%w: invalid forward reply: %v", icebergcatalog.ErrServiceUnavailable, err)
+		return 0, fmt.Errorf("%w: invalid forward reply: %v", icebergcatalog.ErrServiceUnavailable, err)
 	}
 	if reply.ErrorType == "" {
-		return nil
+		return reply.Index, nil
 	}
-	return errorFromIcebergType(reply.ErrorType, reply.ErrorMessage)
+	return 0, errorFromIcebergType(reply.ErrorType, reply.ErrorMessage)
+}
+
+func isIcebergMetaCommand(data []byte) bool {
+	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
+	switch cmd.Type() {
+	case MetaCmdTypeIcebergCreateNamespace,
+		MetaCmdTypeIcebergDeleteNamespace,
+		MetaCmdTypeIcebergCreateTable,
+		MetaCmdTypeIcebergCommitTable,
+		MetaCmdTypeIcebergDeleteTable:
+		return true
+	default:
+		return false
+	}
 }
 
 func icebergErrorType(err error) string {
