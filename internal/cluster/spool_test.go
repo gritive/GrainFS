@@ -3,6 +3,8 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -35,6 +37,25 @@ func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(got))
+}
+
+func TestSpoolObjectS3BucketUsesMD5ETag(t *testing.T) {
+	data := []byte("hello s3 object")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+	require.Equal(t, int64(len(data)), sp.Size)
+	h := md5.Sum(data)
+	require.Equal(t, hex.EncodeToString(h[:]), sp.ETag) // MD5 for S3 user buckets
+}
+
+func TestSpoolObjectNoBucketSkipsHashing(t *testing.T) {
+	data := []byte("no etag needed")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+	require.Equal(t, int64(len(data)), sp.Size)
+	require.Empty(t, sp.ETag) // no bucket → no etag computed
 }
 
 func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
