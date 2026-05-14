@@ -164,3 +164,17 @@ func TestRestoreLegacyGzipSnapshotIsUnsupported(t *testing.T) {
 	require.False(t, backend.restoreObjectsCalled)
 	require.False(t, backend.restoreBucketsCalled)
 }
+
+func TestManagerSeedsNextSeqFromLegacyGzipSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	writeLegacyGzipSnapshotFile(t, filepath.Join(dir, "snapshot-99.json.gz"), testSnapshot(99))
+	backend := &formatTestBackend{}
+	mgr, err := NewManager(dir, backend, "")
+	require.NoError(t, err)
+
+	snap, err := mgr.Create("after-legacy")
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), snap.Seq)
+	_, err = os.Stat(filepath.Join(dir, "snapshot-100.json.zst"))
+	require.NoError(t, err)
+}

@@ -54,6 +54,11 @@ func NewManagerWithEncryptor(snapshotDir string, backend storage.Snapshotable, w
 			maxSeq = s.Seq
 		}
 	}
+	if legacyMax, err := maxLegacySnapshotSeq(snapshotDir); err != nil {
+		return nil, err
+	} else if legacyMax > maxSeq {
+		maxSeq = legacyMax
+	}
 	m.nextSeq.Store(maxSeq)
 	return m, nil
 }
@@ -187,6 +192,28 @@ func (m *Manager) path(seq uint64) string {
 
 func (m *Manager) legacyPath(seq uint64) string {
 	return filepath.Join(m.dir, "snapshot-"+strconv.FormatUint(seq, 10)+".json.gz")
+}
+
+func maxLegacySnapshotSeq(snapshotDir string) (uint64, error) {
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		return 0, fmt.Errorf("read snapshot dir: %w", err)
+	}
+	var maxSeq uint64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") || !strings.HasSuffix(e.Name(), ".json.gz") {
+			continue
+		}
+		seqText := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "snapshot-"), ".json.gz")
+		seq, err := strconv.ParseUint(seqText, 10, 64)
+		if err != nil {
+			continue
+		}
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return maxSeq, nil
 }
 
 // ErrNotFound indicates the snapshot does not exist.

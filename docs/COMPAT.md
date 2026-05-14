@@ -46,7 +46,7 @@ The second entry is the previous version. If parsing fails or only one version e
 | 3 | `TestSnapshotLegacyGzipRejectedByCurrent` | N-1 creates gzip snapshot; N rejects restore after the zstd snapshot cutover | live |
 | 5 | `TestInstallSnapshotPath` | N-1 cluster runs; N node joins and receives InstallSnapshot RPC | live |
 | 6 | `TestRestartToOlderBinary` | Canary: documents behavior when N-1 binary reads N-format data | live |
-| 7 | `TestHeadSnapshotReject` | HEAD-format snapshot with `GFSNAP01` envelope is rejected by older binary with non-200 restore response | live |
+| 7 | `TestHeadSnapshotInvisibleToOlderBinary` | HEAD-format `.json.zst` snapshot is invisible to older `.json.gz` readers with non-200 restore response | live |
 
 > Scenario 4 (FSM divergence detection via StateHash) is deferred to a separate PR (Slice 2+).
 
