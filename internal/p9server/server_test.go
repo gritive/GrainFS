@@ -6,6 +6,8 @@ import (
 	"syscall"
 	"testing"
 
+	"bytes"
+	"fmt"
 	"time"
 
 	"github.com/hugelgupf/p9/p9"
@@ -198,5 +200,93 @@ func TestServer_ListenAndServe_Starts(t *testing.T) {
 	err := srv.ListenAndServe(ctx, "127.0.0.1:0")
 	if err != nil {
 		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+}
+
+// Task 9: Benchmarks
+
+// prepareBench9P creates a LocalBackend with one object of objSize bytes.
+// Returns ready-to-use objectFile, bucketFile, rootFile pointing at "bench"/"bench.bin".
+func prepareBench9P(b *testing.B, objSize int) (*objectFile, *bucketFile, *rootFile) {
+	b.Helper()
+	backend, err := storage.NewLocalBackend(b.TempDir())
+	require.NoError(b, err)
+
+	require.NoError(b, backend.CreateBucket(context.Background(), "bench"))
+	data := make([]byte, objSize)
+	obj, err := backend.PutObject(context.Background(), "bench", "bench.bin",
+		bytes.NewReader(data), "application/octet-stream")
+	require.NoError(b, err)
+
+	root := &rootFile{backend: backend}
+	bf := &bucketFile{backend: backend, bucket: "bench"}
+	of := &objectFile{backend: backend, bucket: "bench", key: "bench.bin", meta: obj}
+	return of, bf, root
+}
+
+// BenchmarkObjectFile_ReadAt measures PartialIO-backed random read throughput.
+// LocalBackend implements storage.PartialIO so this exercises the fast path.
+func BenchmarkObjectFile_ReadAt(b *testing.B) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"4KiB", 4 << 10},
+		{"64KiB", 64 << 10},
+		{"1MiB", 1 << 20},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			of, _, _ := prepareBench9P(b, tc.size)
+			buf := make([]byte, tc.size)
+			b.SetBytes(int64(tc.size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, _ = of.ReadAt(buf, 0)
+			}
+		})
+	}
+}
+
+// BenchmarkBucketFile_Readdir measures directory listing cost at various scales.
+func BenchmarkBucketFile_Readdir(b *testing.B) {
+	cases := []struct {
+		name string
+		n    int
+	}{
+		{"100objs", 100},
+		{"1000objs", 1000},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			backend, err := storage.NewLocalBackend(b.TempDir())
+			require.NoError(b, err)
+			require.NoError(b, backend.CreateBucket(context.Background(), "bench"))
+			for i := range tc.n {
+				_, err := backend.PutObject(context.Background(), "bench",
+					fmt.Sprintf("obj/%06d.bin", i), strings.NewReader("x"), "application/octet-stream")
+				require.NoError(b, err)
+			}
+			bf := &bucketFile{backend: backend, bucket: "bench"}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				_, _ = bf.Readdir(0, uint32(tc.n))
+			}
+		})
+	}
+}
+
+// BenchmarkRootFile_Walk_Bucket measures bucket lookup latency (HeadBucket + QID alloc).
+func BenchmarkRootFile_Walk_Bucket(b *testing.B) {
+	_, _, root := prepareBench9P(b, 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, file, _ := root.Walk([]string{"bench"})
+		if file != nil {
+			_ = file.Close()
+		}
 	}
 }
