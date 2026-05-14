@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSnapshotForwardCompat(t *testing.T) {
+func TestSnapshotLegacyGzipRejectedByCurrent(t *testing.T) {
 	prev := prevBinary(t)
 	cur := getBinary()
 
@@ -62,34 +62,27 @@ func TestSnapshotForwardCompat(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&snapOut))
 	seq := snapOut.Seq
+	legacyPath := fmt.Sprintf("%s/snapshots/snapshot-%d.json.gz", dataDir, seq)
+	if _, err := os.Stat(legacyPath); err != nil {
+		terminateProcess(cmd1)
+		t.Skip("previous binary no longer writes legacy gzip snapshots")
+	}
 
 	terminateProcess(cmd1)
 
-	// Phase 2: restart with cur binary, restore snapshot, read data.
+	// Phase 2: restart with cur binary; legacy gzip snapshots are not restorable
+	// after the zstd snapshot cutover.
 	cmd2 := startGrainfsNode(t, cur, dataDir, curHTTP, curRaft, encKeyFile)
 	t.Cleanup(func() { terminateProcess(cmd2) })
 	require.NoError(t, waitForPort(curHTTP, 60*time.Second))
 	time.Sleep(2 * time.Second)
 
-	// Restore snapshot
 	restoreURL := fmt.Sprintf("http://127.0.0.1:%d/admin/snapshots/%d/restore", curHTTP, seq)
 	resp2, err := httpPostJSON(restoreURL, nil)
 	require.NoError(t, err)
 	defer resp2.Body.Close()
-	require.Equal(t, http.StatusOK, resp2.StatusCode, "restore snapshot")
-
-	// Wait for restore
-	time.Sleep(3 * time.Second)
-	require.NoError(t, waitForPort(curHTTP, 30*time.Second))
-
-	curClient := newCompatS3Client(fmt.Sprintf("http://127.0.0.1:%d", curHTTP), ak, sk)
-	res, err := curClient.GetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: aws.String("snap-compat"),
-		Key:    aws.String("snap-obj"),
-	})
+	body, err := io.ReadAll(resp2.Body)
 	require.NoError(t, err)
-	defer res.Body.Close()
-	got, err := io.ReadAll(res.Body)
-	require.NoError(t, err)
-	require.Equal(t, "snapshot data", string(got))
+	require.Equal(t, http.StatusConflict, resp2.StatusCode, "legacy gzip snapshot must not restore body=%s", body)
+	require.Contains(t, strings.ToLower(string(body)), "unsupported snapshot format")
 }

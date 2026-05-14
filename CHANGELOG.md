@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.205.2] - 2026-05-15 — fix: NFS cluster benchmark reliability
+## [0.0.206.1] - 2026-05-15 — fix: NFS cluster benchmark reliability
 
 ### Fixed
 
@@ -13,6 +13,30 @@
 - `git diff --check`
 - `go test ./internal/storage ./internal/cluster -run 'TestInternalETag|TestVerifyETag|Test.*ETag|Test.*SingleLocal|TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID|TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch|TestNodeIDMatchesFrom'`
 - `NODE_COUNT=3 FIO_RUNTIME=3 FIO_STREAM_SIZE=4m FIO_STREAM_JOBS=1 FIO_RAND_SIZE=1m FIO_RAND_JOBS=1 CPU_PROFILE_SECONDS=8 CLUSTER_WARMUP_SLEEP=1 ./benchmarks/bench_nfs_cluster_profile.sh ./bin/grainfs`
+
+## [0.0.206.0] - 2026-05-15 — feat: write metadata snapshots with zstd
+
+### Added
+
+- **Snapshot zstd benchmark coverage** — snapshot compression benchmarks now compare gzip and zstd encode/decode behavior on representative snapshot payloads.
+
+### Changed
+
+- **Zstd metadata snapshots** — newly written metadata snapshots now keep the `GFSNAP01` envelope and store the JSON payload with zstd in `snapshot-<seq>.json.zst` files.
+- **Snapshot compatibility policy** — legacy `.json.gz` snapshot archives are now intentionally unsupported by restore flows after the zstd cutover.
+- **Rolling-upgrade docs** — compatibility docs now describe the zstd payload, `.json.zst` suffix, and older-binary suffix-level invisibility.
+
+### Fixed
+
+- **Legacy snapshot restore response** — direct restore of an existing `.json.gz` snapshot now returns an unsupported-format conflict instead of looking like a missing snapshot.
+- **Snapshot sequence safety** — upgraded nodes seed new snapshot sequence numbers from legacy `.json.gz` filenames as well as current `.json.zst` files, avoiding sequence reuse after upgrade.
+
+### Verification
+
+- `make test-unit`
+- `go test ./internal/snapshot -count=1`
+- `go test ./internal/server -run 'TestRestore(SnapshotUnsupportedFormat|LegacyGzipSnapshot)ReturnsConflict' -count=1`
+- `go test -tags compat ./tests/compat -run 'TestSnapshot(LegacyGzipRejectedByCurrent|HeadSnapshotInvisibleToOlderBinary)' -count=1`
 
 ## [0.0.205.1] - 2026-05-15 — fix: encrypted benchmark allocation hotspots
 
