@@ -136,6 +136,23 @@ func TestValueEnvelopeRoundTrip(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
+func TestValueEnvelopeSealToReusesDestination(t *testing.T) {
+	enc, err := NewEncryptor(bytes.Repeat([]byte{0x11}, 32))
+	require.NoError(t, err)
+	plaintext := bytes.Repeat([]byte("x"), 64*1024)
+	aad := []byte("local-object:physical:chunk:7")
+	dst := make([]byte, 0, 3+12+len(plaintext)+enc.AEADOverhead())
+
+	sealed, err := enc.SealValueAADTo(dst, aad, plaintext)
+	require.NoError(t, err)
+	require.True(t, IsEncryptedValue(sealed))
+	require.Equal(t, cap(dst), cap(sealed))
+
+	got, err := enc.OpenValue(string(aad), sealed)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
 func TestValueEnvelopeRejectsWrongDomainAndTamper(t *testing.T) {
 	enc, err := NewEncryptor(bytes.Repeat([]byte{0x22}, 32))
 	require.NoError(t, err)

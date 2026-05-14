@@ -40,6 +40,29 @@ func BenchmarkSealValue(b *testing.B) {
 	}
 }
 
+func BenchmarkSealValueAADTo(b *testing.B) {
+	enc := benchmarkEncryptor(b)
+	aad := []byte("bench:value")
+	for _, size := range []int{1 << 10, 64 << 10, 1 << 20, 4 << 20} {
+		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
+			plaintext := benchmarkPayload(size)
+			dst := make([]byte, 0, 3+12+len(plaintext)+enc.AEADOverhead())
+			b.SetBytes(int64(len(plaintext)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sealed, err := enc.SealValueAADTo(dst[:0], aad, plaintext)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(sealed) == 0 {
+					b.Fatal("empty ciphertext")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkOpenValue(b *testing.B) {
 	enc := benchmarkEncryptor(b)
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20, 4 << 20} {

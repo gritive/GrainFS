@@ -125,7 +125,16 @@ func IsEncryptedValue(data []byte) bool {
 }
 
 func (e *Encryptor) SealValue(domain string, plaintext []byte) ([]byte, error) {
-	out := make([]byte, 3+e.aead.NonceSize(), 3+e.aead.NonceSize()+len(plaintext)+e.aead.Overhead())
+	return e.SealValueAADTo(nil, []byte(domain), plaintext)
+}
+
+func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]byte, error) {
+	headerLen := 3 + e.aead.NonceSize()
+	outLen := headerLen + len(plaintext) + e.aead.Overhead()
+	if cap(dst) < outLen {
+		dst = make([]byte, 0, outLen)
+	}
+	out := dst[:headerLen]
 	out[0] = valueMagic0
 	out[1] = valueMagic1
 	out[2] = valueVersion1
@@ -133,7 +142,7 @@ func (e *Encryptor) SealValue(domain string, plaintext []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
-	return e.aead.Seal(out, nonce, plaintext, []byte(domain)), nil
+	return e.aead.Seal(out, nonce, plaintext, aad), nil
 }
 
 func (e *Encryptor) OpenValue(domain string, blob []byte) ([]byte, error) {

@@ -43,6 +43,19 @@ func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
+func TestEncryptedObjectFileWriteKeepsRecordsBoundedForReadAt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	plaintext := bytes.Repeat([]byte("x"), 2*(1<<20)+1)
+
+	size, _, err := writeEncryptedObjectFile(path, enc, "local-object:large-records", bytes.NewReader(plaintext))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(plaintext)), size)
+
+	records := countEncryptedObjectRecords(t, path)
+	require.Equal(t, 17, records)
+}
+
 func TestEncryptedObjectFileReadAtWriteAtAndTruncate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
 	enc := testEncryptor(t)
@@ -104,6 +117,34 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(buf), n)
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
+}
+
+func countEncryptedObjectRecords(t *testing.T, path string) int {
+	t.Helper()
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	magic := make([]byte, len(encryptedObjectMagic))
+	_, err = io.ReadFull(f, magic)
+	require.NoError(t, err)
+	require.Equal(t, encryptedObjectMagic, string(magic))
+
+	records := 0
+	var hdr [8]byte
+	for {
+		_, err = io.ReadFull(f, hdr[:])
+		if err == io.EOF {
+			return records
+		}
+		require.NoError(t, err)
+
+		blobLen := binary.BigEndian.Uint32(hdr[4:])
+		_, err = f.Seek(int64(blobLen), io.SeekCurrent)
+		require.NoError(t, err)
+		records++
+	}
 }
 
 func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.T) {

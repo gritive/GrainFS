@@ -1,23 +1,31 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
 const (
 	encryptedObjectMagic = "GFOBJENC1"
-	encryptedChunkSize   = 64 * 1024
+	encryptedChunkSize   = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
 )
 
 func encryptedChunkAAD(domain string, chunk uint64) string {
 	return fmt.Sprintf("%s:chunk:%d", domain, chunk)
+}
+
+func encryptedChunkAADBytes(dst []byte, domain string, chunk uint64) []byte {
+	dst = append(dst[:0], domain...)
+	dst = append(dst, ":chunk:"...)
+	return strconv.AppendUint(dst, chunk, 10)
 }
 
 func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, r io.Reader) (int64, string, error) {
@@ -32,12 +40,15 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 		return 0, "", fmt.Errorf("create encrypted object: %w", err)
 	}
 	defer f.Close()
+	bw := bufio.NewWriterSize(f, 1<<20)
 
-	if _, err := f.Write([]byte(encryptedObjectMagic)); err != nil {
+	if _, err := bw.Write([]byte(encryptedObjectMagic)); err != nil {
 		return 0, "", fmt.Errorf("write encrypted object magic: %w", err)
 	}
 
 	buf := make([]byte, encryptedChunkSize)
+	sealedBuf := make([]byte, 0, 3+12+encryptedChunkSize+enc.AEADOverhead())
+	aadBuf := make([]byte, 0, len(domain)+len(":chunk:")+20)
 	var size int64
 	var chunk uint64
 	for {
@@ -45,13 +56,15 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 		if n > 0 {
 			plain := buf[:n]
 			_, _ = h.Write(plain)
-			sealed, err := enc.SealValue(encryptedChunkAAD(domain, chunk), plain)
+			aadBuf = encryptedChunkAADBytes(aadBuf, domain, chunk)
+			sealed, err := enc.SealValueAADTo(sealedBuf[:0], aadBuf, plain)
 			if err != nil {
 				return 0, "", fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
 			}
-			if err := writeEncryptedObjectRecord(f, uint32(n), sealed); err != nil {
+			if err := writeEncryptedObjectRecord(bw, uint32(n), sealed); err != nil {
 				return 0, "", err
 			}
+			sealedBuf = sealed
 			size += int64(n)
 			chunk++
 		}
@@ -61,6 +74,9 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 		if readErr != nil {
 			return 0, "", fmt.Errorf("read object plaintext: %w", readErr)
 		}
+	}
+	if err := bw.Flush(); err != nil {
+		return 0, "", fmt.Errorf("flush encrypted object: %w", err)
 	}
 	return size, etagFromHash(h), nil
 }
