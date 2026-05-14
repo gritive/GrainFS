@@ -102,10 +102,6 @@ active work로 승격할 때만 code/API surface를 먼저 읽은 뒤 별도 pla
 
 ## Source Backlog Memory (Preserved)
 
-### Audit Log Lake — Phase 2 (Task 4)
-
-- [ ] **Audit Iceberg `day(ts)` partition 재도입** — 현재 `audit.s3` Iceberg table은 DuckDB 호환성을 위해 unpartitioned로 유지하고, 물리 경로만 `data/YYYY-MM-DD/*.parquet`로 날짜별 정리한다. 후속에서 hidden partition `day(ts)`를 되살리려면 manifest partition tuple/field summary encoding, metadata partition spec, DuckDB single/cluster/follower-ship SELECT e2e, 빠른 artifact contract test를 먼저 추가/갱신한다.
-
 ### Bucket & IAM CLI DX
 
 - [ ] **`BucketInfo.Size` (총 사용 바이트)** — object_count 다음 단계. S3 GetBucketMetrics 또는 Walk 기반.
