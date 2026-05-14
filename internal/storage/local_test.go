@@ -92,6 +92,29 @@ func TestPutAndGetObject(t *testing.T) {
 	assert.Equal(t, int64(len(data)), meta.Size)
 }
 
+func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	plaintext := []byte("sensitive object payload")
+	_, err = b.PutObject(context.Background(), "bkt", "key", bytes.NewReader(plaintext), "text/plain")
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(b.objectPath("bkt", "key"))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), string(plaintext))
+
+	rc, _, err := b.GetObject(context.Background(), "bkt", "key")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
 func TestGetObjectNotFound(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")

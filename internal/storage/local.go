@@ -90,12 +90,24 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
+func encryptedObjectFileDomain(objPath string) string {
+	return "local-object-file:" + filepath.Clean(objPath)
+}
+
 // OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
 // object. It does NOT fall back to peers (there are none in solo mode) and
 // returns os.ErrNotExist when the file is missing — the contract scrubber
 // verifiers rely on.
 func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
-	return os.Open(b.objectPath(bucket, key))
+	objPath := b.objectPath(bucket, key)
+	if b.encryptor != nil {
+		obj, err := b.HeadObject(context.Background(), bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return openEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(objPath), obj.Size)
+	}
+	return os.Open(objPath)
 }
 
 func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
@@ -240,7 +252,14 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 		etag string
 		cerr error
 	)
-	{
+	if b.encryptor != nil {
+		_ = tmp.Close()
+		size, etag, cerr = writeEncryptedObjectFile(tmpPath, b.encryptor, encryptedObjectFileDomain(objPath), r)
+		if cerr != nil {
+			cleanupTmp()
+			return nil, fmt.Errorf("write encrypted object: %w", cerr)
+		}
+	} else {
 		h, release := hashForBucket(bucket)
 		w := io.MultiWriter(tmp, h)
 		size, cerr = io.Copy(w, r)
@@ -309,6 +328,14 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 	obj, err := b.HeadObject(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if b.encryptor != nil {
+		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.encryptor, encryptedObjectFileDomain(b.objectPath(bucket, key)), obj.Size)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open encrypted object: %w", err)
+		}
+		return rc, obj, nil
 	}
 
 	f, err := os.Open(b.objectPath(bucket, key))
@@ -388,8 +415,20 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	_ = ctx
 	objPath := b.objectPath(bucket, key)
-	if err := os.Truncate(objPath, size); err != nil {
-		return fmt.Errorf("truncate: %w", err)
+	var currentSize int64
+	if b.encryptor != nil {
+		obj, err := b.HeadObject(context.Background(), bucket, key)
+		if err != nil {
+			return err
+		}
+		currentSize = obj.Size
+		if _, err := truncateEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(objPath), currentSize, size); err != nil {
+			return fmt.Errorf("truncate encrypted object: %w", err)
+		}
+	} else {
+		if err := os.Truncate(objPath, size); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		}
 	}
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
@@ -436,6 +475,37 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	if localTraceEnabled {
 		log.Debug().Dur("mkdir", time.Since(tStage)).Str("bucket", bucket).Msg("WriteAt trace")
 		tStage = time.Now()
+	}
+
+	if b.encryptor != nil {
+		currentSize := int64(0)
+		if existing, err := b.HeadObject(context.Background(), bucket, key); err == nil {
+			currentSize = existing.Size
+		} else if !errors.Is(err, ErrObjectNotFound) {
+			return nil, err
+		}
+		size, etag, err := writeAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(objPath), offset, data, currentSize)
+		if err != nil {
+			return nil, fmt.Errorf("encrypted writeat: %w", err)
+		}
+		now := time.Now().Unix()
+		obj := &Object{
+			Key:          key,
+			Size:         size,
+			ContentType:  "application/octet-stream",
+			ETag:         etag,
+			LastModified: now,
+		}
+		meta, err := marshalObject(obj)
+		if err != nil {
+			return nil, fmt.Errorf("marshal metadata: %w", err)
+		}
+		if err := b.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(b.objectMetaKey(bucket, key), meta)
+		}); err != nil {
+			return nil, err
+		}
+		return obj, nil
 	}
 
 	// O_CREATE|O_RDWR: create if new, open in-place if existing.
@@ -528,7 +598,15 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 // ReadAt reads len(buf) bytes from the object at the given offset via pread(2).
 func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	_ = ctx
-	f, err := os.Open(b.objectPath(bucket, key))
+	objPath := b.objectPath(bucket, key)
+	if b.encryptor != nil {
+		obj, err := b.HeadObject(context.Background(), bucket, key)
+		if err != nil {
+			return 0, err
+		}
+		return readAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(objPath), obj.Size, offset, buf)
+	}
+	f, err := os.Open(objPath)
 	if err != nil {
 		return 0, err
 	}
