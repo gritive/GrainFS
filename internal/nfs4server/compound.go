@@ -834,7 +834,7 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 
 	bucket, key := extractBucketAndKey(d.currentPath)
 	// Fast path: pread(2) directly — skips HeadObject + GetObject + Seek.
-	if ra, ok := partialIOBackend(d.backend); ok {
+	if ra, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
 		var buf []byte
 		var pooled bool
 		if count <= nfsMaxReadBlock {
@@ -961,7 +961,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	release := d.state.LockPath(key)
 	defer release()
 
-	if wa, ok := partialIOBackend(d.backend); ok {
+	if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 		// Fast path: stream prefix+data+suffix via kernel I/O — no heap allocation.
 		if _, err = wa.WriteAt(context.Background(), bucket, key, offset, writeData); err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1140,7 +1140,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 		size, _ := ar.ReadUint64()
 		release := d.state.LockPath(key)
 		defer release()
-		if tr, ok := truncatableBackend(d.backend); ok {
+		if tr, ok := truncatableBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 			if err := tr.Truncate(context.Background(), bucket, key, int64(size)); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
@@ -1328,7 +1328,7 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 	if err != nil {
 		return OpResult{OpCode: OpRename, Status: NFS4ERR_NOENT}
 	}
-	if partial, ok := partialIOBackend(d.backend); ok {
+	if partial, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, dstBucket) {
 		data, err := io.ReadAll(rc)
 		rc.Close()
 		if err != nil {

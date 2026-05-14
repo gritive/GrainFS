@@ -18,10 +18,12 @@ import (
 )
 
 var (
-	colimaHostIP   = envOrDefault("HOST_IP", "192.168.5.2")
-	colimaNFS4Port = envOrDefault("NFS4_PORT", "19249")
-	colimaHTTPPort = envOrDefault("HTTP_PORT", "19200")
-	clusterKey     = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	colimaHostIP          = envOrDefault("HOST_IP", "192.168.5.2")
+	colimaNFS4Port        = envOrDefault("NFS4_PORT", "19249")
+	colimaHTTPPort        = envOrDefault("HTTP_PORT", "19200")
+	clusterKey            = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	colimaAdminSock       string
+	colimaNFSExportBucket = "colima-nfs-export"
 )
 
 var nfsVersions = []string{"4.0", "4.1", "4.2"}
@@ -44,7 +46,7 @@ func runColimaSSH(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func withNFSMount(t *testing.T, vers string, fn func(mnt string)) {
+func withNFSRootMount(t *testing.T, vers string, fn func(mnt string)) {
 	t.Helper()
 	slug := strings.ReplaceAll(vers, ".", "")
 	name := strings.ReplaceAll(t.Name(), "/", "-")
@@ -57,6 +59,13 @@ func withNFSMount(t *testing.T, vers string, fn func(mnt string)) {
 		colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
 	})
 	fn(mnt)
+}
+
+func withNFSMount(t *testing.T, vers string, fn func(mnt string)) {
+	t.Helper()
+	withNFSRootMount(t, vers, func(mnt string) {
+		fn(mnt + "/" + colimaNFSExportBucket)
+	})
 }
 
 func TestMain(m *testing.M) {
@@ -84,6 +93,7 @@ func TestMain(m *testing.M) {
 	if binary == "" {
 		binary = "../../bin/grainfs"
 	}
+	colimaAdminSock = dataDir + "/admin.sock"
 
 	args := []string{
 		"serve",
@@ -122,6 +132,21 @@ func TestMain(m *testing.M) {
 	}
 	if !ready {
 		fmt.Fprintln(os.Stderr, "grainfs did not become healthy within 10s")
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+
+	out, err := exec.Command(binary, "bucket", "create", colimaNFSExportBucket, "--endpoint", colimaAdminSock).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bucket create failed: %v\n%s\n", err, out)
+		cmd.Process.Kill()
+		os.RemoveAll(dataDir)
+		os.Exit(1)
+	}
+	out, err = exec.Command(binary, "nfs", "export", "add", colimaNFSExportBucket, "--endpoint", colimaAdminSock).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "nfs export add failed: %v\n%s\n", err, out)
 		cmd.Process.Kill()
 		os.RemoveAll(dataDir)
 		os.Exit(1)
@@ -173,6 +198,12 @@ func testBasicOps(t *testing.T, mnt string) {
 	require.Errorf(t, err, "testdir should not exist after rm -rf, but got: %s", out)
 }
 
+func TestNFS4_MultiExportPseudoRootListsBucket(t *testing.T) {
+	withNFSRootMount(t, "4.1", func(mnt string) {
+		require.Contains(t, runColimaSSH(t, "ls", mnt), colimaNFSExportBucket)
+	})
+}
+
 func testSetAttr(t *testing.T, mnt string) {
 	t.Helper()
 	testDir := mnt + "/testdir-setattr"
@@ -206,7 +237,7 @@ func testSetAttr(t *testing.T, mnt string) {
 	runColimaSSH(t, "sudo", "rm", "-rf", testDir)
 }
 
-func testCommit(t *testing.T, mnt string, vers string) {
+func testCommit(t *testing.T, mountPoint string, mnt string, vers string) {
 	t.Helper()
 	testDir := mnt + "/testdir-commit"
 	runColimaSSH(t, "sudo", "mkdir", "-p", testDir)
@@ -217,10 +248,10 @@ func testCommit(t *testing.T, mnt string, vers string) {
 	sha1 := strings.Fields(runColimaSSH(t, "sha256sum", filePath))[0]
 
 	// remount and re-read — verifies data was durably committed
-	runColimaSSH(t, "sudo", "umount", "-l", mnt)
+	runColimaSSH(t, "sudo", "umount", "-l", mountPoint)
 	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
 		"-o", fmt.Sprintf("vers=%s,port=%s", vers, colimaNFS4Port),
-		fmt.Sprintf("%s:/", colimaHostIP), mnt)
+		fmt.Sprintf("%s:/", colimaHostIP), mountPoint)
 
 	sha2 := strings.Fields(runColimaSSH(t, "sha256sum", filePath))[0]
 	require.Equal(t, sha1, sha2, "commit sha256 after remount")
@@ -254,8 +285,8 @@ func TestNFS4_Commit(t *testing.T) {
 	for _, vers := range nfsVersions {
 		vers := vers
 		t.Run("vers_"+strings.ReplaceAll(vers, ".", "_"), func(t *testing.T) {
-			withNFSMount(t, vers, func(mnt string) {
-				testCommit(t, mnt, vers)
+			withNFSRootMount(t, vers, func(mnt string) {
+				testCommit(t, mnt, mnt+"/"+colimaNFSExportBucket, vers)
 			})
 		})
 	}
