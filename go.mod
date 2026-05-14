@@ -15,6 +15,7 @@ require (
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/hugelgupf/p9 v0.4.0
 	github.com/klauspost/compress v1.18.6
 	github.com/klauspost/reedsolomon v1.14.0
 	github.com/prometheus/client_golang v1.23.2
@@ -72,7 +73,6 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
-	github.com/hugelgupf/p9 v0.4.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/asmfmt v1.3.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
