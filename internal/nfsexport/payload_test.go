@@ -39,3 +39,17 @@ func TestPayloadRejectsMalformedInput(t *testing.T) {
 	_, err = DecodeDeletePayload([]byte{1, 2, 3})
 	require.Error(t, err)
 }
+
+func TestBucketDeleteCascadePayloadRoundTrip(t *testing.T) {
+	payload, err := EncodeBucketDeleteCascadePayload("b1", true)
+	require.NoError(t, err)
+	bucket, force, err := DecodeBucketDeleteCascadePayload(payload)
+	require.NoError(t, err)
+	require.Equal(t, "b1", bucket)
+	require.True(t, force)
+}
+
+func TestBucketDeleteCascadePayloadRejectsEmptyBucket(t *testing.T) {
+	_, err := EncodeBucketDeleteCascadePayload("", false)
+	require.Error(t, err)
+}

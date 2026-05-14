@@ -9,12 +9,13 @@ import (
 var ErrPropagationBarrierRequired = errors.New("nfsexport: propagation barrier required")
 
 type Proposer interface {
-	ProposeUpsert(ctx context.Context, bucket string, cfg Config) error
-	ProposeDelete(ctx context.Context, bucket string) error
+	ProposeUpsert(ctx context.Context, bucket string, cfg Config) (uint64, error)
+	ProposeDelete(ctx context.Context, bucket string) (uint64, error)
+	ProposeBucketDeleteCascade(ctx context.Context, bucket string, force bool) (uint64, error)
 }
 
 type PropagationBarrier interface {
-	WaitApplied(ctx context.Context) error
+	WaitApplied(ctx context.Context, index uint64) error
 }
 
 type ServiceConfig struct {
@@ -59,10 +60,11 @@ func (s *ExportService) Upsert(ctx context.Context, bucket string, p UpsertParam
 		return err
 	}
 	cfg := Config{ReadOnly: p.ReadOnly}
-	if err := s.proposer.ProposeUpsert(ctx, bucket, cfg); err != nil {
+	idx, err := s.proposer.ProposeUpsert(ctx, bucket, cfg)
+	if err != nil {
 		return err
 	}
-	return s.waitApplied(ctx)
+	return s.waitApplied(ctx, idx)
 }
 
 func (s *ExportService) Delete(ctx context.Context, bucket string) error {
@@ -75,10 +77,66 @@ func (s *ExportService) Delete(ctx context.Context, bucket string) error {
 	if err := s.ensurePropagationSupported(); err != nil {
 		return err
 	}
-	if err := s.proposer.ProposeDelete(ctx, bucket); err != nil {
+	idx, err := s.proposer.ProposeDelete(ctx, bucket)
+	if err != nil {
 		return err
 	}
-	return s.waitApplied(ctx)
+	return s.waitApplied(ctx, idx)
+}
+
+func (s *ExportService) DeleteForBucketDelete(ctx context.Context, bucket string, force bool) error {
+	if bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	if s.proposer == nil {
+		return fmt.Errorf("nfsexport: proposer not configured")
+	}
+	if err := s.ensurePropagationSupported(); err != nil {
+		return err
+	}
+	idx, err := s.proposer.ProposeBucketDeleteCascade(ctx, bucket, force)
+	if err != nil {
+		return err
+	}
+	return s.waitApplied(ctx, idx)
+}
+
+func (s *ExportService) RestoreForBucketDelete(ctx context.Context, bucket string, cfg Config) error {
+	if bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	if s.proposer == nil {
+		return fmt.Errorf("nfsexport: proposer not configured")
+	}
+	if err := s.ensurePropagationSupported(); err != nil {
+		return err
+	}
+	idx, err := s.proposer.ProposeUpsert(ctx, bucket, cfg)
+	if err != nil {
+		return err
+	}
+	return s.waitApplied(ctx, idx)
+}
+
+func (s *ExportService) MarkBucketDeleteCleanup(bucket string) error {
+	if s.store == nil {
+		return fmt.Errorf("nfsexport: store not configured")
+	}
+	return s.store.MarkBucketDeleteCleanup(bucket)
+}
+
+func (s *ExportService) ClearBucketDeleteCleanup(bucket string) error {
+	if s.store == nil {
+		return fmt.Errorf("nfsexport: store not configured")
+	}
+	return s.store.ClearBucketDeleteCleanup(bucket)
+}
+
+func (s *ExportService) PendingBucketDeleteCleanups() ([]string, error) {
+	if s.store == nil {
+		return nil, fmt.Errorf("nfsexport: store not configured")
+	}
+	return s.store.PendingBucketDeleteCleanups()
 }
 
 func (s *ExportService) Get(bucket string) (Config, bool) {
@@ -95,11 +153,11 @@ func (s *ExportService) List() []string {
 	return s.store.Snapshot().SortedNames()
 }
 
-func (s *ExportService) waitApplied(ctx context.Context) error {
+func (s *ExportService) waitApplied(ctx context.Context, index uint64) error {
 	if s.barrier == nil {
 		return nil
 	}
-	return s.barrier.WaitApplied(ctx)
+	return s.barrier.WaitApplied(ctx, index)
 }
 
 func (s *ExportService) ensurePropagationSupported() error {

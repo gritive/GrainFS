@@ -218,14 +218,16 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 	const numNodes = 5
 
 	addrs := make([]string, numNodes)
-	for i := range addrs {
-		addrs[i] = freeUDPAddr(t)
-	}
-
 	transports := make([]*transport.QUICTransport, numNodes)
 	dataNodes := make([]RaftNode, numNodes)
 	dataClosers := make([]func() error, numNodes)
 	metaNodes := make([]*MetaRaft, numNodes)
+	for i := range transports {
+		tr := transport.MustNewQUICTransport("shared-raft-quic-test")
+		require.NoError(t, tr.Listen(context.Background(), "127.0.0.1:0"))
+		transports[i] = tr
+		addrs[i] = tr.LocalAddr()
+	}
 	for i := range metaNodes {
 		peers := make([]string, 0, numNodes-1)
 		for j := range addrs {
@@ -234,11 +236,9 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 			}
 		}
 
-		tr := transport.MustNewQUICTransport("shared-raft-quic-test")
-		require.NoError(t, tr.Listen(context.Background(), addrs[i]))
 		dataNode, dataClose, err := newRaftNode(raft.DefaultConfig(addrs[i], peers), "")
 		require.NoError(t, err)
-		dataRPC := NewRaftQUICRPCTransport(tr, dataNode)
+		dataRPC := NewRaftQUICRPCTransport(transports[i], dataNode)
 		dataRPC.SetTransport()
 		metaNode, err := NewMetaRaft(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
@@ -247,10 +247,9 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 			DataDir: t.TempDir(),
 		})
 		require.NoError(t, err)
-		metaTransport := NewMetaTransportQUIC(tr, metaNode.Node())
+		metaTransport := NewMetaTransportQUIC(transports[i], metaNode.Node())
 		metaNode.SetTransport(metaTransport)
 
-		transports[i] = tr
 		dataNodes[i] = dataNode
 		dataClosers[i] = dataClose
 		metaNodes[i] = metaNode

@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPutFHGenerationDriftReturnsFHExpired(t *testing.T) {
+func TestMultiExportGenerationDriftReturnsFHExpired(t *testing.T) {
 	d := newDispatcherWithExports(t, map[string]exportConfig{
 		"bucket": {generation: 1},
 	})
@@ -21,7 +21,7 @@ func TestPutFHGenerationDriftReturnsFHExpired(t *testing.T) {
 	require.Equal(t, NFS4ERR_FHEXPIRED, d.opPutFH(fh[:]).Status)
 }
 
-func TestPutFHRemovedExportReturnsAdminRevoked(t *testing.T) {
+func TestMultiExportRemovedExportReturnsAdminRevoked(t *testing.T) {
 	d := newDispatcherWithExports(t, map[string]exportConfig{
 		"bucket": {generation: 1},
 	})

@@ -101,7 +101,7 @@ func (d *Dispatcher) opAllocate(data []byte) OpResult {
 		return OpResult{OpCode: OpAllocate, Status: NFS4_OK}
 	}
 
-	if tr, ok := truncatableBackend(d.backend); ok {
+	if tr, ok := truncatableBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 		if err := tr.Truncate(context.Background(), bucket, key, required); err != nil {
 			return OpResult{OpCode: OpAllocate, Status: NFS4ERR_IO}
 		}
@@ -242,7 +242,7 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 
 	release := d.state.LockPath(d.currentPath)
 	defer release()
-	if partial, ok := partialIOBackend(d.backend); ok {
+	if partial, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, dstBucket) {
 		if _, err := partial.WriteAt(context.Background(), dstBucket, dstKey, dstOffset, srcData); err != nil {
 			return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 		}

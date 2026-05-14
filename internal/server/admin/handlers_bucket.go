@@ -99,12 +99,13 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 	if storage.IsInternalBucket(name) {
 		return NewForbidden("cannot delete internal bucket")
 	}
+	var hadNfsExport bool
 	if d.NfsExports != nil {
-		if _, ok := d.NfsExports.Get(name); ok {
-			return NewConflict("bucket has an NFS export; remove the export first", map[string]any{
-				"bucket": name,
-				"hint":   "grainfs nfs export remove " + name,
-			})
+		_, hadNfsExport = d.NfsExports.Get(name)
+	}
+	if d.NfsExports != nil && hadNfsExport {
+		if err := d.NfsExports.MarkBucketDeleteCleanup(name); err != nil {
+			return NewInternal("mark NFS export bucket-delete cleanup: " + err.Error())
 		}
 	}
 	var err error
@@ -114,10 +115,41 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 		err = d.Buckets.DeleteBucket(ctx, name)
 	}
 	if err == nil {
+		if d.NfsExports != nil {
+			_, hasNfsExportAfterDelete := d.NfsExports.Get(name)
+			shouldCascade := hadNfsExport || hasNfsExportAfterDelete
+			if shouldCascade && !hadNfsExport {
+				if err := d.NfsExports.MarkBucketDeleteCleanup(name); err != nil {
+					return NewInternal("mark NFS export bucket-delete cleanup after bucket delete: " + err.Error())
+				}
+			}
+			if !shouldCascade {
+				return nil
+			}
+			if err := d.NfsExports.DeleteForBucketDelete(ctx, name, force); err != nil {
+				return NewInternal("cascade delete NFS export after bucket delete: " + err.Error())
+			}
+			if err := d.NfsExports.ClearBucketDeleteCleanup(name); err != nil {
+				return NewInternal("clear NFS export bucket-delete cleanup: " + err.Error())
+			}
+		}
 		return nil
 	}
 	if errors.Is(err, storage.ErrBucketNotFound) {
+		if d.NfsExports != nil && hadNfsExport {
+			if cascadeErr := d.NfsExports.DeleteForBucketDelete(ctx, name, force); cascadeErr != nil {
+				return NewInternal("bucket not found; cascade delete NFS export: " + cascadeErr.Error())
+			}
+			if clearErr := d.NfsExports.ClearBucketDeleteCleanup(name); clearErr != nil {
+				return NewInternal("bucket not found; clear NFS export bucket-delete cleanup: " + clearErr.Error())
+			}
+		}
 		return NewNotFound("bucket not found")
+	}
+	if d.NfsExports != nil && hadNfsExport {
+		if clearErr := d.NfsExports.ClearBucketDeleteCleanup(name); clearErr != nil {
+			return NewInternal("delete bucket: " + err.Error() + "; clear NFS export bucket-delete cleanup: " + clearErr.Error())
+		}
 	}
 	if errors.Is(err, storage.ErrBucketNotEmpty) {
 		if force {

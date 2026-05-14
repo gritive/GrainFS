@@ -7,6 +7,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -956,6 +957,70 @@ func TestApplyNfsExportDelete_Idempotent(t *testing.T) {
 
 	_, ok := store.Get("b1")
 	require.False(t, ok)
+}
+
+func TestApplyNfsExportBucketDeleteCascadeDeletesExportAfterBucket(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+	_, err = store.ApplyUpsert("b1", false, 1)
+	require.NoError(t, err)
+
+	payload, err := nfsexport.EncodeBucketDeleteCascadePayload("b1", true)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade, payload)
+	require.NoError(t, err)
+
+	require.NoError(t, f.applyCmd(cmd))
+	_, ok := store.Get("b1")
+	require.False(t, ok)
+}
+
+func TestMetaFSM_NfsExportsSnapshotRestore(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+	_, err = store.ApplyUpsert("b1", true, 7)
+	require.NoError(t, err)
+	before, ok := store.Get("b1")
+	require.True(t, ok)
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	restoredStore, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f2 := NewMetaFSM()
+	f2.SetExportStore(restoredStore)
+	calls := 0
+	f2.SetOnNfsExportChange(func() { calls++ })
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
+	require.Equal(t, 1, calls)
+
+	after, ok := restoredStore.Get("b1")
+	require.True(t, ok)
+	require.Equal(t, before, after)
+}
+
+func TestMetaFSM_RestoreLegacySnapshotKeepsNfsExports(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+	before, err := store.ApplyUpsert("b1", true, 7)
+	require.NoError(t, err)
+
+	b := flatbuffers.NewBuilder(64)
+	clusterpb.MetaStateSnapshotStart(b)
+	root := clusterpb.MetaStateSnapshotEnd(b)
+	b.Finish(root)
+
+	require.NoError(t, f.Restore(raft.SnapshotMeta{}, append([]byte(nil), b.FinishedBytes()...)))
+	after, ok := store.Get("b1")
+	require.True(t, ok)
+	require.Equal(t, before, after)
 }
 
 func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {

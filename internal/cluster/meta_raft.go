@@ -66,6 +66,10 @@ type MetaRaft struct {
 	// nil = leader-only (Propose on a follower returns an error).
 	forwardFn func(ctx context.Context, data []byte) error
 
+	// forwardFnWithIndex is used by callers that must wait on the committed
+	// raft index after forwarding through a non-leader.
+	forwardFnWithIndex func(ctx context.Context, data []byte) (uint64, error)
+
 	// lastApplied is read atomically from waitApplied (hot path).
 	// applyNotifyMu protects applyNotify channel swaps only.
 	lastApplied   atomic.Uint64
@@ -178,6 +182,12 @@ func (m *MetaRaft) SetTransport(t MetaTransport) {
 // S3 PUT ?lifecycle on a non-leader node) forwards instead of failing.
 func (m *MetaRaft) SetForwarder(fn func(ctx context.Context, data []byte) error) {
 	m.forwardFn = fn
+}
+
+// SetForwarderWithIndex injects the follower→leader forwarding closure for
+// callers that need the committed raft index from the leader.
+func (m *MetaRaft) SetForwarderWithIndex(fn func(ctx context.Context, data []byte) (uint64, error)) {
+	m.forwardFnWithIndex = fn
 }
 
 func (m *MetaRaft) wireTransport(t MetaTransport) {
@@ -484,11 +494,29 @@ func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
 		MetaCmdTypeIcebergDeleteTable:
 		return m.ProposeIcebergMetaCommand(ctx, data)
 	default:
+		_, err := m.ProposeMetaCommandWithIndex(ctx, data)
+		return err
+	}
+}
+
+// ProposeMetaCommandWithIndex proposes an already-encoded non-Iceberg MetaCmd
+// and returns the committed raft index. Iceberg commands use semantic request
+// waiters and do not expose a proposal index through this path.
+func (m *MetaRaft) ProposeMetaCommandWithIndex(ctx context.Context, data []byte) (uint64, error) {
+	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
+	switch cmd.Type() {
+	case MetaCmdTypeIcebergCreateNamespace,
+		MetaCmdTypeIcebergDeleteNamespace,
+		MetaCmdTypeIcebergCreateTable,
+		MetaCmdTypeIcebergCommitTable,
+		MetaCmdTypeIcebergDeleteTable:
+		return 0, fmt.Errorf("meta_raft: iceberg commands do not expose proposal index through this path")
+	default:
 		idx, err := m.node.ProposeWait(ctx, data)
 		if err != nil {
-			return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
 		}
-		return m.waitApplied(ctx, idx)
+		return idx, m.waitApplied(ctx, idx)
 	}
 }
 
@@ -501,31 +529,50 @@ func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
 // SetForwarder, the encoded command is forwarded to the leader via the
 // meta-raft forward path (StreamMetaProposeForward) instead of failing.
 func (m *MetaRaft) Propose(ctx context.Context, cmdType MetaCmdType, payload []byte) error {
+	_, err := m.ProposeWithIndex(ctx, cmdType, payload)
+	return err
+}
+
+// ProposeWithIndex wraps a typed payload in a MetaCmd envelope, proposes it to
+// the cluster, and returns the committed raft index.
+func (m *MetaRaft) ProposeWithIndex(ctx context.Context, cmdType MetaCmdType, payload []byte) (uint64, error) {
 	data, err := encodeMetaCmd(cmdType, payload)
 	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+		return 0, fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}
-	return m.proposeOrForward(ctx, m.node, data)
+	return m.proposeOrForwardWithIndex(ctx, m.node, data)
 }
 
 // proposeOrForward submits data to the local raft node when this node is the
 // leader, otherwise forwards it via the configured forwardFn. Extracted so it
 // can be unit-tested without a real raft node.
 func (m *MetaRaft) proposeOrForward(ctx context.Context, node metaProposerNode, data []byte) error {
+	_, err := m.proposeOrForwardWithIndex(ctx, node, data)
+	return err
+}
+
+func (m *MetaRaft) proposeOrForwardWithIndex(ctx context.Context, node metaProposerNode, data []byte) (uint64, error) {
 	if node.IsLeader() {
 		idx, err := node.ProposeWait(ctx, data)
 		if err != nil {
-			return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
 		}
-		return m.waitApplied(ctx, idx)
+		return idx, m.waitApplied(ctx, idx)
+	}
+	if m.forwardFnWithIndex != nil {
+		idx, err := m.forwardFnWithIndex(ctx, data)
+		if err != nil {
+			return 0, fmt.Errorf("meta_raft: forward to leader: %w", err)
+		}
+		return idx, nil
 	}
 	if m.forwardFn == nil {
-		return fmt.Errorf("meta_raft: not leader and no forwarder configured")
+		return 0, fmt.Errorf("meta_raft: not leader and no forwarder configured")
 	}
 	if err := m.forwardFn(ctx, data); err != nil {
-		return fmt.Errorf("meta_raft: forward to leader: %w", err)
+		return 0, fmt.Errorf("meta_raft: forward to leader: %w", err)
 	}
-	return nil
+	return 0, nil
 }
 
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {

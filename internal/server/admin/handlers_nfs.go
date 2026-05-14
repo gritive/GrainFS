@@ -20,6 +20,27 @@ func (a *NfsExportServiceAdapter) Delete(ctx context.Context, bucket string) err
 	return a.Svc.Delete(ctx, bucket)
 }
 
+func (a *NfsExportServiceAdapter) DeleteForBucketDelete(ctx context.Context, bucket string, force bool) error {
+	return a.Svc.DeleteForBucketDelete(ctx, bucket, force)
+}
+
+func (a *NfsExportServiceAdapter) RestoreForBucketDelete(ctx context.Context, info NfsExportInfo) error {
+	return a.Svc.RestoreForBucketDelete(ctx, info.Bucket, nfsexport.Config{
+		ReadOnly:   info.ReadOnly,
+		FsidMajor:  info.FsidMajor,
+		FsidMinor:  info.FsidMinor,
+		Generation: info.Generation,
+	})
+}
+
+func (a *NfsExportServiceAdapter) MarkBucketDeleteCleanup(bucket string) error {
+	return a.Svc.MarkBucketDeleteCleanup(bucket)
+}
+
+func (a *NfsExportServiceAdapter) ClearBucketDeleteCleanup(bucket string) error {
+	return a.Svc.ClearBucketDeleteCleanup(bucket)
+}
+
 func (a *NfsExportServiceAdapter) Get(bucket string) (NfsExportInfo, bool) {
 	cfg, ok := a.Svc.Get(bucket)
 	if !ok {

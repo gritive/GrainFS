@@ -334,6 +334,7 @@ enum MetaCmdType : uint8 {
   MigrationJobFailed      = 39, // Migration job: failed
   NfsExportUpsert         = 40, // NFSv4 multi-export: registry upsert (Phase 1)
   NfsExportDelete         = 41, // NFSv4 multi-export: registry delete (Phase 1)
+  NfsExportBucketDeleteCascade = 42, // NFSv4 multi-export: bucket delete cascade marker
 }
 
 table MetaNodeEntry {
@@ -536,6 +537,11 @@ table NfsExportDeleteCmd {
   bucket:string;
 }
 
+table NfsExportBucketDeleteCascadeCmd {
+  bucket:string;
+  force:bool = false;
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
   shard_groups:[ShardGroupEntry];             // PR-C
@@ -546,6 +552,7 @@ table MetaStateSnapshot {
   iceberg_tables:[IcebergTableEntry];
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
+  nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's

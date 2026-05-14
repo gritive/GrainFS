@@ -12,6 +12,7 @@ import (
 )
 
 const KeyPrefix = "__nfsexport_/"
+const cleanupKeyPrefix = "__nfsexport_cleanup_/"
 const allocatorKey = "__nfsexport_meta_/next_minor"
 
 type Snapshot struct {
@@ -32,6 +33,13 @@ func (s *Snapshot) SortedNames() []string {
 		return nil
 	}
 	return append([]string(nil), s.names...)
+}
+
+func (s *Snapshot) Entries() map[string]Config {
+	if s == nil {
+		return nil
+	}
+	return cloneSnapshotMap(s)
 }
 
 type Store struct {
@@ -197,6 +205,83 @@ func (s *Store) SetAllocator(v uint64) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return setAllocatorTxn(txn, v)
 	})
+}
+
+func (s *Store) ReplaceAll(rows map[string]Config) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := cloneSnapshotMap((*Snapshot)(nil))
+	var maxMinor uint64
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.IteratorOptions{Prefix: []byte(KeyPrefix)})
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			if err := txn.Delete(it.Item().KeyCopy(nil)); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+		}
+		for bucket, cfg := range rows {
+			payload, err := EncodeUpsertPayload(bucket, cfg)
+			if err != nil {
+				return err
+			}
+			if cfg.FsidMinor > maxMinor {
+				maxMinor = cfg.FsidMinor
+			}
+			if err := txn.Set([]byte(KeyPrefix+bucket), payload); err != nil {
+				return err
+			}
+			next[bucket] = cfg
+		}
+		return setAllocatorTxn(txn, maxMinor)
+	}); err != nil {
+		return err
+	}
+	s.snap.Store(newSnapshot(next))
+	return nil
+}
+
+func (s *Store) MarkBucketDeleteCleanup(bucket string) error {
+	if bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(cleanupKeyPrefix+bucket), []byte{1})
+	})
+}
+
+func (s *Store) ClearBucketDeleteCleanup(bucket string) error {
+	if bucket == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete([]byte(cleanupKeyPrefix + bucket))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		return err
+	})
+}
+
+func (s *Store) PendingBucketDeleteCleanups() ([]string, error) {
+	var out []string
+	err := s.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.IteratorOptions{Prefix: []byte(cleanupKeyPrefix)})
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			bucket := strings.TrimPrefix(string(it.Item().Key()), cleanupKeyPrefix)
+			if bucket != "" {
+				out = append(out, bucket)
+			}
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out, err
 }
 
 func (s *Store) ensureAllocatorAtLeast(min uint64) error {

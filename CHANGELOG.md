@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.188.0] - 2026-05-14 — feat: NFS export propagation follow-up
+
+### Added
+
+- **Multi-node NFS export propagation** — admin export add, update, remove, and bucket-delete cascade operations now wait for the committed meta-Raft index to apply before reporting success.
+- **Bucket-delete cascade coverage** — process-level E2E coverage now verifies exported bucket deletion removes the export on success and preserves it when deletion or propagation fails.
+
+### Fixed
+
+- **Safe exported bucket deletion** — exported bucket deletion now records a durable cleanup marker and completes the NFS export cascade after the bucket delete succeeds, so crash or cascade failures can be retried without pre-removing a live bucket export.
+- **User export partial-I/O fallback** — NFSv4 user-bucket exports now honor backend `PreferWriteAt`/`PreferReadAt` hints so writes, truncate, allocate, rename, and copy fall back to object-store paths instead of internal-bucket-only fast paths.
+- **Cluster E2E UDP port race** — the five-node QUIC/static E2E now binds UDP listeners atomically instead of reserving free ports before parallel test startup.
+
 ## [0.0.187.0] - 2026-05-14 — feat: NFSv4 multi-export registry and routing
 
 ### Added

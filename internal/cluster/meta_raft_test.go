@@ -556,3 +556,14 @@ func TestMetaRaft_proposeOrForward_LeaderProposesLocally(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, node.proposeCalls, "ProposeWait must be called when leader")
 }
+
+func TestMetaRaftProposeWithIndexLeaderReturnsCommittedIndex(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	m.lastApplied.Store(42)
+	node := &fakeProposerNode{isLeader: true, proposeIdx: 42}
+
+	got, err := m.proposeOrForwardWithIndex(context.Background(), node, []byte("cmd"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), got)
+	require.Equal(t, 1, node.proposeCalls)
+}
