@@ -20,6 +20,11 @@ func setupTestBackend(t *testing.T) *LocalBackend {
 	return b
 }
 
+func TestNewEncryptedLocalBackendRejectsNilEncryptor(t *testing.T) {
+	_, err := NewEncryptedLocalBackend(t.TempDir(), nil)
+	require.Error(t, err)
+}
+
 func TestCreateBucket(t *testing.T) {
 	b := setupTestBackend(t)
 

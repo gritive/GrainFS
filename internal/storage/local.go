@@ -16,6 +16,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 )
 
@@ -25,8 +26,9 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	root string
-	db   *badger.DB
+	root      string
+	db        *badger.DB
+	encryptor *encrypt.Encryptor
 }
 
 var (
@@ -41,6 +43,17 @@ func (b *LocalBackend) DB() *badger.DB { return b.db }
 
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
+	return newLocalBackend(root, nil)
+}
+
+func NewEncryptedLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypted local backend requires encryptor")
+	}
+	return newLocalBackend(root, enc)
+}
+
+func newLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -53,7 +66,7 @@ func NewLocalBackend(root string) (*LocalBackend, error) {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &LocalBackend{root: root, db: db}, nil
+	return &LocalBackend{root: root, db: db, encryptor: enc}, nil
 }
 
 // Close closes the metadata database.

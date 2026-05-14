@@ -106,6 +106,13 @@ type Config struct {
 	FlagsSnapshot map[string]string
 }
 
+func (c Config) RequireEncryptor() (*encrypt.Encryptor, error) {
+	if c.Encryptor == nil {
+		return nil, fmt.Errorf("production runtime requires at-rest encryptor")
+	}
+	return c.Encryptor, nil
+}
+
 // LogStartupConfigSnapshot writes the structured startup-config debug log and
 // the on-disk .last-config.json snapshot. It accepts a pre-redacted snapshot
 // map (built upstream by cmd/grainfs/collectFlagsSnapshot) plus the
