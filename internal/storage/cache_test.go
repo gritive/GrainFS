@@ -63,6 +63,40 @@ func TestCachedBackend_GetObjectCacheHit(t *testing.T) {
 	assert.Equal(t, int64(1), cb.Stats().Hits)
 }
 
+func TestCachedObjectReaderCloseIsIdempotentAfterReuse(t *testing.T) {
+	rc := newCachedObjectReader([]byte("first"))
+	require.NoError(t, rc.Close())
+	require.NoError(t, rc.Close())
+
+	rc1 := newCachedObjectReader([]byte("abc"))
+	rc2 := newCachedObjectReader([]byte("xyz"))
+	defer rc1.Close()
+	defer rc2.Close()
+
+	require.NoError(t, rc.Close())
+
+	body1, err := io.ReadAll(rc1)
+	require.NoError(t, err)
+	body2, err := io.ReadAll(rc2)
+	require.NoError(t, err)
+	require.Equal(t, "abc", string(body1))
+	require.Equal(t, "xyz", string(body2))
+}
+
+func TestCachedObjectReaderPreservesWriterTo(t *testing.T) {
+	rc := newCachedObjectReader([]byte("abc"))
+	defer rc.Close()
+
+	wt, ok := any(rc).(io.WriterTo)
+	require.True(t, ok)
+
+	var dst strings.Builder
+	n, err := wt.WriteTo(&dst)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n)
+	require.Equal(t, "abc", dst.String())
+}
+
 func TestCachedBackend_HeadObjectCacheHit(t *testing.T) {
 	cb, _ := newTestCachedBackend(t)
 

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/pool"
 )
 
 const (
@@ -20,6 +22,54 @@ type cacheEntry struct {
 	size int64
 }
 
+type objectCacheKey struct {
+	bucket string
+	key    string
+}
+
+var cachedObjectReaderStatePool = pool.New(func() *cachedObjectReaderState {
+	return &cachedObjectReaderState{}
+})
+
+type cachedObjectReader struct {
+	st *cachedObjectReaderState
+}
+
+type cachedObjectReaderState struct {
+	r bytes.Reader
+}
+
+func newCachedObjectReader(data []byte) *cachedObjectReader {
+	st := cachedObjectReaderStatePool.Get()
+	st.r.Reset(data)
+	return &cachedObjectReader{st: st}
+}
+
+func (r *cachedObjectReader) Read(p []byte) (int, error) {
+	if r.st == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return r.st.r.Read(p)
+}
+
+func (r *cachedObjectReader) WriteTo(w io.Writer) (int64, error) {
+	if r.st == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return r.st.r.WriteTo(w)
+}
+
+func (r *cachedObjectReader) Close() error {
+	st := r.st
+	if st == nil {
+		return nil
+	}
+	r.st = nil
+	st.r.Reset(nil)
+	cachedObjectReaderStatePool.Put(st)
+	return nil
+}
+
 // CacheStats reports cache performance counters.
 type CacheStats struct {
 	Hits      int64
@@ -31,8 +81,9 @@ type CacheStats struct {
 type CacheOption func(*CachedBackend)
 
 var (
-	_ Backend   = (*CachedBackend)(nil)
-	_ PartialIO = (*CachedBackend)(nil)
+	_ Backend     = (*CachedBackend)(nil)
+	_ PartialIO   = (*CachedBackend)(nil)
+	_ io.WriterTo = (*cachedObjectReader)(nil)
 )
 
 // WithMaxCacheBytes sets the total maximum bytes for cached object content.
@@ -66,8 +117,8 @@ type CachedBackend struct {
 // Readers load and inspect it without locks; writers clone, mutate, and publish
 // with CompareAndSwap.
 type cacheState struct {
-	entries   map[string]cacheEntry
-	order     []string // oldest -> newest
+	entries   map[objectCacheKey]cacheEntry
+	order     []objectCacheKey // oldest -> newest
 	usedBytes int64
 }
 
@@ -94,10 +145,10 @@ func (cb *CachedBackend) Stats() CacheStats {
 	}
 }
 
-func cacheKey(bucket, key string) string { return bucket + "/" + key }
+func cacheKey(bucket, key string) objectCacheKey { return objectCacheKey{bucket: bucket, key: key} }
 
 func emptyCacheState() *cacheState {
-	return &cacheState{entries: make(map[string]cacheEntry)}
+	return &cacheState{entries: make(map[objectCacheKey]cacheEntry)}
 }
 
 // GetObject returns a cached reader on hit, or fetches from the underlying
@@ -110,7 +161,7 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 	if ok {
 		cb.hits.Add(1)
 		obj := entry.obj // copy
-		return io.NopCloser(bytes.NewReader(entry.data)), &obj, nil
+		return newCachedObjectReader(entry.data), &obj, nil
 	}
 
 	// Cache miss: check size before buffering
@@ -140,7 +191,7 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 
 	cb.put(ck, cacheEntry{data: data, obj: *obj, size: int64(len(data))})
 
-	return io.NopCloser(bytes.NewReader(data)), obj, nil
+	return newCachedObjectReader(data), obj, nil
 }
 
 // HeadObject returns cached metadata on hit.
@@ -217,7 +268,9 @@ func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 	ck := cacheKey(bucket, key)
 	entry, ok := cb.getCached(ck)
 	if ok {
-		return bytes.NewReader(entry.data).ReadAt(buf, offset)
+		var r bytes.Reader
+		r.Reset(entry.data)
+		return r.ReadAt(buf, offset)
 	}
 
 	ra, ok := cb.Backend.(PartialIO)
@@ -363,7 +416,7 @@ func (cb *CachedBackend) invalidate(bucket, key string) {
 }
 
 // put adds an entry to the cache, evicting the oldest published entries if necessary.
-func (cb *CachedBackend) put(key string, entry cacheEntry) {
+func (cb *CachedBackend) put(key objectCacheKey, entry cacheEntry) {
 	if entry.size > cb.maxBytes {
 		return
 	}
@@ -379,7 +432,7 @@ func (cb *CachedBackend) put(key string, entry cacheEntry) {
 	}
 }
 
-func (cb *CachedBackend) getCached(key string) (cacheEntry, bool) {
+func (cb *CachedBackend) getCached(key objectCacheKey) (cacheEntry, bool) {
 	st := cb.state.Load()
 	if st == nil {
 		return cacheEntry{}, false
@@ -388,10 +441,10 @@ func (cb *CachedBackend) getCached(key string) (cacheEntry, bool) {
 	return entry, ok
 }
 
-func (s *cacheState) cloneWithout(key string) *cacheState {
+func (s *cacheState) cloneWithout(key objectCacheKey) *cacheState {
 	next := &cacheState{
-		entries:   make(map[string]cacheEntry, len(s.entries)-1),
-		order:     make([]string, 0, len(s.order)),
+		entries:   make(map[objectCacheKey]cacheEntry, len(s.entries)-1),
+		order:     make([]objectCacheKey, 0, len(s.order)),
 		usedBytes: s.usedBytes,
 	}
 	for k, v := range s.entries {
@@ -409,10 +462,10 @@ func (s *cacheState) cloneWithout(key string) *cacheState {
 	return next
 }
 
-func (s *cacheState) cloneWith(key string, entry cacheEntry, maxBytes int64) (*cacheState, int64) {
+func (s *cacheState) cloneWith(key objectCacheKey, entry cacheEntry, maxBytes int64) (*cacheState, int64) {
 	next := &cacheState{
-		entries:   make(map[string]cacheEntry, len(s.entries)+1),
-		order:     make([]string, 0, len(s.order)+1),
+		entries:   make(map[objectCacheKey]cacheEntry, len(s.entries)+1),
+		order:     make([]objectCacheKey, 0, len(s.order)+1),
 		usedBytes: s.usedBytes,
 	}
 	for k, v := range s.entries {

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.200.0] - 2026-05-15 — perf: zero-alloc SigV4, storage cache, and NBD reply hot paths
+
+### Changed
+
+- **S3 SigV4 verification** — cached verification now parses auth fields and credential scopes without building per-request maps/slices, and compares expected HMAC hex without allocating the expected signature string.
+- **Storage cache hits** — cached object reads now reuse reader state and struct cache keys, reducing cache-hit allocation churn while preserving lock-free snapshot reads.
+- **NBD replies** — fixed and structured reply headers now reuse fixed buffers instead of allocating header slices on steady-state transmission paths.
+
+### Fixed
+
+- **Header auth query handling** — header-signed S3 requests whose query values contain `X-Amz-Algorithm=` or whose query includes an empty presign marker are no longer misclassified as presigned URLs; encoded presign keys remain recognized through a cold fallback.
+- **Cached reader reuse safety** — stale double-close after cached reader reuse can no longer reset an active reader.
+- **Coverage build compatibility** — NBD reply header pooling now avoids the generic fixed-array pattern that triggered a Go coverage compiler ICE while keeping the zero-allocation budget.
+
 ## [0.0.199.0] - 2026-05-15 — feat: S3 audit log lake — Phase 2 (bootstrap + metrics + --audit-iceberg flag + e2e)
 
 ### Added

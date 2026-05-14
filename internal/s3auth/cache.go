@@ -105,31 +105,30 @@ func (cv *CachingVerifier) LookupSecret(accessKey string) string {
 // presigned URL query params. Returns empty strings on malformed or missing input.
 func parseCredentialFull(r *http.Request) (accessKey, date, region, service, scope string) {
 	var credential string
-	q := r.URL.Query()
-	if q.Get("X-Amz-Algorithm") != "" {
-		credential = q.Get("X-Amz-Credential")
+	if hasPresignedAlgorithm(r) {
+		credential = r.URL.Query().Get("X-Amz-Credential")
 	} else {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
 			return "", "", "", "", ""
 		}
-		credential = parseAuthHeader(auth)["Credential"]
+		credential = parseAuthHeaderFields(auth).Credential
 	}
 	// credential = "accessKey/date/region/service/aws4_request"
-	parts := strings.SplitN(credential, "/", 5)
-	if len(parts) < 5 || parts[0] == "" {
+	accessKey, date, region, service, ok := parseCredentialParts(credential)
+	if !ok {
 		return "", "", "", "", ""
 	}
-	return parts[0], parts[1], parts[2], parts[3], parts[1] + "/" + parts[2] + "/" + parts[3] + "/aws4_request"
+	return accessKey, date, region, service, date + "/" + region + "/" + service + "/aws4_request"
 }
 
 // presignedExpiry returns the remaining duration until a presigned URL expires,
 // or 0 if not a presigned URL or expiry cannot be determined.
 func presignedExpiry(r *http.Request) time.Duration {
-	q := r.URL.Query()
-	if q.Get("X-Amz-Algorithm") == "" {
+	if !hasPresignedAlgorithm(r) {
 		return 0
 	}
+	q := r.URL.Query()
 	amzDate := q.Get("X-Amz-Date")
 	expiresStr := q.Get("X-Amz-Expires")
 	if amzDate == "" || expiresStr == "" {
