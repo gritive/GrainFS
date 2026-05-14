@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -137,6 +138,31 @@ func TestOutboxAppendFinalizedIgnoresCommittedEventID(t *testing.T) {
 	require.NoError(t, box.AppendFinalized(ctx, ev))
 
 	pending, err := box.Pending(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
+func TestOutboxAckEventsChunksLargeBatches(t *testing.T) {
+	box, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer box.Close()
+
+	ctx := context.Background()
+	events := make([]audit.S3Event, 2500)
+	for i := range events {
+		events[i] = audit.S3Event{
+			EventID:    "evt-large-" + strconv.Itoa(i),
+			RequestID:  "req-large-" + strconv.Itoa(i),
+			Ts:         int64(i + 1),
+			Status:     200,
+			Finalized:  true,
+			AuthStatus: "allow",
+		}
+		require.NoError(t, box.AppendFinalized(ctx, events[i]))
+	}
+
+	require.NoError(t, box.AckEvents(ctx, events))
+	pending, err := box.Pending(ctx, len(events))
 	require.NoError(t, err)
 	require.Empty(t, pending)
 }

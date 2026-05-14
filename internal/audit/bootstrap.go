@@ -47,6 +47,19 @@ func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend audi
 				NewMetadataLocation:      metaLocation,
 				Metadata:                 migrated,
 			}); err != nil {
+				if errors.Is(err, icebergcatalog.ErrCommitFailed) {
+					latest, loadErr := catalog.LoadTable(ctx, ident)
+					if loadErr == nil {
+						_, stillChanged, migrateErr := MigrateMetadataToCurrent(latest.Metadata, time.Now().UnixMilli())
+						if migrateErr != nil {
+							return fmt.Errorf("audit bootstrap: recheck migrated metadata: %w", migrateErr)
+						}
+						if !stillChanged {
+							log.Info().Str("table", Namespace+"."+TableS3).Msg("audit bootstrap: metadata migrated by another node")
+							return nil
+						}
+					}
+				}
 				return fmt.Errorf("audit bootstrap: commit migrated metadata: %w", err)
 			}
 			log.Info().Str("table", Namespace+"."+TableS3).Msg("audit bootstrap: metadata migrated")

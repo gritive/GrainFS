@@ -27,6 +27,11 @@ func TestMigrateMetadataV1ToCurrent(t *testing.T) {
 	require.Empty(t, specs[0].(map[string]any)["fields"], "legacy unpartitioned spec must remain readable")
 	require.Equal(t, float64(1), specs[1].(map[string]any)["spec-id"])
 	require.Equal(t, float64(1), meta["default-spec-id"])
+
+	gotAgain, changedAgain, err := audit.MigrateMetadataToCurrent(got, time.Now().Add(time.Second).UnixMilli())
+	require.NoError(t, err)
+	require.False(t, changedAgain)
+	require.JSONEq(t, string(got), string(gotAgain))
 }
 
 func TestMigrateMetadataCurrentNoop(t *testing.T) {

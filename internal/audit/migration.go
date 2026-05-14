@@ -24,12 +24,7 @@ func MigrateMetadataToCurrent(raw json.RawMessage, nowMs int64) (json.RawMessage
 	}
 
 	specs, _ := meta["partition-specs"].([]any)
-	needsPartition := len(specs) == 0
-	if len(specs) > 0 {
-		fields, _ := specs[0].(map[string]any)["fields"].([]any)
-		needsPartition = len(fields) == 0
-	}
-	if needsPartition {
+	if !hasDayPartitionSpec(specs) {
 		newSpecID := nextPartitionSpecID(specs)
 		specs = append(specs, map[string]any{
 			"spec-id": float64(newSpecID),
@@ -49,6 +44,26 @@ func MigrateMetadataToCurrent(raw json.RawMessage, nowMs int64) (json.RawMessage
 	meta["last-updated-ms"] = float64(nowMs)
 	out, err := json.Marshal(meta)
 	return json.RawMessage(out), true, err
+}
+
+func hasDayPartitionSpec(specs []any) bool {
+	for _, raw := range specs {
+		spec, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		fields, _ := spec["fields"].([]any)
+		for _, rawField := range fields {
+			field, ok := rawField.(map[string]any)
+			if !ok {
+				continue
+			}
+			if field["name"] == "ts_day" && field["transform"] == "day" && getInt64(field, "source-id") == 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func nextPartitionSpecID(specs []any) int64 {

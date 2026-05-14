@@ -39,7 +39,10 @@ func ClassifyS3Operation(method string, hasKey bool, rawQuery string, h http.Hea
 	if has("versions") {
 		return OperationInfo{Operation: "ListObjectVersions", Subresource: "versions"}
 	}
-	if has("uploads") {
+	if method == "GET" && !hasKey && has("uploads") {
+		return OperationInfo{Operation: "ListMultipartUploads", Subresource: "uploads"}
+	}
+	if method == "POST" && hasKey && has("uploads") {
 		return OperationInfo{Operation: "CreateMultipartUpload", Subresource: "uploads"}
 	}
 	if has("uploadId") {

@@ -53,6 +53,7 @@ type bootstrapFakeCatalog struct {
 	tables     map[string]*icebergcatalog.Table
 	nsExistsOK bool // if true, CreateNamespace returns ErrNamespaceExists
 	nsErr      error
+	raceCommit bool
 }
 
 func newBootstrapCatalog() *bootstrapFakeCatalog {
@@ -116,6 +117,12 @@ func (c *bootstrapFakeCatalog) CommitTable(_ context.Context, ident icebergcatal
 		Metadata:         in.Metadata,
 	}
 	c.mu.Lock()
+	if c.raceCommit {
+		c.raceCommit = false
+		c.tables[ident.Name] = tbl
+		c.mu.Unlock()
+		return nil, icebergcatalog.ErrCommitFailed
+	}
 	c.tables[ident.Name] = tbl
 	c.mu.Unlock()
 	return tbl, nil
@@ -171,6 +178,30 @@ func TestBootstrap_MigratesExistingV1Table(t *testing.T) {
 	require.Equal(t, float64(23), meta["last-column-id"])
 	require.Equal(t, float64(1000), meta["last-partition-id"])
 	require.NotEqual(t, "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json", tbl.MetadataLocation)
+}
+
+func TestBootstrap_ToleratesConcurrentMetadataMigration(t *testing.T) {
+	cat := newBootstrapCatalog()
+	cat.raceCommit = true
+	backend := newBootstrapBackend()
+	v1 := fmt.Sprintf(audit.S3InitialMetadataV1ForTest, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
+	_, err := cat.CreateTable(context.Background(), icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
+	}, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json",
+		Metadata:         json.RawMessage(v1),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, audit.Bootstrap(context.Background(), cat, backend))
+
+	tbl, err := cat.LoadTable(context.Background(), icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
+	})
+	require.NoError(t, err)
+	_, changed, err := audit.MigrateMetadataToCurrent(tbl.Metadata, time.Now().UnixMilli())
+	require.NoError(t, err)
+	require.False(t, changed)
 }
 
 func TestBootstrap_NamespaceExistsIgnored(t *testing.T) {

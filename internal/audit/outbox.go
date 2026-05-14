@@ -14,6 +14,7 @@ var ErrOutboxInvalidEvent = errors.New("audit outbox invalid event")
 
 const staleAttemptAfter = 5 * time.Minute
 const committedEventTombstoneTTL = 7 * 24 * time.Hour
+const ackEventsChunkSize = 1000
 
 // Outbox stores audit events durably until the Iceberg committer acks them.
 type Outbox struct {
@@ -176,6 +177,20 @@ func (o *Outbox) Ack(ctx context.Context, eventIDs []string) error {
 // stale-attempt rows intentionally do not get tombstoned; a still-running
 // request may finalize later with the real status, bytes, and latency.
 func (o *Outbox) AckEvents(ctx context.Context, events []S3Event) error {
+	for len(events) > 0 {
+		n := ackEventsChunkSize
+		if len(events) < n {
+			n = len(events)
+		}
+		if err := o.ackEventsChunk(ctx, events[:n]); err != nil {
+			return err
+		}
+		events = events[n:]
+	}
+	return nil
+}
+
+func (o *Outbox) ackEventsChunk(ctx context.Context, events []S3Event) error {
 	return o.db.Update(func(txn *badger.Txn) error {
 		for _, ev := range events {
 			select {

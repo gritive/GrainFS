@@ -23,6 +23,7 @@ func TestClassifyS3Operation(t *testing.T) {
 		{method: "GET", hasKey: false, wantOp: "ListObjects"},
 		{method: "GET", hasKey: false, query: "policy", wantOp: "GetBucketPolicy", wantSub: "policy"},
 		{method: "PUT", hasKey: false, query: "policy", wantOp: "PutBucketPolicy", wantSub: "policy"},
+		{method: "GET", hasKey: false, query: "uploads", wantOp: "ListMultipartUploads", wantSub: "uploads"},
 		{method: "GET", hasKey: true, wantOp: "GetObject"},
 		{method: "HEAD", hasKey: true, wantOp: "HeadObject"},
 		{method: "PUT", hasKey: true, wantOp: "PutObject"},
