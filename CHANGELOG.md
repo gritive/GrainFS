@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.195.0] - 2026-05-14 — feat: rolling upgrade capability gates
+
+### Added
+
+- **Capability gate framework** — `internal/compat` defines capability names, hard-gate errors, active feature helpers, and `grainfs_capability_reject_total{capability,scope,severity,operation,forced}` telemetry for version-skew rejections.
+- **Config epoch-bound meta-Raft gates** — meta-Raft proposals can now be admitted through a `CapabilityGate` that verifies every current voter has fresh readiness evidence before new metadata commands are proposed or forwarded.
+- **Gated migration cutover hook** — bucket upstream cutover state is persisted through IAM/meta-Raft, and `POST /v1/migration/cutover` is rejected until the cluster advertises the migration cutover capability.
+- **Rolling upgrade compat coverage** — mixed-version compat tests now verify migration cutover fails closed before all nodes are capable, and the runbook documents capability gate rejection response.
+
 ## [0.0.194.0] - 2026-05-14 — feat: S3 audit log lake — Phase 1 (Iceberg + Parquet)
 
 ### Added
