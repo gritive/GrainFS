@@ -17,6 +17,7 @@ import (
 )
 
 const spoolCopyBufferSize = 1 << 20
+const maxEncryptedSpoolBlobBytes = 2 * spoolCopyBufferSize
 
 var spoolCopyBufferPool = sync.Pool{
 	New: func() any {
@@ -315,6 +316,9 @@ func readSpoolEncryptedRecord(r io.Reader, enc *encrypt.Encryptor, domain string
 	blobLen := binary.BigEndian.Uint32(header[4:])
 	if blobLen == 0 {
 		return nil, false, fmt.Errorf("read encrypted spool record: empty blob")
+	}
+	if blobLen > maxEncryptedSpoolBlobBytes {
+		return nil, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
 	}
 	blob := make([]byte, blobLen)
 	if _, err := io.ReadFull(r, blob); err != nil {

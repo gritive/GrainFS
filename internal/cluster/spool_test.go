@@ -120,6 +120,30 @@ func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testin
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
 }
 
+func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
+	enc := newClusterTestEncryptor(t)
+	payload := []byte("sensitive cluster spool payload")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", enc, "cluster-spool:oversized")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	f, err := os.OpenFile(sp.Path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	var hdr [8]byte
+	_, err = f.ReadAt(hdr[:], 0)
+	require.NoError(t, err)
+	binary.BigEndian.PutUint32(hdr[4:], uint32(maxEncryptedSpoolBlobBytes+1))
+	_, err = f.WriteAt(hdr[:], 0)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	_, err = io.ReadAll(rc)
+	require.Error(t, err)
+	require.NoError(t, rc.Close())
+}
+
 func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
 	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_volumes")
 	require.NoError(t, err)

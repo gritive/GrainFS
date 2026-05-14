@@ -2,6 +2,7 @@ package wal_test
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -260,6 +261,135 @@ func TestWAL_EncryptedReplayRejectsFrameMetadataTamper(t *testing.T) {
 
 	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {})
 	require.Error(t, err)
+}
+
+func TestWAL_EncryptedReplayRejectsTruncatedFrame(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	var walPath string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasPrefix(filepath.Base(path), "wal-") && strings.HasSuffix(filepath.Base(path), ".bin") {
+			walPath = path
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, walPath)
+
+	info, err := os.Stat(walPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(walPath, info.Size()-1))
+
+	_, err = wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {})
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+func TestWAL_EncryptedOpenIgnoresTrailingPartialFrame(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	var walPath string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasPrefix(filepath.Base(path), "wal-") && strings.HasSuffix(filepath.Base(path), ".bin") {
+			walPath = path
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, walPath)
+
+	info, err := os.Stat(walPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(walPath, info.Size()-1))
+
+	reopened, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	require.NoError(t, reopened.Close())
+}
+
+func TestWAL_EncryptedOpenRejectsFrameMetadataTamper(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "bucket", Key: "secret-key"})
+	require.NoError(t, w.Flush())
+	require.NoError(t, w.Close())
+
+	var walPath string
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasPrefix(filepath.Base(path), "wal-") && strings.HasSuffix(filepath.Base(path), ".bin") {
+			walPath = path
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, walPath)
+
+	raw, err := os.ReadFile(walPath)
+	require.NoError(t, err)
+	raw[15] ^= 0x01 // header(8) + seq field's last byte
+	require.NoError(t, os.WriteFile(walPath, raw, 0o644))
+
+	_, err = wal.OpenEncrypted(dir, enc)
+	require.Error(t, err)
+}
+
+func TestWAL_EncryptedPersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
+	require.NoError(t, err)
+
+	w, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	w.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k1", ETag: "e1", Size: 42})
+	w.AppendAsync(wal.Entry{Op: wal.OpDelete, Bucket: "b", Key: "k1"})
+	require.NoError(t, w.Flush())
+	firstSeq := w.CurrentSeq()
+	require.NoError(t, w.Close())
+
+	w2, err := wal.OpenEncrypted(dir, enc)
+	require.NoError(t, err)
+	require.Equal(t, firstSeq, w2.CurrentSeq())
+
+	w2.AppendAsync(wal.Entry{Op: wal.OpPut, Bucket: "b", Key: "k2"})
+	require.NoError(t, w2.Flush())
+	require.Equal(t, firstSeq+1, w2.CurrentSeq())
+	require.NoError(t, w2.Close())
+
+	var keys []string
+	n, err := wal.ReplayEncrypted(dir, 0, time.Now().Add(time.Second), enc, func(e wal.Entry) {
+		keys = append(keys, e.Key)
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, []string{"k1", "k1", "k2"}, keys)
 }
 
 func TestWAL_NonexistentDirReturnsError(t *testing.T) {

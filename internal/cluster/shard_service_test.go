@@ -261,6 +261,28 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 	assert.Contains(t, err.Error(), "decrypt shard")
 }
 
+func TestShardService_WithEncryptorReadsLegacyCRCShard(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	legacy := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))
+	plaintext := []byte("legacy crc shard data")
+	require.NoError(t, legacy.WriteLocalShard("bkt", "obj", 0, plaintext))
+
+	upgraded := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+	got, err := upgraded.ReadLocalShard("bkt", "obj", 0)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+
+	buf := make([]byte, 6)
+	n, err := upgraded.ReadLocalShardAt("bkt", "obj", 0, 7, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(buf), n)
+	require.Equal(t, []byte("crc sh"), buf)
+}
+
 func TestShardService_WithEncryptorNil(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(nil))

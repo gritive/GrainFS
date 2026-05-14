@@ -30,6 +30,9 @@ func openBadgerValue(enc *encrypt.Encryptor, domain string, key, val []byte) ([]
 	if enc == nil {
 		return append([]byte(nil), val...), nil
 	}
+	if !encrypt.IsEncryptedValue(val) {
+		return append([]byte(nil), val...), nil
+	}
 	return enc.OpenValueAAD(badgerValueAAD(domain, key), val)
 }
 

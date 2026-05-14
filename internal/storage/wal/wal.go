@@ -38,6 +38,7 @@ const (
 	maxSegmentBytes   = 64 * 1024 * 1024 // 64 MB
 	maxSegmentEntries = 10_000
 	chanCap           = 4096
+	maxEntryBodyBytes = 16 * 1024 * 1024
 )
 
 // Entry is a single WAL record.
@@ -243,10 +244,12 @@ func (w *WAL) scanMaxSeq() (uint64, error) {
 		if !walFilename(e.Name()) {
 			continue
 		}
-		seq, err := lastSeqInFile(filepath.Join(w.dir, e.Name()))
+		seq, err := lastSeqInFile(filepath.Join(w.dir, e.Name()), w.encryptor)
 		if err != nil {
 			log.Warn().Str("file", e.Name()).Err(err).Msg("wal: scan failed")
-			continue
+			if w.encryptor != nil {
+				return 0, err
+			}
 		}
 		if seq > maxSeq {
 			maxSeq = seq
@@ -325,7 +328,13 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 	var count int
 	for {
 		e, body, err := readEntryFrame(f, ver)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if err == io.EOF {
+			break
+		}
+		if err == io.ErrUnexpectedEOF {
+			if ver == fileVersionV3 {
+				return count, err
+			}
 			break
 		}
 		if err != nil {
@@ -352,7 +361,7 @@ func replayFile(path string, fromSeq uint64, targetNs int64, enc *encrypt.Encryp
 	return count, nil
 }
 
-func lastSeqInFile(path string) (uint64, error) {
+func lastSeqInFile(path string, enc *encrypt.Encryptor) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -364,12 +373,23 @@ func lastSeqInFile(path string) (uint64, error) {
 	}
 	var lastSeq uint64
 	for {
-		e, _, err := readEntryFrame(f, ver)
+		e, body, err := readEntryFrame(f, ver)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
+			if ver == fileVersionV3 {
+				return lastSeq, err
+			}
 			return lastSeq, nil
+		}
+		if ver == fileVersionV3 {
+			if enc == nil {
+				return lastSeq, fmt.Errorf("wal: encrypted segment requires encryptor")
+			}
+			if _, err := decryptEntryBody(e, body, enc); err != nil {
+				return lastSeq, err
+			}
 		}
 		lastSeq = e.Seq
 	}
@@ -522,6 +542,9 @@ func readEntryFrame(r io.Reader, wireVer uint32) (Entry, []byte, error) {
 			return Entry{}, nil, err
 		}
 		bodyLen := binary.BigEndian.Uint32(fixed[16:20])
+		if bodyLen > maxEntryBodyBytes {
+			return Entry{}, nil, fmt.Errorf("wal: encrypted entry body too large: %d", bodyLen)
+		}
 		body := make([]byte, bodyLen)
 		if bodyLen > 0 {
 			if _, err := io.ReadFull(r, body); err != nil {

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -65,6 +66,19 @@ func TestPreferWriteAt_RejectsDistinctPeers(t *testing.T) {
 
 	require.False(t, b.PreferWriteAt("__grainfs_volumes"),
 		"multi-node internal buckets must not use local-only pwrite")
+}
+
+func TestPreferWriteAt_RejectsEncryptedShardStorage(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x44}, 32))
+	require.NoError(t, err)
+	svc := NewShardService(b.root, nil, WithEncryptor(enc))
+	b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr})
+
+	require.False(t, b.PreferWriteAt("__grainfs_volumes"))
+	_, err = b.WriteAt(context.Background(), "__grainfs_volumes", "vol/blk", 0, []byte("abcd"))
+	require.Error(t, err)
+	require.Error(t, b.Truncate(context.Background(), "__grainfs_volumes", "vol/blk", 4))
 }
 
 // TestSelfAddr_DifferentFromRaftNodeID confirms that selfAddr (an address like

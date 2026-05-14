@@ -49,11 +49,12 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 					return nil
 				}
 				var meta objectMeta
-				if err := item.Value(func(v []byte) error {
-					var derr error
-					meta, derr = unmarshalObjectMeta(v)
-					return derr
-				}); err != nil {
+				v, err := b.itemValueCopy(item)
+				if err != nil {
+					return nil
+				}
+				meta, err = unmarshalObjectMeta(v)
+				if err != nil {
 					return nil
 				}
 				result = append(result, storage.SnapshotObject{
@@ -277,17 +278,20 @@ func (b *DistributedBackend) latestMatchingObjectVersionID(obj storage.SnapshotO
 			versionID = ""
 			return nil
 		}
-		return item.Value(func(v []byte) error {
-			meta, err := unmarshalObjectMeta(v)
-			if err != nil {
-				versionID = ""
-				return nil
-			}
-			if meta.ETag != obj.ETag || meta.Size != obj.Size {
-				versionID = ""
-			}
+		v, err := b.itemValueCopy(item)
+		if err != nil {
+			versionID = ""
 			return nil
-		})
+		}
+		meta, err := unmarshalObjectMeta(v)
+		if err != nil {
+			versionID = ""
+			return nil
+		}
+		if meta.ETag != obj.ETag || meta.Size != obj.Size {
+			versionID = ""
+		}
+		return nil
 	})
 	return versionID
 }

@@ -9,12 +9,14 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
 // loadOrCreateEncryptionKey loads a key from file or auto-generates one in the
-// data directory. An explicitly provided missing key path is treated as an
-// error, because generating a new key would make existing shards unreadable.
-func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, error) {
+// data directory when allowed. An explicitly provided missing key path is
+// treated as an error, because generating a new key would make existing shards
+// unreadable.
+func loadOrCreateEncryptionKey(keyFile, dataDir string, allowAutoGenerate bool) (*encrypt.Encryptor, error) {
 	explicitPath := keyFile != ""
 	if !explicitPath {
 		keyFile = filepath.Join(dataDir, "encryption.key")
@@ -32,6 +34,9 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 	if explicitPath {
 		return nil, fmt.Errorf("encryption key file not found: %s (mount failure?): %w", keyFile, err)
 	}
+	if !allowAutoGenerate {
+		return nil, fmt.Errorf("--encryption-key-file is required for cluster/join mode; refusing to auto-generate node-local key")
+	}
 
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o755); err != nil {
 		return nil, fmt.Errorf("create key dir: %w", err)
@@ -46,4 +51,14 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string) (*encrypt.Encryptor, err
 
 	log.Info().Str("component", "server").Str("key_file", keyFile).Msg("at-rest encryption enabled (auto-generated key)")
 	return encrypt.NewEncryptor(keyData)
+}
+
+func allowAutoGenerateEncryptionKey(dataDir, raftAddr string) bool {
+	if raftAddr != "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, serveruntime.JoinPendingFile)); err == nil {
+		return false
+	}
+	return true
 }

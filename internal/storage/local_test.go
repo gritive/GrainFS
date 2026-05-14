@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
@@ -170,6 +171,33 @@ func TestEncryptedLocalBackendListsEncryptedObjectMetadata(t *testing.T) {
 		}
 	}
 	require.Equal(t, listedSizes, snapshotSizes)
+}
+
+func TestEncryptedLocalBackendObjectSurvivesDataRootMove(t *testing.T) {
+	enc := testEncryptor(t)
+	root := filepath.Join(t.TempDir(), "root")
+	b, err := NewEncryptedLocalBackend(root, enc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	plaintext := []byte("movable encrypted object")
+	_, err = b.PutObject(ctx, "bkt", "dir/object.txt", bytes.NewReader(plaintext), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, b.Close())
+
+	moved := filepath.Join(t.TempDir(), "moved")
+	require.NoError(t, os.Rename(root, moved))
+	reopened, err := NewEncryptedLocalBackend(moved, enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	rc, _, err := reopened.GetObject(ctx, "bkt", "dir/object.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
 }
 
 func TestEncryptedLocalBackendDoesNotAdvertiseWriteAt(t *testing.T) {

@@ -100,26 +100,24 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			ref.Key = key
 			ref.VersionID = versionID
 			skip := false
-			if verr := metaItem.Value(func(val []byte) error {
-				m, derr := unmarshalObjectMeta(val)
-				if derr != nil {
-					return derr
-				}
-				if m.ETag == deleteMarkerETag {
-					skip = true
-					return nil
-				}
-				ref.Size = m.Size
-				ref.ETag = m.ETag
-				ref.RingVersion = RingVersion(m.RingVersion)
-				ref.ECData = m.ECData
-				ref.ECParity = m.ECParity
-				ref.NodeIDs = m.NodeIDs
-				ref.PlacementGroupID = m.PlacementGroupID
-				return nil
-			}); verr != nil {
+			val, verr := f.itemValueCopy(metaItem)
+			if verr != nil {
 				return verr
 			}
+			m, verr := unmarshalObjectMeta(val)
+			if verr != nil {
+				return verr
+			}
+			if m.ETag == deleteMarkerETag {
+				skip = true
+			}
+			ref.Size = m.Size
+			ref.ETag = m.ETag
+			ref.RingVersion = RingVersion(m.RingVersion)
+			ref.ECData = m.ECData
+			ref.ECParity = m.ECParity
+			ref.NodeIDs = m.NodeIDs
+			ref.PlacementGroupID = m.PlacementGroupID
 			if skip {
 				return nil
 			}
@@ -169,23 +167,21 @@ func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
 			var ref ObjectMetaRef
 			ref.Bucket = bucket
 			ref.Key = key
-			verr := item.Value(func(val []byte) error {
-				m, derr := unmarshalObjectMeta(val)
-				if derr != nil {
-					return derr
-				}
-				ref.Size = m.Size
-				ref.ETag = m.ETag
-				ref.RingVersion = RingVersion(m.RingVersion)
-				ref.ECData = m.ECData
-				ref.ECParity = m.ECParity
-				ref.NodeIDs = m.NodeIDs
-				ref.PlacementGroupID = m.PlacementGroupID
-				return nil
-			})
+			val, verr := f.itemValueCopy(item)
 			if verr != nil {
 				return verr
 			}
+			m, verr := unmarshalObjectMeta(val)
+			if verr != nil {
+				return verr
+			}
+			ref.Size = m.Size
+			ref.ETag = m.ETag
+			ref.RingVersion = RingVersion(m.RingVersion)
+			ref.ECData = m.ECData
+			ref.ECParity = m.ECParity
+			ref.NodeIDs = m.NodeIDs
+			ref.PlacementGroupID = m.PlacementGroupID
 			seen[bucket+"\x00"+key] = struct{}{}
 			return fn(ref)
 		})
@@ -359,15 +355,17 @@ func (f *FSM) LookupObjectECShards(bucket, key, versionID string) (k, m int, err
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			meta, derr := unmarshalObjectMeta(val)
-			if derr != nil {
-				return derr
-			}
-			k = int(meta.ECData)
-			m = int(meta.ECParity)
-			return nil
-		})
+		val, err := f.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		meta, derr := unmarshalObjectMeta(val)
+		if derr != nil {
+			return derr
+		}
+		k = int(meta.ECData)
+		m = int(meta.ECParity)
+		return nil
 	})
 	if errors.Is(err, badger.ErrKeyNotFound) {
 		return 0, 0, nil // N× 모드: EC 메타 없음

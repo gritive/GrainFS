@@ -171,7 +171,7 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		partReader := &encryptedMultipartPartsReader{backend: b, uploadID: uploadID, parts: parts}
 		defer partReader.Close()
 		h, release := hashForBucket(bucket)
-		totalSize, etag, err = writeEncryptedObjectFileWithHash(objPath, b.encryptor, encryptedObjectFileDomain(objPath), partReader, h)
+		totalSize, etag, err = writeEncryptedObjectFileWithHash(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), partReader, h)
 		release()
 		if err != nil {
 			os.Remove(objPath)
@@ -405,13 +405,12 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 		var size int64
 		name := fmt.Sprintf("%05d", partNumber)
 		if b.encryptor != nil {
-			plain, err := readEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.encryptor, b.multipartPartDomain(uploadID, partNumber))
+			var err error
+			size, err = hashEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.encryptor, b.multipartPartDomain(uploadID, partNumber), h)
 			if err != nil {
 				release()
 				return nil, fmt.Errorf("hash encrypted part %d: %w", partNumber, err)
 			}
-			_, _ = h.Write(plain)
-			size = int64(len(plain))
 		} else {
 			full := filepath.Join(b.partDir(uploadID), name)
 			f, err := os.Open(full)

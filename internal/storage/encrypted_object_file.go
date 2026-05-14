@@ -8,6 +8,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -78,6 +79,9 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 	if err := bw.Flush(); err != nil {
 		return 0, "", fmt.Errorf("flush encrypted object: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		return 0, "", fmt.Errorf("sync encrypted object: %w", err)
+	}
 	return size, etagFromHash(h), nil
 }
 
@@ -144,6 +148,9 @@ func (r *encryptedObjectReader) loadNext() error {
 	plainLen, sealed, err := readEncryptedObjectRecord(r.f)
 	if err != nil {
 		if err == io.EOF {
+			if r.remaining > 0 {
+				return io.ErrUnexpectedEOF
+			}
 			return io.EOF
 		}
 		return err
@@ -207,6 +214,9 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 		if blobLen > 256*1024*1024 {
 			return copied, fmt.Errorf("encrypted object record too large")
 		}
+		if err := validateEncryptedObjectRecordPlainLen(chunk, plainPos, size, plainLen); err != nil {
+			return copied, err
+		}
 		chunkStart := plainPos
 		chunkEnd := plainPos + int64(plainLen)
 		if chunkEnd > size {
@@ -258,7 +268,7 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 }
 
 func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, offset uint64, data []byte, currentSize int64) (int64, string, error) {
-	plain, err := readEncryptedObjectFile(path, enc, domain)
+	plain, err := readEncryptedObjectFile(path, enc, domain, currentSize)
 	if err != nil {
 		if !os.IsNotExist(err) || currentSize != 0 {
 			return 0, "", err
@@ -268,6 +278,10 @@ func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain stri
 	if int64(len(plain)) > currentSize {
 		plain = plain[:currentSize]
 	}
+	maxInt := int(^uint(0) >> 1)
+	if offset > uint64(maxInt-len(data)) {
+		return 0, "", fmt.Errorf("encrypted writeat offset too large: %d", offset)
+	}
 	off := int(offset)
 	end := off + len(data)
 	if end > len(plain) {
@@ -276,14 +290,14 @@ func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain stri
 		plain = extended
 	}
 	copy(plain[off:], data)
-	return writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plain))
+	return writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain))
 }
 
 func truncateEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, currentSize int64, newSize int64) (int64, error) {
 	if newSize < 0 {
 		return 0, fmt.Errorf("negative size")
 	}
-	plain, err := readEncryptedObjectFile(path, enc, domain)
+	plain, err := readEncryptedObjectFile(path, enc, domain, currentSize)
 	if err != nil {
 		return 0, err
 	}
@@ -297,14 +311,45 @@ func truncateEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain str
 		copy(extended, plain)
 		plain = extended
 	}
-	_, _, err = writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plain))
+	_, _, err = writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain))
 	if err != nil {
 		return 0, err
 	}
 	return newSize, nil
 }
 
-func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string) ([]byte, error) {
+func writeEncryptedObjectFileAtomic(path string, enc *encrypt.Encryptor, domain string, r io.Reader) (int64, string, error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".encrypted-object-*")
+	if err != nil {
+		return 0, "", fmt.Errorf("create encrypted object temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, "", fmt.Errorf("close encrypted object temp: %w", err)
+	}
+	cleanup := func() {
+		_ = os.Remove(tmpPath)
+	}
+
+	size, etag, err := writeEncryptedObjectFile(tmpPath, enc, domain, r)
+	if err != nil {
+		cleanup()
+		return 0, "", err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return 0, "", fmt.Errorf("rename encrypted object: %w", err)
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return size, etag, nil
+}
+
+func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, expectedSize int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -339,7 +384,52 @@ func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string)
 		_, _ = out.Write(plain)
 		chunk++
 	}
+	if expectedSize >= 0 && int64(out.Len()) < expectedSize {
+		return nil, io.ErrUnexpectedEOF
+	}
 	return out.Bytes(), nil
+}
+
+func hashEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, h hash.Hash) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	magic := make([]byte, len(encryptedObjectMagic))
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return 0, fmt.Errorf("read encrypted object magic: %w", err)
+	}
+	if string(magic) != encryptedObjectMagic {
+		return 0, fmt.Errorf("invalid encrypted object magic")
+	}
+
+	var size int64
+	var chunk uint64
+	for {
+		plainLen, sealed, err := readEncryptedObjectRecord(f)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		plain, err := enc.OpenValue(encryptedChunkAAD(domain, chunk), sealed)
+		clear(sealed)
+		if err != nil {
+			return 0, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
+		}
+		if len(plain) != int(plainLen) {
+			clear(plain)
+			return 0, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
+		}
+		_, _ = h.Write(plain)
+		size += int64(len(plain))
+		clear(plain)
+		chunk++
+	}
+	return size, nil
 }
 
 func encryptedObjectFilePlainSize(path string) (int64, error) {
@@ -409,4 +499,25 @@ func readEncryptedObjectRecord(r io.Reader) (uint32, []byte, error) {
 		return 0, nil, fmt.Errorf("read encrypted object record body: %w", err)
 	}
 	return plainLen, sealed, nil
+}
+
+func validateEncryptedObjectRecordPlainLen(chunk uint64, plainPos int64, size int64, plainLen uint32) error {
+	if plainLen == 0 {
+		return fmt.Errorf("encrypted object chunk %d has empty plaintext length", chunk)
+	}
+	if plainLen > encryptedChunkSize {
+		return fmt.Errorf("encrypted object chunk %d length exceeds chunk size", chunk)
+	}
+	expected := int64(encryptedChunkSize)
+	remaining := size - plainPos
+	if remaining < expected {
+		expected = remaining
+	}
+	if expected <= 0 {
+		return fmt.Errorf("encrypted object chunk %d starts past object size", chunk)
+	}
+	if int64(plainLen) != expected {
+		return fmt.Errorf("encrypted object chunk %d header length mismatch", chunk)
+	}
+	return nil
 }

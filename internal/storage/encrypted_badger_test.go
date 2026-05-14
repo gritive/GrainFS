@@ -94,3 +94,24 @@ func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
 		return nil
 	}))
 }
+
+func TestEncryptedBadgerValueReadsLegacyPlaintext(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	defer db.Close()
+
+	enc := testEncryptor(t)
+	key := []byte("obj:bkt/legacy")
+	plain := []byte(`{"key":"legacy"}`)
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, plain)
+	}))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		got, err := getBadgerValue(txn, enc, "badger:meta:object", key)
+		require.NoError(t, err)
+		require.Equal(t, plain, got)
+		return nil
+	}))
+}

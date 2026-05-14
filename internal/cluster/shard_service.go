@@ -794,6 +794,7 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		return nil, err
 	}
 	data := raw
+	decodedEncoded := false
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	if eccodec.IsEncryptedShard(raw) {
 		if s.encryptor == nil {
@@ -810,8 +811,15 @@ func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte,
 		if err != nil {
 			return nil, err
 		}
+		decodedEncoded = true
 	}
 	if s.encryptor != nil {
+		if !encrypt.IsEncryptedBlob(data) {
+			if decodedEncoded {
+				return data, nil
+			}
+			return nil, fmt.Errorf("decrypt shard: not an encrypted blob (missing magic header)")
+		}
 		data, err = s.encryptor.DecryptWithAAD(data, aad)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt shard: %w", err)
@@ -851,7 +859,7 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 		}
 		return &multiReadCloser{Reader: r, close: f.Close}, nil
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
@@ -900,7 +908,7 @@ func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset
 		}
 		return io.ReadFull(r, buf)
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		info, err := f.Stat()
 		if err != nil {
 			return 0, err
@@ -958,7 +966,7 @@ func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, off
 		}
 		return &multiReadCloser{Reader: r, close: f.Close}, nil
 	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) && s.encryptor == nil {
+	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		info, err := f.Stat()
 		if err != nil {
 			_ = f.Close()

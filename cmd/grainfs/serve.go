@@ -33,7 +33,7 @@ func init() {
 	serveCmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address for cluster communication (required in cluster mode)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
-	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated if omitted)")
+	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated only for solo bootstrap if omitted)")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")
 	serveCmd.Flags().String("9p-bind", "127.0.0.1", "9P2000.L bind address; set 0.0.0.0 only on trusted networks")
@@ -160,8 +160,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
 	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
 
+	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	encKeyFile, _ := cmd.Flags().GetString("encryption-key-file")
-	shardEncryptor, err := loadOrCreateEncryptionKey(encKeyFile, dataDir)
+	shardEncryptor, err := loadOrCreateEncryptionKey(encKeyFile, dataDir, allowAutoGenerateEncryptionKey(dataDir, raftAddr))
 	if err != nil {
 		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
 	}
@@ -197,7 +198,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	nodeID, _ := cmd.Flags().GetString("node-id")
-	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
 	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor, iamStore, iamApplier)
 	return serveruntime.Run(ctx, cfg)

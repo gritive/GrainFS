@@ -25,6 +25,7 @@ type BlobLocation struct {
 const (
 	entryOverhead  = 4 + 1 + 4 + 4 // key_len + flags + data_len + crc32
 	flagCompressed = byte(0x01)
+	flagEncrypted  = byte(0x02)
 )
 
 // BlobStore manages append-only blob files for packing small objects.
@@ -122,6 +123,7 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 
 	offset := bs.activeOff
 	if bs.encryptor != nil {
+		flags |= flagEncrypted
 		sealed, err := bs.encryptor.SealValueAADTo(nil, bs.entryAAD(bs.activeID, uint64(offset), key, flags), storedPayload)
 		if err != nil {
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
@@ -167,12 +169,8 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 		return BlobLocation{}, err
 	}
 
-	// CRC32 of key + payload (compressed or raw)
-	h := crc32.NewIEEE()
-	h.Write([]byte(key))
-	h.Write(payload)
 	crc := make([]byte, 4)
-	binary.BigEndian.PutUint32(crc, h.Sum32())
+	binary.BigEndian.PutUint32(crc, blobEntryCRC([]byte(key), flags, payload))
 	if _, err := bs.active.Write(crc); err != nil {
 		return BlobLocation{}, err
 	}
@@ -247,11 +245,13 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	}
 	expectedCRC := binary.BigEndian.Uint32(header[:])
 
-	h := crc32.NewIEEE()
-	h.Write(key)
-	h.Write(payload)
-	if h.Sum32() != expectedCRC {
-		return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
+	if blobEntryCRC(key, flags, payload) != expectedCRC {
+		if legacyBlobEntryCRC(key, payload) != expectedCRC {
+			return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
+		}
+		if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, payload); err != nil {
+			return nil, err
+		}
 	}
 
 	payload, err = bs.decodePayload(loc.BlobID, loc.Offset, string(key), flags, payload)
@@ -358,11 +358,13 @@ func (bs *BlobStore) Compact(blobID uint64, tombstones map[string]bool) (map[str
 		offset += int64(entryOverhead + int(keyLen) + int(dataLen))
 
 		if !tombstones[string(key)] {
-			h := crc32.NewIEEE()
-			h.Write(key)
-			h.Write(payload)
-			if h.Sum32() != expectedCRC {
-				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", blobID, entryOffset)
+			if blobEntryCRC(key, flags, payload) != expectedCRC {
+				if legacyBlobEntryCRC(key, payload) != expectedCRC {
+					return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", blobID, entryOffset)
+				}
+				if err := bs.rejectEncryptedFlagDowngrade(blobID, uint64(entryOffset), string(key), flags, payload); err != nil {
+					return nil, err
+				}
 			}
 			data, err := bs.decodePayload(blobID, uint64(entryOffset), string(key), flags, payload)
 			if err != nil {
@@ -426,15 +428,60 @@ func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags by
 	return aad
 }
 
+func blobEntryCRC(key []byte, flags byte, payload []byte) uint32 {
+	h := crc32.NewIEEE()
+	h.Write(key)
+	_, _ = h.Write([]byte{flags})
+	h.Write(payload)
+	return h.Sum32()
+}
+
+func legacyBlobEntryCRC(key []byte, payload []byte) uint32 {
+	h := crc32.NewIEEE()
+	h.Write(key)
+	h.Write(payload)
+	return h.Sum32()
+}
+
+func (bs *BlobStore) rejectEncryptedFlagDowngrade(blobID uint64, offset uint64, key string, flags byte, payload []byte) error {
+	if bs.encryptor == nil || flags&flagEncrypted != 0 || !encrypt.IsEncryptedValue(payload) {
+		return nil
+	}
+	for _, candidate := range encryptedFlagCandidates(flags) {
+		if _, err := bs.encryptor.OpenValueAAD(bs.entryAAD(blobID, offset, key, candidate), payload); err == nil {
+			return fmt.Errorf("encrypted blob entry flags mismatch")
+		}
+	}
+	return nil
+}
+
+func encryptedFlagCandidates(flags byte) []byte {
+	withEncrypted := flags | flagEncrypted
+	withCompressedEncrypted := flags | flagCompressed | flagEncrypted
+	if withEncrypted == withCompressedEncrypted {
+		return []byte{withEncrypted}
+	}
+	return []byte{withEncrypted, withCompressedEncrypted}
+}
+
 func (bs *BlobStore) decodePayload(blobID uint64, offset uint64, key string, flags byte, payload []byte) ([]byte, error) {
 	if bs.encryptor == nil {
 		return payload, nil
 	}
-	plain, err := bs.encryptor.OpenValueAAD(bs.entryAAD(blobID, offset, key, flags), payload)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt blob entry: %w", err)
+	if flags&flagEncrypted != 0 {
+		plain, err := bs.encryptor.OpenValueAAD(bs.entryAAD(blobID, offset, key, flags), payload)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt blob entry: %w", err)
+		}
+		return plain, nil
 	}
-	return plain, nil
+	if !encrypt.IsEncryptedValue(payload) {
+		return payload, nil
+	}
+	if err := bs.rejectEncryptedFlagDowngrade(blobID, offset, key, flags, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 // ScanAll scans all blob files and returns the last known location for each key.

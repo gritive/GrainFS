@@ -181,6 +181,115 @@ func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestEncryptedBlobStoreRejectsEncryptedFlagDowngrade(t *testing.T) {
+	enc := newPackblobTestEncryptor(t)
+
+	dir := t.TempDir()
+	bs, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	loc, err := bs.Append("bucket/key", []byte("packed-sensitive-payload"))
+	require.NoError(t, err)
+
+	path := bs.blobPath(loc.BlobID)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	keyLen := binary.BigEndian.Uint32(raw[loc.Offset:])
+	keyStart := int(loc.Offset) + 4
+	keyEnd := keyStart + int(keyLen)
+	flagsOff := keyEnd
+	require.Equal(t, flagEncrypted, raw[flagsOff]&flagEncrypted)
+	raw[flagsOff] &^= flagEncrypted
+
+	dataLenOff := flagsOff + 1
+	dataLen := binary.BigEndian.Uint32(raw[dataLenOff:])
+	payloadStart := dataLenOff + 4
+	payloadEnd := payloadStart + int(dataLen)
+	crcOff := payloadEnd
+
+	h := crc32.NewIEEE()
+	h.Write(raw[keyStart:keyEnd])
+	h.Write(raw[payloadStart:payloadEnd])
+	binary.BigEndian.PutUint32(raw[crcOff:], h.Sum32())
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
+
+	_, err = bs.Read(loc)
+	require.Error(t, err)
+}
+
+func TestEncryptedBlobStoreRejectsCompressedEncryptedFlagDowngrade(t *testing.T) {
+	enc := newPackblobTestEncryptor(t)
+
+	dir := t.TempDir()
+	bs, err := NewEncryptedBlobStore(dir, 256*1024*1024, enc)
+	require.NoError(t, err)
+	defer bs.Close()
+	bs.EnableCompression()
+
+	loc, err := bs.Append("bucket/key", bytes.Repeat([]byte("packed-sensitive-payload-"), 1024))
+	require.NoError(t, err)
+
+	path := bs.blobPath(loc.BlobID)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	keyLen := binary.BigEndian.Uint32(raw[loc.Offset:])
+	keyStart := int(loc.Offset) + 4
+	keyEnd := keyStart + int(keyLen)
+	flagsOff := keyEnd
+	require.Equal(t, flagCompressed|flagEncrypted, raw[flagsOff])
+	raw[flagsOff] = 0
+
+	dataLenOff := flagsOff + 1
+	dataLen := binary.BigEndian.Uint32(raw[dataLenOff:])
+	payloadStart := dataLenOff + 4
+	payloadEnd := payloadStart + int(dataLen)
+	crcOff := payloadEnd
+	binary.BigEndian.PutUint32(raw[crcOff:], blobEntryCRC(raw[keyStart:keyEnd], raw[flagsOff], raw[payloadStart:payloadEnd]))
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
+
+	_, err = bs.Read(loc)
+	require.Error(t, err)
+}
+
+func TestEncryptedBlobStoreReadsLegacyPlaintextEntry(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	plaintext := []byte("legacy packed payload")
+	loc, err := legacy.Append("bucket/key", plaintext)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	encrypted, err := NewEncryptedBlobStore(dir, 256*1024*1024, newPackblobTestEncryptor(t))
+	require.NoError(t, err)
+	defer encrypted.Close()
+
+	got, err := encrypted.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+func TestEncryptedBlobStoreReadsLegacyPlaintextEntryWithEncryptedMagicPrefix(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	plaintext := []byte{0xAE, 0xE2, 0x01, 'l', 'e', 'g', 'a', 'c', 'y'}
+	loc, err := legacy.Append("bucket/key", plaintext)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	encrypted, err := NewEncryptedBlobStore(dir, 256*1024*1024, newPackblobTestEncryptor(t))
+	require.NoError(t, err)
+	defer encrypted.Close()
+
+	got, err := encrypted.Read(loc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
 func newPackblobTestEncryptor(t *testing.T) *encrypt.Encryptor {
 	t.Helper()
 	key := bytes.Repeat([]byte{0x66}, 32)

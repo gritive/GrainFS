@@ -119,6 +119,30 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
 }
 
+func TestEncryptedObjectFileReadAtRejectsSkippedChunkHeaderTamper(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	domain := "local-object:physical-readat-header-tamper"
+	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
+
+	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	require.NoError(t, err)
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	var hdr [8]byte
+	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	require.NoError(t, err)
+	binary.BigEndian.PutUint32(hdr[:4], encryptedChunkSize-1)
+	_, err = f.WriteAt(hdr[:], int64(len(encryptedObjectMagic)))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	buf := make([]byte, 32)
+	_, err = readAtEncryptedObjectFile(path, enc, domain, size, int64(encryptedChunkSize), buf)
+	require.Error(t, err)
+}
+
 func TestEncryptedObjectFileReadAtRejectsCorruptRequestedChunk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "object")
 	enc := testEncryptor(t)
@@ -198,4 +222,44 @@ func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, len(buf), n)
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
+}
+
+func TestEncryptedObjectFileOpenRejectsTruncatedExpectedObject(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	domain := "local-object:physical-truncated"
+
+	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("payload")))
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(path, int64(len(encryptedObjectMagic))))
+
+	rc, err := openEncryptedObjectFile(path, enc, domain, size)
+	require.NoError(t, err)
+	defer rc.Close()
+	_, err = io.ReadAll(rc)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "object")
+	enc := testEncryptor(t)
+	domain := "local-object:physical-whole-record-truncated"
+	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), 32)...)
+
+	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	require.NoError(t, err)
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	var hdr [8]byte
+	_, err = f.ReadAt(hdr[:], int64(len(encryptedObjectMagic)))
+	require.NoError(t, err)
+	firstBlobLen := binary.BigEndian.Uint32(hdr[4:])
+	require.NoError(t, f.Close())
+
+	firstRecordEnd := int64(len(encryptedObjectMagic) + len(hdr) + int(firstBlobLen))
+	require.NoError(t, os.Truncate(path, firstRecordEnd))
+
+	_, _, err = writeAtEncryptedObjectFile(path, enc, domain, 0, []byte("z"), size)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
