@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/compat"
 )
 
 func TestAdminAPI_CreateSA(t *testing.T) {
@@ -836,5 +838,34 @@ func TestAdminAPI_BucketUpstream_DeleteProposeFailureReturns500(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("Propose failure: got %d want 500; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminAPI_BucketUpstream_CutoverGateRejectReturnsConflict(t *testing.T) {
+	store := NewStore()
+	enc := newTestEncryptor(t)
+	fp := newFakeProposer()
+	fp.bucketUpstreamCutoverErr = &compat.GateRejectError{Plan: compat.GatePlan{
+		Capability: compat.CapabilityMigrationCutoverV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationMigrationCutover,
+		Missing:    []compat.NodeID{"node-old"},
+	}}
+	store.applyBucketUpstreamPut(BucketUpstream{Bucket: "shared", Endpoint: "http://up", AccessKey: "AK"})
+	api := NewAdminAPI(store, fp, enc)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/migration/cutover", strings.NewReader(`{"bucket":"shared"}`))
+	w := httptest.NewRecorder()
+	api.HandleBucketUpstreamCutover(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "node-old") {
+		t.Fatalf("public error leaked node ID: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "migration_cutover_v1") {
+		t.Fatalf("public error missing capability: %s", w.Body.String())
 	}
 }

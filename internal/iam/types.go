@@ -24,6 +24,7 @@ type Proposer interface {
 	ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error
 	ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error
 	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
+	ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error
 }
 
 // Role is the 3-tier permission level for a (SA, Bucket) grant.

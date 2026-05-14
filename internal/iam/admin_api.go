@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
@@ -577,6 +578,40 @@ func (a *AdminAPI) DeleteBucketUpstream(ctx context.Context, bucket string) erro
 
 func (a *AdminAPI) HandleBucketUpstreamDelete(w http.ResponseWriter, r *http.Request, bucket string) {
 	if err := a.DeleteBucketUpstream(r.Context(), bucket); err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type BucketUpstreamCutoverRequest struct {
+	Bucket string `json:"bucket"`
+}
+
+func (a *AdminAPI) CutoverBucketUpstream(ctx context.Context, bucket string) error {
+	if bucket == "" {
+		return &adminapi.Error{Code: "invalid", Message: "bucket required"}
+	}
+	if _, ok := a.store.LookupBucketUpstream(bucket); !ok {
+		return &adminapi.Error{Code: "not_found", Message: "not found"}
+	}
+	if err := a.proposer.ProposeBucketUpstreamCutover(ctx, bucket); err != nil {
+		var gateErr *compat.GateRejectError
+		if errors.As(err, &gateErr) {
+			return &adminapi.Error{Code: "conflict", Message: gateErr.PublicMessage()}
+		}
+		return &adminapi.Error{Code: "internal", Message: "propose cutover: " + err.Error()}
+	}
+	return nil
+}
+
+func (a *AdminAPI) HandleBucketUpstreamCutover(w http.ResponseWriter, r *http.Request) {
+	var req BucketUpstreamCutoverRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := a.CutoverBucketUpstream(r.Context(), req.Bucket); err != nil {
 		writeAdminError(w, err)
 		return
 	}

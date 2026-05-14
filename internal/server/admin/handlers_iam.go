@@ -61,3 +61,7 @@ func ListBucketUpstreams(ctx context.Context, d *Deps) ([]iam.BucketUpstreamItem
 func DeleteBucketUpstream(ctx context.Context, d *Deps, bucket string) error {
 	return d.IAM.DeleteBucketUpstream(ctx, bucket)
 }
+
+func CutoverBucketUpstream(ctx context.Context, d *Deps, bucket string) error {
+	return d.IAM.CutoverBucketUpstream(ctx, bucket)
+}

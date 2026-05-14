@@ -142,6 +142,7 @@ type IAMService interface {
 	GetBucketUpstream(ctx context.Context, bucket string) (iam.BucketUpstreamItem, error)
 	ListBucketUpstreams(ctx context.Context) ([]iam.BucketUpstreamItem, error)
 	DeleteBucketUpstream(ctx context.Context, bucket string) error
+	CutoverBucketUpstream(ctx context.Context, bucket string) error
 }
 
 // Deps bundles the shared dependencies required by every admin handler.
