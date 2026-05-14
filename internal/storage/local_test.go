@@ -465,3 +465,17 @@ func TestOperations_ForceDeleteBucket(t *testing.T) {
 	// bucket should be gone
 	require.Error(t, ops.HeadBucket(ctx, "force-test"))
 }
+
+func TestDeleteBucket_ClearsPolicy(t *testing.T) {
+	b := setupTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "reuse-bucket"))
+	require.NoError(t, b.SetBucketPolicy("reuse-bucket", []byte(`{"Version":"2012-10-17","Statement":[]}`)))
+
+	require.NoError(t, b.DeleteBucket(ctx, "reuse-bucket"))
+
+	// Recreate bucket — must NOT inherit the previous policy.
+	require.NoError(t, b.CreateBucket(ctx, "reuse-bucket"))
+	_, err := b.GetBucketPolicy("reuse-bucket")
+	assert.ErrorIs(t, err, ErrBucketNotFound, "ghost policy must be gone after bucket delete+recreate")
+}
