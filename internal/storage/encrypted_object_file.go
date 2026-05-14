@@ -2,10 +2,9 @@ package storage
 
 import (
 	"bytes"
-	"crypto/md5"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 
@@ -22,6 +21,12 @@ func encryptedChunkAAD(domain string, chunk uint64) string {
 }
 
 func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, r io.Reader) (int64, string, error) {
+	h, release := hashForBucket("")
+	defer release()
+	return writeEncryptedObjectFileWithHash(path, enc, domain, r, h)
+}
+
+func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domain string, r io.Reader, h hash.Hash) (int64, string, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return 0, "", fmt.Errorf("create encrypted object: %w", err)
@@ -32,7 +37,6 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 		return 0, "", fmt.Errorf("write encrypted object magic: %w", err)
 	}
 
-	h := md5.New()
 	buf := make([]byte, encryptedChunkSize)
 	var size int64
 	var chunk uint64
@@ -58,7 +62,7 @@ func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string
 			return 0, "", fmt.Errorf("read object plaintext: %w", readErr)
 		}
 	}
-	return size, hex.EncodeToString(h.Sum(nil)), nil
+	return size, etagFromHash(h), nil
 }
 
 func openEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, size int64) (io.ReadCloser, error) {

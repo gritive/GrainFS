@@ -1,8 +1,8 @@
 package storage
 
 import (
+	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +26,10 @@ func (b *LocalBackend) partDir(uploadID string) string {
 
 func (b *LocalBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
+}
+
+func (b *LocalBackend) multipartPartDomain(uploadID string, partNumber int) string {
+	return fmt.Sprintf("multipart-part:%s:%d", uploadID, partNumber)
 }
 
 type multipartMeta struct {
@@ -90,23 +94,37 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 	}
 
 	partFile := b.partPath(uploadID, partNumber)
+	if b.encryptor != nil {
+		h, release := hashForBucket(bucket)
+		size, etag, err := writeEncryptedObjectFileWithHash(partFile, b.encryptor, b.multipartPartDomain(uploadID, partNumber), r, h)
+		release()
+		if err != nil {
+			os.Remove(partFile)
+			return nil, fmt.Errorf("write encrypted part: %w", err)
+		}
+		return &Part{
+			PartNumber: partNumber,
+			ETag:       etag,
+			Size:       size,
+		}, nil
+	}
+
 	f, err := os.Create(partFile)
 	if err != nil {
 		return nil, fmt.Errorf("create part file: %w", err)
 	}
 
-	h := md5Pool.Get()
-	h.Reset()
+	h, release := hashForBucket(bucket)
 	w := io.MultiWriter(f, h)
 	size, err := io.Copy(w, r)
 	f.Close()
 	if err != nil {
-		md5Pool.Put(h)
+		release()
 		os.Remove(partFile)
 		return nil, fmt.Errorf("write part: %w", err)
 	}
-	etag := hex.EncodeToString(h.Sum(nil))
-	md5Pool.Put(h)
+	etag := etagFromHash(h)
+	release()
 
 	return &Part{
 		PartNumber: partNumber,
@@ -144,45 +162,64 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
-	// assemble final object
 	objPath := b.objectPath(bucket, key)
 	if err := os.MkdirAll(filepath.Dir(objPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create object dir: %w", err)
 	}
 
-	out, err := os.Create(objPath)
-	if err != nil {
-		return nil, fmt.Errorf("create final object: %w", err)
-	}
-
-	h := md5Pool.Get()
-	h.Reset()
-	w := io.MultiWriter(out, h)
 	var totalSize int64
+	var etag string
 
-	for _, p := range parts {
-		partFile := b.partPath(uploadID, p.PartNumber)
-		f, err := os.Open(partFile)
-		if err != nil {
-			out.Close()
-			md5Pool.Put(h)
-			os.Remove(objPath)
-			return nil, fmt.Errorf("open part %d: %w", p.PartNumber, err)
+	if b.encryptor != nil {
+		readers := make([]io.Reader, 0, len(parts))
+		for _, p := range parts {
+			partFile := b.partPath(uploadID, p.PartNumber)
+			plain, err := readEncryptedObjectFile(partFile, b.encryptor, b.multipartPartDomain(uploadID, p.PartNumber))
+			if err != nil {
+				os.Remove(objPath)
+				return nil, fmt.Errorf("open encrypted part %d: %w", p.PartNumber, err)
+			}
+			readers = append(readers, bytes.NewReader(plain))
 		}
-		n, err := io.Copy(w, f)
-		f.Close()
+		h, release := hashForBucket(bucket)
+		totalSize, etag, err = writeEncryptedObjectFileWithHash(objPath, b.encryptor, encryptedObjectFileDomain(objPath), io.MultiReader(readers...), h)
+		release()
 		if err != nil {
-			out.Close()
-			md5Pool.Put(h)
 			os.Remove(objPath)
-			return nil, fmt.Errorf("copy part %d: %w", p.PartNumber, err)
+			return nil, fmt.Errorf("write encrypted final object: %w", err)
 		}
-		totalSize += n
+	} else {
+		out, err := os.Create(objPath)
+		if err != nil {
+			return nil, fmt.Errorf("create final object: %w", err)
+		}
+
+		h, release := hashForBucket(bucket)
+		w := io.MultiWriter(out, h)
+
+		for _, p := range parts {
+			partFile := b.partPath(uploadID, p.PartNumber)
+			f, err := os.Open(partFile)
+			if err != nil {
+				out.Close()
+				release()
+				os.Remove(objPath)
+				return nil, fmt.Errorf("open part %d: %w", p.PartNumber, err)
+			}
+			n, err := io.Copy(w, f)
+			f.Close()
+			if err != nil {
+				out.Close()
+				release()
+				os.Remove(objPath)
+				return nil, fmt.Errorf("copy part %d: %w", p.PartNumber, err)
+			}
+			totalSize += n
+		}
+		out.Close()
+		etag = etagFromHash(h)
+		release()
 	}
-	out.Close()
-
-	etag := hex.EncodeToString(h.Sum(nil))
-	md5Pool.Put(h)
 	now := time.Now().Unix()
 
 	obj := &Object{
@@ -302,21 +339,32 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 		if parseErr != nil || partNumber <= 0 {
 			continue
 		}
-		full := filepath.Join(b.partDir(uploadID), name)
-		f, err := os.Open(full)
-		if err != nil {
-			return nil, fmt.Errorf("open part %d: %w", partNumber, err)
+		h, release := hashForBucket(bucket)
+		var size int64
+		if b.encryptor != nil {
+			plain, err := readEncryptedObjectFile(filepath.Join(b.partDir(uploadID), name), b.encryptor, b.multipartPartDomain(uploadID, partNumber))
+			if err != nil {
+				release()
+				return nil, fmt.Errorf("hash encrypted part %d: %w", partNumber, err)
+			}
+			_, _ = h.Write(plain)
+			size = int64(len(plain))
+		} else {
+			full := filepath.Join(b.partDir(uploadID), name)
+			f, err := os.Open(full)
+			if err != nil {
+				release()
+				return nil, fmt.Errorf("open part %d: %w", partNumber, err)
+			}
+			size, err = io.Copy(h, f)
+			f.Close()
+			if err != nil {
+				release()
+				return nil, fmt.Errorf("hash part %d: %w", partNumber, err)
+			}
 		}
-		h := md5Pool.Get()
-		h.Reset()
-		size, err := io.Copy(h, f)
-		f.Close()
-		if err != nil {
-			md5Pool.Put(h)
-			return nil, fmt.Errorf("hash part %d: %w", partNumber, err)
-		}
-		partETag := hex.EncodeToString(h.Sum(nil))
-		md5Pool.Put(h)
+		partETag := etagFromHash(h)
+		release()
 		out = append(out, Part{
 			PartNumber: partNumber,
 			ETag:       partETag,

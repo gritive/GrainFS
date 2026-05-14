@@ -62,6 +62,42 @@ func TestAbortMultipartUpload(t *testing.T) {
 	require.ErrorIs(t, b.AbortMultipartUpload(context.Background(), "test-bucket", "aborted.bin", upload.UploadID), ErrUploadNotFound)
 }
 
+func TestEncryptedMultipartPartFilesHidePlaintext(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	up, err := b.CreateMultipartUpload(context.Background(), "bkt", "obj", "text/plain")
+	require.NoError(t, err)
+
+	partBytes := []byte("multipart-sensitive-payload")
+	part, err := b.UploadPart(context.Background(), "bkt", "obj", up.UploadID, 1, bytes.NewReader(partBytes))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(partBytes)), part.Size)
+
+	raw, err := os.ReadFile(b.partPath(up.UploadID, 1))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), string(partBytes))
+
+	parts, err := b.ListParts(context.Background(), "bkt", "obj", up.UploadID, 100)
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.Equal(t, part.ETag, parts[0].ETag)
+
+	obj, err := b.CompleteMultipartUpload(context.Background(), "bkt", "obj", up.UploadID, []Part{*part})
+	require.NoError(t, err)
+	require.Equal(t, int64(len(partBytes)), obj.Size)
+
+	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, partBytes, got)
+}
+
 func TestUploadPartInvalidUploadID(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")

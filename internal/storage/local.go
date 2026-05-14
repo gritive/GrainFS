@@ -254,7 +254,9 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	)
 	if b.encryptor != nil {
 		_ = tmp.Close()
-		size, etag, cerr = writeEncryptedObjectFile(tmpPath, b.encryptor, encryptedObjectFileDomain(objPath), r)
+		h, release := hashForBucket(bucket)
+		size, etag, cerr = writeEncryptedObjectFileWithHash(tmpPath, b.encryptor, encryptedObjectFileDomain(objPath), r, h)
+		release()
 		if cerr != nil {
 			cleanupTmp()
 			return nil, fmt.Errorf("write encrypted object: %w", cerr)
