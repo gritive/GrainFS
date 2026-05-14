@@ -87,7 +87,61 @@ SELECT CAST(sum(a) AS VARCHAR) AS total FROM grainfs_iceberg.ns_cluster_e2e.t;
 	runDuckDBIcebergExecWithCreds(t, cluster.httpURLs[2], cluster.accessKey, cluster.secretKey, `
 DROP TABLE grainfs_iceberg.ns_cluster_e2e.t;
 DROP SCHEMA grainfs_iceberg.ns_cluster_e2e;
-`)
+	`)
+}
+
+// TestAuditIcebergSingleDuckDB starts one node with audit enabled, performs S3
+// PUTs, waits for the committer to flush, then verifies the audit.s3 Iceberg
+// table via DuckDB.
+func TestAuditIcebergSingleDuckDB(t *testing.T) {
+	skipIfShort(t, "skipping single-node audit Iceberg DuckDB e2e in short mode")
+
+	const commitInterval = 8 * time.Second
+	start := time.Now()
+	dataDir, err := os.MkdirTemp("", "grainfs-audit-iceberg-duckdb-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(dataDir)
+	raftPort := freePort()
+	encKeyFile := makeSharedEncryptionKeyFile(t)
+
+	server := startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort, encKeyFile,
+		"--audit-iceberg=true",
+		"--audit-commit-interval", commitInterval.String(),
+	)
+	ak, sk := bootstrapAdminViaUDS(t, dataDir)
+	client := s3ClientFor(server.endpoint, ak, sk)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
+	require.NoError(t, err)
+	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-audit-single")})
+	require.NoError(t, err)
+
+	const numPuts = 5
+	writeStart := time.Now()
+	for i := 0; i < numPuts; i++ {
+		key := fmt.Sprintf("audit-test-single-obj-%d", i)
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("test-audit-single"),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("hello audit"),
+		})
+		require.NoError(t, err)
+	}
+	writeElapsed := time.Since(writeStart)
+
+	time.Sleep(commitInterval + 4*time.Second)
+
+	queryStart := time.Now()
+	runDuckDBIcebergSQLWithCreds(t, server.endpoint, ak, sk,
+		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
+FROM grainfs_iceberg.audit.s3
+WHERE bucket = 'test-audit-single' AND method = 'PUT';`,
+		fmt.Sprintf("%d", numPuts),
+	)
+	t.Logf("audit_iceberg_single_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
+		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
 }
 
 func requireIcebergClusterS3Ready(t *testing.T, cluster *mrCluster, bucket string) {
@@ -133,10 +187,15 @@ type icebergE2EServer struct {
 }
 
 func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int, encKeyFile string) icebergE2EServer {
+	return startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort, encKeyFile)
+}
+
+func startIcebergE2EServerWithExtraArgs(t *testing.T, dataDir string, raftPort int, encKeyFile string, extraArgs ...string) icebergE2EServer {
 	t.Helper()
 
 	port := freePort()
-	cmd := exec.Command(getBinary(), "serve",
+	args := []string{
+		"serve",
 		"--data", dataDir,
 		"--port", fmt.Sprintf("%d", port),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
@@ -145,7 +204,9 @@ func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int, encKeyFil
 		"--encryption-key-file", encKeyFile,
 		"--lifecycle-interval", "0",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
+	}
+	args = append(args, extraArgs...)
+	cmd := exec.Command(getBinary(), args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
@@ -225,6 +286,7 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 	skipIfShort(t, "skipping audit Iceberg DuckDB e2e in short mode")
 
 	const commitInterval = 8 * time.Second
+	start := time.Now()
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
@@ -247,6 +309,7 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 
 	// Emit a few S3 events via PutObject so the ring buffer has events to commit.
 	const numPuts = 5
+	writeStart := time.Now()
 	for i := 0; i < numPuts; i++ {
 		key := fmt.Sprintf("audit-test-obj-%d", i)
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
@@ -256,17 +319,76 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+	writeElapsed := time.Since(writeStart)
 
 	// Wait for at least one commit cycle to run.
 	time.Sleep(commitInterval + 4*time.Second)
 
 	// Query audit.s3 via DuckDB — expect at least numPuts rows for bucket test-audit.
+	queryStart := time.Now()
 	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
 		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
 FROM grainfs_iceberg.audit.s3
-WHERE bucket = 'test-audit' AND method = 'PutObject';`,
+WHERE bucket = 'test-audit' AND method = 'PUT';`,
 		fmt.Sprintf("%d", numPuts),
 	)
+	t.Logf("audit_iceberg_cluster_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
+		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
+}
+
+// TestAuditIcebergClusterFollowerShipDuckDB verifies that audit events emitted
+// on a follower are shipped to the leader and become readable through DuckDB.
+func TestAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
+	skipIfShort(t, "skipping audit Iceberg follower shipping DuckDB e2e in short mode")
+
+	const commitInterval = 8 * time.Second
+	start := time.Now()
+	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNFS4: true,
+		disableNBD:  true,
+		ExtraArgs: []string{
+			"--audit-iceberg=true",
+			"--audit-commit-interval", commitInterval.String(),
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables", "test-audit-follower")
+	leaderClient := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
+	_, err := leaderClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
+	require.NoError(t, err)
+	_, err = leaderClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-audit-follower")})
+	require.NoError(t, err)
+	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
+
+	followerIdx := (cluster.leaderIdx + 1) % len(cluster.httpURLs)
+	followerClient := ecS3Client(cluster.httpURLs[followerIdx], cluster.accessKey, cluster.secretKey)
+	const numPuts = 3
+	writeStart := time.Now()
+	for i := 0; i < numPuts; i++ {
+		key := fmt.Sprintf("audit-follower-obj-%d", i)
+		_, err := followerClient.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("test-audit-follower"),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("hello follower audit"),
+		})
+		require.NoError(t, err)
+	}
+	writeElapsed := time.Since(writeStart)
+
+	time.Sleep(commitInterval + 4*time.Second)
+
+	queryStart := time.Now()
+	runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
+		`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt
+FROM grainfs_iceberg.audit.s3
+WHERE bucket = 'test-audit-follower' AND method = 'PUT';`,
+		fmt.Sprintf("%d", numPuts),
+	)
+	t.Logf("audit_iceberg_cluster_follower_ship_duckdb puts=%d follower_idx=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
+		numPuts, followerIdx, writeElapsed, time.Since(queryStart), time.Since(start))
 }
 
 // TestAuditIcebergClusterLeaderFlap verifies that audit events captured on followers

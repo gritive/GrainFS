@@ -262,6 +262,8 @@ func TestCommitter_FlushesRingToIceberg(t *testing.T) {
 	for k := range backend.objects {
 		if strings.HasSuffix(k, ".parquet") {
 			hasParquet = true
+			require.Contains(t, k, "/data/")
+			require.NotContains(t, k, "dt=", "DuckDB httpfs percent-encodes '=' and breaks S3 signature validation")
 		}
 	}
 	backend.mu.Unlock()
