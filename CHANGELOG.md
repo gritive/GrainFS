@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.190.2] - 2026-05-14 — feat: unknown MetaCmd telemetry
+
+### Added
+
+- **Unknown MetaCmd visibility** — operators now get `grainfs_unknown_metacmd_total{type}` when a node ignores a raft metadata command it does not recognize or handle.
+- **Rolling-upgrade alerting** — Prometheus rule `GrainFSUnknownMetaCmdIgnored` warns on ignored MetaCmd events, including first-seen counter series, and the runbook explains the version-skew response path.
+
 ## [0.0.190.1] - 2026-05-14 — feat: rolling upgrade CI compat lane (Slice 1)
 
 ### Added
