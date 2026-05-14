@@ -30,9 +30,12 @@ func (o *Operations) GetBucketPolicy(bucket string) ([]byte, error) {
 		return nil, err
 	}
 	if o.policyStore != nil {
-		if err := o.policyStore.Set(bucket, data); err != nil {
-			return nil, err
-		}
+		// Ignore compilation errors: an existing policy with a non-conforming Effect
+		// (e.g. stored before Effect validation was added) must still be readable via
+		// the admin API. The raw bytes are returned; only the in-memory compiled cache
+		// is skipped, so S3 auth for that bucket defaults to deny until the policy is
+		// rewritten with a valid Effect.
+		_ = o.policyStore.Set(bucket, data)
 	}
 	return data, nil
 }
