@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.197.0] - 2026-05-14 — feat: S3 audit log lake — Phase 2 (bootstrap + metrics + --audit-iceberg flag + e2e)
+## [0.0.199.0] - 2026-05-15 — feat: S3 audit log lake — Phase 2 (bootstrap + metrics + --audit-iceberg flag + e2e)
 
 ### Added
 
@@ -20,6 +20,30 @@
 - **오해 유발 로그** — commit 실패 시 "events retained in zerolog" → "events in this batch are dropped" 수정.
 - **부트스트랩 에러 레벨** — 감사 부트스트랩 에러 `Debug` → `Warn` 격상.
 - **snapshot retain 경쟁 조건** — `AutoSnapshotter.takeAndPrune()`이 스냅샷 생성 전 (retain-1)개로 먼저 prune하여 순간적으로 retain 한도를 초과하는 문제 수정; 생성 후 재-prune으로 생성 중 retain 감소 케이스도 처리.
+
+## [0.0.198.0] - 2026-05-15 — perf: xxhash3 ETag for internal buckets (~37× faster than MD5)
+
+### Changed
+
+- **Internal bucket write speed** — ETag computation on `__grainfs_*` write paths (WriteAt, PutObject, spool, cluster repair) now uses xxhash3 (~25 GB/s) instead of MD5 (~650 MB/s), a ~37× improvement. S3 user buckets are unaffected and continue using MD5.
+- **Hash pool reuse** — `multipart.go` upload/complete/list paths now reuse a `sync.Pool`-backed MD5 hasher, eliminating per-operation allocations.
+- **Algorithm-aware ETag verification** — `VerifyETag`, `ReplicationVerifier`, and `tryRepairFromPeer` detect the algorithm from ETag length (32 chars = MD5, 16 chars = xxhash3). Existing MD5 ETags verify correctly without migration.
+
+### Fixed
+
+- **Scrubber repair queue exhaustion** — `ReplicationVerifier` previously misreported objects with unrecognized ETag formats (e.g. multipart composite ETags) as `Corrupt`, which could exhaust the repair queue. These are now reported as `Skipped`.
+- **Hasher pool lifetime** — `PutObjectWithUserMetadata` now returns the hash pool object immediately after computing the ETag rather than holding it for the duration of the rename + metadata write.
+
+## [0.0.197.0] - 2026-05-14 — fix: lock-free storage cache audit
+
+### Changed
+
+- **Storage read cache locking** — `CachedBackend` now publishes immutable cache snapshots with atomic compare-and-swap instead of protecting cache state with a mutex, keeping cache hits lock-free while preserving write invalidation.
+- **Lock-free audit documentation** — added a production mutex inventory and review rule that explains which locks are justified, which should stay off read hot paths, and which storage locks remain acceptable.
+
+### Fixed
+
+- **Volume read/write serialization** — documented `Manager.mu` as a justified mutation boundary and added regression coverage proving `ReadAt` remains serialized with concurrent `WriteAt` for block-object consistency.
 
 ## [0.0.196.0] - 2026-05-14 — feat: 9P read-write support
 

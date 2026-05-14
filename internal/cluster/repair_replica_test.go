@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // fakePeerResponse is the canned ReadShard outcome for a single peer.
@@ -218,6 +220,25 @@ func TestRepairReplicaWith_EmptyExpectedETag(t *testing.T) {
 	require.Contains(t, err.Error(), "missing expected ETag")
 	require.Empty(t, reader.calls,
 		"ETag guard must run before any peer query")
+}
+
+func TestRepairReplicaWith_XXH3ETag(t *testing.T) {
+	payload := []byte("hello-internal-bucket")
+	etag := storage.InternalETag(payload)
+	require.Len(t, etag, 16, "xxhash3 etag must be 16 hex chars")
+
+	peers := []string{"self", "peer-a"}
+	b := newTestBackendForRepair(t, peers, "self")
+	reader := &fakePeerReader{responses: map[string]fakePeerResponse{
+		"peer-a": {data: payload},
+	}}
+
+	err := b.repairReplicaWith(context.Background(), reader, "__grainfs_volumes", "k", "v1", etag)
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(b.objectPathV("__grainfs_volumes", "k", "v1"))
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
 }
 
 func TestRepairReplicaWith_EmptyVersionIDDefaultsCurrent(t *testing.T) {

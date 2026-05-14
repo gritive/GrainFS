@@ -3,12 +3,16 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 type failingReader struct {
@@ -20,11 +24,12 @@ func (r failingReader) Read([]byte) (int, error) {
 }
 
 func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello")), true)
+	data := []byte("hello")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_volumes")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(5), sp.Size)
-	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", sp.ETag)
+	require.Equal(t, storage.InternalETag(data), sp.ETag) // xxhash3 for internal buckets
 
 	rc, err := sp.Open()
 	require.NoError(t, err)
@@ -34,9 +39,28 @@ func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
 	require.Equal(t, "hello", string(got))
 }
 
+func TestSpoolObjectS3BucketUsesMD5ETag(t *testing.T) {
+	data := []byte("hello s3 object")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+	require.Equal(t, int64(len(data)), sp.Size)
+	h := md5.Sum(data)
+	require.Equal(t, hex.EncodeToString(h[:]), sp.ETag) // MD5 for S3 user buckets
+}
+
+func TestSpoolObjectNoBucketSkipsHashing(t *testing.T) {
+	data := []byte("no etag needed")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+	require.Equal(t, int64(len(data)), sp.Size)
+	require.Empty(t, sp.ETag) // no bucket → no etag computed
+}
+
 func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 	dir := t.TempDir()
-	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, true)
+	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_volumes")
 	require.ErrorContains(t, err, "spool object")
 	entries, readErr := os.ReadDir(dir)
 	require.NoError(t, readErr)
@@ -44,7 +68,7 @@ func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), true)
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_volumes")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -67,7 +91,7 @@ func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), true)
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_volumes")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
