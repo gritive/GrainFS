@@ -228,18 +228,16 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 		cerr error
 	)
 	{
-		h := md5Pool.Get()
-		h.Reset()
+		h, release := hashForBucket(bucket)
+		defer release()
 		w := io.MultiWriter(tmp, h)
 		size, cerr = io.Copy(w, r)
 		tmp.Close()
 		if cerr != nil {
-			md5Pool.Put(h)
 			cleanupTmp()
 			return nil, fmt.Errorf("write object: %w", cerr)
 		}
-		etag = hex.EncodeToString(h.Sum(nil))
-		md5Pool.Put(h)
+		etag = etagFromHash(h)
 	}
 
 	if localTraceEnabled {
