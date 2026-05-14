@@ -8,12 +8,14 @@
 - **NFSv4 pseudo-root multi-export routing** — NFS clients can browse registered buckets under the pseudo-root and route file operations to the selected bucket instead of the legacy fixed bucket.
 - **Read-only export enforcement** — write, create, remove, rename, setattr, allocate, deallocate, and copy operations now reject mutations against read-only exports.
 - **Export lifecycle E2E coverage** — CLI lifecycle tests cover export add/update/remove JSON output, missing-bucket rejection, and fsid/generation fields.
-- **Fail-closed export lifecycle** — bucket deletion now rejects exported buckets instead of best-effort cascading the export first, and multi-node clusters reject NFS export mutations until a full propagation barrier is wired.
+- **Safe export delete cascade** — bucket deletion now removes an NFS export only after the bucket delete succeeds; failed bucket deletes leave the export registered.
+- **Multi-node export propagation coverage** — e2e tests now verify follower-routed export creation propagates to every node, and bucket delete cascade behavior is covered end-to-end.
 - **`GRAINFS_LOG_LEVEL` fallback** — `grainfs --log-level` still wins when explicitly provided, otherwise the CLI uses `GRAINFS_LOG_LEVEL` before falling back to `info`.
 
 ### Changed
 
 - **NFSv4 legacy bucket hard removal** — `__grainfs_nfs4` is no longer an internal bucket and the NFSv4 server no longer auto-creates or routes through it.
+- **NFS export propagation barrier** — admin export mutations in multi-node clusters now wait for the committed meta-Raft index to apply locally before returning.
 - **E2E parallelism control** — `make test-e2e` now runs per-test invocations in parallel via `E2E_TEST_JOBS` (default `2`; set `E2E_TEST_JOBS=1` for serial execution).
 - **NFS metadata cache keys** — NFSv4 metadata invalidation and file metadata cache entries are now bucket-aware.
 
@@ -25,6 +27,8 @@
 - **Cross-export guards** — NFSv4 rename/copy across different exports now returns `NFS4ERR_XDEV`, and destination writes use the destination bucket.
 - **Stale export handles** — filehandles bound to an older export generation now expire with `NFS4ERR_FHEXPIRED`; removed exports return `NFS4ERR_ADMIN_REVOKED`.
 - **Live export refresh** — Raft-applied export registry changes now refresh the running NFSv4 server snapshot instead of requiring restart.
+- **User export partial-I/O fallback** — NFSv4 user-bucket exports now honor backend `PreferWriteAt`/`PreferReadAt` hints so writes, truncate, allocate, rename, and copy fall back to object-store paths instead of internal-bucket-only fast paths.
+- **Cluster E2E UDP port race** — the five-node QUIC/static E2E now binds UDP listeners atomically instead of reserving free ports before parallel test startup.
 
 ## [0.0.186.1] - 2026-05-14 — docs: DX polish — NFS/NBD/Iceberg Quick Start
 
