@@ -1,11 +1,15 @@
 package cluster
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1672,4 +1676,81 @@ func TestClusterCoordinator_CompleteMultipartUpload_ForwardCommitsObjectIndex(t 
 	require.Equal(t, "k", proposer.entries[0].Key)
 	require.Equal(t, "v1", proposer.entries[0].VersionID)
 	require.Equal(t, "g1", proposer.entries[0].PlacementGroupID)
+}
+
+func TestClusterCoordinator_PutObjectForwardFrameRecordsTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	c, d := setupCoordWithForward(t, "bench", "group-1", []string{"peer-a", "self"})
+	proposer := &recordingObjectIndexProposer{}
+	c.WithObjectIndexProposer(proposer)
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "trace-key", Size: 4, VersionID: "v1", LastModified: time.Now().Unix()},
+		"bench",
+	)
+
+	_, err := c.PutObject(context.Background(), "bench", "trace-key", strings.NewReader("body"), "text/plain")
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageRouteWrite)
+	requirePutTraceStage(t, events, PutTraceStageForwardSendFrame)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexPropose)
+	require.Equal(t, PutTraceIngressForwardedNonLeader, events[0].Ingress)
+	require.Equal(t, PutTraceForwardFrame, events[0].ForwardMode)
+}
+
+func TestClusterCoordinator_PutObjectLocalRecordsLocalTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bench", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	_, err := c.PutObject(context.Background(), "bench", "local-trace-key", strings.NewReader("body"), "text/plain")
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageRouteWrite)
+	for _, ev := range events {
+		require.Equal(t, PutTraceIngressLocalLeader, ev.Ingress)
+	}
+}
+
+func readPutTraceEvents(t *testing.T, path string) []PutTraceEvent {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	var out []PutTraceEvent
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var ev PutTraceEvent
+		require.NoError(t, json.Unmarshal(sc.Bytes(), &ev))
+		out = append(out, ev)
+	}
+	require.NoError(t, sc.Err())
+	require.NotEmpty(t, out)
+	return out
+}
+
+func requirePutTraceStage(t *testing.T, events []PutTraceEvent, stage PutTraceStage) {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Stage == stage {
+			return
+		}
+	}
+	require.Failf(t, "missing stage", "stage %s not found in %#v", stage, events)
 }

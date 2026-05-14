@@ -525,8 +525,25 @@ func (c *ClusterCoordinator) commitObjectIndex(ctx context.Context, bucket, key 
 	if storage.IsInternalBucket(bucket) {
 		return nil
 	}
+	if _, ok := PutTraceRequestFromContext(ctx); !ok {
+		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
+			Bucket:      bucket,
+			Key:         key,
+			GroupID:     group.ID,
+			Ingress:     PutTraceIngressLocalLeader,
+			SizeClass:   PutTraceSizeUnknown,
+			ForwardMode: PutTraceForwardNone,
+		})
+	}
 	entry := buildObjectIndexEntry(group, bucket, key, obj, isDeleteMarker)
-	return c.indexWriter.ProposeObjectIndex(ctx, entry, false)
+	stageStart := time.Now()
+	err := c.indexWriter.ProposeObjectIndex(ctx, entry, false)
+	fields := PutTraceStageFields{MetaProposeSite: "coordinator", MetaProposeCount: 1}
+	if err != nil {
+		fields.Error = err.Error()
+	}
+	ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
+	return err
 }
 
 func objectIndexECConfigForGroup(group ShardGroupEntry) ECConfig {
@@ -1041,9 +1058,14 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
+	routeStart := time.Now()
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
 		return nil, err
+	}
+	sizeClass := PutTraceSizeUnknown
+	if s, ok := r.(interface{ Len() int }); ok {
+		sizeClass = putTraceSizeClass(int64(s.Len()), c.maxBody)
 	}
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
@@ -1051,6 +1073,15 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
+		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
+			Bucket:      bucket,
+			Key:         key,
+			GroupID:     group.ID,
+			Ingress:     PutTraceIngressLocalLeader,
+			SizeClass:   sizeClass,
+			ForwardMode: PutTraceForwardNone,
+		})
+		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
 		obj, err := gb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 		if err != nil {
 			return nil, err
@@ -1066,9 +1097,19 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 
 	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
 		args := buildPutObjectArgs(bucket, key, contentType, nil)
-		streamCtx := ctx
-		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
-		reply, err := c.forward.SendStream(streamCtx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, r)
+		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
+			Bucket:      bucket,
+			Key:         key,
+			GroupID:     target.GroupID,
+			Ingress:     PutTraceIngressForwardedNonLeader,
+			SizeClass:   PutTraceSizeLarge,
+			ForwardMode: PutTraceForwardStream,
+		})
+		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
+		resolveStart := time.Now()
+		peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+		ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
+		reply, err := c.forward.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args, r)
 		if err != nil {
 			return nil, topologyForwardWriteError(group, err)
 		}
@@ -1087,6 +1128,15 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildPutObjectArgs(bucket, key, contentType, body)
+	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		GroupID:     target.GroupID,
+		Ingress:     PutTraceIngressForwardedNonLeader,
+		SizeClass:   putTraceSizeClass(int64(len(body)), c.maxBody),
+		ForwardMode: PutTraceForwardFrame,
+	})
+	ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpPutObject, args)
 	if err != nil {
 		return nil, topologyForwardWriteError(group, err)
