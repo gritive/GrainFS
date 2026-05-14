@@ -36,6 +36,13 @@ type indexedFakeProposer struct {
 	deletes   []string
 }
 
+func (p *indexedFakeProposer) ProposeCreate(_ context.Context, bucket string, cfg Config) (uint64, error) {
+	p.nextIndex++
+	p.upserts = append(p.upserts, cfg)
+	_, err := p.store.ApplyCreate(bucket, cfg.ReadOnly, p.fsidMajor)
+	return p.nextIndex, err
+}
+
 func (p *indexedFakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) (uint64, error) {
 	p.nextIndex++
 	p.upserts = append(p.upserts, cfg)
@@ -53,6 +60,15 @@ func (p *indexedFakeProposer) ProposeBucketDeleteCascade(_ context.Context, buck
 	p.nextIndex++
 	p.deletes = append(p.deletes, bucket)
 	return p.nextIndex, p.store.Delete(bucket)
+}
+
+func (p *fakeProposer) ProposeCreate(_ context.Context, bucket string, cfg Config) (uint64, error) {
+	if p.err != nil {
+		return 0, p.err
+	}
+	p.upserts = append(p.upserts, cfg)
+	_, err := p.store.ApplyCreate(bucket, cfg.ReadOnly, p.fsidMajor)
+	return uint64(len(p.upserts) + len(p.deletes)), err
 }
 
 func (p *fakeProposer) ProposeUpsert(_ context.Context, bucket string, cfg Config) (uint64, error) {

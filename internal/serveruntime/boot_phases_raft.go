@@ -3,10 +3,12 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -44,6 +46,8 @@ func bootMetaRaftWiring(state *bootState) error {
 		return fmt.Errorf("init meta-raft: %w", err)
 	}
 	state.metaRaft = metaRaft
+	state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))
+	state.metaRaft.SetCapabilityGate(state.capabilityGate)
 
 	// Mux-aware constructor: auto-registers metaRaft.Node() on groupRaftMux
 	// under the magic groupID "__meta__" so receiver-side mux dispatch is
@@ -58,9 +62,16 @@ func bootMetaRaftWiring(state *bootState) error {
 	metaRaft.FSM().SetExportStore(exportStore)
 	metaRaft.FSM().SetExportFsidMajor(1)
 	state.nfsExportSvc = nfsexport.NewExportService(nfsexport.ServiceConfig{
-		Store:    exportStore,
-		Proposer: &cluster.NfsExportProposer{Propose: metaRaft.ProposeWithIndex},
-		Barrier:  metaRaft,
+		Store: exportStore,
+		Proposer: &cluster.NfsExportProposer{
+			Propose:         metaRaft.ProposeWithIndex,
+			ProposeWithGate: metaRaft.ProposeWithGate,
+			GatePlan: func(operation compat.Operation) (compat.GatePlan, error) {
+				refreshCapabilityGate(state)
+				return state.capabilityGate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, operation, time.Now())
+			},
+		},
+		Barrier: metaRaft,
 	})
 
 	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
@@ -75,6 +86,27 @@ func bootMetaRaftWiring(state *bootState) error {
 		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
 	}
 	return nil
+}
+
+func refreshCapabilityGate(state *bootState) {
+	if state == nil || state.capabilityGate == nil || state.metaRaft == nil {
+		return
+	}
+	state.capabilityGate.SetTTL(capabilityEvidenceTTL(state))
+	state.capabilityGate.SetMetaRaftSnapshot(state.metaRaft.Node().CommittedIndex(), state.metaRaft.Node().Configuration())
+	state.capabilityGate.ReportEvidence(state.metaRaft.FSM().CapabilityEvidence(state.metaRaft.Node().ID(), time.Now()))
+}
+
+func capabilityEvidenceTTL(state *bootState) time.Duration {
+	ttl := 15 * time.Second
+	if state == nil || state.metaRaft == nil {
+		return ttl
+	}
+	interval := state.metaRaft.FSM().ClusterConfig().BalancerGossipInterval()
+	if interval > 0 && 3*interval > ttl {
+		return 3 * interval
+	}
+	return ttl
 }
 
 // bootDataGroupRouter constructs the DataGroupManager + Router and registers

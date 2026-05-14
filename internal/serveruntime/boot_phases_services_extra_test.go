@@ -42,7 +42,8 @@ func servicesExtraPrereqs(t *testing.T) (context.Context, *bootState) {
 
 // TestBootBalancerAndGossip_NoFlagsSkips — happy path: with BalancerEnabled
 // patched to false via ClusterConfig and HealReceiptEnabled = false, the phase
-// is a no-op. state.balancerProposer and state.gossipReceiver remain nil.
+// skips the balancer but still starts gossip so capability evidence can reach
+// nodes that join after this process starts.
 func TestBootBalancerAndGossip_NoFlagsSkips(t *testing.T) {
 	ctx, state := servicesExtraPrereqs(t)
 	disableBalancerForTest(t, state)
@@ -53,7 +54,7 @@ func TestBootBalancerAndGossip_NoFlagsSkips(t *testing.T) {
 	require.NoError(t, bootBalancerAndGossip(ctx, state))
 
 	assert.Nil(t, state.balancerProposer, "balancerProposer still nil (BalancerEnabled=false)")
-	assert.Nil(t, state.gossipReceiver, "gossipReceiver still nil (HealReceiptEnabled=false)")
+	assert.NotNil(t, state.gossipReceiver, "gossipReceiver started for capability evidence")
 }
 
 // TestBootWALAndForwarders_PopulatesForwarders — happy path: phase opens the
@@ -101,10 +102,10 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.clusterCoord)
 	assert.Equal(t, 0, state.seedGroups, "seedGroups zero before phase")
 
-	// 1. Balancer + gossip — no-op with default Config; fields stay nil.
+	// 1. Balancer + gossip — skips balancer but starts capability gossip.
 	require.NoError(t, bootBalancerAndGossip(ctx, state))
 	assert.Nil(t, state.balancerProposer, "balancerProposer skipped (no flag)")
-	assert.Nil(t, state.gossipReceiver, "gossipReceiver skipped (no heal-receipt)")
+	assert.NotNil(t, state.gossipReceiver, "gossipReceiver started for capability evidence")
 	// WAL still not opened — proves WALAndForwarders has not yet run.
 	assert.Nil(t, state.wal, "WAL not opened before its phase")
 

@@ -71,6 +71,7 @@ type MetaRaft struct {
 	// forwardFnWithIndex is used by callers that must wait on the committed
 	// raft index after forwarding through a non-leader.
 	forwardFnWithIndex func(ctx context.Context, data []byte) (uint64, error)
+	forwardFnWithGate  func(ctx context.Context, data []byte, plan compat.GatePlan) (uint64, error)
 
 	capabilityGate *CapabilityGate
 
@@ -195,6 +196,10 @@ func (m *MetaRaft) SetForwarder(fn func(ctx context.Context, data []byte) error)
 // callers that need the committed raft index from the leader.
 func (m *MetaRaft) SetForwarderWithIndex(fn func(ctx context.Context, data []byte) (uint64, error)) {
 	m.forwardFnWithIndex = fn
+}
+
+func (m *MetaRaft) SetForwarderWithGate(fn func(ctx context.Context, data []byte, plan compat.GatePlan) (uint64, error)) {
+	m.forwardFnWithGate = fn
 }
 
 func (m *MetaRaft) SetCapabilityGate(gate *CapabilityGate) {
@@ -531,6 +536,13 @@ func (m *MetaRaft) ProposeMetaCommandWithIndex(ctx context.Context, data []byte)
 	}
 }
 
+func (m *MetaRaft) ProposeMetaCommandWithGate(ctx context.Context, plan compat.GatePlan, data []byte) (uint64, error) {
+	if err := m.validateGatePlanForProposal(plan); err != nil {
+		return 0, err
+	}
+	return m.ProposeMetaCommandWithIndex(ctx, data)
+}
+
 // Propose wraps a typed IAM (or other) payload in a MetaCmd FlatBuffers
 // envelope and proposes it to the cluster, blocking until applied to the
 // local FSM. Used by external dispatchers (e.g., iam.MetaProposer) that
@@ -598,13 +610,34 @@ func (m *MetaRaft) proposeOrForwardWithIndex(ctx context.Context, node metaPropo
 }
 
 func (m *MetaRaft) proposeOrForwardWithGate(ctx context.Context, node metaProposerNode, plan compat.GatePlan, data []byte) (uint64, error) {
-	if m.capabilityGate == nil {
-		return 0, fmt.Errorf("meta_raft: capability gate not configured for %s", plan.Capability)
-	}
-	if err := m.capabilityGate.ValidatePlanStillCurrent(plan); err != nil {
+	if err := m.validateGatePlanForProposal(plan); err != nil {
 		return 0, err
 	}
+	if !node.IsLeader() {
+		if m.forwardFnWithGate == nil {
+			return 0, fmt.Errorf("meta_raft: not leader and no gated forwarder configured")
+		}
+		idx, err := m.forwardFnWithGate(ctx, data, plan)
+		if err != nil {
+			return 0, fmt.Errorf("meta_raft: forward to leader: %w", err)
+		}
+		if idx == 0 {
+			return idx, nil
+		}
+		return idx, m.waitForwardedAppliedResult(ctx, idx)
+	}
 	return m.proposeOrForwardWithIndex(ctx, node, data)
+}
+
+func (m *MetaRaft) validateGatePlanForProposal(plan compat.GatePlan) error {
+	if m.capabilityGate == nil {
+		return fmt.Errorf("meta_raft: capability gate not configured for %s", plan.Capability)
+	}
+	if err := m.capabilityGate.ValidatePlanStillCurrent(plan); err != nil {
+		return err
+	}
+	_, err := m.capabilityGate.RequireMetaRaftCapability(plan.Capability, plan.Operation, time.Now())
+	return err
 }
 
 func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {

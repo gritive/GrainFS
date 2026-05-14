@@ -214,6 +214,7 @@ table NodeStatsMsg {
   disk_avail_bytes:uint64;
   requests_per_sec:double;
   joined_at:int64;
+  capabilities:[string]; // rolling-upgrade evidence advertised by this node
 }
 
 // ReceiptGossipMsg broadcasts the sender's most recent HealReceipt IDs
@@ -337,6 +338,7 @@ enum MetaCmdType : uint8 {
   NfsExportBucketDeleteCascade = 42, // NFSv4 multi-export: bucket delete cascade marker
   CapabilityActivate      = 43, // Rolling-upgrade capability: active persisted feature marker
   MigrationCutover        = 44, // Migration job: mark bucket upstream cutover semantics active
+  NfsExportCreate         = 45, // NFSv4 multi-export: create only, reject existing export
 }
 
 table MetaNodeEntry {

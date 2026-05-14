@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/server/admin"
@@ -21,8 +22,17 @@ import (
 
 type fakeNfsExportProposer struct {
 	store      *nfsexport.Store
+	createErr  error
 	cascadeErr error
 	cascades   int
+}
+
+func (p *fakeNfsExportProposer) ProposeCreate(_ context.Context, bucket string, cfg nfsexport.Config) (uint64, error) {
+	if p.createErr != nil {
+		return 0, p.createErr
+	}
+	_, err := p.store.ApplyCreate(bucket, cfg.ReadOnly, 1)
+	return 1, err
 }
 
 func (p *fakeNfsExportProposer) ProposeUpsert(_ context.Context, bucket string, cfg nfsexport.Config) (uint64, error) {
@@ -211,6 +221,37 @@ func TestAdminNfsExportUpsertPropagationTimeout(t *testing.T) {
 	require.Equal(t, "export_propagation_timeout", ae.Code)
 }
 
+func TestAdminNfsExportUpsertCapabilityRejectIsUnsupported(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	buckets := newFakeBucketOps()
+	buckets.buckets["b1"] = true
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityNfsExportCreateV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationNfsExportCreate,
+		Unknown:    []compat.NodeID{"node-b"},
+	}
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: &fakeNfsExportProposer{store: store, createErr: compat.Reject(plan)},
+	})
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "unsupported", ae.Code)
+	require.Contains(t, ae.Message, compat.CapabilityNfsExportCreateV1)
+}
+
 func TestAdminNfsExportUpsertValidation(t *testing.T) {
 	d, buckets := newAdminTestDepsWithNfs(t)
 	ctx := context.Background()
@@ -264,6 +305,25 @@ func TestAdminNfsExportCRUD(t *testing.T) {
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
 	require.Equal(t, "export_not_found", ae.Code)
+}
+
+func TestAdminNfsExportAddRejectsExistingExport(t *testing.T) {
+	d, buckets := newAdminTestDepsWithNfs(t)
+	buckets.buckets["b1"] = true
+	ctx := context.Background()
+
+	created, err := admin.AdminNfsExportUpsert(ctx, d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	require.NoError(t, err)
+	_, err = admin.AdminNfsExportUpsert(ctx, d, admin.NfsExportUpsertReq{Bucket: "b1", ReadOnly: true})
+
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "conflict", ae.Code)
+	require.Contains(t, ae.Message, "already registered")
+
+	got, ok := d.NfsExports.Get("b1")
+	require.True(t, ok)
+	require.Equal(t, created, got)
 }
 
 func TestAdminNfsExportUpdateMissing(t *testing.T) {

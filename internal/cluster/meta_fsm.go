@@ -76,6 +76,7 @@ const (
 	MetaCmdTypeNfsExportUpsert              = clusterpb.MetaCmdTypeNfsExportUpsert
 	MetaCmdTypeNfsExportDelete              = clusterpb.MetaCmdTypeNfsExportDelete
 	MetaCmdTypeNfsExportBucketDeleteCascade = clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade
+	MetaCmdTypeNfsExportCreate              = clusterpb.MetaCmdTypeNfsExportCreate
 	MetaCmdTypeCapabilityActivate           = clusterpb.MetaCmdTypeCapabilityActivate
 	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
 )
@@ -438,6 +439,8 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeNfsExportUpsert:
 		return f.applyNfsExportUpsert(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeNfsExportCreate:
+		return f.applyNfsExportCreate(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeNfsExportDelete:
 		return f.applyNfsExportDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade:
@@ -511,6 +514,21 @@ func (f *MetaFSM) applyNfsExportUpsert(payload []byte) error {
 		if _, err := f.exportStore.ApplyUpsert(bucket, cfg.ReadOnly, f.exportFsidMajor); err != nil {
 			return err
 		}
+	}
+	f.publishNfsExportChange()
+	return nil
+}
+
+func (f *MetaFSM) applyNfsExportCreate(payload []byte) error {
+	if f.exportStore == nil {
+		return fmt.Errorf("meta_fsm: NFS export store not wired")
+	}
+	bucket, cfg, err := nfsexport.DecodeUpsertPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: NfsExportCreate: %w", err)
+	}
+	if _, err := f.exportStore.ApplyCreate(bucket, cfg.ReadOnly, f.exportFsidMajor); err != nil {
+		return err
 	}
 	f.publishNfsExportChange()
 	return nil
@@ -619,6 +637,9 @@ func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Eviden
 	caps := map[string]bool{}
 	if f.iamApplier != nil && f.migrationStore != nil {
 		caps[compat.CapabilityMigrationCutoverV1] = true
+	}
+	if f.exportStore != nil {
+		caps[compat.CapabilityNfsExportCreateV1] = true
 	}
 	return compat.Evidence{
 		NodeID:       compat.NodeID(nodeID),

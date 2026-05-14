@@ -97,8 +97,25 @@ func (rcv *NodeStatsMsg) MutateJoinedAt(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *NodeStatsMsg) Capabilities(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *NodeStatsMsg) CapabilitiesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func NodeStatsMsgStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func NodeStatsMsgAddNodeId(builder *flatbuffers.Builder, nodeId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodeId), 0)
@@ -114,6 +131,12 @@ func NodeStatsMsgAddRequestsPerSec(builder *flatbuffers.Builder, requestsPerSec 
 }
 func NodeStatsMsgAddJoinedAt(builder *flatbuffers.Builder, joinedAt int64) {
 	builder.PrependInt64Slot(4, joinedAt, 0)
+}
+func NodeStatsMsgAddCapabilities(builder *flatbuffers.Builder, capabilities flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(capabilities), 0)
+}
+func NodeStatsMsgStartCapabilitiesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func NodeStatsMsgEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

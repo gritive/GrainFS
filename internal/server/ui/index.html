@@ -79,6 +79,7 @@ tbody tr:last-child td{border-bottom:none}
   <div class="logo">GrainFS</div>
   <nav>
     <button class="active" data-tab="browser">Object Browser</button>
+    <button data-tab="storage">Storage</button>
     <button data-tab="volumes">Volumes</button>
     <button data-tab="snapshots">Snapshots</button>
     <button data-tab="events">Events</button>
@@ -115,6 +116,36 @@ tbody tr:last-child td{border-bottom:none}
   </div>
 </div>
 
+<!-- Storage Tab -->
+<div class="content hidden" id="tab-storage">
+  <div class="stats">
+    <div class="stat-card"><div class="label">NFSv4</div><div class="value" id="storage-nfs4">-</div></div>
+    <div class="stat-card"><div class="label">NBD</div><div class="value" id="storage-nbd">-</div></div>
+    <div class="stat-card"><div class="label">9P</div><div class="value" id="storage-p9">-</div></div>
+    <div class="stat-card"><div class="label">Buckets</div><div class="value" id="storage-bucket-count">-</div></div>
+  </div>
+  <div class="toolbar">
+    <div class="breadcrumb"><span>Storage</span></div>
+    <div class="actions">
+      <button class="btn" id="btn-storage-refresh">Refresh</button>
+      <button class="btn primary" id="btn-storage-create-bucket">Create Bucket</button>
+    </div>
+  </div>
+  <div id="storage-msg" style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem"></div>
+  <div class="table-wrap" style="margin-bottom:1rem">
+    <table>
+      <thead><tr><th>Bucket</th><th>Upstream</th><th>NFS Export</th><th>Mode</th></tr></thead>
+      <tbody id="storage-bucket-list"></tbody>
+    </table>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>NFS Export</th><th>Mode</th><th>FSID</th><th>Generation</th></tr></thead>
+      <tbody id="storage-nfs-list"></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- Volumes Tab -->
 <div class="content hidden" id="tab-volumes">
   <div class="toolbar">
@@ -125,7 +156,7 @@ tbody tr:last-child td{border-bottom:none}
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Size</th><th>Block Size</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Size</th><th>Block Size</th><th>Health</th></tr></thead>
       <tbody id="volume-list"></tbody>
     </table>
   </div>
@@ -378,6 +409,7 @@ tbody tr:last-child td{border-bottom:none}
   <div class="modal">
     <h3>Create Bucket</h3>
     <input type="text" id="bucket-name-input" placeholder="Bucket name">
+    <div id="bucket-modal-msg" style="font-size:0.8rem;color:var(--text-muted);min-height:1rem;margin-top:0.5rem"></div>
     <div class="modal-actions">
       <button class="btn" id="modal-bucket-cancel">Cancel</button>
       <button class="btn primary" id="modal-bucket-ok">Create</button>
@@ -400,17 +432,6 @@ tbody tr:last-child td{border-bottom:none}
     <div class="modal-actions">
       <button class="btn" id="modal-volume-cancel">Cancel</button>
       <button class="btn primary" id="modal-volume-ok">Create</button>
-    </div>
-  </div>
-</div>
-
-<div class="modal-overlay hidden" id="modal-confirm-delete">
-  <div class="modal">
-    <h3 id="confirm-delete-label">Delete?</h3>
-    <p style="color:var(--text-muted);font-size:0.8125rem;margin-bottom:1rem">This action cannot be undone.</p>
-    <div class="modal-actions">
-      <button class="btn" id="modal-delete-cancel">Cancel</button>
-      <button class="btn danger" id="modal-delete-ok">Delete</button>
     </div>
   </div>
 </div>
@@ -489,6 +510,19 @@ tbody tr:last-child td{border-bottom:none}
 
   function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
+  function setBucketModalMessage(text, danger) {
+    var msg = document.getElementById('bucket-modal-msg');
+    if (!msg) return;
+    msg.style.color = danger ? 'var(--danger)' : 'var(--text-muted)';
+    msg.textContent = text || '';
+  }
+
+  function openBucketModal() {
+    setBucketModalMessage('', false);
+    document.getElementById('modal-bucket').classList.remove('hidden');
+    document.getElementById('bucket-name-input').focus();
+  }
+
   function clearChildren(el) { while (el.firstChild) el.removeChild(el.firstChild); }
 
   function mkEl(tag, attrs, children) {
@@ -513,6 +547,7 @@ tbody tr:last-child td{border-bottom:none}
       document.querySelectorAll('.content').forEach(function(c) { c.classList.add('hidden'); });
       var tab = document.getElementById('tab-' + btn.dataset.tab);
       if (tab) tab.classList.remove('hidden');
+      if (btn.dataset.tab === 'storage') loadStorage();
       if (btn.dataset.tab === 'volumes') loadVolumes();
       if (btn.dataset.tab === 'snapshots') loadSnapshots();
       if (btn.dataset.tab === 'events') loadEvents();
@@ -551,7 +586,7 @@ tbody tr:last-child td{border-bottom:none}
           mkEl('td', { textContent: name + '/', className: 'name-cell', tabindex: '0', role: 'button', onclick: function() { openBucket(name); }, onkeydown: function(e) { if (e.key === 'Enter') openBucket(name); } }),
           mkTd('\u2014', 'size-cell'),
           mkTd(fmtDate(date), 'date-cell'),
-          mkEl('td', null, [mkEl('button', { className: 'btn danger', textContent: 'Delete', onclick: function() { confirmDelete('bucket', name); } })])
+          mkTd('')
         ]);
         tbody.appendChild(tr);
       });
@@ -587,7 +622,7 @@ tbody tr:last-child td{border-bottom:none}
           mkEl('td', { textContent: key, className: 'name-cell', tabindex: '0', role: 'button', onclick: function() { downloadObject(name, key); }, onkeydown: function(e) { if (e.key === 'Enter') downloadObject(name, key); } }),
           mkTd(fmtBytes(parseInt(size)), 'size-cell'),
           mkTd(fmtDate(date), 'date-cell'),
-          mkEl('td', null, [mkEl('button', { className: 'btn danger', textContent: 'Delete', onclick: function() { confirmDelete('object', name + '/' + key); } })])
+          mkTd('')
         ]);
         tbody.appendChild(tr);
       });
@@ -604,48 +639,26 @@ tbody tr:last-child td{border-bottom:none}
     }
   }
 
-  // Confirm delete modal
-  var pendingDeleteType = null;
-  var pendingDeleteTarget = null;
-
-  function confirmDelete(type, target) {
-    pendingDeleteType = type;
-    pendingDeleteTarget = target;
-    var label = type === 'bucket' ? 'bucket "' + target + '"' : target;
-    document.getElementById('confirm-delete-label').textContent = 'Delete ' + label + '?';
-    document.getElementById('modal-confirm-delete').classList.remove('hidden');
-  }
-
-  function executeDelete() {
-    if (pendingDeleteType === 'bucket') {
-      deleteBucket(pendingDeleteTarget);
-    } else if (pendingDeleteType === 'object') {
-      var parts = pendingDeleteTarget.split('/');
-      var bucket = parts.shift();
-      var key = parts.join('/');
-      deleteObject(bucket, key);
-    } else if (pendingDeleteType === 'volume') {
-      deleteVolume(pendingDeleteTarget);
-    }
-    closeModal('modal-confirm-delete');
-  }
-
   function createBucket() {
     var name = document.getElementById('bucket-name-input').value.trim();
-    if (!name) return;
-    fetch(baseURL + '/' + encodeURIComponent(name), { method: 'PUT' }).then(function() {
+    if (!name) {
+      setBucketModalMessage('Bucket name is required.', true);
+      return;
+    }
+    setBucketModalMessage('', false);
+    fetchAuth(baseURL + '/ui/api/storage/buckets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name })
+    }).then(function(r) {
+      if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || e.code || ('HTTP ' + r.status)); });
       closeModal('modal-bucket');
       document.getElementById('bucket-name-input').value = '';
       loadBuckets();
+      loadStorage();
+    }).catch(function(e) {
+      setBucketModalMessage(e.message || 'create bucket failed', true);
     });
-  }
-
-  function deleteBucket(name) {
-    fetch(baseURL + '/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadBuckets(); });
-  }
-
-  function deleteObject(bucket, key) {
-    fetch(baseURL + '/' + encodeURIComponent(bucket) + '/' + encodeURIComponent(key), { method: 'DELETE' }).then(function() { openBucket(bucket); });
   }
 
   function downloadObject(bucket, key) {
@@ -686,7 +699,7 @@ tbody tr:last-child td{border-bottom:none}
 
   document.getElementById('btn-create').addEventListener('click', function() {
     if (currentBucket) return;
-    document.getElementById('modal-bucket').classList.remove('hidden');
+    openBucketModal();
   });
 
   // Modal buttons
@@ -694,8 +707,85 @@ tbody tr:last-child td{border-bottom:none}
   document.getElementById('modal-bucket-ok').addEventListener('click', createBucket);
   document.getElementById('modal-volume-cancel').addEventListener('click', function() { closeModal('modal-volume'); });
   document.getElementById('modal-volume-ok').addEventListener('click', createVolume);
-  document.getElementById('modal-delete-cancel').addEventListener('click', function() { closeModal('modal-confirm-delete'); });
-  document.getElementById('modal-delete-ok').addEventListener('click', executeDelete);
+
+  // Storage
+  function protocolLabel(p) {
+    if (!p || !p.enabled) return 'off';
+    if (p.bind) return p.bind + ':' + p.port;
+    return String(p.port);
+  }
+
+  function fetchStorageJSON(path, optional) {
+    return fetchAuth(baseURL + path).then(function(r) {
+      if (optional && (r.status === 404 || r.status === 405)) return null;
+      return r.json().then(function(payload) {
+        if (!r.ok) throw new Error((payload && (payload.error || payload.code)) || ('HTTP ' + r.status));
+        return payload;
+      });
+    });
+  }
+
+  function loadStorage() {
+    var msg = document.getElementById('storage-msg');
+    msg.style.color = 'var(--text-muted)';
+    msg.textContent = 'Loading storage state...';
+
+    Promise.all([
+      fetchStorageJSON('/ui/api/storage/protocols'),
+      fetchStorageJSON('/ui/api/storage/buckets'),
+      fetchStorageJSON('/ui/api/storage/nfs/exports', true)
+    ]).then(function(results) {
+      var protocols = results[0] || {};
+      var bucketPayload = results[1] || {};
+      var nfsPayload = results[2] || {};
+      var buckets = bucketPayload.buckets || [];
+      var exports = nfsPayload.exports || [];
+
+      document.getElementById('storage-nfs4').textContent = protocolLabel(protocols.nfs4);
+      document.getElementById('storage-nbd').textContent = protocolLabel(protocols.nbd);
+      document.getElementById('storage-p9').textContent = protocolLabel(protocols.p9);
+      document.getElementById('storage-bucket-count').textContent = String(buckets.length);
+
+      var bucketBody = document.getElementById('storage-bucket-list');
+      clearChildren(bucketBody);
+      if (buckets.length === 0) {
+        bucketBody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No buckets.' })]));
+      }
+      buckets.forEach(function(b) {
+        var nfs = b.nfs_export;
+        bucketBody.appendChild(mkEl('tr', null, [
+          mkTd(b.name || ''),
+          mkTd(b.has_upstream ? 'configured' : 'none'),
+          mkTd(nfs && nfs.registered ? 'registered' : 'none'),
+          mkTd(nfs && nfs.registered ? (nfs.read_only ? 'read-only' : 'read-write') : '')
+        ]));
+      });
+
+      var nfsBody = document.getElementById('storage-nfs-list');
+      clearChildren(nfsBody);
+      if (exports.length === 0) {
+        nfsBody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No NFS exports.' })]));
+      }
+      exports.forEach(function(e) {
+        nfsBody.appendChild(mkEl('tr', null, [
+          mkTd(e.bucket || ''),
+          mkTd(e.read_only ? 'read-only' : 'read-write'),
+          mkTd((e.fsid_major || 0) + '.' + (e.fsid_minor || 0), 'size-cell'),
+          mkTd(String(e.generation || 0), 'size-cell')
+        ]));
+      });
+
+      msg.textContent = '';
+    }).catch(function(e) {
+      msg.style.color = 'var(--danger)';
+      msg.textContent = e.message || 'Failed to load storage state.';
+    });
+  }
+
+  document.getElementById('btn-storage-refresh').addEventListener('click', loadStorage);
+  document.getElementById('btn-storage-create-bucket').addEventListener('click', function() {
+    openBucketModal();
+  });
 
   // Volumes
   function loadVolumes() {
@@ -715,7 +805,7 @@ tbody tr:last-child td{border-bottom:none}
           mkTd(v.name),
           mkTd(fmtBytes(v.size), 'size-cell'),
           mkTd(String(v.block_size), 'size-cell'),
-          mkEl('td', null, [mkEl('button', { className: 'btn danger', textContent: 'Delete', onclick: function() { confirmDelete('volume', v.name); } })])
+          mkTd(v.health || '')
         ]);
         tbody.appendChild(tr);
       });
@@ -741,10 +831,6 @@ tbody tr:last-child td{border-bottom:none}
       document.getElementById('vol-name-input').value = '';
       loadVolumes();
     });
-  }
-
-  function deleteVolume(name) {
-    fetchAuth(baseURL + '/ui/api/volumes/' + encodeURIComponent(name), { method: 'DELETE' }).then(function() { loadVolumes(); });
   }
 
   // Dashboard
@@ -1275,8 +1361,7 @@ tbody tr:last-child td{border-bottom:none}
           mkTd(fmtBytes(s.size_bytes || 0), 'size-cell'),
           mkTd(s.reason || ''),
           mkEl('td', null, [
-            mkEl('button', { className: 'btn', textContent: 'Restore', onclick: function() { restoreSnapshot(s.seq); } }),
-            mkEl('button', { className: 'btn danger', style: 'margin-left:0.4rem', textContent: 'Delete', onclick: function() { deleteSnapshot(s.seq); } })
+            mkEl('button', { className: 'btn', textContent: 'Restore', onclick: function() { restoreSnapshot(s.seq); } })
           ])
         ]);
         tbody.appendChild(tr);
@@ -1312,12 +1397,6 @@ tbody tr:last-child td{border-bottom:none}
         msg.style.color = 'var(--success)';
         msg.textContent = 'Restored ' + d.restored_objects + ' objects' + (d.stale_blobs && d.stale_blobs.length ? ' (' + d.stale_blobs.length + ' stale)' : '');
       }).catch(function() { msg.style.color = 'var(--danger)'; msg.textContent = 'Request failed'; });
-  }
-
-  function deleteSnapshot(seq) {
-    fetch(baseURL + '/admin/snapshots/' + seq, { method: 'DELETE' })
-      .then(function() { loadSnapshots(); })
-      .catch(function() {});
   }
 
   document.getElementById('btn-create-snap').addEventListener('click', createSnapshot);

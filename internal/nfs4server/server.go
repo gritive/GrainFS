@@ -57,12 +57,16 @@ func (s *Server) ListenAndServe(addr string) error {
 	if err != nil {
 		return fmt.Errorf("nfs4 listen: %w", err)
 	}
+	return s.Serve(ln)
+}
 
+// Serve accepts NFSv4 connections from an already-open listener.
+func (s *Server) Serve(ln net.Listener) error {
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
 
-	s.logger.Info().Str("addr", addr).Msg("nfs4 server started")
+	s.logger.Info().Str("addr", ln.Addr().String()).Msg("nfs4 server started")
 
 	for {
 		conn, err := ln.Accept()

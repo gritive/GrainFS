@@ -101,6 +101,7 @@ type BucketOps interface {
 }
 
 type NfsExportService interface {
+	Create(ctx context.Context, bucket string, params NfsExportUpsertParams) error
 	Upsert(ctx context.Context, bucket string, params NfsExportUpsertParams) error
 	Delete(ctx context.Context, bucket string) error
 	DeleteForBucketDelete(ctx context.Context, bucket string, force bool) error
@@ -120,6 +121,10 @@ type NfsExportUpsertReq = adminapi.NfsExportUpsertReq
 type ListNfsExportsResp = adminapi.ListNfsExportsResp
 type ExportDebugResp = adminapi.ExportDebugResp
 type ExportDebugLookup = adminapi.ExportDebugLookup
+type ListStorageBucketsResp = adminapi.ListStorageBucketsResp
+type StorageBucketSummary = adminapi.StorageBucketSummary
+type StorageBucketNFSExport = adminapi.StorageBucketNFSExport
+type StorageProtocolStatusResp = adminapi.StorageProtocolStatusResp
 
 type NFSDiag interface {
 	RecentLookups(bucket string, window time.Duration) []nfs4server.LookupRecord
@@ -159,7 +164,8 @@ type Deps struct {
 	IAM             IAMService            // optional; nil disables IAM admin endpoints
 	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
 	NfsExports      NfsExportService      // optional; nil disables NFS export admin endpoints
-	NFSDiag         NFSDiag               // optional; nil disables live NFS lookup/client diagnostics
+	Protocols       StorageProtocolStatusResp
+	NFSDiag         NFSDiag // optional; nil disables live NFS lookup/client diagnostics
 	Token           *dashboard.TokenStore
 	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID          string

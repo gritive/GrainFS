@@ -236,13 +236,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 
 	mstore := migration.NewJobStore(state.distBackend.FSMDB())
 	state.metaRaft.FSM().SetMigration(mstore)
-	gate := cluster.NewCapabilityGate(compat.DefaultRegistry, 15*time.Second)
-	refreshGate := func() {
-		gate.SetMetaRaftSnapshot(state.metaRaft.Node().CommittedIndex(), state.metaRaft.Node().Configuration())
-		gate.ReportEvidence(state.metaRaft.FSM().CapabilityEvidence(state.metaRaft.Node().ID(), time.Now()))
+	if state.capabilityGate == nil {
+		state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))
+		state.metaRaft.SetCapabilityGate(state.capabilityGate)
 	}
-	refreshGate()
-	state.metaRaft.SetCapabilityGate(gate)
+	refreshCapabilityGate(state)
 	mprop := &cluster.MigrationProposer{
 		Propose: state.metaRaft.Propose,
 		ProposeWithGate: func(ctx context.Context, plan compat.GatePlan, cmdType clusterpb.MetaCmdType, payload []byte) error {
@@ -250,8 +248,8 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			return err
 		},
 		GatePlan: func(operation compat.Operation) (compat.GatePlan, error) {
-			refreshGate()
-			return gate.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, operation, time.Now())
+			refreshCapabilityGate(state)
+			return state.capabilityGate.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, operation, time.Now())
 		},
 	}
 	if state.iamProposer != nil {

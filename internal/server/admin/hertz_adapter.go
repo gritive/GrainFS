@@ -44,11 +44,12 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 // handler logic).
 func RegisterUI(h *server.Hertz, d *Deps) {
 	g := h.Group("/ui/api")
-	registerSnapshot(g, d)
-	registerVolume(g, d)
-	registerScrub(g, d)
+	registerSnapshotUI(g, d)
+	registerVolumeUI(g, d)
+	registerScrubUI(g, d)
 	registerCluster(g, d)
 	registerResource(g, d)
+	registerStorageUI(g, d)
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api —
 	// they live only on the local admin Unix socket.
 	registerIAM(g, d)
@@ -73,6 +74,18 @@ func registerResource(g router, d *Deps) {
 	g.GET("/resource/vlog/breakdown", wrapZero(d, GetVlogBreakdown))
 }
 
+func registerStorageUI(g router, d *Deps) {
+	g.GET("/storage/protocols", wrapZero(d, AdminStorageProtocols))
+	if d.Buckets != nil {
+		g.GET("/storage/buckets", wrapZero(d, AdminListStorageBuckets))
+		g.POST("/storage/buckets", wrapBody[CreateBucketAdminReq, BucketInfo](d, AdminCreateStorageBucket))
+	}
+	if d.NfsExports != nil {
+		g.GET("/storage/nfs/exports", wrapZero(d, AdminNfsExportList))
+		g.GET("/storage/nfs/exports/:name", wrapName(d, AdminNfsExportGet))
+	}
+}
+
 func registerVolume(g router, d *Deps) {
 	g.GET("/volumes", wrapZero(d, ListVolumes))
 	g.POST("/volumes", wrapBody[CreateVolumeReq, VolumeInfo](d, CreateVolume))
@@ -86,11 +99,23 @@ func registerVolume(g router, d *Deps) {
 	g.POST("/volumes/:name/read-at", wrapBody[ReadAtVolumeReq, ReadAtVolumeResp](d, ReadAtVolume))
 }
 
+func registerVolumeUI(g router, d *Deps) {
+	g.GET("/volumes", wrapZero(d, ListVolumes))
+	g.POST("/volumes", wrapBody[CreateVolumeReq, VolumeInfo](d, CreateVolume))
+	g.GET("/volumes/:name", wrapName(d, GetVolume))
+	g.GET("/volumes/:name/stat", wrapName(d, StatVolume))
+}
+
 func registerSnapshot(g router, d *Deps) {
 	g.POST("/volumes/:name/snapshots", wrapName(d, CreateSnapshot))
 	g.GET("/volumes/:name/snapshots", wrapName(d, ListSnapshots))
 	g.DELETE("/volumes/:name/snapshots/:snap", deleteSnapshotHandler(d))
 	g.POST("/volumes/:name/snapshots/:snap/rollback", rollbackHandler(d))
+}
+
+func registerSnapshotUI(g router, d *Deps) {
+	g.POST("/volumes/:name/snapshots", wrapName(d, CreateSnapshot))
+	g.GET("/volumes/:name/snapshots", wrapName(d, ListSnapshots))
 }
 
 func registerScrub(g router, d *Deps) {
@@ -99,6 +124,13 @@ func registerScrub(g router, d *Deps) {
 	g.GET("/scrub/jobs", wrapZero(d, ListScrubJobs))
 	g.GET("/scrub/jobs/:id", scrubJobByIDHandler(d, GetScrubJob))
 	g.DELETE("/scrub/jobs/:id", scrubJobCancelHandler(d))
+}
+
+func registerScrubUI(g router, d *Deps) {
+	g.POST("/volumes/:name/scrub", scrubVolumeHandler(d))
+	g.POST("/scrub", wrapBody[ScrubReq, ScrubResp](d, TriggerScrub))
+	g.GET("/scrub/jobs", wrapZero(d, ListScrubJobs))
+	g.GET("/scrub/jobs/:id", scrubJobByIDHandler(d, GetScrubJob))
 }
 
 func scrubVolumeHandler(d *Deps) app.HandlerFunc {

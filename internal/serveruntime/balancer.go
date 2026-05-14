@@ -59,6 +59,10 @@ func StartBalancer(
 	numShards int,
 	clusterCfg cluster.BalancerClusterCfg,
 	diskCfg cluster.DiskCfgReader,
+	capabilityGate *cluster.CapabilityGate,
+	capabilityEvidence cluster.CapabilityEvidenceSource,
+	addrBook cluster.NodeAddressBook,
+	gossipPeerProvider func() []string,
 ) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
 	gossipInterval := clusterCfg.BalancerGossipInterval()
 	migrationPendingTTL := clusterCfg.BalancerMigrationPendingTTL()
@@ -80,8 +84,12 @@ func StartBalancer(
 
 	fsm.SetMigrationHooks(taskCh, exec, balancer)
 
-	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval)
-	receiver := cluster.NewGossipReceiver(quicTransport, statsStore)
+	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval).
+		WithPeerProvider(gossipPeerProvider).
+		WithCapabilityEvidenceSource(capabilityEvidence)
+	receiver := cluster.NewGossipReceiver(quicTransport, statsStore).
+		WithCapabilityGate(capabilityGate).
+		WithNodeAddressBook(addrBook)
 
 	go sender.Run(ctx)
 	go receiver.Run(ctx)

@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -120,11 +121,15 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	metaRaft.SetForwarderWithIndex(func(ctx context.Context, data []byte) (uint64, error) {
 		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data)
 	})
+	metaRaft.SetForwarderWithGate(func(ctx context.Context, data []byte, plan compat.GatePlan) (uint64, error) {
+		return state.metaForwardSender.SendWithGate(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data, plan)
+	})
 
 	state.distBackend.SetBucketAssigner(cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	}))
-	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft)
+	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
+		WithGateRefresh(func() { refreshCapabilityGate(state) })
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
 	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
 		if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {

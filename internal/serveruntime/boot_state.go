@@ -80,6 +80,7 @@ type bootState struct {
 	// bootDataGroupRouter and bootRotationAndAdminAPI register callbacks
 	// against state.metaRaft.FSM(); bootMetaRaftStart then calls Start.
 	metaRaft         *cluster.MetaRaft
+	capabilityGate   *cluster.CapabilityGate
 	metaTransport    *cluster.MetaTransportQUIC
 	dgMgr            *cluster.DataGroupManager
 	clusterRouter    *cluster.Router

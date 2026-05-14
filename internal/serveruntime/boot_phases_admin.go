@@ -9,6 +9,7 @@ import (
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/server"
@@ -68,6 +69,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		IAM:             state.iamAdminAPI,
 		Buckets:         storage.NewOperations(state.backend),
 		NfsExports:      &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
+		Protocols:       storageProtocolStatusFromConfig(cfg),
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
@@ -122,4 +124,22 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		_ = adminSrv.Stop(stopCtx)
 	})
 	return nil
+}
+
+func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {
+	return adminapi.StorageProtocolStatusResp{
+		NFS4: adminapi.ProtocolEndpointStatus{
+			Enabled: cfg.NFS4Port > 0,
+			Port:    cfg.NFS4Port,
+		},
+		NBD: adminapi.ProtocolEndpointStatus{
+			Enabled: cfg.NBDPort > 0,
+			Port:    cfg.NBDPort,
+		},
+		P9: adminapi.ProtocolEndpointStatus{
+			Enabled: cfg.P9Port > 0,
+			Bind:    cfg.P9Bind,
+			Port:    cfg.P9Port,
+		},
+	}
 }

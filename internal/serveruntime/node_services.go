@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
@@ -23,6 +24,9 @@ type NodeServices struct {
 	nfs4Srv *nfs4server.Server
 	nbdSrv  *nbd.Server
 	p9Srv   *p9server.Server
+	nfs4Err error
+	nbdErr  error
+	p9Err   error
 }
 
 // Close shuts down any started services. Safe to call on the zero value.
@@ -49,6 +53,25 @@ func (n *NodeServices) Close() {
 // invalidator with the cluster registry after StartNodeServices returns.
 func (n *NodeServices) NFS4() *nfs4server.Server { return n.nfs4Srv }
 
+// ProtocolStatus reports the protocols that actually started. Configured
+// protocols that failed to bind remain disabled with a warning.
+func (n *NodeServices) ProtocolStatus(cfg Config) adminapi.StorageProtocolStatusResp {
+	resp := storageProtocolStatusFromConfig(cfg)
+	resp.NFS4.Enabled = n.nfs4Srv != nil
+	resp.NBD.Enabled = n.nbdSrv != nil
+	resp.P9.Enabled = n.p9Srv != nil
+	if cfg.NFS4Port > 0 && n.nfs4Srv == nil && n.nfs4Err != nil {
+		resp.NFS4.Warning = "start failed: " + n.nfs4Err.Error()
+	}
+	if cfg.NBDPort > 0 && n.nbdSrv == nil && n.nbdErr != nil {
+		resp.NBD.Warning = "start failed: " + n.nbdErr.Error()
+	}
+	if cfg.P9Port > 0 && n.p9Srv == nil && n.p9Err != nil {
+		resp.P9.Warning = "start failed: " + n.p9Err.Error()
+	}
+	return resp
+}
+
 func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 	if n.nfs4Srv != nil {
 		n.nfs4Srv.SetExportSource(src)
@@ -64,22 +87,29 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 	svc := &NodeServices{}
 
 	if nfs4Port > 0 {
-		svc.nfs4Srv = nfs4server.NewServer(backend)
-		go func() {
-			nfs4Addr := fmt.Sprintf(":%d", nfs4Port)
-			if err := svc.nfs4Srv.ListenAndServe(nfs4Addr); err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return
+		nfs4Addr := fmt.Sprintf(":%d", nfs4Port)
+		ln, err := net.Listen("tcp", nfs4Addr)
+		if err != nil {
+			svc.nfs4Err = fmt.Errorf("nfs4 listen: %w", err)
+			log.Error().Err(svc.nfs4Err).Msg("nfs4 server start failed")
+		} else {
+			svc.nfs4Srv = nfs4server.NewServer(backend)
+			go func() {
+				if err := svc.nfs4Srv.Serve(ln); err != nil {
+					if errors.Is(err, net.ErrClosed) {
+						return
+					}
+					log.Error().Err(err).Msg("nfs4 server error")
 				}
-				log.Error().Err(err).Msg("nfs4 server error")
-			}
-		}()
+			}()
+		}
 	}
 
 	if nbdPort > 0 {
 		const defaultVolName = "default"
 		nbdSrv, err := startNBDServer(volMgr, defaultVolName, nbdPort, ri)
 		if err != nil {
+			svc.nbdErr = err
 			log.Error().Err(err).Msg("nbd server start failed")
 		} else {
 			svc.nbdSrv = nbdSrv
@@ -87,16 +117,22 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 	}
 
 	if p9Port > 0 {
-		svc.p9Srv = p9server.NewServer(backend)
-		go func() {
-			if p9Bind == "" {
-				p9Bind = "127.0.0.1"
-			}
-			addr := net.JoinHostPort(p9Bind, fmt.Sprintf("%d", p9Port))
-			if err := svc.p9Srv.ListenAndServe(ctx, addr); err != nil && ctx.Err() == nil {
-				log.Error().Err(err).Msg("9p server error")
-			}
-		}()
+		if p9Bind == "" {
+			p9Bind = "127.0.0.1"
+		}
+		addr := net.JoinHostPort(p9Bind, fmt.Sprintf("%d", p9Port))
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			svc.p9Err = fmt.Errorf("9p listen %s: %w", addr, err)
+			log.Error().Err(svc.p9Err).Msg("9p server start failed")
+		} else {
+			svc.p9Srv = p9server.NewServer(backend)
+			go func() {
+				if err := svc.p9Srv.Serve(ctx, ln); err != nil && ctx.Err() == nil {
+					log.Error().Err(err).Msg("9p server error")
+				}
+			}()
+		}
 	}
 
 	return svc
@@ -107,9 +143,14 @@ func startNBDServer(mgr *volume.Manager, volName string, port int, ri nbd.ReadIn
 	if ri != nil {
 		srv.SetReadIndexer(ri)
 	}
+	addr := fmt.Sprintf(":%d", port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("nbd listen: %w", err)
+	}
+	log.Info().Str("component", "nbd").Str("addr", ln.Addr().String()).Str("volume", volName).Msg("nbd server started")
 	go func() {
-		addr := fmt.Sprintf(":%d", port)
-		if err := srv.ListenAndServe(addr); err != nil {
+		if err := srv.Serve(ln); err != nil {
 			log.Error().Err(err).Msg("nbd server error")
 		}
 	}()

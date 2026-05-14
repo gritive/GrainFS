@@ -865,6 +865,30 @@ func TestApplyNfsExportUpsert_WritesStore(t *testing.T) {
 	require.Equal(t, nfsexport.Config{ReadOnly: true, FsidMajor: 1, FsidMinor: 1, Generation: 1}, got)
 }
 
+func TestApplyNfsExportCreateRejectsExisting(t *testing.T) {
+	f := NewMetaFSM()
+	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
+	require.NoError(t, err)
+	f.SetExportStore(store)
+
+	payload, err := nfsexport.EncodeUpsertPayload("b1", nfsexport.Config{ReadOnly: false})
+	require.NoError(t, err)
+	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportCreate, payload)
+	require.NoError(t, err)
+	require.NoError(t, f.applyCmd(data))
+
+	payload, err = nfsexport.EncodeUpsertPayload("b1", nfsexport.Config{ReadOnly: true})
+	require.NoError(t, err)
+	data, err = encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportCreate, payload)
+	require.NoError(t, err)
+	require.ErrorIs(t, f.applyCmd(data), nfsexport.ErrExportExists)
+
+	got, ok := store.Get("b1")
+	require.True(t, ok)
+	require.False(t, got.ReadOnly)
+	require.Equal(t, uint64(1), got.Generation)
+}
+
 func TestApplyNfsExport_ChangeCallback(t *testing.T) {
 	f := NewMetaFSM()
 	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))

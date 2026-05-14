@@ -631,7 +631,16 @@ func TestMetaRaftProposeWithIndexFollowerLocalApplyTimeoutStillReturnsCommittedI
 func TestMetaRaftProposeWithGateRejectsStalePlan(t *testing.T) {
 	m := &MetaRaft{applyNotify: make(chan struct{})}
 	gate := NewCapabilityGate(nil, time.Second)
-	gate.SetMetaRaftSnapshot(2, raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}})
+	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}}
+	gate.SetMetaRaftSnapshot(2, cfg)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-1"),
+		Capabilities: map[string]bool{
+			compat.CapabilityMigrationCutoverV1: true,
+		},
+		LastSeen: time.Now(),
+		Ready:    true,
+	})
 	m.capabilityGate = gate
 	node := &fakeProposerNode{isLeader: true, proposeIdx: 3}
 
@@ -652,7 +661,16 @@ func TestMetaRaftProposeWithGateAllowsCurrentPlan(t *testing.T) {
 	m := &MetaRaft{applyNotify: make(chan struct{})}
 	m.lastApplied.Store(3)
 	gate := NewCapabilityGate(nil, time.Second)
-	gate.SetMetaRaftSnapshot(2, raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}})
+	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}}
+	gate.SetMetaRaftSnapshot(2, cfg)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-1"),
+		Capabilities: map[string]bool{
+			compat.CapabilityMigrationCutoverV1: true,
+		},
+		LastSeen: time.Now(),
+		Ready:    true,
+	})
 	m.capabilityGate = gate
 	node := &fakeProposerNode{isLeader: true, proposeIdx: 3}
 
@@ -661,10 +679,80 @@ func TestMetaRaftProposeWithGateAllowsCurrentPlan(t *testing.T) {
 		Scope:      compat.ScopeMetaRaft,
 		Severity:   compat.SeverityHard,
 		Operation:  compat.OperationMigrationCutover,
-		ConfigID:   2,
+		ConfigID:   raftConfigurationID(cfg),
 	}
 	got, err := m.proposeOrForwardWithGate(context.Background(), node, plan, []byte("cmd"))
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), got)
 	require.Equal(t, 1, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithGateFollowerRequiresGatedForwarder(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	gate := NewCapabilityGate(nil, time.Second)
+	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}}
+	gate.SetMetaRaftSnapshot(2, cfg)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-1"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: time.Now(),
+		Ready:    true,
+	})
+	m.capabilityGate = gate
+	m.forwardFnWithIndex = func(context.Context, []byte) (uint64, error) {
+		t.Fatal("gated proposals must not use the raw indexed forwarder")
+		return 0, nil
+	}
+	node := &fakeProposerNode{isLeader: false}
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityNfsExportCreateV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationNfsExportCreate,
+		ConfigID:   raftConfigurationID(cfg),
+	}
+
+	_, err := m.proposeOrForwardWithGate(context.Background(), node, plan, []byte("cmd"))
+	require.ErrorContains(t, err, "no gated forwarder")
+	require.Equal(t, 0, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	gate := NewCapabilityGate(nil, time.Second)
+	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}}
+	gate.SetMetaRaftSnapshot(2, cfg)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-1"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: time.Now(),
+		Ready:    true,
+	})
+	m.capabilityGate = gate
+	var gotPlan compat.GatePlan
+	m.forwardFnWithGate = func(_ context.Context, data []byte, plan compat.GatePlan) (uint64, error) {
+		require.Equal(t, []byte("cmd"), data)
+		gotPlan = plan
+		return 42, nil
+	}
+	node := &fakeProposerNode{isLeader: false}
+	plan := compat.GatePlan{
+		Capability: compat.CapabilityNfsExportCreateV1,
+		Scope:      compat.ScopeMetaRaft,
+		Severity:   compat.SeverityHard,
+		Operation:  compat.OperationNfsExportCreate,
+		ConfigID:   raftConfigurationID(cfg),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	got, err := m.proposeOrForwardWithGate(ctx, node, plan, []byte("cmd"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), got)
+	require.Equal(t, plan, gotPlan)
+	require.Equal(t, 0, node.proposeCalls)
 }

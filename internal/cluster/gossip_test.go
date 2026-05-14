@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -85,14 +87,29 @@ func (m *mockTransport) inject(from string, msg *transport.Message) {
 }
 
 // statsGossipMsg encodes a NodeStatsMsg as a StreamAdmin transport.Message.
-func statsGossipMsg(ns NodeStats) *transport.Message {
+func statsGossipMsg(ns NodeStats, capabilities ...string) *transport.Message {
 	b := flatbuffers.NewBuilder(64)
 	nodeIDOff := b.CreateString(ns.NodeID)
+	var capabilitiesVec flatbuffers.UOffsetT
+	if len(capabilities) > 0 {
+		offsets := make([]flatbuffers.UOffsetT, len(capabilities))
+		for i, capability := range capabilities {
+			offsets[i] = b.CreateString(capability)
+		}
+		clusterpb.NodeStatsMsgStartCapabilitiesVector(b, len(offsets))
+		for i := len(offsets) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offsets[i])
+		}
+		capabilitiesVec = b.EndVector(len(offsets))
+	}
 	clusterpb.NodeStatsMsgStart(b)
 	clusterpb.NodeStatsMsgAddNodeId(b, nodeIDOff)
 	clusterpb.NodeStatsMsgAddDiskUsedPct(b, ns.DiskUsedPct)
 	clusterpb.NodeStatsMsgAddDiskAvailBytes(b, ns.DiskAvailBytes)
 	clusterpb.NodeStatsMsgAddRequestsPerSec(b, ns.RequestsPerSec)
+	if capabilitiesVec != 0 {
+		clusterpb.NodeStatsMsgAddCapabilities(b, capabilitiesVec)
+	}
 	root := clusterpb.NodeStatsMsgEnd(b)
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -137,6 +154,78 @@ func TestGossipSender_PayloadDecodable(t *testing.T) {
 	assert.Equal(t, "node-a", string(pb.NodeId()))
 	assert.Equal(t, 70.0, pb.DiskUsedPct())
 	assert.Equal(t, 120.0, pb.RequestsPerSec())
+}
+
+type staticCapabilityEvidence struct {
+	caps map[string]bool
+}
+
+func (s staticCapabilityEvidence) CapabilityEvidence(nodeID string, now time.Time) compat.Evidence {
+	return compat.Evidence{
+		NodeID:       compat.NodeID(nodeID),
+		Capabilities: s.caps,
+		LastSeen:     now,
+		Ready:        true,
+	}
+}
+
+type fakeGossipAddressBook struct {
+	nodes []MetaNodeEntry
+}
+
+func (f fakeGossipAddressBook) Nodes() []MetaNodeEntry {
+	return f.nodes
+}
+
+func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
+		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		}})
+	sender.broadcastOnce(context.Background())
+
+	msgs := tr.SentTo("node-b:9000")
+	require.Len(t, msgs, 1)
+
+	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].Payload, 0)
+	require.Equal(t, 1, pb.CapabilitiesLength())
+	assert.Equal(t, compat.CapabilityNfsExportCreateV1, string(pb.Capabilities(0)))
+}
+
+func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+	peers := []string{"node-b:9000"}
+
+	sender := NewGossipSender("node-a", nil, tr, store, 30*time.Second).
+		WithPeerProvider(func() []string {
+			return append([]string(nil), peers...)
+		})
+	peers = []string{"node-c:9000"}
+
+	sender.broadcastOnce(context.Background())
+
+	require.Empty(t, tr.SentTo("node-b:9000"))
+	require.Len(t, tr.SentTo("node-c:9000"), 1)
+}
+
+func TestGossipSenderConnectsDynamicPeerBeforeSend(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+
+	sender := NewGossipSender("node-a", nil, tr, store, 30*time.Second).
+		WithPeerProvider(func() []string { return []string{"node-c:9000"} })
+
+	sender.broadcastOnce(context.Background())
+
+	require.True(t, tr.ConnectedTo("node-c:9000"))
+	require.Len(t, tr.SentTo("node-c:9000"), 1)
 }
 
 func TestGossipSender_SkipsBroadcastWhenNoLocalStats(t *testing.T) {
@@ -266,6 +355,113 @@ func TestGossipReceiver_AcceptsMatchingNodeId(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, ok := store.Get("node-b")
 		return ok
+	}, 500*time.Millisecond, 10*time.Millisecond)
+}
+
+func TestGossipReceiverReportsCapabilityEvidenceToGate(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	gate.SetMetaRaftSnapshot(7, raft.Configuration{Servers: []raft.Server{
+		{ID: "node-a", Suffrage: raft.Voter},
+		{ID: "node-b", Suffrage: raft.Voter},
+	}})
+	now := time.Now()
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-a"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: now,
+		Ready:    true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	recv := NewGossipReceiver(tr, store).WithCapabilityGate(gate)
+	go recv.Run(ctx)
+
+	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
+	tr.recv <- &transport.ReceivedMessage{From: "node-b:9000", Message: msg}
+
+	require.Eventually(t, func() bool {
+		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
+		return err == nil
+	}, 500*time.Millisecond, 10*time.Millisecond)
+}
+
+func TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	gate.SetMetaRaftSnapshot(7, raft.Configuration{Servers: []raft.Server{
+		{ID: "10.0.0.1:7001", Suffrage: raft.Voter},
+		{ID: "10.0.0.2:7001", Suffrage: raft.Voter},
+	}})
+	now := time.Now()
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("10.0.0.1:7001"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: now,
+		Ready:    true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	recv := NewGossipReceiver(tr, store).
+		WithCapabilityGate(gate).
+		WithNodeAddressBook(fakeGossipAddressBook{nodes: []MetaNodeEntry{
+			{ID: "node-b", Address: "10.0.0.2:7001"},
+		}})
+	go recv.Run(ctx)
+
+	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
+	tr.recv <- &transport.ReceivedMessage{From: "10.0.0.2:54321", Message: msg}
+
+	require.Eventually(t, func() bool {
+		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
+		return err == nil
+	}, 500*time.Millisecond, 10*time.Millisecond)
+}
+
+func TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	gate.SetMetaRaftSnapshot(7, raft.Configuration{Servers: []raft.Server{
+		{ID: "node-a:7001", Suffrage: raft.Voter},
+		{ID: "node-b:7001", Suffrage: raft.Voter},
+	}})
+	now := time.Now()
+	gate.ReportEvidence(compat.Evidence{
+		NodeID: compat.NodeID("node-a:7001"),
+		Capabilities: map[string]bool{
+			compat.CapabilityNfsExportCreateV1: true,
+		},
+		LastSeen: now,
+		Ready:    true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	recv := NewGossipReceiver(tr, store).
+		WithCapabilityGate(gate).
+		WithNodeAddressBook(fakeGossipAddressBook{nodes: []MetaNodeEntry{
+			{ID: "node-b", Address: "node-b:7001"},
+		}})
+	go recv.Run(ctx)
+
+	msg := statsGossipMsg(NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
+	tr.recv <- &transport.ReceivedMessage{From: "node-b:54321", Message: msg}
+
+	require.Eventually(t, func() bool {
+		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
+		return err == nil
 	}, 500*time.Millisecond, 10*time.Millisecond)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -23,14 +25,20 @@ type ReceiptRoutingCache interface {
 	Update(nodeID string, ids []string)
 }
 
+type CapabilityEvidenceSource interface {
+	CapabilityEvidence(nodeID string, now time.Time) compat.Evidence
+}
+
 // GossipSender broadcasts local node stats to all peers at a configurable interval via StreamAdmin.
 type GossipSender struct {
-	nodeID   string
-	peers    []string
-	tr       transport.Transport
-	store    *NodeStatsStore
-	interval time.Duration
-	logger   zerolog.Logger
+	nodeID         string
+	peers          []string
+	peerProvider   func() []string
+	tr             transport.Transport
+	store          *NodeStatsStore
+	interval       time.Duration
+	logger         zerolog.Logger
+	evidenceSource CapabilityEvidenceSource
 }
 
 // NewGossipSender creates a sender that broadcasts nodeID's stats at the given interval.
@@ -43,6 +51,23 @@ func NewGossipSender(nodeID string, peers []string, tr transport.Transport, stor
 		interval: interval,
 		logger:   log.With().Str("component", "gossip").Logger(),
 	}
+}
+
+func (s *GossipSender) WithCapabilityEvidenceSource(source CapabilityEvidenceSource) *GossipSender {
+	s.evidenceSource = source
+	return s
+}
+
+func (s *GossipSender) WithPeerProvider(provider func() []string) *GossipSender {
+	s.peerProvider = provider
+	return s
+}
+
+func (s *GossipSender) snapshotPeers() []string {
+	if s.peerProvider != nil {
+		return s.peerProvider()
+	}
+	return append([]string(nil), s.peers...)
 }
 
 // Run starts the gossip broadcast loop. Blocks until ctx is cancelled.
@@ -73,19 +98,49 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	}
 	b := flatbuffers.NewBuilder(64)
 	nodeIDOff := b.CreateString(s.nodeID)
+	var capabilitiesVec flatbuffers.UOffsetT
+	if s.evidenceSource != nil {
+		ev := s.evidenceSource.CapabilityEvidence(s.nodeID, time.Now())
+		if ev.Ready && len(ev.Capabilities) > 0 {
+			capabilities := make([]string, 0, len(ev.Capabilities))
+			for capability, ready := range ev.Capabilities {
+				if ready {
+					capabilities = append(capabilities, capability)
+				}
+			}
+			sort.Strings(capabilities)
+			offsets := make([]flatbuffers.UOffsetT, len(capabilities))
+			for i, capability := range capabilities {
+				offsets[i] = b.CreateString(capability)
+			}
+			clusterpb.NodeStatsMsgStartCapabilitiesVector(b, len(offsets))
+			for i := len(offsets) - 1; i >= 0; i-- {
+				b.PrependUOffsetT(offsets[i])
+			}
+			capabilitiesVec = b.EndVector(len(offsets))
+		}
+	}
 	clusterpb.NodeStatsMsgStart(b)
 	clusterpb.NodeStatsMsgAddNodeId(b, nodeIDOff)
 	clusterpb.NodeStatsMsgAddDiskUsedPct(b, stats.DiskUsedPct)
 	clusterpb.NodeStatsMsgAddDiskAvailBytes(b, stats.DiskAvailBytes)
 	clusterpb.NodeStatsMsgAddRequestsPerSec(b, stats.RequestsPerSec)
 	clusterpb.NodeStatsMsgAddJoinedAt(b, joinedAtUnix)
+	if capabilitiesVec != 0 {
+		clusterpb.NodeStatsMsgAddCapabilities(b, capabilitiesVec)
+	}
 	root := clusterpb.NodeStatsMsgEnd(b)
 	b.Finish(root)
 	raw := b.FinishedBytes()
 	payload := make([]byte, len(raw))
 	copy(payload, raw)
 	msg := &transport.Message{Type: transport.StreamAdmin, Payload: payload}
-	for _, peer := range s.peers {
+	for _, peer := range s.snapshotPeers() {
+		if err := s.tr.Connect(ctx, peer); err != nil {
+			s.logger.Warn().Str("peer", peer).Err(err).Msg("gossip: connect failed")
+			metrics.BalancerGossipErrorsTotal.Inc()
+			continue
+		}
 		if err := s.tr.Send(ctx, peer, msg); err != nil {
 			s.logger.Warn().Str("peer", peer).Err(err).Msg("gossip: send failed")
 			metrics.BalancerGossipErrorsTotal.Inc()
@@ -110,7 +165,9 @@ type GossipReceiver struct {
 
 	// receiptCache is set via SetReceiptCache. Stored as atomic.Pointer so
 	// Run can read it without a lock and callers can wire it post-construction.
-	receiptCache atomic.Pointer[ReceiptRoutingCache]
+	receiptCache   atomic.Pointer[ReceiptRoutingCache]
+	capabilityGate atomic.Pointer[CapabilityGate]
+	addrBook       atomic.Pointer[NodeAddressBook]
 }
 
 // NewGossipReceiver creates a receiver backed by the given transport.
@@ -120,6 +177,28 @@ func NewGossipReceiver(tr transport.Transport, store *NodeStatsStore) *GossipRec
 		store:  store,
 		logger: log.With().Str("component", "gossip").Logger(),
 	}
+}
+
+func (r *GossipReceiver) WithCapabilityGate(gate *CapabilityGate) *GossipReceiver {
+	r.SetCapabilityGate(gate)
+	return r
+}
+
+func (r *GossipReceiver) SetCapabilityGate(gate *CapabilityGate) {
+	r.capabilityGate.Store(gate)
+}
+
+func (r *GossipReceiver) WithNodeAddressBook(book NodeAddressBook) *GossipReceiver {
+	r.SetNodeAddressBook(book)
+	return r
+}
+
+func (r *GossipReceiver) SetNodeAddressBook(book NodeAddressBook) {
+	if book == nil {
+		r.addrBook.Store(nil)
+		return
+	}
+	r.addrBook.Store(&book)
 }
 
 // SetReceiptCache wires the receipt routing cache. When set, StreamReceipt
@@ -165,8 +244,9 @@ func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 	if nodeID == "" {
 		return
 	}
+	evidenceNodeID, matches := r.resolveGossipNodeID(nodeID, rm.From)
 	// Verify the claimed NodeId matches the actual sender address to prevent spoofing.
-	if !nodeIDMatchesFrom(nodeID, rm.From) {
+	if !matches {
 		r.logger.Warn().Str("claimed", nodeID).Str("from", rm.From).Msg("gossip: NodeId mismatch, dropping")
 		return
 	}
@@ -181,6 +261,21 @@ func (r *GossipReceiver) handleNodeStats(rm *transport.ReceivedMessage) {
 		RequestsPerSec: pb.RequestsPerSec(),
 		JoinedAt:       joinedAt,
 	})
+	if gate := r.capabilityGate.Load(); gate != nil && pb.CapabilitiesLength() > 0 {
+		capabilities := make(map[string]bool, pb.CapabilitiesLength())
+		for i := 0; i < pb.CapabilitiesLength(); i++ {
+			capability := string(pb.Capabilities(i))
+			if capability != "" {
+				capabilities[capability] = true
+			}
+		}
+		gate.ReportEvidence(compat.Evidence{
+			NodeID:       evidenceNodeID,
+			Capabilities: capabilities,
+			LastSeen:     time.Now(),
+			Ready:        true,
+		})
+	}
 }
 
 func (r *GossipReceiver) handleReceiptGossip(rm *transport.ReceivedMessage) {
@@ -216,6 +311,19 @@ func decodeNodeStatsMsg(data []byte) (msg *clusterpb.NodeStatsMsg, err error) {
 		}
 	}()
 	return clusterpb.GetRootAsNodeStatsMsg(data, 0), nil
+}
+
+func (r *GossipReceiver) resolveGossipNodeID(nodeID, from string) (compat.NodeID, bool) {
+	bookPtr := r.addrBook.Load()
+	if bookPtr != nil {
+		if addr, ok := ResolveNodeAddress(*bookPtr, nodeID); ok {
+			return compat.NodeID(addr), nodeIDMatchesFrom(addr, from)
+		}
+	}
+	if nodeIDMatchesFrom(nodeID, from) {
+		return compat.NodeID(nodeID), true
+	}
+	return compat.NodeID(nodeID), false
 }
 
 // nodeIDMatchesFrom returns true if nodeID corresponds to the connection address from.

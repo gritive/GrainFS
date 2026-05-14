@@ -11,8 +11,10 @@ import (
 
 var ErrPropagationBarrierRequired = errors.New("nfsexport: propagation barrier required")
 var ErrPropagationTimeout = errors.New("nfsexport: propagation timeout")
+var ErrExportExists = errors.New("nfsexport: export already exists")
 
 type Proposer interface {
+	ProposeCreate(ctx context.Context, bucket string, cfg Config) (uint64, error)
 	ProposeUpsert(ctx context.Context, bucket string, cfg Config) (uint64, error)
 	ProposeDelete(ctx context.Context, bucket string) (uint64, error)
 	ProposeBucketDeleteCascade(ctx context.Context, bucket string, force bool) (uint64, error)
@@ -48,6 +50,27 @@ func NewExportService(cfg ServiceConfig) *ExportService {
 		clusterNodeCount: cfg.ClusterNodeCount,
 	}
 	return s
+}
+
+func (s *ExportService) Create(ctx context.Context, bucket string, p UpsertParams) error {
+	if bucket == "" {
+		return fmt.Errorf("bucket is required")
+	}
+	if s.store == nil {
+		return fmt.Errorf("nfsexport: store not configured")
+	}
+	if s.proposer == nil {
+		return fmt.Errorf("nfsexport: proposer not configured")
+	}
+	if err := s.ensurePropagationSupported(); err != nil {
+		return err
+	}
+	cfg := Config{ReadOnly: p.ReadOnly}
+	idx, err := s.proposer.ProposeCreate(ctx, bucket, cfg)
+	if err != nil {
+		return err
+	}
+	return s.waitApplied(ctx, idx)
 }
 
 func (s *ExportService) Upsert(ctx context.Context, bucket string, p UpsertParams) error {
