@@ -92,6 +92,7 @@ func refreshCapabilityGate(state *bootState) {
 	if state == nil || state.capabilityGate == nil || state.metaRaft == nil {
 		return
 	}
+	state.capabilityGate.SetTTL(capabilityEvidenceTTL(state))
 	state.capabilityGate.SetMetaRaftSnapshot(state.metaRaft.Node().CommittedIndex(), state.metaRaft.Node().Configuration())
 	state.capabilityGate.ReportEvidence(state.metaRaft.FSM().CapabilityEvidence(state.metaRaft.Node().ID(), time.Now()))
 }

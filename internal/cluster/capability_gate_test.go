@@ -52,6 +52,27 @@ func TestCapabilityGateRejectsStaleEvidence(t *testing.T) {
 	require.Equal(t, compat.NodeID("node-1"), plan.Stale[0].NodeID)
 }
 
+func TestCapabilityGateSetTTLExtendsStaleWindow(t *testing.T) {
+	g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
+	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}}
+	seenAt := time.Unix(10, 0)
+	g.SetMetaRaftSnapshot(9, cfg)
+	g.ReportEvidence(compat.Evidence{
+		NodeID:       "node-1",
+		Capabilities: map[string]bool{compat.CapabilityMigrationCutoverV1: true},
+		LastSeen:     seenAt,
+		Ready:        true,
+	})
+
+	_, err := g.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, compat.OperationMigrationCutover, seenAt.Add(20*time.Second))
+	require.Error(t, err)
+
+	g.SetTTL(30 * time.Second)
+	plan, err := g.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, compat.OperationMigrationCutover, seenAt.Add(20*time.Second))
+	require.NoError(t, err)
+	require.True(t, plan.Allowed())
+}
+
 func TestCapabilityGateAllowsReadyFreshMembers(t *testing.T) {
 	g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
 	now := time.Unix(10, 0)

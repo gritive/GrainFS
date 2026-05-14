@@ -38,6 +38,15 @@ func (g *CapabilityGate) SetMetaRaftSnapshot(_ uint64, cfg raft.Configuration) {
 	g.config = cfg
 }
 
+func (g *CapabilityGate) SetTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ttl = ttl
+}
+
 func (g *CapabilityGate) ReportEvidence(ev compat.Evidence) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
