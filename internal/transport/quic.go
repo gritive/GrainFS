@@ -641,11 +641,7 @@ func (t *QUICTransport) doCapabilityExchangeDial(ctx context.Context, conn *quic
 
 	stream, err := conn.OpenStreamSync(ceCtx)
 	if err != nil {
-		reason := ceReasonIOError
-		if isDeadlineErr(err) {
-			reason = ceReasonTimeout
-		}
-		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(reason)).Inc()
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(ioOrTimeoutReason(err))).Inc()
 		return fmt.Errorf("open CE stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
@@ -658,17 +654,13 @@ func (t *QUICTransport) doCapabilityExchangeDial(ctx context.Context, conn *quic
 		Type:    StreamCapabilityExchange,
 		Payload: []byte{ceVersion, ceFeatures},
 	}); err != nil {
-		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(ceReasonIOError)).Inc()
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(ioOrTimeoutReason(err))).Inc()
 		return fmt.Errorf("encode CE: %w", err)
 	}
 
 	resp, err := t.codec.Decode(stream)
 	if err != nil {
-		reason := ceReasonIOError
-		if isDeadlineErr(err) {
-			reason = ceReasonTimeout
-		}
-		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(reason)).Inc()
+		metrics.TransportCECounter.WithLabelValues("dialer", "failure", string(ioOrTimeoutReason(err))).Inc()
 		return fmt.Errorf("decode CE response: %w", err)
 	}
 	if resp.Status != StatusOK {
@@ -703,6 +695,15 @@ func isDeadlineErr(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
+// ioOrTimeoutReason returns ceReasonTimeout if err looks like a deadline/timeout,
+// ceReasonIOError otherwise.
+func ioOrTimeoutReason(err error) ceFailReason {
+	if isDeadlineErr(err) {
+		return ceReasonTimeout
+	}
+	return ceReasonIOError
+}
+
 // handleCapabilityExchange performs the server-side capability exchange on an
 // accepted mux connection. Must return nil before handing conn to muxHandler.
 func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
@@ -711,11 +712,7 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
-		reason := ceReasonIOError
-		if isDeadlineErr(err) {
-			reason = ceReasonTimeout
-		}
-		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(reason)).Inc()
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ioOrTimeoutReason(err))).Inc()
 		return fmt.Errorf("accept CE stream: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
@@ -726,11 +723,7 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 
 	msg, err := t.codec.Decode(stream)
 	if err != nil {
-		reason := ceReasonIOError
-		if isDeadlineErr(err) {
-			reason = ceReasonTimeout
-		}
-		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(reason)).Inc()
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ioOrTimeoutReason(err))).Inc()
 		return fmt.Errorf("decode CE: %w", err)
 	}
 	if msg.Type != StreamCapabilityExchange {
@@ -757,8 +750,12 @@ func (t *QUICTransport) handleCapabilityExchange(conn *quic.Conn) error {
 		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonFeatureUnsup)).Inc()
 		return fmt.Errorf("CE unsupported feature bits 0x%02x", msg.Payload[1])
 	}
+	if err := t.codec.Encode(stream, NewResponse(msg, []byte{ceVersion, ceFeatures})); err != nil {
+		metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonIOError)).Inc()
+		return err
+	}
 	metrics.TransportCECounter.WithLabelValues("acceptor", "success", "").Inc()
-	return t.codec.Encode(stream, NewResponse(msg, []byte{ceVersion, ceFeatures}))
+	return nil
 }
 
 // GetOrConnectMux dials (or returns the cached) mux QUIC connection for addr.

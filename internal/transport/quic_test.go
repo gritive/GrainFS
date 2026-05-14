@@ -915,11 +915,9 @@ func TestCE_Counter_EmitsOnFailure(t *testing.T) {
 	}))
 	_, _ = codec.Decode(stream)
 
-	time.Sleep(300 * time.Millisecond) // let the server goroutine emit the metric
-
-	assert.Equal(t, acceptorBefore+1,
-		testutil.ToFloat64(metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonVersionMismatch))),
-		"acceptor version_mismatch failure counter must increment by 1")
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.TransportCECounter.WithLabelValues("acceptor", "failure", string(ceReasonVersionMismatch))) == acceptorBefore+1
+	}, 2*time.Second, 10*time.Millisecond, "acceptor version_mismatch failure counter must increment by 1")
 }
 
 // TestCE_FeatureBit_Unsupported_Rejected verifies that a peer sending a
