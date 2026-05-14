@@ -10,6 +10,7 @@ import (
 )
 
 var ErrPropagationBarrierRequired = errors.New("nfsexport: propagation barrier required")
+var ErrPropagationTimeout = errors.New("nfsexport: propagation timeout")
 
 type Proposer interface {
 	ProposeUpsert(ctx context.Context, bucket string, cfg Config) (uint64, error)
@@ -162,7 +163,7 @@ func (s *ExportService) waitApplied(ctx context.Context, index uint64) error {
 	}
 	start := time.Now()
 	if err := s.barrier.WaitApplied(ctx, index); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrPropagationTimeout, err)
 	}
 	metrics.NFSExportPropagationSeconds.Observe(time.Since(start).Seconds())
 	return nil

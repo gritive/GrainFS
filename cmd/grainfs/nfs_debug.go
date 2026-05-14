@@ -20,7 +20,9 @@ func nfsDebugCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := client.ExportDebug(cmd.Context(), args[0])
+			ctx, cancel := applyAdminTimeout(cmd.Context(), cmd)
+			defer cancel()
+			resp, err := client.ExportDebug(ctx, args[0])
 			if err != nil {
 				if !nfsJSONOut(cmd) {
 					nfsadmin.RenderError(cmd.ErrOrStderr(), err)
@@ -63,7 +65,11 @@ func renderExportDebug(w io.Writer, d nfsadmin.ExportDebugResp) error {
 			return err
 		}
 	}
-	if len(d.ActiveMountClients) == 0 {
+	if d.ActiveMountClients == nil {
+		if _, err := fmt.Fprintln(w, "Clients: tracking not enabled"); err != nil {
+			return err
+		}
+	} else if len(d.ActiveMountClients) == 0 {
 		if _, err := fmt.Fprintln(w, "Clients: none tracked"); err != nil {
 			return err
 		}

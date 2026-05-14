@@ -191,6 +191,12 @@ func NewExportNotFound(bucket string) *Error {
 		WithHelp("List existing exports with 'grainfs nfs export list'.").
 		WithDocs("https://github.com/gritive/GrainFS/docs/nfs-export-lifecycle.md#export-not-found")
 }
+func NewExportPropagationTimeout(bucket string) *Error {
+	return (&Error{Code: "export_propagation_timeout", Message: "NFS export '" + bucket + "' did not propagate before the admin timeout"}).
+		WithParam("bucket").
+		WithHelp("Check cluster health and retry with a longer --timeout if nodes are healthy.").
+		WithDocs("https://github.com/gritive/GrainFS/docs/nfs-export-lifecycle.md#propagation-timeout")
+}
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq
 type WriteAtVolumeResp = adminapi.WriteAtVolumeResp

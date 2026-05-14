@@ -91,6 +91,9 @@ func AdminNfsExportUpsert(ctx context.Context, d *Deps, req NfsExportUpsertReq) 
 		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
 			return NfsExportInfo{}, NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
 		}
+		if errors.Is(err, nfsexport.ErrPropagationTimeout) {
+			return NfsExportInfo{}, NewExportPropagationTimeout(req.Bucket)
+		}
 		return NfsExportInfo{}, NewInternal("upsert NFS export: " + err.Error())
 	}
 	info, _ := d.NfsExports.Get(req.Bucket)
@@ -107,6 +110,9 @@ func AdminNfsExportUpdate(ctx context.Context, d *Deps, bucket string, req NfsEx
 	if err := d.NfsExports.Upsert(ctx, bucket, NfsExportUpsertParams{ReadOnly: req.ReadOnly}); err != nil {
 		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
 			return NfsExportInfo{}, NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
+		}
+		if errors.Is(err, nfsexport.ErrPropagationTimeout) {
+			return NfsExportInfo{}, NewExportPropagationTimeout(bucket)
 		}
 		return NfsExportInfo{}, NewInternal("update NFS export: " + err.Error())
 	}
@@ -140,6 +146,9 @@ func AdminNfsExportDelete(ctx context.Context, d *Deps, bucket string) error {
 		if errors.Is(err, nfsexport.ErrPropagationBarrierRequired) {
 			return NewUnsupported("NFS export changes require propagation support in multi-node clusters", nil)
 		}
+		if errors.Is(err, nfsexport.ErrPropagationTimeout) {
+			return NewExportPropagationTimeout(bucket)
+		}
 		return NewInternal("delete NFS export: " + err.Error())
 	}
 	return nil
@@ -148,6 +157,9 @@ func AdminNfsExportDelete(ctx context.Context, d *Deps, bucket string) error {
 func AdminNfsExportDebug(ctx context.Context, d *Deps, bucket string) (ExportDebugResp, error) {
 	if d.NfsExports == nil {
 		return ExportDebugResp{}, NewUnsupported("NFS export admin not configured on this node", nil)
+	}
+	if storage.IsInternalBucket(bucket) {
+		return ExportDebugResp{}, NewForbidden("cannot inspect internal bucket")
 	}
 	resp := ExportDebugResp{Bucket: bucket}
 	if info, ok := d.NfsExports.Get(bucket); ok {
@@ -168,10 +180,6 @@ func AdminNfsExportDebug(ctx context.Context, d *Deps, bucket string) (ExportDeb
 	if d.NFSDiag != nil {
 		resp.RecentLookups = exportDebugLookups(d.NFSDiag.RecentLookups(bucket, time.Minute))
 		resp.ActiveMountClients = d.NFSDiag.ActiveMountClients(bucket)
-	}
-	if d.NodeID != "" && resp.Registered {
-		resp.Propagation.AppliedNodes = []string{d.NodeID}
-		resp.Propagation.TotalNodes = 1
 	}
 	return resp, nil
 }

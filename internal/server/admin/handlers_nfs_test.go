@@ -44,11 +44,14 @@ func (p *fakeNfsExportProposer) ProposeBucketDeleteCascade(_ context.Context, bu
 	return 1, p.store.Delete(bucket)
 }
 
-type recordingNfsBarrier struct{ indexes []uint64 }
+type recordingNfsBarrier struct {
+	indexes []uint64
+	err     error
+}
 
 func (b *recordingNfsBarrier) WaitApplied(_ context.Context, index uint64) error {
 	b.indexes = append(b.indexes, index)
-	return nil
+	return b.err
 }
 
 type fakeNFSDiag struct {
@@ -141,9 +144,40 @@ func TestAdminNfsExportDebug_Registered(t *testing.T) {
 	require.True(t, resp.Registered)
 	require.True(t, resp.BackendBucket.Exists)
 	require.EqualValues(t, 1234, resp.BackendBucket.ObjectCount)
-	require.Equal(t, []string{"node-a"}, resp.Propagation.AppliedNodes)
 	require.Equal(t, []string{"10.0.0.5:2049"}, resp.ActiveMountClients)
 	require.Len(t, resp.RecentLookups, 1)
+}
+
+func TestAdminNfsExportDebugRejectsInternalBucket(t *testing.T) {
+	d, _ := newAdminTestDepsWithNfs(t)
+	_, err := admin.AdminNfsExportDebug(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "forbidden", ae.Code)
+}
+
+func TestAdminNfsExportUpsertPropagationTimeout(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	buckets := newFakeBucketOps()
+	buckets.buckets["b1"] = true
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: &fakeNfsExportProposer{store: store},
+		Barrier:  &recordingNfsBarrier{err: context.DeadlineExceeded},
+	})
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "export_propagation_timeout", ae.Code)
 }
 
 func TestAdminNfsExportUpsertValidation(t *testing.T) {

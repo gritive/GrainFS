@@ -1,7 +1,9 @@
 package serveruntime
 
 import (
+	"errors"
 	"fmt"
+	"net"
 
 	"github.com/rs/zerolog/log"
 
@@ -27,7 +29,11 @@ func (n *NodeServices) Close() {
 			log.Warn().Err(err).Msg("nbd server close error")
 		}
 	}
-	// nfs4Srv exposes no Close; relies on context cancellation.
+	if n.nfs4Srv != nil {
+		if err := n.nfs4Srv.Close(); err != nil {
+			log.Warn().Err(err).Msg("nfs4 server close error")
+		}
+	}
 }
 
 // NFS4 returns the started NFSv4 server, or nil when NFS4 was not enabled
@@ -54,6 +60,9 @@ func StartNodeServices(backend storage.Backend,
 		go func() {
 			nfs4Addr := fmt.Sprintf(":%d", nfs4Port)
 			if err := svc.nfs4Srv.ListenAndServe(nfs4Addr); err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				log.Error().Err(err).Msg("nfs4 server error")
 			}
 		}()
