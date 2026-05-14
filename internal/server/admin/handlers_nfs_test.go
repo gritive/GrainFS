@@ -1,7 +1,11 @@
 package admin_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"path/filepath"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -61,6 +65,43 @@ func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
 		Buckets:    buckets,
 		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
 	}, buckets
+}
+
+func startAdminNfsHTTP(t *testing.T) (*http.Client, string) {
+	t.Helper()
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "admin.sock")
+	deps, _ := newAdminTestDepsWithNfs(t)
+	srv, err := admin.Start(admin.Config{SocketPath: sock, Deps: deps})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	return unixHTTPClient(sock), "http://unix"
+}
+
+func TestExportAdd_BucketNotFound_Returns404(t *testing.T) {
+	client, baseURL := startAdminNfsHTTP(t)
+	resp, err := client.Post(baseURL+"/v1/nfs/exports", "application/json", bytes.NewBufferString(`{"bucket":"missing"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "must be 404 NOT FOUND, not 500")
+	var e adminapi.Error
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&e))
+	require.Equal(t, "bucket_not_found", e.Code)
+	require.NotEmpty(t, e.Help)
+	require.NotEmpty(t, e.DocsURL)
+}
+
+func TestExportGet_NotFound_Returns404(t *testing.T) {
+	client, baseURL := startAdminNfsHTTP(t)
+	resp, err := client.Get(baseURL + "/v1/nfs/exports/missing")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "must be 404 NOT FOUND, not 500")
+	var e adminapi.Error
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&e))
+	require.Equal(t, "export_not_found", e.Code)
 }
 
 func TestAdminNfsExportUpsertValidation(t *testing.T) {

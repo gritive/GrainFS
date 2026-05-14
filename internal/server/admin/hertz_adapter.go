@@ -402,7 +402,11 @@ func statusForCode(c string) int {
 	switch c {
 	case "not_found":
 		return consts.StatusNotFound
+	case "bucket_not_found", "export_not_found":
+		return consts.StatusNotFound
 	case "conflict":
+		return consts.StatusConflict
+	case "export_already_exists":
 		return consts.StatusConflict
 	case "invalid":
 		return consts.StatusBadRequest
@@ -414,6 +418,8 @@ func statusForCode(c string) int {
 		return consts.StatusForbidden
 	case "retry":
 		return consts.StatusServiceUnavailable
+	case "export_propagation_timeout":
+		return consts.StatusGatewayTimeout
 	default:
 		return consts.StatusInternalServerError
 	}
