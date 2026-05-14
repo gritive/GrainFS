@@ -381,13 +381,8 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 
 	data, _ := xml.Marshal(result)
 	if s.auditEmitter != nil {
-		nodeID := ""
-		if s.cluster != nil {
-			nodeID = s.cluster.NodeID()
-		}
 		s.auditEmitter.EmitS3(audit.S3Event{
 			Ts:       time.Now().UnixMicro(),
-			NodeID:   nodeID,
 			SAID:     iam.PrincipalFromContext(ctx),
 			SourceIP: c.ClientIP(),
 			Method:   "LIST",
@@ -471,13 +466,8 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 
 	s.mutations.OnObjectWrite(ctx, bucket, key, result)
 	if s.auditEmitter != nil {
-		nodeID := ""
-		if s.cluster != nil {
-			nodeID = s.cluster.NodeID()
-		}
 		s.auditEmitter.EmitS3(audit.S3Event{
 			Ts:        start.UnixMicro(),
-			NodeID:    nodeID,
 			SAID:      iam.PrincipalFromContext(ctx),
 			SourceIP:  c.ClientIP(),
 			Method:    "PUT",
@@ -643,13 +633,8 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	}
 
 	if s.auditEmitter != nil {
-		nodeID := ""
-		if s.cluster != nil {
-			nodeID = s.cluster.NodeID()
-		}
 		s.auditEmitter.EmitS3(audit.S3Event{
 			Ts:        start.UnixMicro(),
-			NodeID:    nodeID,
 			SAID:      iam.PrincipalFromContext(ctx),
 			SourceIP:  c.ClientIP(),
 			Method:    "GET",
@@ -1056,13 +1041,8 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	}
 	s.mutations.OnObjectDelete(ctx, bucket, key, result)
 	if s.auditEmitter != nil {
-		nodeID := ""
-		if s.cluster != nil {
-			nodeID = s.cluster.NodeID()
-		}
 		s.auditEmitter.EmitS3(audit.S3Event{
 			Ts:        time.Now().UnixMicro(),
-			NodeID:    nodeID,
 			SAID:      iam.PrincipalFromContext(ctx),
 			SourceIP:  c.ClientIP(),
 			Method:    "DELETE",
