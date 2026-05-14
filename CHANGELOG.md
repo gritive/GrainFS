@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.206.1] - 2026-05-15 — fix: NFS cluster benchmark reliability
+
+### Fixed
+
+- **NFS cluster benchmark startup** — localhost multi-node benchmark runs now use raft addresses as node IDs, so capability gossip accepts each node and export creation can proceed.
+- **NFS cluster fio setup** — clustered NFS fio workloads now disable preallocation, matching the single-node NFS benchmark and avoiding long pre-layout stalls.
+
+### Verification
+
+- `bash -n benchmarks/bench_nfs_cluster_profile.sh`
+- `git diff --check`
+- `go test ./internal/storage ./internal/cluster -run 'TestInternalETag|TestVerifyETag|Test.*ETag|Test.*SingleLocal|TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID|TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch|TestNodeIDMatchesFrom'`
+- `NODE_COUNT=3 FIO_RUNTIME=3 FIO_STREAM_SIZE=4m FIO_STREAM_JOBS=1 FIO_RAND_SIZE=1m FIO_RAND_JOBS=1 CPU_PROFILE_SECONDS=8 CLUSTER_WARMUP_SLEEP=1 ./benchmarks/bench_nfs_cluster_profile.sh ./bin/grainfs`
+
 ## [0.0.206.0] - 2026-05-15 — feat: write metadata snapshots with zstd
 
 ### Added
