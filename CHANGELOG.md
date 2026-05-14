@@ -19,6 +19,7 @@
 - **배치 캡** — follower drain 루프 최대 65536 이벤트로 제한; `DecodeS3Batch` count > 65536 거부로 OOM 방어.
 - **오해 유발 로그** — commit 실패 시 "events retained in zerolog" → "events in this batch are dropped" 수정.
 - **부트스트랩 에러 레벨** — 감사 부트스트랩 에러 `Debug` → `Warn` 격상.
+- **snapshot retain 경쟁 조건** — `AutoSnapshotter.takeAndPrune()`이 스냅샷 생성 전 (retain-1)개로 먼저 prune하여 순간적으로 retain 한도를 초과하는 문제 수정; 생성 후 재-prune으로 생성 중 retain 감소 케이스도 처리.
 
 ## [0.0.196.0] - 2026-05-14 — feat: 9P read-write support
 
