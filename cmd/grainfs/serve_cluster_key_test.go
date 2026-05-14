@@ -19,7 +19,6 @@ func newServeTestCmd(clusterKey string) *cobra.Command {
 	cmd.Flags().Int("nfs-port", 0, "")
 	cmd.Flags().Int("nfs4-port", 0, "")
 	cmd.Flags().Int("nbd-port", 0, "")
-	cmd.Flags().Bool("no-encryption", true, "")
 	cmd.Flags().String("encryption-key-file", "", "")
 	cmd.Flags().String("upstream", "", "")
 	cmd.Flags().Bool("heal-receipt-enabled", false, "")

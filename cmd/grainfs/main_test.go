@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -27,4 +28,13 @@ func TestEffectiveLogLevelFlagOverridesEnv(t *testing.T) {
 	require.NoError(t, cmd.PersistentFlags().Set("log-level", "warn"))
 
 	require.Equal(t, "warn", effectiveLogLevel(cmd))
+}
+
+func TestServeHelpDoesNotExposeNoEncryption(t *testing.T) {
+	buf := new(bytes.Buffer)
+	serveCmd.SetOut(buf)
+	serveCmd.SetErr(buf)
+
+	require.NoError(t, serveCmd.Help())
+	require.NotContains(t, buf.String(), "--no-encryption")
 }
