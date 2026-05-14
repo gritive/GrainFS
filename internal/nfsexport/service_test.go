@@ -189,3 +189,16 @@ func TestExportServiceWrapsPropagationBarrierError(t *testing.T) {
 	require.ErrorIs(t, err, ErrPropagationTimeout)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+func TestExportServicePreservesNonTimeoutPropagationBarrierError(t *testing.T) {
+	db, store := openTestStore(t, t.TempDir())
+	defer db.Close()
+	p := &indexedFakeProposer{store: store, fsidMajor: 7}
+	want := errors.New("apply loop stopped")
+	barrier := &recordingBarrier{err: want}
+	svc := NewExportService(ServiceConfig{Store: store, Proposer: p, Barrier: barrier})
+
+	err := svc.Upsert(context.Background(), "b1", UpsertParams{})
+	require.ErrorIs(t, err, want)
+	require.NotErrorIs(t, err, ErrPropagationTimeout)
+}

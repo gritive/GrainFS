@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -154,6 +155,36 @@ func TestAdminNfsExportDebugRejectsInternalBucket(t *testing.T) {
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
 	require.Equal(t, "forbidden", ae.Code)
+}
+
+type nfsDebugBucketHeadError struct{ *fakeBucketOps }
+
+func (f nfsDebugBucketHeadError) HeadBucket(context.Context, string) error {
+	return errors.New("badger unavailable")
+}
+
+type nfsDebugBucketCountError struct{ *fakeBucketOps }
+
+func (f nfsDebugBucketCountError) CountObjects(context.Context, string) (int64, error) {
+	return 0, errors.New("badger unavailable")
+}
+
+func TestAdminNfsExportDebugSurfacesBackendErrors(t *testing.T) {
+	d, buckets := newAdminTestDepsWithNfs(t)
+	buckets.buckets["my-data"] = true
+
+	d.Buckets = nfsDebugBucketHeadError{fakeBucketOps: buckets}
+	_, err := admin.AdminNfsExportDebug(context.Background(), d, "my-data")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "internal", ae.Code)
+	require.Contains(t, ae.Message, "head bucket")
+
+	d.Buckets = nfsDebugBucketCountError{fakeBucketOps: buckets}
+	_, err = admin.AdminNfsExportDebug(context.Background(), d, "my-data")
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "internal", ae.Code)
+	require.Contains(t, ae.Message, "count objects")
 }
 
 func TestAdminNfsExportUpsertPropagationTimeout(t *testing.T) {

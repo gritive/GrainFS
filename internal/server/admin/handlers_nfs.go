@@ -172,9 +172,13 @@ func AdminNfsExportDebug(ctx context.Context, d *Deps, bucket string) (ExportDeb
 	if d.Buckets != nil {
 		if err := d.Buckets.HeadBucket(ctx, bucket); err == nil {
 			resp.BackendBucket.Exists = true
-			if count, err := d.Buckets.CountObjects(ctx, bucket); err == nil {
-				resp.BackendBucket.ObjectCount = count
+			count, err := d.Buckets.CountObjects(ctx, bucket)
+			if err != nil {
+				return ExportDebugResp{}, NewInternal("count objects: " + err.Error())
 			}
+			resp.BackendBucket.ObjectCount = count
+		} else if !errors.Is(err, storage.ErrBucketNotFound) {
+			return ExportDebugResp{}, NewInternal("head bucket: " + err.Error())
 		}
 	}
 	if d.NFSDiag != nil {

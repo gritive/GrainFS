@@ -163,7 +163,10 @@ func (s *ExportService) waitApplied(ctx context.Context, index uint64) error {
 	}
 	start := time.Now()
 	if err := s.barrier.WaitApplied(ctx, index); err != nil {
-		return fmt.Errorf("%w: %w", ErrPropagationTimeout, err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return fmt.Errorf("%w: %w", ErrPropagationTimeout, err)
+		}
+		return err
 	}
 	metrics.NFSExportPropagationSeconds.Observe(time.Since(start).Seconds())
 	return nil
