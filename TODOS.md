@@ -6,10 +6,10 @@
 
 ### Audit Log Lake — Phase 2 (Task 4)
 
-- [ ] **`--audit-iceberg` 플래그** — `cmd/grainfs/serve.go` + `serveruntime.Config.AuditIceberg`. `boot_phases_srvopts.go`에서 Emitter + Committer 생성 및 wiring (`grainfs-audit` 버킷 bootstrap 포함).
-- [ ] **Prometheus metrics** — `internal/audit/metrics.go`: `audit_drops_total`, `audit_commit_lag_seconds`, `audit_committer_state` 3개 메트릭.
-- [ ] **E2E 테스트** — `tests/e2e/iceberg_duckdb_test.go`에 `TestAuditIcebergClusterDuckDB` 추가.
-- [ ] **`docs/audit-iceberg.md`** — Quick Start 3줄 + 파라미터 레퍼런스.
+- [x] **`--audit-iceberg` 플래그** — `cmd/grainfs/serve.go` + `serveruntime.Config.AuditIceberg`. `boot_phases_srvopts.go`에서 Emitter + Committer 생성 및 wiring (`grainfs-audit` 버킷 bootstrap 포함).
+- [x] **Prometheus metrics** — `internal/audit/metrics.go`: `audit_drops_total`, `audit_commit_lag_seconds`, `audit_committer_state` 3개 메트릭.
+- [x] **E2E 테스트** — `tests/e2e/iceberg_duckdb_test.go`에 `TestAuditIcebergClusterDuckDB` 추가.
+- [x] **`docs/audit-iceberg.md`** — Quick Start 3줄 + 파라미터 레퍼런스.
 - [ ] **Audit Iceberg `day(ts)` partition 재도입** — 현재 `audit.s3` Iceberg table은 DuckDB 호환성을 위해 unpartitioned로 유지하고, 물리 경로만 `data/YYYY-MM-DD/*.parquet`로 날짜별 정리한다. 후속에서 hidden partition `day(ts)`를 되살리려면 manifest partition tuple/field summary encoding, metadata partition spec, DuckDB single/cluster/follower-ship SELECT e2e, 빠른 artifact contract test를 먼저 추가/갱신한다.
 
 ### Bucket & IAM CLI DX
