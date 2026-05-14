@@ -3,14 +3,16 @@
 ## Commands
 
 ```bash
-make build              # bin/grainfs 빌드
-make test               # unit 테스트 (tests/e2e 제외)
-make test-race          # race detector 포함
-make test-e2e           # E2E (binary 필요, 자동 빌드)
-make test-nbd-colima    # NBD 테스트 (colima VM)
-make test-nfs4-colima   # NFSv4 테스트 (colima VM)
-make lint               # golangci-lint
-make fbs                # FlatBuffers (.fbs → .go) 재생성
+make build               # bin/grainfs 빌드
+make test-unit           # unit 테스트만 (colima/e2e 제외)
+make test                # test-unit + test-colima (colima VM 필요)
+make test-race           # race detector 포함
+make test-e2e            # E2E (binary 필요, 자동 빌드)
+make test-nbd-colima     # NBD 테스트 (colima VM)
+make test-nfs4-colima    # NFSv4 테스트 (colima VM)
+make test-fuse-s3-colima # FUSE/S3 테스트 (colima VM)
+make lint                # golangci-lint
+make fbs                 # FlatBuffers (.fbs → .go) 재생성
 ```
 
 Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
@@ -32,7 +34,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + NFSv4 + NBD + Web UI를 하나로 제공
 - 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(QUIC/Raft)
-- internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, s3auth, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot
+- internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### 보안 규칙
@@ -70,6 +72,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - CONTEXT.md: 도메인 용어/현재 상태 (루트, 13KB)
 - ROADMAP.md: 개발 로드맵 및 Phase별 기능 정의
 - README.md: Quick Start 및 CLI 옵션
+- CHANGELOG.md: 버전별 변경 기록 (`VERSION` 파일과 함께 릴리스 source of truth)
 - docs/adr/: 아키텍처 결정 기록
 - docs/recover-cluster.md: RecoverCluster offline 재해 복구 절차
 - docs/RUNBOOK.md, docs/DRILL_MANUAL.md, docs/SLI_SLO.md: 운영/드릴/SLO 문서
@@ -80,89 +83,8 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - `tests/nbd_colima/`, `tests/nfs4_colima/`, `tests/fuse_s3_colima/`: colima VM, 빌드 태그 `colima` 필수
 - NBD 테스트는 colima VM에서 실행
 
-## Coding Behavior Guidelines
+## Tasks
 
-Behavioral guidelines to reduce common LLM coding mistakes.
+이 프로젝트의 태스크 파일은 `TODOS.md` (루트 디렉토리)입니다.
 
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-### 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-### 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-### 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-### 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
-> **Note:** 이 프로젝트의 태스크 파일은 `TODOS.md` (루트 디렉토리)입니다.
-
----
-
-## Skill routing
-
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint → invoke context-save
-- Resume, restore → invoke context-restore
-- Code quality, health check → invoke health
+> Coding Behavior Guidelines와 Skill routing은 글로벌 `~/.claude/CLAUDE.md`에서 상속받습니다.

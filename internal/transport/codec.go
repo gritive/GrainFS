@@ -64,6 +64,32 @@ func (c *BinaryCodec) EncodeWriterTo(w io.Writer, fw *FlatBuffersWriter) error {
 	return nil
 }
 
+// DecodeCapped reads a framed message from r, rejecting payloads larger than
+// maxPayload bytes before allocating. Use this for fixed-size protocol frames
+// (e.g. CE handshake) to bound per-connection memory use.
+func (c *BinaryCodec) DecodeCapped(r io.Reader, maxPayload uint32) (*Message, error) {
+	header := [headerSize]byte{}
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return nil, fmt.Errorf("read header: %w", err)
+	}
+
+	streamType := StreamType(header[0])
+	id := binary.BigEndian.Uint64(header[1:9])
+	status := MessageStatus(header[9])
+	payloadLen := binary.BigEndian.Uint32(header[10:])
+
+	if payloadLen > maxPayload {
+		return nil, fmt.Errorf("payload size %d exceeds cap %d", payloadLen, maxPayload)
+	}
+
+	payload := make([]byte, payloadLen)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, fmt.Errorf("read payload: %w", err)
+	}
+
+	return &Message{Type: streamType, ID: id, Status: status, Payload: payload}, nil
+}
+
 // Decode reads a framed message from r.
 func (c *BinaryCodec) Decode(r io.Reader) (*Message, error) {
 	header := [headerSize]byte{}
