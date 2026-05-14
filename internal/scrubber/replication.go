@@ -2,8 +2,6 @@ package scrubber
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -89,9 +87,9 @@ type ReplicaRepairer interface {
 // (LocalBackend vs DistributedBackend differ).
 type LocalOpener func(bucket, key string) (io.ReadCloser, error)
 
-// ReplicationVerifier MD5s the local copy of each replicated object and
-// compares against the expected ETag. Repair delegates to the cluster-side
-// ReplicaRepairer.
+// ReplicationVerifier verifies the local copy of each replicated object against
+// the stored ETag. Algorithm is selected by ETag length: 32=MD5, 16=xxhash3.
+// Repair delegates to the cluster-side ReplicaRepairer.
 type ReplicationVerifier struct {
 	open     LocalOpener
 	repairer ReplicaRepairer
@@ -119,13 +117,12 @@ func (v *ReplicationVerifier) Verify(ctx context.Context, b Block) (BlockStatus,
 		return BlockStatus{}, fmt.Errorf("open local: %w", err)
 	}
 	defer rc.Close()
-	h := md5.New()
-	if _, err := io.Copy(h, rc); err != nil {
-		return BlockStatus{}, fmt.Errorf("md5 local: %w", err)
+	match, err := storage.VerifyETag(rc, b.ExpectedETag)
+	if err != nil {
+		return BlockStatus{}, fmt.Errorf("verify etag local: %w", err)
 	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if got != b.ExpectedETag {
-		return BlockStatus{Corrupt: true, Detail: fmt.Sprintf("md5 %s != etag %s", got, b.ExpectedETag)}, nil
+	if !match {
+		return BlockStatus{Corrupt: true, Detail: fmt.Sprintf("etag mismatch: expected %s", b.ExpectedETag)}, nil
 	}
 	return BlockStatus{Healthy: true}, nil
 }

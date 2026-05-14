@@ -2,8 +2,6 @@ package scrubber
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,7 +102,7 @@ func TestReplicationVerifier_HealthyCorruptMissing(t *testing.T) {
 	require.Equal(t, []string{target.Bucket + "/" + target.Key}, rep.calls)
 }
 
-func TestReplicationVerifier_ETagIsObjectMD5(t *testing.T) {
+func TestReplicationVerifier_ETagIsObjectXXH3(t *testing.T) {
 	b, root := setupBackend(t)
 	bucket := "__grainfs_volumes"
 	key := "__vol/v1/blk_000000000000"
@@ -121,9 +119,8 @@ func TestReplicationVerifier_ETagIsObjectMD5(t *testing.T) {
 
 	data, err := os.ReadFile(filepath.Join(root, "data", bucket, key))
 	require.NoError(t, err)
-	h := md5.Sum(data)
-	require.Equal(t, hex.EncodeToString(h[:]), got.ExpectedETag,
-		"expected ETag = MD5(local file). If this fails the storage layer regressed the oracle.")
+	require.Equal(t, storage.InternalETag(data), got.ExpectedETag,
+		"expected ETag = xxhash3(local file). Internal buckets use xxhash3 oracle.")
 }
 
 type fakeRepairer struct{ calls []string }
