@@ -17,6 +17,19 @@
 - **Rolling-upgrade forwarding** — gated meta-Raft forwarding preserves legacy raw migration cutovers while rejecting raw gated NFS create commands.
 - **Capability gossip delivery** — capability evidence survives the QUIC stream catch-all path, records evidence under raft member addresses, and refreshes gate TTL from replayed cluster gossip settings.
 
+## [0.0.203.0] - 2026-05-15 — feat: snapshot format compatibility header
+
+### Added
+
+- **Snapshot format envelope** — newly written metadata snapshots now carry a `GFSNAP01` header with reader and writer format integers before the existing gzip JSON payload.
+- **Forward-format restore guard** — restore rejects future snapshot envelopes before mutating backend state, and the admin restore API reports unsupported formats as `409 Conflict`.
+- **Snapshot compatibility coverage** — tests cover header round-trips, legacy gzip-only snapshots, future-format rejection before backend mutation, API conflict responses, and the older-binary rejection compat scenario.
+
+### Changed
+
+- **Legacy snapshot reads** — existing gzip-only snapshots remain readable by detecting gzip magic before envelope parsing.
+- **Rolling-upgrade compatibility docs** — `docs/COMPAT.md` now documents the snapshot envelope and marks `TestHeadSnapshotReject` as live.
+
 ## [0.0.202.0] - 2026-05-15 — feat: require local at-rest encryption
 
 ### Added
