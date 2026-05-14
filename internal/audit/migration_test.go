@@ -1,0 +1,33 @@
+package audit_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/audit"
+)
+
+func TestMigrateMetadataV1ToCurrent(t *testing.T) {
+	v1 := fmt.Sprintf(audit.S3InitialMetadataV1ForTest, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
+	got, changed, err := audit.MigrateMetadataToCurrent(json.RawMessage(v1), time.Now().UnixMilli())
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal(got, &meta))
+	require.Equal(t, float64(23), meta["last-column-id"])
+	require.Equal(t, float64(1000), meta["last-partition-id"])
+	require.NotEmpty(t, meta["partition-specs"])
+}
+
+func TestMigrateMetadataCurrentNoop(t *testing.T) {
+	current := fmt.Sprintf(audit.S3InitialMetadata, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
+	got, changed, err := audit.MigrateMetadataToCurrent(json.RawMessage(current), time.Now().UnixMilli())
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.JSONEq(t, current, string(got))
+}

@@ -3,10 +3,13 @@ package audit_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -143,6 +146,31 @@ func TestBootstrap_Idempotent(t *testing.T) {
 
 	require.NoError(t, audit.Bootstrap(context.Background(), cat, backend))
 	require.NoError(t, audit.Bootstrap(context.Background(), cat, backend))
+}
+
+func TestBootstrap_MigratesExistingV1Table(t *testing.T) {
+	cat := newBootstrapCatalog()
+	backend := newBootstrapBackend()
+	v1 := fmt.Sprintf(audit.S3InitialMetadataV1ForTest, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
+	_, err := cat.CreateTable(context.Background(), icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
+	}, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json",
+		Metadata:         json.RawMessage(v1),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, audit.Bootstrap(context.Background(), cat, backend))
+
+	tbl, err := cat.LoadTable(context.Background(), icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
+	})
+	require.NoError(t, err)
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal(tbl.Metadata, &meta))
+	require.Equal(t, float64(23), meta["last-column-id"])
+	require.Equal(t, float64(1000), meta["last-partition-id"])
+	require.NotEqual(t, "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json", tbl.MetadataLocation)
 }
 
 func TestBootstrap_NamespaceExistsIgnored(t *testing.T) {
