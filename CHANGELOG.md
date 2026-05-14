@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.204.0] - 2026-05-15 — feat: storage operations console
+
+### Added
+
+- **Storage operations console** — dashboard UI and `/ui/api/storage/*` routes now expose protocol status, safe bucket list/create, and NFS export state without mounting destructive storage mutations.
+- **Capability-gated NFS export create** — NFS export registration now uses create-only meta-Raft commands gated by `nfs_export_create_v1` evidence across current meta-Raft members.
+- **Protocol bind status** — NFSv4, NBD, and 9P service status now reflects actual listener bind success or failure for the admin/dashboard surface.
+
+### Changed
+
+- **Dashboard safety boundary** — the browser/volume/snapshot UI no longer exposes object delete, bucket delete, volume delete, or snapshot rollback/delete actions through `/ui/api`.
+
+### Fixed
+
+- **Rolling-upgrade forwarding** — gated meta-Raft forwarding preserves legacy raw migration cutovers while rejecting raw gated NFS create commands.
+- **Capability gossip delivery** — capability evidence survives the QUIC stream catch-all path, records evidence under raft member addresses, and refreshes gate TTL from replayed cluster gossip settings.
+
 ## [0.0.202.0] - 2026-05-15 — feat: require local at-rest encryption
 
 ### Added
