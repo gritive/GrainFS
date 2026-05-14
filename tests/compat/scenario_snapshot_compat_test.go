@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -55,7 +56,7 @@ func TestSnapshotForwardCompat(t *testing.T) {
 	resp, err := httpPostJSON(snapURL, map[string]string{"reason": "compat-test"})
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, 200, resp.StatusCode, "create snapshot")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "create snapshot")
 	var snapOut struct {
 		Seq uint64 `json:"seq"`
 	}
@@ -75,7 +76,7 @@ func TestSnapshotForwardCompat(t *testing.T) {
 	resp2, err := httpPostJSON(restoreURL, nil)
 	require.NoError(t, err)
 	defer resp2.Body.Close()
-	require.Equal(t, 200, resp2.StatusCode, "restore snapshot")
+	require.Equal(t, http.StatusOK, resp2.StatusCode, "restore snapshot")
 
 	// Wait for restore
 	time.Sleep(3 * time.Second)

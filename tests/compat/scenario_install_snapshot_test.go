@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,11 +43,7 @@ func TestInstallSnapshotPath(t *testing.T) {
 	}
 
 	// Create snapshot on leader (node 0) via HTTP.
-	snapURL := fmt.Sprintf("%s/admin/snapshots", c.httpURLs[0])
-	resp, err := httpPostJSON(snapURL, map[string]string{"reason": "install-snap-compat"})
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	c.CreateSnapshot(t, 0)
 
 	// Stop node 1 (old follower).
 	terminateProcess(c.procs[1])

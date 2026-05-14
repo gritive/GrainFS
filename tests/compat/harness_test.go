@@ -3,6 +3,7 @@
 package compat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -270,27 +271,24 @@ func iamUDSClient(sock string) *http.Client {
 
 // httpPostJSON POSTs a JSON body to url and returns the response.
 func httpPostJSON(url string, body any) (*http.Response, error) {
-	var r io.Reader
+	client := &http.Client{Timeout: 10 * time.Second}
+	var req *http.Request
+	var err error
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		r = strings.NewReader(string(buf))
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	var req *http.Request
-	var err error
-	if r != nil {
-		req, err = http.NewRequestWithContext(context.Background(), "POST", url, r)
+		req, err = http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewReader(buf))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 	} else {
 		req, err = http.NewRequestWithContext(context.Background(), "POST", url, http.NoBody)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		if err != nil {
+			return nil, err
+		}
 	}
 	return client.Do(req)
 }
