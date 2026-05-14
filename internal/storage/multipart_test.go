@@ -98,6 +98,26 @@ func TestEncryptedMultipartPartFilesHidePlaintext(t *testing.T) {
 	require.Equal(t, partBytes, got)
 }
 
+func TestEncryptedMultipartUploadsListDecryptsMetadata(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	up, err := b.CreateMultipartUpload(ctx, "bkt", "prefix/obj", "text/plain")
+	require.NoError(t, err)
+
+	uploads, err := b.ListMultipartUploads(ctx, "bkt", "prefix/", 100)
+	require.NoError(t, err)
+	require.Len(t, uploads, 1)
+	require.Equal(t, up.UploadID, uploads[0].UploadID)
+	require.Equal(t, "bkt", uploads[0].Bucket)
+	require.Equal(t, "prefix/obj", uploads[0].Key)
+	require.Equal(t, "text/plain", uploads[0].ContentType)
+}
+
 func TestUploadPartInvalidUploadID(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")

@@ -450,12 +450,14 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 	})
 }
 
-// WriteAt patches [offset, offset+len(data)) of the stored object using pwrite(2).
+// WriteAt patches [offset, offset+len(data)) of the stored object.
 // The file is created if it does not exist; it is extended if the write exceeds the
 // current size. Bytes outside the written range are preserved, and writes before the
 // first byte produce a sparse hole filled with zeros.
 //
-// This is O(len(data)) — no full-file copy per write.
+// Unencrypted writes use pwrite(2) and are O(len(data)). Encrypted writes preserve
+// semantics by rewriting the encrypted object, so callers should check PreferWriteAt
+// before using this as a hot-path optimization.
 func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error) {
 	_ = ctx
 	var tStart, tStage time.Time
@@ -611,7 +613,7 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 }
 
 func (b *LocalBackend) PreferWriteAt(bucket string) bool {
-	return IsInternalBucket(bucket)
+	return b.encryptor == nil && IsInternalBucket(bucket)
 }
 
 // Sync implements storage.Syncable.
@@ -666,7 +668,11 @@ func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, m
 			}
 			var obj Object
 			err := it.Item().Value(func(val []byte) error {
-				decoded, err := unmarshalObject(val)
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, val)
+				if err != nil {
+					return err
+				}
+				decoded, err := unmarshalObject(plain)
 				if err != nil {
 					return err
 				}
@@ -695,7 +701,11 @@ func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, f
 		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
 			var obj Object
 			if err := it.Item().Value(func(val []byte) error {
-				decoded, err := unmarshalObject(val)
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, val)
+				if err != nil {
+					return err
+				}
+				decoded, err := unmarshalObject(plain)
 				if err != nil {
 					return err
 				}
@@ -805,7 +815,11 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 
 			var obj Object
 			if err := it.Item().Value(func(val []byte) error {
-				decoded, err := unmarshalObject(val)
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, val)
+				if err != nil {
+					return err
+				}
+				decoded, err := unmarshalObject(plain)
 				if err != nil {
 					return err
 				}

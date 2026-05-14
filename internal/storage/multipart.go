@@ -263,7 +263,11 @@ func (b *LocalBackend) ListMultipartUploads(ctx context.Context, bucket, prefix 
 		mpuPrefix := []byte("mpu:")
 		for it.Seek(mpuPrefix); it.ValidForPrefix(mpuPrefix); it.Next() {
 			err := it.Item().Value(func(val []byte) error {
-				meta, err := unmarshalMultipartMeta(val)
+				plain, err := openBadgerValue(b.encryptor, badgerDomainMultipart, val)
+				if err != nil {
+					return err
+				}
+				meta, err := unmarshalMultipartMeta(plain)
 				if err != nil {
 					return err
 				}

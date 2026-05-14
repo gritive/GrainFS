@@ -128,6 +128,59 @@ func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
+func TestEncryptedLocalBackendListsEncryptedObjectMetadata(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	_, err = b.PutObject(ctx, "bkt", "dir/a.txt", bytes.NewReader([]byte("alpha")), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "bkt", "dir/b.txt", bytes.NewReader([]byte("beta")), "text/plain")
+	require.NoError(t, err)
+
+	listed, err := b.ListObjects(ctx, "bkt", "dir/", 100)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	listedSizes := make(map[string]int64)
+	for _, obj := range listed {
+		listedSizes[obj.Key] = obj.Size
+	}
+	require.Equal(t, map[string]int64{
+		"dir/a.txt": 5,
+		"dir/b.txt": 4,
+	}, listedSizes)
+
+	walked := make(map[string]int64)
+	err = b.WalkObjects(ctx, "bkt", "dir/", func(obj *Object) error {
+		walked[obj.Key] = obj.Size
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, listedSizes, walked)
+
+	snapshots, err := b.ListAllObjects()
+	require.NoError(t, err)
+	snapshotSizes := make(map[string]int64)
+	for _, obj := range snapshots {
+		if obj.Bucket == "bkt" {
+			snapshotSizes[obj.Key] = obj.Size
+		}
+	}
+	require.Equal(t, listedSizes, snapshotSizes)
+}
+
+func TestEncryptedLocalBackendDoesNotAdvertiseWriteAt(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.False(t, b.PreferWriteAt("__grainfs_volumes"))
+}
+
 func TestGetObjectNotFound(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")

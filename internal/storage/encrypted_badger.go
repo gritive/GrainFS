@@ -26,6 +26,13 @@ func setBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key,
 	return txn.Set(key, sealed)
 }
 
+func openBadgerValue(enc *encrypt.Encryptor, domain string, val []byte) ([]byte, error) {
+	if enc == nil {
+		return append([]byte(nil), val...), nil
+	}
+	return enc.OpenValue(domain, val)
+}
+
 func getBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key []byte) ([]byte, error) {
 	item, err := txn.Get(key)
 	if err != nil {
@@ -33,16 +40,9 @@ func getBadgerValue(txn *badger.Txn, enc *encrypt.Encryptor, domain string, key 
 	}
 	var out []byte
 	err = item.Value(func(val []byte) error {
-		if enc == nil {
-			out = append([]byte(nil), val...)
-			return nil
-		}
-		plain, openErr := enc.OpenValue(domain, val)
-		if openErr != nil {
-			return openErr
-		}
-		out = plain
-		return nil
+		var openErr error
+		out, openErr = openBadgerValue(enc, domain, val)
+		return openErr
 	})
 	return out, err
 }
