@@ -134,6 +134,31 @@ curl -s http://localhost:9000/metrics | grep '^grainfs_ec_scrub_unverified_shard
 
 If `reason="legacy_no_crc"` is non-zero, scrub can read the shard bytes but cannot prove bit-level integrity. Treat those shards as migration candidates, not healthy repaired data.
 
+## NFS Multi-Bucket Export
+
+Use explicit exports for every bucket mounted through NFSv4:
+
+```bash
+grainfs nfs export list
+grainfs nfs export add <bucket>
+grainfs nfs debug <bucket>
+```
+
+Triage:
+
+- `No such file or directory` at the pseudo-root: check `grainfs nfs debug <bucket>` and register the bucket if `registered=false`.
+- Stale handles after export changes: unmount/remount affected clients and check the export generation in `grainfs nfs debug`.
+- Backend exists but NFS is missing: create the export; S3 bucket creation alone does not expose the bucket over NFS.
+
+Metrics:
+
+- `grainfs_nfs_exports_total{state}`
+- `grainfs_nfs_export_propagation_seconds`
+- `grainfs_nfs_lookup_unknown_export_total`
+- `grainfs_nfs_revoked_stateids_total{reason}`
+
+Grafana example: `docs/observability/nfs-multi-export.json`.
+
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
 
 ```bash

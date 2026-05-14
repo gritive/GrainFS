@@ -46,11 +46,13 @@ func putCompoundResponse(resp *CompoundResponse) {
 
 var dispatcherPool = pool.New(func() *Dispatcher { return &Dispatcher{} })
 
-func getDispatcher(backend storage.Backend, state *StateManager, server *Server) *Dispatcher {
+func getDispatcherWithClient(backend storage.Backend, state *StateManager, server *Server, clientAddr string, hinter *unknownExportHinter) *Dispatcher {
 	d := dispatcherPool.Get()
 	d.backend = backend
 	d.state = state
 	d.server = server
+	d.clientAddr = clientAddr
+	d.hinter = hinter
 	d.currentFH = FileHandle{}
 	d.currentPath = ""
 	d.savedFH = FileHandle{}
@@ -65,6 +67,8 @@ func putDispatcher(d *Dispatcher) {
 	d.backend = nil
 	d.state = nil
 	d.server = nil
+	d.clientAddr = ""
+	d.hinter = nil
 	d.replayFull = nil
 	d.pendingCacheSlot = nil
 	dispatcherPool.Put(d)
@@ -219,6 +223,8 @@ type Dispatcher struct {
 	backend          storage.Backend
 	state            *StateManager
 	server           *Server
+	clientAddr       string
+	hinter           *unknownExportHinter
 	currentFH        FileHandle
 	currentPath      string
 	savedFH          FileHandle
@@ -424,6 +430,27 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 	exists := d.state.IsDir(childPath)
 	if !exists && d.currentPath == "/" && childKey == "" && d.server != nil {
 		exists = d.server.isExportRegistered(childBucket)
+		if !exists {
+			if d.server.lookups != nil {
+				d.server.lookups.Record(LookupRecord{
+					Client: d.clientAddr,
+					Bucket: childBucket,
+					Result: "unknown_bucket",
+				})
+			}
+			if d.hinter != nil {
+				d.hinter.emit(d.clientAddr, childBucket)
+			}
+			log.Debug().Str("name", name).Str("child", childPath).Bool("exists", false).Msg("nfs4: LOOKUP")
+			return OpResult{OpCode: OpLookup, Status: NFS4ERR_NOENT}
+		}
+		if d.server.lookups != nil {
+			d.server.lookups.Record(LookupRecord{
+				Client: d.clientAddr,
+				Bucket: childBucket,
+				Result: "ok",
+			})
+		}
 	}
 	if !exists && d.backend != nil {
 		_, err := d.backend.HeadObject(context.Background(), childBucket, childKey)
@@ -998,7 +1025,7 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 
 	// Serialise all writes to the same path. Without this, an offset=0
 	// PutObject can run concurrently with an offset>0 RMW, clobbering data.
-	release := d.state.LockPath(key)
+	release := d.state.LockPath(objectLockKey(bucket, key))
 	defer release()
 
 	if wa, ok := partialIOBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
@@ -1178,7 +1205,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 	// FATTR4_SIZE (word0 bit 4)
 	if bm0&(1<<4) != 0 {
 		size, _ := ar.ReadUint64()
-		release := d.state.LockPath(key)
+		release := d.state.LockPath(objectLockKey(bucket, key))
 		defer release()
 		if tr, ok := truncatableBackend(d.backend); ok && preferWriteAt(d.backend, bucket) {
 			if err := tr.Truncate(context.Background(), bucket, key, int64(size)); err != nil {

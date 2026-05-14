@@ -52,6 +52,12 @@ func (c *Client) ListExports(ctx context.Context) (ListNfsExportsResp, error) {
 	return resp, err
 }
 
+func (c *Client) ExportDebug(ctx context.Context, bucket string) (ExportDebugResp, error) {
+	var resp ExportDebugResp
+	err := c.Get(ctx, "/v1/nfs/exports/"+url.PathEscape(bucket)+"/debug", &resp)
+	return resp, err
+}
+
 func (c *Client) DeleteExport(ctx context.Context, bucket string) error {
 	return c.Delete(ctx, "/v1/nfs/exports/"+url.PathEscape(bucket), nil)
 }

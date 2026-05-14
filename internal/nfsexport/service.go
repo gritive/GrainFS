@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 var ErrPropagationBarrierRequired = errors.New("nfsexport: propagation barrier required")
+var ErrPropagationTimeout = errors.New("nfsexport: propagation timeout")
 
 type Proposer interface {
 	ProposeUpsert(ctx context.Context, bucket string, cfg Config) (uint64, error)
@@ -157,7 +161,15 @@ func (s *ExportService) waitApplied(ctx context.Context, index uint64) error {
 	if s.barrier == nil {
 		return nil
 	}
-	return s.barrier.WaitApplied(ctx, index)
+	start := time.Now()
+	if err := s.barrier.WaitApplied(ctx, index); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return fmt.Errorf("%w: %w", ErrPropagationTimeout, err)
+		}
+		return err
+	}
+	metrics.NFSExportPropagationSeconds.Observe(time.Since(start).Seconds())
+	return nil
 }
 
 func (s *ExportService) ensurePropagationSupported() error {

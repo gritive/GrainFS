@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync/atomic"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 )
 
@@ -59,9 +60,13 @@ func (s *Server) SetExportSource(src exportSource) {
 
 func (s *Server) RefreshExports(_ context.Context) error {
 	if s.exportSource == nil {
+		metrics.NFSExportsTotal.WithLabelValues("ro").Set(0)
+		metrics.NFSExportsTotal.WithLabelValues("rw").Set(0)
 		return nil
 	}
+	prev := s.loadExports()
 	rows := make(map[string]exportConfig)
+	ro, rw := 0, 0
 	for _, bucket := range s.exportSource.List() {
 		cfg, ok := s.exportSource.Get(bucket)
 		if !ok {
@@ -73,8 +78,28 @@ func (s *Server) RefreshExports(_ context.Context) error {
 			fsidMinor:  cfg.FsidMinor,
 			generation: cfg.Generation,
 		}
+		if cfg.ReadOnly {
+			ro++
+		} else {
+			rw++
+		}
+	}
+	if s.state != nil {
+		for bucket, old := range prev.byBucket {
+			next, ok := rows[bucket]
+			switch {
+			case !ok:
+				n := s.state.InvalidateForBucket(bucket)
+				metrics.NFSRevokedStateIDs.WithLabelValues("export_remove").Add(float64(n))
+			case !old.readOnly && next.readOnly:
+				n := s.state.InvalidateForBucket(bucket)
+				metrics.NFSRevokedStateIDs.WithLabelValues("export_ro_update").Add(float64(n))
+			}
+		}
 	}
 	s.exports.Store(buildSnap(rows))
+	metrics.NFSExportsTotal.WithLabelValues("ro").Set(float64(ro))
+	metrics.NFSExportsTotal.WithLabelValues("rw").Set(float64(rw))
 	return nil
 }
 

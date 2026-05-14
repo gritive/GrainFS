@@ -40,7 +40,7 @@ func TestOpWriteHonorsPreferWriteAtFalse(t *testing.T) {
 	require.NoError(t, local.CreateBucket(context.Background(), "user-bucket"))
 
 	backend := &preferPutObjectBackend{Backend: local}
-	d := getDispatcher(backend, NewStateManager(), nil)
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
 	t.Cleanup(func() { putDispatcher(d) })
 	d.currentPath = "/user-bucket/file.bin"
 
@@ -71,7 +71,7 @@ func TestSetAttrSizeHonorsPreferWriteAtFalse(t *testing.T) {
 	require.NoError(t, err)
 
 	backend := &preferPutObjectBackend{Backend: local}
-	d := getDispatcher(backend, NewStateManager(), nil)
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
 	t.Cleanup(func() { putDispatcher(d) })
 	d.currentPath = "/user-bucket/file.bin"
 

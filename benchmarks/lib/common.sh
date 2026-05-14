@@ -164,7 +164,7 @@ bench_bootstrap_iam_credentials() {
   echo "  bootstrapping IAM credentials..."
   bench_wait_admin_socket "$data_dir" 100 0.2
 
-  bootstrap_json=$("$binary" iam sa create "$name" --endpoint "$admin_sock")
+  bootstrap_json=$("$binary" iam --json sa create "$name" --endpoint "$admin_sock")
   ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["access_key"])' <<<"$bootstrap_json")
   SECRET_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["secret_key"])' <<<"$bootstrap_json")
   export ACCESS_KEY SECRET_KEY
@@ -207,6 +207,25 @@ bench_create_bucket_retry() {
   done
 
   [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "bucket not ready: $bucket at $base_url" >&2
+  return 1
+}
+
+bench_create_bucket_admin_retry() {
+  local binary="$1"
+  local data_dir="$2"
+  local bucket="$3"
+  local attempts="${4:-60}"
+  local sleep_seconds="${5:-0.5}"
+  local admin_sock="${data_dir}/admin.sock"
+
+  for _ in $(seq 1 "$attempts"); do
+    if "$binary" bucket create "$bucket" --endpoint "$admin_sock" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "bucket not ready: $bucket via admin socket $admin_sock" >&2
   return 1
 }
 

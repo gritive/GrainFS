@@ -36,6 +36,48 @@ func TestStateManager_GetOrCreateFH(t *testing.T) {
 	assert.Equal(t, "/dir/file.txt", path)
 }
 
+func TestStateManager_InvalidateForBucket(t *testing.T) {
+	sm := NewStateManager()
+	fh1 := sm.GetOrCreateFH("/b1/a.txt")
+	fh2 := sm.GetOrCreateFH("/b1/b.txt")
+	fh3 := sm.GetOrCreateFH("/b2/c.txt")
+	sm.BindFHGeneration(fh1, "b1", 1)
+	sm.BindFHGeneration(fh2, "b1", 1)
+	sm.BindFHGeneration(fh3, "b2", 1)
+
+	require.Equal(t, 2, sm.InvalidateForBucket("b1"))
+	_, ok := sm.FHBinding(fh1)
+	require.False(t, ok)
+	_, ok = sm.FHBinding(fh2)
+	require.False(t, ok)
+	_, ok = sm.FHBinding(fh3)
+	require.True(t, ok)
+	_, ok = sm.ResolveFH(fh1)
+	require.False(t, ok)
+	_, ok = sm.ResolveFH(fh2)
+	require.False(t, ok)
+	require.NotEqual(t, fh1, sm.GetOrCreateFH("/b1/a.txt"))
+}
+
+func TestObjectLockKey_IsolatesBuckets(t *testing.T) {
+	sm := NewStateManager()
+	release := sm.LockPath(objectLockKey("bucket-a", "same/key"))
+	defer release()
+
+	acquired := make(chan struct{})
+	go func() {
+		releaseOther := sm.LockPath(objectLockKey("bucket-b", "same/key"))
+		releaseOther()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("same object key in a different bucket must not share the write lock")
+	}
+}
+
 func TestStateManager_InvalidateFH(t *testing.T) {
 	sm := NewStateManager()
 

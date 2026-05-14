@@ -14,7 +14,7 @@ Use 'grainfs nfs export add <bucket>' to register a bucket as an NFS export.`,
 func init() {
 	registerAdminEndpointFlag(nfsCmd)
 	registerAdminTimeoutFlag(nfsCmd)
-	nfsCmd.PersistentFlags().String("format", "text", "output format: text|json")
+	nfsCmd.AddCommand(nfsDebugCmd())
 	nfsCmd.AddCommand(nfsExportCmd())
 	rootCmd.AddCommand(nfsCmd)
 }

@@ -25,9 +25,9 @@ fi
 
 WORKLOAD="${WORKLOAD:-streaming}"
 FIO_RUNTIME="${FIO_RUNTIME:-15}"
-FIO_STREAM_SIZE="${FIO_STREAM_SIZE:-256m}"
+FIO_STREAM_SIZE="${FIO_STREAM_SIZE:-16m}"
 FIO_STREAM_JOBS="${FIO_STREAM_JOBS:-4}"
-FIO_RAND_SIZE="${FIO_RAND_SIZE:-64m}"
+FIO_RAND_SIZE="${FIO_RAND_SIZE:-1m}"
 FIO_RAND_JOBS="${FIO_RAND_JOBS:-4}"
 case "$WORKLOAD" in
   streaming|metadata|append) ;;
@@ -40,7 +40,8 @@ esac
 HTTP_PORT=$(bench_free_port)
 NFS4_PORT=$(bench_free_port)
 PPROF_PORT=$(bench_free_port)
-HOST_IP="192.168.5.2"   # macOS host IP as seen from Colima VM
+HOST_IP="${HOST_IP:-192.168.5.2}"   # macOS host IP as seen from Colima VM
+BUCKET="${BUCKET:-benchnfs}"
 MNT="/mnt/grainfs-bench-nfs"
 NFS_VERS="${NFS_VERS:-4.0}"
 NFS_SERVER_WARMUP_SLEEP="${NFS_SERVER_WARMUP_SLEEP:-3}"
@@ -92,11 +93,17 @@ echo "  waiting ${NFS_SERVER_WARMUP_SLEEP}s for raft group leadership..."
 sleep "$NFS_SERVER_WARMUP_SLEEP"
 
 echo ""
+echo "=== preparing bucket export ($BUCKET) ==="
+bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR"
+bench_create_bucket_admin_retry "$BINARY" "$DATA_DIR" "$BUCKET"
+"$BINARY" nfs export add "$BUCKET" --endpoint "$DATA_DIR/admin.sock" || true
+
+echo ""
 echo "=== mounting NFS inside Colima (vers=$NFS_VERS host=$HOST_IP port=$NFS4_PORT) ==="
 bench_colima_ssh sudo mkdir -p "$MNT"
 bench_colima_ssh sudo mount -t nfs4 \
   -o "vers=$NFS_VERS,port=$NFS4_PORT,rsize=131072,wsize=131072,hard,intr" \
-  "${HOST_IP}:/" "$MNT"
+  "${HOST_IP}:/${BUCKET}" "$MNT"
 
 echo "  mount OK — checking df:"
 bench_colima_ssh df -h "$MNT" || true
@@ -144,18 +151,21 @@ sudo mkdir -p "\$BENCH_DIR"
 
 echo "--- sequential write (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_write --directory="\$BENCH_DIR" --rw=write --bs=128k \
+  --fallocate=none \
   --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
 echo "--- sequential read (${FIO_STREAM_JOBS} threads, 128K blocks) ---"
 sudo fio --name=seq_read --directory="\$BENCH_DIR" --rw=read --bs=128k \
+  --fallocate=none \
   --size="$FIO_STREAM_SIZE" --numjobs="$FIO_STREAM_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
 echo ""
 echo "--- random read/write mix (${FIO_RAND_JOBS} threads, 4K blocks, 75% read) ---"
 sudo fio --name=rand_mix --directory="\$BENCH_DIR" --rw=randrw --rwmixread=75 \
+  --fallocate=none \
   --bs=4k --size="$FIO_RAND_SIZE" --numjobs="$FIO_RAND_JOBS" --runtime="$FIO_RUNTIME" --time_based --group_reporting \
   --output-format=normal --ioengine=sync
 
@@ -208,6 +218,7 @@ sudo fio \
   --name=append \
   --filename="\$BENCH_DIR/file" \
   --rw=write \
+  --fallocate=none \
   --bs=4k \
   --size=1g \
   --numjobs=1 \

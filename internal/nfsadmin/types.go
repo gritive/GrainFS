@@ -10,6 +10,7 @@ import (
 type NfsExportInfo = adminapi.NfsExportInfo
 type NfsExportUpsertReq = adminapi.NfsExportUpsertReq
 type ListNfsExportsResp = adminapi.ListNfsExportsResp
+type ExportDebugResp = adminapi.ExportDebugResp
 
 type BaseOptions struct {
 	Endpoint string

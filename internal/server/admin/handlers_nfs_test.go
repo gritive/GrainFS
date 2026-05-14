@@ -1,13 +1,20 @@
 package admin_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"path/filepath"
 	"testing"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/server/admin"
 )
@@ -38,11 +45,27 @@ func (p *fakeNfsExportProposer) ProposeBucketDeleteCascade(_ context.Context, bu
 	return 1, p.store.Delete(bucket)
 }
 
-type recordingNfsBarrier struct{ indexes []uint64 }
+type recordingNfsBarrier struct {
+	indexes []uint64
+	err     error
+}
 
 func (b *recordingNfsBarrier) WaitApplied(_ context.Context, index uint64) error {
 	b.indexes = append(b.indexes, index)
-	return nil
+	return b.err
+}
+
+type fakeNFSDiag struct {
+	lookups []nfs4server.LookupRecord
+	clients []string
+}
+
+func (f *fakeNFSDiag) RecentLookups(_ string, _ time.Duration) []nfs4server.LookupRecord {
+	return f.lookups
+}
+
+func (f *fakeNFSDiag) ActiveMountClients(_ string) []string {
+	return f.clients
 }
 
 func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
@@ -61,6 +84,131 @@ func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
 		Buckets:    buckets,
 		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
 	}, buckets
+}
+
+func startAdminNfsHTTP(t *testing.T) (*http.Client, string) {
+	t.Helper()
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "admin.sock")
+	deps, _ := newAdminTestDepsWithNfs(t)
+	srv, err := admin.Start(admin.Config{SocketPath: sock, Deps: deps})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	return unixHTTPClient(sock), "http://unix"
+}
+
+func TestExportAdd_BucketNotFound_Returns404(t *testing.T) {
+	client, baseURL := startAdminNfsHTTP(t)
+	resp, err := client.Post(baseURL+"/v1/nfs/exports", "application/json", bytes.NewBufferString(`{"bucket":"missing"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "must be 404 NOT FOUND, not 500")
+	var e adminapi.Error
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&e))
+	require.Equal(t, "bucket_not_found", e.Code)
+	require.NotEmpty(t, e.Help)
+	require.NotEmpty(t, e.DocsURL)
+}
+
+func TestExportGet_NotFound_Returns404(t *testing.T) {
+	client, baseURL := startAdminNfsHTTP(t)
+	resp, err := client.Get(baseURL + "/v1/nfs/exports/missing")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "must be 404 NOT FOUND, not 500")
+	var e adminapi.Error
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&e))
+	require.Equal(t, "export_not_found", e.Code)
+}
+
+func TestAdminNfsExportDebug_Registered(t *testing.T) {
+	d, buckets := newAdminTestDepsWithNfs(t)
+	buckets.buckets["my-data"] = true
+	buckets.counts["my-data"] = 1234
+	d.NodeID = "node-a"
+	d.NFSDiag = &fakeNFSDiag{
+		lookups: []nfs4server.LookupRecord{{
+			Client: "10.0.0.5:2049",
+			Bucket: "my-data",
+			Result: "ok",
+			At:     time.Unix(100, 0),
+		}},
+		clients: []string{"10.0.0.5:2049"},
+	}
+	_, err := admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "my-data"})
+	require.NoError(t, err)
+
+	resp, err := admin.AdminNfsExportDebug(context.Background(), d, "my-data")
+	require.NoError(t, err)
+	require.True(t, resp.Registered)
+	require.True(t, resp.BackendBucket.Exists)
+	require.EqualValues(t, 1234, resp.BackendBucket.ObjectCount)
+	require.Equal(t, []string{"10.0.0.5:2049"}, resp.ActiveMountClients)
+	require.Len(t, resp.RecentLookups, 1)
+}
+
+func TestAdminNfsExportDebugRejectsInternalBucket(t *testing.T) {
+	d, _ := newAdminTestDepsWithNfs(t)
+	_, err := admin.AdminNfsExportDebug(context.Background(), d, "__grainfs_internal")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "forbidden", ae.Code)
+}
+
+type nfsDebugBucketHeadError struct{ *fakeBucketOps }
+
+func (f nfsDebugBucketHeadError) HeadBucket(context.Context, string) error {
+	return errors.New("badger unavailable")
+}
+
+type nfsDebugBucketCountError struct{ *fakeBucketOps }
+
+func (f nfsDebugBucketCountError) CountObjects(context.Context, string) (int64, error) {
+	return 0, errors.New("badger unavailable")
+}
+
+func TestAdminNfsExportDebugSurfacesBackendErrors(t *testing.T) {
+	d, buckets := newAdminTestDepsWithNfs(t)
+	buckets.buckets["my-data"] = true
+
+	d.Buckets = nfsDebugBucketHeadError{fakeBucketOps: buckets}
+	_, err := admin.AdminNfsExportDebug(context.Background(), d, "my-data")
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "internal", ae.Code)
+	require.Contains(t, ae.Message, "head bucket")
+
+	d.Buckets = nfsDebugBucketCountError{fakeBucketOps: buckets}
+	_, err = admin.AdminNfsExportDebug(context.Background(), d, "my-data")
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "internal", ae.Code)
+	require.Contains(t, ae.Message, "count objects")
+}
+
+func TestAdminNfsExportUpsertPropagationTimeout(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	store, err := nfsexport.OpenStore(db)
+	require.NoError(t, err)
+	buckets := newFakeBucketOps()
+	buckets.buckets["b1"] = true
+	svc := nfsexport.NewExportService(nfsexport.ServiceConfig{
+		Store:    store,
+		Proposer: &fakeNfsExportProposer{store: store},
+		Barrier:  &recordingNfsBarrier{err: context.DeadlineExceeded},
+	})
+	d := &admin.Deps{
+		Buckets:    buckets,
+		NfsExports: &admin.NfsExportServiceAdapter{Svc: svc},
+	}
+
+	_, err = admin.AdminNfsExportUpsert(context.Background(), d, admin.NfsExportUpsertReq{Bucket: "b1"})
+	var ae *adminapi.Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "export_propagation_timeout", ae.Code)
 }
 
 func TestAdminNfsExportUpsertValidation(t *testing.T) {

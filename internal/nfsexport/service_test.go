@@ -177,3 +177,28 @@ func TestExportServiceWaitsForCommittedIndex(t *testing.T) {
 	require.NoError(t, svc.Delete(context.Background(), "b1"))
 	require.Equal(t, []uint64{1, 2}, barrier.indexes)
 }
+
+func TestExportServiceWrapsPropagationBarrierError(t *testing.T) {
+	db, store := openTestStore(t, t.TempDir())
+	defer db.Close()
+	p := &indexedFakeProposer{store: store, fsidMajor: 7}
+	barrier := &recordingBarrier{err: context.DeadlineExceeded}
+	svc := NewExportService(ServiceConfig{Store: store, Proposer: p, Barrier: barrier})
+
+	err := svc.Upsert(context.Background(), "b1", UpsertParams{})
+	require.ErrorIs(t, err, ErrPropagationTimeout)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestExportServicePreservesNonTimeoutPropagationBarrierError(t *testing.T) {
+	db, store := openTestStore(t, t.TempDir())
+	defer db.Close()
+	p := &indexedFakeProposer{store: store, fsidMajor: 7}
+	want := errors.New("apply loop stopped")
+	barrier := &recordingBarrier{err: want}
+	svc := NewExportService(ServiceConfig{Store: store, Proposer: p, Barrier: barrier})
+
+	err := svc.Upsert(context.Background(), "b1", UpsertParams{})
+	require.ErrorIs(t, err, want)
+	require.NotErrorIs(t, err, ErrPropagationTimeout)
+}

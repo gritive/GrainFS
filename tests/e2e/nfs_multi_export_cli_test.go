@@ -55,7 +55,7 @@ func TestE2E_NFSMultiExportCLI_RejectsMissingBucket(t *testing.T) {
 
 func runNfsExportJSON(t *testing.T, verb, bucket string, flags ...string) e2eNfsExport {
 	t.Helper()
-	args := []string{"nfs", "export", verb, bucket, "--format", "json"}
+	args := []string{"nfs", "export", verb, bucket, "--json"}
 	args = append(args, flags...)
 	out, code := runCLI(t, testServerDataDir, args...)
 	require.Equalf(t, 0, code, "%s", out)
@@ -72,7 +72,7 @@ func parseSingleNfsExport(t *testing.T, raw string) e2eNfsExport {
 
 func listNfsExports(t *testing.T) []e2eNfsExport {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "nfs", "export", "list", "--format", "json")
+	out, code := runCLI(t, testServerDataDir, "nfs", "export", "list", "--json")
 	require.Equalf(t, 0, code, "%s", out)
 	return parseNfsExportList(t, out)
 }

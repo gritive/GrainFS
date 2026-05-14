@@ -170,6 +170,7 @@ func registerNfsExports(g router, d *Deps) {
 	}
 	g.POST("/nfs/exports", wrapBody[NfsExportUpsertReq, NfsExportInfo](d, AdminNfsExportUpsert))
 	g.GET("/nfs/exports", wrapZero(d, AdminNfsExportList))
+	g.GET("/nfs/exports/:name/debug", wrapName(d, AdminNfsExportDebug))
 	g.GET("/nfs/exports/:name", wrapName(d, AdminNfsExportGet))
 	g.DELETE("/nfs/exports/:name", nfsExportDeleteHandler(d))
 	g.PATCH("/nfs/exports/:name", nfsExportPatchHandler(d))
@@ -402,7 +403,11 @@ func statusForCode(c string) int {
 	switch c {
 	case "not_found":
 		return consts.StatusNotFound
+	case "bucket_not_found", "export_not_found":
+		return consts.StatusNotFound
 	case "conflict":
+		return consts.StatusConflict
+	case "export_already_exists":
 		return consts.StatusConflict
 	case "invalid":
 		return consts.StatusBadRequest
@@ -414,6 +419,8 @@ func statusForCode(c string) int {
 		return consts.StatusForbidden
 	case "retry":
 		return consts.StatusServiceUnavailable
+	case "export_propagation_timeout":
+		return consts.StatusGatewayTimeout
 	default:
 		return consts.StatusInternalServerError
 	}

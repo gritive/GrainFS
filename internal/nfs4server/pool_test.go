@@ -144,7 +144,7 @@ func TestHandleCompoundInto_ParseError(t *testing.T) {
 	defer putXDRWriter(w)
 
 	// Truncated data forces ParseCompound to fail → NFS4ERR_INVAL response.
-	srv.handleCompoundInto([]byte{0}, w)
+	srv.handleCompoundIntoFrom([]byte{0}, w, "")
 
 	b := w.Bytes()
 	require.GreaterOrEqual(t, len(b), 4, "response must contain at least a status uint32")
