@@ -52,6 +52,11 @@ func TestStateManager_InvalidateForBucket(t *testing.T) {
 	require.False(t, ok)
 	_, ok = sm.FHBinding(fh3)
 	require.True(t, ok)
+	_, ok = sm.ResolveFH(fh1)
+	require.False(t, ok)
+	_, ok = sm.ResolveFH(fh2)
+	require.False(t, ok)
+	require.NotEqual(t, fh1, sm.GetOrCreateFH("/b1/a.txt"))
 }
 
 func TestObjectLockKey_IsolatesBuckets(t *testing.T) {

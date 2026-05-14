@@ -152,6 +152,10 @@ func (sm *StateManager) InvalidateForBucket(bucket string) int {
 		if binding.bucket != bucket {
 			continue
 		}
+		if p, ok := sm.fhToPath[fh]; ok {
+			delete(sm.pathToFH, p)
+		}
+		delete(sm.fhToPath, fh)
 		delete(sm.fhBind, fh)
 		n++
 	}
