@@ -18,6 +18,7 @@ import (
 // only cluster mode; without --cluster-key the boot must error out.
 func TestE2E_Cluster_RefusesEmptyClusterKey(t *testing.T) {
 	dir := t.TempDir()
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 	port := freePort()
 	raft := freePort()
 
@@ -33,7 +34,7 @@ func TestE2E_Cluster_RefusesEmptyClusterKey(t *testing.T) {
 		"--node-id", "n-no-key",
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 	)
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "process must exit non-zero without --cluster-key")
@@ -51,6 +52,7 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 
 	leaderDataDir := shortTempDir(t)
 	joinerDataDir := shortTempDir(t)
+	encKeyFile := makeSharedEncryptionKeyFile(t)
 
 	leaderHTTP := freePort()
 	leaderRaft := freePort()
@@ -69,7 +71,7 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		"--cluster-key", keyA,
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -113,7 +115,7 @@ func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
 		"--cluster-key", keyB, // MISMATCH
 		"--nfs4-port", "0",
 		"--nbd-port", "0",
-		"--no-encryption",
+		"--encryption-key-file", encKeyFile,
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

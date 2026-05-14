@@ -75,13 +75,13 @@ func bootMetaRaftWiring(state *bootState) error {
 	})
 
 	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
-	// SetIAM is nil-safe for iamApplier (--no-encryption mode).
+	// SetIAM is nil-safe for test configurations that do not provide IAM.
 	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil {
 		metaRaft.FSM().SetIAM(state.cfg.IAMStore, state.cfg.IAMApplier)
 	}
 	// Cluster-config PATCH with alert-webhook-secret requires the encryptor on
-	// the FSM (apply-side gate, Task 7). Nil in --no-encryption mode — Apply
-	// then rejects such patches with "encryption disabled".
+	// the FSM (apply-side gate, Task 7). Nil test configurations reject such
+	// patches with "encryption disabled".
 	if state.cfg.Encryptor != nil {
 		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
 	}

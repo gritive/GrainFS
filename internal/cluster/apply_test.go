@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -39,6 +41,104 @@ func TestFSM_CreateBucket(t *testing.T) {
 		return err
 	})
 	assert.NoError(t, err)
+}
+
+func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x46}, 32))
+	require.NoError(t, err)
+	fsm.SetEncryptor(enc)
+
+	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      "b",
+		Key:         "secret-object",
+		ContentType: "text/secret",
+		UserMetadata: map[string]string{
+			"x-amz-meta-secret": "customer-private-metadata",
+		},
+		VersionID: "v1",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(putData))
+
+	mpuData, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID:    "upload-secret",
+		Bucket:      "b",
+		Key:         "secret-object",
+		ContentType: "application/private",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(mpuData))
+
+	policy := []byte(`{"Statement":[{"Resource":"secret-policy-resource"}]}`)
+	policyData, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b", PolicyJSON: policy})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(policyData))
+
+	err = db.View(func(txn *badger.Txn) error {
+		for _, tc := range []struct {
+			key       []byte
+			forbidden string
+		}{
+			{fsm.keys.ObjectMetaKeyV("b", "secret-object", "v1"), "customer-private-metadata"},
+			{fsm.keys.MultipartKey("upload-secret"), "application/private"},
+			{fsm.keys.BucketPolicyKey("b"), "secret-policy-resource"},
+		} {
+			item, err := txn.Get(tc.key)
+			require.NoError(t, err)
+			raw, err := item.ValueCopy(nil)
+			require.NoError(t, err)
+			require.True(t, encrypt.IsEncryptedValue(raw))
+			require.NotContains(t, string(raw), tc.forbidden)
+
+			plain, err := fsm.itemValueCopy(item)
+			require.NoError(t, err)
+			require.Contains(t, string(plain), tc.forbidden)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x47}, 32))
+	require.NoError(t, err)
+	fsm.SetEncryptor(enc)
+
+	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b",
+		Key:    "tampered",
+		ETag:   "etag",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(putData))
+
+	metaKey := fsm.keys.ObjectMetaKey("b", "tampered")
+	require.NoError(t, db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(metaKey)
+		if err != nil {
+			return err
+		}
+		raw, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		require.True(t, encrypt.IsEncryptedValue(raw))
+		raw[len(raw)-1] ^= 0x01
+		return txn.Set(metaKey, raw)
+	}))
+
+	deleteData, err := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "tampered"})
+	require.NoError(t, err)
+	require.Error(t, fsm.Apply(deleteData))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(metaKey)
+		return err
+	}))
 }
 
 func TestFSM_DeleteBucket(t *testing.T) {

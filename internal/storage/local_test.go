@@ -5,8 +5,11 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +21,11 @@ func setupTestBackend(t *testing.T) *LocalBackend {
 	require.NoError(t, err, "NewLocalBackend")
 	t.Cleanup(func() { b.Close() })
 	return b
+}
+
+func TestNewEncryptedLocalBackendRejectsNilEncryptor(t *testing.T) {
+	_, err := NewEncryptedLocalBackend(t.TempDir(), nil)
+	require.Error(t, err)
 }
 
 func TestCreateBucket(t *testing.T) {
@@ -85,6 +93,120 @@ func TestPutAndGetObject(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	assert.Equal(t, data, got)
 	assert.Equal(t, int64(len(data)), meta.Size)
+}
+
+func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	plaintext := []byte("sensitive object payload")
+	key := "sensitive-meta-key"
+	_, err = b.PutObject(context.Background(), "bkt", key, bytes.NewReader(plaintext), "text/plain")
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(b.objectPath("bkt", key))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), string(plaintext))
+
+	require.NoError(t, b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.objectMetaKey("bkt", key))
+		require.NoError(t, err)
+		return item.Value(func(val []byte) error {
+			require.True(t, encrypt.IsEncryptedValue(val))
+			require.NotContains(t, string(val), key)
+			return nil
+		})
+	}))
+
+	rc, _, err := b.GetObject(context.Background(), "bkt", key)
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+func TestEncryptedLocalBackendListsEncryptedObjectMetadata(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	_, err = b.PutObject(ctx, "bkt", "dir/a.txt", bytes.NewReader([]byte("alpha")), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, "bkt", "dir/b.txt", bytes.NewReader([]byte("beta")), "text/plain")
+	require.NoError(t, err)
+
+	listed, err := b.ListObjects(ctx, "bkt", "dir/", 100)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	listedSizes := make(map[string]int64)
+	for _, obj := range listed {
+		listedSizes[obj.Key] = obj.Size
+	}
+	require.Equal(t, map[string]int64{
+		"dir/a.txt": 5,
+		"dir/b.txt": 4,
+	}, listedSizes)
+
+	walked := make(map[string]int64)
+	err = b.WalkObjects(ctx, "bkt", "dir/", func(obj *Object) error {
+		walked[obj.Key] = obj.Size
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, listedSizes, walked)
+
+	snapshots, err := b.ListAllObjects()
+	require.NoError(t, err)
+	snapshotSizes := make(map[string]int64)
+	for _, obj := range snapshots {
+		if obj.Bucket == "bkt" {
+			snapshotSizes[obj.Key] = obj.Size
+		}
+	}
+	require.Equal(t, listedSizes, snapshotSizes)
+}
+
+func TestEncryptedLocalBackendObjectSurvivesDataRootMove(t *testing.T) {
+	enc := testEncryptor(t)
+	root := filepath.Join(t.TempDir(), "root")
+	b, err := NewEncryptedLocalBackend(root, enc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	plaintext := []byte("movable encrypted object")
+	_, err = b.PutObject(ctx, "bkt", "dir/object.txt", bytes.NewReader(plaintext), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, b.Close())
+
+	moved := filepath.Join(t.TempDir(), "moved")
+	require.NoError(t, os.Rename(root, moved))
+	reopened, err := NewEncryptedLocalBackend(moved, enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	rc, _, err := reopened.GetObject(ctx, "bkt", "dir/object.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+}
+
+func TestEncryptedLocalBackendDoesNotAdvertiseWriteAt(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.False(t, b.PreferWriteAt("__grainfs_volumes"))
 }
 
 func TestGetObjectNotFound(t *testing.T) {

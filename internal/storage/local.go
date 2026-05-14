@@ -16,6 +16,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 )
 
@@ -25,8 +26,9 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	root string
-	db   *badger.DB
+	root      string
+	db        *badger.DB
+	encryptor *encrypt.Encryptor
 }
 
 var (
@@ -41,6 +43,17 @@ func (b *LocalBackend) DB() *badger.DB { return b.db }
 
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
+	return newLocalBackend(root, nil)
+}
+
+func NewEncryptedLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypted local backend requires encryptor")
+	}
+	return newLocalBackend(root, enc)
+}
+
+func newLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -53,7 +66,7 @@ func NewLocalBackend(root string) (*LocalBackend, error) {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &LocalBackend{root: root, db: db}, nil
+	return &LocalBackend{root: root, db: db, encryptor: enc}, nil
 }
 
 // Close closes the metadata database.
@@ -77,12 +90,24 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(b.root, "data", bucket, key)
 }
 
+func encryptedObjectFileDomain(bucket, key string) string {
+	return "local-object-file:" + bucket + "/" + key
+}
+
 // OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
 // object. It does NOT fall back to peers (there are none in solo mode) and
 // returns os.ErrNotExist when the file is missing — the contract scrubber
 // verifiers rely on.
 func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
-	return os.Open(b.objectPath(bucket, key))
+	objPath := b.objectPath(bucket, key)
+	if b.encryptor != nil {
+		obj, err := b.HeadObject(context.Background(), bucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return openEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
+	}
+	return os.Open(objPath)
 }
 
 func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
@@ -100,7 +125,7 @@ func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 		if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
 			return fmt.Errorf("create bucket dir: %w", err)
 		}
-		return txn.Set(bk, []byte(`{}`))
+		return setBadgerValue(txn, b.encryptor, badgerDomainBucket, bk, []byte(`{}`))
 	})
 }
 
@@ -227,7 +252,16 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 		etag string
 		cerr error
 	)
-	{
+	if b.encryptor != nil {
+		_ = tmp.Close()
+		h, release := hashForBucket(bucket)
+		size, etag, cerr = writeEncryptedObjectFileWithHash(tmpPath, b.encryptor, encryptedObjectFileDomain(bucket, key), r, h)
+		release()
+		if cerr != nil {
+			cleanupTmp()
+			return nil, fmt.Errorf("write encrypted object: %w", cerr)
+		}
+	} else {
 		h, release := hashForBucket(bucket)
 		w := io.MultiWriter(tmp, h)
 		size, cerr = io.Copy(w, r)
@@ -273,7 +307,7 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	}
 
 	err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.objectMetaKey(bucket, key), meta)
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
 	})
 	if err != nil {
 		return nil, err
@@ -298,6 +332,14 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 		return nil, nil, err
 	}
 
+	if b.encryptor != nil {
+		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open encrypted object: %w", err)
+		}
+		return rc, obj, nil
+	}
+
 	f, err := os.Open(b.objectPath(bucket, key))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open object: %w", err)
@@ -318,21 +360,19 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 
 	var obj Object
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.objectMetaKey(bucket, key))
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key))
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			decoded, err := unmarshalObject(val)
-			if err != nil {
-				return err
-			}
-			obj = *decoded
-			return nil
-		})
+		decoded, err := unmarshalObject(val)
+		if err != nil {
+			return err
+		}
+		obj = *decoded
+		return nil
 	})
 
 	if localTraceEnabled {
@@ -349,25 +389,23 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(mk)
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			obj, merr := unmarshalObject(val)
-			if merr != nil {
-				return merr
-			}
-			obj.ACL = acl
-			newVal, merr := marshalObject(obj)
-			if merr != nil {
-				return merr
-			}
-			return txn.Set(mk, newVal)
-		})
+		obj, err := unmarshalObject(val)
+		if err != nil {
+			return err
+		}
+		obj.ACL = acl
+		newVal, err := marshalObject(obj)
+		if err != nil {
+			return err
+		}
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
 	})
 }
 
@@ -375,39 +413,51 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	_ = ctx
 	objPath := b.objectPath(bucket, key)
-	if err := os.Truncate(objPath, size); err != nil {
-		return fmt.Errorf("truncate: %w", err)
+	var currentSize int64
+	if b.encryptor != nil {
+		obj, err := b.HeadObject(context.Background(), bucket, key)
+		if err != nil {
+			return err
+		}
+		currentSize = obj.Size
+		if _, err := truncateEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), currentSize, size); err != nil {
+			return fmt.Errorf("truncate encrypted object: %w", err)
+		}
+	} else {
+		if err := os.Truncate(objPath, size); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		}
 	}
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(mk)
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
 		if err == badger.ErrKeyNotFound {
 			return ErrObjectNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			obj, merr := unmarshalObject(val)
-			if merr != nil {
-				return merr
-			}
-			obj.Size = size
-			newVal, merr := marshalObject(obj)
-			if merr != nil {
-				return merr
-			}
-			return txn.Set(mk, newVal)
-		})
+		obj, err := unmarshalObject(val)
+		if err != nil {
+			return err
+		}
+		obj.Size = size
+		newVal, err := marshalObject(obj)
+		if err != nil {
+			return err
+		}
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
 	})
 }
 
-// WriteAt patches [offset, offset+len(data)) of the stored object using pwrite(2).
+// WriteAt patches [offset, offset+len(data)) of the stored object.
 // The file is created if it does not exist; it is extended if the write exceeds the
 // current size. Bytes outside the written range are preserved, and writes before the
 // first byte produce a sparse hole filled with zeros.
 //
-// This is O(len(data)) — no full-file copy per write.
+// Unencrypted writes use pwrite(2) and are O(len(data)). Encrypted writes preserve
+// semantics by rewriting the encrypted object, so callers should check PreferWriteAt
+// before using this as a hot-path optimization.
 func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error) {
 	_ = ctx
 	var tStart, tStage time.Time
@@ -423,6 +473,37 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	if localTraceEnabled {
 		log.Debug().Dur("mkdir", time.Since(tStage)).Str("bucket", bucket).Msg("WriteAt trace")
 		tStage = time.Now()
+	}
+
+	if b.encryptor != nil {
+		currentSize := int64(0)
+		if existing, err := b.HeadObject(context.Background(), bucket, key); err == nil {
+			currentSize = existing.Size
+		} else if !errors.Is(err, ErrObjectNotFound) {
+			return nil, err
+		}
+		size, etag, err := writeAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), offset, data, currentSize)
+		if err != nil {
+			return nil, fmt.Errorf("encrypted writeat: %w", err)
+		}
+		now := time.Now().Unix()
+		obj := &Object{
+			Key:          key,
+			Size:         size,
+			ContentType:  "application/octet-stream",
+			ETag:         etag,
+			LastModified: now,
+		}
+		meta, err := marshalObject(obj)
+		if err != nil {
+			return nil, fmt.Errorf("marshal metadata: %w", err)
+		}
+		if err := b.db.Update(func(txn *badger.Txn) error {
+			return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
+		}); err != nil {
+			return nil, err
+		}
+		return obj, nil
 	}
 
 	// O_CREATE|O_RDWR: create if new, open in-place if existing.
@@ -502,7 +583,7 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 		return nil, fmt.Errorf("marshal metadata: %w", err)
 	}
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.objectMetaKey(bucket, key), meta)
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
 	}); err != nil {
 		return nil, err
 	}
@@ -515,7 +596,15 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 // ReadAt reads len(buf) bytes from the object at the given offset via pread(2).
 func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	_ = ctx
-	f, err := os.Open(b.objectPath(bucket, key))
+	objPath := b.objectPath(bucket, key)
+	if b.encryptor != nil {
+		obj, err := b.HeadObject(context.Background(), bucket, key)
+		if err != nil {
+			return 0, err
+		}
+		return readAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size, offset, buf)
+	}
+	f, err := os.Open(objPath)
 	if err != nil {
 		return 0, err
 	}
@@ -524,7 +613,7 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 }
 
 func (b *LocalBackend) PreferWriteAt(bucket string) bool {
-	return IsInternalBucket(bucket)
+	return b.encryptor == nil && IsInternalBucket(bucket)
 }
 
 // Sync implements storage.Syncable.
@@ -577,9 +666,15 @@ func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, m
 			if count >= maxKeys {
 				break
 			}
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
 			var obj Object
-			err := it.Item().Value(func(val []byte) error {
-				decoded, err := unmarshalObject(val)
+			err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				if err != nil {
+					return err
+				}
+				decoded, err := unmarshalObject(plain)
 				if err != nil {
 					return err
 				}
@@ -606,9 +701,15 @@ func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, f
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
 			var obj Object
-			if err := it.Item().Value(func(val []byte) error {
-				decoded, err := unmarshalObject(val)
+			if err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				if err != nil {
+					return err
+				}
+				decoded, err := unmarshalObject(plain)
 				if err != nil {
 					return err
 				}
@@ -665,18 +766,15 @@ func (b *LocalBackend) policyKey(bucket string) []byte {
 func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 	var data []byte
 	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(b.policyKey(bucket))
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainPolicy, b.policyKey(bucket))
 		if err == badger.ErrKeyNotFound {
 			return ErrBucketNotFound
 		}
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
-			data = make([]byte, len(val))
-			copy(data, val)
-			return nil
-		})
+		data = val
+		return nil
 	})
 	return data, err
 }
@@ -684,7 +782,7 @@ func (b *LocalBackend) GetBucketPolicy(bucket string) ([]byte, error) {
 // SetBucketPolicy stores the raw policy JSON for a bucket.
 func (b *LocalBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
 	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.policyKey(bucket), policyJSON)
+		return setBadgerValue(txn, b.encryptor, badgerDomainPolicy, b.policyKey(bucket), policyJSON)
 	})
 }
 
@@ -719,9 +817,15 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 			bucket := rest[:slashIdx]
 			key := rest[slashIdx+1:]
 
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
 			var obj Object
-			if err := it.Item().Value(func(val []byte) error {
-				decoded, err := unmarshalObject(val)
+			if err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				if err != nil {
+					return err
+				}
+				decoded, err := unmarshalObject(plain)
 				if err != nil {
 					return err
 				}
@@ -798,7 +902,7 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
 		}
 		if err := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Set(b.objectMetaKey(snap.Bucket, snap.Key), meta)
+			return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(snap.Bucket, snap.Key), meta)
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
 		}

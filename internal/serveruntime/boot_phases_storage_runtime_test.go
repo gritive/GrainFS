@@ -28,6 +28,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 		DataDir:    t.TempDir(),
 		NodeID:     "n1",
 		ClusterKey: "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		Encryptor:  newTestEncryptor(t),
 	})
 	require.NoError(t, bootValidateConfig(state))
 	require.NoError(t, bootAutoMigrate(state))

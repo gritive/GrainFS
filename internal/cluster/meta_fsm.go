@@ -239,9 +239,9 @@ type MetaFSM struct {
 	clusterCfg *ClusterConfig
 
 	// encryptor is used to gate cluster-config patches that carry a wrapped
-	// alert-webhook secret. nil = --no-encryption mode; such patches are
-	// rejected at apply time (see applyClusterConfigPatch). Wired via
-	// SetEncryptor before the raft log starts replaying.
+	// alert-webhook secret. nil means the encryptor has not been wired; such
+	// patches are rejected at apply time (see applyClusterConfigPatch). Wired
+	// via SetEncryptor before the raft log starts replaying.
 	encryptor *encrypt.Encryptor
 }
 
@@ -281,15 +281,15 @@ func (f *MetaFSM) IAMStore() *iam.Store { return f.iamStore }
 
 // SetEncryptor wires the cluster-wide encryptor used to gate cluster-config
 // patches carrying wrapped secrets. Must be called before the raft log starts
-// replaying. nil = --no-encryption mode; cluster-config patches with a wrapped
-// secret will be rejected at apply.
+// replaying. nil means cluster-config patches with a wrapped secret will be
+// rejected at apply.
 func (f *MetaFSM) SetEncryptor(e *encrypt.Encryptor) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.encryptor = e
 }
 
-// Encryptor returns the registered encryptor (nil in --no-encryption mode).
+// Encryptor returns the registered encryptor, or nil if it has not been wired.
 func (f *MetaFSM) Encryptor() *encrypt.Encryptor { return f.encryptor }
 
 // SetLifecycle wires the lifecycle store into the MetaFSM. Must be called
@@ -2087,7 +2087,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// IAM restore — replaces in-memory IAM state on the receiving node so
 	// raft log compaction (LogGCInterval) does not silently drop SAs/keys/
 	// grants/auth_enabled. Skip when there's no trailer (legacy snapshot)
-	// or no IAM data, or when IAM is not wired (anonymous/no-encryption mode).
+	// or no IAM data, or when IAM is not wired.
 	if len(iamData) > 0 {
 		if f.iamStore == nil || f.iamApplier == nil {
 			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")

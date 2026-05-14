@@ -102,7 +102,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	// Start auto-snapshotter for object-level PITR snapshots (separate from
 	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
 	// anchored to the object mutation log.
-	if err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), 30*time.Second); err != nil {
+	if err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.cfg.Encryptor, 30*time.Second); err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}
 

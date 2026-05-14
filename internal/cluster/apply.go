@@ -10,6 +10,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -22,6 +23,7 @@ var restoreCrashAfterDrop func()
 type FSM struct {
 	db   *badger.DB
 	keys *stateKeyspace
+	enc  *encrypt.Encryptor
 
 	// Guards onMigrateShard and commitNotifier against concurrent SetMigrationHooks + Apply.
 	mu sync.RWMutex
@@ -213,7 +215,7 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		// Versioned entries are only written when a VersionID is supplied. Legacy
 		// replay (empty VersionID) gets the single legacy key only.
 		if c.VersionID != "" {
-			if err := txn.Set(f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
+			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), meta); err != nil {
 				return err
 			}
 			if c.PreserveLatest {
@@ -233,7 +235,7 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		}
 		// Dual-write: keep the legacy latest-only key in sync during the transition
 		// so readers that haven't been ported yet still see the object.
-		if err := txn.Set(f.keys.ObjectMetaKey(c.Bucket, c.Key), meta); err != nil {
+		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), meta); err != nil {
 			return err
 		}
 		if c.VersionID != "" {
@@ -263,12 +265,18 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 		var rv RingVersion
 		if err := f.db.Update(func(txn *badger.Txn) error {
 			if item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key)); gerr == nil {
-				_ = item.Value(func(v []byte) error {
+				if err := item.Value(func(raw []byte) error {
+					v, err := f.openValue(item.Key(), raw)
+					if err != nil {
+						return err
+					}
 					if m, derr := unmarshalObjectMeta(v); derr == nil {
 						rv = RingVersion(m.RingVersion)
 					}
 					return nil
-				})
+				}); err != nil {
+					return err
+				}
 			}
 			if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
 				return err
@@ -308,7 +316,7 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 			_ = latItem.Value(func(v []byte) error { prevVersionID = string(v); return nil })
 		}
 
-		if err := txn.Set(f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
+		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
 			return err
 		}
 		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
@@ -351,7 +359,11 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 		if gerr != nil {
 			return gerr
 		}
-		return item.Value(func(v []byte) error {
+		return item.Value(func(raw []byte) error {
+			v, err := f.openValue(item.Key(), raw)
+			if err != nil {
+				return err
+			}
 			if m, derr := unmarshalObjectMeta(v); derr == nil {
 				rv = RingVersion(m.RingVersion)
 			}
@@ -436,7 +448,7 @@ func (f *FSM) applyCreateMultipartUpload(data []byte) error {
 		return fmt.Errorf("marshal multipart meta: %w", err)
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(f.keys.MultipartKey(c.UploadID), meta)
+		return f.setValue(txn, f.keys.MultipartKey(c.UploadID), meta)
 	})
 }
 
@@ -461,11 +473,11 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
-		if err := txn.Set(f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
+		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
 		}
 		if c.VersionID != "" {
-			if err := txn.Set(f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
+			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
 				return err
 			}
 			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
@@ -496,7 +508,7 @@ func (f *FSM) applySetBucketPolicy(data []byte) error {
 		return err
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(f.keys.BucketPolicyKey(c.Bucket), c.PolicyJSON)
+		return f.setValue(txn, f.keys.BucketPolicyKey(c.Bucket), c.PolicyJSON)
 	})
 }
 
@@ -543,7 +555,11 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 		if err != nil {
 			return err
 		}
-		return item.Value(func(val []byte) error {
+		return item.Value(func(raw []byte) error {
+			val, err := f.openValue(item.Key(), raw)
+			if err != nil {
+				return err
+			}
 			m, merr := unmarshalObjectMeta(val)
 			if merr != nil {
 				return merr
@@ -553,7 +569,7 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 			if merr != nil {
 				return merr
 			}
-			if err := txn.Set(legacyKey, newVal); err != nil {
+			if err := f.setValue(txn, legacyKey, newVal); err != nil {
 				return err
 			}
 			// Also update the versioned record if this bucket has versioning enabled.
@@ -571,7 +587,11 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 			if verr != nil {
 				return nil //nolint:nilerr // versioned record missing, skip
 			}
-			return vItem.Value(func(vval []byte) error {
+			return vItem.Value(func(raw []byte) error {
+				vval, err := f.openValue(vItem.Key(), raw)
+				if err != nil {
+					return err
+				}
 				vm, merr := unmarshalObjectMeta(vval)
 				if merr != nil {
 					return merr
@@ -581,7 +601,7 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 				if merr != nil {
 					return merr
 				}
-				return txn.Set(vKey, vNewVal)
+				return f.setValue(txn, vKey, vNewVal)
 			})
 		})
 	})

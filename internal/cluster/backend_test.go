@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -525,6 +527,43 @@ func TestDistributedBackend_MultipartComplete(t *testing.T) {
 
 	data, _ := io.ReadAll(rc)
 	require.Equal(t, append(part1, part2...), data)
+}
+
+func TestDistributedBackend_EncryptedMultipartHidesPartPlaintext(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x45}, 32))
+	require.NoError(t, err)
+	b.SetShardService(NewShardService(b.root, nil, WithEncryptor(enc)), []string{b.selfAddr})
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	partBytes := []byte("cluster multipart sensitive payload")
+	upload, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+
+	part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(partBytes))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(partBytes)), part.Size)
+
+	rawPart, err := os.ReadFile(b.partPath(upload.UploadID, 1))
+	require.NoError(t, err)
+	require.NotContains(t, string(rawPart), string(partBytes))
+
+	listed, err := b.ListParts(ctx, "bucket", "mp.bin", upload.UploadID, 100)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, part.ETag, listed[0].ETag)
+
+	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", upload.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+	require.Equal(t, int64(len(partBytes)), obj.Size)
+
+	rc, _, err := b.GetObject(ctx, "bucket", "mp.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, partBytes, got)
 }
 
 func TestDistributedBackend_MultipartAbort(t *testing.T) {

@@ -44,7 +44,10 @@ func bootSnapshotAndApplyLoop(state *bootState) error {
 	var inner storage.Backend = state.distBackend
 	if state.cfg.PackThreshold > 0 {
 		blobDir := filepath.Join(state.cfg.DataDir, "blobs")
-		pb, perr := packblob.NewPackedBackend(inner, blobDir, int64(state.cfg.PackThreshold))
+		pb, perr := packblob.NewPackedBackendWithOptions(inner, blobDir, int64(state.cfg.PackThreshold), packblob.PackedBackendOptions{
+			Compress:  true,
+			Encryptor: state.cfg.Encryptor,
+		})
 		if perr != nil {
 			return perr
 		}

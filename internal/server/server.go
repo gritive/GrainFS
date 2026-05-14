@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cache/blockcache"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -102,6 +103,7 @@ type Server struct {
 	readIndexer   ReadIndexer // nil = no gate (single-node)
 	raftSnapshots RaftSnapshotter
 	dataDir       string
+	snapshotEnc   *encrypt.Encryptor
 	snapMgr       *snapshot.Manager
 	scrubber      *scrubber.BackgroundScrubber // nil if not using ECBackend
 	verifier      *s3auth.CachingVerifier
@@ -308,6 +310,13 @@ func WithDataDir(dir string) Option {
 	}
 }
 
+// WithSnapshotEncryptor lets PITR endpoints replay encrypted WAL entries.
+func WithSnapshotEncryptor(enc *encrypt.Encryptor) Option {
+	return func(s *Server) {
+		s.snapshotEnc = enc
+	}
+}
+
 // WithScrubber sets the background scrubber (only used with ECBackend).
 func WithScrubber(sc *scrubber.BackgroundScrubber) Option {
 	return func(s *Server) {
@@ -449,7 +458,7 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 		if snap := ss.Snapshotable; snap != nil {
 			dir := filepath.Join(s.dataDir, "snapshots")
 			walDir := filepath.Join(s.dataDir, "wal")
-			if mgr, err := snapshot.NewManager(dir, snap, walDir); err == nil {
+			if mgr, err := snapshot.NewManagerWithEncryptor(dir, snap, walDir, s.snapshotEnc); err == nil {
 				s.snapMgr = mgr
 			} else {
 				log.Warn().Err(err).Msg("snapshot manager init failed, snapshot/PITR endpoints will be unavailable")

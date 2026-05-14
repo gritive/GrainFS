@@ -1195,22 +1195,24 @@ func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string
 	}
 
 	name := strings.ReplaceAll(t.Name(), "/", "-")
-	mountDir := "/mnt/grainfs-mr-nfs-" + name
+	mountDir := fmt.Sprintf("/mnt/grainfs-mr-nfs-%s-%d", name, time.Now().UnixNano())
 	runColimaSSH(t, "sudo", "mkdir", "-p", mountDir)
 	t.Cleanup(func() {
 		_ = colimaSSH("sudo", "umount", "-l", mountDir).Run()
 		_ = colimaSSH("sudo", "rmdir", mountDir).Run()
 	})
 
-	runColimaSSH(t, "sudo", "mount", "-t", "nfs4",
+	if out, err := colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
 		"-o", fmt.Sprintf("vers=4.1,port=%d,rw,hard,intr,timeo=600,retrans=2", nfsPort),
 		fmt.Sprintf("%s:/", hostIP),
 		mountDir,
-	)
+	); err != nil {
+		t.Skipf("Colima NFSv4 mount failed; macOS smoke requires a working Colima NFS client: %v\n%s", err, out)
+	}
 
 	nfsFilePath := mountDir + "/s3-file.txt"
 	require.Eventually(t, func() bool {
-		out, err := colimaSSH("sudo", "cat", nfsFilePath).CombinedOutput()
+		out, err := colimaSSHCombinedOutput(2*time.Second, "sudo", "cat", nfsFilePath)
 		return err == nil && string(out) == s3Body
 	}, 30*time.Second, 500*time.Millisecond, "object not visible via Colima NFSv4 mount")
 
@@ -1221,6 +1223,12 @@ func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string
 
 func colimaSSH(args ...string) *exec.Cmd {
 	return exec.Command("colima", append([]string{"ssh", "--"}, args...)...)
+}
+
+func colimaSSHCombinedOutput(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "colima", append([]string{"ssh", "--"}, args...)...).CombinedOutput()
 }
 
 func runColimaSSH(t *testing.T, args ...string) string {

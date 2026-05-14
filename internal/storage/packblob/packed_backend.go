@@ -17,6 +17,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -56,7 +57,8 @@ var _ interface {
 
 // PackedBackendOptions configures optional behavior for PackedBackend.
 type PackedBackendOptions struct {
-	Compress bool // enable zstd compression for packed (small) objects
+	Compress  bool // enable zstd compression for packed (small) objects
+	Encryptor *encrypt.Encryptor
 }
 
 // NewPackedBackend creates a packed backend wrapping inner.
@@ -68,7 +70,15 @@ func NewPackedBackend(inner storage.Backend, blobDir string, threshold int64) (*
 
 // NewPackedBackendWithOptions creates a packed backend with optional configuration.
 func NewPackedBackendWithOptions(inner storage.Backend, blobDir string, threshold int64, opts PackedBackendOptions) (*PackedBackend, error) {
-	bs, err := NewBlobStore(blobDir, 256*1024*1024) // 256MB max blob
+	var (
+		bs  *BlobStore
+		err error
+	)
+	if opts.Encryptor != nil {
+		bs, err = NewEncryptedBlobStore(blobDir, 256*1024*1024, opts.Encryptor)
+	} else {
+		bs, err = NewBlobStore(blobDir, 256*1024*1024)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create blob store: %w", err)
 	}
