@@ -143,6 +143,7 @@ const (
 const (
 	nbdPoolBufSize      = 4096
 	nbdLargePoolBufSize = 64 * 1024
+	nbdHugePoolBufSize  = 128 * 1024
 )
 
 var (
@@ -160,6 +161,7 @@ type Server struct {
 	closed       atomic.Bool
 	bufPool      *pool.Pool[[]byte]
 	largeBufPool *pool.Pool[[]byte]
+	hugeBufPool  *pool.Pool[[]byte]
 	readIndexer  ReadIndexer // nil = no gate (single-node / non-distributed)
 }
 
@@ -170,6 +172,7 @@ func NewServer(mgr *volume.Manager, volName string) *Server {
 		volName:      volName,
 		bufPool:      pool.New(func() []byte { return make([]byte, nbdPoolBufSize) }),
 		largeBufPool: pool.New(func() []byte { return make([]byte, nbdLargePoolBufSize) }),
+		hugeBufPool:  pool.New(func() []byte { return make([]byte, nbdHugePoolBufSize) }),
 	}
 }
 
@@ -260,6 +263,9 @@ func (s *Server) getBuf(length uint32) []byte {
 	if length == nbdLargePoolBufSize {
 		return s.largeBufPool.Get()
 	}
+	if length == nbdHugePoolBufSize {
+		return s.hugeBufPool.Get()
+	}
 	return make([]byte, length)
 }
 
@@ -269,6 +275,8 @@ func (s *Server) putBuf(buf []byte) {
 		s.bufPool.Put(buf)
 	} else if len(buf) == nbdLargePoolBufSize {
 		s.largeBufPool.Put(buf)
+	} else if len(buf) == nbdHugePoolBufSize {
+		s.hugeBufPool.Put(buf)
 	}
 }
 

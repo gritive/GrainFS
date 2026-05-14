@@ -68,7 +68,11 @@ func (f *bucketFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 func (f *bucketFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
 	qid := p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, f.prefix)}
 	valid := p9.AttrMask{Mode: true, NLink: true}
-	attr := p9.Attr{Mode: p9.ModeDirectory | 0555, NLink: 2}
+	mode := uint32(0755)
+	if f.prefix != "" {
+		mode = loadP9FileMeta(context.Background(), f.backend, f.bucket, dirMarkerKey(f.prefix)).Mode
+	}
+	attr := p9.Attr{Mode: p9.ModeDirectory | p9.FileMode(mode&0777), NLink: 2}
 	return qid, valid, attr, nil
 }
 
@@ -85,7 +89,11 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 	if isP9ReservedKey(key) {
 		return nil, p9.QID{}, 0, syscall.EPERM
 	}
-	unlock := f.locks.lock(f.bucket, key)
+	lockKeys := []objectLockKey{{bucket: f.bucket, key: key}}
+	if parentKey, ok := f.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	unlock := f.locks.lockMany(lockKeys...)
 	defer unlock()
 
 	ctx := context.Background()
@@ -93,6 +101,9 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 		return nil, p9.QID{}, 0, syscall.EEXIST
 	} else if !errors.Is(err, storage.ErrObjectNotFound) {
 		return nil, p9.QID{}, 0, syscall.EIO
+	}
+	if f.hasPrefix(dirMarkerKey(key)) {
+		return nil, p9.QID{}, 0, syscall.EISDIR
 	}
 	obj, err := f.backend.PutObject(ctx, f.bucket, key, bytes.NewReader(nil), "application/octet-stream")
 	if err != nil {
@@ -110,8 +121,54 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}, qid, 0, nil
 }
 
+func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.QID, error) {
+	if !validObjectName(name) {
+		return p9.QID{}, syscall.EINVAL
+	}
+	if isP9ReservedName(name) {
+		return p9.QID{}, syscall.EPERM
+	}
+	key := f.childKey(name)
+	if isP9ReservedKey(key) {
+		return p9.QID{}, syscall.EPERM
+	}
+	markerKey := dirMarkerKey(key)
+	lockKeys := []objectLockKey{
+		objectLockKey{bucket: f.bucket, key: key},
+		objectLockKey{bucket: f.bucket, key: markerKey},
+	}
+	if parentKey, ok := f.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	unlock := f.locks.lockMany(lockKeys...)
+	defer unlock()
+
+	ctx := context.Background()
+	if _, err := f.backend.HeadObject(ctx, f.bucket, key); err == nil {
+		return p9.QID{}, syscall.EEXIST
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return p9.QID{}, syscall.EIO
+	}
+	if f.hasPrefix(markerKey) {
+		return p9.QID{}, syscall.EEXIST
+	}
+	if _, err := f.backend.PutObject(ctx, f.bucket, markerKey, bytes.NewReader(nil), "application/x-directory"); err != nil {
+		return p9.QID{}, syscall.EIO
+	}
+	meta := p9FileMeta{
+		Mode:  uint32(permissions) & 0777,
+		Mtime: time.Now().UnixNano(),
+	}
+	if err := saveP9FileMeta(ctx, f.backend, f.bucket, markerKey, meta); err != nil {
+		_ = f.backend.DeleteObject(ctx, f.bucket, markerKey)
+		return p9.QID{}, syscall.EIO
+	}
+	return p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, key)}, nil
+}
+
 func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
-	if flags != 0 {
+	const atRemovedir = 0x200
+	if flags != 0 && flags != atRemovedir {
 		return syscall.EINVAL
 	}
 	if !validObjectName(name) {
@@ -124,10 +181,17 @@ func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
 	if isP9ReservedKey(key) {
 		return syscall.EPERM
 	}
-	unlock := f.locks.lockMany(
+	if flags == atRemovedir {
+		return f.rmdir(key)
+	}
+	lockKeys := []objectLockKey{
 		objectLockKey{bucket: f.bucket, key: key},
 		objectLockKey{bucket: f.bucket, key: p9MetaSidecarKey(key)},
-	)
+	}
+	if parentKey, ok := f.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	unlock := f.locks.lockMany(lockKeys...)
 	defer unlock()
 
 	ctx := context.Background()
@@ -141,6 +205,54 @@ func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
 		return syscall.EIO
 	}
 	_ = f.backend.DeleteObject(ctx, f.bucket, p9MetaSidecarKey(key))
+	return nil
+}
+
+func (f *bucketFile) rmdir(key string) error {
+	markerKey := dirMarkerKey(key)
+	unlock := f.locks.lock(f.bucket, markerKey)
+	defer unlock()
+
+	ctx := context.Background()
+	hasMarker := false
+	if _, err := f.backend.HeadObject(ctx, f.bucket, markerKey); err == nil {
+		hasMarker = true
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return syscall.EIO
+	}
+
+	hasChild := false
+	walk := func(foundKey string) error {
+		if foundKey == markerKey {
+			return nil
+		}
+		if isP9ReservedKey(foundKey) {
+			return nil
+		}
+		hasChild = true
+		return errStopReaddir
+	}
+	var err error
+	if walker, ok := f.backend.(objectKeyWalker); ok {
+		err = walker.WalkObjectKeys(ctx, f.bucket, markerKey, walk)
+	} else {
+		err = f.backend.WalkObjects(ctx, f.bucket, markerKey, func(obj *storage.Object) error {
+			return walk(obj.Key)
+		})
+	}
+	if err != nil && !errors.Is(err, errStopReaddir) {
+		return syscall.EIO
+	}
+	if hasChild {
+		return syscall.ENOTEMPTY
+	}
+	if !hasMarker {
+		return syscall.ENOENT
+	}
+	if err := f.backend.DeleteObject(ctx, f.bucket, markerKey); err != nil {
+		return syscall.EIO
+	}
+	_ = f.backend.DeleteObject(ctx, f.bucket, p9MetaSidecarKey(markerKey))
 	return nil
 }
 
@@ -166,12 +278,19 @@ func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) er
 	if isP9ReservedKey(oldKey) || isP9ReservedKey(newKey) {
 		return syscall.EPERM
 	}
-	unlock := f.locks.lockMany(
+	lockKeys := []objectLockKey{
 		objectLockKey{bucket: f.bucket, key: oldKey},
 		objectLockKey{bucket: f.bucket, key: newKey},
 		objectLockKey{bucket: f.bucket, key: p9MetaSidecarKey(oldKey)},
 		objectLockKey{bucket: f.bucket, key: p9MetaSidecarKey(newKey)},
-	)
+	}
+	if parentKey, ok := f.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	if parentKey, ok := dst.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	unlock := f.locks.lockMany(lockKeys...)
 	defer unlock()
 
 	ctx := context.Background()
@@ -187,6 +306,9 @@ func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) er
 	}
 	if oldKey == newKey {
 		return nil
+	}
+	if f.hasPrefix(dirMarkerKey(newKey)) {
+		return syscall.EISDIR
 	}
 	if copier, ok := f.backend.(storage.Copier); ok {
 		if _, err := copier.CopyObject(f.bucket, oldKey, f.bucket, newKey); err != nil {
@@ -278,8 +400,19 @@ func (f *bucketFile) childKey(name string) string {
 	return f.prefix + name
 }
 
+func (f *bucketFile) parentDirLockKey() (objectLockKey, bool) {
+	if f.prefix == "" {
+		return objectLockKey{}, false
+	}
+	return objectLockKey{bucket: f.bucket, key: dirMarkerKey(f.prefix)}, true
+}
+
 func validObjectName(name string) bool {
 	return name != "" && !strings.Contains(name, "/")
+}
+
+func dirMarkerKey(key string) string {
+	return strings.TrimSuffix(key, "/") + "/"
 }
 
 func (f *bucketFile) hasPrefix(prefix string) bool {

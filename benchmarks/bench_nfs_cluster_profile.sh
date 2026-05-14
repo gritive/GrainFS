@@ -14,6 +14,7 @@ bench_require_colima
 HOST_IP="${HOST_IP:-192.168.5.2}"
 NODE_COUNT="${NODE_COUNT:-3}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-nfs-cluster-bench}"
+BUCKET="${BUCKET:-benchnfs}"
 MNT="/mnt/grainfs-bench-nfs-cluster"
 NFS_VERS="${NFS_VERS:-4.0}"
 FIO_RUNTIME="${FIO_RUNTIME:-15}"
@@ -104,6 +105,7 @@ start_node() {
 start_node 0
 bench_wait_tcp_port "127.0.0.1" "$(http_port 0)" "node-0 HTTP" 180 0.2
 bench_wait_tcp_port "127.0.0.1" "$(pprof_port 0)" "node-0 pprof" 180 0.2
+bench_wait_admin_socket "$BENCH_DIR/n0" 100 0.2
 
 for i in $(seq 1 $((NODE_COUNT - 1))); do
   printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
@@ -137,6 +139,13 @@ fi
 LEADER_NFS_PORT="$(nfs_port "$LEADER_INDEX")"
 LEADER_PPROF_PORT="$(pprof_port "$LEADER_INDEX")"
 echo "  leader node-$LEADER_INDEX NFS=:$LEADER_NFS_PORT pprof=:$LEADER_PPROF_PORT"
+bench_wait_admin_socket "$BENCH_DIR/n$LEADER_INDEX" 100 0.2
+
+echo ""
+echo "=== preparing bucket export ($BUCKET) ==="
+bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n$LEADER_INDEX"
+bench_create_bucket_admin_retry "$BINARY" "$BENCH_DIR/n$LEADER_INDEX" "$BUCKET"
+"$BINARY" nfs export add "$BUCKET" --endpoint "$BENCH_DIR/n$LEADER_INDEX/admin.sock" || true
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
 echo ""
@@ -144,7 +153,7 @@ echo "=== mounting NFS inside Colima (vers=$NFS_VERS host=$HOST_IP port=$LEADER_
 bench_colima_ssh sudo mkdir -p "$MNT"
 bench_colima_ssh sudo mount -t nfs4 \
   -o "vers=$NFS_VERS,port=$LEADER_NFS_PORT,rsize=131072,wsize=131072,hard,intr" \
-  "${HOST_IP}:/" "$MNT"
+  "${HOST_IP}:/${BUCKET}" "$MNT"
 bench_colima_ssh df -h "$MNT" || true
 
 curl -sf "http://127.0.0.1:$LEADER_PPROF_PORT/debug/pprof/heap" \
