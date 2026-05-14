@@ -88,16 +88,11 @@ func encodeMetaForwardReply(err error) []byte {
 func encodeMetaForwardReplyWithIndex(index uint64, err error) []byte {
 	reply := metaForwardReply{Index: index}
 	if err != nil {
-		reply.ErrorType = icebergErrorType(err)
+		reply.ErrorType = metaForwardErrorType(err)
 		reply.ErrorMessage = err.Error()
 	}
 	data, _ := json.Marshal(reply)
 	return data
-}
-
-func decodeMetaForwardReply(data []byte) error {
-	_, err := decodeMetaForwardReplyWithIndex(data)
-	return err
 }
 
 func decodeMetaForwardReplyWithIndex(data []byte) (uint64, error) {
@@ -109,6 +104,20 @@ func decodeMetaForwardReplyWithIndex(data []byte) (uint64, error) {
 		return reply.Index, nil
 	}
 	return 0, errorFromIcebergType(reply.ErrorType, reply.ErrorMessage)
+}
+
+// MetaForwardApplyError preserves non-Iceberg FSM apply errors across the
+// follower-to-leader forwarding boundary. Callers can inspect the message today;
+// future typed NFS errors can add explicit wire tags beside this generic shape.
+type MetaForwardApplyError struct {
+	Message string
+}
+
+func (e MetaForwardApplyError) Error() string {
+	if e.Message == "" {
+		return "meta apply error"
+	}
+	return e.Message
 }
 
 func isIcebergMetaCommand(data []byte) bool {
@@ -123,6 +132,31 @@ func isIcebergMetaCommand(data []byte) bool {
 	default:
 		return false
 	}
+}
+
+func metaForwardErrorType(err error) string {
+	if errors.Is(err, raft.ErrNotLeader) {
+		return "not-leader"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if isIcebergCatalogError(err) {
+		return icebergErrorType(err)
+	}
+	return "meta-apply-error"
+}
+
+func isIcebergCatalogError(err error) bool {
+	return errors.Is(err, icebergcatalog.ErrNamespaceNotFound) ||
+		errors.Is(err, icebergcatalog.ErrNamespaceExists) ||
+		errors.Is(err, icebergcatalog.ErrNamespaceNotEmpty) ||
+		errors.Is(err, icebergcatalog.ErrTableNotFound) ||
+		errors.Is(err, icebergcatalog.ErrTableExists) ||
+		errors.Is(err, icebergcatalog.ErrCommitFailed)
 }
 
 func icebergErrorType(err error) string {
@@ -162,6 +196,12 @@ func errorFromIcebergType(errorType, message string) error {
 		return icebergcatalog.ErrCommitFailed
 	case "not-leader":
 		return raft.ErrNotLeader
+	case "timeout":
+		return context.DeadlineExceeded
+	case "canceled":
+		return context.Canceled
+	case "meta-apply-error":
+		return MetaForwardApplyError{Message: message}
 	default:
 		if message == "" {
 			return icebergcatalog.ErrServiceUnavailable

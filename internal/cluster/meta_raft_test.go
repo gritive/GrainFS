@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -566,4 +567,62 @@ func TestMetaRaftProposeWithIndexLeaderReturnsCommittedIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), got)
 	require.Equal(t, 1, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithIndexReturnsApplyError(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	m.lastApplied.Store(42)
+	applyErr := errors.New("apply failed")
+	m.recordApplyResult(42, applyErr)
+	node := &fakeProposerNode{isLeader: true, proposeIdx: 42}
+
+	got, err := m.proposeOrForwardWithIndex(context.Background(), node, []byte("cmd"))
+	require.Equal(t, uint64(42), got)
+	require.ErrorIs(t, err, applyErr)
+	require.Equal(t, 1, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithIndexFollowerWaitsForLocalApply(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	m.forwardFnWithIndex = func(context.Context, []byte) (uint64, error) {
+		return 42, nil
+	}
+	node := &fakeProposerNode{isLeader: false}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.proposeOrForwardWithIndex(context.Background(), node, []byte("cmd"))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("propose returned before follower-local apply: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	m.lastApplied.Store(42)
+	m.applyNotifyMu.Lock()
+	old := m.applyNotify
+	m.applyNotify = make(chan struct{})
+	m.applyNotifyMu.Unlock()
+	close(old)
+
+	require.NoError(t, <-done)
+	require.Equal(t, 0, node.proposeCalls)
+}
+
+func TestMetaRaftProposeWithIndexFollowerLocalApplyTimeoutStillReturnsCommittedIndex(t *testing.T) {
+	m := &MetaRaft{applyNotify: make(chan struct{})}
+	m.forwardFnWithIndex = func(context.Context, []byte) (uint64, error) {
+		return 42, nil
+	}
+	node := &fakeProposerNode{isLeader: false}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	got, err := m.proposeOrForwardWithIndex(ctx, node, []byte("cmd"))
+	require.Equal(t, uint64(42), got)
+	require.NoError(t, err)
+	require.Equal(t, 0, node.proposeCalls)
 }
