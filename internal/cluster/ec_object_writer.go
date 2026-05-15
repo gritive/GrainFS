@@ -14,6 +14,7 @@ import (
 )
 
 type ecObjectShardStore interface {
+	WriteLocalShard(bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error
 	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
@@ -209,10 +210,32 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 				if err != nil {
 					return fmt.Errorf("open ec shard %d: %w", i, err)
 				}
-				werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
-				if closer, ok := body.(io.Closer); ok {
-					if closeErr := closer.Close(); werr == nil && closeErr != nil {
-						werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+				if shardSize != nil {
+					if size, sizeErr := shardSize(i); sizeErr == nil && size <= ecShardBufferedLimit {
+						var data []byte
+						data, werr = io.ReadAll(body)
+						if closer, ok := body.(io.Closer); ok {
+							if closeErr := closer.Close(); werr == nil && closeErr != nil {
+								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+							}
+						}
+						if werr == nil {
+							werr = w.shards.WriteLocalShard(plan.Bucket, shardKey, i, data)
+						}
+					} else {
+						werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+						if closer, ok := body.(io.Closer); ok {
+							if closeErr := closer.Close(); werr == nil && closeErr != nil {
+								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+							}
+						}
+					}
+				} else {
+					werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+					if closer, ok := body.(io.Closer); ok {
+						if closeErr := closer.Close(); werr == nil && closeErr != nil {
+							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+						}
 					}
 				}
 				observePutStage("ec_write_shard", "local", shardStageStart)

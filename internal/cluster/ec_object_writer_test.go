@@ -144,6 +144,41 @@ func TestECObjectWriter_WriteMemoryShardsUsesBufferedRemoteShardWrites(t *testin
 	require.Equal(t, int64(5), result.Size)
 }
 
+func TestECObjectWriter_WriteMemoryShardsUsesBufferedLocalShardWrites(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "node-a",
+		shards: shards,
+	}
+	dir := t.TempDir()
+	spoolPath := filepath.Join(dir, "object")
+	require.NoError(t, os.WriteFile(spoolPath, []byte("hello"), 0o600))
+	sp := &spooledObject{Path: spoolPath, Size: 5, ETag: "etag"}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 1, ParityShards: 0},
+		Placement:        []string{"node-a"},
+		RingVersion:      7,
+		ContentType:      "text/plain",
+	}
+
+	result, err := writer.writeMemoryShards(context.Background(), plan, sp)
+	require.NoError(t, err)
+
+	require.Len(t, shards.bufferedLocalWrites, 1)
+	require.Empty(t, shards.localWrites)
+	require.Equal(t, "object/v1", shards.bufferedLocalWrites[0].key)
+	require.Len(t, shards.bufferedLocalWrites[0].body, shardHeaderSize+len("hello"))
+	gotSize, _, err := decodeShardHeader(shards.bufferedLocalWrites[0].body[:shardHeaderSize])
+	require.NoError(t, err)
+	require.Equal(t, int64(5), gotSize)
+	require.Equal(t, []byte("hello"), shards.bufferedLocalWrites[0].body[shardHeaderSize:])
+	require.Equal(t, int64(5), result.Size)
+}
+
 func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
 	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
@@ -207,7 +242,7 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 	result, err := writer.writeDataShards(context.Background(), plan, []byte("hello"))
 	require.NoError(t, err)
 
-	require.Len(t, shards.localWrites, 1)
+	require.Len(t, shards.bufferedLocalWrites, 1)
 	require.Equal(t, int64(5), result.Size)
 	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", result.ETag)
 	require.Equal(t, "object/v1", result.ShardKey)
@@ -243,12 +278,13 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 }
 
 type fakeECObjectWriterShards struct {
-	writeShardErr     map[string]error
-	localWrites       []fakeECObjectWriterLocalWrite
-	bufferedWrites    []fakeECObjectWriterBufferedWrite
-	streamWrites      []fakeECObjectWriterStreamWrite
-	deleteLocalCalls  []string
-	deleteRemoteCalls []string
+	writeShardErr       map[string]error
+	localWrites         []fakeECObjectWriterLocalWrite
+	bufferedLocalWrites []fakeECObjectWriterLocalWrite
+	bufferedWrites      []fakeECObjectWriterBufferedWrite
+	streamWrites        []fakeECObjectWriterStreamWrite
+	deleteLocalCalls    []string
+	deleteRemoteCalls   []string
 }
 
 type fakeECObjectWriterLocalWrite struct {
@@ -280,6 +316,16 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, sha
 		key:      key,
 		shardIdx: shardIdx,
 		body:     data,
+	})
+	return nil
+}
+
+func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
+	f.bufferedLocalWrites = append(f.bufferedLocalWrites, fakeECObjectWriterLocalWrite{
+		bucket:   bucket,
+		key:      key,
+		shardIdx: shardIdx,
+		body:     append([]byte(nil), data...),
 	})
 	return nil
 }
