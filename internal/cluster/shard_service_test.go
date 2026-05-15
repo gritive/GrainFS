@@ -557,6 +557,10 @@ func TestShardService_WriteShardRecordsRemoteTraceBreakdown(t *testing.T) {
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteRemoteBuild)
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteRemoteCall)
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteRemoteDecode)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalMkdir)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncode)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalFile)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
 }
 
 func readShardServiceTraceEvents(t *testing.T, path string) []PutTraceEvent {

@@ -553,7 +553,14 @@ type shardRequest struct {
 }
 
 func (s *ShardService) handleWrite(sr *shardRequest) *transport.Message {
-	if err := s.WriteLocalShard(sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      sr.Bucket,
+		Key:         sr.Key,
+		Ingress:     PutTraceIngressReceiver,
+		SizeClass:   putTraceSizeClass(int64(len(sr.Data)), ecShardBufferedLimit),
+		ForwardMode: PutTraceForwardNone,
+	})
+	if err := s.writeLocalShard(ctx, sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -672,30 +679,87 @@ func (s *ShardService) DecryptPayload(data, aad []byte) ([]byte, error) {
 // New encrypted writes use eccodec's chunked AEAD envelope. Plain writes keep
 // the CRC envelope while that compatibility path remains available.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
+	return s.writeLocalShard(context.Background(), bucket, key, shardIdx, data)
+}
+
+func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
 	dir := filepath.Join(s.dataDir, bucket, key)
+	mkdirStart := time.Now()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
 		return fmt.Errorf("create shard dir: %w", err)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
 	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	dirSynced := false
 	if s.encryptor != nil {
+		fileStart := time.Now()
 		if err := eccodec.WriteEncryptedShardStreamAtomic(path, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+				Bytes:            int64(len(data)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
 			return err
 		}
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+		})
 		dirSynced = true
 	} else {
-		if err := s.writeShardFile(path, eccodec.EncodeShard(data)); err != nil {
+		encodeStart := time.Now()
+		payload := eccodec.EncodeShard(data)
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+		})
+		fileStart := time.Now()
+		if err := s.writeShardFile(path, payload); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
 			return err
 		}
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+			Bytes:            int64(len(payload)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+		})
 	}
 	if dirSynced {
 		return nil
 	}
+	dirSyncStart := time.Now()
+	var dirSyncErr error
 	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
+		dirSyncErr = d.Sync()
 		d.Close()
+	} else {
+		dirSyncErr = err
 	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+		Error:            putTraceErrorString(dirSyncErr),
+	})
 	return nil
 }
 
