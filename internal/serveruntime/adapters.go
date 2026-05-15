@@ -14,6 +14,8 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
+	"github.com/gritive/GrainFS/internal/server/execution"
+	"github.com/gritive/GrainFS/internal/serveruntime/executioncluster"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -126,6 +128,41 @@ func (a *ScrubProposerAdapter) Propose(ctx context.Context, req scrubber.Trigger
 		OriginatorNodeID: a.nodeID,
 	}
 	return entry, true, a.metaRaft.ProposeScrubTrigger(ctx, entry)
+}
+
+// ScrubExecutionBackend adapts the existing meta-Raft scrub proposer to the
+// execution cluster backend contract.
+type ScrubExecutionBackend struct {
+	proposer *ScrubProposerAdapter
+}
+
+var _ executioncluster.ScrubBackend = (*ScrubExecutionBackend)(nil)
+
+func NewScrubExecutionBackend(proposer *ScrubProposerAdapter) *ScrubExecutionBackend {
+	return &ScrubExecutionBackend{proposer: proposer}
+}
+
+func (a *ScrubExecutionBackend) TriggerScrub(ctx context.Context, op execution.Operation) (execution.ScrubResult, error) {
+	if op.Kind != execution.OperationScrub || a == nil || a.proposer == nil {
+		return execution.ScrubResult{}, execution.NewError(execution.CodeUnsupported, execution.ErrExecutionUnsupported)
+	}
+	if err := op.Scrub.Validate(); err != nil {
+		return execution.ScrubResult{}, err
+	}
+	scope := scrubber.ScopeFull
+	if op.Scrub.Scope == execution.ScrubScopeLive {
+		scope = scrubber.ScopeLive
+	}
+	entry, created, err := a.proposer.Propose(ctx, scrubber.TriggerReq{
+		Bucket:    op.Scrub.Bucket,
+		KeyPrefix: op.Scrub.KeyPrefix,
+		Scope:     scope,
+		DryRun:    op.Scrub.DryRun,
+	})
+	if err != nil {
+		return execution.ScrubResult{}, err
+	}
+	return execution.ScrubResult{SessionID: entry.SessionID, Created: created}, nil
 }
 
 // ScrubAggregatorAdapter implements admin.ScrubAggregator over

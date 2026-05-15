@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,7 +10,62 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server/execution"
 )
+
+func TestScrubExecutionBackendPreservesDedupResult(t *testing.T) {
+	director := scrubber.NewDirector(scrubber.DirectorOpts{QueueSize: 1, NodeID: "n1"})
+	req := scrubber.TriggerReq{
+		Bucket:    "ec1",
+		KeyPrefix: "prefix/",
+		Scope:     scrubber.ScopeLive,
+		DryRun:    true,
+	}
+	existingSessionID, created := director.Trigger(req)
+	require.NotEmpty(t, existingSessionID)
+	require.True(t, created)
+
+	proposer := NewScrubProposerAdapter(nil, director, "n1")
+	backend := NewScrubExecutionBackend(proposer)
+
+	got, err := backend.TriggerScrub(context.Background(), execution.Operation{
+		ID:   "operation-id-not-session-id",
+		Kind: execution.OperationScrub,
+		Scrub: execution.ScrubOperation{
+			Bucket:    req.Bucket,
+			KeyPrefix: req.KeyPrefix,
+			Scope:     execution.ScrubScopeLive,
+			DryRun:    req.DryRun,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, execution.ScrubResult{SessionID: existingSessionID, Created: false}, got)
+	require.NotEqual(t, "operation-id-not-session-id", got.SessionID)
+}
+
+func TestScrubExecutionBackendRejectsMissingProposer(t *testing.T) {
+	backend := NewScrubExecutionBackend(nil)
+
+	_, err := backend.TriggerScrub(context.Background(), execution.Operation{
+		Kind:  execution.OperationScrub,
+		Scrub: execution.ScrubOperation{Bucket: "ec1"},
+	})
+
+	require.ErrorIs(t, err, execution.ErrExecutionUnsupported)
+	require.Equal(t, execution.CodeUnsupported, execution.CodeOf(err))
+}
+
+func TestScrubExecutionBackendRejectsUnsupportedOperationKind(t *testing.T) {
+	backend := NewScrubExecutionBackend(NewScrubProposerAdapter(nil, scrubber.NewDirector(scrubber.DirectorOpts{}), "n1"))
+
+	_, err := backend.TriggerScrub(context.Background(), execution.Operation{})
+
+	require.Error(t, err)
+	require.True(t, errors.Is(err, execution.ErrExecutionUnsupported))
+	require.Equal(t, execution.CodeUnsupported, execution.CodeOf(err))
+}
 
 func TestFreshReplicationProbeResultsKeepsOnlyFreshSuccessEvidence(t *testing.T) {
 	now := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
