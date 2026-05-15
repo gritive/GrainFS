@@ -14,6 +14,11 @@
 #   NO_BUILD      — 1이면 빌드 건너뜀
 #   PROFILE       — 1이면 pprof 프로파일 수집 (기본: 0)
 #   PPROF_PORT    — pprof HTTP 포트 (기본: 6060, PROFILE=1일 때만 사용)
+#   PUT_MATRIX    — 1이면 포트/크기 PUT 매트릭스 실행 (기본: 0)
+#   PUT_TRACE     — 1이면 PUT trace JSONL 기록 및 리포트 생성 (기본: 0)
+#   PUT_SMALL_KB  — PUT 매트릭스 small 오브젝트 크기 KB (기본: 64)
+#   PUT_LARGE_KB  — PUT 매트릭스 large 오브젝트 크기 KB (기본: 6144)
+#   PUT_MATRIX_ITERATIONS — PUT 매트릭스 셀별 반복 횟수 (기본: 25)
 #
 # 3노드 포트 배치:
 #   노드1: S3=9100  Raft=19100
@@ -192,8 +197,6 @@ fi
 bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n${LEADER_IDX}" "bench-cluster"
 bench_create_bucket_admin_retry "$BINARY" "$BENCH_DIR/n${LEADER_IDX}" "bench"
 
-TARGET_PORT=""
-TARGET_PPROF_PORT=""
 TARGET_PORT="$LEADER_PORT"
 TARGET_PPROF_PORT="$LEADER_PPROF_PORT"
 echo "[bench] writable target on port ${TARGET_PORT}"
