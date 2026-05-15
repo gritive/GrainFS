@@ -74,10 +74,15 @@ type command struct {
 	// (Raft §6.4). Gated on (state==Leader && same term) — same as peerInFlight —
 	// so a stale goroutine from a previous leader term cannot satisfy a fresh
 	// ReadIndex with old evidence.
-	hbPeer          string
-	hbTerm          uint64
-	hbDispatchTerm  uint64
-	hbRoundID       uint64
+	hbPeer         string
+	hbTerm         uint64
+	hbDispatchTerm uint64
+	hbRoundID      uint64
+	// hbLeaderCommit captures args.LeaderCommit at dispatch time. If the
+	// leader's commitIndex advances while this RPC is in flight, the peer needs
+	// an immediate follow-up AE to learn the new commit without waiting for the
+	// next heartbeat tick.
+	hbLeaderCommit  uint64
 	hbSuccess       bool
 	hbMatchAfter    uint64
 	hbConflictTerm  uint64
@@ -1222,6 +1227,7 @@ func (n *Node) dispatchAppendEntries(peer string, args *AppendEntriesArgs, round
 		hbMatchAfter:   matchAfter,
 		hbDispatchTerm: args.Term,
 		hbRoundID:      roundID,
+		hbLeaderCommit: args.LeaderCommit,
 	}
 	t := n.loadTransport()
 	if t == nil {
@@ -1315,9 +1321,12 @@ func (n *Node) handleHeartbeatReply(cmd command) {
 		if n.st.peerLastRound != nil && cmd.hbRoundID > n.st.peerLastRound[cmd.hbPeer] {
 			n.st.peerLastRound[cmd.hbPeer] = cmd.hbRoundID
 		}
+		oldCommit := n.st.commitIndex
 		n.maybeAdvanceCommitIndex()
 		n.tryFlushReadIndex()
-		if n.hasPendingLogEntries(cmd.hbPeer) {
+		if n.st.commitIndex > oldCommit {
+			n.dispatchReadyReplicas()
+		} else if n.hasPendingLogEntries(cmd.hbPeer) || n.hasNewerLeaderCommit(cmd.hbPeer, cmd.hbLeaderCommit) {
 			n.dispatchOne(cmd.hbPeer)
 		}
 		return
@@ -1331,11 +1340,28 @@ func (n *Node) handleHeartbeatReply(cmd command) {
 }
 
 func (n *Node) hasPendingLogEntries(peer string) bool {
+	next := n.st.nextIndex[peer]
+	return n.canDispatchAppendEntries(peer) && next <= n.st.lastLogIndex()
+}
+
+func (n *Node) hasNewerLeaderCommit(peer string, sentCommit uint64) bool {
+	return n.canDispatchAppendEntries(peer) && n.st.commitIndex > sentCommit
+}
+
+func (n *Node) canDispatchAppendEntries(peer string) bool {
 	if n.st.peerInFlight == nil {
 		return false
 	}
-	next := n.st.nextIndex[peer]
-	return next >= n.st.log.FirstIndex() && next <= n.st.lastLogIndex()
+	next, ok := n.st.nextIndex[peer]
+	return ok && next >= n.st.log.FirstIndex()
+}
+
+func (n *Node) dispatchReadyReplicas() {
+	for _, peer := range n.st.replicaSet() {
+		if n.canDispatchAppendEntries(peer) {
+			n.dispatchOne(peer)
+		}
+	}
 }
 
 // applyConflictHint rolls nextIndex[peer] back according to the follower's
