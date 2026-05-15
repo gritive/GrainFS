@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.209.1] - 2026-05-15 — docs: refresh compatibility and benchmark guides
+
+### Added
+
+- **Compatibility references**: S3, NFSv4, 9P, NBD, and Iceberg now have focused compatibility matrices that separate supported, partial, not tested, and not supported surfaces.
+- **Benchmark reference**: repository benchmark targets and current local performance snapshots now live in a dedicated reference page.
+- **Documentation index and user guide**: readers can start from a role-based docs index and follow a user guide instead of scanning ad hoc files.
+
+### Changed
+
+- **README focus**: the README now summarizes product scope, compatibility, performance, and documentation links without listing every operator or CLI detail inline.
+- **Docs layout**: user, operator, architecture, and reference material now live under consistent lowercase paths, with legacy runbooks moved into the operator section.
+- **NFSv4 attribute audit**: the attribute matrix now reports status and relevant caveats without source-code columns or conformance-run bookkeeping.
+- **English docs cleanup**: Korean and ad hoc planning prose in the tracked docs was converted to concise English.
+
+### Fixed
+
+- **Moved-document links**: code comments and admin error help links now point at the relocated operator and reference docs.
+- **9P platform claims**: macOS native 9P is no longer described as something users should route through a Linux VM.
+
+### Verification
+
+- `git diff --check origin/master...HEAD`
+- `go build ./cmd/grainfs`
+
 ## [0.0.209.0] - 2026-05-15 — perf: stabilize and shorten clustered PUTs
 
 ### Added
