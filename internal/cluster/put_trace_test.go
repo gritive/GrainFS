@@ -97,6 +97,26 @@ func TestPutTraceWritesJSONLWhenEnabled(t *testing.T) {
 	require.NoError(t, sc.Err())
 }
 
+func TestPutTraceCreatesFilePrivateToOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:    "bench",
+		Key:       "obj-private",
+		GroupID:   "group-1",
+		Ingress:   PutTraceIngressLocalLeader,
+		SizeClass: PutTraceSizeSmall,
+	})
+	done := StartPutTraceStage(ctx, PutTraceStageRouteWrite)
+	done(PutTraceStageFields{})
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
 func TestPutTraceConcurrentWritesRemainLineDelimited(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
 	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
