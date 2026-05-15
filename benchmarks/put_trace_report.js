@@ -37,6 +37,11 @@ function matrixParts(cell) {
   return { ingress, sizeClass, forwardMode };
 }
 
+const inclusiveWrapperStages = new Set([
+  'forward_send_frame',
+  'forward_send_stream',
+]);
+
 const byRequest = new Map();
 for (const ev of events) {
   const reqKey = `${ev.bucket}/${ev.key}`;
@@ -95,14 +100,24 @@ for (const [cell, requests] of byCell.entries()) {
     slowShardMicros.push(slowShard);
   }
 
+  let dominantInclusiveStage = '';
+  let dominantInclusiveP99 = -1;
   let dominantStage = '';
   let dominantP99 = -1;
   for (const [stage, values] of stageDurations.entries()) {
     const p99 = percentile(values, 99);
-    if (p99 > dominantP99) {
+    if (p99 > dominantInclusiveP99) {
+      dominantInclusiveP99 = p99;
+      dominantInclusiveStage = stage;
+    }
+    if (!inclusiveWrapperStages.has(stage) && p99 > dominantP99) {
       dominantP99 = p99;
       dominantStage = stage;
     }
+  }
+  if (!dominantStage) {
+    dominantStage = dominantInclusiveStage;
+    dominantP99 = dominantInclusiveP99;
   }
 
   const parts = matrixParts(cell);
@@ -116,6 +131,9 @@ for (const [cell, requests] of byCell.entries()) {
     dominant_stage: dominantStage,
     dominant_stage_p95_ms: +(percentile(stageDurations.get(dominantStage) || [], 95) / 1000).toFixed(2),
     dominant_stage_p99_ms: +(dominantP99 / 1000).toFixed(2),
+    dominant_inclusive_stage: dominantInclusiveStage,
+    dominant_inclusive_stage_p95_ms: +(percentile(stageDurations.get(dominantInclusiveStage) || [], 95) / 1000).toFixed(2),
+    dominant_inclusive_stage_p99_ms: +(dominantInclusiveP99 / 1000).toFixed(2),
     meta_index_propose_count_p99: percentile(metaCounts, 99),
     meta_index_propose_count_p99_receiver: percentile(receiverMetaCounts, 99),
     meta_index_propose_count_p99_coordinator: percentile(coordinatorMetaCounts, 99),
@@ -126,10 +144,10 @@ for (const [cell, requests] of byCell.entries()) {
 }
 
 rows.sort((a, b) => a.cell.localeCompare(b.cell));
-console.log('| Cell | Requests | Dominant stage | Stage p95 ms | Stage p99 ms | Meta recv/coordinator p99 | Forward attempts p99 | Forwarded bytes p99 | Slowest shard p99 ms |');
-console.log('|------|----------|----------------|--------------|--------------|---------------------------|----------------------|---------------------|----------------------|');
+console.log('| Cell | Requests | Dominant stage | Stage p95 ms | Stage p99 ms | Inclusive stage | Inclusive p99 ms | Meta recv/coordinator p99 | Forward attempts p99 | Forwarded bytes p99 | Slowest shard p99 ms |');
+console.log('|------|----------|----------------|--------------|--------------|-----------------|------------------|---------------------------|----------------------|---------------------|----------------------|');
 for (const row of rows) {
-  console.log(`| ${row.cell} | ${row.requests} | ${row.dominant_stage} | ${row.dominant_stage_p95_ms} | ${row.dominant_stage_p99_ms} | ${row.meta_index_propose_count_p99_receiver}/${row.meta_index_propose_count_p99_coordinator} | ${row.forward_attempts_p99} | ${row.forwarded_bytes_p99} | ${row.slowest_shard_p99_ms} |`);
+  console.log(`| ${row.cell} | ${row.requests} | ${row.dominant_stage} | ${row.dominant_stage_p95_ms} | ${row.dominant_stage_p99_ms} | ${row.dominant_inclusive_stage} | ${row.dominant_inclusive_stage_p99_ms} | ${row.meta_index_propose_count_p99_receiver}/${row.meta_index_propose_count_p99_coordinator} | ${row.forward_attempts_p99} | ${row.forwarded_bytes_p99} | ${row.slowest_shard_p99_ms} |`);
 }
 
 const outPath = path.join('benchmarks', 'put-trace-report.json');
