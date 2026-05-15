@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -137,16 +138,23 @@ func TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession(t *testing.T) {
 	first, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	var firstResp map[string]any
-	require.NoError(t, json.NewDecoder(first.Body).Decode(&firstResp))
-	first.Body.Close()
+	decodeScrubTriggerResp(t, first, &firstResp)
 	require.True(t, firstResp["created"].(bool), "first call: created=true expected")
 	firstID := firstResp["session_id"].(string)
 
 	second, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	var secondResp map[string]any
-	require.NoError(t, json.NewDecoder(second.Body).Decode(&secondResp))
-	second.Body.Close()
+	decodeScrubTriggerResp(t, second, &secondResp)
 	require.False(t, secondResp["created"].(bool), "second call: dedup hit must return Created=false")
 	require.Equal(t, firstID, secondResp["session_id"].(string), "dedup must return same SessionID")
+}
+
+func decodeScrubTriggerResp(t *testing.T, resp *http.Response, out *map[string]any) {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", string(body))
+	require.NoError(t, json.Unmarshal(body, out))
 }
