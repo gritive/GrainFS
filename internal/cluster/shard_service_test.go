@@ -130,6 +130,15 @@ func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+
+	req := buildShardEnvelope("WriteShard", "bkt", "obj/v1", 1, payload)
+	defer func() { req.Builder.Reset(); shardBuilderPool.Put(req.Builder) }()
+
+	require.LessOrEqual(t, cap(req.Builder.Bytes), 80<<10)
+}
+
 func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))

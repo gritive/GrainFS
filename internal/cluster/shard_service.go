@@ -28,6 +28,14 @@ var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers
 
 const maxShardRangeReplyBytes = 64 << 10
 
+func getShardBuilder(minSize int) *flatbuffers.Builder {
+	b := shardBuilderPool.Get()
+	if cap(b.Bytes) >= minSize {
+		return b
+	}
+	return flatbuffers.NewBuilder(minSize)
+}
+
 type shardFileWriter func(path string, payload []byte) error
 
 // ShardService handles remote shard storage via QUIC Data Streams.
@@ -459,7 +467,8 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 // Returns a FlatBuffersWriter whose Builder MUST be Reset()+Put() to shardBuilderPool after use.
 func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *transport.FlatBuffersWriter {
 	// Build ShardRequest in b; b.FinishedBytes() points into b's internal buffer.
-	b := shardBuilderPool.Get()
+	requestSize := len(data) + len(bucket) + len(key) + 128
+	b := getShardBuilder(requestSize)
 	bucketOff := b.CreateString(bucket)
 	keyOff := b.CreateString(key)
 	var dataOff flatbuffers.UOffsetT
@@ -477,7 +486,8 @@ func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte
 	srBytes := b.FinishedBytes()
 
 	// Build RPCMessage in b2; CreateByteVector copies srBytes into b2's buffer.
-	b2 := shardBuilderPool.Get()
+	responseSize := len(srBytes) + len(msgType) + 128
+	b2 := getShardBuilder(responseSize)
 	typeOff := b2.CreateString(msgType)
 	srVec := b2.CreateByteVector(srBytes) // srBytes copied — b can now be returned
 	b.Reset()
