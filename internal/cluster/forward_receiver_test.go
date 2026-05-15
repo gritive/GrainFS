@@ -119,6 +119,23 @@ func TestForwardReceiver_HandlePutObject_CommitsObjectIndex(t *testing.T) {
 	require.False(t, proposer.entries[0].IsDeleteMarker)
 }
 
+func TestForwardReceiver_HandlePutObject_MissingIndexProposerReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	args := buildPutObjectArgs("bucket", "mykey", "text/plain", []byte("hello"))
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "mutating forwards must not succeed without object-index proposer")
+	_, err := gb.HeadObject(context.Background(), "bucket", "mykey")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
 func TestForwardReceiver_HandlePutObject_ProposeError_ReturnsInternal(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-1")
 	mgr := NewDataGroupManager()
@@ -157,6 +174,23 @@ func TestForwardReceiver_HandlePutObjectStream_CommitsObjectIndex(t *testing.T) 
 	require.Equal(t, "streamkey", proposer.entries[0].Key)
 	require.NotEmpty(t, proposer.entries[0].VersionID)
 	require.Equal(t, "group-1", proposer.entries[0].PlacementGroupID)
+}
+
+func TestForwardReceiver_HandlePutObjectStream_MissingIndexProposerReturnsInternal(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	args := buildPutObjectArgs("bucket", "streamkey", "text/plain", nil)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply := rcv.HandleBody(&transport.Message{Type: transport.StreamGroupForwardBody, Payload: payload}, bytes.NewReader([]byte("body")))
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "streamed mutating forwards must not succeed without object-index proposer")
+	_, err := gb.HeadObject(context.Background(), "bucket", "streamkey")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
 func TestForwardReceiver_HandlePutObjectStream_ProposeError_ReturnsInternal(t *testing.T) {
