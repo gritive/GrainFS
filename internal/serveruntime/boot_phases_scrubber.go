@@ -141,6 +141,8 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		state.adminDeps.ScrubProposer = scrubProposer
 		exec := executioncluster.NewExecutor(
 			NewScrubExecutionBackend(scrubProposer),
+			executioncluster.WithMaxAttempts(3),
+			executioncluster.WithRetryBackoff(50*time.Millisecond),
 			executioncluster.WithMetrics(executioncluster.NewPrometheusMetrics()),
 		)
 		state.adminDeps.Execution = exec
