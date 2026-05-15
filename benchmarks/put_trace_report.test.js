@@ -18,6 +18,14 @@ test('forward send stages do not hide receiver-side dominant stages', () => {
     forward_mode: 'stream',
   };
   const events = [
+    {
+      ...base,
+      ingress: 'local_leader',
+      size_class: 'unknown',
+      forward_mode: 'none',
+      stage: 'http_put_total',
+      duration_micros: 250000,
+    },
     { ...base, stage: 'forward_send_stream', duration_micros: 220000, forward_attempts: 1, bytes: 8388745 },
     { ...base, ingress: 'receiver', stage: 'receiver_backend_put', duration_micros: 90000 },
     { ...base, ingress: 'receiver', stage: 'meta_index_propose', duration_micros: 130000, meta_propose_site: 'receiver', meta_propose_count: 1 },
@@ -32,5 +40,5 @@ test('forward send stages do not hide receiver-side dominant stages', () => {
 
   const report = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'put-trace-report.json'), 'utf8'));
   assert.equal(report[0].dominant_stage, 'meta_index_propose');
-  assert.equal(report[0].dominant_inclusive_stage, 'forward_send_stream');
+  assert.equal(report[0].dominant_inclusive_stage, 'http_put_total');
 });

@@ -11,6 +11,11 @@ import (
 type PutTraceStage string
 
 const (
+	PutTraceStageHTTPPutTotal            PutTraceStage = "http_put_total"
+	PutTraceStageHTTPPutPrepare          PutTraceStage = "http_put_prepare"
+	PutTraceStageHTTPPutBackend          PutTraceStage = "http_put_backend"
+	PutTraceStageHTTPPutMutation         PutTraceStage = "http_put_mutation"
+	PutTraceStageHTTPPutResponse         PutTraceStage = "http_put_response"
 	PutTraceStageRouteWrite              PutTraceStage = "route_write"
 	PutTraceStageForwardResolveLeader    PutTraceStage = "forward_resolve_leader"
 	PutTraceStageForwardSendFrame        PutTraceStage = "forward_send_frame"

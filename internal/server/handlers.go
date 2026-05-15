@@ -383,6 +383,7 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
+	requestStart := time.Now()
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -406,6 +407,26 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	sizeClass := cluster.PutTraceSizeUnknown
+	if contentLength := c.Request.Header.ContentLength(); contentLength >= 0 {
+		if contentLength > cluster.DefaultMaxForwardBodyBytes {
+			sizeClass = cluster.PutTraceSizeLarge
+		} else {
+			sizeClass = cluster.PutTraceSizeSmall
+		}
+	}
+	ctx = cluster.ContextWithPutTrace(ctx, cluster.PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		Ingress:     cluster.PutTraceIngressLocalLeader,
+		SizeClass:   sizeClass,
+		ForwardMode: cluster.PutTraceForwardNone,
+	})
+	defer func() {
+		cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutTotal, requestStart, cluster.PutTraceStageFields{})
+	}()
+
+	prepareStart := time.Now()
 	contentType := string(c.GetHeader("Content-Type"))
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -435,30 +456,39 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	body := bytes.NewReader(rawBody)
 	aclHeader := string(c.GetHeader("x-amz-acl"))
 	userMetadata := copyUserMetadata(c)
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutPrepare, prepareStart, cluster.PutTraceStageFields{
+		Bytes: int64(len(rawBody)),
+	})
 
 	var (
 		result *storage.PutObjectResult
 		putErr error
 	)
+	backendStart := time.Now()
 	if aclHeader != "" {
 		acl := s3auth.ParseACLHeader(aclHeader)
 		result, putErr = s.ops.PutObjectWithACLAndUserMetadataResult(ctx, bucket, key, body, contentType, uint8(acl), userMetadata)
 	} else {
 		result, putErr = s.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, body, contentType, userMetadata)
 	}
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutBackend, backendStart, cluster.PutTraceStageFields{})
 	if putErr != nil {
 		mapError(c, putErr)
 		return
 	}
 	obj := result.Object
 
+	mutationStart := time.Now()
 	s.mutations.OnObjectWrite(ctx, bucket, key, result)
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutMutation, mutationStart, cluster.PutTraceStageFields{})
 
+	responseStart := time.Now()
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
 	c.Status(consts.StatusOK)
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutResponse, responseStart, cluster.PutTraceStageFields{})
 }
 
 type objectMetricDelta struct {

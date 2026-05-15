@@ -31,6 +31,11 @@ func TestPutTraceDisabledIsNoop(t *testing.T) {
 }
 
 func TestPutTraceStageVocabularyIsStable(t *testing.T) {
+	require.Equal(t, "http_put_total", string(PutTraceStageHTTPPutTotal))
+	require.Equal(t, "http_put_prepare", string(PutTraceStageHTTPPutPrepare))
+	require.Equal(t, "http_put_backend", string(PutTraceStageHTTPPutBackend))
+	require.Equal(t, "http_put_mutation", string(PutTraceStageHTTPPutMutation))
+	require.Equal(t, "http_put_response", string(PutTraceStageHTTPPutResponse))
 	require.Equal(t, "route_write", string(PutTraceStageRouteWrite))
 	require.Equal(t, "forward_resolve_leader", string(PutTraceStageForwardResolveLeader))
 	require.Equal(t, "forward_send_frame", string(PutTraceStageForwardSendFrame))

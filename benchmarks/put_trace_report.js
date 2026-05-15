@@ -38,20 +38,27 @@ function matrixParts(cell) {
 }
 
 const inclusiveWrapperStages = new Set([
-  'forward_send_frame',
-  'forward_send_stream',
+	'http_put_total',
+	'forward_send_frame',
+	'forward_send_stream',
 ]);
+
+function isHTTPPutStage(stage) {
+	return stage.startsWith('http_put_');
+}
 
 const byRequest = new Map();
 for (const ev of events) {
-  const reqKey = `${ev.bucket}/${ev.key}`;
-  if (!byRequest.has(reqKey)) byRequest.set(reqKey, []);
+	const reqKey = `${ev.bucket}/${ev.key}`;
+	if (!byRequest.has(reqKey)) byRequest.set(reqKey, []);
   byRequest.get(reqKey).push(ev);
 }
 
 const byCell = new Map();
 for (const reqEvents of byRequest.values()) {
-  const first = reqEvents.find((ev) => ev.ingress !== 'receiver') || reqEvents[0];
+	const first = reqEvents.find((ev) => !isHTTPPutStage(ev.stage) && ev.ingress !== 'receiver') ||
+		reqEvents.find((ev) => ev.ingress !== 'receiver') ||
+		reqEvents[0];
   const cell = matrixCell(first);
   if (!byCell.has(cell)) byCell.set(cell, []);
   byCell.get(cell).push(reqEvents);
