@@ -1196,6 +1196,10 @@ func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, buck
 		if handled || err != nil {
 			return obj, err
 		}
+		obj, handled, err = b.tryPutObjectECDataInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata)
+		if handled || err != nil {
+			return obj, err
+		}
 	}
 
 	stageStart = time.Now()
@@ -1295,6 +1299,30 @@ func sizedReaderAtSection(r io.Reader, maxBytes int64) (io.Reader, int64, bool) 
 	}
 	offset := sr.Size() - remaining
 	return io.NewSectionReader(sr, offset, remaining), remaining, true
+}
+
+func (b *DistributedBackend) tryPutObjectECDataInMemory(
+	ctx context.Context,
+	bucket, key, versionID string,
+	r io.Reader,
+	contentType string,
+	userMetadata map[string]string,
+) (*storage.Object, bool, error) {
+	body, size, ok := sizedReaderAtSection(r, maxECMemoryShardFastPathBytes)
+	if !ok {
+		return nil, false, nil
+	}
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, true, fmt.Errorf("read small EC object: %w", err)
+	}
+	if int64(len(data)) != size {
+		return nil, true, fmt.Errorf("read small EC object: got %d bytes, expected %d", len(data), size)
+	}
+
+	obj, err := b.putObjectECData(ctx, bucket, key, versionID, data, contentType, userMetadata)
+	clear(data)
+	return obj, true, err
 }
 
 // PutObjectAsync is the write-back variant of PutObject.
@@ -1659,9 +1687,25 @@ func PlacementGroupHasFullEntry(ctx context.Context) bool {
 // via PlacementForNodes (legacy). The RingVersion is stored in object metadata
 // so reads can recompute the same placement without a separate Raft record.
 func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versionID string, data []byte, contentType string) (*storage.Object, error) {
+	return b.putObjectECData(ctx, bucket, key, versionID, data, contentType, nil)
+}
 
+func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, versionID string, data []byte, contentType string, userMetadata map[string]string) (*storage.Object, error) {
+	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	if !ok {
+		if b.bypassBucketCheck {
+			return nil, fmt.Errorf("putObjectEC: missing placement_group_id")
+		}
+		placementGroupID = "group-0"
+	}
 	liveNodes := b.ecWriteNodes()
 	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
+	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
+		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
+	}
+	if effectiveCfg.NumShards() == 0 {
+		return nil, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
+	}
 
 	// ShardService's key parameter carries the versionID as a suffix so shards
 	// for different versions land at different paths without changing the API.
@@ -1669,9 +1713,26 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	topologyWrite := false
+	topologyGroup := ShardGroupEntry{}
+	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+		topologyWrite = true
+		topologyGroup = group
+		placementGroupID = group.ID
+		effectiveCfg = cfg
+		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+		ringVer = 0
+	} else if PlacementGroupHasFullEntry(ctx) {
+		return nil, err
+	}
 	if len(placement) != effectiveCfg.NumShards() {
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
 			len(placement), effectiveCfg.NumShards(), effectiveCfg.DataShards, effectiveCfg.ParityShards)
+	}
+	if topologyWrite {
+		if err := b.checkTopologyPlacementHealth(topologyGroup, effectiveCfg, placement); err != nil {
+			return nil, err
+		}
 	}
 
 	// Commit metadata. RingVersion + ECData/ECParity + NodeIDs stored so reads
@@ -1679,17 +1740,22 @@ func (b *DistributedBackend) putObjectEC(ctx context.Context, bucket, key, versi
 	// is used when RingVersion==0 and no placement record exists).
 	// On failure, best-effort cleanup of orphaned shards.
 	plan := ecObjectWritePlan{
-		Bucket:      bucket,
-		Key:         key,
-		VersionID:   versionID,
-		Config:      effectiveCfg,
-		Placement:   placement,
-		RingVersion: ringVer,
-		ContentType: contentType,
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        versionID,
+		PlacementGroupID: placementGroupID,
+		Config:           effectiveCfg,
+		Placement:        placement,
+		RingVersion:      ringVer,
+		ContentType:      contentType,
+		UserMetadata:     cloneStringMap(userMetadata),
 	}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeDataShards(ctx, plan, data)
 	if err != nil {
+		if topologyWrite {
+			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
+		}
 		return nil, err
 	}
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
