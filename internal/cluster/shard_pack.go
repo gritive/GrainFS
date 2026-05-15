@@ -34,6 +34,7 @@ type shardPackStore struct {
 	nextID    uint64
 	index     map[string]shardPackLocation
 	readFiles map[uint64]*os.File
+	scratch   []byte
 }
 
 func newShardPackStore(dir string) (*shardPackStore, error) {
@@ -103,31 +104,17 @@ func (s *shardPackStore) append(flag byte, key string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entrySize := int64(4 + 1 + 4 + len(key) + len(data) + 4)
+	s.scratch = appendShardPackRecord(s.scratch[:0], flag, key, data)
+	record := s.scratch
+	entrySize := int64(len(record))
 	if s.activeOff > 0 && s.activeOff+entrySize > s.maxSize {
 		if err := s.rotate(); err != nil {
 			return err
 		}
 	}
 
-	header := make([]byte, 9)
-	binary.BigEndian.PutUint32(header[0:4], uint32(len(key)))
-	header[4] = flag
-	binary.BigEndian.PutUint32(header[5:9], uint32(len(data)))
-	payloadOffset := s.activeOff + int64(len(header)) + int64(len(key))
-
-	if _, err := s.active.Write(header); err != nil {
-		return err
-	}
-	if _, err := s.active.Write([]byte(key)); err != nil {
-		return err
-	}
-	if _, err := s.active.Write(data); err != nil {
-		return err
-	}
-	crc := make([]byte, 4)
-	binary.BigEndian.PutUint32(crc, shardPackCRC(flag, key, data))
-	if _, err := s.active.Write(crc); err != nil {
+	payloadOffset := s.activeOff + 9 + int64(len(key))
+	if _, err := s.active.Write(record); err != nil {
 		return err
 	}
 	s.activeOff += entrySize
@@ -142,6 +129,22 @@ func (s *shardPackStore) append(flag byte, key string, data []byte) error {
 		}
 	}
 	return nil
+}
+
+func appendShardPackRecord(dst []byte, flag byte, key string, data []byte) []byte {
+	start := len(dst)
+	dst = append(dst, make([]byte, 4+1+4+len(key)+len(data)+4)...)
+	record := dst[start:]
+	binary.BigEndian.PutUint32(record[0:4], uint32(len(key)))
+	record[4] = flag
+	binary.BigEndian.PutUint32(record[5:9], uint32(len(data)))
+	off := 9
+	copy(record[off:], key)
+	off += len(key)
+	copy(record[off:], data)
+	off += len(data)
+	binary.BigEndian.PutUint32(record[off:], shardPackCRC(flag, key, data))
+	return dst
 }
 
 func (s *shardPackStore) rotate() error {
