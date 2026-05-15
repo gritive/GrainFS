@@ -28,6 +28,7 @@ import (
 const (
 	quicMaxIdleTimeout         = 10 * time.Second
 	quicKeepAlivePeriod        = 3 * time.Second
+	quicOpenStreamTimeout      = 750 * time.Millisecond
 	quicMaxRPCStreams          = 4096
 	quicStreamCopyBufferSize   = 256 << 10
 	quicInitialReceiveWindow   = 16 << 20
@@ -1176,7 +1177,7 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 		return nil, err
 	}
 
-	stream, err := conn.OpenStreamSync(ctx)
+	stream, err := openStreamWithTimeout(ctx, conn)
 	if err != nil {
 		if !shouldEvictOpenStreamError(ctx, err) {
 			return nil, err
@@ -1186,7 +1187,7 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 		if err != nil {
 			return nil, fmt.Errorf("reconnect to %s: %w", addr, err)
 		}
-		if stream, err = conn.OpenStreamSync(ctx); err != nil {
+		if stream, err = openStreamWithTimeout(ctx, conn); err != nil {
 			return nil, fmt.Errorf("open stream to %s: %w", addr, err)
 		}
 	}
@@ -1209,9 +1210,38 @@ func (t *QUICTransport) CallFlatBuffer(ctx context.Context, addr string, fw *Fla
 	return checkResponseStatus(addr, resp)
 }
 
+func openStreamWithTimeout(ctx context.Context, conn *quic.Conn) (*quic.Stream, error) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= quicOpenStreamTimeout {
+		return conn.OpenStreamSync(ctx)
+	}
+	openCtx, cancel := context.WithTimeout(ctx, quicOpenStreamTimeout)
+	defer cancel()
+	stream, err := conn.OpenStreamSync(openCtx)
+	if err != nil && openCtx.Err() != nil && ctx.Err() == nil {
+		return nil, errOpenStreamTimedOut{err: err}
+	}
+	return stream, err
+}
+
+type errOpenStreamTimedOut struct {
+	err error
+}
+
+func (e errOpenStreamTimedOut) Error() string {
+	return e.err.Error()
+}
+
+func (e errOpenStreamTimedOut) Unwrap() error {
+	return e.err
+}
+
 func shouldEvictOpenStreamError(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
+	}
+	var openTimeout errOpenStreamTimedOut
+	if errors.As(err, &openTimeout) {
+		return true
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 		return false

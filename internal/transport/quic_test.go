@@ -463,6 +463,75 @@ func TestQUICTransport_CallFlatBuffer_ReleasesStreamCredit(t *testing.T) {
 	}
 }
 
+func TestQUICTransport_CallFlatBuffer_AllowsMoreThanDefaultConcurrentStreams(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	entered := make(chan struct{}, 128)
+	releaseHandlers := make(chan struct{})
+	server.SetStreamHandler(func(reqMsg *Message) *Message {
+		entered <- struct{}{}
+		<-releaseHandlers
+		return NewResponse(reqMsg, []byte("ok"))
+	})
+
+	const calls = 128
+
+	var wg sync.WaitGroup
+	errs := make(chan error, calls)
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b := flatbuffers.NewBuilder(32)
+			off := b.CreateByteVector([]byte("x"))
+			b.Finish(off)
+
+			resp, err := client.CallFlatBuffer(ctx, server.LocalAddr(), &FlatBuffersWriter{Typ: StreamData, Builder: b})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !bytes.Equal([]byte("ok"), resp.Payload) {
+				errs <- fmt.Errorf("unexpected payload %q", string(resp.Payload))
+				return
+			}
+		}()
+	}
+
+	for i := 0; i < calls; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			close(releaseHandlers)
+			wg.Wait()
+			close(errs)
+			t.Fatalf("only %d/%d concurrent streams reached the server", i, calls)
+		}
+	}
+	close(releaseHandlers)
+	wg.Wait()
+	close(errs)
+	require.Empty(t, errs)
+}
+
+func TestShouldEvictOpenStreamTimeoutBeforeParentDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	err := errOpenStreamTimedOut{err: context.DeadlineExceeded}
+	require.True(t, shouldEvictOpenStreamError(ctx, err))
+}
+
 func TestStreamClassOf(t *testing.T) {
 	require.Equal(t, StreamClassControl, ClassOf(StreamControl))
 	require.Equal(t, StreamClassMeta, ClassOf(StreamMetaRaft))
