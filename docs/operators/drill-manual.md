@@ -6,7 +6,8 @@ This manual defines disaster recovery drills for real data loss scenarios.
 Operators run each drill by hand to prove that backups work, recovery procedures
 are correct, and the runbook is accurate.
 
-**Drill philosophy:** Failures are inevitable. Recovery procedures are hypotheses. Drills are experiments that prove or disprove those hypotheses.
+**Drill rule:** Treat every recovery procedure as unproven until a drill runs it
+against test data.
 
 ---
 
@@ -30,13 +31,25 @@ Then **re-run the drill** to validate the fix.
 
 ## Pre-Drill Checklist
 
-Before running ANY drill, verify:
+Before running a drill, verify:
 
 - [ ] **Test environment**: Use isolated test environment (NOT production)
 - [ ] **Test data**: Populate with realistic test data (not empty)
 - [ ] **Backup**: Create baseline backup before drill
 - [ ] **Time box**: Allocate 2-4 hours per drill (drills can uncover complex issues)
 - [ ] **Observer**: Have a second person observe and document (if possible)
+
+After each drill starts a fresh `GrainFS` process, create an admin service
+account and export AWS credentials before running `aws --endpoint-url` commands:
+
+```bash
+grainfs iam sa create admin --endpoint "$TEST_DIR/admin.sock"
+# {"access_key":"GRAIN...","secret_key":"<one-time>", ...}
+
+export AWS_ACCESS_KEY_ID=<access_key>
+export AWS_SECRET_ACCESS_KEY=<secret_key>
+export AWS_DEFAULT_REGION=us-east-1
+```
 
 ---
 
@@ -55,12 +68,14 @@ Before running ANY drill, verify:
    ```bash
    # Create test data directory
    TEST_DIR=/tmp/drill-disk-fail
+   CLUSTER_KEY=$(openssl rand -hex 32)
    mkdir -p $TEST_DIR
 
    # Start `GrainFS`
    grainfs serve \
      --data $TEST_DIR \
      --port 9001 \
+     --cluster-key "$CLUSTER_KEY" \
      > /tmp/grainfs-drill.log 2>&1 &
    GRAINFS_PID=$!
 
@@ -124,7 +139,7 @@ echo "Drill timer started: $DRILL_START"
 3. **Verify data loss:**
    ```bash
    # Attempt to start `GrainFS` (should fail or start with empty state)
-   grainfs serve --data $TEST_DIR --port 9001 &
+   grainfs serve --data $TEST_DIR --port 9001 --cluster-key "$CLUSTER_KEY" &
    sleep 3
 
    # Try to access data (should fail or return empty)
@@ -167,6 +182,7 @@ Follow the rollback procedure from `docs/operators/runbook.md`:
    grainfs serve \
      --data $TEST_DIR \
      --port 9001 \
+     --cluster-key "$CLUSTER_KEY" \
      > /tmp/grainfs-drill-recovery.log 2>&1 &
    GRAINFS_PID=$!
    sleep 5
@@ -298,7 +314,7 @@ echo "Drill timer started: $DRILL_START"
 
 3. **Attempt startup (should fail):**
    ```bash
-   grainfs serve --data $TEST_DIR --port 9001 > /tmp/corrupt-startup.log 2>&1 &
+   grainfs serve --data $TEST_DIR --port 9001 --cluster-key "$CLUSTER_KEY" > /tmp/corrupt-startup.log 2>&1 &
    sleep 5
 
    # Check logs for errors
@@ -430,7 +446,7 @@ Expected: "NoSuchBucket"
 3. **Restart `GrainFS`:**
    ```bash
    pgrep -f "grainfs serve" | xargs kill
-   grainfs serve --data $TEST_DIR --port 9001 &
+   grainfs serve --data $TEST_DIR --port 9001 --cluster-key "$CLUSTER_KEY" &
    sleep 5
    ```
 
@@ -618,6 +634,7 @@ echo "Drill timer started: $DRILL_START"
    ```bash
    export RESTIC_REPOSITORY=<backup-repo>
    export RESTIC_PASSWORD="$(secret-manager read grainfs/restic-password)"
+   export CLUSTER_KEY="$(secret-manager read grainfs/cluster-key)"
    export GRAINFS_ACCESS_KEY="$(secret-manager read grainfs/access-key)"
    export GRAINFS_SECRET_KEY="$(secret-manager read grainfs/secret-key)"
    ```
@@ -635,7 +652,8 @@ echo "Drill timer started: $DRILL_START"
    ```bash
    grainfs serve \
      --data /grainfs/data \
-     --port 9000
+     --port 9000 \
+     --cluster-key "$CLUSTER_KEY"
    ```
 
 ### Verify Recovery
@@ -853,11 +871,13 @@ Same setup as Drill #1 (Disk Failure), but with **multiple backups over time**:
 1. **Start test environment:**
    ```bash
    TEST_DIR=/tmp/drill-data-rollback
+   CLUSTER_KEY=$(openssl rand -hex 32)
    mkdir -p $TEST_DIR
 
    grainfs serve \
      --data $TEST_DIR \
      --port 9001 \
+     --cluster-key "$CLUSTER_KEY" \
      > /tmp/grainfs-drill.log 2>&1 &
    GRAINFS_PID=$!
 
@@ -972,6 +992,7 @@ Follow the runbook's data rollback procedure:
    grainfs serve \
      --data $TEST_DIR \
      --port 9001 \
+     --cluster-key "$CLUSTER_KEY" \
      > /tmp/grainfs-rollback.log 2>&1 &
    GRAINFS_PID=$!
 

@@ -55,7 +55,7 @@ func testNFSStat(mountPoint, path string) (os.FileInfo, error) {
 
 **Cons:**
 - Complex setup
-- VM networking needs explicit host/guest address handling
+- Requires explicit host/guest address handling
 
 ## Recommendation
 
