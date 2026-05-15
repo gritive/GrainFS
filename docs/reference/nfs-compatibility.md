@@ -26,8 +26,9 @@ coverage. Unit-test-only coverage is not enough.
 | Protocol       | NFSv4.0 mount path                            | Supported |                                                                                                                                        |
 | Protocol       | NFSv4.1 mount path                            | Supported |                                                                                                                                        |
 | Protocol       | NFSv4.2 mount path                            | Supported |                                                                                                                                        |
-| Protocol       | NFSv4 attribute model                         | Partial   | Several optional/recommended attributes are intentionally skipped; see the attribute audit. |
+| Protocol       | NFSv4 attribute model                         | Partial   | Several optional/recommended attributes are not implemented; see the attribute audit. |
 | Protocol       | NFSv4.2 feature parity                        | Partial   | RFC 7862 feature parity is not claimed; only listed NFSv4.2 operations are claimed.                                                     |
+| Security       | Per-client NFS authentication                 | Not supported | NFSv4 exports do not use S3 IAM; restrict access with bind address, firewall, or private network. |
 | Exports        | Multi-bucket pseudo-root                      | Supported | Pseudo-root lists exported buckets as child directories.                                                                                 |
 | Exports        | Read-only exports                             | Supported |                                                                                                                                        |
 

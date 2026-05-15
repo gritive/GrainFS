@@ -1,8 +1,8 @@
 # `GrainFS` Technical Roadmap
 
-`GrainFS` is a single-binary distributed object store. It starts as a local
-S3-compatible server and can grow into a Raft-backed cluster with object, file,
-and block protocol surfaces.
+`GrainFS` is a single-binary distributed object store. It runs as a local
+S3-compatible server or as a Raft-backed cluster with object, file, and block
+protocol surfaces.
 
 ## Product Position
 
@@ -67,7 +67,7 @@ into the shared storage and cluster layers.
 ### File And Block Protocols
 
 - NFSv4 server with explicit bucket exports and export propagation.
-- 9P2000.L read/write support for trusted local or VM networks.
+- 9P2000.L read/write support for trusted local or private networks.
 - Linux NBD volumes with multi-node byte replication.
 - Shared VFS/cache invalidation paths for cross-protocol visibility.
 

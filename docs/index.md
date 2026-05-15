@@ -61,6 +61,9 @@ Use these when you need the design rationale behind the system.
 | --- | --- |
 | Protocol layering | [Protocol layering](architecture/protocol-layering.md) |
 | Admin, identity, and bucket configuration | [Admin and identity architecture](architecture/admin-identity-and-bucket-config.md) |
+| BadgerDB consolidation history | [BadgerDB consolidation](architecture/badger-consolidation.md) |
 | Durability and object placement | [Durability and placement](architecture/durability-and-placement.md) |
 | Storage operation boundaries | [Storage operations facade](architecture/storage-operations-facade.md) |
 | Cache invalidation | [Cache invalidation flow](architecture/cache-invalidation-flow.md) |
+| NFS client testing approach | [NFS client spike](architecture/nfs-client-spike.md) |
+| Raft RPC stream multiplexing | [QUIC stream multiplexing](architecture/quic-stream-multiplex.md) |

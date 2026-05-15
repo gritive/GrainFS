@@ -15,7 +15,8 @@ locations.
 ## Start `GrainFS`
 
 ```sh
-grainfs serve --data ./data --port 9000 &
+CLUSTER_KEY=$(openssl rand -hex 32)
+grainfs serve --data ./data --port 9000 --cluster-key "$CLUSTER_KEY" &
 
 # Bootstrap: create the first service account and note the access_key / secret_key
 grainfs iam sa create admin --endpoint ./data/admin.sock
@@ -29,7 +30,11 @@ Create the warehouse bucket before writing table data:
 curl -X PUT http://127.0.0.1:9000/grainfs-tables \
   --aws-sigv4 "aws:amz:us-east-1:s3" \
   -u "<access_key>:<secret_key>"
-# or with awscli: aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://grainfs-tables
+
+export AWS_ACCESS_KEY_ID=<access_key>
+export AWS_SECRET_ACCESS_KEY=<secret_key>
+export AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://grainfs-tables
 ```
 
 ## Attach from DuckDB

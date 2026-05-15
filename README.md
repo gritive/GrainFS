@@ -1,7 +1,7 @@
 # `GrainFS`
 
-`GrainFS` is a lightweight distributed storage server that starts as a single
-binary and can grow into a cluster.
+`GrainFS` is a single-binary distributed storage server. It runs as one local
+node or as a Raft-backed cluster.
 
 It exposes object, file, and block interfaces over one storage layer:
 
@@ -29,17 +29,13 @@ export GRAINFS_ADMIN_SOCKET=./storage/admin.sock
 Use the returned `access_key` and `secret_key` with any SigV4 S3 client:
 
 ```bash
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id <access_key> --secret-access-key <secret_key> \
-  s3 mb s3://test
+export AWS_ACCESS_KEY_ID=<access_key>
+export AWS_SECRET_ACCESS_KEY=<secret_key>
+export AWS_DEFAULT_REGION=us-east-1
 
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id <access_key> --secret-access-key <secret_key> \
-  s3 cp file.txt s3://test/
-
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id <access_key> --secret-access-key <secret_key> \
-  s3 ls s3://test/
+aws --endpoint-url http://localhost:9000 s3 mb s3://test
+aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://test/
+aws --endpoint-url http://localhost:9000 s3 ls s3://test/
 ```
 
 The server creates a `default` bucket at startup and exposes the object browser
@@ -95,6 +91,10 @@ required targets are writable.
 **Same data, multiple protocols.** S3, NFSv4, 9P, NBD, and Iceberg use the same
 storage backend contracts. Use the compatibility docs for protocol-specific
 limits.
+
+**Protocol network boundary.** S3 uses IAM. NFSv4, 9P, and NBD do not use S3
+IAM; expose those listeners only on loopback, private networks, or
+firewall-restricted addresses.
 
 ## Common Workflows
 

@@ -73,13 +73,12 @@ grainfs iam key revoke <sa_id> <old_access_key>
 Use path-style S3 clients against the configured HTTP port:
 
 ```bash
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id <access_key> --secret-access-key <secret_key> \
-  s3 mb s3://mybucket
+export AWS_ACCESS_KEY_ID=<access_key>
+export AWS_SECRET_ACCESS_KEY=<secret_key>
+export AWS_DEFAULT_REGION=us-east-1
 
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id <access_key> --secret-access-key <secret_key> \
-  s3 cp file.txt s3://mybucket/file.txt
+aws --endpoint-url http://localhost:9000 s3 mb s3://mybucket
+aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://mybucket/file.txt
 ```
 
 Configure per-bucket pull-through upstreams through the admin surface:
@@ -99,12 +98,12 @@ See `../reference/s3-compatibility.md` for the supported S3 surface.
 ## NFSv4
 
 NFSv4 exports are explicit. Create an S3 bucket, register it as an export, then
-mount the pseudo-root:
+mount the pseudo-root. This example assumes the `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables from the S3 section
+are still set.
 
 ```bash
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id <access_key> --secret-access-key <secret_key> \
-  s3 mb s3://mydata
+aws --endpoint-url http://localhost:9000 s3 mb s3://mydata
 
 grainfs nfs export add mydata
 

@@ -1,26 +1,26 @@
 # Per-Node BadgerDB Consolidation (C2)
 
-**Status:** **PAUSED** (2026-05-02). C1 + P0b shipped. P3 (FSM state DB consolidation) deferred — codex 13개 이슈로 일시 정지, 그리고 R+H (QUIC stream-reuse, v0.0.16~v0.0.17) 효과로 idle CPU 70% → 3.5%로 떨어져 P3 시급도 낮아짐.
+**Status:** **PAUSED** (2026-05-02). C1 + P0b shipped. P3 (FSM state DB consolidation) is deferred after 13 Codex findings and the R+H QUIC stream-reuse work in v0.0.16-v0.0.17 reduced idle syscall CPU from 70% to 3.5%.
 
 **Shipped:**
 - **C1** (v0.0.13.0): `WithNumCompactors(2)` per-instance reduction. idle goroutines −7%, CPU −4%.
-- **P0a** (v0.0.13.0): load-N32 baseline + scaling cliff 확인 (5 nodes × 32 groups × 2 BadgerDB = 320 instances).
+- **P0a** (v0.0.13.0): load-N32 baseline and scaling cliff confirmed (5 nodes × 32 groups × 2 BadgerDB = 320 instances).
 - **P0b** (v0.0.13.0 → finalized v0.0.145.0): shared raft-log DB. idle-N8: goroutines −16%, heap −19%, RSS −25%. `OpenSharedLogStore`; shared raft-log is the only layout (the `--shared-badger` flag was removed in v0.0.145.0).
 
 **Paused (P3):**
-- FSM state DB 노드당 1개로 통합. design v2 codex 리뷰에서 13개 이슈 (live snapshot Restore가 FSM 우회, DropPrefix DB-wide stall 등). 추정 11-14일.
-- **재오픈 조건:** (a) FSM state badger가 새 perf 핫스팟으로 떠오르면, (b) 13개 이슈에 대한 mitigation 명확해지면. 그 외에는 v0.1.x에 close.
+- Consolidate the FSM state DB to one instance per node. Design v2 received 13 Codex findings, including live snapshot restore bypassing the FSM and DB-wide DropPrefix stalls. Estimated effort: 11-14 days.
+- **Reopen conditions:** reopen if the FSM state Badger instance becomes a new performance hotspot, or if mitigations for the 13 findings become clear. Otherwise keep this closed for v0.1.x.
 
 **Why R+H pushed P3 down the priority list:**
 
-| 시점 | 측정 (idle-N8) | 비고 |
+| Point | Measurement (idle-N8) | Notes |
 |------|----------------|------|
-| 원래 baseline (v0.0.12) | CPU 26.4%, gor 307, syscall 70% | C2 design 트리거 |
-| C1 만 (v0.0.13 일부) | CPU 25.4%, gor 285 | 사소한 개선 |
-| C1 + P0b (v0.0.13.0) | CPU 26.0%, gor 241, RSS 278 MB | shared raft-log 효과 |
+| Original baseline (v0.0.12) | CPU 26.4%, gor 307, syscall 70% | C2 design trigger |
+| C1 only (partial v0.0.13) | CPU 25.4%, gor 285 | Small improvement |
+| C1 + P0b (v0.0.13.0) | CPU 26.0%, gor 241, RSS 278 MB | Shared raft-log effect |
 | C1 + P0b + R+H (v0.0.17.0) | CPU 22.9%, **syscall 2%**, gor 329 | **− 78% CPU samples** |
 
-R+H가 syscall 합산 70% → 3.5% 잡았기 때문에 idle CPU 봐서 P3로 추가 가능한 절감이 작아짐. 진행해도 가치 있는 다른 수치 (RSS, FD, FSM apply latency) 가 새 핫스팟이 되면 그때 재오픈.
+R+H reduced combined syscall CPU from 70% to 3.5%, so P3 now has less idle-CPU upside. Reopen only if another useful metric becomes the hotspot, such as RSS, FD count, or FSM apply latency.
 
 **Original design below.**
 
@@ -937,7 +937,7 @@ host and measure:
 
 The result determines whether P3 is the next priority or whether
 something else (e.g., raft tick rate tuning, badger compaction
-parameter tuning, different scaling axis) shows more leverage.
+parameter tuning, different scaling axis) should come first.
 
 If after measurement P3 is still the right move, address the 13
 issues above before any code lands.
@@ -995,7 +995,7 @@ When the sweep is done, fill in this table:
 
 - C1 PR: #128 `perf/badger-compactor` (cheap compactor reduction baseline)
 - Codex review of this design: see PR review thread linked from #128
-- TODOS Phase 19 entry: "BadgerDB 인스턴스 통합" (deferred from C1)
+- TODOS Phase 19 entry: "BadgerDB instance consolidation" (deferred from C1)
 - P0a plan + measurements: this section + `tests/e2e/cluster_perf_profile_test.go` matrix
 
 ---

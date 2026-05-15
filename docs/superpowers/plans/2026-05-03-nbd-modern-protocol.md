@@ -612,7 +612,7 @@ func TestNBDInteropToolsAvailable(t *testing.T) {
 }
 ```
 
-Add follow-up tests that start `grainfs serve --nbd-port`, then run qemu/libnbd commands for `OPT_GO`, read/write, zero, and status when the tool supports them.
+Add follow-up tests that start `grainfs serve --cluster-key <key> --nbd-port <port>`, then run qemu/libnbd commands for `OPT_GO`, read/write, zero, and status when the tool supports them.
 
 - [x] **Step 2: Add Makefile target**
 

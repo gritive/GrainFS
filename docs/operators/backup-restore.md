@@ -115,7 +115,8 @@ grainfs restore \
 **After restore:**
 ```bash
 # Start GrainFS with restored data
-grainfs serve --data /path/to/restore
+CLUSTER_KEY=$(openssl rand -hex 32)
+grainfs serve --data /path/to/restore --cluster-key "$CLUSTER_KEY"
 ```
 
 ## Automated Backups
@@ -198,7 +199,8 @@ Or manually:
 grainfs restore --repo /backup/grainfs --target /tmp/grainfs-restore-test
 
 # Start GrainFS and verify data
-grainfs serve --data /tmp/grainfs-restore-test --port 9001
+CLUSTER_KEY=$(openssl rand -hex 32)
+grainfs serve --data /tmp/grainfs-restore-test --port 9001 --cluster-key "$CLUSTER_KEY"
 ```
 
 ### 3. Verify Backup Metrics
@@ -224,7 +226,8 @@ restic stats --repo /backup/grainfs
 3. Restore from backup:
    ```bash
    grainfs restore --repo /backup/grainfs --target /new/disk
-   grainfs serve --data /new/disk
+   CLUSTER_KEY=$(openssl rand -hex 32)
+   grainfs serve --data /new/disk --cluster-key "$CLUSTER_KEY"
    ```
 
 ### Scenario 2: Data Corruption

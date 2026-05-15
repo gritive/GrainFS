@@ -27,17 +27,20 @@ admin group can connect; others cannot.
 ### Bootstrap a new cluster
 
 ```bash
-# 1) Start grainfs (no auth flags needed).
-grainfs serve --data ./data --port 9000 &
+# 1) Start grainfs.
+CLUSTER_KEY=$(openssl rand -hex 32)
+grainfs serve --data ./data --port 9000 --cluster-key "$CLUSTER_KEY" &
 
 # 2) Create the first admin SA (returns one-time secret_key).
 grainfs iam sa create admin --endpoint ./data/admin.sock
 # {"sa_id":"sa-default","access_key":"GRAIN...","secret_key":"<one-time>","grants":[{"bucket":"*","role":"admin"}]}
 
 # 3) Use the credentials for S3 traffic.
-aws --endpoint-url http://localhost:9000 \
-    --access-key-id GRAIN... --secret-access-key <secret> \
-    s3 mb s3://my-bucket
+export AWS_ACCESS_KEY_ID=GRAIN...
+export AWS_SECRET_ACCESS_KEY=<secret>
+export AWS_DEFAULT_REGION=us-east-1
+
+aws --endpoint-url http://localhost:9000 s3 mb s3://my-bucket
 ```
 
 ### Race condition
@@ -56,7 +59,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 ### Infrastructure Readiness
 
 - [ ] **Server resources**: Minimum 4 CPU, 8GB RAM, 100GB disk
-- [ ] **Network connectivity**: Ports 9000 (S3 API), 9002 (NFS), and the NBD port if enabled are accessible
+- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients. Keep NFSv4 2049, NBD 10809, and 9P listeners on loopback, private networks, or firewall-restricted addresses when enabled.
 - [ ] **Disk mounting**: Data directory mounted on reliable storage (SSD recommended)
 - [ ] **Backup repository**: Restic repo initialized and accessible
 - [ ] **Monitoring**: Prometheus scraping configured and receiving data
@@ -67,6 +70,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
   ```bash
   export GRAINFS_DATA_DIR=/path/to/production/data
   export GRAINFS_PORT=9000
+  export GRAINFS_CLUSTER_KEY="$(secret-manager read grainfs/cluster-key)"
   export GRAINFS_ACCESS_KEY="$(secret-manager read grainfs/access-key)"
   export GRAINFS_SECRET_KEY="$(secret-manager read grainfs/secret-key)"
   ```
@@ -278,6 +282,7 @@ above) immediately after the first node starts. S3 clients, such as
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
+  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -287,6 +292,7 @@ grainfs serve \
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
+  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   --node-id node-1 \
   --raft-addr node-1.example.com:9001 \
   > /var/log/grainfs/production.log 2>&1 &
@@ -295,6 +301,7 @@ grainfs serve \
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
+  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   --node-id node-2 \
   --raft-addr node-2.example.com:9001 \
   --join node-1.example.com:9001 \
@@ -365,10 +372,10 @@ Expected: Process ID printed
 **API health check:**
 ```bash
 # Using AWS CLI
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id $GRAINFS_ACCESS_KEY \
-  --secret-access-key $GRAINFS_SECRET_KEY \
-  s3 ls
+AWS_ACCESS_KEY_ID=$GRAINFS_ACCESS_KEY \
+AWS_SECRET_ACCESS_KEY=$GRAINFS_SECRET_KEY \
+AWS_DEFAULT_REGION=us-east-1 \
+  aws --endpoint-url http://localhost:9000 s3 ls
 ```
 Expected: No error, bucket list returned (may be empty)
 
@@ -404,6 +411,7 @@ cp $LATEST_BACKUP /usr/local/bin/grainfs
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
+  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -432,6 +440,7 @@ mv $GRAINFS_DATA_DIR.restored $GRAINFS_DATA_DIR
 grainfs serve \
   --data $GRAINFS_DATA_DIR \
   --port $GRAINFS_PORT \
+  --cluster-key "$GRAINFS_CLUSTER_KEY" \
   > /var/log/grainfs/production.log 2>&1 &
 ```
 
@@ -605,7 +614,8 @@ make build
 mkdir -p /var/lib/grainfs
 
 # Start GrainFS directly
-./bin/grainfs serve --data /var/lib/grainfs --port 9000
+CLUSTER_KEY=$(openssl rand -hex 32)
+./bin/grainfs serve --data /var/lib/grainfs --port 9000 --cluster-key "$CLUSTER_KEY"
 ```
 
 After the server starts, bootstrap the admin SA once via the host-side admin socket:
@@ -618,20 +628,16 @@ for subsequent S3 client commands.
 **Health check:**
 ```bash
 # API health check
-aws --endpoint-url http://localhost:9000 \
-  --access-key-id $GRAINFS_ACCESS_KEY \
-  --secret-access-key $GRAINFS_SECRET_KEY \
-  s3 ls
+AWS_ACCESS_KEY_ID=$GRAINFS_ACCESS_KEY \
+AWS_SECRET_ACCESS_KEY=$GRAINFS_SECRET_KEY \
+AWS_DEFAULT_REGION=us-east-1 \
+  aws --endpoint-url http://localhost:9000 s3 ls
 ```
 
 **Rollback:**
 ```bash
 # Replace ./bin/grainfs with the previous binary, then restart the service:
-./bin/grainfs serve --data /var/lib/grainfs --port 9000
-  grainfs:previous-version \
-  serve \
-  --data /data \
-  --port 9000
+./bin/grainfs serve --data /var/lib/grainfs --port 9000 --cluster-key "$CLUSTER_KEY"
 ```
 
 ### Kubernetes Deployment
@@ -643,6 +649,11 @@ aws --endpoint-url http://localhost:9000 \
 
 # Create namespace
 kubectl create namespace grainfs
+
+# Store the cluster PSK used by the deployment example below.
+kubectl create secret generic grainfs-secrets \
+  -n grainfs \
+  --from-literal=cluster-key="$(openssl rand -hex 32)"
 ```
 
 **Deployment:**
@@ -682,15 +693,25 @@ spec:
       containers:
       - name: grainfs
         image: grainfs:latest
+        args:
+        - serve
+        - --data
+        - /grainfs/data
+        - --port
+        - "9000"
+        - --cluster-key
+        - $(GRAINFS_CLUSTER_KEY)
         ports:
         - containerPort: 9000
-        - containerPort: 9002
-          name: nfs
+          name: s3
+        - containerPort: 2049
+          name: nfsv4
         env:
-        - name: GRAINFS_DATA_DIR
-          value: /grainfs/data
-        - name: GRAINFS_PORT
-          value: "9000"
+        - name: GRAINFS_CLUSTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: grainfs-secrets
+              key: cluster-key
         volumeMounts:
         - name: data
           mountPath: /grainfs/data
