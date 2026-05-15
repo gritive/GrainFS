@@ -51,6 +51,10 @@ func (b *Backend) PutObjectWithUserMetadata(ctx context.Context, bucket, key str
 	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 }
 
+func (b *Backend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.PutObjectResult, error) {
+	return storage.NewOperations(b.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+}
+
 func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
 	type asyncPutter interface {
 		PutObjectAsync(context.Context, string, string, io.Reader, string) (*storage.Object, func() error, error)

@@ -295,7 +295,7 @@ func TestClusterCoordinator_PutObject_AllowsMetaAssignedBucketBeforeLocalBucketR
 
 	require.NoError(t, err)
 	require.Equal(t, int64(4), obj.Size)
-	require.Equal(t, []string{"HeadBucket:assigned-bucket"}, base.calls)
+	require.Empty(t, base.calls)
 }
 
 func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *testing.T) {
@@ -367,7 +367,7 @@ func TestClusterCoordinator_DeleteObject_MissingObjectIsIdempotentWhenBucketExis
 
 	require.NoError(t, err)
 	require.NotEmpty(t, markerID)
-	require.Equal(t, []string{"HeadBucket:existing-bucket"}, base.calls)
+	require.Empty(t, base.calls)
 	require.Len(t, proposer.entries, 1)
 	require.True(t, proposer.entries[0].IsDeleteMarker)
 	require.Equal(t, "missing-key", proposer.entries[0].Key)
@@ -593,6 +593,44 @@ func TestClusterCoordinator_HeadBucket_UsesMetaAssignmentWhenBaseIsEmpty(t *test
 
 	require.NoError(t, c.HeadBucket(context.Background(), "default"))
 	require.Equal(t, []string{"HeadBucket:default"}, base.calls)
+}
+
+func TestClusterCoordinator_RequireObjectBucket_SkipsBaseWhenBucketAssigned(t *testing.T) {
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeBucketAssignmentSource{
+		assignments: map[string]string{"default": "group-0"},
+	}
+	c := NewClusterCoordinator(base, nil, nil, meta, "self")
+
+	require.NoError(t, c.requireObjectBucket(context.Background(), "default"))
+	require.Empty(t, base.calls)
+}
+
+func TestClusterCoordinator_PutObjectWithResultUsesObjectIndexForMissingPrevious(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	gb.Node().Start()
+	stopApply := make(chan struct{})
+	go gb.RunApplyLoop(stopApply)
+	t.Cleanup(func() { close(stopApply) })
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "g1")
+	meta := &emptyObjectIndexMeta{fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	result, err := c.PutObjectWithUserMetadataResult(context.Background(), "photos", "new-key", strings.NewReader("body"), "text/plain", nil)
+
+	require.NoError(t, err)
+	require.False(t, result.Previous.Exists)
+	require.Equal(t, int64(4), result.Object.Size)
+	require.Empty(t, base.calls)
 }
 
 func TestClusterCoordinator_ListObjects_UsesObjectIndexAcrossPlacementGroups(t *testing.T) {
