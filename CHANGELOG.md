@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.209.2] - 2026-05-15 — docs: tighten compatibility and operator guides
+
+### Changed
+
+- **Operator examples**: `grainfs serve` examples now include `--cluster-key`, data paths, and ports where needed so copy-paste runs fail less often.
+- **Credential setup**: S3, Iceberg, drill, and runbook docs now show the current IAM service-account flow and standard AWS CLI environment variables.
+- **Protocol boundaries**: NFS, 9P, and NBD compatibility docs now state the actual network protocol expectations instead of implying unsupported client paths.
+
+### Fixed
+
+- **English-only docs**: remaining Korean prose in tracked docs was converted to English.
+- **Stop-slop pass**: predictable AI-writing phrases in the touched docs were replaced with more direct wording.
+- **Runbook deployment secret**: the Kubernetes example now creates the cluster-key secret consumed by the deployment.
+
+### Verification
+
+- `make test-unit`
+- `git diff --check -- README.md ROADMAP.md docs`
+- CJK text scan across `README.md`, `ROADMAP.md`, and `docs`
+- local markdown link check
+- fenced code block parity check
+
 ## [0.0.209.1] - 2026-05-15 — docs: refresh compatibility and benchmark guides
 
 ### Added
