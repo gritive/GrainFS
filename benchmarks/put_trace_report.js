@@ -72,6 +72,8 @@ for (const [cell, requests] of byCell.entries()) {
   const coordinatorMetaCounts = [];
   const forwardAttempts = [];
   const forwardedBytes = [];
+  const leaderHintUsed = [];
+  const notLeaderRetries = [];
   const slowShardMicros = [];
   const groupIDs = new Set();
   for (const reqEvents of requests) {
@@ -80,6 +82,8 @@ for (const [cell, requests] of byCell.entries()) {
     let coordinatorMetaCount = 0;
     let attempts = 0;
     let requestForwardedBytes = 0;
+    let requestLeaderHintUsed = 0;
+    let requestNotLeaderRetries = 0;
     let slowShard = 0;
     for (const ev of reqEvents) {
       if (ev.group_id) groupIDs.add(ev.group_id);
@@ -92,6 +96,8 @@ for (const [cell, requests] of byCell.entries()) {
         if (ev.meta_propose_site === 'coordinator') coordinatorMetaCount += count;
       }
       attempts = Math.max(attempts, ev.forward_attempts || 0);
+      if (ev.leader_hint_used) requestLeaderHintUsed = 1;
+      requestNotLeaderRetries = Math.max(requestNotLeaderRetries, ev.not_leader_retries || 0);
       if (ev.stage === 'forward_send_frame' || ev.stage === 'forward_send_stream') {
         requestForwardedBytes = Math.max(requestForwardedBytes, ev.bytes || 0);
       }
@@ -104,6 +110,8 @@ for (const [cell, requests] of byCell.entries()) {
     coordinatorMetaCounts.push(coordinatorMetaCount);
     forwardAttempts.push(attempts);
     forwardedBytes.push(requestForwardedBytes);
+    leaderHintUsed.push(requestLeaderHintUsed);
+    notLeaderRetries.push(requestNotLeaderRetries);
     slowShardMicros.push(slowShard);
   }
 
@@ -145,16 +153,18 @@ for (const [cell, requests] of byCell.entries()) {
     meta_index_propose_count_p99_receiver: percentile(receiverMetaCounts, 99),
     meta_index_propose_count_p99_coordinator: percentile(coordinatorMetaCounts, 99),
     forward_attempts_p99: percentile(forwardAttempts, 99),
+    leader_hint_used_p99: percentile(leaderHintUsed, 99),
+    not_leader_retries_p99: percentile(notLeaderRetries, 99),
     forwarded_bytes_p99: percentile(forwardedBytes, 99),
     slowest_shard_p99_ms: +(percentile(slowShardMicros, 99) / 1000).toFixed(2),
   });
 }
 
 rows.sort((a, b) => a.cell.localeCompare(b.cell));
-console.log('| Cell | Requests | Dominant stage | Stage p95 ms | Stage p99 ms | Inclusive stage | Inclusive p99 ms | Meta recv/coordinator p99 | Forward attempts p99 | Forwarded bytes p99 | Slowest shard p99 ms |');
-console.log('|------|----------|----------------|--------------|--------------|-----------------|------------------|---------------------------|----------------------|---------------------|----------------------|');
+console.log('| Cell | Requests | Dominant stage | Stage p95 ms | Stage p99 ms | Inclusive stage | Inclusive p99 ms | Meta recv/coordinator p99 | Forward attempts p99 | Leader hint used p99 | NotLeader retries p99 | Forwarded bytes p99 | Slowest shard p99 ms |');
+console.log('|------|----------|----------------|--------------|--------------|-----------------|------------------|---------------------------|----------------------|----------------------|-----------------------|---------------------|----------------------|');
 for (const row of rows) {
-  console.log(`| ${row.cell} | ${row.requests} | ${row.dominant_stage} | ${row.dominant_stage_p95_ms} | ${row.dominant_stage_p99_ms} | ${row.dominant_inclusive_stage} | ${row.dominant_inclusive_stage_p99_ms} | ${row.meta_index_propose_count_p99_receiver}/${row.meta_index_propose_count_p99_coordinator} | ${row.forward_attempts_p99} | ${row.forwarded_bytes_p99} | ${row.slowest_shard_p99_ms} |`);
+  console.log(`| ${row.cell} | ${row.requests} | ${row.dominant_stage} | ${row.dominant_stage_p95_ms} | ${row.dominant_stage_p99_ms} | ${row.dominant_inclusive_stage} | ${row.dominant_inclusive_stage_p99_ms} | ${row.meta_index_propose_count_p99_receiver}/${row.meta_index_propose_count_p99_coordinator} | ${row.forward_attempts_p99} | ${row.leader_hint_used_p99} | ${row.not_leader_retries_p99} | ${row.forwarded_bytes_p99} | ${row.slowest_shard_p99_ms} |`);
 }
 
 const outPath = path.join('benchmarks', 'put-trace-report.json');
