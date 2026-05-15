@@ -13,11 +13,9 @@ benchmarks/iceberg_table_report.json
 benchmarks/put-matrix-*.json
 benchmarks/put-trace-report.json
 benchmarks/profiles/
-docs/superpowers/
 meta/
 /raft/
 receipts/
-docs/superpowers/
 benchmarks/scratch/
 
 # superpowers 스킬 산출물 — git 미포함

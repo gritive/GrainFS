@@ -17,7 +17,7 @@
 #   PUT_MATRIX    — 1이면 포트/크기 PUT 매트릭스 실행 (기본: 0)
 #   PUT_TRACE     — 1이면 PUT trace JSONL 기록 및 리포트 생성 (기본: 0)
 #   PUT_SMALL_KB  — PUT 매트릭스 small 오브젝트 크기 KB (기본: 64)
-#   PUT_LARGE_KB  — PUT 매트릭스 large 오브젝트 크기 KB (기본: 6144)
+#   PUT_LARGE_KB  — PUT 매트릭스 large 오브젝트 크기 KB (기본: 8192)
 #   PUT_MATRIX_ITERATIONS — PUT 매트릭스 셀별 반복 횟수 (기본: 25)
 #
 # 3노드 포트 배치:

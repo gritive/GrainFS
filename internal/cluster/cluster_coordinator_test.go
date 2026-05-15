@@ -1554,6 +1554,25 @@ func TestClusterCoordinator_PutObject_ForwardLeavesObjectIndexToReceiver(t *test
 	require.Empty(t, proposer.entries, "forward receiver owns object-index commit for forwarded PUTs")
 }
 
+func TestClusterCoordinator_PutObject_StreamForwardLeavesObjectIndexToReceiver(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
+	c.forward.WithStreamDialer(d.stream)
+	proposer := &recordingObjectIndexProposer{}
+	c.WithObjectIndexProposer(proposer)
+	body := bytes.Repeat([]byte("z"), DefaultMaxForwardBodyBytes+1024)
+	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream", ContentType: "application/octet-stream", VersionID: "v1"},
+		"bk",
+	)
+
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, d.streamCalls, 1)
+	require.Empty(t, proposer.entries, "forward receiver owns object-index commit for streamed forwarded PUTs")
+}
+
 func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := []byte("non-empty-body")
