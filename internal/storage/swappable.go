@@ -78,6 +78,11 @@ func (sb *SwappableBackend) PutObjectWithUserMetadata(ctx context.Context, bucke
 	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 }
 
+func (sb *SwappableBackend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error) {
+	inner := *sb.inner.Load()
+	return NewOperations(inner).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+}
+
 func (sb *SwappableBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
 	inner := *sb.inner.Load()
 	return putObjectWithACLOnBackend(context.Background(), inner, bucket, key, r, contentType, acl)

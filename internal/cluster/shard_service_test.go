@@ -1,8 +1,10 @@
 package cluster
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -314,6 +316,10 @@ func TestShardService_ResolvePeerAddress(t *testing.T) {
 // read back via handleRead → ReadLocalShard (decrypt).
 func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	ctx := context.Background()
+	tracePath := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", tracePath)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
 
 	key := bytes.Repeat([]byte("e"), 32)
 	enc1, err := encrypt.NewEncryptor(key)
@@ -348,6 +354,14 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	got, readErr := svc1.ReadShard(ctx, tr2.LocalAddr(), "bkt", "key", 0)
 	require.NoError(t, readErr)
 	assert.Equal(t, plaintext, got)
+
+	events := readShardServiceTraceEvents(t, tracePath)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncOpen)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncWrite)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncSync)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncClose)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncRename)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
 }
 
 func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
@@ -518,6 +532,102 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	// Verify shard is gone on Node2
 	_, err = os.ReadFile(shardPath)
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestShardService_WriteShardRecordsRemoteTraceBreakdown(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
+	tr1 := transport.MustNewQUICTransport("test-cluster-psk")
+	tr2 := transport.MustNewQUICTransport("test-cluster-psk")
+	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
+	defer tr1.Close()
+	defer tr2.Close()
+	require.NoError(t, tr1.Connect(ctx, tr2.LocalAddr()))
+
+	svc1 := NewShardService(t.TempDir(), tr1)
+	svc2 := NewShardService(t.TempDir(), tr2)
+	tr2.SetStreamHandler(svc2.HandleRPC())
+
+	traceCtx := ContextWithPutTrace(ctx, PutTraceRequest{
+		Bucket:      "mybucket",
+		Key:         "mykey",
+		GroupID:     "group-1",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+
+	err := svc1.WriteShard(traceCtx, tr2.LocalAddr(), "mybucket", "mykey", 0, []byte("shard-data-0"))
+	require.NoError(t, err)
+
+	events := readShardServiceTraceEvents(t, path)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteRemoteBuild)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteRemoteCall)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteRemoteDecode)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalMkdir)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncode)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalFile)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalBuffered)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
+}
+
+func TestShardService_WriteLocalShardContextRecordsTraceBreakdown(t *testing.T) {
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "mybucket",
+		Key:         "mykey",
+		GroupID:     "group-1",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
+	svc := NewShardService(t.TempDir(), transport.MustNewQUICTransport("test-cluster-psk"))
+	err := svc.WriteLocalShardContext(ctx, "mybucket", "mykey", 0, []byte("local-shard"))
+	require.NoError(t, err)
+
+	events := readShardServiceTraceEvents(t, path)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalMkdir)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncode)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalFile)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalBuffered)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
+}
+
+func readShardServiceTraceEvents(t *testing.T, path string) []PutTraceEvent {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	var out []PutTraceEvent
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var ev PutTraceEvent
+		require.NoError(t, json.Unmarshal(sc.Bytes(), &ev))
+		out = append(out, ev)
+	}
+	require.NoError(t, sc.Err())
+	require.NotEmpty(t, out)
+	return out
+}
+
+func requireShardServiceTraceStage(t *testing.T, events []PutTraceEvent, stage PutTraceStage) {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Stage == stage {
+			return
+		}
+	}
+	require.Failf(t, "missing trace stage", "stage %s not found in %#v", stage, events)
 }
 
 // TestWriteLocalShard_Atomic verifies that WriteLocalShard is crash-safe:

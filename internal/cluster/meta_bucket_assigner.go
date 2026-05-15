@@ -19,6 +19,7 @@ type ForwardingBucketAssigner struct {
 
 var bucketAssignmentLocalApplyTimeout = 10 * time.Second
 var objectIndexLocalApplyTimeout = 10 * time.Second
+var objectIndexLocalApplyPollInterval = time.Millisecond
 
 func NewForwardingBucketAssigner(local *MetaRaft, forward MetaForwardFunc) *ForwardingBucketAssigner {
 	return &ForwardingBucketAssigner{local: local, forward: forward}
@@ -84,23 +85,50 @@ func (p *ForwardingObjectIndexProposer) ProposeObjectIndex(ctx context.Context, 
 	if p.local.IsLeader() || p.forward == nil {
 		return p.local.ProposeObjectIndex(ctx, entry, preserveLatest)
 	}
+	encodeStart := time.Now()
 	payload, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
+			MetaProposeSite: "forwarder",
+			Error:           err.Error(),
+		})
 		return fmt.Errorf("meta object index proposer: encode PutObjectIndex: %w", err)
 	}
 	data, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, payload)
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
+			MetaProposeSite: "forwarder",
+			Error:           err.Error(),
+		})
 		return fmt.Errorf("meta object index proposer: encode MetaCmd: %w", err)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
+		MetaProposeSite: "forwarder",
+	})
+	forwardStart := time.Now()
 	if err := p.forward(ctx, data); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexForward, forwardStart, PutTraceStageFields{
+			MetaProposeSite: "forwarder",
+			Error:           err.Error(),
+		})
 		return err
 	}
+	ObservePutTraceStage(ctx, PutTraceStageMetaIndexForward, forwardStart, PutTraceStageFields{
+		MetaProposeSite: "forwarder",
+	})
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, objectIndexLocalApplyTimeout)
 		defer cancel()
 	}
-	return waitForLocalObjectIndex(ctx, p.local, entry)
+	waitStart := time.Now()
+	err = waitForLocalObjectIndex(ctx, p.local, entry)
+	fields := PutTraceStageFields{MetaProposeSite: "forwarder"}
+	if err != nil {
+		fields.Error = err.Error()
+	}
+	ObservePutTraceStage(ctx, PutTraceStageMetaIndexWaitLocal, waitStart, fields)
+	return err
 }
 
 func (p *ForwardingObjectIndexProposer) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error {
@@ -130,7 +158,7 @@ func (p *ForwardingObjectIndexProposer) ProposeDeleteObjectIndex(ctx context.Con
 }
 
 func waitForLocalObjectIndex(ctx context.Context, local *MetaRaft, want ObjectIndexEntry) error {
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(objectIndexLocalApplyPollInterval)
 	defer ticker.Stop()
 	for {
 		if got, ok := local.FSM().ObjectIndexVersion(want.Bucket, want.Key, want.VersionID); ok &&
@@ -146,7 +174,7 @@ func waitForLocalObjectIndex(ctx context.Context, local *MetaRaft, want ObjectIn
 }
 
 func waitForLocalObjectIndexDelete(ctx context.Context, local *MetaRaft, bucket, key, versionID string) error {
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(objectIndexLocalApplyPollInterval)
 	defer ticker.Stop()
 	for {
 		if _, ok := local.FSM().ObjectIndexVersion(bucket, key, versionID); !ok {

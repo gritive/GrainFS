@@ -37,6 +37,20 @@ function matrixParts(cell) {
   return { ingress, sizeClass, forwardMode };
 }
 
+function objectKeyFromTraceKey(key) {
+  const slash = key.lastIndexOf('/');
+  if (slash === -1) return key;
+  const tail = key.slice(slash + 1);
+  if (
+    tail === 'current' ||
+    /^[0-9A-HJKMNP-TV-Z]{26}$/.test(tail) ||
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tail)
+  ) {
+    return key.slice(0, slash);
+  }
+  return key;
+}
+
 const inclusiveWrapperStages = new Set([
 	'http_put_total',
 	'forward_send_frame',
@@ -47,9 +61,22 @@ function isHTTPPutStage(stage) {
 	return stage.startsWith('http_put_');
 }
 
+function topStageSummary(stageDurations, limit) {
+  return [...stageDurations.entries()]
+    .filter(([stage]) => !inclusiveWrapperStages.has(stage))
+    .map(([stage, values]) => ({
+      stage,
+      p99_ms: +(percentile(values, 99) / 1000).toFixed(2),
+    }))
+    .sort((a, b) => b.p99_ms - a.p99_ms)
+    .slice(0, limit)
+    .map((item) => `${item.stage}:${item.p99_ms}`)
+    .join('<br>');
+}
+
 const byRequest = new Map();
 for (const ev of events) {
-	const reqKey = `${ev.bucket}/${ev.key}`;
+	const reqKey = `${ev.bucket}/${objectKeyFromTraceKey(ev.key)}`;
 	if (!byRequest.has(reqKey)) byRequest.set(reqKey, []);
   byRequest.get(reqKey).push(ev);
 }
@@ -75,6 +102,9 @@ for (const [cell, requests] of byCell.entries()) {
   const leaderHintUsed = [];
   const notLeaderRetries = [];
   const slowShardMicros = [];
+  const localShardWrites = [];
+  const localDirSyncs = [];
+  const localDirSyncsPerNode = [];
   const groupIDs = new Set();
   for (const reqEvents of requests) {
     let metaCount = 0;
@@ -85,6 +115,9 @@ for (const [cell, requests] of byCell.entries()) {
     let requestLeaderHintUsed = 0;
     let requestNotLeaderRetries = 0;
     let slowShard = 0;
+    let requestLocalShardWrites = 0;
+    let requestLocalDirSyncs = 0;
+    const requestLocalDirSyncsByNode = new Map();
     for (const ev of reqEvents) {
       if (ev.group_id) groupIDs.add(ev.group_id);
       if (!stageDurations.has(ev.stage)) stageDurations.set(ev.stage, []);
@@ -104,6 +137,12 @@ for (const [cell, requests] of byCell.entries()) {
       if (ev.stage === 'shard_write_local' || ev.stage === 'shard_write_remote') {
         slowShard = Math.max(slowShard, ev.duration_micros || 0);
       }
+      if (ev.stage === 'shard_write_local_file') requestLocalShardWrites += 1;
+      if (ev.stage === 'shard_write_local_dirsync') {
+        requestLocalDirSyncs += 1;
+        const nodeKey = ev.node_id || `pid:${ev.pid || 0}`;
+        requestLocalDirSyncsByNode.set(nodeKey, (requestLocalDirSyncsByNode.get(nodeKey) || 0) + 1);
+      }
     }
     metaCounts.push(metaCount);
     receiverMetaCounts.push(receiverMetaCount);
@@ -113,6 +152,9 @@ for (const [cell, requests] of byCell.entries()) {
     leaderHintUsed.push(requestLeaderHintUsed);
     notLeaderRetries.push(requestNotLeaderRetries);
     slowShardMicros.push(slowShard);
+    localShardWrites.push(requestLocalShardWrites);
+    localDirSyncs.push(requestLocalDirSyncs);
+    localDirSyncsPerNode.push(Math.max(0, ...requestLocalDirSyncsByNode.values()));
   }
 
   let dominantInclusiveStage = '';
@@ -146,6 +188,7 @@ for (const [cell, requests] of byCell.entries()) {
     dominant_stage: dominantStage,
     dominant_stage_p95_ms: +(percentile(stageDurations.get(dominantStage) || [], 95) / 1000).toFixed(2),
     dominant_stage_p99_ms: +(dominantP99 / 1000).toFixed(2),
+    top_stage_p99_ms: topStageSummary(stageDurations, 3),
     dominant_inclusive_stage: dominantInclusiveStage,
     dominant_inclusive_stage_p95_ms: +(percentile(stageDurations.get(dominantInclusiveStage) || [], 95) / 1000).toFixed(2),
     dominant_inclusive_stage_p99_ms: +(dominantInclusiveP99 / 1000).toFixed(2),
@@ -157,14 +200,17 @@ for (const [cell, requests] of byCell.entries()) {
     not_leader_retries_p99: percentile(notLeaderRetries, 99),
     forwarded_bytes_p99: percentile(forwardedBytes, 99),
     slowest_shard_p99_ms: +(percentile(slowShardMicros, 99) / 1000).toFixed(2),
+    local_shard_writes_p99: percentile(localShardWrites, 99),
+    local_dirsyncs_p99: percentile(localDirSyncs, 99),
+    local_dirsyncs_per_node_p99: percentile(localDirSyncsPerNode, 99),
   });
 }
 
 rows.sort((a, b) => a.cell.localeCompare(b.cell));
-console.log('| Cell | Requests | Dominant stage | Stage p95 ms | Stage p99 ms | Inclusive stage | Inclusive p99 ms | Meta recv/coordinator p99 | Forward attempts p99 | Leader hint used p99 | NotLeader retries p99 | Forwarded bytes p99 | Slowest shard p99 ms |');
-console.log('|------|----------|----------------|--------------|--------------|-----------------|------------------|---------------------------|----------------------|----------------------|-----------------------|---------------------|----------------------|');
+console.log('| Cell | Requests | Dominant stage | Stage p95 ms | Stage p99 ms | Top stage p99 ms | Inclusive stage | Inclusive p99 ms | Meta recv/coordinator p99 | Forward attempts p99 | Leader hint used p99 | NotLeader retries p99 | Forwarded bytes p99 | Slowest shard p99 ms | Local shard writes p99 | Local dirsyncs p99 | Max dirsyncs/node p99 |');
+console.log('|------|----------|----------------|--------------|--------------|------------------|-----------------|------------------|---------------------------|----------------------|----------------------|-----------------------|---------------------|----------------------|------------------------|--------------------|-----------------------|');
 for (const row of rows) {
-  console.log(`| ${row.cell} | ${row.requests} | ${row.dominant_stage} | ${row.dominant_stage_p95_ms} | ${row.dominant_stage_p99_ms} | ${row.dominant_inclusive_stage} | ${row.dominant_inclusive_stage_p99_ms} | ${row.meta_index_propose_count_p99_receiver}/${row.meta_index_propose_count_p99_coordinator} | ${row.forward_attempts_p99} | ${row.leader_hint_used_p99} | ${row.not_leader_retries_p99} | ${row.forwarded_bytes_p99} | ${row.slowest_shard_p99_ms} |`);
+  console.log(`| ${row.cell} | ${row.requests} | ${row.dominant_stage} | ${row.dominant_stage_p95_ms} | ${row.dominant_stage_p99_ms} | ${row.top_stage_p99_ms} | ${row.dominant_inclusive_stage} | ${row.dominant_inclusive_stage_p99_ms} | ${row.meta_index_propose_count_p99_receiver}/${row.meta_index_propose_count_p99_coordinator} | ${row.forward_attempts_p99} | ${row.leader_hint_used_p99} | ${row.not_leader_retries_p99} | ${row.forwarded_bytes_p99} | ${row.slowest_shard_p99_ms} | ${row.local_shard_writes_p99} | ${row.local_dirsyncs_p99} | ${row.local_dirsyncs_per_node_p99} |`);
 }
 
 const outPath = path.join('benchmarks', 'put-trace-report.json');

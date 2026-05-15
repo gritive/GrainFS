@@ -46,6 +46,8 @@ type ForwardSender struct {
 	streamDialer       forwardStreamDialer
 	readDialer         forwardReadStreamDialer
 	leaderHintResolver func(string) string
+	mu                 sync.RWMutex
+	leaderByGroup      map[string]string
 	timeout            time.Duration
 	readinessRetry     time.Duration
 	streamSlots        chan struct{}
@@ -55,10 +57,11 @@ type ForwardSender struct {
 // NewForwardSender constructs a sender with default 2 minute per-call timeout.
 func NewForwardSender(d forwardDialer) *ForwardSender {
 	return &ForwardSender{
-		dialer:      d,
-		timeout:     2 * time.Minute,
-		streamSlots: make(chan struct{}, 8),
-		readSlots:   make(chan struct{}, 64),
+		dialer:        d,
+		leaderByGroup: map[string]string{},
+		timeout:       2 * time.Minute,
+		streamSlots:   make(chan struct{}, 8),
+		readSlots:     make(chan struct{}, 64),
 	}
 }
 
@@ -103,6 +106,28 @@ func (s *ForwardSender) WithMaxForwardReadStreams(n int) *ForwardSender {
 	}
 	s.readSlots = make(chan struct{}, n)
 	return s
+}
+
+func (s *ForwardSender) cachedLeader(groupID string) string {
+	if s == nil || groupID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	leader := s.leaderByGroup[groupID]
+	s.mu.RUnlock()
+	return leader
+}
+
+func (s *ForwardSender) rememberLeader(groupID, peer string) {
+	if s == nil || groupID == "" || peer == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.leaderByGroup == nil {
+		s.leaderByGroup = map[string]string{}
+	}
+	s.leaderByGroup[groupID] = peer
+	s.mu.Unlock()
 }
 
 // encodeForwardPayload assembles the 0x08 wire payload.
@@ -201,6 +226,7 @@ func (s *ForwardSender) Send(
 					NotLeaderRetries: notLeaderRetries,
 				})
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+					s.rememberLeader(groupID, hint)
 					leaderHintUsed = true
 					attempts++
 					r2, err2 := s.dialer(ctx, hint, payload)
@@ -220,6 +246,7 @@ func (s *ForwardSender) Send(
 					continue
 				}
 			}
+			s.rememberLeader(groupID, peer)
 			return reply, nil
 		}
 		if lastDialErr == nil && !retryableNotLeader {
@@ -252,6 +279,9 @@ func (s *ForwardSender) ResolveLeaderPeers(ctx context.Context, peers []string, 
 	if s == nil || s.dialer == nil || len(peers) == 0 {
 		return peers
 	}
+	if cached := s.cachedLeader(groupID); cached != "" {
+		return preferForwardPeer(peers, cached)
+	}
 	payload := encodeForwardPayload(groupID, raftpb.ForwardOpHeadObject, buildHeadObjectArgs(bucket, key))
 	for _, peer := range peers {
 		if err := ctx.Err(); err != nil {
@@ -265,11 +295,13 @@ func (s *ForwardSender) ResolveLeaderPeers(ctx context.Context, peers []string, 
 			if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 				hintReply, hintErr := s.dialer(ctx, hint, payload)
 				if hintErr == nil && !isNotLeaderReply(hintReply) {
+					s.rememberLeader(groupID, hint)
 					return preferForwardPeer(peers, hint)
 				}
 			}
 			continue
 		}
+		s.rememberLeader(groupID, peer)
 		return preferForwardPeer(peers, peer)
 	}
 	return peers
@@ -367,6 +399,7 @@ func (s *ForwardSender) SendStream(
 					if err := rewindForwardBody(body); err != nil {
 						return nil, err
 					}
+					s.rememberLeader(groupID, hint)
 					leaderHintUsed = true
 					attempts++
 					r2, err2 := s.streamDialer(ctx, hint, payload, body)
@@ -387,6 +420,7 @@ func (s *ForwardSender) SendStream(
 					continue
 				}
 			}
+			s.rememberLeader(groupID, peer)
 			return reply, nil
 		}
 		if lastDialErr == nil && !retryableNotLeader {
@@ -459,6 +493,7 @@ func (s *ForwardSender) SendReadStream(
 					_ = body.Close()
 				}
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+					s.rememberLeader(groupID, hint)
 					r2, b2, err2 := s.readDialer(ctx, hint, payload)
 					if err2 == nil {
 						releaseSlot = false
@@ -473,6 +508,7 @@ func (s *ForwardSender) SendReadStream(
 				}
 				return reply, io.NopCloser(bytes.NewReader(nil)), nil
 			}
+			s.rememberLeader(groupID, peer)
 			releaseSlot = false
 			return reply, newForwardSlotReadCloser(body, readSlots), nil
 		}

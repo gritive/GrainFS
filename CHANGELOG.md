@@ -1,6 +1,38 @@
 # Changelog
 
-## [0.0.208.0] - 2026-05-15: refactor: split server route and runtime surfaces
+## [0.0.209.0] - 2026-05-15 — perf: stabilize and shorten clustered PUTs
+
+### Added
+
+- **PUT trace shard attribution** — benchmark traces now identify remote shard open, buffer, RPC, local write, sync, meta-index, and forwarding stages so slow PUTs can be tied to the exact cluster phase.
+- **PUT trace reports by object path** — the report now groups by ingress mode, size class, forwarding mode, and object key so local leader and forwarded non-leader paths can be compared directly.
+- **PUT matrix warmup** — the cluster benchmark now warms each port and object-size path before measurement, then clears warmup trace data so startup leader election no longer pollutes p99 results.
+
+### Changed
+
+- **Forwarded PUT routing** — coordinators now resolve cached data-group leaders before forwarding writes, reducing avoidable peer sweeps on stable clusters.
+- **Small EC shard writes** — small local shards now use buffered write paths with request-context tracing, cutting local shard write and sync overhead visible in the PUT matrix.
+- **Object-index waits** — forwarded object-index local apply polling now reacts faster, reducing meta-index wait time on the receiver path.
+- **Mutation preflight** — indexed PUTs now derive previous-object facts from the object index when possible, avoiding extra storage preflight work on hot PUT paths.
+
+### Fixed
+
+- **Bucket preflight on assigned buckets** — clustered PUTs now skip the base backend bucket existence check when the meta bucket assignment is already known.
+- **Forwarded PUT p99 stability** — benchmark measurement now excludes data-group leader warmup retries, dropping the observed forwarded non-leader p99 outlier from roughly 183 ms to roughly 55 ms in the measured matrix.
+
+### Verification
+
+- `go test ./internal/storage/... -count=1`
+- `go test ./internal/cluster -count=1`
+- `go test ./internal/server -run 'TestPut' -count=1`
+- `go test ./... -count=1` (all non-e2e packages completed; `tests/e2e` exceeded package timeout)
+- `go test ./tests/nbd_interop -count=1 -timeout=5m`
+- `go test ./tests/e2e -run '^TestIAM_E2E_PolicyBypassClosed$' -count=1 -timeout=3m`
+- `go test ./tests/e2e -run '^TestE2E_DynamicGroupSeeding_1to5$' -count=1 -timeout=8m`
+- `make build`
+- `NO_BUILD=1 PUT_MATRIX=1 PUT_TRACE=1 PUT_MATRIX_ITERATIONS=12 PUT_SMALL_KB=64 PUT_LARGE_KB=1024 CLUSTER_WARMUP_SLEEP=1 ./benchmarks/bench_cluster.sh`
+
+## [0.0.208.0] - 2026-05-15 — refactor: split server route and runtime surfaces
 
 ### Added
 

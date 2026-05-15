@@ -36,6 +36,10 @@ type PutObjectResult struct {
 	Previous PreviousObject
 }
 
+type userMetadataResultPutter interface {
+	PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error)
+}
+
 func (o *Operations) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
 	return o.backend.PutObject(ctx, bucket, key, r, contentType)
 }
@@ -56,6 +60,9 @@ func (o *Operations) PutObjectWithUserMetadata(ctx context.Context, bucket, key 
 }
 
 func (o *Operations) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error) {
+	if putter, ok := o.backend.(userMetadataResultPutter); ok {
+		return putter.PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+	}
 	previous, err := o.previousObject(ctx, bucket, key)
 	if err != nil {
 		return nil, err

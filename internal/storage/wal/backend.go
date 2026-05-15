@@ -73,6 +73,23 @@ func (b *Backend) PutObjectWithUserMetadata(ctx context.Context, bucket, key str
 	return obj, nil
 }
 
+func (b *Backend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.PutObjectResult, error) {
+	result, err := storage.NewOperations(b.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+	if err != nil {
+		return nil, err
+	}
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      bucket,
+		Key:         key,
+		ETag:        result.Object.ETag,
+		ContentType: contentType,
+		Size:        result.Object.Size,
+		VersionID:   result.Object.VersionID,
+	})
+	return result, nil
+}
+
 // PutObjectAsync delegates to the inner backend's write-back path and appends
 // the WAL entry inside the commitFn so PITR records only committed objects.
 func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {

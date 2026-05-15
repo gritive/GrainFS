@@ -13,6 +13,7 @@ const OBJECT_SIZE_KB = parseInt(__ENV.OBJECT_SIZE_KB || '64');
 const MATRIX_CELL = __ENV.MATRIX_CELL || 'unknown';
 const ITERATIONS = parseInt(__ENV.ITERATIONS || '25');
 const VUS = parseInt(__ENV.VUS || '1');
+const WARMUP = (__ENV.WARMUP || '0') === '1';
 const USE_UNSIGNED_PAYLOAD = (__ENV.UNSIGNED_PAYLOAD || '1') !== '0';
 const PAYLOAD = 'x'.repeat(OBJECT_SIZE_KB * 1024);
 
@@ -119,6 +120,9 @@ export function handleSummary(data) {
     p95_ms: latency ? latency.values['p(95)'] : 0,
     p99_ms: latency ? latency.values['p(99)'] : 0,
   };
+  if (WARMUP) {
+    return { stdout: '' };
+  }
   return {
     stdout: `${JSON.stringify(report)}\n`,
     [`benchmarks/put-matrix-${MATRIX_CELL}.json`]: JSON.stringify(report, null, 2),
