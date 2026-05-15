@@ -28,6 +28,9 @@ const (
 	PutTraceStageShardWriteRemoteOpen    PutTraceStage = "shard_write_remote_open"
 	PutTraceStageShardWriteRemoteBuffer  PutTraceStage = "shard_write_remote_buffer"
 	PutTraceStageShardWriteRemoteRPC     PutTraceStage = "shard_write_remote_rpc"
+	PutTraceStageShardWriteRemoteBuild   PutTraceStage = "shard_write_remote_build"
+	PutTraceStageShardWriteRemoteCall    PutTraceStage = "shard_write_remote_call"
+	PutTraceStageShardWriteRemoteDecode  PutTraceStage = "shard_write_remote_decode"
 	PutTraceStageDataRaftProposeMeta     PutTraceStage = "data_raft_propose_meta"
 	PutTraceStageMetaIndexPropose        PutTraceStage = "meta_index_propose"
 )

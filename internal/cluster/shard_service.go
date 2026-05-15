@@ -168,20 +168,62 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
+	buildStart := time.Now()
 	fw := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data)
 	defer func() { fw.Builder.Reset(); shardBuilderPool.Put(fw.Builder) }()
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuild, buildStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTarget:      peerAddr,
+		ShardTargetClass: "remote",
+	})
+	callStart := time.Now()
 	resp, err := s.transport.CallFlatBuffer(ctx, peerAddr, fw)
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteCall, callStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTarget:      peerAddr,
+			ShardTargetClass: "remote",
+			Error:            err.Error(),
+		})
 		return fmt.Errorf("write shard to %s: %w", peerAddr, err)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteCall, callStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTarget:      peerAddr,
+		ShardTargetClass: "remote",
+	})
 
+	decodeStart := time.Now()
 	rpcType, _, err := unmarshalEnvelope(resp.Payload)
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteDecode, decodeStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTarget:      peerAddr,
+			ShardTargetClass: "remote",
+			Error:            err.Error(),
+		})
 		return fmt.Errorf("unmarshal response: %w", err)
 	}
 	if rpcType == "Error" {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteDecode, decodeStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTarget:      peerAddr,
+			ShardTargetClass: "remote",
+			Error:            "remote error",
+		})
 		return fmt.Errorf("remote error from %s", peer)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteDecode, decodeStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTarget:      peerAddr,
+		ShardTargetClass: "remote",
+	})
 	return nil
 }
 

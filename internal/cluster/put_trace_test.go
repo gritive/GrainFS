@@ -48,6 +48,9 @@ func TestPutTraceStageVocabularyIsStable(t *testing.T) {
 	require.Equal(t, "shard_write_remote_open", string(PutTraceStageShardWriteRemoteOpen))
 	require.Equal(t, "shard_write_remote_buffer", string(PutTraceStageShardWriteRemoteBuffer))
 	require.Equal(t, "shard_write_remote_rpc", string(PutTraceStageShardWriteRemoteRPC))
+	require.Equal(t, "shard_write_remote_build", string(PutTraceStageShardWriteRemoteBuild))
+	require.Equal(t, "shard_write_remote_call", string(PutTraceStageShardWriteRemoteCall))
+	require.Equal(t, "shard_write_remote_decode", string(PutTraceStageShardWriteRemoteDecode))
 	require.Equal(t, "data_raft_propose_meta", string(PutTraceStageDataRaftProposeMeta))
 	require.Equal(t, "meta_index_propose", string(PutTraceStageMetaIndexPropose))
 }
