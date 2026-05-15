@@ -26,7 +26,7 @@ var errInternalReply = errors.New("forward: internal reply error")
 // --- Args builders (request side) ---
 
 func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	b := flatbuffers.NewBuilder(64 + len(body))
+	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
@@ -38,6 +38,15 @@ func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
 	raftpb.PutObjectArgsAddBody(b, bodyOff)
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
+}
+
+func putObjectArgsBuilderSize(bucket, key, contentType string, bodyLen int) int {
+	const tableOverhead = 128
+	n := bodyLen + len(bucket) + len(key) + len(contentType) + tableOverhead
+	if bodyLen > 0 {
+		n += bodyLen
+	}
+	return n
 }
 
 func buildGetObjectArgs(bucket, key string) []byte {
