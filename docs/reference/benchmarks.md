@@ -21,26 +21,27 @@ object sizes, concurrency, and cold/warm-cache rules.
 
 ## Existing Benchmark Targets
 
-| Target | Scope | Primary artifacts |
-| --- | --- | --- |
-| `make bench` | Single-node S3 object PUT/GET/DELETE | `benchmarks/report.json` |
-| `make bench-cluster` | Multi-node S3 object benchmark | `benchmarks/report.json`, cluster logs |
-| `PUT_MATRIX=1 make bench-cluster` | Cluster PUT matrix by ingress port and object size | `benchmarks/put-matrix-port<port>-<small\|large>.json` |
-| `PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster` | PUT matrix plus per-node stage tracing | owner-only JSONL traces and `benchmarks/put_trace_report.js` output |
-| `make bench-profile` | Multi-node S3 benchmark with pprof | `/tmp/grainfs-bench-*.out` |
-| `make bench-topology-get` | Topology-aware GET profile | topology GET report and pprof files |
-| `make bench-topology-get-matrix` | Topology-aware GET matrix | matrix reports and pprof files |
-| `make bench-iceberg-table` | Single-node Iceberg REST Catalog table API | `benchmarks/iceberg_table_report.json` |
-| `make bench-iceberg-table-cluster` | Multi-node Iceberg table API | `benchmarks/iceberg_table_report.json` |
-| `make bench-nfs` | Single-node NFS fio profile via Colima | `benchmarks/profiles/nfs-*/fio_output.txt` |
-| `make bench-nfs-cluster` | Multi-node NFS fio profile | `benchmarks/profiles/nfs-*` |
-| `make bench-nfs-multi` | Multi-bucket NFS export profile | `benchmarks/profiles/nfs-multi-*` |
-| `make bench-nbd` | Single-node NBD fio profile via Colima | `benchmarks/profiles/nbd-*` |
-| `make bench-nbd-cluster` | Multi-node NBD fio profile | `benchmarks/profiles/nbd-*` |
-| `make bench-9p` | Single-node 9P profile | `benchmarks/profiles/9p-*` |
-| `make bench-9p-cluster` | Multi-node 9P profile | `benchmarks/profiles/9p-*` |
-| `make bench-fuse-s3-colima` | rclone direct S3 vs rclone mount throughput | Go benchmark output |
-| `make bench-directio-s3` | Direct I/O S3 benchmark | script output |
+| Target                                        | Scope                                              | Primary artifacts                                                   |
+| --------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
+| `make bench`                                  | Single-node S3 object PUT/GET/DELETE               | `benchmarks/report.json`                                            |
+| `make bench-cluster`                          | Multi-node S3 object benchmark                     | `benchmarks/report.json`, cluster logs                              |
+| `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 mixed workload   | `benchmarks/profiles/s3-compat-compare-*`                           |
+| `PUT_MATRIX=1 make bench-cluster`             | Cluster PUT matrix by ingress port and object size | `benchmarks/put-matrix-port<port>-<small\|large>.json`              |
+| `PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster` | PUT matrix plus per-node stage tracing             | owner-only JSONL traces and `benchmarks/put_trace_report.js` output |
+| `make bench-profile`                          | Multi-node S3 benchmark with pprof                 | `/tmp/grainfs-bench-*.out`                                          |
+| `make bench-topology-get`                     | Topology-aware GET profile                         | topology GET report and pprof files                                 |
+| `make bench-topology-get-matrix`              | Topology-aware GET matrix                          | matrix reports and pprof files                                      |
+| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog table API         | `benchmarks/iceberg_table_report.json`                              |
+| `make bench-iceberg-table-cluster`            | Multi-node Iceberg table API                       | `benchmarks/iceberg_table_report.json`                              |
+| `make bench-nfs`                              | Single-node NFS fio profile via Colima             | `benchmarks/profiles/nfs-*/fio_output.txt`                          |
+| `make bench-nfs-cluster`                      | Multi-node NFS fio profile                         | `benchmarks/profiles/nfs-*`                                         |
+| `make bench-nfs-multi`                        | Multi-bucket NFS export profile                    | `benchmarks/profiles/nfs-multi-*`                                   |
+| `make bench-nbd`                              | Single-node NBD fio profile via Colima             | `benchmarks/profiles/nbd-*`                                         |
+| `make bench-nbd-cluster`                      | Multi-node NBD fio profile                         | `benchmarks/profiles/nbd-*`                                         |
+| `make bench-9p`                               | Single-node 9P profile                             | `benchmarks/profiles/9p-*`                                          |
+| `make bench-9p-cluster`                       | Multi-node 9P profile                              | `benchmarks/profiles/9p-*`                                          |
+| `make bench-fuse-s3-colima`                   | rclone direct S3 vs rclone mount throughput        | Go benchmark output                                                 |
+| `make bench-directio-s3`                      | Direct I/O S3 benchmark                            | script output                                                       |
 
 ## Result Interpretation
 
@@ -75,6 +76,16 @@ Use this protocol before publishing `GrainFS` vs RustFS vs MinIO results.
 RustFS and MinIO are valid comparison anchors. Do not claim parity until this
 document or an adjacent report links a reproducible run.
 
+`benchmarks/bench_s3_compat_compare.sh` implements the local same-host version
+of this protocol. It prefers native binaries or explicit external endpoints and
+skips unusable local builds, such as license-gated MinIO AIStor binaries. Set
+`MINIO_BIN=$HOME/go/bin/minio` or another explicit binary path when the default
+`minio` on `PATH` is not benchmarkable. Set `RUN_WARP=1` to add MinIO `warp`
+GET/PUT runs shaped after RustFS public benchmark reports. For short local
+iterations, `WARP_NOCLEAR=1` skips `warp` cleanup while preserving raw benchdata.
+Keep the k6 mixed workload as the primary comparable result unless all targets
+pass the same `warp` operation surface.
+
 ## Current Local Snapshots
 
 This table lists values already documented in the repository.
@@ -82,7 +93,7 @@ This table lists values already documented in the repository.
 | Scenario                                                               | Result                                                                                                            |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | FUSE-over-S3, 64 MiB payload, Apple M3, Colima loopback, 3-run average | Direct S3 write 96.8 MB/s, direct S3 read 108.0 MB/s, rclone mount write 106.7 MB/s, rclone mount read 107.3 MB/s |
-| `GrainFS` vs RustFS vs MinIO S3 object benchmark                         | Pending reproducible run                                                                                          |
+| `GrainFS` vs RustFS vs MinIO S3 object benchmark                       | Pending reproducible run                                                                                          |
 | CI regression threshold                                                | Not yet enforced                                                                                                  |
 
 ## Adding Results

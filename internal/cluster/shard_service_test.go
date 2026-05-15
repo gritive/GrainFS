@@ -89,6 +89,47 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithEncryptor(enc),
+		WithShardPackThreshold(1024),
+	)
+
+	plaintext := []byte("secret shard data")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, plaintext))
+
+	_, err = os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	got, err := svc.ReadLocalShard("bkt", "obj/v1", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+
+	buf := make([]byte, 6)
+	n, err := svc.ReadLocalShardAt("bkt", "obj/v1", 0, 7, buf)
+	require.NoError(t, err)
+	assert.Equal(t, len(buf), n)
+	assert.Equal(t, []byte("shard "), buf)
+
+	r, err := svc.OpenLocalShardRange("bkt", "obj/v1", 0, 7, 5)
+	require.NoError(t, err)
+	defer r.Close()
+	ranged, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("shard"), ranged)
+
+	require.NoError(t, svc.DeleteLocalShards("bkt", "obj/v1"))
+	_, err = svc.ReadLocalShard("bkt", "obj/v1", 0)
+	require.Error(t, err)
+}
+
 func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))

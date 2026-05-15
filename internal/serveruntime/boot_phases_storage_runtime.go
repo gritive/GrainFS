@@ -71,6 +71,10 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
 		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
 	}
+	if state.cfg.ShardPackThreshold > 0 {
+		shardSvcOpts = append(shardSvcOpts, cluster.WithShardPackThreshold(state.cfg.ShardPackThreshold))
+		log.Info().Int("threshold", state.cfg.ShardPackThreshold).Msg("cluster shard pack requested")
+	}
 	if state.cfg.MeasureReadAmp {
 		readamp.Enable()
 		log.Info().Msg("read-amplification simulator enabled — see grainfs_readamp_* counters at /metrics")

@@ -37,6 +37,39 @@ and object keys. The report groups requests by ingress, size class, and forwardi
 then summarizes forwarded bytes, leader-hint retries, meta-index proposal
 counts, and the slowest shard stage.
 
+## S3-Compatible Comparison
+
+`make bench-s3-compat-compare` runs the shared k6 S3 mixed workload against
+GrainFS single-node and any local native MinIO/RustFS binaries available on
+`PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`, or `RUSTFS_URL` to point at
+specific released builds or already-running endpoints.
+
+```bash
+make bench-s3-compat-compare
+# results: benchmarks/profiles/s3-compat-compare-<timestamp>/summary.md
+```
+
+The macOS `minio` command may resolve to MinIO AIStor builds that deny S3
+operations without a license. The comparison script detects that case and skips
+MinIO rather than recording unusable 403 results. Use a benchmarkable native
+MinIO binary through `MINIO_BIN=/path/to/minio`.
+
+```bash
+MINIO_BIN=$HOME/go/bin/minio make bench-s3-compat-compare
+```
+
+The script also has an optional MinIO `warp` lane, shaped after RustFS public
+benchmark methodology:
+
+```bash
+RUN_WARP=1 WARP_OPS=get,put WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 make bench-s3-compat-compare
+```
+
+`warp` uses a broader S3 operation surface than the k6 mixed workload; failures
+are recorded as raw `warp.out` artifacts and do not replace k6 comparison
+results. Set `WARP_NOCLEAR=1` when you want to keep objects and skip `warp`
+cleanup time in short local runs.
+
 ## NFS Multi-Bucket Export Baseline
 
 The NFSv4 server now uses explicit bucket exports. Single-bucket benchmark runs

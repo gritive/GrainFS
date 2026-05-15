@@ -11,6 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 	"github.com/gritive/GrainFS/internal/storage/wal"
 )
@@ -39,9 +40,27 @@ import (
 func bootBackendWrap(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
-	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD, then
-	// wrap it with WAL so routed object mutations are captured for PITR.
-	var backend storage.Backend = wal.NewBackend(state.clusterCoord, state.wal)
+	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD. In
+	// single-node mode, opt-in packed blobs can sit on this routed path and
+	// avoid per-object shard-file commits for small objects.
+	var routed storage.Backend = state.clusterCoord
+	if cfg.PackThreshold > 0 && !cfg.RaftAddrExplicit && cfg.NodeID == "" && !state.joinMode {
+		blobDir := filepath.Join(cfg.DataDir, "blobs")
+		pb, err := packblob.NewPackedBackendWithOptions(routed, blobDir, int64(cfg.PackThreshold), packblob.PackedBackendOptions{
+			Compress:  false,
+			Encryptor: cfg.Encryptor,
+		})
+		if err != nil {
+			return err
+		}
+		routed = pb
+		log.Info().Int("threshold", cfg.PackThreshold).Msg("single-node packed blob storage enabled on routed backend")
+	} else if cfg.PackThreshold > 0 {
+		log.Warn().Int("threshold", cfg.PackThreshold).Msg("packed blob fast path is currently single-node only; cluster routed backend keeps EC shard storage")
+	}
+
+	// Wrap it with WAL so routed object mutations are captured for PITR.
+	var backend storage.Backend = wal.NewBackend(routed, state.wal)
 
 	// Wrap with pull-through cache. Per /plan-eng-review override A10 — fail-fast at
 	// startup if cfg.IAMStore is nil. This guards against future construction-order

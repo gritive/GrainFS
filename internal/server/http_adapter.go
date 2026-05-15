@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 )
@@ -52,8 +53,20 @@ func (w *hertzResponseWriter) WriteHeader(statusCode int) {
 
 // toHTTPRequest converts Hertz RequestContext to a stdlib http.Request for SigV4 verification.
 func toHTTPRequest(c *app.RequestContext) *http.Request {
+	rawPath := string(c.URI().Path())
+	if requestURI := string(c.URI().RequestURI()); requestURI != "" {
+		rawPath = requestURI
+		if i := strings.IndexByte(rawPath, '?'); i >= 0 {
+			rawPath = rawPath[:i]
+		}
+	}
+	path, err := url.PathUnescape(rawPath)
+	if err != nil {
+		path = string(c.URI().Path())
+	}
 	u := &url.URL{
-		Path:     string(c.URI().Path()),
+		Path:     path,
+		RawPath:  rawPath,
 		RawQuery: string(c.URI().QueryString()),
 	}
 	r := &http.Request{

@@ -50,10 +50,11 @@ type Config struct {
 	QUICMuxFlushWindow    time.Duration
 
 	// Storage / EC
-	DirectIO       bool
-	MeasureReadAmp bool
-	ShardCacheSize int64
-	PackThreshold  int
+	DirectIO           bool
+	MeasureReadAmp     bool
+	ShardCacheSize     int64
+	PackThreshold      int
+	ShardPackThreshold int
 
 	// Heal receipts
 	HealReceiptEnabled        bool

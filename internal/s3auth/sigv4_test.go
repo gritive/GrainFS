@@ -74,6 +74,18 @@ func TestVerifyPutRequest(t *testing.T) {
 	assert.Equal(t, "mykey", accessKey)
 }
 
+func TestCanonicalRequestUsesEscapedPath(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPut, "http://localhost:9000/bucket/prefix/1.name%29.rnd", nil)
+	require.NoError(t, err)
+	req.Host = "localhost:9000"
+	req.Header.Set("X-Amz-Date", "20260515T160252Z")
+	req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+
+	canonical := buildCanonicalRequest(req, "host;x-amz-content-sha256;x-amz-date")
+	assert.Contains(t, canonical, "/bucket/prefix/1.name%29.rnd")
+	assert.NotContains(t, canonical, "/bucket/prefix/1.name).rnd")
+}
+
 func TestPresignURL(t *testing.T) {
 	tests := []struct {
 		name      string
