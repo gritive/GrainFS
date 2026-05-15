@@ -15,6 +15,7 @@ import (
 
 type ecObjectShardStore interface {
 	WriteLocalShard(bucket, key string, shardIdx int, data []byte) error
+	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error
 	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
@@ -220,7 +221,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 							}
 						}
 						if werr == nil {
-							werr = w.shards.WriteLocalShard(plan.Bucket, shardKey, i, data)
+							werr = w.shards.WriteLocalShardContext(gctx, plan.Bucket, shardKey, i, data)
 						}
 					} else {
 						werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)

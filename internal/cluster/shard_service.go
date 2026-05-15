@@ -682,6 +682,10 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	return s.writeLocalShard(context.Background(), bucket, key, shardIdx, data)
 }
 
+func (s *ShardService) WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
+	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
+}
+
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
 	dir := filepath.Join(s.dataDir, bucket, key)
 	mkdirStart := time.Now()

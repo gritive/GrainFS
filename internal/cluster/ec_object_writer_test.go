@@ -330,6 +330,10 @@ func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx 
 	return nil
 }
 
+func (f *fakeECObjectWriterShards) WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
+	return f.WriteLocalShard(bucket, key, shardIdx, data)
+}
+
 func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
 	f.bufferedWrites = append(f.bufferedWrites, fakeECObjectWriterBufferedWrite{
 		peer:     peer,

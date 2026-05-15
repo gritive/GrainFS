@@ -576,6 +576,32 @@ func TestShardService_WriteShardRecordsRemoteTraceBreakdown(t *testing.T) {
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
 }
 
+func TestShardService_WriteLocalShardContextRecordsTraceBreakdown(t *testing.T) {
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "mybucket",
+		Key:         "mykey",
+		GroupID:     "group-1",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
+	svc := NewShardService(t.TempDir(), transport.MustNewQUICTransport("test-cluster-psk"))
+	err := svc.WriteLocalShardContext(ctx, "mybucket", "mykey", 0, []byte("local-shard"))
+	require.NoError(t, err)
+
+	events := readShardServiceTraceEvents(t, path)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalMkdir)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncode)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalFile)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalBuffered)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
+}
+
 func readShardServiceTraceEvents(t *testing.T, path string) []PutTraceEvent {
 	t.Helper()
 	f, err := os.Open(path)
