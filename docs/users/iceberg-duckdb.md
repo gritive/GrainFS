@@ -1,6 +1,6 @@
 # DuckDB Iceberg REST Catalog
 
-GrainFS exposes an Iceberg REST Catalog compatible table API for DuckDB at
+`GrainFS` exposes an Iceberg REST Catalog compatible table API for DuckDB at
 `/iceberg/v1`.
 
 Single-node `grainfs serve` stores catalog namespace and table state in the
@@ -8,11 +8,11 @@ local Badger-backed metadata DB. Multi-peer cluster mode stores namespace and
 table metadata pointers in meta-Raft, so clients can call `/iceberg/*` on leader
 or follower nodes without creating node-local split-brain catalog state.
 
-Table metadata JSON files remain ordinary GrainFS objects under the warehouse
+Table metadata JSON files remain ordinary `GrainFS` objects under the warehouse
 bucket. Meta-Raft stores only the current namespace/table records and metadata
 locations.
 
-## Start GrainFS
+## Start `GrainFS`
 
 ```sh
 grainfs serve --data ./data --port 9000 &
@@ -35,7 +35,7 @@ curl -X PUT http://127.0.0.1:9000/grainfs-tables \
 ## Attach from DuckDB
 
 > **Note:** `KEY_ID` and `SECRET` below are the `access_key` and `secret_key` returned
-> by `grainfs iam sa create` above. Replace the placeholder values before running.
+> by `grainfs iam sa create` above. Replace the example values before running.
 
 ```sql
 INSTALL iceberg;
@@ -80,9 +80,9 @@ Run the embedded DuckDB e2e with:
 make test-e2e-iceberg
 ```
 
-The single-node test starts GrainFS, creates the warehouse bucket, attaches
+The single-node test starts `GrainFS`, creates the warehouse bucket, attaches
 DuckDB through the Iceberg REST Catalog, creates and writes a table, restarts
-GrainFS, reads the table again, then drops the table and namespace through
+`GrainFS`, reads the table again, then drops the table and namespace through
 DuckDB.
 
 Cluster coverage includes a three-node DuckDB e2e that creates the warehouse

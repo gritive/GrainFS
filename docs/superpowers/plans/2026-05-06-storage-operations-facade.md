@@ -6,7 +6,7 @@
 
 **Architecture:** `storage.Backend` remains the low-level primitive. `storage.Operations` becomes the request-handler entry point for S3-facing storage capabilities and owns outer-first adapter lookup, safe fallbacks, typed unsupported-operation errors, and rollback behavior. `server.Server` receives a `ServerStorage` composition bundle so handlers use `Ops` while constructor-only subsystems still get snapshot, volume, and DB dependencies explicitly.
 
-**Tech Stack:** Go 1.26.2, Hertz server handlers, Badger-backed storage, GrainFS `internal/storage`, `internal/server`, `internal/cluster`, and `internal/policy`.
+**Tech Stack:** Go 1.26.2, Hertz server handlers, Badger-backed storage, `GrainFS` `internal/storage`, `internal/server`, `internal/cluster`, and `internal/policy`.
 
 ---
 

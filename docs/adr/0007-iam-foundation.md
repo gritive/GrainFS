@@ -6,7 +6,7 @@ Related: ADR 0006 (CLI uses admin UDS, dashboard uses HTTP)
 
 ## Context
 
-GrainFS originally accepted a single `--access-key/--secret-key` pair on
+`GrainFS` originally accepted a single `--access-key/--secret-key` pair on
 the `serve` CLI and gated all S3 traffic on that one credential. That
 shape is sufficient for a single-tenant deployment but cannot satisfy
 four downstream features that share the same primitive: per-bucket
@@ -116,7 +116,7 @@ much more often than bucket-scoped, and bucket metadata changes at a
 different rate from grants.
 
 **Approach D: external IAM (Keycloak / Auth0).** Rejected for v1
-because GrainFS is a single-binary product; introducing an external
+because `GrainFS` is a single-binary product; introducing an external
 dependency for first-launch IAM would push deployments toward managed
 infra. Future work can add SAML/OIDC bridging on top of the SA model.
 

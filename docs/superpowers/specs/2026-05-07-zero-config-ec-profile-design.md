@@ -3,7 +3,7 @@
 ## Goal
 
 Make erasure-coding profile selection fully zero-config. Operators should not
-choose `k` or `m` for normal cluster startup; GrainFS derives the effective EC
+choose `k` or `m` for normal cluster startup; `GrainFS` derives the effective EC
 profile from cluster size.
 
 ## Background

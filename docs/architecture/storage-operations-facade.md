@@ -58,8 +58,8 @@ optional capability probing.
 
 Server construction still needs storage-shaped dependencies for non-handler
 subsystems such as snapshot management, volume management, and Iceberg catalog
-wiring. Those dependencies should be passed through an explicit composition
-type instead of giving handlers a raw backend escape hatch:
+wiring. Pass those dependencies through an explicit composition type instead of
+giving handlers a raw backend escape hatch:
 
 ```go
 type ServerStorage struct {
@@ -161,7 +161,7 @@ This keeps the Interface deep while preserving Implementation locality.
 
 ## Performance Constraints
 
-`Operations` should build a capability plan when it is constructed instead of
+`Operations` should build a capability plan during construction instead of
 walking the decorated backend chain on every request. The plan records
 outer-first adapters and whether each safe fallback is available.
 
@@ -170,9 +170,9 @@ Static chains may keep a fixed plan; dynamic wrappers should expose a
 generation marker or equivalent signal so `Operations` can refresh stale
 capability plans without putting a full chain walk on every hot-path call.
 
-`CopyObject` fallback must stay streaming. Metadata directive, ACL, versioning,
-and delete-marker decisions must be resolved before consuming the source body,
-then the source reader should flow directly into the destination put path.
+`CopyObject` fallback must stay streaming. Resolve metadata directive, ACL,
+versioning, and delete-marker decisions before consuming the source body. Then
+stream the source reader into the destination put path.
 
 Policy authorization remains on the compiled in-memory hot path. The facade owns
 policy CRUD persistence and cache synchronization, while auth middleware uses a

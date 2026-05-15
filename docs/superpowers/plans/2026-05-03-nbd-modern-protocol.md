@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make GrainFS NBD negotiate fixed newstyle correctly and add modern NBD features without regressing the existing Linux `nbd-client` path.
+**Goal:** Make `GrainFS` NBD negotiate fixed newstyle correctly and add modern NBD features without regressing the existing Linux `nbd-client` path.
 
 **Architecture:** Split the current monolithic NBD server into explicit negotiation state, request parsing, reply writing, and command handlers. Do not advertise an extension until the parser, handler, reply path, tests, and interop gate for that extension exist. Keep simple replies as the default and keep extended headers disabled until qemu/libnbd smoke passes.
 

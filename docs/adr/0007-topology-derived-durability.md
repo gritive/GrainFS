@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-GrainFS chooses object EC profiles from cluster topology instead of
+`GrainFS` chooses object EC profiles from cluster topology instead of
 operator-supplied `k/m` flags. That makes configured topology the durability
 policy, but object versions can outlive the topology that created them. Reads,
 repair, remove-peer, rebalancing, and background resharding need one model for

@@ -74,8 +74,8 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - README.md: Quick Start 및 CLI 옵션
 - CHANGELOG.md: 버전별 변경 기록 (`VERSION` 파일과 함께 릴리스 source of truth)
 - docs/adr/: 아키텍처 결정 기록
-- docs/recover-cluster.md: RecoverCluster offline 재해 복구 절차
-- docs/RUNBOOK.md, docs/DRILL_MANUAL.md, docs/SLI_SLO.md: 운영/드릴/SLO 문서
+- docs/operators/recover-cluster.md: RecoverCluster offline 재해 복구 절차
+- docs/operators/runbook.md, docs/operators/drill-manual.md, docs/operators/sli-slo.md: 운영/드릴/SLO 문서
 
 ### 테스트 레이아웃
 - `tests/e2e/`: 일반 E2E (Go test)

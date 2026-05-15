@@ -5,7 +5,7 @@ Branch: `feat/nbd-modern-protocol`
 
 ## Goal
 
-GrainFS should support modern NBD clients without regressing the existing Linux
+`GrainFS` should support modern NBD clients without regressing the existing Linux
 `nbd-client` path. The work covers two layers:
 
 1. Make the existing fixed newstyle negotiation spec-compliant and predictable.
@@ -13,7 +13,7 @@ GrainFS should support modern NBD clients without regressing the existing Linux
    `BLOCK_STATUS` with `base:allocation`, and extended headers.
 
 NBD does not have NFS-style protocol versions such as 4.0, 4.1, and 4.2. It has
-handshake styles and negotiated options. GrainFS already sends a fixed newstyle
+handshake styles and negotiated options. `GrainFS` already sends a fixed newstyle
 header, but the current server only implements a small subset of option haggling
 and transmission commands.
 
@@ -119,7 +119,7 @@ option haggling when the NBD protocol allows fallback.
 ## Size Constraints
 
 Modern NBD clients can discover server size constraints through
-`NBD_INFO_BLOCK_SIZE` in `NBD_OPT_INFO` and `NBD_OPT_GO`. GrainFS should make
+`NBD_INFO_BLOCK_SIZE` in `NBD_OPT_INFO` and `NBD_OPT_GO`. `GrainFS` should make
 those limits explicit before advertising extensions that can describe larger
 operations.
 
@@ -154,7 +154,7 @@ Initial implementation prioritizes correctness:
 - Return an error if offset or length exceeds the volume size.
 
 `NBD_CMD_FLAG_FAST_ZERO` should not be advertised or accepted as a guarantee
-until GrainFS has a true fast zero path. If a client requests fast zero before
+until `GrainFS` has a true fast zero path. If a client requests fast zero before
 that path exists, the server returns an explicit unsupported error rather than
 silently doing slow work.
 
@@ -227,7 +227,7 @@ future sparse/read-amplification optimization.
 structured replies and block status are stable.
 
 Treat extended headers as experimental until interop proves otherwise. The code
-may parse and test the mode in-process, but GrainFS must not advertise or
+may parse and test the mode in-process, but `GrainFS` must not advertise or
 acknowledge `NBD_OPT_EXTENDED_HEADERS` in normal operation until qemu/libnbd
 smoke tests pass against the implementation.
 
@@ -236,7 +236,7 @@ Extended mode should:
 - Negotiate per connection.
 - Parse extended request headers separately from simple request headers.
 - Keep simple-header clients fully backward compatible.
-- Enforce GrainFS maximum request size even if the extended header can describe
+- Enforce `GrainFS` maximum request size even if the extended header can describe
   larger counts.
 - Return explicit NBD errors for unsupported large operations.
 

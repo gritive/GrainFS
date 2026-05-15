@@ -1,8 +1,8 @@
-# GrainFS Service Level Indicators (SLIs) and Objectives (SLOs)
+# `GrainFS` Service Level Indicators (SLIs) and Objectives (SLOs)
 
 ## Overview
 
-This document defines the quantitative metrics that determine if GrainFS is "production ready" for deployment evaluation.
+This document defines the quantitative metrics that determine if `GrainFS` is "production ready" for deployment evaluation.
 
 ## Target Availability: 99.9% (3-nines)
 
@@ -154,7 +154,7 @@ curl http://localhost:9000/metrics | grainfs_slo_compliance == 1
 
 ---
 
-## How to Calculate SLO Compliance
+## SLO Compliance Calculation
 
 **Example: Monthly Availability = 99.95%**
 

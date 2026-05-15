@@ -1,6 +1,6 @@
 # DuckDB Iceberg REST Request Trace
 
-Captured for the GrainFS Iceberg REST Catalog implementation.
+Captured for the `GrainFS` Iceberg REST Catalog implementation.
 
 Date: 2026-05-02
 DuckDB CLI: `v1.5.2 (Variegata) 8a5851971f`
@@ -235,7 +235,7 @@ POST /v1/transactions/commit
 Important correction to the design:
 
 - DuckDB 1.5.2 sends table creation through `POST /v1/transactions/commit` after `POST /v1/namespaces/{namespace}/tables`.
-- GrainFS Phase 1 must implement `POST /v1/transactions/commit`; a table-specific commit endpoint alone is not enough.
+- `GrainFS` Phase 1 must implement `POST /v1/transactions/commit`; a table-specific commit endpoint alone is not enough.
 
 ## Implementation Implications
 
@@ -258,4 +258,8 @@ Error responses must be Iceberg JSON errors. S3 XML error helpers must not be re
 
 ## Trace Limitations
 
-This trace used an instrumented mock REST Catalog to capture DuckDB's catalog request sequence. It did not complete `INSERT` or `SELECT` against real table data because that requires a real S3 warehouse endpoint, valid Iceberg metadata files, and Parquet data files. Those are Phase 2 e2e requirements after the Phase 1 catalog contract is implemented.
+An instrumented mock REST Catalog captured DuckDB's catalog request sequence.
+The trace did not complete `INSERT` or `SELECT` against real table data because
+that requires a real S3 warehouse endpoint, valid Iceberg metadata files, and
+Parquet data files. Phase 2 e2e tests cover those requirements after Phase 1
+implements the catalog contract.

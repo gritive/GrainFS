@@ -1,10 +1,10 @@
-# GrainFS Rolling Upgrade Compatibility Policy
+# `GrainFS` Rolling Upgrade Compatibility Policy
 
-> **Status:** Slice 4 — snapshot format header and older-binary restore rejection shipped
+> **Status:** Slice 4, snapshot format header and older-binary restore rejection shipped
 
 ## Policy
 
-GrainFS supports **N → N+1 single-step rolling upgrades** within a minor version boundary.
+`GrainFS` supports **N → N+1 single-step rolling upgrades** within a minor version boundary.
 Version format: `0.0.X.Y` where `X` is the minor segment tracked in `CHANGELOG.md`.
 
 | Direction | Supported? |
@@ -27,12 +27,12 @@ COMPAT_PREV_BIN=/path/to/grainfs-prev make test-compat
 ```
 
 Without `COMPAT_PREV_BIN`, tests that require a previous binary are **skipped** (not failed).
-The CI compat lane is meant to be wired to a `COMPAT_PREV_BIN` pointing at the last released binary.
+Wire the CI compat lane to a `COMPAT_PREV_BIN` that points at the last released binary.
 
 ## Version Detection
 
 `tests/compat/prevtag_test.go` parses `CHANGELOG.md` to determine the previous version.
-`CHANGELOG.md` format: `## [0.0.X.Y] - date — description`
+`CHANGELOG.md` format: `## [0.0.X.Y] - date - description`
 
 The second entry is the previous version. If parsing fails or only one version exists,
 `prevVersion()` returns `""`.
@@ -48,23 +48,23 @@ The second entry is the previous version. If parsing fails or only one version e
 | 6 | `TestRestartToOlderBinary` | Canary: documents behavior when N-1 binary reads N-format data | live |
 | 7 | `TestHeadSnapshotInvisibleToOlderBinary` | HEAD-format `.json.zst` snapshot is invisible to older `.json.gz` readers with non-200 restore response | live |
 
-> Scenario 4 (FSM divergence detection via StateHash) is deferred to a separate PR (Slice 2+).
+> A separate PR handles Scenario 4, FSM divergence detection via StateHash.
 
 ## Developer Guide
 
-### When to add a compat test
+### Compat Test Triggers
 
-Add a compat test whenever you change any of the following in a way that existing data may be affected:
+Add a compat test when a change can affect existing data in any of these areas:
 
 - BadgerDB key/value schemas (`internal/badgerrole`, `internal/cluster/meta_fsm.go`)
 - Raft log entry encoding (FlatBuffers schemas in `internal/**/*.fbs`)
 - Snapshot format (`internal/snapshot`)
 - S3/IAM wire protocol
 
-### How to add a test
+### Adding A Test
 
 1. Add a new `Test*` function to `tests/compat/scenario_*.go` (with `//go:build compat`)
-2. Call `prevBinary(t)` at the top — this skips the test if `COMPAT_PREV_BIN` is not set
+2. Call `prevBinary(t)` at the top. This skips the test if `COMPAT_PREV_BIN` is not set.
 3. Use `startCompatCluster` or `startGrainfsNode` for process management
 4. Commit the test **before** merging the breaking change
 
@@ -72,11 +72,11 @@ Add a compat test whenever you change any of the following in a way that existin
 
 A new binary (N) **must** be able to read and operate on data written by the previous binary (N-1),
 except for deprecated gzip snapshot archives during the zstd snapshot cutover.
-It does **not** need to write data readable by N-1 (downgrade is unsupported).
+It does **not** need to write data readable by N-1. `GrainFS` does not support downgrade.
 
 ### Snapshot format compatibility
 
-New snapshots are written as a small binary envelope followed by a zstd-compressed JSON payload:
+New writers store snapshots as a small binary envelope followed by a zstd-compressed JSON payload:
 
 | Field | Encoding |
 |-------|----------|

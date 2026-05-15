@@ -1,34 +1,51 @@
 # ADR 0010: Relocate Bucket-Upstream Admin/CLI Surface
 
 ## Status
-Accepted (2026-05-09). Supersedes the surface-placement portion of ADR 0009;
-0009 의 FSM/snapshot/AAD 결정은 그대로 유지된다.
+
+Accepted (2026-05-09). Supersedes the surface-placement portion of ADR 0009.
+ADR 0009's FSM, snapshot, and AAD decisions remain unchanged.
 
 ## Context
-ADR 0009은 bucket-scoped upstream credentials를 IAM Store에 저장하기로 결정하면서
-admin path와 CLI도 `iam` 카테고리 아래(`/v1/iam/bucket-upstream`,
-`grainfs iam bucket-upstream …`)에 배치했다. v0.0.123.0 출시 후 사용자 검토에서
-`iam`은 principal(SA/AccessKey/Grant) 축인 반면 `bucket-upstream`은 resource(bucket)
-축의 외부 자격증명 설정이라 카테고리가 미스핏임이 확인됐다.
+
+ADR 0009 decided to store bucket-scoped upstream credentials in the IAM store.
+It also placed the admin path and CLI under the `iam` category:
+`/v1/iam/bucket-upstream` and `grainfs iam bucket-upstream ...`. After the
+v0.0.123.0 release, user review found that placement to be a category mismatch:
+`iam` is the principal axis, covering SAs, access keys, and grants, while
+`bucket-upstream` configures external credentials on the resource axis, scoped
+to a bucket.
 
 ## Decision
-- CLI: `grainfs iam bucket-upstream {set,…}` → `grainfs bucket upstream {put,get,list,delete}`
+
+- CLI:
+  `grainfs iam bucket-upstream {set,...}` becomes
+  `grainfs bucket upstream {put,get,list,delete}`.
 - Admin path:
-  - `POST /v1/iam/bucket-upstream` → `PUT /v1/buckets/upstream`
-  - `GET  /v1/iam/bucket-upstream` → `GET /v1/buckets/upstream`
-  - `GET  /v1/iam/bucket-upstream/:bucket` → `GET /v1/buckets/:bucket/upstream`
-  - `DELETE /v1/iam/bucket-upstream/:bucket` → `DELETE /v1/buckets/:bucket/upstream`
-- HTTP method: POST → PUT (idempotent upsert; grant 와 align)
-- 구버전 path/CLI는 즉시 제거 (admin UDS는 내부 인터페이스)
-- FSM(`internal/iam`), snapshot trailer, AAD `"bucket-upstream:"+bucket`,
-  MetaCmdType IDs 32/33, FlatBuffers payload 모두 보존
+  - `POST /v1/iam/bucket-upstream` becomes `PUT /v1/buckets/upstream`.
+  - `GET /v1/iam/bucket-upstream` becomes `GET /v1/buckets/upstream`.
+  - `GET /v1/iam/bucket-upstream/:bucket` becomes
+    `GET /v1/buckets/:bucket/upstream`.
+  - `DELETE /v1/iam/bucket-upstream/:bucket` becomes
+    `DELETE /v1/buckets/:bucket/upstream`.
+- HTTP method changes from POST to PUT for idempotent upsert, matching grant
+  behavior.
+- The old path and CLI are removed immediately because admin UDS is an internal
+  interface.
+- FSM implementation (`internal/iam`), snapshot trailer, AAD
+  `"bucket-upstream:"+bucket`, `MetaCmdType` IDs 32/33, and FlatBuffers payloads
+  are preserved.
 
 ## Consequences
-- v0.0.122 ↔ v0.0.133 raft 호환성 유지 (payload/snapshot 무변경)
-- BREAKING: 기존 CLI 명령 사용자 스크립트는 수정 필요. CHANGELOG 매핑 표 제공
-- 향후 bucket sub-resource(policy/lifecycle/event 등)가 같은 `/v1/buckets/:bucket/*`
-  prefix와 `grainfs bucket *` 트리에 합류 가능
+
+- Raft compatibility between v0.0.122 and v0.0.133 is preserved because payload
+  and snapshot formats do not change.
+- Breaking change: scripts using the old CLI commands must update. CHANGELOG
+  provides the command mapping.
+- Future bucket subresources such as policy, lifecycle, and events can use the
+  same `/v1/buckets/:bucket/*` prefix and `grainfs bucket *` CLI tree.
 
 ## Out of scope
-FSM을 별도 패키지로 분리하는 것은 raft snapshot/AAD/types 의존이 깊어 별도 ADR/PR
-대상으로 남긴다.
+
+Splitting the FSM into a separate package remains future work. The current FSM
+has deep dependencies on Raft snapshot, AAD, and command type definitions, so it
+needs a separate ADR and PR.

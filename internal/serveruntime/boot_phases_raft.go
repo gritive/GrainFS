@@ -157,7 +157,7 @@ func bootRotationAndAdminAPI(state *bootState) error {
 
 	// Build the AdminAPI wired against the meta-FSM proposer. Only when IAM
 	// dependencies are wired. First-SA bootstrap is performed via admin UDS
-	// POST /v1/iam/sa (see docs/RUNBOOK.md).
+	// POST /v1/iam/sa (see docs/operators/runbook.md).
 	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil && state.cfg.Encryptor != nil {
 		state.iamProposer = &iam.MetaProposer{Propose: state.metaRaft.Propose}
 		state.iamAdminAPI = iam.NewAdminAPI(state.cfg.IAMStore, state.iamProposer, state.cfg.Encryptor)

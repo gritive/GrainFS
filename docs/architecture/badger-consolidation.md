@@ -51,7 +51,7 @@ instances**.
 
 ## Current architecture
 
-Per raft group, GrainFS opens **2** BadgerDB instances:
+Per raft group, `GrainFS` opens **2** BadgerDB instances:
 
 | File | Purpose | sync writes |
 |---|---|---|
@@ -304,7 +304,7 @@ Each must have explicit test coverage before merge:
    May require tuning `NumCompactors` back up for the shared state DB.
 
 3. **Backup/restore semantics**: the existing recover-cluster workflow
-   (`docs/recover-cluster.md`) operates on per-group dirs. Will need updating
+   (`docs/operators/recover-cluster.md`) operates on per-group dirs. Will need updating
    for shared layout — likely simpler (one snapshot per node covers everything).
 
 4. **fdatasync amortization**: with shared raft-log DB, all groups' AppendEntries
@@ -944,13 +944,21 @@ issues above before any code lands.
 
 ### Status: FINALIZED (v0.0.x — this PR)
 
-Implemented per the 2026-05-11 `/grill-me` triage (all 13 v2-review issues resolved or descoped — see `docs/superpowers/plans/2026-05-11-shared-fsm-state-db-p3.md` and the `## Eng review decisions (2026-05-11)` section there). Per-group `groups/*/badger/` retired; `<dataDir>/shared-fsm/` is the only layout; `GroupLifecycleConfig.FSMStore` required; `state.distBackend` uses the shared DB with a `"group-0"` keyspace via `cluster.NewDistributedBackendForGroup`. `FSM.Snapshot`/`FSM.Restore` are group-prefix-scoped; `FormatVersion` carried in the raft snapshot-meta record. Live InstallSnapshot RPC catch-up FSM-restore remains a separate pre-existing bug (`TODOS.md`). DestroyGroupData / permanent-group-removal explicitly out of scope.
+Implemented after the 2026-05-11 engineering triage resolved or descoped the
+v2 review issues. Per-group `groups/*/badger/` retired;
+`<dataDir>/shared-fsm/` is the only layout; `GroupLifecycleConfig.FSMStore` is
+required; `state.distBackend` uses the shared DB with a `"group-0"` keyspace via
+`cluster.NewDistributedBackendForGroup`. `FSM.Snapshot` and `FSM.Restore` are
+group-prefix-scoped; `FormatVersion` is carried in the raft snapshot-meta
+record. Live InstallSnapshot RPC catch-up FSM-restore remains a separate
+pre-existing bug (`TODOS.md`). DestroyGroupData and permanent group removal are
+explicitly out of scope.
 
 **Test coverage shipped:** `stateKeyspace` unit tests (round-trip, pathological IDs, scan helper); `TestSharedFSM_*` invariant suite (prefix isolation across all FSM/backend paths, pathological-ID e2e, group-close-doesn't-close-shared-DB, snapshot containment, restore replaces only own group, restore rejects wrong FormatVersion / already-prefixed keys / corrupt bytes before drop, empty-keyspace whole-DB replace, restart persistence, restore-crash-mid-DropPrefix self-heal via reboot). `make lint-keyspace` gate prevents new raw FSM-state key literals in `internal/cluster`.
 
 **Lifecycle keys (`lifecycle:{bucket}`, meta-Raft-replicated, process-global)** now live in the shared FSM DB unprefixed (previously in the meta DB — `state.distBackend.FSMDB()` switched DBs). No key collision (a group prefix is `4-byte-len||groupID`; the first 4 bytes can't be `"life"`). Pre-1.0, no existing lifecycle data, so no migration was needed.
 
-**`grainfs recover-cluster`** now requires the source data dir's last FSM snapshot to be `format_version == 2` (a binary including these P3 changes); pre-P3 snapshots are rejected with `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. See `docs/recover-cluster.md`.
+**`grainfs recover-cluster`** now requires the source data dir's last FSM snapshot to be `format_version == 2` (a binary including these P3 changes); pre-P3 snapshots are rejected with `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. See `docs/operators/recover-cluster.md`.
 
 #### Perf matrix sweep — DEFERRED to a quiet-host run
 

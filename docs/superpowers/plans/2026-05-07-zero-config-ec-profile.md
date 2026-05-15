@@ -6,7 +6,7 @@
 
 **Architecture:** `AutoECConfigForClusterSize` becomes the single zero-config profile policy. Server startup wires that policy into backends without operator-provided `k/m`, and object index metadata records the profile derived from the selected placement group voter count. Tests and benchmarks express desired profiles through node count, not `--ec-data` or `--ec-parity`.
 
-**Tech Stack:** Go 1.26+, Cobra CLI, Badger-backed cluster metadata, GrainFS cluster coordinator, Go e2e harness, shell benchmark scripts.
+**Tech Stack:** Go 1.26+, Cobra CLI, Badger-backed cluster metadata, `GrainFS` cluster coordinator, Go e2e harness, shell benchmark scripts.
 
 ---
 

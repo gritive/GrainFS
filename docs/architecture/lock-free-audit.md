@@ -1,6 +1,6 @@
 # Lock-Free Audit
 
-GrainFS defaults to lock-free reads and narrow writer serialization. A mutex is
+`GrainFS` defaults to lock-free reads and narrow writer serialization. A mutex is
 acceptable only when it protects a real multi-object invariant, protocol
 ordering rule, file descriptor/stream ordering rule, or a short writer-side
 copy-on-write publish step.

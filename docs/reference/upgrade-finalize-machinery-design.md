@@ -1,4 +1,4 @@
-# Rolling Upgrade Slice 4 — Finalize Machinery Design
+# Rolling Upgrade Slice 4: Finalize Machinery Design
 
 > **Status:** Design document (pre-implementation)
 > **Parent:** Slice 1 shipped CI compat lane (`tests/compat/`)
@@ -9,10 +9,10 @@
 Slice 1 ships the compat test lane and a forward-read/mixed-cluster safety net.
 Slice 4 closes the remaining gaps needed for production-grade rolling upgrades:
 
-1. **`upgrade finalize` command** — operator-initiated gate that confirms all nodes are on N+1
-2. **StateHash** — Raft FSM state fingerprint for divergence detection (Scenario 4)
-3. **Snapshot version header** — prevents older binaries from silently restoring incompatible snapshots (Scenario 7)
-4. **Drain/rollback procedure** — documented runbook for partial upgrade rollback
+1. **`upgrade finalize` command**: operator gate that confirms all nodes are on N+1
+2. **StateHash**: Raft FSM state fingerprint for divergence detection (Scenario 4)
+3. **Snapshot version header**: prevents older binaries from restoring incompatible snapshots (Scenario 7)
+4. **Drain/rollback procedure**: runbook for partial upgrade rollback
 
 ---
 
@@ -44,7 +44,7 @@ Upgrade finalized at version 0.0.189.0
 
 ### Admin API additions needed
 
-`GET /admin/version` — returns `{"version":"0.0.189.0","node_id":"n1"}` (admin UDS only).
+`GET /admin/version` returns `{"version":"0.0.189.0","node_id":"n1"}` over admin UDS.
 
 ### Raft log entry
 
@@ -64,7 +64,7 @@ A `--min-apply-lag 0` flag would enforce this.
 
 ---
 
-## Feature 2: StateHash — FSM Divergence Detection (Scenario 4)
+## Feature 2: StateHash for FSM Divergence Detection (Scenario 4)
 
 ### Problem
 
@@ -94,17 +94,18 @@ func (f *MetaFSM) StateHash() (string, error) {
 
 Each `hash*` function iterates its keys in sorted order to ensure determinism.
 
-#### Why deferred from Slice 1
+#### Deferral Reason
 
-- `MetaFSM` fields (`buckets`, `objectLatest`, etc.) use `map[string]T` which requires
-  explicit sorted iteration — easy to miss a field and produce non-deterministic hashes.
-- Some fields (e.g. `activePlan`, `loadSnapshot`) are ephemeral and must be excluded.
+- `MetaFSM` fields (`buckets`, `objectLatest`, etc.) use `map[string]T`, so the
+  implementation must sort keys for every stable field.
+- The hash code must exclude ephemeral fields such as `activePlan` and
+  `loadSnapshot`.
 - Requires a complete inventory of "stable" vs "ephemeral" FSM fields first.
 - A bad hash implementation would produce false positives, disrupting healthy clusters.
 
 #### Detection + alerting
 
-When a node detects a StateHash mismatch via gossip:
+After a node detects a StateHash mismatch via gossip:
 1. Logs `WARN fsm_divergence node_id=X expected=<hash> got=<hash>`
 2. Emits a `grainfs_fsm_divergence_total` Prometheus counter
 3. Does NOT self-fence (would cause cascading failures)
@@ -132,7 +133,7 @@ New snapshots use a fixed binary envelope before a zstd-compressed JSON payload:
 | written_at_unix_nano | `int64` big-endian |
 | payload | zstd-compressed JSON snapshot |
 
-Compatibility is controlled by snapshot format integers, not GrainFS binary semver.
+Snapshot format integers control compatibility, not `GrainFS` binary semver.
 The current writer and reader format are both `1`.
 
 Restore path:
@@ -164,20 +165,20 @@ func readSnapshotFromReader(r io.Reader) (*Snapshot, error) {
 }
 ```
 
-When `min_reader_format` is greater than the current reader format, restore fails with
+If `min_reader_format` exceeds the current reader format, restore fails with
 `ErrUnsupportedSnapshotFormat` before any backend mutation. The admin restore API maps
 that error to `409 Conflict` with an operator-readable hint.
 
-Unknown envelopes are also rejected. Legacy gzip-only snapshots are detected by gzip
-magic before header parsing and rejected with `ErrUnsupportedSnapshotFormat`.
+The reader also rejects unknown envelopes. It detects legacy gzip-only snapshots
+by gzip magic before header parsing and returns `ErrUnsupportedSnapshotFormat`.
 
 ### Rollout
 
-The envelope is written starting from the first binary that includes this feature.
-Old binaries do not write the envelope, and current binaries intentionally reject
+The first binary that includes this feature writes the envelope.
+Old binaries do not write the envelope, and current binaries reject
 gzip-only legacy snapshots after the zstd conversion. Old binaries presented with
 an envelope fail gzip parsing and return non-200 from restore; this is intentional
-because downgrade restore is unsupported.
+because `GrainFS` does not support downgrade restore.
 
 ---
 
@@ -193,13 +194,13 @@ discovered in the new binary, the operator needs a safe rollback path.
 **Partial rollback (mixed cluster → all old)**
 
 1. Stop all N+1 nodes
-2. For each stopped N+1 node, restart with the N binary — it will replay Raft entries
-   written by N+1 nodes (forward entries must be N-compatible, enforced by compat tests)
+2. Restart each stopped N+1 node with the N binary. It replays Raft entries
+   written by N+1 nodes; compat tests must enforce N-compatible forward entries.
 3. If any node fails to restart: restore from the last N-era snapshot
 
 **Full rollback (all N+1 → all N)**
 
-Only safe if no N+1-only data format was committed to the Raft log.
+Safe only if the Raft log contains no N+1-only data format.
 The `upgrade finalize` command (Feature 1) deliberately does NOT write any incompatible
 entries, so rollback from a finalized N+1 cluster is still possible if N can read N+1 data.
 
@@ -208,7 +209,7 @@ entries, so rollback from a finalized N+1 cluster is still possible if N can rea
 `grainfs upgrade rollback --to-version 0.0.188.0` (future):
 1. Checks all nodes still have N-era data (no irrecoverable N+1 entries)
 2. If safe: prints rollback steps
-3. If not safe: prints what N+1-only entries exist and why rollback is blocked
+3. If rollback is unsafe: print the N+1-only entries and why they block rollback.
 
 ---
 
@@ -229,10 +230,10 @@ entries, so rollback from a finalized N+1 cluster is still possible if N can rea
 
 ## Open Questions
 
-1. **StateHash scope**: should ephemeral fields (activePlan, rotation state) be excluded?
+1. **StateHash scope**: which ephemeral fields should the hash exclude?
    They affect cluster behavior but may differ legitimately between nodes.
 2. **Hash frequency**: per-snapshot-install only, or also at Raft heartbeat (expensive)?
 3. **min_reader_format policy**: do we bump it on every breaking snapshot payload change,
    or only on major format revisions?
-4. **Rollback support window**: how many versions back should rollback be supported?
+4. **Rollback support window**: how many previous versions should support rollback?
    Current proposal: N-1 only (matches the compat test policy).

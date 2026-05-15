@@ -34,21 +34,16 @@ This document captures lessons learned from disaster recovery drills. Each drill
 **RPO Achieved:** Last backup (X minutes before failure)
 
 #### What Worked
-- [List procedures that worked smoothly]
-- [Example: "Backup restoration procedure was clear and accurate"]
-- [Example: "grainfs restore command worked as documented"]
+Record procedures that worked smoothly, including commands that matched the
+runbook and recovery steps that required no operator correction.
 
 #### What Broke
-- [List issues encountered]
-- [Example: "Step 3.2 in runbook had incorrect command syntax"]
-- [Example: "Restic snapshot lookup was unclear - which snapshot to use?"]
-- [Example: "grainfs doctor didn't detect missing data directory"]
+Record incorrect commands, ambiguous runbook steps, missing diagnostics, and any
+unexpected recovery delay.
 
 #### Fixes Applied
-- [List code/documentation changes]
-- [Example: "Fixed RUNBOOK.md Step 3.2 command syntax"]
-- [Example: "Added pre-restoration diagnostic check"]
-- [Example: "Updated restic snapshot selection to use --latest flag"]
+Record the code, configuration, and documentation changes applied after the
+drill.
 
 #### Code Changes
 ```bash
@@ -67,7 +62,7 @@ git log --oneline --grep="drill #1" | head -10
 **Validation:** All fixes from first run worked correctly
 
 #### Remaining Issues
-- [List any new or remaining issues]
+Record any issue that still blocks closing the drill.
 
 #### Status:** CLOSED / OPEN
 
@@ -224,9 +219,9 @@ If the same issue appears in 2+ drills, it's a systematic problem requiring arch
 
 **Current Status:** MET / NOT MET
 
-**Blocked by:** [List any failing drills or issues]
+**Blocked by:** record any failing drills or open recovery issues.
 
-**Remediation Plan:** [What needs to be done to unblock]
+**Remediation Plan:** record the concrete work needed to unblock production readiness.
 
 ---
 

@@ -2,7 +2,9 @@
 
 ## Overview
 
-This manual defines disaster recovery drills to validate that GrainFS can survive real-world data loss scenarios. Each drill is executed manually to prove that backups work, recovery procedures are correct, and the runbook is accurate.
+This manual defines disaster recovery drills for real data loss scenarios.
+Operators run each drill by hand to prove that backups work, recovery procedures
+are correct, and the runbook is accurate.
 
 **Drill philosophy:** Failures are inevitable. Recovery procedures are hypotheses. Drills are experiments that prove or disprove those hypotheses.
 
@@ -55,7 +57,7 @@ Before running ANY drill, verify:
    TEST_DIR=/tmp/drill-disk-fail
    mkdir -p $TEST_DIR
 
-   # Start GrainFS
+   # Start `GrainFS`
    grainfs serve \
      --data $TEST_DIR \
      --port 9001 \
@@ -106,7 +108,7 @@ DRILL_START=$(date +%s)
 echo "Drill timer started: $DRILL_START"
 ```
 
-1. **Stop GrainFS:**
+1. **Stop `GrainFS`:**
    ```bash
    kill $GRAINFS_PID
    ```
@@ -121,7 +123,7 @@ echo "Drill timer started: $DRILL_START"
 
 3. **Verify data loss:**
    ```bash
-   # Attempt to start GrainFS (should fail or start with empty state)
+   # Attempt to start `GrainFS` (should fail or start with empty state)
    grainfs serve --data $TEST_DIR --port 9001 &
    sleep 3
 
@@ -132,7 +134,7 @@ echo "Drill timer started: $DRILL_START"
 
 ### Execute Recovery
 
-Follow the rollback procedure from `docs/RUNBOOK.md`:
+Follow the rollback procedure from `docs/operators/runbook.md`:
 
 1. **Stop failed instance:**
    ```bash
@@ -160,7 +162,7 @@ Follow the rollback procedure from `docs/RUNBOOK.md`:
    mv $TEST_DIR.restored $TEST_DIR
    ```
 
-4. **Start GrainFS:**
+4. **Start `GrainFS`:**
    ```bash
    grainfs serve \
      --data $TEST_DIR \
@@ -228,7 +230,7 @@ Expected: RTO < 30 minutes
 
 ### Document Learnings
 
-Record results in `docs/DISASTER_RECOVERY.md`:
+Record results in `docs/operators/disaster-recovery.md`:
 
 ```markdown
 ## Drill #1: Disk Failure - YYYY-MM-DD
@@ -238,14 +240,11 @@ Record results in `docs/DISASTER_RECOVERY.md`:
 **RTO achieved:** X minutes (target: 30 minutes)
 **RPO achieved:** Last backup (X minutes before failure)
 
-**What worked:**
-- [List what went smoothly]
+**What worked:** record successful recovery steps and useful observations.
 
-**What broke:**
-- [List any issues encountered]
+**What broke:** record failed commands, unexpected delays, or data issues.
 
-**Fixes applied:**
-- [List code/runbook changes made]
+**Fixes applied:** record code, configuration, or runbook changes made.
 
 **Re-run required:** Yes / No
 ```
@@ -263,7 +262,7 @@ rm -rf $TEST_DIR $TEST_DIR.failed /tmp/test-object-*
 
 ## Drill #2: BadgerDB Corruption
 
-**Scenario:** Metadata database (BadgerDB) becomes corrupted. Cannot start GrainFS. Must diagnose and recover.
+**Scenario:** Metadata database (BadgerDB) becomes corrupted. Cannot start `GrainFS`. Must diagnose and recover.
 
 **Severity:** SEV1 - Complete system outage
 
@@ -282,7 +281,7 @@ DRILL_START=$(date +%s)
 echo "Drill timer started: $DRILL_START"
 ```
 
-1. **Stop GrainFS:**
+1. **Stop `GrainFS`:**
    ```bash
    kill $GRAINFS_PID
    ```
@@ -318,7 +317,7 @@ echo "Drill timer started: $DRILL_START"
 2. **Attempt BadgerDB repair (if supported):**
    ```bash
    # BadgerDB has a repair command
-   # Note: This is placeholder - actual command depends on BadgerDB version
+   # Replace this with the BadgerDB inspection command for the version under test.
    badgerdb repair --dir $TEST_DIR/badger
    ```
 
@@ -358,7 +357,7 @@ Expected: RTO < 30 minutes
 
 ### Document Learnings
 
-Record in `docs/DISASTER_RECOVERY.md`
+Record in `docs/operators/disaster-recovery.md`
 
 ---
 
@@ -409,7 +408,7 @@ Expected: "NoSuchBucket"
    # List snapshots with timestamps
    restic snapshots --repo $RESTIC_REPOSITORY
 
-   # Find snapshot from just before deletion
+   # Find the snapshot immediately before deletion
    # Assume deletion happened at 10:00, find 09:00 snapshot
    ```
 
@@ -428,7 +427,7 @@ Expected: "NoSuchBucket"
    cp -r /tmp/restore/$(basename $TEST_DIR)/badger/* $TEST_DIR/badger/
    ```
 
-3. **Restart GrainFS:**
+3. **Restart `GrainFS`:**
    ```bash
    pgrep -f "grainfs serve" | xargs kill
    grainfs serve --data $TEST_DIR --port 9001 &
@@ -465,7 +464,7 @@ Expected: RTO < 30 minutes
 
 ### Document Learnings
 
-Record in `docs/DISASTER_RECOVERY.md`
+Record in `docs/operators/disaster-recovery.md`
 
 ---
 
@@ -492,7 +491,7 @@ curl -X POST http://localhost:8474/proxies \
   -d '{"name":"grainfs","upstream":"localhost:9001","listen":"127.0.0.1:9002"}'
 ```
 
-Start GrainFS on port 9001, use port 9002 as proxy endpoint
+Start `GrainFS` on port 9001, use port 9002 as proxy endpoint
 
 ### Inject Failure
 
@@ -571,7 +570,7 @@ Expected: RTO < 30 minutes
 
 ### Document Learnings
 
-Record in `docs/DISASTER_RECOVERY.md`
+Record in `docs/operators/disaster-recovery.md`
 
 **Cleanup:**
 ```bash
@@ -607,7 +606,7 @@ echo "Drill timer started: $DRILL_START"
 
 1. **Install dependencies:**
    ```bash
-   # Install GrainFS
+   # Install `GrainFS`
    cp grainfs /usr/local/bin/grainfs
    chmod +x /usr/local/bin/grainfs
 
@@ -618,9 +617,9 @@ echo "Drill timer started: $DRILL_START"
 2. **Configure environment:**
    ```bash
    export RESTIC_REPOSITORY=<backup-repo>
-   export RESTIC_PASSWORD=<from-secrets-manager>
-   export GRAINFS_ACCESS_KEY=<from-secrets-manager>
-   export GRAINFS_SECRET_KEY=<from-secrets-manager>
+   export RESTIC_PASSWORD="$(secret-manager read grainfs/restic-password)"
+   export GRAINFS_ACCESS_KEY="$(secret-manager read grainfs/access-key)"
+   export GRAINFS_SECRET_KEY="$(secret-manager read grainfs/secret-key)"
    ```
 
 3. **Restore data:**
@@ -632,7 +631,7 @@ echo "Drill timer started: $DRILL_START"
      --target /grainfs/data
    ```
 
-4. **Start GrainFS:**
+4. **Start `GrainFS`:**
    ```bash
    grainfs serve \
      --data /grainfs/data \
@@ -671,13 +670,13 @@ Expected: RTO < 30 minutes
 
 ### Document Learnings
 
-Record in `docs/DISASTER_RECOVERY.md`
+Record in `docs/operators/disaster-recovery.md`
 
 ---
 
 ## Drill #6: Binary Rollback Validation
 
-**Purpose:** Validate that the binary rollback procedure from the runbook actually works.
+**Purpose:** Validate the binary rollback procedure from the runbook.
 
 **Scenario:** Deploy a new binary that has a critical bug, then rollback to the previous version.
 
@@ -827,7 +826,7 @@ fi
 
 ### Document Learnings
 
-Record in `docs/DISASTER_RECOVERY.md`
+Record in `docs/operators/disaster-recovery.md`
 
 **Cleanup:**
 ```bash
@@ -839,7 +838,7 @@ rm -rf $TEST_DIR /tmp/grainfs-*.log
 
 ## Drill #7: Data Rollback Validation
 
-**Purpose:** Validate that the data rollback procedure (restoring to a previous snapshot) actually works.
+**Purpose:** Validate the data rollback procedure by restoring to a previous snapshot.
 
 **Scenario:** Corruption is discovered 1 day after deployment. Must restore to yesterday's backup.
 
@@ -926,7 +925,7 @@ echo "Data rollback drill timer started: $ROLLBACK_START"
    echo "⚠️  Corruption detected in Day 2 data! Need to rollback to Day 1."
    ```
 
-2. **Stop GrainFS:**
+2. **Stop `GrainFS`:**
    ```bash
    kill $GRAINFS_PID
    ```
@@ -944,7 +943,7 @@ Follow the runbook's data rollback procedure:
    echo "Restoring to snapshot: $SNAPSHOT"
    ```
 
-2. **Stop GrainFS (if still running):**
+2. **Stop `GrainFS` (if still running):**
    ```bash
    pgrep -f "grainfs serve" | xargs kill 2>/dev/null || true
    ```
@@ -968,7 +967,7 @@ Follow the runbook's data rollback procedure:
    mv $TEST_DIR.restored $TEST_DIR
    ```
 
-6. **Start GrainFS with rolled-back data:**
+6. **Start `GrainFS` with rolled-back data:**
    ```bash
    grainfs serve \
      --data $TEST_DIR \
@@ -1042,7 +1041,7 @@ echo "RPO achieved: $RPO_HOURS hours (within 24-hour target)"
 
 ### Document Learnings
 
-Record in `docs/DISASTER_RECOVERY.md`
+Record in `docs/operators/disaster-recovery.md`
 
 **Cleanup:**
 ```bash
@@ -1074,8 +1073,8 @@ Track all drill executions:
 
 After each drill, update these documents:
 
-1. **RUNBOOK.md** - Fix any incorrect procedures or missing steps
-2. **DISASTER_RECOVERY.md** - Document what broke and how it was fixed
-3. **DRILL_MANUAL.md** - Update drill procedures if they were unclear
+1. **runbook.md** - Fix any incorrect procedures or missing steps
+2. **disaster-recovery.md** - Document what broke and how it was fixed
+3. **drill-manual.md** - Update drill procedures if they were unclear
 
 **Principle:** Documentation is living. Drills expose gaps. Fix the gaps immediately.

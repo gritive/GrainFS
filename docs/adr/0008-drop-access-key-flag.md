@@ -62,7 +62,7 @@ route every bootstrap through the admin UDS:
 - **Out-of-scope flags are kept.** `--upstream-access-key`,
   `--src-access-key`, `--dst-access-key` continue to exist; they
   authenticate to *external* S3 endpoints and have nothing to do with
-  the GrainFS data-plane auth.
+  the `GrainFS` data-plane auth.
 
 E2E coverage:
 
