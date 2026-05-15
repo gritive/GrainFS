@@ -16,6 +16,8 @@ func statusForCode(c string) int {
 		return consts.StatusConflict
 	case "export_already_exists":
 		return consts.StatusConflict
+	case "job_cancelled":
+		return consts.StatusConflict
 	case "invalid":
 		return consts.StatusBadRequest
 	case "unsupported":
@@ -27,6 +29,8 @@ func statusForCode(c string) int {
 	case "retry":
 		return consts.StatusServiceUnavailable
 	case "export_propagation_timeout":
+		return consts.StatusGatewayTimeout
+	case "job_timeout":
 		return consts.StatusGatewayTimeout
 	default:
 		return consts.StatusInternalServerError
