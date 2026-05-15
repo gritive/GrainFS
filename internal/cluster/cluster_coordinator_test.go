@@ -1544,7 +1544,7 @@ func TestClusterCoordinator_PutObject_ForwardResolvesLeaderBeforeSmallFrame(t *t
 	require.Equal(t, "peer-B", d.calls[2].peer)
 }
 
-func TestClusterCoordinator_PutObject_ForwardCommitsObjectIndex(t *testing.T) {
+func TestClusterCoordinator_PutObject_ForwardLeavesObjectIndexToReceiver(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
 	proposer := &recordingObjectIndexProposer{}
 	c.WithObjectIndexProposer(proposer)
@@ -1558,12 +1558,7 @@ func TestClusterCoordinator_PutObject_ForwardCommitsObjectIndex(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
-	require.Len(t, proposer.entries, 1)
-	require.Equal(t, "bk", proposer.entries[0].Bucket)
-	require.Equal(t, "k", proposer.entries[0].Key)
-	require.Equal(t, "v1", proposer.entries[0].VersionID)
-	require.Equal(t, "g1", proposer.entries[0].PlacementGroupID)
-	require.Equal(t, []string{"a", "self"}, proposer.entries[0].NodeIDs)
+	require.Empty(t, proposer.entries, "forward receiver owns object-index commit for forwarded PUTs")
 }
 
 func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
@@ -1728,8 +1723,6 @@ func TestClusterCoordinator_PutObjectForwardFrameRecordsTrace(t *testing.T) {
 	reloadPutTraceSinkForTest()
 
 	c, d := setupCoordWithForward(t, "bench", "group-1", []string{"peer-a", "self"})
-	proposer := &recordingObjectIndexProposer{}
-	c.WithObjectIndexProposer(proposer)
 	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "trace-key", Size: 4, VersionID: "v1", LastModified: time.Now().Unix()},
 		"bench",
@@ -1740,8 +1733,8 @@ func TestClusterCoordinator_PutObjectForwardFrameRecordsTrace(t *testing.T) {
 
 	events := readPutTraceEvents(t, path)
 	requirePutTraceStage(t, events, PutTraceStageRouteWrite)
+	requirePutTraceStage(t, events, PutTraceStageForwardResolveLeader)
 	requirePutTraceStage(t, events, PutTraceStageForwardSendFrame)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexPropose)
 	require.Equal(t, PutTraceIngressForwardedNonLeader, events[0].Ingress)
 	require.Equal(t, PutTraceForwardFrame, events[0].ForwardMode)
 }

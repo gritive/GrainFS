@@ -1117,7 +1117,7 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 		if err != nil {
 			return nil, err
 		}
-		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+		return obj, nil
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
@@ -1151,7 +1151,7 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 	if obj.Size != int64(len(body)) {
 		return nil, ErrForwardBodySizeMismatch
 	}
-	return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
+	return obj, nil
 }
 
 func (c *ClusterCoordinator) PutObjectWithACL(
