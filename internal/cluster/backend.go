@@ -1977,7 +1977,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	bodyHash hash.Hash,
 ) (*storage.Object, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	result, err := writer.writeSingleLocalReader(ecObjectWritePlan{
+	result, err := writer.writeSingleLocalReader(ctx, ecObjectWritePlan{
 		Bucket:           bucket,
 		Key:              key,
 		VersionID:        versionID,

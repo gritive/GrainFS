@@ -195,6 +195,15 @@ func (c *Cache) Put(key string, data []byte) {
 		// rather than evict the whole shard to make room.
 		return
 	}
+
+	s.mu.Lock()
+	if elem, ok := s.entries[key]; ok {
+		s.lru.MoveToFront(elem)
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
 	cp := make([]byte, len(data))
 	copy(cp, data)
 

@@ -19,6 +19,10 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 
 	bucket := c.Param("bucket")
 	key := getKey(c)
+	if key == "" {
+		s.headBucket(ctx, c)
+		return
+	}
 
 	versionID := string(c.QueryArgs().Peek("versionId"))
 	obj, err := s.loadObjectForHead(ctx, bucket, key, versionID)

@@ -21,6 +21,10 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 
 	bucket := c.Param("bucket")
 	key := getKey(c)
+	if key == "" {
+		s.createBucket(ctx, c)
+		return
+	}
 
 	// Check if this is an UploadPart request
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
@@ -94,6 +98,10 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 
 	bucket := c.Param("bucket")
 	key := getKey(c)
+	if key == "" {
+		s.deleteBucket(ctx, c)
+		return
+	}
 
 	// DELETE /:bucket/:key?uploadId=<id> — abort an in-progress multipart upload.
 	// Checked before ?versionId= because S3 routes the request to AbortMultipartUpload

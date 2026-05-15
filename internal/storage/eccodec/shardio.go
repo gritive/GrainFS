@@ -531,9 +531,21 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 // WriteEncryptedShardStreamAtomic writes a chunked encrypted shard from r
 // using the same tmp + sync + rename recipe as WriteShardStreamAtomic.
 func WriteEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+	return writeEncryptedShardStreamAtomic(path, r, enc, aadBase, chunkSize, true)
+}
+
+// WriteEncryptedShardStreamAtomicExistingDir is WriteEncryptedShardStreamAtomic
+// for callers that already ensured filepath.Dir(path) exists.
+func WriteEncryptedShardStreamAtomicExistingDir(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int) error {
+	return writeEncryptedShardStreamAtomic(path, r, enc, aadBase, chunkSize, false)
+}
+
+func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc *encrypt.Encryptor, aadBase []byte, chunkSize int, mkdir bool) error {
 	stageStart := time.Now()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir shard dir: %w", err)
+	if mkdir {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("mkdir shard dir: %w", err)
+		}
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -813,8 +825,20 @@ func WriteShardAtomic(path string, data []byte) error {
 // WriteShardStreamAtomic writes an encoded shard from r without buffering the
 // full payload in memory.
 func WriteShardStreamAtomic(path string, r io.Reader) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir shard dir: %w", err)
+	return writeShardStreamAtomic(path, r, true)
+}
+
+// WriteShardStreamAtomicExistingDir is WriteShardStreamAtomic for callers that
+// already ensured filepath.Dir(path) exists.
+func WriteShardStreamAtomicExistingDir(path string, r io.Reader) error {
+	return writeShardStreamAtomic(path, r, false)
+}
+
+func writeShardStreamAtomic(path string, r io.Reader, mkdir bool) error {
+	if mkdir {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("mkdir shard dir: %w", err)
+		}
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)

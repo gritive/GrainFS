@@ -26,6 +26,10 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 
 	bucket := c.Param("bucket")
 	key := getKey(c)
+	if key == "" {
+		s.listObjects(ctx, c)
+		return
+	}
 
 	// GET /:bucket/:key?uploadId=<id> — list parts for one in-progress multipart.
 	// Checked before versionId / Range because S3 routes the request to ListParts

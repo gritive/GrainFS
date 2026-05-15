@@ -1060,7 +1060,11 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 			br.Reset(writeData)
 			_, err = d.backend.PutObject(context.Background(), bucket, key, br, "application/octet-stream")
 		} else {
-			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize)
+			var ra storage.PartialIO
+			if partial, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
+				ra = partial
+			}
+			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize, ra)
 		}
 		if err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1075,21 +1079,33 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64) error {
+func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64, ra storage.PartialIO) error {
 	var (
 		rc      io.ReadCloser
 		readers []io.Reader
 	)
 	if existingSize > 0 {
-		var err error
-		rc, _, err = d.backend.GetObject(ctx, bucket, key)
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
 		prefixLen := min(offset, existingSize)
-		if prefixLen > 0 {
-			readers = append(readers, io.LimitReader(rc, int64(prefixLen)))
+		if ra != nil {
+			if prefixLen > 0 {
+				readers = append(readers, &backendReadAtReader{
+					ctx:       ctx,
+					backend:   ra,
+					bucket:    bucket,
+					key:       key,
+					remaining: int64(prefixLen),
+				})
+			}
+		} else {
+			var err error
+			rc, _, err = d.backend.GetObject(ctx, bucket, key)
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+			if prefixLen > 0 {
+				readers = append(readers, io.LimitReader(rc, int64(prefixLen)))
+			}
 		}
 		if offset > existingSize {
 			readers = append(readers, io.LimitReader(zeroReader{}, int64(offset-existingSize)))
@@ -1100,11 +1116,53 @@ func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key stri
 
 	readers = append(readers, bytes.NewReader(writeData))
 	end := offset + uint64(len(writeData))
-	if rc != nil && end < existingSize {
-		readers = append(readers, &skipThenReader{r: rc, n: int64(end - min(offset, existingSize))})
+	if end < existingSize {
+		if ra != nil {
+			readers = append(readers, &backendReadAtReader{
+				ctx:       ctx,
+				backend:   ra,
+				bucket:    bucket,
+				key:       key,
+				offset:    int64(end),
+				remaining: int64(existingSize - end),
+			})
+		} else if rc != nil {
+			readers = append(readers, &skipThenReader{r: rc, n: int64(end - min(offset, existingSize))})
+		}
 	}
 	_, err := d.backend.PutObject(ctx, bucket, key, io.MultiReader(readers...), "application/octet-stream")
 	return err
+}
+
+type backendReadAtReader struct {
+	ctx       context.Context
+	backend   storage.PartialIO
+	bucket    string
+	key       string
+	offset    int64
+	remaining int64
+}
+
+func (r *backendReadAtReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.backend.ReadAt(r.ctx, r.bucket, r.key, r.offset, p)
+	r.offset += int64(n)
+	r.remaining -= int64(n)
+	if err != nil {
+		if errors.Is(err, io.EOF) && n > 0 {
+			return n, nil
+		}
+		return n, err
+	}
+	if n == 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return n, nil
 }
 
 type zeroReader struct{}

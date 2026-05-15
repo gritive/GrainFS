@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,4 +175,39 @@ func TestOutboxAppendRequiresEventID(t *testing.T) {
 
 	err = box.AppendAttempt(context.Background(), audit.S3Event{RequestID: "req-1"})
 	require.True(t, errors.Is(err, audit.ErrOutboxInvalidEvent))
+}
+
+func BenchmarkOutboxAppendAttemptFinalize(b *testing.B) {
+	box, err := audit.OpenOutbox(filepath.Join(b.TempDir(), "audit-outbox"))
+	require.NoError(b, err)
+	defer box.Close()
+
+	ctx := context.Background()
+	var seq atomic.Uint64
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			id := seq.Add(1)
+			ev := audit.S3Event{
+				EventID:    "evt-" + strconv.FormatUint(id, 10),
+				RequestID:  "req-" + strconv.FormatUint(id, 10),
+				Ts:         time.Now().UnixMicro(),
+				Method:     "PUT",
+				Operation:  "PutObject",
+				Bucket:     "bench",
+				Key:        "obj-" + strconv.FormatUint(id, 10),
+				Status:     0,
+				AuthStatus: "allow",
+			}
+			if err := box.AppendAttempt(ctx, ev); err != nil {
+				b.Fatal(err)
+			}
+			ev.Status = 200
+			ev.BytesIn = 64 << 10
+			ev.LatencyMs = 10
+			if err := box.Finalize(ctx, ev); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

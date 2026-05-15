@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,52 @@ func newTestPackedBackend(t *testing.T) *PackedBackend {
 	return pb
 }
 
+type countingBackend struct {
+	mockBackend
+	puts    atomic.Int64
+	deletes atomic.Int64
+}
+
+func (b *countingBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	b.puts.Add(1)
+	return b.mockBackend.PutObject(ctx, bucket, key, r, contentType)
+}
+
+func (b *countingBackend) DeleteObject(ctx context.Context, bucket, key string) error {
+	b.deletes.Add(1)
+	return b.mockBackend.DeleteObject(ctx, bucket, key)
+}
+
+func TestPackedBackend_SmallObjectSkipsInnerMarkerWrite(t *testing.T) {
+	inner := &countingBackend{}
+	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	_, err = pb.PutObject(context.Background(), "test", "small.txt", strings.NewReader("tiny data"), "text/plain")
+	require.NoError(t, err)
+	require.Equal(t, int64(0), inner.puts.Load(), "small packed objects should not create per-object marker PUTs")
+
+	require.NoError(t, pb.DeleteObject(context.Background(), "test", "small.txt"))
+	require.Equal(t, int64(0), inner.deletes.Load(), "small packed deletes should not call inner object delete without a marker")
+}
+
+func TestPackedBackend_DeleteBucketSeesPackedObjects(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+	_, err := pb.PutObject(context.Background(), "test", "small.txt", strings.NewReader("tiny data"), "text/plain")
+	require.NoError(t, err)
+
+	require.ErrorIs(t, pb.DeleteBucket(context.Background(), "test"), storage.ErrBucketNotEmpty)
+
+	require.NoError(t, pb.ForceDeleteBucket(context.Background(), "test"))
+	require.ErrorIs(t, pb.HeadBucket(context.Background(), "test"), storage.ErrBucketNotFound)
+	pb.mu.RLock()
+	_, packed := pb.index[pb.indexKey("test", "small.txt")]
+	pb.mu.RUnlock()
+	require.False(t, packed, "force delete should remove packed index entries for the bucket")
+}
+
 func TestPackedBackend_SmallObjectGoesToBlob(t *testing.T) {
 	pb := newTestPackedBackend(t)
 	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
@@ -41,6 +88,41 @@ func TestPackedBackend_SmallObjectGoesToBlob(t *testing.T) {
 	data, _ := io.ReadAll(rc)
 	assert.Equal(t, "tiny data", string(data))
 	assert.Equal(t, obj.ETag, gotObj.ETag)
+}
+
+func TestPackedBackend_SmallObjectWithUserMetadataGoesToBlob(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+
+	obj, err := pb.PutObjectWithUserMetadata(
+		context.Background(),
+		"test",
+		"small-meta.txt",
+		strings.NewReader("tiny data"),
+		"text/plain",
+		map[string]string{"origin": "s3"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(9), obj.Size)
+	require.Equal(t, map[string]string{"origin": "s3"}, obj.UserMetadata)
+
+	pb.mu.RLock()
+	_, packed := pb.index[pb.indexKey("test", "small-meta.txt")]
+	pb.mu.RUnlock()
+	require.True(t, packed, "metadata-aware small PUT should still use blob storage")
+
+	head, err := pb.HeadObject(context.Background(), "test", "small-meta.txt")
+	require.NoError(t, err)
+	require.Equal(t, int64(9), head.Size)
+	require.Equal(t, map[string]string{"origin": "s3"}, head.UserMetadata)
+
+	rc, gotObj, err := pb.GetObject(context.Background(), "test", "small-meta.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "tiny data", string(data))
+	require.Equal(t, map[string]string{"origin": "s3"}, gotObj.UserMetadata)
 }
 
 func TestPackedBackend_LargeObjectPassesThrough(t *testing.T) {
