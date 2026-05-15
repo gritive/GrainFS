@@ -37,6 +37,20 @@ function matrixParts(cell) {
   return { ingress, sizeClass, forwardMode };
 }
 
+function objectKeyFromTraceKey(key) {
+  const slash = key.lastIndexOf('/');
+  if (slash === -1) return key;
+  const tail = key.slice(slash + 1);
+  if (
+    tail === 'current' ||
+    /^[0-9A-HJKMNP-TV-Z]{26}$/.test(tail) ||
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tail)
+  ) {
+    return key.slice(0, slash);
+  }
+  return key;
+}
+
 const inclusiveWrapperStages = new Set([
 	'http_put_total',
 	'forward_send_frame',
@@ -62,7 +76,7 @@ function topStageSummary(stageDurations, limit) {
 
 const byRequest = new Map();
 for (const ev of events) {
-	const reqKey = `${ev.bucket}/${ev.key}`;
+	const reqKey = `${ev.bucket}/${objectKeyFromTraceKey(ev.key)}`;
 	if (!byRequest.has(reqKey)) byRequest.set(reqKey, []);
   byRequest.get(reqKey).push(ev);
 }
