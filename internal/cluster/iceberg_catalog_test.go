@@ -424,3 +424,105 @@ func TestForwardingObjectIndexProposerForwardsFromFollower(t *testing.T) {
 	requirePutTraceStage(t, events, PutTraceStageMetaIndexForward)
 	requirePutTraceStage(t, events, PutTraceStageMetaIndexWaitLocal)
 }
+
+func TestForwardingObjectIndexProposerUsesForwardedApplyIndex(t *testing.T) {
+	follower := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = follower.Close() })
+
+	entry := ObjectIndexEntry{
+		Bucket:           "photos",
+		Key:              "img.jpg",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Size:             42,
+		ETag:             "etag",
+	}
+
+	var forwarded []byte
+	proposer := NewForwardingObjectIndexProposer(follower, func(context.Context, []byte) error {
+		t.Fatal("legacy forwarder should not be used when an index forwarder is configured")
+		return nil
+	}).WithIndexForwarder(func(_ context.Context, command []byte) (uint64, error) {
+		forwarded = append([]byte(nil), command...)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = follower.FSM().applyCmd(command)
+			follower.lastApplied.Store(42)
+			follower.applyNotifyMu.Lock()
+			old := follower.applyNotify
+			follower.applyNotify = make(chan struct{})
+			follower.applyNotifyMu.Unlock()
+			close(old)
+		}()
+		return 42, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, proposer.ProposeObjectIndex(ctx, entry, false))
+
+	cmd := clusterpb.GetRootAsMetaCmd(forwarded, 0)
+	require.Equal(t, MetaCmdTypePutObjectIndex, cmd.Type())
+	got, ok := follower.FSM().ObjectIndexVersion("photos", "img.jpg", "v1")
+	require.True(t, ok)
+	require.Equal(t, "group-1", got.PlacementGroupID)
+}
+
+func BenchmarkForwardingObjectIndexProposerApplyWait(b *testing.B) {
+	bench := func(b *testing.B, useForwardedIndex bool) {
+		tr := newMetaTransportFake()
+		follower, err := NewMetaRaft(MetaRaftConfig{
+			NodeID:    "node-0",
+			Peers:     nil,
+			DataDir:   b.TempDir(),
+			Transport: tr,
+		})
+		require.NoError(b, err)
+		tr.register("node-0", follower)
+		b.Cleanup(func() { _ = follower.Close() })
+
+		proposer := NewForwardingObjectIndexProposer(follower, func(_ context.Context, command []byte) error {
+			go func() {
+				time.Sleep(100 * time.Microsecond)
+				_ = follower.FSM().applyCmd(command)
+			}()
+			return nil
+		})
+		if useForwardedIndex {
+			var idx uint64
+			proposer.WithIndexForwarder(func(_ context.Context, command []byte) (uint64, error) {
+				idx++
+				appliedIndex := idx
+				go func() {
+					time.Sleep(100 * time.Microsecond)
+					_ = follower.FSM().applyCmd(command)
+					follower.lastApplied.Store(appliedIndex)
+					follower.applyNotifyMu.Lock()
+					old := follower.applyNotify
+					follower.applyNotify = make(chan struct{})
+					follower.applyNotifyMu.Unlock()
+					close(old)
+				}()
+				return appliedIndex, nil
+			})
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			entry := ObjectIndexEntry{
+				Bucket:           "photos",
+				Key:              fmt.Sprintf("img-%d.jpg", i),
+				VersionID:        "v1",
+				PlacementGroupID: "group-1",
+				Size:             42,
+				ETag:             "etag",
+			}
+			if err := proposer.ProposeObjectIndex(context.Background(), entry, false); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+
+	b.Run("poll_fsm", func(b *testing.B) { bench(b, false) })
+	b.Run("forwarded_apply_index", func(b *testing.B) { bench(b, true) })
+}
