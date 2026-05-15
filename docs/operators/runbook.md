@@ -391,6 +391,15 @@ curl http://localhost:9000/metrics | grep grainfs_up
 ```
 Expected: `grainfs_up 1`
 
+For cluster scrub trigger execution, also check the bounded executor metrics:
+
+```bash
+curl http://localhost:9000/metrics | grep '^grainfs_execution_cluster_'
+```
+
+Watch queue depth, retries, timeouts, worker failures, aggregation failures, and
+job duration before treating cluster scrub admission or completion as healthy.
+
 ---
 
 ## Rollback Procedure

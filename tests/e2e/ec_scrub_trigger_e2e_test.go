@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -111,14 +112,11 @@ func TestE2E_ECScrubTrigger_FlowsThroughCluster(t *testing.T) {
 		sessionID, info["bucket"], info["scope"], info["status"],
 		info["checked"], info["detected"], info["repaired"], info["partial"])
 
-	// Trigger reached the aggregator (status=done returned, no decode error).
-	// Counters being zero is acceptable here — the resolver may have routed
-	// the bucket to a peer whose scrub finished before our 5s aggregation
-	// window, or the bucket has no EC objects yet (PUT may have placed
-	// non-EC blobs depending on cluster size + ECConfig.IsActive).
-	// Repair-on-corrupt-shard coverage lives in cluster_scrubber_test.go.
+	checked, ok := info["checked"].(float64)
+	require.True(t, ok, "checked must decode as a JSON number")
 	require.Equal(t, "done", info["status"], "session must reach done")
 	require.Equal(t, "ec-test", info["bucket"], "bucket field must round-trip")
+	require.Greater(t, checked, float64(0), "EC resolver and aggregation path must report checked objects")
 }
 
 // TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession verifies the
@@ -137,16 +135,23 @@ func TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession(t *testing.T) {
 	first, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	var firstResp map[string]any
-	require.NoError(t, json.NewDecoder(first.Body).Decode(&firstResp))
-	first.Body.Close()
+	decodeScrubTriggerResp(t, first, &firstResp)
 	require.True(t, firstResp["created"].(bool), "first call: created=true expected")
 	firstID := firstResp["session_id"].(string)
 
 	second, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
 	var secondResp map[string]any
-	require.NoError(t, json.NewDecoder(second.Body).Decode(&secondResp))
-	second.Body.Close()
+	decodeScrubTriggerResp(t, second, &secondResp)
 	require.False(t, secondResp["created"].(bool), "second call: dedup hit must return Created=false")
 	require.Equal(t, firstID, secondResp["session_id"].(string), "dedup must return same SessionID")
+}
+
+func decodeScrubTriggerResp(t *testing.T, resp *http.Response, out *map[string]any) {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", string(body))
+	require.NoError(t, json.Unmarshal(body, out))
 }

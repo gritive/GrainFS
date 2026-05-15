@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.0.210.0] - 2026-05-15 — feat: route scrub through execution actors
+
+### Added
+
+- **Request execution contract**: admin scrub requests now pass through a typed
+  `Operation` and `Result` contract that can choose single-node or cluster
+  execution without changing the response shape.
+- **Cluster scrub actor runtime**: cluster-mode scrub triggers now use a bounded
+  mailbox executor with retry, timeout, cancellation, metrics, and cleanup
+  wiring.
+- **Execution observability**: queue depth, retry, timeout, worker failure,
+  aggregation failure, and job duration metrics are available for the new actor
+  path.
+
+### Changed
+
+- **Scrub trigger routing**: `/v1/scrub` keeps the existing
+  `session_id`/`created` contract while routing through the execution seam when
+  cluster execution is available, with legacy proposer fallback preserved.
+- **Actor execution strategy docs**: the single/cluster request architecture now
+  documents package boundaries, error mapping, capacity policy, performance
+  gates, and the completed implementation checklist.
+
+### Fixed
+
+- **Admin error mapping**: bounded execution failures now map to stable admin
+  codes and HTTP statuses, including retryable admission failures, timeouts,
+  cancellations, job failures, and aggregation failures.
+- **Production retry policy**: scrub actor boot wiring now uses the planned
+  three-attempt retry policy with a 50 ms backoff.
+- **Raft apply shutdown flush**: stopping a node no longer randomly drops ready
+  apply entries during shutdown, removing a flaky replication ordering failure
+  in the unit lane.
+
+### Verification
+
+- `go test ./internal/raft -run '^TestApplyLoopShutdownFlushesReadyEntries$' -count=50 -v`
+- `go test ./internal/raft -count=5`
+- `go test ./internal/server/execution ./internal/server/admin ./internal/serveruntime ./internal/serveruntime/executioncluster ./internal/metrics -count=1`
+- `go test -race ./internal/serveruntime/executioncluster -count=1`
+- `go test -count=1 -timeout 180s -v ./tests/e2e -run 'TestE2E_ECScrubTrigger'`
+- `go test ./internal/server/admin -run '^$' -bench 'BenchmarkTriggerScrub(LegacyProposer|ExecutionSeam|ExecutionActor)$' -benchmem -count=5`
+- `go list ./... | rg -v '^github.com/gritive/GrainFS/tests/e2e$' | xargs go test -count=1`
+- `go test ./tests/e2e -count=1 -timeout 120s -run '^TestE2E_ECScrubTrigger'`
+- `git diff --check`
+
 ## [0.0.209.2] - 2026-05-15 — docs: tighten compatibility and operator guides
 
 ### Changed

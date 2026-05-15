@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server/execution"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -52,15 +53,39 @@ func ListScrubJobs(ctx context.Context, d *Deps) (ListScrubJobsResp, error) {
 // resolver then walks the bucket's group's BadgerDB if locally owned. The
 // operator polls GET /v1/scrub/jobs/<id> for aggregated stats.
 func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error) {
-	if d.ScrubProposer == nil {
-		return ScrubResp{}, NewInternal("scrub proposer not configured")
-	}
 	if req.Bucket == "" {
 		return ScrubResp{}, NewInvalid("bucket required")
 	}
 	scope, err := parseScrubScope(req.Scope)
 	if err != nil {
 		return ScrubResp{}, err
+	}
+	if d.Execution != nil {
+		execScope := execution.ScrubScopeFull
+		if scope == scrubber.ScopeLive {
+			execScope = execution.ScrubScopeLive
+		}
+		// Scrub keeps its existing session_id contract; Operation.ID stays zero here.
+		plan, err := (execution.Planner{ClusterAvailable: true}).Plan(execution.Operation{
+			Kind: execution.OperationScrub,
+			Scrub: execution.ScrubOperation{
+				Bucket:    req.Bucket,
+				KeyPrefix: req.KeyPrefix,
+				Scope:     execScope,
+				DryRun:    req.DryRun,
+			},
+		})
+		if err != nil {
+			return ScrubResp{}, executionErrorToAdmin(err)
+		}
+		result, err := d.Execution.Execute(ctx, plan)
+		if err != nil {
+			return ScrubResp{}, executionErrorToAdmin(err)
+		}
+		return ScrubResp{SessionID: result.Scrub.SessionID, Created: result.Scrub.Created}, nil
+	}
+	if d.ScrubProposer == nil {
+		return ScrubResp{}, NewInternal("scrub proposer not configured")
 	}
 	entry, created, err := d.ScrubProposer.Propose(ctx, scrubber.TriggerReq{
 		Bucket: req.Bucket, KeyPrefix: req.KeyPrefix, Scope: scope, DryRun: req.DryRun,

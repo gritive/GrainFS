@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/server/execution"
 )
 
 type mockDirector struct {
@@ -161,6 +162,50 @@ func TestTriggerScrub_ProposerError(t *testing.T) {
 type errAggTest string
 
 func (e errAggTest) Error() string { return string(e) }
+
+type mockExecutionExecutor struct {
+	gotPlan execution.Plan
+	result  execution.Result
+	err     error
+}
+
+func (m *mockExecutionExecutor) Execute(_ context.Context, plan execution.Plan) (execution.Result, error) {
+	m.gotPlan = plan
+	return m.result, m.err
+}
+
+func TestTriggerScrub_UsesExecutionExecutorWhenConfigured(t *testing.T) {
+	exec := &mockExecutionExecutor{result: execution.Result{Scrub: execution.ScrubResult{SessionID: "sid-exec", Created: true}}}
+
+	resp, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1", Scope: "live", DryRun: true})
+
+	require.NoError(t, err)
+	require.Equal(t, "sid-exec", resp.SessionID)
+	require.True(t, resp.Created)
+	require.Equal(t, execution.StrategyCluster, exec.gotPlan.Strategy)
+	require.Equal(t, "ec1", exec.gotPlan.Operation.Scrub.Bucket)
+	require.Equal(t, execution.ScrubScopeLive, exec.gotPlan.Operation.Scrub.Scope)
+	require.True(t, exec.gotPlan.Operation.Scrub.DryRun)
+}
+
+func TestTriggerScrub_ExecutionErrorUsesBoundedAdminCode(t *testing.T) {
+	exec := &mockExecutionExecutor{err: execution.NewError(execution.CodeRetry, execution.ErrAdmissionRejected)}
+
+	_, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1"})
+
+	var ae *Error
+	require.ErrorAs(t, err, &ae)
+	require.Equal(t, "retry", ae.Code)
+}
+
+func TestTriggerScrub_ExecutionPreservesSessionIDCreatedContract(t *testing.T) {
+	exec := &mockExecutionExecutor{result: execution.Result{Scrub: execution.ScrubResult{SessionID: "sid-contract", Created: false}}}
+
+	resp, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1"})
+
+	require.NoError(t, err)
+	require.Equal(t, ScrubResp{SessionID: "sid-contract", Created: false}, resp)
+}
 
 type mockScrubAggregator struct {
 	infos    []ScrubJobInfo
