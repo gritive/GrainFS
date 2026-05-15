@@ -1317,11 +1317,25 @@ func (n *Node) handleHeartbeatReply(cmd command) {
 		}
 		n.maybeAdvanceCommitIndex()
 		n.tryFlushReadIndex()
+		if n.hasPendingLogEntries(cmd.hbPeer) {
+			n.dispatchOne(cmd.hbPeer)
+		}
 		return
 	}
 
 	// Failure path: apply conflict hint if present.
 	n.applyConflictHint(cmd)
+	if n.hasPendingLogEntries(cmd.hbPeer) {
+		n.dispatchOne(cmd.hbPeer)
+	}
+}
+
+func (n *Node) hasPendingLogEntries(peer string) bool {
+	if n.st.peerInFlight == nil {
+		return false
+	}
+	next := n.st.nextIndex[peer]
+	return next >= n.st.log.FirstIndex() && next <= n.st.lastLogIndex()
 }
 
 // applyConflictHint rolls nextIndex[peer] back according to the follower's
