@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.207.0] - 2026-05-15 — refactor: split server route and runtime surfaces
+
+### Added
+
+- **Route surface manifests** — server and admin routes now have explicit path, availability, and auth surface tables with tests covering route visibility and anonymous/authenticated policy decisions.
+- **Startup recovery package** — orphan tmp and multipart startup cleanup now lives in `internal/startuprecovery`, making server bootstrap thinner and independently testable.
+- **NFS export e2e coverage** — multi-node NFS export tests now wait for rolling-upgrade capability gossip and mount explicit export paths.
+
+### Changed
+
+- **Server composition root** — the S3 server bootstrap, options, routes, middleware, and domain handlers are split into focused files instead of concentrating the system wiring in `server.go`.
+- **Admin server modules** — admin route registration, Hertz adapters, bucket/NFS/scrub/volume handlers, and dependency wiring are separated by responsibility.
+- **Object and Iceberg handlers** — object reads/writes, multipart, copy, post-policy, versioning, and Iceberg REST catalog flows are split into smaller modules while preserving existing API behavior.
+
+### Fixed
+
+- **Range authorization ordering** — range reads that use backend `ReadAt` now authorize private objects before writing object metadata headers.
+- **Heal event persistence coverage** — heal emitter tests again cover event-store persistence and nil-hub enqueue behavior.
+- **NFSv4 smoke flow** — the multi-raft NFSv4 smoke test now registers the bucket as an export before mounting and reads through the pseudo-root export directory.
+
+### Verification
+
+- `git diff --check origin/master`
+- `go test -count=1 ./internal/server/... ./internal/startuprecovery ./internal/serveruntime`
+- `go build -o bin/grainfs ./cmd/grainfs`
+- `go test ./tests/e2e -run 'TestE2E_MultiRaftSharding_NFSv4Smoke|TestE2E_NFSMultiExportPropagation_MultiNode' -count=1 -timeout=4m -v`
+- `go test ./tests/e2e -count=1 -timeout=25m`
+
 ## [0.0.206.1] - 2026-05-15 — fix: NFS cluster benchmark reliability
 
 ### Fixed
