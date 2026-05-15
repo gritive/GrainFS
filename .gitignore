@@ -10,6 +10,8 @@ bin/grainfs
 *.fbs.stamp
 benchmarks/report.json
 benchmarks/iceberg_table_report.json
+benchmarks/put-matrix-*.json
+benchmarks/put-trace-report.json
 benchmarks/profiles/
 meta/
 /raft/

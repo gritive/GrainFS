@@ -14,6 +14,8 @@ const OBJECT_SIZE_KB = parseInt(__ENV.OBJECT_SIZE_KB || '64');
 const MATRIX_CELL = __ENV.MATRIX_CELL || 'unknown';
 const ITERATIONS = parseInt(__ENV.ITERATIONS || '25');
 const VUS = parseInt(__ENV.VUS || '1');
+const USE_UNSIGNED_PAYLOAD = (__ENV.UNSIGNED_PAYLOAD || '1') !== '0';
+const PAYLOAD = 'x'.repeat(OBJECT_SIZE_KB * 1024);
 
 const putLatency = new Trend('grainfs_matrix_put_latency', true);
 const putOps = new Counter('grainfs_matrix_put_ops');
@@ -69,7 +71,7 @@ function sign(method, url, body, addContentType) {
   const now = new Date();
   const amzdate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
   const dateStamp = amzdate.slice(0, 8);
-  const payloadHash = crypto.sha256(body || '', 'hex');
+  const payloadHash = USE_UNSIGNED_PAYLOAD ? 'UNSIGNED-PAYLOAD' : crypto.sha256(body || '', 'hex');
   const hdrMap = {
     host,
     'x-amz-content-sha256': payloadHash,
@@ -101,9 +103,8 @@ export function setup() {
 
 export function putOnly() {
   const key = `${MATRIX_CELL}/obj-${__VU}-${__ITER}-${randomString(8)}`;
-  const payload = randomString(OBJECT_SIZE_KB * 1024);
   const putUrl = `${BASE}/${BUCKET}/${key}`;
-  const res = http.put(putUrl, payload, { headers: sign('PUT', putUrl, payload, true) });
+  const res = http.put(putUrl, PAYLOAD, { headers: sign('PUT', putUrl, PAYLOAD, true) });
   putLatency.add(res.timings.duration);
   putOps.add(1);
   check(res, { 'put ok': (r) => r.status === 200 });

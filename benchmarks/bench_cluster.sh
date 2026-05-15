@@ -64,6 +64,9 @@ fi
 # ── 임시 디렉토리 정리 ────────────────────────────────────────────────────────
 rm -rf "$BENCH_DIR"
 mkdir -p "$BENCH_DIR"/{n1,n2,n3}
+BENCH_ENCRYPTION_KEY_FILE="${BENCH_ENCRYPTION_KEY_FILE:-$BENCH_DIR/encryption.key}"
+export BENCH_ENCRYPTION_KEY_FILE
+bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
 
 # ── 프로파일 디렉토리 ────────────────────────────────────────────────────────
 PROFILE_DIR=""
@@ -82,20 +85,19 @@ start_node() {
   local idx="$1"        # 1 | 2 | 3
   local s3_port="$2"
   local raft_port="$3"
-  local peers="$4"      # 쉼표 구분 raft 주소 목록 (자신 제외)
-  local extra="${5:-}"  # 추가 플래그 (--pprof-port 등)
+  local extra="${4:-}"  # 추가 플래그 (--pprof-port 등)
   local logfile="$BENCH_DIR/n${idx}.log"
   local trace_env=()
   if [[ "$PUT_TRACE" == "1" ]]; then
-    trace_env=(env "GRAINFS_PUT_TRACE_FILE=$BENCH_DIR/n${idx}/put-trace.jsonl" "GRAINFS_NODE_ID=node${idx}")
+    trace_env=(env "GRAINFS_PUT_TRACE_FILE=$BENCH_DIR/n${idx}/put-trace.jsonl" "GRAINFS_NODE_ID=127.0.0.1:${raft_port}")
   fi
 
   "${trace_env[@]}" "$BINARY" serve \
     --data "$BENCH_DIR/n${idx}" \
     --port "$s3_port" \
+    --node-id "127.0.0.1:${raft_port}" \
     --raft-addr "127.0.0.1:${raft_port}" \
-    --peers "$peers" \
-    --cluster-key "bench-local-key" \
+    --cluster-key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \
@@ -122,13 +124,23 @@ trap cleanup EXIT INT TERM
 # 리더 감지 후 그 노드에 pprof가 열려 있어야 하므로,
 # PROFILE=1이면 세 노드 모두에 서로 다른 pprof 포트를 할당한다.
 if [[ "$PROFILE" == "1" ]]; then
-  start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102" "--pprof-port $PPROF_PORT"
-  start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102" "--pprof-port $((PPROF_PORT+1))"
-  start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101" "--pprof-port $((PPROF_PORT+2))"
+  start_node 1 9100 19100 "--pprof-port $PPROF_PORT"
+  bench_wait_tcp_port "127.0.0.1" 9100 "node1 S3" 180 0.2
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n2/.join-pending"
+  chmod 600 "$BENCH_DIR/n2/.join-pending"
+  start_node 2 9101 19101 "--pprof-port $((PPROF_PORT+1))"
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n3/.join-pending"
+  chmod 600 "$BENCH_DIR/n3/.join-pending"
+  start_node 3 9102 19102 "--pprof-port $((PPROF_PORT+2))"
 else
-  start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102"
-  start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102"
-  start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101"
+  start_node 1 9100 19100
+  bench_wait_tcp_port "127.0.0.1" 9100 "node1 S3" 180 0.2
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n2/.join-pending"
+  chmod 600 "$BENCH_DIR/n2/.join-pending"
+  start_node 2 9101 19101
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n3/.join-pending"
+  chmod 600 "$BENCH_DIR/n3/.join-pending"
+  start_node 3 9102 19102
 fi
 
 # ── 클러스터 준비 대기 ────────────────────────────────────────────────────────
@@ -149,6 +161,7 @@ done
 
 # Raft 리더 선출 대기: /api/cluster/status에서 node_id == leader_id 인 노드 탐색
 LEADER_PORT=""
+LEADER_IDX=""
 LEADER_DEADLINE=$(( $(date +%s) + 30 ))
 while [[ -z "$LEADER_PORT" ]]; do
   if (( $(date +%s) > LEADER_DEADLINE )); then
@@ -162,6 +175,7 @@ while [[ -z "$LEADER_PORT" ]]; do
     leader_id=$(echo "$status" | grep -o '"leader_id":"[^"]*"' | cut -d'"' -f4)
     if [[ -n "$leader_id" && "$node_id" == "$leader_id" ]]; then
       LEADER_PORT="$port"
+      LEADER_IDX=$((port_idx + 1))
       LEADER_PPROF_PORT=$((PPROF_PORT + port_idx))
       break
     fi
@@ -175,26 +189,13 @@ else
   echo "[bench] cluster ready — leader on port ${LEADER_PORT}"
 fi
 
+bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n${LEADER_IDX}" "bench-cluster"
+bench_create_bucket_admin_retry "$BINARY" "$BENCH_DIR/n${LEADER_IDX}" "bench"
+
 TARGET_PORT=""
 TARGET_PPROF_PORT=""
-for _ in $(seq 1 60); do
-  for port_idx in 0 1 2; do
-    port=$((9100 + port_idx))
-    if BENCH_QUIET=1 bench_create_bucket_retry "http://127.0.0.1:${port}" "bench" 1 0.1 &&
-      BENCH_QUIET=1 bench_put_object_retry "http://127.0.0.1:${port}" "bench" ".bench-ready" 1 0.1; then
-      TARGET_PORT="$port"
-      TARGET_PPROF_PORT=$((PPROF_PORT + port_idx))
-      break 2
-    fi
-  done
-  sleep 0.5
-done
-
-if [[ -z "$TARGET_PORT" ]]; then
-  echo "[error] no writable S3 endpoint found" >&2
-  tail -30 "$BENCH_DIR"/n*.log >&2
-  exit 1
-fi
+TARGET_PORT="$LEADER_PORT"
+TARGET_PPROF_PORT="$LEADER_PPROF_PORT"
 echo "[bench] writable target on port ${TARGET_PORT}"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
@@ -209,6 +210,8 @@ if [[ "$PUT_MATRIX" == "1" ]]; then
     "$K6" run "$MATRIX_SCRIPT" \
       --env BASE_URL="http://127.0.0.1:${port}" \
       --env BUCKET="bench" \
+      --env ACCESS_KEY="$ACCESS_KEY" \
+      --env SECRET_KEY="$SECRET_KEY" \
       --env OBJECT_SIZE_KB="$size_kb" \
       --env MATRIX_CELL="$cell" \
       --env ITERATIONS="$PUT_MATRIX_ITERATIONS" \
@@ -261,6 +264,8 @@ fi
 "$K6" run "$SCRIPT" \
   --env BASE_URL="http://127.0.0.1:${TARGET_PORT}" \
   --env BUCKET="bench" \
+  --env ACCESS_KEY="$ACCESS_KEY" \
+  --env SECRET_KEY="$SECRET_KEY" \
   --env OBJECT_SIZE_KB="$SIZE_KB" \
   --env DURATION="$DURATION" \
   --env RAMP_UP="$RAMP_UP" \
