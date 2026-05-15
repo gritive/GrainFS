@@ -21,12 +21,12 @@ import (
 // connections have empty RemoteAddr (would fail isLocalhostAddr), and
 // UDS file mode (0660 + admin-group) already gates access.
 func (s *Server) RegisterClusterAdminUDS(h *server.Hertz) {
-	g := h.Group("/v1/cluster")
-	g.GET("/status", s.clusterStatus)
-	g.GET("/placement", s.clusterPlacement)
-	g.POST("/remove-peer", s.removePeerHandler)
-	g.GET("/eventlog", s.queryEventLog)
-	g.POST("/transfer-leader", s.transferLeaderHandler)
-	g.GET("/health", s.clusterHealth)
-	g.GET("/balancer/status", s.balancerStatusHandler)
+	g := h.Group(routePrefixAdminUDSCluster)
+	g.GET(routePathAdminUDSClusterStatus, s.clusterStatus)
+	g.GET(routePathAdminUDSPlacement, s.clusterPlacement)
+	g.POST(routePathAdminUDSRemovePeer, s.removePeerHandler)
+	g.GET(routePathAdminUDSEventLog, s.queryEventLog)
+	g.POST(routePathAdminUDSTransferLeader, s.transferLeaderHandler)
+	g.GET(routePathAdminUDSHealth, s.clusterHealth)
+	g.GET(routePathAdminUDSBalancerStatus, s.balancerStatusHandler)
 }

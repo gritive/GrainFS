@@ -17,8 +17,7 @@ import (
 //
 // POST /admin/pitr  — restore to a point in time
 func (s *Server) registerPITRAPI(h *server.Hertz) {
-	admin := h.Group("/admin", localhostOnly())
-	admin.POST("/pitr", s.pitrRestoreHandler)
+	h.POST(routePathAdminPITR, localhostOnly(), s.pitrRestoreHandler)
 }
 
 // POST /admin/pitr

@@ -16,6 +16,7 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/startuprecovery"
 	"github.com/gritive/GrainFS/internal/volume"
 )
 
@@ -54,7 +55,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 
 	// Phase 16 Week 3: cluster mode also needs startup recovery for the
 	// node's local data dir (per-node multipart parts + .tmp leftovers).
-	if rec, err := server.RunStartupRecovery(ctx, cfg.DataDir, srv.Operations(), activeEmitter); err != nil && !errors.Is(err, context.Canceled) {
+	if rec, err := startuprecovery.Run(ctx, cfg.DataDir, srv.Operations(), activeEmitter); err != nil && !errors.Is(err, context.Canceled) {
 		log.Warn().Err(err).Msg("startup recovery failed")
 	} else if rec.OrphanTmpRemoved+rec.OrphanMultipartRemoved+len(rec.Errors) > 0 {
 		log.Info().

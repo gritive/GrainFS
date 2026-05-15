@@ -26,12 +26,12 @@ func DashboardTokenMiddleware(ts *dashboard.TokenStore) app.HandlerFunc {
 			return
 		}
 		path := string(c.Path())
-		if !strings.HasPrefix(path, "/ui/") && path != "/ui" {
+		if !routeIsUISurface(path) {
 			c.Next(ctx)
 			return
 		}
 		// Allow ?token=... on the entry path so the browser can hand off.
-		if path == "/ui/" || path == "/ui" {
+		if path == routePathUIRoot || path == routePathUI {
 			if t := string(c.Query("token")); t != "" && ts.Verify(t) {
 				c.Next(ctx)
 				return

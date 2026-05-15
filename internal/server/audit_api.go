@@ -22,38 +22,23 @@ type auditHealthResponse struct {
 }
 
 func (s *Server) registerAuditAPI(h *server.Hertz) {
-	h.GET("/api/audit/health", localhostOnly(), s.auditHealth)
-	h.GET("/api/audit/s3", localhostOnly(), s.auditSearchS3)
+	h.GET(routePathAuditHealth, localhostOnly(), s.auditHealth)
+	h.GET(routePathAuditS3, localhostOnly(), s.auditSearchS3)
 }
 
 func (s *Server) auditHealth(ctx context.Context, c *app.RequestContext) {
-	if s.auditOutbox == nil {
+	if !s.routeFeatureAvailable(routeFeatureAuditHealth) {
 		c.JSON(consts.StatusOK, auditHealthResponse{
 			Enabled:        false,
 			GuaranteeState: "disabled",
 		})
 		return
 	}
-
-	stats, err := s.auditOutbox.Stats(ctx)
-	if err != nil {
-		c.JSON(consts.StatusOK, auditHealthResponse{
-			Enabled:        true,
-			GuaranteeState: "critical",
-		})
-		return
-	}
-
-	c.JSON(consts.StatusOK, auditHealthResponse{
-		Enabled:         true,
-		GuaranteeState:  "ok",
-		OutboxBacklog:   stats.Backlog,
-		OldestPendingUS: stats.OldestPendingUS,
-	})
+	c.JSON(consts.StatusOK, s.auditHealthSnapshot(ctx))
 }
 
 func (s *Server) auditSearchS3(ctx context.Context, c *app.RequestContext) {
-	if s.auditSearcher == nil {
+	if !s.routeFeatureAvailable(routeFeatureAuditSearchS3) {
 		c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "audit search is not configured"})
 		return
 	}

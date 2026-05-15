@@ -28,8 +28,8 @@ type RaftStatsProvider interface {
 }
 
 func (s *Server) registerDashboardHealthAPI(h *server.Hertz) {
-	h.GET("/admin/health/badger", localhostOnly(), s.badgerHealthHandler)
-	h.GET("/admin/health/raft", localhostOnly(), s.raftHealthHandler)
+	h.GET(routePathAdminHealthBadger, localhostOnly(), s.badgerHealthHandler)
+	h.GET(routePathAdminHealthRaft, localhostOnly(), s.raftHealthHandler)
 }
 
 // badgerHealthHandler serves GET /admin/health/badger.
@@ -50,22 +50,5 @@ func (s *Server) badgerHealthHandler(_ context.Context, c *app.RequestContext) {
 
 // raftHealthHandler serves GET /admin/health/raft.
 func (s *Server) raftHealthHandler(_ context.Context, c *app.RequestContext) {
-	if s.cluster == nil {
-		c.JSON(consts.StatusOK, map[string]any{"available": false})
-		return
-	}
-	resp := map[string]any{
-		"available": true,
-		"node_id":   s.cluster.NodeID(),
-		"state":     s.cluster.State(),
-		"term":      s.cluster.Term(),
-		"leader_id": s.cluster.LeaderID(),
-		"peers":     s.cluster.Peers(),
-	}
-	if rsp, ok := s.cluster.(RaftStatsProvider); ok {
-		resp["commit_index"] = rsp.CommitIndex()
-		resp["applied_index"] = rsp.AppliedIndex()
-		resp["last_log_index"] = rsp.LastLogIndex()
-	}
-	c.JSON(consts.StatusOK, resp)
+	c.JSON(consts.StatusOK, s.raftHealthSnapshot())
 }

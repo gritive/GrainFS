@@ -3,13 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
-	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // Health, QuorumInfo, PeerHealthRow are the wire types for GET /v1/cluster/health.
@@ -29,30 +27,33 @@ func (s *Server) clusterHealth(_ context.Context, c *app.RequestContext) {
 	c.Data(consts.StatusOK, "application/json", data)
 }
 
-// deriveHealth reads s.cluster + degradedFlag + peer_snapshot and returns
-// a populated Health struct (with Issues derived).
+// deriveHealth returns the current cluster health wire model.
 func (s *Server) deriveHealth() Health {
+	return s.clusterHealthSnapshot()
+}
+
+func buildClusterHealth(info ClusterInfo, degraded bool) Health {
 	h := Health{
 		Mode:     "local",
-		Degraded: s.degradedFlag.Load(),
+		Degraded: degraded,
 	}
 	hasConfiguredPeers := false
-	if s.cluster != nil {
+	if info != nil {
 		h.Mode = "cluster"
-		h.LeaderID = s.cluster.LeaderID()
-		h.Term = s.cluster.Term()
-		peers := s.cluster.Peers()
+		h.LeaderID = info.LeaderID()
+		h.Term = info.Term()
+		peers := info.Peers()
 		hasConfiguredPeers = len(peers) > 0
 
 		// Prefer typed peer_snapshot evidence when available.
-		rows := s.cluster.Snapshot().PeerSnapshot
+		rows := info.Snapshot().PeerSnapshot
 		if len(rows) > 0 {
 			h.Peers = mapPeerHealthRows(rows)
 		} else {
 			// Fallback: peers list only. Default state to "configured".
-			h.Peers = append(h.Peers, PeerHealthRow{PeerID: s.cluster.NodeID(), State: "self"})
+			h.Peers = append(h.Peers, PeerHealthRow{PeerID: info.NodeID(), State: "self"})
 			for _, p := range peers {
-				if p == s.cluster.NodeID() {
+				if p == info.NodeID() {
 					continue
 				}
 				h.Peers = append(h.Peers, PeerHealthRow{PeerID: p, State: "configured"})
@@ -76,77 +77,4 @@ func (s *Server) deriveHealth() Health {
 	}
 	h.Issues = deriveIssues(h, hasConfiguredPeers)
 	return h
-}
-
-// mapPeerHealthRows translates internal PeerLivenessRow into the wire
-// PeerHealthRow shape. State mapping:
-//
-//	PeerIdentitySelf                  → "self"
-//	PeerLivenessLive                  → "live"
-//	PeerLivenessHealthCooldown        → "cooldown"
-//	PeerLivenessProbeFailed           → "down"
-//	PeerLivenessConfigured            → "configured"
-//	(any future state added upstream) → string(r.LivenessState)
-//
-// The fall-through preserves the raw internal name so a new state isn't
-// silently rendered as "configured" — operators see something unfamiliar
-// and can investigate, and deriveIssues can match on it later if needed.
-func mapPeerHealthRows(rows []cluster.PeerLivenessRow) []PeerHealthRow {
-	out := make([]PeerHealthRow, 0, len(rows))
-	for _, r := range rows {
-		var state string
-		switch {
-		case r.IdentityState == cluster.PeerIdentitySelf:
-			state = "self"
-		case r.LivenessState == cluster.PeerLivenessLive:
-			state = "live"
-		case r.LivenessState == cluster.PeerLivenessHealthCooldown:
-			state = "cooldown"
-		case r.LivenessState == cluster.PeerLivenessProbeFailed:
-			state = "down"
-		case r.LivenessState == cluster.PeerLivenessConfigured:
-			state = "configured"
-		default:
-			state = string(r.LivenessState)
-		}
-		out = append(out, PeerHealthRow{
-			PeerID:   r.PeerID,
-			State:    state,
-			RaftAddr: r.RaftAddr,
-		})
-	}
-	return out
-}
-
-// deriveIssues applies Phase-1 rules to produce human-readable issues.
-// Pure function for table-driven testing.
-//
-// Rules:
-//  1. Mode=local with configured peers → "single-node mode"
-//  2. Cluster mode + quorum lost → "QUORUM LOST: A/V alive, need R"
-//  3. Cluster mode + voters down/cooldown (quorum still healthy) → per-voter notice
-//  4. Degraded EC flag → "EC degraded mode"
-//  5. (extension point)
-func deriveIssues(h Health, hasConfiguredPeers bool) []string {
-	var issues []string
-	if h.Mode == "local" && hasConfiguredPeers {
-		issues = append(issues, "single-node mode")
-	}
-	if h.Mode == "cluster" {
-		if !h.Quorum.Healthy {
-			issues = append(issues, fmt.Sprintf(
-				"QUORUM LOST: only %d/%d voters alive, need %d",
-				h.Quorum.AliveCount, h.Quorum.VotersTotal, h.Quorum.Required))
-		} else if h.Quorum.AliveCount < h.Quorum.VotersTotal {
-			for _, p := range h.Peers {
-				if p.State == "down" || p.State == "cooldown" {
-					issues = append(issues, fmt.Sprintf("voter %s %s — investigate", p.PeerID, p.State))
-				}
-			}
-		}
-	}
-	if h.Degraded {
-		issues = append(issues, "EC degraded mode")
-	}
-	return issues
 }

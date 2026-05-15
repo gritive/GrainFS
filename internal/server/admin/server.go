@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/user"
 	"runtime"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -51,36 +49,9 @@ func Start(cfg Config) (*Server, error) {
 	if cfg.Deps == nil {
 		return nil, errors.New("admin: Deps required")
 	}
-	if err := cleanupStaleSocket(cfg.SocketPath); err != nil {
-		return nil, err
-	}
-	ln, err := net.Listen("unix", cfg.SocketPath)
+	ln, err := prepareAdminSocket(cfg.SocketPath, cfg.Group)
 	if err != nil {
-		return nil, fmt.Errorf("listen unix %s: %w", cfg.SocketPath, err)
-	}
-	if err := os.Chmod(cfg.SocketPath, 0o660); err != nil {
-		_ = ln.Close()
-		_ = os.Remove(cfg.SocketPath)
-		return nil, fmt.Errorf("chmod 0660 %s: %w", cfg.SocketPath, err)
-	}
-	if cfg.Group != "" {
-		gr, err := user.LookupGroup(cfg.Group)
-		if err != nil {
-			_ = ln.Close()
-			_ = os.Remove(cfg.SocketPath)
-			return nil, fmt.Errorf("lookup group %q: %w", cfg.Group, err)
-		}
-		gid, err := strconv.Atoi(gr.Gid)
-		if err != nil {
-			_ = ln.Close()
-			_ = os.Remove(cfg.SocketPath)
-			return nil, fmt.Errorf("parse gid %q: %w", gr.Gid, err)
-		}
-		if err := os.Chown(cfg.SocketPath, -1, gid); err != nil {
-			_ = ln.Close()
-			_ = os.Remove(cfg.SocketPath)
-			return nil, fmt.Errorf("chown %s to %s: %w", cfg.SocketPath, cfg.Group, err)
-		}
+		return nil, err
 	}
 
 	// Wrap the raw UDS listener so every accepted conn carries the resolved

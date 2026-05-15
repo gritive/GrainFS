@@ -1,0 +1,56 @@
+package server
+
+import (
+	"fmt"
+	"io"
+	"strconv"
+
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
+func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Object, rangeHeader string) (bool, error) {
+	if rangeHeader != "" {
+		start, end, ok := parseByteRange(rangeHeader, obj.Size)
+		if !ok {
+			c.Status(consts.StatusRequestedRangeNotSatisfiable)
+			c.Header("Content-Range", fmt.Sprintf("bytes */%d", obj.Size))
+			return false, nil
+		}
+
+		if seeker, ok := rc.(io.Seeker); ok {
+			if _, err := seeker.Seek(start, io.SeekStart); err != nil {
+				return false, err
+			}
+		} else {
+			if _, err := io.CopyN(io.Discard, rc, start); err != nil {
+				return false, err
+			}
+		}
+
+		length := end - start + 1
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
+		c.Header("Content-Length", strconv.FormatInt(length, 10))
+		c.Set(auditBytesOutKey, length)
+		c.Response.SetBodyStream(io.NopCloser(io.LimitReader(rc, length)), int(length))
+		c.Status(consts.StatusPartialContent)
+		return true, nil
+	}
+
+	c.Set(auditBytesOutKey, obj.Size)
+	if obj.Size > 16*1024 {
+		c.Response.SetBodyStream(rc, int(obj.Size))
+		c.Status(consts.StatusOK)
+		return true, nil
+	}
+
+	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return false, err
+	}
+	c.Data(consts.StatusOK, obj.ContentType, data)
+	return false, nil
+}

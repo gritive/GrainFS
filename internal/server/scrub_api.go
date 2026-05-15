@@ -10,7 +10,7 @@ import (
 )
 
 func (s *Server) registerScrubAPI(h *server.Hertz) {
-	h.GET("/admin/health/scrub", localhostOnly(), s.scrubStatsHandler)
+	h.GET(routePathAdminHealthScrub, localhostOnly(), s.scrubStatsHandler)
 }
 
 type scrubStatsResponse struct {
@@ -23,17 +23,5 @@ type scrubStatsResponse struct {
 }
 
 func (s *Server) scrubStatsHandler(_ context.Context, c *app.RequestContext) {
-	if s.scrubber == nil {
-		c.JSON(consts.StatusOK, scrubStatsResponse{Available: false})
-		return
-	}
-	stats := s.scrubber.Stats()
-	c.JSON(consts.StatusOK, scrubStatsResponse{
-		LastRun:        stats.LastRun,
-		ObjectsChecked: stats.ObjectsChecked,
-		ShardErrors:    stats.ShardErrors,
-		Repaired:       stats.Repaired,
-		Unrepairable:   stats.Unrepairable,
-		Available:      true,
-	})
+	c.JSON(consts.StatusOK, s.scrubStatsSnapshot())
 }

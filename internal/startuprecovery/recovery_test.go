@@ -1,4 +1,4 @@
-package server
+package startuprecovery
 
 import (
 	"context"
@@ -51,7 +51,7 @@ func TestStartupRecovery_DeletesOldTmpFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(fresh, []byte("inflight"), 0o644))
 
 	cap := &captureSrvEmitter{}
-	res, err := RunStartupRecovery(context.Background(), root, nil, cap)
+	res, err := Run(context.Background(), root, nil, cap)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.OrphanTmpRemoved, "old .tmp must be removed, fresh must be kept")
@@ -84,7 +84,7 @@ func TestStartupRecovery_SkipsRaftBadgerInternalDirs(t *testing.T) {
 		require.NoError(t, os.Chtimes(p, past, past))
 	}
 
-	res, err := RunStartupRecovery(context.Background(), root, nil, nil)
+	res, err := Run(context.Background(), root, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.OrphanTmpRemoved)
 	require.NoFileExists(t, oldShardTmp)
@@ -108,7 +108,7 @@ func TestStartupRecovery_DeletesOldMultipartParts(t *testing.T) {
 
 	cap := &captureSrvEmitter{}
 	ops := newOpsForTest(t, root)
-	res, err := RunStartupRecovery(context.Background(), root, ops, cap)
+	res, err := Run(context.Background(), root, ops, cap)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.OrphanMultipartRemoved)
@@ -143,7 +143,7 @@ func TestStartupRecovery_DeletesOldMultipartPartsWhenOpsCannotReachSweeper(t *te
 
 	cap := &captureSrvEmitter{}
 	ops := storage.NewOperations(noMultipartSweepBackend{Backend: local})
-	res, err := RunStartupRecovery(context.Background(), root, ops, cap)
+	res, err := Run(context.Background(), root, ops, cap)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, res.OrphanMultipartRemoved)
@@ -162,7 +162,7 @@ func TestStartupRecovery_NothingToCleanEmitsNoEvents(t *testing.T) {
 
 	cap := &captureSrvEmitter{}
 	ops := newOpsForTest(t, root)
-	res, err := RunStartupRecovery(context.Background(), root, ops, cap)
+	res, err := Run(context.Background(), root, ops, cap)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.OrphanTmpRemoved+res.OrphanMultipartRemoved)
 	require.Empty(t, cap.events, "clean restart must not emit per-action HealEvents")
@@ -172,7 +172,7 @@ func TestStartupRecovery_MissingDataRoot(t *testing.T) {
 	// Pointing at a non-existent root must return cleanly — operator might be
 	// running --data on first boot before any state exists.
 	cap := &captureSrvEmitter{}
-	res, err := RunStartupRecovery(context.Background(), "/nonexistent/grainfs/data", nil, cap)
+	res, err := Run(context.Background(), "/nonexistent/grainfs/data", nil, cap)
 	require.NoError(t, err)
 	require.Equal(t, 0, res.OrphanTmpRemoved)
 	require.Equal(t, 0, res.OrphanMultipartRemoved)
@@ -185,7 +185,7 @@ func TestStartupRecovery_NilEmitterIsSafe(t *testing.T) {
 	past := time.Now().Add(-10 * time.Minute)
 	require.NoError(t, os.Chtimes(tmp, past, past))
 
-	_, err := RunStartupRecovery(context.Background(), root, nil, nil)
+	_, err := Run(context.Background(), root, nil, nil)
 	require.NoError(t, err)
 }
 
@@ -203,6 +203,6 @@ func TestStartupRecovery_ContextCancelStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := RunStartupRecovery(ctx, root, nil, nil)
+	_, err := Run(ctx, root, nil, nil)
 	require.ErrorIs(t, err, context.Canceled)
 }

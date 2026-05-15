@@ -36,11 +36,11 @@ type BalancerNodeInfo struct {
 }
 
 func (s *Server) registerBalancerAPI(h *server.Hertz) {
-	h.GET("/api/cluster/balancer/status", s.balancerStatusHandler)
+	h.GET(routePathClusterBalancer, s.balancerStatusHandler)
 }
 
 func (s *Server) balancerStatusHandler(_ context.Context, c *app.RequestContext) {
-	if s.balancer == nil {
+	if !s.routeFeatureAvailable(routeFeatureBalancer) {
 		c.JSON(consts.StatusOK, adminapi.BalancerStatus{Available: false})
 		return
 	}
