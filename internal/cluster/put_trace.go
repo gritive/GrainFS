@@ -25,6 +25,9 @@ const (
 	PutTraceStageReceiverBackendPut      PutTraceStage = "receiver_backend_put"
 	PutTraceStageShardWriteLocal         PutTraceStage = "shard_write_local"
 	PutTraceStageShardWriteRemote        PutTraceStage = "shard_write_remote"
+	PutTraceStageShardWriteRemoteOpen    PutTraceStage = "shard_write_remote_open"
+	PutTraceStageShardWriteRemoteBuffer  PutTraceStage = "shard_write_remote_buffer"
+	PutTraceStageShardWriteRemoteRPC     PutTraceStage = "shard_write_remote_rpc"
 	PutTraceStageDataRaftProposeMeta     PutTraceStage = "data_raft_propose_meta"
 	PutTraceStageMetaIndexPropose        PutTraceStage = "meta_index_propose"
 )

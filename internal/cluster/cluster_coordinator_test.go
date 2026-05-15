@@ -1504,8 +1504,9 @@ func TestClusterCoordinator_PutObject_Forward(t *testing.T) {
 	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
-	require.Len(t, d.calls, 1)
-	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
+	require.Len(t, d.calls, 2)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[1].op)
 }
 
 func TestClusterCoordinator_PutObject_ForwardRetriesHintForSmallFrame(t *testing.T) {
@@ -1513,10 +1514,14 @@ func TestClusterCoordinator_PutObject_ForwardRetriesHintForSmallFrame(t *testing
 	body := []byte("small-forward-body")
 	d.replyFunc = func(peer string, op raftpb.ForwardOp, args []byte) ([]byte, error, bool) {
 		switch op {
-		case raftpb.ForwardOpPutObject:
+		case raftpb.ForwardOpHeadObject:
 			if peer == "peer-A" {
 				return notLeaderReplyBytes(t, "peer-B"), nil, true
 			}
+			if peer == "peer-B" {
+				return buildSimpleReply(raftpb.ForwardStatusNoSuchKey, ""), nil, true
+			}
+		case raftpb.ForwardOpPutObject:
 			if peer == "peer-B" {
 				return buildObjectReply(
 					&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
@@ -1530,11 +1535,13 @@ func TestClusterCoordinator_PutObject_ForwardRetriesHintForSmallFrame(t *testing
 
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
-	require.Len(t, d.calls, 2)
-	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
+	require.Len(t, d.calls, 3)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
 	require.Equal(t, "peer-A", d.calls[0].peer)
-	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[1].op)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[1].op)
 	require.Equal(t, "peer-B", d.calls[1].peer)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[2].op)
+	require.Equal(t, "peer-B", d.calls[2].peer)
 }
 
 func TestClusterCoordinator_PutObject_ForwardLeavesObjectIndexToReceiver(t *testing.T) {
@@ -1662,10 +1669,11 @@ func TestClusterCoordinator_PutObject_StreamDialerSmallBodyUsesSingleMessage(t *
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
 	require.Empty(t, d.streamCalls)
-	require.Len(t, d.calls, 1)
-	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
+	require.Len(t, d.calls, 2)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[1].op)
 
-	args := raftpb.GetRootAsPutObjectArgs(d.calls[0].args, 0)
+	args := raftpb.GetRootAsPutObjectArgs(d.calls[1].args, 0)
 	require.Equal(t, body, args.BodyBytes())
 }
 
