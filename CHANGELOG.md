@@ -30,9 +30,14 @@
   cancellations, job failures, and aggregation failures.
 - **Production retry policy**: scrub actor boot wiring now uses the planned
   three-attempt retry policy with a 50 ms backoff.
+- **Raft apply shutdown flush**: stopping a node no longer randomly drops ready
+  apply entries during shutdown, removing a flaky replication ordering failure
+  in the unit lane.
 
 ### Verification
 
+- `go test ./internal/raft -run '^TestApplyLoopShutdownFlushesReadyEntries$' -count=50 -v`
+- `go test ./internal/raft -count=5`
 - `go test ./internal/server/execution ./internal/server/admin ./internal/serveruntime ./internal/serveruntime/executioncluster ./internal/metrics -count=1`
 - `go test -race ./internal/serveruntime/executioncluster -count=1`
 - `go test -count=1 -timeout 180s -v ./tests/e2e -run 'TestE2E_ECScrubTrigger'`

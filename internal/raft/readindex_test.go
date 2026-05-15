@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -383,5 +384,34 @@ func TestApplyPipeline_OrderingUnderSlowFSM(t *testing.T) {
 		require.Greater(t, delivered[i], delivered[i-1],
 			"applyCh delivery must be FIFO by Index; got delivered[%d]=%d, delivered[%d]=%d",
 			i-1, delivered[i-1], i, delivered[i])
+	}
+}
+
+func TestApplyLoopShutdownFlushesReadyEntries(t *testing.T) {
+	for attempt := 0; attempt < 50; attempt++ {
+		n, err := NewNode(Config{ID: fmt.Sprintf("n%d", attempt)})
+		require.NoError(t, err)
+
+		go n.applyLoop()
+
+		want := []LogEntry{
+			{Term: 1, Index: 1, Type: LogEntryNoOp},
+			{Term: 1, Index: 2, Command: []byte("v1")},
+			{Term: 1, Index: 3, Command: []byte("v2")},
+			{Term: 1, Index: 4, Command: []byte("v3")},
+		}
+		for _, entry := range want {
+			n.applyInCh <- entry
+		}
+
+		close(n.stopCh)
+		close(n.applyInCh)
+
+		var got []LogEntry
+		for entry := range n.ApplyCh() {
+			got = append(got, entry)
+		}
+
+		require.Equal(t, want, got)
 	}
 }

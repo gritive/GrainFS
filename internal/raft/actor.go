@@ -644,11 +644,13 @@ func (n *Node) applyLoop() {
 		select {
 		case e, ok := <-n.applyInCh:
 			if !ok {
-				// Actor exited; flush remaining buffer.
+				// Actor exited; flush remaining buffer. stopCh is already
+				// closed during normal Stop, so selecting on it here can
+				// randomly drop entries even when applyCh is ready.
 				for _, ent := range buf {
 					select {
 					case n.applyCh <- ent:
-					case <-n.stopCh:
+					default:
 						return
 					}
 				}
