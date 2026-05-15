@@ -327,6 +327,8 @@ make bench-nfs-cluster            # multi-node NFS, same fio actions
 ```
 
 S3 object 결과는 `benchmarks/report.json`, Iceberg table API 결과는 `benchmarks/iceberg_table_report.json`에 저장된다.
+클러스터 PUT 경로를 포트/오브젝트 크기별로 분리 측정하려면 `PUT_MATRIX=1 make bench-cluster`를 사용한다.
+`PUT_TRACE=1`을 함께 지정하면 각 노드가 owner-only JSONL trace를 남기고 `benchmarks/put_trace_report.js`가 forwarded PUT의 dominant stage, leader-hint retry, meta-index propose count를 요약한다.
 NFS 벤치마크는 기본 `NFS_VERS=4.0`으로 마운트하며, `NFS_VERS=4.1 make bench-nfs` 또는
 `NFS_VERS=4.2 make bench-nfs-cluster`처럼 프로토콜 버전별 병목을 분리해서 측정할 수 있다.
 암호화는 항상 켜진 상태에서 측정한다. 고정 키로 반복 측정해야 할 때는 `BENCH_ENCRYPTION_KEY_FILE`을 지정한다.
