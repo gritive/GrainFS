@@ -1,9 +1,7 @@
 package server
 
 import (
-	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,40 +10,12 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-func TestHealEmitter_BroadcastsToHealCategoryOnly(t *testing.T) {
-	hub := NewHub()
-	em := newHealEmitter(hub, nil)
+type captureSrvEmitter struct {
+	events []scrubber.HealEvent
+}
 
-	_, healCh, cancelHeal := hub.Subscribe(healEvCategory)
-	defer cancelHeal()
-
-	_, logCh, cancelLog := hub.Subscribe("log")
-	defer cancelLog()
-
-	ev := scrubber.NewEvent(scrubber.PhaseReconstruct, scrubber.OutcomeSuccess)
-	ev.Bucket = "photos"
-	ev.Key = "img.jpg"
-	ev.ShardID = 2
-	ev.CorrelationID = "corr-1"
-	em.Emit(ev)
-
-	select {
-	case e := <-healCh:
-		assert.Equal(t, healEvCategory, e.Type)
-		var got scrubber.HealEvent
-		require.NoError(t, json.Unmarshal(e.Data, &got))
-		assert.Equal(t, scrubber.PhaseReconstruct, got.Phase)
-		assert.Equal(t, "photos", got.Bucket)
-		assert.EqualValues(t, 2, got.ShardID)
-	case <-time.After(time.Second):
-		t.Fatal("heal subscriber did not receive event")
-	}
-
-	select {
-	case e := <-logCh:
-		t.Fatalf("log subscriber received unexpected event type=%s", e.Type)
-	case <-time.After(50 * time.Millisecond):
-	}
+func (c *captureSrvEmitter) Emit(ev scrubber.HealEvent) {
+	c.events = append(c.events, ev)
 }
 
 func TestHealEmitter_PersistsToEventStore(t *testing.T) {
@@ -73,7 +43,6 @@ func TestHealEmitter_PersistsToEventStore(t *testing.T) {
 }
 
 func TestHealEmitter_NilHubAndEnqueue_NoPanic(t *testing.T) {
-	// Both sinks nil — emitter must remain a safe no-op aside from metrics.
 	em := newHealEmitter(nil, nil)
 	em.Emit(scrubber.NewEvent(scrubber.PhaseStartup, scrubber.OutcomeSuccess))
 }

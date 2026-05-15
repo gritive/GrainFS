@@ -10,11 +10,11 @@ import (
 )
 
 func (s *Server) registerIncidentAPI(h *server.Hertz) {
-	if s.incidentStore == nil {
+	if !s.routeFeatureRoutesVisible(routeFeatureIncident) {
 		return
 	}
-	h.GET("/api/incidents", s.listIncidents)
-	h.GET("/api/incidents/:id", s.getIncident)
+	h.GET(routePathIncidents, s.listIncidents)
+	h.GET(routePrefixIncidents+":id", s.getIncident)
 }
 
 func (s *Server) listIncidents(ctx context.Context, c *app.RequestContext) {

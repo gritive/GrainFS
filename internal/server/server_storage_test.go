@@ -36,3 +36,32 @@ func TestNewWithServerStorageUsesStorageBackendAsHandlerBackend(t *testing.T) {
 
 	require.Same(t, backend, s.backend)
 }
+
+func TestNormalizeServerStorageFillsPolicyOpsAndVolumeBackend(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	store := policy.NewCompiledPolicyStore()
+	ss, gotStore := normalizeServerStorage(ServerStorage{Backend: backend}, store)
+
+	require.Same(t, store, gotStore)
+	require.NotNil(t, ss.Ops)
+	require.Same(t, backend, ss.Backend)
+	require.Same(t, backend, ss.Ops.Backend())
+	require.Same(t, backend, ss.VolumeBackend)
+}
+
+func TestNormalizeServerStorageDerivesBackendFromOperations(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	ops := storage.NewOperations(backend)
+	ss, gotStore := normalizeServerStorage(ServerStorage{Ops: ops}, nil)
+
+	require.NotNil(t, gotStore)
+	require.Same(t, ops, ss.Ops)
+	require.Same(t, backend, ss.Backend)
+	require.Same(t, backend, ss.VolumeBackend)
+}

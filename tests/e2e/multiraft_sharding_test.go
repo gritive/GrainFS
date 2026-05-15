@@ -1110,6 +1110,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 		Bucket: aws.String(legacyNFS4Bucket),
 	})
 	require.NoError(t, err)
+	runNfsExportJSONOnDataDir(t, c.dataDirs[0], "add", legacyNFS4Bucket)
 
 	const s3Body = "written-via-s3"
 	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
@@ -1120,7 +1121,7 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	require.NoError(t, err)
 
 	const nfsBody = "written-via-nfs"
-	runNFSv4SmokeClient(t, c.nfs4Ports[0], s3Body, nfsBody)
+	runNFSv4SmokeClient(t, c.nfs4Ports[0], legacyNFS4Bucket, s3Body, nfsBody)
 
 	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(legacyNFS4Bucket),
@@ -1135,20 +1136,20 @@ func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
 	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
 
-func runNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string) {
+func runNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) {
 	t.Helper()
 
 	switch runtime.GOOS {
 	case "linux":
-		runLocalNFSv4SmokeClient(t, nfsPort, s3Body, nfsBody)
+		runLocalNFSv4SmokeClient(t, nfsPort, bucket, s3Body, nfsBody)
 	case "darwin":
-		runColimaNFSv4SmokeClient(t, nfsPort, s3Body, nfsBody)
+		runColimaNFSv4SmokeClient(t, nfsPort, bucket, s3Body, nfsBody)
 	default:
 		t.Skipf("NFSv4 smoke requires Linux local mount or Colima VM client; unsupported GOOS=%s", runtime.GOOS)
 	}
 }
 
-func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string) {
+func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) {
 	t.Helper()
 
 	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
@@ -1169,17 +1170,17 @@ func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string)
 		t.Skip("NFSv4 smoke requires local NFS mount permissions")
 	}
 
-	nfsFilePath := filepath.Join(mountDir, "s3-file.txt")
+	nfsFilePath := filepath.Join(mountDir, bucket, "s3-file.txt")
 	require.Eventually(t, func() bool {
 		data, err := os.ReadFile(nfsFilePath)
 		return err == nil && string(data) == s3Body
 	}, 30*time.Second, 500*time.Millisecond, "object not visible via NFSv4")
 
-	nfsNewFilePath := filepath.Join(mountDir, "nfs-file.txt")
+	nfsNewFilePath := filepath.Join(mountDir, bucket, "nfs-file.txt")
 	require.NoError(t, os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0o644))
 }
 
-func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string) {
+func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) {
 	t.Helper()
 
 	if _, err := exec.LookPath("colima"); err != nil {
@@ -1210,13 +1211,13 @@ func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, s3Body, nfsBody string
 		t.Skipf("Colima NFSv4 mount failed; macOS smoke requires a working Colima NFS client: %v\n%s", err, out)
 	}
 
-	nfsFilePath := mountDir + "/s3-file.txt"
+	nfsFilePath := mountDir + "/" + bucket + "/s3-file.txt"
 	require.Eventually(t, func() bool {
 		out, err := colimaSSHCombinedOutput(2*time.Second, "sudo", "cat", nfsFilePath)
 		return err == nil && string(out) == s3Body
 	}, 30*time.Second, 500*time.Millisecond, "object not visible via Colima NFSv4 mount")
 
-	nfsNewFilePath := mountDir + "/nfs-file.txt"
+	nfsNewFilePath := mountDir + "/" + bucket + "/nfs-file.txt"
 	runColimaSSH(t, "sudo", "bash", "-c",
 		fmt.Sprintf("printf %%s %s > %s", shellQuote(nfsBody), shellQuote(nfsNewFilePath)))
 }

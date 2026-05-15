@@ -7,8 +7,6 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-
-	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // clusterTransferLeader is implemented by *cluster.MetaRaft to expose the
@@ -32,7 +30,7 @@ type TransferLeaderResult struct {
 // transferLeaderHandler exposes POST /v1/cluster/transfer-leader on the
 // admin Unix socket. Status code policy (A1-a):
 //
-//	cluster mode not configured (s.cluster == nil OR no transfer support) → 503
+//	cluster mode not configured (cluster feature unavailable OR no transfer support) → 503
 //	mutation gate engaged                                                 → 503
 //	not currently the leader                                              → 409 + leader_id
 //	raft.ErrNoPeers (single node)                                         → 503
@@ -43,52 +41,41 @@ func (s *Server) transferLeaderHandler(_ context.Context, c *app.RequestContext)
 	if s.blockIfMutationDisabled(c, "cluster_transfer_leader") {
 		return
 	}
-	if s.cluster == nil {
+	result, err := s.transferClusterLeadership()
+	if err == nil {
+		data, _ := json.Marshal(result)
+		c.Data(consts.StatusOK, "application/json", data)
+		return
+	}
+
+	var notLeader clusterNotLeaderError
+	switch {
+	case errors.Is(err, errClusterModeNotConfigured):
 		c.JSON(consts.StatusServiceUnavailable, map[string]string{
 			"error": "cluster mode not configured",
 		})
 		return
-	}
-	tl, ok := s.cluster.(clusterTransferLeader)
-	if !ok {
+	case errors.Is(err, errClusterTransferNotSupported):
 		c.JSON(consts.StatusServiceUnavailable, map[string]string{
 			"error": "cluster adapter does not support transfer-leader",
 		})
 		return
-	}
-	if !tl.IsLeader() {
-		c.JSON(consts.StatusConflict, map[string]any{
-			"error":     "not leader",
-			"leader_id": s.cluster.LeaderID(),
+	case errors.As(err, &notLeader):
+		if notLeader.retry {
+			writeClusterNotLeaderRetry(c, notLeader.Error(), notLeader.leaderID)
+			return
+		}
+		writeClusterNotLeader(c, notLeader.Error(), notLeader.leaderID)
+		return
+	case errors.Is(err, errClusterTransferSingleNode):
+		c.JSON(consts.StatusServiceUnavailable, map[string]string{
+			"error": "single-node mode: no peers to transfer to",
+		})
+		return
+	default:
+		c.JSON(consts.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
 		})
 		return
 	}
-	oldLeader := s.cluster.NodeID()
-	term := s.cluster.Term()
-	if err := tl.TransferLeadership(); err != nil {
-		switch {
-		case errors.Is(err, raft.ErrNoPeers):
-			c.JSON(consts.StatusServiceUnavailable, map[string]string{
-				"error": "single-node mode: no peers to transfer to",
-			})
-			return
-		case errors.Is(err, raft.ErrNotLeader):
-			c.JSON(consts.StatusConflict, map[string]any{
-				"error":     "leadership changed during transfer",
-				"leader_id": s.cluster.LeaderID(),
-				"retry":     true,
-			})
-			return
-		default:
-			c.JSON(consts.StatusInternalServerError, map[string]string{
-				"error": err.Error(),
-			})
-			return
-		}
-	}
-	data, _ := json.Marshal(TransferLeaderResult{
-		OldLeader: oldLeader,
-		Term:      term,
-	})
-	c.Data(consts.StatusOK, "application/json", data)
 }

@@ -8,14 +8,9 @@
 package server
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -39,85 +34,6 @@ type AlertsState struct {
 	// Lock-free: append-only via CompareAndSwap, snapshot-read in the tracker's
 	// actor goroutine. Callbacks must not block or call back into the tracker.
 	secondaryCallbacks atomic.Pointer[[]func(bool)]
-}
-
-// NewAlertsState wires the dispatcher and tracker together. The dispatcher's
-// failure callback is captured here so the state can record the last failed
-// alert for the Force Resend button.
-func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.DegradedConfig) *AlertsState {
-	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
-		return alerts.NewDispatcher(webhookURL, opts, func(a alerts.Alert, err error) {
-			s.recordFailure(a, err)
-		})
-	})
-}
-
-// NewAlertsStateWithConfig builds an AlertsState whose dispatcher reads its
-// webhook URL + wrapped secret from cfg on every Send. This is the production
-// wiring used by serveruntime — a cluster-config PATCH that flips the URL or
-// rotates the secret takes effect on the next alert without a process restart.
-//
-// cfg must not be nil; enc may be nil (in which case the secret is treated as
-// disabled even if the wrapped blob is populated, matching the static
-// empty-secret path).
-//
-// alertKind is forwarded to the underlying Dispatcher and surfaces as the
-// alert_kind label on WebhookSignatureDecryptFailureTotal so operators can
-// tell which AlertsState saw stale wrapped secrets after a rotate-key.
-func NewAlertsStateWithConfig(
-	cfg alerts.AlertCfgReader,
-	enc alerts.SecretDecrypter,
-	secretAAD []byte,
-	opts alerts.Options,
-	trackerCfg alerts.DegradedConfig,
-	alertKind string,
-) *AlertsState {
-	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
-		return alerts.NewDispatcherWithConfig(cfg, enc, secretAAD, opts, func(a alerts.Alert, err error) {
-			s.recordFailure(a, err)
-		}, alertKind)
-	})
-}
-
-func newAlertsStateFromDispatcher(trackerCfg alerts.DegradedConfig, build func(*AlertsState) *alerts.Dispatcher) *AlertsState {
-	s := &AlertsState{}
-	s.dispatcher = build(s)
-	// When the tracker trips into hold mode, send a critical webhook so
-	// the on-call human knows the system is being held degraded for them.
-	// Fire the send in a goroutine: OnHold already runs outside the tracker
-	// lock, but it runs on the caller's goroutine (scrubber, raft monitor,
-	// disk collector). A synchronous webhook retry could block that caller
-	// for tens of seconds. The dispatcher's onFailure callback still records
-	// delivery failures for the dashboard banner and Force Resend, so
-	// fire-and-forget is safe.
-	trackerCfg.OnHold = func(reason string) {
-		go func() {
-			_ = s.dispatcher.Send(alerts.Alert{
-				Type:     "degraded_hold",
-				Severity: alerts.SeverityCritical,
-				Message:  "Tracker held in degraded mode: " + reason,
-			})
-		}()
-	}
-	// Mirror tracker state into the Prometheus gauge. Runs in the actor
-	// goroutine (see DegradedConfig.OnStateChange godoc), so the gauge
-	// cannot observe a stale value between a concurrent Report and the
-	// mirror update.
-	trackerCfg.OnStateChange = func(degraded bool) {
-		if degraded {
-			metrics.Degraded.Set(1)
-		} else {
-			metrics.Degraded.Set(0)
-		}
-		// Call secondary callbacks (e.g. Server.degradedFlag.Store) — lock-free read.
-		if cbs := s.secondaryCallbacks.Load(); cbs != nil {
-			for _, cb := range *cbs {
-				cb(degraded)
-			}
-		}
-	}
-	s.tracker = alerts.NewDegradedTracker(trackerCfg)
-	return s
 }
 
 // AddOnStateChange registers a callback that is invoked whenever the degraded
@@ -187,74 +103,4 @@ func (s *AlertsState) recordFailure(a alerts.Alert, err error) {
 	s.lastFailedErr = err.Error()
 	s.lastFailedAt = time.Now()
 	metrics.AlertDeliveryFailedTotal.Inc()
-}
-
-// alertsStatusResponse mirrors the dashboard banner contract.
-type alertsStatusResponse struct {
-	Degraded          bool      `json:"degraded"`
-	Held              bool      `json:"held"`
-	LastReason        string    `json:"last_reason,omitempty"`
-	LastResource      string    `json:"last_resource,omitempty"`
-	EnteredAt         time.Time `json:"entered_at,omitempty"`
-	FlapCount         int       `json:"flap_count"`
-	DeliveredOK       uint64    `json:"delivered_ok"`
-	DeliveryFailed    uint64    `json:"delivery_failed"`
-	LastFailedType    string    `json:"last_failed_type,omitempty"`
-	LastFailedErr     string    `json:"last_failed_err,omitempty"`
-	LastFailedAt      time.Time `json:"last_failed_at,omitempty"`
-	WebhookConfigured bool      `json:"webhook_configured"`
-}
-
-func (s *Server) registerAlertsAPI(h *server.Hertz) {
-	if s.alerts == nil {
-		return
-	}
-	h.GET("/api/admin/alerts/status", localhostOnly(), s.alertsStatus)
-	h.POST("/api/admin/alerts/resend", localhostOnly(), s.alertsResend)
-}
-
-func (s *Server) alertsStatus(_ context.Context, c *app.RequestContext) {
-	st := s.alerts.tracker.Status()
-	s.alerts.mu.Lock()
-	resp := alertsStatusResponse{
-		Degraded:          st.Degraded,
-		Held:              st.Held,
-		LastReason:        st.LastReason,
-		LastResource:      st.LastResource,
-		EnteredAt:         st.EnteredAt,
-		FlapCount:         st.FlapCount,
-		DeliveredOK:       s.alerts.deliveredOK,
-		DeliveryFailed:    s.alerts.deliveryFailed,
-		WebhookConfigured: s.alerts.dispatcher != nil,
-	}
-	if s.alerts.lastFailed != nil {
-		resp.LastFailedType = s.alerts.lastFailed.Type
-		resp.LastFailedErr = s.alerts.lastFailedErr
-		resp.LastFailedAt = s.alerts.lastFailedAt
-	}
-	s.alerts.mu.Unlock()
-	c.JSON(consts.StatusOK, resp)
-}
-
-func (s *Server) alertsResend(_ context.Context, c *app.RequestContext) {
-	if s.blockIfMutationDisabled(c, "alerts_resend") {
-		return
-	}
-	s.alerts.mu.Lock()
-	last := s.alerts.lastFailed
-	s.alerts.mu.Unlock()
-	if last == nil {
-		c.JSON(consts.StatusOK, map[string]any{"resent": false, "reason": "no failed alert to resend"})
-		return
-	}
-	if err := s.alerts.Send(*last); err != nil {
-		c.JSON(consts.StatusBadGateway, map[string]any{"resent": false, "error": err.Error()})
-		return
-	}
-	// Clear the failed slot so the banner disappears on next status poll.
-	s.alerts.mu.Lock()
-	s.alerts.lastFailed = nil
-	s.alerts.lastFailedErr = ""
-	s.alerts.mu.Unlock()
-	c.JSON(consts.StatusOK, map[string]any{"resent": true})
 }

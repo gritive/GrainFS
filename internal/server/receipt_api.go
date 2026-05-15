@@ -21,28 +21,18 @@ import (
 // routes 404 — safer than a naked "not configured" error that leaks that
 // the feature exists on this node.
 func (s *Server) registerReceiptAPI(h *server.Hertz) {
-	if s.receiptAPI == nil {
+	if !s.routeFeatureRoutesVisible(routeFeatureReceipt) {
 		return
 	}
 
-	// Build handler chains conditionally. When s.verifier is nil (e.g.,
-	// test setups that skip the IAM wiring), the global auth middleware
-	// was also skipped in New() — attaching authMiddleware here would
-	// NPE on s.verifier.Verify. Matching the global pattern keeps
-	// behavior consistent: nil verifier means no auth across every path.
 	getByID := func(_ context.Context, c *app.RequestContext) {
 		id := c.Param("id")
-		s.receiptAPI.ServeGetReceipt(newResponseWriter(c), toHTTPRequest(c), id)
+		s.serveReceiptByID(c, id)
 	}
 	listRange := func(_ context.Context, c *app.RequestContext) {
-		s.receiptAPI.ServeListReceipts(newResponseWriter(c), toHTTPRequest(c))
+		s.serveReceiptList(c)
 	}
 
-	if s.verifier != nil {
-		h.GET("/api/receipts/:id", s.authMiddleware(), getByID)
-		h.GET("/api/receipts", s.authMiddleware(), listRange)
-	} else {
-		h.GET("/api/receipts/:id", getByID)
-		h.GET("/api/receipts", listRange)
-	}
+	h.GET(routePathReceiptByID, getByID)
+	h.GET(routePathReceipts, listRange)
 }

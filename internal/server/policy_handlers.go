@@ -22,7 +22,7 @@ func (s *Server) putBucketPolicy(c *app.RequestContext, bucket string) {
 		return
 	}
 
-	if err := s.ops.SetBucketPolicy(bucket, body); err != nil {
+	if err := s.storeBucketPolicy(bucket, body); err != nil {
 		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
@@ -30,7 +30,7 @@ func (s *Server) putBucketPolicy(c *app.RequestContext, bucket string) {
 }
 
 func (s *Server) getBucketPolicy(c *app.RequestContext, bucket string) {
-	data, err := s.ops.GetBucketPolicy(bucket)
+	data, err := s.loadBucketPolicy(bucket)
 	if err != nil {
 		if errors.Is(err, storage.ErrUnsupportedOperation) {
 			writeXMLError(c, consts.StatusNotFound, "NoSuchBucketPolicy", "The bucket policy does not exist")
@@ -43,7 +43,7 @@ func (s *Server) getBucketPolicy(c *app.RequestContext, bucket string) {
 }
 
 func (s *Server) deleteBucketPolicy(c *app.RequestContext, bucket string) {
-	if err := s.ops.DeleteBucketPolicy(bucket); err != nil {
+	if err := s.deleteBucketPolicyStorage(bucket); err != nil {
 		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}

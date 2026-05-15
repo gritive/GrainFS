@@ -49,24 +49,12 @@ func RunSystemPreflight(cfg PreflightConfig) error {
 // checkDataDir verifies the data directory exists and can be written to.
 func checkDataDir(dataDir string) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return fmt.Errorf(
-			"preflight: cannot create data directory %s: %w\n\n"+
-				"Recovery guide:\n"+
-				"  1. Ensure the parent directory exists and the process has write permission.\n"+
-				"  2. Set --data to a writable path (e.g. --data /var/lib/grainfs).",
-			dataDir, err,
-		)
+		return preflightCreateDataDirError(dataDir, err)
 	}
 
 	probe := filepath.Join(dataDir, ".grainfs-preflight")
 	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
-		return fmt.Errorf(
-			"preflight: data directory %s is not writable: %w\n\n"+
-				"Recovery guide:\n"+
-				"  1. Check ownership: 'ls -la %s'.\n"+
-				"  2. Fix with: 'chown -R $(whoami) %s' or run as the owning user.",
-			dataDir, err, filepath.Dir(dataDir), dataDir,
-		)
+		return preflightDataDirWritableError(dataDir, err)
 	}
 	_ = os.Remove(probe)
 	return nil
@@ -83,13 +71,7 @@ func checkDiskSpace(dataDir string) error {
 	avail := stat.Bavail * uint64(stat.Bsize) //nolint:gosec
 	switch {
 	case avail < failDiskBytes:
-		return fmt.Errorf(
-			"preflight: insufficient disk space at %s: only %s available (need at least 512 MiB)\n\n"+
-				"Recovery guide:\n"+
-				"  1. Free disk space: 'df -h %s'.\n"+
-				"  2. Move the data directory to a larger volume with --data.",
-			dataDir, fmtBytes(avail), dataDir,
-		)
+		return preflightInsufficientDiskError(dataDir, avail)
 	case avail < warnDiskBytes:
 		log.Warn().
 			Str("dir", dataDir).
@@ -106,13 +88,7 @@ func checkPortFree(addr string) error {
 	}
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf(
-			"preflight: HTTP address %s is already in use: %w\n\n"+
-				"Recovery guide:\n"+
-				"  1. Find the conflicting process: 'lsof -i %s' or 'ss -tlnp | grep %s'.\n"+
-				"  2. Stop the conflicting process, or use a different port with --port.",
-			addr, err, addr, addr,
-		)
+		return preflightPortInUseError(addr, err)
 	}
 	_ = l.Close()
 	return nil

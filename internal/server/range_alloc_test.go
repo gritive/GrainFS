@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -172,6 +173,49 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.Equal(t, int32(1), backend.readAtCalls.Load())
 	require.Equal(t, int64(10), backend.lastOffset.Load())
 	require.Equal(t, int64(10), backend.lastReadSize.Load())
+	require.Zero(t, backend.getObjCalls.Load())
+}
+
+func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testing.T) {
+	tmp := t.TempDir()
+	local, err := storage.NewLocalBackend(tmp)
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+
+	_, err = local.PutObjectWithUserMetadata(
+		context.Background(),
+		"b",
+		"private",
+		bytes.NewReader([]byte("0123456789")),
+		"application/octet-stream",
+		map[string]string{"secret": "do-not-leak"},
+	)
+	require.NoError(t, err)
+	require.NoError(t, local.SetObjectACL("b", "private", uint8(s3auth.ACLPrivate)))
+
+	backend := &countingReadAtBackend{Backend: local}
+	port := freePort(t)
+	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend, WithAuth([]s3auth.Credentials{{
+		AccessKey: "ak",
+		SecretKey: "sk",
+	}}))
+	go s.Run()
+	t.Cleanup(func() {
+		_ = s.Shutdown(context.Background())
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/private", port), nil)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=0-1")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Empty(t, resp.Header.Get("x-amz-meta-secret"))
+	require.Zero(t, backend.readAtCalls.Load())
 	require.Zero(t, backend.getObjCalls.Load())
 }
 

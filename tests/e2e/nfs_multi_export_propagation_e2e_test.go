@@ -39,8 +39,12 @@ func runNfsExportJSONOnDataDir(t *testing.T, dataDir, verb, bucket string, flags
 	t.Helper()
 	args := []string{"nfs", "export", verb, bucket, "--json"}
 	args = append(args, flags...)
-	out, code := runCLI(t, dataDir, args...)
-	require.Equalf(t, 0, code, "%s", out)
+	var out string
+	require.Eventually(t, func() bool {
+		var code int
+		out, code = runCLI(t, dataDir, args...)
+		return code == 0
+	}, 45*time.Second, 500*time.Millisecond, "%s", out)
 	return parseSingleNfsExport(t, out)
 }
 

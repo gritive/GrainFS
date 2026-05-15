@@ -125,7 +125,7 @@ func (h *Hub) WriteSSE(ctx context.Context, w io.Writer, categories ...string) {
 
 	// SSE comment lines start with ":" and are ignored by clients (per spec).
 	// They serve as a header-flush nudge and as a keep-alive heartbeat.
-	fmt.Fprint(w, ": ok\n\n") //nolint:errcheck
+	writeSSEOpen(w)
 
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
@@ -135,12 +135,12 @@ func (h *Hub) WriteSSE(ctx context.Context, w io.Writer, categories ...string) {
 		case <-ctx.Done():
 			return
 		case <-keepalive.C:
-			fmt.Fprint(w, ": keep-alive\n\n") //nolint:errcheck
+			writeSSEKeepAlive(w)
 		case e, ok := <-ch:
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, e.Data) //nolint:errcheck
+			writeSSEEvent(w, e)
 		}
 	}
 }

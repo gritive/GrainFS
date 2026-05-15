@@ -19,14 +19,9 @@ func ScrubVolume(ctx context.Context, d *Deps, req ScrubVolumeReq) (ScrubVolumeR
 	if req.Name == "" {
 		return ScrubVolumeResp{}, NewInvalid("name required")
 	}
-	scope := scrubber.ScopeFull
-	switch strings.ToLower(req.Scope) {
-	case "", "full":
-		scope = scrubber.ScopeFull
-	case "live":
-		scope = scrubber.ScopeLive
-	default:
-		return ScrubVolumeResp{}, NewInvalid("scope must be 'full' or 'live'")
+	scope, err := parseScrubScope(req.Scope)
+	if err != nil {
+		return ScrubVolumeResp{}, err
 	}
 	id, created := d.Director.Trigger(scrubber.TriggerReq{
 		Bucket:    volume.VolumeBucketName,
@@ -63,14 +58,9 @@ func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error)
 	if req.Bucket == "" {
 		return ScrubResp{}, NewInvalid("bucket required")
 	}
-	scope := scrubber.ScopeFull
-	switch strings.ToLower(req.Scope) {
-	case "", "full":
-		scope = scrubber.ScopeFull
-	case "live":
-		scope = scrubber.ScopeLive
-	default:
-		return ScrubResp{}, NewInvalid("scope must be 'full' or 'live'")
+	scope, err := parseScrubScope(req.Scope)
+	if err != nil {
+		return ScrubResp{}, err
 	}
 	entry, created, err := d.ScrubProposer.Propose(ctx, scrubber.TriggerReq{
 		Bucket: req.Bucket, KeyPrefix: req.KeyPrefix, Scope: scope, DryRun: req.DryRun,
@@ -90,14 +80,9 @@ func GetScrubJob(ctx context.Context, d *Deps, sessionID string) (ScrubJobInfo, 
 	}
 	local, hasLocal := d.Director.GetSession(sessionID)
 
-	var peerInfos []ScrubJobInfo
-	var peerFailures []string
-	if d.ScrubAggregator != nil {
-		var err error
-		peerInfos, peerFailures, err = d.ScrubAggregator.Peers(ctx, sessionID)
-		if err != nil {
-			return ScrubJobInfo{}, NewInternal("aggregate peers: " + err.Error())
-		}
+	peerInfos, peerFailures, err := aggregateScrubPeers(ctx, d, sessionID)
+	if err != nil {
+		return ScrubJobInfo{}, err
 	}
 	if !hasLocal && len(peerInfos) == 0 {
 		if len(peerFailures) > 0 {
@@ -108,36 +93,7 @@ func GetScrubJob(ctx context.Context, d *Deps, sessionID string) (ScrubJobInfo, 
 
 	out := sessionToInfo(local)
 	out.OwnedHere = hasLocal && local.Stats.Checked > 0
-	for _, p := range peerInfos {
-		out.Checked += p.Checked
-		out.Healthy += p.Healthy
-		out.Detected += p.Detected
-		out.Repaired += p.Repaired
-		out.Unrepairable += p.Unrepairable
-		out.Skipped += p.Skipped
-		if p.Status == "running" {
-			out.Status = "running"
-		}
-		if p.OwnedHere && (out.Bucket == "" || out.Bucket == "—") {
-			out.Bucket = p.Bucket
-			out.KeyPrefix = p.KeyPrefix
-			out.Scope = p.Scope
-			out.DryRun = p.DryRun
-		}
-	}
-	if out.Status == "" {
-		for _, p := range peerInfos {
-			if p.Status != "" {
-				out.Status = p.Status
-				break
-			}
-		}
-	}
-	if len(peerFailures) > 0 {
-		out.Partial = true
-		out.PeerFailures = peerFailures
-	}
-	return out, nil
+	return mergeScrubPeerInfo(out, peerInfos, peerFailures), nil
 }
 
 // CancelScrubJob marks a running session as cancelled. Best-effort: in-flight
@@ -150,30 +106,4 @@ func CancelScrubJob(ctx context.Context, d *Deps, sessionID string) error {
 		return NewNotFound(err.Error())
 	}
 	return nil
-}
-
-func sessionToInfo(s scrubber.Session) ScrubJobInfo {
-	scope := "full"
-	if s.Scope == scrubber.ScopeLive {
-		scope = "live"
-	}
-	info := ScrubJobInfo{
-		SessionID:    s.ID,
-		Bucket:       s.Bucket,
-		KeyPrefix:    s.KeyPrefix,
-		Scope:        scope,
-		DryRun:       s.DryRun,
-		Status:       s.Status,
-		StartedAt:    s.StartedAt.Unix(),
-		Checked:      s.Stats.Checked,
-		Healthy:      s.Stats.Healthy,
-		Detected:     s.Stats.Detected,
-		Repaired:     s.Stats.Repaired,
-		Unrepairable: s.Stats.Unrepairable,
-		Skipped:      s.Stats.Skipped,
-	}
-	if !s.DoneAt.IsZero() {
-		info.DoneAt = s.DoneAt.Unix()
-	}
-	return info
 }

@@ -22,7 +22,7 @@ type configPatchResponse struct {
 
 // registerConfigAPI registers PATCH /api/admin/config for hot-reload.
 func (s *Server) registerConfigAPI(h *server.Hertz) {
-	h.PATCH("/api/admin/config", localhostOnly(), s.patchConfigHandler)
+	h.PATCH(routePathConfig, localhostOnly(), s.patchConfigHandler)
 }
 
 func (s *Server) patchConfigHandler(_ context.Context, c *app.RequestContext) {
@@ -43,9 +43,7 @@ func (s *Server) patchConfigHandler(_ context.Context, c *app.RequestContext) {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid scrub_interval"})
 			return
 		}
-		if s.scrubber != nil {
-			s.scrubber.SetInterval(d)
-		}
+		s.setScrubInterval(d)
 		resp.ScrubInterval = d.String()
 	}
 
