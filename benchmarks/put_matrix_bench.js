@@ -1,7 +1,6 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
-import { randomString } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';
 import crypto from 'k6/crypto';
 
 const BASE = __ENV.BASE_URL || 'http://localhost:9000';
@@ -102,7 +101,7 @@ export function setup() {
 }
 
 export function putOnly() {
-  const key = `${MATRIX_CELL}/obj-${__VU}-${__ITER}-${randomString(8)}`;
+  const key = `${MATRIX_CELL}/obj-${__VU}-${__ITER}`;
   const putUrl = `${BASE}/${BUCKET}/${key}`;
   const res = http.put(putUrl, PAYLOAD, { headers: sign('PUT', putUrl, PAYLOAD, true) });
   putLatency.add(res.timings.duration);
