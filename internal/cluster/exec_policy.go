@@ -110,3 +110,19 @@ func (e *LocalExecution) ResolveWrite(ctx context.Context, target RouteTarget) (
 		}
 	}
 }
+
+// ResolveObjectWrite returns the local voter backend for object PUTs even when
+// this node is not the current data-group leader. Object data shards can be
+// written by any local voter; the group metadata commit is still serialized
+// through DistributedBackend.propose, which forwards the small metadata command
+// to the leader when needed.
+func (e *LocalExecution) ResolveObjectWrite(ctx context.Context, target RouteTarget) (*GroupBackend, error) {
+	gb := e.groups.Backend(target.GroupID)
+	if gb == nil {
+		return nil, nil
+	}
+	if target.SelfIsVoter && !target.SelfIsOnlyVoter {
+		return gb, nil
+	}
+	return e.ResolveWrite(ctx, target)
+}

@@ -615,9 +615,15 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	if b.shardSvc == nil {
 		return 0, fmt.Errorf("forwardPropose: no transport available")
 	}
+	streamType := transport.StreamProposeForward
+	payload := data
+	if groupID, ok := PlacementGroupFromContext(ctx); ok {
+		streamType = transport.StreamDataGroupProposeForward
+		payload = encodeGroupForwardPayload(groupID, data)
+	}
 	resp, err := b.shardSvc.SendRequest(ctx, leaderAddr, &transport.Message{
-		Type:    transport.StreamProposeForward,
-		Payload: data,
+		Type:    streamType,
+		Payload: payload,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("forwardPropose: send: %w", err)
@@ -628,7 +634,11 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	index := binary.BigEndian.Uint64(resp.Payload[0:8])
 	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
 	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
-		return 0, fmt.Errorf("forwardPropose: leader error: %s", string(resp.Payload[12:12+int(errLen)]))
+		msg := string(resp.Payload[12 : 12+int(errLen)])
+		if msg == raft.ErrNotLeader.Error() {
+			return 0, raft.ErrNotLeader
+		}
+		return 0, fmt.Errorf("forwardPropose: leader error: %s", msg)
 	}
 	return index, nil
 }

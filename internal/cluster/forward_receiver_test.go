@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -94,6 +95,23 @@ func TestForwardReceiver_NonLeaderVoter_ReturnsHint(t *testing.T) {
 	status := fr.Status()
 	require.True(t, status == raftpb.ForwardStatusOK || status == raftpb.ForwardStatusNotVoter || status == raftpb.ForwardStatusNotLeader,
 		"expected OK/NotVoter/NotLeader, got %v", status)
+}
+
+func TestForwardReceiver_HandleGroupPropose_DispatchesToGroupBackend(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	reply := rcv.HandleGroupPropose(&transport.Message{
+		Type:    transport.StreamDataGroupProposeForward,
+		Payload: encodeGroupForwardPayload("group-1", []byte("propose-bytes")),
+	})
+
+	require.NotNil(t, reply)
+	require.Len(t, reply.Payload, 12)
+	require.Greater(t, binary.BigEndian.Uint64(reply.Payload[0:8]), uint64(0))
+	require.Zero(t, binary.BigEndian.Uint32(reply.Payload[8:12]))
 }
 
 func TestForwardReceiver_HandlePutObject_CommitsObjectIndex(t *testing.T) {

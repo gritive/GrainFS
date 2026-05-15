@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"sync/atomic"
@@ -68,8 +69,38 @@ func (r *ForwardReceiver) requireObjectIndexProposer(bucket, key string) (object
 // The 0x08 stream type is used for intra-cluster forwarding of bucket-scoped operations.
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 	shardSvc.RegisterHandler(transport.StreamProposeGroupForward, r.Handle)
+	shardSvc.RegisterHandler(transport.StreamDataGroupProposeForward, r.HandleGroupPropose)
 	shardSvc.RegisterBodyHandler(transport.StreamGroupForwardBody, r.HandleBody)
 	shardSvc.RegisterReadHandler(transport.StreamGroupForwardRead, r.HandleRead)
+}
+
+// HandleGroupPropose forwards a raw DistributedBackend metadata command to the
+// matching local data-group raft node.
+func (r *ForwardReceiver) HandleGroupPropose(req *transport.Message) *transport.Message {
+	groupID, data, err := decodeGroupForwardPayload(req.Payload)
+	if err != nil {
+		return groupProposeReply(0, err)
+	}
+	dg := r.groups.Get(groupID)
+	if dg == nil || dg.Backend() == nil || dg.Backend().Node() == nil {
+		return groupProposeReply(0, errors.New("group propose: not voter"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	idx, err := dg.Backend().Node().ProposeWait(ctx, data)
+	return groupProposeReply(idx, err)
+}
+
+func groupProposeReply(index uint64, err error) *transport.Message {
+	resp := make([]byte, 12)
+	if err != nil {
+		errBytes := []byte(err.Error())
+		binary.BigEndian.PutUint32(resp[8:12], uint32(len(errBytes)))
+		resp = append(resp, errBytes...)
+	} else {
+		binary.BigEndian.PutUint64(resp[0:8], index)
+	}
+	return &transport.Message{Type: transport.StreamDataGroupProposeForward, Payload: resp}
 }
 
 // Handle implements transport.Handler for 0x08 stream.

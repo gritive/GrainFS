@@ -1073,7 +1073,7 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveObjectWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
