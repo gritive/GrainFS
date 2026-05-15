@@ -112,14 +112,11 @@ func TestE2E_ECScrubTrigger_FlowsThroughCluster(t *testing.T) {
 		sessionID, info["bucket"], info["scope"], info["status"],
 		info["checked"], info["detected"], info["repaired"], info["partial"])
 
-	// Trigger reached the aggregator (status=done returned, no decode error).
-	// Counters being zero is acceptable here — the resolver may have routed
-	// the bucket to a peer whose scrub finished before our 5s aggregation
-	// window, or the bucket has no EC objects yet (PUT may have placed
-	// non-EC blobs depending on cluster size + ECConfig.IsActive).
-	// Repair-on-corrupt-shard coverage lives in cluster_scrubber_test.go.
+	checked, ok := info["checked"].(float64)
+	require.True(t, ok, "checked must decode as a JSON number")
 	require.Equal(t, "done", info["status"], "session must reach done")
 	require.Equal(t, "ec-test", info["bucket"], "bucket field must round-trip")
+	require.Greater(t, checked, float64(0), "EC resolver and aggregation path must report checked objects")
 }
 
 // TestE2E_ECScrubTrigger_DedupHit_ReturnsExistingSession verifies the

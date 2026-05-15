@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultMailboxCapacity = 16
+	defaultMailboxCapacity = 64
 	defaultJobTimeout      = 30 * time.Second
 	defaultMaxAttempts     = 1
 	defaultRetryBackoff    = 10 * time.Millisecond

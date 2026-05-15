@@ -123,6 +123,13 @@ func TestClusterExecutorExecutesAcceptedScrubJob(t *testing.T) {
 	requireQueueDepthEventually(t, metrics, 0)
 }
 
+func TestClusterExecutorDefaultMailboxCapacityMatchesProductionPlan(t *testing.T) {
+	exec := NewExecutor(newFakeScrubBackend())
+	t.Cleanup(func() { require.NoError(t, exec.Close(context.Background())) })
+
+	require.Equal(t, 64, cap(exec.mailbox))
+}
+
 func TestClusterExecutorRejectsInvalidPlanBeforeAdmission(t *testing.T) {
 	backend := newFakeScrubBackend()
 	metrics := newFakeMetrics()
