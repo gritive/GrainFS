@@ -325,6 +325,26 @@ func TestForwardSender_ResolveLeaderPeers_TreatsNoSuchKeyAsLeader(t *testing.T) 
 	require.Equal(t, []string{"peer-A", "peer-B"}, peers)
 }
 
+func TestForwardSender_ResolveLeaderPeers_UsesCachedLeader(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		if peer == "peer-A" {
+			return notLeaderReplyBytes(t, "peer-B"), nil
+		}
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(dialer)
+
+	peers := s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-C"}, "group-1", "b", "k1")
+	require.Equal(t, []string{"peer-B", "peer-A", "peer-C"}, peers)
+	require.Equal(t, []string{"peer-A", "peer-B"}, connected)
+
+	peers = s.ResolveLeaderPeers(context.Background(), []string{"peer-A", "peer-C"}, "group-1", "b", "k2")
+	require.Equal(t, []string{"peer-B", "peer-A", "peer-C"}, peers)
+	require.Equal(t, []string{"peer-A", "peer-B"}, connected, "second resolve should use cached leader without probing")
+}
+
 func TestForwardSender_SendStream_NotLeaderWithoutRewindDoesNotRetryBody(t *testing.T) {
 	calls := 0
 	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {

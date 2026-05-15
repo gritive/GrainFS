@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -331,6 +332,10 @@ func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
 func TestMetaRaft_ProposeObjectIndex_CommitToFSM(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
+	tracePath := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", tracePath)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
 
 	require.NoError(t, m.Bootstrap())
 	require.NoError(t, m.Start(context.Background()))
@@ -347,13 +352,25 @@ func TestMetaRaft_ProposeObjectIndex_CommitToFSM(t *testing.T) {
 		ECParity:         1,
 		NodeIDs:          []string{"n1", "n2", "n3"},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "b",
+		Key:         "k",
+		GroupID:     "group-2",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	require.NoError(t, m.ProposeObjectIndex(ctx, entry, false))
 
 	got, ok := m.FSM().ObjectIndexLatest("b", "k")
 	require.True(t, ok)
 	require.Equal(t, entry, got)
+	events := readPutTraceEvents(t, tracePath)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexEncode)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexLocalPropose)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexLocalApply)
 }
 
 func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {

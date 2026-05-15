@@ -17,6 +17,11 @@ Tune the matrix with:
 PUT_SMALL_KB=64 PUT_LARGE_KB=8192 PUT_MATRIX_ITERATIONS=25 PUT_MATRIX=1 make bench-cluster
 ```
 
+The matrix warms each port and object-size path before measurement by default,
+then clears PUT traces so the report excludes warmup traffic. Disable that with
+`PUT_MATRIX_WARMUP=0`, or tune it with `PUT_MATRIX_WARMUP_ITERATIONS` and
+`PUT_MATRIX_WARMUP_ROUNDS`.
+
 Set `PUT_TRACE=1` with the matrix to write per-node PUT trace JSONL files under
 the benchmark temp directory and print a dominant-stage report:
 

@@ -41,6 +41,18 @@ func TestOperationsPutObjectWithResultContinuesWhenPreviousMissing(t *testing.T)
 	require.Equal(t, []string{"head:b/k", "put:b/k:text/plain:new"}, backend.calls)
 }
 
+func TestOperationsPutObjectWithResultUsesBackendNativeResult(t *testing.T) {
+	backend := &nativeMutationResultBackend{}
+	ops := NewOperations(backend)
+
+	result, err := ops.PutObjectWithResult(context.Background(), "b", "k", strings.NewReader("new"), "text/plain")
+
+	require.NoError(t, err)
+	require.Equal(t, "native", result.Object.ETag)
+	require.Equal(t, PreviousObject{Exists: true, Size: 7, ETag: "old", VersionID: "v1"}, result.Previous)
+	require.Equal(t, []string{"native:b/k:text/plain:new"}, backend.calls)
+}
+
 func TestOperationsPutObjectWithResultFailsBeforeMutationWhenPreviousReadFails(t *testing.T) {
 	readErr := errors.New("head failed")
 	backend := &mutationResultBackend{previousErr: readErr}
@@ -239,4 +251,27 @@ func (b *mutationResultBackend) CompleteMultipartUpload(
 func (b *mutationResultBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	b.calls = append(b.calls, "delete-marker:"+bucket+"/"+key)
 	return b.markerID, nil
+}
+
+type nativeMutationResultBackend struct {
+	basicBackend
+	calls []string
+}
+
+func (b *nativeMutationResultBackend) PutObjectWithUserMetadataResult(
+	_ context.Context,
+	bucket, key string,
+	r io.Reader,
+	contentType string,
+	_ map[string]string,
+) (*PutObjectResult, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	b.calls = append(b.calls, "native:"+bucket+"/"+key+":"+contentType+":"+string(data))
+	return &PutObjectResult{
+		Object:   ObjectFacts{Size: int64(len(data)), ETag: "native", VersionID: "v2"},
+		Previous: PreviousObject{Exists: true, Size: 7, ETag: "old", VersionID: "v1"},
+	}, nil
 }

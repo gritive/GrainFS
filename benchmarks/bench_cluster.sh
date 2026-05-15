@@ -19,6 +19,9 @@
 #   PUT_SMALL_KB  — PUT 매트릭스 small 오브젝트 크기 KB (기본: 64)
 #   PUT_LARGE_KB  — PUT 매트릭스 large 오브젝트 크기 KB (기본: 8192)
 #   PUT_MATRIX_ITERATIONS — PUT 매트릭스 셀별 반복 횟수 (기본: 25)
+#   PUT_MATRIX_WARMUP — PUT 매트릭스 측정 전 리더 경로 예열 여부 (기본: 1)
+#   PUT_MATRIX_WARMUP_ITERATIONS — PUT 매트릭스 예열 셀별 반복 횟수 (기본: 3)
+#   PUT_MATRIX_WARMUP_ROUNDS — PUT 매트릭스 예열 최대 라운드 수 (기본: 5)
 #
 # 3노드 포트 배치:
 #   노드1: S3=9100  Raft=19100
@@ -51,6 +54,9 @@ PUT_MATRIX="${PUT_MATRIX:-0}"
 PUT_SMALL_KB="${PUT_SMALL_KB:-64}"
 PUT_LARGE_KB="${PUT_LARGE_KB:-8192}"
 PUT_MATRIX_ITERATIONS="${PUT_MATRIX_ITERATIONS:-25}"
+PUT_MATRIX_WARMUP="${PUT_MATRIX_WARMUP:-1}"
+PUT_MATRIX_WARMUP_ITERATIONS="${PUT_MATRIX_WARMUP_ITERATIONS:-3}"
+PUT_MATRIX_WARMUP_ROUNDS="${PUT_MATRIX_WARMUP_ROUNDS:-5}"
 
 # ── 의존성 확인 ────────────────────────────────────────────────────────────────
 bench_require_command "$K6" "brew install k6"
@@ -210,6 +216,8 @@ if [[ "$PUT_MATRIX" == "1" ]]; then
     local cell="$1"
     local port="$2"
     local size_kb="$3"
+    local iterations="${4:-$PUT_MATRIX_ITERATIONS}"
+    local warmup="${5:-0}"
     "$K6" run "$MATRIX_SCRIPT" \
       --env BASE_URL="http://127.0.0.1:${port}" \
       --env BUCKET="bench" \
@@ -217,9 +225,49 @@ if [[ "$PUT_MATRIX" == "1" ]]; then
       --env SECRET_KEY="$SECRET_KEY" \
       --env OBJECT_SIZE_KB="$size_kb" \
       --env MATRIX_CELL="$cell" \
-      --env ITERATIONS="$PUT_MATRIX_ITERATIONS" \
+      --env ITERATIONS="$iterations" \
+      --env WARMUP="$warmup" \
       --env VUS="1"
   }
+
+  reset_put_traces() {
+    [[ "$PUT_TRACE" == "1" ]] || return 0
+    local trace
+    for trace in "$BENCH_DIR"/n*/put-trace.jsonl; do
+      [[ -e "$trace" ]] && : >"$trace"
+    done
+  }
+
+  run_put_matrix_warmup() {
+    [[ "$PUT_MATRIX_WARMUP" == "1" ]] || return 0
+
+    local round retry_count
+    for round in $(seq 1 "$PUT_MATRIX_WARMUP_ROUNDS"); do
+      reset_put_traces
+      echo "[bench] PUT matrix warmup round ${round}/${PUT_MATRIX_WARMUP_ROUNDS}"
+      for port in 9100 9101 9102; do
+        run_put_matrix_cell "warmup-port${port}-small" "$port" "$PUT_SMALL_KB" "$PUT_MATRIX_WARMUP_ITERATIONS" 1
+        run_put_matrix_cell "warmup-port${port}-large" "$port" "$PUT_LARGE_KB" "$PUT_MATRIX_WARMUP_ITERATIONS" 1
+      done
+
+      if [[ "$PUT_TRACE" != "1" ]]; then
+        break
+      fi
+
+      retry_count=$({ grep -h '"stage":"forward_not_leader_retry"' "$BENCH_DIR"/n*/put-trace.jsonl 2>/dev/null || true; } | wc -l | tr -d ' ')
+      if [[ "$retry_count" == "0" ]]; then
+        echo "[bench] PUT matrix warmup stable"
+        reset_put_traces
+        return 0
+      fi
+      echo "[bench] warmup saw ${retry_count} forwarding leader retries; waiting…"
+      sleep 0.5
+    done
+
+    reset_put_traces
+  }
+
+  run_put_matrix_warmup
 
   for port in 9100 9101 9102; do
     run_put_matrix_cell "port${port}-small" "$port" "$PUT_SMALL_KB"

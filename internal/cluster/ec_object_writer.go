@@ -14,6 +14,8 @@ import (
 )
 
 type ecObjectShardStore interface {
+	WriteLocalShard(bucket, key string, shardIdx int, data []byte) error
+	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error
 	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
@@ -124,11 +126,16 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 		}
 	}()
 
-	return w.writeShardReaders(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
 		if idx < 0 || idx >= len(shards) {
 			return nil, fmt.Errorf("ec memory shard %d out of range", idx)
 		}
 		return bytes.NewReader(shards[idx]), nil
+	}, func(idx int) (int64, error) {
+		if idx < 0 || idx >= len(shards) {
+			return 0, fmt.Errorf("ec memory shard %d out of range", idx)
+		}
+		return int64(len(shards[idx])), nil
 	}, "ec_memory")
 }
 
@@ -143,11 +150,16 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		ETag: hex.EncodeToString(h[:]),
 	}
 
-	return w.writeShardReaders(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
 		if idx < 0 || idx >= len(shards) {
 			return nil, fmt.Errorf("ec data shard %d out of range", idx)
 		}
 		return bytes.NewReader(shards[idx]), nil
+	}, func(idx int) (int64, error) {
+		if idx < 0 || idx >= len(shards) {
+			return 0, fmt.Errorf("ec data shard %d out of range", idx)
+		}
+		return int64(len(shards[idx])), nil
 	}, "ec")
 }
 
@@ -199,10 +211,32 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 				if err != nil {
 					return fmt.Errorf("open ec shard %d: %w", i, err)
 				}
-				werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
-				if closer, ok := body.(io.Closer); ok {
-					if closeErr := closer.Close(); werr == nil && closeErr != nil {
-						werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+				if shardSize != nil {
+					if size, sizeErr := shardSize(i); sizeErr == nil && size <= ecShardBufferedLimit {
+						var data []byte
+						data, werr = io.ReadAll(body)
+						if closer, ok := body.(io.Closer); ok {
+							if closeErr := closer.Close(); werr == nil && closeErr != nil {
+								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+							}
+						}
+						if werr == nil {
+							werr = w.shards.WriteLocalShardContext(gctx, plan.Bucket, shardKey, i, data)
+						}
+					} else {
+						werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+						if closer, ok := body.(io.Closer); ok {
+							if closeErr := closer.Close(); werr == nil && closeErr != nil {
+								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+							}
+						}
+					}
+				} else {
+					werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+					if closer, ok := body.(io.Closer); ok {
+						if closeErr := closer.Close(); werr == nil && closeErr != nil {
+							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
+						}
 					}
 				}
 				observePutStage("ec_write_shard", "local", shardStageStart)
@@ -309,24 +343,72 @@ func (w ecObjectWriter) writeRemoteShard(
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
+		openStart := time.Now()
 		body, err := openShard(shardIdx)
 		if err != nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteOpen, openStart, PutTraceStageFields{
+				ShardIndex:       shardIdx,
+				ShardTarget:      node,
+				ShardTargetClass: "remote",
+				Error:            err.Error(),
+			})
 			return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
 		}
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteOpen, openStart, PutTraceStageFields{
+			ShardIndex:       shardIdx,
+			ShardTarget:      node,
+			ShardTargetClass: "remote",
+		})
 
 		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
 		if shardSize != nil {
 			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
+				bufferStart := time.Now()
 				var data []byte
 				data, err = io.ReadAll(body)
 				if err == nil {
+					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
+						Bytes:            int64(len(data)),
+						ShardIndex:       shardIdx,
+						ShardTarget:      node,
+						ShardTargetClass: "remote",
+					})
+					rpcStart := time.Now()
 					err = w.shards.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
+					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
+						Bytes:            int64(len(data)),
+						ShardIndex:       shardIdx,
+						ShardTarget:      node,
+						ShardTargetClass: "remote",
+						Error:            putTraceErrorString(err),
+					})
+				} else {
+					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
+						ShardIndex:       shardIdx,
+						ShardTarget:      node,
+						ShardTargetClass: "remote",
+						Error:            err.Error(),
+					})
 				}
 			} else {
+				rpcStart := time.Now()
 				err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
+				ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
+					ShardIndex:       shardIdx,
+					ShardTarget:      node,
+					ShardTargetClass: "remote",
+					Error:            putTraceErrorString(err),
+				})
 			}
 		} else {
+			rpcStart := time.Now()
 			err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
+				ShardIndex:       shardIdx,
+				ShardTarget:      node,
+				ShardTargetClass: "remote",
+				Error:            putTraceErrorString(err),
+			})
 		}
 		if closer, ok := body.(io.Closer); ok {
 			if closeErr := closer.Close(); err == nil && closeErr != nil {

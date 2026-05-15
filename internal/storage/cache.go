@@ -231,6 +231,11 @@ func (cb *CachedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, 
 	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
 }
 
+func (cb *CachedBackend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error) {
+	cb.invalidate(bucket, key)
+	return NewOperations(cb.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+}
+
 func (cb *CachedBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
 	cb.invalidate(bucket, key)
 	return putObjectWithACLOnBackend(context.Background(), cb.Backend, bucket, key, r, contentType, acl)

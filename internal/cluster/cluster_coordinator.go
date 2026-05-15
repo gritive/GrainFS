@@ -279,6 +279,9 @@ func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket str
 	if storage.IsInternalBucket(bucket) || c.base == nil {
 		return nil
 	}
+	if c.bucketAssigned(bucket) {
+		return nil
+	}
 	err := c.base.HeadBucket(ctx, bucket)
 	if err == nil {
 		return nil
@@ -1137,7 +1140,10 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 		ForwardMode: PutTraceForwardFrame,
 	})
 	ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpPutObject, args)
+	resolveStart := time.Now()
+	peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+	ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
+	reply, err := c.forward.Send(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args)
 	if err != nil {
 		return nil, topologyForwardWriteError(group, err)
 	}
@@ -1149,6 +1155,86 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 		return nil, ErrForwardBodySizeMismatch
 	}
 	return obj, nil
+}
+
+func (c *ClusterCoordinator) PutObjectWithUserMetadataResult(
+	ctx context.Context,
+	bucket, key string,
+	r io.Reader,
+	contentType string,
+	userMetadata map[string]string,
+) (*storage.PutObjectResult, error) {
+	previous, err := c.previousObjectForMutation(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := c.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+	if err != nil {
+		return nil, err
+	}
+	facts, err := objectFactsForMutation("PutObject", obj)
+	if err != nil {
+		return nil, err
+	}
+	return &storage.PutObjectResult{Object: facts, Previous: previous}, nil
+}
+
+func (c *ClusterCoordinator) previousObjectForMutation(ctx context.Context, bucket, key string) (storage.PreviousObject, error) {
+	if !storage.IsInternalBucket(bucket) && c.indexWriter != nil {
+		if src := metaObjectIndexAdapter(c.meta); src != nil {
+			entry, ok := src.ObjectIndexLatest(bucket, key)
+			if !ok || entry.IsDeleteMarker {
+				return storage.PreviousObject{}, nil
+			}
+			return storage.PreviousObject{
+				Exists:    true,
+				Size:      entry.Size,
+				ETag:      entry.ETag,
+				VersionID: entry.VersionID,
+			}, nil
+		}
+	}
+	obj, err := c.HeadObject(ctx, bucket, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return storage.PreviousObject{}, nil
+		}
+		return storage.PreviousObject{}, err
+	}
+	return previousObjectFacts(obj)
+}
+
+func previousObjectFacts(obj *storage.Object) (storage.PreviousObject, error) {
+	if obj == nil {
+		return storage.PreviousObject{}, storage.InvalidMutationResultError{Op: "HeadObject", Field: "object", Reason: "nil object"}
+	}
+	if obj.Size < 0 {
+		return storage.PreviousObject{}, storage.InvalidMutationResultError{Op: "HeadObject", Field: "size", Reason: "negative size"}
+	}
+	return storage.PreviousObject{
+		Exists:    true,
+		Size:      obj.Size,
+		ETag:      obj.ETag,
+		VersionID: obj.VersionID,
+	}, nil
+}
+
+func objectFactsForMutation(op string, obj *storage.Object) (storage.ObjectFacts, error) {
+	if obj == nil {
+		return storage.ObjectFacts{}, storage.InvalidMutationResultError{Op: op, Field: "object", Reason: "nil object"}
+	}
+	if obj.Size < 0 {
+		return storage.ObjectFacts{}, storage.InvalidMutationResultError{Op: op, Field: "size", Reason: "negative size"}
+	}
+	if obj.ETag == "" {
+		return storage.ObjectFacts{}, storage.InvalidMutationResultError{Op: op, Field: "etag", Reason: "empty etag"}
+	}
+	return storage.ObjectFacts{
+		Size:         obj.Size,
+		ETag:         obj.ETag,
+		VersionID:    obj.VersionID,
+		LastModified: obj.LastModified,
+	}, nil
 }
 
 func (c *ClusterCoordinator) PutObjectWithACL(
