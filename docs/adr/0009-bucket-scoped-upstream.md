@@ -20,7 +20,7 @@ Two problems remained after PR #258:
 2. **Cluster-wide single endpoint.** Pull-through accepted one
    `(endpoint, access_key, secret_key)` tuple per cluster. Per-bucket
    migration sources couldn't be expressed; multi-source migrations
-   required running multiple GrainFS clusters or staging the migration
+   required running multiple `GrainFS` clusters or staging the migration
    sequentially.
 
 The user describes pull-through as a *migration tool*, not a permanent

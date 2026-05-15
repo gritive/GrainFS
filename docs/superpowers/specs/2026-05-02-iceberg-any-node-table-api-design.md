@@ -5,7 +5,7 @@ Status: approved design
 
 ## Goal
 
-Make the Iceberg REST Catalog metadata API work when clients call any GrainFS
+Make the Iceberg REST Catalog metadata API work when clients call any `GrainFS`
 node in a cluster. Reads and writes must be safe across leader and follower
 nodes without enabling node-local catalog state that can split-brain.
 
@@ -53,7 +53,7 @@ HTTP /iceberg/*
 
 This avoids a second Raft group and avoids leader-local Badger state. It also
 keeps existing object storage behavior unchanged: metadata JSON files are still
-written through the GrainFS backend and table pointer changes are committed
+written through the `GrainFS` backend and table pointer changes are committed
 through the catalog. Meta-Raft stores the current metadata pointer, not the
 metadata JSON body.
 
@@ -121,7 +121,7 @@ grow with table history and snapshots; putting it into meta-Raft would bloat the
 log and every `MetaFSM` snapshot. `LoadTable` returns metadata by reading the
 warehouse object referenced by `MetadataLocation`. `CommitTable` validates
 requirements against that object, writes the next metadata object through the
-GrainFS backend, and commits only the pointer CAS through meta-Raft.
+`GrainFS` backend, and commits only the pointer CAS through meta-Raft.
 
 All getters return defensive copies. Snapshot and restore include both maps so
 restart and follower replay preserve catalog pointer state.
@@ -244,7 +244,7 @@ needed for every read on every node.
 ## Metadata JSON Object Writes
 
 Table creation and commit still write Iceberg metadata JSON objects through the
-existing GrainFS backend before committing the table pointer.
+existing `GrainFS` backend before committing the table pointer.
 
 Cluster mode stores only `MetadataLocation` in meta-Raft. The current metadata
 JSON is read from the warehouse object when a handler needs to load a table or

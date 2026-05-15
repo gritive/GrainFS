@@ -4,7 +4,9 @@
 
 ## Problem Statement
 
-When S3 PUT creates an object, the NFS server's VFS stat/dir caches show stale data. We need a mechanism for S3 mutations to invalidate VFS caches.
+S3 PUT can create an object while the NFS server still holds stale VFS stat and
+directory cache entries. `GrainFS` needs an invalidation path from S3 mutations to
+VFS caches.
 
 ## Current Architecture
 

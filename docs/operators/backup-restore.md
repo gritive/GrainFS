@@ -1,8 +1,8 @@
-# GrainFS Backup and Restore Guide
+# `GrainFS` Backup and Restore Guide
 
 ## Overview
 
-GrainFS uses [restic](https://restic.net/) for backup and restore. Restic is a modern, secure, and deduplicated backup tool that supports multiple storage backends.
+`GrainFS` uses [restic](https://restic.net/) for backup and restore. Restic is a modern, secure, and deduplicated backup tool that supports multiple storage backends.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ restic version
 
 ### 1. Initialize Backup Repository
 
-First, initialize a restic repository where backups will be stored:
+First, initialize the restic repository that will store backups:
 
 **Local filesystem:**
 ```bash
@@ -216,11 +216,11 @@ restic stats --repo /backup/grainfs
 
 ### Scenario 1: Disk Failure
 
-**Symptoms:** GrainFS won't start, disk errors
+**Symptoms:** `GrainFS` won't start, disk errors
 
 **Recovery:**
 1. Replace failed disk
-2. Reinstall GrainFS
+2. Reinstall `GrainFS`
 3. Restore from backup:
    ```bash
    grainfs restore --repo /backup/grainfs --target /new/disk
@@ -232,7 +232,7 @@ restic stats --repo /backup/grainfs
 **Symptoms:** Objects return wrong data, errors in logs
 
 **Recovery:**
-1. Stop GrainFS
+1. Stop `GrainFS`
 2. Run diagnostics:
    ```bash
    grainfs doctor --data /grainfs/data
@@ -366,4 +366,4 @@ grainfs backup --repo /backup/grainfs --data /grainfs/data
 - [Restic Documentation](https://restic.readthedocs.io/)
 - [Restic Backup Strategies](https://restic.readthedocs.io/en/stable/080_examples.html)
 - [S3-Compatible Storage](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html#s3)
-- [GrainFS SLI/SLO](./SLI_SLO.md) - RTO/RPO definitions
+- [`GrainFS` SLI/SLO](./sli-slo.md) - RTO/RPO definitions

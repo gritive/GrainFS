@@ -1,23 +1,21 @@
-# GrainFS Production Deployment Runbook
+# `GrainFS` Production Deployment Runbook
 
 ## Overview
 
-This runbook documents the step-by-step procedure to deploy GrainFS to production. It has been validated through actual deployment drills.
-
-**Last validated:** [Date of drill execution]
-**Validated by:** [Who ran the drill]
-**Environment:** [Production/staging description]
+This runbook documents the step-by-step procedure to deploy `GrainFS` to production.
+Record drill dates, runners, and target environments in the deployment log for
+the cluster.
 
 ---
 
-## Admin UDS — Bootstrap & Permissions
+## Admin UDS Bootstrap And Permissions
 
 The admin Unix socket at `<data-dir>/admin.sock` is the **sole bootstrap path** for new
 clusters. It is also used by `grainfs cluster ...`, `grainfs iam ...` subcommands.
 
 ### Permissions
 
-The socket is created with mode `0660` (hard-fail on chmod failure). Operators in the
+`GrainFS` creates the socket with mode `0660` (hard-fail on chmod failure). Operators in the
 admin group can connect; others cannot.
 
 - Default: socket owned by the user running `grainfs serve`, group is the user's primary
@@ -58,7 +56,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 ### Infrastructure Readiness
 
 - [ ] **Server resources**: Minimum 4 CPU, 8GB RAM, 100GB disk
-- [ ] **Network connectivity**: Ports 9000 (S3 API), 9002 (NFS), [NBD port] accessible
+- [ ] **Network connectivity**: Ports 9000 (S3 API), 9002 (NFS), and the NBD port if enabled are accessible
 - [ ] **Disk mounting**: Data directory mounted on reliable storage (SSD recommended)
 - [ ] **Backup repository**: Restic repo initialized and accessible
 - [ ] **Monitoring**: Prometheus scraping configured and receiving data
@@ -69,8 +67,8 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
   ```bash
   export GRAINFS_DATA_DIR=/path/to/production/data
   export GRAINFS_PORT=9000
-  export GRAINFS_ACCESS_KEY=<from-secrets-manager>
-  export GRAINFS_SECRET_KEY=<from-secrets-manager>
+  export GRAINFS_ACCESS_KEY="$(secret-manager read grainfs/access-key)"
+  export GRAINFS_SECRET_KEY="$(secret-manager read grainfs/secret-key)"
   ```
 - [ ] **Cluster membership** (if applicable):
   ```bash
@@ -80,7 +78,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 - [ ] **Backup credentials**:
   ```bash
   export RESTIC_REPOSITORY=<backup-repo>
-  export RESTIC_PASSWORD=<from-secrets-manager>
+  export RESTIC_PASSWORD="$(secret-manager read grainfs/restic-password)"
   ```
 
 ### Safety Checks
@@ -210,7 +208,7 @@ Expected: Snapshot with tag `$TAG` appears in list
 
 ---
 
-### Step 2: Stop Existing GrainFS Process (if upgrading)
+### Step 2: Stop Existing `GrainFS` Process (if upgrading)
 
 ```bash
 # Find existing process
@@ -255,24 +253,25 @@ grainfs --version
 
 Expected: Version string matches expected deployment version
 
-**v0.0.106.0+ rolling upgrade gate (IAM bucket-scoped keys):** Scoped key 발급
-(`grainfs iam key create --bucket <name>`)은 모든 노드를 v0.0.106.0+ 로 올린
-뒤에만 수행하라. v0.0.105.0 이하 follower는 새 raft cmd `IAMKeyCreateScoped`
-(type 30) 를 unknown으로 graceful no-op 처리하고 warn 로그를 남긴다 — leader는
-성공 응답을 반환하지만 일부 follower 상태에 키가 반영되지 않아 leadership
-변경 시 키가 사라질 수 있다. Mixed-version window 동안에는 `--bucket` 플래그
-없이 발급되는 unrestricted 키만 안전하다.
+**v0.0.106.0+ rolling upgrade gate (IAM bucket-scoped keys):** Create scoped
+keys (`grainfs iam key create --bucket <name>`) only after every node runs
+v0.0.106.0 or newer. v0.0.105.0 and older followers treat the new Raft command
+`IAMKeyCreateScoped` (type 30) as an unknown graceful no-op and emit a warning.
+The leader returns success, but some followers may not store the key, so the key
+can disappear after a leadership change. During mixed-version windows, create
+only unrestricted keys without `--bucket`.
 
 ---
 
-### Step 4: Start GrainFS
+### Step 4: Start `GrainFS`
 
 `grainfs serve` no longer accepts `--access-key`/`--secret-key`. The first cluster
-operator runs the admin SA bootstrap (see "Admin UDS — Bootstrap & Permissions"
-above) immediately after the first node starts; the resulting `access_key`/
-`secret_key` are then used by **S3 clients** (e.g., `aws --endpoint-url`) and
-exported as `$GRAINFS_ACCESS_KEY`/`$GRAINFS_SECRET_KEY` for the rest of this
-runbook's `aws` examples.
+operator runs the admin SA bootstrap (see "Admin UDS Bootstrap And Permissions"
+above) immediately after the first node starts. S3 clients, such as
+`aws --endpoint-url`, then use the resulting `access_key` and `secret_key`;
+`GrainFS` stores only the HMAC hash. Export those credentials as
+`$GRAINFS_ACCESS_KEY` and `$GRAINFS_SECRET_KEY` for the rest of this runbook's
+`aws` examples.
 
 **Local mode:**
 ```bash
@@ -304,14 +303,28 @@ grainfs serve \
 
 ### Optional: Pull-through cache for migration (v0.0.123.0+)
 
-> **Rolling-upgrade ordering:** `bucket-upstream` records propagate via a new MetaCmdType (IDs 32/33) introduced in v0.0.123.0. While a cluster is mid-upgrade — some nodes still on v0.0.122 or earlier — DO NOT issue `grainfs bucket upstream put/delete` commands. Pre-v0.0.123 followers will silently no-op the raft entry on apply (rolling-upgrade safety design). The records are recovered correctly via snapshot replay on next snapshot install, but during the apply gap the follower's view is inconsistent. Wait until every node reports v0.0.123.0+ before configuring bucket upstreams. The CLI/admin path was relocated in v0.0.133.0 (see ADR 0010); FSM/snapshot format is unchanged so v0.0.122 ↔ v0.0.133 raft compatibility is preserved.
+> **Rolling-upgrade ordering:** `bucket-upstream` records propagate via
+> MetaCmdType IDs 32 and 33, introduced in v0.0.123.0. During a mixed-version
+> upgrade, do not issue `grainfs bucket upstream put/delete` while any node still
+> runs v0.0.122 or earlier. Older followers ignore the Raft entry during apply.
+> Snapshot replay restores the records on the next snapshot install, but the
+> follower view remains inconsistent during the apply gap. Wait until every node
+> reports v0.0.123.0 or newer before configuring bucket upstreams. v0.0.133.0
+> moved the CLI and admin path; FSM and snapshot formats did not change, so
+> v0.0.122 through v0.0.133 retain Raft compatibility.
 
-> **Unknown MetaCmd alert:** `grainfs_unknown_metacmd_total{type}` increments when a node ignores a raft metadata command it does not recognize or handle. Treat `GrainFSUnknownMetaCmdIgnored` as a version-skew or implementation-gap warning: confirm every node's version, pause use of the newly introduced feature, and finish the rolling upgrade before relying on state from that MetaCmd. Transport capability-exchange rejections are tracked separately by `grainfs_transport_ce_total{role,outcome,reason}`.
+> **Unknown MetaCmd alert:** `grainfs_unknown_metacmd_total{type}` increments
+> when a node ignores a Raft metadata command it does not recognize or handle.
+> Treat `GrainFSUnknownMetaCmdIgnored` as a version-skew or implementation-gap
+> warning: confirm every node's version, pause use of the new feature, and
+> finish the rolling upgrade before relying on state from that MetaCmd. `GrainFS`
+> tracks transport capability-exchange rejections separately with
+> `grainfs_transport_ce_total{role,outcome,reason}`.
 
 > **Capability gate rejection:** `grainfs_capability_reject_total{capability,scope,severity,operation,forced}` increments when an admin/API path tries to use a feature that not every required Raft member can apply. For hard persisted features, do not force the operation. Finish the rolling upgrade, confirm every required node advertises the capability, then retry. Admin UDS errors include missing/stale node IDs; public data-plane errors intentionally do not expose node topology.
 
 If migrating from another S3-compatible source, register the upstream per
-bucket via the admin UDS. The `--upstream*` cmdline flags were removed in
+bucket via the admin UDS. `GrainFS` removed the `--upstream*` cmdline flags in
 v0.0.123.0; the IAM-managed approach replaces them.
 
 ```bash
@@ -330,8 +343,8 @@ grainfs bucket upstream delete legacy-data --endpoint /grainfs/data/admin.sock
 Pull-through is read-only and on-miss only: the first GET on a missing
 object proxies upstream and stores locally; subsequent GETs hit local
 cache. Migration "completion" semantics (cutover, progress) are not yet
-implemented — track via your own counters from the upstream side. See
-ADR 0009 for the deferred work.
+implemented. Track migration progress from the upstream side until `GrainFS` has
+first-class cutover and progress reporting.
 
 ---
 
@@ -428,15 +441,22 @@ grainfs serve \
 
 ### Evicting a permanently-dead node
 
-When a cluster node fails irrecoverably (hardware loss, corrupted disk past recovery), remove it from the meta-Raft voter set so quorum math reflects the surviving members. Run **on the leader node** — the endpoint is the admin Unix socket (mode 0660 + admin-group) at `<data-dir>/admin.sock`.
+If a cluster node fails past recovery, remove it from the meta-Raft voter set so
+quorum math reflects the surviving members. Run the command **on the leader
+node**. Use the admin Unix socket at `<data-dir>/admin.sock`; `GrainFS` creates it
+with mode 0660 plus the admin group.
 
-The examples below assume the socket path is exported once for the procedure:
+Export the socket path once for the procedure:
 
 ```bash
 export ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
 ```
 
-1. Identify the dead voter. `cluster peers` lists the current metaRaft voter set; cross-reference with `cluster status` (or the operator's external monitoring) to identify which one is the dead node. Normal rows use node IDs. Legacy raft-address rows that cannot be resolved are shown as `unresolved_legacy` so operators can still see the row that blocks membership mutation:
+1. Identify the dead voter. `cluster peers` lists the current metaRaft voter
+   set; cross-reference it with `cluster status` or external monitoring. Normal
+   rows use node IDs. `GrainFS` shows unresolved legacy raft-address rows as
+   `unresolved_legacy` so operators can still see the row that blocks membership
+   mutation:
 
    ```bash
    grainfs cluster --endpoint $ENDPOINT peers
@@ -447,28 +467,40 @@ export ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
    grainfs cluster --endpoint $ENDPOINT status --format json   # includes peer_snapshot
    ```
 
-2. Pre-flight check is automatic. The server uses the peer snapshot membership-mutation policy: `self` and rows with fresh successful metaRaft AppendEntries evidence count as `live`, while `configured` rows are treated as unknown. Failed heartbeats alone do not make a peer display-down for this policy. If removal would drop the post-removal voter count below quorum, or another unresolved legacy row makes identity ambiguous, the command refuses unless `--force`:
+2. The server runs pre-flight checks automatically. The peer snapshot
+   membership-mutation policy counts `self` and rows with fresh successful
+   metaRaft AppendEntries evidence as `live`; it treats `configured` rows as
+   unknown. Failed heartbeats alone do not mark a peer display-down for this
+   policy. If removal would drop the post-removal voter count below quorum, or
+   another unresolved legacy row makes identity ambiguous, the command refuses
+   unless `--force`:
 
    ```bash
    grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --yes
    ```
 
-3. Verify the voter set shrank and an audit event was recorded:
+3. Verify that the voter set shrank and `GrainFS` recorded an audit event:
 
    ```bash
    grainfs cluster --endpoint $ENDPOINT peers
    grainfs cluster --endpoint $ENDPOINT events --type cluster-remove-peer --since 1h
    ```
 
-**`--force` semantics**: bypasses pre-flight only — does not bypass the engine. Use when the operator has independently confirmed the peer is permanently lost and the joint-consensus commit can still progress (e.g., 3-of-5 alive removing 1 dead). For clusters that have already lost quorum, `recover cluster` (offline snapshot recovery) is the right tool, not `remove-peer --force`.
+**`--force` semantics**: bypasses pre-flight only. It does not bypass the
+engine. Use it when the operator has confirmed the peer is permanently lost and
+the joint-consensus commit can still progress, such as 3-of-5 alive while
+removing 1 dead voter. For clusters that have lost quorum, use `recover cluster`
+(offline snapshot recovery) instead of `remove-peer --force`.
 
-**Removing the leader**: safe — the engine commits the joint Cnew, then the leader steps down via commit-time wakeup and a new leader is elected from the remaining voters. Operator does not need a separate `transfer-leader` step.
+**Removing the leader**: the engine commits the joint Cnew, then the leader
+steps down via commit-time wakeup. The remaining voters elect a new leader. The
+operator does not need a separate `transfer-leader` step.
 
 ---
 
 ## NFSv4 Conformance Testing
 
-GrainFS tracks NFSv4.1 RFC 8881 attribute coverage in `docs/nfsv4-compliance.md`. Update the matrix in the same PR as any NFS attribute behavior change.
+`GrainFS` tracks NFSv4 RFC 8881 attribute behavior in `docs/reference/nfsv4-attribute-audit.md`. Update the audit in the same PR as any NFS attribute behavior change.
 
 The external pynfs suite is advisory and non-blocking:
 
@@ -476,7 +508,7 @@ The external pynfs suite is advisory and non-blocking:
 make test-pynfs-colima
 ```
 
-The runner clones the pinned upstream pynfs commit, starts a local GrainFS server, creates a test bucket/export, and writes results to `tests/conformance/results/summary.json` plus a timestamped log. Failures should be copied into `TODOS.md` follow-ups; they do not block ordinary PRs unless a PR explicitly changes NFS protocol behavior.
+The runner clones the pinned upstream pynfs commit, starts a local `GrainFS` server, creates a test bucket/export, and writes results to `tests/conformance/results/summary.json` plus a timestamped log. Failures should be copied into `TODOS.md` follow-ups; they do not block ordinary PRs unless a PR explicitly changes NFS protocol behavior.
 
 ---
 
@@ -491,7 +523,7 @@ Ensure alerts from `alerts/prometheus/rules.yml` are configured:
 curl http://prometheus:9090/api/v1/rules | grep grainfs
 ```
 
-Expected: GrainFS alert rules appear in output
+Expected: `GrainFS` alert rules appear in output
 
 ### Log Aggregation
 
@@ -507,7 +539,7 @@ systemctl restart rsyslog
 
 ## Common Issues and Fixes
 
-### Issue: GrainFS won't start
+### Issue: `GrainFS` won't start
 
 **Symptoms:** Process exits immediately, "address already in use"
 
@@ -538,7 +570,7 @@ ps aux | grep grainfs
 **Fix:**
 - Increase server memory
 - Reduce cache size (if configurable)
-- Restart GrainFS
+- Restart `GrainFS`
 
 ### Issue: Slow API response
 
@@ -717,112 +749,116 @@ grainfs backup \
 
 Update deployment log:
 
-```markdown
-## Deployment Log - YYYY-MM-DD
-
-**Deployed by:** [Name]
-**Version:** [GrainFS version]
-**Pre-deploy backup:** [snapshot ID]
-**Post-deploy backup:** [snapshot ID]
-**Verification:** All checks passed
-**Issues:** None
-```
+Record the deployment date, operator, `GrainFS` version, pre-deploy backup ID,
+post-deploy backup ID, verification result, and any issues found.
 
 ---
 
 ## Validation Status
 
-This runbook has been validated through [N] deployment drills. See `docs/DRILL_MANUAL.md` for drill procedures and results.
+Track deployment drills in the deployment log. See `docs/operators/drill-manual.md`
+for drill procedures and result fields.
 
 ---
 
 ## Cluster Key Rotation
 
-`--cluster-key`는 클러스터 TLS identity (cert + SPKI)를 결정론적으로 도출하는 PSK이다.
-다른 키 → 다른 클러스터 identity. 옛 키를 가진 노드는 새 키 노드와 인증 실패한다.
+`--cluster-key` is the PSK used to derive the cluster TLS
+identity (certificate and SPKI). A different key creates a different cluster
+identity; nodes that keep the old key fail authentication against nodes that use
+the new key.
 
-**v0.0.39 부터 무중단(rolling) rotation 지원.** S3/NFS/NBD downtime 없이 PSK를
-교체할 수 있다. CLI는 meta-raft leader의 localhost-only Unix socket
-(`$DATA/rotate.sock`, mode 0600)을 통해 명령을 전송한다.
+**v0.0.39 and newer support online rolling rotation.** The PSK can be replaced
+without S3, NFS, or NBD downtime. The CLI sends rotation commands through the
+meta-Raft leader's localhost-only Unix socket (`$DATA/rotate.sock`, mode 0600).
 
-### Online rotation (권장)
+### Online rotation (recommended)
 
-전제: 모든 노드가 v0.0.39+ 이며 정상 작동 중. Leader 식별:
+Prerequisite: every node runs v0.0.39 or newer and is healthy. Identify the
+leader with:
 `grainfs cluster --endpoint <data-dir>/admin.sock status`.
 
-> ⚠ **다중 노드 클러스터 필수 절차**: 회전은 모든 peer가 새 PSK를 자신의
-> `keys.d/next.key`로 가지고 있을 때만 정상 동작한다. CLI는 leader의 디스크에만
-> 키를 쓰므로, 절차 1~2 단계에서 **반드시 모든 peer에게 같은 PSK 파일을 미리
-> 배포해야 한다**. 미배포 시 leader는 phase를 자동 진행하지만 follower 워커들은
-> ENOENT로 실패하고 transport identity 전환이 일어나지 않아 cluster network
-> split 발생. (Plan C ack 모델: raft commit이 묵시적 ack — peer 적용 실패는
-> leader가 감지하지 못함.)
+> **Required for multi-node clusters:** rotation works correctly only when every
+> peer already has the new PSK in its own `keys.d/next.key`. The CLI writes the
+> key only to the leader's disk, so steps 1 and 2 must pre-distribute the same
+> PSK file to every peer. If a peer is missing the file, the leader still
+> advances phases, but follower workers fail with ENOENT and do not switch their
+> transport identity. That can split cluster networking. Under the Plan C ack
+> model, Raft commit is the implicit ack; the leader does not detect per-peer
+> apply failures.
 
-1. **새 키 생성**:
+1. **Generate a new key**:
    ```
    openssl rand -hex 32 > /tmp/grainfs-new-psk  # 32-byte PSK = 64 hex chars
    ```
 
-2. **모든 peer 노드에 새 PSK 배포** (leader 포함):
+2. **Distribute the new PSK to every peer node, including the leader**:
    ```bash
-   # 각 peer에 대해 — secure channel (ssh / ansible / vault) 사용
+   # For each peer, use a secure channel such as SSH, Ansible, or Vault.
    for HOST in node1 node2 node3; do
      ssh "$HOST" "umask 077 && mkdir -p /path/to/data/keys.d && cat > /path/to/data/keys.d/next.key" < /tmp/grainfs-new-psk
      ssh "$HOST" "chmod 600 /path/to/data/keys.d/next.key"
    done
    ```
-   각 노드의 `<DATA>/keys.d/next.key` 파일에 동일한 64자 hex PSK가 쓰여 있어야
-   함. 파일 내용은 hex 문자열 + 줄바꿈. 권한 0600.
+   Every node must have the same 64-character hex PSK in
+   `<DATA>/keys.d/next.key`. The file content is the hex string followed by a
+   newline. File mode must be 0600.
 
-3. **Leader 노드에서 회전 시작**:
+3. **Start rotation on the leader node**:
    ```
-   # leader의 keys.d/next.key는 이미 있어야 함 — 없으면 CLI가 자동으로 생성
+   # The leader's keys.d/next.key should already exist; otherwise the CLI creates it.
    ./grainfs cluster rotate-key begin --new-key=$(cat /tmp/grainfs-new-psk) --endpoint=/path/to/data/rotate.sock
    ```
-   출력에 `rotation_id`, `OLD SPKI`, `NEW SPKI` 표시. CLI는 즉시 반환되며
-   클러스터가 background에서 자동으로 phase 1→2→3→steady 진행.
+   The output includes `rotation_id`, `OLD SPKI`, and `NEW SPKI`. The CLI
+   returns after submitting the request; the cluster advances in the background
+   through phases 1, 2, 3, and then steady state.
 
-   **회전 중 follower의 `next.key`가 없거나 SPKI 불일치이면 해당 follower는
-   transport를 swap하지 못한다.** 다른 노드와 통신 단절. 즉시 `abort` 수행 후
-   2단계 재배포.
+   **If a follower is missing `next.key` or has an SPKI mismatch during rotation,
+   that follower cannot swap transport identity.** It loses connectivity to the
+   other nodes. Abort immediately, then repeat step 2.
 
-3. **진행 상황 모니터링**:
+4. **Monitor progress**:
    ```
    ./grainfs cluster rotate-key status --endpoint=/path/to/data/rotate.sock
    ```
-   - phase=2 (begun): accept set에 NEW 추가, 여전히 OLD 제시
-   - phase=3 (switched): 활성 cert를 NEW로 전환, OLD는 accept 유지
-   - phase=1 (steady): NEW가 활성, OLD는 `keys.d/previous.key` 보관
+   - phase=2 (begun): workers add NEW to the accept set, while nodes still present OLD.
+   - phase=3 (switched): nodes present NEW, while workers still accept OLD.
+   - phase=1 (steady): nodes present NEW, and `GrainFS` keeps OLD in `keys.d/previous.key`.
 
-   각 phase 사이 5초 grace로 워커가 디스크 I/O + transport identity swap
-   완료. 정상 진행 시 ~10–15초 내 완료.
+   A five-second grace period between phases gives workers time to complete disk
+   I/O and swap transport identity. A healthy rotation usually finishes in about
+   10 to 15 seconds.
 
-4. **모든 노드의 영구 설정에 새 키 반영** — 다음 재시작 시에도 새 키가
-   유지되도록 환경변수, 시스템d 유닛, `--cluster-key` 플래그를 업데이트한다.
-   디스크의 `keys.d/current.key`는 회전 직후 자동으로 NEW로 갱신되므로 플래그 없이
-   재시작해도 회전 후 NEW를 사용한다 (D10 — disk wins).
+5. **Update persistent configuration on every node** so the new key survives the
+   next restart. Update environment variables, systemd units, or the
+   `--cluster-key` flag as applicable. `GrainFS` updates `keys.d/current.key` to
+   NEW after rotation, so a restart without a flag uses the rotated NEW key
+   (D10: disk wins).
 
-5. **검증**: `grainfs cluster --endpoint <data-dir>/admin.sock status` 로 모든
-   peer 정상, `grainfs cluster rotate-key status --endpoint <data-dir>/rotate.sock`
-   으로 phase=1 (steady) 확인.
+6. **Verify**: use `grainfs cluster --endpoint <data-dir>/admin.sock status` to
+   confirm all peers are healthy, then use
+   `grainfs cluster rotate-key status --endpoint <data-dir>/rotate.sock` to
+   confirm `phase=1` (steady).
 
-### 회전 중 실패 처리
+### Failure handling during rotation
 
-- **운영자 취소**:
+- **Operator abort**:
   ```
-  ./grainfs cluster rotate-key abort --reason=<설명> --endpoint=/path/to/data/rotate.sock
+  ./grainfs cluster rotate-key abort --reason=<reason> --endpoint=/path/to/data/rotate.sock
   ```
-  - phase 2에서 abort: OLD로 롤백 (NEW 폐기)
-  - phase 3에서 abort: NEW로 forward-roll (일부 peer가 이미 NEW를 제시 중이라
-    revert가 안전하지 않음 — D18)
+  - Abort in phase 2: roll back to OLD and discard NEW.
+  - Abort in phase 3: forward-roll to NEW because some peers may already present
+    NEW, making revert unsafe (D18).
 
-- **Global timeout**: 회전이 30분을 초과하면 leader가 자동으로 abort 발행.
+- **Global timeout**: if rotation exceeds 30 minutes, the leader automatically
+  issues an abort.
 
-- **Down peer**: 한 노드가 회전 중 응답하지 않으면 raft commit 자체가 진행되지
-  않아 phase가 멈춘다. 해당 노드를 복구하거나 클러스터에서 제거한 뒤 재개.
+- **Down peer**: if a node stops responding during rotation, Raft commit does
+  not progress and the phase stalls. Recover the node or remove it from the
+  cluster, then resume.
 
-### Offline fallback (모든 노드가 v0.0.39 미만일 때)
+### Offline fallback (all nodes older than v0.0.39)
 
-1. 모든 노드 정지 (S3/NFS/NBD downtime 발생).
-2. 모든 노드를 새 `--cluster-key`로 재시작.
-3. `grainfs cluster --endpoint <data-dir>/admin.sock status`로 peer 재연결 확인.
+1. Stop every node. This causes S3, NFS, and NBD downtime.
+2. Restart every node with the new `--cluster-key`.
+3. Confirm peer reconnection with `grainfs cluster --endpoint <data-dir>/admin.sock status`.

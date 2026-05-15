@@ -1,7 +1,7 @@
 # Recover Cluster
 
 RecoverCluster is an offline disaster-recovery flow for the case where a
-GrainFS cluster has lost Raft majority and cannot elect a leader.
+`GrainFS` cluster has lost Raft majority and cannot elect a leader.
 
 It does not repair a live cluster in place. It promotes the latest persisted
 metadata Raft snapshot from an offline source data directory into a fresh
@@ -9,7 +9,7 @@ single-node target.
 
 ## Drill
 
-1. Stop all GrainFS processes that can access the source data directory.
+1. Stop all `GrainFS` processes that can access the source data directory.
 2. Pick an empty target directory.
 3. Inspect the source without mutation:
 
@@ -48,17 +48,17 @@ grainfs recover cluster verify \
   `blobs`, `wal`, or `snapshots`.
 - V1 refuses sources with `groups/*` because per-group Raft recovery needs its
   own consistency design.
-- Snapshots captured during joint consensus are refused unless the operator
-  explicitly reruns `plan`/`execute` with `--strip-joint-state` to recover as a
+- `execute` refuses snapshots captured during joint consensus unless the
+  operator reruns `plan`/`execute` with `--strip-joint-state` to recover as a
   clean single-node cluster.
 - `execute` requires the source data dir's last FSM snapshot to be
-  `format_version == 2` — i.e. written by a binary that includes the C2-P3
+  `format_version == 2`, written by a binary that includes the C2-P3
   shared-FSM-state changes. A pre-C2-P3 source fails with
   `FSM.Restore: unsupported snapshot FormatVersion 0 (want 2)`. To recover from
   such a dir, first bring it up on a current binary so it produces a v2 snapshot,
   stop it cleanly, then run `plan`/`execute` against the new data dir.
-- Active recovered snapshot membership is rewritten to exactly one voter: the
-  new node ID. Original membership is preserved in
+- `execute` rewrites active recovered snapshot membership to exactly one voter:
+  the new node ID. It preserves original membership in
   `recovery/recovercluster.json`.
 - Recovered targets write `writable=false` and `serve` wraps the storage backend
   with a write gate until verification marks the marker writable.

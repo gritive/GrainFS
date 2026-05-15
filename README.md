@@ -1,497 +1,162 @@
-# GrainFS
+# `GrainFS`
 
-경량 분산 객체 스토리지. 싱글 바이너리로 S3 호환 스토리지를 즉시 실행하고, 필요하면 클러스터로 확장한다.
+`GrainFS` is a lightweight distributed storage server that starts as a single
+binary and can grow into a cluster.
 
-**Object Storage (S3 API) + Block Storage (NBD) + File Storage (NFSv4/9P)** 를 하나의 바이너리로 제공.
+It exposes object, file, and block interfaces over one storage layer:
+
+- **Object storage:** S3-compatible HTTP API
+- **File storage:** NFSv4 and 9P2000.L
+- **Block storage:** NBD for Linux clients
+- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows
 
 ## Quick Start
 
 ```bash
-# 빌드
 make build
 
 CLUSTER_KEY=$(openssl rand -hex 32)
 
-# 실행 — 2초 내 S3 엔드포인트 동작
 ./bin/grainfs serve --data ./storage --port 9000 --cluster-key "$CLUSTER_KEY" &
 
-# 첫 admin SA 부트스트랩 — admin UDS로 SA 생성, 응답에서 access_key/secret_key 1회 노출
+# Bootstrap the first admin service account through the local admin socket.
 ./bin/grainfs iam sa create admin --endpoint ./storage/admin.sock
-# {"sa_id":"sa-default","access_key":"GRAIN...","secret_key":"<one-time>","grants":[{"bucket":"*","role":"admin"}]}
+# {"sa_id":"sa-default","access_key":"GRAIN...","secret_key":"<one-time>",...}
 
-# admin socket 경로를 환경변수로 등록하면 이후 모든 grainfs 명령에서 --endpoint 생략 가능
 export GRAINFS_ADMIN_SOCKET=./storage/admin.sock
-
-# 사용 (위 응답의 access_key/secret_key를 사용)
-aws --endpoint-url http://localhost:9000 \
-    --access-key-id <access_key> --secret-access-key <secret_key> \
-    s3 mb s3://test
-aws --endpoint-url http://localhost:9000 \
-    --access-key-id <access_key> --secret-access-key <secret_key> \
-    s3 cp file.txt s3://test/
-aws --endpoint-url http://localhost:9000 \
-    --access-key-id <access_key> --secret-access-key <secret_key> \
-    s3 ls s3://test/
 ```
 
-서버 시작 시 `default` 버킷이 자동 생성된다. 브라우저에서 `http://localhost:9000/ui/` 로 Object Browser 접근 가능. 부트스트랩 전에는 모든 S3 트래픽이 401을 반환한다.
+Use the returned `access_key` and `secret_key` with any SigV4 S3 client:
 
-## Features
+```bash
+aws --endpoint-url http://localhost:9000 \
+  --access-key-id <access_key> --secret-access-key <secret_key> \
+  s3 mb s3://test
 
-| 기능               | 설명                                                          |
-| ------------------ | ------------------------------------------------------------- |
-| S3 API             | PUT, GET, HEAD, DELETE, LIST, Multipart Upload, Presigned URL |
-| Erasure Coding     | 노드 수 기반 zero-config EC + shard integrity envelope |
-| QUIC Transport     | quic-go 기반 멀티플렉싱, TLS 1.3 내장                         |
-| Custom Raft        | QUIC 위 합의, 리더 선출/로그 복제/스냅샷                      |
-| 단일 노드 → Cluster     | 무중단 클러스터 전환                                          |
-| Volume Device      | NBD (Linux), NFSv4, 9P2000.L                                  |
-| Object Browser     | 웹 UI에서 오브젝트 탐색, Storage 탭에서 안전한 운영 상태 확인 |
-| At-rest Encryption | AES-256-GCM, 키 자동 생성                                     |
-| Monitoring         | Prometheus 메트릭 + 대시보드                                  |
-| Zero-Ops Incidents | missing shard repair / corrupt shard quarantine / Badger startup recovery 상태와 proof 표시 |
+aws --endpoint-url http://localhost:9000 \
+  --access-key-id <access_key> --secret-access-key <secret_key> \
+  s3 cp file.txt s3://test/
 
-## Standards Compliance
-
-- **S3**: AWS Signature Version 4 (HMAC-SHA256) 호환
-- **NFSv4.1**: RFC 8881 coverage matrix: [`docs/nfsv4-compliance.md`](docs/nfsv4-compliance.md)
-- **Conformance tests**: `tests/conformance/run_pynfs.sh` (pynfs, advisory)
-
-## CLI Options
-
-```
-grainfs serve [flags]
-
-Flags:
-  -d, --data string                   데이터 디렉토리 (default "./data")
-  -p, --port int                      HTTP/S3 포트 (default 9000)
-      --cluster-key string            클러스터 peer 인증용 pre-shared key. 단일 노드도 필수.
-                                      권장: `openssl rand -hex 32`
-      --admin-socket string           admin Unix socket 경로 (default <data>/admin.sock)
-      --admin-group string            admin socket chown 그룹 (default: caller primary group)
-      --public-url string             `grainfs dashboard` 출력용 public dashboard base URL
-      --node-id string                노드 ID (생략 시 자동 생성)
-      --raft-addr string              Raft listen 주소
-      --nfs4-port int                 NFSv4 포트 (default 2049, 0=비활성)
-      --nbd-port int                  NBD 포트 (default 10809, 0=비활성). Linux client 필요.
-      --9p-bind string                9P2000.L bind 주소 (default "127.0.0.1")
-      --9p-port int                   9P2000.L 포트 (default 0, 비활성)
-      --block-cache-size int          volume block cache bytes (default 67108864)
-      --shard-cache-size int          EC shard cache bytes (default 268435456)
-      --scrub-interval duration       EC shard scrub 주기 (default 24h)
-      --reshard-interval duration     EC background reshard 주기 (default 24h)
-      --ring-reshard-interval duration ring placement reshard 주기 (default 1h)
-      --audit-iceberg                 S3 audit log lake 활성화 (default true)
-      --audit-commit-interval duration audit flush 주기 (default 1m)
-      --encryption-key-file string    32-byte encryption key file 경로
-      --raft-log-gc-interval duration Raft 로그 GC 실행 주기 (default 30s)
+aws --endpoint-url http://localhost:9000 \
+  --access-key-id <access_key> --secret-access-key <secret_key> \
+  s3 ls s3://test/
 ```
 
-전체 옵션은 실행 중인 바이너리 기준으로 확인한다:
+The server creates a `default` bucket at startup and exposes the object browser
+at `http://localhost:9000/ui/`. S3 requests return `401` until an operator
+creates the first service account.
+
+For all serve flags, use:
 
 ```bash
 ./bin/grainfs serve --help
 ```
 
-### Zero-Config EC Profile
+## What It Supports
 
-`grainfs serve`는 EC `k/m`을 CLI에서 받지 않고 노드 수로 자동 선택한다. 운영 배포는 3노드 이상을 권장한다. 1노드와 2노드는 개발, 복구, 또는 3노드 배포로 가는 중간 단계로 취급한다.
+| Area | Summary | Details |
+| --- | --- | --- |
+| S3 API | Bucket/object basics, multipart upload, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
+| File protocols | NFSv4 explicit bucket exports, 9P2000.L | [NFSv4 compatibility](docs/reference/nfs-compatibility.md), [9P compatibility](docs/reference/9p-compatibility.md) |
+| Block protocol | Linux NBD protocol surface | [NBD compatibility](docs/reference/nbd-compatibility.md) |
+| Iceberg | DuckDB-compatible REST Catalog | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
+| Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
+| Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
 
-| 노드 수 | EC profile |
+The compatibility tables use `Supported` only for features covered by e2e,
+conformance, or real client integration tests. Unit tests alone do not qualify.
+
+## Performance
+
+| Comparison | Current status | Details |
+| --- | --- | --- |
+| `GrainFS` local FUSE-over-S3 snapshot | Documented repository snapshot: 64 MiB payload, Apple M3, Colima loopback, 3-run average | [Benchmark methodology](docs/reference/benchmarks.md#current-local-snapshots) |
+| `GrainFS` vs RustFS S3 object benchmark | Pending reproducible same-host run | [Comparable S3 protocol](docs/reference/benchmarks.md#comparable-s3-protocol) |
+| `GrainFS` vs MinIO S3 object benchmark | Pending reproducible same-host run | [Comparable S3 protocol](docs/reference/benchmarks.md#comparable-s3-protocol) |
+
+README only shows benchmark summaries. Publish competitor numbers after the raw
+artifacts, host details, durability profile, workload, and commit pins are
+recorded in [docs/reference/benchmarks.md](docs/reference/benchmarks.md).
+
+## Core Concepts
+
+**Admin socket first.** Mutating admin operations use the local Unix domain
+socket by default (`<data>/admin.sock`). Set `GRAINFS_ADMIN_SOCKET` to avoid
+passing `--endpoint` on every command.
+
+**Secure bootstrap.** A fresh cluster has no S3 credentials. Create the first
+service account through the admin socket; the secret key is shown once.
+
+**Zero-config EC.** Operators do not choose `k/m` at startup. `GrainFS` derives
+the desired erasure-coding profile from cluster size and placement group voters.
+Temporary target loss does not silently lower durability; writes fail until the
+required targets are writable.
+
+**Same data, multiple protocols.** S3, NFSv4, 9P, NBD, and Iceberg use the same
+storage backend contracts. Use the compatibility docs for protocol-specific
+limits.
+
+## Common Workflows
+
+| Workflow | Command or entry point |
 | --- | --- |
-| 1 | 1+0 |
-| 2 | 1+1 |
-| 3 | 2+1 |
-| 4 | 2+2 |
-| 5 | 3+2 |
-| 6 | 4+2 |
-| 7 | 5+2 |
-| 8+ | 6+2 |
+| Create/list service accounts and grants | `grainfs iam --endpoint <data>/admin.sock ...` |
+| Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
+| Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
+| Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
+| Export a bucket over NFSv4 | `grainfs nfs export add <bucket>` |
+| Create an NBD volume | `grainfs volume create <name> --size 10Gi` |
+| Run recovery planning | `grainfs recover cluster plan --source-data <dir> --target-data <dir>` |
+| Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
+| Check incidents | `curl http://localhost:9000/api/incidents` |
 
-Object writes derive their desired EC profile from the selected placement
-group's configured voters. Temporary target loss does not lower durability; the
-write fails with S3 `503 ServiceUnavailable` until all required targets are
-writable. Operators can inspect actual-vs-desired layouts with:
-
-```bash
-grainfs cluster --endpoint <data-dir>/admin.sock placement
-grainfs cluster --endpoint <data-dir>/admin.sock placement <bucket> <key> --format json
-```
-
-The same report is available from the admin socket at `/v1/cluster/placement`
-and from the HTTP admin API at `/api/cluster/placement`.
-
-### Cluster-Wide Policy via Admin API
-
-`grainfs cluster config` manages Raft-replicated policy values that apply to
-every node (balancer behavior, alert webhook, disk thresholds). Changes take
-effect at the next consumer tick — no restart. See `CHANGELOG.md` for the v0.155
-migration if you're upgrading.
-
-### Recovery Commands
-
-```bash
-grainfs recover --dry-run --data /var/lib/grainfs
-
-grainfs recover cluster plan \
-  --source-data /var/lib/grainfs \
-  --target-data /var/lib/grainfs-recovered \
-  --new-node-id node-recovered \
-  --new-raft-addr 10.0.0.10:19100
-
-grainfs recover cluster execute \
-  --source-data /var/lib/grainfs \
-  --target-data /var/lib/grainfs-recovered \
-  --new-node-id node-recovered \
-  --new-raft-addr 10.0.0.10:19100
-
-grainfs recover cluster verify \
-  --target-data /var/lib/grainfs-recovered \
-  --mark-writable
-```
-
-`recover --auto`는 더 이상 데이터를 변경하지 않고 실패한다. 다수결을 잃은 클러스터는 먼저 `recover cluster plan`으로 offline source를 읽기 전용 검사한 뒤 fresh target에 복구한다.
-
-상세 절차: [docs/recover-cluster.md](docs/recover-cluster.md)
-
-### Cluster Membership 조작
-
-운영 중인 메타-Raft 클러스터의 멤버십을 CLI로 조회/변경한다. 모든 명령은 노드에 SSH 접속해 admin Unix socket(`<data-dir>/admin.sock`, mode 0660 + admin-group)으로 실행한다.
-
-```bash
-ENDPOINT=/var/run/grainfs/admin.sock   # or <data-dir>/admin.sock
-
-# 현재 voter / liveness 표
-grainfs cluster --endpoint $ENDPOINT peers
-
-# 최근 클러스터 이벤트 (cluster-join, cluster-remove-peer 등 필터)
-grainfs cluster --endpoint $ENDPOINT events --type cluster-remove-peer --since 24h
-
-# 죽은 노드 축출 (정족수 손실 없음 → pre-flight 통과)
-grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --yes
-
-# 정족수 손실을 감수하는 강제 제거 (재해 복구 직전 단계)
-grainfs cluster --endpoint $ENDPOINT remove-peer node-2 --force --yes
-```
-
-`<id>`는 현재 `cluster --endpoint $ENDPOINT status` / `cluster --endpoint $ENDPOINT peers`가 표시하는 voter 식별자를 그대로 넘긴다. 정상 경로는 node ID이며, legacy metadata가 아직 raft address로만 남아 있으면 그 주소가 `unresolved_legacy` row로 표시된다. `cluster status`는 `peer_snapshot`에서 identity state와 liveness state를 분리해 보여주고, 기존 `peers` / `peer_addrs` / `peer_states` / `down_nodes` 필드는 호환성을 위해 같은 snapshot에서 파생된다. `remove-peer` pre-flight는 snapshot의 membership-mutation policy를 사용하므로 `self`와 최근 successful metaRaft AppendEntries evidence가 있는 명시적 `live` row만 alive로 세고, `configured` row는 아직 fresh liveness evidence가 없는 unknown으로 취급한다. Joint consensus(§4.3) 경로로 atomic 제거가 commit되며, 리더 본인을 제거하면 commit-time wakeup 후 follower로 강등되고 새 리더가 선출된다.
-
-### IAM (multi-team)
-
-GrainFS는 cluster meta-Raft 위에 IAM 모델 (ServiceAccount + AccessKey + Grant) 을 두어 운영자가 SA별 / 버킷별 권한을 부여한다. 모든 자격 증명은 admin UDS (`<data-dir>/admin.sock`) 통해 부트스트랩 / 관리한다. 부트스트랩 전 클러스터는 SA가 없으므로 모든 S3 호출이 401을 반환한다.
-
-```bash
-ENDPOINT=./data/admin.sock
-
-# SA 생성. secret_key는 응답에서 단 한번만 노출되므로 즉시 보관해야 한다.
-grainfs iam --endpoint $ENDPOINT sa create alice --description "data team"
-# {"sa_id":"01931...","name":"alice","access_key":"AKGF...","secret_key":"...","created_at":"..."}
-
-# SA 목록과 단건 조회
-grainfs iam --endpoint $ENDPOINT sa list
-grainfs iam --endpoint $ENDPOINT sa get 01931...
-
-# 버킷별 권한 부여 (Read | Write | Admin)
-grainfs iam --endpoint $ENDPOINT grant put 01931... mybucket Write
-grainfs iam --endpoint $ENDPOINT grant list --sa 01931...
-
-# Key 회전 — 새 키 발급 후 구 키 취소를 별도 호출로 분리해 client rollover 윈도를 확보한다
-grainfs iam --endpoint $ENDPOINT key create 01931...
-grainfs iam --endpoint $ENDPOINT key revoke 01931... AKGF<old>
-
-# Grant / SA 회수
-grainfs iam --endpoint $ENDPOINT grant delete 01931... mybucket
-grainfs iam --endpoint $ENDPOINT sa delete 01931...
-
-# Per-bucket pull-through upstream (v0.0.133.0+) — secret-key는 stdin/파일로만 입력
-ENDPOINT=$(pwd)/data/admin.sock
-
-grainfs bucket --endpoint $ENDPOINT upstream put legacy-data \
-  --upstream-url http://upstream-minio:9000 \
-  --access-key legacy-ak \
-  --secret-key-stdin <<<"legacy-sk"
-
-grainfs bucket --endpoint $ENDPOINT upstream get legacy-data
-grainfs bucket --endpoint $ENDPOINT upstream list
-grainfs bucket --endpoint $ENDPOINT upstream delete legacy-data
-```
-
-Auth 모드:
-
-| 상태 | 동작 |
-| --- | --- |
-| 부트스트랩 전 (SA 미등록) | 모든 S3 호출 401. 운영자는 admin UDS로 첫 SA를 생성해야 한다. |
-| 첫 SA 생성 (`sa create` on empty store) | `IAMInitFirstSA` 한 번의 FSM Apply로 default SA (`sa-default`) + AccessKey + wildcard Admin grant를 atomic 커밋한다. 응답에 `access_key`/`secret_key`가 1회 노출된다. |
-| 이후 SA 생성 | 일반 경로. wildcard grant 자동 발급은 없으며, 운영자가 명시적으로 `grant put`을 호출해야 한다. |
-| Race | 빈 클러스터에 두 운영자가 동시에 `sa create`를 호출하면 첫 propose가 이기고, 두 번째는 `409 Conflict`로 거절된다. |
-
-권한 평가는 두 단계 직렬이다: 먼저 IAM grant (특정 버킷 grant > wildcard grant), 그다음 bucket policy. 둘 다 통과해야 허용된다. Audit 이벤트는 zerolog의 `event=iam_audit` 구조화 필드로 발행된다.
-
-상세 설계는 [docs/adr/0007-iam-foundation.md](docs/adr/0007-iam-foundation.md) 참고. 버킷별 pull-through upstream 설계는 [docs/adr/0009-bucket-scoped-upstream.md](docs/adr/0009-bucket-scoped-upstream.md), CLI/admin 표면 재배치는 [docs/adr/0010-relocate-bucket-upstream-surface.md](docs/adr/0010-relocate-bucket-upstream-surface.md) 참고.
-
-## 클러스터 Balancer
-
-클러스터 모드에서 노드 간 디스크 불균형이 20% 이상이면 자동으로 샤드를 이동한다.
-
-### 상태 확인
-
-```bash
-curl http://localhost:9000/api/cluster/balancer/status | jq .
-```
-
-응답 예시:
-```json
-{
-  "available": true,
-  "active": false,
-  "imbalance_pct": 12.3,
-  "nodes": [
-    {"node_id": "node-a", "disk_used_pct": 62.1, "disk_avail_bytes": 38654705664},
-    {"node_id": "node-b", "disk_used_pct": 49.8, "disk_avail_bytes": 53687091200}
-  ]
-}
-```
-
-`active: true`이면 마이그레이션 진행 중. `imbalance_pct`가 5% 미만으로 내려가면 자동 중단.
-
-> 상세 운영 가이드: [docs/operations/balancer.md](docs/operations/balancer.md)
-
-## Zero-Ops Incidents
-
-클러스터 모드에서 GrainFS는 missing shard repair, CRC corruption quarantine, open FD exhaustion risk, Badger startup recovery를 incident/recovery 상태로 기록한다. 대시보드의 self-healing 영역에서 현재 상태와 다음 조치를 볼 수 있고, API로도 조회할 수 있다.
-
-```bash
-curl http://localhost:9000/api/incidents | jq .
-curl http://localhost:9000/api/incidents/<incident-id> | jq .
-```
-
-HealReceipt proof는 S3 credential이 설정된 배포에서 인증이 필요하다.
-
-```bash
-curl -H 'Authorization: ...' http://localhost:9000/api/receipts/<receipt-id>
-```
-
-Corrupt shard가 감지되면 해당 object version만 quarantine된다. 같은 bucket의 다른 object와 최신 healthy version은 계속 서비스된다. Isolation 자체가 실패하면 incident는 `needs-human` 상태로 남아 운영자가 복원 또는 삭제를 결정할 수 있게 한다.
-
-Open FD 경고는 기본 활성화되어 있으며 현재 FD 사용률, 임계 도달 ETA, 상위 FD category를 함께 기록한다. `fd_exhaustion_risk`가 `blocked`이면 `LimitNOFILE`/`ulimit -n` 상향, socket/session leak 확인, graceful restart 중 하나를 실행해야 한다.
-
-Badger role startup recovery는 metadata, raft-log, group-state, receipt, dedup, volume-catalog, incident-state DB를 역할별로 판정한다. 필수 역할 실패는 시작을 막고, group-state 실패는 읽기 전용으로 시작해 storage writes와 mutating admin APIs에 `RecoveryReadOnly` 503을 반환하며, optional receipt/dedup/incident-state 실패는 해당 feature만 비활성화한다.
-
-incident-state DB가 열리기 전에 발생한 Badger startup failure는 `<data>/.recovery/` 아래에 파일 journal로 남긴다. 이후 incident-state DB가 정상적으로 열리는 boot에서 journal entry가 incident store로 import되어 `/api/incidents`에서 같은 role/path/action을 확인할 수 있다.
-
-## Documentation
-
-- [Backup and restore](docs/BACKUP_RESTORE.md)
-- [Disaster recovery drill log](docs/DISASTER_RECOVERY.md)
-- [Drill manual](docs/DRILL_MANUAL.md)
-- [Production runbook](docs/RUNBOOK.md)
-- [SLI/SLO](docs/SLI_SLO.md)
-- [RecoverCluster drill](docs/recover-cluster.md)
-- [Raft log GC (managed mode, always active)](docs/badger-managed-mode-rollback.md)
-- [Protocol layering contract](docs/architecture/protocol-layering.md)
-- [DuckDB Iceberg REST Catalog](docs/iceberg-duckdb.md)
-- [DuckDB Iceberg REST request trace](docs/iceberg-duckdb-request-trace.md)
-- [Iceberg any-node table API design](docs/superpowers/specs/2026-05-02-iceberg-any-node-table-api-design.md)
+Operational details live in [docs/index.md](docs/index.md#operators).
 
 ## Development
 
-### 요구사항
+Requirements:
 
 - Go 1.26+
+- `k6` for S3 benchmarks
+- Linux client tooling for NFS, NBD, 9P, and FUSE-over-S3 integration tests
 
-### 빌드 & 테스트
-
-```bash
-make build          # 바이너리 빌드
-make test           # 전체 테스트
-make test-race      # race detector 포함
-make test-e2e       # E2E 테스트
-make test-nbd-interop # qemu/libnbd 기반 NBD interop smoke
-make lint           # go vet + gofmt 검사
-```
-
-### 벤치마크
-
-[k6](https://k6.io/) 설치 후:
+Common commands:
 
 ```bash
-make bench                        # single-node S3 object PUT/GET/DELETE
-make bench-cluster                # multi-node S3 object, same k6 actions
-make bench-profile                # multi-node S3 object benchmark + pprof
-make bench-iceberg-table          # single-node Iceberg REST Catalog compatible table API
-make bench-iceberg-table-cluster  # multi-node Iceberg table API, same k6 actions
-make bench-nfs                    # single-node NFS fio profile via Colima
-make bench-nbd                    # single-node NBD fio profile via Colima
-make bench-nbd-cluster            # multi-node NBD, same fio actions
-make bench-nfs-cluster            # multi-node NFS, same fio actions
+make build
+make test
+make test-race
+make test-e2e
+make lint
 ```
 
-S3 object 결과는 `benchmarks/report.json`, Iceberg table API 결과는 `benchmarks/iceberg_table_report.json`에 저장된다.
-클러스터 PUT 경로를 포트/오브젝트 크기별로 분리 측정하려면 `PUT_MATRIX=1 make bench-cluster`를 사용한다.
-`PUT_TRACE=1`을 함께 지정하면 각 노드가 owner-only JSONL trace를 남기고 `benchmarks/put_trace_report.js`가 forwarded PUT의 dominant stage, leader-hint retry, meta-index propose count를 요약한다.
-NFS 벤치마크는 기본 `NFS_VERS=4.0`으로 마운트하며, `NFS_VERS=4.1 make bench-nfs` 또는
-`NFS_VERS=4.2 make bench-nfs-cluster`처럼 프로토콜 버전별 병목을 분리해서 측정할 수 있다.
-암호화는 항상 켜진 상태에서 측정한다. 고정 키로 반복 측정해야 할 때는 `BENCH_ENCRYPTION_KEY_FILE`을 지정한다.
-
-### FUSE-over-S3 마운트 (rclone/s3fs/goofys)
-
-GrainFS는 **표준 S3-compatible** API를 제공하므로, 별도 클라이언트 바이너리 없이 기존 FUSE-over-S3 도구로 마운트할 수 있다. 클라이언트 머신에 GrainFS 바이너리 설치는 불필요하다.
-
-**예: rclone (Linux 클라이언트, macOS 서버)**
+Benchmark targets:
 
 ```bash
-# 1. (서버) GrainFS 시작 + admin UDS로 SA 부트스트랩 — rclone은 SigV4를 사용하므로 자격 증명 필수
-CLUSTER_KEY=$(openssl rand -hex 32)
-grainfs serve --data ./data --port 9000 --cluster-key "$CLUSTER_KEY" &
-grainfs iam sa create admin --endpoint ./data/admin.sock
-# 응답의 access_key=<ak>, secret_key=<sk>를 아래 단계에서 사용
-
-# 2. (클라이언트) rclone config 작성: ~/.config/rclone/rclone.conf
-[grainfs]
-type = s3
-provider = Other
-access_key_id = <ak>
-secret_access_key = <sk>
-endpoint = http://<server-host>:9000
-region = us-east-1
-force_path_style = true
-
-# 3. (클라이언트) 버킷 생성 + 마운트
-rclone mkdir grainfs:mybucket
-rclone mount grainfs:mybucket /mnt/grainfs \
-    --vfs-cache-mode writes --dir-cache-time 1s --allow-other --daemon
+make bench
+make bench-cluster
+make bench-profile
+make bench-iceberg-table
+make bench-iceberg-table-cluster
+make bench-nfs
+make bench-nbd
+make bench-nfs-cluster
+make bench-nbd-cluster
 ```
 
-**지원/미지원 연산** (S3 시맨틱의 한계)
+Use [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for benchmark
+methodology and result interpretation. Use
+[benchmarks/README.md](benchmarks/README.md) for script flags.
 
-| 연산                 | 지원 | 비고                                                |
-| -------------------- | ---- | --------------------------------------------------- |
-| read / write         | ✅   | rclone `--vfs-cache-mode writes`로 close-to-open    |
-| mkdir / ls / rm      | ✅   | S3 prefix 기반 (실제 디렉토리 inode 없음)           |
-| rename (mv)          | ⚠️   | CopyObject + DeleteObject — **non-atomic**          |
-| chmod / chown        | ❌   | S3는 POSIX permissions 미지원                       |
-| atomic create+rename | ❌   | rsync `--inplace` 필요한 워크로드는 NFSv4 권장      |
-| file locking         | ❌   | DB / git 인덱스 동시쓰기 워크로드는 NFSv4 권장      |
+## Documentation
 
-엄격한 POSIX 시맨틱이 필요하면 NFSv4를 사용한다 (아래 NFSv4 Quick Start 참고).
-
-검증: `make test-fuse-s3-colima` (macOS 호스트 + Colima Linux VM, rclone 마운트로 핵심 연산 round-trip 테스트).
-
-**처리량 벤치** (`make bench-fuse-s3-colima`, 64 MiB 페이로드, Apple M3, Colima loopback, 3회 평균)
-
-| 경로                       | Write       | Read        |
-| -------------------------- | ----------- | ----------- |
-| Direct S3 (rclone copyto)  | 96.8 MB/s   | 108.0 MB/s  |
-| FUSE mount (rclone mount)  | 106.7 MB/s  | 107.3 MB/s  |
-| FUSE 오버헤드              | ≈ 0%        | ≈ 0%        |
-
-`--vfs-cache-mode off`로 close(2)가 PUT 완료까지 블록되도록 설정 → 동기 처리량 측정. `--vfs-cache-mode writes/full`을 쓰면 close 후 백그라운드 업로드 + 로컬 캐시 효과로 체감 처리량은 더 높지만, 정확한 S3 round-trip 측정에는 부적절.
-
-### NFSv4 Quick Start
-
-GrainFS NFSv4 서버는 `--nfs4-port 2049`(기본)로 함께 시작된다. 버킷을 NFS로 공개하려면 `grainfs nfs export add`를 사용한다. 마운트 후 `/mnt/<bucket>/`으로 접근하며, S3 API와 NFS 양쪽에서 같은 데이터를 본다.
-
-```bash
-# 1. 서버 시작 + 부트스트랩 (Quick Start와 동일)
-CLUSTER_KEY=$(openssl rand -hex 32)
-./bin/grainfs serve --data ./storage --port 9000 --cluster-key "$CLUSTER_KEY" &
-./bin/grainfs iam sa create admin --endpoint ./storage/admin.sock
-export GRAINFS_ADMIN_SOCKET=./storage/admin.sock
-
-# 2. S3 버킷 생성
-aws --endpoint-url http://localhost:9000 \
-    --access-key-id <access_key> --secret-access-key <secret_key> \
-    s3 mb s3://mydata
-
-# 3. 버킷을 NFS로 공개
-./bin/grainfs nfs export add mydata
-
-# 4. 마운트 (macOS 또는 Linux — pseudo-root에 버킷이 서브디렉토리로 나타남)
-sudo mkdir -p /mnt/grainfs
-sudo mount -t nfs4 -o "vers=4.0,port=2049,rw,hard,intr" localhost:/ /mnt/grainfs
-
-# 5. 파일 읽기/쓰기 — POSIX 시맨틱 (atomic rename, file locking 지원)
-ls /mnt/grainfs/           # → mydata/
-echo "hello" | sudo tee /mnt/grainfs/mydata/test.txt
-aws ... s3 ls s3://mydata/ # → test.txt (S3에서도 동일하게 보임)
-
-# 마운트 해제 / export 해제
-sudo umount /mnt/grainfs
-./bin/grainfs nfs export remove mydata
-```
-
-export 관리 명령:
-
-```bash
-grainfs nfs export list                  # 활성 export 목록
-grainfs nfs export add mydata --ro       # 읽기 전용으로 공개
-grainfs nfs export update mydata --rw    # 읽기/쓰기로 변경
-grainfs nfs debug mydata                 # 연결 상태 진단
-grainfs nfs debug mydata --json          # 자동화/런북용 JSON 출력
-```
-
-> **주의:** NFS 서버는 `--nfs4-port 0`으로 비활성화할 수 있다.
-> 컨테이너에서 비루트 사용자로 실행할 때는 `--nfs4-port 0`으로 비활성화하거나 적절한 권한을 부여해야 한다.
-
-운영 문제 해결은 [`docs/nfs-debug.md`](docs/nfs-debug.md)와
-[`docs/nfs-export-lifecycle.md`](docs/nfs-export-lifecycle.md)를 참고한다.
-
-### NBD Quick Start (Linux 전용)
-
-NBD(Network Block Device)는 Linux 커널 클라이언트가 필요하다. GrainFS NBD 서버는 `--nbd-port`로 활성화하며, `grainfs volume`으로 볼륨을 생성한 뒤 `nbd-client`로 연결한다.
-
-```bash
-# 서버 시작 — NBD 기본 포트 10809 (기본 활성)
-CLUSTER_KEY=$(openssl rand -hex 32)
-./bin/grainfs serve --data ./storage --port 9000 --cluster-key "$CLUSTER_KEY" &
-export GRAINFS_ADMIN_SOCKET=./storage/admin.sock  # iam sa create 완료 후
-
-# 볼륨 생성
-./bin/grainfs volume create v1 --size 10Gi
-
-# (Linux) nbd-client 설치 후 연결 — 볼륨 이름(-N)은 위에서 생성한 이름
-sudo apt-get install nbd-client          # 또는 yum install nbd
-sudo modprobe nbd
-sudo nbd-client localhost 10809 /dev/nbd0 -N v1
-
-# 파일시스템 생성 + 마운트
-sudo mkfs.ext4 /dev/nbd0
-sudo mkdir -p /mnt/nbd-v1
-sudo mount /dev/nbd0 /mnt/nbd-v1
-
-# 사용 후 정리
-sudo umount /mnt/nbd-v1
-sudo nbd-client -d /dev/nbd0
-```
-
-> **macOS:** NBD 클라이언트는 Linux 전용이다. macOS에서 테스트하려면 colima VM을 사용한다 (아래 참고).
-
-### NBD 테스트 (macOS)
-
-macOS에서 NBD는 커널 모듈이 필요하므로 **colima** Linux VM을 클라이언트로 사용한다.
-
-```bash
-# 1회 설치
-brew install colima qemu
-colima start --vm-type qemu
-
-# NBD E2E 테스트 실행
-make test-nbd-colima
-```
-
-Linux에서는 로컬 커널 클라이언트로 interop smoke를 실행한다:
-
-```bash
-make test-nbd-interop
-```
-
-Modern NBD negotiation smoke는 qemu/libnbd 도구가 있을 때 실행한다:
-
-```bash
-make test-nbd-interop
-```
-
-현재 NBD 서버는 fixed newstyle, `OPT_INFO`, `OPT_GO`, `NBD_INFO_BLOCK_SIZE`, `WRITE_ZEROES`, structured read reply, `base:allocation` block status를 지원한다. Extended headers는 parser만 있고 qemu/libnbd interop가 고정될 때까지 기본 협상에서 `NBD_REP_ERR_UNSUP`으로 유지한다.
+| Topic | Document |
+| --- | --- |
+| Documentation hub | [docs/index.md](docs/index.md) |
+| Users | [docs/users/guide.md](docs/users/guide.md) |
+| Operators | [docs/index.md#operators](docs/index.md#operators) |
+| Reference | [docs/index.md#reference](docs/index.md#reference) |
+| Explanation | [docs/index.md#explanation](docs/index.md#explanation) |
 
 ## License
 

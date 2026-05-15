@@ -1,5 +1,8 @@
 # GrainFS Benchmarks
 
+For benchmark principles, result interpretation, and RustFS/MinIO comparison
+rules, see [`docs/reference/benchmarks.md`](../docs/reference/benchmarks.md).
+
 ## S3 Cluster PUT Matrix
 
 `make bench-cluster` starts a local 3-node cluster and runs the standard S3
@@ -24,8 +27,8 @@ the benchmark temp directory and print a dominant-stage report:
 PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster
 ```
 
-Trace files are created mode `0600` because they include raw bucket and object
-keys. The report groups requests by ingress, size class, and forwarding mode,
+The scripts create trace files with mode `0600` because they include raw bucket
+and object keys. The report groups requests by ingress, size class, and forwarding mode,
 then summarizes forwarded bytes, leader-hint retries, meta-index proposal
 counts, and the slowest shard stage.
 
@@ -70,5 +73,5 @@ NUM_BUCKETS=8 FIO_WORKERS_PER_BUCKET=8 READDIR_SAMPLES=1000 make bench-nfs-multi
 ```
 
 Use `go tool pprof -top -focus='LockPath' cpu.pprof` to inspect export-level
-contention. Pseudo-root latency is measured through a separate `host:/` mount;
-bucket throughput is measured through `host:/bench-<i>` mounts.
+contention. Measure pseudo-root latency through a separate `host:/` mount and
+bucket throughput through `host:/bench-<i>` mounts.

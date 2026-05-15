@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Convert the GrainFS storage boundary to context-first signatures without changing storage behavior.
+**Goal:** Convert the `GrainFS` storage boundary to context-first signatures without changing storage behavior.
 
 **Architecture:** `storage.Backend` becomes the request-cancellation boundary used by S3, NFSv4, NBD, Iceberg migration, cluster coordination, cache, WAL, packblob, pull-through, recovery gate, and volume layers. This P0 slice is intentionally mechanical: pass existing request or service contexts where available, use `context.Background()` only at explicit process/test roots, and do not change replication, routing, MPU, EC, lifecycle, or metadata semantics.
 

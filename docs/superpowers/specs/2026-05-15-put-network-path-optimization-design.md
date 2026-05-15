@@ -2,7 +2,7 @@
 
 ## Goal
 
-Measure and, only where justified, optimize GrainFS PUT network flow without changing the current durability model:
+Measure and, only where justified, optimize `GrainFS` PUT network flow without changing the current durability model:
 
 1. Object bytes are written to shard owners over QUIC shard streams.
 2. Data-group Raft commits object metadata (`CmdPutObjectMeta`).

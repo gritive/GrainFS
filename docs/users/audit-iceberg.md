@@ -1,9 +1,9 @@
 # Audit Log Lake: Iceberg + Parquet
 
-GrainFS stores S3 audit logs in its own `grainfs-audit` bucket as the Iceberg
-table `audit.s3`. The table is intended for incident review, compliance
-sampling, dashboard health checks, and deeper DuckDB analysis without requiring
-an external warehouse.
+`GrainFS` stores S3 audit logs in its own `grainfs-audit` bucket as the Iceberg
+table `audit.s3`. Operators can use the table for incident review, compliance
+sampling, dashboard health checks, and DuckDB analysis without an external
+warehouse.
 
 ## Capture Guarantees
 
@@ -13,7 +13,7 @@ Audit capture is request-envelope based:
    subresource, request id, source IP, and user agent.
 2. Before authz and handler execution, it writes a durable attempt to the local
    Badger-backed audit outbox.
-3. After the response is produced, it finalizes the same outbox row with status,
+3. After the handler produces the response, it finalizes the same outbox row with status,
    bytes, latency, auth result, and error reason.
 4. The audit committer drains durable rows into `audit.s3` and acks them only
    after a successful leader commit or follower ship.
@@ -29,9 +29,8 @@ silently mutate or read user data.
 | `--audit-iceberg` | `true` | Enable the audit subsystem. |
 | `--audit-commit-interval` | `60s` | Interval for flushing outbox rows to Iceberg. |
 
-The audit bucket and Iceberg table are bootstrapped automatically. Existing
-older audit metadata is migrated in place to the current schema and partition
-spec during bootstrap.
+`GrainFS` bootstraps the audit bucket and Iceberg table. During bootstrap, it
+migrates older audit metadata in place to the current schema and partition spec.
 
 ## Storage Layout
 
@@ -47,10 +46,10 @@ grainfs-audit/
     snap-<snapshot-id>-<uuid>.avro
 ```
 
-`grainfs-audit` is an internal bucket. S3 writes, bucket-level reads, and
-listing remain blocked. Object-level `GET` and `HEAD` are allowed only for the
-server's loopback DuckDB reader when it signs requests with the generated
-internal audit credential.
+`grainfs-audit` is an internal bucket. `GrainFS` blocks S3 writes, bucket-level
+reads, and listing. It allows object-level `GET` and `HEAD` only for the
+server's loopback DuckDB reader when that reader signs requests with the
+generated internal audit credential.
 
 ## Schema
 
@@ -59,7 +58,7 @@ Table: `audit.s3` (Iceberg v2)
 | Column | Type | Description |
 |--------|------|-------------|
 | `ts` | `timestamptz` | Request timestamp. |
-| `node_id` | `string` | GrainFS node that handled the request. |
+| `node_id` | `string` | `GrainFS` node that handled the request. |
 | `request_id` | `string` | Request id returned in S3 response headers. |
 | `sa_id` | `string` | IAM service account id, when authenticated. |
 | `source_ip` | `string` | Client IP address. |
@@ -105,9 +104,9 @@ APIs:
 
 Supported `/api/audit/s3` filters include `since`, `until`, `bucket`,
 `key_prefix`, `sa_id`, `operation`, `status`, `status_class`, `err_class`,
-`request_id`, and `limit`. `limit` is clamped to 500 and query execution uses a
-10 second context timeout. The audit API is localhost-only and is intended for
-the bundled dashboard or local operator tooling.
+`request_id`, and `limit`. `GrainFS` clamps `limit` to 500 and runs each query with
+a 10 second context timeout. The audit API listens on localhost for the bundled
+dashboard or local operator tooling.
 
 The search endpoint requires a configured audit searcher. Unit tests use a mock
 searcher; production wiring should provide a DuckDB searcher with an endpoint
@@ -156,8 +155,8 @@ ORDER BY requests DESC;
   Iceberg, then ack only committed event ids.
 - Followers keep rows in their local durable outbox until `ShipToLeader`
   succeeds.
-- On leader loss, unacked local rows remain pending and are retried after a new
-  leader is available.
+- On leader loss, followers keep unacked local rows pending and retry them after
+  a new leader becomes available.
 
 ## Prometheus Metrics
 

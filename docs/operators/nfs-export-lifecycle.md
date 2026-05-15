@@ -1,6 +1,6 @@
 # NFS Export Lifecycle
 
-GrainFS exports S3 buckets over NFSv4 only after an explicit registration:
+`GrainFS` exports S3 buckets over NFSv4 only after an explicit registration:
 
 ```bash
 grainfs bucket create mydata
@@ -13,7 +13,7 @@ handles to the export generation so stale handles fail closed.
 
 ## bucket-not-found
 
-The bucket must exist before it can be exported. Create the bucket first:
+Create the bucket before exporting it:
 
 ```bash
 grainfs bucket create <bucket>
@@ -43,7 +43,7 @@ apply lag.
 
 ## bucket-locked-by-export
 
-An exported bucket may be protected from destructive bucket operations. Remove
+`GrainFS` may protect an exported bucket from destructive bucket operations. Remove
 the export first, wait for clients to unmount, then retry the bucket operation:
 
 ```bash

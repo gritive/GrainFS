@@ -144,7 +144,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	// IAM Store always exists. Static creds are no longer accepted via flag —
-	// bootstrap goes through admin UDS POST /v1/iam/sa (see docs/RUNBOOK.md).
+	// bootstrap goes through admin UDS POST /v1/iam/sa (see docs/operators/runbook.md).
 	iamStore := iam.NewStore()
 	inner := s3auth.NewVerifier(nil)
 	inner.SecretLookup = iam.NewSecretLookup(iamStore)

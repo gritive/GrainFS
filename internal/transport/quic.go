@@ -50,7 +50,7 @@ const (
 	// ceFeaturesSupportedMask is the set of feature bits this node accepts.
 	// Any bit in the peer's features byte that is NOT in this mask triggers a
 	// feature_unsupported rejection. Add bits here when new features land and
-	// update docs/transport-mux-versioning.md.
+	// update docs/reference/transport-mux-versioning.md.
 	ceFeaturesSupportedMask = byte(0x00)
 )
 

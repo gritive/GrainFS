@@ -6,7 +6,7 @@
 
 **Architecture:** Introduce a shared `e2eCluster` harness in `tests/e2e/cluster_harness_test.go` with `ClusterModeDynamicJoin` as the default and `ClusterModeStaticPeers` as an explicit option. Move ad hoc dynamic join startup out of `cluster_join_e2e_test.go`, then migrate service-level tests to the shared harness while preserving static-only tests under a legacy helper.
 
-**Tech Stack:** Go e2e tests, `os/exec` process harness, AWS SDK S3 client, existing GrainFS `serve` CLI flags.
+**Tech Stack:** Go e2e tests, `os/exec` process harness, AWS SDK S3 client, existing `GrainFS` `serve` CLI flags.
 
 ---
 
