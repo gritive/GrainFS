@@ -316,6 +316,10 @@ func TestShardService_ResolvePeerAddress(t *testing.T) {
 // read back via handleRead → ReadLocalShard (decrypt).
 func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	ctx := context.Background()
+	tracePath := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", tracePath)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
 
 	key := bytes.Repeat([]byte("e"), 32)
 	enc1, err := encrypt.NewEncryptor(key)
@@ -350,6 +354,14 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	got, readErr := svc1.ReadShard(ctx, tr2.LocalAddr(), "bkt", "key", 0)
 	require.NoError(t, readErr)
 	assert.Equal(t, plaintext, got)
+
+	events := readShardServiceTraceEvents(t, tracePath)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncOpen)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncWrite)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncSync)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncClose)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncRename)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
 }
 
 func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
@@ -560,6 +572,7 @@ func TestShardService_WriteShardRecordsRemoteTraceBreakdown(t *testing.T) {
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalMkdir)
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalEncode)
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalFile)
+	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalBuffered)
 	requireShardServiceTraceStage(t, events, PutTraceStageShardWriteLocalDirSync)
 }
 

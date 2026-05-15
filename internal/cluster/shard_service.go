@@ -704,7 +704,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 	dirSynced := false
 	if s.encryptor != nil {
 		fileStart := time.Now()
-		if err := eccodec.WriteEncryptedShardStreamAtomic(path, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+		if err := s.writeEncryptedShardFile(ctx, dir, path, data, aad, shardIdx); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
 				Bytes:            int64(len(data)),
 				ShardIndex:       shardIdx,
@@ -728,7 +728,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 			ShardTargetClass: "local",
 		})
 		fileStart := time.Now()
-		if err := s.writeShardFile(path, payload); err != nil {
+		if err := s.writeShardFile(ctx, path, payload, shardIdx); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
 				Bytes:            int64(len(payload)),
 				ShardIndex:       shardIdx,
@@ -751,6 +751,114 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 	if d, err := os.Open(dir); err == nil {
 		dirSyncErr = d.Sync()
 		d.Close()
+	} else {
+		dirSyncErr = err
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+		Error:            putTraceErrorString(dirSyncErr),
+	})
+	return nil
+}
+
+func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, data, aad []byte, shardIdx int) error {
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
+	openStart := time.Now()
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+
+	writeStart := time.Now()
+	if err := eccodec.EncodeEncryptedShard(f, bytes.NewReader(data), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		cleanup()
+		return err
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+
+	syncStart := time.Now()
+	if err := f.Sync(); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, syncStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		cleanup()
+		return fmt.Errorf("sync tmp shard: %w", err)
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, syncStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+
+	closeStart := time.Now()
+	if err := f.Close(); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close tmp shard: %w", err)
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+
+	renameStart := time.Now()
+	if err := os.Rename(tmp, path); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
+			Bytes:            int64(len(data)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename shard: %w", err)
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
+		Bytes:            int64(len(data)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+
+	dirSyncStart := time.Now()
+	var dirSyncErr error
+	if d, err := os.Open(dir); err == nil {
+		dirSyncErr = d.Sync()
+		_ = d.Close()
 	} else {
 		dirSyncErr = err
 	}
@@ -790,29 +898,59 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 // file is opened with platform-specific direct-I/O hints and the payload is
 // padded to alignment + truncated; when false the standard buffered path
 // runs unchanged. Errors at any step delete the tmp file before returning.
-func (s *ShardService) writeShardFile(path string, payload []byte) error {
+func (s *ShardService) writeShardFile(ctx context.Context, path string, payload []byte, shardIdx int) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	if s.directIO {
+		directStart := time.Now()
 		if err := s.directWriter(tmp, payload); err == nil {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirect, directStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+			})
 			if err := os.Rename(tmp, path); err != nil {
 				os.Remove(tmp)
 				return fmt.Errorf("rename shard: %w", err)
 			}
 			return nil
 		} else if isUnsupportedDirectIO(err) {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirect, directStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
 			// Some filesystems (overlayfs, certain tmpfs configs) reject
 			// O_DIRECT with EINVAL. Fall back to the buffered path so
 			// production stays up — log nothing here; the operator already
 			// opted in and the tests cover both branches.
 			os.Remove(tmp)
 		} else {
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirect, directStart, PutTraceStageFields{
+				Bytes:            int64(len(payload)),
+				ShardIndex:       shardIdx,
+				ShardTargetClass: "local",
+				Error:            err.Error(),
+			})
 			os.Remove(tmp)
 			return err
 		}
 	}
+	bufferedStart := time.Now()
 	if err := writeBuffered(tmp, payload); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalBuffered, bufferedStart, PutTraceStageFields{
+			Bytes:            int64(len(payload)),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
 		return err
 	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalBuffered, bufferedStart, PutTraceStageFields{
+		Bytes:            int64(len(payload)),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename shard: %w", err)
