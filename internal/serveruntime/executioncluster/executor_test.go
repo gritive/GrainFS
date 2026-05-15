@@ -21,17 +21,24 @@ type fakeScrubBackend struct {
 	release chan struct{}
 	closed  atomic.Bool
 	delay   time.Duration
+	ids     chan string
 	results []execution.ScrubResult
 	errs    []error
 }
 
 func newFakeScrubBackend() *fakeScrubBackend {
-	return &fakeScrubBackend{started: make(chan struct{}, 16)}
+	return &fakeScrubBackend{started: make(chan struct{}, 16), ids: make(chan string, 16)}
 }
 
-func (f *fakeScrubBackend) TriggerScrub(ctx context.Context, op execution.ScrubOperation) (execution.ScrubResult, error) {
-	_ = op
+func (f *fakeScrubBackend) TriggerScrub(ctx context.Context, op execution.Operation) (execution.ScrubResult, error) {
+	if op.ID == "" {
+		return execution.ScrubResult{}, execution.NewError(execution.CodeInvalid, execution.ErrInvalidOperation)
+	}
 	call := int(f.calls.Add(1))
+	select {
+	case f.ids <- op.ID:
+	default:
+	}
 	select {
 	case f.started <- struct{}{}:
 	default:
@@ -261,6 +268,72 @@ func TestClusterExecutorMapsCallerCancellation(t *testing.T) {
 	require.Equal(t, execution.CodeJobCancelled, execution.CodeOf(err))
 }
 
+func TestClusterExecutorDoesNotRunQueuedJobAfterCallerCancellation(t *testing.T) {
+	backend := newFakeScrubBackend()
+	backend.release = make(chan struct{})
+	metrics := newFakeMetrics()
+	exec := NewExecutor(backend, WithMetrics(metrics), WithJobTimeout(time.Second), WithMailboxCapacity(1))
+	t.Cleanup(func() {
+		backend.closeRelease()
+		require.NoError(t, exec.Close(context.Background()))
+	})
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := exec.Execute(context.Background(), validScrubPlan())
+		firstDone <- err
+	}()
+	backend.requireStarted(t)
+	drainQueueDepthMetrics(metrics)
+
+	queuedCtx, cancelQueued := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := exec.Execute(queuedCtx, validScrubPlan())
+		secondDone <- err
+	}()
+	requireQueueDepthEventually(t, metrics, 1)
+	cancelQueued()
+
+	err := receiveErr(t, secondDone)
+	require.ErrorIs(t, err, execution.ErrJobCancelled)
+	require.Equal(t, execution.CodeJobCancelled, execution.CodeOf(err))
+	backend.closeRelease()
+	require.NoError(t, receiveErr(t, firstDone))
+	require.Eventually(t, func() bool {
+		return backend.calls.Load() == 1
+	}, 100*time.Millisecond, time.Millisecond)
+}
+
+func TestClusterExecutorCloseCancelsQueuedJobWithoutRunningBackend(t *testing.T) {
+	backend := newFakeScrubBackend()
+	backend.release = make(chan struct{})
+	metrics := newFakeMetrics()
+	exec := NewExecutor(backend, WithMetrics(metrics), WithJobTimeout(time.Second), WithMailboxCapacity(1))
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := exec.Execute(context.Background(), validScrubPlan())
+		firstDone <- err
+	}()
+	backend.requireStarted(t)
+	drainQueueDepthMetrics(metrics)
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := exec.Execute(context.Background(), validScrubPlan())
+		secondDone <- err
+	}()
+	requireQueueDepthEventually(t, metrics, 1)
+
+	require.NoError(t, exec.Close(context.Background()))
+	require.ErrorIs(t, receiveErr(t, firstDone), execution.ErrJobCancelled)
+	require.ErrorIs(t, receiveErr(t, secondDone), execution.ErrJobCancelled)
+	require.Eventually(t, func() bool {
+		return backend.calls.Load() == 1
+	}, 100*time.Millisecond, time.Millisecond)
+}
+
 func TestClusterExecutorRetriesThenSucceeds(t *testing.T) {
 	backend := newFakeScrubBackend()
 	backend.errs = []error{errTransientScrub}
@@ -281,6 +354,7 @@ func TestClusterExecutorRetriesThenSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, execution.ScrubResult{SessionID: "sid-retry", Created: false}, result.Scrub)
 	require.Equal(t, int32(2), backend.calls.Load())
+	require.Equal(t, receiveID(t, backend.ids), receiveID(t, backend.ids))
 }
 
 func TestClusterExecutorReturnsJobFailedAfterRetryExhaustion(t *testing.T) {
@@ -300,6 +374,7 @@ func TestClusterExecutorReturnsJobFailedAfterRetryExhaustion(t *testing.T) {
 	require.Equal(t, execution.CodeJobFailed, execution.CodeOf(err))
 	require.ErrorIs(t, err, errTransientScrub)
 	require.Equal(t, int32(2), backend.calls.Load())
+	require.Equal(t, receiveID(t, backend.ids), receiveID(t, backend.ids))
 }
 
 func TestClusterExecutorShutdownDoesNotLeakGoroutines(t *testing.T) {
@@ -363,5 +438,16 @@ func receiveErr(t *testing.T, ch <-chan error) error {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for executor result")
 		return nil
+	}
+}
+
+func receiveID(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case id := <-ch:
+		return id
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for operation ID")
+		return ""
 	}
 }
