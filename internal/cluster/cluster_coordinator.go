@@ -1137,7 +1137,10 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 		ForwardMode: PutTraceForwardFrame,
 	})
 	ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
-	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpPutObject, args)
+	resolveStart := time.Now()
+	peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+	ObservePutTraceStage(ctx, PutTraceStageForwardResolveLeader, resolveStart, PutTraceStageFields{})
+	reply, err := c.forward.Send(ctx, peers, target.GroupID, raftpb.ForwardOpPutObject, args)
 	if err != nil {
 		return nil, topologyForwardWriteError(group, err)
 	}
