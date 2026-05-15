@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
+	requestStart := time.Now()
 	if s.isDegraded() {
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", "system is in degraded mode: writes suspended")
 		return
@@ -33,6 +37,26 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	sizeClass := cluster.PutTraceSizeUnknown
+	if contentLength := c.Request.Header.ContentLength(); contentLength >= 0 {
+		if contentLength > cluster.DefaultMaxForwardBodyBytes {
+			sizeClass = cluster.PutTraceSizeLarge
+		} else {
+			sizeClass = cluster.PutTraceSizeSmall
+		}
+	}
+	ctx = cluster.ContextWithPutTrace(ctx, cluster.PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		Ingress:     cluster.PutTraceIngressLocalLeader,
+		SizeClass:   sizeClass,
+		ForwardMode: cluster.PutTraceForwardNone,
+	})
+	defer func() {
+		cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutTotal, requestStart, cluster.PutTraceStageFields{})
+	}()
+
+	prepareStart := time.Now()
 	contentType := putObjectContentType(c)
 	rawBody, err := putObjectBody(c)
 	if err != nil {
@@ -42,6 +66,9 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 
 	body := bytes.NewReader(rawBody)
 	userMetadata := copyUserMetadata(c)
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutPrepare, prepareStart, cluster.PutTraceStageFields{
+		Bytes: int64(len(rawBody)),
+	})
 
 	result, putErr := s.putObjectWithUserMetadata(ctx, bucket, key, body, contentType, putObjectACL(c), userMetadata)
 	if putErr != nil {
@@ -50,11 +77,13 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 	obj := result.Object
 
+	responseStart := time.Now()
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}
 	c.Status(consts.StatusOK)
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutResponse, responseStart, cluster.PutTraceStageFields{})
 }
 
 func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {

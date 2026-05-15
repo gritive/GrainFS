@@ -985,6 +985,238 @@ func (b *blockingAETransport) SendAppendEntries(peer string, args *AppendEntries
 	return nil, ErrUnknownPeer
 }
 
+// blockEmptyAETransport blocks one or more empty AppendEntries calls while
+// allowing entry-bearing replication to pass. It lets tests put a leader's
+// per-peer single-flight gate in the exact "heartbeat in flight, new proposal
+// appended" state without blocking the proposal's eventual replication RPC.
+type blockEmptyAETransport struct {
+	inner      Transport
+	blockPeers map[string]bool
+	releaseCh  chan struct{}
+	blockedCh  chan string
+	armed      atomic.Bool
+}
+
+func (b *blockEmptyAETransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	return b.inner.SendRequestVote(peer, args)
+}
+
+func (b *blockEmptyAETransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return b.inner.SendInstallSnapshot(peer, args)
+}
+
+func (b *blockEmptyAETransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return b.inner.SendTimeoutNow(peer, args)
+}
+
+func (b *blockEmptyAETransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	if b.armed.Load() && b.blockPeers[peer] && len(args.Entries) == 0 {
+		select {
+		case b.blockedCh <- peer:
+		default:
+		}
+		<-b.releaseCh
+	}
+	return b.inner.SendAppendEntries(peer, args)
+}
+
+// TestProposeDispatchesPendingEntryAfterHeartbeatReply verifies that a proposal
+// made while heartbeats are in flight does not wait for the next heartbeat tick.
+// Once the heartbeat replies clear peerInFlight, the leader should immediately
+// dispatch the pending entry to those peers.
+func TestProposeDispatchesPendingEntryAfterHeartbeatReply(t *testing.T) {
+	net := newMemNetwork()
+	ids := []string{"n1", "n2", "n3"}
+	nodes := make([]*Node, 3)
+
+	for i, id := range ids {
+		et := 2 * time.Second
+		if i == 0 {
+			et = fastElectionTimeout
+		}
+		n, nerr := NewNode(Config{
+			ID:               id,
+			Peers:            otherIDsLocal(ids, id),
+			ElectionTimeout:  et,
+			HeartbeatTimeout: 500 * time.Millisecond,
+		})
+		require.NoError(t, nerr)
+		nodes[i] = n
+	}
+
+	releaseCh := make(chan struct{})
+	blocker := &blockEmptyAETransport{
+		inner: net.Register("n1", nodes[0]),
+		blockPeers: map[string]bool{
+			"n2": true,
+			"n3": true,
+		},
+		releaseCh: releaseCh,
+		blockedCh: make(chan string, 8),
+	}
+	nodes[0].SetTransport(blocker)
+	nodes[1].SetTransport(net.Register("n2", nodes[1]))
+	nodes[2].SetTransport(net.Register("n3", nodes[2]))
+
+	for _, n := range nodes {
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func(n *Node) {
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+
+	n1 := nodes[0]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
+		"n1 did not become leader")
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.CommittedIndex() >= 1 }),
+		"leader no-op did not commit")
+
+	blocker.armed.Store(true)
+	seen := map[string]bool{}
+	require.NoError(t, waitFor(2*time.Second, func() bool {
+		for {
+			select {
+			case peer := <-blocker.blockedCh:
+				seen[peer] = true
+			default:
+				return seen["n2"] && seen["n3"]
+			}
+		}
+	}), "expected empty heartbeats to both followers to be blocked")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	doneCh := make(chan error, 1)
+	go func() {
+		_, err := n1.ProposeWait(ctx, []byte("after-heartbeat"))
+		doneCh <- err
+	}()
+
+	select {
+	case err := <-doneCh:
+		require.NoError(t, err)
+		t.Fatal("proposal completed before blocked heartbeats were released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseCh)
+
+	select {
+	case err := <-doneCh:
+		require.NoError(t, err)
+	case <-time.After(120 * time.Millisecond):
+		t.Fatal("proposal waited for a later heartbeat tick after in-flight heartbeats replied")
+	}
+}
+
+type blockEntryReplyTransport struct {
+	inner     Transport
+	blockPeer string
+	releaseCh chan struct{}
+	blockedCh chan struct{}
+	armed     atomic.Bool
+}
+
+func (b *blockEntryReplyTransport) SendRequestVote(peer string, args *RequestVoteArgs) (*RequestVoteReply, error) {
+	return b.inner.SendRequestVote(peer, args)
+}
+
+func (b *blockEntryReplyTransport) SendInstallSnapshot(peer string, args *InstallSnapshotArgs) (*InstallSnapshotReply, error) {
+	return b.inner.SendInstallSnapshot(peer, args)
+}
+
+func (b *blockEntryReplyTransport) SendTimeoutNow(peer string, args *TimeoutNowArgs) (*TimeoutNowReply, error) {
+	return b.inner.SendTimeoutNow(peer, args)
+}
+
+func (b *blockEntryReplyTransport) SendAppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
+	reply, err := b.inner.SendAppendEntries(peer, args)
+	if b.armed.Load() && peer == b.blockPeer && len(args.Entries) > 0 {
+		select {
+		case b.blockedCh <- struct{}{}:
+		default:
+		}
+		<-b.releaseCh
+	}
+	return reply, err
+}
+
+// TestCommitDispatchesLeaderCommitAfterFollowerReply verifies that a follower
+// which already appended an entry with an old LeaderCommit learns the later
+// commit immediately after its in-flight reply returns. Without this, forwarded
+// callers waiting for their local FSM can sit until the next heartbeat tick.
+func TestCommitDispatchesLeaderCommitAfterFollowerReply(t *testing.T) {
+	net := newMemNetwork()
+	ids := []string{"n1", "n2", "n3"}
+	nodes := make([]*Node, 3)
+
+	for i, id := range ids {
+		et := 2 * time.Second
+		if i == 0 {
+			et = fastElectionTimeout
+		}
+		n, nerr := NewNode(Config{
+			ID:               id,
+			Peers:            otherIDsLocal(ids, id),
+			ElectionTimeout:  et,
+			HeartbeatTimeout: 500 * time.Millisecond,
+		})
+		require.NoError(t, nerr)
+		nodes[i] = n
+	}
+
+	releaseCh := make(chan struct{})
+	blocker := &blockEntryReplyTransport{
+		inner:     net.Register("n1", nodes[0]),
+		blockPeer: "n3",
+		releaseCh: releaseCh,
+		blockedCh: make(chan struct{}, 1),
+	}
+	nodes[0].SetTransport(blocker)
+	nodes[1].SetTransport(net.Register("n2", nodes[1]))
+	nodes[2].SetTransport(net.Register("n3", nodes[2]))
+
+	for _, n := range nodes {
+		n.Start()
+		t.Cleanup(n.Stop)
+		go func(n *Node) {
+			for range n.ApplyCh() {
+			}
+		}(n)
+	}
+
+	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
+		"n1 did not become leader")
+	require.NoError(t, waitFor(2*time.Second, func() bool {
+		return n1.CommittedIndex() >= 1 && n2.CommittedIndex() >= 1 && n3.CommittedIndex() >= 1
+	}), "leader no-op did not apply across cluster")
+
+	blocker.armed.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := n1.ProposeWait(ctx, []byte("commit-notify"))
+	require.NoError(t, err)
+
+	select {
+	case <-blocker.blockedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected n3 entry reply to be blocked")
+	}
+	require.NoError(t, waitFor(2*time.Second, func() bool {
+		return n1.CommittedIndex() >= 2 && n2.CommittedIndex() >= 2
+	}), "proposal did not commit via n2")
+	require.Less(t, n3.CommittedIndex(), uint64(2), "n3 should have appended but not applied before commit notification")
+
+	close(releaseCh)
+
+	require.NoError(t, waitFor(120*time.Millisecond, func() bool {
+		return n3.CommittedIndex() >= 2
+	}), "n3 waited for a later heartbeat tick to learn LeaderCommit")
+}
+
 // TestSingleFlight_PartitionedPeerNoGoroutineLeak verifies the per-peer
 // single-flight gate: when a peer's transport hangs (simulated by blocking
 // SendAppendEntries on a channel), at most 1 AE goroutine is in flight for that

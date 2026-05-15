@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"io"
+	"time"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -19,15 +21,19 @@ func (s *Server) putObjectWithUserMetadata(
 		result *storage.PutObjectResult
 		err    error
 	)
+	backendStart := time.Now()
 	if acl != nil {
 		result, err = s.ops.PutObjectWithACLAndUserMetadataResult(ctx, bucket, key, body, contentType, *acl, userMetadata)
 	} else {
 		result, err = s.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, body, contentType, userMetadata)
 	}
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutBackend, backendStart, cluster.PutTraceStageFields{})
 	if err != nil {
 		return nil, err
 	}
+	mutationStart := time.Now()
 	s.mutations.OnObjectWrite(ctx, bucket, key, result)
+	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutMutation, mutationStart, cluster.PutTraceStageFields{})
 	return result, nil
 }
 

@@ -1,12 +1,13 @@
 # Changelog
 
-## [0.0.207.0] - 2026-05-15 — refactor: split server route and runtime surfaces
+## [0.0.208.0] - 2026-05-15 — refactor: split server route and runtime surfaces
 
 ### Added
 
 - **Route surface manifests** — server and admin routes now have explicit path, availability, and auth surface tables with tests covering route visibility and anonymous/authenticated policy decisions.
 - **Startup recovery package** — orphan tmp and multipart startup cleanup now lives in `internal/startuprecovery`, making server bootstrap thinner and independently testable.
 - **NFS export e2e coverage** — multi-node NFS export tests now wait for rolling-upgrade capability gossip and mount explicit export paths.
+- **PUT trace handoff** — HTTP PUT trace stages from `0.0.207.0` now flow through the split object-write runtime without restoring the old monolithic handler file.
 
 ### Changed
 
@@ -27,6 +28,34 @@
 - `go build -o bin/grainfs ./cmd/grainfs`
 - `go test ./tests/e2e -run 'TestE2E_MultiRaftSharding_NFSv4Smoke|TestE2E_NFSMultiExportPropagation_MultiNode' -count=1 -timeout=4m -v`
 - `go test ./tests/e2e -count=1 -timeout=25m`
+
+## [0.0.207.0] - 2026-05-15 — perf: attribute and tighten PUT forwarding
+
+### Added
+
+- **PUT trace attribution** — local and forwarded PUT paths can now emit benchmark-only JSONL trace events for routing, forwarding, receiver, shard-write, Raft metadata, and meta-index stages.
+- **PUT matrix benchmark** — local cluster benchmarks can now compare small and large PUT latency across leader and follower ports, then generate a dominant-stage report with forward attempts, leader-hint retries, forwarded bytes, shard timing, and meta-index proposal counts.
+- **PUT trace regression coverage** — trace sink behavior, coordinator forwarding, receiver forwarding, sender retry fields, report dominance, trace file permissions, and Raft dispatch timing now have targeted tests.
+
+### Changed
+
+- **Forwarded PUT index ownership** — forwarded PUTs now commit object-index entries on the receiving data-group leader instead of also committing from the forwarding coordinator.
+- **Forwarding leader handling** — small forwarded PUTs avoid the extra preflight round trip and rely on NotLeader hint retry, while streamed PUTs keep the leader preflight before sending a non-rewindable body.
+- **Raft replication wakeups** — leaders now dispatch pending entries after heartbeat replies and notify follower reads sooner when commit progress advances.
+- **Follower read fallback budget** — follower local-read waits now use a shorter budget before forwarding, reducing long PUT-path waits observed during benchmark runs.
+
+### Fixed
+
+- **Forwarded mutation safety** — forward receivers now reject mutating object operations when object-index proposal is not wired, preventing successful writes that would be missing from the global object index.
+- **Trace file privacy** — PUT trace JSONL files are created owner-only, reducing accidental exposure of raw bucket and key names during benchmark runs.
+- **Benchmark artifact hygiene** — generated PUT matrix summaries and trace reports are ignored, and local superpowers plan files stay outside git.
+
+### Verification
+
+- `go test ./internal/cluster -count=1`
+- `go test ./internal/raft -count=1`
+- `go test ./internal/server -count=1`
+- `node --check benchmarks/put_trace_report.js && node --test benchmarks/put_trace_report.test.js`
 
 ## [0.0.206.1] - 2026-05-15 — fix: NFS cluster benchmark reliability
 

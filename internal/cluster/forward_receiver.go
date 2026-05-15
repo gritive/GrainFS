@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync/atomic"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -53,6 +54,14 @@ func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *For
 func (r *ForwardReceiver) WithObjectIndexProposer(p objectIndexProposer) *ForwardReceiver {
 	r.indexProposer = p
 	return r
+}
+
+func (r *ForwardReceiver) requireObjectIndexProposer(bucket, key string) (objectIndexProposer, *transport.Message) {
+	if r.indexProposer != nil {
+		return r.indexProposer, nil
+	}
+	log.Error().Str("bucket", bucket).Str("key", key).Msg("forward: missing object-index proposer for mutating operation")
+	return nil, statusReply(raftpb.ForwardStatusInternal)
 }
 
 // Register installs this ForwardReceiver as the handler for StreamProposeGroupForward (0x08) on shardSvc.
@@ -259,37 +268,80 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
 	key := string(pa.Key())
-	ctx := contextForForwardedGroup(context.Background(), dg)
+	indexProposer, missingIndexReply := r.requireObjectIndexProposer(bucket, key)
+	if missingIndexReply != nil {
+		return missingIndexReply
+	}
+	ctx := ContextWithPutTrace(contextForForwardedGroup(context.Background(), dg), PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		GroupID:     dg.ID(),
+		Ingress:     PutTraceIngressReceiver,
+		SizeClass:   putTraceSizeClass(int64(len(pa.BodyBytes())), DefaultMaxForwardBodyBytes),
+		ForwardMode: PutTraceForwardFrame,
+	})
+	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
+	stageStart := time.Now()
 	obj, err := dg.Backend().PutObject(ctx, bucket, key, bytes.NewReader(pa.BodyBytes()), string(pa.ContentType()))
+	fields := PutTraceStageFields{Bytes: int64(len(pa.BodyBytes()))}
 	if err != nil {
+		fields.Error = err.Error()
+		ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
 		return statusReply(mapErrorToStatus(err))
 	}
-	if r.indexProposer != nil {
-		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
-		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
-			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
-			return statusReply(raftpb.ForwardStatusInternal)
-		}
+	ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
+	entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+	stageStart = time.Now()
+	err = indexProposer.ProposeObjectIndex(ctx, entry, false)
+	fields = PutTraceStageFields{MetaProposeSite: "receiver", MetaProposeCount: 1}
+	if err != nil {
+		fields.Error = err.Error()
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+		return statusReply(raftpb.ForwardStatusInternal)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
 	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
-	ctx := contextForForwardedGroup(context.Background(), dg)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
 	key := string(pa.Key())
+	indexProposer, missingIndexReply := r.requireObjectIndexProposer(bucket, key)
+	if missingIndexReply != nil {
+		drainForwardBody(body)
+		return missingIndexReply
+	}
+	ctx := ContextWithPutTrace(contextForForwardedGroup(context.Background(), dg), PutTraceRequest{
+		Bucket:      bucket,
+		Key:         key,
+		GroupID:     dg.ID(),
+		Ingress:     PutTraceIngressReceiver,
+		SizeClass:   PutTraceSizeLarge,
+		ForwardMode: PutTraceForwardStream,
+	})
+	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
+	stageStart := time.Now()
 	obj, err := dg.Backend().PutObject(ctx, bucket, key, body, string(pa.ContentType()))
+	fields := PutTraceStageFields{}
 	if err != nil {
+		fields.Error = err.Error()
+		ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
 		return statusReply(mapErrorToStatus(err))
 	}
-	if r.indexProposer != nil {
-		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
-		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
-			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
-			return statusReply(raftpb.ForwardStatusInternal)
-		}
+	ObservePutTraceStage(ctx, PutTraceStageReceiverBackendPut, stageStart, fields)
+	entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+	stageStart = time.Now()
+	err = indexProposer.ProposeObjectIndex(ctx, entry, false)
+	fields = PutTraceStageFields{MetaProposeSite: "receiver", MetaProposeCount: 1}
+	if err != nil {
+		fields.Error = err.Error()
+		ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+		return statusReply(raftpb.ForwardStatusInternal)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageMetaIndexPropose, stageStart, fields)
 	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
@@ -426,18 +478,20 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 	da := raftpb.GetRootAsDeleteObjectArgs(args, 0)
 	bucket := string(da.Bucket())
 	key := string(da.Key())
+	indexProposer, missingIndexReply := r.requireObjectIndexProposer(bucket, key)
+	if missingIndexReply != nil {
+		return missingIndexReply
+	}
 	markerID, err := dg.Backend().DeleteObjectReturningMarker(bucket, key)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if r.indexProposer != nil {
-		ctx := contextForForwardedGroup(context.Background(), dg)
-		marker := &storage.Object{Key: key, VersionID: markerID}
-		entry := objectIndexEntryForDataGroup(dg, bucket, key, marker, true)
-		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
-			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex (delete marker) failed; orphan may be created")
-			return statusReply(raftpb.ForwardStatusInternal)
-		}
+	ctx := contextForForwardedGroup(context.Background(), dg)
+	marker := &storage.Object{Key: key, VersionID: markerID}
+	entry := objectIndexEntryForDataGroup(dg, bucket, key, marker, true)
+	if err := indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex (delete marker) failed; orphan may be created")
+		return statusReply(raftpb.ForwardStatusInternal)
 	}
 	return &transport.Message{Payload: buildObjectReply(&storage.Object{
 		Key:       key,
@@ -458,15 +512,17 @@ func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) 
 	bucket := string(da.Bucket())
 	key := string(da.Key())
 	versionID := string(da.VersionId())
+	indexProposer, missingIndexReply := r.requireObjectIndexProposer(bucket, key)
+	if missingIndexReply != nil {
+		return missingIndexReply
+	}
 	if err := dg.Backend().DeleteObjectVersion(bucket, key, versionID); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if r.indexProposer != nil {
-		ctx := contextForForwardedGroup(context.Background(), dg)
-		if err := r.indexProposer.ProposeDeleteObjectIndex(ctx, bucket, key, versionID); err != nil {
-			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Str("version_id", versionID).Msg("forward: ProposeDeleteObjectIndex failed; stale index entry may remain")
-			return statusReply(raftpb.ForwardStatusInternal)
-		}
+	ctx := contextForForwardedGroup(context.Background(), dg)
+	if err := indexProposer.ProposeDeleteObjectIndex(ctx, bucket, key, versionID); err != nil {
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Str("version_id", versionID).Msg("forward: ProposeDeleteObjectIndex failed; stale index entry may remain")
+		return statusReply(raftpb.ForwardStatusInternal)
 	}
 	return &transport.Message{Payload: buildOKReply()}
 }
@@ -559,6 +615,10 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 	ca := raftpb.GetRootAsCompleteMultipartUploadArgs(args, 0)
 	bucket := string(ca.Bucket())
 	key := string(ca.Key())
+	indexProposer, missingIndexReply := r.requireObjectIndexProposer(bucket, key)
+	if missingIndexReply != nil {
+		return missingIndexReply
+	}
 	n := ca.PartsLength()
 	parts := make([]storage.Part, n)
 	var partRef raftpb.PartRef
@@ -574,12 +634,10 @@ func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []by
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if r.indexProposer != nil {
-		entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
-		if err := r.indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
-			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
-			return statusReply(raftpb.ForwardStatusInternal)
-		}
+	entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+	if err := indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed; orphan may be created")
+		return statusReply(raftpb.ForwardStatusInternal)
 	}
 	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
