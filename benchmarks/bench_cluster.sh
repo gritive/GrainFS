@@ -14,6 +14,11 @@
 #   NO_BUILD      — 1이면 빌드 건너뜀
 #   PROFILE       — 1이면 pprof 프로파일 수집 (기본: 0)
 #   PPROF_PORT    — pprof HTTP 포트 (기본: 6060, PROFILE=1일 때만 사용)
+#   PUT_MATRIX    — 1이면 포트/크기 PUT 매트릭스 실행 (기본: 0)
+#   PUT_TRACE     — 1이면 PUT trace JSONL 기록 및 리포트 생성 (기본: 0)
+#   PUT_SMALL_KB  — PUT 매트릭스 small 오브젝트 크기 KB (기본: 64)
+#   PUT_LARGE_KB  — PUT 매트릭스 large 오브젝트 크기 KB (기본: 8192)
+#   PUT_MATRIX_ITERATIONS — PUT 매트릭스 셀별 반복 횟수 (기본: 25)
 #
 # 3노드 포트 배치:
 #   노드1: S3=9100  Raft=19100
@@ -41,6 +46,11 @@ SIZE_KB="${SIZE_KB:-64}"
 PROFILE="${PROFILE:-0}"
 PPROF_PORT="${PPROF_PORT:-6060}"
 SCRIPT="$BENCHMARKS_DIR/s3_bench.js"
+PUT_TRACE="${PUT_TRACE:-0}"
+PUT_MATRIX="${PUT_MATRIX:-0}"
+PUT_SMALL_KB="${PUT_SMALL_KB:-64}"
+PUT_LARGE_KB="${PUT_LARGE_KB:-8192}"
+PUT_MATRIX_ITERATIONS="${PUT_MATRIX_ITERATIONS:-25}"
 
 # ── 의존성 확인 ────────────────────────────────────────────────────────────────
 bench_require_command "$K6" "brew install k6"
@@ -59,6 +69,9 @@ fi
 # ── 임시 디렉토리 정리 ────────────────────────────────────────────────────────
 rm -rf "$BENCH_DIR"
 mkdir -p "$BENCH_DIR"/{n1,n2,n3}
+BENCH_ENCRYPTION_KEY_FILE="${BENCH_ENCRYPTION_KEY_FILE:-$BENCH_DIR/encryption.key}"
+export BENCH_ENCRYPTION_KEY_FILE
+bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
 
 # ── 프로파일 디렉토리 ────────────────────────────────────────────────────────
 PROFILE_DIR=""
@@ -77,16 +90,19 @@ start_node() {
   local idx="$1"        # 1 | 2 | 3
   local s3_port="$2"
   local raft_port="$3"
-  local peers="$4"      # 쉼표 구분 raft 주소 목록 (자신 제외)
-  local extra="${5:-}"  # 추가 플래그 (--pprof-port 등)
+  local extra="${4:-}"  # 추가 플래그 (--pprof-port 등)
   local logfile="$BENCH_DIR/n${idx}.log"
+  local trace_env=()
+  if [[ "$PUT_TRACE" == "1" ]]; then
+    trace_env=(env "GRAINFS_PUT_TRACE_FILE=$BENCH_DIR/n${idx}/put-trace.jsonl" "GRAINFS_NODE_ID=127.0.0.1:${raft_port}")
+  fi
 
-  "$BINARY" serve \
+  "${trace_env[@]}" "$BINARY" serve \
     --data "$BENCH_DIR/n${idx}" \
     --port "$s3_port" \
+    --node-id "127.0.0.1:${raft_port}" \
     --raft-addr "127.0.0.1:${raft_port}" \
-    --peers "$peers" \
-    --cluster-key "bench-local-key" \
+    --cluster-key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
     $(bench_encryption_args) \
     --nfs4-port 0 \
     --nbd-port 0 \
@@ -113,13 +129,23 @@ trap cleanup EXIT INT TERM
 # 리더 감지 후 그 노드에 pprof가 열려 있어야 하므로,
 # PROFILE=1이면 세 노드 모두에 서로 다른 pprof 포트를 할당한다.
 if [[ "$PROFILE" == "1" ]]; then
-  start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102" "--pprof-port $PPROF_PORT"
-  start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102" "--pprof-port $((PPROF_PORT+1))"
-  start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101" "--pprof-port $((PPROF_PORT+2))"
+  start_node 1 9100 19100 "--pprof-port $PPROF_PORT"
+  bench_wait_tcp_port "127.0.0.1" 9100 "node1 S3" 180 0.2
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n2/.join-pending"
+  chmod 600 "$BENCH_DIR/n2/.join-pending"
+  start_node 2 9101 19101 "--pprof-port $((PPROF_PORT+1))"
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n3/.join-pending"
+  chmod 600 "$BENCH_DIR/n3/.join-pending"
+  start_node 3 9102 19102 "--pprof-port $((PPROF_PORT+2))"
 else
-  start_node 1 9100 19100 "127.0.0.1:19101,127.0.0.1:19102"
-  start_node 2 9101 19101 "127.0.0.1:19100,127.0.0.1:19102"
-  start_node 3 9102 19102 "127.0.0.1:19100,127.0.0.1:19101"
+  start_node 1 9100 19100
+  bench_wait_tcp_port "127.0.0.1" 9100 "node1 S3" 180 0.2
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n2/.join-pending"
+  chmod 600 "$BENCH_DIR/n2/.join-pending"
+  start_node 2 9101 19101
+  printf '%s' "127.0.0.1:19100" >"$BENCH_DIR/n3/.join-pending"
+  chmod 600 "$BENCH_DIR/n3/.join-pending"
+  start_node 3 9102 19102
 fi
 
 # ── 클러스터 준비 대기 ────────────────────────────────────────────────────────
@@ -140,6 +166,7 @@ done
 
 # Raft 리더 선출 대기: /api/cluster/status에서 node_id == leader_id 인 노드 탐색
 LEADER_PORT=""
+LEADER_IDX=""
 LEADER_DEADLINE=$(( $(date +%s) + 30 ))
 while [[ -z "$LEADER_PORT" ]]; do
   if (( $(date +%s) > LEADER_DEADLINE )); then
@@ -153,6 +180,7 @@ while [[ -z "$LEADER_PORT" ]]; do
     leader_id=$(echo "$status" | grep -o '"leader_id":"[^"]*"' | cut -d'"' -f4)
     if [[ -n "$leader_id" && "$node_id" == "$leader_id" ]]; then
       LEADER_PORT="$port"
+      LEADER_IDX=$((port_idx + 1))
       LEADER_PPROF_PORT=$((PPROF_PORT + port_idx))
       break
     fi
@@ -166,28 +194,43 @@ else
   echo "[bench] cluster ready — leader on port ${LEADER_PORT}"
 fi
 
-TARGET_PORT=""
-TARGET_PPROF_PORT=""
-for _ in $(seq 1 60); do
-  for port_idx in 0 1 2; do
-    port=$((9100 + port_idx))
-    if BENCH_QUIET=1 bench_create_bucket_retry "http://127.0.0.1:${port}" "bench" 1 0.1 &&
-      BENCH_QUIET=1 bench_put_object_retry "http://127.0.0.1:${port}" "bench" ".bench-ready" 1 0.1; then
-      TARGET_PORT="$port"
-      TARGET_PPROF_PORT=$((PPROF_PORT + port_idx))
-      break 2
-    fi
-  done
-  sleep 0.5
-done
+bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n${LEADER_IDX}" "bench-cluster"
+bench_create_bucket_admin_retry "$BINARY" "$BENCH_DIR/n${LEADER_IDX}" "bench"
 
-if [[ -z "$TARGET_PORT" ]]; then
-  echo "[error] no writable S3 endpoint found" >&2
-  tail -30 "$BENCH_DIR"/n*.log >&2
-  exit 1
-fi
+TARGET_PORT="$LEADER_PORT"
+TARGET_PPROF_PORT="$LEADER_PPROF_PORT"
 echo "[bench] writable target on port ${TARGET_PORT}"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
+
+if [[ "$PUT_MATRIX" == "1" ]]; then
+  MATRIX_SCRIPT="$BENCHMARKS_DIR/put_matrix_bench.js"
+  echo "[bench] running PUT matrix with trace=${PUT_TRACE}"
+
+  run_put_matrix_cell() {
+    local cell="$1"
+    local port="$2"
+    local size_kb="$3"
+    "$K6" run "$MATRIX_SCRIPT" \
+      --env BASE_URL="http://127.0.0.1:${port}" \
+      --env BUCKET="bench" \
+      --env ACCESS_KEY="$ACCESS_KEY" \
+      --env SECRET_KEY="$SECRET_KEY" \
+      --env OBJECT_SIZE_KB="$size_kb" \
+      --env MATRIX_CELL="$cell" \
+      --env ITERATIONS="$PUT_MATRIX_ITERATIONS" \
+      --env VUS="1"
+  }
+
+  for port in 9100 9101 9102; do
+    run_put_matrix_cell "port${port}-small" "$port" "$PUT_SMALL_KB"
+    run_put_matrix_cell "port${port}-large" "$port" "$PUT_LARGE_KB"
+  done
+
+  if [[ "$PUT_TRACE" == "1" ]]; then
+    node "$BENCHMARKS_DIR/put_trace_report.js" "$BENCH_DIR"/n*/put-trace.jsonl
+  fi
+  exit 0
+fi
 
 # ── 프로파일: 벤치마크 전 heap 수집 ─────────────────────────────────────────
 if [[ "$PROFILE" == "1" ]]; then
@@ -224,6 +267,8 @@ fi
 "$K6" run "$SCRIPT" \
   --env BASE_URL="http://127.0.0.1:${TARGET_PORT}" \
   --env BUCKET="bench" \
+  --env ACCESS_KEY="$ACCESS_KEY" \
+  --env SECRET_KEY="$SECRET_KEY" \
   --env OBJECT_SIZE_KB="$SIZE_KB" \
   --env DURATION="$DURATION" \
   --env RAMP_UP="$RAMP_UP" \

@@ -1,11 +1,15 @@
 package cluster
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1018,6 +1022,7 @@ type recordingDialer struct {
 	streamReplyBy map[raftpb.ForwardOp][]byte
 	readReplyBy   map[raftpb.ForwardOp][]byte
 	readBodyBy    map[raftpb.ForwardOp][]byte
+	replyFunc     func(peer string, op raftpb.ForwardOp, args []byte) ([]byte, error, bool)
 	defaultErr    error
 }
 
@@ -1041,6 +1046,11 @@ func (d *recordingDialer) dial(ctx context.Context, peer string, payload []byte)
 	argsCopy := make([]byte, len(args))
 	copy(argsCopy, args)
 	d.calls = append(d.calls, dialerCall{peer: peer, op: op, gid: gid, args: argsCopy, rawly: payload})
+	if d.replyFunc != nil {
+		if reply, err, ok := d.replyFunc(peer, op, argsCopy); ok {
+			return reply, err
+		}
+	}
 	if reply, ok := d.replyByOp[op]; ok {
 		return reply, nil
 	}
@@ -1494,10 +1504,40 @@ func TestClusterCoordinator_PutObject_Forward(t *testing.T) {
 	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
 }
 
-func TestClusterCoordinator_PutObject_ForwardCommitsObjectIndex(t *testing.T) {
+func TestClusterCoordinator_PutObject_ForwardRetriesHintForSmallFrame(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"peer-A", "peer-C"})
+	body := []byte("small-forward-body")
+	d.replyFunc = func(peer string, op raftpb.ForwardOp, args []byte) ([]byte, error, bool) {
+		switch op {
+		case raftpb.ForwardOpPutObject:
+			if peer == "peer-A" {
+				return notLeaderReplyBytes(t, "peer-B"), nil, true
+			}
+			if peer == "peer-B" {
+				return buildObjectReply(
+					&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
+				), nil, true
+			}
+		}
+		return buildSimpleReply(raftpb.ForwardStatusInternal, ""), nil, true
+	}
+
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, d.calls, 2)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[0].op)
+	require.Equal(t, "peer-A", d.calls[0].peer)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[1].op)
+	require.Equal(t, "peer-B", d.calls[1].peer)
+}
+
+func TestClusterCoordinator_PutObject_ForwardLeavesObjectIndexToReceiver(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
 	proposer := &recordingObjectIndexProposer{}
 	c.WithObjectIndexProposer(proposer)
@@ -1511,12 +1551,26 @@ func TestClusterCoordinator_PutObject_ForwardCommitsObjectIndex(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), obj.Size)
-	require.Len(t, proposer.entries, 1)
-	require.Equal(t, "bk", proposer.entries[0].Bucket)
-	require.Equal(t, "k", proposer.entries[0].Key)
-	require.Equal(t, "v1", proposer.entries[0].VersionID)
-	require.Equal(t, "g1", proposer.entries[0].PlacementGroupID)
-	require.Equal(t, []string{"a", "self"}, proposer.entries[0].NodeIDs)
+	require.Empty(t, proposer.entries, "forward receiver owns object-index commit for forwarded PUTs")
+}
+
+func TestClusterCoordinator_PutObject_StreamForwardLeavesObjectIndexToReceiver(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
+	c.forward.WithStreamDialer(d.stream)
+	proposer := &recordingObjectIndexProposer{}
+	c.WithObjectIndexProposer(proposer)
+	body := bytes.Repeat([]byte("z"), DefaultMaxForwardBodyBytes+1024)
+	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream", ContentType: "application/octet-stream", VersionID: "v1"},
+		"bk",
+	)
+
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, d.streamCalls, 1)
+	require.Empty(t, proposer.entries, "forward receiver owns object-index commit for streamed forwarded PUTs")
 }
 
 func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
@@ -1672,4 +1726,78 @@ func TestClusterCoordinator_CompleteMultipartUpload_ForwardCommitsObjectIndex(t 
 	require.Equal(t, "k", proposer.entries[0].Key)
 	require.Equal(t, "v1", proposer.entries[0].VersionID)
 	require.Equal(t, "g1", proposer.entries[0].PlacementGroupID)
+}
+
+func TestClusterCoordinator_PutObjectForwardFrameRecordsTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	c, d := setupCoordWithForward(t, "bench", "group-1", []string{"peer-a", "self"})
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "trace-key", Size: 4, VersionID: "v1", LastModified: time.Now().Unix()},
+		"bench",
+	)
+
+	_, err := c.PutObject(context.Background(), "bench", "trace-key", strings.NewReader("body"), "text/plain")
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageRouteWrite)
+	requirePutTraceStage(t, events, PutTraceStageForwardSendFrame)
+	require.Equal(t, PutTraceIngressForwardedNonLeader, events[0].Ingress)
+	require.Equal(t, PutTraceForwardFrame, events[0].ForwardMode)
+}
+
+func TestClusterCoordinator_PutObjectLocalRecordsLocalTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bench", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	_, err := c.PutObject(context.Background(), "bench", "local-trace-key", strings.NewReader("body"), "text/plain")
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageRouteWrite)
+	for _, ev := range events {
+		require.Equal(t, PutTraceIngressLocalLeader, ev.Ingress)
+	}
+}
+
+func readPutTraceEvents(t *testing.T, path string) []PutTraceEvent {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	var out []PutTraceEvent
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var ev PutTraceEvent
+		require.NoError(t, json.Unmarshal(sc.Bytes(), &ev))
+		out = append(out, ev)
+	}
+	require.NoError(t, sc.Err())
+	require.NotEmpty(t, out)
+	return out
+}
+
+func requirePutTraceStage(t *testing.T, events []PutTraceEvent, stage PutTraceStage) {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Stage == stage {
+			return
+		}
+	}
+	require.Failf(t, "missing stage", "stage %s not found in %#v", stage, events)
 }

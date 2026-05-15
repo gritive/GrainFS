@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -561,4 +562,41 @@ func TestForwardSender_SendStreamUsesPerCallTimeoutContext(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoReachablePeer)
 	require.Less(t, time.Since(start), 200*time.Millisecond)
 	<-started
+}
+
+func TestForwardSender_SendRecordsAttemptsAndNotLeaderRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+
+	calls := 0
+	s := NewForwardSender(func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return notLeaderReplyBytes(t, "peer-b"), nil
+		}
+		return okReplyBytes(t), nil
+	})
+
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "bench",
+		Key:         "retry-key",
+		GroupID:     "group-1",
+		Ingress:     PutTraceIngressForwardedNonLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardFrame,
+	})
+	_, err := s.Send(ctx, []string{"peer-a"}, "group-1", raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "bench", "retry-key"))
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageForwardNotLeaderRetry)
+	var send PutTraceEvent
+	for _, ev := range events {
+		if ev.Stage == PutTraceStageForwardSendFrame {
+			send = ev
+		}
+	}
+	require.Equal(t, 2, send.ForwardAttempts)
+	require.True(t, send.LeaderHintUsed)
 }

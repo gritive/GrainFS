@@ -1,5 +1,34 @@
 # GrainFS Benchmarks
 
+## S3 Cluster PUT Matrix
+
+`make bench-cluster` starts a local 3-node cluster and runs the standard S3
+object benchmark. Set `PUT_MATRIX=1` to run a PUT-only matrix across all three
+S3 ports with small and large objects:
+
+```bash
+PUT_MATRIX=1 make bench-cluster
+# results: benchmarks/put-matrix-port<port>-<small|large>.json
+```
+
+Tune the matrix with:
+
+```bash
+PUT_SMALL_KB=64 PUT_LARGE_KB=8192 PUT_MATRIX_ITERATIONS=25 PUT_MATRIX=1 make bench-cluster
+```
+
+Set `PUT_TRACE=1` with the matrix to write per-node PUT trace JSONL files under
+the benchmark temp directory and print a dominant-stage report:
+
+```bash
+PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster
+```
+
+Trace files are created mode `0600` because they include raw bucket and object
+keys. The report groups requests by ingress, size class, and forwarding mode,
+then summarizes forwarded bytes, leader-hint retries, meta-index proposal
+counts, and the slowest shard stage.
+
 ## NFS Multi-Bucket Export Baseline
 
 The NFSv4 server now uses explicit bucket exports. Single-bucket benchmark runs

@@ -169,6 +169,18 @@ func (s *ForwardSender) Send(
 		defer cancel()
 	}
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
+	stageStart := time.Now()
+	attempts := 0
+	notLeaderRetries := 0
+	leaderHintUsed := false
+	defer func() {
+		ObservePutTraceStage(ctx, PutTraceStageForwardSendFrame, stageStart, PutTraceStageFields{
+			Bytes:            int64(len(payload)),
+			ForwardAttempts:  attempts,
+			LeaderHintUsed:   leaderHintUsed,
+			NotLeaderRetries: notLeaderRetries,
+		})
+	}()
 
 	for {
 		var lastDialErr error
@@ -177,13 +189,20 @@ func (s *ForwardSender) Send(
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+			attempts++
 			reply, err := s.dialer(ctx, peer, payload)
 			if err != nil {
 				lastDialErr = err
 				continue // try next peer
 			}
 			if isNotLeaderReply(reply) {
+				notLeaderRetries++
+				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
+					NotLeaderRetries: notLeaderRetries,
+				})
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
+					leaderHintUsed = true
+					attempts++
 					r2, err2 := s.dialer(ctx, hint, payload)
 					if err2 == nil {
 						return r2, nil
@@ -301,6 +320,22 @@ func (s *ForwardSender) SendStream(
 	}
 
 	payload := encodeForwardPayload(groupID, op, fbsArgs)
+	stageStart := time.Now()
+	attempts := 0
+	notLeaderRetries := 0
+	leaderHintUsed := false
+	forwardedBytes := int64(len(payload))
+	if sizer, ok := body.(interface{ Len() int }); ok {
+		forwardedBytes += int64(sizer.Len())
+	}
+	defer func() {
+		ObservePutTraceStage(ctx, PutTraceStageForwardSendStream, stageStart, PutTraceStageFields{
+			Bytes:            forwardedBytes,
+			ForwardAttempts:  attempts,
+			LeaderHintUsed:   leaderHintUsed,
+			NotLeaderRetries: notLeaderRetries,
+		})
+	}()
 	for {
 		var lastDialErr error
 		retryableNotLeader := false
@@ -311,6 +346,7 @@ func (s *ForwardSender) SendStream(
 			if err := rewindForwardBody(body); err != nil {
 				return nil, err
 			}
+			attempts++
 			reply, err := s.streamDialer(ctx, peer, payload, body)
 			if err != nil {
 				lastDialErr = err
@@ -323,10 +359,16 @@ func (s *ForwardSender) SendStream(
 				if !canRewindForwardBody(body) {
 					return reply, nil
 				}
+				notLeaderRetries++
+				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
+					NotLeaderRetries: notLeaderRetries,
+				})
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 					if err := rewindForwardBody(body); err != nil {
 						return nil, err
 					}
+					leaderHintUsed = true
+					attempts++
 					r2, err2 := s.streamDialer(ctx, hint, payload, body)
 					if err2 == nil {
 						return r2, nil

@@ -52,7 +52,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 ### 성능 규칙
 - Erasure Coding: Reed-Solomon 4+2 기본, 가변 설정 가능
 - QUIC 멀티플렉싱으로 클러스터 통신
-- 벤치마크: k6 기반 S3 PUT/GET/DELETE throughput 측정
+- 벤치마크: k6 기반 S3 PUT/GET/DELETE throughput 측정, `PUT_MATRIX=1 make bench-cluster`로 클러스터 PUT 포트/크기 매트릭스 측정, `PUT_TRACE=1`로 benchmark-only PUT trace 리포트 생성
 
 ## Persona Test
 

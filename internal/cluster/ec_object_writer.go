@@ -206,9 +206,21 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 					}
 				}
 				observePutStage("ec_write_shard", "local", shardStageStart)
+				ObservePutTraceStage(ctx, PutTraceStageShardWriteLocal, shardStageStart, PutTraceStageFields{
+					ShardIndex:       i,
+					ShardTarget:      node,
+					ShardTargetClass: "local",
+					Error:            putTraceErrorString(werr),
+				})
 			} else {
 				werr = w.writeRemoteShard(gctx, openShard, shardSize, i, node, plan.Bucket, shardKey)
 				observePutStage("ec_write_shard", "remote", shardStageStart)
+				ObservePutTraceStage(ctx, PutTraceStageShardWriteRemote, shardStageStart, PutTraceStageFields{
+					ShardIndex:       i,
+					ShardTarget:      node,
+					ShardTargetClass: "remote",
+					Error:            putTraceErrorString(werr),
+				})
 				if w.peerHealth != nil {
 					if werr != nil {
 						w.peerHealth.MarkUnhealthy(node)
