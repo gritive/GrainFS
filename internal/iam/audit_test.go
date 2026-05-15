@@ -1,9 +1,14 @@
 package iam
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -104,5 +109,33 @@ func TestLogAuditEmitter_DoesNotError(t *testing.T) {
 		Action: s3auth.GetObject, Status: AuditStatusAllow,
 	}); err != nil {
 		t.Errorf("LogAuditEmitter.Emit returned %v, want nil", err)
+	}
+}
+
+func TestLogAuditEmitter_DefaultInfoLevelSuppressesAllowButKeepsDeny(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf).Level(zerolog.InfoLevel)
+	t.Cleanup(func() { log.Logger = prev })
+
+	em := NewLogAuditEmitter()
+	if err := em.Emit(context.Background(), AuditEvent{
+		SAID: "sa-1", Bucket: "b", Key: "allowed",
+		Action: s3auth.PutObject, Status: AuditStatusAllow,
+	}); err != nil {
+		t.Fatalf("allow emit returned error: %v", err)
+	}
+	if strings.Contains(buf.String(), "iam.authz") {
+		t.Fatalf("allow audit log should be debug-only at default info level, got %q", buf.String())
+	}
+
+	if err := em.Emit(context.Background(), AuditEvent{
+		SAID: "sa-1", Bucket: "b", Key: "denied",
+		Action: s3auth.PutObject, Status: AuditStatusDeny, Reason: "no_grant",
+	}); err != nil {
+		t.Fatalf("deny emit returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "iam.authz") || !strings.Contains(buf.String(), `"status":"deny"`) {
+		t.Fatalf("deny audit log should remain visible at info level, got %q", buf.String())
 	}
 }

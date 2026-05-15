@@ -107,7 +107,11 @@ type logAuditEmitter struct{}
 func NewLogAuditEmitter() AuditEmitter { return logAuditEmitter{} }
 
 func (logAuditEmitter) Emit(_ context.Context, ev AuditEvent) error {
-	log.Info().
+	evt := log.Debug()
+	if ev.Status == AuditStatusDeny {
+		evt = log.Info()
+	}
+	evt.
 		Str("event", "iam_audit").
 		Str("sa_id", ev.SAID).
 		Str("bucket", ev.Bucket).
