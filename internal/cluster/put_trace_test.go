@@ -64,6 +64,11 @@ func TestPutTraceStageVocabularyIsStable(t *testing.T) {
 	require.Equal(t, "shard_write_local_dirsync", string(PutTraceStageShardWriteLocalDirSync))
 	require.Equal(t, "data_raft_propose_meta", string(PutTraceStageDataRaftProposeMeta))
 	require.Equal(t, "meta_index_propose", string(PutTraceStageMetaIndexPropose))
+	require.Equal(t, "meta_index_encode", string(PutTraceStageMetaIndexEncode))
+	require.Equal(t, "meta_index_forward", string(PutTraceStageMetaIndexForward))
+	require.Equal(t, "meta_index_wait_local", string(PutTraceStageMetaIndexWaitLocal))
+	require.Equal(t, "meta_index_local_propose", string(PutTraceStageMetaIndexLocalPropose))
+	require.Equal(t, "meta_index_local_apply", string(PutTraceStageMetaIndexLocalApply))
 }
 
 func TestPutTraceWritesJSONLWhenEnabled(t *testing.T) {

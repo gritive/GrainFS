@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -377,6 +378,10 @@ func TestForwardingBucketAssignerTimesOutWaitingForLocalApply(t *testing.T) {
 func TestForwardingObjectIndexProposerForwardsFromFollower(t *testing.T) {
 	follower := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = follower.Close() })
+	tracePath := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", tracePath)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
 
 	entry := ObjectIndexEntry{
 		Bucket:           "photos",
@@ -397,7 +402,15 @@ func TestForwardingObjectIndexProposerForwardsFromFollower(t *testing.T) {
 		return nil
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "photos",
+		Key:         "img.jpg",
+		GroupID:     "group-1",
+		Ingress:     PutTraceIngressReceiver,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardFrame,
+	})
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	require.NoError(t, proposer.ProposeObjectIndex(ctx, entry, false))
 
@@ -406,4 +419,8 @@ func TestForwardingObjectIndexProposerForwardsFromFollower(t *testing.T) {
 	got, ok := follower.FSM().ObjectIndexVersion("photos", "img.jpg", "v1")
 	require.True(t, ok)
 	require.Equal(t, "group-1", got.PlacementGroupID)
+	events := readPutTraceEvents(t, tracePath)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexEncode)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexForward)
+	requirePutTraceStage(t, events, PutTraceStageMetaIndexWaitLocal)
 }
