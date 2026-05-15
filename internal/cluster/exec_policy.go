@@ -31,7 +31,7 @@ func NewLocalExecution(groups localBackendLookup) *LocalExecution {
 }
 
 const (
-	localExecFollowerReadDeadline = 25 * time.Millisecond
+	localExecFollowerReadDeadline = 10 * time.Millisecond
 	localExecSelfOnlyLeaderWait   = 5 * time.Second
 )
 
