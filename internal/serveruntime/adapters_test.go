@@ -16,6 +16,8 @@ import (
 
 func TestScrubExecutionBackendPreservesDedupResult(t *testing.T) {
 	director := scrubber.NewDirector(scrubber.DirectorOpts{QueueSize: 1, NodeID: "n1"})
+	director.Start(context.Background())
+	defer director.Stop()
 	req := scrubber.TriggerReq{
 		Bucket:    "ec1",
 		KeyPrefix: "prefix/",
@@ -58,7 +60,10 @@ func TestScrubExecutionBackendRejectsMissingProposer(t *testing.T) {
 }
 
 func TestScrubExecutionBackendRejectsUnsupportedOperationKind(t *testing.T) {
-	backend := NewScrubExecutionBackend(NewScrubProposerAdapter(nil, scrubber.NewDirector(scrubber.DirectorOpts{}), "n1"))
+	director := scrubber.NewDirector(scrubber.DirectorOpts{})
+	director.Start(context.Background())
+	defer director.Stop()
+	backend := NewScrubExecutionBackend(NewScrubProposerAdapter(nil, director, "n1"))
 
 	_, err := backend.TriggerScrub(context.Background(), execution.Operation{})
 
