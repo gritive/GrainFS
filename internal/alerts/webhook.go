@@ -439,6 +439,67 @@ func colorFor(s Severity) string {
 	return "warning"
 }
 
+// env returns the controller's owned dispatch environment. Test-only access path.
+func (d *Dispatcher) env() *dispatchEnv {
+	return d.envPtr
+}
+
+// Start launches the controller goroutine. Idempotent (CompareAndSwap guard).
+func (d *Dispatcher) Start(ctx context.Context) {
+	if !d.started.CompareAndSwap(false, true) {
+		return
+	}
+	d.workerCtx, d.workerCancel = context.WithCancel(ctx)
+	go d.controllerLoop()
+}
+
+func (d *Dispatcher) controllerLoop() {
+	defer close(d.done)
+	for {
+		select {
+		case <-d.stop:
+			d.drainResidualSendCmds()
+			return
+		case cmd := <-d.inbox:
+			cmd.apply(d.envPtr)
+		case rcmd := <-d.releaseInbox:
+			rcmd.apply(d.envPtr)
+		}
+	}
+}
+
+func (d *Dispatcher) drainResidualSendCmds() {
+	for {
+		select {
+		case cmd := <-d.inbox:
+			if _, ok := cmd.(sendCmd); ok {
+				d.observeDrop(dropReasonStopped)
+			}
+		default:
+			return
+		}
+	}
+}
+
+// Stop stub (정식 구현은 Task 9):
+func (d *Dispatcher) Stop(ctx context.Context) error {
+	if !d.started.Load() {
+		return nil
+	}
+	d.stopOnce.Do(func() {
+		d.stopping.Store(true)
+		close(d.stop)
+		<-d.done
+	})
+	return nil
+}
+
+// observeDrop records a drop event. Task 5에서 metric + warn log 추가.
+func (d *Dispatcher) observeDrop(reason dropReason) {
+	// Task 5에서 metric + warn log 추가
+	_ = reason
+}
+
 // ErrEmptyURL is returned when a caller passes an empty webhook URL to a
 // helper that requires one. Currently unused at the public surface but kept
 // for callers building higher-level abstractions.
