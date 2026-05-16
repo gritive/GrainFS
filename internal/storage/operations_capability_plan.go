@@ -37,11 +37,13 @@ func buildACLCapabilityPlan(backend Backend) aclCapabilityPlan {
 }
 
 // aclPlanForCall mirrors planForCall but caches the ACL discovery rules
-// (allowAtomicBehindCurrent). It shares planGen so any Swap invalidates
-// both caches via the same atomic.Uint64 bump.
+// (allowAtomicBehindCurrent). It uses its own aclPlanGen counter so that
+// rebuilding either cache cannot make the other look fresh against a stale
+// pointer — both are validated against the same upstream genSource but
+// invalidate independently.
 func (o *Operations) aclPlanForCall() aclCapabilityPlan {
 	current := o.currentGeneration()
-	if cached := o.aclPlan.Load(); cached != nil && o.planGen.Load() == current {
+	if cached := o.aclPlan.Load(); cached != nil && o.aclPlanGen.Load() == current {
 		return *cached
 	}
 	return o.rebuildACLPlan(current)
@@ -53,7 +55,7 @@ func (o *Operations) rebuildACLPlan(current uint64) aclCapabilityPlan {
 		endGen := o.currentGeneration()
 		if current == endGen {
 			o.aclPlan.Store(&plan)
-			o.planGen.Store(current)
+			o.aclPlanGen.Store(current)
 			return plan
 		}
 		current = endGen

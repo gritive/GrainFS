@@ -88,6 +88,33 @@ func TestSwappableBackendCachedOpsRaceWithSwap(t *testing.T) {
 	require.Same(t, finalInner, finalOps.Backend(), "cached ops must wrap the current inner after concurrent Swap")
 }
 
+func TestOperationsACLPlanRebuildDoesNotMaskStaleMainPlan(t *testing.T) {
+	// Regression: planGen used to be shared between main plan and ACL plan,
+	// so a rebuildACLPlan after a Swap would update planGen and make a
+	// stale main plan look fresh. Each cache now tracks its own generation
+	// so this scenario rebuilds main plan correctly.
+	swappable := NewSwappableBackend(&aclNoCapabilityBackend{})
+	ops := NewOperations(swappable)
+	// Prime both caches at gen=0.
+	_ = ops.planForCall()
+	_ = ops.aclPlanForCall()
+
+	// Swap to a backend that exposes SetObjectACL — capability discovery
+	// must surface it on the next planForCall.
+	dyn := &dynamicACLBackend{}
+	swappable.Swap(dyn)
+
+	// Touch ACL cache first; with the previous shared-planGen design this
+	// would bump planGen and a subsequent planForCall would return the
+	// pre-swap (no-ACL) plan.
+	_ = ops.aclPlanForCall()
+
+	// SetObjectACL routes through planForCall(). If main plan is stale
+	// (no aclSetter discovered), this returns the no-adapter sentinel.
+	require.NoError(t, ops.SetObjectACL("b", "k", 7))
+	require.Equal(t, []string{"setacl:b/k:7"}, dyn.calls)
+}
+
 func TestOperationsRefreshesPlanAfterSwappableBackendSwap(t *testing.T) {
 	swappable := NewSwappableBackend(&aclNoCapabilityBackend{})
 	ops := NewOperations(swappable)

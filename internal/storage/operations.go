@@ -34,8 +34,9 @@ import (
 type Operations struct {
 	backend     Backend
 	plan        atomic.Pointer[operationsPlan]
-	aclPlan     atomic.Pointer[aclCapabilityPlan]
 	planGen     atomic.Uint64
+	aclPlan     atomic.Pointer[aclCapabilityPlan]
+	aclPlanGen  atomic.Uint64           // independent of planGen; each cache invalidates itself
 	genSource   operationPlanGeneration // nil = no SwappableBackend in chain → plan never invalidates
 	policyStore *policy.CompiledPolicyStore
 }
@@ -212,14 +213,15 @@ func (o *Operations) planForCall() operationsPlan {
 
 func (o *Operations) rebuildPlan(current uint64) operationsPlan {
 	// Seqlock-style: bracket the rebuild with generation checks. If a swap
-	// races us, retry. Bounded by the rate of Swap() which is rare.
+	// races us, retry. Bounded by the rate of Swap() which is rare. Only
+	// touches its own (plan, planGen) pair — aclPlan tracks its own gen and
+	// invalidates independently via aclPlanForCall.
 	for {
 		plan := buildOperationsPlan(o.backend)
 		endGen := o.currentGeneration()
 		if current == endGen {
 			o.plan.Store(&plan)
 			o.planGen.Store(current)
-			o.aclPlan.Store(nil) // invalidate sibling cache; rebuilt lazily on demand
 			return plan
 		}
 		current = endGen
