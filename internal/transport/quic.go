@@ -594,7 +594,10 @@ func (t *QUICTransport) handleStream(from string, stream *quic.Stream) {
 		}
 		if body != nil {
 			defer body.Close()
-			_, _ = copyQUICStream(stream, body)
+			if _, err := copyQUICStream(stream, body); err != nil {
+				stream.CancelWrite(quic.StreamErrorCode(quicAppErrCode))
+				return
+			}
 		}
 		return
 	}

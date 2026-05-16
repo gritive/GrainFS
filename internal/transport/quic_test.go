@@ -689,6 +689,44 @@ func TestQUICTransport_CallReadContextDoesNotCancelReturnedBody(t *testing.T) {
 	require.Equal(t, body, got)
 }
 
+func TestQUICTransport_CallReadPropagatesHandlerBodyError(t *testing.T) {
+	ctx := context.Background()
+
+	server := MustNewQUICTransport("test-cluster-psk")
+	client := MustNewQUICTransport("test-cluster-psk")
+	defer server.Close()
+	defer client.Close()
+
+	server.HandleRead(StreamGroupForwardRead, func(req *Message) (*Message, io.ReadCloser) {
+		return NewResponse(req, []byte("meta")), io.NopCloser(&errorAfterReader{
+			data: []byte("partial"),
+			err:  io.ErrUnexpectedEOF,
+		})
+	})
+
+	require.NoError(t, server.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
+
+	_, rc, err := client.CallRead(ctx, server.LocalAddr(), &Message{Type: StreamGroupForwardRead})
+	require.Error(t, err)
+	require.Nil(t, rc)
+}
+
+type errorAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errorAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
 func TestMuxALPNConstant(t *testing.T) {
 	tr := MustNewQUICTransport("test-cluster-psk")
 	defer tr.Close()
