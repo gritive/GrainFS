@@ -252,6 +252,18 @@ func buildListPartsArgs(bucket, key, uploadID string, maxParts int32) []byte {
 	return b.FinishedBytes()
 }
 
+func buildListMultipartUploadsArgs(bucket, prefix string, maxUploads int32) []byte {
+	b := flatbuffers.NewBuilder(80)
+	bk := b.CreateString(bucket)
+	pf := b.CreateString(prefix)
+	raftpb.ListMultipartUploadsArgsStart(b)
+	raftpb.ListMultipartUploadsArgsAddBucket(b, bk)
+	raftpb.ListMultipartUploadsArgsAddPrefix(b, pf)
+	raftpb.ListMultipartUploadsArgsAddMaxUploads(b, maxUploads)
+	b.Finish(raftpb.ListMultipartUploadsArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 // --- Reply builders (response side — used by ForwardReceiver in T8 + tests) ---
 
 // buildObjectReply builds an OK reply with a populated ForwardObjectMeta —
@@ -399,6 +411,34 @@ func buildUploadReply(bucket, key, uploadID string) []byte {
 	raftpb.ForwardReplyStart(b)
 	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
 	raftpb.ForwardReplyAddUpload(b, upOff)
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildMultipartUploadsReply(uploads []*storage.MultipartUpload) []byte {
+	b := flatbuffers.NewBuilder(64 + len(uploads)*64)
+	metas := make([]flatbuffers.UOffsetT, len(uploads))
+	for i, upload := range uploads {
+		bk := b.CreateString(upload.Bucket)
+		k := b.CreateString(upload.Key)
+		u := b.CreateString(upload.UploadID)
+		ct := b.CreateString(upload.ContentType)
+		raftpb.ForwardMultipartUploadMetaStart(b)
+		raftpb.ForwardMultipartUploadMetaAddBucket(b, bk)
+		raftpb.ForwardMultipartUploadMetaAddKey(b, k)
+		raftpb.ForwardMultipartUploadMetaAddUploadId(b, u)
+		raftpb.ForwardMultipartUploadMetaAddContentType(b, ct)
+		raftpb.ForwardMultipartUploadMetaAddCreatedAt(b, upload.CreatedAt)
+		metas[i] = raftpb.ForwardMultipartUploadMetaEnd(b)
+	}
+	raftpb.ForwardReplyStartUploadsVector(b, len(uploads))
+	for i := len(metas) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(metas[i])
+	}
+	uploadsVec := b.EndVector(len(uploads))
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
+	raftpb.ForwardReplyAddUploads(b, uploadsVec)
 	b.Finish(raftpb.ForwardReplyEnd(b))
 	return b.FinishedBytes()
 }
@@ -603,6 +643,29 @@ func partsFromReply(reply []byte) ([]storage.Part, error) {
 			PartNumber: int(p.PartNumber()),
 			ETag:       string(p.Etag()),
 			Size:       p.Size(),
+		})
+	}
+	return out, nil
+}
+
+func multipartUploadsFromReply(reply []byte) ([]*storage.MultipartUpload, error) {
+	if err := parseReplyStatus(reply); err != nil {
+		return nil, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	n := fr.UploadsLength()
+	out := make([]*storage.MultipartUpload, 0, n)
+	var upload raftpb.ForwardMultipartUploadMeta
+	for i := 0; i < n; i++ {
+		if !fr.Uploads(&upload, i) {
+			continue
+		}
+		out = append(out, &storage.MultipartUpload{
+			Bucket:      string(upload.Bucket()),
+			Key:         string(upload.Key()),
+			UploadID:    string(upload.UploadId()),
+			ContentType: string(upload.ContentType()),
+			CreatedAt:   upload.CreatedAt(),
 		})
 	}
 	return out, nil

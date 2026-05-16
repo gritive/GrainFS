@@ -21,9 +21,11 @@ const (
 type Operation string
 
 const (
-	OperationMigrationCutover Operation = "migration_cutover"
-	OperationNfsExportCreate  Operation = "nfs_export_create"
-	OperationListParts        Operation = "list_parts"
+	OperationMigrationCutover      Operation = "migration_cutover"
+	OperationNfsExportCreate       Operation = "nfs_export_create"
+	OperationCreateMultipartUpload Operation = "create_multipart_upload"
+	OperationListMultipartUploads  Operation = "list_multipart_uploads"
+	OperationListParts             Operation = "list_parts"
 )
 
 const (

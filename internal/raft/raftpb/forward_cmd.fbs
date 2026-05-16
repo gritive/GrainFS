@@ -24,7 +24,8 @@ enum ForwardOp : byte {
   ScrubSessionStat = 14,
   ReadAt = 15,
   SetObjectACL = 16,
-  ListParts = 17
+  ListParts = 17,
+  ListMultipartUploads = 18
 }
 
 table ScrubSessionStatArgs {
@@ -156,6 +157,12 @@ table ListPartsArgs {
   max_parts:int32;
 }
 
+table ListMultipartUploadsArgs {
+  bucket:string;
+  prefix:string;
+  max_uploads:int32;
+}
+
 enum ForwardStatus : byte {
   OK = 0,
   NotLeader = 1,
@@ -198,6 +205,8 @@ table ForwardMultipartUploadMeta {
   bucket:string;
   key:string;
   upload_id:string;
+  content_type:string;
+  created_at:long;
 }
 
 table ForwardReply {
@@ -212,6 +221,7 @@ table ForwardReply {
   versions:[ForwardObjectVersionMeta]; // ListObjectVersions
   scrub_session:ScrubSessionStatReply; // ScrubSessionStat
   parts:[ForwardPartMeta];           // ListParts
+  uploads:[ForwardMultipartUploadMeta]; // ListMultipartUploads
 }
 
 root_type ForwardReply;

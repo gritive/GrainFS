@@ -320,6 +320,25 @@ func TestForwardReceiver_HandleListParts_MissingUploadReturnsNoSuchKey(t *testin
 	require.Equal(t, raftpb.ForwardStatusNoSuchUpload, fr.Status())
 }
 
+func TestForwardReceiver_HandleListMultipartUploads_CallsBackend(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "listed/mpu-key", "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListMultipartUploads, buildListMultipartUploadsArgs("bucket", "listed/", 100))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	uploads, err := multipartUploadsFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []*storage.MultipartUpload{up}, uploads)
+}
+
 func TestForwardReceiver_HandleDeleteObject_CommitsDeleteMarkerIndex(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-1")
 	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))

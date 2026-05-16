@@ -35,6 +35,8 @@ type fakeBackend struct {
 	headErr    error
 	deleteErr  error
 	listErr    error
+	mpuResult  []*storage.MultipartUpload
+	mpuErr     error
 }
 
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
@@ -143,7 +145,8 @@ func (f *fakeBackend) AbortMultipartUpload(ctx context.Context, bucket, key, upl
 }
 func (f *fakeBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
 	_ = ctx
-	return nil, fmt.Errorf("fakeBackend.ListMultipartUploads not implemented")
+	f.record(fmt.Sprintf("ListMultipartUploads:%s:%s:%d", bucket, prefix, maxUploads))
+	return f.mpuResult, f.mpuErr
 }
 func (f *fakeBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
 	_ = ctx
@@ -1506,11 +1509,22 @@ func TestClusterCoordinator_WalkObjects_FnError_Stops(t *testing.T) {
 
 func TestClusterCoordinator_CreateMultipartUpload_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	reportMultipartListingCapability(c, "a")
 	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
 	up, err := c.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
 	require.NoError(t, err)
 	require.Equal(t, "upload-1", up.UploadID)
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+}
+
+func TestClusterCoordinator_CreateMultipartUpload_GateRejectsBeforePeerCall(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.WithCapabilityGate(NewCapabilityGate(compat.DefaultRegistry, time.Minute))
+	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
+
+	_, err := c.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+	require.Empty(t, d.calls)
 }
 
 func TestClusterCoordinator_CompleteMultipartUpload_Forward(t *testing.T) {
@@ -1534,17 +1548,50 @@ func TestClusterCoordinator_AbortMultipartUpload_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpAbortMultipartUpload, d.calls[0].op)
 }
 
+func TestClusterCoordinator_ListMultipartUploads_RejectsWhenGroupBackendMissing(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"node-a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"node-a"}},
+	}}
+	c := NewClusterCoordinator(nil, mgr, router, meta, "self")
+
+	_, err := c.ListMultipartUploads(context.Background(), "bk", "", 100)
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+}
+
+func TestClusterCoordinator_ListMultipartUploads_ForwardsWhenGroupBackendMissing(t *testing.T) {
+	want := []*storage.MultipartUpload{{Bucket: "bk", Key: "listed/incomplete.bin", UploadID: "upload-1"}}
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"node-a"})
+	reportMultipartListingCapability(c, "node-a")
+	d.replyByOp[raftpb.ForwardOpListMultipartUploads] = buildMultipartUploadsReply(want)
+
+	got, err := c.ListMultipartUploads(context.Background(), "bk", "listed/", 100)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpListMultipartUploads, d.calls[0].op)
+	args := raftpb.GetRootAsListMultipartUploadsArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "listed/", string(args.Prefix()))
+	require.Equal(t, int32(0), args.MaxUploads())
+}
+
+func TestClusterCoordinator_ListMultipartUploads_GateRejectsBeforePeerCall(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"node-a"})
+	c.WithCapabilityGate(NewCapabilityGate(compat.DefaultRegistry, time.Minute))
+	d.replyByOp[raftpb.ForwardOpListMultipartUploads] = buildMultipartUploadsReply(nil)
+
+	_, err := c.ListMultipartUploads(context.Background(), "bk", "listed/", 100)
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+	require.Empty(t, d.calls)
+}
+
 func TestClusterCoordinator_ListParts_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
-	now := time.Now()
-	gate.ReportEvidence(compat.Evidence{
-		NodeID:       "a",
-		Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
-		LastSeen:     now,
-		Ready:        true,
-	})
-	c.WithCapabilityGate(gate)
+	reportMultipartListingCapability(c, "a")
 	d.replyByOp[raftpb.ForwardOpListParts] = buildPartsReply([]storage.Part{
 		{PartNumber: 1, ETag: "etag-1", Size: 10},
 		{PartNumber: 2, ETag: "etag-2", Size: 20},
@@ -1595,6 +1642,20 @@ func TestClusterCoordinator_ListParts_GateRejectsBeforePeerCall(t *testing.T) {
 	_, err := c.ListParts(context.Background(), "bk", "k", "upload-1", 100)
 	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
 	require.Empty(t, d.calls)
+}
+
+func reportMultipartListingCapability(c *ClusterCoordinator, peers ...string) {
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	now := time.Now()
+	for _, peer := range peers {
+		gate.ReportEvidence(compat.Evidence{
+			NodeID:       compat.NodeID(peer),
+			Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+			LastSeen:     now,
+			Ready:        true,
+		})
+	}
+	c.WithCapabilityGate(gate)
 }
 
 // TestClusterCoordinator_GetObject_NoSuchBucketStatus verifies that a server-

@@ -159,6 +159,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleCompleteMultipartUpload(dg, fbsArgs)
 	case raftpb.ForwardOpAbortMultipartUpload:
 		return r.handleAbortMultipartUpload(dg, fbsArgs)
+	case raftpb.ForwardOpListMultipartUploads:
+		return r.handleListMultipartUploads(dg, fbsArgs)
 	case raftpb.ForwardOpListParts:
 		return r.handleListParts(dg, fbsArgs)
 	case raftpb.ForwardOpGetObjectVersion:
@@ -688,6 +690,21 @@ func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte)
 		return statusReply(mapErrorToStatus(err))
 	}
 	return &transport.Message{Payload: buildOKReply()}
+}
+
+func (r *ForwardReceiver) handleListMultipartUploads(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
+	la := raftpb.GetRootAsListMultipartUploadsArgs(args, 0)
+	uploads, err := dg.Backend().ListMultipartUploads(
+		ctx,
+		string(la.Bucket()),
+		string(la.Prefix()),
+		int(la.MaxUploads()),
+	)
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildMultipartUploadsReply(uploads)}
 }
 
 func (r *ForwardReceiver) handleListParts(dg *DataGroup, args []byte) *transport.Message {

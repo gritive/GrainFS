@@ -299,5 +299,6 @@ func startMultipartListingCluster(t *testing.T, ctx context.Context, bucketName 
 		},
 	)
 	require.NoError(t, err)
+	waitForMultipartListingCreate(t, ctx, cluster.S3Client(leaderIdx), bucketName, multipartListingKey, 120*time.Second)
 	return cluster, leaderIdx
 }

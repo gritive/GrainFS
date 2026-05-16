@@ -24,6 +24,7 @@ const (
 	ForwardOpReadAt                  ForwardOp = 15
 	ForwardOpSetObjectACL            ForwardOp = 16
 	ForwardOpListParts               ForwardOp = 17
+	ForwardOpListMultipartUploads    ForwardOp = 18
 )
 
 var EnumNamesForwardOp = map[ForwardOp]string{
@@ -44,6 +45,7 @@ var EnumNamesForwardOp = map[ForwardOp]string{
 	ForwardOpReadAt:                  "ReadAt",
 	ForwardOpSetObjectACL:            "SetObjectACL",
 	ForwardOpListParts:               "ListParts",
+	ForwardOpListMultipartUploads:    "ListMultipartUploads",
 }
 
 var EnumValuesForwardOp = map[string]ForwardOp{
@@ -64,6 +66,7 @@ var EnumValuesForwardOp = map[string]ForwardOp{
 	"ReadAt":                  ForwardOpReadAt,
 	"SetObjectACL":            ForwardOpSetObjectACL,
 	"ListParts":               ForwardOpListParts,
+	"ListMultipartUploads":    ForwardOpListMultipartUploads,
 }
 
 func (v ForwardOp) String() string {

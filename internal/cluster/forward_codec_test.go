@@ -31,3 +31,26 @@ func TestForwardCodec_ForwardReplyParts(t *testing.T) {
 		{PartNumber: 2, ETag: "etag-2", Size: 20},
 	}, parts)
 }
+
+func TestForwardCodec_ListMultipartUploadsArgs(t *testing.T) {
+	args := buildListMultipartUploadsArgs("bucket", "prefix/", 500)
+
+	decoded := raftpb.GetRootAsListMultipartUploadsArgs(args, 0)
+	require.Equal(t, "bucket", string(decoded.Bucket()))
+	require.Equal(t, "prefix/", string(decoded.Prefix()))
+	require.Equal(t, int32(500), decoded.MaxUploads())
+}
+
+func TestForwardCodec_ForwardReplyMultipartUploads(t *testing.T) {
+	reply := buildMultipartUploadsReply([]*storage.MultipartUpload{
+		{Bucket: "bucket", Key: "prefix/a.bin", UploadID: "upload-1", ContentType: "text/plain", CreatedAt: 11},
+		{Bucket: "bucket", Key: "prefix/b.bin", UploadID: "upload-2", ContentType: "application/octet-stream", CreatedAt: 22},
+	})
+
+	uploads, err := multipartUploadsFromReply(reply)
+	require.NoError(t, err)
+	require.Equal(t, []*storage.MultipartUpload{
+		{Bucket: "bucket", Key: "prefix/a.bin", UploadID: "upload-1", ContentType: "text/plain", CreatedAt: 11},
+		{Bucket: "bucket", Key: "prefix/b.bin", UploadID: "upload-2", ContentType: "application/octet-stream", CreatedAt: 22},
+	}, uploads)
+}

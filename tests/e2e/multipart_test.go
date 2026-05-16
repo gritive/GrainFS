@@ -129,6 +129,8 @@ type multipartListingFixture struct {
 	ETagTwo string
 }
 
+const multipartListingKey = "listed/incomplete.bin"
+
 func exerciseMultipartListingFeature(t testing.TB, ctx context.Context, client *s3.Client, bucket, partLabel string, waitForParts bool) multipartListingFixture {
 	t.Helper()
 
@@ -142,7 +144,7 @@ func createIncompleteMultipartListingFixture(t testing.TB, ctx context.Context, 
 
 	fixture := multipartListingFixture{
 		Bucket: bucket,
-		Key:    "listed/incomplete.bin",
+		Key:    multipartListingKey,
 		Prefix: "listed/",
 	}
 	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
@@ -182,6 +184,32 @@ func createIncompleteMultipartListingFixture(t testing.TB, ctx context.Context, 
 	return fixture
 }
 
+func waitForMultipartListingCreate(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string, timeout time.Duration) {
+	t.Helper()
+
+	var lastErr error
+	require.Eventually(t, func() bool {
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		_, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: initOut.UploadId,
+		})
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		return true
+	}, timeout, time.Second, "multipart listing create gate did not open: %v", lastErr)
+}
+
 func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3.Client, fixture multipartListingFixture, waitForParts bool) {
 	t.Helper()
 
@@ -205,10 +233,28 @@ func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3
 		return err
 	}
 	if waitForParts {
-		require.Eventually(t, func() bool { return listParts() == nil }, 30*time.Second, 500*time.Millisecond)
+		require.Eventually(t, func() bool {
+			return listParts() == nil && multipartListingPartsMatch(parts, fixture)
+		}, 30*time.Second, 500*time.Millisecond)
 	} else {
 		require.NoError(t, listParts())
 	}
+	assertMultipartListingParts(t, parts, fixture)
+}
+
+func multipartListingPartsMatch(parts *s3.ListPartsOutput, fixture multipartListingFixture) bool {
+	if parts == nil || len(parts.Parts) != 2 {
+		return false
+	}
+	return aws.ToInt32(parts.Parts[0].PartNumber) == 1 &&
+		aws.ToString(parts.Parts[0].ETag) == fixture.ETagOne &&
+		aws.ToInt32(parts.Parts[1].PartNumber) == 2 &&
+		aws.ToString(parts.Parts[1].ETag) == fixture.ETagTwo
+}
+
+func assertMultipartListingParts(t testing.TB, parts *s3.ListPartsOutput, fixture multipartListingFixture) {
+	t.Helper()
+
 	require.Len(t, parts.Parts, 2)
 	assert.Equal(t, int32(1), aws.ToInt32(parts.Parts[0].PartNumber))
 	assert.Equal(t, fixture.ETagOne, aws.ToString(parts.Parts[0].ETag))

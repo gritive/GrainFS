@@ -107,4 +107,10 @@ func TestDefaultRegistryIncludesMultipartListingCapability(t *testing.T) {
 	if OperationListParts != Operation("list_parts") {
 		t.Fatalf("OperationListParts = %s", OperationListParts)
 	}
+	if OperationCreateMultipartUpload != Operation("create_multipart_upload") {
+		t.Fatalf("OperationCreateMultipartUpload = %s", OperationCreateMultipartUpload)
+	}
+	if OperationListMultipartUploads != Operation("list_multipart_uploads") {
+		t.Fatalf("OperationListMultipartUploads = %s", OperationListMultipartUploads)
+	}
 }
