@@ -27,6 +27,9 @@ func TestCompatibilityMatricesDoNotUseNotTestedStatus(t *testing.T) {
 				t.Fatalf("%s uses Not tested; compatibility matrices must choose Supported, Partial, Not supported, or Not planned", file)
 			}
 			if file == "s3-compatibility.md" {
+				if err := validateRequiredS3CompatibilityRows(string(body)); err != nil {
+					t.Fatal(err)
+				}
 				if err := validateProductionEssentialS3Evidence(string(body)); err != nil {
 					t.Fatal(err)
 				}
@@ -87,6 +90,32 @@ func validateProductionEssentialS3Evidence(markdown string) error {
 	return nil
 }
 
+func validateRequiredS3CompatibilityRows(markdown string) error {
+	required := []string{
+		"Lifecycle Expiration.Days",
+		"Lifecycle transition effects",
+		"SSE-S3 headers",
+		"SSE-KMS headers",
+		"SSE-C headers",
+		"Object Lock / retention / legal hold",
+	}
+	rows := make(map[string]bool, len(required))
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 4 {
+			continue
+		}
+		rows[cells[1]] = true
+	}
+
+	for _, operation := range required {
+		if !rows[operation] {
+			return fmt.Errorf("S3 compatibility matrix must include split row %q", operation)
+		}
+	}
+	return nil
+}
+
 func markdownTableCells(line string) []string {
 	line = strings.TrimSpace(line)
 	if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
@@ -103,6 +132,7 @@ func markdownTableCells(line string) []string {
 
 func isProductionEssentialS3Operation(operation string) bool {
 	return operation == "multipart listing apis" ||
+		(operation == "sse-s3 headers") ||
 		(strings.Contains(operation, "sse-s3/sse-kms") && strings.Contains(operation, "headers")) ||
 		strings.Contains(operation, "lifecycle expiration")
 }

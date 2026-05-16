@@ -44,15 +44,20 @@ binary and data compatibility across rolling upgrades.
 | Access control    | ACL header on object write/copy         | Supported     |                                                                                  |
 | Bucket controls   | Versioning                              | Supported     |                                                                                  |
 | Bucket controls   | Lifecycle config replication            | Supported     | Replicates lifecycle configuration through cluster metadata.                     |
-| Bucket controls   | Lifecycle expiration/transition effects | Not supported | Configuration replication exists; S3 lifecycle action semantics are not claimed. |
+| Bucket controls   | Lifecycle Expiration.Days               | Not supported | Configuration replication exists; S3 current-version expiration semantics are not claimed yet. |
+| Bucket controls   | Lifecycle transition effects            | Not supported | Storage-class transitions are not implemented.                                  |
+| Bucket controls   | Lifecycle noncurrent-version actions    | Not supported | Noncurrent-version lifecycle semantics are not claimed.                         |
+| Bucket controls   | Lifecycle multipart-abort actions       | Not supported | Multipart abort lifecycle rules are not implemented.                            |
 | Bucket controls   | Object tagging                          | Not supported |                                                                                  |
 | Bucket controls   | CORS                                    | Not supported |                                                                                  |
 | Bucket controls   | Static website hosting                  | Not supported |                                                                                  |
 | Bucket controls   | Bucket notification configuration       | Not supported | Internal events exist, but S3 bucket notification compatibility is not claimed.  |
 | Bucket controls   | Bucket replication                      | Not supported | `GrainFS` has Raft/EC replication; S3 bucket replication is not claimed.           |
-| Object governance | Object Lock, retention, legal hold      | Not supported |                                                                                  |
+| Object governance | Object Lock / retention / legal hold    | Not supported |                                                                                  |
 | Query             | S3 Select                               | Not supported |                                                                                  |
-| Encryption        | SSE-S3/SSE-KMS/SSE-C S3 headers         | Not supported | Stored bytes are encrypted; S3 SSE headers, KMS keys, and SSE-C keys are not claimed. |
+| Encryption        | SSE-S3 headers                          | Not supported | Stored bytes are encrypted; S3 SSE-S3 request/response headers are not claimed yet. |
+| Encryption        | SSE-KMS headers                         | Not supported | Stored bytes are encrypted; KMS key semantics are not implemented.              |
+| Encryption        | SSE-C headers                           | Not supported | Customer-supplied key semantics are not implemented.                            |
 
 ## Client Compatibility
 
