@@ -67,12 +67,12 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 | Comparison | Current status | Details |
 | --- | --- | --- |
 | `GrainFS` local FUSE-over-S3 snapshot | Documented repository snapshot: 64 MiB payload, Apple M3, Colima loopback, 3-run average | [Benchmark methodology](docs/reference/benchmarks.md#current-local-snapshots) |
-| `GrainFS` vs RustFS S3 object benchmark | Pending reproducible same-host run | [Comparable S3 protocol](docs/reference/benchmarks.md#comparable-s3-protocol) |
-| `GrainFS` vs MinIO S3 object benchmark | Pending reproducible same-host run | [Comparable S3 protocol](docs/reference/benchmarks.md#comparable-s3-protocol) |
+| `GrainFS` vs MinIO/RustFS 3-node S3 PUT | Latest same-host `warp` run: GrainFS 105.20 MiB/s, MinIO 45.37 MiB/s, RustFS 23.61 MiB/s for 64 KiB objects at c16 | [Local 3-node warp rebaseline](docs/reference/benchmarks.md#2026-05-16-local-3-node-warp-rebaseline) |
+| `GrainFS` 3-node S3 GET | Unresolved in the latest run: `warp` timed out during the bucket-location probe on node1 before the timed GET phase | [Local 3-node warp rebaseline](docs/reference/benchmarks.md#2026-05-16-local-3-node-warp-rebaseline) |
 
-README only shows benchmark summaries. Publish competitor numbers after the raw
-artifacts, host details, durability profile, workload, and commit pins are
-recorded in [docs/reference/benchmarks.md](docs/reference/benchmarks.md).
+Benchmark summaries point back to raw artifacts, host details, durability
+profile, workload, and commit pins in
+[docs/reference/benchmarks.md](docs/reference/benchmarks.md).
 
 ## Core Concepts
 

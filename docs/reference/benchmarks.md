@@ -93,7 +93,7 @@ This table lists values already documented in the repository.
 | Scenario                                                               | Result                                                                                                            |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | FUSE-over-S3, 64 MiB payload, Apple M3, Colima loopback, 3-run average | Direct S3 write 96.8 MB/s, direct S3 read 108.0 MB/s, rclone mount write 106.7 MB/s, rclone mount read 107.3 MB/s |
-| `GrainFS` vs RustFS vs MinIO 3-node warp PUT, 64 KiB, c16              | `GrainFS` 104.30 MiB/s, MinIO 103.66 MiB/s, RustFS 48.37 MiB/s; all runs reported 0 errors                         |
+| `GrainFS` vs RustFS vs MinIO 3-node warp PUT, 64 KiB, c16              | Latest same-host run: `GrainFS` 105.20 MiB/s, MinIO 45.37 MiB/s, RustFS 23.61 MiB/s; competitor runs reported 0 errors |
 | CI regression threshold                                                | Not yet enforced                                                                                                  |
 
 ## 2026-05-16 Local 3-Node Warp Baseline
@@ -123,6 +123,27 @@ Known caveats:
   no longer appears after the small EC memory path change.
 - `GrainFS` IAM allow authz console logs were suppressed at the default info
   level; deny authz logs remain visible and durable S3 audit remains enabled.
+
+## 2026-05-16 Local 3-Node Warp Rebaseline
+
+These snapshots were captured after `8857d1ac` with the same local loopback
+3-node layout, signed S3 requests, 64 KiB objects, concurrency 16, `warp`,
+and `--host-select roundrobin --noclear`.
+
+| Target    | Commit / build                  | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET status | Raw artifacts |
+| --------- | ------------------------------- | --------: | --------: | ---------: | --------: | ---------- | ------------- |
+| `GrainFS` | `8857d1ac`                      |    105.20 |   1683.25 |          0 |         - | failed before timed run: `?location=` probe timed out on node1 | `benchmarks/profiles/s3-compat-cluster-warp-grainfs-after-eof-fix-20260516-150809` |
+| MinIO     | local 3-process distributed run |     45.37 |    725.99 |          0 |    267.98 | ok | `benchmarks/profiles/s3-compat-cluster-warp-minio-rebaseline-20260516-151218` |
+| RustFS    | local 3-process distributed run |     23.61 |    377.79 |          0 |    102.40 | ok | `benchmarks/profiles/s3-compat-cluster-warp-rustfs-rebaseline-20260516-151417` |
+
+Observed deltas:
+
+- `GrainFS` PUT throughput was 2.32x the new MinIO PUT baseline and 4.46x the
+  new RustFS PUT baseline in this run.
+- `GrainFS` GET no longer surfaced the prior `unexpected EOF`, but the run did
+  not reach the timed GET phase because `warp` timed out waiting for response
+  headers from node1 while probing bucket location. Treat GET as unresolved
+  until that stall is root-caused and a successful GET run is captured.
 
 ## Adding Results
 
