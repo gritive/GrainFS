@@ -33,6 +33,9 @@ func TestCompatibilityMatricesDoNotUseNotTestedStatus(t *testing.T) {
 				if err := validateProductionEssentialS3Evidence(string(body)); err != nil {
 					t.Fatal(err)
 				}
+				if err := validateUnsupportedS3FailClosedEvidence(string(body)); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}
@@ -90,6 +93,29 @@ func validateProductionEssentialS3Evidence(markdown string) error {
 	return nil
 }
 
+func validateUnsupportedS3FailClosedEvidence(markdown string) error {
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 4 {
+			continue
+		}
+
+		operation := cells[1]
+		status := strings.ToLower(cells[2])
+		notes := strings.ToLower(cells[3])
+		if status != "not supported" || !requiresFailClosedEvidence(operation) {
+			continue
+		}
+		if strings.Contains(notes, "fail-closed") && strings.Contains(notes, "server tests") {
+			continue
+		}
+
+		return fmt.Errorf("Not supported S3 row %q must include fail-closed server test evidence in Notes", operation)
+	}
+
+	return nil
+}
+
 func validateRequiredS3CompatibilityRows(markdown string) error {
 	required := []string{
 		"Lifecycle Expiration.Days",
@@ -114,6 +140,10 @@ func validateRequiredS3CompatibilityRows(markdown string) error {
 		}
 	}
 	return nil
+}
+
+func requiresFailClosedEvidence(operation string) bool {
+	return operation == "SSE-KMS headers" || operation == "SSE-C headers"
 }
 
 func markdownTableCells(line string) []string {

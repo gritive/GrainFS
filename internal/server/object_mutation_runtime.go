@@ -16,17 +16,22 @@ func (s *Server) putObjectWithUserMetadata(
 	contentType string,
 	acl *uint8,
 	userMetadata map[string]string,
+	systemMetadata storage.ObjectSystemMetadata,
 ) (*storage.PutObjectResult, error) {
 	var (
 		result *storage.PutObjectResult
 		err    error
 	)
 	backendStart := time.Now()
-	if acl != nil {
-		result, err = s.ops.PutObjectWithACLAndUserMetadataResult(ctx, bucket, key, body, contentType, *acl, userMetadata)
-	} else {
-		result, err = s.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, body, contentType, userMetadata)
-	}
+	result, err = s.ops.PutObjectWithRequestResult(ctx, storage.PutObjectRequest{
+		Bucket:         bucket,
+		Key:            key,
+		Body:           body,
+		ContentType:    contentType,
+		ACL:            acl,
+		UserMetadata:   userMetadata,
+		SystemMetadata: systemMetadata,
+	})
 	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutBackend, backendStart, cluster.PutTraceStageFields{})
 	if err != nil {
 		return nil, err

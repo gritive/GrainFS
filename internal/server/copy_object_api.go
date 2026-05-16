@@ -14,6 +14,12 @@ import (
 
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
 func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, dstBucket, dstKey, copySource string) {
+	systemMetadata, sseErr := parseObjectSSEHeaders(c)
+	if sseErr != nil {
+		writeSSEHeaderError(c, sseErr)
+		return
+	}
+
 	src, ok := parseCopySource(copySource)
 	if !ok {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-copy-source format")
@@ -59,6 +65,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		MetadataDirective: directive,
 		ContentType:       string(c.GetHeader("Content-Type")),
 		UserMetadata:      copyUserMetadata(c),
+		SystemMetadata:    systemMetadata,
 		Preconditions:     preconditions,
 	}
 	result, err := s.copyObjectWithMutation(ctx, req)
@@ -67,6 +74,7 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 	obj := result.Object
+	writeSSEAlgorithmHeader(c, obj.SSEAlgorithm)
 
 	response := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult>
