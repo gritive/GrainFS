@@ -16,6 +16,13 @@ copy-on-write publish step.
   generation counter (`SwappableBackend.Generation()`). `planForCall` hot
   path is allocation-free and lock-free; `NewOperations` enforces the
   single-Generation-source invariant at construction.
+- `internal/storage/packblob.BlobStore.Append` no longer compresses inside
+  the critical section. Compression now runs against the input data before
+  the lock is acquired. Encryption stays inside the lock because its AAD
+  depends on `activeID` and `activeOff`. Mixed parallel read/write
+  benchmark: writer throughput +170% (compression-bound serial path
+  unblocked); read-only parallel benchmark: -5% latency. The file write
+  itself remains the dominant critical-section cost.
 - `internal/volume.Manager.ReadAt` keeps `Manager.mu` while reading block data.
   This is a justified serialization boundary: volume metadata, live maps, and
   physical block objects are not versioned independently, so snapshotting only
@@ -50,8 +57,15 @@ copy-on-write publish step.
   to fetch. Splitting this further requires a per-volume/per-block transaction
   or immutable object-version design.
 - `internal/storage/packblob.BlobStore.mu` serializes the active blob file and
-  offset. This is justified for append ordering, but compression must stay
-  outside the critical section if it becomes visible in mutex profiles.
+  offset. This is justified for append ordering. Compression now runs before
+  the lock is acquired (see `BlobStore.Append`): the mutex profile trigger
+  identified by an earlier draft of this audit was hit by a mixed parallel
+  read/write benchmark (94% of mutex delay on `Append`), and compression was
+  moved outside the critical section accordingly. The file write and offset
+  update remain inside the lock — those cannot be parallelised without a
+  per-blob transaction or pre-allocated extent scheme, which is out of scope
+  for this audit pass. Encryption AAD depends on the in-lock `activeID` /
+  `activeOff`, so it remains inside the critical section.
 - `internal/storage/packblob.PackedBackend.mu` protects the packed-object index.
   Reads hold it only to copy an index entry before blob I/O. If packed small
   object reads become a hot-path bottleneck, convert this to the same immutable

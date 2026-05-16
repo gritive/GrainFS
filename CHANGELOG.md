@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.220.0] - 2026-05-17 - perf: move blob compression outside the BlobStore.Append critical section
+
+### Changed
+- **`BlobStore.Append`** now compresses input data *before* acquiring
+  `BlobStore.mu`. The mutex profile of a mixed parallel read/write workload
+  showed `Append` at 94% of total mutex delay, with zstd compression running
+  inside the critical section. Compression depends only on the input bytes
+  and the `bs.compress` setup flag (set once at construction); it does not
+  need the lock. The file write and offset update remain inside the lock —
+  those preserve append ordering and cannot be moved without a different
+  schema (per-blob transactions or pre-allocated extents). Encryption stays
+  inside the lock because its AAD depends on the in-lock `activeID` /
+  `activeOff`.
+- `BlobStore.EnableCompression` docstring now spells out the
+  construction-only contract: callers must set `bs.compress` before the
+  BlobStore is shared with any goroutine, because the new pre-lock
+  compression path in `Append` reads the flag without the mutex. Future
+  contributors cannot silently race that read by flipping compression on a
+  live BlobStore.
+
+### Internal
+- Adds `get_parallel_bench_test.go` with `BenchmarkParallelGetSmallObjects`
+  and `BenchmarkParallelGetWithWriter`. Together they document the original
+  contention (`BlobStore.Append` at 94% of mutex delay during mixed
+  read/write) and the post-fix profile (`Append` still dominant at 95.8% —
+  the remaining cost is the file write itself, not compression).
+- Negative finding recorded: a parallel `BenchmarkParallelGetSmallObjects`
+  showed `PackedBackend.mu` RLock contention below the profiler's
+  significance threshold (< 0.5% of mutex delay) even at 100k entries. The
+  audit's conditional follow-up for `PackedBackend.mu` ("if packed small
+  object reads become a hot-path bottleneck, convert to the immutable
+  snapshot pattern") is **not** triggered by current workloads. The bench
+  remains as a regression guard.
+- `docs/architecture/lock-free-audit.md` "Changes In This Audit" section
+  records the move; the `BlobStore.mu` inventory entry is updated to note
+  that compression is now outside the critical section.
+
 ## [0.0.219.1] - 2026-05-17 - docs: ADR 0014 capability plan cache pattern
 
 ### Internal
