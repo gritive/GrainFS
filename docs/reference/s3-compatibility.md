@@ -44,7 +44,7 @@ binary and data compatibility across rolling upgrades.
 | Access control    | ACL header on object write/copy         | Supported     |                                                                                  |
 | Bucket controls   | Versioning                              | Supported     |                                                                                  |
 | Bucket controls   | Lifecycle config replication            | Supported     | Replicates lifecycle configuration through cluster metadata.                     |
-| Bucket controls   | Lifecycle Expiration.Days               | Not supported | Configuration replication exists; S3 current-version expiration semantics are not claimed yet. |
+| Bucket controls   | Lifecycle Expiration.Days               | Supported     | Lifecycle worker tests cover current-version expiration through the normal delete path; cluster e2e covers lifecycle config replication. |
 | Bucket controls   | Lifecycle transition effects            | Not supported | Storage-class transitions are not implemented.                                  |
 | Bucket controls   | Lifecycle noncurrent-version actions    | Not supported | Noncurrent-version lifecycle semantics are not claimed.                         |
 | Bucket controls   | Lifecycle multipart-abort actions       | Not supported | Multipart abort lifecycle rules are not implemented.                            |

@@ -72,6 +72,7 @@ func newWorker(store *Store, backend *mockBackend, deleter *mockDeleter) *Worker
 		backend: backend,
 		deleter: deleter,
 		limiter: rate.NewLimiter(rate.Inf, 0),
+		now:     time.Now,
 	}
 }
 
@@ -157,6 +158,42 @@ func TestWorker_ExpiresOldObject(t *testing.T) {
 	w.runCycle(context.Background())
 
 	assert.Equal(t, []string{"bucket/old.log"}, deleter.deleted)
+}
+
+func TestWorker_ExpirationDaysSkipsDeleteMarkers(t *testing.T) {
+	db := newTestDB(t)
+	store := NewStore(db)
+	now := time.Unix(1700000000, 0).UTC()
+
+	cfg := &LifecycleConfiguration{
+		Rules: []Rule{{
+			ID:         "expire-1",
+			Status:     "Enabled",
+			Expiration: &Expiration{Days: 1},
+		}},
+	}
+	require.NoError(t, store.put("bucket", cfg))
+
+	backend := &mockBackend{
+		buckets: []string{"bucket"},
+		objects: map[string][]scrubber.ObjectRecord{
+			"bucket": {{
+				Bucket:         "bucket",
+				Key:            "marker",
+				LastModified:   now.Add(-48 * time.Hour).Unix(),
+				IsDeleteMarker: true,
+			}},
+		},
+	}
+	deleter := &mockDeleter{}
+
+	w := newWorker(store, backend, deleter)
+	w.now = func() time.Time { return now }
+	w.runCycle(context.Background())
+
+	assert.Empty(t, deleter.deleted)
+	assert.Equal(t, int64(1), w.Stats().ObjectsChecked)
+	assert.Zero(t, w.Stats().Expired)
 }
 
 // TestWorker_SkipsRecentObject verifies that an object newer than Expiration.Days
