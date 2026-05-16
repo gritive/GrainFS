@@ -32,6 +32,9 @@ type objectMeta struct {
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
 // as stored in BadgerDB.
 type clusterMultipartMeta struct {
+	Bucket           string
+	Key              string
+	CreatedAt        int64
 	ContentType      string
 	PlacementGroupID string
 }
@@ -535,11 +538,16 @@ func unmarshalSnapshotState(data []byte) (result map[string][]byte, err error) {
 
 func marshalClusterMultipartMeta(m clusterMultipartMeta) ([]byte, error) {
 	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(m.Bucket)
+	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	pgOff := b.CreateString(m.PlacementGroupID)
 	clusterpb.MultipartMetaStart(b)
 	clusterpb.MultipartMetaAddContentType(b, ctOff)
 	clusterpb.MultipartMetaAddPlacementGroupId(b, pgOff)
+	clusterpb.MultipartMetaAddBucket(b, bucketOff)
+	clusterpb.MultipartMetaAddKey(b, keyOff)
+	clusterpb.MultipartMetaAddCreatedAt(b, m.CreatedAt)
 	return fbFinish(b, clusterpb.MultipartMetaEnd(b)), nil
 }
 
@@ -551,6 +559,9 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 		return clusterMultipartMeta{}, fmt.Errorf("unmarshal MultipartMeta: %w", err)
 	}
 	return clusterMultipartMeta{
+		Bucket:           string(t.Bucket()),
+		Key:              string(t.Key()),
+		CreatedAt:        t.CreatedAt(),
 		ContentType:      string(t.ContentType()),
 		PlacementGroupID: string(t.PlacementGroupId()),
 	}, nil

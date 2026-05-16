@@ -95,3 +95,25 @@ func TestRecordRejectUsesBoundedLabels(t *testing.T) {
 		t.Fatalf("RejectLabels must not include raw path label")
 	}
 }
+
+func TestDefaultRegistryIncludesMultipartListingCapability(t *testing.T) {
+	capDef, ok := DefaultRegistry.Lookup(CapabilityMultipartListingV1)
+	if !ok {
+		t.Fatalf("DefaultRegistry missing %s", CapabilityMultipartListingV1)
+	}
+	if capDef.Scope != ScopePeerTransport {
+		t.Fatalf("multipart listing scope = %s, want %s", capDef.Scope, ScopePeerTransport)
+	}
+	if capDef.IntroducedVersion != "0.0.213.0" {
+		t.Fatalf("multipart listing introduced version = %s", capDef.IntroducedVersion)
+	}
+	if OperationListParts != Operation("list_parts") {
+		t.Fatalf("OperationListParts = %s", OperationListParts)
+	}
+	if OperationCreateMultipartUpload != Operation("create_multipart_upload") {
+		t.Fatalf("OperationCreateMultipartUpload = %s", OperationCreateMultipartUpload)
+	}
+	if OperationListMultipartUploads != Operation("list_multipart_uploads") {
+		t.Fatalf("OperationListMultipartUploads = %s", OperationListMultipartUploads)
+	}
+}

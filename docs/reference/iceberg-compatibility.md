@@ -12,7 +12,6 @@ coverage. Unit-test-only coverage is not enough.
 | ------------- | ----------------------------------------------------------------------- |
 | Supported     | Covered by e2e, conformance, or real client integration tests.          |
 | Partial       | Integration-tested, but with known semantic or scope limits.            |
-| Not tested    | Implemented or expected behavior exists, but no e2e, conformance, or real client test covers it yet. |
 | Not supported | `GrainFS` does not implement or claim this compatibility surface. |
 | Not planned   | Intentionally outside the product scope.                                |
 
@@ -29,6 +28,6 @@ coverage. Unit-test-only coverage is not enough.
 | Any-node cluster access | Leader and follower API calls      | Supported  | Catalog requests can enter through different cluster nodes.                                         |
 | Access delegation       | `ACCESS_DELEGATION_MODE none`      | Supported  | Delegated access is not claimed.                                                                    |
 | Stage create            | `SUPPORT_STAGE_CREATE false`       | Supported  | Stage create is disabled.                                                                           |
-| Spark                   | Spark Iceberg REST Catalog client  | Not tested |                                                                                                     |
-| Trino                   | Trino Iceberg REST Catalog client  | Not tested |                                                                                                     |
-| PyIceberg               | PyIceberg REST Catalog client      | Not tested |                                                                                                     |
+| Spark                   | Spark Iceberg REST Catalog client  | Not supported | No compatibility claim without real-client coverage.                                                |
+| Trino                   | Trino Iceberg REST Catalog client  | Not supported | No compatibility claim without real-client coverage.                                                |
+| PyIceberg               | PyIceberg REST Catalog client      | Not supported | No compatibility claim without real-client coverage.                                                |

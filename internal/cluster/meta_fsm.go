@@ -641,6 +641,7 @@ func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Eviden
 	if f.exportStore != nil {
 		caps[compat.CapabilityNfsExportCreateV1] = true
 	}
+	caps[compat.CapabilityMultipartListingV1] = true
 	return compat.Evidence{
 		NodeID:       compat.NodeID(nodeID),
 		Capabilities: caps,

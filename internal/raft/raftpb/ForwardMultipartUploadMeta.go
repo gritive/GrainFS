@@ -65,8 +65,28 @@ func (rcv *ForwardMultipartUploadMeta) UploadId() []byte {
 	return nil
 }
 
+func (rcv *ForwardMultipartUploadMeta) ContentType() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *ForwardMultipartUploadMeta) CreatedAt() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ForwardMultipartUploadMeta) MutateCreatedAt(n int64) bool {
+	return rcv._tab.MutateInt64Slot(12, n)
+}
+
 func ForwardMultipartUploadMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(5)
 }
 func ForwardMultipartUploadMetaAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -76,6 +96,12 @@ func ForwardMultipartUploadMetaAddKey(builder *flatbuffers.Builder, key flatbuff
 }
 func ForwardMultipartUploadMetaAddUploadId(builder *flatbuffers.Builder, uploadId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(uploadId), 0)
+}
+func ForwardMultipartUploadMetaAddContentType(builder *flatbuffers.Builder, contentType flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(contentType), 0)
+}
+func ForwardMultipartUploadMetaAddCreatedAt(builder *flatbuffers.Builder, createdAt int64) {
+	builder.PrependInt64Slot(4, createdAt, 0)
 }
 func ForwardMultipartUploadMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

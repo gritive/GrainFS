@@ -14,6 +14,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -111,6 +112,7 @@ type ClusterCoordinator struct {
 	ecConfig    ECConfig
 	runtime     atomic.Pointer[clusterCoordinatorRuntime]
 	indexWriter objectIndexProposer
+	capGate     *CapabilityGate
 
 	opRouter  *OpRouter
 	localExec *LocalExecution
@@ -200,6 +202,11 @@ func (c *ClusterCoordinator) WithECConfig(cfg ECConfig) *ClusterCoordinator {
 func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *ClusterCoordinator {
 	c.indexWriter = p
 	c.rebuild()
+	return c
+}
+
+func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCoordinator {
+	c.capGate = gate
 	return c
 }
 
@@ -1007,6 +1014,9 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 		return nil, err
 	}
 	ctx = contextWithObjectWritePlacement(ctx, group)
+	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, c.multipartListingCapabilityPeers(target, group)); err != nil {
+		return nil, err
+	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
@@ -1561,20 +1571,73 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 	return parseReplyStatus(reply)
 }
 
-// ListMultipartUploads delegates to the local DistributedBackend, which scans
-// the FSM-replicated multipartKey range. First-slice limitation: cluster
-// multipart metadata does not yet record bucket+key, so this returns an empty
-// list in cluster mode. Single-node mode (LocalBackend) returns the real
-// list.
+// ListMultipartUploads scans local data-group backends and forwards to owners
+// for placeholder groups so bucket-wide results are complete from any node.
 func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
-	return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	if c.groups == nil {
+		return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	}
+	var uploads []*storage.MultipartUpload
+	groups := c.groups.All()
+	for _, dg := range groups {
+		gb := dg.Backend()
+		if gb == nil {
+			groupUploads, err := c.forwardListMultipartUploads(ctx, dg.ID(), bucket, prefix)
+			if err != nil {
+				return nil, err
+			}
+			uploads = append(uploads, groupUploads...)
+			continue
+		}
+		groupUploads, err := gb.ListMultipartUploads(ctx, bucket, prefix, 0)
+		if err != nil {
+			return nil, err
+		}
+		uploads = append(uploads, groupUploads...)
+	}
+	if len(groups) == 0 && c.base != nil {
+		return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	}
+	sort.Slice(uploads, func(i, j int) bool {
+		if uploads[i].CreatedAt != uploads[j].CreatedAt {
+			return uploads[i].CreatedAt < uploads[j].CreatedAt
+		}
+		if uploads[i].Key != uploads[j].Key {
+			return uploads[i].Key < uploads[j].Key
+		}
+		return uploads[i].UploadID < uploads[j].UploadID
+	})
+	if maxUploads > 0 && len(uploads) > maxUploads {
+		uploads = uploads[:maxUploads]
+	}
+	return uploads, nil
 }
 
-// ListParts routes by (bucket, key) to the data Raft group that owns the
-// upload's part files. If the local node is on the routed group, parts are
-// read directly; otherwise we surface the parts visible at the local
-// DistributedBackend (best-effort, see DistributedBackend.ListParts).
-// Forwarding ListParts to the remote group's leader is a follow-up.
+func (c *ClusterCoordinator) forwardListMultipartUploads(ctx context.Context, groupID, bucket, prefix string) ([]*storage.MultipartUpload, error) {
+	if c.forward == nil {
+		return nil, rejectIncompleteMultipartListing(compat.OperationListMultipartUploads)
+	}
+	target, err := c.runtimeState().opRouter.routeGroup(groupID)
+	if err != nil {
+		return nil, err
+	}
+	if len(target.Peers) == 0 {
+		return nil, rejectIncompleteMultipartListing(compat.OperationListMultipartUploads)
+	}
+	if err := c.requireMultipartListingPeerCapability(compat.OperationListMultipartUploads, target.Peers); err != nil {
+		return nil, err
+	}
+	args := buildListMultipartUploadsArgs(bucket, prefix, 0)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListMultipartUploads, args)
+	if err != nil {
+		return nil, err
+	}
+	return multipartUploadsFromReply(reply)
+}
+
+// ListParts routes by (bucket, key): local group backend first; otherwise the
+// peer-transport capability gate must pass before forwarding to the remote
+// data-group leader.
 func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
 	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
@@ -1585,7 +1648,51 @@ func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadI
 	} else if gb != nil {
 		return gb.ListParts(ctx, bucket, key, uploadID, maxParts)
 	}
-	return c.base.ListParts(ctx, bucket, key, uploadID, maxParts)
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	if err := c.requireMultipartListingPeerCapability(compat.OperationListParts, target.Peers); err != nil {
+		return nil, err
+	}
+	args := buildListPartsArgs(bucket, key, uploadID, int32(maxParts))
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListParts, args)
+	if err != nil {
+		return nil, err
+	}
+	return partsFromReply(reply)
+}
+
+func (c *ClusterCoordinator) requireMultipartListingPeerCapability(op compat.Operation, peers []string) error {
+	if c.capGate == nil {
+		return nil
+	}
+	_, err := c.capGate.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, op, peers, time.Now())
+	return err
+}
+
+func (c *ClusterCoordinator) multipartListingCapabilityPeers(target RouteTarget, group ShardGroupEntry) []string {
+	if len(target.Peers) > 0 {
+		return target.Peers
+	}
+	if len(group.PeerIDs) > 0 {
+		return append([]string(nil), group.PeerIDs...)
+	}
+	if c.meta != nil {
+		if entry, ok := c.meta.ShardGroup(target.GroupID); ok {
+			return append([]string(nil), entry.PeerIDs...)
+		}
+	}
+	return nil
+}
+
+func rejectIncompleteMultipartListing(op compat.Operation) error {
+	return compat.Reject(compat.GatePlan{
+		Capability: compat.CapabilityMultipartListingV1,
+		Scope:      compat.ScopeDataGroup,
+		Severity:   compat.SeverityHard,
+		Operation:  op,
+		Unknown:    []compat.NodeID{"data_group"},
+	})
 }
 
 var (

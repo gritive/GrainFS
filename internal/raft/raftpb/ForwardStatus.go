@@ -14,6 +14,7 @@ const (
 	ForwardStatusNoSuchKey                    ForwardStatus = 4
 	ForwardStatusEntityTooLarge               ForwardStatus = 5
 	ForwardStatusInsufficientPlacementTargets ForwardStatus = 6
+	ForwardStatusNoSuchUpload                 ForwardStatus = 7
 	ForwardStatusInternal                     ForwardStatus = 99
 )
 
@@ -25,6 +26,7 @@ var EnumNamesForwardStatus = map[ForwardStatus]string{
 	ForwardStatusNoSuchKey:                    "NoSuchKey",
 	ForwardStatusEntityTooLarge:               "EntityTooLarge",
 	ForwardStatusInsufficientPlacementTargets: "InsufficientPlacementTargets",
+	ForwardStatusNoSuchUpload:                 "NoSuchUpload",
 	ForwardStatusInternal:                     "Internal",
 }
 
@@ -36,6 +38,7 @@ var EnumValuesForwardStatus = map[string]ForwardStatus{
 	"NoSuchKey":                    ForwardStatusNoSuchKey,
 	"EntityTooLarge":               ForwardStatusEntityTooLarge,
 	"InsufficientPlacementTargets": ForwardStatusInsufficientPlacementTargets,
+	"NoSuchUpload":                 ForwardStatusNoSuchUpload,
 	"Internal":                     ForwardStatusInternal,
 }
 

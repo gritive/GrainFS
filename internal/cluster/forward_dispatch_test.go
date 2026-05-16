@@ -21,6 +21,8 @@ func TestBucketForwardOpSpecsCoverBucketOps(t *testing.T) {
 		raftpb.ForwardOpUploadPart,
 		raftpb.ForwardOpCompleteMultipartUpload,
 		raftpb.ForwardOpAbortMultipartUpload,
+		raftpb.ForwardOpListParts,
+		raftpb.ForwardOpListMultipartUploads,
 		raftpb.ForwardOpGetObjectVersion,
 		raftpb.ForwardOpDeleteObjectVersion,
 		raftpb.ForwardOpListObjectVersions,
@@ -60,6 +62,8 @@ func TestBucketForwardOpSpecsClassifyTransportKind(t *testing.T) {
 		raftpb.ForwardOpCreateMultipartUpload,
 		raftpb.ForwardOpCompleteMultipartUpload,
 		raftpb.ForwardOpAbortMultipartUpload,
+		raftpb.ForwardOpListParts,
+		raftpb.ForwardOpListMultipartUploads,
 		raftpb.ForwardOpDeleteObjectVersion,
 		raftpb.ForwardOpListObjectVersions,
 	} {

@@ -441,6 +441,9 @@ func (f *FSM) applyCreateMultipartUpload(data []byte) error {
 		return err
 	}
 	meta, err := marshalClusterMultipartMeta(clusterMultipartMeta{
+		Bucket:           c.Bucket,
+		Key:              c.Key,
+		CreatedAt:        c.CreatedAt,
 		ContentType:      c.ContentType,
 		PlacementGroupID: c.PlacementGroupID,
 	})

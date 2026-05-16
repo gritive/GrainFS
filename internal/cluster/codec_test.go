@@ -138,6 +138,9 @@ func TestSnapshotStateCodecRoundTrip(t *testing.T) {
 
 func TestClusterMultipartMetaCodecRoundTrip(t *testing.T) {
 	orig := clusterMultipartMeta{
+		Bucket:           "photos",
+		Key:              "raw/img.bin",
+		CreatedAt:        12345,
 		ContentType:      "application/octet-stream",
 		PlacementGroupID: "group-5",
 	}
@@ -148,8 +151,28 @@ func TestClusterMultipartMetaCodecRoundTrip(t *testing.T) {
 
 	decoded, err := unmarshalClusterMultipartMeta(data)
 	require.NoError(t, err)
+	assert.Equal(t, "photos", decoded.Bucket)
+	assert.Equal(t, "raw/img.bin", decoded.Key)
+	assert.Equal(t, int64(12345), decoded.CreatedAt)
 	assert.Equal(t, "application/octet-stream", decoded.ContentType)
 	assert.Equal(t, "group-5", decoded.PlacementGroupID)
+}
+
+func TestClusterMultipartMetaCodecLegacyDecodeZeroValues(t *testing.T) {
+	legacy := clusterMultipartMeta{
+		ContentType:      "application/octet-stream",
+		PlacementGroupID: "group-legacy",
+	}
+	data, err := marshalClusterMultipartMeta(legacy)
+	require.NoError(t, err)
+
+	decoded, err := unmarshalClusterMultipartMeta(data)
+	require.NoError(t, err)
+	assert.Empty(t, decoded.Bucket)
+	assert.Empty(t, decoded.Key)
+	assert.Zero(t, decoded.CreatedAt)
+	assert.Equal(t, "application/octet-stream", decoded.ContentType)
+	assert.Equal(t, "group-legacy", decoded.PlacementGroupID)
 }
 
 func TestEncodeDecodeCommand_DeleteBucket(t *testing.T) {

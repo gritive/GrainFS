@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -110,6 +111,155 @@ func TestMultipart_Abort(t *testing.T) {
 		Key:    aws.String("aborted.bin"),
 	})
 	assert.Error(t, err)
+}
+
+func TestMultipart_List(t *testing.T) {
+	ctx := context.Background()
+	createBucket(t, "mp-list")
+
+	exerciseMultipartListingFeature(t, ctx, testS3Client, "mp-list", "part", false)
+}
+
+type multipartListingFixture struct {
+	Bucket  string
+	Key     string
+	Prefix  string
+	Upload  string
+	ETagOne string
+	ETagTwo string
+}
+
+const multipartListingKey = "listed/incomplete.bin"
+
+func exerciseMultipartListingFeature(t testing.TB, ctx context.Context, client *s3.Client, bucket, partLabel string, waitForParts bool) multipartListingFixture {
+	t.Helper()
+
+	fixture := createIncompleteMultipartListingFixture(t, ctx, client, bucket, partLabel)
+	assertMultipartListingFeature(t, ctx, client, fixture, waitForParts)
+	return fixture
+}
+
+func createIncompleteMultipartListingFixture(t testing.TB, ctx context.Context, client *s3.Client, bucket, partLabel string) multipartListingFixture {
+	t.Helper()
+
+	fixture := multipartListingFixture{
+		Bucket: bucket,
+		Key:    multipartListingKey,
+		Prefix: "listed/",
+	}
+	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(fixture.Bucket),
+		Key:         aws.String(fixture.Key),
+		ContentType: aws.String("application/octet-stream"),
+	})
+	require.NoError(t, err)
+	fixture.Upload = aws.ToString(initOut.UploadId)
+	require.NotEmpty(t, fixture.Upload)
+	t.Cleanup(func() {
+		_, _ = client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(fixture.Bucket),
+			Key:      aws.String(fixture.Key),
+			UploadId: aws.String(fixture.Upload),
+		})
+	})
+
+	p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(fixture.Bucket),
+		Key:        aws.String(fixture.Key),
+		UploadId:   aws.String(fixture.Upload),
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader([]byte(partLabel + "-one")),
+	})
+	require.NoError(t, err)
+	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(fixture.Bucket),
+		Key:        aws.String(fixture.Key),
+		UploadId:   aws.String(fixture.Upload),
+		PartNumber: aws.Int32(2),
+		Body:       bytes.NewReader([]byte(partLabel + "-two")),
+	})
+	require.NoError(t, err)
+	fixture.ETagOne = aws.ToString(p1.ETag)
+	fixture.ETagTwo = aws.ToString(p2.ETag)
+	return fixture
+}
+
+func waitForMultipartListingCreate(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string, timeout time.Duration) {
+	t.Helper()
+
+	var lastErr error
+	require.Eventually(t, func() bool {
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		_, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: initOut.UploadId,
+		})
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		return true
+	}, timeout, time.Second, "multipart listing create gate did not open: %v", lastErr)
+}
+
+func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3.Client, fixture multipartListingFixture, waitForParts bool) {
+	t.Helper()
+
+	uploads, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(fixture.Bucket),
+		Prefix: aws.String(fixture.Prefix),
+	})
+	require.NoError(t, err)
+	require.Len(t, uploads.Uploads, 1)
+	assert.Equal(t, fixture.Key, aws.ToString(uploads.Uploads[0].Key))
+	assert.Equal(t, fixture.Upload, aws.ToString(uploads.Uploads[0].UploadId))
+
+	var parts *s3.ListPartsOutput
+	listParts := func() error {
+		var err error
+		parts, err = client.ListParts(ctx, &s3.ListPartsInput{
+			Bucket:   aws.String(fixture.Bucket),
+			Key:      aws.String(fixture.Key),
+			UploadId: aws.String(fixture.Upload),
+		})
+		return err
+	}
+	if waitForParts {
+		require.Eventually(t, func() bool {
+			return listParts() == nil && multipartListingPartsMatch(parts, fixture)
+		}, 30*time.Second, 500*time.Millisecond)
+	} else {
+		require.NoError(t, listParts())
+	}
+	assertMultipartListingParts(t, parts, fixture)
+}
+
+func multipartListingPartsMatch(parts *s3.ListPartsOutput, fixture multipartListingFixture) bool {
+	if parts == nil || len(parts.Parts) != 2 {
+		return false
+	}
+	return aws.ToInt32(parts.Parts[0].PartNumber) == 1 &&
+		aws.ToString(parts.Parts[0].ETag) == fixture.ETagOne &&
+		aws.ToInt32(parts.Parts[1].PartNumber) == 2 &&
+		aws.ToString(parts.Parts[1].ETag) == fixture.ETagTwo
+}
+
+func assertMultipartListingParts(t testing.TB, parts *s3.ListPartsOutput, fixture multipartListingFixture) {
+	t.Helper()
+
+	require.Len(t, parts.Parts, 2)
+	assert.Equal(t, int32(1), aws.ToInt32(parts.Parts[0].PartNumber))
+	assert.Equal(t, fixture.ETagOne, aws.ToString(parts.Parts[0].ETag))
+	assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
+	assert.Equal(t, fixture.ETagTwo, aws.ToString(parts.Parts[1].ETag))
 }
 
 func TestMultipart_ThreeParts(t *testing.T) {

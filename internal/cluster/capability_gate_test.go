@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -91,6 +92,62 @@ func TestCapabilityGateAllowsReadyFreshMembers(t *testing.T) {
 	require.Equal(t, raftConfigurationID(cfg), plan.ConfigID)
 }
 
+func TestCapabilityGateRequiresPeerTransportCapability(t *testing.T) {
+	g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
+	now := time.Unix(10, 0)
+	g.ReportEvidence(compat.Evidence{
+		NodeID:       "node-1",
+		Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+		LastSeen:     now,
+		Ready:        true,
+	})
+
+	plan, err := g.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, compat.OperationListParts, []string{"node-1", "node-2"}, now)
+	require.Error(t, err)
+	require.Equal(t, compat.ScopePeerTransport, plan.Scope)
+	require.Equal(t, []compat.NodeID{"node-2"}, plan.Unknown)
+
+	g.ReportEvidence(compat.Evidence{
+		NodeID:       "node-2",
+		Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+		LastSeen:     now,
+		Ready:        true,
+	})
+	plan, err = g.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, compat.OperationListParts, []string{"node-1", "node-2"}, now)
+	require.NoError(t, err)
+	require.True(t, plan.Allowed())
+}
+
+func BenchmarkCapabilityGate_RequirePeerTransportCapability(b *testing.B) {
+	cases := []int{3, 6, 12}
+	now := time.Unix(10, 0)
+	for _, peersCount := range cases {
+		b.Run(fmt.Sprintf("peers_%d", peersCount), func(b *testing.B) {
+			g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
+			peers := make([]string, peersCount)
+			for i := range peers {
+				peer := fmt.Sprintf("node-%02d", i)
+				peers[i] = peer
+				g.ReportEvidence(compat.Evidence{
+					NodeID:       compat.NodeID(peer),
+					Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+					LastSeen:     now,
+					Ready:        true,
+				})
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				plan, err := g.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, compat.OperationListParts, peers, now)
+				if err != nil || !plan.Allowed() {
+					b.Fatalf("gate rejected: plan=%+v err=%v", plan, err)
+				}
+			}
+		})
+	}
+}
+
 func TestCapabilityGateRejectsAfterConfigEpochChange(t *testing.T) {
 	g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
 	cfg := raft.Configuration{Servers: []raft.Server{{ID: "node-1", Suffrage: raft.Voter}}}
@@ -144,4 +201,11 @@ func TestMetaFSMCapabilityEvidenceAdvertisesNfsExportCreateAfterStoreWiring(t *t
 
 	ev = f.CapabilityEvidence("node-1", time.Unix(10, 0))
 	require.True(t, ev.Capabilities[compat.CapabilityNfsExportCreateV1])
+}
+
+func TestMetaFSMCapabilityEvidenceAdvertisesMultipartListing(t *testing.T) {
+	f := NewMetaFSM()
+	ev := f.CapabilityEvidence("node-1", time.Unix(10, 0))
+	require.True(t, ev.Capabilities[compat.CapabilityMultipartListingV1])
+	require.True(t, ev.Ready)
 }

@@ -283,6 +283,62 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ProposeError_ReturnsInter
 	require.Equal(t, raftpb.ForwardStatusInternal, fr.Status(), "ProposeObjectIndex failure must return Internal")
 }
 
+func TestForwardReceiver_HandleListParts_CallsBackend(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "mpu-key", "text/plain")
+	require.NoError(t, err)
+	part, err := gb.UploadPart(context.Background(), "bucket", "mpu-key", up.UploadID, 1, bytes.NewReader([]byte("part-one")))
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListParts, buildListPartsArgs("bucket", "mpu-key", up.UploadID, 100))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	parts, err := partsFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []storage.Part{*part}, parts)
+}
+
+func TestForwardReceiver_HandleListParts_MissingUploadReturnsNoSuchUpload(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListParts, buildListPartsArgs("bucket", "mpu-key", "missing", 100))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNoSuchUpload, fr.Status())
+}
+
+func TestForwardReceiver_HandleListMultipartUploads_CallsBackend(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+	up, err := gb.CreateMultipartUpload(context.Background(), "bucket", "listed/mpu-key", "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr)
+
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListMultipartUploads, buildListMultipartUploadsArgs("bucket", "listed/", 100))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	uploads, err := multipartUploadsFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Equal(t, []*storage.MultipartUpload{up}, uploads)
+}
+
 func TestForwardReceiver_HandleDeleteObject_CommitsDeleteMarkerIndex(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-1")
 	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))

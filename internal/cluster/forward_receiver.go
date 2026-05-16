@@ -159,6 +159,10 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleCompleteMultipartUpload(dg, fbsArgs)
 	case raftpb.ForwardOpAbortMultipartUpload:
 		return r.handleAbortMultipartUpload(dg, fbsArgs)
+	case raftpb.ForwardOpListMultipartUploads:
+		return r.handleListMultipartUploads(dg, fbsArgs)
+	case raftpb.ForwardOpListParts:
+		return r.handleListParts(dg, fbsArgs)
 	case raftpb.ForwardOpGetObjectVersion:
 		return r.handleGetObjectVersion(dg, fbsArgs)
 	case raftpb.ForwardOpDeleteObjectVersion:
@@ -688,6 +692,37 @@ func (r *ForwardReceiver) handleAbortMultipartUpload(dg *DataGroup, args []byte)
 	return &transport.Message{Payload: buildOKReply()}
 }
 
+func (r *ForwardReceiver) handleListMultipartUploads(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
+	la := raftpb.GetRootAsListMultipartUploadsArgs(args, 0)
+	uploads, err := dg.Backend().ListMultipartUploads(
+		ctx,
+		string(la.Bucket()),
+		string(la.Prefix()),
+		int(la.MaxUploads()),
+	)
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildMultipartUploadsReply(uploads)}
+}
+
+func (r *ForwardReceiver) handleListParts(dg *DataGroup, args []byte) *transport.Message {
+	ctx := context.Background()
+	la := raftpb.GetRootAsListPartsArgs(args, 0)
+	parts, err := dg.Backend().ListParts(
+		ctx,
+		string(la.Bucket()),
+		string(la.Key()),
+		string(la.UploadId()),
+		int(la.MaxParts()),
+	)
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildPartsReply(parts)}
+}
+
 func errReply(status raftpb.ForwardStatus, hint string) *transport.Message {
 	return &transport.Message{Payload: buildSimpleReply(status, hint)}
 }
@@ -705,6 +740,9 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	}
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		return raftpb.ForwardStatusNoSuchKey
+	}
+	if errors.Is(err, storage.ErrUploadNotFound) {
+		return raftpb.ForwardStatusNoSuchUpload
 	}
 	if errors.Is(err, storage.ErrEntityTooLarge) {
 		return raftpb.ForwardStatusEntityTooLarge

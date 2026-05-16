@@ -242,3 +242,63 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	expected := append(part1Data, part2Data...)
 	assert.Equal(t, expected, body)
 }
+
+func TestCluster_Multipart_List(t *testing.T) {
+	skipIfShort(t, "skipping multi-node multipart listing e2e in -short mode")
+
+	const (
+		bucketName = "mp-list-cluster"
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	cluster, leaderIdx := startMultipartListingCluster(t, ctx, bucketName)
+
+	client := cluster.S3Client(leaderIdx)
+	exerciseMultipartListingFeature(t, ctx, client, bucketName, "cluster-part", true)
+}
+
+func TestCluster_Multipart_ListFanoutAcrossNodes(t *testing.T) {
+	skipIfShort(t, "skipping multi-node multipart listing fanout e2e in -short mode")
+
+	const bucketName = "mp-list-fanout"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	cluster, leaderIdx := startMultipartListingCluster(t, ctx, bucketName)
+
+	fixture := createIncompleteMultipartListingFixture(t, ctx, cluster.S3Client(leaderIdx), bucketName, "cluster-fanout-part")
+
+	for i := range cluster.httpURLs {
+		t.Run(fmt.Sprintf("node-%d", i+1), func(t *testing.T) {
+			assertMultipartListingFeature(t, ctx, cluster.S3Client(i), fixture, true)
+		})
+	}
+}
+
+func startMultipartListingCluster(t *testing.T, ctx context.Context, bucketName string) (*e2eCluster, int) {
+	t.Helper()
+
+	cluster := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      3,
+		Mode:       ClusterModeDynamicJoin,
+		LogPrefix:  "grainfs-mp-list",
+		DisableNFS: true,
+		DisableNBD: true,
+	})
+	cluster.GrantAdminOnBuckets(bucketName)
+
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		cluster.httpURLs,
+		120*time.Second,
+		5*time.Second,
+		time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, cluster.accessKey, cluster.secretKey), bucketName)
+		},
+	)
+	require.NoError(t, err)
+	waitForMultipartListingCreate(t, ctx, cluster.S3Client(leaderIdx), bucketName, multipartListingKey, 120*time.Second)
+	return cluster, leaderIdx
+}

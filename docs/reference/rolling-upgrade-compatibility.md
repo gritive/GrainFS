@@ -16,6 +16,17 @@ Version format: `0.0.X.Y` where `X` is the minor segment tracked in `CHANGELOG.m
 During a rolling upgrade, a mixed cluster (some N nodes, some N+1 nodes) must handle
 S3 reads/writes without data loss or errors.
 
+## Capability-Gated Operations
+
+Some features require every target peer to advertise a named capability before
+the operation is accepted. In mixed-version clusters, these operations fail fast
+with a service-unavailable S3 error instead of sending an unknown peer-transport
+opcode or returning partial data.
+
+| Capability | Introduced | Scope | Operations gated | Mixed-version behavior |
+| --- | --- | --- | --- | --- |
+| `multipart_listing_v1` | `0.0.213.0` | Peer transport | `CreateMultipartUpload`, `ListMultipartUploads`, `ListParts` | Reject until all target peers advertise the capability. |
+
 ## Running the Compat Suite
 
 ```bash

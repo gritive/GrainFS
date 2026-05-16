@@ -31,8 +31,8 @@ object sizes, concurrency, and cold/warm-cache rules.
 | `make bench-profile`                          | Multi-node S3 benchmark with pprof                 | `/tmp/grainfs-bench-*.out`                                          |
 | `make bench-topology-get`                     | Topology-aware GET profile                         | topology GET report and pprof files                                 |
 | `make bench-topology-get-matrix`              | Topology-aware GET matrix                          | matrix reports and pprof files                                      |
-| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog table API         | `benchmarks/iceberg_table_report.json`                              |
-| `make bench-iceberg-table-cluster`            | Multi-node Iceberg table API                       | `benchmarks/iceberg_table_report.json`                              |
+| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog table API via Go runner | `benchmarks/iceberg_table_report.json`                              |
+| `make bench-iceberg-table-cluster`            | Multi-node Iceberg table API via Go runner               | `benchmarks/iceberg_table_report.json`                              |
 | `make bench-nfs`                              | Single-node NFS fio profile via Colima             | `benchmarks/profiles/nfs-*/fio_output.txt`                          |
 | `make bench-nfs-cluster`                      | Multi-node NFS fio profile                         | `benchmarks/profiles/nfs-*`                                         |
 | `make bench-nfs-multi`                        | Multi-bucket NFS export profile                    | `benchmarks/profiles/nfs-multi-*`                                   |
