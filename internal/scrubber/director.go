@@ -191,7 +191,7 @@ func (c cancelCmd) apply(env *directorEnv) {
 }
 
 type Director struct {
-	mu        sync.Mutex
+	mu        sync.Mutex // TODO: Task 9에서 제거
 	sources   map[string]BlockSource
 	verifiers map[string]BlockVerifier
 	sessions  map[string]*liveSession
@@ -200,6 +200,12 @@ type Director struct {
 	incident  IncidentRecorder
 	stop      chan struct{}
 	nodeID    string
+
+	// Actor migration fields (Task 3에서 추가, Task 9에서 정리)
+	inbox   chan directorCmd
+	done    chan struct{}
+	started atomic.Bool
+	env     *directorEnv // controller goroutine 단독 접근
 }
 
 // Session is the public snapshot of a scrub session as returned by
@@ -306,16 +312,29 @@ func NewDirector(opts DirectorOpts) *Director {
 	if opts.QueueSize == 0 {
 		opts.QueueSize = 64
 	}
-	return &Director{
+	queue := make(chan triggerReq, opts.QueueSize)
+	d := &Director{
 		sources:   map[string]BlockSource{},
 		verifiers: map[string]BlockVerifier{},
 		sessions:  map[string]*liveSession{},
 		dedup:     map[string]string{},
-		queue:     make(chan triggerReq, opts.QueueSize),
+		queue:     queue,
 		incident:  opts.Incident,
 		stop:      make(chan struct{}),
 		nodeID:    opts.NodeID,
+		inbox:     make(chan directorCmd, opts.QueueSize),
+		done:      make(chan struct{}),
 	}
+	d.env = &directorEnv{
+		sources:   d.sources,
+		verifiers: d.verifiers,
+		sessions:  d.sessions,
+		dedup:     d.dedup,
+		queue:     queue,
+		nodeID:    opts.NodeID,
+		incident:  opts.Incident,
+	}
+	return d
 }
 
 func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
@@ -410,10 +429,45 @@ func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
 }
 
 func (d *Director) Start(ctx context.Context) {
-	go d.workerLoop(ctx)
+	if !d.started.CompareAndSwap(false, true) {
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.controllerLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		d.workerLoop(ctx)
+	}()
+	go func() {
+		wg.Wait()
+		close(d.done)
+	}()
 }
 
-func (d *Director) Stop() { close(d.stop) }
+// Stop closes the stop channel and blocks until both controller and worker
+// goroutines have exited. Safe to call multiple times only if the second
+// call doesn't race with the first close (callers should serialize).
+func (d *Director) Stop() {
+	close(d.stop)
+	<-d.done
+}
+
+func (d *Director) controllerLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.stop:
+			return
+		case cmd := <-d.inbox:
+			cmd.apply(d.env)
+		}
+	}
+}
 
 func (d *Director) workerLoop(ctx context.Context) {
 	for {
