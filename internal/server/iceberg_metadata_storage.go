@@ -17,11 +17,12 @@ func (s *Server) writeIcebergMetadataObject(ctx context.Context, location string
 	if !ok {
 		return fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	acl := uint8(s3auth.ACLPrivate)
-	if s.iamStore == nil || !s.iamStore.AuthEnabled() {
-		acl = uint8(s3auth.ACLPublicRead)
+	var err error
+	if s.iamStore != nil && s.iamStore.AuthEnabled() {
+		_, err = s.ops.PutObject(ctx, bucket, key, bytes.NewReader(metadata), "application/json")
+	} else {
+		_, err = s.ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", uint8(s3auth.ACLPublicRead))
 	}
-	_, err := s.ops.PutObjectWithACL(ctx, bucket, key, bytes.NewReader(metadata), "application/json", acl)
 	if errors.Is(err, io.EOF) {
 		return nil
 	}

@@ -167,13 +167,11 @@ func newRunner(cfg config) *runner {
 }
 
 func (r *runner) run(ctx context.Context) benchmarkReport {
-	runCtx, cancel := context.WithTimeout(ctx, r.cfg.duration)
-	defer cancel()
-
+	stopAt := time.Now().Add(r.cfg.duration)
 	var wg sync.WaitGroup
 	for i := 0; i < r.cfg.concurrency; i++ {
 		wg.Add(1)
-		go r.runWorker(runCtx, i, &wg)
+		go r.runWorker(ctx, stopAt, i, &wg)
 	}
 	wg.Wait()
 
@@ -192,10 +190,10 @@ func (r *runner) run(ctx context.Context) benchmarkReport {
 	}
 }
 
-func (r *runner) runWorker(ctx context.Context, workerID int, wg *sync.WaitGroup) {
+func (r *runner) runWorker(ctx context.Context, stopAt time.Time, workerID int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var iter uint64
-	for {
+	for time.Now().Before(stopAt) {
 		select {
 		case <-ctx.Done():
 			return
