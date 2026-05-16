@@ -13,6 +13,12 @@
   schema (per-blob transactions or pre-allocated extents). Encryption stays
   inside the lock because its AAD depends on the in-lock `activeID` /
   `activeOff`.
+- `BlobStore.EnableCompression` docstring now spells out the
+  construction-only contract: callers must set `bs.compress` before the
+  BlobStore is shared with any goroutine, because the new pre-lock
+  compression path in `Append` reads the flag without the mutex. Future
+  contributors cannot silently race that read by flipping compression on a
+  live BlobStore.
 
 ### Internal
 - Adds `get_parallel_bench_test.go` with `BenchmarkParallelGetSmallObjects`
@@ -30,6 +36,18 @@
 - `docs/architecture/lock-free-audit.md` "Changes In This Audit" section
   records the move; the `BlobStore.mu` inventory entry is updated to note
   that compression is now outside the critical section.
+
+## [0.0.219.1] - 2026-05-17 - docs: ADR 0014 capability plan cache pattern
+
+### Internal
+- **ADR 0014** records the storage Operations capability plan cache decision
+  (`atomic.Pointer` publication, single-Generation-source invariant, independent
+  per-cache generation counters, per-wrapper long-lived `*Operations`).
+  Establishes the third shape in the lock-free publication pattern family
+  alongside IAM whole-state CoW (ADR 0007) and worker-pointer publication
+  (ADR 0012, ADR 0013). Locks in `SwappableBackend` as the sole Generation()
+  source so future contributors do not silently break cache invalidation by
+  adding a second source.
 
 ## [0.0.219.0] - 2026-05-17 - refactor: lock-free Operations capability plan cache
 
