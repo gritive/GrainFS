@@ -3,6 +3,8 @@ package alerts
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,6 +86,69 @@ func TestSend_InboxFullDropsWithReason(t *testing.T) {
 		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "inbox_full"))
 	require.GreaterOrEqual(t, after-before, float64(1))
 	close(block)
+}
+
+func TestRetryAndDeliver_SuccessSendsRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	d := NewDispatcher(srv.URL, Options{Clock: time.Now}, nil)
+	d.Start(context.Background())
+	defer d.Stop(context.Background()) //nolint:errcheck
+
+	done := make(chan struct{})
+	var gotAlert Alert
+	var gotErr error
+	d.envPtr.onResult = func(a Alert, err error) {
+		gotAlert = a
+		gotErr = err
+		close(done)
+	}
+
+	d.Send(Alert{Type: "t", Resource: "r", Severity: SeverityWarning, Message: "m"})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("onResult not invoked in time")
+	}
+	require.Equal(t, "t", gotAlert.Type)
+	require.NoError(t, gotErr)
+}
+
+func TestRetryAndDeliver_CtxCancelStopsBackoff(t *testing.T) {
+	t.Skip("requires Task 9: Stop must honor ctx deadline and invoke workerCancel before drain")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	d := NewDispatcher(srv.URL, Options{
+		Clock:       time.Now,
+		MaxRetries:  5,
+		BackoffBase: 10 * time.Second,
+	}, nil)
+	d.Start(context.Background())
+
+	done := make(chan error, 1)
+	d.envPtr.onResult = func(_ Alert, err error) {
+		select {
+		case done <- err:
+		default:
+		}
+	}
+	d.Send(Alert{Type: "t", Resource: "r", Severity: SeverityWarning, Message: "m"})
+
+	// 즉시 Stop ctx로 짧은 timeout → workerCancel
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := d.Stop(ctx)
+	require.Error(t, err) // ctx deadline exceeded
+	select {
+	case got := <-done:
+		require.Error(t, got, "worker must surface error via onResult")
+	case <-time.After(2 * time.Second):
+		t.Fatal("onResult not invoked")
+	}
 }
 
 func TestController_ProcessesSendThenRelease(t *testing.T) {

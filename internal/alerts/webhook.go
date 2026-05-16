@@ -23,6 +23,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -202,6 +203,7 @@ func newDispatcher(opts Options, onFailure FailureCallback) *Dispatcher {
 		opts:     opts,
 		onResult: opts.OnResult,
 	}
+	d.envPtr.spawn = d.spawnWorker
 	return d
 }
 
@@ -238,9 +240,70 @@ func dedupKey(a Alert) string {
 	return a.Type + "|" + a.Resource
 }
 
+// spawnWorker starts an ephemeral delivery goroutine. Wired into envPtr.spawn
+// by newDispatcher so sendCmd.apply can launch a worker without holding the
+// controller goroutine. workerWG tracks the worker for Stop's drain.
+func (d *Dispatcher) spawnWorker(a Alert, url, secret string) {
+	d.workerWG.Add(1)
+	go d.retryAndDeliver(d.workerCtx, a, url, secret)
+}
+
+// retryAndDeliver runs the bounded exponential backoff retry loop for a single
+// alert. On every iteration it either delivers (and releases) or, on retry,
+// sleeps until either the backoff elapses or ctx is cancelled. The result is
+// always reported through releaseToController so the controller can update
+// lastSent/inFlight and fire OnResult — the worker never touches that state
+// directly.
+func (d *Dispatcher) retryAndDeliver(ctx context.Context, alert Alert, url, secret string) {
+	defer d.workerWG.Done()
+	body, err := json.Marshal(slackPayload(alert))
+	if err != nil {
+		d.releaseToController(alert, fmt.Errorf("marshal alert: %w", err))
+		return
+	}
+	var lastErr error
+	for attempt := 0; attempt <= d.opts.MaxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(d.backoff(attempt)):
+			case <-ctx.Done():
+				d.releaseToController(alert, ctx.Err())
+				return
+			}
+		}
+		lastErr = d.deliver(ctx, url, secret, body)
+		if lastErr == nil {
+			d.releaseToController(alert, nil)
+			return
+		}
+	}
+	d.releaseToController(alert, lastErr)
+	// Note: Options.OnResult is invoked from the controller's releaseCmd.apply,
+	// so the release channel is the single source of result notification — no
+	// duplicate failure callback here.
+}
+
+// releaseToController enqueues a releaseCmd for the controller. If the
+// controller has already stopped (stop channel closed), the result is recorded
+// directly on metrics so we still observe success/failure counts even when
+// shutdown races the worker.
+func (d *Dispatcher) releaseToController(a Alert, err error) {
+	select {
+	case d.releaseInbox <- releaseCmd{key: dedupKey(a), alert: a, err: err}:
+	case <-d.stop:
+		if err == nil {
+			metrics.AlertDeliveryAttempts.WithLabelValues("success").Inc()
+		} else {
+			metrics.AlertDeliveryAttempts.WithLabelValues("failed").Inc()
+		}
+	}
+}
+
 // deliver does one POST. 2xx → success. Anything else is a retryable error.
-func (d *Dispatcher) deliver(url, secret string, body []byte) error {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+// ctx propagates Stop's workerCancel into the HTTP transport so a long-blocked
+// Do() unblocks promptly on shutdown.
+func (d *Dispatcher) deliver(ctx context.Context, url, secret string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
