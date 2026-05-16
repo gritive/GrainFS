@@ -77,6 +77,20 @@ profile directory. The old k6 mixed workload is no longer used for
 GrainFS/MinIO/RustFS comparison claims because its write-heavy operation mix and
 client implementation are not the shared public benchmark surface.
 
+## Iceberg Table API
+
+`make bench-iceberg-table` and `make bench-iceberg-table-cluster` run the
+Iceberg REST Catalog table lifecycle benchmark with a Go runner, not k6. The
+shell scripts still start GrainFS, bootstrap IAM credentials, optionally collect
+pprof profiles, and write `benchmarks/iceberg_table_report.json`.
+
+Tune the workload with:
+
+```bash
+VUS=16 DURATION=1m make bench-iceberg-table
+VUS=16 DURATION=1m make bench-iceberg-table-cluster
+```
+
 ## NFS Multi-Bucket Export Baseline
 
 The NFSv4 server now uses explicit bucket exports. Single-bucket benchmark runs
