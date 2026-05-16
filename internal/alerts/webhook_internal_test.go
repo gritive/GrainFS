@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -215,4 +216,66 @@ func TestController_ProcessesSendThenRelease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("controller did not deliver release")
 	}
+}
+
+func TestDispatchEnv_DecryptWarnRateLimit(t *testing.T) {
+	var nowNs atomic.Int64
+	nowNs.Store(time.Now().UnixNano())
+	env := &dispatchEnv{
+		opts: Options{
+			Clock: func() time.Time { return time.Unix(0, nowNs.Load()) },
+		},
+		alertKind: "test",
+	}
+	fakeErr := errors.New("key not found")
+
+	// 첫 호출 — lastDecryptWarnAt 갱신
+	env.observeSecretDecryptFailure(fakeErr)
+	first := env.lastDecryptWarnAt
+	require.False(t, first.IsZero())
+
+	// 같은 시점 두 번째 호출 — lastDecryptWarnAt 변화 없음
+	env.observeSecretDecryptFailure(fakeErr)
+	require.Equal(t, first, env.lastDecryptWarnAt)
+
+	// 1분 1ns 후 — 갱신
+	nowNs.Add(int64(time.Minute) + 1)
+	env.observeSecretDecryptFailure(fakeErr)
+	require.True(t, env.lastDecryptWarnAt.After(first))
+}
+
+// TestController_InboxAndReleaseAreSeparateChannels verifies that inbox (sendCmd)
+// and releaseInbox (releaseCmd) are distinct buffered channels (F4 design
+// property: release backpressure ≠ send backpressure).  A single roundtrip via a
+// blocking spawn also confirms that the release path reaches onResult.
+func TestController_InboxAndReleaseAreSeparateChannels(t *testing.T) {
+	d := NewDispatcher("http://example", Options{Clock: time.Now}, nil)
+
+	var releasedCount atomic.Int32
+	workerBlock := make(chan struct{})
+	var spawnedCount atomic.Int32
+
+	d.envPtr.spawn = func(a Alert, url, secret string) {
+		spawnedCount.Add(1)
+		<-workerBlock
+		d.releaseInbox <- releaseCmd{key: dedupKey(a), alert: a, err: nil}
+	}
+	d.envPtr.onResult = func(_ Alert, _ error) {
+		releasedCount.Add(1)
+	}
+
+	d.Start(context.Background())
+	defer d.Stop(context.Background()) //nolint:errcheck
+
+	// F4 structural assertion: inbox and releaseInbox are separate channels
+	require.Equal(t, 32, cap(d.inbox), "inbox capacity")
+	require.Equal(t, 16, cap(d.releaseInbox), "releaseInbox capacity")
+
+	d.Send(Alert{Type: "t", Resource: "first"})
+	require.Eventually(t, func() bool { return spawnedCount.Load() == 1 },
+		time.Second, 5*time.Millisecond, "spawn must run for first alert")
+
+	close(workerBlock)
+	require.Eventually(t, func() bool { return releasedCount.Load() == 1 },
+		time.Second, 5*time.Millisecond, "release path must invoke onResult")
 }
