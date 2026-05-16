@@ -35,6 +35,9 @@ type shardPackStore struct {
 	index     map[string]shardPackLocation
 	readFiles map[uint64]*os.File
 	scratch   []byte
+	// syncOnAppend is intentionally false by default. The shard pack is a hot
+	// path for small EC shards; per-record fsync collapses throughput.
+	syncOnAppend bool
 }
 
 func newShardPackStore(dir string) (*shardPackStore, error) {
@@ -117,8 +120,10 @@ func (s *shardPackStore) append(flag byte, key string, data []byte) error {
 	if _, err := s.active.Write(record); err != nil {
 		return err
 	}
-	if err := s.active.Sync(); err != nil {
-		return err
+	if s.syncOnAppend {
+		if err := s.active.Sync(); err != nil {
+			return err
+		}
 	}
 	s.activeOff += entrySize
 

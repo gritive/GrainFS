@@ -130,6 +130,18 @@ func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+
+	require.NotNil(t, svc.shardPack)
+	require.False(t, svc.shardPack.syncOnAppend)
+}
+
 func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(
