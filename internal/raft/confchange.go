@@ -352,8 +352,12 @@ func newJointConfig(oldV, newV []string) effectiveConfig {
 }
 
 // cloneLearners returns a fresh copy of c.learners (nil if empty). Used by
-// applyConfigEntry to carry learners across voter-set transitions and by
-// snapshot() to detach published readState from the actor-owned map.
+// applyConfigEntry / handleAddLearner / handlePromote / handleRemoveLearner
+// to carry learners across voter-set transitions: callers build a `next`
+// effectiveConfig, get a fresh map here, then mutate `next.learners` before
+// publishing `currentConfig = next`. snapshot() no longer calls this — it
+// shallow-copies the immutable currentConfig (see snapshot()'s invariant
+// comment for why).
 func (c effectiveConfig) cloneLearners() map[string]string {
 	if len(c.learners) == 0 {
 		return nil

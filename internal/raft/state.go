@@ -198,20 +198,32 @@ type configHistoryEntry struct {
 }
 
 // snapshot builds a readState reflecting the current actor-owned state.
+//
+// effectiveConfig is shared by reference, not deep-copied. The defensive
+// copy that used to live here is redundant once you verify the invariants:
+//
+//  1. Every currentConfig mutation site replaces the whole struct via
+//     newSingleConfig / newJointConfig / applyConfigEntry / configHistory
+//     restore. None of them mutate voters / oldVoters / learners in place
+//     — each builds fresh slices and a fresh map, then assigns
+//     n.st.currentConfig = next. Grep `currentConfig.voters[` and
+//     `append(currentConfig.voters, ...)` in this package — both return
+//     zero hits — before relaxing this contract further.
+//
+//  2. Configuration() (the only public surface that exposes voters /
+//     learners) calls allVoters() and builds a fresh []Server. External
+//     code never receives the published slice header directly, so it
+//     cannot retain or mutate it.
+//
+//  3. Internal readers (Configuration() body) use the published slices
+//     for read-only ops (len + range). The actor reads currentConfig for
+//     quorum math, also read-only. Two concurrent reads of the same
+//     backing array are safe under the Go memory model.
+//
+// **Invariant**: currentConfig is wholesale-replacement only. Any future
+// change that mutates voters / oldVoters / learners in place breaks this
+// contract and reintroduces the defensive copy requirement.
 func (s *actorState) snapshot() *readState {
-	// Defensive-copy the effectiveConfig slices so the published readState
-	// is fully detached from the actor-owned state. Reads from
-	// Configuration() can then traverse the slices without locking.
-	cfgCopy := effectiveConfig{joint: s.currentConfig.joint}
-	if len(s.currentConfig.voters) > 0 {
-		cfgCopy.voters = make([]string, len(s.currentConfig.voters))
-		copy(cfgCopy.voters, s.currentConfig.voters)
-	}
-	if len(s.currentConfig.oldVoters) > 0 {
-		cfgCopy.oldVoters = make([]string, len(s.currentConfig.oldVoters))
-		copy(cfgCopy.oldVoters, s.currentConfig.oldVoters)
-	}
-	cfgCopy.learners = s.currentConfig.cloneLearners()
 	return &readState{
 		state:       s.state,
 		term:        s.currentTerm,
@@ -219,7 +231,7 @@ func (s *actorState) snapshot() *readState {
 		commitIndex: s.commitIndex,
 		isLeader:    s.state == Leader && s.leaderID == s.id && s.leaderID != "",
 		votedFor:    s.votedFor,
-		config:      cfgCopy,
+		config:      s.currentConfig,
 	}
 }
 
