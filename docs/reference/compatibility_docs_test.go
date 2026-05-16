@@ -176,8 +176,8 @@ func validateObjectGovernanceBoundary(markdown string) error {
 func validateClientSmokeEvidence(markdown string) error {
 	required := map[string]string{
 		"MinIO client (`mc`)": "TestS3ClientSmoke/MinIOMC",
-		"s3fs":                "TestS3ClientSmoke/S3FS",
-		"goofys":              "TestS3ClientSmoke/Goofys",
+		"s3fs":                "TestFUSE_S3_S3FS",
+		"goofys":              "TestFUSE_S3_Goofys",
 	}
 	seen := make(map[string]bool, len(required))
 	for _, line := range strings.Split(markdown, "\n") {

@@ -67,6 +67,6 @@ binary and data compatibility across rolling upgrades.
 | boto3                       | Supported  |                                                                                                    |
 | rclone direct S3            | Supported  |                                                                                                    |
 | rclone mount / FUSE-over-S3 | Partial    | S3 semantics mean rename is copy+delete and POSIX chmod/chown/locking are not supported over FUSE. |
-| s3fs                        | Not supported | `TestS3ClientSmoke/S3FS` added; local verification skipped because local FUSE mount capability was unavailable. |
-| goofys                      | Not supported | `TestS3ClientSmoke/Goofys` added; local verification skipped because `goofys` was absent.          |
-| MinIO client (`mc`)         | Not supported | `TestS3ClientSmoke/MinIOMC` reached write/read/list but skipped support promotion because `mc rm` used an unsupported POST delete operation. |
+| s3fs                        | Not supported | `TestFUSE_S3_S3FS` must pass in the Colima Linux VM via `make test-s3-client-smoke-colima` before promotion. |
+| goofys                      | Not supported | `TestFUSE_S3_Goofys` must pass in the Colima Linux VM via `make test-s3-client-smoke-colima` before promotion. |
+| MinIO client (`mc`)         | Supported  | `TestS3ClientSmoke/MinIOMC` covers write, read, list, delete, and deletion verification.           |

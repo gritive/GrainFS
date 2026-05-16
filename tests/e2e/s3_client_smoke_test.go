@@ -42,12 +42,7 @@ func testS3ClientSmokeMinIOMC(t *testing.T) {
 	require.Equal(t, "mc smoke", string(out))
 	out = runClientCommand(t, nil, "mc", "--config-dir", configDir, "ls", "grainfs/"+bucket)
 	require.Contains(t, string(out), "smoke.txt")
-	if out, err := runClientCommandAllowError(t, nil, "mc", "--config-dir", configDir, "rm", "grainfs/"+bucket+"/smoke.txt"); err != nil {
-		if strings.Contains(string(out), "unsupported POST operation") {
-			t.Skipf("mc delete uses an unsupported POST delete operation; leaving MinIO Client row Not supported: %v\n%s", err, out)
-		}
-		t.Fatalf("mc rm failed: %v\n%s", err, out)
-	}
+	runClientCommand(t, nil, "mc", "--config-dir", configDir, "rm", "grainfs/"+bucket+"/smoke.txt")
 	requireObjectDeleted(t, bucket, "smoke.txt")
 }
 
