@@ -66,7 +66,6 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 
 | Comparison | Current status | Details |
 | --- | --- | --- |
-| `GrainFS` local FUSE-over-S3 snapshot | Documented repository snapshot: 64 MiB payload, Apple M3, Colima loopback, 3-run average | [Benchmark methodology](docs/reference/benchmarks.md#current-local-snapshots) |
 | `GrainFS` vs MinIO/RustFS 3-node S3 PUT | Latest same-host `warp` run: GrainFS 92.11 MiB/s, MinIO 47.05 MiB/s, RustFS 36.31 MiB/s for 64 KiB objects at c16, with 0 errors | [Local 3-node warp final](docs/reference/benchmarks.md#2026-05-16-local-3-node-warp-final) |
 | `GrainFS` vs MinIO/RustFS 3-node S3 GET | Latest same-host `warp` run: GrainFS 325.53 MiB/s, MinIO 296.84 MiB/s, RustFS 105.88 MiB/s for 64 KiB objects at c16, with 0 errors | [Local 3-node warp final](docs/reference/benchmarks.md#2026-05-16-local-3-node-warp-final) |
 
