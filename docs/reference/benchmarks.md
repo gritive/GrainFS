@@ -89,18 +89,11 @@ host lists to `warp`. The previous k6 mixed workload is not used for
 GrainFS/MinIO/RustFS comparison claims because it is not the shared benchmark
 surface.
 
-## Current Local Snapshots
+## Latest Local Result
 
-This table lists values already documented in the repository.
-
-| Scenario                                                               | Result                                                                                                            |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| FUSE-over-S3, 64 MiB payload, Apple M3, Colima loopback, 3-run average | Direct S3 write 96.8 MB/s, direct S3 read 108.0 MB/s, rclone mount write 106.7 MB/s, rclone mount read 107.3 MB/s |
-| `GrainFS` vs RustFS vs MinIO single-node warp, 64 KiB, c16             | Latest same-host clean run: `GrainFS` PUT 573.88 MiB/s and GET 1324.50 MiB/s; MinIO PUT 252.88 MiB/s and GET 1074.01 MiB/s; RustFS PUT 225.43 MiB/s and GET 500.35 MiB/s |
-| `GrainFS` vs RustFS vs MinIO 3-node warp, 64 KiB, c16                  | Latest same-host clean run: `GrainFS` PUT 92.11 MiB/s and GET 325.53 MiB/s; MinIO PUT 47.05 MiB/s and GET 296.84 MiB/s; RustFS PUT 36.31 MiB/s and GET 105.88 MiB/s |
-| CI regression threshold                                                | Not yet enforced                                                                                                  |
-
-## 2026-05-16 Local Single-Node Warp Final
+This section keeps only the latest comparable S3 result. Older benchmark runs
+remain in their raw artifact directories and prior commits, not in this
+reference page.
 
 These snapshots were captured by `benchmarks/bench_s3_compat_compare.sh` on the
 local Apple M3 loopback setup with signed S3 requests, 64 KiB objects,
@@ -126,83 +119,10 @@ Observed deltas:
   run summary is
   `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/summary.md`.
 
-## 2026-05-16 Local 3-Node Warp Baseline
+## Updating Results
 
-These snapshots were captured on a local Apple M3 host with loopback 3-node
-clusters, signed S3 requests, 64 KiB objects, concurrency 16, `warp`, and
-`--host-select roundrobin --noclear`. `GrainFS` ran at-rest encryption and
-default Iceberg audit enabled.
-
-| Target    | Commit / build                  | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | Raw artifacts |
-| --------- | ------------------------------- | --------: | --------: | ---------: | --------: | ------------- |
-| `GrainFS` | `5c42653c`                      |    104.30 |   1668.79 |          0 |         - | `benchmarks/profiles/s3-compat-cluster-warp-grainfs-memec-put30-20260516-060428` |
-| MinIO     | local 3-process distributed run |    103.66 |   1658.37 |          0 |    340.17 | `benchmarks/profiles/s3-compat-cluster-warp-minio-baseline-20260516` |
-| RustFS    | local 3-process distributed run |     48.37 |    773.85 |          0 |     86.20 | `benchmarks/profiles/s3-compat-cluster-warp-rustfs-baseline-rpcsecret-20260516` |
-
-Known caveats:
-
-- The MinIO and RustFS baselines were measured once and reused while iterating
-  on `GrainFS`.
-- The final `GrainFS` PUT run ended above the MinIO PUT baseline despite severe
-  local disk pressure: `/System/Volumes/Data` was 98% full before the run and
-  99% full before benchmark-directory cleanup.
-- `GrainFS` GET was not remeasured in the final run because the completion gate
-  was PUT throughput versus the existing MinIO PUT baseline.
-- The final `GrainFS` CPU profiles show `syscall.rawsyscalln` still dominates
-  CPU samples, mostly through QUIC packet send paths; `spoolObjectEncrypted`
-  no longer appears after the small EC memory path change.
-- `GrainFS` IAM allow authz console logs were suppressed at the default info
-  level; deny authz logs remain visible and durable S3 audit remains enabled.
-
-## 2026-05-16 Local 3-Node Warp Rebaseline
-
-These snapshots were captured after `2c50e868` with the same local loopback
-3-node layout, signed S3 requests, 64 KiB objects, concurrency 16, `warp`,
-and `--host-select roundrobin --noclear`.
-
-| Target    | Commit / build                  | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET status | Raw artifacts |
-| --------- | ------------------------------- | --------: | --------: | ---------: | --------: | ---------- | ------------- |
-| `GrainFS` | `2c50e868`                      |    106.67 |   1706.67 |          0 |    247.18 | reached timed GET, but `warp` recorded 2 `unexpected EOF` errors on node1 | `benchmarks/profiles/s3-compat-cluster-warp-grainfs-rebaseline-20260516-152041` |
-| MinIO     | local 3-process distributed run |     46.86 |    749.76 |          0 |    279.61 | ok | `benchmarks/profiles/s3-compat-cluster-warp-minio-rebaseline-20260516-152407` |
-| RustFS    | local 3-process distributed run |     35.72 |    571.48 |          0 |     76.50 | ok | `benchmarks/profiles/s3-compat-cluster-warp-rustfs-rebaseline-20260516-152618` |
-
-Observed deltas:
-
-- `GrainFS` PUT throughput was 2.28x the new MinIO PUT baseline and 2.99x the
-  new RustFS PUT baseline in this run.
-- The earlier stale-binary GrainFS run timed out during `warp`'s bucket-location
-  probe. The rebuilt `2c50e868` binary reached the timed GET phase, but GET is
-  still not a clean baseline because `warp` observed 2 `unexpected EOF` errors.
-
-## 2026-05-16 Local 3-Node Warp Final
-
-These snapshots use the same local Apple M3 loopback setup, signed S3 requests,
-64 KiB objects, concurrency 16, `warp`, `--host-select roundrobin`, and
-`--noclear`. MinIO and RustFS were rebaselined once for the final comparison.
-`GrainFS` ran with at-rest encryption and default Iceberg audit enabled.
-
-| Target    | Commit / build                  | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET obj/s | GET errors | Raw artifacts |
-| --------- | ------------------------------- | --------: | --------: | ---------: | --------: | --------: | ---------: | ------------- |
-| `GrainFS` | `ae6057d6`                      |     92.11 |   1473.72 |          0 |    325.53 |   5208.42 |          0 | `benchmarks/profiles/s3-compat-cluster-warp-grainfs-rawbuffer64-20260516-161159` |
-| MinIO     | local 3-process distributed run |     47.05 |    752.77 |          0 |    296.84 |   4749.39 |          0 | `benchmarks/profiles/s3-compat-cluster-warp-minio-rebaseline-20260516-155338` |
-| RustFS    | local 3-process distributed run |     36.31 |    580.88 |          0 |    105.88 |   1694.14 |          0 | `benchmarks/profiles/s3-compat-cluster-warp-rustfs-rebaseline-20260516-155512` |
-
-Observed deltas:
-
-- `GrainFS` PUT throughput was 1.96x the final MinIO PUT baseline and 2.54x
-  the final RustFS PUT baseline.
-- `GrainFS` GET throughput was 1.10x the final MinIO GET baseline and 3.07x
-  the final RustFS GET baseline.
-- The earlier `warp` GET `unexpected EOF` issue was reproduced on 64 KiB
-  streamed responses, then removed by buffering warp-sized object responses and
-  avoiding the extra Hertz `Data` append copy with `SetBodyRaw`.
-- The focused Go benchmark for the 64 KiB response path improved from
-  `20785-21967 ns/op`, about `205812-205822 B/op`, and `31 allocs/op` to
-  `15983-16569 ns/op`, `140169 B/op`, and `29 allocs/op`.
-
-## Adding Results
-
-Add a dated subsection or report file with:
+Replace the latest result above when publishing a new comparable benchmark.
+Record:
 
 ```text
 Date:
@@ -217,5 +137,5 @@ Summary:
 Known caveats:
 ```
 
-Avoid replacing raw artifacts with prose summaries. Summaries should point back
-to the original JSON, fio output, trace, or pprof files.
+Avoid keeping historical benchmark tables in this document. Summaries should
+point back to the original JSON, fio output, trace, or pprof files.
