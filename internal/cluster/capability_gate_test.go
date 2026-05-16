@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -115,6 +116,36 @@ func TestCapabilityGateRequiresPeerTransportCapability(t *testing.T) {
 	plan, err = g.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, compat.OperationListParts, []string{"node-1", "node-2"}, now)
 	require.NoError(t, err)
 	require.True(t, plan.Allowed())
+}
+
+func BenchmarkCapabilityGate_RequirePeerTransportCapability(b *testing.B) {
+	cases := []int{3, 6, 12}
+	now := time.Unix(10, 0)
+	for _, peersCount := range cases {
+		b.Run(fmt.Sprintf("peers_%d", peersCount), func(b *testing.B) {
+			g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
+			peers := make([]string, peersCount)
+			for i := range peers {
+				peer := fmt.Sprintf("node-%02d", i)
+				peers[i] = peer
+				g.ReportEvidence(compat.Evidence{
+					NodeID:       compat.NodeID(peer),
+					Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+					LastSeen:     now,
+					Ready:        true,
+				})
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				plan, err := g.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, compat.OperationListParts, peers, now)
+				if err != nil || !plan.Allowed() {
+					b.Fatalf("gate rejected: plan=%+v err=%v", plan, err)
+				}
+			}
+		})
+	}
 }
 
 func TestCapabilityGateRejectsAfterConfigEpochChange(t *testing.T) {

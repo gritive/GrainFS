@@ -136,6 +136,53 @@ func BenchmarkGetObjectEC_DirectReconstruct(b *testing.B) {
 	}
 }
 
+func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
+	cases := []struct {
+		name       string
+		uploads    int
+		maxUploads int
+	}{
+		{"100_all", 100, 0},
+		{"1000_all", 1000, 0},
+		{"1000_max100", 1000, 100},
+		{"10000_max100", 10000, 100},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			bk := newTestDistributedBackend(b)
+			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+			for i := 0; i < tc.uploads; i++ {
+				bucket := "bench"
+				prefix := "listed/"
+				if i%10 == 0 {
+					bucket = "other"
+				}
+				if i%7 == 0 {
+					prefix = "else/"
+				}
+				writeMultipartMeta(b, bk, fmt.Sprintf("upload-%06d", i), clusterMultipartMeta{
+					Bucket:           bucket,
+					Key:              fmt.Sprintf("%sobj-%06d.bin", prefix, i),
+					CreatedAt:        int64(i),
+					ContentType:      "application/octet-stream",
+					PlacementGroupID: "group-1",
+				})
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				uploads, err := bk.ListMultipartUploads(context.Background(), "bench", "listed/", tc.maxUploads)
+				require.NoError(b, err)
+				if tc.maxUploads > 0 && len(uploads) > tc.maxUploads {
+					b.Fatalf("got %d uploads, max %d", len(uploads), tc.maxUploads)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkGetObjectEC_LocalDataShardRead(b *testing.B) {
 	cases := []struct {
 		name string

@@ -688,7 +688,7 @@ func TestDistributedBackend_ListMultipartUploadsFiltersSkipsLegacyAndSorts(t *te
 	require.Equal(t, []string{"upload-early-a", "upload-early-b", "upload-late"}, multipartUploadIDs(all))
 }
 
-func writeMultipartMeta(t *testing.T, b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMeta(t testing.TB, b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
 	t.Helper()
 	raw, err := marshalClusterMultipartMeta(meta)
 	require.NoError(t, err)

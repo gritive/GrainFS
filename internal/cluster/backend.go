@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -3374,29 +3375,35 @@ func contextForMultipartComplete(
 func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
 	_ = ctx
 	var uploads []*storage.MultipartUpload
+	bucketBytes := []byte(bucket)
+	prefixBytes := []byte(prefix)
 	err := b.db.View(func(txn *badger.Txn) error {
 		return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item *badger.Item) error {
 			raw, err := b.itemValueCopy(item)
 			if err != nil {
 				return err
 			}
-			meta, err := unmarshalClusterMultipartMeta(raw)
+			meta, err := fbSafe(raw, func(d []byte) *clusterpb.MultipartMeta {
+				return clusterpb.GetRootAsMultipartMeta(d, 0)
+			})
 			if err != nil {
-				return err
+				return fmt.Errorf("unmarshal MultipartMeta: %w", err)
 			}
-			if meta.Bucket == "" || meta.Key == "" {
+			metaBucket := meta.Bucket()
+			metaKey := meta.Key()
+			if len(metaBucket) == 0 || len(metaKey) == 0 {
 				return nil
 			}
-			if meta.Bucket != bucket || !strings.HasPrefix(meta.Key, prefix) {
+			if !bytes.Equal(metaBucket, bucketBytes) || !bytes.HasPrefix(metaKey, prefixBytes) {
 				return nil
 			}
 			uploadID := strings.TrimPrefix(string(rawKey), "mpu:")
 			uploads = append(uploads, &storage.MultipartUpload{
 				UploadID:    uploadID,
-				Bucket:      meta.Bucket,
-				Key:         meta.Key,
-				ContentType: meta.ContentType,
-				CreatedAt:   meta.CreatedAt,
+				Bucket:      string(metaBucket),
+				Key:         string(metaKey),
+				ContentType: string(meta.ContentType()),
+				CreatedAt:   meta.CreatedAt(),
 			})
 			return nil
 		})
@@ -3405,18 +3412,22 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 		return nil, err
 	}
 	sort.Slice(uploads, func(i, j int) bool {
-		if uploads[i].CreatedAt != uploads[j].CreatedAt {
-			return uploads[i].CreatedAt < uploads[j].CreatedAt
-		}
-		if uploads[i].Key != uploads[j].Key {
-			return uploads[i].Key < uploads[j].Key
-		}
-		return uploads[i].UploadID < uploads[j].UploadID
+		return multipartUploadLess(*uploads[i], *uploads[j])
 	})
 	if maxUploads > 0 && len(uploads) > maxUploads {
 		uploads = uploads[:maxUploads]
 	}
 	return uploads, nil
+}
+
+func multipartUploadLess(a, b storage.MultipartUpload) bool {
+	if a.CreatedAt != b.CreatedAt {
+		return a.CreatedAt < b.CreatedAt
+	}
+	if a.Key != b.Key {
+		return a.Key < b.Key
+	}
+	return a.UploadID < b.UploadID
 }
 
 // ListParts walks the local node's partDir for the given uploadID. Parts
