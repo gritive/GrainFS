@@ -2162,6 +2162,7 @@ func encodeMetaRemoveNodeCmd(nodeID string) ([]byte, error) {
 	return fbFinish(b, clusterpb.MetaRemoveNodeCmdEnd(b)), nil
 }
 
+//nolint:unused // referenced by meta_fsm_capability_test.go.
 func buildMetaCapabilityActivatePayload(capability string) []byte {
 	b := flatbuffers.NewBuilder(128)
 	capOff := b.CreateString(capability)

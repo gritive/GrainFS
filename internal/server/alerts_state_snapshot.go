@@ -20,8 +20,6 @@ type alertsStatusResponse struct {
 
 func (s *AlertsState) StatusSnapshot() alertsStatusResponse {
 	st := s.tracker.Status()
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	resp := alertsStatusResponse{
 		Degraded:          st.Degraded,
 		Held:              st.Held,
@@ -29,32 +27,30 @@ func (s *AlertsState) StatusSnapshot() alertsStatusResponse {
 		LastResource:      st.LastResource,
 		EnteredAt:         st.EnteredAt,
 		FlapCount:         st.FlapCount,
-		DeliveredOK:       s.deliveredOK,
-		DeliveryFailed:    s.deliveryFailed,
+		DeliveredOK:       s.deliveredOK.Load(),
+		DeliveryFailed:    s.deliveryFailed.Load(),
 		WebhookConfigured: s.dispatcher != nil,
 	}
-	if s.lastFailed != nil {
-		resp.LastFailedType = s.lastFailed.Type
-		resp.LastFailedErr = s.lastFailedErr
-		resp.LastFailedAt = s.lastFailedAt
+	if snap := s.lastFailed.Load(); snap != nil {
+		resp.LastFailedType = snap.Alert.Type
+		resp.LastFailedErr = snap.ErrMessage
+		resp.LastFailedAt = snap.At
 	}
 	return resp
 }
 
+// ResendLastFailed re-fires the last-failed alert through the dispatcher.
+// Returns (true, nil) when a snapshot was present and the resend was dispatched
+// (fire-and-forget — the actual delivery result lands in onResult). The
+// last-failed slot is cleared optimistically so the banner disappears on the
+// next status poll; if the resend ultimately fails, onResult re-populates it.
 func (s *AlertsState) ResendLastFailed() (bool, error) {
-	s.mu.Lock()
-	last := s.lastFailed
-	s.mu.Unlock()
-	if last == nil {
+	snap := s.lastFailed.Load()
+	if snap == nil {
 		return false, nil
 	}
-	if err := s.Send(*last); err != nil {
-		return false, err
-	}
-	// Clear the failed slot so the banner disappears on next status poll.
-	s.mu.Lock()
-	s.lastFailed = nil
-	s.lastFailedErr = ""
-	s.mu.Unlock()
+	s.Send(snap.Alert)
+	// Clear the failed slot optimistically so the banner disappears.
+	s.lastFailed.CompareAndSwap(snap, nil)
 	return true, nil
 }

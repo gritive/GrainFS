@@ -107,7 +107,7 @@ func StartVlog(ctx context.Context, opts VlogOptions, deps Deps) {
 			OnFailIncident: func(cat resourcewatch.Category, err error) {
 				recordBadgerGCFailedIncident(ctx, deps.Recorder, deps.NodeID, cat, err)
 				if deps.Alerts != nil {
-					_ = deps.Alerts.Send(alerts.Alert{
+					deps.Alerts.Send(alerts.Alert{
 						Type:     "badger_gc_failed",
 						Severity: alerts.SeverityCritical,
 						Resource: fmt.Sprintf("%s/%s", deps.NodeID, cat),
@@ -244,14 +244,12 @@ func sendVlogAlert(nodeID string, sender AlertsSender, decision *resourcewatch.D
 		severity = alerts.SeverityCritical
 	}
 	log.Warn().Str("level", string(decision.Level)).Float64("ratio", decision.Ratio).Msg(decision.Message)
-	go func() {
-		_ = sender.Send(alerts.Alert{
-			Type:     "vlog_" + string(decision.Level),
-			Severity: severity,
-			Resource: nodeID,
-			Message:  decision.Message,
-		})
-	}()
+	sender.Send(alerts.Alert{
+		Type:     "vlog_" + string(decision.Level),
+		Severity: severity,
+		Resource: nodeID,
+		Message:  decision.Message,
+	})
 }
 
 func recordBadgerGCFailedIncident(ctx context.Context, recorder IncidentRecorder, nodeID string, cat resourcewatch.Category, gcErr error) {

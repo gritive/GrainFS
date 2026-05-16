@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -19,6 +20,19 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
+
+// startDispatcherInternal is the internal-package version of the helper used in
+// webhook_test.go: starts d and arranges Stop on cleanup so the controller
+// goroutine cannot leak into subsequent tests.
+func startDispatcherInternal(t *testing.T, d *Dispatcher) {
+	t.Helper()
+	d.Start(context.Background())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = d.Stop(ctx)
+	})
+}
 
 // stubDecrypter always returns the configured error.
 type stubDecrypter struct{ err error }
@@ -57,8 +71,10 @@ func TestWebhook_DecryptFailure_EmitsMetricAndLogUnsigned(t *testing.T) {
 	d := NewDispatcherWithConfig(cfg, dec, []byte("aad"),
 		Options{Clock: func() time.Time { return now }, MaxRetries: 0, DedupWindow: 0},
 		nil, "degraded")
+	startDispatcherInternal(t, d)
 
 	d.Send(Alert{Type: "t", Severity: SeverityWarning, Resource: "r", Message: "m", Time: now})
+	d.DrainForTest()
 
 	require.InDelta(t, 1.0,
 		testutil.ToFloat64(metrics.WebhookSignatureDecryptFailureTotal.WithLabelValues("degraded", "key_not_found")),
@@ -91,12 +107,19 @@ func TestWebhook_DecryptFailure_LogRateLimited_MetricNotRateLimited(t *testing.T
 	d := NewDispatcherWithConfig(cfg, dec, []byte("aad"),
 		Options{Clock: func() time.Time { return now }, MaxRetries: 0, DedupWindow: 0},
 		nil, "degraded")
+	startDispatcherInternal(t, d)
 
 	// Send 100 alerts with distinct Resource keys (DedupWindow=0 also disables dedup).
+	// Drain between batches so the 32-slot inbox cannot drop alerts as
+	// dropReasonInboxFull — this test asserts a metric increment of exactly 100.
 	for i := 0; i < 100; i++ {
 		res := "r" + string(rune('a'+(i%26))) + string(rune('a'+((i/26)%26)))
 		d.Send(Alert{Type: "t", Severity: SeverityWarning, Resource: res, Message: "m", Time: now})
+		if i%16 == 15 {
+			d.DrainForTest()
+		}
 	}
+	d.DrainForTest()
 
 	require.InDelta(t, 100.0,
 		testutil.ToFloat64(metrics.WebhookSignatureDecryptFailureTotal.WithLabelValues("degraded", "aad_mismatch")),
@@ -151,8 +174,10 @@ func TestWebhook_DecryptFailure_RealEncryptorClassification(t *testing.T) {
 	d := NewDispatcherWithConfig(cfg, encB, aad,
 		Options{Clock: func() time.Time { return now }, MaxRetries: 0, DedupWindow: 0},
 		nil, "cluster")
+	startDispatcherInternal(t, d)
 
 	d.Send(Alert{Type: "t", Severity: SeverityWarning, Resource: "r", Message: "m", Time: now})
+	d.DrainForTest()
 
 	require.InDelta(t, 1.0,
 		testutil.ToFloat64(metrics.WebhookSignatureDecryptFailureTotal.WithLabelValues("cluster", "aad_mismatch")),

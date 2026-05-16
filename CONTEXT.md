@@ -472,3 +472,25 @@ direct-block write selection, block cache read/write behavior, pool quota
 checks, and `AllocatedBlocks` accounting. Snapshot, clone, and rollback remain
 separate callers for the first slice, though they may reuse the same result
 shape later.
+
+### Alerts Webhook Dispatcher
+
+The alerts webhook dispatcher is a fire-and-forget actor that delivers
+operational alerts to a Slack-compatible webhook. Callers invoke Send(Alert)
+synchronously; the dispatcher's controller goroutine owns dedup state
+(lastSent, inFlight) and decrypt-warn rate-limit state without mutexes.
+Each accepted alert is handled by an ephemeral worker goroutine that
+executes ctx-aware retry/backoff and reports back via a release command
+on a dedicated channel (separated from sendCmd to prevent self-serialization
+of release backpressure). Inbox is bounded; overflow, pre-Start, and
+post-Stop sends are dropped with `AlertDispatchDroppedTotal{reason}` and a
+1-minute rate-limited warn log. Stop is ctx-aware: graceful timeout
+waits for outstanding workers, then cancels worker ctx so backoff sleeps
+and in-flight HTTP POSTs abort immediately.
+
+This is an ergonomic deepening of the caller API (consolidating six
+go-wrapped Send call sites) plus minor locality consolidation (dedup state
+single-owner). It is **not** a locality consolidation in the
+scrubber-Director sense — dedup state was already race-free under mutex.
+Future reviewers proposing actor variants for this module should weigh
+those costs against this baseline.

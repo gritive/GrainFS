@@ -432,6 +432,13 @@ var (
 		Help: "Webhook signing-secret decrypt failures, partitioned by alert dispatcher kind and error class. Indicates a stale wrapped-secret after cluster rotate-key; alerts continue to deliver unsigned.",
 	}, []string{"alert_kind", "err_class"})
 
+	// AlertDispatchDroppedTotal counts alerts dropped without delivery,
+	// partitioned by alert_kind and reason (inbox_full|not_started|stopped).
+	AlertDispatchDroppedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_alerts_dispatcher_dropped_total",
+		Help: "Count of alerts dropped without delivery, by reason (inbox_full|not_started|stopped).",
+	}, []string{"alert_kind", "reason"})
+
 	// Raft snapshot operator metrics.
 	RaftSnapshotTriggerTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_raft_snapshot_trigger_total",

@@ -7,8 +7,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -22,10 +20,10 @@ type RaftStateProvider interface {
 }
 
 // AlertSender is the minimal slice of *server.AlertsState used by the quorum
-// monitor — a single Send call. Defined here to avoid a cluster→server
-// circular import.
+// monitor — a single fire-and-forget Send call. Defined here to avoid a
+// cluster→server circular import.
 type AlertSender interface {
-	Send(alerts.Alert) error
+	Send(alerts.Alert)
 }
 
 // probeTimeout is the maximum time to wait for a UDP response when probing a
@@ -118,9 +116,7 @@ func (m *DegradedMonitor) checkQuorum() {
 				Resource: "cluster",
 				Message:  fmt.Sprintf("no leader for %d consecutive %s ticks — quorum likely lost", m.quorumAlertThreshold, m.interval),
 			}
-			if err := m.alertSender.Send(alert); err != nil {
-				log.Warn().Err(err).Msg("quorum-lost alert send failed")
-			}
+			m.alertSender.Send(alert)
 		}
 	} else {
 		m.quorumLostTicks = 0

@@ -165,21 +165,6 @@ func (v *Verifier) verifyPresigned(r *http.Request) (string, error) {
 	return accessKey, nil
 }
 
-func parseAuthHeader(auth string) map[string]string {
-	result := make(map[string]string)
-	parts := parseAuthHeaderFields(auth)
-	if parts.Credential != "" {
-		result["Credential"] = parts.Credential
-	}
-	if parts.SignedHeaders != "" {
-		result["SignedHeaders"] = parts.SignedHeaders
-	}
-	if parts.Signature != "" {
-		result["Signature"] = parts.Signature
-	}
-	return result
-}
-
 type authHeaderFields struct {
 	Credential    string
 	SignedHeaders string

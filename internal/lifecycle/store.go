@@ -49,6 +49,8 @@ func (s *Store) Get(bucket string) (*LifecycleConfiguration, error) {
 
 // put stores cfg as the lifecycle configuration for bucket.
 // Test-only: production writes go through PutRaw (FSM apply path).
+//
+//nolint:unused // referenced by store_test.go and worker_test.go.
 func (s *Store) put(bucket string, cfg *LifecycleConfiguration) error {
 	data, err := xml.Marshal(cfg)
 	if err != nil {

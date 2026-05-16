@@ -135,14 +135,12 @@ func sendGoroutineAlert(nodeID string, sender AlertsSender, decision *resourcewa
 		severity = alerts.SeverityCritical
 	}
 	log.Warn().Str("level", string(decision.Level)).Float64("ratio", decision.Ratio).Msg(decision.Message)
-	go func() {
-		_ = sender.Send(alerts.Alert{
-			Type:     "goroutine_" + string(decision.Level),
-			Severity: severity,
-			Resource: nodeID,
-			Message:  decision.Message,
-		})
-	}()
+	sender.Send(alerts.Alert{
+		Type:     "goroutine_" + string(decision.Level),
+		Severity: severity,
+		Resource: nodeID,
+		Message:  decision.Message,
+	})
 }
 
 func goroutineIncidentID(nodeID string) string {

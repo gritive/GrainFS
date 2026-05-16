@@ -6,13 +6,12 @@ import (
 )
 
 // NewAlertsState wires the dispatcher and tracker together. The dispatcher's
-// failure callback is captured here so the state can record the last failed
-// alert for the Force Resend button.
+// OnResult callback is captured here so the state can record success counters
+// and the last failed alert for the Force Resend button.
 func NewAlertsState(webhookURL string, opts alerts.Options, trackerCfg alerts.DegradedConfig) *AlertsState {
 	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
-		return alerts.NewDispatcher(webhookURL, opts, func(a alerts.Alert, err error) {
-			s.recordFailure(a, err)
-		})
+		opts.OnResult = s.onResult
+		return alerts.NewDispatcher(webhookURL, opts, nil)
 	})
 }
 
@@ -37,9 +36,8 @@ func NewAlertsStateWithConfig(
 	alertKind string,
 ) *AlertsState {
 	return newAlertsStateFromDispatcher(trackerCfg, func(s *AlertsState) *alerts.Dispatcher {
-		return alerts.NewDispatcherWithConfig(cfg, enc, secretAAD, opts, func(a alerts.Alert, err error) {
-			s.recordFailure(a, err)
-		}, alertKind)
+		opts.OnResult = s.onResult
+		return alerts.NewDispatcherWithConfig(cfg, enc, secretAAD, opts, nil, alertKind)
 	})
 }
 
@@ -48,20 +46,16 @@ func newAlertsStateFromDispatcher(trackerCfg alerts.DegradedConfig, build func(*
 	s.dispatcher = build(s)
 	// When the tracker trips into hold mode, send a critical webhook so
 	// the on-call human knows the system is being held degraded for them.
-	// Fire the send in a goroutine: OnHold already runs outside the tracker
-	// lock, but it runs on the caller's goroutine (scrubber, raft monitor,
-	// disk collector). A synchronous webhook retry could block that caller
-	// for tens of seconds. The dispatcher's onFailure callback still records
-	// delivery failures for the dashboard banner and Force Resend, so
-	// fire-and-forget is safe.
+	// Dispatcher.Send is now fire-and-forget — the controller goroutine owns
+	// retry, so OnHold callers (scrubber, raft monitor, disk collector) are
+	// never blocked. onResult records delivery failures for the dashboard
+	// banner and Force Resend.
 	trackerCfg.OnHold = func(reason string) {
-		go func() {
-			_ = s.dispatcher.Send(alerts.Alert{
-				Type:     "degraded_hold",
-				Severity: alerts.SeverityCritical,
-				Message:  "Tracker held in degraded mode: " + reason,
-			})
-		}()
+		s.dispatcher.Send(alerts.Alert{
+			Type:     "degraded_hold",
+			Severity: alerts.SeverityCritical,
+			Message:  "Tracker held in degraded mode: " + reason,
+		})
 	}
 	// Mirror tracker state into the Prometheus gauge. Runs in the actor
 	// goroutine (see DegradedConfig.OnStateChange godoc), so the gauge

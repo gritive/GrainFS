@@ -146,14 +146,12 @@ func sendFDAlert(nodeID string, sender AlertsSender, decision *resourcewatch.Dec
 		severity = alerts.SeverityCritical
 	}
 	log.Warn().Str("level", string(decision.Level)).Float64("ratio", decision.Ratio).Msg(decision.Message)
-	go func() {
-		_ = sender.Send(alerts.Alert{
-			Type:     "fd_" + string(decision.Level),
-			Severity: severity,
-			Resource: nodeID,
-			Message:  decision.Message,
-		})
-	}()
+	sender.Send(alerts.Alert{
+		Type:     "fd_" + string(decision.Level),
+		Severity: severity,
+		Resource: nodeID,
+		Message:  decision.Message,
+	})
 }
 
 func fdIncidentID(nodeID string) string {

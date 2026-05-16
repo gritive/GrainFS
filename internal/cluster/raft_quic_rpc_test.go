@@ -206,10 +206,10 @@ func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
 	cluster := newV2QUICCluster(t, 3, 2500*time.Millisecond)
 	timeoutNowHandled := make(chan string, 1)
 	for _, rpc := range cluster.rpcs {
-		rpc.node = timeoutNowObservingNode{
-			RaftNode: rpc.node,
+		rpc.SetNode(timeoutNowObservingNode{
+			RaftNode: rpc.GetNode(),
 			handled:  timeoutNowHandled,
-		}
+		})
 	}
 	cluster.startAll()
 

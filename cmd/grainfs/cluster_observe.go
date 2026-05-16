@@ -173,27 +173,6 @@ func runClusterPlacement(ctx context.Context, client *clusteradmin.Client, bucke
 	return nil
 }
 
-// renderGroupPeers formats the peer list for a shard group, falling back
-// to "(unknown group)" when the bucket assignment references a group ID
-// that isn't present in shard_groups (e.g. stale assignment after a
-// shard-group GC). Avoids silently emitting an empty trailing column.
-func renderGroupPeers(groups []clusteradmin.ShardGroup, id string) string {
-	peers := lookupGroupPeers(groups, id)
-	if peers == nil {
-		return "(unknown group)"
-	}
-	return strings.Join(peers, ", ")
-}
-
-func lookupGroupPeers(groups []clusteradmin.ShardGroup, id string) []string {
-	for _, g := range groups {
-		if g.ID == id {
-			return g.PeerIDs
-		}
-	}
-	return nil
-}
-
 // printJSONIndented renders v as indented JSON to w. Shared helper for
 // --format=json output across cluster subcommands.
 func printJSONIndented(w io.Writer, v any) error {

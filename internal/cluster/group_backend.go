@@ -57,6 +57,8 @@ func (g *GroupBackend) leaderProbe() raftLeaderProbe {
 // newGroupBackendWithRaftForTest is a test-only constructor returning a
 // GroupBackend whose leaderProbe() reflects the provided fake. Production
 // callers must use NewGroupBackend / WrapDistributedBackend.
+//
+//nolint:unused // referenced by exec_policy_test.go.
 func newGroupBackendWithRaftForTest(p raftLeaderProbe) *GroupBackend {
 	return &GroupBackend{testLeaderProbe: p}
 }

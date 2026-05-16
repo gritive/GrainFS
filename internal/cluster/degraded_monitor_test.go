@@ -20,15 +20,15 @@ type fakeRaftState struct {
 func (f *fakeRaftState) State() raft.NodeState { return f.state }
 func (f *fakeRaftState) LeaderID() string      { return f.leaderID }
 
-// fakeSender records every alert it is asked to send and can simulate errors.
+// fakeSender records every alert it is asked to send. err is retained for
+// historical tests but is no longer surfaced — Send is fire-and-forget.
 type fakeSender struct {
 	sent []alerts.Alert
 	err  error
 }
 
-func (f *fakeSender) Send(a alerts.Alert) error {
+func (f *fakeSender) Send(a alerts.Alert) {
 	f.sent = append(f.sent, a)
-	return f.err
 }
 
 func newQuorumMonitor(t *testing.T, st *fakeRaftState, sender *fakeSender) *DegradedMonitor {

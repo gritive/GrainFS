@@ -61,7 +61,7 @@ func peerCredMiddleware() app.HandlerFunc {
 			return
 		}
 		cred := pca.Cred()
-		ctx = WithPeerCred(ctx, PeerCredValue{UID: cred.UID, Resolved: cred.Resolved})
+		ctx = WithPeerCred(ctx, PeerCredValue(cred))
 		c.Next(ctx)
 	}
 }

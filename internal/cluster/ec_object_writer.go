@@ -84,6 +84,7 @@ func newECObjectWriter(selfID string, shards ecObjectShardStore, peerHealth ecOb
 	}
 }
 
+//nolint:unused // referenced by ec_object_writer_test.go.
 func (w ecObjectWriter) writeShardReaders(
 	ctx context.Context,
 	plan ecObjectWritePlan,
@@ -116,7 +117,6 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 	stageStart = time.Now()
 	shards, err := ECSplit(plan.Config, data)
 	clear(data)
-	data = nil
 	if err != nil {
 		return ecObjectWriteResult{}, err
 	}

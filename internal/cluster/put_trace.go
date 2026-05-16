@@ -150,6 +150,7 @@ func openPutTraceSinkFromEnv() *putTraceSink {
 	}
 }
 
+//nolint:unused // referenced by *_test.go files across the cluster package.
 func reloadPutTraceSinkForTest() {
 	if globalPutTraceSink != nil && globalPutTraceSink.file != nil {
 		_ = globalPutTraceSink.file.Close()
@@ -157,6 +158,7 @@ func reloadPutTraceSinkForTest() {
 	globalPutTraceSink = openPutTraceSinkFromEnv()
 }
 
+//nolint:unused // referenced by put_trace_test.go.
 func putTraceEnabled() bool {
 	return globalPutTraceSink != nil
 }

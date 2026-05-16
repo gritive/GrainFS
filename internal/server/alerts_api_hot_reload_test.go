@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -105,6 +106,14 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 		alerts.DegradedConfig{},
 		"hot-reload-test",
 	)
+	// Start the dispatcher actor (production wires Start in a later task; the
+	// hot-reload contract exercised here lives wholly inside the actor pattern).
+	state.dispatcher.Start(context.Background())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = state.dispatcher.Stop(ctx)
+	})
 	t.Cleanup(state.Close)
 
 	rcv1 := newRecordingReceiver(t)
@@ -123,7 +132,7 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 	}))
 
 	a1 := alerts.Alert{Type: "test", Severity: alerts.SeverityWarning, Resource: "r1", Message: "first alert", Time: time.Now()}
-	require.NoError(t, state.Send(a1))
+	state.Send(a1)
 	got1 := rcv1.waitForRequest(t, 1)
 	require.Equal(t, expectedSignature(secret1, got1.body), got1.signature,
 		"alert 1 must be signed with secret-v1")
@@ -139,7 +148,7 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 	}))
 
 	a2 := alerts.Alert{Type: "test", Severity: alerts.SeverityWarning, Resource: "r2", Message: "second alert", Time: time.Now()}
-	require.NoError(t, state.Send(a2))
+	state.Send(a2)
 	got2 := rcv2.waitForRequest(t, 1)
 	require.Equal(t, expectedSignature(secret2, got2.body), got2.signature,
 		"alert 2 must be signed with secret-v2 (rotated)")

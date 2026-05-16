@@ -8,7 +8,6 @@
 package server
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,19 +15,29 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
+// alertFailureSnapshot is the immutable last-failed-alert record swapped via
+// atomic.Pointer so readers (StatusSnapshot, ResendLastFailed) never block.
+type alertFailureSnapshot struct {
+	Alert      alerts.Alert
+	ErrMessage string
+	At         time.Time
+}
+
 // AlertsState owns the dashboard's view of the cluster's alert plumbing:
 // degraded tracker + last-failed alert + delivery counters. The Server
 // holds a single AlertsState and exposes it via /api/admin/alerts/*.
+//
+// All fields are lock-free: counters are atomic.Uint64, the last-failed slot
+// is atomic.Pointer[alertFailureSnapshot] (COW), and secondary callbacks live
+// in atomic.Pointer[[]func(bool)]. Dispatcher delivery is fire-and-forget;
+// success/failure bookkeeping happens in onResult (controller goroutine).
 type AlertsState struct {
 	dispatcher *alerts.Dispatcher
 	tracker    *alerts.DegradedTracker
 
-	mu             sync.Mutex
-	lastFailed     *alerts.Alert
-	lastFailedErr  string
-	lastFailedAt   time.Time
-	deliveredOK    uint64
-	deliveryFailed uint64
+	deliveredOK    atomic.Uint64
+	deliveryFailed atomic.Uint64
+	lastFailed     atomic.Pointer[alertFailureSnapshot]
 
 	// Secondary OnStateChange callbacks wired after construction (e.g. by Server).
 	// Lock-free: append-only via CompareAndSwap, snapshot-read in the tracker's
@@ -60,20 +69,31 @@ func (s *AlertsState) AddOnStateChange(fn func(bool)) {
 	}
 }
 
-// Send fires an alert through the dispatcher and updates counters/metrics.
+// Send fires an alert through the dispatcher in fire-and-forget mode. Returns
+// immediately. Delivery success/failure bookkeeping happens asynchronously in
+// onResult (invoked from the dispatcher's controller goroutine).
+//
 // Safe to call from any goroutine.
-func (s *AlertsState) Send(a alerts.Alert) error {
-	err := s.dispatcher.Send(a)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err != nil {
-		s.deliveryFailed++
-		metrics.AlertDeliveryAttempts.WithLabelValues("failed").Inc()
-		return err
+func (s *AlertsState) Send(a alerts.Alert) {
+	s.dispatcher.Send(a)
+}
+
+// onResult is registered on the dispatcher Options.OnResult. Called from the
+// controller goroutine — must not block. atomic stores only.
+func (s *AlertsState) onResult(a alerts.Alert, err error) {
+	if err == nil {
+		s.deliveredOK.Add(1)
+		metrics.AlertDeliveryAttempts.WithLabelValues("success").Inc()
+		return
 	}
-	s.deliveredOK++
-	metrics.AlertDeliveryAttempts.WithLabelValues("success").Inc()
-	return nil
+	s.deliveryFailed.Add(1)
+	metrics.AlertDeliveryAttempts.WithLabelValues("failed").Inc()
+	metrics.AlertDeliveryFailedTotal.Inc()
+	s.lastFailed.Store(&alertFailureSnapshot{
+		Alert:      a,
+		ErrMessage: err.Error(),
+		At:         time.Now(),
+	})
 }
 
 // Tracker exposes the DegradedTracker for callers (scrubber, raft, disk
@@ -95,12 +115,3 @@ func (s *AlertsState) Close() {
 // were not configured. Used by other server components (raft monitor, disk
 // collector) to push fault/healthy reports.
 func (s *Server) Alerts() *AlertsState { return s.alerts }
-
-func (s *AlertsState) recordFailure(a alerts.Alert, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastFailed = &a
-	s.lastFailedErr = err.Error()
-	s.lastFailedAt = time.Now()
-	metrics.AlertDeliveryFailedTotal.Inc()
-}
