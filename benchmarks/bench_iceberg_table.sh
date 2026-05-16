@@ -8,7 +8,6 @@ source "$SCRIPT_DIR/lib/common.sh"
 cd "$REPO_ROOT"
 
 BINARY="${BINARY:-./bin/grainfs}"
-K6="${K6:-k6}"
 BASE_PORT="${BASE_PORT:-$(bench_free_port)}"
 PPROF_PORT="${PPROF_PORT:-$(bench_free_port)}"
 PROFILE="${PROFILE:-0}"
@@ -16,8 +15,6 @@ VUS="${VUS:-${MAX_VUS:-10}}"
 DURATION="${DURATION:-30s}"
 RAMP_UP="${RAMP_UP:-10s}"
 RAMP_DOWN="${RAMP_DOWN:-5s}"
-
-bench_require_command "$K6" "brew install k6"
 
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
   echo "[bench] building grainfs..."
@@ -82,15 +79,15 @@ if [[ "$PROFILE" == "1" ]]; then
   PPROF_BG_PID=$!
 fi
 
-"$K6" run "$BENCHMARKS_DIR/iceberg_table_bench.js" \
-  --env BASE_URL="http://127.0.0.1:$BASE_PORT" \
-  --env ACCESS_KEY="$ACCESS_KEY" \
-  --env SECRET_KEY="$SECRET_KEY" \
-  --env MAX_VUS="$VUS" \
-  --env DURATION="$DURATION" \
-  --env RAMP_UP="$RAMP_UP" \
-  --env RAMP_DOWN="$RAMP_DOWN" \
-  "$@" || K6_EXIT=$?
+go run ./benchmarks/iceberg_table_bench \
+  -base-url "http://127.0.0.1:$BASE_PORT" \
+  -access-key "$ACCESS_KEY" \
+  -secret-key "$SECRET_KEY" \
+  -concurrency "$VUS" \
+  -duration "$DURATION" \
+  -namespace-prefix "bench_ns" \
+  -report "benchmarks/iceberg_table_report.json" \
+  "$@" || BENCH_EXIT=$?
 
 [[ -n "$PPROF_BG_PID" ]] && wait "$PPROF_BG_PID" 2>/dev/null || true
 
@@ -103,4 +100,4 @@ if [[ "$PROFILE" == "1" ]]; then
 fi
 
 echo "[bench] done. report: benchmarks/iceberg_table_report.json"
-exit "${K6_EXIT:-0}"
+exit "${BENCH_EXIT:-0}"
