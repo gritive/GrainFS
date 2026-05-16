@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
+	"time"
 )
 
 func TestOperationStatsSummary(t *testing.T) {
@@ -57,5 +59,22 @@ func TestFailureRateExceeded(t *testing.T) {
 	}
 	if !failureRateExceeded(0, 1, 0.05) {
 		t.Fatal("failures with no total requests must exceed threshold")
+	}
+}
+
+func TestSignS3AddsRequiredHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPut, "http://127.0.0.1:9000/grainfs-tables", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signS3(req, []byte{}, "AKIA_TEST", "SECRET_TEST", time.Date(2026, 5, 16, 1, 2, 3, 0, time.UTC))
+	if req.Header.Get("Authorization") == "" {
+		t.Fatal("missing Authorization")
+	}
+	if req.Header.Get("x-amz-content-sha256") == "" {
+		t.Fatal("missing x-amz-content-sha256")
+	}
+	if req.Header.Get("x-amz-date") != "20260516T010203Z" {
+		t.Fatalf("x-amz-date = %q", req.Header.Get("x-amz-date"))
 	}
 }
