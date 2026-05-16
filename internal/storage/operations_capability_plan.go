@@ -1,11 +1,5 @@
 package storage
 
-import (
-	"context"
-	"fmt"
-	"io"
-)
-
 type aclCapabilityPlan struct {
 	atomicPutter AtomicACLPutter
 	aclSetter    ACLSetter
@@ -42,43 +36,28 @@ func buildACLCapabilityPlan(backend Backend) aclCapabilityPlan {
 	return plan
 }
 
-func executePutObjectWithACL(
-	ctx context.Context,
-	backend Backend,
-	bucket, key string,
-	r io.Reader,
-	contentType string,
-	acl uint8,
-) (*Object, error) {
-	plan := buildACLCapabilityPlan(backend)
-	if plan.atomicPutter != nil {
-		return plan.atomicPutter.PutObjectWithACL(bucket, key, r, contentType, acl)
+// aclPlanForCall mirrors planForCall but caches the ACL discovery rules
+// (allowAtomicBehindCurrent). It shares planGen so any Swap invalidates
+// both caches via the same atomic.Uint64 bump.
+func (o *Operations) aclPlanForCall() aclCapabilityPlan {
+	current := o.currentGeneration()
+	if cached := o.aclPlan.Load(); cached != nil && o.planGen.Load() == current {
+		return *cached
 	}
-	if plan.aclSetter == nil {
-		return nil, UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonNoAdapter}
-	}
+	return o.rebuildACLPlan(current)
+}
 
-	obj, err := backend.PutObject(ctx, bucket, key, r, contentType)
-	if err != nil {
-		return nil, err
-	}
-	if err := plan.aclSetter.SetObjectACL(bucket, key, acl); err != nil {
-		if obj == nil || obj.VersionID == "" {
-			return nil, fmt.Errorf("%w: acl error: %v; rollback error: missing version id",
-				UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonRollbackFailed},
-				err,
-			)
+func (o *Operations) rebuildACLPlan(current uint64) aclCapabilityPlan {
+	for {
+		plan := buildACLCapabilityPlan(o.backend)
+		endGen := o.currentGeneration()
+		if current == endGen {
+			o.aclPlan.Store(&plan)
+			o.planGen.Store(current)
+			return plan
 		}
-		if rollbackErr := rollbackPutObjectWithACL(plan, bucket, key, obj.VersionID); rollbackErr != nil {
-			return nil, fmt.Errorf("%w: acl error: %v; rollback error: %v",
-				UnsupportedOperationError{Op: "PutObjectWithACL", Reason: UnsupportedReasonRollbackFailed},
-				err,
-				rollbackErr,
-			)
-		}
-		return nil, err
+		current = endGen
 	}
-	return obj, nil
 }
 
 func rollbackPutObjectWithACL(plan aclCapabilityPlan, bucket, key, versionID string) error {

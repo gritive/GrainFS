@@ -111,6 +111,11 @@ type CachedBackend struct {
 	hits      atomic.Int64
 	misses    atomic.Int64
 	evictions atomic.Int64
+
+	// ops is a long-lived Operations facade over the inner Backend, reused
+	// by result-shape Put helpers below. The inner Backend never changes for
+	// a CachedBackend instance, so this is built once at construction.
+	ops *Operations
 }
 
 // cacheState is immutable after publication through CachedBackend.state.
@@ -128,6 +133,7 @@ func NewCachedBackend(backend Backend, opts ...CacheOption) *CachedBackend {
 		Backend:     backend,
 		maxBytes:    defaultMaxCacheBytes,
 		maxObjBytes: defaultMaxObjectCacheBytes,
+		ops:         NewOperations(backend),
 	}
 	cb.state.Store(emptyCacheState())
 	for _, o := range opts {
@@ -233,7 +239,7 @@ func (cb *CachedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, 
 
 func (cb *CachedBackend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error) {
 	cb.invalidate(bucket, key)
-	return NewOperations(cb.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+	return cb.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
 }
 
 func (cb *CachedBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRequest) (*Object, error) {
@@ -247,7 +253,7 @@ func (cb *CachedBackend) PutObjectWithRequest(ctx context.Context, req PutObject
 
 func (cb *CachedBackend) PutObjectWithRequestResult(ctx context.Context, req PutObjectRequest) (*PutObjectResult, error) {
 	cb.invalidate(req.Bucket, req.Key)
-	return NewOperations(cb.Backend).PutObjectWithRequestResult(ctx, req)
+	return cb.ops.PutObjectWithRequestResult(ctx, req)
 }
 
 func (cb *CachedBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {

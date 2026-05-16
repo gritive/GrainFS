@@ -1,8 +1,9 @@
 package storage
 
 import (
+	"fmt"
 	"io"
-	"sync"
+	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/policy"
 )
@@ -24,11 +25,18 @@ import (
 //	    no
 //	    |
 //	    +-- return UnsupportedOperation{Op, Reason}
+//
+// Capability plan caching: planForCall returns a cached operationsPlan
+// validated against a single Generation() source in the wrapper chain. The
+// only Backend that implements operationPlanGeneration is SwappableBackend
+// (enforced at construction in NewOperations). Generation bumps on Swap
+// invalidate the cache; cache reads are lock-free via atomic.Pointer.
 type Operations struct {
 	backend     Backend
-	plan        operationsPlan
-	planMu      sync.RWMutex
-	planGen     []uint64
+	plan        atomic.Pointer[operationsPlan]
+	aclPlan     atomic.Pointer[aclCapabilityPlan]
+	planGen     atomic.Uint64
+	genSource   operationPlanGeneration // nil = no SwappableBackend in chain → plan never invalidates
 	policyStore *policy.CompiledPolicyStore
 }
 
@@ -90,9 +98,13 @@ func WithPolicyStore(store *policy.CompiledPolicyStore) OperationsOption {
 
 func NewOperations(backend Backend, opts ...OperationsOption) *Operations {
 	o := &Operations{
-		backend: backend,
-		plan:    buildOperationsPlan(backend),
-		planGen: collectOperationsPlanGeneration(backend),
+		backend:   backend,
+		genSource: findGenerationSource(backend),
+	}
+	plan := buildOperationsPlan(backend)
+	o.plan.Store(&plan)
+	if o.genSource != nil {
+		o.planGen.Store(o.genSource.Generation())
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -187,48 +199,57 @@ type operationPlanGeneration interface {
 	Generation() uint64
 }
 
+// planForCall returns the cached storage decorator capability plan. Fast path
+// is a single atomic load of the generation source and one atomic.Pointer
+// load — no allocation, no lock.
 func (o *Operations) planForCall() operationsPlan {
-	current := collectOperationsPlanGeneration(o.backend)
-
-	o.planMu.RLock()
-	if equalGenerationSnapshot(o.planGen, current) {
-		plan := o.plan
-		o.planMu.RUnlock()
-		return plan
+	current := o.currentGeneration()
+	if cached := o.plan.Load(); cached != nil && o.planGen.Load() == current {
+		return *cached
 	}
-	o.planMu.RUnlock()
-
-	o.planMu.Lock()
-	defer o.planMu.Unlock()
-
-	current = collectOperationsPlanGeneration(o.backend)
-	if !equalGenerationSnapshot(o.planGen, current) {
-		o.plan = buildOperationsPlan(o.backend)
-		o.planGen = current
-	}
-	return o.plan
+	return o.rebuildPlan(current)
 }
 
-func collectOperationsPlanGeneration(backend Backend) []uint64 {
-	var gen []uint64
+func (o *Operations) rebuildPlan(current uint64) operationsPlan {
+	// Seqlock-style: bracket the rebuild with generation checks. If a swap
+	// races us, retry. Bounded by the rate of Swap() which is rare.
+	for {
+		plan := buildOperationsPlan(o.backend)
+		endGen := o.currentGeneration()
+		if current == endGen {
+			o.plan.Store(&plan)
+			o.planGen.Store(current)
+			o.aclPlan.Store(nil) // invalidate sibling cache; rebuilt lazily on demand
+			return plan
+		}
+		current = endGen
+	}
+}
+
+func (o *Operations) currentGeneration() uint64 {
+	if o.genSource == nil {
+		return 0
+	}
+	return o.genSource.Generation()
+}
+
+// findGenerationSource walks the chain and returns the single Generation()
+// implementer. Panics if more than one is found — the cache invariant requires
+// a single source so that bumps are observable as a single atomic.Uint64.
+// Only SwappableBackend is expected to satisfy operationPlanGeneration.
+func findGenerationSource(backend Backend) operationPlanGeneration {
+	var found operationPlanGeneration
 	for b := backend; b != nil; b = unwrapOperationBackend(b) {
-		if marker, ok := b.(operationPlanGeneration); ok {
-			gen = append(gen, marker.Generation())
+		marker, ok := b.(operationPlanGeneration)
+		if !ok {
+			continue
 		}
-	}
-	return gen
-}
-
-func equalGenerationSnapshot(a, b []uint64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+		if found != nil {
+			panic(fmt.Sprintf("storage: more than one operationPlanGeneration source in chain (existing=%T, new=%T); only SwappableBackend may implement Generation()", found, marker))
 		}
+		found = marker
 	}
-	return true
+	return found
 }
 
 func unwrapOperationBackend(backend Backend) Backend {
