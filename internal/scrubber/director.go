@@ -41,6 +41,155 @@ type directorCmd interface {
 	apply(env *directorEnv)
 }
 
+// triggerCmd — admin Trigger 호출 (blocking, reply expected).
+type triggerCmd struct {
+	req   TriggerReq
+	reply chan triggerReply
+}
+
+type triggerReply struct {
+	sessionID string
+	created   bool
+}
+
+// applyFromFSMCmd — FSM apply 호출 (fire-and-forget, non-blocking inbox).
+type applyFromFSMCmd struct {
+	entry ScrubTriggerEntry
+}
+
+// lookupDedupCmd — propose 경로 short-circuit (blocking, reply).
+type lookupDedupCmd struct {
+	req   TriggerReq
+	reply chan lookupDedupReply
+}
+
+type lookupDedupReply struct {
+	entry ScrubTriggerEntry
+	ok    bool
+}
+
+// sessionsCmd — admin: 전체 세션 스냅샷.
+type sessionsCmd struct {
+	reply chan []Session
+}
+
+// getSessionCmd — admin: 단일 세션 조회.
+type getSessionCmd struct {
+	id    string
+	reply chan getSessionReply
+}
+
+type getSessionReply struct {
+	session Session
+	ok      bool
+}
+
+// cancelCmd — admin: 세션 취소.
+type cancelCmd struct {
+	id    string
+	reply chan error
+}
+
+func (c triggerCmd) apply(env *directorEnv) {
+	dk := dedupKey(c.req)
+	if existing, ok := env.dedup[dk]; ok {
+		c.reply <- triggerReply{sessionID: existing, created: false}
+		return
+	}
+	sess := newLiveSession(uuid.NewString(), c.req.Bucket, c.req.KeyPrefix, c.req.Scope, c.req.DryRun, time.Now())
+	env.sessions[sess.id] = sess
+	env.dedup[dk] = sess.id
+
+	srcName := routeSourceFor(c.req.Bucket, c.req.KeyPrefix)
+	tr := triggerReq{sess: sess, src: env.sources[srcName], ver: env.verifiers[srcName]}
+	select {
+	case env.queue <- tr:
+		c.reply <- triggerReply{sessionID: sess.id, created: true}
+	default:
+		delete(env.dedup, dk)
+		delete(env.sessions, sess.id)
+		c.reply <- triggerReply{sessionID: "", created: false}
+	}
+}
+
+func (c applyFromFSMCmd) apply(env *directorEnv) {
+	if _, exists := env.sessions[c.entry.SessionID]; exists {
+		return
+	}
+	startedAt := time.Now()
+	if c.entry.RequestedAt != 0 {
+		startedAt = time.Unix(c.entry.RequestedAt, 0)
+	}
+	sess := newLiveSession(c.entry.SessionID, c.entry.Bucket, c.entry.KeyPrefix, c.entry.Scope, c.entry.DryRun, startedAt)
+	env.sessions[sess.id] = sess
+	dk := dedupKey(TriggerReq{Bucket: c.entry.Bucket, KeyPrefix: c.entry.KeyPrefix, Scope: c.entry.Scope, DryRun: c.entry.DryRun})
+	if _, ok := env.dedup[dk]; !ok {
+		env.dedup[dk] = sess.id
+	}
+	srcName := routeSourceFor(c.entry.Bucket, c.entry.KeyPrefix)
+	tr := triggerReq{sess: sess, src: env.sources[srcName], ver: env.verifiers[srcName]}
+	select {
+	case env.queue <- tr:
+	default:
+		delete(env.sessions, sess.id)
+		if env.dedup[dk] == sess.id {
+			delete(env.dedup, dk)
+		}
+		log.Warn().Str("session_id", c.entry.SessionID).Msg("scrub director: queue full, dropped FSM entry")
+	}
+}
+
+func (c lookupDedupCmd) apply(env *directorEnv) {
+	dk := dedupKey(c.req)
+	id, ok := env.dedup[dk]
+	if !ok {
+		c.reply <- lookupDedupReply{ok: false}
+		return
+	}
+	sess, ok := env.sessions[id]
+	if !ok {
+		c.reply <- lookupDedupReply{ok: false}
+		return
+	}
+	c.reply <- lookupDedupReply{
+		entry: ScrubTriggerEntry{
+			SessionID: sess.id,
+			Bucket:    sess.bucket,
+			KeyPrefix: sess.keyPrefix,
+			Scope:     sess.scope,
+			DryRun:    sess.dryRun,
+		},
+		ok: true,
+	}
+}
+
+func (c sessionsCmd) apply(env *directorEnv) {
+	out := make([]Session, 0, len(env.sessions))
+	for _, s := range env.sessions {
+		out = append(out, s.snapshot())
+	}
+	c.reply <- out
+}
+
+func (c getSessionCmd) apply(env *directorEnv) {
+	s, ok := env.sessions[c.id]
+	if !ok {
+		c.reply <- getSessionReply{ok: false}
+		return
+	}
+	c.reply <- getSessionReply{session: s.snapshot(), ok: true}
+}
+
+func (c cancelCmd) apply(env *directorEnv) {
+	s, ok := env.sessions[c.id]
+	if !ok {
+		c.reply <- fmt.Errorf("session %q not found", c.id)
+		return
+	}
+	s.status.Store("cancelled")
+	c.reply <- nil
+}
+
 type Director struct {
 	mu        sync.Mutex
 	sources   map[string]BlockSource
@@ -280,7 +429,7 @@ func (d *Director) workerLoop(ctx context.Context) {
 }
 
 func (d *Director) runSession(ctx context.Context, sess *liveSession) {
-	srcName := d.routeSource(sess.bucket, sess.keyPrefix)
+	srcName := routeSourceFor(sess.bucket, sess.keyPrefix)
 	d.mu.Lock()
 	src := d.sources[srcName]
 	ver := d.verifiers[srcName]
@@ -397,10 +546,10 @@ func (d *Director) markDone(sess *liveSession) {
 	}
 }
 
-// routeSource maps a scrub request to a registered source name. Most internal
-// buckets are still full-object replicated, but volume data blocks are written
-// through the EC data path and must be verified as shards.
-func (d *Director) routeSource(bucket, keyPrefix string) string {
+// routeSourceFor는 (bucket, keyPrefix)를 source 이름으로 매핑한다. ctx-free.
+// Most internal buckets are still full-object replicated, but volume data
+// blocks are written through the EC data path and must be verified as shards.
+func routeSourceFor(bucket, keyPrefix string) string {
 	if bucket == "__grainfs_volumes" && strings.Contains(keyPrefix, "/blk_") {
 		return "ec"
 	}
