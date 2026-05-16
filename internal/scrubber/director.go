@@ -617,14 +617,9 @@ func (d *Director) GetSession(id string) (Session, bool) {
 // flag at the next block boundary in runSession and stops emitting work.
 // Already-issued Verify/Repair calls run to completion.
 func (d *Director) CancelSession(id string) error {
-	d.mu.Lock()
-	s, ok := d.sessions[id]
-	d.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("session %q not found", id)
-	}
-	s.status.Store("cancelled")
-	return nil
+	reply := make(chan error, 1)
+	d.inbox <- cancelCmd{id: id, reply: reply}
+	return <-reply
 }
 
 func dedupKey(r TriggerReq) string {
