@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.214.0] - 2026-05-16 - perf: tighten Iceberg catalog benchmark hot path
+
+### Changed
+
+- **Iceberg table metadata reads**: clustered Iceberg catalog loads now reuse the
+  freshly read table metadata after create and commit operations, avoiding a
+  repeated object read on the benchmark lifecycle hot path while preserving
+  follower read-forwarding behavior.
+- **Iceberg benchmark failure gate**: the Go Iceberg table benchmark now exits
+  non-zero when any request fails, so low-rate request failures can no longer
+  be hidden behind a successful benchmark exit.
+- **Iceberg benchmark connection reuse**: the Go benchmark runner now sizes its
+  HTTP transport for high-throughput local runs and records failure samples in
+  the JSON report, preventing macOS ephemeral port exhaustion from masquerading
+  as catalog failures.
+
+### Verification
+
+- `go test ./benchmarks/iceberg_table_bench ./internal/server ./internal/cluster ./internal/compat ./docs/reference -count=1`
+- `go test ./internal/cluster -run '^$' -bench '^BenchmarkMetaCatalogLoadTableRepeated$' -benchmem -count=3`
+- `VUS=4 DURATION=20s RAMP_UP=0s RAMP_DOWN=0s make bench-iceberg-table`
+- `VUS=4 DURATION=20s RAMP_UP=0s RAMP_DOWN=0s CLUSTER_WARMUP_SLEEP=1 make bench-iceberg-table-cluster`
+- `PROFILE=1 VUS=4 DURATION=20s RAMP_UP=0s RAMP_DOWN=0s make bench-iceberg-table`
+- `git diff --check`
+
 ## [0.0.213.0] - 2026-05-16 - feat: support production S3 compatibility core
 
 ### Added
