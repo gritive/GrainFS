@@ -434,19 +434,14 @@ func (d *Director) workerLoop(ctx context.Context) {
 		case <-d.stop:
 			return
 		case req := <-d.queue:
-			d.runSession(ctx, req.sess)
+			d.runSession(ctx, req.sess, req.src, req.ver)
 		}
 	}
 }
 
-func (d *Director) runSession(ctx context.Context, sess *liveSession) {
-	srcName := routeSourceFor(sess.bucket, sess.keyPrefix)
-	d.mu.Lock()
-	src := d.sources[srcName]
-	ver := d.verifiers[srcName]
-	d.mu.Unlock()
+func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockSource, ver BlockVerifier) {
 	if src == nil || ver == nil {
-		log.Warn().Str("session_id", sess.id).Str("source", srcName).Msg("scrub director: no source registered")
+		log.Warn().Str("session_id", sess.id).Msg("scrub director: no source registered at dispatch")
 		d.markDone(sess)
 		return
 	}
