@@ -92,6 +92,8 @@ func TestDirector_TriggerThenGetSession_Visible(t *testing.T) {
 }
 
 // 3. Cancel 후 worker가 다음 block 경계에서 정지한다.
+// 검증: cancel 후 push된 두 번째 블록은 *Verify 호출이 발생하지 않아야* 한다
+// (worker가 for-loop 최상단의 cancel-check에서 이탈하여 ch를 drain).
 func TestDirector_CancelStopsWorkerAtNextBoundary(t *testing.T) {
 	src := newBlockingSource("ec")
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 4})
@@ -111,13 +113,21 @@ func TestDirector_CancelStopsWorkerAtNextBoundary(t *testing.T) {
 		return ok && sess.Stats.Checked >= 1
 	}, 2*time.Second)
 
+	// Cancel 후 두 번째 블록을 push. worker는 다음 iteration 최상단에서
+	// cancel을 감지하고 즉시 drain하여야 한다. blk_1의 Verify는 호출되지 않아야 함.
 	require.NoError(t, d.CancelSession(id))
+	src.push(Block{Bucket: "__grainfs_volumes", Key: "blk_1"})
 	src.close()
 
 	waitFor(t, func() bool {
 		sess, ok := d.GetSession(id)
 		return ok && sess.Status == "cancelled" && !sess.DoneAt.IsZero()
 	}, 2*time.Second)
+
+	final, ok := d.GetSession(id)
+	require.True(t, ok)
+	require.Equal(t, int64(1), final.Stats.Checked,
+		"second block must NOT have been verified — cancel should pre-empt at the loop boundary")
 }
 
 // 4. ApplyFromFSM이 같은 sessionID로 두 번 도착 — 두 번째는 no-op.
@@ -190,4 +200,29 @@ func TestDirector_StopDuringCommand_NoPanic(t *testing.T) {
 	d.Stop()
 	close(stopProducers)
 	wg.Wait()
+}
+
+// Stop()을 두 번 호출해도 close-of-closed-channel panic이 없어야 한다.
+func TestDirector_Stop_Idempotent(t *testing.T) {
+	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
+	d.Register("ec", &countingSource{name: "ec"}, noopVerifier{})
+	d.Start(context.Background())
+	d.Stop()
+	d.Stop() // 두 번째 호출 — panic 없어야 함
+}
+
+// Start 없이 Stop을 호출하면 즉시 반환되어야 한다 (hang 금지).
+func TestDirector_Stop_WithoutStart_ReturnsImmediately(t *testing.T) {
+	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
+	done := make(chan struct{})
+	go func() {
+		d.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// PASS
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop without prior Start hung")
+	}
 }

@@ -194,10 +194,11 @@ type Director struct {
 	queue chan triggerReq // worker dispatch (env에도 같은 핸들 보관)
 	stop  chan struct{}
 
-	inbox   chan directorCmd
-	done    chan struct{}
-	started atomic.Bool
-	env     *directorEnv
+	inbox    chan directorCmd
+	done     chan struct{}
+	started  atomic.Bool
+	stopOnce sync.Once
+	env      *directorEnv
 }
 
 // Session is the public snapshot of a scrub session as returned by
@@ -397,10 +398,22 @@ func (d *Director) Start(ctx context.Context) {
 }
 
 // Stop closes the stop channel and blocks until both controller and worker
-// goroutines have exited. Safe to call multiple times only if the second
-// call doesn't race with the first close (callers should serialize).
+// goroutines have exited. Idempotent — multiple calls are safe; subsequent
+// calls return immediately after the first completes. No-op if Start was
+// never called.
+//
+// Contract: after Stop returns (or the ctx passed to Start is cancelled),
+// the Director is dead. Any subsequent call to Trigger/LookupDedup/
+// Sessions/GetSession/CancelSession will block forever because the
+// controller goroutine has exited. ApplyFromFSM remains safe (non-blocking
+// send + drop).
 func (d *Director) Stop() {
-	close(d.stop)
+	if !d.started.Load() {
+		return
+	}
+	d.stopOnce.Do(func() {
+		close(d.stop)
+	})
 	<-d.done
 }
 
