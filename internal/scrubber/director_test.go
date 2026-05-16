@@ -32,6 +32,8 @@ func (r *recordingIncident) count() int {
 func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
 	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
+	d.Start(context.Background())
+	defer d.Stop()
 	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_", Scope: ScopeFull}
 	id1, created1 := d.Trigger(req)
 	require.NotEmpty(t, id1)
@@ -85,6 +87,8 @@ func TestDirector_RoutesVolumeBlocksToECSource(t *testing.T) {
 
 func TestDirector_LookupDedup_Hit(t *testing.T) {
 	d := NewDirector(DirectorOpts{NodeID: "n1"})
+	d.Start(context.Background())
+	defer d.Stop()
 	id, created := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
 	require.NotEmpty(t, id)
 	require.True(t, created)
@@ -97,6 +101,8 @@ func TestDirector_LookupDedup_Hit(t *testing.T) {
 
 func TestDirector_LookupDedup_Miss(t *testing.T) {
 	d := NewDirector(DirectorOpts{NodeID: "n1"})
+	d.Start(context.Background())
+	defer d.Stop()
 	_, ok := d.LookupDedup(TriggerReq{Bucket: "ghost", Scope: ScopeFull})
 	require.False(t, ok)
 }

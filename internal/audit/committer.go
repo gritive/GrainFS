@@ -514,7 +514,7 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 		copySourceKeyB.Append(e.CopySourceKey)
 	}
 
-	rec := builder.NewRecord()
+	rec := builder.NewRecordBatch()
 	defer rec.Release()
 
 	var buf bytes.Buffer

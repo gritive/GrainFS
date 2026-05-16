@@ -21,21 +21,190 @@ type IncidentRecorder interface {
 	Record(ctx context.Context, facts []incident.Fact) error
 }
 
-type Director struct {
-	mu        sync.Mutex
+// directorEnv는 controller goroutine이 단독 소유하는 environment다.
+// directorCmd.apply가 이 env를 mutate한다. controller 외 어떤 goroutine도
+// env 필드를 직접 만지지 않는다.
+type directorEnv struct {
 	sources   map[string]BlockSource
 	verifiers map[string]BlockVerifier
 	sessions  map[string]*liveSession
 	dedup     map[string]string
-	queue     chan triggerReq
-	incident  IncidentRecorder
-	stop      chan struct{}
-	nodeID    string
+
+	queue    chan triggerReq // controller → worker dispatch
+	nodeID   string
+	incident IncidentRecorder
+}
+
+// directorCmd는 controller inbox 메시지의 marker interface다.
+// apply는 반드시 controller goroutine에서만 호출된다 (race-free 보장).
+type directorCmd interface {
+	apply(env *directorEnv)
+}
+
+// triggerCmd — admin Trigger 호출 (blocking, reply expected).
+type triggerCmd struct {
+	req   TriggerReq
+	reply chan triggerReply
+}
+
+type triggerReply struct {
+	sessionID string
+	created   bool
+}
+
+// applyFromFSMCmd — FSM apply 호출 (fire-and-forget, non-blocking inbox).
+type applyFromFSMCmd struct {
+	entry ScrubTriggerEntry
+}
+
+// lookupDedupCmd — propose 경로 short-circuit (blocking, reply).
+type lookupDedupCmd struct {
+	req   TriggerReq
+	reply chan lookupDedupReply
+}
+
+type lookupDedupReply struct {
+	entry ScrubTriggerEntry
+	ok    bool
+}
+
+// sessionsCmd — admin: 전체 세션 스냅샷.
+type sessionsCmd struct {
+	reply chan []Session
+}
+
+// getSessionCmd — admin: 단일 세션 조회.
+type getSessionCmd struct {
+	id    string
+	reply chan getSessionReply
+}
+
+type getSessionReply struct {
+	session Session
+	ok      bool
+}
+
+// cancelCmd — admin: 세션 취소.
+type cancelCmd struct {
+	id    string
+	reply chan error
+}
+
+func (c triggerCmd) apply(env *directorEnv) {
+	dk := dedupKey(c.req)
+	if existing, ok := env.dedup[dk]; ok {
+		c.reply <- triggerReply{sessionID: existing, created: false}
+		return
+	}
+	sess := newLiveSession(uuid.NewString(), c.req.Bucket, c.req.KeyPrefix, c.req.Scope, c.req.DryRun, time.Now())
+	env.sessions[sess.id] = sess
+	env.dedup[dk] = sess.id
+
+	srcName := routeSourceFor(c.req.Bucket, c.req.KeyPrefix)
+	tr := triggerReq{sess: sess, src: env.sources[srcName], ver: env.verifiers[srcName]}
+	select {
+	case env.queue <- tr:
+		c.reply <- triggerReply{sessionID: sess.id, created: true}
+	default:
+		delete(env.dedup, dk)
+		delete(env.sessions, sess.id)
+		c.reply <- triggerReply{sessionID: "", created: false}
+	}
+}
+
+func (c applyFromFSMCmd) apply(env *directorEnv) {
+	if _, exists := env.sessions[c.entry.SessionID]; exists {
+		return
+	}
+	startedAt := time.Now()
+	if c.entry.RequestedAt != 0 {
+		startedAt = time.Unix(c.entry.RequestedAt, 0)
+	}
+	sess := newLiveSession(c.entry.SessionID, c.entry.Bucket, c.entry.KeyPrefix, c.entry.Scope, c.entry.DryRun, startedAt)
+	env.sessions[sess.id] = sess
+	dk := dedupKey(TriggerReq{Bucket: c.entry.Bucket, KeyPrefix: c.entry.KeyPrefix, Scope: c.entry.Scope, DryRun: c.entry.DryRun})
+	if _, ok := env.dedup[dk]; !ok {
+		env.dedup[dk] = sess.id
+	}
+	srcName := routeSourceFor(c.entry.Bucket, c.entry.KeyPrefix)
+	tr := triggerReq{sess: sess, src: env.sources[srcName], ver: env.verifiers[srcName]}
+	select {
+	case env.queue <- tr:
+	default:
+		delete(env.sessions, sess.id)
+		if env.dedup[dk] == sess.id {
+			delete(env.dedup, dk)
+		}
+		log.Warn().Str("session_id", c.entry.SessionID).Msg("scrub director: queue full, dropped FSM entry")
+	}
+}
+
+func (c lookupDedupCmd) apply(env *directorEnv) {
+	dk := dedupKey(c.req)
+	id, ok := env.dedup[dk]
+	if !ok {
+		c.reply <- lookupDedupReply{ok: false}
+		return
+	}
+	sess, ok := env.sessions[id]
+	if !ok {
+		c.reply <- lookupDedupReply{ok: false}
+		return
+	}
+	c.reply <- lookupDedupReply{
+		entry: ScrubTriggerEntry{
+			SessionID: sess.id,
+			Bucket:    sess.bucket,
+			KeyPrefix: sess.keyPrefix,
+			Scope:     sess.scope,
+			DryRun:    sess.dryRun,
+		},
+		ok: true,
+	}
+}
+
+func (c sessionsCmd) apply(env *directorEnv) {
+	out := make([]Session, 0, len(env.sessions))
+	for _, s := range env.sessions {
+		out = append(out, s.snapshot())
+	}
+	c.reply <- out
+}
+
+func (c getSessionCmd) apply(env *directorEnv) {
+	s, ok := env.sessions[c.id]
+	if !ok {
+		c.reply <- getSessionReply{ok: false}
+		return
+	}
+	c.reply <- getSessionReply{session: s.snapshot(), ok: true}
+}
+
+func (c cancelCmd) apply(env *directorEnv) {
+	s, ok := env.sessions[c.id]
+	if !ok {
+		c.reply <- fmt.Errorf("session %q not found", c.id)
+		return
+	}
+	s.status.Store("cancelled")
+	c.reply <- nil
+}
+
+type Director struct {
+	queue chan triggerReq // worker dispatch (env에도 같은 핸들 보관)
+	stop  chan struct{}
+
+	inbox    chan directorCmd
+	done     chan struct{}
+	started  atomic.Bool
+	stopOnce sync.Once
+	env      *directorEnv
 }
 
 // Session is the public snapshot of a scrub session as returned by
 // Director.Sessions / GetSession. Counters are plain int64 because the
-// snapshot is taken under d.mu — writers use the atomic-backed liveSession.
+// snapshot is taken on the controller goroutine — writers use the
+// atomic-backed liveSession.
 type Session struct {
 	ID        string
 	Bucket    string
@@ -58,8 +227,8 @@ type SessionStats struct {
 }
 
 // liveSession is the in-flight session state. Counter mutations happen on
-// the atomic fields without holding d.mu; readers (Sessions, GetSession)
-// snapshot via load() into a public Session copy.
+// the atomic fields directly; readers (Sessions, GetSession) snapshot via
+// load() into a public Session copy on the controller goroutine.
 type liveSession struct {
 	id        string
 	bucket    string
@@ -129,29 +298,42 @@ type DirectorOpts struct {
 
 type triggerReq struct {
 	sess *liveSession
+	src  BlockSource
+	ver  BlockVerifier
 }
 
 func NewDirector(opts DirectorOpts) *Director {
 	if opts.QueueSize == 0 {
 		opts.QueueSize = 64
 	}
-	return &Director{
+	queue := make(chan triggerReq, opts.QueueSize)
+	env := &directorEnv{
 		sources:   map[string]BlockSource{},
 		verifiers: map[string]BlockVerifier{},
 		sessions:  map[string]*liveSession{},
 		dedup:     map[string]string{},
-		queue:     make(chan triggerReq, opts.QueueSize),
-		incident:  opts.Incident,
-		stop:      make(chan struct{}),
+		queue:     queue,
 		nodeID:    opts.NodeID,
+		incident:  opts.Incident,
+	}
+	return &Director{
+		queue: queue,
+		stop:  make(chan struct{}),
+		inbox: make(chan directorCmd, opts.QueueSize),
+		done:  make(chan struct{}),
+		env:   env,
 	}
 }
 
+// Register는 Start 이전에 boot phase에서만 호출된다. Start 이후 호출 시 panic.
+// directorEnv는 controller goroutine 단독 소유지만 Start 이전이므로
+// 직접 mutation이 race-free다.
 func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sources[name] = src
-	d.verifiers[name] = ver
+	if d.started.Load() {
+		panic("scrubber.Director: Register called after Start")
+	}
+	d.env.sources[name] = src
+	d.env.verifiers[name] = ver
 }
 
 // LookupDedup returns the in-flight ScrubTriggerEntry for a request key, or
@@ -159,43 +341,17 @@ func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
 // duplicate triggers before raft propose so we do not consume two raft entries
 // for the same logical scrub.
 func (d *Director) LookupDedup(req TriggerReq) (ScrubTriggerEntry, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	id, ok := d.dedup[dedupKey(req)]
-	if !ok {
-		return ScrubTriggerEntry{}, false
-	}
-	sess, ok := d.sessions[id]
-	if !ok {
-		return ScrubTriggerEntry{}, false
-	}
-	return ScrubTriggerEntry{
-		SessionID: sess.id,
-		Bucket:    sess.bucket,
-		KeyPrefix: sess.keyPrefix,
-		Scope:     sess.scope,
-		DryRun:    sess.dryRun,
-	}, true
+	reply := make(chan lookupDedupReply, 1)
+	d.inbox <- lookupDedupCmd{req: req, reply: reply}
+	r := <-reply
+	return r.entry, r.ok
 }
 
 func (d *Director) Trigger(req TriggerReq) (string, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	dk := dedupKey(req)
-	if existing, ok := d.dedup[dk]; ok {
-		return existing, false
-	}
-	sess := newLiveSession(uuid.NewString(), req.Bucket, req.KeyPrefix, req.Scope, req.DryRun, time.Now())
-	d.sessions[sess.id] = sess
-	d.dedup[dk] = sess.id
-	select {
-	case d.queue <- triggerReq{sess: sess}:
-	default:
-		delete(d.dedup, dk)
-		delete(d.sessions, sess.id)
-		return "", false
-	}
-	return sess.id, true
+	reply := make(chan triggerReply, 1)
+	d.inbox <- triggerCmd{req: req, reply: reply}
+	r := <-reply
+	return r.sessionID, r.created
 }
 
 func newLiveSession(id, bucket, keyPrefix string, scope ScrubScope, dryRun bool, startedAt time.Time) *liveSession {
@@ -211,38 +367,68 @@ func newLiveSession(id, bucket, keyPrefix string, scope ScrubScope, dryRun bool,
 	return s
 }
 
+// ApplyFromFSM은 raft FSM apply loop에서 호출된다. 절대 블록하지 않는다.
+// inbox가 가득 차면 warning 로그 후 드랍 — 현재 의미 보존.
 func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
-	d.mu.Lock()
-	if _, exists := d.sessions[entry.SessionID]; exists {
-		d.mu.Unlock()
-		return
-	}
-	startedAt := time.Now()
-	if entry.RequestedAt != 0 {
-		startedAt = time.Unix(entry.RequestedAt, 0)
-	}
-	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, startedAt)
-	d.sessions[entry.SessionID] = sess
-	// Populate dedup so a re-trigger of the same (bucket, prefix, scope, dryRun)
-	// short-circuits via LookupDedup (admin handler avoids burning a raft entry
-	// per duplicate request).
-	dk := dedupKey(TriggerReq{Bucket: entry.Bucket, KeyPrefix: entry.KeyPrefix, Scope: entry.Scope, DryRun: entry.DryRun})
-	if _, ok := d.dedup[dk]; !ok {
-		d.dedup[dk] = entry.SessionID
-	}
-	d.mu.Unlock()
 	select {
-	case d.queue <- triggerReq{sess: sess}:
+	case d.inbox <- applyFromFSMCmd{entry: entry}:
 	default:
-		log.Warn().Str("session_id", entry.SessionID).Msg("scrub director: queue full, dropped FSM entry")
+		log.Warn().Str("session_id", entry.SessionID).Msg("scrub director: inbox full, dropped FSM entry")
 	}
 }
 
 func (d *Director) Start(ctx context.Context) {
-	go d.workerLoop(ctx)
+	if !d.started.CompareAndSwap(false, true) {
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.controllerLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		d.workerLoop(ctx)
+	}()
+	go func() {
+		wg.Wait()
+		close(d.done)
+	}()
 }
 
-func (d *Director) Stop() { close(d.stop) }
+// Stop closes the stop channel and blocks until both controller and worker
+// goroutines have exited. Idempotent — multiple calls are safe; subsequent
+// calls return immediately after the first completes. No-op if Start was
+// never called.
+//
+// Contract: after Stop returns (or the ctx passed to Start is cancelled),
+// the Director is dead. Any subsequent call to Trigger/LookupDedup/
+// Sessions/GetSession/CancelSession will block forever because the
+// controller goroutine has exited. ApplyFromFSM remains safe (non-blocking
+// send + drop).
+func (d *Director) Stop() {
+	if !d.started.Load() {
+		return
+	}
+	d.stopOnce.Do(func() {
+		close(d.stop)
+	})
+	<-d.done
+}
+
+func (d *Director) controllerLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.stop:
+			return
+		case cmd := <-d.inbox:
+			cmd.apply(d.env)
+		}
+	}
+}
 
 func (d *Director) workerLoop(ctx context.Context) {
 	for {
@@ -252,19 +438,14 @@ func (d *Director) workerLoop(ctx context.Context) {
 		case <-d.stop:
 			return
 		case req := <-d.queue:
-			d.runSession(ctx, req.sess)
+			d.runSession(ctx, req.sess, req.src, req.ver)
 		}
 	}
 }
 
-func (d *Director) runSession(ctx context.Context, sess *liveSession) {
-	srcName := d.routeSource(sess.bucket, sess.keyPrefix)
-	d.mu.Lock()
-	src := d.sources[srcName]
-	ver := d.verifiers[srcName]
-	d.mu.Unlock()
+func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockSource, ver BlockVerifier) {
 	if src == nil || ver == nil {
-		log.Warn().Str("session_id", sess.id).Str("source", srcName).Msg("scrub director: no source registered")
+		log.Warn().Str("session_id", sess.id).Msg("scrub director: no source registered at dispatch")
 		d.markDone(sess)
 		return
 	}
@@ -309,7 +490,7 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession) {
 			Kind:   incident.ScopeObject,
 			Bucket: blk.Bucket,
 			Key:    blk.Key,
-			NodeID: d.nodeID,
+			NodeID: d.env.nodeID,
 		}
 		now := time.Now()
 		facts := []incident.Fact{{
@@ -321,8 +502,8 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession) {
 			At:            now,
 		}}
 		if sess.dryRun {
-			if d.incident != nil {
-				_ = d.incident.Record(ctx, facts)
+			if d.env.incident != nil {
+				_ = d.env.incident.Record(ctx, facts)
 			}
 			continue
 		}
@@ -343,8 +524,8 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession) {
 				Scope:         scope,
 				At:            time.Now(),
 			})
-			if d.incident != nil {
-				_ = d.incident.Record(ctx, facts)
+			if d.env.incident != nil {
+				_ = d.env.incident.Record(ctx, facts)
 			}
 			continue
 		}
@@ -360,8 +541,8 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession) {
 			Scope:         scope,
 			At:            time.Now(),
 		})
-		if d.incident != nil {
-			_ = d.incident.Record(ctx, facts)
+		if d.env.incident != nil {
+			_ = d.env.incident.Record(ctx, facts)
 		}
 	}
 	d.markDone(sess)
@@ -375,10 +556,10 @@ func (d *Director) markDone(sess *liveSession) {
 	}
 }
 
-// routeSource maps a scrub request to a registered source name. Most internal
-// buckets are still full-object replicated, but volume data blocks are written
-// through the EC data path and must be verified as shards.
-func (d *Director) routeSource(bucket, keyPrefix string) string {
+// routeSourceFor는 (bucket, keyPrefix)를 source 이름으로 매핑한다. ctx-free.
+// Most internal buckets are still full-object replicated, but volume data
+// blocks are written through the EC data path and must be verified as shards.
+func routeSourceFor(bucket, keyPrefix string) string {
 	if bucket == "__grainfs_volumes" && strings.Contains(keyPrefix, "/blk_") {
 		return "ec"
 	}
@@ -389,41 +570,25 @@ func (d *Director) routeSource(bucket, keyPrefix string) string {
 }
 
 func (d *Director) Sessions() []Session {
-	d.mu.Lock()
-	live := make([]*liveSession, 0, len(d.sessions))
-	for _, s := range d.sessions {
-		live = append(live, s)
-	}
-	d.mu.Unlock()
-	out := make([]Session, 0, len(live))
-	for _, s := range live {
-		out = append(out, s.snapshot())
-	}
-	return out
+	reply := make(chan []Session, 1)
+	d.inbox <- sessionsCmd{reply: reply}
+	return <-reply
 }
 
 func (d *Director) GetSession(id string) (Session, bool) {
-	d.mu.Lock()
-	s, ok := d.sessions[id]
-	d.mu.Unlock()
-	if !ok {
-		return Session{}, false
-	}
-	return s.snapshot(), true
+	reply := make(chan getSessionReply, 1)
+	d.inbox <- getSessionCmd{id: id, reply: reply}
+	r := <-reply
+	return r.session, r.ok
 }
 
 // CancelSession marks a session cancelled. The running worker observes the
 // flag at the next block boundary in runSession and stops emitting work.
 // Already-issued Verify/Repair calls run to completion.
 func (d *Director) CancelSession(id string) error {
-	d.mu.Lock()
-	s, ok := d.sessions[id]
-	d.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("session %q not found", id)
-	}
-	s.status.Store("cancelled")
-	return nil
+	reply := make(chan error, 1)
+	d.inbox <- cancelCmd{id: id, reply: reply}
+	return <-reply
 }
 
 func dedupKey(r TriggerReq) string {

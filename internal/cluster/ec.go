@@ -274,9 +274,9 @@ var ecDataShardBufferPool sync.Pool
 
 func getECDataShardBuffer(size int) []byte {
 	if v := ecDataShardBufferPool.Get(); v != nil {
-		buf := v.([]byte)
-		if cap(buf) >= size {
-			return buf[:size]
+		bufp := v.(*[]byte)
+		if cap(*bufp) >= size {
+			return (*bufp)[:size]
 		}
 	}
 	return make([]byte, size)
@@ -284,7 +284,8 @@ func getECDataShardBuffer(size int) []byte {
 
 func putECDataShardBuffer(buf []byte) {
 	if buf != nil {
-		ecDataShardBufferPool.Put(buf[:cap(buf)])
+		b := buf[:cap(buf)]
+		ecDataShardBufferPool.Put(&b)
 	}
 }
 
