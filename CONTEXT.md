@@ -494,3 +494,36 @@ single-owner). It is **not** a locality consolidation in the
 scrubber-Director sense — dedup state was already race-free under mutex.
 Future reviewers proposing actor variants for this module should weigh
 those costs against this baseline.
+
+### Migration Worker
+
+The migration worker is the leader-only goroutine in
+`internal/migration.Service` that copies objects from a configured source
+backend into a destination bucket. Job state lives durably in `JobStore`
+(BadgerDB); the worker holds no in-memory job registry. Its `Run` loop
+selects on a cap-1 `trigger` channel, an optional `interval` ticker, and
+`ctx.Done`. `SubmitJob` writes the job record through the proposer and
+pokes `trigger` so the leader picks it up without waiting for the next
+tick.
+
+Job-state transitions (start, done, failed) are proposed through the
+meta-Raft FSM. Per-bucket pagination cursors are written by the leader
+directly to local BadgerDB via `JobStore.SaveCursor` and are not replicated
+— a leader change between scan pages may resume from an earlier cursor on
+the new leader. This is an existing gap independent of the worker's actor
+shape.
+
+The `trigger` channel is non-blocking with silent-drop semantics. The
+`interval` ticker is the multi-node safety net: when `SubmitJob` is served
+by a follower and the trigger poke lands at a peer that is not the
+current leader, the eventual periodic scan on the actual leader catches
+the running job. Removing the ticker would require routing `SubmitJob`
+to the leader and is out of scope for the worker module.
+
+`migration.Service` publishes the worker pointer to `SubmitJob` callers
+through `atomic.Pointer[Worker]`; `cancelFn` and the wait group are owned
+by the single `Run` goroutine. The service intentionally is **not** a
+controller actor — its only cross-goroutine state is the worker pointer,
+so a controller actor would be a pass-through. See
+`docs/adr/0012-migration-service-lock-free-publication.md` for the reject
+rationale.

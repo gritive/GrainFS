@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.216.0] - 2026-05-17 - refactor(migration): lock-free worker publication
+
+### Changed
+- `migration.Service` removes `sync.Mutex`. The worker handle is published
+  via `atomic.Pointer[Worker]` so `SubmitJob` callers acquire no lock to
+  signal a leader-side trigger. `cancelFn` and the wait group stay as plain
+  fields because only the `Run()` goroutine touches them.
+- `running` is no longer carried as a separate field; it is derived from
+  `worker.Load() != nil`. `workerRunningForTest` uses the same derivation.
+- `migration.Worker` is unchanged. `Trigger` keeps its non-blocking
+  silent-drop semantics, and the `interval` ticker remains the multi-node
+  safety net for triggers that land on followers.
+
+### Added
+- `docs/adr/0012-migration-service-lock-free-publication.md` records why
+  the migration service is intentionally not folded into a controller-actor
+  shape (its only cross-goroutine state is pointer publication, so atomic
+  publication is the correct deepening rather than an actor pass-through).
+- `CONTEXT.md` gains a Migration Worker domain entry. It also clarifies
+  that job-state transitions are replicated through the meta-Raft FSM while
+  `JobStore.SaveCursor` writes the per-bucket pagination cursor directly
+  to the leader's local BadgerDB (an existing replication gap, unchanged
+  by this release).
+
 ## [0.0.215.0] - 2026-05-16 - refactor(alerts): convert Dispatcher to fire-and-forget actor
 
 ### Changed

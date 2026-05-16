@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -26,6 +27,9 @@ type LeadershipSignal interface {
 
 // Service is the deep module for bucket migration jobs. It owns job submission,
 // leader-only execution, and status reporting. Callers do not reach past this.
+//
+// See docs/adr/0012-migration-service-lock-free-publication.md for why the
+// worker handle is published lock-free instead of through a controller actor.
 type Service struct {
 	store      *JobStore
 	proposer   Proposer
@@ -34,11 +38,13 @@ type Service struct {
 	dst        Destination // may be nil in unit tests
 	interval   time.Duration
 
-	mu       sync.Mutex
-	running  bool
+	// worker is published by Run()'s reconcile loop. SubmitJob loads it
+	// lock-free; nil means this node is not the current leader.
+	worker atomic.Pointer[Worker]
+
+	// cancelFn and workerWG are only touched by the Run() goroutine.
 	cancelFn context.CancelFunc
 	workerWG sync.WaitGroup
-	worker   *Worker
 
 	logger zerolog.Logger
 }
@@ -64,10 +70,7 @@ func (s *Service) SubmitJob(ctx context.Context, bucket string) error {
 	if err := s.proposer.ProposeJobStart(ctx, bucket); err != nil {
 		return fmt.Errorf("migration: submit job: %w", err)
 	}
-	s.mu.Lock()
-	w := s.worker
-	s.mu.Unlock()
-	if w != nil {
+	if w := s.worker.Load(); w != nil {
 		w.Trigger()
 	}
 	return nil
@@ -95,9 +98,7 @@ func (s *Service) Run(ctx context.Context) {
 
 func (s *Service) reconcile(ctx context.Context) {
 	isLeader := s.leadership.IsLeader()
-	s.mu.Lock()
-	running := s.running
-	s.mu.Unlock()
+	running := s.worker.Load() != nil
 	switch {
 	case isLeader && !running:
 		s.start(ctx)
@@ -107,9 +108,7 @@ func (s *Service) reconcile(ctx context.Context) {
 }
 
 func (s *Service) start(parent context.Context) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running {
+	if s.worker.Load() != nil {
 		return
 	}
 	if s.src == nil || s.dst == nil {
@@ -117,10 +116,9 @@ func (s *Service) start(parent context.Context) {
 		return
 	}
 	workerCtx, cancel := context.WithCancel(parent)
-	s.cancelFn = cancel
-	s.running = true
 	w := newWorker(s.store, s.src, s.dst, s.proposer, s.interval)
-	s.worker = w
+	s.cancelFn = cancel
+	s.worker.Store(w)
 	s.workerWG.Add(1)
 	go func() {
 		defer s.workerWG.Done()
@@ -131,16 +129,12 @@ func (s *Service) start(parent context.Context) {
 }
 
 func (s *Service) stop() {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
+	if s.worker.Load() == nil {
 		return
 	}
 	cancel := s.cancelFn
 	s.cancelFn = nil
-	s.running = false
-	s.worker = nil
-	s.mu.Unlock()
+	s.worker.Store(nil)
 	if cancel != nil {
 		cancel()
 	}
@@ -151,7 +145,5 @@ func (s *Service) stop() {
 //
 //nolint:unused // referenced by service_test.go.
 func (s *Service) workerRunningForTest() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.running
+	return s.worker.Load() != nil
 }
