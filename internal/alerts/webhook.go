@@ -494,10 +494,25 @@ func (d *Dispatcher) Stop(ctx context.Context) error {
 	return nil
 }
 
-// observeDrop records a drop event. Task 5에서 metric + warn log 추가.
+// observeDrop increments AlertDispatchDroppedTotal and emits a rate-limited
+// warn log (at most once per minute per Dispatcher via CAS on lastDropWarnAt).
 func (d *Dispatcher) observeDrop(reason dropReason) {
-	// Task 5에서 metric + warn log 추가
-	_ = reason
+	alertKind := ""
+	if d.envPtr != nil {
+		alertKind = d.envPtr.alertKind
+	}
+	metrics.AlertDispatchDroppedTotal.
+		WithLabelValues(alertKind, string(reason)).Inc()
+	now := d.opts.Clock().UnixNano()
+	prev := d.lastDropWarnAt.Load()
+	if time.Duration(now-prev) > time.Minute &&
+		d.lastDropWarnAt.CompareAndSwap(prev, now) {
+		log.Warn().
+			Str("event", "webhook_alert_dropped").
+			Str("alert_kind", alertKind).
+			Str("reason", string(reason)).
+			Msg("alert dispatcher dropped alert")
+	}
 }
 
 // ErrEmptyURL is returned when a caller passes an empty webhook URL to a
