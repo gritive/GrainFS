@@ -21,6 +21,26 @@ type IncidentRecorder interface {
 	Record(ctx context.Context, facts []incident.Fact) error
 }
 
+// directorEnv는 controller goroutine이 단독 소유하는 environment다.
+// directorCmd.apply가 이 env를 mutate한다. controller 외 어떤 goroutine도
+// env 필드를 직접 만지지 않는다.
+type directorEnv struct {
+	sources   map[string]BlockSource
+	verifiers map[string]BlockVerifier
+	sessions  map[string]*liveSession
+	dedup     map[string]string
+
+	queue    chan triggerReq // controller → worker dispatch
+	nodeID   string
+	incident IncidentRecorder
+}
+
+// directorCmd는 controller inbox 메시지의 marker interface다.
+// apply는 반드시 controller goroutine에서만 호출된다 (race-free 보장).
+type directorCmd interface {
+	apply(env *directorEnv)
+}
+
 type Director struct {
 	mu        sync.Mutex
 	sources   map[string]BlockSource
@@ -129,6 +149,8 @@ type DirectorOpts struct {
 
 type triggerReq struct {
 	sess *liveSession
+	src  BlockSource
+	ver  BlockVerifier
 }
 
 func NewDirector(opts DirectorOpts) *Director {
