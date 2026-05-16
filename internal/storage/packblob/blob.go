@@ -109,9 +109,12 @@ func newBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 
 // Append writes a key+data entry to the active blob. Returns the location.
 func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
+	// Compress before locking — CPU-bound, depends only on input. bs.compress
+	// is set once at construction via EnableCompression and never mutated
+	// thereafter, so this read is safe without the mutex. Moving compression
+	// outside the critical section keeps zstd CPU off the serial writer path
+	// (audit follow-up: lock-free-audit.md → "compression must stay outside
+	// the critical section if it becomes visible in mutex profiles").
 	flags := byte(0)
 	payload := data
 	if bs.compress {
@@ -122,6 +125,9 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 		}
 	}
 	storedPayload := payload
+
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
 
 	offset := bs.activeOff
 	if bs.encryptor != nil {
