@@ -709,8 +709,14 @@ func TestQUICTransport_CallReadPropagatesHandlerBodyError(t *testing.T) {
 	require.NoError(t, client.Connect(ctx, server.LocalAddr()))
 
 	_, rc, err := client.CallRead(ctx, server.LocalAddr(), &Message{Type: StreamGroupForwardRead})
+	if err != nil {
+		require.Nil(t, rc)
+		return
+	}
+	defer rc.Close()
+
+	_, err = io.ReadAll(rc)
 	require.Error(t, err)
-	require.Nil(t, rc)
 }
 
 type errorAfterReader struct {
