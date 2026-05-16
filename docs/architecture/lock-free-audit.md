@@ -23,6 +23,15 @@ copy-on-write publish step.
   benchmark: writer throughput +170% (compression-bound serial path
   unblocked); read-only parallel benchmark: -5% latency. The file write
   itself remains the dominant critical-section cost.
+- `internal/storage/packblob.BlobStore.readFiles` (read-only file handle
+  cache) is no longer shared with `bs.mu`. The map is published via
+  `atomic.Pointer[map[uint64]*os.File]`; `getReadFile` hits the cache
+  lock-free, and the miss path performs `os.Open` outside any lock and
+  inserts via CAS-retry CoW (losers close their duplicate fd). Mixed
+  parallel read/write mutex profile: total delay 445s → 51s (-88.5%);
+  `getReadFile` disappears from the profile and the writer-side
+  `Append` self-blocking collapses (it was waiting on readers holding
+  the same lock). Reader latency under writer pressure: -57%.
 - `internal/volume.Manager.ReadAt` keeps `Manager.mu` while reading block data.
   This is a justified serialization boundary: volume metadata, live maps, and
   physical block objects are not versioned independently, so snapshotting only
@@ -57,15 +66,14 @@ copy-on-write publish step.
   to fetch. Splitting this further requires a per-volume/per-block transaction
   or immutable object-version design.
 - `internal/storage/packblob.BlobStore.mu` serializes the active blob file and
-  offset. This is justified for append ordering. Compression now runs before
-  the lock is acquired (see `BlobStore.Append`): the mutex profile trigger
-  identified by an earlier draft of this audit was hit by a mixed parallel
-  read/write benchmark (94% of mutex delay on `Append`), and compression was
-  moved outside the critical section accordingly. The file write and offset
-  update remain inside the lock — those cannot be parallelised without a
-  per-blob transaction or pre-allocated extent scheme, which is out of scope
-  for this audit pass. Encryption AAD depends on the in-lock `activeID` /
-  `activeOff`, so it remains inside the critical section.
+  offset. This is justified for append ordering. Compression runs before
+  the lock is acquired (see `BlobStore.Append`), and the `readFiles`
+  open-fd cache is now lock-free (see status entry above), so the lock
+  only covers the active-file write and offset update. Encryption AAD
+  depends on the in-lock `activeID` / `activeOff`, so it remains inside
+  the critical section. Further parallelisation requires a per-blob
+  transaction or pre-allocated extent scheme, out of scope for this
+  audit pass.
 - `internal/storage/packblob.PackedBackend.mu` protects the packed-object index.
   Reads hold it only to copy an index entry before blob I/O. If packed small
   object reads become a hot-path bottleneck, convert this to the same immutable

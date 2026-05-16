@@ -40,7 +40,17 @@ type BlobStore struct {
 	compress  bool
 	encryptor *encrypt.Encryptor
 	lockFile  *os.File // held for the lifetime of this BlobStore (flock on unix)
-	readFiles map[uint64]*os.File
+
+	// readFiles caches open *os.File handles for completed (read-only) blobs.
+	// Published as an immutable map snapshot via atomic.Pointer so the hot
+	// read path (BlobStore.Read → getReadFile) does not share bs.mu with
+	// BlobStore.Append on the writer hot path. Insert is a CAS-retry CoW;
+	// concurrent first-fillers race os.Open and the loser closes its
+	// duplicate fd (acceptable: fills are rare — once per blob file).
+	// Audit follow-up: lock-free-audit.md → "BlobStore.getReadFile shares
+	// bs.mu with Append; separate when mixed-workload mutex profile shows
+	// contention on the read path."
+	readFiles atomic.Pointer[map[uint64]*os.File]
 }
 
 // EnableCompression enables zstd compression for new entries.
@@ -78,10 +88,11 @@ func newBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	}
 
 	bs := &BlobStore{
-		dir:       dir,
-		maxSize:   maxSize,
-		readFiles: make(map[uint64]*os.File),
+		dir:     dir,
+		maxSize: maxSize,
 	}
+	initial := make(map[uint64]*os.File)
+	bs.readFiles.Store(&initial)
 
 	// Acquire an exclusive directory lock to prevent two BlobStore instances
 	// from writing the same blob files concurrently.
@@ -266,6 +277,13 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 }
 
 // Close closes the active blob file and releases the directory lock.
+//
+// The caller must guarantee no concurrent Append / Read / getReadFile is
+// in flight. Reads no longer take bs.mu (readFiles is published via
+// atomic.Pointer), so a concurrent read started after Close has begun
+// could insert a duplicate fd into the empty post-Close map and leak
+// it. PackedBackend.Close is the only production caller and runs at
+// shutdown after request handlers have drained.
 func (bs *BlobStore) Close() error {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
@@ -274,20 +292,20 @@ func (bs *BlobStore) Close() error {
 			return err
 		}
 	}
-	for id, f := range bs.readFiles {
+	m := bs.readFiles.Load()
+	for _, f := range *m {
 		if err := f.Close(); err != nil {
 			return err
 		}
-		delete(bs.readFiles, id)
 	}
+	empty := make(map[uint64]*os.File)
+	bs.readFiles.Store(&empty)
 	releaseBlobDirLock(bs.lockFile)
 	return nil
 }
 
 func (bs *BlobStore) getReadFile(blobID uint64) (*os.File, error) {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-	if f := bs.readFiles[blobID]; f != nil {
+	if f := (*bs.readFiles.Load())[blobID]; f != nil {
 		return f, nil
 	}
 	path := bs.blobPath(blobID)
@@ -295,8 +313,21 @@ func (bs *BlobStore) getReadFile(blobID uint64) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open blob %d: %w", blobID, err)
 	}
-	bs.readFiles[blobID] = f
-	return f, nil
+	for {
+		old := bs.readFiles.Load()
+		if existing := (*old)[blobID]; existing != nil {
+			_ = f.Close() // lost the race to another caller
+			return existing, nil
+		}
+		next := make(map[uint64]*os.File, len(*old)+1)
+		for k, v := range *old {
+			next[k] = v
+		}
+		next[blobID] = f
+		if bs.readFiles.CompareAndSwap(old, &next) {
+			return f, nil
+		}
+	}
 }
 
 func readFullAt(f *os.File, buf []byte, off *int64) error {
