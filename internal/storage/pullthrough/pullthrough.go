@@ -23,6 +23,7 @@ type Upstream interface {
 type Backend struct {
 	storage.Backend
 	resolver Resolver
+	ops      *storage.Operations // long-lived facade over local; reused by result-shape helpers
 }
 
 var (
@@ -36,7 +37,7 @@ var (
 // per-bucket Upstreams; pass NewIAMResolver(store) for the IAM-backed routing.
 // For tests, pass a fake Resolver implementation.
 func NewBackend(local storage.Backend, resolver Resolver) *Backend {
-	return &Backend{Backend: local, resolver: resolver}
+	return &Backend{Backend: local, resolver: resolver, ops: storage.NewOperations(local)}
 }
 
 // Unwrap exposes the wrapped backend so capability detection (and other
@@ -52,7 +53,7 @@ func (b *Backend) PutObjectWithUserMetadata(ctx context.Context, bucket, key str
 }
 
 func (b *Backend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.PutObjectResult, error) {
-	return storage.NewOperations(b.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+	return b.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
 }
 
 func (b *Backend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
@@ -64,7 +65,7 @@ func (b *Backend) PutObjectWithRequest(ctx context.Context, req storage.PutObjec
 }
 
 func (b *Backend) PutObjectWithRequestResult(ctx context.Context, req storage.PutObjectRequest) (*storage.PutObjectResult, error) {
-	return storage.NewOperations(b.Backend).PutObjectWithRequestResult(ctx, req)
+	return b.ops.PutObjectWithRequestResult(ctx, req)
 }
 
 func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {

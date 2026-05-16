@@ -10,6 +10,12 @@ copy-on-write publish step.
 - `internal/storage.CachedBackend` no longer has a mutex. Cache state is an
   immutable snapshot published with `atomic.Pointer` and `CompareAndSwap`.
   Cache reads do not acquire locks.
+- `internal/storage.Operations` no longer has a mutex. The storage decorator
+  capability plan and the ACL capability plan are published with
+  `atomic.Pointer` and validated against a single-source `atomic.Uint64`
+  generation counter (`SwappableBackend.Generation()`). `planForCall` hot
+  path is allocation-free and lock-free; `NewOperations` enforces the
+  single-Generation-source invariant at construction.
 - `internal/volume.Manager.ReadAt` keeps `Manager.mu` while reading block data.
   This is a justified serialization boundary: volume metadata, live maps, and
   physical block objects are not versioned independently, so snapshotting only
@@ -124,7 +130,6 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   for index lookup/update, not blob reads.
 - `internal/storage/pullthrough/resolver.go` - upstream client cache; hits take
   read lock, rotations rebuild under write lock.
-- `internal/storage/operations.go` - cached operations plan generation.
 
 ### Service State And Admin Surfaces
 

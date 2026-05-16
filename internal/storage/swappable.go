@@ -9,9 +9,14 @@ import (
 // SwappableBackend wraps a Backend and allows hot-swapping at runtime.
 // All operations are forwarded to the inner backend. The swap is atomic
 // and safe for concurrent use.
+//
+// Result-shape methods (PutObjectWith*Result) reuse a cached *Operations
+// over the inner backend; Swap invalidates that cache so the next call
+// rebuilds against the new inner.
 type SwappableBackend struct {
 	inner atomic.Pointer[Backend]
 	gen   atomic.Uint64
+	ops   atomic.Pointer[Operations] // cached Operations(inner); reset on Swap
 }
 
 var _ Backend = (*SwappableBackend)(nil)
@@ -25,9 +30,44 @@ func NewSwappableBackend(b Backend) *SwappableBackend {
 
 // Swap replaces the inner backend atomically. In-flight requests on the old
 // backend will complete normally; new requests will use the new backend.
+//
+// Ordering rationale: ops is reset BEFORE inner is swapped so a reader that
+// sees the new inner cannot pick up the stale ops; the gen bump happens LAST
+// so any racing planForCall on the freshly-built ops sees the new generation
+// and invalidates correctly.
 func (sb *SwappableBackend) Swap(b Backend) {
+	sb.ops.Store(nil)
 	sb.inner.Store(&b)
 	sb.gen.Add(1)
+}
+
+// cachedOps returns the cached Operations over the current inner backend,
+// lazily building it on first use after construction or after a Swap.
+//
+// Race protection: a concurrent Swap may complete while we are reading inner
+// and building the Operations. If sb.gen bumps during the window between
+// reading inner and publishing ops, we discard the freshly-built ops and
+// retry — otherwise we would cache an *Operations that wraps the OLD inner
+// and a subsequent Swap could be silently defeated by the stale cache entry.
+// CompareAndSwap on a nil slot ensures we never overwrite an entry a racing
+// reader already published (or a later Swap reset to nil).
+func (sb *SwappableBackend) cachedOps() *Operations {
+	for {
+		if ops := sb.ops.Load(); ops != nil {
+			return ops
+		}
+		startGen := sb.gen.Load()
+		inner := *sb.inner.Load()
+		ops := NewOperations(inner)
+		if sb.gen.Load() != startGen {
+			continue // Swap raced our build; discard and retry
+		}
+		if sb.ops.CompareAndSwap(nil, ops) {
+			return ops
+		}
+		// Another reader published first, or Swap reset to nil; loop and
+		// re-read sb.ops on the next iteration.
+	}
 }
 
 // Inner returns the current inner backend.
@@ -79,8 +119,7 @@ func (sb *SwappableBackend) PutObjectWithUserMetadata(ctx context.Context, bucke
 }
 
 func (sb *SwappableBackend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error) {
-	inner := *sb.inner.Load()
-	return NewOperations(inner).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+	return sb.cachedOps().PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
 }
 
 func (sb *SwappableBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRequest) (*Object, error) {
@@ -93,8 +132,7 @@ func (sb *SwappableBackend) PutObjectWithRequest(ctx context.Context, req PutObj
 }
 
 func (sb *SwappableBackend) PutObjectWithRequestResult(ctx context.Context, req PutObjectRequest) (*PutObjectResult, error) {
-	inner := *sb.inner.Load()
-	return NewOperations(inner).PutObjectWithRequestResult(ctx, req)
+	return sb.cachedOps().PutObjectWithRequestResult(ctx, req)
 }
 
 func (sb *SwappableBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {

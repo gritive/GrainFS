@@ -6,6 +6,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,90 @@ func TestUnsupportedOperationErrorsAsTyped(t *testing.T) {
 	require.True(t, errors.As(err, &typed))
 	require.Equal(t, "CopyObject", typed.Op)
 	require.Equal(t, UnsupportedReasonUnsafeFallback, typed.Reason)
+}
+
+func TestNewOperationsPanicsOnMultipleGenerationSources(t *testing.T) {
+	// Two SwappableBackend layers in the chain violates the single-source
+	// invariant required by the atomic.Uint64 generation cache. Construction
+	// must fail loudly so a future contributor cannot silently break
+	// invalidation by adding Generation() to another wrapper.
+	require.Panics(t, func() {
+		NewOperations(NewSwappableBackend(NewSwappableBackend(&aclNoCapabilityBackend{})))
+	})
+}
+
+func TestSwappableBackendCachedOpsInvalidatedOnSwap(t *testing.T) {
+	// Verifies that sb.cachedOps() rebuilds against the new inner after Swap.
+	// The cached *Operations is reset before inner is swapped (see Swap
+	// ordering rationale in swappable.go); this test asserts the cached
+	// pointer changes across Swap.
+	first := &aclNoCapabilityBackend{}
+	sb := NewSwappableBackend(first)
+	opsA := sb.cachedOps()
+	require.NotNil(t, opsA)
+	require.Same(t, opsA, sb.cachedOps(), "second call before Swap returns same cached *Operations")
+
+	sb.Swap(&aclNoCapabilityBackend{})
+	opsB := sb.cachedOps()
+	require.NotNil(t, opsB)
+	require.NotSame(t, opsA, opsB, "Swap must invalidate the cached *Operations")
+}
+
+func TestSwappableBackendCachedOpsRaceWithSwap(t *testing.T) {
+	// Stress test: concurrent cachedOps() and Swap() must not leave a stale
+	// *Operations cached. After all swaps settle, the cached ops must wrap
+	// the final inner. Combined with -race, also flushes out data races on
+	// the inner / ops / gen triple.
+	sb := NewSwappableBackend(&aclNoCapabilityBackend{})
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			sb.Swap(&aclNoCapabilityBackend{})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations*5; i++ {
+			_ = sb.cachedOps()
+		}
+	}()
+	wg.Wait()
+
+	// Final invariant: cached ops's backend identity must match the current
+	// inner pointer. If a stale ops survived, the addresses would diverge.
+	finalInner := sb.Inner()
+	finalOps := sb.cachedOps()
+	require.Same(t, finalInner, finalOps.Backend(), "cached ops must wrap the current inner after concurrent Swap")
+}
+
+func TestOperationsACLPlanRebuildDoesNotMaskStaleMainPlan(t *testing.T) {
+	// Regression: planGen used to be shared between main plan and ACL plan,
+	// so a rebuildACLPlan after a Swap would update planGen and make a
+	// stale main plan look fresh. Each cache now tracks its own generation
+	// so this scenario rebuilds main plan correctly.
+	swappable := NewSwappableBackend(&aclNoCapabilityBackend{})
+	ops := NewOperations(swappable)
+	// Prime both caches at gen=0.
+	_ = ops.planForCall()
+	_ = ops.aclPlanForCall()
+
+	// Swap to a backend that exposes SetObjectACL — capability discovery
+	// must surface it on the next planForCall.
+	dyn := &dynamicACLBackend{}
+	swappable.Swap(dyn)
+
+	// Touch ACL cache first; with the previous shared-planGen design this
+	// would bump planGen and a subsequent planForCall would return the
+	// pre-swap (no-ACL) plan.
+	_ = ops.aclPlanForCall()
+
+	// SetObjectACL routes through planForCall(). If main plan is stale
+	// (no aclSetter discovered), this returns the no-adapter sentinel.
+	require.NoError(t, ops.SetObjectACL("b", "k", 7))
+	require.Equal(t, []string{"setacl:b/k:7"}, dyn.calls)
 }
 
 func TestOperationsRefreshesPlanAfterSwappableBackendSwap(t *testing.T) {

@@ -14,7 +14,8 @@ import (
 // WAL writes are advisory: failures are logged but do not block S3 operations.
 type Backend struct {
 	storage.Backend
-	w *WAL
+	w   *WAL
+	ops *storage.Operations // long-lived facade over inner; reused by result-shape helpers
 }
 
 var (
@@ -25,7 +26,7 @@ var (
 
 // NewBackend creates a WALBackend wrapping inner.
 func NewBackend(inner storage.Backend, w *WAL) *Backend {
-	return &Backend{Backend: inner, w: w}
+	return &Backend{Backend: inner, w: w, ops: storage.NewOperations(inner)}
 }
 
 // WALOffset returns the sequence number of the last WAL entry written.
@@ -74,7 +75,7 @@ func (b *Backend) PutObjectWithUserMetadata(ctx context.Context, bucket, key str
 }
 
 func (b *Backend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.PutObjectResult, error) {
-	result, err := storage.NewOperations(b.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
+	result, err := b.ops.PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +113,7 @@ func (b *Backend) PutObjectWithRequest(ctx context.Context, req storage.PutObjec
 }
 
 func (b *Backend) PutObjectWithRequestResult(ctx context.Context, req storage.PutObjectRequest) (*storage.PutObjectResult, error) {
-	result, err := storage.NewOperations(b.Backend).PutObjectWithRequestResult(ctx, req)
+	result, err := b.ops.PutObjectWithRequestResult(ctx, req)
 	if err != nil {
 		return nil, err
 	}

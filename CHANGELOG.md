@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.219.0] - 2026-05-17 - refactor: lock-free Operations capability plan cache
+
+### Changed
+- **Storage decorator capability plan**: `Operations.planForCall` and the ACL
+  capability plan now publish through `atomic.Pointer` and validate against a
+  single-source `atomic.Uint64` generation counter
+  (`SwappableBackend.Generation()`). Fast path is allocation-free and
+  lock-free (7.7 ns/op, 0 B/op, 0 allocs/op on Apple M3).
+- **Result-shape wrappers**: `SwappableBackend`, `CachedBackend`, `wal.Backend`,
+  and `pullthrough.Backend` hold a long-lived `*Operations` over their inner
+  backend instead of constructing a fresh `Operations` on every
+  `PutObjectWith*Result` call. `SwappableBackend.Swap` resets the cached
+  `*Operations` before swapping inner so post-swap calls rebuild against the
+  new inner.
+
+### Fixed
+- **Hot-swap race in `SwappableBackend.cachedOps`**: a concurrent `Swap` could
+  cause a reader to store an `*Operations` wrapping the previous inner,
+  silently defeating the swap. The cache now uses a generation seqlock plus
+  CAS publication so a racing build is discarded and rebuilt against the
+  post-swap inner.
+- **Cross-cache staleness between main plan and ACL plan**: a shared `planGen`
+  meant that rebuilding the ACL cache made a stale main plan look fresh. Each
+  cache now tracks its own generation (`planGen`, `aclPlanGen`) and
+  invalidates independently while still observing the same upstream generation
+  source.
+
+### Internal
+- `NewOperations` enforces the single-`Generation()`-source invariant at
+  construction and panics if more than one source is discovered in the chain.
+  Adds `TestNewOperationsPanicsOnMultipleGenerationSources`,
+  `TestSwappableBackendCachedOpsInvalidatedOnSwap`,
+  `TestSwappableBackendCachedOpsRaceWithSwap`, and
+  `TestOperationsACLPlanRebuildDoesNotMaskStaleMainPlan` to guard the
+  invariants.
+- `docs/architecture/lock-free-audit.md` records the change and removes
+  `internal/storage/operations.go` from the mutex inventory.
+- `CONTEXT.md` extends the Storage Decorator Capability Plan section with the
+  caching contract and single-source invariant.
+
 ## [0.0.218.0] - 2026-05-17 - feat: S3 production compatibility and warp benchmarks
 
 ### Added
