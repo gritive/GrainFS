@@ -536,6 +536,7 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 		DestinationRef: storage.ObjectRef{Bucket: dstBucket, Key: dstKey},
 		SourceObject:   srcObj,
 		ContentType:    srcObj.ContentType,
+		UserMetadata:   cloneStringMap(srcObj.UserMetadata),
 	})
 }
 
@@ -581,6 +582,7 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 		dst.ContentType = req.ContentType
 		dst.ETag = srcEntry.ETag
 		dst.LastModified = time.Now().Unix()
+		dst.UserMetadata = cloneStringMap(req.UserMetadata)
 		pb.index[dstIKey] = dst
 		pb.mu.Unlock()
 
@@ -591,6 +593,7 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 			ContentType:  req.ContentType,
 			ETag:         hex.EncodeToString(h[:]),
 			LastModified: time.Now().Unix(),
+			UserMetadata: cloneStringMap(req.UserMetadata),
 		}, nil
 	}
 	pb.mu.Unlock()
@@ -606,7 +609,7 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 	if contentType == "" && obj != nil {
 		contentType = obj.ContentType
 	}
-	return pb.PutObject(ctx, dstBucket, dstKey, rc, contentType)
+	return pb.PutObjectWithUserMetadata(ctx, dstBucket, dstKey, rc, contentType, req.UserMetadata)
 }
 
 // --- Multipart operations (pass through to inner) ---

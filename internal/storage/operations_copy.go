@@ -47,6 +47,7 @@ type CopyObjectAccelerationRequest struct {
 	DestinationRef ObjectRef
 	SourceObject   *Object
 	ContentType    string
+	UserMetadata   map[string]string
 }
 
 type copyObjectAccelerator interface {

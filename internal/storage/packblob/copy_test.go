@@ -58,6 +58,30 @@ func TestCopyObject_RefcountIncremented(t *testing.T) {
 	assert.Equal(t, "shared data", string(data))
 }
 
+func TestCopyObject_PreservesUserMetadata(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "b"))
+
+	_, err := pb.PutObjectWithUserMetadata(
+		context.Background(),
+		"b",
+		"orig.txt",
+		strings.NewReader("shared data"),
+		"text/plain",
+		map[string]string{"x-amz-meta-owner": "me"},
+	)
+	require.NoError(t, err)
+
+	var copier storage.Copier = pb
+	obj, err := copier.CopyObject("b", "orig.txt", "b", "copy.txt")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"x-amz-meta-owner": "me"}, obj.UserMetadata)
+
+	head, err := pb.HeadObject(context.Background(), "b", "copy.txt")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"x-amz-meta-owner": "me"}, head.UserMetadata)
+}
+
 func TestOperationsCopyObjectUsesPackedAdapterAndReplaceContentType(t *testing.T) {
 	pb := newTestPackedBackend(t)
 	require.NoError(t, pb.CreateBucket(context.Background(), "b"))

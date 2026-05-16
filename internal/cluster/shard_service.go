@@ -1509,7 +1509,9 @@ func (r *skipThenLimitReader) Read(p []byte) (int, error) {
 // DeleteLocalShards removes every shard for key on the local node (all indices).
 func (s *ShardService) DeleteLocalShards(bucket, key string) error {
 	if s.shardPack != nil {
-		_ = s.shardPack.deleteKey(bucket, key)
+		if err := s.shardPack.deleteKey(bucket, key); err != nil {
+			return err
+		}
 	}
 	dir := filepath.Join(s.dataDir, bucket, key)
 	return os.RemoveAll(dir)
@@ -1525,10 +1527,14 @@ func (s *ShardService) handleRead(sr *shardRequest) *transport.Message {
 
 func (s *ShardService) handleDelete(sr *shardRequest) *transport.Message {
 	if s.shardPack != nil {
-		_ = s.shardPack.deleteKey(sr.Bucket, sr.Key)
+		if err := s.shardPack.deleteKey(sr.Bucket, sr.Key); err != nil {
+			return s.errorResponse(err.Error())
+		}
 	}
 	dir := filepath.Join(s.dataDir, sr.Bucket, sr.Key)
-	os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		return s.errorResponse(err.Error())
+	}
 	return s.okResponse(nil)
 }
 

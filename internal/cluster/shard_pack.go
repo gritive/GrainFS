@@ -117,6 +117,9 @@ func (s *shardPackStore) append(flag byte, key string, data []byte) error {
 	if _, err := s.active.Write(record); err != nil {
 		return err
 	}
+	if err := s.active.Sync(); err != nil {
+		return err
+	}
 	s.activeOff += entrySize
 
 	if flag == shardPackFlagPut {
@@ -149,6 +152,9 @@ func appendShardPackRecord(dst []byte, flag byte, key string, data []byte) []byt
 
 func (s *shardPackStore) rotate() error {
 	if s.active != nil {
+		if err := s.active.Sync(); err != nil {
+			return err
+		}
 		if err := s.active.Close(); err != nil {
 			return err
 		}
@@ -162,7 +168,7 @@ func (s *shardPackStore) rotate() error {
 	s.activeID = id
 	s.activeOff = 0
 	s.nextID = id + 1
-	return nil
+	return syncDir(s.dir)
 }
 
 func (s *shardPackStore) scan() error {
@@ -208,7 +214,8 @@ func (s *shardPackStore) scanFile(blobID uint64, path string) error {
 			return nil
 		}
 		payloadOffset := off + int64(len(header)) + int64(keyLen)
-		if _, err := f.Seek(int64(dataLen), io.SeekCurrent); err != nil {
+		data := make([]byte, dataLen)
+		if _, err := io.ReadFull(f, data); err != nil {
 			return nil
 		}
 		var crcBuf [4]byte
@@ -217,9 +224,7 @@ func (s *shardPackStore) scanFile(blobID uint64, path string) error {
 		}
 		entrySize := int64(len(header)) + int64(keyLen) + int64(dataLen) + int64(len(crcBuf))
 		off += entrySize
-		// Validate only the metadata part on scan; payload validation happens
-		// through the shard envelope decrypt/CRC when the shard is read.
-		if binary.BigEndian.Uint32(crcBuf[:]) == 0 {
+		if binary.BigEndian.Uint32(crcBuf[:]) != shardPackCRC(flag, string(key), data) {
 			return nil
 		}
 		pkey := string(key)
@@ -253,4 +258,13 @@ func shardPackCRC(flag byte, key string, data []byte) uint32 {
 	_, _ = h.Write([]byte(key))
 	_, _ = h.Write(data)
 	return h.Sum32()
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

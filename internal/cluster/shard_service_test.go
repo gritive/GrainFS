@@ -130,6 +130,50 @@ func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
+	require.NotNil(t, svc.shardPack)
+	require.NoError(t, svc.shardPack.active.Close())
+
+	err := svc.DeleteLocalShards("bkt", "obj/v1")
+	require.Error(t, err)
+}
+
+func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
+	require.NotNil(t, svc.shardPack)
+	packPath := svc.shardPack.blobPath(svc.shardPack.activeID)
+	require.NoError(t, svc.shardPack.active.Close())
+
+	raw, err := os.ReadFile(packPath)
+	require.NoError(t, err)
+	raw[len(raw)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(packPath, raw, 0o600))
+
+	restarted := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+	require.NotNil(t, restarted.shardPack)
+	_, ok := restarted.shardPack.index[shardPackKey("bkt", "obj/v1", 0)]
+	require.False(t, ok)
+}
+
 func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 
