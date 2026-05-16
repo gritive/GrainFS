@@ -140,6 +140,7 @@ Benchmark targets:
 ```bash
 make bench
 make bench-cluster
+make bench-s3-compat-compare
 make bench-profile
 make bench-iceberg-table
 make bench-iceberg-table-cluster

@@ -25,6 +25,7 @@ binary and data compatibility across rolling upgrades.
 | Bucket basics     | HeadBucket                              | Supported     |                                                                                  |
 | Bucket basics     | ListBuckets                             | Supported     | Internal buckets are excluded from user listing.                                 |
 | Bucket basics     | DeleteBucket                            | Supported     |                                                                                  |
+| Bucket basics     | GetBucketLocation                       | Supported     | Returns `us-east-1`.                                                             |
 | Object basics     | PutObject                               | Supported     |                                                                                  |
 | Object basics     | GetObject                               | Supported     |                                                                                  |
 | Object basics     | HeadObject                              | Supported     |                                                                                  |
