@@ -747,9 +747,18 @@ type forwardReadValidator struct {
 }
 
 func (r *forwardReadValidator) Read(p []byte) (int, error) {
+	if r.got >= r.want {
+		return 0, io.EOF
+	}
+	if remaining := r.want - r.got; int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
 	n, err := r.rc.Read(p)
 	r.got += int64(n)
-	if err == io.EOF && r.got != r.want {
+	if r.got == r.want {
+		return n, nil
+	}
+	if err == io.EOF {
 		return n, ErrForwardBodySizeMismatch
 	}
 	return n, err
@@ -1073,7 +1082,7 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 	if c.indexWriter != nil {
 		ctx = contextWithObjectWritePlacement(ctx, group)
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveObjectWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{

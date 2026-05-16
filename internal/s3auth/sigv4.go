@@ -261,7 +261,7 @@ func unescapesTo(s, want string) bool {
 }
 
 func buildCanonicalRequest(r *http.Request, signedHeadersStr string) string {
-	uri := r.URL.Path
+	uri := r.URL.EscapedPath()
 	if uri == "" {
 		uri = "/"
 	}
@@ -405,7 +405,7 @@ func hmacSHA256(key, data []byte) []byte {
 // For presigned URLs, the payload hash is always UNSIGNED-PAYLOAD and the query string
 // excludes the X-Amz-Signature parameter.
 func buildPresignedCanonicalRequest(r *http.Request, signedHeadersStr string) string {
-	uri := r.URL.Path
+	uri := r.URL.EscapedPath()
 	if uri == "" {
 		uri = "/"
 	}

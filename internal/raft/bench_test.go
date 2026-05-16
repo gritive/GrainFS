@@ -119,6 +119,65 @@ func BenchmarkProposeWait_SingleNode_BadgerDefault(b *testing.B) {
 	}
 }
 
+func BenchmarkProposeWait_SingleNode_BadgerDefault_Parallel(b *testing.B) {
+	for _, batchLimit := range []int{1, maxProposeAppendBatch} {
+		b.Run(fmt.Sprintf("batch-%d", batchLimit), func(b *testing.B) {
+			prev := proposeAppendBatchLimit
+			proposeAppendBatchLimit = batchLimit
+			b.Cleanup(func() { proposeAppendBatchLimit = prev })
+
+			dir := b.TempDir()
+			db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+			if err != nil {
+				b.Fatalf("badger.Open: %v", err)
+			}
+			b.Cleanup(func() { _ = db.Close() })
+
+			logStore, err := newBadgerLogStore(db, []byte("raft/v2/log/"))
+			if err != nil {
+				b.Fatalf("newBadgerLogStore: %v", err)
+			}
+			stable, err := newBadgerStableStore(db, []byte("raft/v2/hardstate/"))
+			if err != nil {
+				b.Fatalf("newBadgerStableStore: %v", err)
+			}
+
+			n, err := NewNode(Config{
+				ID:          "n1",
+				LogStore:    logStore,
+				StableStore: stable,
+			})
+			if err != nil {
+				b.Fatalf("NewNode: %v", err)
+			}
+			n.Start()
+			b.Cleanup(n.Stop)
+
+			if err := waitFor(2*time.Second, n.IsLeader); err != nil {
+				b.Fatalf("node did not become leader: %v", err)
+			}
+
+			go func() {
+				for range n.ApplyCh() {
+				}
+			}()
+
+			cmd := []byte("bench-payload")
+			ctx := context.Background()
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					if _, err := n.ProposeWait(ctx, cmd); err != nil {
+						b.Fatalf("ProposeWait: %v", err)
+					}
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkProposeAndCommit_3Voter measures ProposeWait throughput on a
 // 3-voter cluster backed by in-memory stores and wired through memNetwork
 // (no real network). Measures actor + in-process RPC round-trip cost.

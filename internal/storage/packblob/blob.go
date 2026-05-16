@@ -40,6 +40,7 @@ type BlobStore struct {
 	compress  bool
 	encryptor *encrypt.Encryptor
 	lockFile  *os.File // held for the lifetime of this BlobStore (flock on unix)
+	readFiles map[uint64]*os.File
 }
 
 // EnableCompression enables zstd compression for new entries.
@@ -71,8 +72,9 @@ func newBlobStore(dir string, maxSize int64) (*BlobStore, error) {
 	}
 
 	bs := &BlobStore{
-		dir:     dir,
-		maxSize: maxSize,
+		dir:       dir,
+		maxSize:   maxSize,
+		readFiles: make(map[uint64]*os.File),
 	}
 
 	// Acquire an exclusive directory lock to prevent two BlobStore instances
@@ -186,22 +188,17 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 
 // Read reads the data at the given location. Verifies CRC32.
 func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
-	path := bs.blobPath(loc.BlobID)
-	f, err := os.Open(path)
+	f, err := bs.getReadFile(loc.BlobID)
 	if err != nil {
-		return nil, fmt.Errorf("open blob %d: %w", loc.BlobID, err)
-	}
-	defer f.Close()
-
-	if _, err := f.Seek(int64(loc.Offset), 0); err != nil {
 		return nil, err
 	}
+	off := int64(loc.Offset)
 
 	const maxEntrySize = 256 * 1024 * 1024 // 256MB sanity cap against corrupt blobs
 	var header [4]byte
 
 	// Read key_len
-	if _, err := io.ReadFull(f, header[:]); err != nil {
+	if err := readFullAt(f, header[:], &off); err != nil {
 		return nil, err
 	}
 	keyLen := binary.BigEndian.Uint32(header[:])
@@ -209,48 +206,40 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		return nil, fmt.Errorf("corrupt blob: keyLen %d exceeds max", keyLen)
 	}
 
-	// Read key
-	key := make([]byte, keyLen)
-	if _, err := io.ReadFull(f, key); err != nil {
+	restLen := int(keyLen) + 1 + 4 + int(loc.Length) + 4
+	rest := make([]byte, restLen)
+	if err := readFullAt(f, rest, &off); err != nil {
 		return nil, err
 	}
 
-	// Read flags
-	var flagBuf [1]byte
-	if _, err := io.ReadFull(f, flagBuf[:]); err != nil {
-		return nil, err
-	}
-	flags := flagBuf[0]
+	key := rest[:keyLen]
+	cursor := int(keyLen)
 
-	// Read data_len
-	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return nil, err
-	}
-	dataLen := binary.BigEndian.Uint32(header[:])
+	flags := rest[cursor]
+	cursor++
+
+	dataLen := binary.BigEndian.Uint32(rest[cursor : cursor+4])
+	cursor += 4
 	if dataLen > maxEntrySize {
 		return nil, fmt.Errorf("corrupt blob: dataLen %d exceeds max", dataLen)
 	}
-
-	// Read payload (may be compressed)
-	payload := make([]byte, dataLen)
-	if dataLen > 0 {
-		if _, err := io.ReadFull(f, payload); err != nil {
-			return nil, err
-		}
+	if dataLen != loc.Length {
+		return nil, fmt.Errorf("corrupt blob: dataLen %d does not match location length %d", dataLen, loc.Length)
 	}
 
-	// Read and verify CRC
-	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return nil, err
-	}
-	expectedCRC := binary.BigEndian.Uint32(header[:])
+	payload := rest[cursor : cursor+int(dataLen)]
+	cursor += int(dataLen)
 
-	if blobEntryCRC(key, flags, payload) != expectedCRC {
-		if legacyBlobEntryCRC(key, payload) != expectedCRC {
-			return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
-		}
-		if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, payload); err != nil {
-			return nil, err
+	expectedCRC := binary.BigEndian.Uint32(rest[cursor : cursor+4])
+
+	if !bs.skipReadCRC(flags) {
+		if blobEntryCRC(key, flags, payload) != expectedCRC {
+			if legacyBlobEntryCRC(key, payload) != expectedCRC {
+				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
+			}
+			if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, payload); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -273,8 +262,47 @@ func (bs *BlobStore) Close() error {
 			return err
 		}
 	}
+	for id, f := range bs.readFiles {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		delete(bs.readFiles, id)
+	}
 	releaseBlobDirLock(bs.lockFile)
 	return nil
+}
+
+func (bs *BlobStore) getReadFile(blobID uint64) (*os.File, error) {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	if f := bs.readFiles[blobID]; f != nil {
+		return f, nil
+	}
+	path := bs.blobPath(blobID)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open blob %d: %w", blobID, err)
+	}
+	bs.readFiles[blobID] = f
+	return f, nil
+}
+
+func readFullAt(f *os.File, buf []byte, off *int64) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	if _, err := f.ReadAt(buf, *off); err != nil {
+		return err
+	}
+	*off += int64(len(buf))
+	return nil
+}
+
+func (bs *BlobStore) skipReadCRC(flags byte) bool {
+	// AES-GCM authenticates encrypted blob entries, including key, blob id,
+	// offset, and flags via AAD. Recomputing CRC32 over the ciphertext on every
+	// GET duplicates that integrity check on the hot path.
+	return bs.encryptor != nil && flags&flagEncrypted != 0
 }
 
 func (bs *BlobStore) rotate() error {
@@ -539,6 +567,11 @@ func (bs *BlobStore) ScanAll() (map[string]BlobLocation, error) {
 			}
 			if _, err := io.ReadFull(f, header[:]); err != nil { // skip CRC
 				break
+			}
+			expectedCRC := binary.BigEndian.Uint32(header[:])
+			if crc := blobEntryCRC(key, flagBuf[0], data); crc != expectedCRC && legacyBlobEntryCRC(key, data) != expectedCRC {
+				offset += int64(entryOverhead + int(keyLen) + int(dataLen))
+				continue
 			}
 
 			entrySize := int64(entryOverhead + int(keyLen) + int(dataLen))

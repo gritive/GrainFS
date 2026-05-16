@@ -64,15 +64,20 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 
 ## Performance
 
-| Comparison | Current status | Details |
-| --- | --- | --- |
-| `GrainFS` local FUSE-over-S3 snapshot | Documented repository snapshot: 64 MiB payload, Apple M3, Colima loopback, 3-run average | [Benchmark methodology](docs/reference/benchmarks.md#current-local-snapshots) |
-| `GrainFS` vs RustFS S3 object benchmark | Pending reproducible same-host run | [Comparable S3 protocol](docs/reference/benchmarks.md#comparable-s3-protocol) |
-| `GrainFS` vs MinIO S3 object benchmark | Pending reproducible same-host run | [Comparable S3 protocol](docs/reference/benchmarks.md#comparable-s3-protocol) |
+Latest same-host `warp` runs, 64 KiB objects, concurrency 16, signed S3
+requests, 0 errors:
 
-README only shows benchmark summaries. Publish competitor numbers after the raw
-artifacts, host details, durability profile, workload, and commit pins are
-recorded in [docs/reference/benchmarks.md](docs/reference/benchmarks.md).
+| Mode | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| ---- | --------- | --------: | --------: | -----------: | -----------: |
+| Single-node | `GrainFS` |    517.36 |   1212.67 |        2.05x |        1.13x |
+| Single-node | MinIO     |    252.88 |   1074.01 |        1.00x |        1.00x |
+| Single-node | RustFS    |    225.43 |    500.35 |        0.89x |        0.47x |
+| 3-node cluster | `GrainFS` |    103.22 |    325.85 |        2.19x |        1.10x |
+| 3-node cluster | MinIO     |     47.05 |    296.84 |        1.00x |        1.00x |
+| 3-node cluster | RustFS    |     36.31 |    105.88 |        0.77x |        0.36x |
+
+Methodology and raw artifacts:
+[benchmark reference](docs/reference/benchmarks.md#latest-local-result).
 
 ## Core Concepts
 
@@ -117,7 +122,7 @@ Operational details live in [docs/index.md](docs/index.md#operators).
 Requirements:
 
 - Go 1.26+
-- `k6` for S3 benchmarks
+- `warp` for S3-compatible comparison benchmarks
 - Linux client tooling for NFS, NBD, 9P, and FUSE-over-S3 integration tests
 
 Common commands:
@@ -135,6 +140,7 @@ Benchmark targets:
 ```bash
 make bench
 make bench-cluster
+make bench-s3-compat-compare
 make bench-profile
 make bench-iceberg-table
 make bench-iceberg-table-cluster

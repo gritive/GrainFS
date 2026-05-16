@@ -28,6 +28,7 @@ MIX_LIST="${MIX_LIST:-write-heavy,read-heavy}"
 SIZE_KB="${SIZE_KB:-4096}"
 OBJECT_COUNT="${OBJECT_COUNT:-16}"
 PROFILE="${PROFILE:-1}"
+PUT_TRACE="${PUT_TRACE:-0}"
 PROFILE_ROOT="${PROFILE_ROOT:-benchmarks/profiles/single-s3-$(date +%Y%m%d-%H%M%S)}"
 BUCKET="${BUCKET:-bench}"
 SETUP_TIMEOUT="${SETUP_TIMEOUT:-5m}"
@@ -47,6 +48,7 @@ fi
 
 rm -rf "$BENCH_DIR"
 mkdir -p "$BENCH_DIR" "$PROFILE_ROOT"
+TRACE_FILE="$PROFILE_ROOT/put-trace.jsonl"
 
 SERVER_PID=""
 cleanup() {
@@ -82,7 +84,12 @@ if [[ "$PROFILE" == "1" ]]; then
   args+=(--pprof-port "$PPROF_PORT")
 fi
 
-"${args[@]}" >"$BENCH_DIR/server.log" 2>&1 &
+trace_env=()
+if [[ "$PUT_TRACE" == "1" ]]; then
+  trace_env=(env "GRAINFS_PUT_TRACE_FILE=$TRACE_FILE" "GRAINFS_NODE_ID=single")
+fi
+
+"${trace_env[@]}" "${args[@]}" >"$BENCH_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo "[bench] server started http=:${HTTP_PORT} pid=${SERVER_PID}"
 
@@ -103,6 +110,7 @@ echo "  target      : http://127.0.0.1:${HTTP_PORT}"
   echo "  mix         : ${MIX_LIST}"
   [[ -n "${SERVER_ARGS:-}" ]] && echo "  server args : ${SERVER_ARGS}"
   echo "  output      : ${PROFILE_ROOT}"
+  [[ "$PUT_TRACE" == "1" ]] && echo "  put trace   : ${TRACE_FILE}"
 [[ "$PROFILE" == "1" ]] && echo "  pprof       : http://127.0.0.1:${PPROF_PORT}/debug/pprof/"
 echo "=================================================================="
 echo ""
@@ -250,6 +258,10 @@ for vus in "${CONCURRENCY_VALUES[@]}"; do
 done
 
 cp "$BENCH_DIR/server.log" "$PROFILE_ROOT/server.log" 2>/dev/null || true
+if [[ "$PUT_TRACE" == "1" && -s "$TRACE_FILE" ]]; then
+  node "$BENCHMARKS_DIR/put_trace_report.js" "$TRACE_FILE" >/dev/null 2>&1 || true
+  cp "$BENCHMARKS_DIR/put-trace-report.json" "$PROFILE_ROOT/put-trace-report.json" 2>/dev/null || true
+fi
 
 echo ""
 echo "=================================================================="

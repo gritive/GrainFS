@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault test-backup clean run lint lint-keyspace bench bench-cluster bench-profile bench-topology-get bench-topology-get-matrix bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima bench-fuse-s3-colima bench-directio-s3 test-raft-v2-chaos test-compat test-9p-colima
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault test-backup clean run lint lint-keyspace bench bench-cluster bench-s3-compat-compare bench-profile bench-topology-get bench-topology-get-matrix bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima bench-fuse-s3-colima bench-directio-s3 test-raft-v2-chaos test-compat test-9p-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_PATTERN ?= ^Test
@@ -163,6 +163,9 @@ bench: bin/$(BINARY)
 
 bench-cluster: bin/$(BINARY)
 	NO_BUILD=1 ./benchmarks/bench_cluster.sh
+
+bench-s3-compat-compare: bin/$(BINARY)
+	NO_BUILD=1 ./benchmarks/bench_s3_compat_compare.sh
 
 # bench-profile: run k6 load test while collecting pprof profiles.
 # CPU profile is collected concurrently with k6 (captures real load).

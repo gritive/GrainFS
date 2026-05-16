@@ -74,7 +74,7 @@ for size_kb in "${SIZES[@]}"; do
     CONCURRENCY_LIST="$CONCURRENCY_LIST" \
     INGRESS_LIST="$INGRESS_LIST" \
     MIX_LIST="$MIX_LIST" \
-    "$SCRIPT_DIR/bench_two_node_s3_profile.sh"; then
+    "$SCRIPT_DIR/bench_s3_cluster_profile.sh"; then
     FAIL=1
   fi
   {

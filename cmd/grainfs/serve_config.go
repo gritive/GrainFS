@@ -49,6 +49,7 @@ func buildClusterConfig(
 	cfg.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")
 	cfg.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
 	cfg.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
+	cfg.ShardPackThreshold, _ = cmd.Flags().GetInt("shard-pack-threshold")
 
 	cfg.HealReceiptEnabled, _ = cmd.Flags().GetBool("heal-receipt-enabled")
 	cfg.HealReceiptPSK, _ = cmd.Flags().GetString("heal-receipt-psk")

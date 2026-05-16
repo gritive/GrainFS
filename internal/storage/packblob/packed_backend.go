@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,13 +27,21 @@ type indexEntry struct {
 	Location     BlobLocation
 	Refcount     atomic.Int64
 	OriginalSize int64 // uncompressed byte count
+	ContentType  string
+	ETag         string
+	LastModified int64
+	UserMetadata map[string]string
 }
 
 // indexEntryJSON is a serializable form of indexEntry.
 type indexEntryJSON struct {
-	Location     BlobLocation `json:"location"`
-	Refcount     int64        `json:"refcount"`
-	OriginalSize int64        `json:"original_size"`
+	Location     BlobLocation      `json:"location"`
+	Refcount     int64             `json:"refcount"`
+	OriginalSize int64             `json:"original_size"`
+	ContentType  string            `json:"content_type,omitempty"`
+	ETag         string            `json:"etag,omitempty"`
+	LastModified int64             `json:"last_modified,omitempty"`
+	UserMetadata map[string]string `json:"user_metadata,omitempty"`
 }
 
 // PackedBackend wraps a storage.Backend and packs small objects into blob files.
@@ -51,6 +60,8 @@ type PackedBackend struct {
 }
 
 var _ storage.Backend = (*PackedBackend)(nil)
+var _ storage.Snapshotable = (*PackedBackend)(nil)
+var _ storage.BucketSnapshotable = (*PackedBackend)(nil)
 var _ interface {
 	CopyObjectWithRequest(context.Context, storage.CopyObjectAccelerationRequest) (*storage.Object, error)
 } = (*PackedBackend)(nil)
@@ -126,8 +137,29 @@ func (pb *PackedBackend) Close() error {
 	return pb.blobStore.Close()
 }
 
+func (pb *PackedBackend) Unwrap() storage.Backend { return pb.inner }
+
 func (pb *PackedBackend) indexKey(bucket, key string) string {
 	return bucket + "/" + key
+}
+
+func (pb *PackedBackend) bucketHasPackedObjectsLocked(bucket string) bool {
+	pfx := bucket + "/"
+	for ikey, entry := range pb.index {
+		if strings.HasPrefix(ikey, pfx) && entry.Refcount.Load() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (pb *PackedBackend) deleteBucketIndexLocked(bucket string) {
+	pfx := bucket + "/"
+	for ikey := range pb.index {
+		if strings.HasPrefix(ikey, pfx) {
+			delete(pb.index, ikey)
+		}
+	}
 }
 
 // SaveIndex persists the in-memory index to {blobDir}/index.json.
@@ -139,6 +171,10 @@ func (pb *PackedBackend) SaveIndex() error {
 			Location:     e.Location,
 			Refcount:     e.Refcount.Load(),
 			OriginalSize: e.OriginalSize,
+			ContentType:  e.ContentType,
+			ETag:         e.ETag,
+			LastModified: e.LastModified,
+			UserMetadata: cloneStringMap(e.UserMetadata),
 		}
 	}
 	pb.mu.RUnlock()
@@ -167,7 +203,14 @@ func (pb *PackedBackend) LoadIndex() error {
 		}
 		pb.mu.Lock()
 		for k, v := range m {
-			e := &indexEntry{Location: v.Location, OriginalSize: v.OriginalSize}
+			e := &indexEntry{
+				Location:     v.Location,
+				OriginalSize: v.OriginalSize,
+				ContentType:  v.ContentType,
+				ETag:         v.ETag,
+				LastModified: v.LastModified,
+				UserMetadata: cloneStringMap(v.UserMetadata),
+			}
 			e.Refcount.Store(v.Refcount)
 			pb.index[k] = e
 		}
@@ -185,7 +228,17 @@ func (pb *PackedBackend) LoadIndex() error {
 	}
 	pb.mu.Lock()
 	for k, loc := range locs {
-		e := &indexEntry{Location: loc}
+		data, readErr := pb.blobStore.Read(loc)
+		if readErr != nil {
+			return fmt.Errorf("read rebuilt blob entry %s: %w", k, readErr)
+		}
+		h := md5.Sum(data)
+		e := &indexEntry{
+			Location:     loc,
+			OriginalSize: int64(len(data)),
+			ETag:         hex.EncodeToString(h[:]),
+			LastModified: time.Now().Unix(),
+		}
 		e.Refcount.Store(1)
 		pb.index[k] = e
 	}
@@ -204,11 +257,26 @@ func (pb *PackedBackend) HeadBucket(ctx context.Context, bucket string) error {
 }
 
 func (pb *PackedBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	if err := pb.inner.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	pb.mu.RLock()
+	hasPacked := pb.bucketHasPackedObjectsLocked(bucket)
+	pb.mu.RUnlock()
+	if hasPacked {
+		return storage.ErrBucketNotEmpty
+	}
 	return pb.inner.DeleteBucket(ctx, bucket)
 }
 
 func (pb *PackedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
-	return pb.inner.ForceDeleteBucket(ctx, bucket)
+	if err := pb.inner.ForceDeleteBucket(ctx, bucket); err != nil {
+		return err
+	}
+	pb.mu.Lock()
+	pb.deleteBucketIndexLocked(bucket)
+	pb.mu.Unlock()
+	return nil
 }
 
 func (pb *PackedBackend) ListBuckets(ctx context.Context) ([]string, error) {
@@ -218,6 +286,10 @@ func (pb *PackedBackend) ListBuckets(ctx context.Context) ([]string, error) {
 // --- Object operations ---
 
 func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	return pb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, nil)
+}
+
+func (pb *PackedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
 	if err := pb.inner.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -230,7 +302,7 @@ func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io
 
 	// Large objects pass through to inner backend
 	if int64(len(data)) >= pb.threshold {
-		return pb.inner.PutObject(ctx, bucket, key, bytes.NewReader(data), contentType)
+		return putInnerWithUserMetadata(ctx, pb.inner, bucket, key, bytes.NewReader(data), contentType, userMetadata)
 	}
 
 	// Small object → pack into blob
@@ -249,16 +321,17 @@ func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io
 	if old, ok := pb.index[ikey]; ok {
 		old.Refcount.Add(-1)
 	}
-	e := &indexEntry{Location: loc, OriginalSize: int64(len(data))}
+	e := &indexEntry{
+		Location:     loc,
+		OriginalSize: int64(len(data)),
+		ContentType:  contentType,
+		ETag:         etag,
+		LastModified: now,
+		UserMetadata: cloneStringMap(userMetadata),
+	}
 	e.Refcount.Store(1)
 	pb.index[ikey] = e
 	pb.mu.Unlock()
-
-	// Store metadata via inner PutObject (it will create a small marker file)
-	// This keeps the metadata in BadgerDB consistent
-	if _, err := pb.inner.PutObject(ctx, bucket, key, bytes.NewReader(nil), contentType); err != nil {
-		return nil, fmt.Errorf("sync metadata: %w", err)
-	}
 
 	return &storage.Object{
 		Key:          key,
@@ -266,7 +339,54 @@ func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io
 		ContentType:  contentType,
 		ETag:         etag,
 		LastModified: now,
+		UserMetadata: cloneStringMap(userMetadata),
 	}, nil
+}
+
+func putInnerWithUserMetadata(ctx context.Context, inner storage.Backend, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
+	if len(userMetadata) == 0 {
+		return inner.PutObject(ctx, bucket, key, r, contentType)
+	}
+	putter, ok := inner.(storage.UserMetadataPutter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func packedObjectFromEntry(key string, entry *indexEntry, data []byte) *storage.Object {
+	size := entry.OriginalSize
+	if size == 0 && data != nil {
+		size = int64(len(data))
+	}
+	etag := entry.ETag
+	if etag == "" && data != nil {
+		h := md5.Sum(data)
+		etag = hex.EncodeToString(h[:])
+	}
+	modified := entry.LastModified
+	if modified == 0 {
+		modified = time.Now().Unix()
+	}
+	return &storage.Object{
+		Key:          key,
+		Size:         size,
+		ContentType:  entry.ContentType,
+		ETag:         etag,
+		LastModified: modified,
+		UserMetadata: cloneStringMap(entry.UserMetadata),
+	}
 }
 
 func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
@@ -282,19 +402,7 @@ func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 			return nil, nil, fmt.Errorf("read packed object: %w", err)
 		}
 
-		h := md5.Sum(data)
-		meta, _ := pb.inner.HeadObject(ctx, bucket, key)
-		contentType := ""
-		if meta != nil {
-			contentType = meta.ContentType
-		}
-		obj := &storage.Object{
-			Key:          key,
-			Size:         int64(len(data)),
-			ContentType:  contentType,
-			ETag:         hex.EncodeToString(h[:]),
-			LastModified: time.Now().Unix(),
-		}
+		obj := packedObjectFromEntry(key, entry, data)
 		return io.NopCloser(bytes.NewReader(data)), obj, nil
 	}
 
@@ -310,24 +418,7 @@ func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*s
 	pb.mu.RUnlock()
 
 	if packed && entry.Refcount.Load() > 0 {
-		data, err := pb.blobStore.Read(entry.Location)
-		if err != nil {
-			return nil, fmt.Errorf("read packed object: %w", err)
-		}
-
-		h := md5.Sum(data)
-		meta, _ := pb.inner.HeadObject(ctx, bucket, key)
-		contentType := ""
-		if meta != nil {
-			contentType = meta.ContentType
-		}
-		return &storage.Object{
-			Key:          key,
-			Size:         int64(len(data)),
-			ContentType:  contentType,
-			ETag:         hex.EncodeToString(h[:]),
-			LastModified: time.Now().Unix(),
-		}, nil
+		return packedObjectFromEntry(key, entry, nil), nil
 	}
 
 	return pb.inner.HeadObject(ctx, bucket, key)
@@ -342,8 +433,7 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 			delete(pb.index, ikey)
 		}
 		pb.mu.Unlock()
-		// Also remove from inner backend metadata
-		return pb.inner.DeleteObject(ctx, bucket, key)
+		return nil
 	}
 	pb.mu.Unlock()
 
@@ -370,21 +460,17 @@ func (pb *PackedBackend) ListObjects(ctx context.Context, bucket, prefix string,
 			// Extract the key part
 			k := ikey[len(bucket)+1:]
 
-			// Update or add: packed objects have zero-byte markers in the inner backend,
-			// so we must replace the inner-reported size with the actual original size.
+			obj := packedObjectFromEntry(k, entry, nil)
 			found := false
 			for _, o := range objects {
 				if o.Key == k {
-					o.Size = entry.OriginalSize
+					*o = *obj
 					found = true
 					break
 				}
 			}
 			if !found {
-				objects = append(objects, &storage.Object{
-					Key:  k,
-					Size: entry.OriginalSize,
-				})
+				objects = append(objects, obj)
 			}
 		}
 	}
@@ -400,14 +486,14 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 	// Collect packed-index keys that match so we can fix sizes / emit extras.
 	pb.mu.RLock()
 	pfx := bucket + "/" + prefix
-	packed := make(map[string]int64) // key → OriginalSize
+	packed := make(map[string]*indexEntry)
 	for ikey, entry := range pb.index {
 		if entry.Refcount.Load() <= 0 {
 			continue
 		}
 		if len(ikey) >= len(pfx) && ikey[:len(pfx)] == pfx {
 			k := ikey[len(bucket)+1:]
-			packed[k] = entry.OriginalSize
+			packed[k] = entry
 		}
 	}
 	pb.mu.RUnlock()
@@ -415,8 +501,8 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 	seen := make(map[string]bool)
 	if err := pb.inner.WalkObjects(ctx, bucket, prefix, func(obj *storage.Object) error {
 		seen[obj.Key] = true
-		if sz, ok := packed[obj.Key]; ok {
-			obj.Size = sz
+		if entry, ok := packed[obj.Key]; ok {
+			*obj = *packedObjectFromEntry(obj.Key, entry, nil)
 		}
 		return fn(obj)
 	}); err != nil {
@@ -424,11 +510,11 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 	}
 
 	// Emit packed-only entries not found in inner.
-	for k, sz := range packed {
+	for k, entry := range packed {
 		if seen[k] {
 			continue
 		}
-		if err := fn(&storage.Object{Key: k, Size: sz}); err != nil {
+		if err := fn(packedObjectFromEntry(k, entry, nil)); err != nil {
 			return err
 		}
 	}
@@ -450,6 +536,7 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 		DestinationRef: storage.ObjectRef{Bucket: dstBucket, Key: dstKey},
 		SourceObject:   srcObj,
 		ContentType:    srcObj.ContentType,
+		UserMetadata:   cloneStringMap(srcObj.UserMetadata),
 	})
 }
 
@@ -492,23 +579,12 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 		dst := &indexEntry{Location: loc}
 		dst.Refcount.Store(1)
 		dst.OriginalSize = srcEntry.OriginalSize
+		dst.ContentType = req.ContentType
+		dst.ETag = srcEntry.ETag
+		dst.LastModified = time.Now().Unix()
+		dst.UserMetadata = cloneStringMap(req.UserMetadata)
 		pb.index[dstIKey] = dst
 		pb.mu.Unlock()
-
-		if _, err := pb.inner.PutObject(ctx, dstBucket, dstKey, bytes.NewReader(nil), req.ContentType); err != nil {
-			pb.mu.Lock()
-			if cur, ok := pb.index[dstIKey]; ok && cur == dst {
-				if oldDst != nil {
-					oldDst.Refcount.Add(1)
-					pb.index[dstIKey] = oldDst
-				} else {
-					delete(pb.index, dstIKey)
-				}
-				srcEntry.Refcount.Add(-1)
-			}
-			pb.mu.Unlock()
-			return nil, fmt.Errorf("sync copy metadata: %w", err)
-		}
 
 		h := md5.Sum(data)
 		return &storage.Object{
@@ -517,6 +593,7 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 			ContentType:  req.ContentType,
 			ETag:         hex.EncodeToString(h[:]),
 			LastModified: time.Now().Unix(),
+			UserMetadata: cloneStringMap(req.UserMetadata),
 		}, nil
 	}
 	pb.mu.Unlock()
@@ -532,7 +609,7 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 	if contentType == "" && obj != nil {
 		contentType = obj.ContentType
 	}
-	return pb.PutObject(ctx, dstBucket, dstKey, rc, contentType)
+	return pb.PutObjectWithUserMetadata(ctx, dstBucket, dstKey, rc, contentType, req.UserMetadata)
 }
 
 // --- Multipart operations (pass through to inner) ---
@@ -559,4 +636,69 @@ func (pb *PackedBackend) ListMultipartUploads(ctx context.Context, bucket, prefi
 
 func (pb *PackedBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
 	return pb.inner.ListParts(ctx, bucket, key, uploadID, maxParts)
+}
+
+func (pb *PackedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
+	snap, ok := pb.inner.(storage.Snapshotable)
+	if !ok {
+		return nil, storage.ErrSnapshotNotSupported
+	}
+	objects, err := snap.ListAllObjects()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(objects))
+	for _, obj := range objects {
+		seen[pb.indexKey(obj.Bucket, obj.Key)] = struct{}{}
+	}
+	pb.mu.RLock()
+	defer pb.mu.RUnlock()
+	for ikey, entry := range pb.index {
+		if entry.Refcount.Load() <= 0 {
+			continue
+		}
+		if _, ok := seen[ikey]; ok {
+			continue
+		}
+		bucket, key, ok := strings.Cut(ikey, "/")
+		if !ok {
+			continue
+		}
+		objects = append(objects, storage.SnapshotObject{
+			Bucket:      bucket,
+			Key:         key,
+			ETag:        entry.ETag,
+			Size:        entry.OriginalSize,
+			ContentType: entry.ContentType,
+			Modified:    entry.LastModified,
+		})
+	}
+	return objects, nil
+}
+
+func (pb *PackedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
+	snap, ok := pb.inner.(storage.Snapshotable)
+	if !ok {
+		return 0, nil, storage.ErrSnapshotNotSupported
+	}
+	pb.mu.Lock()
+	pb.index = make(map[string]*indexEntry)
+	pb.mu.Unlock()
+	return snap.RestoreObjects(objects)
+}
+
+func (pb *PackedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
+	snap, ok := pb.inner.(storage.BucketSnapshotable)
+	if !ok {
+		return nil, nil
+	}
+	return snap.ListAllBuckets()
+}
+
+func (pb *PackedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	snap, ok := pb.inner.(storage.BucketSnapshotable)
+	if !ok {
+		return nil
+	}
+	return snap.RestoreBuckets(buckets)
 }

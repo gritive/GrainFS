@@ -417,6 +417,48 @@ func TestListObjects(t *testing.T) {
 	assert.Len(t, prefixResult.Contents, 2)
 }
 
+func TestGetBucketLocation(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	http.DefaultClient.Do(req)
+
+	resp, err := http.Get(base + "/mybucket?location")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result bucketLocationResult
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, "us-east-1", result.LocationConstraint)
+
+	resp, err = http.Get(base + "/mybucket/?location=")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestBucketTrailingSlashRoutesAsBucket(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/slashbucket/", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodHead, base+"/slashbucket/", nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp, err = http.Get(base + "/slashbucket/")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
 func TestPutObjectToBucketNotFound(t *testing.T) {
 	base := setupTestServer(t)
 

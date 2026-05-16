@@ -89,6 +89,130 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+func TestShardService_SharedPackWriteReadRangeDelete(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithEncryptor(enc),
+		WithShardPackThreshold(1024),
+	)
+
+	plaintext := []byte("secret shard data")
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, plaintext))
+
+	_, err = os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	got, err := svc.ReadLocalShard("bkt", "obj/v1", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+
+	buf := make([]byte, 6)
+	n, err := svc.ReadLocalShardAt("bkt", "obj/v1", 0, 7, buf)
+	require.NoError(t, err)
+	assert.Equal(t, len(buf), n)
+	assert.Equal(t, []byte("shard "), buf)
+
+	r, err := svc.OpenLocalShardRange("bkt", "obj/v1", 0, 7, 5)
+	require.NoError(t, err)
+	defer r.Close()
+	ranged, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("shard"), ranged)
+
+	require.NoError(t, svc.DeleteLocalShards("bkt", "obj/v1"))
+	_, err = svc.ReadLocalShard("bkt", "obj/v1", 0)
+	require.Error(t, err)
+}
+
+func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+
+	require.NotNil(t, svc.shardPack)
+	require.False(t, svc.shardPack.syncOnAppend)
+}
+
+func TestShardService_SharedPackDeleteReturnsTombstoneWriteError(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
+	require.NotNil(t, svc.shardPack)
+	require.NoError(t, svc.shardPack.active.Close())
+
+	err := svc.DeleteLocalShards("bkt", "obj/v1")
+	require.Error(t, err)
+}
+
+func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+
+	require.NoError(t, svc.WriteLocalShard("bkt", "obj/v1", 0, []byte("secret shard data")))
+	require.NotNil(t, svc.shardPack)
+	packPath := svc.shardPack.blobPath(svc.shardPack.activeID)
+	require.NoError(t, svc.shardPack.active.Close())
+
+	raw, err := os.ReadFile(packPath)
+	require.NoError(t, err)
+	raw[len(raw)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(packPath, raw, 0o600))
+
+	restarted := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithShardPackThreshold(1024),
+	)
+	require.NotNil(t, restarted.shardPack)
+	_, ok := restarted.shardPack.index[shardPackKey("bkt", "obj/v1", 0)]
+	require.False(t, ok)
+}
+
+func TestShardPackScanSkipsOversizedRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shardpack_0000000000000000.dat")
+	key := shardPackKey("bkt", "obj/v1", 0)
+	record := appendShardPackRecord(nil, shardPackFlagPut, key, make([]byte, 65))
+	require.NoError(t, os.WriteFile(path, record, 0o600))
+
+	store := &shardPackStore{
+		dir:     dir,
+		maxSize: 64,
+		index:   make(map[string]shardPackLocation),
+	}
+	require.NoError(t, store.scanFile(0, path))
+
+	_, ok := store.index[key]
+	require.False(t, ok)
+}
+
+func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+
+	req := buildShardEnvelope("WriteShard", "bkt", "obj/v1", 1, payload)
+	defer func() { req.Builder.Reset(); shardBuilderPool.Put(req.Builder) }()
+
+	require.LessOrEqual(t, cap(req.Builder.Bytes), 80<<10)
+}
+
 func TestShardService_OpenLocalShard_CRCFooterMismatchDetected(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"))

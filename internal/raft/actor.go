@@ -10,6 +10,9 @@ import (
 // cfg.MaxEntriesPerAE is zero. Mirrors v1's DefaultConfig value
 // (internal/raft/raft.go:212).
 const defaultMaxEntriesPerAE = 512
+const maxProposeAppendBatch = 64
+
+var proposeAppendBatchLimit = maxProposeAppendBatch
 
 // mustEntry retrieves the log entry at 1-based logical index idx from the
 // actor's log. Panics if the index is out of range — log indexing bugs are
@@ -275,6 +278,12 @@ func (n *Node) run() {
 		case <-n.stopCh:
 			return
 		case cmd := <-n.cmdCh:
+			if cmd.kind == cmdPropose {
+				if postponed, ok := n.handleProposeBatch(cmd); ok {
+					n.handle(postponed)
+				}
+				continue
+			}
 			n.handle(cmd)
 		case <-n.electionTimer.C:
 			n.onElectionTimeout()
@@ -669,6 +678,82 @@ func (n *Node) applyLoop() {
 				buf = nil
 			}
 		}
+	}
+}
+
+func (n *Node) handleProposeBatch(first command) (command, bool) {
+	if n.st.state != Leader {
+		if first.proposeReply != nil {
+			first.proposeReply <- proposalResult{err: ErrNotLeader}
+		}
+		return command{}, false
+	}
+
+	batchLimit := proposeAppendBatchLimit
+	if batchLimit < 1 {
+		batchLimit = 1
+	}
+	cmds := make([]command, 0, batchLimit)
+	cmds = append(cmds, first)
+	var postponed command
+	var hasPostponed bool
+drain:
+	for len(cmds) < batchLimit {
+		select {
+		case next := <-n.cmdCh:
+			if next.kind != cmdPropose {
+				postponed = next
+				hasPostponed = true
+				break drain
+			}
+			cmds = append(cmds, next)
+		default:
+			break drain
+		}
+	}
+	n.appendProposeBatch(cmds)
+	return postponed, hasPostponed
+}
+
+func (n *Node) appendProposeBatch(cmds []command) {
+	if len(cmds) == 1 {
+		n.handlePropose(cmds[0])
+		return
+	}
+
+	startIdx := n.st.log.LastIndex() + 1
+	entries := make([]LogEntry, len(cmds))
+	for i, cmd := range cmds {
+		entries[i] = LogEntry{
+			Term:    n.st.currentTerm,
+			Index:   startIdx + uint64(i),
+			Command: cmd.proposeCommand,
+			Type:    cmd.proposeType,
+		}
+	}
+	if err := n.st.log.Append(entries); err != nil {
+		panic("raftv2: Append: " + err.Error())
+	}
+
+	if n.st.proposeWaiters == nil {
+		n.st.proposeWaiters = make(map[uint64]chan proposalResult)
+	}
+	for i, cmd := range cmds {
+		if cmd.proposeReply != nil {
+			n.st.proposeWaiters[startIdx+uint64(i)] = cmd.proposeReply
+		}
+	}
+
+	lastIdx := entries[len(entries)-1].Index
+	if n.st.isSoloVoter() {
+		n.applyCommitted(n.st.commitIndex, lastIdx)
+		n.publish()
+		return
+	}
+
+	n.publish()
+	for _, peer := range n.st.replicaSet() {
+		n.dispatchOne(peer)
 	}
 }
 

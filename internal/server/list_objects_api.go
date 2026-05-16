@@ -30,6 +30,10 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		s.listObjectVersions(ctx, c, bucket)
 		return
 	}
+	if c.QueryArgs().Has("location") {
+		s.getBucketLocation(ctx, c, bucket)
+		return
+	}
 	if c.QueryArgs().Has("uploads") {
 		s.listMultipartUploads(ctx, c, bucket)
 		return
@@ -65,5 +69,18 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 	}
 
 	data, _ := xml.Marshal(result)
+	c.Data(consts.StatusOK, "application/xml", data)
+}
+
+func (s *Server) getBucketLocation(ctx context.Context, c *app.RequestContext, bucket string) {
+	if err := s.requireBucket(ctx, bucket); err != nil {
+		mapError(c, err)
+		return
+	}
+
+	data, _ := xml.Marshal(bucketLocationResult{
+		Xmlns:              "http://s3.amazonaws.com/doc/2006-03-01/",
+		LocationConstraint: "us-east-1",
+	})
 	c.Data(consts.StatusOK, "application/xml", data)
 }

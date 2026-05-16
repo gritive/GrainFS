@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,38 @@ func TestForwardPayload_TruncatedArgs(t *testing.T) {
 	}
 	_, _, _, err := decodeForwardPayload(payload)
 	require.ErrorIs(t, err, ErrTruncatedArgs)
+}
+
+func TestBuildPutObjectArgs_SmallBodyAllocationBound(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 64*1024)
+	const runs = 200
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		args := buildPutObjectArgs("warp-grainfs-postcommits-20260516", "prefix/object.rnd", "application/octet-stream", body)
+		require.Greater(t, len(args), len(body))
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	avgAlloc := float64(after.TotalAlloc-before.TotalAlloc) / runs
+	require.Lessf(t, avgAlloc, float64(len(body))*2.5, "avg allocation per buildPutObjectArgs call = %.0f bytes", avgAlloc)
+}
+
+func BenchmarkBuildPutObjectArgs_64KiB(b *testing.B) {
+	body := bytes.Repeat([]byte("x"), 64*1024)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		args := buildPutObjectArgs("warp-grainfs-postcommits-20260516", "prefix/object.rnd", "application/octet-stream", body)
+		if len(args) <= len(body) {
+			b.Fatalf("args length %d <= body length %d", len(args), len(body))
+		}
+	}
 }
 
 // TestForwardSender_TryEachPeer_FirstDownNextSucceeds verifies the recovery

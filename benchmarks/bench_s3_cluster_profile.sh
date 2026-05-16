@@ -2,10 +2,10 @@
 # Start a GrainFS cluster and run S3 PUT/GET mix benchmarks.
 #
 # Examples:
-#   PROFILE=1 ./benchmarks/bench_two_node_s3_profile.sh
-#   NODE_COUNT=3 PROFILE=1 ./benchmarks/bench_two_node_s3_profile.sh
-#   NODE_COUNT=3 INGRESS_LIST=round-robin MIX_LIST=pure-put,put-heavy,mixed ./benchmarks/bench_two_node_s3_profile.sh
-#   SERVER_ARGS="--shard-cache-size 0" DURATION=15s CONCURRENCY_LIST=32 ./benchmarks/bench_two_node_s3_profile.sh
+#   PROFILE=1 ./benchmarks/bench_s3_cluster_profile.sh
+#   NODE_COUNT=2 PROFILE=1 ./benchmarks/bench_s3_cluster_profile.sh
+#   INGRESS_LIST=round-robin MIX_LIST=pure-put,put-heavy,mixed ./benchmarks/bench_s3_cluster_profile.sh
+#   SERVER_ARGS="--shard-cache-size 0" DURATION=15s CONCURRENCY_LIST=32 ./benchmarks/bench_s3_cluster_profile.sh
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ cd "$REPO_ROOT"
 
 BINARY="${BINARY:-./bin/grainfs}"
 K6="${K6:-k6}"
-NODE_COUNT="${NODE_COUNT:-2}"
+NODE_COUNT="${NODE_COUNT:-3}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-${NODE_COUNT}-node-s3-bench}"
 DURATION="${DURATION:-30s}"
 RAMP_UP="${RAMP_UP:-1s}"

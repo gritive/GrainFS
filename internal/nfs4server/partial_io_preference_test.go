@@ -14,18 +14,25 @@ import (
 type preferPutObjectBackend struct {
 	storage.Backend
 	writeAtCalled  bool
+	readAtCalled   bool
 	truncateCalled bool
+	preferReadAt   bool
 }
 
 func (b *preferPutObjectBackend) PreferWriteAt(string) bool { return false }
+func (b *preferPutObjectBackend) PreferReadAt(string) bool  { return b.preferReadAt }
 
 func (b *preferPutObjectBackend) WriteAt(context.Context, string, string, uint64, []byte) (*storage.Object, error) {
 	b.writeAtCalled = true
 	return nil, errors.New("unexpected WriteAt")
 }
 
-func (b *preferPutObjectBackend) ReadAt(context.Context, string, string, int64, []byte) (int, error) {
-	return 0, errors.New("unexpected ReadAt")
+func (b *preferPutObjectBackend) ReadAt(ctx context.Context, bucket, key string, off int64, p []byte) (int, error) {
+	b.readAtCalled = true
+	if !b.preferReadAt {
+		return 0, errors.New("unexpected ReadAt")
+	}
+	return b.Backend.(storage.PartialIO).ReadAt(ctx, bucket, key, off, p)
 }
 
 func (b *preferPutObjectBackend) Truncate(context.Context, string, string, int64) error {
@@ -83,6 +90,38 @@ func TestOpWriteFallbackStreamsPartialOverwrite(t *testing.T) {
 
 	res := d.opWrite(w.Bytes())
 	require.Equal(t, NFS4_OK, res.Status)
+	require.False(t, backend.writeAtCalled)
+
+	rc, _, err := local.GetObject(context.Background(), "user-bucket", "file.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "heYYo", string(got))
+}
+
+func TestOpWriteFallbackUsesReadAtWhenPreferred(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+	require.NoError(t, local.CreateBucket(context.Background(), "user-bucket"))
+	_, err = local.PutObject(context.Background(), "user-bucket", "file.bin", strings.NewReader("hello"), "application/octet-stream")
+	require.NoError(t, err)
+
+	backend := &preferPutObjectBackend{Backend: local, preferReadAt: true}
+	d := getDispatcherWithClient(backend, NewStateManager(), nil, "", nil)
+	t.Cleanup(func() { putDispatcher(d) })
+	d.currentPath = "/user-bucket/file.bin"
+
+	w := &XDRWriter{}
+	w.buf.Write(make([]byte, 16)) // stateid
+	w.WriteUint64(2)
+	w.WriteUint32(2)
+	w.WriteOpaque([]byte("YY"))
+
+	res := d.opWrite(w.Bytes())
+	require.Equal(t, NFS4_OK, res.Status)
+	require.True(t, backend.readAtCalled)
 	require.False(t, backend.writeAtCalled)
 
 	rc, _, err := local.GetObject(context.Background(), "user-bucket", "file.bin")

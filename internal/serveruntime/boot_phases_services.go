@@ -1,13 +1,8 @@
 package serveruntime
 
 import (
-	"path/filepath"
-
-	"github.com/rs/zerolog/log"
-
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/packblob"
 )
 
 // bootSnapshotAndApplyLoop builds the packblob+cachedBackend wrap chain,
@@ -37,25 +32,7 @@ func bootSnapshotAndApplyLoop(state *bootState) error {
 	// previously lived here is gone.
 	state.fsm = state.distBackend.FSMRef()
 
-	// Wrapping chain (inner → outer): distBackend → packblob → cachedBackend.
-	// The WAL + pullthrough wrappers are added downstream in run.go (later
-	// services phases) because they depend on the WAL handle and IAMStore
-	// which are not yet phase-owned.
-	var inner storage.Backend = state.distBackend
-	if state.cfg.PackThreshold > 0 {
-		blobDir := filepath.Join(state.cfg.DataDir, "blobs")
-		pb, perr := packblob.NewPackedBackendWithOptions(inner, blobDir, int64(state.cfg.PackThreshold), packblob.PackedBackendOptions{
-			Compress:  true,
-			Encryptor: state.cfg.Encryptor,
-		})
-		if perr != nil {
-			return perr
-		}
-		inner = pb
-		log.Info().Int("threshold", state.cfg.PackThreshold).Msg("packed blob storage enabled")
-	}
-
-	state.cachedBackend = storage.NewCachedBackend(inner)
+	state.cachedBackend = storage.NewCachedBackend(state.distBackend)
 	state.distBackend.RegisterCacheInvalidator("s3-cache", cluster.CacheInvalidatorFunc(state.cachedBackend.InvalidateKey))
 
 	go state.distBackend.RunApplyLoop(state.stopApply)

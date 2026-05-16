@@ -8,6 +8,7 @@ import (
 
 // MetaForwardFunc forwards an encoded MetaCmd to the meta-Raft leader.
 type MetaForwardFunc func(ctx context.Context, command []byte) error
+type MetaForwardWithIndexFunc func(ctx context.Context, command []byte) (uint64, error)
 
 // ForwardingBucketAssigner persists bucket placement through the local
 // meta-Raft leader, or forwards the encoded meta command when this node is a
@@ -70,12 +71,18 @@ func waitForLocalBucketAssignment(ctx context.Context, local *MetaRaft, bucket, 
 // the meta-Raft leader, or forwards encoded meta commands when this node is a
 // follower.
 type ForwardingObjectIndexProposer struct {
-	local   *MetaRaft
-	forward MetaForwardFunc
+	local            *MetaRaft
+	forward          MetaForwardFunc
+	forwardWithIndex MetaForwardWithIndexFunc
 }
 
 func NewForwardingObjectIndexProposer(local *MetaRaft, forward MetaForwardFunc) *ForwardingObjectIndexProposer {
 	return &ForwardingObjectIndexProposer{local: local, forward: forward}
+}
+
+func (p *ForwardingObjectIndexProposer) WithIndexForwarder(forward MetaForwardWithIndexFunc) *ForwardingObjectIndexProposer {
+	p.forwardWithIndex = forward
+	return p
 }
 
 func (p *ForwardingObjectIndexProposer) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error {
@@ -106,7 +113,13 @@ func (p *ForwardingObjectIndexProposer) ProposeObjectIndex(ctx context.Context, 
 		MetaProposeSite: "forwarder",
 	})
 	forwardStart := time.Now()
-	if err := p.forward(ctx, data); err != nil {
+	var idx uint64
+	if p.forwardWithIndex != nil {
+		idx, err = p.forwardWithIndex(ctx, data)
+	} else {
+		err = p.forward(ctx, data)
+	}
+	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageMetaIndexForward, forwardStart, PutTraceStageFields{
 			MetaProposeSite: "forwarder",
 			Error:           err.Error(),
@@ -122,7 +135,11 @@ func (p *ForwardingObjectIndexProposer) ProposeObjectIndex(ctx context.Context, 
 		defer cancel()
 	}
 	waitStart := time.Now()
-	err = waitForLocalObjectIndex(ctx, p.local, entry)
+	if idx > 0 {
+		err = p.local.waitAppliedResult(ctx, idx)
+	} else {
+		err = waitForLocalObjectIndex(ctx, p.local, entry)
+	}
 	fields := PutTraceStageFields{MetaProposeSite: "forwarder"}
 	if err != nil {
 		fields.Error = err.Error()
@@ -146,13 +163,22 @@ func (p *ForwardingObjectIndexProposer) ProposeDeleteObjectIndex(ctx context.Con
 	if err != nil {
 		return fmt.Errorf("meta object index proposer: encode MetaCmd: %w", err)
 	}
-	if err := p.forward(ctx, data); err != nil {
+	var idx uint64
+	if p.forwardWithIndex != nil {
+		idx, err = p.forwardWithIndex(ctx, data)
+	} else {
+		err = p.forward(ctx, data)
+	}
+	if err != nil {
 		return err
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, objectIndexLocalApplyTimeout)
 		defer cancel()
+	}
+	if idx > 0 {
+		return p.local.waitAppliedResult(ctx, idx)
 	}
 	return waitForLocalObjectIndexDelete(ctx, p.local, bucket, key, versionID)
 }

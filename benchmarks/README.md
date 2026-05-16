@@ -37,6 +37,46 @@ and object keys. The report groups requests by ingress, size class, and forwardi
 then summarizes forwarded bytes, leader-hint retries, meta-index proposal
 counts, and the slowest shard stage.
 
+## S3-Compatible Comparison
+
+`make bench-s3-compat-compare` runs the official local S3-compatible comparison
+with MinIO `warp` against GrainFS single-node and any local native MinIO/RustFS
+binaries available on `PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`, or
+`RUSTFS_URL` to point at specific released builds or already-running endpoints.
+
+```bash
+make bench-s3-compat-compare
+# results: benchmarks/profiles/s3-compat-compare-<timestamp>/summary.md
+```
+
+The macOS `minio` command may resolve to MinIO AIStor builds that deny S3
+operations without a license. The comparison script detects that case and skips
+MinIO rather than recording unusable 403 results. Use a benchmarkable native
+MinIO binary through `MINIO_BIN=/path/to/minio`.
+
+```bash
+MINIO_BIN=$HOME/go/bin/minio make bench-s3-compat-compare
+```
+
+The comparison reports PUT and GET as separate rows, using the same signed S3
+requests, object size, concurrency, duration, and lookup mode for every target.
+The default is a short local baseline: 64 KiB objects, concurrency 16, 30s per
+operation, `WARP_HOST_SELECT=roundrobin`, and `WARP_NOCLEAR=1` so GET measures
+a warm-read pass over the objects written by the preceding PUT pass.
+
+```bash
+WARP_OPS=put,get WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 WARP_DURATION=1m make bench-s3-compat-compare
+```
+
+For cluster endpoints, pass a comma-separated host list through the matching
+`*_URL` variable; the script strips URL schemes before passing the host list to
+`warp`.
+
+Failures are recorded as raw `warp.out` and `analyze.out` artifacts under the
+profile directory. The old k6 mixed workload is no longer used for
+GrainFS/MinIO/RustFS comparison claims because its write-heavy operation mix and
+client implementation are not the shared public benchmark surface.
+
 ## NFS Multi-Bucket Export Baseline
 
 The NFSv4 server now uses explicit bucket exports. Single-bucket benchmark runs

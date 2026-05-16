@@ -29,3 +29,9 @@ type objectResult struct {
 	ETag         string `xml:"ETag"`
 	Size         int64  `xml:"Size"`
 }
+
+type bucketLocationResult struct {
+	XMLName            xml.Name `xml:"LocationConstraint"`
+	Xmlns              string   `xml:"xmlns,attr"`
+	LocationConstraint string   `xml:",chardata"`
+}

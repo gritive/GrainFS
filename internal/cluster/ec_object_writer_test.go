@@ -64,7 +64,7 @@ func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
 	}
 	sp := &spooledObject{Size: 5}
 
-	result, err := writer.writeSingleLocalReader(plan, sp, strings.NewReader("hello"), "test", md5.New())
+	result, err := writer.writeSingleLocalReader(context.Background(), plan, sp, strings.NewReader("hello"), "test", md5.New())
 	require.NoError(t, err)
 
 	require.Len(t, shards.localWrites, 1)
@@ -318,6 +318,10 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, sha
 		body:     data,
 	})
 	return nil
+}
+
+func (f *fakeECObjectWriterShards) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
+	return f.WriteLocalShardStream(bucket, key, shardIdx, body)
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {

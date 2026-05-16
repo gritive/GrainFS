@@ -17,6 +17,7 @@ type ecObjectShardStore interface {
 	WriteLocalShard(bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error
+	WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error
 	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
 	DeleteLocalShards(bucket, key string) error
@@ -224,7 +225,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 							werr = w.shards.WriteLocalShardContext(gctx, plan.Bucket, shardKey, i, data)
 						}
 					} else {
-						werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+						werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
 						if closer, ok := body.(io.Closer); ok {
 							if closeErr := closer.Close(); werr == nil && closeErr != nil {
 								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
@@ -232,7 +233,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 						}
 					}
 				} else {
-					werr = w.shards.WriteLocalShardStream(plan.Bucket, shardKey, i, body)
+					werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
 					if closer, ok := body.(io.Closer); ok {
 						if closeErr := closer.Close(); werr == nil && closeErr != nil {
 							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
@@ -290,6 +291,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 }
 
 func (w ecObjectWriter) writeSingleLocalReader(
+	ctx context.Context,
 	plan ecObjectWritePlan,
 	sp *spooledObject,
 	body io.Reader,
@@ -304,7 +306,7 @@ func (w ecObjectWriter) writeSingleLocalReader(
 		body = io.TeeReader(body, bodyHash)
 	}
 	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
-	if err := w.shards.WriteLocalShardStream(plan.Bucket, shardKey, 0, shardBody); err != nil {
+	if err := w.shards.WriteLocalShardStreamContext(ctx, plan.Bucket, shardKey, 0, shardBody); err != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("write single local shard: %w", err)
 	}
 	observePutStage(metricPath, "write_local_shard", stageStart)

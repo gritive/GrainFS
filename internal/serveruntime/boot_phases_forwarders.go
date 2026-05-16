@@ -97,6 +97,8 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		})
 	indexProposer := cluster.NewForwardingObjectIndexProposer(metaRaft, func(ctx context.Context, command []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
+	}).WithIndexForwarder(func(ctx context.Context, command []byte) (uint64, error) {
+		return state.metaForwardSender.SendWithIndex(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	})
 	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr).
 		WithObjectIndexProposer(indexProposer)

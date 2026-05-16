@@ -208,6 +208,53 @@ func TestDistributedBackend_PutAndGetObject(t *testing.T) {
 	require.Equal(t, obj.Size, gotObj.Size)
 }
 
+func TestDistributedBackend_PutObjectSmallSizedReaderSkipsPutSpool(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardService(NewShardService(b.root, nil), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+
+	payload := bytes.Repeat([]byte("a"), 64<<10)
+	obj, err := b.PutObject(context.Background(), "bucket", "small.bin", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(payload)), obj.Size)
+
+	rc, gotObj, err := b.GetObject(context.Background(), "bucket", "small.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+	require.Equal(t, obj.ETag, gotObj.ETag)
+
+	_, err = os.Stat(b.spoolDir())
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestDistributedBackend_PutObjectSpooledMemoryShardsPreservesUserMetadata(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardService(NewShardService(b.root, nil), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+
+	payload := bytes.Repeat([]byte("a"), 64<<10)
+	body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+	obj, err := b.PutObjectWithUserMetadata(
+		context.Background(),
+		"bucket",
+		"small-meta.bin",
+		body,
+		"application/octet-stream",
+		map[string]string{"x-amz-meta-owner": "me"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"x-amz-meta-owner": "me"}, obj.UserMetadata)
+
+	gotObj, err := b.HeadObject(context.Background(), "bucket", "small-meta.bin")
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"x-amz-meta-owner": "me"}, gotObj.UserMetadata)
+}
+
 func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 
