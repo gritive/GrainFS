@@ -73,6 +73,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+stop_target_backends() {
+  local start_idx="$1"
+  local i pid
+  for ((i=${#PIDS[@]} - 1; i >= start_idx; i--)); do
+    pid="${PIDS[$i]}"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    unset 'PIDS[$i]'
+  done
+  PIDS=("${PIDS[@]:-}")
+}
+
 start_grainfs_single() {
   if [[ "${GRAINFS_SINGLE_URL:-}" != "" ]]; then
     set_start_info "$GRAINFS_SINGLE_URL" "${GRAINFS_ACCESS_KEY:-}" "${GRAINFS_SECRET_KEY:-}" "external"
@@ -342,6 +354,7 @@ IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
 for target in grainfs-single minio rustfs; do
   target_enabled "$target" || continue
+  target_pid_start="${#PIDS[@]}"
 
   case "$target" in
     grainfs-single)
@@ -374,6 +387,8 @@ for target in grainfs-single minio rustfs; do
         ;;
     esac
   done
+
+  stop_target_backends "$target_pid_start"
 done
 
 append_summary_rows
