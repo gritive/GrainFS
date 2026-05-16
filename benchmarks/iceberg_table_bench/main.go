@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -44,6 +45,8 @@ type runner struct {
 
 	totalRequests  atomic.Uint64
 	failedRequests atomic.Uint64
+	failuresMu     sync.Mutex
+	failures       []failureSample
 
 	createNamespace *operationStats
 	createTable     *operationStats
@@ -118,9 +121,18 @@ type reportSummary struct {
 	FailedRequests uint64 `json:"failed_requests"`
 }
 
+type failureSample struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Status int    `json:"status,omitempty"`
+	Error  string `json:"error,omitempty"`
+	Body   string `json:"body,omitempty"`
+}
+
 type benchmarkReport struct {
 	Timestamp       string           `json:"timestamp"`
 	Summary         reportSummary    `json:"summary"`
+	Failures        []failureSample  `json:"failures,omitempty"`
 	CreateNamespace operationSummary `json:"create_namespace"`
 	CreateTable     operationSummary `json:"create_table"`
 	LoadTable       operationSummary `json:"load_table"`
@@ -153,9 +165,21 @@ func parseConfig() (config, error) {
 }
 
 func newRunner(cfg config) *runner {
+	maxConns := max(32, cfg.concurrency*8)
 	return &runner{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		cfg: cfg,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				MaxIdleConns:        maxConns,
+				MaxIdleConnsPerHost: maxConns,
+				MaxConnsPerHost:     maxConns,
+				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  true,
+			},
+		},
 
 		createNamespace: newOperationStats(),
 		createTable:     newOperationStats(),
@@ -181,6 +205,7 @@ func (r *runner) run(ctx context.Context) benchmarkReport {
 			TotalRequests:  r.totalRequests.Load(),
 			FailedRequests: r.failedRequests.Load(),
 		},
+		Failures:        r.failureSamples(),
 		CreateNamespace: r.createNamespace.summary(),
 		CreateTable:     r.createTable.summary(),
 		LoadTable:       r.loadTable.summary(),
@@ -315,6 +340,7 @@ func (r *runner) doJSON(ctx context.Context, method, path string, body []byte, w
 	if err != nil {
 		r.totalRequests.Add(1)
 		r.failedRequests.Add(1)
+		r.recordFailure(failureSample{Method: method, Path: path, Error: err.Error()})
 		return false, 0
 	}
 	if body != nil {
@@ -327,17 +353,41 @@ func (r *runner) doJSON(ctx context.Context, method, path string, body []byte, w
 	r.totalRequests.Add(1)
 	if err != nil {
 		r.failedRequests.Add(1)
+		r.recordFailure(failureSample{Method: method, Path: path, Error: err.Error()})
 		return false, elapsed
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	raw, _ := io.ReadAll(resp.Body)
 	for _, code := range want {
 		if resp.StatusCode == code {
 			return true, elapsed
 		}
 	}
 	r.failedRequests.Add(1)
+	r.recordFailure(failureSample{Method: method, Path: path, Status: resp.StatusCode, Body: trimFailureBody(raw)})
 	return false, elapsed
+}
+
+func (r *runner) recordFailure(sample failureSample) {
+	r.failuresMu.Lock()
+	if len(r.failures) < 20 {
+		r.failures = append(r.failures, sample)
+	}
+	r.failuresMu.Unlock()
+}
+
+func (r *runner) failureSamples() []failureSample {
+	r.failuresMu.Lock()
+	defer r.failuresMu.Unlock()
+	return append([]failureSample(nil), r.failures...)
+}
+
+func trimFailureBody(raw []byte) string {
+	const max = 512
+	if len(raw) > max {
+		raw = raw[:max]
+	}
+	return string(raw)
 }
 
 func signS3(req *http.Request, payload []byte, accessKey, secretKey string, now time.Time) {
@@ -424,6 +474,10 @@ func failureRateExceeded(total, failed uint64, threshold float64) bool {
 	return float64(failed)/float64(total) > threshold
 }
 
+func benchmarkFailed(summary reportSummary) bool {
+	return summary.FailedRequests > 0
+}
+
 func writeReport(path string, r benchmarkReport) error {
 	raw, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
@@ -476,7 +530,7 @@ func main() {
 		os.Exit(1)
 	}
 	printReport(report, cfg.reportPath)
-	if failureRateExceeded(report.Summary.TotalRequests, report.Summary.FailedRequests, 0.05) {
+	if benchmarkFailed(report.Summary) {
 		os.Exit(1)
 	}
 }

@@ -52,7 +52,8 @@ Use these metrics consistently:
 - Resource use: CPU, RSS, heap, goroutine count, and file descriptors when available.
 - Cluster behavior: ingress node, owner node, forwarded bytes, leader-hint retries,
   meta-index proposal count, and slowest shard stage when PUT tracing is enabled.
-- Error rate: all non-2xx S3 responses and transport/client errors.
+- Error rate: all non-2xx protocol responses and transport/client errors.
+  Benchmark runners should exit non-zero when any measured request fails.
 
 For fio-based protocol benchmarks, record workload mode, block size, queue depth,
 number of jobs, runtime, mount options, and client kernel/tool versions.

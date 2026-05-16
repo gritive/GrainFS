@@ -32,6 +32,7 @@ func TestBenchmarkReportJSONShape(t *testing.T) {
 	r := benchmarkReport{
 		Timestamp:       "2026-05-16T00:00:00Z",
 		Summary:         reportSummary{TotalRequests: 7, FailedRequests: 1},
+		Failures:        []failureSample{{Method: http.MethodGet, Path: "/iceberg/v1/config", Status: http.StatusInternalServerError}},
 		CreateNamespace: operationSummary{Ops: 1, P50MS: "1.00", P99MS: "1.00", AvgMS: "1.00", MinMS: "1.00", MaxMS: "1.00"},
 	}
 	raw, err := json.Marshal(r)
@@ -48,6 +49,9 @@ func TestBenchmarkReportJSONShape(t *testing.T) {
 	if _, ok := decoded["summary"]; !ok {
 		t.Fatalf("report missing summary: %s", raw)
 	}
+	if _, ok := decoded["failures"]; !ok {
+		t.Fatalf("report missing failures: %s", raw)
+	}
 }
 
 func TestFailureRateExceeded(t *testing.T) {
@@ -59,6 +63,15 @@ func TestFailureRateExceeded(t *testing.T) {
 	}
 	if !failureRateExceeded(0, 1, 0.05) {
 		t.Fatal("failures with no total requests must exceed threshold")
+	}
+}
+
+func TestBenchmarkFailedRequiresZeroFailedRequests(t *testing.T) {
+	if !benchmarkFailed(reportSummary{TotalRequests: 100, FailedRequests: 1}) {
+		t.Fatal("benchmark must fail when any request fails")
+	}
+	if benchmarkFailed(reportSummary{TotalRequests: 100, FailedRequests: 0}) {
+		t.Fatal("benchmark must pass when all requests pass")
 	}
 }
 

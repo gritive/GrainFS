@@ -84,6 +84,11 @@ Iceberg REST Catalog table lifecycle benchmark with a Go runner, not k6. The
 shell scripts still start GrainFS, bootstrap IAM credentials, optionally collect
 pprof profiles, and write `benchmarks/iceberg_table_report.json`.
 
+The runner treats any failed request as a benchmark failure. When failures
+occur, the JSON report includes a bounded `failures` sample list with method,
+path, status, error, and response body fields to make local transport or server
+errors visible.
+
 Tune the workload with:
 
 ```bash

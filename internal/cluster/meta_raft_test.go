@@ -77,7 +77,7 @@ func (f *MetaTransportFake) SendTimeoutNow(peer string, args *raft.TimeoutNowArg
 }
 
 // newSingleMetaRaft creates a single-node MetaRaft for testing.
-func newSingleMetaRaft(t *testing.T) *MetaRaft {
+func newSingleMetaRaft(t testing.TB) *MetaRaft {
 	t.Helper()
 	tr := newMetaTransportFake()
 	m, err := NewMetaRaft(MetaRaftConfig{
