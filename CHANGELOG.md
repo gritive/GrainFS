@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.219.1] - 2026-05-17 - docs: ADR 0014 capability plan cache pattern
+
+### Internal
+- **ADR 0014** records the storage Operations capability plan cache decision
+  (`atomic.Pointer` publication, single-Generation-source invariant, independent
+  per-cache generation counters, per-wrapper long-lived `*Operations`).
+  Establishes the third shape in the lock-free publication pattern family
+  alongside IAM whole-state CoW (ADR 0007) and worker-pointer publication
+  (ADR 0012, ADR 0013). Locks in `SwappableBackend` as the sole Generation()
+  source so future contributors do not silently break cache invalidation by
+  adding a second source.
+
 ## [0.0.219.0] - 2026-05-17 - refactor: lock-free Operations capability plan cache
 
 ### Changed
