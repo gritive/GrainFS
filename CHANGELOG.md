@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.0.213.0] - 2026-05-16 - feat: support production S3 compatibility core
+
+### Added
+
+- **S3 production compatibility guardrails**: compatibility reference docs now
+  use explicit supported/not supported status values, with tests preventing
+  ambiguous `not tested` claims from returning.
+- **Clustered multipart listing**: `ListMultipartUploads` and `ListParts` now
+  work through the clustered forwarding path so single-node and cluster e2e
+  tests exercise the same multipart listing feature set.
+- **Iceberg benchmark Go runner**: `benchmarks/iceberg_table_bench` provides a
+  native Go benchmark runner for Iceberg namespace/table lifecycle operations.
+
+### Changed
+
+- **Multipart listing performance**: clustered multipart upload scans filter
+  FlatBuffers payloads before string allocation, reducing allocation pressure on
+  the listing hot path.
+- **Iceberg benchmark scripts**: single-node and cluster Iceberg benchmark entry
+  points now run the Go runner instead of the legacy k6 script.
+- **Benchmark documentation**: benchmark references document the new Iceberg
+  runner and keep the S3 baseline policy aligned with `warp`.
+
+### Fixed
+
+- **Cluster multipart routing**: forwarded multipart listing/list-parts requests
+  now encode, dispatch, and decode through the cluster transport correctly.
+- **Multipart create gating**: local multipart creation is gated on required
+  peer transport capabilities before accepting operations that require cluster
+  forwarding support.
+- **Iceberg metadata writes with IAM**: Iceberg table metadata writes avoid the
+  ACL write path when IAM is enabled, preventing rollback failures on fresh
+  metadata objects.
+
+### Removed
+
+- **Iceberg k6 workload**: the old `benchmarks/iceberg_table_bench.js` workload
+  has been removed from the official Iceberg benchmark path.
+
+### Verification
+
+- `go test ./benchmarks/iceberg_table_bench ./internal/server ./internal/cluster ./internal/compat ./docs/reference -count=1`
+- `GRAINFS_BINARY=$(pwd)/bin/grainfs go test ./tests/e2e -run 'TestMultipart_List|TestCluster_Multipart_List' -count=1`
+- `bash -n benchmarks/bench_iceberg_table.sh benchmarks/bench_iceberg_table_cluster.sh`
+- `VUS=2 DURATION=3s RAMP_UP=0s RAMP_DOWN=0s make bench-iceberg-table`
+- `VUS=2 DURATION=3s RAMP_UP=0s RAMP_DOWN=0s make bench-iceberg-table-cluster`
+- `git diff --check -- ':!docs/superpowers/**'`
+
 ## [0.0.212.0] - 2026-05-16 — refactor: convert scrubber Director to single-owner actor
 
 ### Changed
