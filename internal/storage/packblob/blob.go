@@ -44,6 +44,12 @@ type BlobStore struct {
 }
 
 // EnableCompression enables zstd compression for new entries.
+//
+// Construction-only: must be called before the BlobStore is shared with any
+// goroutine, including before the owning PackedBackend's periodic-save
+// goroutine starts. After construction the bs.compress flag is read
+// without the mutex from BlobStore.Append's pre-lock compression path; a
+// concurrent write to this flag would race that read.
 func (bs *BlobStore) EnableCompression() {
 	bs.compress = true
 }
