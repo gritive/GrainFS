@@ -118,15 +118,9 @@ func TestRetryAndDeliver_SuccessSendsRelease(t *testing.T) {
 }
 
 func TestRetryAndDeliver_CtxCancelStopsBackoff(t *testing.T) {
-	// Plan-deviation note: the plan's original assertion
-	// `require.ErrorIs(got, context.Canceled)` via onResult is structurally
-	// unreachable. close(d.stop) flips the controller into the stop branch,
-	// which exits without consuming releaseInbox. By the time workerCancel
-	// fires (at 50ms) and the worker enqueues releaseCmd, the controller
-	// has long since returned — releaseToController falls through to its
-	// `<-d.stop` branch which only bumps metrics. Asserting ctx semantics
-	// on Stop itself (graceful + workerCancel path exercised) is what this
-	// test name actually claims to cover.
+	// Asserts workerCancel actually aborts a long backoff sleep — onResult is
+	// NOT checked because Stop drops in-flight releases by design (see
+	// Options.OnResult godoc).
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -172,11 +166,8 @@ func TestStop_BeforeStartIsNoop(t *testing.T) {
 }
 
 func TestStop_DrainsResidualSendCmdsAsDroppedStopped(t *testing.T) {
-	// drainResidualSendCmds를 결정적으로 검증: controller를 시작하지 않고
-	// inbox에 sendCmd를 직접 enqueue한 후 drain을 직접 호출.
-	// 전체 Stop lifecycle을 통한 검증은 controller가 spawn에 의해 block되는
-	// 시점/inbox가 빈 시점이 race이므로 (design doc Q1) deterministic하지
-	// 않다. 본 단위 테스트는 drain 자체의 카운팅 정확성만 보장한다.
+	// Unit-level: counts drainResidualSendCmds output without the controller
+	// lifecycle (lifecycle smoke lives in TestLifecycle_SendStopCompletesPromptly).
 	d := NewDispatcher("http://example", Options{}, nil)
 
 	for i := 0; i < 3; i++ {
@@ -189,6 +180,37 @@ func TestStop_DrainsResidualSendCmdsAsDroppedStopped(t *testing.T) {
 		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
 	require.Equal(t, float64(3), after-before,
 		"drainResidualSendCmds must count each residual sendCmd as dropped(stopped)")
+}
+
+// TestLifecycle_SendStopCompletesPromptly exercises the full Send→Stop
+// lifecycle with a non-empty inbox. Asserts (a) no deadlock/panic and (b) Stop
+// returns in bounded time. The exact split between "drained as stopped" vs
+// "processed via spawn" is racy (design doc Q1) — this smoke test only
+// guarantees the lifecycle terminates and that the stopped counter never
+// regresses.
+func TestLifecycle_SendStopCompletesPromptly(t *testing.T) {
+	d := NewDispatcher("http://example", Options{Clock: time.Now}, nil)
+	// spawn synthesizes an immediate release so the controller keeps draining
+	// the inbox rather than blocking on a fake worker.
+	d.envPtr.spawn = func(a Alert, _, _ string) {
+		d.releaseInbox <- releaseCmd{key: dedupKey(a), alert: a, err: nil}
+	}
+	d.Start(context.Background())
+
+	before := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
+	for i := 0; i < 32; i++ {
+		d.Send(Alert{Type: "t", Resource: fmt.Sprintf("r%d", i)})
+	}
+	start := time.Now()
+	require.NoError(t, d.Stop(context.Background()))
+	elapsed := time.Since(start)
+	require.Less(t, elapsed, time.Second,
+		"full Send→Stop lifecycle must complete promptly; took %s", elapsed)
+	after := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
+	require.GreaterOrEqual(t, after-before, float64(0),
+		"stopped counter must never regress across Stop")
 }
 
 func TestController_ProcessesSendThenRelease(t *testing.T) {

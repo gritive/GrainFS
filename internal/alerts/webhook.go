@@ -86,6 +86,14 @@ type Options struct {
 	// non-nil after all retries are exhausted or ctx cancellation. OnResult
 	// must not block; persistent I/O must be fanned out via a separate
 	// goroutine.
+	//
+	// Best-effort on Stop: if Stop fires while a worker is mid-flight, the
+	// worker's release may race the controller exit; in that case
+	// releaseToController falls through to its <-d.stop branch which only
+	// bumps metrics.AlertDeliveryAttempts ({success|failed}). OnResult is
+	// NOT invoked for those alerts. Subscribers needing a complete
+	// delivery audit must read AlertDeliveryAttempts +
+	// AlertDispatchDroppedTotal in addition to OnResult.
 	OnResult func(Alert, error)
 }
 
