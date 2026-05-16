@@ -104,6 +104,9 @@ func TestDefaultRegistryIncludesMultipartListingCapability(t *testing.T) {
 	if capDef.Scope != ScopePeerTransport {
 		t.Fatalf("multipart listing scope = %s, want %s", capDef.Scope, ScopePeerTransport)
 	}
+	if capDef.IntroducedVersion != "0.0.213.0" {
+		t.Fatalf("multipart listing introduced version = %s", capDef.IntroducedVersion)
+	}
 	if OperationListParts != Operation("list_parts") {
 		t.Fatalf("OperationListParts = %s", OperationListParts)
 	}

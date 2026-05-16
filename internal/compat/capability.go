@@ -68,7 +68,7 @@ var DefaultRegistry = mustRegistry([]Capability{
 		Name:              CapabilityMultipartListingV1,
 		Scope:             ScopePeerTransport,
 		Severity:          SeverityHard,
-		IntroducedVersion: "0.0.212.0",
+		IntroducedVersion: "0.0.213.0",
 		Description:       "Allows clustered multipart listing metadata and remote ListParts forwarding.",
 		Semantics:         "Nodes must persist bucket/key multipart metadata and understand the ListParts forward opcode.",
 	},
