@@ -356,23 +356,10 @@ func (d *Director) LookupDedup(req TriggerReq) (ScrubTriggerEntry, bool) {
 }
 
 func (d *Director) Trigger(req TriggerReq) (string, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	dk := dedupKey(req)
-	if existing, ok := d.dedup[dk]; ok {
-		return existing, false
-	}
-	sess := newLiveSession(uuid.NewString(), req.Bucket, req.KeyPrefix, req.Scope, req.DryRun, time.Now())
-	d.sessions[sess.id] = sess
-	d.dedup[dk] = sess.id
-	select {
-	case d.queue <- triggerReq{sess: sess}:
-	default:
-		delete(d.dedup, dk)
-		delete(d.sessions, sess.id)
-		return "", false
-	}
-	return sess.id, true
+	reply := make(chan triggerReply, 1)
+	d.inbox <- triggerCmd{req: req, reply: reply}
+	r := <-reply
+	return r.sessionID, r.created
 }
 
 func newLiveSession(id, bucket, keyPrefix string, scope ScrubScope, dryRun bool, startedAt time.Time) *liveSession {

@@ -32,6 +32,8 @@ func (r *recordingIncident) count() int {
 func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
 	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
+	d.Start(context.Background())
+	defer d.Stop()
 	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_", Scope: ScopeFull}
 	id1, created1 := d.Trigger(req)
 	require.NotEmpty(t, id1)
