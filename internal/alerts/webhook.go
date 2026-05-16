@@ -19,6 +19,7 @@ package alerts
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,6 +30,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -141,6 +143,24 @@ type Dispatcher struct {
 	// once per minute per Dispatcher so a persistent decrypt failure cannot
 	// flood the log. Mu-protected.
 	lastDecryptWarnAt time.Time
+
+	// Actor fields (이번 PR에서 도입). 기존 mu/lastSent/inFlight/lastDecryptWarnAt는
+	// 다음 Task들에서 dispatchEnv로 이주 후 제거.
+	inbox        chan dispatchCmd
+	releaseInbox chan dispatchCmd
+	stop         chan struct{}
+	done         chan struct{}
+
+	workerCtx    context.Context
+	workerCancel context.CancelFunc
+	workerWG     sync.WaitGroup
+	started      atomic.Bool
+	stopping     atomic.Bool
+	stopOnce     sync.Once
+
+	lastDropWarnAt atomic.Int64
+
+	envPtr *dispatchEnv
 }
 
 // NewDispatcher constructs a static-config Dispatcher. An empty url turns Send
@@ -148,6 +168,7 @@ type Dispatcher struct {
 func NewDispatcher(url string, opts Options, onFailure FailureCallback) *Dispatcher {
 	d := newDispatcher(opts, onFailure)
 	d.url = url
+	d.envPtr.url = url
 	return d
 }
 
@@ -170,6 +191,10 @@ func NewDispatcherWithConfig(cfg AlertCfgReader, enc SecretDecrypter, secretAAD 
 	d.enc = enc
 	d.secretAAD = secretAAD
 	d.alertKind = alertKind
+	d.envPtr.cfg = cfg
+	d.envPtr.enc = enc
+	d.envPtr.secretAAD = secretAAD
+	d.envPtr.alertKind = alertKind
 	return d
 }
 
@@ -192,12 +217,23 @@ func newDispatcher(opts Options, onFailure FailureCallback) *Dispatcher {
 	if opts.Clock == nil {
 		opts.Clock = time.Now
 	}
-	return &Dispatcher{
+	d := &Dispatcher{
 		opts:      opts,
 		onFailure: onFailure,
 		lastSent:  map[string]time.Time{},
 		inFlight:  map[string]struct{}{},
+
+		inbox:        make(chan dispatchCmd, 32),
+		releaseInbox: make(chan dispatchCmd, 16),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
 	}
+	d.envPtr = &dispatchEnv{
+		lastSent: map[string]time.Time{},
+		inFlight: map[string]struct{}{},
+		opts:     opts,
+	}
+	return d
 }
 
 // Send delivers a in best-effort fashion. Returns nil on success or after
