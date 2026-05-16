@@ -117,7 +117,7 @@ Operational details live in [docs/index.md](docs/index.md#operators).
 Requirements:
 
 - Go 1.26+
-- `k6` for S3 benchmarks
+- `warp` for S3-compatible comparison benchmarks
 - Linux client tooling for NFS, NBD, 9P, and FUSE-over-S3 integration tests
 
 Common commands:

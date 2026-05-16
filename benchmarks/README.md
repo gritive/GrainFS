@@ -39,10 +39,10 @@ counts, and the slowest shard stage.
 
 ## S3-Compatible Comparison
 
-`make bench-s3-compat-compare` runs the shared k6 S3 mixed workload against
-GrainFS single-node and any local native MinIO/RustFS binaries available on
-`PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`, or `RUSTFS_URL` to point at
-specific released builds or already-running endpoints.
+`make bench-s3-compat-compare` runs the official local S3-compatible comparison
+with MinIO `warp` against GrainFS single-node and any local native MinIO/RustFS
+binaries available on `PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`, or
+`RUSTFS_URL` to point at specific released builds or already-running endpoints.
 
 ```bash
 make bench-s3-compat-compare
@@ -58,17 +58,24 @@ MinIO binary through `MINIO_BIN=/path/to/minio`.
 MINIO_BIN=$HOME/go/bin/minio make bench-s3-compat-compare
 ```
 
-The script also has an optional MinIO `warp` lane, shaped after RustFS public
-benchmark methodology:
+The comparison reports PUT and GET as separate rows, using the same signed S3
+requests, object size, concurrency, duration, and lookup mode for every target.
+The default is a short local baseline: 64 KiB objects, concurrency 16, 30s per
+operation, `WARP_HOST_SELECT=roundrobin`, and `WARP_NOCLEAR=1` so GET measures
+a warm-read pass over the objects written by the preceding PUT pass.
 
 ```bash
-RUN_WARP=1 WARP_OPS=get,put WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 make bench-s3-compat-compare
+WARP_OPS=put,get WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 WARP_DURATION=1m make bench-s3-compat-compare
 ```
 
-`warp` uses a broader S3 operation surface than the k6 mixed workload; failures
-are recorded as raw `warp.out` artifacts and do not replace k6 comparison
-results. Set `WARP_NOCLEAR=1` when you want to keep objects and skip `warp`
-cleanup time in short local runs.
+For cluster endpoints, pass a comma-separated host list through the matching
+`*_URL` variable; the script strips URL schemes before passing the host list to
+`warp`.
+
+Failures are recorded as raw `warp.out` and `analyze.out` artifacts under the
+profile directory. The old k6 mixed workload is no longer used for
+GrainFS/MinIO/RustFS comparison claims because its write-heavy operation mix and
+client implementation are not the shared public benchmark surface.
 
 ## NFS Multi-Bucket Export Baseline
 

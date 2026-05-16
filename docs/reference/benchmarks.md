@@ -25,7 +25,7 @@ object sizes, concurrency, and cold/warm-cache rules.
 | --------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
 | `make bench`                                  | Single-node S3 object PUT/GET/DELETE               | `benchmarks/report.json`                                            |
 | `make bench-cluster`                          | Multi-node S3 object benchmark                     | `benchmarks/report.json`, cluster logs                              |
-| `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 mixed workload   | `benchmarks/profiles/s3-compat-compare-*`                           |
+| `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload  | `benchmarks/profiles/s3-compat-compare-*`                           |
 | `PUT_MATRIX=1 make bench-cluster`             | Cluster PUT matrix by ingress port and object size | `benchmarks/put-matrix-port<port>-<small\|large>.json`              |
 | `PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster` | PUT matrix plus per-node stage tracing             | owner-only JSONL traces and `benchmarks/put_trace_report.js` output |
 | `make bench-profile`                          | Multi-node S3 benchmark with pprof                 | `/tmp/grainfs-bench-*.out`                                          |
@@ -77,14 +77,17 @@ RustFS and MinIO are valid comparison anchors. Do not claim parity until this
 document or an adjacent report links a reproducible run.
 
 `benchmarks/bench_s3_compat_compare.sh` implements the local same-host version
-of this protocol. It prefers native binaries or explicit external endpoints and
-skips unusable local builds, such as license-gated MinIO AIStor binaries. Set
+of this protocol with MinIO `warp` as the official comparison tool. It prefers
+native binaries or explicit external endpoints and skips unusable local builds,
+such as license-gated MinIO AIStor binaries. Set
 `MINIO_BIN=$HOME/go/bin/minio` or another explicit binary path when the default
-`minio` on `PATH` is not benchmarkable. Set `RUN_WARP=1` to add MinIO `warp`
-GET/PUT runs shaped after RustFS public benchmark reports. For short local
-iterations, `WARP_NOCLEAR=1` skips `warp` cleanup while preserving raw benchdata.
-Keep the k6 mixed workload as the primary comparable result unless all targets
-pass the same `warp` operation surface.
+`minio` on `PATH` is not benchmarkable. The script reports PUT and GET
+separately from `warp analyze`, using the same signed S3 requests, object size,
+concurrency, duration, bucket lookup mode, `roundrobin` host selection, and
+warm-read rule for every target. Cluster endpoints are passed as comma-separated
+host lists to `warp`. The previous k6 mixed workload is not used for
+GrainFS/MinIO/RustFS comparison claims because it is not the shared benchmark
+surface.
 
 ## Current Local Snapshots
 

@@ -6,8 +6,7 @@
 #
 # Examples:
 #   ./benchmarks/bench_s3_compat_compare.sh
-#   TARGETS=grainfs-single,minio DURATION=15s CONCURRENCY_LIST=4,16 ./benchmarks/bench_s3_compat_compare.sh
-#   RUN_WARP=1 WARP_DURATION=1m WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 ./benchmarks/bench_s3_compat_compare.sh
+#   TARGETS=grainfs-single,minio WARP_DURATION=1m WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 ./benchmarks/bench_s3_compat_compare.sh
 #   RUSTFS_URL=http://127.0.0.1:9002 RUSTFS_ACCESS_KEY=rustfsadmin RUSTFS_SECRET_KEY=rustfsadmin ./benchmarks/bench_s3_compat_compare.sh
 
 set -euo pipefail
@@ -17,29 +16,18 @@ source "$SCRIPT_DIR/lib/common.sh"
 cd "$REPO_ROOT"
 
 BINARY="${BINARY:-./bin/grainfs}"
-K6="${K6:-k6}"
 TARGETS="${TARGETS:-grainfs-single,minio,rustfs}"
 PROFILE_ROOT="${PROFILE_ROOT:-benchmarks/profiles/s3-compat-compare-$(date +%Y%m%d-%H%M%S)}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-s3-compat-compare}"
 BUCKET="${BUCKET:-bench}"
-DURATION="${DURATION:-12s}"
-RAMP_UP="${RAMP_UP:-1s}"
-RAMP_DOWN="${RAMP_DOWN:-1s}"
-GRACEFUL_RAMP_DOWN="${GRACEFUL_RAMP_DOWN:-1s}"
-GRACEFUL_STOP="${GRACEFUL_STOP:-2s}"
-CONCURRENCY_LIST="${CONCURRENCY_LIST:-4,16}"
-MIX_LIST="${MIX_LIST:-write-heavy}"
-SIZE_KB="${SIZE_KB:-64}"
-OBJECT_COUNT="${OBJECT_COUNT:-64}"
-SCRIPT="$BENCHMARKS_DIR/s3_mixed_profile.js"
-RUN_WARP="${RUN_WARP:-0}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
-WARP_DURATION="${WARP_DURATION:-1m}"
-WARP_OBJ_SIZE="${WARP_OBJ_SIZE:-20MiB}"
-WARP_OBJECTS="${WARP_OBJECTS:-128}"
-WARP_CONCURRENT="${WARP_CONCURRENT:-32}"
-WARP_OPS="${WARP_OPS:-get,put}"
-WARP_NOCLEAR="${WARP_NOCLEAR:-0}"
+WARP_DURATION="${WARP_DURATION:-30s}"
+WARP_OBJ_SIZE="${WARP_OBJ_SIZE:-64KiB}"
+WARP_OBJECTS="${WARP_OBJECTS:-4096}"
+WARP_CONCURRENT="${WARP_CONCURRENT:-16}"
+WARP_OPS="${WARP_OPS:-put,get}"
+WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
+WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 
 MINIO_BIN="${MINIO_BIN:-$(command -v minio 2>/dev/null || true)}"
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
@@ -49,7 +37,10 @@ RUSTFS_BIN="${RUSTFS_BIN:-$(command -v rustfs 2>/dev/null || true)}"
 RUSTFS_ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfsadmin}"
 RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
 
-bench_require_command "$K6" "brew install k6"
+if [[ -z "$WARP_BIN" ]]; then
+  echo "[error] warp is required for S3-compatible comparison benchmarks. Install minio/warp or set WARP_BIN." >&2
+  exit 1
+fi
 
 mkdir -p "$PROFILE_ROOT"
 rm -rf "$BENCH_DIR"
@@ -186,95 +177,37 @@ write_summary_header() {
     echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- targets: $TARGETS"
-    echo "- object: ${SIZE_KB}KB"
-    echo "- object count: ${OBJECT_COUNT}"
-    echo "- duration: ${DURATION}"
-    echo "- concurrency: ${CONCURRENCY_LIST}"
-    echo "- mix: ${MIX_LIST}"
-    echo "- warp: ${RUN_WARP}"
-    if [[ "$RUN_WARP" == "1" ]]; then
-      echo "- warp method: ${WARP_OPS}, object=${WARP_OBJ_SIZE}, objects=${WARP_OBJECTS}, concurrent=${WARP_CONCURRENT}, duration=${WARP_DURATION}, noclear=${WARP_NOCLEAR}"
-    fi
+    echo "- tool: warp ($("$WARP_BIN" --version 2>/dev/null | head -n 1 || echo "$WARP_BIN"))"
+    echo "- operations: ${WARP_OPS}"
+    echo "- object: ${WARP_OBJ_SIZE}"
+    echo "- objects for GET seed: ${WARP_OBJECTS}"
+    echo "- duration: ${WARP_DURATION}"
+    echo "- concurrency: ${WARP_CONCURRENT}"
+    echo "- noclear: ${WARP_NOCLEAR}"
+    echo "- host select: ${WARP_HOST_SELECT}"
     echo "- raw artifacts: ${PROFILE_ROOT}"
+    echo
+    echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT and GET are reported separately. With WARP_NOCLEAR=1, GET is a warm-read pass over objects written by the preceding PUT pass."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. MinIO/RustFS local runs use their default single-node durability unless an external endpoint is supplied."
     echo
-    echo "| target | mode | mix | VUs | PUT ops | PUT p99 ms | GET ops | GET p99 ms | failed rate | throughput MB/s | ratio vs MinIO | ratio vs RustFS |"
-    echo "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    echo "| target | mode | op | MiB/s | obj/s | errors | ratio vs MinIO | ratio vs RustFS | artifacts |"
+    echo "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
   } >"$summary"
 }
 
 host_for_warp() {
   local url="$1"
-  url="${url#http://}"
-  url="${url#https://}"
-  echo "${url%%/*}"
-}
-
-run_k6_case() {
-  local target="$1"
-  local mode="$2"
-  local base_url="$3"
-  local access_key="$4"
-  local secret_key="$5"
-  local mix="$6"
-  local write_percent="$7"
-  local vus="$8"
-  local out_dir="$PROFILE_ROOT/$target/$mix-c$vus"
-  mkdir -p "$out_dir"
-
-  echo "[bench] $target $mode mix=$mix vus=$vus url=$base_url"
-  if ! BASE_URL="$base_url" \
-    SEED_URL="$base_url" \
-    BUCKET="$BUCKET" \
-    ACCESS_KEY="$access_key" \
-    SECRET_KEY="$secret_key" \
-    DURATION="$DURATION" \
-    RAMP_UP="$RAMP_UP" \
-    RAMP_DOWN="$RAMP_DOWN" \
-    GRACEFUL_RAMP_DOWN="$GRACEFUL_RAMP_DOWN" \
-    GRACEFUL_STOP="$GRACEFUL_STOP" \
-    MAX_VUS="$vus" \
-    OBJECT_SIZE_KB="$SIZE_KB" \
-    OBJECT_COUNT="$OBJECT_COUNT" \
-    MIX="$mix" \
-    WRITE_PERCENT="$write_percent" \
-    SUMMARY_JSON="$out_dir/report.json" \
-    "$K6" run "$SCRIPT" >"$out_dir/k6.out" 2>&1; then
-    echo "k6: non-zero exit for $target $mix c$vus; keeping raw output" | tee -a "$PROFILE_ROOT/skipped.txt"
-  fi
-
-  if [[ ! -f "$out_dir/report.json" ]]; then
-    echo "k6: missing report for $target $mix c$vus" | tee -a "$PROFILE_ROOT/skipped.txt"
-    return 0
-  fi
-  python3 - "$target" "$mode" "$mix" "$vus" "$out_dir/report.json" "$PROFILE_ROOT/results.tsv" <<'PY'
-import json
-import sys
-
-target, mode, mix, vus, report_path, out_path = sys.argv[1:]
-with open(report_path) as f:
-    r = json.load(f)
-put = r.get("put", {})
-get = r.get("get", {})
-put_bps = float(put.get("bytes_per_sec") or 0)
-get_bps = float(get.get("bytes_per_sec") or 0)
-throughput_mib = (put_bps + get_bps) / 1024 / 1024
-row = [
-    target,
-    mode,
-    mix,
-    str(vus),
-    str(int(float(put.get("ops") or 0))),
-    str(float(put.get("p99_ms") or 0)),
-    str(int(float(get.get("ops") or 0))),
-    str(float(get.get("p99_ms") or 0)),
-    str(float(r.get("http_req_failed") or 0)),
-    f"{throughput_mib:.4f}",
-]
-with open(out_path, "a") as f:
-    f.write("\t".join(row) + "\n")
-PY
+  local hosts=()
+  local part
+  IFS=',' read -ra hosts <<<"$url"
+  for i in "${!hosts[@]}"; do
+    part="${hosts[$i]}"
+    part="${part#http://}"
+    part="${part#https://}"
+    hosts[$i]="${part%%/*}"
+  done
+  (IFS=','; echo "${hosts[*]}")
 }
 
 run_warp_case() {
@@ -284,14 +217,11 @@ run_warp_case() {
   local secret_key="$4"
   local op="$5"
   local out_dir="$PROFILE_ROOT/$target/warp-$op"
+  local data_file="$out_dir/warp.data.json.zst"
   local host
+  local args
   host="$(host_for_warp "$base_url")"
   mkdir -p "$out_dir"
-
-  if [[ -z "$WARP_BIN" ]]; then
-    echo "warp-$op: skipped for $target; set WARP_BIN or install minio/warp" | tee -a "$PROFILE_ROOT/skipped.txt"
-    return 0
-  fi
 
   echo "[bench] $target warp $op host=$host object=$WARP_OBJ_SIZE concurrent=$WARP_CONCURRENT"
   args=(
@@ -305,6 +235,7 @@ run_warp_case() {
     --obj.size "$WARP_OBJ_SIZE" \
     --concurrent "$WARP_CONCURRENT" \
     --lookup path
+    --host-select "$WARP_HOST_SELECT"
     --benchdata "$out_dir/warp.data"
   )
   if [[ "$op" == "get" ]]; then
@@ -316,11 +247,47 @@ run_warp_case() {
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then
     echo "warp-$op: non-zero exit for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
+
+  if [[ ! -f "$data_file" ]]; then
+    echo "warp-$op: missing benchdata for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
+    return 0
+  fi
+
+  if ! "$WARP_BIN" analyze "$data_file" >"$out_dir/analyze.out" 2>&1; then
+    echo "warp-$op: analyze failed for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
+    return 0
+  fi
+
+  if ! python3 - "$target" "$START_MODE" "$op" "$out_dir/analyze.out" "$PROFILE_ROOT/warp-results.tsv" "$out_dir" <<'PY'
+import re
+import sys
+
+target, mode, op, analyze_path, out_path, artifact_dir = sys.argv[1:]
+text = open(analyze_path, encoding="utf-8").read()
+avg = re.search(r"Average:\s+([0-9.]+)\s+MiB/s,\s+([0-9.]+)\s+obj/s", text)
+err = re.search(r"Errors:\s+([0-9]+)", text)
+if not avg:
+    sys.exit("missing Average line")
+row = [
+    target,
+    mode,
+    op,
+    f"{float(avg.group(1)):.2f}",
+    f"{float(avg.group(2)):.2f}",
+    str(int(err.group(1)) if err else 0),
+    artifact_dir,
+]
+with open(out_path, "a", encoding="utf-8") as f:
+    f.write("\t".join(row) + "\n")
+PY
+  then
+    echo "warp-$op: missing average throughput for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
+  fi
 }
 
 append_summary_rows() {
   local summary="$PROFILE_ROOT/summary.md"
-  python3 - "$PROFILE_ROOT/results.tsv" "$summary" <<'PY'
+  python3 - "$PROFILE_ROOT/warp-results.tsv" "$summary" <<'PY'
 import sys
 from collections import defaultdict
 
@@ -330,7 +297,7 @@ try:
     with open(results_path) as f:
         for line in f:
             parts = line.rstrip("\n").split("\t")
-            if len(parts) != 10:
+            if len(parts) != 7:
                 continue
             rows.append(parts)
 except FileNotFoundError:
@@ -338,8 +305,8 @@ except FileNotFoundError:
 
 by_case = defaultdict(dict)
 for row in rows:
-    target, _, mix, vus = row[:4]
-    by_case[(mix, vus)][target] = float(row[9])
+    target, _, op = row[:3]
+    by_case[op][target] = float(row[3])
 
 def ratio(value, base):
     if not base:
@@ -348,15 +315,14 @@ def ratio(value, base):
 
 with open(summary_path, "a") as out:
     for row in rows:
-        target, mode, mix, vus, put_ops, put_p99, get_ops, get_p99, failed, throughput = row
-        tput = float(throughput)
-        case = by_case[(mix, vus)]
+        target, mode, op, mib, objs, errors, artifact_dir = row
+        throughput = float(mib)
+        case = by_case[op]
         minio = case.get("minio", 0)
         rustfs = case.get("rustfs", 0)
         out.write(
-            f"| {target} | {mode} | {mix} | {vus} | {put_ops} | {float(put_p99):.2f} | "
-            f"{get_ops} | {float(get_p99):.2f} | {float(failed):.4f} | {tput:.2f} | "
-            f"{ratio(tput, minio)} | {ratio(tput, rustfs)} |\n"
+            f"| {target} | {mode} | {op.upper()} | {throughput:.2f} | {float(objs):.2f} | "
+            f"{int(errors)} | {ratio(throughput, minio)} | {ratio(throughput, rustfs)} | `{artifact_dir}` |\n"
         )
 PY
 }
@@ -370,11 +336,9 @@ target_enabled() {
 }
 
 write_summary_header
-: >"$PROFILE_ROOT/results.tsv"
+: >"$PROFILE_ROOT/warp-results.tsv"
 : >"$PROFILE_ROOT/skipped.txt"
-
-IFS=',' read -ra MIXES <<<"$MIX_LIST"
-IFS=',' read -ra CONCURRENCIES <<<"$CONCURRENCY_LIST"
+IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
 for target in grainfs-single minio rustfs; do
   target_enabled "$target" || continue
@@ -401,34 +365,15 @@ for target in grainfs-single minio rustfs; do
   access_key="$START_ACCESS_KEY"
   secret_key="$START_SECRET_KEY"
   mode="$START_MODE"
-  for mix in "${MIXES[@]}"; do
-    case "$mix" in
-      pure-put) write_percent=100 ;;
-      put-heavy|write-heavy) write_percent=90 ;;
-      mixed) write_percent=50 ;;
-      read-heavy) write_percent=10 ;;
+  for op in "${WARP_OP_LIST[@]}"; do
+    case "$op" in
+      get|put) run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op" ;;
       *)
-        echo "[error] unknown mix: $mix" >&2
+        echo "[error] unknown WARP_OPS entry: $op" >&2
         exit 1
         ;;
     esac
-    for vus in "${CONCURRENCIES[@]}"; do
-      run_k6_case "$target" "$mode" "$base_url" "$access_key" "$secret_key" "$mix" "$write_percent" "$vus"
-    done
   done
-
-  if [[ "$RUN_WARP" == "1" ]]; then
-    IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
-    for op in "${WARP_OP_LIST[@]}"; do
-      case "$op" in
-        get|put) run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op" ;;
-        *)
-          echo "[error] unknown WARP_OPS entry: $op" >&2
-          exit 1
-          ;;
-      esac
-    done
-  fi
 done
 
 append_summary_rows
