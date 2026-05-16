@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -19,6 +20,13 @@ type MetaCatalog struct {
 	read      *MetaCatalogReadSender
 	readPeers func() []string
 	nextID    atomic.Uint64
+	cacheMu   sync.RWMutex
+	cache     map[string]cachedIcebergMetadata
+}
+
+type cachedIcebergMetadata struct {
+	location string
+	metadata []byte
 }
 
 func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, warehouse string) *MetaCatalog {
@@ -112,7 +120,15 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 	if err := c.propose(ctx, MetaCmdTypeIcebergCreateTable, payload, cmd.RequestID); err != nil {
 		return nil, err
 	}
-	return c.LoadTable(ctx, ident)
+	if !c.meta.IsLeader() {
+		return c.LoadTable(ctx, ident)
+	}
+	tbl, err := c.loadTableLocal(ident)
+	if err != nil {
+		return nil, err
+	}
+	c.storeCachedMetadata(ident, tbl.MetadataLocation, tbl.Metadata)
+	return tbl, nil
 }
 
 func (c *MetaCatalog) LoadTable(ctx context.Context, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
@@ -129,6 +145,14 @@ func (c *MetaCatalog) loadTableLocal(ident icebergcatalog.Identifier) (*icebergc
 			return nil, icebergcatalog.ErrNamespaceNotFound
 		}
 		return nil, icebergcatalog.ErrTableNotFound
+	}
+	if metadata, ok := c.cachedMetadata(ident, entry.MetadataLocation); ok {
+		return &icebergcatalog.Table{
+			Identifier:       cloneIcebergIdent(entry.Identifier),
+			MetadataLocation: entry.MetadataLocation,
+			Metadata:         metadata,
+			Properties:       cloneStringMap(entry.Properties),
+		}, nil
 	}
 	metadata, err := c.readMetadata(entry.MetadataLocation)
 	if err != nil {
@@ -177,7 +201,11 @@ func (c *MetaCatalog) DeleteTable(ctx context.Context, ident icebergcatalog.Iden
 	if err != nil {
 		return err
 	}
-	return c.propose(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID)
+	if err := c.propose(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID); err != nil {
+		return err
+	}
+	c.deleteCachedMetadata(ident)
+	return nil
 }
 
 func (c *MetaCatalog) CommitTable(ctx context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
@@ -196,6 +224,9 @@ func (c *MetaCatalog) CommitTable(ctx context.Context, ident icebergcatalog.Iden
 	}
 	metadata := make([]byte, len(in.Metadata))
 	copy(metadata, in.Metadata)
+	if len(metadata) > 0 {
+		c.storeCachedMetadata(ident, in.NewMetadataLocation, metadata)
+	}
 	return &icebergcatalog.Table{
 		Identifier:       ident,
 		MetadataLocation: in.NewMetadataLocation,
@@ -215,6 +246,36 @@ func (c *MetaCatalog) propose(ctx context.Context, typ MetaCmdType, payload []by
 		return err
 	}
 	return c.forward(ctx, data)
+}
+
+func (c *MetaCatalog) cachedMetadata(ident icebergcatalog.Identifier, location string) ([]byte, bool) {
+	c.cacheMu.RLock()
+	entry, ok := c.cache[icebergTableKey(ident)]
+	c.cacheMu.RUnlock()
+	if !ok || entry.location != location {
+		return nil, false
+	}
+	metadata := make([]byte, len(entry.metadata))
+	copy(metadata, entry.metadata)
+	return metadata, true
+}
+
+func (c *MetaCatalog) storeCachedMetadata(ident icebergcatalog.Identifier, location string, metadata []byte) {
+	c.cacheMu.Lock()
+	if c.cache == nil {
+		c.cache = make(map[string]cachedIcebergMetadata)
+	}
+	c.cache[icebergTableKey(ident)] = cachedIcebergMetadata{
+		location: location,
+		metadata: append([]byte(nil), metadata...),
+	}
+	c.cacheMu.Unlock()
+}
+
+func (c *MetaCatalog) deleteCachedMetadata(ident icebergcatalog.Identifier) {
+	c.cacheMu.Lock()
+	delete(c.cache, icebergTableKey(ident))
+	c.cacheMu.Unlock()
 }
 
 func (c *MetaCatalog) requestID(prefix string) string {

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +55,80 @@ func TestMetaCatalogLoadTableReadsMetadataFromWarehouseObject(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, string(metadata), string(tbl.Metadata))
 	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
+}
+
+func TestMetaCatalogLoadTableReusesMetadataReadAfterCreate(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { local.Close() })
+	backend := &countingGetBackend{Backend: local}
+	require.NoError(t, backend.CreateBucket(context.Background(), "grainfs-tables"))
+	metadata := json.RawMessage(`{"format-version":2,"current-snapshot-id":42}`)
+	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader(metadata), "application/json")
+	require.NoError(t, err)
+
+	catalog := NewMetaCatalog(m, backend, "s3://grainfs-tables/warehouse")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
+	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+		Metadata:         json.RawMessage(`{"wrong":true}`),
+	})
+	require.NoError(t, err)
+
+	tbl, err := catalog.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	require.JSONEq(t, string(metadata), string(tbl.Metadata))
+	require.Equal(t, int64(1), backend.gets.Load())
+}
+
+func BenchmarkMetaCatalogLoadTableRepeated(b *testing.B) {
+	m := newSingleMetaRaft(b)
+	b.Cleanup(func() { _ = m.Close() })
+	require.NoError(b, m.Bootstrap())
+	require.NoError(b, m.Start(context.Background()))
+	require.Eventually(b, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	local, err := storage.NewLocalBackend(b.TempDir())
+	require.NoError(b, err)
+	b.Cleanup(func() { local.Close() })
+	backend := &countingGetBackend{Backend: local}
+	require.NoError(b, backend.CreateBucket(context.Background(), "grainfs-tables"))
+	metadata := bytes.Repeat([]byte(`{"format-version":2,"current-snapshot-id":42}`), 64)
+	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader(metadata), "application/json")
+	require.NoError(b, err)
+
+	catalog := NewMetaCatalog(m, backend, "s3://grainfs-tables/warehouse")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
+	require.NoError(b, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+	})
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := catalog.LoadTable(context.Background(), ident); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(backend.gets.Load()), "getobject_total")
 }
 
 func TestMetaCatalogLeaderListCommitAndDelete(t *testing.T) {
@@ -134,6 +210,16 @@ func TestMetaCatalogFollowerWriteUsesForwarderTypedResult(t *testing.T) {
 	require.Equal(t, 1, calls)
 }
 
+type countingGetBackend struct {
+	storage.Backend
+	gets atomic.Int64
+}
+
+func (b *countingGetBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	b.gets.Add(1)
+	return b.Backend.GetObject(ctx, bucket, key)
+}
+
 func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
@@ -158,6 +244,58 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
 	_, ok := leader.FSM().IcebergNamespace([]string{"analytics"})
 	require.True(t, ok)
+}
+
+func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	follower := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = follower.Close() })
+
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+	require.NoError(t, backend.CreateBucket(context.Background(), "grainfs-tables"))
+	metadata := json.RawMessage(`{"format-version":2,"current-snapshot-id":7}`)
+	metadataLocation := "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json"
+	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader(metadata), "application/json")
+	require.NoError(t, err)
+
+	leaderCatalog := NewMetaCatalog(leader, backend, "s3://grainfs-tables/warehouse")
+	leaderReceiver := NewMetaProposeForwardReceiver(leader)
+	forwardSender := NewMetaProposeForwardSender(func(_ string, payload []byte) ([]byte, error) {
+		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+	})
+	readReceiver := NewMetaCatalogReadReceiver(leaderCatalog)
+	readSender := NewMetaCatalogReadSender(func(_ string, payload []byte) ([]byte, error) {
+		return readReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+	})
+	followerCatalog := NewMetaCatalogWithForwarders(
+		follower,
+		backend,
+		"s3://grainfs-tables/warehouse",
+		func(ctx context.Context, command []byte) error {
+			return forwardSender.Send(ctx, []string{"leader"}, command)
+		},
+		readSender,
+		func() []string { return []string{"leader"} },
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, leaderCatalog.CreateNamespace(ctx, []string{"analytics"}, nil))
+	tbl, err := followerCatalog.CreateTable(ctx, icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}, icebergcatalog.CreateTableInput{
+		MetadataLocation: metadataLocation,
+	})
+	require.NoError(t, err)
+	require.Equal(t, metadataLocation, tbl.MetadataLocation)
+	require.JSONEq(t, string(metadata), string(tbl.Metadata))
 }
 
 func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
