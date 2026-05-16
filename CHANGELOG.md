@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.212.0] - 2026-05-16 — refactor: convert scrubber Director to single-owner actor
+
+### Changed
+
+- **Scrubber Director registry ownership**: `internal/scrubber/Director`의
+  `sources`/`verifiers`/`sessions`/`dedup` 4종 map을 `sync.Mutex` 보호에서
+  단일 controller goroutine 단독 소유로 이전했다. 외부 API 시그니처와 의미
+  (FSM drop semantics, dedup 영구성, 직렬 scrub 실행)는 모두 보존되며, 운영자
+  관찰 가능한 동작 변화는 없다.
+- **Worker dispatch**: controller가 `Trigger`/`ApplyFromFSM` 처리 시점에
+  source/verifier를 resolve해 worker에 동봉 전달한다. worker→controller
+  round-trip 제거.
+- **Lifecycle 안전성**: `Stop()`이 idempotent (`sync.Once`) + `Start` 없이
+  호출 시 즉시 반환. `done` chan으로 controller/worker 종료 완료 대기 가능.
+  `Register`는 `Start` 이후 호출 시 panic으로 시점 제약 명시.
+
+### Fixed
+
+- **Pre-existing staticcheck 경고 3건**:
+  `internal/audit/committer.go` deprecated `builder.NewRecord` 교체 (SA1019),
+  `internal/storage/eccodec/shardio.go` 불필요한 for-loop 래퍼 제거 (SA4004),
+  `internal/cluster/ec.go` `ecDataShardBufferPool`을 `*[]byte`로 변경해
+  `sync.Pool` boxing alloc 회피 (SA6002).
+
+### Documentation
+
+- `docs/architecture/scrubber-director-actor.md`: actor 통합 설계 노트
+  (topology, decisions, test strategy, out-of-scope).
+- `TODOS.md`: 후속 task 3건 등록 (dedup 영구성 정책, 공통 JobActor 추상화,
+  Register constructor 옵션화).
+
 ## [0.0.211.0] - 2026-05-16 — perf: improve small-object S3 throughput
 
 ### Added
