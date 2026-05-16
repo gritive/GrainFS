@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +38,9 @@ type Stats struct {
 }
 
 // Worker periodically scans buckets and applies lifecycle rules.
+//
+// See docs/adr/0013-lifecycle-service-lock-free-publication.md for the
+// lock-free stats publication shape.
 type Worker struct {
 	store    *Store
 	backend  Scrubbable
@@ -46,9 +48,13 @@ type Worker struct {
 	interval time.Duration
 	limiter  *rate.Limiter
 
-	mu     sync.Mutex
-	stats  Stats
-	cancel context.CancelFunc
+	// lastRunNano stores time.UnixNano of the most recently completed cycle;
+	// 0 means "never run". Stats() translates 0 to a zero-value time.Time{}
+	// so admin callers that rely on IsZero see the same behaviour.
+	lastRunNano    atomic.Int64
+	objectsChecked atomic.Int64
+	expired        atomic.Int64
+	versionsPruned atomic.Int64
 }
 
 // NewWorker creates a lifecycle Worker. interval controls how often rules are applied.
@@ -62,13 +68,9 @@ func NewWorker(store *Store, backend Scrubbable, deleter ObjectDeleter, interval
 	}
 }
 
-// Run starts the lifecycle worker loop. It blocks until ctx is cancelled or Stop is called.
+// Run starts the lifecycle worker loop. It blocks until ctx is cancelled.
+// Cancellation is driven by Service.stop cancelling the workerCtx.
 func (w *Worker) Run(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	w.mu.Lock()
-	w.cancel = cancel
-	w.mu.Unlock()
-
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
@@ -83,26 +85,17 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// Stop signals the worker to finish the current cycle and exit.
-func (w *Worker) Stop() {
-	w.mu.Lock()
-	cancel := w.cancel
-	w.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
 // Stats returns a copy of the current worker statistics.
 func (w *Worker) Stats() Stats {
-	w.mu.Lock()
-	lastRun := w.stats.LastRun
-	w.mu.Unlock()
+	var lastRun time.Time
+	if n := w.lastRunNano.Load(); n != 0 {
+		lastRun = time.Unix(0, n)
+	}
 	return Stats{
 		LastRun:        lastRun,
-		ObjectsChecked: atomic.LoadInt64(&w.stats.ObjectsChecked),
-		Expired:        atomic.LoadInt64(&w.stats.Expired),
-		VersionsPruned: atomic.LoadInt64(&w.stats.VersionsPruned),
+		ObjectsChecked: w.objectsChecked.Load(),
+		Expired:        w.expired.Load(),
+		VersionsPruned: w.versionsPruned.Load(),
 	}
 }
 
@@ -141,14 +134,12 @@ func (w *Worker) runCycle(ctx context.Context) {
 				}() // drain producer to prevent goroutine leak
 				return
 			}
-			atomic.AddInt64(&w.stats.ObjectsChecked, 1)
+			w.objectsChecked.Add(1)
 			w.applyRules(ctx, obj, cfg.Rules, now)
 		}
 	}
 
-	w.mu.Lock()
-	w.stats.LastRun = now
-	w.mu.Unlock()
+	w.lastRunNano.Store(now.UnixNano())
 }
 
 func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rules []Rule, now time.Time) {
@@ -171,7 +162,7 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 				if err := w.deleter.DeleteObject(ctx, obj.Bucket, obj.Key); err != nil {
 					log.Error().Str("bucket", obj.Bucket).Str("key", obj.Key).Err(err).Msg("lifecycle: delete object")
 				} else {
-					atomic.AddInt64(&w.stats.Expired, 1)
+					w.expired.Add(1)
 				}
 				continue // skip version expiration for deleted current object
 			}
@@ -207,7 +198,7 @@ func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rule
 					if err := w.deleter.DeleteObjectVersion(obj.Bucket, obj.Key, v.VersionID); err != nil {
 						log.Error().Str("key", obj.Key).Str("versionID", v.VersionID).Err(err).Msg("lifecycle: delete version")
 					} else {
-						atomic.AddInt64(&w.stats.VersionsPruned, 1)
+						w.versionsPruned.Add(1)
 					}
 				}
 				noncurrentIdx++
