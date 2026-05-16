@@ -151,6 +151,104 @@ force_path_style = true
 	fn(mnt)
 }
 
+func withS3FSMount(t *testing.T, fn func(mnt string)) {
+	t.Helper()
+	requireColimaFUSEClient(t, "s3fs", "colima ssh -- sudo apt install -y s3fs fuse3")
+
+	name := strings.ReplaceAll(t.Name(), "/", "-")
+	mnt := "/tmp/grainfs-s3fs-" + name
+	passwdPath := "/tmp/grainfs-s3fs-" + name + ".passwd"
+	runColimaShell(t, fmt.Sprintf("umask 077 && printf '%%s:%%s' %q %q > %s", accessKey, secretKey, passwdPath))
+	runColimaSSH(t, "mkdir", "-p", mnt)
+
+	_, err := s3Client().CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	if err != nil && !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") {
+		require.NoError(t, err, "create bucket for s3fs")
+	}
+
+	out, err := colimaSSH(
+		"s3fs", bucket, mnt,
+		"-o", "passwd_file="+passwdPath,
+		"-o", "url=http://"+colimaHostIP+":"+colimaHTTPPort,
+		"-o", "use_path_request_style",
+		"-o", "nomultipart",
+	).CombinedOutput()
+	require.NoErrorf(t, err, "s3fs mount\n%s", out)
+	waitForColimaMount(t, mnt)
+
+	t.Cleanup(func() {
+		unmountColima(t, mnt)
+		colimaSSH("rmdir", mnt).Run()           //nolint:errcheck
+		colimaSSH("rm", "-f", passwdPath).Run() //nolint:errcheck
+	})
+
+	fn(mnt)
+}
+
+func withGoofysMount(t *testing.T, fn func(mnt string)) {
+	t.Helper()
+	requireColimaFUSEClient(t, "goofys", "install goofys in the Colima VM")
+
+	name := strings.ReplaceAll(t.Name(), "/", "-")
+	mnt := "/tmp/grainfs-goofys-" + name
+	runColimaSSH(t, "mkdir", "-p", mnt)
+
+	_, err := s3Client().CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	if err != nil && !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") {
+		require.NoError(t, err, "create bucket for goofys")
+	}
+
+	out, err := colimaSSH(
+		"env",
+		"AWS_ACCESS_KEY_ID="+accessKey,
+		"AWS_SECRET_ACCESS_KEY="+secretKey,
+		"AWS_REGION=us-east-1",
+		"goofys",
+		"--endpoint", "http://"+colimaHostIP+":"+colimaHTTPPort,
+		"--region", "us-east-1",
+		bucket,
+		mnt,
+	).CombinedOutput()
+	require.NoErrorf(t, err, "goofys mount\n%s", out)
+	waitForColimaMount(t, mnt)
+
+	t.Cleanup(func() {
+		unmountColima(t, mnt)
+		colimaSSH("rmdir", mnt).Run() //nolint:errcheck
+	})
+
+	fn(mnt)
+}
+
+func requireColimaFUSEClient(t *testing.T, binary, installHint string) {
+	t.Helper()
+	if out, err := colimaSSH("which", binary).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) == "" {
+		t.Skipf("%s not installed in Colima VM (try: %s)", binary, installHint)
+	}
+	if _, err := colimaSSH("test", "-e", "/dev/fuse").CombinedOutput(); err != nil {
+		t.Skip("/dev/fuse not present in Colima VM")
+	}
+}
+
+func waitForColimaMount(t *testing.T, mnt string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := colimaSSH("mountpoint", "-q", mnt).Run(); err == nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	require.NoError(t, colimaSSH("mountpoint", "-q", mnt).Run(), "mount should become ready within 15s")
+}
+
+func unmountColima(t *testing.T, mnt string) {
+	t.Helper()
+	colimaSSH("fusermount3", "-u", mnt).Run()    //nolint:errcheck
+	colimaSSH("fusermount", "-u", mnt).Run()     //nolint:errcheck
+	colimaSSH("sudo", "umount", "-l", mnt).Run() //nolint:errcheck
+}
+
 func TestMain(m *testing.M) {
 	if err := exec.Command("colima", "status").Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "colima not running — skipping all colima tests")
@@ -336,4 +434,27 @@ func TestFUSE_S3_CrossProtocol(t *testing.T) {
 
 		runColimaSSH(t, "rm", "-f", mnt+"/cross-protocol.txt", "/tmp/cross.txt")
 	})
+}
+
+func TestFUSE_S3_S3FS(t *testing.T) {
+	withS3FSMount(t, func(mnt string) {
+		exerciseFUSEClientSmoke(t, mnt, "s3fs-colima")
+	})
+}
+
+func TestFUSE_S3_Goofys(t *testing.T) {
+	withGoofysMount(t, func(mnt string) {
+		exerciseFUSEClientSmoke(t, mnt, "goofys-colima")
+	})
+}
+
+func exerciseFUSEClientSmoke(t *testing.T, mnt, content string) {
+	t.Helper()
+	path := mnt + "/client-smoke.txt"
+	runColimaShell(t, fmt.Sprintf("printf %%s %q > %s", content, path))
+	got := runColimaSSH(t, "cat", path)
+	require.Equal(t, content, got)
+	require.Contains(t, runColimaSSH(t, "ls", mnt), "client-smoke.txt")
+	runColimaSSH(t, "rm", "-f", path)
+	require.Error(t, colimaSSH("test", "-f", path).Run(), "deleted file should not remain visible")
 }

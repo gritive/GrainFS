@@ -54,7 +54,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 ### 성능 규칙
 - Erasure Coding: Reed-Solomon 4+2 기본, 가변 설정 가능
 - QUIC 멀티플렉싱으로 클러스터 통신
-- 벤치마크: `make bench-s3-compat-compare`로 MinIO warp 기반 GrainFS/MinIO/RustFS S3 PUT/GET 비교 측정, `PUT_MATRIX=1 make bench-cluster`로 클러스터 PUT 포트/크기 매트릭스 측정, `PUT_TRACE=1`로 benchmark-only PUT trace 리포트 생성, `make bench-iceberg-table`/`make bench-iceberg-table-cluster`로 Go 기반 Iceberg table lifecycle 측정
+- 벤치마크: `make bench`/`make bench-cluster`/`make bench-s3-compat-compare`로 MinIO warp 기반 S3 PUT/GET/DELETE 측정, `make bench-iceberg-table`/`make bench-iceberg-table-cluster`로 `warp iceberg` 기반 Iceberg REST Catalog 측정
 
 ## Persona Test
 

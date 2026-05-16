@@ -17,6 +17,10 @@ func marshalObject(obj *Object) ([]byte, error) {
 	ctOff := b.CreateString(obj.ContentType)
 	etagOff := b.CreateString(obj.ETag)
 	metadataOff := buildUserMetadataVector(b, obj.UserMetadata)
+	var sseOff flatbuffers.UOffsetT
+	if obj.SSEAlgorithm != "" {
+		sseOff = b.CreateString(obj.SSEAlgorithm)
+	}
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -26,6 +30,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	storagepb.ObjectAddAcl(b, obj.ACL)
 	if metadataOff != 0 {
 		storagepb.ObjectAddUserMetadata(b, metadataOff)
+	}
+	if sseOff != 0 {
+		storagepb.ObjectAddSseAlgorithm(b, sseOff)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -55,6 +62,7 @@ func unmarshalObject(data []byte) (obj *Object, err error) {
 		LastModified: t.LastModified(),
 		ACL:          t.Acl(),
 		UserMetadata: readUserMetadata(t.UserMetadataLength(), t.UserMetadata),
+		SSEAlgorithm: string(t.SseAlgorithm()),
 	}, nil
 }
 

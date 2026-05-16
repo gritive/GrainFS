@@ -214,6 +214,17 @@ func (b *LocalBackend) PutObject(ctx context.Context, bucket, key string, r io.R
 }
 
 func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error) {
+	return b.PutObjectWithRequest(ctx, PutObjectRequest{
+		Bucket:       bucket,
+		Key:          key,
+		Body:         r,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
+	})
+}
+
+func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRequest) (*Object, error) {
+	bucket, key := req.Bucket, req.Key
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -255,7 +266,7 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	if b.encryptor != nil {
 		_ = tmp.Close()
 		h, release := hashForBucket(bucket)
-		size, etag, cerr = writeEncryptedObjectFileWithHash(tmpPath, b.encryptor, encryptedObjectFileDomain(bucket, key), r, h)
+		size, etag, cerr = writeEncryptedObjectFileWithHash(tmpPath, b.encryptor, encryptedObjectFileDomain(bucket, key), req.Body, h)
 		release()
 		if cerr != nil {
 			cleanupTmp()
@@ -264,7 +275,7 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	} else {
 		h, release := hashForBucket(bucket)
 		w := io.MultiWriter(tmp, h)
-		size, cerr = io.Copy(w, r)
+		size, cerr = io.Copy(w, req.Body)
 		if cerr == nil {
 			etag = etagFromHash(h)
 		}
@@ -295,10 +306,14 @@ func (b *LocalBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	obj := &Object{
 		Key:          key,
 		Size:         size,
-		ContentType:  contentType,
+		ContentType:  req.ContentType,
 		ETag:         etag,
 		LastModified: now,
-		UserMetadata: cloneStringMap(userMetadata),
+		UserMetadata: cloneStringMap(req.UserMetadata),
+		SSEAlgorithm: req.SystemMetadata.SSEAlgorithm,
+	}
+	if req.ACL != nil {
+		obj.ACL = *req.ACL
 	}
 
 	meta, err := marshalObject(obj)
@@ -755,7 +770,14 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 	}
 	defer rc.Close()
 
-	return b.PutObjectWithUserMetadata(ctx, dstBucket, dstKey, rc, obj.ContentType, obj.UserMetadata)
+	return b.PutObjectWithRequest(ctx, PutObjectRequest{
+		Bucket:         dstBucket,
+		Key:            dstKey,
+		Body:           rc,
+		ContentType:    obj.ContentType,
+		UserMetadata:   obj.UserMetadata,
+		SystemMetadata: ObjectSystemMetadata{SSEAlgorithm: obj.SSEAlgorithm},
+	})
 }
 
 func (b *LocalBackend) policyKey(bucket string) []byte {
@@ -835,12 +857,13 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 				return err
 			}
 			objs = append(objs, SnapshotObject{
-				Bucket:      bucket,
-				Key:         key,
-				ETag:        obj.ETag,
-				Size:        obj.Size,
-				ContentType: obj.ContentType,
-				Modified:    obj.LastModified,
+				Bucket:       bucket,
+				Key:          key,
+				ETag:         obj.ETag,
+				Size:         obj.Size,
+				ContentType:  obj.ContentType,
+				Modified:     obj.LastModified,
+				SSEAlgorithm: obj.SSEAlgorithm,
 			})
 		}
 		return nil
@@ -896,7 +919,7 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 			continue
 		}
 		// Restore metadata
-		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified}
+		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm}
 		meta, err := marshalObject(obj)
 		if err != nil {
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)

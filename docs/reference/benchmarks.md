@@ -23,16 +23,11 @@ object sizes, concurrency, and cold/warm-cache rules.
 
 | Target                                        | Scope                                              | Primary artifacts                                                   |
 | --------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
-| `make bench`                                  | Single-node S3 object PUT/GET/DELETE               | `benchmarks/report.json`                                            |
-| `make bench-cluster`                          | Multi-node S3 object benchmark                     | `benchmarks/report.json`, cluster logs                              |
-| `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload  | `benchmarks/profiles/s3-compat-compare-*`                           |
-| `PUT_MATRIX=1 make bench-cluster`             | Cluster PUT matrix by ingress port and object size | `benchmarks/put-matrix-port<port>-<small\|large>.json`              |
-| `PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster` | PUT matrix plus per-node stage tracing             | owner-only JSONL traces and `benchmarks/put_trace_report.js` output |
-| `make bench-profile`                          | Multi-node S3 benchmark with pprof                 | `/tmp/grainfs-bench-*.out`                                          |
-| `make bench-topology-get`                     | Topology-aware GET profile                         | topology GET report and pprof files                                 |
-| `make bench-topology-get-matrix`              | Topology-aware GET matrix                          | matrix reports and pprof files                                      |
-| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog table API via Go runner | `benchmarks/iceberg_table_report.json`                              |
-| `make bench-iceberg-table-cluster`            | Multi-node Iceberg table API via Go runner               | `benchmarks/iceberg_table_report.json`                              |
+| `make bench`                                  | Single-node S3 `warp` PUT/GET workload             | `benchmarks/profiles/s3-compat-compare-*`                           |
+| `make bench-cluster`                          | 3-node S3 `warp` PUT/GET workload                  | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
+| `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload | `benchmarks/profiles/s3-compat-compare-*`                           |
+| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog via `warp iceberg` | `benchmarks/profiles/iceberg-table-*`                               |
+| `make bench-iceberg-table-cluster`            | Multi-node Iceberg REST Catalog via `warp iceberg`  | `benchmarks/profiles/iceberg-table-*`, cluster logs                 |
 | `make bench-nfs`                              | Single-node NFS fio profile via Colima             | `benchmarks/profiles/nfs-*/fio_output.txt`                          |
 | `make bench-nfs-cluster`                      | Multi-node NFS fio profile                         | `benchmarks/profiles/nfs-*`                                         |
 | `make bench-nfs-multi`                        | Multi-bucket NFS export profile                    | `benchmarks/profiles/nfs-multi-*`                                   |
@@ -41,7 +36,6 @@ object sizes, concurrency, and cold/warm-cache rules.
 | `make bench-9p`                               | Single-node 9P profile                             | `benchmarks/profiles/9p-*`                                          |
 | `make bench-9p-cluster`                       | Multi-node 9P profile                              | `benchmarks/profiles/9p-*`                                          |
 | `make bench-fuse-s3-colima`                   | rclone direct S3 vs rclone mount throughput        | Go benchmark output                                                 |
-| `make bench-directio-s3`                      | Direct I/O S3 benchmark                            | script output                                                       |
 
 ## Result Interpretation
 
@@ -51,7 +45,7 @@ Use these metrics consistently:
 - Latency: p50, p95, p99, and max when available.
 - Resource use: CPU, RSS, heap, goroutine count, and file descriptors when available.
 - Cluster behavior: ingress node, owner node, forwarded bytes, leader-hint retries,
-  meta-index proposal count, and slowest shard stage when PUT tracing is enabled.
+  meta-index proposal count, and slowest shard stage when tracing is enabled.
 - Error rate: all non-2xx protocol responses and transport/client errors.
   Benchmark runners should exit non-zero when any measured request fails.
 
@@ -86,9 +80,15 @@ such as license-gated MinIO AIStor binaries. Set
 separately from `warp analyze`, using the same signed S3 requests, object size,
 concurrency, duration, bucket lookup mode, `roundrobin` host selection, and
 warm-read rule for every target. Cluster endpoints are passed as comma-separated
-host lists to `warp`. The previous k6 mixed workload is not used for
-GrainFS/MinIO/RustFS comparison claims because it is not the shared benchmark
-surface.
+host lists to `warp`. The script also accepts `WARP_OPS=put,get,delete` for
+batch delete measurements through `warp delete --batch`. k6-based S3 benchmark
+scripts have been removed; S3 performance claims should use `warp`.
+
+Iceberg catalog benchmarks also use MinIO `warp` through
+`make bench-iceberg-table` and `make bench-iceberg-table-cluster`. The default
+Iceberg profile is `catalog-mixed` with views and update operations disabled so
+the workload runs cleanly against the current table catalog surface; commit-heavy
+update benchmarking is tracked separately.
 
 ## Latest Local Result
 
@@ -140,7 +140,7 @@ Observed deltas:
 - Raw summary:
   `benchmarks/profiles/review-impact-cluster-grainfs-nosync-20260516-171937/summary.md`.
 
-The official comparison no longer uses the old k6 mixed workload.
+The official comparison uses `warp`; the old k6 mixed workload has been removed.
 
 ## Updating Results
 

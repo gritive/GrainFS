@@ -70,6 +70,7 @@ type PutObjectMetaCmd struct {
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
 	UserMetadata     map[string]string
+	SSEAlgorithm     string
 	// PreserveLatest writes this version without moving lat:{bucket}/{key}.
 	// Snapshot restore uses it for non-latest versions.
 	PreserveLatest bool

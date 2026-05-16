@@ -133,6 +133,24 @@ func TestIcebergConfigUsesJSONAndBypassesS3Routes(t *testing.T) {
 	require.Equal(t, "s3://grainfs-tables/warehouse", got.Defaults["warehouse"])
 }
 
+func TestIcebergAIStorAliasSupportsWarpWarehouseAndConfig(t *testing.T) {
+	base := setupTestServer(t)
+
+	postIcebergJSON(t, base+"/_iceberg/v1/warehouses", `{"name":"warehouse"}`, http.StatusOK)
+
+	resp, err := http.Get(base + "/_iceberg/v1/config?warehouse=warehouse")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+	var got struct {
+		Defaults map[string]string `json:"defaults"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, "s3://grainfs-tables/warehouse", got.Defaults["warehouse"])
+}
+
 func TestIcebergConfigUsesInjectedCatalogInterface(t *testing.T) {
 	base := setupTestServerWithOptions(t, WithIcebergCatalog(fakeIcebergCatalog{warehouse: "s3://custom/warehouse"}))
 

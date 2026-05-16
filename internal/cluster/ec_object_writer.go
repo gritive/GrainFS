@@ -47,6 +47,7 @@ type ecObjectWritePlan struct {
 	RingVersion      RingVersion
 	ContentType      string
 	UserMetadata     map[string]string
+	SSEAlgorithm     string
 }
 
 type ecObjectWriteResult struct {

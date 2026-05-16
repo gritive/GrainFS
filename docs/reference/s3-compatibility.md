@@ -44,15 +44,20 @@ binary and data compatibility across rolling upgrades.
 | Access control    | ACL header on object write/copy         | Supported     |                                                                                  |
 | Bucket controls   | Versioning                              | Supported     |                                                                                  |
 | Bucket controls   | Lifecycle config replication            | Supported     | Replicates lifecycle configuration through cluster metadata.                     |
-| Bucket controls   | Lifecycle expiration/transition effects | Not supported | Configuration replication exists; S3 lifecycle action semantics are not claimed. |
+| Bucket controls   | Lifecycle Expiration.Days               | Supported     | Lifecycle worker tests cover current-version expiration through the normal delete path; cluster e2e covers lifecycle config replication. |
+| Bucket controls   | Lifecycle transition effects            | Not supported | Storage-class transitions are not implemented.                                  |
+| Bucket controls   | Lifecycle noncurrent-version actions    | Not supported | Noncurrent-version lifecycle semantics are not claimed.                         |
+| Bucket controls   | Lifecycle multipart-abort actions       | Not supported | Multipart abort lifecycle rules are not implemented.                            |
 | Bucket controls   | Object tagging                          | Not supported |                                                                                  |
 | Bucket controls   | CORS                                    | Not supported |                                                                                  |
 | Bucket controls   | Static website hosting                  | Not supported |                                                                                  |
 | Bucket controls   | Bucket notification configuration       | Not supported | Internal events exist, but S3 bucket notification compatibility is not claimed.  |
 | Bucket controls   | Bucket replication                      | Not supported | `GrainFS` has Raft/EC replication; S3 bucket replication is not claimed.           |
-| Object governance | Object Lock, retention, legal hold      | Not supported |                                                                                  |
+| Object governance | Object Lock / retention / legal hold    | Not supported | Blocked on a separate governance design covering versioning, deletes, lifecycle, and permissions. |
 | Query             | S3 Select                               | Not supported |                                                                                  |
-| Encryption        | SSE-S3/SSE-KMS/SSE-C S3 headers         | Not supported | Stored bytes are encrypted; S3 SSE headers, KMS keys, and SSE-C keys are not claimed. |
+| Encryption        | SSE-S3 headers                          | Supported     | Server tests and `TestS3SSE` e2e cover AES256 PUT response, HEAD/GET response, and CopyObject header preservation. |
+| Encryption        | SSE-KMS headers                         | Not supported | KMS key semantics are not implemented; fail-closed server tests reject KMS headers with `NotImplemented`. |
+| Encryption        | SSE-C headers                           | Not supported | Customer-supplied key semantics are not implemented; fail-closed server tests reject SSE-C headers with `NotImplemented`. |
 
 ## Client Compatibility
 
@@ -62,5 +67,6 @@ binary and data compatibility across rolling upgrades.
 | boto3                       | Supported  |                                                                                                    |
 | rclone direct S3            | Supported  |                                                                                                    |
 | rclone mount / FUSE-over-S3 | Partial    | S3 semantics mean rename is copy+delete and POSIX chmod/chown/locking are not supported over FUSE. |
-| s3fs/goofys                 | Not supported | No compatibility claim without real-client coverage.                                               |
-| MinIO client (`mc`)         | Not supported | No compatibility claim without real-client coverage.                                               |
+| s3fs                        | Not supported | `TestFUSE_S3_S3FS` must pass in the Colima Linux VM via `make test-s3-client-smoke-colima` before promotion. |
+| goofys                      | Not supported | `TestFUSE_S3_Goofys` must pass in the Colima Linux VM via `make test-s3-client-smoke-colima` before promotion. |
+| MinIO client (`mc`)         | Supported  | `TestS3ClientSmoke/MinIOMC` covers write, read, list, delete, and deletion verification.           |

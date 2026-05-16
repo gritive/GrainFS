@@ -47,6 +47,7 @@ type Worker struct {
 	deleter  ObjectDeleter
 	interval time.Duration
 	limiter  *rate.Limiter
+	now      func() time.Time
 
 	// lastRunNano stores time.UnixNano of the most recently completed cycle;
 	// 0 means "never run". Stats() translates 0 to a zero-value time.Time{}
@@ -65,6 +66,7 @@ func NewWorker(store *Store, backend Scrubbable, deleter ObjectDeleter, interval
 		deleter:  deleter,
 		interval: interval,
 		limiter:  rate.NewLimiter(100, 10), // 100 deletes/sec, burst 10
+		now:      time.Now,
 	}
 }
 
@@ -100,7 +102,7 @@ func (w *Worker) Stats() Stats {
 }
 
 func (w *Worker) runCycle(ctx context.Context) {
-	now := time.Now()
+	now := w.currentTime()
 	buckets, err := w.backend.ListBuckets(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("lifecycle: list buckets")
@@ -140,6 +142,13 @@ func (w *Worker) runCycle(ctx context.Context) {
 	}
 
 	w.lastRunNano.Store(now.UnixNano())
+}
+
+func (w *Worker) currentTime() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
 }
 
 func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rules []Rule, now time.Time) {

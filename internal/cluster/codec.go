@@ -27,6 +27,7 @@ type objectMeta struct {
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
 	UserMetadata     map[string]string
+	SSEAlgorithm     string
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -111,6 +112,10 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	etagOff := b.CreateString(c.ETag)
 	vidOff := b.CreateString(c.VersionID)
 	pgOff := b.CreateString(c.PlacementGroupID)
+	var sseOff flatbuffers.UOffsetT
+	if c.SSEAlgorithm != "" {
+		sseOff = b.CreateString(c.SSEAlgorithm)
+	}
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
@@ -140,6 +145,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		clusterpb.PutObjectMetaCmdAddIsDeleteMarker(b, true)
 	}
 	clusterpb.PutObjectMetaCmdAddPlacementGroupId(b, pgOff)
+	if sseOff != 0 {
+		clusterpb.PutObjectMetaCmdAddSseAlgorithm(b, sseOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -171,6 +179,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
+		SSEAlgorithm:     string(t.SseAlgorithm()),
 		PreserveLatest:   t.PreserveLatest(),
 		IsDeleteMarker:   t.IsDeleteMarker(),
 	}, nil
@@ -415,6 +424,10 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	ctOff := b.CreateString(m.ContentType)
 	etagOff := b.CreateString(m.ETag)
 	pgOff := b.CreateString(m.PlacementGroupID)
+	var sseOff flatbuffers.UOffsetT
+	if m.SSEAlgorithm != "" {
+		sseOff = b.CreateString(m.SSEAlgorithm)
+	}
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(m.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
@@ -437,6 +450,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		clusterpb.ObjectMetaAddUserMetadata(b, metadataOff)
 	}
 	clusterpb.ObjectMetaAddPlacementGroupId(b, pgOff)
+	if sseOff != 0 {
+		clusterpb.ObjectMetaAddSseAlgorithm(b, sseOff)
+	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -467,6 +483,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
+		SSEAlgorithm:     string(t.SseAlgorithm()),
 	}, nil
 }
 

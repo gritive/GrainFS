@@ -55,6 +55,18 @@ func (b *Backend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, k
 	return storage.NewOperations(b.Backend).PutObjectWithUserMetadataResult(ctx, bucket, key, r, contentType, userMetadata)
 }
 
+func (b *Backend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	putter, ok := b.Backend.(storage.RequestPutter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithRequest(ctx, req)
+}
+
+func (b *Backend) PutObjectWithRequestResult(ctx context.Context, req storage.PutObjectRequest) (*storage.PutObjectResult, error) {
+	return storage.NewOperations(b.Backend).PutObjectWithRequestResult(ctx, req)
+}
+
 func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
 	type asyncPutter interface {
 		PutObjectAsync(context.Context, string, string, io.Reader, string) (*storage.Object, func() error, error)

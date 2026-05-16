@@ -9,10 +9,11 @@ const (
 	routePathUI      = "/ui"
 	routePathUIRoot  = "/ui/"
 
-	routePrefixAPI     = "/api/"
-	routePrefixAdmin   = "/admin/"
-	routePrefixIceberg = "/iceberg/"
-	routePrefixUI      = "/ui/"
+	routePrefixAPI           = "/api/"
+	routePrefixAdmin         = "/admin/"
+	routePrefixIceberg       = "/iceberg/"
+	routePrefixIcebergAIStor = "/_iceberg/"
+	routePrefixUI            = "/ui/"
 
 	routePathEvents            = "/api/events"
 	routePathHealEventsStream  = "/api/events/heal/stream"

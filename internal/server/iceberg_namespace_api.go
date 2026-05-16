@@ -28,6 +28,30 @@ func (s *Server) icebergConfig(_ context.Context, c *app.RequestContext) {
 	})
 }
 
+func (s *Server) icebergEnsureWarehouse(_ context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
+	store, ok := s.requireIceberg(c)
+	if !ok {
+		return
+	}
+	c.JSON(consts.StatusOK, map[string]string{
+		"name":      string(c.QueryArgs().Peek("name")),
+		"warehouse": store.Warehouse(),
+	})
+}
+
+func (s *Server) icebergDeleteWarehouse(_ context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
+		return
+	}
+	if _, ok := s.requireIceberg(c); !ok {
+		return
+	}
+	c.Status(consts.StatusNoContent)
+}
+
 func (s *Server) icebergListNamespaces(ctx context.Context, c *app.RequestContext) {
 	store, ok := s.requireIceberg(c)
 	if !ok {

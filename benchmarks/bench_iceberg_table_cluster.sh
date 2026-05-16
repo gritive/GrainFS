@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Iceberg REST Catalog table API cluster benchmark.
-# Uses the same Go workload runner as bench_iceberg_table.sh, changing only topology.
+# Iceberg REST Catalog cluster benchmark using MinIO warp.
 
 set -euo pipefail
 
@@ -14,14 +13,29 @@ BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-iceberg-table-cluster-bench}"
 PROFILE="${PROFILE:-0}"
 VUS="${VUS:-${MAX_VUS:-10}}"
 DURATION="${DURATION:-30s}"
-RAMP_UP="${RAMP_UP:-10s}"
-RAMP_DOWN="${RAMP_DOWN:-5s}"
+WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
+ICEBERG_WARP_COMMAND="${ICEBERG_WARP_COMMAND:-catalog-mixed}"
+ICEBERG_CATALOG="${ICEBERG_CATALOG:-warehouse}"
+ICEBERG_BUCKET="${ICEBERG_BUCKET:-grainfs-tables}"
+ICEBERG_BASE_LOCATION="${ICEBERG_BASE_LOCATION:-s3://${ICEBERG_BUCKET}}"
+ICEBERG_NAMESPACE_WIDTH="${ICEBERG_NAMESPACE_WIDTH:-1}"
+ICEBERG_NAMESPACE_DEPTH="${ICEBERG_NAMESPACE_DEPTH:-1}"
+ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-4}"
+ICEBERG_VIEWS_PER_NS="${ICEBERG_VIEWS_PER_NS:-0}"
+ICEBERG_COLUMNS="${ICEBERG_COLUMNS:-10}"
+ICEBERG_PROPERTIES="${ICEBERG_PROPERTIES:-5}"
+ICEBERG_NS_UPDATE_DISTRIB="${ICEBERG_NS_UPDATE_DISTRIB:-0}"
+ICEBERG_TABLE_UPDATE_DISTRIB="${ICEBERG_TABLE_UPDATE_DISTRIB:-0}"
+ICEBERG_VIEW_UPDATE_DISTRIB="${ICEBERG_VIEW_UPDATE_DISTRIB:-0}"
+WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
+WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
   echo "[bench] building grainfs..."
   make build
 fi
 bench_require_binary "$BINARY"
+bench_require_command "$WARP_BIN" "brew install minio/stable/warp"
 
 if [[ "$NODE_COUNT" -lt 2 ]]; then
   echo "[error] NODE_COUNT must be >= 2 for clustered Iceberg profile" >&2
@@ -147,11 +161,13 @@ TARGET_PORT="$LEADER_PORT"
 echo "[bench] writable target node-$TARGET_INDEX on :$TARGET_PORT"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
-PROFILE_DIR=""
+echo "[bench] creating Iceberg warehouse bucket ($ICEBERG_BUCKET)..."
+bench_create_bucket_admin_retry "$BINARY" "$BENCH_DIR/n$TARGET_INDEX" "$ICEBERG_BUCKET"
+
+PROFILE_DIR="${PROFILE_ROOT:-benchmarks/profiles/iceberg-table-${NODE_COUNT}-node-cluster-warp-$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$PROFILE_DIR"
 PPROF_BG_PID=""
 if [[ "$PROFILE" == "1" ]]; then
-  PROFILE_DIR="benchmarks/profiles/iceberg-table-${NODE_COUNT}-node-cluster-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$PROFILE_DIR"
   target_pprof="$(pprof_port "$TARGET_INDEX")"
   curl -sf "http://127.0.0.1:$target_pprof/debug/pprof/heap" \
     -o "$PROFILE_DIR/heap_pre.pb.gz" && echo "[pprof] heap_pre.pb.gz saved" || true
@@ -164,15 +180,85 @@ if [[ "$PROFILE" == "1" ]]; then
   PPROF_BG_PID=$!
 fi
 
-go run ./benchmarks/iceberg_table_bench \
-  -base-url "http://127.0.0.1:$TARGET_PORT" \
-  -access-key "$ACCESS_KEY" \
-  -secret-key "$SECRET_KEY" \
-  -concurrency "$VUS" \
-  -duration "$DURATION" \
-  -namespace-prefix "bench_ns" \
-  -report "benchmarks/iceberg_table_report.json" \
-  "$@" || BENCH_EXIT=$?
+hosts=""
+for i in $(seq 0 $((NODE_COUNT - 1))); do
+  part="127.0.0.1:$(http_port "$i")"
+  if [[ -z "$hosts" ]]; then
+    hosts="$part"
+  else
+    hosts="${hosts},${part}"
+  fi
+done
+benchdata="$PROFILE_DIR/warp.data"
+args=(
+  iceberg "$ICEBERG_WARP_COMMAND"
+  --no-color
+  --host "$hosts"
+  --access-key "$ACCESS_KEY"
+  --secret-key "$SECRET_KEY"
+  --bucket "$ICEBERG_BUCKET"
+  --catalog-name "$ICEBERG_CATALOG"
+  --base-location "$ICEBERG_BASE_LOCATION"
+  --namespace-width "$ICEBERG_NAMESPACE_WIDTH"
+  --namespace-depth "$ICEBERG_NAMESPACE_DEPTH"
+  --tables-per-ns "$ICEBERG_TABLES_PER_NS"
+  --concurrent "$VUS"
+  --duration "$DURATION"
+  --host-select "$WARP_HOST_SELECT"
+  --lookup path
+  --benchdata "$benchdata"
+)
+case "$ICEBERG_WARP_COMMAND" in
+  catalog-read|catalog-mixed)
+    args+=(
+      --views-per-ns "$ICEBERG_VIEWS_PER_NS"
+      --columns "$ICEBERG_COLUMNS"
+      --properties "$ICEBERG_PROPERTIES"
+    )
+    if [[ "$ICEBERG_WARP_COMMAND" == "catalog-mixed" ]]; then
+      args+=(
+        --ns-update-distrib "$ICEBERG_NS_UPDATE_DISTRIB"
+        --table-update-distrib "$ICEBERG_TABLE_UPDATE_DISTRIB"
+        --view-update-distrib "$ICEBERG_VIEW_UPDATE_DISTRIB"
+      )
+    fi
+    ;;
+  catalog-commits)
+    args+=(--views-per-ns "$ICEBERG_VIEWS_PER_NS")
+    ;;
+  sustained)
+    args+=(--columns "$ICEBERG_COLUMNS" --properties "$ICEBERG_PROPERTIES")
+    ;;
+  *)
+    echo "[error] unsupported ICEBERG_WARP_COMMAND: $ICEBERG_WARP_COMMAND" >&2
+    exit 1
+    ;;
+esac
+if [[ "$WARP_NOCLEAR" == "1" ]]; then
+  args+=(--noclear)
+fi
+
+echo "[bench] running warp iceberg ${ICEBERG_WARP_COMMAND}"
+"$WARP_BIN" "${args[@]}" "$@" >"$PROFILE_DIR/warp.out" 2>&1 || BENCH_EXIT=$?
+data_file="$benchdata.json.zst"
+if [[ -f "$data_file" ]]; then
+  "$WARP_BIN" analyze "$data_file" >"$PROFILE_DIR/analyze.out" 2>&1 || true
+fi
+{
+  echo "# Iceberg warp cluster benchmark"
+  echo
+  echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "- commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "- command: ${ICEBERG_WARP_COMMAND}"
+  echo "- hosts: ${hosts}"
+  echo "- catalog: ${ICEBERG_CATALOG}"
+  echo "- bucket: ${ICEBERG_BUCKET}"
+  echo "- base location: ${ICEBERG_BASE_LOCATION}"
+  echo "- concurrency: ${VUS}"
+  echo "- duration: ${DURATION}"
+  echo "- update distribution: ns=${ICEBERG_NS_UPDATE_DISTRIB}, table=${ICEBERG_TABLE_UPDATE_DISTRIB}, view=${ICEBERG_VIEW_UPDATE_DISTRIB}"
+  echo "- raw artifacts: ${PROFILE_DIR}"
+} >"$PROFILE_DIR/summary.md"
 
 [[ -n "$PPROF_BG_PID" ]] && wait "$PPROF_BG_PID" 2>/dev/null || true
 
@@ -184,5 +270,5 @@ if [[ "$PROFILE" == "1" ]]; then
   echo "[pprof] profiles saved to $PROFILE_DIR/"
 fi
 
-echo "[bench] done. report: benchmarks/iceberg_table_report.json"
+echo "[bench] done. artifacts: $PROFILE_DIR"
 exit "${BENCH_EXIT:-0}"

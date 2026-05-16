@@ -21,6 +21,7 @@ func TestRouteAuthnPolicyForPath_DocumentsCurrentBypassSurface(t *testing.T) {
 		{path: "/api/audit/s3", want: routeAuthnAnonymous},
 		{path: "/api/cache/status", want: routeAuthnAnonymous},
 		{path: "/iceberg/v1/config", want: routeAuthnAnonymous},
+		{path: "/_iceberg/v1/config", want: routeAuthnAnonymous},
 		{path: "/admin/health/raft", want: routeAuthnLocalhost},
 		{path: "/bucket", want: routeAuthnSigV4},
 		{path: "/bucket/key", want: routeAuthnSigV4},
@@ -50,6 +51,7 @@ func TestRouteSurfaceForPath_DocumentsS3AndNonS3Surfaces(t *testing.T) {
 		{path: "/api/admin/config", want: routeSurfaceOps},
 		{path: "/admin/health/raft", want: routeSurfaceAdmin},
 		{path: "/iceberg/v1/config", want: routeSurfaceIceberg},
+		{path: "/_iceberg/v1/config", want: routeSurfaceIceberg},
 		{path: "/ui/", want: routeSurfaceUI},
 	}
 
@@ -76,6 +78,7 @@ func TestS3PathBucketKey_UsesRouteSurface(t *testing.T) {
 		{path: "/api/admin/config", wantBucket: "", wantKey: ""},
 		{path: "/admin/health/raft", wantBucket: "", wantKey: ""},
 		{path: "/iceberg/v1/config", wantBucket: "", wantKey: ""},
+		{path: "/_iceberg/v1/config", wantBucket: "", wantKey: ""},
 		{path: "/ui/api/volumes", wantBucket: "", wantKey: ""},
 	}
 
@@ -98,6 +101,7 @@ func TestRouteSkipsS3Authz_DoesNotTreatEveryAPIPathAsOps(t *testing.T) {
 		{path: "/metrics", want: true},
 		{path: "/ui/", want: true},
 		{path: "/iceberg/v1/config", want: true},
+		{path: "/_iceberg/v1/config", want: true},
 		{path: "/admin/health/raft", want: true},
 		{path: "/api/foo", want: false},
 		{path: "/bucket/key", want: false},

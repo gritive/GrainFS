@@ -33,6 +33,7 @@ var routeSurfaceManifest = []routeSurfaceEntry{
 	{pathPrefix: routePrefixAPI, surface: routeSurfaceOps, authn: routeAuthnSigV4},
 	{pathPrefix: routePrefixUI, surface: routeSurfaceUI, authn: routeAuthnAnonymous, skipS3Authz: true},
 	{pathPrefix: routePrefixIceberg, surface: routeSurfaceIceberg, authn: routeAuthnAnonymous, skipS3Authz: true},
+	{pathPrefix: routePrefixIcebergAIStor, surface: routeSurfaceIceberg, authn: routeAuthnAnonymous, skipS3Authz: true},
 	{pathPrefix: routePrefixAdmin, surface: routeSurfaceAdmin, authn: routeAuthnLocalhost, skipS3Authz: true},
 	{pathExact: routePathEvents, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathHealEventsStream, surface: routeSurfaceOps, authn: routeAuthnAnonymous},

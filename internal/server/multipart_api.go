@@ -21,6 +21,12 @@ func (s *Server) handlePost(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 
+	// POST /:bucket?delete -> DeleteObjects
+	if key == "" && c.QueryArgs().Has("delete") {
+		s.deleteObjects(ctx, c, bucket)
+		return
+	}
+
 	// POST /:bucket/:key?uploads -> CreateMultipartUpload
 	if c.QueryArgs().Has("uploads") {
 		s.createMultipartUpload(ctx, c, bucket, key)

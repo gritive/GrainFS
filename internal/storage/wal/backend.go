@@ -90,6 +90,44 @@ func (b *Backend) PutObjectWithUserMetadataResult(ctx context.Context, bucket, k
 	return result, nil
 }
 
+func (b *Backend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	putter, ok := b.Backend.(storage.RequestPutter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	obj, err := putter.PutObjectWithRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      req.Bucket,
+		Key:         req.Key,
+		ETag:        obj.ETag,
+		ContentType: obj.ContentType,
+		Size:        obj.Size,
+		VersionID:   obj.VersionID,
+	})
+	return obj, nil
+}
+
+func (b *Backend) PutObjectWithRequestResult(ctx context.Context, req storage.PutObjectRequest) (*storage.PutObjectResult, error) {
+	result, err := storage.NewOperations(b.Backend).PutObjectWithRequestResult(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      req.Bucket,
+		Key:         req.Key,
+		ETag:        result.Object.ETag,
+		ContentType: req.ContentType,
+		Size:        result.Object.Size,
+		VersionID:   result.Object.VersionID,
+	})
+	return result, nil
+}
+
 // PutObjectAsync delegates to the inner backend's write-back path and appends
 // the WAL entry inside the commitFn so PITR records only committed objects.
 func (b *Backend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {

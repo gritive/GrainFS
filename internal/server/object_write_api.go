@@ -61,6 +61,11 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}()
 
 	prepareStart := time.Now()
+	systemMetadata, sseErr := parseObjectSSEHeaders(c)
+	if sseErr != nil {
+		writeSSEHeaderError(c, sseErr)
+		return
+	}
 	contentType := putObjectContentType(c)
 	rawBody, err := putObjectBody(c)
 	if err != nil {
@@ -74,7 +79,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		Bytes: int64(len(rawBody)),
 	})
 
-	result, putErr := s.putObjectWithUserMetadata(ctx, bucket, key, body, contentType, putObjectACL(c), userMetadata)
+	result, putErr := s.putObjectWithUserMetadata(ctx, bucket, key, body, contentType, putObjectACL(c), userMetadata, systemMetadata)
 	if putErr != nil {
 		mapError(c, putErr)
 		return
@@ -83,6 +88,7 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 
 	responseStart := time.Now()
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
+	writeSSEAlgorithmHeader(c, obj.SSEAlgorithm)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
 	}

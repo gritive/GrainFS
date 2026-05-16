@@ -27,7 +27,19 @@ func TestCompatibilityMatricesDoNotUseNotTestedStatus(t *testing.T) {
 				t.Fatalf("%s uses Not tested; compatibility matrices must choose Supported, Partial, Not supported, or Not planned", file)
 			}
 			if file == "s3-compatibility.md" {
+				if err := validateRequiredS3CompatibilityRows(string(body)); err != nil {
+					t.Fatal(err)
+				}
 				if err := validateProductionEssentialS3Evidence(string(body)); err != nil {
+					t.Fatal(err)
+				}
+				if err := validateUnsupportedS3FailClosedEvidence(string(body)); err != nil {
+					t.Fatal(err)
+				}
+				if err := validateObjectGovernanceBoundary(string(body)); err != nil {
+					t.Fatal(err)
+				}
+				if err := validateClientSmokeEvidence(string(body)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -87,6 +99,113 @@ func validateProductionEssentialS3Evidence(markdown string) error {
 	return nil
 }
 
+func validateUnsupportedS3FailClosedEvidence(markdown string) error {
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 4 {
+			continue
+		}
+
+		operation := cells[1]
+		status := strings.ToLower(cells[2])
+		notes := strings.ToLower(cells[3])
+		if status != "not supported" || !requiresFailClosedEvidence(operation) {
+			continue
+		}
+		if strings.Contains(notes, "fail-closed") && strings.Contains(notes, "server tests") {
+			continue
+		}
+
+		return fmt.Errorf("Not supported S3 row %q must include fail-closed server test evidence in Notes", operation)
+	}
+
+	return nil
+}
+
+func validateRequiredS3CompatibilityRows(markdown string) error {
+	required := []string{
+		"Lifecycle Expiration.Days",
+		"Lifecycle transition effects",
+		"SSE-S3 headers",
+		"SSE-KMS headers",
+		"SSE-C headers",
+		"Object Lock / retention / legal hold",
+	}
+	rows := make(map[string]bool, len(required))
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 4 {
+			continue
+		}
+		rows[cells[1]] = true
+	}
+
+	for _, operation := range required {
+		if !rows[operation] {
+			return fmt.Errorf("S3 compatibility matrix must include split row %q", operation)
+		}
+	}
+	return nil
+}
+
+func validateObjectGovernanceBoundary(markdown string) error {
+	requiredNotes := []string{
+		"separate governance design",
+		"versioning",
+		"deletes",
+		"lifecycle",
+		"permissions",
+	}
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 4 || cells[1] != "Object Lock / retention / legal hold" {
+			continue
+		}
+		if strings.ToLower(cells[2]) != "not supported" {
+			return fmt.Errorf("Object Lock / retention / legal hold must remain Not supported until governance design lands")
+		}
+		notes := strings.ToLower(cells[3])
+		if !containsAll(notes, requiredNotes) {
+			return fmt.Errorf("Object Lock / retention / legal hold row must name the separate governance design boundary")
+		}
+		return nil
+	}
+	return fmt.Errorf("Object Lock / retention / legal hold row is required")
+}
+
+func validateClientSmokeEvidence(markdown string) error {
+	required := map[string]string{
+		"MinIO client (`mc`)": "TestS3ClientSmoke/MinIOMC",
+		"s3fs":                "TestFUSE_S3_S3FS",
+		"goofys":              "TestFUSE_S3_Goofys",
+	}
+	seen := make(map[string]bool, len(required))
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 3 {
+			continue
+		}
+		subtest, ok := required[cells[0]]
+		if !ok {
+			continue
+		}
+		seen[cells[0]] = true
+		if strings.ToLower(cells[1]) == "supported" && !strings.Contains(cells[2], subtest) {
+			return fmt.Errorf("Supported client row %q must name %s in Notes", cells[0], subtest)
+		}
+	}
+	for client := range required {
+		if !seen[client] {
+			return fmt.Errorf("S3 client compatibility matrix must include row %q", client)
+		}
+	}
+	return nil
+}
+
+func requiresFailClosedEvidence(operation string) bool {
+	return operation == "SSE-KMS headers" || operation == "SSE-C headers"
+}
+
 func markdownTableCells(line string) []string {
 	line = strings.TrimSpace(line)
 	if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
@@ -103,8 +222,18 @@ func markdownTableCells(line string) []string {
 
 func isProductionEssentialS3Operation(operation string) bool {
 	return operation == "multipart listing apis" ||
+		(operation == "sse-s3 headers") ||
 		(strings.Contains(operation, "sse-s3/sse-kms") && strings.Contains(operation, "headers")) ||
 		strings.Contains(operation, "lifecycle expiration")
+}
+
+func containsAll(s string, needles []string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(s, needle) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsAny(s string, needles []string) bool {

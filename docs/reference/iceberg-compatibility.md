@@ -20,8 +20,11 @@ coverage. Unit-test-only coverage is not enough.
 | Area                    | Surface                            | Status     | Notes                                                                                               |
 | ----------------------- | ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------- |
 | Client                  | DuckDB Iceberg REST Catalog        | Supported  |                                                                                                     |
+| Client                  | MinIO `warp iceberg`               | Supported  | Benchmark smoke coverage runs through `make bench-iceberg-table` and `make bench-iceberg-table-cluster`. |
 | Endpoint                | `/iceberg/v1/config`               | Supported  |                                                                                                     |
+| Endpoint                | `/_iceberg/v1/config`              | Supported  | AIStor-compatible alias used by `warp iceberg`.                                                     |
 | Namespace               | List/create/get/head namespace     | Supported  |                                                                                                     |
+| Namespace               | Warehouse create/delete endpoints  | Supported  | No-op compatibility endpoints for clients that provision warehouses before namespace/table work.     |
 | Table                   | List/create/get/head table         | Supported  |                                                                                                     |
 | Commit                  | Transaction commit                 | Supported  |                                                                                                     |
 | Errors                  | Iceberg JSON errors                | Supported  | Returns Iceberg JSON errors; S3 XML errors are not reused.                                          |

@@ -28,6 +28,7 @@ func (s *Server) writeObjectReadHeaders(c *app.RequestContext, obj *storage.Obje
 	c.Header("ETag", etag)
 	c.Header("Last-Modified", time.Unix(obj.LastModified, 0).UTC().Format(http.TimeFormat))
 	c.Header("Accept-Ranges", "bytes")
+	writeSSEObjectHeaders(c, obj)
 	writeUserMetadataHeaders(c, obj.UserMetadata)
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)
