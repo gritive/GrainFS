@@ -101,40 +101,43 @@ roundrobin`, and `--noclear`. PUT and GET used the same bucket per target; GET
 is therefore a warm-read pass over the objects kept from the preceding PUT
 pass. MinIO and RustFS were measured once per mode in the final comparison.
 `GrainFS` ran with at-rest encryption and default Iceberg audit enabled.
+The 3-node `GrainFS` run below used the tree later committed as `24245071`;
+the raw artifact summary records the pre-commit dirty build as
+`da36ef39-dirty`.
 
 ### Single-Node
 
 | Target    | Commit / build | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET obj/s | GET errors | Raw artifacts |
 | --------- | -------------- | --------: | --------: | ---------: | --------: | --------: | ---------: | ------------- |
-| `GrainFS` | `4c109c36`     |    573.88 |   9182.09 |          0 |   1324.50 |  21191.98 |          0 | `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/grainfs-single` |
+| `GrainFS` | `da36ef39`     |    517.36 |   8277.82 |          0 |   1212.67 |  19402.70 |          0 | `benchmarks/profiles/review-impact-single-grainfs-20260516-171005/grainfs-single` |
 | MinIO     | local run      |    252.88 |   4046.10 |          0 |   1074.01 |  17184.13 |          0 | `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/minio` |
 | RustFS    | local run      |    225.43 |   3606.93 |          0 |    500.35 |   8005.57 |          0 | `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/rustfs` |
 
 Observed deltas:
 
-- `GrainFS` PUT throughput was 2.27x the MinIO PUT baseline and 2.55x the
+- `GrainFS` PUT throughput was 2.05x the MinIO PUT baseline and 2.29x the
   RustFS PUT baseline.
-- `GrainFS` GET throughput was 1.23x the MinIO GET baseline and 2.65x the
+- `GrainFS` GET throughput was 1.13x the MinIO GET baseline and 2.42x the
   RustFS GET baseline.
 - Raw summary:
-  `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/summary.md`.
+  `benchmarks/profiles/review-impact-single-grainfs-20260516-171005/summary.md`.
 
 ### 3-Node Cluster
 
 | Target    | Commit / build | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET obj/s | GET errors | Raw artifacts |
 | --------- | -------------- | --------: | --------: | ---------: | --------: | --------: | ---------: | ------------- |
-| `GrainFS` | `ae6057d6`     |     92.11 |   1473.72 |          0 |    325.53 |   5208.42 |          0 | `benchmarks/profiles/s3-compat-cluster-warp-grainfs-rawbuffer64-20260516-161159` |
+| `GrainFS` | `24245071`     |    103.22 |   1651.44 |          0 |    325.85 |   5213.56 |          0 | `benchmarks/profiles/review-impact-cluster-grainfs-nosync-20260516-171937` |
 | MinIO     | local run      |     47.05 |    752.77 |          0 |    296.84 |   4749.39 |          0 | `benchmarks/profiles/s3-compat-cluster-warp-minio-rebaseline-20260516-155338` |
 | RustFS    | local run      |     36.31 |    580.88 |          0 |    105.88 |   1694.14 |          0 | `benchmarks/profiles/s3-compat-cluster-warp-rustfs-rebaseline-20260516-155512` |
 
 Observed deltas:
 
-- `GrainFS` PUT throughput was 1.96x the MinIO PUT baseline and 2.54x the
+- `GrainFS` PUT throughput was 2.19x the MinIO PUT baseline and 2.84x the
   RustFS PUT baseline.
-- `GrainFS` GET throughput was 1.10x the MinIO GET baseline and 3.07x the
+- `GrainFS` GET throughput was 1.10x the MinIO GET baseline and 3.08x the
   RustFS GET baseline.
 - Raw summary:
-  `benchmarks/profiles/s3-compat-cluster-warp-grainfs-rawbuffer64-20260516-161159/summary.md`.
+  `benchmarks/profiles/review-impact-cluster-grainfs-nosync-20260516-171937/summary.md`.
 
 The official comparison no longer uses the old k6 mixed workload.
 
