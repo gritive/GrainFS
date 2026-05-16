@@ -464,6 +464,10 @@ func ms(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
+// failureRateExceeded is exercised by main_test.go; golangci-lint's `unused`
+// linter does not count test-only references.
+//
+//nolint:unused
 func failureRateExceeded(total, failed uint64, threshold float64) bool {
 	if failed == 0 {
 		return false
