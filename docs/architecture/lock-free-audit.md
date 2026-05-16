@@ -132,9 +132,10 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   short read locks.
 - `internal/resourcewatch/registry.go` - registered DB handle list; snapshots
   are copied before GC work.
-- `internal/lifecycle/*`, `internal/migration/service.go`,
-  `internal/nfsexport/store.go` - service job/config stores with low-frequency
-  writes.
+- `internal/nfsexport/store.go` - service job/config store with low-frequency
+  writes. The lifecycle and migration services no longer carry mutexes; their
+  worker handles are published via `atomic.Pointer[Worker]` per ADR 0012 and
+  ADR 0013.
 - `internal/scrubber/director.go`, `scrubber/scrubber.go` - scrub session
   state and last-status snapshots.
 - `internal/server/alerts_api.go`, `sse_hub.go`, `internal/alerts/webhook.go`

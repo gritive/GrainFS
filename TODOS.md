@@ -91,9 +91,16 @@ Work these in order. Do not run them in parallel.
   evidence for shard-side encrypted range decrypt or QUIC syscall cost.
 - [ ] **NBD direct-write bottleneck**: reopen when direct I/O write SLOs matter
   or trace-off profiles confirm per-block `open/pwrite` as the p95 bottleneck.
+- [ ] **NBD qemu/libnbd interop**: promote `OPT_INFO`/`OPT_GO`,
+  `NBD_INFO_BLOCK_SIZE`, structured replies, block status, and extended headers
+  only after a disposable qemu/libnbd smoke harness runs against a real GrainFS
+  NBD port.
 - [ ] **Iceberg REST high-concurrency Raft ceiling**: reopen when production
   catalog workloads miss SLOs or the consistency spec for reducing proposals is
   clear.
+- [ ] **Iceberg Spark/Trino/PyIceberg client coverage**: promote only after
+  real-client REST Catalog smoke tests define which client behaviors are
+  supported versus DuckDB-only compatibility.
 - [ ] **Volume CLI follow-ups**: export/import, policy, attach/detach, and rename
   need concrete server-side lifecycle requirements.
 - [ ] **Scrub scope, EC scrub race, group dir cleanup, PeerHealth threshold**:

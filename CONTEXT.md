@@ -527,3 +527,34 @@ controller actor — its only cross-goroutine state is the worker pointer,
 so a controller actor would be a pass-through. See
 `docs/adr/0012-migration-service-lock-free-publication.md` for the reject
 rationale.
+
+### Bucket Lifecycle Executor
+
+The bucket lifecycle executor is the leader-only goroutine in
+`internal/lifecycle.Service` that scans buckets on an interval and applies
+expiration / noncurrent-version-expiration rules. Lifecycle configurations
+live durably in `lifecycle.Store` (BadgerDB), replicated through the
+meta-Raft FSM (ADR 0011); the executor holds no in-memory rule registry.
+`Service.Run` watches a `LeadershipSignal` and starts a `Worker` while
+self is the leader, stopping it on leadership loss.
+
+`Service` publishes the worker pointer to admin `Status` callers through
+`atomic.Pointer[Worker]`. `cancelFn` and the wait group are owned by the
+single `Run` goroutine and stop()/start() are reached only from
+`reconcile`, which is itself driven by the `Run` loop. Running state is
+derived from `worker.Load() != nil`; there is no separate `running` flag.
+The service intentionally is **not** a controller actor — its only
+cross-goroutine state is the worker pointer, so a controller actor would
+be a pass-through.
+
+`Worker` keeps its cycle counters in `atomic.Int64` fields. `LastRun` is
+published as `lastRunNano atomic.Int64` (unix nanoseconds, `0` means
+"never run"), mirroring `scrubber.liveSession.doneAt`. `Stats()`
+translates `0` to a zero-value `time.Time{}` so admin callers that rely
+on `IsZero` see the same behaviour as before. The worker carries no
+mutex.
+
+See `docs/adr/0013-lifecycle-service-lock-free-publication.md` for the
+follow-up closure of ADR 0012's reservation. ADR 0012 and ADR 0013
+together establish the **lock-free publication pattern** for leader-only
+executor services in this codebase.
