@@ -39,6 +39,9 @@ func TestCompatibilityMatricesDoNotUseNotTestedStatus(t *testing.T) {
 				if err := validateObjectGovernanceBoundary(string(body)); err != nil {
 					t.Fatal(err)
 				}
+				if err := validateClientSmokeEvidence(string(body)); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}
@@ -168,6 +171,35 @@ func validateObjectGovernanceBoundary(markdown string) error {
 		return nil
 	}
 	return fmt.Errorf("Object Lock / retention / legal hold row is required")
+}
+
+func validateClientSmokeEvidence(markdown string) error {
+	required := map[string]string{
+		"MinIO client (`mc`)": "TestS3ClientSmoke/MinIOMC",
+		"s3fs":                "TestS3ClientSmoke/S3FS",
+		"goofys":              "TestS3ClientSmoke/Goofys",
+	}
+	seen := make(map[string]bool, len(required))
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 3 {
+			continue
+		}
+		subtest, ok := required[cells[0]]
+		if !ok {
+			continue
+		}
+		seen[cells[0]] = true
+		if strings.ToLower(cells[1]) == "supported" && !strings.Contains(cells[2], subtest) {
+			return fmt.Errorf("Supported client row %q must name %s in Notes", cells[0], subtest)
+		}
+	}
+	for client := range required {
+		if !seen[client] {
+			return fmt.Errorf("S3 client compatibility matrix must include row %q", client)
+		}
+	}
+	return nil
 }
 
 func requiresFailClosedEvidence(operation string) bool {
