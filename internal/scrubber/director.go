@@ -375,30 +375,13 @@ func newLiveSession(id, bucket, keyPrefix string, scope ScrubScope, dryRun bool,
 	return s
 }
 
+// ApplyFromFSM은 raft FSM apply loop에서 호출된다. 절대 블록하지 않는다.
+// inbox가 가득 차면 warning 로그 후 드랍 — 현재 의미 보존.
 func (d *Director) ApplyFromFSM(entry ScrubTriggerEntry) {
-	d.mu.Lock()
-	if _, exists := d.sessions[entry.SessionID]; exists {
-		d.mu.Unlock()
-		return
-	}
-	startedAt := time.Now()
-	if entry.RequestedAt != 0 {
-		startedAt = time.Unix(entry.RequestedAt, 0)
-	}
-	sess := newLiveSession(entry.SessionID, entry.Bucket, entry.KeyPrefix, entry.Scope, entry.DryRun, startedAt)
-	d.sessions[entry.SessionID] = sess
-	// Populate dedup so a re-trigger of the same (bucket, prefix, scope, dryRun)
-	// short-circuits via LookupDedup (admin handler avoids burning a raft entry
-	// per duplicate request).
-	dk := dedupKey(TriggerReq{Bucket: entry.Bucket, KeyPrefix: entry.KeyPrefix, Scope: entry.Scope, DryRun: entry.DryRun})
-	if _, ok := d.dedup[dk]; !ok {
-		d.dedup[dk] = entry.SessionID
-	}
-	d.mu.Unlock()
 	select {
-	case d.queue <- triggerReq{sess: sess}:
+	case d.inbox <- applyFromFSMCmd{entry: entry}:
 	default:
-		log.Warn().Str("session_id", entry.SessionID).Msg("scrub director: queue full, dropped FSM entry")
+		log.Warn().Str("session_id", entry.SessionID).Msg("scrub director: inbox full, dropped FSM entry")
 	}
 }
 
