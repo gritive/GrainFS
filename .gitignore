@@ -2,7 +2,7 @@ bin/
 tmp/
 .worktrees/
 *.test
-server.test
+/server.test
 /grainfs
 bin/grainfs
 .claude/*.lock
@@ -13,10 +13,7 @@ benchmarks/iceberg_table_report.json
 benchmarks/put-matrix-*.json
 benchmarks/put-trace-report.json
 benchmarks/profiles/
-meta/
+/meta/
 /raft/
 receipts/
 benchmarks/scratch/
-
-# superpowers 스킬 산출물 — git 미포함
-docs/superpowers/
