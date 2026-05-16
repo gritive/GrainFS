@@ -393,51 +393,49 @@ func (r *encryptedShardReader) Read(p []byte) (int, error) {
 }
 
 func (r *encryptedShardReader) loadChunk() error {
-	for {
-		var chunkHeader [encryptedChunkHeaderLen]byte
-		if _, err := io.ReadFull(r.r, chunkHeader[:]); err != nil {
-			if errors.Is(err, io.EOF) {
-				r.done = true
-				return nil
-			}
-			return fmt.Errorf("read encrypted shard chunk header: %w", err)
+	var chunkHeader [encryptedChunkHeaderLen]byte
+	if _, err := io.ReadFull(r.r, chunkHeader[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			r.done = true
+			return nil
 		}
-		plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
-		cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
-		if plainLen > r.chunkSize {
-			return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", r.chunkIdx, plainLen, r.chunkSize)
-		}
-		if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
-			return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", r.chunkIdx, cipherLen, plainLen)
-		}
-
-		if cap(r.cipherBuf) < int(cipherLen) {
-			r.cipherBuf = make([]byte, cipherLen)
-		}
-		ciphertext := r.cipherBuf[:cipherLen]
-		if _, err := io.ReadFull(r.r, ciphertext); err != nil {
-			return fmt.Errorf("read encrypted shard chunk: %w", err)
-		}
-		nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
-		aad := encryptedChunkAAD(r.aadBase, r.chunkIdx)
-		if cap(r.plainBuf) < int(plainLen) {
-			r.plainBuf = make([]byte, 0, plainLen)
-		}
-		plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
-		if err != nil {
-			return fmt.Errorf("decrypt shard chunk %d: %w", r.chunkIdx, err)
-		}
-		if uint32(len(plaintext)) != plainLen {
-			return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", r.chunkIdx, len(plaintext), plainLen)
-		}
-		r.plainBuf = plaintext[:0]
-		r.plain = plaintext
-		r.chunkIdx++
-		if r.chunkIdx == 0 {
-			return fmt.Errorf("encrypted shard has too many chunks")
-		}
-		return nil
+		return fmt.Errorf("read encrypted shard chunk header: %w", err)
 	}
+	plainLen := binary.LittleEndian.Uint32(chunkHeader[0:4])
+	cipherLen := binary.LittleEndian.Uint32(chunkHeader[4:8])
+	if plainLen > r.chunkSize {
+		return fmt.Errorf("encrypted shard chunk %d plaintext length %d exceeds chunk size %d", r.chunkIdx, plainLen, r.chunkSize)
+	}
+	if cipherLen < plainLen || cipherLen > plainLen+uint32(r.enc.AEADOverhead()) {
+		return fmt.Errorf("invalid encrypted shard chunk %d ciphertext length %d for plaintext length %d", r.chunkIdx, cipherLen, plainLen)
+	}
+
+	if cap(r.cipherBuf) < int(cipherLen) {
+		r.cipherBuf = make([]byte, cipherLen)
+	}
+	ciphertext := r.cipherBuf[:cipherLen]
+	if _, err := io.ReadFull(r.r, ciphertext); err != nil {
+		return fmt.Errorf("read encrypted shard chunk: %w", err)
+	}
+	nonce := encryptedChunkNonce(r.noncePrefix, r.chunkIdx)
+	aad := encryptedChunkAAD(r.aadBase, r.chunkIdx)
+	if cap(r.plainBuf) < int(plainLen) {
+		r.plainBuf = make([]byte, 0, plainLen)
+	}
+	plaintext, err := r.enc.OpenWithNonceAAD(r.plainBuf[:0], nonce[:], ciphertext, aad)
+	if err != nil {
+		return fmt.Errorf("decrypt shard chunk %d: %w", r.chunkIdx, err)
+	}
+	if uint32(len(plaintext)) != plainLen {
+		return fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", r.chunkIdx, len(plaintext), plainLen)
+	}
+	r.plainBuf = plaintext[:0]
+	r.plain = plaintext
+	r.chunkIdx++
+	if r.chunkIdx == 0 {
+		return fmt.Errorf("encrypted shard has too many chunks")
+	}
+	return nil
 }
 
 type encryptedShardRangeReader struct {
