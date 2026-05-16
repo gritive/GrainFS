@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.0.211.0] - 2026-05-16 — perf: improve small-object S3 throughput
+
+### Added
+
+- **Official S3 comparison benchmark**: `make bench-s3-compat-compare` now uses
+  MinIO `warp` for comparable GrainFS, MinIO, and RustFS PUT/GET runs in
+  single-node and 3-node cluster modes.
+- **Cluster shard packing**: clustered EC shards below the default 65,537-byte
+  threshold can now use node-local append-only shard packs, matching the
+  small-object optimization used by single-node packed blobs.
+- **Benchmark reporting**: README and the benchmark reference now show the
+  latest same-host `warp` results for both single-node and 3-node cluster runs.
+
+### Changed
+
+- **Small-object defaults**: `grainfs serve` now enables `--pack-threshold` and
+  `--shard-pack-threshold` by default for the 64 KiB workload class instead of
+  requiring explicit tuning.
+- **Cluster PUT hot path**: forwarded writes now use local data voters, sized
+  FlatBuffer builders, batched Raft proposals, and shard-pack append batching to
+  reduce CPU and syscall overhead.
+- **Object GET path**: small object responses are buffered up to a bounded
+  limit, while streamed responses are capped to the expected object length so
+  clients do not observe trailing read errors as object data failures.
+- **Benchmark policy**: MinIO/RustFS comparisons now keep only the latest
+  comparable results and no longer use the old k6 mixed workload for official
+  claims.
+
+### Fixed
+
+- **Cluster shard-pack durability errors**: shard-pack delete tombstone append
+  failures now propagate instead of being silently ignored.
+- **Shard-pack recovery**: startup scanning skips corrupt or truncated terminal
+  records instead of failing the whole packed-shard store.
+- **Packed copy metadata**: packed `CopyObject` preserves user metadata and
+  object metadata across the copy path.
+- **Spooled EC metadata**: memory-spooled EC writes preserve user metadata
+  through clustered object reads and HEAD responses.
+- **SigV4 compatibility**: canonical request handling now accepts the encoded
+  path and payload-signing patterns used by `warp`.
+- **Forwarded read EOF handling**: terminal EOF from forwarded streamed reads is
+  treated as end-of-body instead of surfacing as an unexpected read failure.
+- **S3 bucket compatibility**: bucket-level PUT/DELETE and location queries now
+  match common S3 client expectations.
+
+### Verification
+
+- `make test-unit`
+- `make build`
+- `go test ./internal/cluster ./internal/storage/packblob ./internal/storage -count=1`
+- `go test ./internal/cluster -run 'TestShardService_SharedPack(DefaultDoesNotSyncEveryAppend|DeleteReturnsTombstoneWriteError|RestartSkipsCorruptRecord|WriteReadRangeDelete)|TestShardPackScanSkipsOversizedRecord' -count=1`
+- `git diff --check origin/master...HEAD`
+- `PROFILE_ROOT=benchmarks/profiles/review-impact-single-grainfs-20260516-171005 TARGETS=grainfs-single WARP_DURATION=30s WARP_OBJ_SIZE=64KiB WARP_CONCURRENT=16 WARP_OBJECTS=4096 WARP_OPS=put,get WARP_NOCLEAR=1 WARP_HOST_SELECT=roundrobin make bench-s3-compat-compare`
+- Manual 3-node `warp` PUT/GET run with 64 KiB objects, concurrency 16, and
+  `--host-select roundrobin`, archived under
+  `benchmarks/profiles/review-impact-cluster-grainfs-nosync-20260516-171937`
+
 ## [0.0.210.0] - 2026-05-15 — feat: route scrub through execution actors
 
 ### Added
