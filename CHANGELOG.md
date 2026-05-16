@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.222.0] - 2026-05-17 - perf(raft): drop redundant currentConfig defensive copy from actorState.snapshot
+
+### Changed
+- **`actorState.snapshot`** no longer deep-copies `currentConfig.voters`,
+  `oldVoters`, and `learners` before publishing the readState. Every
+  mutation site replaces `currentConfig` wholesale (via `newSingleConfig`
+  / `newJointConfig` / `applyConfigEntry` / `configHistory` restore);
+  none mutate the slices or learner map in place. `Configuration()`
+  builds its own fresh `[]Server` via `allVoters()`, so external callers
+  never receive the published slice header. Internal readers only use
+  `len` + `range` on the published slices, which is safe under
+  concurrent read.
+- Documents the **wholesale-replacement invariant** on `currentConfig`
+  in `snapshot()`'s comment. Future changes that mutate `voters` /
+  `oldVoters` / `learners` in place break this contract and must
+  reintroduce the defensive copy.
+
+### Performance
+
+Apple M3, `internal/raft/bench_test.go`, 15s × 3 runs (median):
+
+| Bench | Before | After | Delta |
+| --- | --- | --- | --- |
+| `BenchmarkProposeWait_SingleNode_NoFsync` | 974 ns/op, 663 B/op, 5 allocs | 922 ns/op, 638 B/op, 4 allocs | **-5.3% latency, -20% allocs/op** |
+| `BenchmarkProposeAndCommit_3Voter` | 8211 ns/op, 3325 B/op, 39 allocs | 7921 ns/op, 3002 B/op, 33 allocs | **-3.5% latency, -15% allocs/op** |
+
+The earlier 3-second benchtime obscured this with noise — extending to
+15 seconds × 3 runs reveals a consistent ~5% latency drop and an
+integer-detectable allocs/op reduction (5→4 single-node, 39→33 3-voter).
+The removed allocs are small (3-element string slices) but they fire
+on every Raft publish and matter once you measure long enough to see
+the signal.
+
 ## [0.0.221.0] - 2026-05-17 - perf(raft): reuse propose-batch scratch slice in the actor
 
 ### Changed
