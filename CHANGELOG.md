@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.0.218.0] - 2026-05-17 - feat: S3 production compatibility and warp benchmarks
+
+### Added
+- **SSE-S3 compatibility**: S3 PUT/COPY/HEAD/GET now accepts and returns
+  `AES256` server-side encryption headers, persists SSE system metadata through
+  object metadata codecs, and fails closed for unsupported KMS and SSE-C modes.
+- **S3 DeleteObjects compatibility**: batch delete now supports the MinIO `mc`
+  client path, including idempotent missing-key responses.
+- **Real S3 client smoke coverage**: e2e coverage now exercises MinIO `mc` and
+  conditionally runs `s3fs`/`goofys` through a Colima VM when the Linux client
+  environment is available.
+- **Iceberg warp compatibility**: the REST catalog exposes the `/_iceberg`
+  alias and warehouse create/delete no-op endpoints needed by `warp iceberg`.
+- **Lifecycle expiration days**: bucket lifecycle expiration rules now accept
+  day-based expiration semantics.
+
+### Changed
+- **S3 benchmarks**: official single-node and cluster S3 benchmarks are
+  consolidated on MinIO `warp` for PUT, GET, and DELETE runs.
+- **Iceberg benchmarks**: Iceberg single-node and cluster benchmarks now use
+  `warp iceberg`; the default mixed workload disables update distributions so
+  the benchmark runs cleanly before the next optimization pass.
+- **Compatibility documentation**: S3 production compatibility references now
+  distinguish supported, partial, not supported, and not planned rows, keeping
+  `s3fs` and `goofys` not supported until the Colima client smoke path passes.
+
+### Fixed
+- **SSE metadata persistence**: local, packed, and cluster object metadata paths
+  preserve SSE-S3 system metadata, including copy-object metadata handling.
+- **Iceberg metadata shape**: generated table metadata now includes valid UUID,
+  timestamp, partition, and schema fields accepted by `warp iceberg`.
+
+### Removed
+- **k6 S3 benchmarks**: legacy k6-based S3 benchmark entry points were removed
+  from the official benchmark surface.
+- **Custom Iceberg Go runner**: the temporary `benchmarks/iceberg_table_bench`
+  runner was removed after replacing it with `warp iceberg`.
+
+### Verification
+- `make test-unit`
+- `GRAINFS_BINARY=$(pwd)/bin/grainfs go test ./tests/e2e -run 'TestS3|TestIceberg|TestMultipart|TestSmoke' -v -count=1 -timeout 10m`
+- `PROFILE_ROOT=/tmp/grainfs-ship-iceberg-warp-single DURATION=3s VUS=2 ICEBERG_NAMESPACE_WIDTH=1 ICEBERG_NAMESPACE_DEPTH=1 ICEBERG_TABLES_PER_NS=1 ICEBERG_WARP_COMMAND=catalog-mixed NO_BUILD=1 make bench-iceberg-table`
+- `PROFILE_ROOT=/tmp/grainfs-ship-s3-warp-single WARP_DURATION=8s WARP_CONCURRENT=2 WARP_OBJ_SIZE=1KiB WARP_OBJECTS=128 WARP_OPS=put,get NO_BUILD=1 make bench`
+- `git diff --check -- ':!docs/superpowers/**'`
+
 ## [0.0.217.0] - 2026-05-17 - refactor(lifecycle): lock-free executor publication
 
 ### Changed
