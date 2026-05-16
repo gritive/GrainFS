@@ -5,8 +5,8 @@
 ### Added
 
 - **S3 production compatibility guardrails**: compatibility reference docs now
-  use explicit supported/not supported status values, with tests preventing
-  ambiguous `not tested` claims from returning.
+  use explicit supported, partial, not supported, or not planned status values,
+  with tests preventing ambiguous `not tested` claims from returning.
 - **Clustered multipart listing**: `ListMultipartUploads` and `ListParts` now
   work through the clustered forwarding path so single-node and cluster e2e
   tests exercise the same multipart listing feature set.

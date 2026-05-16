@@ -52,7 +52,7 @@ For all serve flags, use:
 
 | Area | Summary | Details |
 | --- | --- | --- |
-| S3 API | Bucket/object basics, multipart upload, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
+| S3 API | Bucket/object basics, multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
 | File protocols | NFSv4 explicit bucket exports, 9P2000.L | [NFSv4 compatibility](docs/reference/nfs-compatibility.md), [9P compatibility](docs/reference/9p-compatibility.md) |
 | Block protocol | Linux NBD protocol surface | [NBD compatibility](docs/reference/nbd-compatibility.md) |
 | Iceberg | DuckDB-compatible REST Catalog | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
