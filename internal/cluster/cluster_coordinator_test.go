@@ -1231,6 +1231,20 @@ func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
 }
 
+func TestForwardReadValidator_IgnoresTerminalErrorAfterExpectedBytes(t *testing.T) {
+	body := []byte("complete-body")
+	rc := &forwardReadValidator{
+		rc:   io.NopCloser(&fullThenUnexpectedEOFReader{body: body}),
+		want: int64(len(body)),
+	}
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+
+	require.NoError(t, err)
+	require.Equal(t, body, got)
+}
+
 func TestClusterCoordinator_ReadAt_FallbackRejectsNegativeOffset(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
@@ -1846,4 +1860,17 @@ func requirePutTraceStage(t *testing.T, events []PutTraceEvent, stage PutTraceSt
 		}
 	}
 	require.Failf(t, "missing stage", "stage %s not found in %#v", stage, events)
+}
+
+type fullThenUnexpectedEOFReader struct {
+	body []byte
+	done bool
+}
+
+func (r *fullThenUnexpectedEOFReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.done = true
+	return copy(p, r.body), nil
 }
