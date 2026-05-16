@@ -82,7 +82,8 @@ type Options struct {
 	// a fake clock to drive dedup deterministically.
 	Clock func() time.Time
 	// OnResult is invoked from the controller goroutine after delivery
-	// completes — once per accepted alert. The error is nil on success,
+	// completes — at most once per accepted alert (see Best-effort on
+	// Stop below for the exception). The error is nil on success,
 	// non-nil after all retries are exhausted or ctx cancellation. OnResult
 	// must not block; persistent I/O must be fanned out via a separate
 	// goroutine.

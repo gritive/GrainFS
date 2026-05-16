@@ -183,11 +183,10 @@ func TestStop_DrainsResidualSendCmdsAsDroppedStopped(t *testing.T) {
 }
 
 // TestLifecycle_SendStopCompletesPromptly exercises the full Send→Stop
-// lifecycle with a non-empty inbox. Asserts (a) no deadlock/panic and (b) Stop
-// returns in bounded time. The exact split between "drained as stopped" vs
-// "processed via spawn" is racy (design doc Q1) — this smoke test only
-// guarantees the lifecycle terminates and that the stopped counter never
-// regresses.
+// lifecycle with a non-empty inbox. Smoke signal: bounded Stop time + absence
+// of deadlock/panic. The exact split between "drained as stopped" vs
+// "processed via spawn" is racy (design doc Q1) — covered by the unit-level
+// TestStop_DrainsResidualSendCmdsAsDroppedStopped, not here.
 func TestLifecycle_SendStopCompletesPromptly(t *testing.T) {
 	d := NewDispatcher("http://example", Options{Clock: time.Now}, nil)
 	// spawn synthesizes an immediate release so the controller keeps draining
@@ -197,8 +196,6 @@ func TestLifecycle_SendStopCompletesPromptly(t *testing.T) {
 	}
 	d.Start(context.Background())
 
-	before := testutil.ToFloat64(
-		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
 	for i := 0; i < 32; i++ {
 		d.Send(Alert{Type: "t", Resource: fmt.Sprintf("r%d", i)})
 	}
@@ -207,10 +204,6 @@ func TestLifecycle_SendStopCompletesPromptly(t *testing.T) {
 	elapsed := time.Since(start)
 	require.Less(t, elapsed, time.Second,
 		"full Send→Stop lifecycle must complete promptly; took %s", elapsed)
-	after := testutil.ToFloat64(
-		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
-	require.GreaterOrEqual(t, after-before, float64(0),
-		"stopped counter must never regress across Stop")
 }
 
 func TestController_ProcessesSendThenRelease(t *testing.T) {
