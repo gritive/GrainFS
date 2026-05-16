@@ -144,6 +144,7 @@ type metaForwardReply struct {
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
+//nolint:unused // referenced by cluster_config_followerforward_test.go and iceberg_catalog_test.go.
 func encodeMetaForwardReply(err error) []byte {
 	return encodeMetaForwardReplyWithIndex(0, err)
 }

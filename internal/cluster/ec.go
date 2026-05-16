@@ -200,6 +200,7 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
 }
 
+//nolint:unused // referenced by ec_test.go.
 func newECReconstructStreamReader(cfg ECConfig, shards []io.Reader) (*ecReconstructStreamReader, error) {
 	return newECReconstructStreamReaderWithPrefetch(cfg, shards, true)
 }

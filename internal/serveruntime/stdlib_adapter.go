@@ -17,24 +17,6 @@ func wrapStdlibNoParam(fn func(http.ResponseWriter, *http.Request)) app.HandlerF
 	}
 }
 
-func wrapStdlibOneParam(p string, fn func(http.ResponseWriter, *http.Request, string)) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		req := buildHTTPRequest(ctx, c)
-		rw := newHertzResponseWriter()
-		fn(rw, req, c.Param(p))
-		rw.flushTo(c)
-	}
-}
-
-func wrapStdlibTwoParams(p1, p2 string, fn func(http.ResponseWriter, *http.Request, string, string)) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		req := buildHTTPRequest(ctx, c)
-		rw := newHertzResponseWriter()
-		fn(rw, req, c.Param(p1), c.Param(p2))
-		rw.flushTo(c)
-	}
-}
-
 // buildHTTPRequest constructs a stdlib *http.Request from a Hertz
 // RequestContext, preserving method, path, query, headers, body, and ctx.
 // Path+query is stored in the request URL; admin handlers read it via

@@ -98,7 +98,8 @@ type bootState struct {
 	// resolved EC profile without re-deriving from cluster size.
 	// node is the data-plane Raft node exposed through the cluster.RaftNode
 	// interface.
-	node             cluster.RaftNode
+	node cluster.RaftNode
+	//nolint:unused // assigned by boot_phases_storage_runtime_test.go to seed the RPC transport for tests.
 	rpcTransport     *cluster.RaftQUICRPCTransport
 	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService

@@ -316,11 +316,6 @@ func (r *encryptedSpoolRecordReader) loadNext() error {
 	return nil
 }
 
-func readSpoolEncryptedRecord(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64) ([]byte, bool, error) {
-	plain, _, done, err := readSpoolEncryptedRecordTo(r, enc, domain, record, nil, nil)
-	return plain, done, err
-}
-
 func readSpoolEncryptedRecordTo(r io.Reader, enc *encrypt.Encryptor, domain string, record uint64, plainBuf, blobBuf []byte) ([]byte, []byte, bool, error) {
 	var header [8]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {

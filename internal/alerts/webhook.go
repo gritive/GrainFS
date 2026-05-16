@@ -383,11 +383,6 @@ func colorFor(s Severity) string {
 	return "warning"
 }
 
-// env returns the controller's owned dispatch environment. Test-only access path.
-func (d *Dispatcher) env() *dispatchEnv {
-	return d.envPtr
-}
-
 // Start launches the controller goroutine. Idempotent (CompareAndSwap guard).
 func (d *Dispatcher) Start(ctx context.Context) {
 	if !d.started.CompareAndSwap(false, true) {

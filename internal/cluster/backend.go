@@ -1924,44 +1924,6 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	return obj, true, err
 }
 
-func (b *DistributedBackend) putObjectECShardReaders(
-	ctx context.Context,
-	bucket, key, versionID, placementGroupID string,
-	ringVer RingVersion,
-	placement []string,
-	cfg ECConfig,
-	sp *spooledObject,
-	contentType string,
-	openShard func(idx int) (io.Reader, error),
-	metricPath string,
-) (*storage.Object, error) {
-	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	result, err := writer.writeShardReaders(ctx, ecObjectWritePlan{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		Config:           cfg,
-		Placement:        placement,
-		RingVersion:      ringVer,
-		ContentType:      contentType,
-	}, sp, openShard, metricPath)
-	if err != nil {
-		return nil, err
-	}
-
-	return b.commitECObjectWriteResult(ctx, ecObjectWritePlan{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        versionID,
-		PlacementGroupID: placementGroupID,
-		Config:           cfg,
-		Placement:        placement,
-		RingVersion:      ringVer,
-		ContentType:      contentType,
-	}, result, metricPath)
-}
-
 func (b *DistributedBackend) commitECObjectWriteResult(
 	ctx context.Context,
 	plan ecObjectWritePlan,
@@ -2560,19 +2522,6 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		_ = b.shardSvc.DeleteShards(ctx, peer, bucket, key)
 	}
 	return nil
-}
-
-// getObjectEC reads shards from the placed nodes and reconstructs the object.
-// rec.Nodes[i] is the nodeID holding shardIdx i. Tolerates up to M unreachable nodes.
-func (b *DistributedBackend) getObjectEC(ctx context.Context, bucket, key, versionID string, rec PlacementRecord) ([]byte, error) {
-	// putObjectEC writes shards under shardKey = key + "/" + versionID so
-	// concurrent versions don't clobber one another on disk. Empty versionID
-	// preserves the pre-Slice-1 legacy layout.
-	shardKey := key
-	if versionID != "" {
-		shardKey = key + "/" + versionID
-	}
-	return b.newECObjectReader().ReadObject(ctx, bucket, shardKey, rec)
 }
 
 func (b *DistributedBackend) newECObjectReader() ecObjectReader {

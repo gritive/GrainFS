@@ -55,8 +55,6 @@ func cloneStateKey(dstVol string) []byte {
 
 func cloneStatePrefixKey() []byte { return []byte(clonePrefix) }
 
-func errNotImpl(name string) error { return fmt.Errorf("dedup: %s not implemented", name) }
-
 // snapState reads the SnapshotState for (vol, snapID) within the given txn.
 // ok=false when no marker exists.
 func (b *badgerIndex) snapState(txn *badger.Txn, vol, snapID string) (st SnapshotState, ok bool, err error) {

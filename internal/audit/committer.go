@@ -645,11 +645,6 @@ func encodeManifest(snapshotID, seqNum int64, parquetPath string, parquetSize, r
 	return buildAvroContainerWithMetadata(schema, rec.Bytes(), icebergManifestMetadata(partitionSpecID)), nil
 }
 
-// buildAvroContainer creates a single-record Avro Object Container File.
-func buildAvroContainer(schema string, datum []byte) []byte {
-	return buildAvroContainerWithMetadata(schema, datum, nil)
-}
-
 func buildAvroContainerWithMetadata(schema string, datum []byte, metadata map[string]string) []byte {
 	sync := [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}

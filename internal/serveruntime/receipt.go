@@ -114,6 +114,8 @@ func openReceiptDB(dataDir string) (*badger.DB, badgerrole.Decision, error) {
 
 // receiptDBOptions exposes the small-options preset for callers that want
 // a per-test receipt DB without going through OpenRole.
+//
+//nolint:unused // referenced by receipt_test.go.
 func receiptDBOptions(dir string) badger.Options {
 	return badgerutil.SmallOptions(dir)
 }

@@ -604,6 +604,8 @@ func (m *MetaRaft) ProposeWithGate(ctx context.Context, plan compat.GatePlan, cm
 // proposeOrForward submits data to the local raft node when this node is the
 // leader, otherwise forwards it via the configured forwardFn. Extracted so it
 // can be unit-tested without a real raft node.
+//
+//nolint:unused // referenced by meta_raft_test.go.
 func (m *MetaRaft) proposeOrForward(ctx context.Context, node metaProposerNode, data []byte) error {
 	_, err := m.proposeOrForwardWithIndex(ctx, node, data)
 	return err

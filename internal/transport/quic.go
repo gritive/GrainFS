@@ -457,20 +457,6 @@ func (t *QUICTransport) acceptLoop() {
 	}
 }
 
-// verifyPeerSPKI checks that the peer presented a cert whose SPKI hash
-// matches `expected`. Used in acceptLoop because quic-go does not honor
-// tls.Config.ClientAuth reliably enough for cluster security to depend on.
-func verifyPeerSPKI(certs []*x509.Certificate, expected [32]byte) error {
-	if len(certs) == 0 {
-		return errors.New("no peer cert presented")
-	}
-	spki := sha256.Sum256(certs[0].RawSubjectPublicKeyInfo)
-	if subtle.ConstantTimeCompare(spki[:], expected[:]) != 1 {
-		return errors.New("peer cert SPKI does not match cluster identity")
-	}
-	return nil
-}
-
 // verifyPeerSPKIs is the multi-SPKI form used during rotation phases 2/3.
 // Accepts the peer if its leaf cert SPKI matches ANY entry in `accepted`.
 // Constant-time per entry; total cost O(n) for n accepted SPKIs (typically 1-2).
@@ -1397,27 +1383,6 @@ func derivePrivKeyFromHKDF(r io.Reader, curve elliptic.Curve) (*ecdsa.PrivateKey
 		return priv, nil
 	}
 	return nil, errors.New("hkdf produced 8 consecutive zero scalars (impossible without a broken PSK)")
-}
-
-// pinExpectedSPKI returns a VerifyPeerCertificate callback that accepts only
-// peers whose leaf cert SPKI hash matches `expected`. Used identically on both
-// sides (D5): client verifies server identity, server verifies client identity.
-// Constant-time compare avoids leaking SPKI through timing.
-func pinExpectedSPKI(expected [32]byte) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
-			return errors.New("no peer cert presented")
-		}
-		cert, err := x509.ParseCertificate(rawCerts[0])
-		if err != nil {
-			return fmt.Errorf("parse peer cert: %w", err)
-		}
-		spki := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-		if subtle.ConstantTimeCompare(spki[:], expected[:]) != 1 {
-			return errors.New("peer cert SPKI does not match cluster identity")
-		}
-		return nil
-	}
 }
 
 // buildClientTLSConfig returns the TLS config used when this transport DIALS
