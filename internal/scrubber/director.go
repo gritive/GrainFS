@@ -191,26 +191,19 @@ func (c cancelCmd) apply(env *directorEnv) {
 }
 
 type Director struct {
-	mu        sync.Mutex // TODO: Task 9에서 제거
-	sources   map[string]BlockSource
-	verifiers map[string]BlockVerifier
-	sessions  map[string]*liveSession
-	dedup     map[string]string
-	queue     chan triggerReq
-	incident  IncidentRecorder
-	stop      chan struct{}
-	nodeID    string
+	queue chan triggerReq // worker dispatch (env에도 같은 핸들 보관)
+	stop  chan struct{}
 
-	// Actor migration fields (Task 3에서 추가, Task 9에서 정리)
 	inbox   chan directorCmd
 	done    chan struct{}
 	started atomic.Bool
-	env     *directorEnv // controller goroutine 단독 접근
+	env     *directorEnv
 }
 
 // Session is the public snapshot of a scrub session as returned by
 // Director.Sessions / GetSession. Counters are plain int64 because the
-// snapshot is taken under d.mu — writers use the atomic-backed liveSession.
+// snapshot is taken on the controller goroutine — writers use the
+// atomic-backed liveSession.
 type Session struct {
 	ID        string
 	Bucket    string
@@ -233,8 +226,8 @@ type SessionStats struct {
 }
 
 // liveSession is the in-flight session state. Counter mutations happen on
-// the atomic fields without holding d.mu; readers (Sessions, GetSession)
-// snapshot via load() into a public Session copy.
+// the atomic fields directly; readers (Sessions, GetSession) snapshot via
+// load() into a public Session copy on the controller goroutine.
 type liveSession struct {
 	id        string
 	bucket    string
@@ -313,35 +306,33 @@ func NewDirector(opts DirectorOpts) *Director {
 		opts.QueueSize = 64
 	}
 	queue := make(chan triggerReq, opts.QueueSize)
-	d := &Director{
+	env := &directorEnv{
 		sources:   map[string]BlockSource{},
 		verifiers: map[string]BlockVerifier{},
 		sessions:  map[string]*liveSession{},
 		dedup:     map[string]string{},
 		queue:     queue,
-		incident:  opts.Incident,
-		stop:      make(chan struct{}),
-		nodeID:    opts.NodeID,
-		inbox:     make(chan directorCmd, opts.QueueSize),
-		done:      make(chan struct{}),
-	}
-	d.env = &directorEnv{
-		sources:   d.sources,
-		verifiers: d.verifiers,
-		sessions:  d.sessions,
-		dedup:     d.dedup,
-		queue:     queue,
 		nodeID:    opts.NodeID,
 		incident:  opts.Incident,
 	}
-	return d
+	return &Director{
+		queue: queue,
+		stop:  make(chan struct{}),
+		inbox: make(chan directorCmd, opts.QueueSize),
+		done:  make(chan struct{}),
+		env:   env,
+	}
 }
 
+// Register는 Start 이전에 boot phase에서만 호출된다. Start 이후 호출 시 panic.
+// directorEnv는 controller goroutine 단독 소유지만 Start 이전이므로
+// 직접 mutation이 race-free다.
 func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sources[name] = src
-	d.verifiers[name] = ver
+	if d.started.Load() {
+		panic("scrubber.Director: Register called after Start")
+	}
+	d.env.sources[name] = src
+	d.env.verifiers[name] = ver
 }
 
 // LookupDedup returns the in-flight ScrubTriggerEntry for a request key, or
@@ -486,7 +477,7 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockS
 			Kind:   incident.ScopeObject,
 			Bucket: blk.Bucket,
 			Key:    blk.Key,
-			NodeID: d.nodeID,
+			NodeID: d.env.nodeID,
 		}
 		now := time.Now()
 		facts := []incident.Fact{{
@@ -498,8 +489,8 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockS
 			At:            now,
 		}}
 		if sess.dryRun {
-			if d.incident != nil {
-				_ = d.incident.Record(ctx, facts)
+			if d.env.incident != nil {
+				_ = d.env.incident.Record(ctx, facts)
 			}
 			continue
 		}
@@ -520,8 +511,8 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockS
 				Scope:         scope,
 				At:            time.Now(),
 			})
-			if d.incident != nil {
-				_ = d.incident.Record(ctx, facts)
+			if d.env.incident != nil {
+				_ = d.env.incident.Record(ctx, facts)
 			}
 			continue
 		}
@@ -537,8 +528,8 @@ func (d *Director) runSession(ctx context.Context, sess *liveSession, src BlockS
 			Scope:         scope,
 			At:            time.Now(),
 		})
-		if d.incident != nil {
-			_ = d.incident.Record(ctx, facts)
+		if d.env.incident != nil {
+			_ = d.env.incident.Record(ctx, facts)
 		}
 	}
 	d.markDone(sess)
