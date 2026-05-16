@@ -142,6 +142,32 @@ func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
 	require.Less(t, len(body), len(data), "partial read should truncate the body")
 }
 
+func TestGetObject_LargeFileIgnoresTerminalErrorAfterFullBody(t *testing.T) {
+	tmpDir := t.TempDir()
+	real, err := storage.NewLocalBackend(tmpDir)
+	require.NoError(t, err)
+	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
+
+	data := bytes.Repeat([]byte("F"), 64*1024)
+	_, err = real.PutObject(context.Background(), "test-bucket", "full.bin", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+	require.NoError(t, real.SetObjectACL("test-bucket", "full.bin", 1)) // ACLPublicRead
+
+	s := New("127.0.0.1:14875", &terminalErrorAfterFullBodyBackend{Backend: real, body: data})
+	go func() { s.Run() }()
+	defer s.Shutdown(context.Background())
+	time.Sleep(100 * time.Millisecond)
+
+	resp, err := http.Get("http://127.0.0.1:14875/test-bucket/full.bin")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+}
+
 // TestColdDataIntegrity tests that objects are retrieved correctly on first access (no warm cache).
 func TestColdDataIntegrity(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -212,6 +238,33 @@ func (r *limitedErrReader) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	r.remaining -= n
 	return n, err
+}
+
+type terminalErrorAfterFullBodyBackend struct {
+	storage.Backend
+	body []byte
+}
+
+func (b *terminalErrorAfterFullBodyBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	_, obj, err := b.Backend.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return io.NopCloser(&fullThenTerminalErrorReader{body: b.body}), obj, nil
+}
+
+type fullThenTerminalErrorReader struct {
+	body []byte
+	off  int
+}
+
+func (r *fullThenTerminalErrorReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.body) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	n := copy(p, r.body[r.off:])
+	r.off += n
+	return n, nil
 }
 
 func byteLabel(n int) string {

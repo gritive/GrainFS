@@ -34,14 +34,14 @@ func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Objec
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
 		c.Header("Content-Length", strconv.FormatInt(length, 10))
 		c.Set(auditBytesOutKey, length)
-		c.Response.SetBodyStream(io.NopCloser(io.LimitReader(rc, length)), int(length))
+		c.Response.SetBodyStream(newExactLengthReadCloser(rc, length), int(length))
 		c.Status(consts.StatusPartialContent)
 		return true, nil
 	}
 
 	c.Set(auditBytesOutKey, obj.Size)
 	if obj.Size > 16*1024 {
-		c.Response.SetBodyStream(rc, int(obj.Size))
+		c.Response.SetBodyStream(newExactLengthReadCloser(rc, obj.Size), int(obj.Size))
 		c.Status(consts.StatusOK)
 		return true, nil
 	}
@@ -53,4 +53,35 @@ func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Objec
 	}
 	c.Data(consts.StatusOK, obj.ContentType, data)
 	return false, nil
+}
+
+type exactLengthReadCloser struct {
+	rc        io.ReadCloser
+	remaining int64
+}
+
+func newExactLengthReadCloser(rc io.ReadCloser, length int64) io.ReadCloser {
+	if length < 0 {
+		length = 0
+	}
+	return &exactLengthReadCloser{rc: rc, remaining: length}
+}
+
+func (r *exactLengthReadCloser) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.rc.Read(p)
+	r.remaining -= int64(n)
+	if r.remaining == 0 {
+		return n, nil
+	}
+	return n, err
+}
+
+func (r *exactLengthReadCloser) Close() error {
+	return r.rc.Close()
 }
