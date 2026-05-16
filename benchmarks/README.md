@@ -3,46 +3,15 @@
 For benchmark principles, result interpretation, and RustFS/MinIO comparison
 rules, see [`docs/reference/benchmarks.md`](../docs/reference/benchmarks.md).
 
-## S3 Cluster PUT Matrix
-
-`make bench-cluster` starts a local 3-node cluster and runs the standard S3
-object benchmark. Set `PUT_MATRIX=1` to run a PUT-only matrix across all three
-S3 ports with small and large objects:
-
-```bash
-PUT_MATRIX=1 make bench-cluster
-# results: benchmarks/put-matrix-port<port>-<small|large>.json
-```
-
-Tune the matrix with:
-
-```bash
-PUT_SMALL_KB=64 PUT_LARGE_KB=8192 PUT_MATRIX_ITERATIONS=25 PUT_MATRIX=1 make bench-cluster
-```
-
-The matrix warms each port and object-size path before measurement by default,
-then clears PUT traces so the report excludes warmup traffic. Disable that with
-`PUT_MATRIX_WARMUP=0`, or tune it with `PUT_MATRIX_WARMUP_ITERATIONS` and
-`PUT_MATRIX_WARMUP_ROUNDS`.
-
-Set `PUT_TRACE=1` with the matrix to write per-node PUT trace JSONL files under
-the benchmark temp directory and print a dominant-stage report:
-
-```bash
-PUT_MATRIX=1 PUT_TRACE=1 make bench-cluster
-```
-
-The scripts create trace files with mode `0600` because they include raw bucket
-and object keys. The report groups requests by ingress, size class, and forwarding mode,
-then summarizes forwarded bytes, leader-hint retries, meta-index proposal
-counts, and the slowest shard stage.
-
 ## S3-Compatible Comparison
 
-`make bench-s3-compat-compare` runs the official local S3-compatible comparison
-with MinIO `warp` against GrainFS single-node and any local native MinIO/RustFS
-binaries available on `PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`, or
-`RUSTFS_URL` to point at specific released builds or already-running endpoints.
+`make bench`, `make bench-cluster`, and `make bench-s3-compat-compare` run the
+official S3 workload with MinIO `warp`. `make bench` targets a local GrainFS
+single-node server, `make bench-cluster` targets a local GrainFS 3-node cluster,
+and `make bench-s3-compat-compare` compares GrainFS single-node with any native
+MinIO/RustFS binaries available on `PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`,
+`MINIO_URL`, or `RUSTFS_URL` to point at specific released builds or
+already-running endpoints.
 
 ```bash
 make bench-s3-compat-compare
@@ -68,19 +37,24 @@ a warm-read pass over the objects written by the preceding PUT pass.
 WARP_OPS=put,get WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 WARP_DURATION=1m make bench-s3-compat-compare
 ```
 
-For cluster endpoints, pass a comma-separated host list through the matching
-`*_URL` variable; the script strips URL schemes before passing the host list to
-`warp`.
+Include batch delete measurements with:
+
+```bash
+WARP_OPS=put,get,delete WARP_OBJECTS=4096 WARP_DELETE_BATCH=100 make bench-cluster
+```
+
+For external cluster endpoints, pass a comma-separated host list through
+`GRAINFS_CLUSTER_URL` or the matching `*_URL` variable; the script strips URL
+schemes before passing the host list to `warp`.
 
 Failures are recorded as raw `warp.out` and `analyze.out` artifacts under the
-profile directory. The old k6 mixed workload is no longer used for
-GrainFS/MinIO/RustFS comparison claims because its write-heavy operation mix and
-client implementation are not the shared public benchmark surface.
+profile directory. k6-based S3 benchmark scripts have been removed; S3
+performance claims should use `warp`.
 
 ## Iceberg Table API
 
 `make bench-iceberg-table` and `make bench-iceberg-table-cluster` run the
-Iceberg REST Catalog table lifecycle benchmark with a Go runner, not k6. The
+Iceberg REST Catalog table lifecycle benchmark with a Go runner. The
 shell scripts still start GrainFS, bootstrap IAM credentials, optionally collect
 pprof profiles, and write `benchmarks/iceberg_table_report.json`.
 

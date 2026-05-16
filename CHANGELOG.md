@@ -346,7 +346,7 @@
 - `go test ./tests/e2e -run '^TestIAM_E2E_PolicyBypassClosed$' -count=1 -timeout=3m`
 - `go test ./tests/e2e -run '^TestE2E_DynamicGroupSeeding_1to5$' -count=1 -timeout=8m`
 - `make build`
-- `NO_BUILD=1 PUT_MATRIX=1 PUT_TRACE=1 PUT_MATRIX_ITERATIONS=12 PUT_SMALL_KB=64 PUT_LARGE_KB=1024 CLUSTER_WARMUP_SLEEP=1 ./benchmarks/bench_cluster.sh`
+- Historical PUT matrix benchmark run before the S3 benchmark suite moved to `warp`.
 
 ## [0.0.208.0] - 2026-05-15 — refactor: split server route and runtime surfaces
 
@@ -403,7 +403,7 @@
 - `go test ./internal/cluster -count=1`
 - `go test ./internal/raft -count=1`
 - `go test ./internal/server -count=1`
-- `node --check benchmarks/put_trace_report.js && node --test benchmarks/put_trace_report.test.js`
+- Historical PUT trace report verification before the S3 benchmark suite moved to `warp`.
 
 ## [0.0.206.1] - 2026-05-15: fix: NFS cluster benchmark reliability
 

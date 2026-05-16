@@ -7,6 +7,7 @@
 # Examples:
 #   ./benchmarks/bench_s3_compat_compare.sh
 #   TARGETS=grainfs-single,minio WARP_DURATION=1m WARP_OBJ_SIZE=20MiB WARP_CONCURRENT=32 ./benchmarks/bench_s3_compat_compare.sh
+#   TARGETS=grainfs-cluster WARP_OPS=put,get,delete ./benchmarks/bench_s3_compat_compare.sh
 #   RUSTFS_URL=http://127.0.0.1:9002 RUSTFS_ACCESS_KEY=rustfsadmin RUSTFS_SECRET_KEY=rustfsadmin ./benchmarks/bench_s3_compat_compare.sh
 
 set -euo pipefail
@@ -28,6 +29,8 @@ WARP_CONCURRENT="${WARP_CONCURRENT:-16}"
 WARP_OPS="${WARP_OPS:-put,get}"
 WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
+WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
+GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-3}"
 
 MINIO_BIN="${MINIO_BIN:-$(command -v minio 2>/dev/null || true)}"
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
@@ -122,6 +125,73 @@ start_grainfs_single() {
   set_start_info "http://127.0.0.1:$port" "$ACCESS_KEY" "$SECRET_KEY" "local"
 }
 
+start_grainfs_cluster() {
+  if [[ "${GRAINFS_CLUSTER_URL:-}" != "" ]]; then
+    set_start_info "$GRAINFS_CLUSTER_URL" "${GRAINFS_ACCESS_KEY:-}" "${GRAINFS_SECRET_KEY:-}" "external"
+    return 0
+  fi
+
+  if [[ "$GRAINFS_CLUSTER_NODES" -lt 2 ]]; then
+    echo "[error] GRAINFS_CLUSTER_NODES must be >= 2" >&2
+    exit 1
+  fi
+  if [[ "${NO_BUILD:-0}" != "1" ]]; then
+    echo "[bench] building grainfs..." >&2
+    make build >&2
+  fi
+  bench_require_binary "$BINARY"
+
+  local cluster_dir="$BENCH_DIR/grainfs-cluster"
+  local enc_key_file="$cluster_dir/encryption.key"
+  local http_ports=()
+  local raft_ports=()
+  local urls=()
+  local idx
+  mkdir -p "$cluster_dir"
+  for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
+    mkdir -p "$cluster_dir/n${idx}"
+    http_ports+=("$(bench_free_port)")
+    raft_ports+=("$(bench_free_port)")
+  done
+  BENCH_ENCRYPTION_KEY_FILE="$enc_key_file"
+  export BENCH_ENCRYPTION_KEY_FILE
+  bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
+
+  start_grainfs_cluster_node() {
+    local node_idx="$1"
+    local zero_idx=$((node_idx - 1))
+    "$BINARY" serve \
+      --data "$cluster_dir/n${node_idx}" \
+      --port "${http_ports[$zero_idx]}" \
+      --node-id "bench-node-${node_idx}" \
+      --raft-addr "127.0.0.1:${raft_ports[$zero_idx]}" \
+      --cluster-key "bench-s3-compat-cluster-key" \
+      $(bench_encryption_args) \
+      --nfs4-port 0 \
+      --nbd-port 0 \
+      --scrub-interval 0 \
+      --lifecycle-interval 0 \
+      --log-level warn \
+      >"$PROFILE_ROOT/grainfs-cluster-node-${node_idx}.log" 2>&1 &
+    PIDS+=($!)
+    bench_wait_tcp_port "127.0.0.1" "${http_ports[$zero_idx]}" "grainfs-cluster node${node_idx} S3" 180 0.2 >&2
+  }
+
+  start_grainfs_cluster_node 1
+  bench_bootstrap_iam_credentials "$BINARY" "$cluster_dir/n1" "bench-s3-compat-cluster" >&2
+  for idx in $(seq 2 "$GRAINFS_CLUSTER_NODES"); do
+    printf '%s' "127.0.0.1:${raft_ports[0]}" >"$cluster_dir/n${idx}/.join-pending"
+    chmod 600 "$cluster_dir/n${idx}/.join-pending"
+    start_grainfs_cluster_node "$idx"
+  done
+  sleep "${CLUSTER_WARMUP_SLEEP:-5}"
+
+  for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
+    urls+=("http://127.0.0.1:${http_ports[$((idx - 1))]}")
+  done
+  set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
+}
+
 start_minio() {
   if [[ "${MINIO_URL:-}" != "" ]]; then
     set_start_info "$MINIO_URL" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "external"
@@ -193,13 +263,14 @@ write_summary_header() {
     echo "- operations: ${WARP_OPS}"
     echo "- object: ${WARP_OBJ_SIZE}"
     echo "- objects for GET seed: ${WARP_OBJECTS}"
+    echo "- delete batch: ${WARP_DELETE_BATCH}"
     echo "- duration: ${WARP_DURATION}"
     echo "- concurrency: ${WARP_CONCURRENT}"
     echo "- noclear: ${WARP_NOCLEAR}"
     echo "- host select: ${WARP_HOST_SELECT}"
     echo "- raw artifacts: ${PROFILE_ROOT}"
     echo
-    echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT and GET are reported separately. With WARP_NOCLEAR=1, GET is a warm-read pass over objects written by the preceding PUT pass."
+    echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. With WARP_NOCLEAR=1, GET measures a warm-read pass over the objects written by the preceding PUT pass; DELETE uses warp's batch delete workload."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. MinIO/RustFS local runs use their default single-node durability unless an external endpoint is supplied."
     echo
@@ -250,8 +321,11 @@ run_warp_case() {
     --host-select "$WARP_HOST_SELECT"
     --benchdata "$out_dir/warp.data"
   )
-  if [[ "$op" == "get" ]]; then
+  if [[ "$op" == "get" || "$op" == "delete" ]]; then
     args+=(--objects "$WARP_OBJECTS")
+  fi
+  if [[ "$op" == "delete" ]]; then
+    args+=(--batch "$WARP_DELETE_BATCH")
   fi
   if [[ "$WARP_NOCLEAR" == "1" ]]; then
     args+=(--noclear)
@@ -270,25 +344,35 @@ run_warp_case() {
     return 0
   fi
 
-  if ! python3 - "$target" "$START_MODE" "$op" "$out_dir/analyze.out" "$PROFILE_ROOT/warp-results.tsv" "$out_dir" <<'PY'
+  if ! python3 - "$target" "$START_MODE" "$op" "$out_dir/analyze.out" "$PROFILE_ROOT/warp-results.tsv" "$out_dir" "$data_file" <<'PY'
+import json
 import re
+import subprocess
 import sys
 
-target, mode, op, analyze_path, out_path, artifact_dir = sys.argv[1:]
+target, mode, op, analyze_path, out_path, artifact_dir, data_path = sys.argv[1:]
 text = open(analyze_path, encoding="utf-8").read()
 avg = re.search(r"Average:\s+([0-9.]+)\s+MiB/s,\s+([0-9.]+)\s+obj/s", text)
 err = re.search(r"Errors:\s+([0-9]+)", text)
 if not avg:
-    sys.exit("missing Average line")
-row = [
-    target,
-    mode,
-    op,
-    f"{float(avg.group(1)):.2f}",
-    f"{float(avg.group(2)):.2f}",
-    str(int(err.group(1)) if err else 0),
-    artifact_dir,
-]
+    if op != "delete":
+        sys.exit("missing Average line")
+    raw = subprocess.check_output(["zstdcat", data_path], text=True)
+    data = json.loads(raw)
+    delete = data.get("by_op_type", {}).get("DELETE", {})
+    hosts = delete.get("throughput_by_host", {})
+    objects = sum(float(v.get("objects", 0)) for v in hosts.values())
+    errors = sum(int(v.get("errors", 0)) for v in hosts.values())
+    millis = sum(float(v.get("measure_duration_millis", 0)) for v in hosts.values())
+    if millis <= 0:
+        sys.exit("missing DELETE duration")
+    mib = 0.0
+    obj_s = objects / (millis / 1000.0)
+else:
+    mib = float(avg.group(1))
+    obj_s = float(avg.group(2))
+    errors = int(err.group(1)) if err else 0
+row = [target, mode, op, f"{mib:.2f}", f"{obj_s:.2f}", str(errors), artifact_dir]
 with open(out_path, "a", encoding="utf-8") as f:
     f.write("\t".join(row) + "\n")
 PY
@@ -352,13 +436,16 @@ write_summary_header
 : >"$PROFILE_ROOT/skipped.txt"
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
-for target in grainfs-single minio rustfs; do
+for target in grainfs-single grainfs-cluster minio rustfs; do
   target_enabled "$target" || continue
   target_pid_start="${#PIDS[@]}"
 
   case "$target" in
     grainfs-single)
       start_grainfs_single
+      ;;
+    grainfs-cluster)
+      start_grainfs_cluster
       ;;
     minio)
       if ! start_minio; then
@@ -380,7 +467,7 @@ for target in grainfs-single minio rustfs; do
   mode="$START_MODE"
   for op in "${WARP_OP_LIST[@]}"; do
     case "$op" in
-      get|put) run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op" ;;
+      get|put|delete) run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op" ;;
       *)
         echo "[error] unknown WARP_OPS entry: $op" >&2
         exit 1
