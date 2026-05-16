@@ -248,12 +248,39 @@ func TestCluster_Multipart_List(t *testing.T) {
 
 	const (
 		bucketName = "mp-list-cluster"
-		keyName    = "listed/incomplete.bin"
-		numNodes   = 3
 	)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	cluster, leaderIdx := startMultipartListingCluster(t, ctx, bucketName)
+
+	client := cluster.S3Client(leaderIdx)
+	exerciseMultipartListingFeature(t, ctx, client, bucketName, "cluster-part", true)
+}
+
+func TestCluster_Multipart_ListFanoutAcrossNodes(t *testing.T) {
+	skipIfShort(t, "skipping multi-node multipart listing fanout e2e in -short mode")
+
+	const bucketName = "mp-list-fanout"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	cluster, leaderIdx := startMultipartListingCluster(t, ctx, bucketName)
+
+	fixture := createIncompleteMultipartListingFixture(t, ctx, cluster.S3Client(leaderIdx), bucketName, "cluster-fanout-part")
+
+	for i := range cluster.httpURLs {
+		t.Run(fmt.Sprintf("node-%d", i+1), func(t *testing.T) {
+			assertMultipartListingFeature(t, ctx, cluster.S3Client(i), fixture, true)
+		})
+	}
+}
+
+func startMultipartListingCluster(t *testing.T, ctx context.Context, bucketName string) (*e2eCluster, int) {
+	t.Helper()
+
 	cluster := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      numNodes,
+		Nodes:      3,
 		Mode:       ClusterModeDynamicJoin,
 		LogPrefix:  "grainfs-mp-list",
 		DisableNFS: true,
@@ -261,8 +288,6 @@ func TestCluster_Multipart_List(t *testing.T) {
 	})
 	cluster.GrantAdminOnBuckets(bucketName)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-	defer cancel()
 	leaderIdx, err := waitForWritableEndpoint(
 		ctx,
 		cluster.httpURLs,
@@ -274,68 +299,5 @@ func TestCluster_Multipart_List(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-
-	client := cluster.S3Client(leaderIdx)
-	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket:      aws.String(bucketName),
-		Key:         aws.String(keyName),
-		ContentType: aws.String("application/octet-stream"),
-	})
-	require.NoError(t, err)
-	uploadID := aws.ToString(initOut.UploadId)
-	require.NotEmpty(t, uploadID)
-	t.Cleanup(func() {
-		_, _ = client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
-			Bucket:   aws.String(bucketName),
-			Key:      aws.String(keyName),
-			UploadId: aws.String(uploadID),
-		})
-	})
-
-	p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String(bucketName),
-		Key:        aws.String(keyName),
-		UploadId:   aws.String(uploadID),
-		PartNumber: aws.Int32(1),
-		Body:       bytes.NewReader([]byte("cluster-part-one")),
-	})
-	require.NoError(t, err)
-	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String(bucketName),
-		Key:        aws.String(keyName),
-		UploadId:   aws.String(uploadID),
-		PartNumber: aws.Int32(2),
-		Body:       bytes.NewReader([]byte("cluster-part-two")),
-	})
-	require.NoError(t, err)
-
-	for i := range cluster.httpURLs {
-		t.Run(fmt.Sprintf("node-%d", i+1), func(t *testing.T) {
-			nodeClient := cluster.S3Client(i)
-			uploads, err := nodeClient.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
-				Bucket: aws.String(bucketName),
-				Prefix: aws.String("listed/"),
-			})
-			require.NoError(t, err)
-			require.Len(t, uploads.Uploads, 1)
-			assert.Equal(t, keyName, aws.ToString(uploads.Uploads[0].Key))
-			assert.Equal(t, uploadID, aws.ToString(uploads.Uploads[0].UploadId))
-
-			var parts *s3.ListPartsOutput
-			require.Eventually(t, func() bool {
-				var err error
-				parts, err = nodeClient.ListParts(ctx, &s3.ListPartsInput{
-					Bucket:   aws.String(bucketName),
-					Key:      aws.String(keyName),
-					UploadId: aws.String(uploadID),
-				})
-				return err == nil
-			}, 30*time.Second, 500*time.Millisecond)
-			require.Len(t, parts.Parts, 2)
-			assert.Equal(t, int32(1), aws.ToInt32(parts.Parts[0].PartNumber))
-			assert.Equal(t, aws.ToString(p1.ETag), aws.ToString(parts.Parts[0].ETag))
-			assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
-			assert.Equal(t, aws.ToString(p2.ETag), aws.ToString(parts.Parts[1].ETag))
-		})
-	}
+	return cluster, leaderIdx
 }
