@@ -28,6 +28,23 @@ available without bypassing outer mutation side-effect wrappers, put-then-set
 fallback rolls back the newly-created version on ACL failure, and recovery
 write gates are not used as rollback deleters.
 
+The plan and its sibling ACL plan are cached on the `Operations` facade and
+published via `atomic.Pointer`; reads are lock-free and allocation-free on
+the hot path. Cache invalidation is driven by a single generation source in
+the wrapper chain — `SwappableBackend.Generation()`. **Invariant: at most one
+backend in any chain may implement `operationPlanGeneration`.** `NewOperations`
+walks the chain and panics if a second source is discovered, because the
+atomic.Uint64 generation cache can only track one source's bumps without
+losing invalidation events. Any future wrapper that needs to invalidate the
+plan must either reuse `SwappableBackend` as its mutation point or extend the
+generation tracking design before adding a new source.
+
+Result-shape wrappers (`SwappableBackend`, `CachedBackend`, `wal.Backend`,
+`pullthrough.Backend`) hold a long-lived `*Operations` over their inner
+backend rather than constructing a fresh one per call. `SwappableBackend.Swap`
+resets its cached `*Operations` (in addition to bumping `Generation`) so the
+next call rebuilds against the new inner.
+
 ### Mutation Result
 
 A mutation result is the storage-facing outcome of a write operation, including

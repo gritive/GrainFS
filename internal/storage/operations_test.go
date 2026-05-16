@@ -30,6 +30,33 @@ func TestUnsupportedOperationErrorsAsTyped(t *testing.T) {
 	require.Equal(t, UnsupportedReasonUnsafeFallback, typed.Reason)
 }
 
+func TestNewOperationsPanicsOnMultipleGenerationSources(t *testing.T) {
+	// Two SwappableBackend layers in the chain violates the single-source
+	// invariant required by the atomic.Uint64 generation cache. Construction
+	// must fail loudly so a future contributor cannot silently break
+	// invalidation by adding Generation() to another wrapper.
+	require.Panics(t, func() {
+		NewOperations(NewSwappableBackend(NewSwappableBackend(&aclNoCapabilityBackend{})))
+	})
+}
+
+func TestSwappableBackendCachedOpsInvalidatedOnSwap(t *testing.T) {
+	// Verifies that sb.cachedOps() rebuilds against the new inner after Swap.
+	// The cached *Operations is reset before inner is swapped (see Swap
+	// ordering rationale in swappable.go); this test asserts the cached
+	// pointer changes across Swap.
+	first := &aclNoCapabilityBackend{}
+	sb := NewSwappableBackend(first)
+	opsA := sb.cachedOps()
+	require.NotNil(t, opsA)
+	require.Same(t, opsA, sb.cachedOps(), "second call before Swap returns same cached *Operations")
+
+	sb.Swap(&aclNoCapabilityBackend{})
+	opsB := sb.cachedOps()
+	require.NotNil(t, opsB)
+	require.NotSame(t, opsA, opsB, "Swap must invalidate the cached *Operations")
+}
+
 func TestOperationsRefreshesPlanAfterSwappableBackendSwap(t *testing.T) {
 	swappable := NewSwappableBackend(&aclNoCapabilityBackend{})
 	ops := NewOperations(swappable)
