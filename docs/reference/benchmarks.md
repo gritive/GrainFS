@@ -96,8 +96,35 @@ This table lists values already documented in the repository.
 | Scenario                                                               | Result                                                                                                            |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | FUSE-over-S3, 64 MiB payload, Apple M3, Colima loopback, 3-run average | Direct S3 write 96.8 MB/s, direct S3 read 108.0 MB/s, rclone mount write 106.7 MB/s, rclone mount read 107.3 MB/s |
+| `GrainFS` vs RustFS vs MinIO single-node warp, 64 KiB, c16             | Latest same-host clean run: `GrainFS` PUT 573.88 MiB/s and GET 1324.50 MiB/s; MinIO PUT 252.88 MiB/s and GET 1074.01 MiB/s; RustFS PUT 225.43 MiB/s and GET 500.35 MiB/s |
 | `GrainFS` vs RustFS vs MinIO 3-node warp, 64 KiB, c16                  | Latest same-host clean run: `GrainFS` PUT 92.11 MiB/s and GET 325.53 MiB/s; MinIO PUT 47.05 MiB/s and GET 296.84 MiB/s; RustFS PUT 36.31 MiB/s and GET 105.88 MiB/s |
 | CI regression threshold                                                | Not yet enforced                                                                                                  |
+
+## 2026-05-16 Local Single-Node Warp Final
+
+These snapshots were captured by `benchmarks/bench_s3_compat_compare.sh` on the
+local Apple M3 loopback setup with signed S3 requests, 64 KiB objects,
+concurrency 16, `warp`, `--host-select roundrobin`, and `--noclear`. PUT and
+GET used the same bucket per target; GET is therefore a warm-read pass over the
+objects kept from the preceding PUT pass. MinIO and RustFS were measured once in
+this final comparison. `GrainFS` ran with at-rest encryption and default
+Iceberg audit enabled.
+
+| Target    | Commit / build | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET obj/s | GET errors | Raw artifacts |
+| --------- | -------------- | --------: | --------: | ---------: | --------: | --------: | ---------: | ------------- |
+| `GrainFS` | `4c109c36`     |    573.88 |   9182.09 |          0 |   1324.50 |  21191.98 |          0 | `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/grainfs-single` |
+| MinIO     | local run      |    252.88 |   4046.10 |          0 |   1074.01 |  17184.13 |          0 | `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/minio` |
+| RustFS    | local run      |    225.43 |   3606.93 |          0 |    500.35 |   8005.57 |          0 | `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/rustfs` |
+
+Observed deltas:
+
+- `GrainFS` PUT throughput was 2.27x the MinIO PUT baseline and 2.55x the
+  RustFS PUT baseline.
+- `GrainFS` GET throughput was 1.23x the MinIO GET baseline and 2.65x the
+  RustFS GET baseline.
+- The official comparison no longer uses the old k6 mixed workload; the raw
+  run summary is
+  `benchmarks/profiles/s3-compat-warp-single-official-20260516-163404/summary.md`.
 
 ## 2026-05-16 Local 3-Node Warp Baseline
 

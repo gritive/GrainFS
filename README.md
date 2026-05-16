@@ -66,6 +66,8 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 
 | Comparison | Current status | Details |
 | --- | --- | --- |
+| `GrainFS` vs MinIO/RustFS single-node S3 PUT | Latest same-host `warp` run: GrainFS 573.88 MiB/s, MinIO 252.88 MiB/s, RustFS 225.43 MiB/s for 64 KiB objects at c16, with 0 errors | [Local single-node warp final](docs/reference/benchmarks.md#2026-05-16-local-single-node-warp-final) |
+| `GrainFS` vs MinIO/RustFS single-node S3 GET | Latest same-host `warp` run: GrainFS 1324.50 MiB/s, MinIO 1074.01 MiB/s, RustFS 500.35 MiB/s for 64 KiB objects at c16, with 0 errors | [Local single-node warp final](docs/reference/benchmarks.md#2026-05-16-local-single-node-warp-final) |
 | `GrainFS` vs MinIO/RustFS 3-node S3 PUT | Latest same-host `warp` run: GrainFS 92.11 MiB/s, MinIO 47.05 MiB/s, RustFS 36.31 MiB/s for 64 KiB objects at c16, with 0 errors | [Local 3-node warp final](docs/reference/benchmarks.md#2026-05-16-local-3-node-warp-final) |
 | `GrainFS` vs MinIO/RustFS 3-node S3 GET | Latest same-host `warp` run: GrainFS 325.53 MiB/s, MinIO 296.84 MiB/s, RustFS 105.88 MiB/s for 64 KiB objects at c16, with 0 errors | [Local 3-node warp final](docs/reference/benchmarks.md#2026-05-16-local-3-node-warp-final) |
 
