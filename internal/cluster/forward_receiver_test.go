@@ -304,7 +304,7 @@ func TestForwardReceiver_HandleListParts_CallsBackend(t *testing.T) {
 	require.Equal(t, []storage.Part{*part}, parts)
 }
 
-func TestForwardReceiver_HandleListParts_MissingUploadReturnsNoSuchKey(t *testing.T) {
+func TestForwardReceiver_HandleListParts_MissingUploadReturnsNoSuchUpload(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-1")
 	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
 
