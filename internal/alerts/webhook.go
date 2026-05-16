@@ -412,6 +412,39 @@ func (d *Dispatcher) controllerLoop() {
 	}
 }
 
+// DrainForTest blocks until all in-flight sends have been processed:
+//  1. A barrier through inbox ensures every prior sendCmd has been applied
+//     (workers spawned with workerWG.Add taken).
+//  2. workerWG.Wait waits for every spawned worker to enqueue its releaseCmd
+//     and exit.
+//  3. A barrier through releaseInbox ensures every release applied so
+//     onResult / lastSent / inFlight bookkeeping is observable to the caller.
+//
+// Test-only — exported only so cross-package tests (package server) can reach
+// it. Production code MUST NOT call this; it serialises against the controller
+// and silently no-ops if the dispatcher is not running.
+func (d *Dispatcher) DrainForTest() {
+	if !d.started.Load() || d.stopping.Load() {
+		return
+	}
+	d.barrierThrough(d.inbox)
+	d.workerWG.Wait()
+	d.barrierThrough(d.releaseInbox)
+}
+
+func (d *Dispatcher) barrierThrough(ch chan dispatchCmd) {
+	done := make(chan struct{})
+	select {
+	case ch <- syncBarrierCmd{done: done}:
+	case <-d.stop:
+		return
+	}
+	select {
+	case <-done:
+	case <-d.stop:
+	}
+}
+
 func (d *Dispatcher) drainResidualSendCmds() {
 	for {
 		select {

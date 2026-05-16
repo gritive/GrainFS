@@ -67,6 +67,17 @@ func (c releaseCmd) apply(env *dispatchEnv) {
 	}
 }
 
+// syncBarrierCmd is a test-only dispatchCmd whose apply just closes done.
+// Used by DrainForTest to confirm that the controller has finished processing
+// every prior releaseCmd in its inbox.
+type syncBarrierCmd struct {
+	done chan struct{}
+}
+
+func (c syncBarrierCmd) apply(*dispatchEnv) {
+	close(c.done)
+}
+
 // dispatchEnv is the controller's owned environment. Mutated only inside the
 // controller goroutine (in cmd.apply) so no mutex is required.
 type dispatchEnv struct {

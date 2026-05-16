@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -90,7 +91,6 @@ func expectedSignature(secret string, body []byte) string {
 // different between the two sends, so the default DedupWindow does not
 // suppress the second delivery.
 func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
-	t.Skip("rewritten in Task 10 — async pattern with drainForTest")
 	key := bytes.Repeat([]byte{0x42}, 32)
 	enc, err := encrypt.NewEncryptor(key)
 	require.NoError(t, err)
@@ -106,6 +106,14 @@ func TestAlertsState_HotReload_WebhookURLAndSecret(t *testing.T) {
 		alerts.DegradedConfig{},
 		"hot-reload-test",
 	)
+	// Start the dispatcher actor (production wires Start in a later task; the
+	// hot-reload contract exercised here lives wholly inside the actor pattern).
+	state.dispatcher.Start(context.Background())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = state.dispatcher.Stop(ctx)
+	})
 	t.Cleanup(state.Close)
 
 	rcv1 := newRecordingReceiver(t)

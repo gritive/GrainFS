@@ -48,6 +48,10 @@ func newFailingReceiver(t *testing.T, fails int) *fakeReceiver {
 // with only the alerts endpoints registered. Returns its base URL and a
 // shutdown helper. Real localhost is required because /api/admin/alerts/*
 // runs through localhostOnly() — synthetic ut requests fail with 403.
+//
+// Also starts the dispatcher actor and registers a Cleanup that stops it
+// before st.Close — production wiring will start the dispatcher in a later
+// task; until then, tests that exercise Send must start it here.
 func startTestAlertsServer(t *testing.T, st *AlertsState) string {
 	t.Helper()
 	port := freeLocalPort(t)
@@ -61,6 +65,15 @@ func startTestAlertsServer(t *testing.T, st *AlertsState) string {
 	srv.registerAlertsAPI(h)
 
 	go h.Spin()
+
+	if st.dispatcher != nil {
+		st.dispatcher.Start(context.Background())
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = st.dispatcher.Stop(ctx)
+		})
+	}
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -116,7 +129,6 @@ func postJSON(t *testing.T, url string, into any) int {
 }
 
 func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
-	t.Skip("rewritten in Task 10 — async pattern with drainForTest")
 	r := newFailingReceiver(t, 0)
 	st := NewAlertsState(r.srv.URL, alerts.Options{
 		MaxRetries:  0,
@@ -125,6 +137,7 @@ func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
 	base := startTestAlertsServer(t, st)
 
 	st.Send(alerts.Alert{Type: "ok", Severity: alerts.SeverityWarning, Message: "ok"})
+	st.dispatcher.DrainForTest()
 
 	var got alertsStatusResponse
 	getJSON(t, base+"/api/admin/alerts/status", &got)
@@ -136,7 +149,6 @@ func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
 }
 
 func TestAlertsStatus_FailureSurfacesForBanner(t *testing.T) {
-	t.Skip("rewritten in Task 10 — async pattern with drainForTest")
 	r := newFailingReceiver(t, 999)
 	st := NewAlertsState(r.srv.URL, alerts.Options{
 		MaxRetries:  1,
@@ -151,6 +163,7 @@ func TestAlertsStatus_FailureSurfacesForBanner(t *testing.T) {
 		Resource: "cluster-1",
 		Message:  "lost",
 	})
+	st.dispatcher.DrainForTest()
 
 	var got alertsStatusResponse
 	getJSON(t, base+"/api/admin/alerts/status", &got)
@@ -161,7 +174,6 @@ func TestAlertsStatus_FailureSurfacesForBanner(t *testing.T) {
 }
 
 func TestAlertsResend_ClearsBannerOnSuccess(t *testing.T) {
-	t.Skip("rewritten in Task 10 — async pattern with drainForTest")
 	// 1 try + 1 retry both fail (2 failures), then resend tries lands on
 	// the third (now-healthy) attempt.
 	r := newFailingReceiver(t, 2)
@@ -169,10 +181,13 @@ func TestAlertsResend_ClearsBannerOnSuccess(t *testing.T) {
 		MaxRetries:  1,
 		BackoffBase: time.Millisecond,
 		BackoffCap:  2 * time.Millisecond,
+		// DedupWindow=0 disables dedup so resend isn't suppressed.
+		DedupWindow: -1,
 	}, alerts.DegradedConfig{})
 	base := startTestAlertsServer(t, st)
 
 	st.Send(alerts.Alert{Type: "x", Severity: alerts.SeverityWarning, Message: "m"})
+	st.dispatcher.DrainForTest()
 
 	var resend struct {
 		Resent bool   `json:"resent"`
@@ -180,6 +195,7 @@ func TestAlertsResend_ClearsBannerOnSuccess(t *testing.T) {
 	}
 	require.Equal(t, http.StatusOK, postJSON(t, base+"/api/admin/alerts/resend", &resend))
 	require.True(t, resend.Resent, "resend must succeed once receiver heals: %s", resend.Error)
+	st.dispatcher.DrainForTest()
 
 	var got alertsStatusResponse
 	getJSON(t, base+"/api/admin/alerts/status", &got)
