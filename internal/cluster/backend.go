@@ -1809,7 +1809,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	}
 
 	if sp.Size <= maxECMemoryShardFastPathBytes {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType)
+		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
@@ -1886,6 +1886,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	cfg ECConfig,
 	sp *spooledObject,
 	contentType string,
+	userMetadata map[string]string,
 ) (*storage.Object, bool, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
@@ -1897,6 +1898,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 		Placement:        placement,
 		RingVersion:      ringVer,
 		ContentType:      contentType,
+		UserMetadata:     cloneStringMap(userMetadata),
 	}, sp)
 	if err != nil {
 		return nil, true, err
@@ -1913,6 +1915,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 			Placement:        placement,
 			RingVersion:      ringVer,
 			ContentType:      contentType,
+			UserMetadata:     cloneStringMap(userMetadata),
 		},
 		result,
 		"ec_memory",
