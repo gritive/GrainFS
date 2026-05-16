@@ -53,15 +53,17 @@ performance claims should use `warp`.
 
 ## Iceberg Table API
 
-`make bench-iceberg-table` and `make bench-iceberg-table-cluster` run the
-Iceberg REST Catalog table lifecycle benchmark with a Go runner. The
-shell scripts still start GrainFS, bootstrap IAM credentials, optionally collect
-pprof profiles, and write `benchmarks/iceberg_table_report.json`.
+`make bench-iceberg-table` and `make bench-iceberg-table-cluster` run MinIO
+`warp iceberg` against GrainFS. The shell scripts start GrainFS, bootstrap IAM
+credentials, optionally collect pprof profiles, and write raw `warp` artifacts
+under `benchmarks/profiles/iceberg-table-*`.
 
-The runner treats any failed request as a benchmark failure. When failures
-occur, the JSON report includes a bounded `failures` sample list with method,
-path, status, error, and response body fields to make local transport or server
-errors visible.
+The default workload is `ICEBERG_WARP_COMMAND=catalog-mixed` with views and
+update operations disabled (`ICEBERG_VIEWS_PER_NS=0`,
+`ICEBERG_TABLE_UPDATE_DISTRIB=0`) so the benchmark targets read/list/head
+table-catalog behavior first. Use `ICEBERG_WARP_COMMAND=catalog-read` or
+`catalog-commits` to focus the workload, and opt into update distribution after
+commit-conflict behavior has been tuned.
 
 Tune the workload with:
 

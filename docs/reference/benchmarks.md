@@ -26,8 +26,8 @@ object sizes, concurrency, and cold/warm-cache rules.
 | `make bench`                                  | Single-node S3 `warp` PUT/GET workload             | `benchmarks/profiles/s3-compat-compare-*`                           |
 | `make bench-cluster`                          | 3-node S3 `warp` PUT/GET workload                  | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
 | `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload | `benchmarks/profiles/s3-compat-compare-*`                           |
-| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog table API via Go runner | `benchmarks/iceberg_table_report.json`                              |
-| `make bench-iceberg-table-cluster`            | Multi-node Iceberg table API via Go runner               | `benchmarks/iceberg_table_report.json`                              |
+| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog via `warp iceberg` | `benchmarks/profiles/iceberg-table-*`                               |
+| `make bench-iceberg-table-cluster`            | Multi-node Iceberg REST Catalog via `warp iceberg`  | `benchmarks/profiles/iceberg-table-*`, cluster logs                 |
 | `make bench-nfs`                              | Single-node NFS fio profile via Colima             | `benchmarks/profiles/nfs-*/fio_output.txt`                          |
 | `make bench-nfs-cluster`                      | Multi-node NFS fio profile                         | `benchmarks/profiles/nfs-*`                                         |
 | `make bench-nfs-multi`                        | Multi-bucket NFS export profile                    | `benchmarks/profiles/nfs-multi-*`                                   |
@@ -83,6 +83,12 @@ warm-read rule for every target. Cluster endpoints are passed as comma-separated
 host lists to `warp`. The script also accepts `WARP_OPS=put,get,delete` for
 batch delete measurements through `warp delete --batch`. k6-based S3 benchmark
 scripts have been removed; S3 performance claims should use `warp`.
+
+Iceberg catalog benchmarks also use MinIO `warp` through
+`make bench-iceberg-table` and `make bench-iceberg-table-cluster`. The default
+Iceberg profile is `catalog-mixed` with views and update operations disabled so
+the workload runs cleanly against the current table catalog surface; commit-heavy
+update benchmarking is tracked separately.
 
 ## Latest Local Result
 
