@@ -36,6 +36,9 @@ func TestCompatibilityMatricesDoNotUseNotTestedStatus(t *testing.T) {
 				if err := validateUnsupportedS3FailClosedEvidence(string(body)); err != nil {
 					t.Fatal(err)
 				}
+				if err := validateObjectGovernanceBoundary(string(body)); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}
@@ -142,6 +145,31 @@ func validateRequiredS3CompatibilityRows(markdown string) error {
 	return nil
 }
 
+func validateObjectGovernanceBoundary(markdown string) error {
+	requiredNotes := []string{
+		"separate governance design",
+		"versioning",
+		"deletes",
+		"lifecycle",
+		"permissions",
+	}
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) < 4 || cells[1] != "Object Lock / retention / legal hold" {
+			continue
+		}
+		if strings.ToLower(cells[2]) != "not supported" {
+			return fmt.Errorf("Object Lock / retention / legal hold must remain Not supported until governance design lands")
+		}
+		notes := strings.ToLower(cells[3])
+		if !containsAll(notes, requiredNotes) {
+			return fmt.Errorf("Object Lock / retention / legal hold row must name the separate governance design boundary")
+		}
+		return nil
+	}
+	return fmt.Errorf("Object Lock / retention / legal hold row is required")
+}
+
 func requiresFailClosedEvidence(operation string) bool {
 	return operation == "SSE-KMS headers" || operation == "SSE-C headers"
 }
@@ -165,6 +193,15 @@ func isProductionEssentialS3Operation(operation string) bool {
 		(operation == "sse-s3 headers") ||
 		(strings.Contains(operation, "sse-s3/sse-kms") && strings.Contains(operation, "headers")) ||
 		strings.Contains(operation, "lifecycle expiration")
+}
+
+func containsAll(s string, needles []string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(s, needle) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsAny(s string, needles []string) bool {

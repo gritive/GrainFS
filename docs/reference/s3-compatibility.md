@@ -53,7 +53,7 @@ binary and data compatibility across rolling upgrades.
 | Bucket controls   | Static website hosting                  | Not supported |                                                                                  |
 | Bucket controls   | Bucket notification configuration       | Not supported | Internal events exist, but S3 bucket notification compatibility is not claimed.  |
 | Bucket controls   | Bucket replication                      | Not supported | `GrainFS` has Raft/EC replication; S3 bucket replication is not claimed.           |
-| Object governance | Object Lock / retention / legal hold    | Not supported |                                                                                  |
+| Object governance | Object Lock / retention / legal hold    | Not supported | Blocked on a separate governance design covering versioning, deletes, lifecycle, and permissions. |
 | Query             | S3 Select                               | Not supported |                                                                                  |
 | Encryption        | SSE-S3 headers                          | Supported     | Server tests and `TestS3SSE` e2e cover AES256 PUT response, HEAD/GET response, and CopyObject header preservation. |
 | Encryption        | SSE-KMS headers                         | Not supported | KMS key semantics are not implemented; fail-closed server tests reject KMS headers with `NotImplemented`. |

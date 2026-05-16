@@ -70,8 +70,10 @@ Work these in order. Do not run them in parallel.
   config reload.
 - [ ] **Migration mirror/cutover correctness**: settle mirror, cutover, and
   status semantics before dashboard polish.
-- [ ] **Bucket/object-lock/retention mapping**: promote only after the semantic
-  mapping is clear.
+- [ ] **Bucket/object-lock/retention governance design**: promote only after the
+  semantic mapping is clear for version-level retention records,
+  governance/compliance delete and overwrite behavior, legal hold permissions,
+  lifecycle expiration interaction, and NFS retention attribute alignment.
 - [ ] **Scrub dedup 영구성 정책**: 현재 `scrubber.Director.dedup`은 영구.
   운영 의도 확인 후 done/cancel 시 cleanup 명령 추가 (ADR 또는
   grill-with-docs). 참조: `docs/architecture/scrubber-director-actor.md`
