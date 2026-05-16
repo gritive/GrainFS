@@ -425,17 +425,41 @@ func (d *Dispatcher) drainResidualSendCmds() {
 	}
 }
 
-// Stop stub (정식 구현은 Task 9):
+// Stop shuts the dispatcher down. The sequence:
+//  1. Mark stopping so caller-side Send paths drop with reason=stopped (closes
+//     the N1 silent-loss race observed during PL8/PR3).
+//  2. Close d.stop so the controller loop exits via drainResidualSendCmds —
+//     queued sendCmds become dropped(stopped) instead of being processed.
+//  3. Wait for outstanding workers (workerWG) with a ctx-aware fallback:
+//     if ctx expires before workers finish, call workerCancel so backoff
+//     sleeps and in-flight HTTP requests abort, then keep waiting for the
+//     drain to complete (we never leak goroutines past Stop's return).
+//  4. Wait for the controller goroutine itself to finish (d.done closed).
+//
+// Idempotent via stopOnce; safe to call before Start (returns nil).
 func (d *Dispatcher) Stop(ctx context.Context) error {
 	if !d.started.Load() {
 		return nil
 	}
+	var stopErr error
 	d.stopOnce.Do(func() {
 		d.stopping.Store(true)
 		close(d.stop)
+		doneCh := make(chan struct{})
+		go func() {
+			d.workerWG.Wait()
+			close(doneCh)
+		}()
+		select {
+		case <-doneCh:
+		case <-ctx.Done():
+			d.workerCancel()
+			<-doneCh
+			stopErr = ctx.Err()
+		}
 		<-d.done
 	})
-	return nil
+	return stopErr
 }
 
 // observeDrop increments AlertDispatchDroppedTotal and emits a rate-limited
