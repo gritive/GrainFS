@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,10 +99,11 @@ func TestAuditSearchS3API(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Len(t, got, 1)
 	require.Equal(t, "req-1", got[0].RequestID)
-	require.Equal(t, "b", searcher.filter.Bucket)
-	require.Equal(t, 400, searcher.filter.StatusClass)
-	require.Equal(t, 5, searcher.filter.Limit)
-	require.False(t, searcher.filter.Since.IsZero())
+	filter := searcher.Filter()
+	require.Equal(t, "b", filter.Bucket)
+	require.Equal(t, 400, filter.StatusClass)
+	require.Equal(t, 5, filter.Limit)
+	require.False(t, filter.Since.IsZero())
 }
 
 func TestAuditSearchS3APIClampsLimit(t *testing.T) {
@@ -112,7 +114,7 @@ func TestAuditSearchS3APIClampsLimit(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, audit.MaxSearchLimit, searcher.filter.Limit)
+	require.Equal(t, audit.MaxSearchLimit, searcher.Filter().Limit)
 }
 
 func TestAuditSearchS3APIRejectsInvalidStatus(t *testing.T) {
@@ -163,14 +165,25 @@ func TestAuditSearcherClosedOnShutdown(t *testing.T) {
 }
 
 type fakeAuditSearcher struct {
+	mu     sync.Mutex
 	filter audit.SearchFilter
 	rows   []audit.SearchRow
 	err    error
 }
 
 func (f *fakeAuditSearcher) SearchS3(_ context.Context, filter audit.SearchFilter) ([]audit.SearchRow, error) {
+	f.mu.Lock()
 	f.filter = filter
-	return f.rows, f.err
+	rows := f.rows
+	err := f.err
+	f.mu.Unlock()
+	return rows, err
+}
+
+func (f *fakeAuditSearcher) Filter() audit.SearchFilter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.filter
 }
 
 type closingAuditSearcher struct {

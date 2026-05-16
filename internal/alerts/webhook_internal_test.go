@@ -172,26 +172,23 @@ func TestStop_BeforeStartIsNoop(t *testing.T) {
 }
 
 func TestStop_DrainsResidualSendCmdsAsDroppedStopped(t *testing.T) {
+	// drainResidualSendCmds를 결정적으로 검증: controller를 시작하지 않고
+	// inbox에 sendCmd를 직접 enqueue한 후 drain을 직접 호출.
+	// 전체 Stop lifecycle을 통한 검증은 controller가 spawn에 의해 block되는
+	// 시점/inbox가 빈 시점이 race이므로 (design doc Q1) deterministic하지
+	// 않다. 본 단위 테스트는 drain 자체의 카운팅 정확성만 보장한다.
 	d := NewDispatcher("http://example", Options{}, nil)
-	block := make(chan struct{})
-	d.Start(context.Background())
-	d.envPtr.spawn = func(Alert, string, string) { <-block }
 
+	for i := 0; i < 3; i++ {
+		d.inbox <- sendCmd{alert: Alert{Type: "t", Resource: fmt.Sprintf("r%d", i)}}
+	}
 	before := testutil.ToFloat64(
 		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
-	for i := 0; i < 10; i++ {
-		d.Send(Alert{Type: "t", Resource: fmt.Sprintf("r%d", i)})
-	}
-	// controller가 첫 sendCmd를 spawn 호출하면 block. 나머지는 inbox에 잔류.
-	// Stop이 close(stop) → drain → 잔여 sendCmd가 reason=stopped 카운터로.
-	close(block) // worker 무산
-	require.NoError(t, d.Stop(context.Background()))
+	d.drainResidualSendCmds()
 	after := testutil.ToFloat64(
 		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
-	// PL10: design doc Q1의 nanosecond race window로 결정적 카운트 보장 불가.
-	// drain이 동작한다는 것만 검증 (적어도 1개 잡힘).
-	require.GreaterOrEqual(t, after-before, float64(1),
-		"drainResidualSendCmds must catch at least some residual sendCmds")
+	require.Equal(t, float64(3), after-before,
+		"drainResidualSendCmds must count each residual sendCmd as dropped(stopped)")
 }
 
 func TestController_ProcessesSendThenRelease(t *testing.T) {

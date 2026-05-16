@@ -15,6 +15,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -35,7 +36,9 @@ const (
 // SetTimeoutNowTransport) that the cluster layer hands to the RaftNode adapter.
 type RaftQUICRPCTransport struct {
 	transport *transport.QUICTransport
-	node      RaftNode
+
+	nodeMu sync.RWMutex
+	node   RaftNode
 }
 
 // NewRaftQUICRPCTransport wires the inbound StreamControl handler. The
@@ -47,10 +50,26 @@ func NewRaftQUICRPCTransport(tr *transport.QUICTransport, node RaftNode) *RaftQU
 	return rpc
 }
 
+// SetNode replaces the RaftNode the transport dispatches to. Safe for
+// concurrent use with the inbound handler (handleRPC); callers that wrap the
+// existing node should pair this with GetNode to read the current value.
+func (r *RaftQUICRPCTransport) SetNode(n RaftNode) {
+	r.nodeMu.Lock()
+	defer r.nodeMu.Unlock()
+	r.node = n
+}
+
+// GetNode returns the current RaftNode. Safe for concurrent use.
+func (r *RaftQUICRPCTransport) GetNode() RaftNode {
+	r.nodeMu.RLock()
+	defer r.nodeMu.RUnlock()
+	return r.node
+}
+
 // SetTransport wires the outbound callbacks into the RaftNode (matches the
 // v1-style API used by *raft.QUICRPCTransport).
 func (r *RaftQUICRPCTransport) SetTransport() {
-	r.node.SetTransport(r.sendRequestVote, r.sendAppendEntries)
+	r.GetNode().SetTransport(r.sendRequestVote, r.sendAppendEntries)
 }
 
 func (r *RaftQUICRPCTransport) sendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
@@ -124,7 +143,7 @@ func (r *RaftQUICRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNow
 
 // SetTimeoutNowTransport wires the outbound TimeoutNow callback into the RaftNode.
 func (r *RaftQUICRPCTransport) SetTimeoutNowTransport() {
-	r.node.SetTimeoutNowTransport(r.sendTimeoutNow)
+	r.GetNode().SetTimeoutNowTransport(r.sendTimeoutNow)
 }
 
 // handleRPC dispatches inbound Raft RPCs to the v2 node via the RaftNode
@@ -138,13 +157,14 @@ func (r *RaftQUICRPCTransport) handleRPC(req *transport.Message) *transport.Mess
 
 	var replyEnvelope []byte
 
+	node := r.GetNode()
 	switch rpcType {
 	case v2RPCTypeRequestVote:
 		args, err := v2DecodeRequestVoteArgs(data)
 		if err != nil {
 			return nil
 		}
-		reply := r.node.HandleRequestVote(args)
+		reply := node.HandleRequestVote(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeRequestVoteReply, reply)
 
 	case v2RPCTypeAppendEntries:
@@ -152,7 +172,7 @@ func (r *RaftQUICRPCTransport) handleRPC(req *transport.Message) *transport.Mess
 		if err != nil {
 			return nil
 		}
-		reply := r.node.HandleAppendEntries(args)
+		reply := node.HandleAppendEntries(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeAppendEntriesReply, reply)
 
 	case v2RPCTypeInstallSnapshot:
@@ -160,11 +180,11 @@ func (r *RaftQUICRPCTransport) handleRPC(req *transport.Message) *transport.Mess
 		if err != nil {
 			return nil
 		}
-		reply := r.node.HandleInstallSnapshot(args)
+		reply := node.HandleInstallSnapshot(args)
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeInstallSnapshotReply, reply)
 
 	case v2RPCTypeTimeoutNow:
-		r.node.HandleTimeoutNow()
+		node.HandleTimeoutNow()
 		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeTimeoutNowReply, nil)
 
 	default:
