@@ -1527,6 +1527,32 @@ func TestClusterCoordinator_CreateMultipartUpload_GateRejectsBeforePeerCall(t *t
 	require.Empty(t, d.calls)
 }
 
+func TestClusterCoordinator_CreateMultipartUpload_LocalLeaderGateRejectsBeforeBackend(t *testing.T) {
+	c, gb := setupCoordWithLocalMultipartLeader(t, []string{"test-node"})
+	c.WithCapabilityGate(NewCapabilityGate(compat.DefaultRegistry, time.Minute))
+
+	_, err := c.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+
+	uploads, listErr := gb.ListMultipartUploads(context.Background(), "bk", "", 100)
+	require.NoError(t, listErr)
+	require.Empty(t, uploads)
+}
+
+func TestClusterCoordinator_CreateMultipartUpload_LocalLeaderGateAllowsWithEvidence(t *testing.T) {
+	c, gb := setupCoordWithLocalMultipartLeader(t, []string{"test-node"})
+	reportMultipartListingCapability(c, "test-node")
+
+	up, err := c.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, up.UploadID)
+
+	uploads, listErr := gb.ListMultipartUploads(context.Background(), "bk", "", 100)
+	require.NoError(t, listErr)
+	require.Len(t, uploads, 1)
+	require.Equal(t, up.UploadID, uploads[0].UploadID)
+}
+
 func TestClusterCoordinator_CompleteMultipartUpload_Forward(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpCompleteMultipartUpload] = buildObjectReply(
@@ -1656,6 +1682,20 @@ func reportMultipartListingCapability(c *ClusterCoordinator, peers ...string) {
 		})
 	}
 	c.WithCapabilityGate(gate)
+}
+
+func setupCoordWithLocalMultipartLeader(t *testing.T, peers []string) (*ClusterCoordinator, *GroupBackend) {
+	t.Helper()
+	gb := newTestGroupBackend(t, "g1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bk"))
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", peers, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: peers},
+	}}
+	return NewClusterCoordinator(&fakeBackend{}, mgr, router, meta, "test-node"), gb
 }
 
 // TestClusterCoordinator_GetObject_NoSuchBucketStatus verifies that a server-

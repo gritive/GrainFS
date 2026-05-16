@@ -1014,6 +1014,9 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 		return nil, err
 	}
 	ctx = contextWithObjectWritePlacement(ctx, group)
+	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, c.multipartListingCapabilityPeers(target, group)); err != nil {
+		return nil, err
+	}
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
@@ -1021,9 +1024,6 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
-	}
-	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, target.Peers); err != nil {
-		return nil, err
 	}
 	args := buildCreateMultipartUploadArgs(bucket, key, contentType)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
@@ -1668,6 +1668,21 @@ func (c *ClusterCoordinator) requireMultipartListingPeerCapability(op compat.Ope
 	}
 	_, err := c.capGate.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, op, peers, time.Now())
 	return err
+}
+
+func (c *ClusterCoordinator) multipartListingCapabilityPeers(target RouteTarget, group ShardGroupEntry) []string {
+	if len(target.Peers) > 0 {
+		return target.Peers
+	}
+	if len(group.PeerIDs) > 0 {
+		return append([]string(nil), group.PeerIDs...)
+	}
+	if c.meta != nil {
+		if entry, ok := c.meta.ShardGroup(target.GroupID); ok {
+			return append([]string(nil), entry.PeerIDs...)
+		}
+	}
+	return nil
 }
 
 func rejectIncompleteMultipartListing(op compat.Operation) error {
