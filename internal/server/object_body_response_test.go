@@ -28,3 +28,25 @@ func TestWriteObjectBody_BuffersWarpSizedObject(t *testing.T) {
 	require.Equal(t, consts.StatusOK, c.Response.StatusCode())
 	require.Equal(t, data, c.Response.Body())
 }
+
+func BenchmarkWriteObjectBody_WarpSizedObject(b *testing.B) {
+	data := bytes.Repeat([]byte("G"), 64*1024)
+	obj := &storage.Object{
+		Key:         "warp-sized.bin",
+		Size:        int64(len(data)),
+		ContentType: "application/octet-stream",
+	}
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		c := app.NewContext(0)
+		streamed, err := writeObjectBody(c, io.NopCloser(bytes.NewReader(data)), obj, "")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if streamed {
+			b.Fatal("unexpected streamed response")
+		}
+	}
+}

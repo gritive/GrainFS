@@ -53,7 +53,9 @@ func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Objec
 	if err != nil {
 		return false, err
 	}
-	c.Data(consts.StatusOK, obj.ContentType, data)
+	c.Header("Content-Type", obj.ContentType)
+	c.Response.SetBodyRaw(data)
+	c.Status(consts.StatusOK)
 	return false, nil
 }
 
