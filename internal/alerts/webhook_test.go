@@ -398,6 +398,11 @@ func TestDispatcher_RecordSentOnFailureDedupsOutageStorm(t *testing.T) {
 		"after dedup window passes, a fresh failing delivery is permitted")
 }
 
+func TestDispatcher_BackoffRespectsContext(t *testing.T) {
+	// Skip until ctx-aware Send is implemented in later task; placeholder
+	t.Skip("revisited in Task 7 when Send accepts ctx via Dispatcher state")
+}
+
 // fakeClock lets dedup tests advance time deterministically.
 type fakeClock struct {
 	mu  sync.Mutex

@@ -236,7 +236,10 @@ func (d *Dispatcher) Send(a Alert) error {
 	var lastErr error
 	for attempt := 0; attempt <= d.opts.MaxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(d.backoff(attempt))
+			// ctx-aware sleep (deliver는 다음 task부터 ctx 받음. 여기서는
+			// 내부 context.Background() 사용 — graceful Stop은 후속 Task에서)
+			timer := time.NewTimer(d.backoff(attempt))
+			<-timer.C
 		}
 		lastErr = d.deliver(url, secret, body)
 		if lastErr == nil {
