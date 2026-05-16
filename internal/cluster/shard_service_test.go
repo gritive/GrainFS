@@ -174,6 +174,24 @@ func TestShardService_SharedPackRestartSkipsCorruptRecord(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestShardPackScanSkipsOversizedRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shardpack_0000000000000000.dat")
+	key := shardPackKey("bkt", "obj/v1", 0)
+	record := appendShardPackRecord(nil, shardPackFlagPut, key, make([]byte, 65))
+	require.NoError(t, os.WriteFile(path, record, 0o600))
+
+	store := &shardPackStore{
+		dir:     dir,
+		maxSize: 64,
+		index:   make(map[string]shardPackLocation),
+	}
+	require.NoError(t, store.scanFile(0, path))
+
+	_, ok := store.index[key]
+	require.False(t, ok)
+}
+
 func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 

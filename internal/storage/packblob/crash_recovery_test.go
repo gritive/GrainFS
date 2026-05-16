@@ -75,6 +75,34 @@ func TestBlobStore_Recovery_ScanAll_AfterTruncation(t *testing.T) {
 	require.Equal(t, []byte("data1"), got1)
 }
 
+func TestBlobStore_Recovery_ScanAll_SkipsBadCRC(t *testing.T) {
+	dir := t.TempDir()
+
+	bs, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+
+	_, err = bs.Append("key1", []byte("data1"))
+	require.NoError(t, err)
+	loc2, err := bs.Append("key2", []byte("data2"))
+	require.NoError(t, err)
+	require.NoError(t, bs.Close())
+
+	blobPath := bs.blobPath(loc2.BlobID)
+	raw, err := os.ReadFile(blobPath)
+	require.NoError(t, err)
+	raw[len(raw)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(blobPath, raw, 0o600))
+
+	bs2, err := NewBlobStore(dir, 256*1024*1024)
+	require.NoError(t, err)
+	defer bs2.Close()
+
+	locs, err := bs2.ScanAll()
+	require.NoError(t, err)
+	require.Contains(t, locs, "key1")
+	require.NotContains(t, locs, "key2")
+}
+
 // TestBlobStore_Recovery_MultipleBlobs verifies that ScanAll recovers entries
 // from all blob files after rotation.
 func TestBlobStore_Recovery_MultipleBlobs(t *testing.T) {

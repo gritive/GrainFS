@@ -209,6 +209,10 @@ func (s *shardPackStore) scanFile(blobID uint64, path string) error {
 		keyLen := binary.BigEndian.Uint32(header[0:4])
 		flag := header[4]
 		dataLen := binary.BigEndian.Uint32(header[5:9])
+		entrySize := int64(len(header)) + int64(keyLen) + int64(dataLen) + 4
+		if entrySize > s.maxSize {
+			return nil
+		}
 		key := make([]byte, keyLen)
 		if _, err := io.ReadFull(f, key); err != nil {
 			return nil
@@ -222,7 +226,6 @@ func (s *shardPackStore) scanFile(blobID uint64, path string) error {
 		if _, err := io.ReadFull(f, crcBuf[:]); err != nil {
 			return nil
 		}
-		entrySize := int64(len(header)) + int64(keyLen) + int64(dataLen) + int64(len(crcBuf))
 		off += entrySize
 		if binary.BigEndian.Uint32(crcBuf[:]) != shardPackCRC(flag, string(key), data) {
 			return nil

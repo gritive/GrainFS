@@ -568,6 +568,11 @@ func (bs *BlobStore) ScanAll() (map[string]BlobLocation, error) {
 			if _, err := io.ReadFull(f, header[:]); err != nil { // skip CRC
 				break
 			}
+			expectedCRC := binary.BigEndian.Uint32(header[:])
+			if crc := blobEntryCRC(key, flagBuf[0], data); crc != expectedCRC && legacyBlobEntryCRC(key, data) != expectedCRC {
+				offset += int64(entryOverhead + int(keyLen) + int(dataLen))
+				continue
+			}
 
 			entrySize := int64(entryOverhead + int(keyLen) + int(dataLen))
 			locs[string(key)] = BlobLocation{
