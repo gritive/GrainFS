@@ -72,6 +72,15 @@ Work these in order. Do not run them in parallel.
   status semantics before dashboard polish.
 - [ ] **Bucket/object-lock/retention mapping**: promote only after the semantic
   mapping is clear.
+- [ ] **Scrub dedup 영구성 정책**: 현재 `scrubber.Director.dedup`은 영구.
+  운영 의도 확인 후 done/cancel 시 cleanup 명령 추가 (ADR 또는
+  grill-with-docs). 참조: `docs/architecture/scrubber-director-actor.md`
+  결정 5.
+- [ ] **공통 JobActor 추상화 검토**: `scrubber`/`lifecycle`/`migration`
+  worker가 공유 가능한 lifecycle 패턴. design doc의 JobActor 컨셉 참조.
+- [ ] **Scrub Register boot phase constructor 옵션화**: `BlockSource`/`Verifier`를
+  `NewDirector` 옵션으로 주입해 `Register`/`started.Bool` 가드 제거.
+  boot phase 의존 그래프 재배치 동반.
 
 ## Deferred Until Triggered
 
