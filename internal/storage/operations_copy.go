@@ -33,13 +33,15 @@ type CopyObjectRequest struct {
 	MetadataDirective CopyMetadataDirective
 	ContentType       string
 	UserMetadata      map[string]string
+	SystemMetadata    ObjectSystemMetadata
 	Preconditions     CopyPreconditions
 	ACL               *uint8
 }
 
 type CopyObjectResult struct {
-	Object   ObjectFacts
-	Previous PreviousObject
+	Object       ObjectFacts
+	Previous     PreviousObject
+	SSEAlgorithm string
 }
 
 type CopyObjectAccelerationRequest struct {
@@ -48,6 +50,7 @@ type CopyObjectAccelerationRequest struct {
 	SourceObject   *Object
 	ContentType    string
 	UserMetadata   map[string]string
+	SystemMetadata ObjectSystemMetadata
 }
 
 type copyObjectAccelerator interface {
@@ -95,8 +98,9 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		contentType = req.ContentType
 	}
 	userMetadata := copyObjectUserMetadata(req, srcObj)
+	systemMetadata := copyObjectSystemMetadata(req, srcObj)
 
-	if req.ACL == nil && len(userMetadata) == 0 && canUseCopyObjectAccelerator(req) && plan.copyObjectAccelerator != nil {
+	if req.ACL == nil && len(userMetadata) == 0 && systemMetadata.empty() && canUseCopyObjectAccelerator(req) && plan.copyObjectAccelerator != nil {
 		obj, err := plan.copyObjectAccelerator.CopyObjectWithRequest(ctx, CopyObjectAccelerationRequest{
 			SourceRef:      req.Source,
 			DestinationRef: req.Destination,
@@ -110,10 +114,10 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: facts, Previous: previous}, nil
+		return &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}, nil
 	}
 
-	if req.ACL == nil && len(userMetadata) == 0 && canUseSimpleCopier(req) && plan.copier != nil {
+	if req.ACL == nil && len(userMetadata) == 0 && systemMetadata.empty() && canUseSimpleCopier(req) && plan.copier != nil {
 		obj, err := plan.copier.CopyObject(req.Source.Bucket, req.Source.Key, req.Destination.Bucket, req.Destination.Key)
 		if err != nil {
 			return nil, err
@@ -122,7 +126,7 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: facts, Previous: previous}, nil
+		return &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}, nil
 	}
 
 	rc, _, err := o.openCopySource(ctx, plan, req.Source)
@@ -131,33 +135,20 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 	}
 	defer rc.Close()
 
-	if req.ACL != nil && len(userMetadata) == 0 {
-		obj, err := o.PutObjectWithACL(ctx, req.Destination.Bucket, req.Destination.Key, rc, contentType, *req.ACL)
-		if err != nil {
-			return nil, err
-		}
-		facts, err := mutationObjectFacts("CopyObject", obj)
-		if err != nil {
-			return nil, err
-		}
-		return &CopyObjectResult{Object: facts, Previous: previous}, nil
-	}
-
-	obj, err := o.PutObjectWithUserMetadata(ctx, req.Destination.Bucket, req.Destination.Key, rc, contentType, userMetadata)
-	if err != nil {
-		return nil, err
-	}
-	if req.ACL != nil {
-		if err := o.SetObjectACL(req.Destination.Bucket, req.Destination.Key, *req.ACL); err != nil {
-			return nil, err
-		}
-		obj.ACL = *req.ACL
-	}
+	obj, err := o.putObjectWithRequest(ctx, PutObjectRequest{
+		Bucket:         req.Destination.Bucket,
+		Key:            req.Destination.Key,
+		Body:           rc,
+		ContentType:    contentType,
+		ACL:            req.ACL,
+		UserMetadata:   userMetadata,
+		SystemMetadata: systemMetadata,
+	})
 	facts, err := mutationObjectFacts("CopyObject", obj)
 	if err != nil {
 		return nil, err
 	}
-	return &CopyObjectResult{Object: facts, Previous: previous}, nil
+	return &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}, nil
 }
 
 func normalizeCopyObjectRequest(req CopyObjectRequest) CopyObjectRequest {
@@ -175,6 +166,16 @@ func copyObjectUserMetadata(req CopyObjectRequest, srcObj *Object) map[string]st
 		return nil
 	}
 	return cloneStringMap(srcObj.UserMetadata)
+}
+
+func copyObjectSystemMetadata(req CopyObjectRequest, srcObj *Object) ObjectSystemMetadata {
+	if req.MetadataDirective == CopyMetadataReplace {
+		return req.SystemMetadata
+	}
+	if srcObj == nil {
+		return ObjectSystemMetadata{}
+	}
+	return ObjectSystemMetadata{SSEAlgorithm: srcObj.SSEAlgorithm}
 }
 
 func (o *Operations) headCopySource(ctx context.Context, plan operationsPlan, ref ObjectRef) (*Object, error) {

@@ -33,6 +33,7 @@ func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 		ModTime:          1700000000,
 		PlacementGroupID: "group-2",
 		UserMetadata:     map[string]string{"x-amz-meta-mtime": "1710000000"},
+		SSEAlgorithm:     "AES256",
 	}
 
 	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
@@ -52,6 +53,7 @@ func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 	assert.Equal(t, int64(1700000000), decoded.ModTime)
 	assert.Equal(t, "group-2", decoded.PlacementGroupID)
 	assert.Equal(t, map[string]string{"x-amz-meta-mtime": "1710000000"}, decoded.UserMetadata)
+	assert.Equal(t, "AES256", decoded.SSEAlgorithm)
 }
 
 func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
@@ -100,6 +102,7 @@ func TestObjectMetaCodecRoundTrip(t *testing.T) {
 		LastModified:     1700002000,
 		PlacementGroupID: "group-2",
 		UserMetadata:     map[string]string{"x-amz-meta-owner": "me"},
+		SSEAlgorithm:     "AES256",
 	}
 
 	data, err := marshalObjectMeta(orig)
@@ -115,6 +118,7 @@ func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	assert.Equal(t, orig.LastModified, decoded.LastModified)
 	assert.Equal(t, orig.PlacementGroupID, decoded.PlacementGroupID)
 	assert.Equal(t, orig.UserMetadata, decoded.UserMetadata)
+	assert.Equal(t, orig.SSEAlgorithm, decoded.SSEAlgorithm)
 }
 
 func TestSnapshotStateCodecRoundTrip(t *testing.T) {

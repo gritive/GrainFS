@@ -173,6 +173,10 @@ func (g *GroupBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, ke
 	return g.DistributedBackend.PutObjectWithUserMetadata(g.placementContext(ctx), bucket, key, r, contentType, userMetadata)
 }
 
+func (g *GroupBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	return g.DistributedBackend.PutObjectWithRequest(g.placementContext(ctx), req)
+}
+
 func (g *GroupBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
 	return g.DistributedBackend.CreateMultipartUpload(g.placementContext(ctx), bucket, key, contentType)
 }

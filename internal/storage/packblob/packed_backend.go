@@ -31,6 +31,7 @@ type indexEntry struct {
 	ETag         string
 	LastModified int64
 	UserMetadata map[string]string
+	SSEAlgorithm string
 }
 
 // indexEntryJSON is a serializable form of indexEntry.
@@ -42,6 +43,7 @@ type indexEntryJSON struct {
 	ETag         string            `json:"etag,omitempty"`
 	LastModified int64             `json:"last_modified,omitempty"`
 	UserMetadata map[string]string `json:"user_metadata,omitempty"`
+	SSEAlgorithm string            `json:"sse_algorithm,omitempty"`
 }
 
 // PackedBackend wraps a storage.Backend and packs small objects into blob files.
@@ -175,6 +177,7 @@ func (pb *PackedBackend) SaveIndex() error {
 			ETag:         e.ETag,
 			LastModified: e.LastModified,
 			UserMetadata: cloneStringMap(e.UserMetadata),
+			SSEAlgorithm: e.SSEAlgorithm,
 		}
 	}
 	pb.mu.RUnlock()
@@ -210,6 +213,7 @@ func (pb *PackedBackend) LoadIndex() error {
 				ETag:         v.ETag,
 				LastModified: v.LastModified,
 				UserMetadata: cloneStringMap(v.UserMetadata),
+				SSEAlgorithm: v.SSEAlgorithm,
 			}
 			e.Refcount.Store(v.Refcount)
 			pb.index[k] = e
@@ -290,19 +294,31 @@ func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io
 }
 
 func (pb *PackedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
+	return pb.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:       bucket,
+		Key:          key,
+		Body:         r,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
+	})
+}
+
+func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	bucket, key := req.Bucket, req.Key
 	if err := pb.inner.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
 
 	// Read all data to determine size
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
 	// Large objects pass through to inner backend
 	if int64(len(data)) >= pb.threshold {
-		return putInnerWithUserMetadata(ctx, pb.inner, bucket, key, bytes.NewReader(data), contentType, userMetadata)
+		req.Body = bytes.NewReader(data)
+		return putInnerWithRequest(ctx, pb.inner, req)
 	}
 
 	// Small object → pack into blob
@@ -324,10 +340,11 @@ func (pb *PackedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, 
 	e := &indexEntry{
 		Location:     loc,
 		OriginalSize: int64(len(data)),
-		ContentType:  contentType,
+		ContentType:  req.ContentType,
 		ETag:         etag,
 		LastModified: now,
-		UserMetadata: cloneStringMap(userMetadata),
+		UserMetadata: cloneStringMap(req.UserMetadata),
+		SSEAlgorithm: req.SystemMetadata.SSEAlgorithm,
 	}
 	e.Refcount.Store(1)
 	pb.index[ikey] = e
@@ -336,10 +353,11 @@ func (pb *PackedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, 
 	return &storage.Object{
 		Key:          key,
 		Size:         int64(len(data)),
-		ContentType:  contentType,
+		ContentType:  req.ContentType,
 		ETag:         etag,
 		LastModified: now,
-		UserMetadata: cloneStringMap(userMetadata),
+		UserMetadata: cloneStringMap(req.UserMetadata),
+		SSEAlgorithm: req.SystemMetadata.SSEAlgorithm,
 	}, nil
 }
 
@@ -352,6 +370,17 @@ func putInnerWithUserMetadata(ctx context.Context, inner storage.Backend, bucket
 		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: storage.UnsupportedReasonNoAdapter}
 	}
 	return putter.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+}
+
+func putInnerWithRequest(ctx context.Context, inner storage.Backend, req storage.PutObjectRequest) (*storage.Object, error) {
+	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" {
+		return putInnerWithUserMetadata(ctx, inner, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
+	}
+	putter, ok := inner.(storage.RequestPutter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return putter.PutObjectWithRequest(ctx, req)
 }
 
 func cloneStringMap(in map[string]string) map[string]string {
@@ -386,6 +415,7 @@ func packedObjectFromEntry(key string, entry *indexEntry, data []byte) *storage.
 		ETag:         etag,
 		LastModified: modified,
 		UserMetadata: cloneStringMap(entry.UserMetadata),
+		SSEAlgorithm: entry.SSEAlgorithm,
 	}
 }
 

@@ -68,6 +68,7 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 					IsDeleteMarker: meta.ETag == deleteMarkerETag,
 					IsLatest:       latest[key] == versionID,
 					ACL:            meta.ACL,
+					SSEAlgorithm:   meta.SSEAlgorithm,
 				})
 				return nil
 			})
@@ -208,6 +209,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			ECParity:         placement.ECParity,
 			NodeIDs:          placement.NodeIDs,
 			PlacementGroupID: placement.PlacementGroupID,
+			SSEAlgorithm:     snap.SSEAlgorithm,
 			PreserveLatest:   preserveLatest,
 			IsDeleteMarker:   snap.IsDeleteMarker,
 		}); err != nil {

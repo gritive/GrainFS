@@ -11,6 +11,7 @@ table Object {
   last_modified:int64;
   acl:uint8;
   user_metadata:[UserMetadata];
+  sse_algorithm:string;
 }
 
 table UserMetadata {

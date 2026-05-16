@@ -14,6 +14,7 @@ func TestObjectCodecRoundTrip(t *testing.T) {
 		ContentType:  "text/markdown",
 		ETag:         "abc123",
 		LastModified: 1700000000,
+		SSEAlgorithm: "AES256",
 	}
 
 	data, err := marshalObject(obj)
@@ -27,6 +28,24 @@ func TestObjectCodecRoundTrip(t *testing.T) {
 	assert.Equal(t, obj.ContentType, decoded.ContentType)
 	assert.Equal(t, obj.ETag, decoded.ETag)
 	assert.Equal(t, obj.LastModified, decoded.LastModified)
+	assert.Equal(t, obj.SSEAlgorithm, decoded.SSEAlgorithm)
+}
+
+func TestObjectCodecOldMetadataDefaultsEmptySSEAlgorithm(t *testing.T) {
+	obj := &Object{
+		Key:          "docs/readme.md",
+		Size:         1024,
+		ContentType:  "text/markdown",
+		ETag:         "abc123",
+		LastModified: 1700000000,
+	}
+
+	data, err := marshalObject(obj)
+	require.NoError(t, err)
+
+	decoded, err := unmarshalObject(data)
+	require.NoError(t, err)
+	assert.Empty(t, decoded.SSEAlgorithm)
 }
 
 func TestMultipartMetaCodecRoundTrip(t *testing.T) {

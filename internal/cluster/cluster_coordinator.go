@@ -1077,6 +1077,18 @@ func (c *ClusterCoordinator) PutObject(
 func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 	ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string,
 ) (*storage.Object, error) {
+	return c.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:       bucket,
+		Key:          key,
+		Body:         r,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
+	})
+}
+
+func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	bucket, key, r, contentType := req.Bucket, req.Key, req.Body, req.ContentType
+	userMetadata := req.UserMetadata
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -1104,14 +1116,19 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadata(
 			ForwardMode: PutTraceForwardNone,
 		})
 		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
-		obj, err := gb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+		var obj *storage.Object
+		if req.SystemMetadata.SSEAlgorithm != "" || req.ACL != nil {
+			obj, err = gb.PutObjectWithRequest(ctx, req)
+		} else {
+			obj, err = gb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+		}
 		if err != nil {
 			return nil, err
 		}
 		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 	}
-	if len(userMetadata) > 0 {
-		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithUserMetadata", Reason: storage.UnsupportedReasonNoAdapter}
+	if len(userMetadata) > 0 || req.SystemMetadata.SSEAlgorithm != "" || req.ACL != nil {
+		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -1183,11 +1200,21 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadataResult(
 	contentType string,
 	userMetadata map[string]string,
 ) (*storage.PutObjectResult, error) {
-	previous, err := c.previousObjectForMutation(ctx, bucket, key)
+	return c.PutObjectWithRequestResult(ctx, storage.PutObjectRequest{
+		Bucket:       bucket,
+		Key:          key,
+		Body:         r,
+		ContentType:  contentType,
+		UserMetadata: userMetadata,
+	})
+}
+
+func (c *ClusterCoordinator) PutObjectWithRequestResult(ctx context.Context, req storage.PutObjectRequest) (*storage.PutObjectResult, error) {
+	previous, err := c.previousObjectForMutation(ctx, req.Bucket, req.Key)
 	if err != nil {
 		return nil, err
 	}
-	obj, err := c.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)
+	obj, err := c.PutObjectWithRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -1253,6 +1280,7 @@ func objectFactsForMutation(op string, obj *storage.Object) (storage.ObjectFacts
 		ETag:         obj.ETag,
 		VersionID:    obj.VersionID,
 		LastModified: obj.LastModified,
+		SSEAlgorithm: obj.SSEAlgorithm,
 	}, nil
 }
 

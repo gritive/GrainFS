@@ -26,6 +26,7 @@ type Object struct {
 	IsDeleteMarker bool   // true when this object is a delete marker
 	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
 	UserMetadata   map[string]string
+	SSEAlgorithm   string
 }
 
 // ACLSetter is an optional interface for backends that support per-object ACL updates.
@@ -43,6 +44,30 @@ type AtomicACLPutter interface {
 // S3 x-amz-meta-* headers with object metadata.
 type UserMetadataPutter interface {
 	PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*Object, error)
+}
+
+// ObjectSystemMetadata stores S3 system metadata that must not be exposed as
+// user metadata headers.
+type ObjectSystemMetadata struct {
+	SSEAlgorithm string
+}
+
+// PutObjectRequest carries optional object metadata that cannot fit in the
+// legacy PutObject signature without overloading user metadata.
+type PutObjectRequest struct {
+	Bucket         string
+	Key            string
+	Body           io.Reader
+	ContentType    string
+	ACL            *uint8
+	UserMetadata   map[string]string
+	SystemMetadata ObjectSystemMetadata
+}
+
+// RequestPutter is an optional interface for backends that can persist full
+// object write requests, including system metadata.
+type RequestPutter interface {
+	PutObjectWithRequest(ctx context.Context, req PutObjectRequest) (*Object, error)
 }
 
 // MultipartUpload tracks an in-progress multipart upload.
@@ -91,6 +116,7 @@ type SnapshotObject struct {
 	IsDeleteMarker bool   `json:"is_delete_marker,omitempty"`
 	IsLatest       bool   `json:"is_latest,omitempty"`
 	ACL            uint8  `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
+	SSEAlgorithm   string `json:"sse_algorithm,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.
