@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.0.223.0] - 2026-05-17 - perf(packblob): split BlobStore.readFiles cache off bs.mu
+
+### Changed
+- **`BlobStore.readFiles`** is now published as an immutable
+  `atomic.Pointer[map[uint64]*os.File]` snapshot. `getReadFile` no
+  longer takes `bs.mu`: the hit path is a lock-free atomic load + map
+  read; the miss path performs `os.Open` outside any lock and inserts
+  via a CAS-retry CoW. Concurrent first-fillers race the syscall and
+  the loser closes its duplicate fd — acceptable because fills happen
+  at most once per blob file. `Close()` walks the published snapshot
+  and stores an empty replacement.
+- Audit follow-up: `docs/architecture/lock-free-audit.md` →
+  "`BlobStore.getReadFile` shares `bs.mu` with `Append`; separate when
+  mixed-workload mutex profile shows contention on the read path."
+  PR #389 left this open after moving compression outside the lock;
+  the mixed-workload mutex profile attributed 4.42% of delay to the
+  read side (and a much larger share to writer self-blocking induced
+  by reader contention on the same lock).
+
+### Performance
+
+Apple M3, `internal/storage/packblob`, `-benchtime=10s -count=2`:
+
+| Bench | Before | After | Delta |
+| --- | --- | --- | --- |
+| `BenchmarkParallelGetWithWriter/entries=10000` | 4873 ns/op, 1051 B/op, 11 allocs | 2097 ns/op, 594 B/op, 6 allocs | **-57% latency, -45% allocs/op** |
+| `BenchmarkParallelGetWithWriter/entries=100000` | 4457 ns/op, 988 B/op, 10 allocs | 1997 ns/op, 600 B/op, 6 allocs | **-55% latency, -40% allocs/op** |
+| `BenchmarkParallelGetSmallObjects` | 1520-1606 ns/op, 6 allocs | 1539-1698 ns/op, 6 allocs | no regression (read-only) |
+
+Mutex profile (`-mutexprofile`, same workload): **total delay
+445.19s → 51.12s (-88.5%)**. `BlobStore.getReadFile` disappears from
+the profile entirely (was 19.69s / 4.42%); `BlobStore.Append`'s
+self-blocking also collapses because readers no longer hold the same
+lock the writer is waiting on. Remaining 51s is dominated by
+`PackedBackend.mu` (RWMutex protecting the small-object index) — a
+separate lock, tracked as a follow-up audit item.
+
+Writer throughput in the mixed bench drops from ~640K to ~230K writes
+during the run. This is the correct trade-off: under the prior lock
+the writer was monopolising the CPU because readers were sleeping on
+contention; with reads decoupled, both sides progress and reader
+latency wins by 2.3x.
+
 ## [0.0.222.0] - 2026-05-17 - perf(raft): drop redundant currentConfig defensive copy from actorState.snapshot
 
 ### Changed
