@@ -64,14 +64,17 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 
 ## Performance
 
-Latest same-host 3-node `warp` run, 64 KiB objects, concurrency 16, signed S3
+Latest same-host `warp` runs, 64 KiB objects, concurrency 16, signed S3
 requests, 0 errors:
 
-| Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
-| --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |     92.11 |    325.53 |        1.96x |        1.10x |
-| MinIO     |     47.05 |    296.84 |        1.00x |        1.00x |
-| RustFS    |     36.31 |    105.88 |        0.77x |        0.36x |
+| Mode | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| ---- | --------- | --------: | --------: | -----------: | -----------: |
+| Single-node | `GrainFS` |    573.88 |   1324.50 |        2.27x |        1.23x |
+| Single-node | MinIO     |    252.88 |   1074.01 |        1.00x |        1.00x |
+| Single-node | RustFS    |    225.43 |    500.35 |        0.89x |        0.47x |
+| 3-node cluster | `GrainFS` |     92.11 |    325.53 |        1.96x |        1.10x |
+| 3-node cluster | MinIO     |     47.05 |    296.84 |        1.00x |        1.00x |
+| 3-node cluster | RustFS    |     36.31 |    105.88 |        0.77x |        0.36x |
 
 Methodology and raw artifacts:
 [benchmark reference](docs/reference/benchmarks.md#latest-local-result).
