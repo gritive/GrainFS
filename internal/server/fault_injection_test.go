@@ -119,8 +119,8 @@ func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
-	// 64KB: above the 16KB threshold → uses SetBodyStream (zero-copy)
-	data := bytes.Repeat([]byte("L"), 64*1024)
+	// 256KiB: above the buffered response threshold, so it uses SetBodyStream.
+	data := bytes.Repeat([]byte("L"), 256*1024)
 	_, err = real.PutObject(context.Background(), "test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 	require.NoError(t, real.SetObjectACL("test-bucket", "large.bin", 1)) // ACLPublicRead

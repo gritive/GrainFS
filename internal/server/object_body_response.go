@@ -11,6 +11,8 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+const bufferedObjectBodyLimit = 128 * 1024
+
 func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Object, rangeHeader string) (bool, error) {
 	if rangeHeader != "" {
 		start, end, ok := parseByteRange(rangeHeader, obj.Size)
@@ -40,14 +42,14 @@ func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Objec
 	}
 
 	c.Set(auditBytesOutKey, obj.Size)
-	if obj.Size > 16*1024 {
+	if obj.Size > bufferedObjectBodyLimit {
 		c.Response.SetBodyStream(newExactLengthReadCloser(rc, obj.Size), int(obj.Size))
 		c.Status(consts.StatusOK)
 		return true, nil
 	}
 
 	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
-	data, err := io.ReadAll(rc)
+	data, err := io.ReadAll(newExactLengthReadCloser(rc, obj.Size))
 	if err != nil {
 		return false, err
 	}
