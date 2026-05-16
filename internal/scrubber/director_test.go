@@ -85,6 +85,8 @@ func TestDirector_RoutesVolumeBlocksToECSource(t *testing.T) {
 
 func TestDirector_LookupDedup_Hit(t *testing.T) {
 	d := NewDirector(DirectorOpts{NodeID: "n1"})
+	d.Start(context.Background())
+	defer d.Stop()
 	id, created := d.Trigger(TriggerReq{Bucket: "b1", KeyPrefix: "p", Scope: ScopeFull})
 	require.NotEmpty(t, id)
 	require.True(t, created)
@@ -97,6 +99,8 @@ func TestDirector_LookupDedup_Hit(t *testing.T) {
 
 func TestDirector_LookupDedup_Miss(t *testing.T) {
 	d := NewDirector(DirectorOpts{NodeID: "n1"})
+	d.Start(context.Background())
+	defer d.Stop()
 	_, ok := d.LookupDedup(TriggerReq{Bucket: "ghost", Scope: ScopeFull})
 	require.False(t, ok)
 }

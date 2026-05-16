@@ -349,23 +349,10 @@ func (d *Director) Register(name string, src BlockSource, ver BlockVerifier) {
 // duplicate triggers before raft propose so we do not consume two raft entries
 // for the same logical scrub.
 func (d *Director) LookupDedup(req TriggerReq) (ScrubTriggerEntry, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	id, ok := d.dedup[dedupKey(req)]
-	if !ok {
-		return ScrubTriggerEntry{}, false
-	}
-	sess, ok := d.sessions[id]
-	if !ok {
-		return ScrubTriggerEntry{}, false
-	}
-	return ScrubTriggerEntry{
-		SessionID: sess.id,
-		Bucket:    sess.bucket,
-		KeyPrefix: sess.keyPrefix,
-		Scope:     sess.scope,
-		DryRun:    sess.dryRun,
-	}, true
+	reply := make(chan lookupDedupReply, 1)
+	d.inbox <- lookupDedupCmd{req: req, reply: reply}
+	r := <-reply
+	return r.entry, r.ok
 }
 
 func (d *Director) Trigger(req TriggerReq) (string, bool) {
@@ -614,27 +601,16 @@ func routeSourceFor(bucket, keyPrefix string) string {
 }
 
 func (d *Director) Sessions() []Session {
-	d.mu.Lock()
-	live := make([]*liveSession, 0, len(d.sessions))
-	for _, s := range d.sessions {
-		live = append(live, s)
-	}
-	d.mu.Unlock()
-	out := make([]Session, 0, len(live))
-	for _, s := range live {
-		out = append(out, s.snapshot())
-	}
-	return out
+	reply := make(chan []Session, 1)
+	d.inbox <- sessionsCmd{reply: reply}
+	return <-reply
 }
 
 func (d *Director) GetSession(id string) (Session, bool) {
-	d.mu.Lock()
-	s, ok := d.sessions[id]
-	d.mu.Unlock()
-	if !ok {
-		return Session{}, false
-	}
-	return s.snapshot(), true
+	reply := make(chan getSessionReply, 1)
+	d.inbox <- getSessionCmd{id: id, reply: reply}
+	r := <-reply
+	return r.session, r.ok
 }
 
 // CancelSession marks a session cancelled. The running worker observes the
