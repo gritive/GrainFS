@@ -242,3 +242,100 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	expected := append(part1Data, part2Data...)
 	assert.Equal(t, expected, body)
 }
+
+func TestCluster_Multipart_List(t *testing.T) {
+	skipIfShort(t, "skipping multi-node multipart listing e2e in -short mode")
+
+	const (
+		bucketName = "mp-list-cluster"
+		keyName    = "listed/incomplete.bin"
+		numNodes   = 3
+	)
+
+	cluster := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      numNodes,
+		Mode:       ClusterModeDynamicJoin,
+		LogPrefix:  "grainfs-mp-list",
+		DisableNFS: true,
+		DisableNBD: true,
+	})
+	cluster.GrantAdminOnBuckets(bucketName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	leaderIdx, err := waitForWritableEndpoint(
+		ctx,
+		cluster.httpURLs,
+		120*time.Second,
+		5*time.Second,
+		time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, cluster.accessKey, cluster.secretKey), bucketName)
+		},
+	)
+	require.NoError(t, err)
+
+	client := cluster.S3Client(leaderIdx)
+	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(keyName),
+		ContentType: aws.String("application/octet-stream"),
+	})
+	require.NoError(t, err)
+	uploadID := aws.ToString(initOut.UploadId)
+	require.NotEmpty(t, uploadID)
+	t.Cleanup(func() {
+		_, _ = client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucketName),
+			Key:      aws.String(keyName),
+			UploadId: aws.String(uploadID),
+		})
+	})
+
+	p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(keyName),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader([]byte("cluster-part-one")),
+	})
+	require.NoError(t, err)
+	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(keyName),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(2),
+		Body:       bytes.NewReader([]byte("cluster-part-two")),
+	})
+	require.NoError(t, err)
+
+	for i := range cluster.httpURLs {
+		t.Run(fmt.Sprintf("node-%d", i+1), func(t *testing.T) {
+			nodeClient := cluster.S3Client(i)
+			uploads, err := nodeClient.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+				Bucket: aws.String(bucketName),
+				Prefix: aws.String("listed/"),
+			})
+			require.NoError(t, err)
+			require.Len(t, uploads.Uploads, 1)
+			assert.Equal(t, keyName, aws.ToString(uploads.Uploads[0].Key))
+			assert.Equal(t, uploadID, aws.ToString(uploads.Uploads[0].UploadId))
+
+			var parts *s3.ListPartsOutput
+			require.Eventually(t, func() bool {
+				var err error
+				parts, err = nodeClient.ListParts(ctx, &s3.ListPartsInput{
+					Bucket:   aws.String(bucketName),
+					Key:      aws.String(keyName),
+					UploadId: aws.String(uploadID),
+				})
+				return err == nil
+			}, 30*time.Second, 500*time.Millisecond)
+			require.Len(t, parts.Parts, 2)
+			assert.Equal(t, int32(1), aws.ToInt32(parts.Parts[0].PartNumber))
+			assert.Equal(t, aws.ToString(p1.ETag), aws.ToString(parts.Parts[0].ETag))
+			assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
+			assert.Equal(t, aws.ToString(p2.ETag), aws.ToString(parts.Parts[1].ETag))
+		})
+	}
+}

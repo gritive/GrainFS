@@ -112,6 +112,66 @@ func TestMultipart_Abort(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestMultipart_List(t *testing.T) {
+	ctx := context.Background()
+	createBucket(t, "mp-list")
+
+	key := "listed/incomplete.bin"
+	initOut, err := testS3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String("mp-list"),
+		Key:         aws.String(key),
+		ContentType: aws.String("application/octet-stream"),
+	})
+	require.NoError(t, err)
+	uploadID := aws.ToString(initOut.UploadId)
+	require.NotEmpty(t, uploadID)
+	t.Cleanup(func() {
+		_, _ = testS3Client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String("mp-list"),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		})
+	})
+
+	p1, err := testS3Client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String("mp-list"),
+		Key:        aws.String(key),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader([]byte("part-one")),
+	})
+	require.NoError(t, err)
+	p2, err := testS3Client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String("mp-list"),
+		Key:        aws.String(key),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(2),
+		Body:       bytes.NewReader([]byte("part-two")),
+	})
+	require.NoError(t, err)
+
+	uploads, err := testS3Client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String("mp-list"),
+		Prefix: aws.String("listed/"),
+	})
+	require.NoError(t, err)
+	require.Len(t, uploads.Uploads, 1)
+	assert.Equal(t, key, aws.ToString(uploads.Uploads[0].Key))
+	assert.Equal(t, uploadID, aws.ToString(uploads.Uploads[0].UploadId))
+
+	parts, err := testS3Client.ListParts(ctx, &s3.ListPartsInput{
+		Bucket:   aws.String("mp-list"),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	require.NoError(t, err)
+	require.Len(t, parts.Parts, 2)
+	assert.Equal(t, int32(1), aws.ToInt32(parts.Parts[0].PartNumber))
+	assert.Equal(t, aws.ToString(p1.ETag), aws.ToString(parts.Parts[0].ETag))
+	assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
+	assert.Equal(t, aws.ToString(p2.ETag), aws.ToString(parts.Parts[1].ETag))
+}
+
 func TestMultipart_ThreeParts(t *testing.T) {
 	ctx := context.Background()
 	createBucket(t, "mp-three")

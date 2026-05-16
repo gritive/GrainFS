@@ -160,7 +160,8 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		WithNodeAddressResolver(metaRaft.FSM()).
 		WithSelfPeerAlias(state.raftAddr).
 		WithECConfig(state.effectiveEC).
-		WithObjectIndexProposer(indexProposer)
+		WithObjectIndexProposer(indexProposer).
+		WithCapabilityGate(state.capabilityGate)
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 

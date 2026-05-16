@@ -1574,7 +1574,37 @@ func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, k
 // list in cluster mode. Single-node mode (LocalBackend) returns the real
 // list.
 func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
-	return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	if c.groups == nil {
+		return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	}
+	var uploads []*storage.MultipartUpload
+	for _, dg := range c.groups.All() {
+		gb := dg.Backend()
+		if gb == nil {
+			continue
+		}
+		groupUploads, err := gb.ListMultipartUploads(ctx, bucket, prefix, 0)
+		if err != nil {
+			return nil, err
+		}
+		uploads = append(uploads, groupUploads...)
+	}
+	if len(uploads) == 0 && c.base != nil {
+		return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
+	}
+	sort.Slice(uploads, func(i, j int) bool {
+		if uploads[i].CreatedAt != uploads[j].CreatedAt {
+			return uploads[i].CreatedAt < uploads[j].CreatedAt
+		}
+		if uploads[i].Key != uploads[j].Key {
+			return uploads[i].Key < uploads[j].Key
+		}
+		return uploads[i].UploadID < uploads[j].UploadID
+	})
+	if maxUploads > 0 && len(uploads) > maxUploads {
+		uploads = uploads[:maxUploads]
+	}
+	return uploads, nil
 }
 
 // ListParts routes by (bucket, key): local group backend first; otherwise the
