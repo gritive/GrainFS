@@ -93,8 +93,36 @@ This table lists values already documented in the repository.
 | Scenario                                                               | Result                                                                                                            |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | FUSE-over-S3, 64 MiB payload, Apple M3, Colima loopback, 3-run average | Direct S3 write 96.8 MB/s, direct S3 read 108.0 MB/s, rclone mount write 106.7 MB/s, rclone mount read 107.3 MB/s |
-| `GrainFS` vs RustFS vs MinIO S3 object benchmark                       | Pending reproducible run                                                                                          |
+| `GrainFS` vs RustFS vs MinIO 3-node warp PUT, 64 KiB, c16              | `GrainFS` 104.30 MiB/s, MinIO 103.66 MiB/s, RustFS 48.37 MiB/s; all runs reported 0 errors                         |
 | CI regression threshold                                                | Not yet enforced                                                                                                  |
+
+## 2026-05-16 Local 3-Node Warp Baseline
+
+These snapshots were captured on a local Apple M3 host with loopback 3-node
+clusters, signed S3 requests, 64 KiB objects, concurrency 16, `warp`, and
+`--host-select roundrobin --noclear`. `GrainFS` ran at-rest encryption and
+default Iceberg audit enabled.
+
+| Target    | Commit / build                  | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | Raw artifacts |
+| --------- | ------------------------------- | --------: | --------: | ---------: | --------: | ------------- |
+| `GrainFS` | `5c42653c`                      |    104.30 |   1668.79 |          0 |         - | `benchmarks/profiles/s3-compat-cluster-warp-grainfs-memec-put30-20260516-060428` |
+| MinIO     | local 3-process distributed run |    103.66 |   1658.37 |          0 |    340.17 | `benchmarks/profiles/s3-compat-cluster-warp-minio-baseline-20260516` |
+| RustFS    | local 3-process distributed run |     48.37 |    773.85 |          0 |     86.20 | `benchmarks/profiles/s3-compat-cluster-warp-rustfs-baseline-rpcsecret-20260516` |
+
+Known caveats:
+
+- The MinIO and RustFS baselines were measured once and reused while iterating
+  on `GrainFS`.
+- The final `GrainFS` PUT run ended above the MinIO PUT baseline despite severe
+  local disk pressure: `/System/Volumes/Data` was 98% full before the run and
+  99% full before benchmark-directory cleanup.
+- `GrainFS` GET was not remeasured in the final run because the completion gate
+  was PUT throughput versus the existing MinIO PUT baseline.
+- The final `GrainFS` CPU profiles show `syscall.rawsyscalln` still dominates
+  CPU samples, mostly through QUIC packet send paths; `spoolObjectEncrypted`
+  no longer appears after the small EC memory path change.
+- `GrainFS` IAM allow authz console logs were suppressed at the default info
+  level; deny authz logs remain visible and durable S3 audit remains enabled.
 
 ## Adding Results
 
