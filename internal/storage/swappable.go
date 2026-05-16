@@ -43,15 +43,31 @@ func (sb *SwappableBackend) Swap(b Backend) {
 
 // cachedOps returns the cached Operations over the current inner backend,
 // lazily building it on first use after construction or after a Swap.
-// Races between concurrent first callers are benign: both build equivalent
-// Operations and the last Store wins.
+//
+// Race protection: a concurrent Swap may complete while we are reading inner
+// and building the Operations. If sb.gen bumps during the window between
+// reading inner and publishing ops, we discard the freshly-built ops and
+// retry — otherwise we would cache an *Operations that wraps the OLD inner
+// and a subsequent Swap could be silently defeated by the stale cache entry.
+// CompareAndSwap on a nil slot ensures we never overwrite an entry a racing
+// reader already published (or a later Swap reset to nil).
 func (sb *SwappableBackend) cachedOps() *Operations {
-	if ops := sb.ops.Load(); ops != nil {
-		return ops
+	for {
+		if ops := sb.ops.Load(); ops != nil {
+			return ops
+		}
+		startGen := sb.gen.Load()
+		inner := *sb.inner.Load()
+		ops := NewOperations(inner)
+		if sb.gen.Load() != startGen {
+			continue // Swap raced our build; discard and retry
+		}
+		if sb.ops.CompareAndSwap(nil, ops) {
+			return ops
+		}
+		// Another reader published first, or Swap reset to nil; loop and
+		// re-read sb.ops on the next iteration.
 	}
-	ops := NewOperations(*sb.inner.Load())
-	sb.ops.Store(ops)
-	return ops
 }
 
 // Inner returns the current inner backend.

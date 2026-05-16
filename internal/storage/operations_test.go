@@ -6,6 +6,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,6 +56,36 @@ func TestSwappableBackendCachedOpsInvalidatedOnSwap(t *testing.T) {
 	opsB := sb.cachedOps()
 	require.NotNil(t, opsB)
 	require.NotSame(t, opsA, opsB, "Swap must invalidate the cached *Operations")
+}
+
+func TestSwappableBackendCachedOpsRaceWithSwap(t *testing.T) {
+	// Stress test: concurrent cachedOps() and Swap() must not leave a stale
+	// *Operations cached. After all swaps settle, the cached ops must wrap
+	// the final inner. Combined with -race, also flushes out data races on
+	// the inner / ops / gen triple.
+	sb := NewSwappableBackend(&aclNoCapabilityBackend{})
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			sb.Swap(&aclNoCapabilityBackend{})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations*5; i++ {
+			_ = sb.cachedOps()
+		}
+	}()
+	wg.Wait()
+
+	// Final invariant: cached ops's backend identity must match the current
+	// inner pointer. If a stale ops survived, the addresses would diverge.
+	finalInner := sb.Inner()
+	finalOps := sb.cachedOps()
+	require.Same(t, finalInner, finalOps.Backend(), "cached ops must wrap the current inner after concurrent Swap")
 }
 
 func TestOperationsRefreshesPlanAfterSwappableBackendSwap(t *testing.T) {
