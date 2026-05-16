@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.0.215.0] - 2026-05-16 - refactor(alerts): convert Dispatcher to fire-and-forget actor
+
+### Changed
+- `Dispatcher.Send` is now fire-and-forget (returns nothing). Acceptance and
+  delivery results are observable only via `AlertDispatchDroppedTotal{reason}`
+  counter and the optional `Options.OnResult` callback.
+- `Dispatcher` is a controller-actor + ephemeral-worker-per-alert. Dedup state
+  (lastSent, inFlight) and decrypt-warn rate-limit state are owned by the
+  controller goroutine; the two prior `sync.Mutex` regions are removed.
+- `cluster.AlertSender` and `resourceguard.AlertsSender` interfaces drop the
+  `error` return.
+- `server.AlertsState` removes `sync.Mutex`; counters are `atomic.Uint64` and
+  `lastFailed` is `atomic.Pointer[alertFailureSnapshot]` COW snapshot.
+- Six caller sites previously wrapping `Send` in `go func() { _ = ... }()`
+  now call `Send(...)` directly.
+
+### Added
+- `AlertDispatchDroppedTotal{alert_kind, reason}` counter with bounded
+  3-enum reason label (`inbox_full`, `not_started`, `stopped`).
+- `Options.OnResult func(Alert, error)` — preferred callback. Legacy
+  `FailureCallback` parameter is mapped to OnResult internally for
+  backwards compatibility but should not be used in new code.
+- `Dispatcher.Start(ctx)` / `Stop(ctx)` — graceful shutdown with ctx-aware
+  retry/backoff and HTTP cancellation.
+- `Dispatcher.DrainForTest()` — test-only synchronization barrier.
+
+### Documentation
+- `CONTEXT.md`: "Alerts Webhook Dispatcher" glossary with honest framing
+  ("ergonomic deepening + minor locality, *not* scrubber-Director-style
+  locality consolidation") to prevent future reviewers from re-proposing
+  the same actor conversion for the wrong reason.
+
+### Notes
+- Race window closure is best-effort: a nanosecond window between caller's
+  `stopping.Load()` and `inbox` send remains formally open. Operationally
+  invisible (alert volume is low, Stop runs once per shutdown), but
+  documented for future reviewers.
+
 ## [0.0.214.0] - 2026-05-16 - perf: tighten Iceberg catalog benchmark hot path
 
 ### Changed
