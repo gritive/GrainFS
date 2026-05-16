@@ -286,6 +286,38 @@ func TestFSM_MultipartCycle(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID:         "upload-listing",
+		Bucket:           "bucket",
+		Key:              "prefix/mp.bin",
+		ContentType:      "application/octet-stream",
+		CreatedAt:        123456,
+		PlacementGroupID: "group-7",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	err = db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(multipartKey("upload-listing"))
+		require.NoError(t, err)
+		raw, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		meta, err := unmarshalClusterMultipartMeta(raw)
+		require.NoError(t, err)
+		require.Equal(t, "bucket", meta.Bucket)
+		require.Equal(t, "prefix/mp.bin", meta.Key)
+		require.Equal(t, int64(123456), meta.CreatedAt)
+		require.Equal(t, "application/octet-stream", meta.ContentType)
+		require.Equal(t, "group-7", meta.PlacementGroupID)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestFSM_AbortMultipart(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())

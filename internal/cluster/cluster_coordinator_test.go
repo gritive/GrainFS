@@ -16,6 +16,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -1531,6 +1532,69 @@ func TestClusterCoordinator_AbortMultipartUpload_Forward(t *testing.T) {
 	d.replyByOp[raftpb.ForwardOpAbortMultipartUpload] = buildOKReply()
 	require.NoError(t, c.AbortMultipartUpload(context.Background(), "bk", "k", "upload-1"))
 	require.Equal(t, raftpb.ForwardOpAbortMultipartUpload, d.calls[0].op)
+}
+
+func TestClusterCoordinator_ListParts_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	now := time.Now()
+	gate.ReportEvidence(compat.Evidence{
+		NodeID:       "a",
+		Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+		LastSeen:     now,
+		Ready:        true,
+	})
+	c.WithCapabilityGate(gate)
+	d.replyByOp[raftpb.ForwardOpListParts] = buildPartsReply([]storage.Part{
+		{PartNumber: 1, ETag: "etag-1", Size: 10},
+		{PartNumber: 2, ETag: "etag-2", Size: 20},
+	})
+
+	parts, err := c.ListParts(context.Background(), "bk", "k", "upload-1", 100)
+	require.NoError(t, err)
+	require.Equal(t, []storage.Part{
+		{PartNumber: 1, ETag: "etag-1", Size: 10},
+		{PartNumber: 2, ETag: "etag-2", Size: 20},
+	}, parts)
+	require.Equal(t, raftpb.ForwardOpListParts, d.calls[0].op)
+	args := raftpb.GetRootAsListPartsArgs(d.calls[0].args, 0)
+	require.Equal(t, "upload-1", string(args.UploadId()))
+	require.Equal(t, int32(100), args.MaxParts())
+}
+
+func TestClusterCoordinator_ListParts_LocalPath(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "g1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bk"))
+	up, err := gb.CreateMultipartUpload(context.Background(), "bk", "k", "text/plain")
+	require.NoError(t, err)
+	part, err := gb.UploadPart(context.Background(), "bk", "k", up.UploadID, 1, strings.NewReader("part"))
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(NewForwardSender(d.dial))
+
+	parts, err := c.ListParts(context.Background(), "bk", "k", up.UploadID, 100)
+	require.NoError(t, err)
+	require.Equal(t, []storage.Part{*part}, parts)
+	require.Empty(t, d.calls)
+}
+
+func TestClusterCoordinator_ListParts_GateRejectsBeforePeerCall(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.WithCapabilityGate(NewCapabilityGate(compat.DefaultRegistry, time.Minute))
+	d.replyByOp[raftpb.ForwardOpListParts] = buildPartsReply([]storage.Part{{PartNumber: 1, ETag: "etag-1", Size: 10}})
+
+	_, err := c.ListParts(context.Background(), "bk", "k", "upload-1", 100)
+	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
+	require.Empty(t, d.calls)
 }
 
 // TestClusterCoordinator_GetObject_NoSuchBucketStatus verifies that a server-

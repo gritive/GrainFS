@@ -23,11 +23,13 @@ type Operation string
 const (
 	OperationMigrationCutover Operation = "migration_cutover"
 	OperationNfsExportCreate  Operation = "nfs_export_create"
+	OperationListParts        Operation = "list_parts"
 )
 
 const (
 	CapabilityMigrationCutoverV1 = "migration_cutover_v1"
 	CapabilityNfsExportCreateV1  = "nfs_export_create_v1"
+	CapabilityMultipartListingV1 = "multipart_listing_v1"
 )
 
 type Capability struct {
@@ -59,6 +61,14 @@ var DefaultRegistry = mustRegistry([]Capability{
 		IntroducedVersion: "0.0.194.0",
 		Description:       "Allows create-only NFS export registry commands.",
 		Semantics:         "Nodes must apply NfsExportCreate as an atomic create-only registry operation instead of ignoring the command.",
+	},
+	{
+		Name:              CapabilityMultipartListingV1,
+		Scope:             ScopePeerTransport,
+		Severity:          SeverityHard,
+		IntroducedVersion: "0.0.212.0",
+		Description:       "Allows clustered multipart listing metadata and remote ListParts forwarding.",
+		Semantics:         "Nodes must persist bucket/key multipart metadata and understand the ListParts forward opcode.",
 	},
 })
 

@@ -3371,19 +3371,52 @@ func contextForMultipartComplete(
 	return ContextWithPlacementGroupEntry(ctx, group), nil
 }
 
-// ListMultipartUploads returns an empty list in cluster mode for now. The
-// FSM-replicated multipartKey value (clusterMultipartMeta) only carries
-// ContentType + PlacementGroupID — bucket and key are not persisted, so a
-// faithful bucket-scoped listing cannot be reconstructed from local FSM
-// state. Single-node deployments use LocalBackend directly and are not
-// affected. Extending the FSM schema to surface bucket+key per upload is a
-// follow-up (#3 follow-on T2-cluster).
 func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
 	_ = ctx
-	_ = bucket
-	_ = prefix
-	_ = maxUploads
-	return []*storage.MultipartUpload{}, nil
+	var uploads []*storage.MultipartUpload
+	err := b.db.View(func(txn *badger.Txn) error {
+		return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item *badger.Item) error {
+			raw, err := b.itemValueCopy(item)
+			if err != nil {
+				return err
+			}
+			meta, err := unmarshalClusterMultipartMeta(raw)
+			if err != nil {
+				return err
+			}
+			if meta.Bucket == "" || meta.Key == "" {
+				return nil
+			}
+			if meta.Bucket != bucket || !strings.HasPrefix(meta.Key, prefix) {
+				return nil
+			}
+			uploadID := strings.TrimPrefix(string(rawKey), "mpu:")
+			uploads = append(uploads, &storage.MultipartUpload{
+				UploadID:    uploadID,
+				Bucket:      meta.Bucket,
+				Key:         meta.Key,
+				ContentType: meta.ContentType,
+				CreatedAt:   meta.CreatedAt,
+			})
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(uploads, func(i, j int) bool {
+		if uploads[i].CreatedAt != uploads[j].CreatedAt {
+			return uploads[i].CreatedAt < uploads[j].CreatedAt
+		}
+		if uploads[i].Key != uploads[j].Key {
+			return uploads[i].Key < uploads[j].Key
+		}
+		return uploads[i].UploadID < uploads[j].UploadID
+	})
+	if maxUploads > 0 && len(uploads) > maxUploads {
+		uploads = uploads[:maxUploads]
+	}
+	return uploads, nil
 }
 
 // ListParts walks the local node's partDir for the given uploadID. Parts

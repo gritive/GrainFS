@@ -238,6 +238,20 @@ func buildAbortMultipartUploadArgs(bucket, key, uploadID string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildListPartsArgs(bucket, key, uploadID string, maxParts int32) []byte {
+	b := flatbuffers.NewBuilder(96)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	u := b.CreateString(uploadID)
+	raftpb.ListPartsArgsStart(b)
+	raftpb.ListPartsArgsAddBucket(b, bk)
+	raftpb.ListPartsArgsAddKey(b, k)
+	raftpb.ListPartsArgsAddUploadId(b, u)
+	raftpb.ListPartsArgsAddMaxParts(b, maxParts)
+	b.Finish(raftpb.ListPartsArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 // --- Reply builders (response side — used by ForwardReceiver in T8 + tests) ---
 
 // buildObjectReply builds an OK reply with a populated ForwardObjectMeta —
@@ -406,6 +420,29 @@ func buildPartReply(part *storage.Part) []byte {
 	return b.FinishedBytes()
 }
 
+func buildPartsReply(parts []storage.Part) []byte {
+	b := flatbuffers.NewBuilder(64 + len(parts)*64)
+	metas := make([]flatbuffers.UOffsetT, len(parts))
+	for i, part := range parts {
+		etag := b.CreateString(part.ETag)
+		raftpb.ForwardPartMetaStart(b)
+		raftpb.ForwardPartMetaAddPartNumber(b, int32(part.PartNumber))
+		raftpb.ForwardPartMetaAddEtag(b, etag)
+		raftpb.ForwardPartMetaAddSize(b, part.Size)
+		metas[i] = raftpb.ForwardPartMetaEnd(b)
+	}
+	raftpb.ForwardReplyStartPartsVector(b, len(parts))
+	for i := len(metas) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(metas[i])
+	}
+	partsVec := b.EndVector(len(parts))
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
+	raftpb.ForwardReplyAddParts(b, partsVec)
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return b.FinishedBytes()
+}
+
 // buildOKReply is a status-only OK reply — DeleteObject, AbortMultipartUpload.
 func buildOKReply() []byte { return buildSimpleReply(raftpb.ForwardStatusOK, "") }
 
@@ -425,6 +462,8 @@ func parseReplyStatus(reply []byte) error {
 		return storage.ErrNoSuchBucket
 	case raftpb.ForwardStatusNoSuchKey:
 		return storage.ErrObjectNotFound
+	case raftpb.ForwardStatusNoSuchUpload:
+		return storage.ErrUploadNotFound
 	case raftpb.ForwardStatusEntityTooLarge:
 		return storage.ErrEntityTooLarge
 	case raftpb.ForwardStatusInsufficientPlacementTargets:
@@ -546,4 +585,25 @@ func partFromReply(reply []byte) (*storage.Part, error) {
 		ETag:       string(p.Etag()),
 		Size:       p.Size(),
 	}, nil
+}
+
+func partsFromReply(reply []byte) ([]storage.Part, error) {
+	if err := parseReplyStatus(reply); err != nil {
+		return nil, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	n := fr.PartsLength()
+	out := make([]storage.Part, 0, n)
+	var p raftpb.ForwardPartMeta
+	for i := 0; i < n; i++ {
+		if !fr.Parts(&p, i) {
+			continue
+		}
+		out = append(out, storage.Part{
+			PartNumber: int(p.PartNumber()),
+			ETag:       string(p.Etag()),
+			Size:       p.Size(),
+		})
+	}
+	return out, nil
 }

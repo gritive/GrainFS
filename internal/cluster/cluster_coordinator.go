@@ -14,6 +14,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -111,6 +112,7 @@ type ClusterCoordinator struct {
 	ecConfig    ECConfig
 	runtime     atomic.Pointer[clusterCoordinatorRuntime]
 	indexWriter objectIndexProposer
+	capGate     *CapabilityGate
 
 	opRouter  *OpRouter
 	localExec *LocalExecution
@@ -200,6 +202,11 @@ func (c *ClusterCoordinator) WithECConfig(cfg ECConfig) *ClusterCoordinator {
 func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *ClusterCoordinator {
 	c.indexWriter = p
 	c.rebuild()
+	return c
+}
+
+func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCoordinator {
+	c.capGate = gate
 	return c
 }
 
@@ -1570,11 +1577,9 @@ func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, p
 	return c.base.ListMultipartUploads(ctx, bucket, prefix, maxUploads)
 }
 
-// ListParts routes by (bucket, key) to the data Raft group that owns the
-// upload's part files. If the local node is on the routed group, parts are
-// read directly; otherwise we surface the parts visible at the local
-// DistributedBackend (best-effort, see DistributedBackend.ListParts).
-// Forwarding ListParts to the remote group's leader is a follow-up.
+// ListParts routes by (bucket, key): local group backend first; otherwise the
+// peer-transport capability gate must pass before forwarding to the remote
+// data-group leader.
 func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
 	target, _, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
@@ -1585,7 +1590,20 @@ func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadI
 	} else if gb != nil {
 		return gb.ListParts(ctx, bucket, key, uploadID, maxParts)
 	}
-	return c.base.ListParts(ctx, bucket, key, uploadID, maxParts)
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	if c.capGate != nil {
+		if _, err := c.capGate.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, compat.OperationListParts, target.Peers, time.Now()); err != nil {
+			return nil, err
+		}
+	}
+	args := buildListPartsArgs(bucket, key, uploadID, int32(maxParts))
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListParts, args)
+	if err != nil {
+		return nil, err
+	}
+	return partsFromReply(reply)
 }
 
 var (

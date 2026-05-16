@@ -36,7 +36,7 @@ binary and data compatibility across rolling upgrades.
 | Object reads      | Conditional headers                     | Supported     |                                                                                  |
 | Multipart         | Create/upload/complete multipart upload | Supported     |                                                                                  |
 | Multipart         | Abort multipart upload                  | Supported     |                                                                                  |
-| Multipart         | Multipart listing APIs                  | Not supported | Cluster/default compatibility is not claimed; cluster listing currently returns no uploads. |
+| Multipart         | Multipart listing APIs                  | Supported     | Cluster tests cover enriched metadata, bucket/prefix filtering, legacy in-progress upload skip, sorted caps, and remote ListParts forwarding; legacy uploads created before bucket/key metadata are complete/abort capable but omitted from listing. |
 | Auth              | AWS Signature Version 4                 | Supported     |                                                                                  |
 | Auth              | Presigned GET/PUT URL                   | Supported     |                                                                                  |
 | Auth              | Browser POST policy/form upload         | Supported     |                                                                                  |

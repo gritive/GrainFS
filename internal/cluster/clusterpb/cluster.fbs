@@ -206,6 +206,9 @@ table SnapshotState {
 table MultipartMeta {
   content_type:string;
   placement_group_id:string;
+  bucket:string;
+  key:string;
+  created_at:int64;
 }
 
 table NodeStatsMsg {

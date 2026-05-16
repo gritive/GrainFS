@@ -196,6 +196,26 @@ func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 	assert.Equal(t, compat.CapabilityNfsExportCreateV1, string(pb.Capabilities(0)))
 }
 
+func TestGossipSenderIncludesMultipartListingCapabilityEvidence(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
+		WithCapabilityEvidenceSource(NewMetaFSM())
+	sender.broadcastOnce(context.Background())
+
+	msgs := tr.SentTo("node-b:9000")
+	require.Len(t, msgs, 1)
+
+	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].Payload, 0)
+	var caps []string
+	for i := 0; i < pb.CapabilitiesLength(); i++ {
+		caps = append(caps, string(pb.Capabilities(i)))
+	}
+	assert.Contains(t, caps, compat.CapabilityMultipartListingV1)
+}
+
 func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)

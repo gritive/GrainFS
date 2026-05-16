@@ -58,6 +58,7 @@ func TestProductionEssentialS3SupportedRowsRequireEvidence(t *testing.T) {
 func validateProductionEssentialS3Evidence(markdown string) error {
 	evidenceMarkers := []string{
 		"cluster e2e",
+		"cluster tests",
 		"server tests",
 		"lifecycle worker tests",
 		"real client",

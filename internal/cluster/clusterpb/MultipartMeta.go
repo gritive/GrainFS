@@ -57,14 +57,51 @@ func (rcv *MultipartMeta) PlacementGroupId() []byte {
 	return nil
 }
 
+func (rcv *MultipartMeta) Bucket() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *MultipartMeta) Key() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *MultipartMeta) CreatedAt() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MultipartMeta) MutateCreatedAt(n int64) bool {
+	return rcv._tab.MutateInt64Slot(12, n)
+}
+
 func MultipartMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(5)
 }
 func MultipartMetaAddContentType(builder *flatbuffers.Builder, contentType flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(contentType), 0)
 }
 func MultipartMetaAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(placementGroupId), 0)
+}
+func MultipartMetaAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(bucket), 0)
+}
+func MultipartMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(key), 0)
+}
+func MultipartMetaAddCreatedAt(builder *flatbuffers.Builder, createdAt int64) {
+	builder.PrependInt64Slot(4, createdAt, 0)
 }
 func MultipartMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

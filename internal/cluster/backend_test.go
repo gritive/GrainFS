@@ -649,6 +649,62 @@ func TestDistributedBackend_MultipartBadBucket(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
+func TestDistributedBackend_ListMultipartUploadsFiltersSkipsLegacyAndSorts(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.CreateBucket(ctx, "other"))
+
+	writeMultipartMeta(t, b, "upload-late", clusterMultipartMeta{
+		Bucket: "bucket", Key: "prefix/z.bin", CreatedAt: 300, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
+	})
+	writeMultipartMeta(t, b, "upload-early-b", clusterMultipartMeta{
+		Bucket: "bucket", Key: "prefix/b.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
+	})
+	writeMultipartMeta(t, b, "upload-early-a", clusterMultipartMeta{
+		Bucket: "bucket", Key: "prefix/a.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
+	})
+	writeMultipartMeta(t, b, "upload-other-prefix", clusterMultipartMeta{
+		Bucket: "bucket", Key: "else/a.bin", CreatedAt: 50, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
+	})
+	writeMultipartMeta(t, b, "upload-other-bucket", clusterMultipartMeta{
+		Bucket: "other", Key: "prefix/a.bin", CreatedAt: 25, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
+	})
+	writeMultipartMeta(t, b, "upload-legacy", clusterMultipartMeta{
+		ContentType: "application/octet-stream", PlacementGroupID: "group-1",
+	})
+
+	out, err := b.ListMultipartUploads(ctx, "bucket", "prefix/", 2)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	require.Equal(t, "upload-early-a", out[0].UploadID)
+	require.Equal(t, "prefix/a.bin", out[0].Key)
+	require.Equal(t, int64(100), out[0].CreatedAt)
+	require.Equal(t, "upload-early-b", out[1].UploadID)
+	require.Equal(t, "prefix/b.bin", out[1].Key)
+
+	all, err := b.ListMultipartUploads(ctx, "bucket", "prefix/", 0)
+	require.NoError(t, err)
+	require.Equal(t, []string{"upload-early-a", "upload-early-b", "upload-late"}, multipartUploadIDs(all))
+}
+
+func writeMultipartMeta(t *testing.T, b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+	t.Helper()
+	raw, err := marshalClusterMultipartMeta(meta)
+	require.NoError(t, err)
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(b.ks().MultipartKey(uploadID), raw)
+	}))
+}
+
+func multipartUploadIDs(uploads []*storage.MultipartUpload) []string {
+	out := make([]string, len(uploads))
+	for i, upload := range uploads {
+		out[i] = upload.UploadID
+	}
+	return out
+}
+
 func TestDistributedBackend_Close(t *testing.T) {
 	dir := t.TempDir()
 

@@ -187,8 +187,28 @@ func (rcv *ForwardReply) ScrubSession(obj *ScrubSessionStatReply) *ScrubSessionS
 	return nil
 }
 
+func (rcv *ForwardReply) Parts(obj *ForwardPartMeta, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ForwardReply) PartsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func ForwardReplyStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func ForwardReplyAddStatus(builder *flatbuffers.Builder, status ForwardStatus) {
 	builder.PrependInt8Slot(0, int8(status), 0)
@@ -225,6 +245,12 @@ func ForwardReplyStartVersionsVector(builder *flatbuffers.Builder, numElems int)
 }
 func ForwardReplyAddScrubSession(builder *flatbuffers.Builder, scrubSession flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(scrubSession), 0)
+}
+func ForwardReplyAddParts(builder *flatbuffers.Builder, parts flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(parts), 0)
+}
+func ForwardReplyStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func ForwardReplyEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

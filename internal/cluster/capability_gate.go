@@ -102,6 +102,54 @@ func (g *CapabilityGate) RequireMetaRaftCapability(capability string, op compat.
 	return plan, nil
 }
 
+func (g *CapabilityGate) RequirePeerTransportCapability(capability string, op compat.Operation, peers []string, now time.Time) (compat.GatePlan, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	capDef, ok := g.registry.Lookup(capability)
+	if !ok {
+		plan := compat.GatePlan{
+			Capability: capability,
+			Scope:      compat.ScopePeerTransport,
+			Severity:   compat.SeverityHard,
+			Operation:  op,
+			ConfigID:   g.configID,
+			Unknown:    []compat.NodeID{"registry"},
+		}
+		return plan, compat.Reject(plan)
+	}
+	plan := compat.GatePlan{
+		Capability: capability,
+		Scope:      capDef.Scope,
+		Severity:   capDef.Severity,
+		Operation:  op,
+		ConfigID:   g.configID,
+	}
+	for _, peer := range peers {
+		nodeID := compat.NodeID(peer)
+		plan.Required = append(plan.Required, nodeID)
+		ev, ok := g.evidence[nodeID]
+		if !ok {
+			plan.Unknown = append(plan.Unknown, nodeID)
+			continue
+		}
+		if !ev.Ready || !ev.Capabilities[capability] {
+			plan.Missing = append(plan.Missing, nodeID)
+			continue
+		}
+		if now.Sub(ev.LastSeen) > g.ttl {
+			plan.Stale = append(plan.Stale, compat.StaleNode{NodeID: nodeID, LastSeen: ev.LastSeen})
+		}
+	}
+	sort.Slice(plan.Required, func(i, j int) bool { return plan.Required[i] < plan.Required[j] })
+	sort.Slice(plan.Missing, func(i, j int) bool { return plan.Missing[i] < plan.Missing[j] })
+	sort.Slice(plan.Unknown, func(i, j int) bool { return plan.Unknown[i] < plan.Unknown[j] })
+	if !plan.Allowed() {
+		return plan, compat.Reject(plan)
+	}
+	return plan, nil
+}
+
 func (g *CapabilityGate) ValidatePlanStillCurrent(plan compat.GatePlan) error {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
