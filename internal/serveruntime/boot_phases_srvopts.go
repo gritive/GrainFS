@@ -88,29 +88,25 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	nodeID := state.nodeID
 	dataDir := cfg.DataDir
 	state.diskCollector.SetOnThreshold(func(level cluster.DiskThresholdLevel, pct float64, availBytes uint64) {
-		// Webhook send may block on retries — dispatch in a goroutine so the
-		// collect loop is never delayed.
+		// Dispatcher.Send is fire-and-forget — the controller goroutine owns
+		// retry, so the collect loop is never blocked.
 		switch level {
 		case cluster.DiskLevelCritical:
 			log.Warn().Float64("pct", pct).Uint64("avail_bytes", availBytes).Msg("disk usage CRITICAL")
-			go func() {
-				_ = clusterAlerts.Send(alerts.Alert{
-					Type:     "disk_critical",
-					Severity: alerts.SeverityCritical,
-					Resource: nodeID,
-					Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
-				})
-			}()
+			clusterAlerts.Send(alerts.Alert{
+				Type:     "disk_critical",
+				Severity: alerts.SeverityCritical,
+				Resource: nodeID,
+				Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
+			})
 		case cluster.DiskLevelWarn:
 			log.Warn().Float64("pct", pct).Uint64("avail_bytes", availBytes).Msg("disk usage warning")
-			go func() {
-				_ = clusterAlerts.Send(alerts.Alert{
-					Type:     "disk_warn",
-					Severity: alerts.SeverityWarning,
-					Resource: nodeID,
-					Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
-				})
-			}()
+			clusterAlerts.Send(alerts.Alert{
+				Type:     "disk_warn",
+				Severity: alerts.SeverityWarning,
+				Resource: nodeID,
+				Message:  fmt.Sprintf("disk used %.1f%% (avail %d bytes) on %s", pct, availBytes, dataDir),
+			})
 		case cluster.DiskLevelOK:
 			log.Info().Float64("pct", pct).Msg("disk usage recovered to normal")
 		}

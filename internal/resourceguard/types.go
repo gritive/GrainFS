@@ -16,9 +16,9 @@ import (
 
 // AlertsSender is the slim interface resourceguard needs from the cluster
 // alerts plumbing. Implemented by *server.AlertsState; defined here so the
-// package does not import internal/server.
+// package does not import internal/server. Send is fire-and-forget.
 type AlertsSender interface {
-	Send(alerts.Alert) error
+	Send(alerts.Alert)
 }
 
 // IncidentRecorder is the slim interface resourceguard needs to record

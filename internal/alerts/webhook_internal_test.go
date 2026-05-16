@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,46 @@ func TestObserveDrop_CounterDeltaCapture(t *testing.T) {
 	after := testutil.ToFloat64(
 		metrics.AlertDispatchDroppedTotal.WithLabelValues("test", "inbox_full"))
 	require.Equal(t, float64(2), after-before)
+}
+
+func TestSend_NotStartedDropsWithReason(t *testing.T) {
+	d := NewDispatcher("http://example", Options{Clock: time.Now}, nil)
+	// Start 호출 안 함
+	before := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "not_started"))
+	d.Send(Alert{Type: "t"})
+	after := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "not_started"))
+	require.Equal(t, float64(1), after-before)
+}
+
+func TestSend_StoppingDropsWithReason(t *testing.T) {
+	d := NewDispatcher("http://example", Options{Clock: time.Now}, nil)
+	d.Start(context.Background())
+	require.NoError(t, d.Stop(context.Background()))
+	before := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
+	d.Send(Alert{Type: "t"}) // post-Stop
+	after := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "stopped"))
+	require.Equal(t, float64(1), after-before)
+}
+
+func TestSend_InboxFullDropsWithReason(t *testing.T) {
+	d := NewDispatcher("http://example", Options{Clock: time.Now}, nil)
+	d.Start(context.Background())
+	defer d.Stop(context.Background()) //nolint:errcheck
+	block := make(chan struct{})
+	d.envPtr.spawn = func(Alert, string, string) { <-block }
+	before := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "inbox_full"))
+	for i := 0; i < 64; i++ { // inbox 32 + outstanding 1 + 여유
+		d.Send(Alert{Type: "t", Resource: fmt.Sprintf("r%d", i)})
+	}
+	after := testutil.ToFloat64(
+		metrics.AlertDispatchDroppedTotal.WithLabelValues("", "inbox_full"))
+	require.GreaterOrEqual(t, after-before, float64(1))
+	close(block)
 }
 
 func TestController_ProcessesSendThenRelease(t *testing.T) {
