@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.217.0] - 2026-05-17 - refactor(lifecycle): lock-free executor publication
+
+### Changed
+- `lifecycle.Service` removes `sync.Mutex`. The worker handle is published
+  via `atomic.Pointer[Worker]` so admin `Status` callers acquire no lock,
+  matching the migration service shape from v0.0.216.0. `cancelFn` and the
+  wait group stay as plain fields because only the `Run()` goroutine
+  touches them through `reconcile -> start/stop`.
+- `Service.running` is removed; running state is derived from
+  `worker.Load() != nil`. `workerRunningForTest` uses the same derivation.
+- `lifecycle.Worker` removes `sync.Mutex`. `Stats.LastRun` is now published
+  through `lastRunNano atomic.Int64` (unix nanoseconds, `0` means "never
+  run"), mirroring `scrubber.liveSession.doneAt`. The three cycle counters
+  (`ObjectsChecked`, `Expired`, `VersionsPruned`) move from raw `int64`
+  with `atomic.AddInt64` to `atomic.Int64` fields with `Add(1)` for
+  type-level consistency. `Stats()` translates `lastRunNano == 0` to a
+  zero-value `time.Time{}` so the existing `IsZero` admin assertion still
+  holds.
+
+### Removed
+- `lifecycle.Worker.Stop()` and `lifecycle.Worker.cancel` are removed.
+  They had no production callers — executor shutdown is driven by
+  `Service.stop` cancelling the workerCtx, which terminates `Worker.Run`
+  via its existing `<-ctx.Done()` arm.
+
+### Added
+- `docs/adr/0013-lifecycle-service-lock-free-publication.md` closes the
+  reservation in ADR 0012 about lifecycle. The conclusion is the same
+  lock-free publication shape as migration, extended with a worker-side
+  atomic stats surface; together ADRs 0012 and 0013 establish the
+  lock-free publication pattern for leader-only executor services.
+- `CONTEXT.md` gains a Bucket Lifecycle Executor domain entry.
+
 ## [0.0.216.0] - 2026-05-17 - refactor(migration): lock-free worker publication
 
 ### Changed

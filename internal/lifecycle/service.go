@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -31,6 +32,9 @@ type LeadershipSignal interface {
 // Service is the deep module for the Bucket Lifecycle Policy domain. It owns
 // validation, replication via Proposer, persistence in Store, and the leader-
 // only executor. Callers do not reach past this interface.
+//
+// See docs/adr/0013-lifecycle-service-lock-free-publication.md for why the
+// worker handle is published lock-free instead of through a controller actor.
 type Service struct {
 	store      *Store
 	proposer   Proposer
@@ -39,11 +43,13 @@ type Service struct {
 	deleter    ObjectDeleter // for executor; may be nil in unit tests
 	interval   time.Duration
 
-	mu       sync.Mutex
-	running  bool
+	// worker is published by Run()'s reconcile loop. Status loads it
+	// lock-free; nil means this node is not the current leader.
+	worker atomic.Pointer[Worker]
+
+	// cancelFn and workerWG are only touched by the Run() goroutine.
 	cancelFn context.CancelFunc
 	workerWG sync.WaitGroup
-	worker   *Worker // non-nil only while the executor goroutine runs; guarded by mu
 
 	logger zerolog.Logger
 }
@@ -94,10 +100,7 @@ type Status struct {
 // Status returns the current executor status. Safe to call on any node; a
 // follower returns Status{Running: false}.
 func (s *Service) Status() Status {
-	s.mu.Lock()
-	w := s.worker
-	running := s.running
-	s.mu.Unlock()
+	w := s.worker.Load()
 	buckets, err := s.store.ListBuckets()
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("lifecycle status: ListBuckets failed")
@@ -105,7 +108,7 @@ func (s *Service) Status() Status {
 	if buckets == nil {
 		buckets = []string{}
 	}
-	if w == nil || !running {
+	if w == nil {
 		return Status{Running: false, Buckets: buckets}
 	}
 	st := w.Stats()
@@ -168,9 +171,7 @@ func (s *Service) Run(ctx context.Context) {
 
 func (s *Service) reconcile(ctx context.Context) {
 	isLeader := s.leadership.IsLeader()
-	s.mu.Lock()
-	running := s.running
-	s.mu.Unlock()
+	running := s.worker.Load() != nil
 	switch {
 	case isLeader && !running:
 		if buckets, err := s.store.ListBuckets(); err != nil {
@@ -186,9 +187,7 @@ func (s *Service) reconcile(ctx context.Context) {
 }
 
 func (s *Service) start(parent context.Context) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running {
+	if s.worker.Load() != nil {
 		return
 	}
 	if s.backend == nil || s.deleter == nil {
@@ -196,11 +195,10 @@ func (s *Service) start(parent context.Context) {
 		return
 	}
 	workerCtx, cancel := context.WithCancel(parent)
-	s.cancelFn = cancel
-	s.running = true
-	s.workerWG.Add(1)
 	w := NewWorker(s.store, s.backend, s.deleter, s.interval)
-	s.worker = w
+	s.cancelFn = cancel
+	s.worker.Store(w)
+	s.workerWG.Add(1)
 	go func() {
 		defer s.workerWG.Done()
 		s.logger.Info().Dur("interval", s.interval).Msg("starting lifecycle executor (now leader)")
@@ -210,16 +208,12 @@ func (s *Service) start(parent context.Context) {
 }
 
 func (s *Service) stop() {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
+	if s.worker.Load() == nil {
 		return
 	}
 	cancel := s.cancelFn
 	s.cancelFn = nil
-	s.running = false
-	s.worker = nil
-	s.mu.Unlock()
+	s.worker.Store(nil)
 	if cancel != nil {
 		cancel()
 	}
@@ -230,7 +224,5 @@ func (s *Service) stop() {
 //
 //nolint:unused // referenced by service_test.go.
 func (s *Service) workerRunningForTest() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.running
+	return s.worker.Load() != nil
 }
