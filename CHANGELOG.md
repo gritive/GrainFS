@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.221.0] - 2026-05-17 - perf(raft): reuse propose-batch scratch slice in the actor
+
+### Changed
+- **`Node.handleProposeBatch`** no longer allocates a fresh
+  `make([]command, 0, maxProposeAppendBatch)` on every proposal. The
+  64-capacity slice of the wide `command` struct dominated the raft
+  benchmark's `alloc_space` profile at >95% of total bytes — most batches
+  only contain one command, leaving the other 63 slots paid for and
+  discarded.
+- The actor goroutine is the sole reader / writer of the propose path, so
+  a plain `proposeCmdScratch []command` field on `Node` beats a
+  `sync.Pool` here. Written slots are zeroed with `clear()` before reuse
+  so stale channel and pointer references do not survive across batches.
+
+### Performance
+
+Apple M3, `internal/raft/bench_test.go`:
+
+| Bench | Before | After | Delta |
+| --- | --- | --- | --- |
+| `BenchmarkProposeWait_SingleNode_NoFsync` | 2180 ns/op, 33438 B/op, 6 allocs | 962 ns/op, 673 B/op, 5 allocs | **-56% latency, -98% bytes** |
+| `BenchmarkProposeAndCommit_3Voter` | 9421 ns/op, 36025 B/op, 40 allocs | 8209 ns/op, 3196 B/op, 39 allocs | **-13% latency, -91% bytes** |
+
+Total `alloc_space` across the bench dropped from 91.15 GB to 4.50 GB
+(20× reduction). `handleProposeBatch` no longer appears in the
+top-allocators list.
+
 ## [0.0.220.0] - 2026-05-17 - perf: move blob compression outside the BlobStore.Append critical section
 
 ### Changed

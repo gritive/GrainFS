@@ -68,6 +68,14 @@ type Node struct {
 	// no locking. Public methods MUST NOT touch st directly.
 	st actorState
 
+	// proposeCmdScratch is a reusable scratch slice for handleProposeBatch.
+	// The actor goroutine is the sole reader/writer, so a plain field beats a
+	// sync.Pool here. Without it, handleProposeBatch allocated a fresh
+	// `make([]command, 0, maxProposeAppendBatch)` on every proposal — a
+	// 64-capacity slice of a ~300B command struct, dominating pprof
+	// alloc_space at >95% of total bench bytes.
+	proposeCmdScratch []command
+
 	// stopOnce guards multi-call Stop().
 	stopOnce sync.Once
 

@@ -693,7 +693,17 @@ func (n *Node) handleProposeBatch(first command) (command, bool) {
 	if batchLimit < 1 {
 		batchLimit = 1
 	}
-	cmds := make([]command, 0, batchLimit)
+	// Reuse the actor-owned scratch slice instead of allocating a fresh
+	// `make([]command, 0, batchLimit)` per call. command is a wide struct
+	// (~15 fields covering propose / RV / AE / heartbeat / vote-reply
+	// payloads); a 64-capacity slice of it was the dominant alloc_space
+	// target in pprof (>95% of bench bytes) even though typical batch size
+	// is 1. The actor goroutine is the sole reader/writer of this field, so
+	// a plain field beats a sync.Pool here.
+	if cap(n.proposeCmdScratch) < batchLimit {
+		n.proposeCmdScratch = make([]command, 0, batchLimit)
+	}
+	cmds := n.proposeCmdScratch[:0]
 	cmds = append(cmds, first)
 	var postponed command
 	var hasPostponed bool
@@ -712,6 +722,10 @@ drain:
 		}
 	}
 	n.appendProposeBatch(cmds)
+	// Clear written slots so the next caller's scratch reuse does not
+	// retain stale channel / pointer references from this batch.
+	clear(cmds)
+	n.proposeCmdScratch = cmds[:0]
 	return postponed, hasPostponed
 }
 
