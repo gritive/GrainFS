@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.0.235.0] - 2026-05-18 - perf(server): pre-allocate buffered response body (-55% allocs, +137% throughput)
+
+### Changed
+- **`server.writeObjectBody`** buffered-response path (objects under
+  the 128 KiB `bufferedObjectBodyLimit` threshold) now allocates the
+  output buffer in one shot at `obj.Size` and reads with
+  `io.ReadFull` instead of routing the reader through
+  `newExactLengthReadCloser` and accumulating via `io.ReadAll`. The
+  old path grew its buffer geometrically (~16 doublings to reach a
+  64 KiB warp-sized object) while wrapping the upstream reader in a
+  length-limiting closer, stacking ~16 throwaway allocations per
+  buffered GET response. The new path is one `make`.
+
+### Performance
+
+`BenchmarkWriteObjectBody_WarpSizedObject` (64 KiB body, 3-run × 3s median):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 29 | 13 | **-55%** |
+| B/op | 140169 | 67568 | **-52%** |
+| ns/op | ~16800 | ~7142 | **-57%** |
+| throughput | 3868 MB/s | 9176 MB/s | **+137%** |
+
+The remaining 13 allocs/op are dominated by the Hertz header machinery
+inside `SetBodyRaw` and the headers that precede it; the bench's prior
+54% from `io.ReadAll` is gone.
+
+`writeObjectBody` is on the S3 GET hot path for every response that
+fits inside `bufferedObjectBodyLimit` (128 KiB). With encryption on
+(production default) the underlying read also benefits from the
+PR #401 reader-buffer reuse, so the full GET path improves end-to-end.
+
+### Correctness note
+
+The original `io.ReadAll` over `exactLengthReadCloser` silently
+truncated when the backend reader ended before reaching `obj.Size` —
+the response was emitted with the `Content-Length` header pointing
+at a larger size than the body actually contained. The new
+`io.ReadFull` returns `io.ErrUnexpectedEOF` in that case, which the
+caller propagates as an error and the client observes as a 5xx
+rather than a silently malformed response. This is a deliberate
+behavior change.
+
+The streaming path (objects ≥ 128 KiB and range requests) still
+wraps the reader in `newExactLengthReadCloser` and is unchanged.
+
 ## [0.0.234.0] - 2026-05-18 - chore(encrypt): remove unused SealValue/OpenValue wrappers + encrypted packblob bench
 
 ### Added
