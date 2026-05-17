@@ -65,14 +65,20 @@ PutObject no longer competing with readers under shared mutex.
 ### Concurrency Semantics
 
 Delete-vs-Put races on the same key now resolve at `Load` granularity
-rather than under a single lock. The final state is identical to the
-prior lock-based code in every realistic interleaving (the entry the
-last writer publishes wins; refcount accounting still matches), but
-`DeleteObject`'s `CompareAndDelete` may now fail if a concurrent
-`PutObject` Swap'd in a fresher entry — that fresh entry is correctly
-preserved (its refcount untouched by the racing Delete, since Delete
-only decrements the entry it Load'd). Callers needing strict atomic
-delete-or-replace semantics must synchronize externally.
+rather than under a single lock. The final state — the live entry
+visible via `index.Load(k)` — is identical to the prior lock-based
+code in every realistic interleaving: the entry the last writer
+publishes wins, and the **live** entry's refcount invariant is
+preserved (the racing `DeleteObject` only decrements the displaced
+entry it Load'd, leaving the fresh entry untouched). `DeleteObject`'s
+`CompareAndDelete` may now fail when a concurrent `PutObject` Swap'd
+in a fresher entry; in that case the **displaced** entry can take a
+transient negative refcount because both `DeleteObject` (on its
+Load'd pointer) and `PutObject`'s `Swap` (on the returned previous
+value) decrement it — that entry is already unreachable from the
+index, so the negative value is never observed and the entry is GC'd
+once the racing goroutines drop their pointers. Callers needing
+strict atomic delete-or-replace semantics must synchronize externally.
 
 ## [0.0.223.0] - 2026-05-17 - perf(packblob): split BlobStore.readFiles cache off bs.mu
 
