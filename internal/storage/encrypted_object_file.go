@@ -114,7 +114,18 @@ type encryptedObjectReader struct {
 	domain    string
 	chunk     uint64
 	remaining int64
-	buf       []byte
+	// buf holds the current chunk's plaintext, drained by Read(). After the
+	// last byte is consumed, the underlying array is reused as the destination
+	// for the next chunk's decrypt — eliminating one heap allocation per chunk.
+	// Read() clears bytes as they leave the buffer (security), and the chunk
+	// boundary truncation clears the discarded tail, so reused capacity always
+	// starts zeroed.
+	buf []byte
+	// aadBuf and sealedBuf are reusable scratch for the per-chunk AAD string
+	// and the on-disk sealed record body. Both grow to chunk-class size on
+	// the first chunk and stay there for the lifetime of the reader.
+	aadBuf    []byte
+	sealedBuf []byte
 	err       error
 }
 
@@ -135,8 +146,16 @@ func (r *encryptedObjectReader) Read(p []byte) (int, error) {
 }
 
 func (r *encryptedObjectReader) Close() error {
+	// Zero all reusable scratch on close so any retained plaintext or
+	// sealed-record bytes never linger past the reader's lifetime.
 	if len(r.buf) > 0 {
 		clear(r.buf)
+	}
+	if cap(r.sealedBuf) > 0 {
+		clear(r.sealedBuf[:cap(r.sealedBuf)])
+	}
+	if cap(r.aadBuf) > 0 {
+		clear(r.aadBuf[:cap(r.aadBuf)])
 	}
 	return r.f.Close()
 }
@@ -145,7 +164,7 @@ func (r *encryptedObjectReader) loadNext() error {
 	if r.remaining <= 0 {
 		return io.EOF
 	}
-	plainLen, sealed, err := readEncryptedObjectRecord(r.f)
+	plainLen, sealed, err := readEncryptedObjectRecordInto(r.f, r.sealedBuf[:0])
 	if err != nil {
 		if err == io.EOF {
 			if r.remaining > 0 {
@@ -155,7 +174,9 @@ func (r *encryptedObjectReader) loadNext() error {
 		}
 		return err
 	}
-	plain, err := r.enc.OpenValue(encryptedChunkAAD(r.domain, r.chunk), sealed)
+	r.sealedBuf = sealed
+	r.aadBuf = encryptedChunkAADBytes(r.aadBuf[:0], r.domain, r.chunk)
+	plain, err := r.enc.OpenValueAADTo(r.buf[:0], r.aadBuf, sealed)
 	clear(sealed)
 	if err != nil {
 		return fmt.Errorf("decrypt object chunk %d: %w", r.chunk, err)
@@ -482,6 +503,14 @@ func writeEncryptedObjectRecord(w io.Writer, plainLen uint32, sealed []byte) err
 }
 
 func readEncryptedObjectRecord(r io.Reader) (uint32, []byte, error) {
+	return readEncryptedObjectRecordInto(r, nil)
+}
+
+// readEncryptedObjectRecordInto reads one sealed record into dst, growing
+// dst only when its capacity is too small. Callers in tight chunk loops
+// reuse the same buffer across iterations so the per-chunk
+// `make([]byte, blobLen)` cost disappears after the first record.
+func readEncryptedObjectRecordInto(r io.Reader, dst []byte) (uint32, []byte, error) {
 	var hdr [8]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -494,11 +523,15 @@ func readEncryptedObjectRecord(r io.Reader) (uint32, []byte, error) {
 	if blobLen > 256*1024*1024 {
 		return 0, nil, fmt.Errorf("encrypted object record too large")
 	}
-	sealed := make([]byte, blobLen)
-	if _, err := io.ReadFull(r, sealed); err != nil {
+	if cap(dst) < int(blobLen) {
+		dst = make([]byte, blobLen)
+	} else {
+		dst = dst[:blobLen]
+	}
+	if _, err := io.ReadFull(r, dst); err != nil {
 		return 0, nil, fmt.Errorf("read encrypted object record body: %w", err)
 	}
-	return plainLen, sealed, nil
+	return plainLen, dst, nil
 }
 
 func validateEncryptedObjectRecordPlainLen(chunk uint64, plainPos int64, size int64, plainLen uint32) error {
