@@ -3,6 +3,7 @@ package pullthrough
 import (
 	"crypto/sha256"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog/log"
 
@@ -35,13 +36,23 @@ type Resolver interface {
 // the live IAM record. No FSM event subscription is needed — callers see
 // the new client at most one request after the FSM apply.
 //
-// Per /plan-eng-review override A8 — mu is sync.RWMutex. Cache-hit fast path
-// takes RLock (no contention with other readers). Cache miss / rotation /
-// invalidation takes Lock. Aligns with project memory feedback_lockfree_over_mutex.
+// The cache is published as an immutable `map[string]*resolverEntry`
+// snapshot via `atomic.Pointer`. Cache-hit reads are lock-free (single
+// atomic load + map lookup). Mutations — cache fill on first hit, eviction
+// when the record disappears, and rebuild on rotation — serialise on
+// writeMu so concurrent mutators clone-on-write and publish a fresh
+// pointer. S3Upstream construction happens under writeMu so a single
+// upstream client is built per rotation; readers piling up on the rotated
+// bucket all see the same final pointer once the writer stores it.
+//
+// Audit follow-up: docs/architecture/lock-free-audit.md →
+// "internal/storage/pullthrough/resolver.go - upstream client cache; hits
+// take read lock, rotations rebuild under write lock." Every pull-through
+// S3 request was paying that RLock; atomic publication eliminates it.
 type IAMResolver struct {
-	store *iam.Store
-	mu    sync.RWMutex
-	cache map[string]*resolverEntry // bucket → cached client
+	store   *iam.Store
+	writeMu sync.Mutex
+	cache   atomic.Pointer[map[string]*resolverEntry]
 }
 
 type resolverEntry struct {
@@ -56,10 +67,10 @@ type resolverEntry struct {
 // the construction path rather than relying on this guard (see runtime
 // wiring in serveruntime/run.go).
 func NewIAMResolver(store *iam.Store) *IAMResolver {
-	return &IAMResolver{
-		store: store,
-		cache: make(map[string]*resolverEntry),
-	}
+	r := &IAMResolver{store: store}
+	initial := make(map[string]*resolverEntry)
+	r.cache.Store(&initial)
+	return r
 }
 
 // Resolve returns the *S3Upstream for the given bucket, building (or
@@ -73,17 +84,11 @@ func NewIAMResolver(store *iam.Store) *IAMResolver {
 func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 	rec, ok := r.store.LookupBucketUpstream(bucket)
 	if !ok {
-		// Probe with RLock first — most cache-miss-no-upstream calls have
-		// nothing to delete, so we avoid writer-lock contention on the common
-		// "bucket has no upstream" path. Only take the writer lock when a
-		// stale entry actually needs to be evicted.
-		r.mu.RLock()
-		_, hadEntry := r.cache[bucket]
-		r.mu.RUnlock()
-		if hadEntry {
-			r.mu.Lock()
-			delete(r.cache, bucket)
-			r.mu.Unlock()
+		// No upstream configured: evict any stale cache entry. Lock-free
+		// probe first; only acquire writeMu if there is actually something
+		// to remove.
+		if _, hadEntry := (*r.cache.Load())[bucket]; hadEntry {
+			r.evictLocked(bucket)
 		}
 		return nil, false
 	}
@@ -91,22 +96,27 @@ func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 	secretHash := sha256.Sum256(rec.SecretKeyEnc)
 
 	// Fast path: cache hit with matching (endpoint, access_key, secret hash).
-	r.mu.RLock()
-	cached, hit := r.cache[bucket]
-	if hit && cached.endpoint == rec.Endpoint && cached.accessKey == rec.AccessKey && cached.secretKeyEncHash == secretHash {
-		up := cached.upstream
-		r.mu.RUnlock()
-		return up, true
+	// Single atomic load; no lock.
+	if cached, hit := (*r.cache.Load())[bucket]; hit &&
+		cached.endpoint == rec.Endpoint &&
+		cached.accessKey == rec.AccessKey &&
+		cached.secretKeyEncHash == secretHash {
+		return cached.upstream, true
 	}
-	r.mu.RUnlock()
 
-	// Slow path: cache miss or rotation — build a new client under exclusive lock.
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// Slow path: cache miss or rotation. Serialise builders so we only
+	// construct one S3Upstream per rotation even under thundering-herd
+	// readers, then publish via CoW.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 
-	// Re-check after upgrading to write lock (another goroutine may have built it).
-	cached, hit = r.cache[bucket]
-	if hit && cached.endpoint == rec.Endpoint && cached.accessKey == rec.AccessKey && cached.secretKeyEncHash == secretHash {
+	// Re-check after acquiring writeMu — another goroutine may have built
+	// the same entry while we waited.
+	old := r.cache.Load()
+	if cached, hit := (*old)[bucket]; hit &&
+		cached.endpoint == rec.Endpoint &&
+		cached.accessKey == rec.AccessKey &&
+		cached.secretKeyEncHash == secretHash {
 		return cached.upstream, true
 	}
 
@@ -118,14 +128,60 @@ func (r *IAMResolver) Resolve(bucket string) (Upstream, bool) {
 			Str("bucket", bucket).
 			Str("endpoint", rec.Endpoint).
 			Msg("pullthrough resolver: build upstream failed; bucket falls through")
-		delete(r.cache, bucket)
+		// Evict any stale entry so the next call doesn't return a fresher
+		// build path against the same broken record without re-attempting.
+		if _, hadEntry := (*old)[bucket]; hadEntry {
+			next := cloneCacheWithout(old, bucket)
+			r.cache.Store(next)
+		}
 		return nil, false
 	}
-	r.cache[bucket] = &resolverEntry{
+
+	next := cloneCache(old, len(*old)+1)
+	next[bucket] = &resolverEntry{
 		endpoint:         rec.Endpoint,
 		accessKey:        rec.AccessKey,
 		secretKeyEncHash: secretHash,
 		upstream:         up,
 	}
+	r.cache.Store(&next)
 	return up, true
+}
+
+// evictLocked drops the entry for bucket from the cache under writeMu. The
+// caller must have observed a hit on bucket via the lock-free probe; a
+// no-op double-check inside the lock keeps the publish path idempotent if
+// another writer evicted concurrently.
+func (r *IAMResolver) evictLocked(bucket string) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	old := r.cache.Load()
+	if _, hit := (*old)[bucket]; !hit {
+		return // another writer already evicted; skip the clone
+	}
+	next := cloneCacheWithout(old, bucket)
+	r.cache.Store(next)
+}
+
+// cloneCache returns a new map with the same entries as src, sized for an
+// upcoming insert.
+func cloneCache(src *map[string]*resolverEntry, sizeHint int) map[string]*resolverEntry {
+	dst := make(map[string]*resolverEntry, sizeHint)
+	for k, v := range *src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// cloneCacheWithout returns a new map with the same entries as src, minus
+// the named bucket.
+func cloneCacheWithout(src *map[string]*resolverEntry, bucket string) *map[string]*resolverEntry {
+	dst := make(map[string]*resolverEntry, len(*src))
+	for k, v := range *src {
+		if k == bucket {
+			continue
+		}
+		dst[k] = v
+	}
+	return &dst
 }
