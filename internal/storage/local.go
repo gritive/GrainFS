@@ -341,7 +341,7 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 	// that hit the object cache never reach this point. The hit-rate
 	// curve at this tracker therefore answers exactly what UBC would
 	// have caught beyond the existing object cache.
-	readamp.RecordBackendObject(bucket + "/" + key)
+	readamp.RecordBackendObject(bucket, key)
 	obj, err := b.HeadObject(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
@@ -364,30 +364,39 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 }
 
 func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
-	if err := b.HeadBucket(ctx, bucket); err != nil {
-		return nil, err
-	}
+	_ = ctx
 
 	var tHead time.Time
 	if localTraceEnabled {
 		tHead = time.Now()
 	}
 
+	// One Badger View serves both checks. Happy path is a single Get on the
+	// object meta key. When that misses, we use the same transaction to
+	// distinguish ErrBucketNotFound from ErrObjectNotFound — the prior code
+	// always did a separate db.View for the bucket lookup, paying Badger's
+	// per-View overhead (getMemTables alloc cluster) twice on every call.
 	var obj Object
 	err := b.db.View(func(txn *badger.Txn) error {
 		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key))
-		if err == badger.ErrKeyNotFound {
-			return ErrObjectNotFound
+		if err == nil {
+			decoded, derr := unmarshalObject(val)
+			if derr != nil {
+				return derr
+			}
+			obj = *decoded
+			return nil
 		}
-		if err != nil {
+		if err != badger.ErrKeyNotFound {
 			return err
 		}
-		decoded, err := unmarshalObject(val)
-		if err != nil {
-			return err
+		// Object missing: probe the bucket so we return the right error.
+		if _, berr := txn.Get(b.bucketKey(bucket)); berr == badger.ErrKeyNotFound {
+			return ErrBucketNotFound
+		} else if berr != nil {
+			return berr
 		}
-		obj = *decoded
-		return nil
+		return ErrObjectNotFound
 	})
 
 	if localTraceEnabled {

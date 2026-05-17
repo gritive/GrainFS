@@ -73,8 +73,17 @@ func RecordECShard(key string) {
 // boundary CachedBackend has already passed before the data reaches
 // the actual storage backend. Hits here are what a unified buffer
 // cache below CachedBackend would have absorbed.
-func RecordBackendObject(key string) {
-	BackendObject16MB.Record(key)
-	BackendObject64MB.Record(key)
-	BackendObject256MB.Record(key)
+//
+// Bucket and key are passed separately so the "bucket/key" composition
+// is paid only when the simulator is enabled (default: off). The hot
+// GetObject path otherwise allocated this string on every call just to
+// hand it to a disabled tracker.
+func RecordBackendObject(bucket, key string) {
+	if !enabled.Load() {
+		return
+	}
+	k := bucket + "/" + key
+	BackendObject16MB.Record(k)
+	BackendObject64MB.Record(k)
+	BackendObject256MB.Record(k)
 }
