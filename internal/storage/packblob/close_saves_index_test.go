@@ -30,10 +30,8 @@ func TestPackedBackend_CloseCallsSaveIndex(t *testing.T) {
 	_, err = pb.CopyObject("bucket", "key1", "bucket", "key2")
 	require.NoError(t, err)
 
-	pb.mu.RLock()
-	entry := pb.index["bucket/key1"]
-	refcountBefore := entry.Refcount.Load()
-	pb.mu.RUnlock()
+	v, _ := pb.index.Load("bucket/key1")
+	refcountBefore := v.(*indexEntry).Refcount.Load()
 	require.Equal(t, int64(2), refcountBefore, "refcount must be 2 after copy")
 
 	// Close without explicitly calling SaveIndex — this is the bug scenario.
@@ -48,10 +46,8 @@ func TestPackedBackend_CloseCallsSaveIndex(t *testing.T) {
 	require.NoError(t, pb2.LoadIndex())
 
 	// Refcount must be 2 — proves Close() saved the index (not just rebuilt from blobs)
-	pb2.mu.RLock()
-	entry2 := pb2.index["bucket/key1"]
-	refcountAfter := entry2.Refcount.Load()
-	pb2.mu.RUnlock()
+	v2, _ := pb2.index.Load("bucket/key1")
+	refcountAfter := v2.(*indexEntry).Refcount.Load()
 
 	assert.Equal(t, int64(2), refcountAfter,
 		"refcount must survive restart: Close() must call SaveIndex()")
