@@ -28,24 +28,19 @@ func TestCopyObject_RefcountOverflow(t *testing.T) {
 
 	// Get the index entry and manually set refcount to near max int64
 	ikey := pb.indexKey("bucket1", "key1")
-	pb.mu.Lock()
-	entry, ok := pb.index[ikey]
+	v, ok := pb.index.Load(ikey)
 	require.True(t, ok, "key1 should exist in index")
+	entry := v.(*indexEntry)
 	// Set refcount to max int64 - 1 (next increment would overflow)
 	entry.Refcount.Store(9223372036854775806) // int64 max - 1
-	pb.mu.Unlock()
 
 	// TEST: CopyObject should detect potential overflow and return error
 	result, err := pb.CopyObject("bucket1", "key1", "bucket1", "key2")
 	if err == nil {
 		t.Logf("CopyObject unexpectedly succeeded: result = %+v", result)
-		// Check refcount after copy
-		pb.mu.RLock()
-		entryAfter, okAfter := pb.index[ikey]
-		if okAfter {
-			t.Logf("Refcount after copy: %d", entryAfter.Refcount.Load())
+		if vAfter, okAfter := pb.index.Load(ikey); okAfter {
+			t.Logf("Refcount after copy: %d", vAfter.(*indexEntry).Refcount.Load())
 		}
-		pb.mu.RUnlock()
 	}
 	assert.Error(t, err, "CopyObject should return error when refcount would overflow")
 	if err != nil {
@@ -53,11 +48,9 @@ func TestCopyObject_RefcountOverflow(t *testing.T) {
 	}
 
 	// TEST: Verify refcount was NOT incremented
-	pb.mu.RLock()
-	entryAfter, okAfter := pb.index[ikey]
+	vAfter, okAfter := pb.index.Load(ikey)
 	require.True(t, okAfter, "key1 should still exist")
-	finalRefcount := entryAfter.Refcount.Load()
-	pb.mu.RUnlock()
+	finalRefcount := vAfter.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(9223372036854775806), finalRefcount, "Refcount should not be incremented when overflow detected")
 }
 
@@ -79,11 +72,9 @@ func TestCopyObject_RefcountAtMaxValue(t *testing.T) {
 
 	// Get the index entry and set refcount to max int64
 	ikey := pb.indexKey("bucket1", "key1")
-	pb.mu.Lock()
-	entry, ok := pb.index[ikey]
+	v, ok := pb.index.Load(ikey)
 	require.True(t, ok, "key1 should exist in index")
-	entry.Refcount.Store(9223372036854775807) // int64 max
-	pb.mu.Unlock()
+	v.(*indexEntry).Refcount.Store(9223372036854775807) // int64 max
 
 	// TEST: CopyObject should detect overflow and return error
 	_, err = pb.CopyObject("bucket1", "key1", "bucket1", "key2")
@@ -91,11 +82,9 @@ func TestCopyObject_RefcountAtMaxValue(t *testing.T) {
 	assert.Contains(t, err.Error(), "overflow", "Error message should mention overflow")
 
 	// TEST: Verify refcount was NOT incremented
-	pb.mu.RLock()
-	entryAfter, okAfter := pb.index[ikey]
+	vAfter, okAfter := pb.index.Load(ikey)
 	require.True(t, okAfter, "key1 should still exist")
-	finalRefcount := entryAfter.Refcount.Load()
-	pb.mu.RUnlock()
+	finalRefcount := vAfter.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(9223372036854775807), finalRefcount, "Refcount should remain at max when overflow detected")
 }
 
@@ -121,9 +110,7 @@ func TestCopyObject_NormalRefcountIncrement(t *testing.T) {
 
 	// Verify refcount incremented to 2
 	ikey := pb.indexKey("bucket1", "key1")
-	pb.mu.RLock()
-	entry := pb.index[ikey]
-	refcount := entry.Refcount.Load()
-	pb.mu.RUnlock()
+	v, _ := pb.index.Load(ikey)
+	refcount := v.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(2), refcount, "Refcount should be 2 after one copy")
 }

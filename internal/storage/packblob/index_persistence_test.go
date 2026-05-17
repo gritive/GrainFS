@@ -28,17 +28,15 @@ func TestIndex_SaveAndLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test data
-	pb.mu.Lock()
-	pb.index["bucket1/key1"] = &indexEntry{
+	pb.index.Store("bucket1/key1", &indexEntry{
 		Location: BlobLocation{BlobID: 1, Offset: 100, Length: 200},
-	}
-	pb.index["bucket1/key2"] = &indexEntry{
+	})
+	pb.index.Store("bucket1/key2", &indexEntry{
 		Location: BlobLocation{BlobID: 1, Offset: 300, Length: 400},
-	}
-	pb.index["bucket2/key1"] = &indexEntry{
+	})
+	pb.index.Store("bucket2/key1", &indexEntry{
 		Location: BlobLocation{BlobID: 2, Offset: 100, Length: 200},
-	}
-	pb.mu.Unlock()
+	})
 
 	// TEST: Save index
 	err = pb.SaveIndex()
@@ -61,18 +59,23 @@ func TestIndex_SaveAndLoad(t *testing.T) {
 	assert.NoError(t, err, "LoadIndex should succeed")
 
 	// TEST: Verify index restored
-	pb2.mu.RLock()
-	assert.Len(t, pb2.index, 3, "Should have 3 entries in restored index")
+	assert.Equal(t, 3, indexLen(pb2), "Should have 3 entries in restored index")
 
 	// Verify specific entries
-	entry1, ok := pb2.index["bucket1/key1"]
+	v1, ok := pb2.index.Load("bucket1/key1")
 	assert.True(t, ok, "bucket1/key1 should exist")
-	assert.Equal(t, BlobLocation{BlobID: 1, Offset: 100, Length: 200}, entry1.Location)
+	assert.Equal(t, BlobLocation{BlobID: 1, Offset: 100, Length: 200}, v1.(*indexEntry).Location)
 
-	entry2, ok := pb2.index["bucket1/key2"]
+	v2, ok := pb2.index.Load("bucket1/key2")
 	assert.True(t, ok, "bucket1/key2 should exist")
-	assert.Equal(t, BlobLocation{BlobID: 1, Offset: 300, Length: 400}, entry2.Location)
-	pb2.mu.RUnlock()
+	assert.Equal(t, BlobLocation{BlobID: 1, Offset: 300, Length: 400}, v2.(*indexEntry).Location)
+}
+
+// indexLen counts entries in the sync.Map (test helper).
+func indexLen(pb *PackedBackend) int {
+	n := 0
+	pb.index.Range(func(_, _ any) bool { n++; return true })
+	return n
 }
 
 // TestIndex_LoadRebuildFromBlobs tests index rebuild from blob files
@@ -97,10 +100,7 @@ func TestIndex_LoadRebuildFromBlobs(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify objects are in index
-	pb.mu.RLock()
-	initialCount := len(pb.index)
-	pb.mu.RUnlock()
-	assert.Greater(t, initialCount, 0, "Should have objects in index")
+	assert.Greater(t, indexLen(pb), 0, "Should have objects in index")
 
 	// TEST: Simulate restart by creating new PackedBackend
 	require.NoError(t, pb.Close())
@@ -197,10 +197,8 @@ func TestIndex_PersistenceWithRefcounts(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify refcount is 2
-	pb.mu.RLock()
-	entry := pb.index["bucket1/key1"]
-	refcountBefore := entry.Refcount.Load()
-	pb.mu.RUnlock()
+	v, _ := pb.index.Load("bucket1/key1")
+	refcountBefore := v.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(2), refcountBefore, "Refcount should be 2 after copy")
 
 	// TEST: Save and load index
@@ -215,10 +213,8 @@ func TestIndex_PersistenceWithRefcounts(t *testing.T) {
 	require.NoError(t, err)
 
 	// TEST: Verify refcount persisted
-	pb2.mu.RLock()
-	entry2 := pb2.index["bucket1/key1"]
-	refcountAfter := entry2.Refcount.Load()
-	pb2.mu.RUnlock()
+	v2b, _ := pb2.index.Load("bucket1/key1")
+	refcountAfter := v2b.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(2), refcountAfter, "Refcount should persist across restart")
 }
 

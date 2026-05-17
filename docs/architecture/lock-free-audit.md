@@ -32,6 +32,18 @@ copy-on-write publish step.
   `getReadFile` disappears from the profile and the writer-side
   `Append` self-blocking collapses (it was waiting on readers holding
   the same lock). Reader latency under writer pressure: -57%.
+- `internal/storage/packblob.PackedBackend` no longer has an index
+  mutex. The packed-object index is a `sync.Map`. GetObject /
+  HeadObject / DeleteObject / PutObject are lock-free on the index;
+  CopyObject preserves transactional semantics via CAS-based refcount
+  increment plus a re-validate `Load`. Range scans (listing, bucket
+  teardown, SaveIndex) use `Range` with documented weakly-consistent
+  semantics. Mixed-workload mutex profile: total delay 48.86s →
+  245ms (-99.5%); the prior `PackedBackend.mu` disappears from the
+  profile entirely. CoW with `atomic.Pointer[map]` was rejected
+  after measurement — isolated PutObject latency is index-size-
+  invariant (11µs through N=100K), so a CoW clone at N=100K would
+  have driven PutObject to ~1ms (~100x regression).
 - `internal/volume.Manager.ReadAt` keeps `Manager.mu` while reading block data.
   This is a justified serialization boundary: volume metadata, live maps, and
   physical block objects are not versioned independently, so snapshotting only
@@ -74,10 +86,6 @@ copy-on-write publish step.
   the critical section. Further parallelisation requires a per-blob
   transaction or pre-allocated extent scheme, out of scope for this
   audit pass.
-- `internal/storage/packblob.PackedBackend.mu` protects the packed-object index.
-  Reads hold it only to copy an index entry before blob I/O. If packed small
-  object reads become a hot-path bottleneck, convert this to the same immutable
-  snapshot pattern used by `CachedBackend`.
 - `internal/storage/wal.WAL.mu` protects the active WAL file and segment
   rotation. The background writer owns the normal path; synchronous fallback
   uses the same lock only when the channel is full.

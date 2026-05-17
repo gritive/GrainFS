@@ -94,6 +94,30 @@ func BenchmarkParallelGetWithWriter(b *testing.B) {
 	}
 }
 
+// BenchmarkPutObjectIsolated measures PutObject latency in isolation while
+// the index is pre-populated with N entries. Used to detect whether an
+// index-protection redesign (e.g. CoW map clone) would blow up writer
+// latency on large indexes.
+func BenchmarkPutObjectIsolated(b *testing.B) {
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("preload=%d", n), func(b *testing.B) {
+			pb, _ := setupPackedBackend(b, n)
+			b.Cleanup(func() { _ = pb.Close() })
+
+			ctx := context.Background()
+			payload := bytes.Repeat([]byte("p"), 256)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, err := pb.PutObject(ctx, "bench", fmt.Sprintf("putkey-%d", i), bytes.NewReader(payload), "application/octet-stream")
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func setupPackedBackend(b *testing.B, n int) (*PackedBackend, []string) {
 	b.Helper()
 	inner, err := storage.NewLocalBackend(b.TempDir())

@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.0.224.0] - 2026-05-17 - perf(packblob): replace PackedBackend.mu with sync.Map index
+
+### Changed
+- **`PackedBackend.mu sync.RWMutex` + `index map[string]*indexEntry`**
+  replaced with `index sync.Map`. `GetObject` / `HeadObject` /
+  `DeleteObject` / `PutObject` are now lock-free on the index:
+  - `PutObject` uses `index.Swap` and decrements the displaced entry's
+    refcount atomically.
+  - `DeleteObject` uses `LoadAndDelete`-equivalent via
+    `Load` + `Refcount.Add(-1)` + `CompareAndDelete` to guard against
+    a concurrent `Swap` publishing a new entry under the same key.
+  - `CopyObject` preserves transactional semantics with a CAS-based
+    refcount increment (rejects entries with `Refcount <= 0` or at
+    `MaxInt64-1`) plus a re-validation `Load` that the source entry
+    is still the canonical one. Lock-free.
+- Range scans (`ListObjects`, `WalkObjects`, `bucketHasPackedObjects`,
+  `deleteBucketIndex`, `ListAllObjects`, `SaveIndex`) use `sync.Map.Range`
+  with documented weakly-consistent semantics — listing/scan operations
+  tolerate concurrent inserts/deletes appearing or not.
+- Audit follow-up: `docs/architecture/lock-free-audit.md` →
+  "`PackedBackend.mu` protects the packed-object index. If packed small
+  object reads become a hot-path bottleneck, convert this to the same
+  immutable snapshot pattern used by `CachedBackend`." PR #392's mixed
+  mutex profile attributed 91.7% of remaining delay (44.81s / 48.86s)
+  to `PackedBackend.PutObject`'s `RWMutex.Unlock` — trigger condition
+  hit. CoW with `atomic.Pointer[map]` was rejected because the
+  isolated PutObject bench showed latency is index-size-invariant
+  (11µs at N=1K through N=100K) — a CoW clone of N=100K would have
+  pushed PutObject from 11µs to ~1ms (~100× regression).
+
+### Performance
+
+Apple M3, `internal/storage/packblob`, `-benchtime=10s -count=2`.
+
+**Headline — mutex profile (`-mutexprofile`, mixed workload):**
+
+| Metric | Before | After | Delta |
+| --- | --- | --- | --- |
+| Total mutex delay | 48.86s | 245.48ms | **-99.5%** |
+| `PackedBackend.PutObject` (RWMutex.Unlock) | 44.81s (91.7%) | disappears | gone |
+
+`PackedBackend.mu` is fully eliminated from the mutex profile.
+Remaining 245ms is dominated by unrelated runtime / BadgerDB system
+locks. PR #392 (BlobStore readFiles) cleared 445s → 51s of
+contention on `bs.mu`; this PR clears the last 48.86s on `pb.mu`,
+leaving the packblob hot path effectively lock-free for index access.
+
+**Secondary — wall-clock bench (10s × 2; tight enough to read trend but
+not a 15s × 3 measurement — treat the percentages as directional, not
+load-bearing — see `feedback_bench_15s_min`):**
+
+| Bench | Before | After | Direction |
+| --- | --- | --- | --- |
+| `BenchmarkParallelGetWithWriter/entries=10000` | 2045 ns/op | 1867 ns/op | reader latency down |
+| `BenchmarkParallelGetWithWriter/entries=100000` | 1925 ns/op | 1858 ns/op | reader latency down |
+| `BenchmarkPutObjectIsolated/preload=1000-100000` | ~11.0-11.4 µs, 18 allocs | ~11.3-11.5 µs, 20 allocs | +2-3% latency, +2 allocs |
+
+The PutObject +2 allocs / +2-3% latency cost is sync.Map's
+interface-boxing overhead for the string key + *indexEntry value;
+the trade is justified by reads becoming completely lock-free and
+PutObject no longer competing with readers under shared mutex.
+
+### Concurrency Semantics
+
+Delete-vs-Put races on the same key now resolve at `Load` granularity
+rather than under a single lock. The final state is identical to the
+prior lock-based code in every realistic interleaving (the entry the
+last writer publishes wins; refcount accounting still matches), but
+`DeleteObject`'s `CompareAndDelete` may now fail if a concurrent
+`PutObject` Swap'd in a fresher entry — that fresh entry is correctly
+preserved (its refcount untouched by the racing Delete, since Delete
+only decrements the entry it Load'd). Callers needing strict atomic
+delete-or-replace semantics must synchronize externally.
+
 ## [0.0.223.0] - 2026-05-17 - perf(packblob): split BlobStore.readFiles cache off bs.mu
 
 ### Changed
