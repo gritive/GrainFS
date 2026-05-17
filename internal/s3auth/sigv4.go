@@ -92,11 +92,8 @@ func (v *Verifier) Verify(r *http.Request) (string, error) {
 	canonicalRequest := buildCanonicalRequest(r, signedHeaders)
 
 	h := sha256.Sum256([]byte(canonicalRequest))
-	scope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
-	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s", amzDate, scope, hex.EncodeToString(h[:]))
-
 	signingKey := DeriveSigningKey(secretKey, date, region, service)
-	if !equalHexMAC(signature, hmacSHA256(signingKey, []byte(stringToSign))) {
+	if !equalHexMAC(signature, hmacSHA256(signingKey, stringToSignBytes(amzDate, date, region, service, h))) {
 		return "", fmt.Errorf("signature mismatch")
 	}
 
@@ -154,11 +151,8 @@ func (v *Verifier) verifyPresigned(r *http.Request) (string, error) {
 	canonicalRequest := buildPresignedCanonicalRequest(r, signedHeaders)
 
 	h := sha256.Sum256([]byte(canonicalRequest))
-	scope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
-	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s", amzDate, scope, hex.EncodeToString(h[:]))
-
 	signingKey := DeriveSigningKey(secretKey, date, region, service)
-	if !equalHexMAC(signature, hmacSHA256(signingKey, []byte(stringToSign))) {
+	if !equalHexMAC(signature, hmacSHA256(signingKey, stringToSignBytes(amzDate, date, region, service, h))) {
 		return "", fmt.Errorf("signature mismatch")
 	}
 
@@ -318,10 +312,8 @@ func (v *Verifier) verifyHeaderWithKey(r *http.Request, accessKey string, signin
 
 	canonicalRequest := buildCanonicalRequest(r, signedHeaders)
 	h := sha256.Sum256([]byte(canonicalRequest))
-	scope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
-	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s", amzDate, scope, hex.EncodeToString(h[:]))
 
-	if !equalHexMAC(signature, hmacSHA256(signingKey, []byte(stringToSign))) {
+	if !equalHexMAC(signature, hmacSHA256(signingKey, stringToSignBytes(amzDate, date, region, service, h))) {
 		return fmt.Errorf("signature mismatch")
 	}
 	return nil
@@ -358,13 +350,37 @@ func (v *Verifier) verifyPresignedWithKey(r *http.Request, signingKey []byte) er
 
 	canonicalRequest := buildPresignedCanonicalRequest(r, signedHeaders)
 	h := sha256.Sum256([]byte(canonicalRequest))
-	scope := fmt.Sprintf("%s/%s/%s/aws4_request", date, region, service)
-	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s", amzDate, scope, hex.EncodeToString(h[:]))
 
-	if !equalHexMAC(signature, hmacSHA256(signingKey, []byte(stringToSign))) {
+	if !equalHexMAC(signature, hmacSHA256(signingKey, stringToSignBytes(amzDate, date, region, service, h))) {
 		return fmt.Errorf("signature mismatch")
 	}
 	return nil
+}
+
+// stringToSignBytes assembles the SigV4 string-to-sign as a single []byte
+// for direct hmac consumption. The legacy verifier built this with two
+// fmt.Sprintf calls plus hex.EncodeToString plus a []byte conversion —
+// four hot-path allocations replaced by one slice and a stack hex array.
+// Byte-equivalent output preserves signature compatibility (verified by
+// the SignRequest/Verify round-trip tests).
+func stringToSignBytes(amzDate, date, region, service string, canonicalReqHash [sha256.Size]byte) []byte {
+	var hexBuf [sha256.Size * 2]byte
+	hex.Encode(hexBuf[:], canonicalReqHash[:])
+	n := len("AWS4-HMAC-SHA256\n") + len(amzDate) + 1 +
+		len(date) + 1 + len(region) + 1 + len(service) + len("/aws4_request\n") +
+		len(hexBuf)
+	out := make([]byte, 0, n)
+	out = append(out, "AWS4-HMAC-SHA256\n"...)
+	out = append(out, amzDate...)
+	out = append(out, '\n')
+	out = append(out, date...)
+	out = append(out, '/')
+	out = append(out, region...)
+	out = append(out, '/')
+	out = append(out, service...)
+	out = append(out, "/aws4_request\n"...)
+	out = append(out, hexBuf[:]...)
+	return out
 }
 
 func equalHexMAC(signature string, mac []byte) bool {

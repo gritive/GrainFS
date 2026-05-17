@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.230.0] - 2026-05-18 - perf(s3auth): replace two fmt.Sprintf with append in Verify hot path
+
+### Changed
+- **`verifyHeaderWithKey` and `verifyPresignedWithKey`** (the cache-hit
+  path that fires on every authenticated S3 request) no longer build
+  the SigV4 string-to-sign through two `fmt.Sprintf` calls plus
+  `hex.EncodeToString` plus a `[]byte` conversion. Those four
+  allocations are replaced by a single `stringToSignBytes` helper that
+  pre-sizes one `[]byte`, hex-encodes the canonical-request hash into a
+  stack array, and appends the fixed pieces in order. Output is
+  byte-equivalent — the existing `SignRequest`/`Verify` round-trip
+  tests verify the byte-for-byte signature conformance.
+
+### Performance
+
+`BenchmarkVerify_Hot` (5-run × 5s median, clean):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 33 | 23 | **-30%** |
+| B/op | 1912 | 1496 | **-22%** |
+| ns/op | ~1981 | ~1590 | **-20%** |
+
+`BenchmarkVerify_Cold` (cache-miss path, dominated by DeriveSigningKey's
+four `hmac.New` calls — only marginal gain available):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 92 | 82 | -11% |
+| B/op | 6264 | 5848 | -7% |
+| ns/op | ~4430 | ~4430 | flat |
+
+This is intentionally a small surgical change. Earlier exploration
+(pooled buffer + append-style canonical request helpers) cut allocs
+to 11 but added 50+ lines of new code around security-sensitive
+signature verification, and the latency improvement was masked by GC
+noise. The risk/reward did not justify the broader refactor; this
+change captures most of the practical alloc win with a single helper
+function.
+
 ## [0.0.229.0] - 2026-05-18 - perf(local): fold bucket check into HeadObject, lazy readamp key
 
 ### Changed
