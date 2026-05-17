@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.227.0] - 2026-05-17 - perf(pullthrough): lock-free IAMResolver cache via atomic.Pointer
+
+### Changed
+- **`pullthrough.IAMResolver`** no longer uses `sync.RWMutex`. The
+  per-bucket upstream-client cache is published as an immutable
+  `map[string]*resolverEntry` snapshot via `atomic.Pointer`. The
+  cache-hit fast path (every pull-through S3 request) is a single
+  atomic load + map lookup with no lock acquire/release. Cache fill,
+  rotation rebuild, and eviction serialise on a small `writeMu` so
+  `NewS3Upstream` is constructed at most once per rotation even under
+  thundering-herd readers; the new entry is then published via
+  clone-on-write.
+- Eviction on "record disappeared" probes lock-free first and only
+  acquires `writeMu` when there's actually something to clone out
+  (avoids the prior unconditional `Lock` on every no-upstream call).
+- Build-failure path still evicts any stale entry (preserved from the
+  prior `delete(cache, bucket)` behavior, now expressed as a
+  clone-without publish under the same `writeMu`) so a broken IAM
+  record can't keep returning the prior cached client.
+
+### Performance
+
+Apple M3, `internal/storage/pullthrough`, `-benchtime=10s -count=2`,
+100 buckets warmed, parallel readers across 8 cores:
+
+| Bench | Before (median) | After (median) | Delta |
+| --- | --- | --- | --- |
+| `BenchmarkParallelResolve` | 112.9 ns/op | 34.9 ns/op | **-69% latency** |
+| `BenchmarkParallelResolveWithRotation` | 126.8 ns/op | 27.0 ns/op | **-79% latency** |
+
+Allocs per call unchanged (1 alloc/op — `sha256.Sum256` input escape,
+not lock-related). Audit follow-up:
+`docs/architecture/lock-free-audit.md` →
+*"upstream client cache; hits take read lock, rotations rebuild under
+write lock."* Every pull-through-bucket S3 request was paying that
+`RLock` acquire/release on a shared cache line.
+
 ## [0.0.226.0] - 2026-05-17 - perf(policy): lock-free CompiledPolicyStore via atomic.Pointer
 
 ### Changed

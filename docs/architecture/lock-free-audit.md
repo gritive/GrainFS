@@ -165,8 +165,12 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
 - `internal/storage/packblob/blob.go` - active append-only blob file and offset.
 - `internal/storage/packblob/packed_backend.go` - packed-object index; held only
   for index lookup/update, not blob reads.
-- `internal/storage/pullthrough/resolver.go` - upstream client cache; hits take
-  read lock, rotations rebuild under write lock.
+- `internal/storage/pullthrough/resolver.go` - upstream client cache; now
+  lock-free via `atomic.Pointer[map[string]*resolverEntry]`. Hit path is a
+  single atomic load. Mutations (cache fill, rotation rebuild, eviction)
+  serialise on a tiny `writeMu` so `NewS3Upstream` is constructed at most
+  once per rotation. Reader latency under parallel load: -69% / -79%
+  (steady-state / with-rotation).
 
 ### Service State And Admin Surfaces
 
