@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.0.229.0] - 2026-05-18 - perf(local): fold bucket check into HeadObject, lazy readamp key
+
+### Changed
+- **`storage.LocalBackend.HeadObject`** no longer opens a separate
+  `db.View` transaction for the bucket-existence pre-check. The bucket
+  probe now runs only when the object meta lookup misses, inside the
+  same transaction — happy path is one Badger View with one Get.
+  Behavior is preserved: GET/HEAD on a missing bucket still returns
+  `ErrBucketNotFound` (we fall back to the bucket probe when the
+  object key misses); GET/HEAD on a missing key in an existing
+  bucket still returns `ErrObjectNotFound`. The prior code paid
+  Badger's per-View overhead (`getMemTables` allocation cluster,
+  oracle read-mark, txn alloc) twice on every call, which was the
+  single largest contributor to the HeadObject allocation profile.
+- **`metrics/readamp.RecordBackendObject`** now takes `(bucket, key)`
+  separately and concatenates them into the tracker key only when the
+  simulator is globally enabled. The simulator is off in production by
+  design (see package doc), so the `bucket + "/" + key` concat was
+  pure waste on every backend GetObject. Single internal caller
+  updated.
+
+### Performance
+
+`BenchmarkHeadObject_NoCache` (3-run × 5s median):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| ns/op | 1279 | 776 | **-39%** |
+| allocs/op | 24 | 16 | **-33%** |
+| B/op | 1497 | 1088 | -27% |
+
+`BenchmarkGetObject_NoCache` (3-run × 5s median):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| ns/op | 15927 | 15023 | -5.7% |
+| allocs/op | 29 | 20 | **-31%** |
+| B/op | 1860 | 1435 | -23% |
+
+GetObject's ns delta is small because file open dominates the path
+(~15µs); the alloc win still falls through end-to-end since GetObject
+delegates to HeadObject for metadata.
+
+Why this matters: HeadObject runs on every S3 `HEAD` request and on
+every `GET` cache miss. CachedBackend absorbs hits in steady state,
+but a cold cache or a write-heavy workload that invalidates the cache
+sees the full backend path on every read. A 39% latency reduction
+there compounds into observable S3 p50 improvement for any workload
+where the metadata cache is not saturated.
+
+### Migration notes
+
+`readamp.RecordBackendObject` signature changed from `(key string)` to
+`(bucket, key string)`. Only one internal caller exists
+(`internal/storage/local.go`), updated atomically. External callers
+(none in tree) must pass bucket and key separately rather than
+pre-concatenating.
+
+The bucket-check fold preserves error semantics exactly and, as a
+side benefit, eliminates a prior race: a concurrent
+`ForceDeleteBucket` between the old two-View sequence could surface
+`ErrObjectNotFound` from the second View when `ErrBucketNotFound` was
+the correct answer (the bucket-and-its-objects were gone before the
+second probe ran). Badger's single-View snapshot makes both Gets see
+the same point-in-time state, so the caller now always gets the
+consistent error.
+
 ## [0.0.228.0] - 2026-05-18 - perf(packblob): cut GetObject allocs from 6 to 4 via typed index key + pooled reader
 
 ### Changed
