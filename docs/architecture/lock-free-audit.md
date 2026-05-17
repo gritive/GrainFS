@@ -48,6 +48,13 @@ copy-on-write publish step.
   This is a justified serialization boundary: volume metadata, live maps, and
   physical block objects are not versioned independently, so snapshotting only
   metadata/live_map is not enough to make concurrent reads and writes safe.
+- `internal/policy.CompiledPolicyStore` no longer has an `RWMutex`. The compiled
+  policy map and raw-JSON map are bundled into an immutable `policyState`
+  snapshot published via `atomic.Pointer`. `Allow` (per-S3-request hot path)
+  and `GetRaw` are lock-free atomic loads; `Set` and `Delete` are serialised
+  by a tiny `writeMu` so concurrent admins merge cleanly, clone the maps,
+  and atomically publish. Policy writes are rare (admin only) while `Allow`
+  fires on every authorised S3 request.
 
 ## Accepted Lock Categories
 
@@ -163,8 +170,9 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
 
 ### Service State And Admin Surfaces
 
-- `internal/policy/compiled.go` - compiled policy map; request evaluation uses
-  short read locks.
+- `internal/policy/compiled.go` - compiled policy map; now lock-free via
+  `atomic.Pointer[policyState]` (writes serialised by a small `writeMu`).
+  Request evaluation (Allow) loads the snapshot without any lock.
 - `internal/resourcewatch/registry.go` - registered DB handle list; snapshots
   are copied before GC work.
 - `internal/nfsexport/store.go` - service job/config store with low-frequency

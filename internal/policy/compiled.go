@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -107,21 +108,43 @@ type compiledPolicy struct {
 	allow [maxS3Action][]compiledRule
 }
 
-// CompiledPolicyStore is a policy store that pre-compiles policies at Set() time
-// for O(1) action lookup and deny-first evaluation.
-// Implements s3auth.Authorizer.
-type CompiledPolicyStore struct {
-	mu       sync.RWMutex
+// policyState is the immutable snapshot published via atomic.Pointer.
+// Set / Delete build a new state with cloned maps and publish atomically;
+// Allow / GetRaw load the current snapshot without locking.
+type policyState struct {
 	byBucket map[string]*compiledPolicy
 	raw      map[string][]byte
 }
 
+// CompiledPolicyStore is a policy store that pre-compiles policies at Set() time
+// for O(1) action lookup and deny-first evaluation.
+// Implements s3auth.Authorizer.
+//
+// Reads (Allow, GetRaw) are lock-free: they load an immutable *policyState
+// via atomic.Pointer and consult its maps directly. Writes (Set, Delete) are
+// serialized by writeMu so two concurrent mutators produce a deterministic
+// merge of their changes; they clone the current state, apply the mutation,
+// and publish a new pointer. Policy updates are rare (bucket policy admin
+// only) while Allow is called on every S3 request, so read-mostly CoW is
+// the right trade-off.
+//
+// Audit follow-up: docs/architecture/lock-free-audit.md →
+// "internal/policy/compiled.go - compiled policy map; request evaluation
+// uses short read locks." Every S3 request takes that RLock; the atomic
+// publication eliminates the read-side acquire/release overhead.
+type CompiledPolicyStore struct {
+	writeMu sync.Mutex
+	state   atomic.Pointer[policyState]
+}
+
 // NewCompiledPolicyStore creates an empty store.
 func NewCompiledPolicyStore() *CompiledPolicyStore {
-	return &CompiledPolicyStore{
+	cs := &CompiledPolicyStore{}
+	cs.state.Store(&policyState{
 		byBucket: make(map[string]*compiledPolicy),
 		raw:      make(map[string][]byte),
-	}
+	})
+	return cs
 }
 
 // Set compiles and stores a policy for a bucket.
@@ -170,26 +193,57 @@ func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
 		}
 	}
 
-	cs.mu.Lock()
-	cs.byBucket[bucket] = cp
-	cs.raw[bucket] = policyJSON
-	cs.mu.Unlock()
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	old := cs.state.Load()
+	next := &policyState{
+		byBucket: make(map[string]*compiledPolicy, len(old.byBucket)+1),
+		raw:      make(map[string][]byte, len(old.raw)+1),
+	}
+	for k, v := range old.byBucket {
+		next.byBucket[k] = v
+	}
+	for k, v := range old.raw {
+		next.raw[k] = v
+	}
+	next.byBucket[bucket] = cp
+	next.raw[bucket] = policyJSON
+	cs.state.Store(next)
 	return nil
 }
 
 // GetRaw returns the raw JSON policy for a bucket, or nil.
 func (cs *CompiledPolicyStore) GetRaw(bucket string) []byte {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.raw[bucket]
+	return cs.state.Load().raw[bucket]
 }
 
 // Delete removes the policy for a bucket.
 func (cs *CompiledPolicyStore) Delete(bucket string) {
-	cs.mu.Lock()
-	delete(cs.byBucket, bucket)
-	delete(cs.raw, bucket)
-	cs.mu.Unlock()
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	old := cs.state.Load()
+	_, hadCompiled := old.byBucket[bucket]
+	_, hadRaw := old.raw[bucket]
+	if !hadCompiled && !hadRaw {
+		return // no-op: avoid an unnecessary clone
+	}
+	next := &policyState{
+		byBucket: make(map[string]*compiledPolicy, len(old.byBucket)),
+		raw:      make(map[string][]byte, len(old.raw)),
+	}
+	for k, v := range old.byBucket {
+		if k == bucket {
+			continue
+		}
+		next.byBucket[k] = v
+	}
+	for k, v := range old.raw {
+		if k == bucket {
+			continue
+		}
+		next.raw[k] = v
+	}
+	cs.state.Store(next)
 }
 
 // Allow evaluates the permission check against compiled policy rules.
@@ -204,10 +258,7 @@ func (cs *CompiledPolicyStore) Allow(_ context.Context, in s3auth.PermCheckInput
 		return false
 	}
 
-	cs.mu.RLock()
-	cp := cs.byBucket[in.Resource.Bucket]
-	cs.mu.RUnlock()
-
+	cp := cs.state.Load().byBucket[in.Resource.Bucket]
 	if cp == nil {
 		return true // no policy = no restriction
 	}
