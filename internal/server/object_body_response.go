@@ -49,8 +49,15 @@ func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Objec
 	}
 
 	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
-	data, err := io.ReadAll(newExactLengthReadCloser(rc, obj.Size))
-	if err != nil {
+	// Pre-allocate the exact-size body buffer in one shot. The old io.ReadAll
+	// over an exactLengthReadCloser grew its buffer geometrically (~16 doublings
+	// to reach a 64 KiB warp object) and wrapped rc in a length-limiting reader,
+	// stacking up ~16 throwaway allocations per request. ReadFull on a properly
+	// sized buffer reads exactly obj.Size bytes (or returns io.ErrUnexpectedEOF
+	// if the backend reader is short, which is preferable to silently emitting
+	// a response shorter than the Content-Length header advertised).
+	data := make([]byte, obj.Size)
+	if _, err := io.ReadFull(rc, data); err != nil {
 		return false, err
 	}
 	c.Header("Content-Type", obj.ContentType)
