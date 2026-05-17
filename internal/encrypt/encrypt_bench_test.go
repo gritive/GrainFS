@@ -19,8 +19,13 @@ func benchmarkPayload(size int) []byte {
 	return bytes.Repeat([]byte("x"), size)
 }
 
-func BenchmarkSealValue(b *testing.B) {
+// BenchmarkSealValue_NilDst measures the SealValueAADTo cost with a nil
+// destination — i.e. the path that allocates a fresh output buffer on every
+// call. Complements BenchmarkSealValueAADTo, which pre-allocates dst and
+// measures the alloc-free steady state.
+func BenchmarkSealValue_NilDst(b *testing.B) {
 	enc := benchmarkEncryptor(b)
+	aad := []byte("bench:value")
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20, 4 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
 			plaintext := benchmarkPayload(size)
@@ -28,7 +33,7 @@ func BenchmarkSealValue(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				sealed, err := enc.SealValue("bench:value", plaintext)
+				sealed, err := enc.SealValueAADTo(nil, aad, plaintext)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -63,12 +68,16 @@ func BenchmarkSealValueAADTo(b *testing.B) {
 	}
 }
 
-func BenchmarkOpenValue(b *testing.B) {
+// BenchmarkOpenValueAAD measures the OpenValueAAD path — equivalent to
+// OpenValueAADTo with a nil destination, allocating a fresh plaintext buffer
+// per call. Use OpenValueAADTo with a reusable dst in hot loops.
+func BenchmarkOpenValueAAD(b *testing.B) {
 	enc := benchmarkEncryptor(b)
+	aad := []byte("bench:value")
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20, 4 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
 			plaintext := benchmarkPayload(size)
-			sealed, err := enc.SealValue("bench:value", plaintext)
+			sealed, err := enc.SealValueAADTo(nil, aad, plaintext)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -76,7 +85,7 @@ func BenchmarkOpenValue(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				got, err := enc.OpenValue("bench:value", sealed)
+				got, err := enc.OpenValueAAD(aad, sealed)
 				if err != nil {
 					b.Fatal(err)
 				}
