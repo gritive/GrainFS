@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.0.233.0] - 2026-05-18 - perf(storage): finish encrypted-file buffer reuse across ReadAt/full-read/hash paths
+
+### Changed
+- The three remaining encrypted-file read paths in
+  `internal/storage/encrypted_object_file.go` —
+  `readAtEncryptedObjectFile` (range read),
+  `readEncryptedObjectFile` (whole-object decrypt to `[]byte`), and
+  `hashEncryptedObjectFile` (streaming hash) — now follow the same
+  buffer-reuse pattern PR #401 introduced for `encryptedObjectReader`.
+  Each function declares `aadBuf`, `sealedBuf`, and `plainBuf` at
+  function scope, populated once on the first chunk and reused for
+  the rest of the loop.
+- `enc.OpenValue(encryptedChunkAAD(domain, chunk), sealed)` is
+  replaced by `enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealedBuf)`
+  at all three sites. The AAD assembly uses the already-existing
+  alloc-free `encryptedChunkAADBytes(aadBuf[:0], domain, chunk)`.
+- `readEncryptedObjectFile` and `hashEncryptedObjectFile` switch from
+  `readEncryptedObjectRecord(f)` to
+  `readEncryptedObjectRecordInto(f, sealedBuf[:0])` so the sealed
+  body is decoded into the reusable buffer rather than allocated
+  fresh per chunk. `readAtEncryptedObjectFile` keeps its inline
+  header parse (it needs the `Seek-past-this-chunk` skip branch),
+  but the body-read now grows-or-reuses `sealedBuf`.
+- Each of the three functions installs a `defer` that zero-fills
+  every reusable buffer (up to capacity) on exit, so plaintext and
+  sealed bytes never linger past the call. Matches the
+  `Reader.Close()` security posture from PR #401.
+- Dead code: the `encryptedChunkAAD(domain, chunk) string` helper
+  (the `fmt.Sprintf`-based variant) was the last reason the
+  Sprintf-allocating path was still loaded into the binary. After
+  this PR it has zero production callers and zero test callers, so
+  it is removed. `encryptedChunkAADBytes` (the alloc-free `dst []byte`
+  variant) remains as the single source for chunk AAD assembly.
+
+### Performance
+
+`BenchmarkEncryptedObjectFileReadAt` (single-chunk range read,
+3-run × 3s median):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 10 | 9 | -10% |
+| B/op | 270749 | 270624 | -0.05% |
+| ns/op | ~45000 | ~49959 | within noise |
+
+ReadAt's savings are modest for one-chunk range reads because the
+three reusable buffers all hit their first-grow on the only chunk
+they process. The win materialises as the range spans more chunks
+— each chunk past the first saves three allocations (AAD, sealed
+body, plaintext). `BenchmarkEncryptedObjectFileRead` is unchanged
+(already at the PR #401 floor of 138 allocs/op).
+
+`readEncryptedObjectFile` and `hashEncryptedObjectFile` are not
+covered by direct benchmarks, but they follow the same per-chunk
+pattern as the now-optimised Reader path, so the savings scale the
+same way: for an N-chunk decrypt of an 8 MiB object, ~3 × (N - 1)
+fewer allocations compared to the prior code, plus 1 fewer per
+chunk from the removed `fmt.Sprintf`. Hash recomputation
+(`hashEncryptedObjectFile`) is on the ETag/integrity hot path; full
+decrypt-to-`[]byte` (`readEncryptedObjectFile`) backs
+read-modify-write at offset.
+
+### Migration notes
+
+Internal-only API changes. No external callers. The removal of the
+`encryptedChunkAAD(domain, chunk) string` helper is safe — grep
+across the tree shows zero remaining references; the same-named
+function in `internal/storage/eccodec/shardio.go` has a different
+signature (`func(base []byte, chunkIdx uint32) []byte`) and is
+unrelated.
+
 ## [0.0.232.0] - 2026-05-18 - perf(storage): reuse buffers in encrypted object reader (-67% allocs)
 
 ### Changed

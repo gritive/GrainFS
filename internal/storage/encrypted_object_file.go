@@ -19,10 +19,6 @@ const (
 	encryptedChunkSize   = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
 )
 
-func encryptedChunkAAD(domain string, chunk uint64) string {
-	return fmt.Sprintf("%s:chunk:%d", domain, chunk)
-}
-
 func encryptedChunkAADBytes(dst []byte, domain string, chunk uint64) []byte {
 	dst = append(dst[:0], domain...)
 	dst = append(dst, ":chunk:"...)
@@ -218,10 +214,27 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 	}
 
 	var (
-		copied   int
-		chunk    uint64
-		plainPos int64
+		copied    int
+		chunk     uint64
+		plainPos  int64
+		aadBuf    []byte
+		sealedBuf []byte
+		plainBuf  []byte
 	)
+	// Zero scratch on exit so plaintext / sealed bytes never linger past the
+	// call. Done as deferred clears rather than function-end inline so early
+	// returns (errors) still wipe.
+	defer func() {
+		if cap(aadBuf) > 0 {
+			clear(aadBuf[:cap(aadBuf)])
+		}
+		if cap(sealedBuf) > 0 {
+			clear(sealedBuf[:cap(sealedBuf)])
+		}
+		if cap(plainBuf) > 0 {
+			clear(plainBuf[:cap(plainBuf)])
+		}
+	}()
 	for copied < len(buf) && plainPos < size {
 		var hdr [8]byte
 		if _, err := io.ReadFull(f, hdr[:]); err != nil {
@@ -254,15 +267,23 @@ func readAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain strin
 			continue
 		}
 
-		sealed := make([]byte, blobLen)
-		if _, err := io.ReadFull(f, sealed); err != nil {
+		// Grow sealedBuf only on the first matched chunk (or when blobLen
+		// exceeds prior cap); reuse the backing array on subsequent chunks.
+		if cap(sealedBuf) < int(blobLen) {
+			sealedBuf = make([]byte, blobLen)
+		} else {
+			sealedBuf = sealedBuf[:blobLen]
+		}
+		if _, err := io.ReadFull(f, sealedBuf); err != nil {
 			return copied, fmt.Errorf("read encrypted object record body: %w", err)
 		}
-		plain, err := enc.OpenValue(encryptedChunkAAD(domain, chunk), sealed)
-		clear(sealed)
+		aadBuf = encryptedChunkAADBytes(aadBuf[:0], domain, chunk)
+		plain, err := enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealedBuf)
+		clear(sealedBuf)
 		if err != nil {
 			return copied, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
+		plainBuf = plain
 		if len(plain) != int(plainLen) {
 			clear(plain)
 			return copied, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
@@ -386,19 +407,38 @@ func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string,
 	}
 
 	var out bytes.Buffer
-	var chunk uint64
+	var (
+		chunk     uint64
+		aadBuf    []byte
+		sealedBuf []byte
+		plainBuf  []byte
+	)
+	defer func() {
+		if cap(aadBuf) > 0 {
+			clear(aadBuf[:cap(aadBuf)])
+		}
+		if cap(sealedBuf) > 0 {
+			clear(sealedBuf[:cap(sealedBuf)])
+		}
+		if cap(plainBuf) > 0 {
+			clear(plainBuf[:cap(plainBuf)])
+		}
+	}()
 	for {
-		plainLen, sealed, err := readEncryptedObjectRecord(f)
+		plainLen, sealed, err := readEncryptedObjectRecordInto(f, sealedBuf[:0])
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return nil, err
 		}
-		plain, err := enc.OpenValue(encryptedChunkAAD(domain, chunk), sealed)
+		sealedBuf = sealed
+		aadBuf = encryptedChunkAADBytes(aadBuf[:0], domain, chunk)
+		plain, err := enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealed)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
+		plainBuf = plain
 		if len(plain) != int(plainLen) {
 			return nil, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
 		}
@@ -427,20 +467,39 @@ func hashEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string,
 	}
 
 	var size int64
-	var chunk uint64
+	var (
+		chunk     uint64
+		aadBuf    []byte
+		sealedBuf []byte
+		plainBuf  []byte
+	)
+	defer func() {
+		if cap(aadBuf) > 0 {
+			clear(aadBuf[:cap(aadBuf)])
+		}
+		if cap(sealedBuf) > 0 {
+			clear(sealedBuf[:cap(sealedBuf)])
+		}
+		if cap(plainBuf) > 0 {
+			clear(plainBuf[:cap(plainBuf)])
+		}
+	}()
 	for {
-		plainLen, sealed, err := readEncryptedObjectRecord(f)
+		plainLen, sealed, err := readEncryptedObjectRecordInto(f, sealedBuf[:0])
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return 0, err
 		}
-		plain, err := enc.OpenValue(encryptedChunkAAD(domain, chunk), sealed)
+		sealedBuf = sealed
+		aadBuf = encryptedChunkAADBytes(aadBuf[:0], domain, chunk)
+		plain, err := enc.OpenValueAADTo(plainBuf[:0], aadBuf, sealed)
 		clear(sealed)
 		if err != nil {
 			return 0, fmt.Errorf("decrypt object chunk %d: %w", chunk, err)
 		}
+		plainBuf = plain
 		if len(plain) != int(plainLen) {
 			clear(plain)
 			return 0, fmt.Errorf("encrypted object chunk %d length mismatch", chunk)
