@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.0.232.0] - 2026-05-18 - perf(storage): reuse buffers in encrypted object reader (-67% allocs)
+
+### Changed
+- **`storage.encryptedObjectReader`** now reuses three per-chunk
+  buffers across reads instead of allocating fresh slices on every
+  loop iteration:
+  - `aadBuf` replaces the `fmt.Sprintf` AAD string with a reusable
+    `[]byte` populated by the already-existing
+    `encryptedChunkAADBytes(dst, domain, chunk)` helper.
+  - `sealedBuf` is fed to a new `readEncryptedObjectRecordInto(r, dst)`
+    helper that grows only when capacity is insufficient (i.e. once,
+    on the first chunk).
+  - `r.buf` (the plaintext output, drained by `Read()`) is reused as
+    the destination passed to `Encryptor.OpenValueAADTo(r.buf[:0],
+    ...)` instead of letting GCM allocate a fresh slice every chunk.
+- `readEncryptedObjectRecord` is preserved as a thin wrapper around
+  the new `readEncryptedObjectRecordInto` so the three call sites
+  outside the hot Reader path (`ReadAt`, `decryptToWriter`,
+  truncate) keep their current behavior unchanged.
+- `encryptedObjectReader.Close()` now zero-fills the new `aadBuf`
+  and `sealedBuf` (up to capacity) in addition to the plaintext
+  buffer, so the security guarantee that no plaintext or sealed
+  bytes linger past the reader's lifetime is preserved.
+
+### Performance
+
+`BenchmarkEncryptedObjectFileRead` (8 MiB sequential decrypt,
+3-run × 3s median):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 415 | 138 | **-67%** |
+| B/op | 17316388 | 8530305 | **-51%** |
+| ns/op | ~2540 | ~2267 | **-11%** |
+| throughput | 3311 MB/s | 3699 MB/s | +12% |
+
+`BenchmarkEncryptedObjectFileReadAt` (range read, 1 chunk):
+unchanged — that path is `readAtEncryptedObjectFile`, not the
+reader. Touching it was out of scope for this PR.
+
+### Remaining allocations
+
+The post-refactor 138 allocs/op are dominated by stdlib internals
+(`crypto/internal/fips140/aes/gcm.sliceForAppend` at ~65% of post
+allocs). Those come from inside `aead.Open` and are not addressable
+without bypassing the standard `cipher.AEAD` interface (security-
+sensitive, explicitly out of scope).
+
+### Migration notes
+
+None. The reader API is unchanged; only internal buffer management
+changes. Same `io.ReadCloser` contract, same security posture
+(plaintext is cleared as it leaves `Read`, all scratch is zeroed on
+`Close`). Tests including the race detector pass without
+modification.
+
 ## [0.0.231.0] - 2026-05-18 - perf(storage): unmarshalObjectInto skips inner Object alloc, big Walk/List win
 
 ### Changed
