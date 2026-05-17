@@ -126,12 +126,12 @@ func TestValueEnvelopeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	plaintext := []byte("customer controlled value")
-	sealed, err := enc.SealValue("badger:meta:object", plaintext)
+	sealed, err := enc.SealValueAADTo(nil, []byte("badger:meta:object"), plaintext)
 	require.NoError(t, err)
 	require.True(t, IsEncryptedValue(sealed))
 	require.NotContains(t, string(sealed), string(plaintext))
 
-	got, err := enc.OpenValue("badger:meta:object", sealed)
+	got, err := enc.OpenValueAAD([]byte("badger:meta:object"), sealed)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
 }
@@ -148,7 +148,7 @@ func TestValueEnvelopeSealToReusesDestination(t *testing.T) {
 	require.True(t, IsEncryptedValue(sealed))
 	require.Equal(t, cap(dst), cap(sealed))
 
-	got, err := enc.OpenValue(string(aad), sealed)
+	got, err := enc.OpenValueAAD(aad, sealed)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
 }
@@ -157,14 +157,14 @@ func TestValueEnvelopeRejectsWrongDomainAndTamper(t *testing.T) {
 	enc, err := NewEncryptor(bytes.Repeat([]byte{0x22}, 32))
 	require.NoError(t, err)
 
-	sealed, err := enc.SealValue("wal:record", []byte("mutation body"))
+	sealed, err := enc.SealValueAADTo(nil, []byte("wal:record"), []byte("mutation body"))
 	require.NoError(t, err)
 
-	_, err = enc.OpenValue("wal:other", sealed)
+	_, err = enc.OpenValueAAD([]byte("wal:other"), sealed)
 	require.Error(t, err)
 
 	sealed[len(sealed)-1] ^= 0x80
-	_, err = enc.OpenValue("wal:record", sealed)
+	_, err = enc.OpenValueAAD([]byte("wal:record"), sealed)
 	require.Error(t, err)
 }
 
@@ -173,6 +173,6 @@ func TestValueEnvelopeRejectsPlaintext(t *testing.T) {
 	require.NoError(t, err)
 
 	require.False(t, IsEncryptedValue([]byte("plain")))
-	_, err = enc.OpenValue("badger:meta:object", []byte("plain"))
+	_, err = enc.OpenValueAAD([]byte("badger:meta:object"), []byte("plain"))
 	require.Error(t, err)
 }

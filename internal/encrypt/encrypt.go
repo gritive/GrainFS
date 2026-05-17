@@ -124,10 +124,6 @@ func IsEncryptedValue(data []byte) bool {
 	return len(data) >= 3 && data[0] == valueMagic0 && data[1] == valueMagic1 && data[2] == valueVersion1
 }
 
-func (e *Encryptor) SealValue(domain string, plaintext []byte) ([]byte, error) {
-	return e.SealValueAADTo(nil, []byte(domain), plaintext)
-}
-
 func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]byte, error) {
 	headerLen := 3 + e.aead.NonceSize()
 	outLen := headerLen + len(plaintext) + e.aead.Overhead()
@@ -143,10 +139,6 @@ func (e *Encryptor) SealValueAADTo(dst []byte, aad []byte, plaintext []byte) ([]
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
 	return e.aead.Seal(out, nonce, plaintext, aad), nil
-}
-
-func (e *Encryptor) OpenValue(domain string, blob []byte) ([]byte, error) {
-	return e.OpenValueAAD([]byte(domain), blob)
 }
 
 func (e *Encryptor) OpenValueAAD(aad []byte, blob []byte) ([]byte, error) {

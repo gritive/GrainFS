@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.0.234.0] - 2026-05-18 - chore(encrypt): remove unused SealValue/OpenValue wrappers + encrypted packblob bench
+
+### Added
+- **`BenchmarkParallelGetSmallObjects_Encrypted`** in
+  `internal/storage/packblob/get_parallel_bench_test.go` — measures the
+  same parallel small-object GET workload as the existing
+  `BenchmarkParallelGetSmallObjects` but with at-rest AES-256-GCM
+  encryption enabled (the production-default per CLAUDE.md). This is
+  the baseline future encryption-touching changes regress-check
+  against. The shared `setupPackedBackend` helper was generalised to
+  accept an `*encrypt.Encryptor` parameter.
+
+### Measured
+
+`BenchmarkParallelGetSmallObjects_Encrypted` (3 sizes × 3s, single
+run):
+
+| entries | allocs/op | B/op | ns/op |
+| ------- | --------- | ---- | ----- |
+| 1000    | 5         | 544  | ~1434 |
+| 10000   | 5         | 544  | ~1372 |
+| 100000  | 5         | 544  | ~1516 |
+
+Compared with the unencrypted bench (4 allocs/op, ~449 B/op, ~1500
+ns/op since PR #397), encryption costs **one extra allocation per
+GetObject** and ~95 B/op. The extra alloc is `OpenValueAAD`'s
+plaintext output buffer, sourced from `BlobStore.decodePayload`. The
+encryption-on overhead is small enough that the previously-considered
+"pool the plaintext buffer in BlobStore" refactor (which would have
+added ~50 LOC of buffer lifecycle around `packedReader.Close`) was
+not justified by the measured delta — this bench is what made that
+clear.
+
+### Removed
+- **`encrypt.Encryptor.SealValue(domain string, plaintext []byte)`** — zero
+  production callers after the encrypted-file refactors in PR #401 and
+  PR #402. The wrapper converted its `domain` string to `[]byte` and
+  delegated to `SealValueAADTo(nil, []byte(domain), plaintext)`. Callers
+  with a `string` domain construct the `[]byte` themselves now (which
+  is what `SealValueAADTo` was always documented to expect). The remaining
+  `SealValueAADTo` is the canonical encrypt path.
+- **`encrypt.Encryptor.OpenValue(domain string, blob []byte)`** — symmetric
+  to the above. All in-tree callers already use `OpenValueAAD([]byte, []byte)`
+  or `OpenValueAADTo(dst, []byte, []byte)`.
+
+### Changed
+- `encrypt_test.go` and `encrypt_bench_test.go` updated to call the
+  canonical API directly. The two benchmarks that measured the removed
+  wrappers are preserved under more accurate names:
+  `BenchmarkSealValue` → `BenchmarkSealValue_NilDst` (measures the
+  nil-dst allocating path) and `BenchmarkOpenValue` →
+  `BenchmarkOpenValueAAD` (measures `OpenValueAAD`'s allocating-output
+  path). Both call the same underlying code as before, so historical
+  comparisons remain valid.
+
+### Notes
+
+A side effect surfaced by the rename: the bench `SealValue` / `OpenValue`
+previously reported 2 allocs/op, while `SealValue_NilDst` /
+`OpenValueAAD` now report 1 alloc/op. The missing alloc was the
+wrapper's per-call `[]byte(domain)` conversion that ran inside the
+timed loop. The wrappers had no production callers so this is
+test-only, but it documents the cost of routing a string-domain
+through the deprecated path. The canonical API has always taken
+`[]byte` AAD precisely to let callers hoist the conversion outside
+their hot loop.
+
 ## [0.0.233.0] - 2026-05-18 - perf(storage): finish encrypted-file buffer reuse across ReadAt/full-read/hash paths
 
 ### Changed
