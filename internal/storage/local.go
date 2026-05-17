@@ -380,12 +380,7 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 	err := b.db.View(func(txn *badger.Txn) error {
 		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key))
 		if err == nil {
-			decoded, derr := unmarshalObject(val)
-			if derr != nil {
-				return derr
-			}
-			obj = *decoded
-			return nil
+			return unmarshalObjectInto(val, &obj)
 		}
 		if err != badger.ErrKeyNotFound {
 			return err
@@ -420,12 +415,12 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 		if err != nil {
 			return err
 		}
-		obj, err := unmarshalObject(val)
-		if err != nil {
+		var obj Object
+		if err := unmarshalObjectInto(val, &obj); err != nil {
 			return err
 		}
 		obj.ACL = acl
-		newVal, err := marshalObject(obj)
+		newVal, err := marshalObject(&obj)
 		if err != nil {
 			return err
 		}
@@ -461,12 +456,12 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 		if err != nil {
 			return err
 		}
-		obj, err := unmarshalObject(val)
-		if err != nil {
+		var obj Object
+		if err := unmarshalObjectInto(val, &obj); err != nil {
 			return err
 		}
 		obj.Size = size
-		newVal, err := marshalObject(obj)
+		newVal, err := marshalObject(&obj)
 		if err != nil {
 			return err
 		}
@@ -698,12 +693,7 @@ func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, m
 				if err != nil {
 					return err
 				}
-				decoded, err := unmarshalObject(plain)
-				if err != nil {
-					return err
-				}
-				obj = *decoded
-				return nil
+				return unmarshalObjectInto(plain, &obj)
 			})
 			if err != nil {
 				return err
@@ -733,12 +723,7 @@ func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, f
 				if err != nil {
 					return err
 				}
-				decoded, err := unmarshalObject(plain)
-				if err != nil {
-					return err
-				}
-				obj = *decoded
-				return nil
+				return unmarshalObjectInto(plain, &obj)
 			}); err != nil {
 				return err
 			}
@@ -856,12 +841,7 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 				if err != nil {
 					return err
 				}
-				decoded, err := unmarshalObject(plain)
-				if err != nil {
-					return err
-				}
-				obj = *decoded
-				return nil
+				return unmarshalObjectInto(plain, &obj)
 			}); err != nil {
 				return err
 			}

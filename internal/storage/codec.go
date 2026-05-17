@@ -44,9 +44,23 @@ func marshalObject(obj *Object) ([]byte, error) {
 	return out, nil
 }
 
-func unmarshalObject(data []byte) (obj *Object, err error) {
+func unmarshalObject(data []byte) (*Object, error) {
+	obj := new(Object)
+	if err := unmarshalObjectInto(data, obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+// unmarshalObjectInto decodes data directly into dst, skipping the inner
+// `&Object{...}` allocation that unmarshalObject performs. Hot read paths
+// (HeadObject, WalkObjects, ListObjects) already keep an Object on the
+// heap because they return it; pointing them at the destination directly
+// avoids one extra allocation per decode. Same recover/error semantics as
+// unmarshalObject.
+func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("unmarshal object: empty data")
+		return fmt.Errorf("unmarshal object: empty data")
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -54,7 +68,7 @@ func unmarshalObject(data []byte) (obj *Object, err error) {
 		}
 	}()
 	t := storagepb.GetRootAsObject(data, 0)
-	return &Object{
+	*dst = Object{
 		Key:          string(t.Key()),
 		Size:         t.Size(),
 		ContentType:  string(t.ContentType()),
@@ -63,7 +77,8 @@ func unmarshalObject(data []byte) (obj *Object, err error) {
 		ACL:          t.Acl(),
 		UserMetadata: readUserMetadata(t.UserMetadataLength(), t.UserMetadata),
 		SSEAlgorithm: string(t.SseAlgorithm()),
-	}, nil
+	}
+	return nil
 }
 
 func buildUserMetadataVector(b *flatbuffers.Builder, metadata map[string]string) flatbuffers.UOffsetT {
