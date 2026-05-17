@@ -1,6 +1,37 @@
 # Changelog
 
-## [0.0.234.0] - 2026-05-18 - chore(encrypt): remove unused SealValue/OpenValue wrappers
+## [0.0.234.0] - 2026-05-18 - chore(encrypt): remove unused SealValue/OpenValue wrappers + encrypted packblob bench
+
+### Added
+- **`BenchmarkParallelGetSmallObjects_Encrypted`** in
+  `internal/storage/packblob/get_parallel_bench_test.go` — measures the
+  same parallel small-object GET workload as the existing
+  `BenchmarkParallelGetSmallObjects` but with at-rest AES-256-GCM
+  encryption enabled (the production-default per CLAUDE.md). This is
+  the baseline future encryption-touching changes regress-check
+  against. The shared `setupPackedBackend` helper was generalised to
+  accept an `*encrypt.Encryptor` parameter.
+
+### Measured
+
+`BenchmarkParallelGetSmallObjects_Encrypted` (3 sizes × 3s, single
+run):
+
+| entries | allocs/op | B/op | ns/op |
+| ------- | --------- | ---- | ----- |
+| 1000    | 5         | 544  | ~1434 |
+| 10000   | 5         | 544  | ~1372 |
+| 100000  | 5         | 544  | ~1516 |
+
+Compared with the unencrypted bench (4 allocs/op, ~449 B/op, ~1500
+ns/op since PR #397), encryption costs **one extra allocation per
+GetObject** and ~95 B/op. The extra alloc is `OpenValueAAD`'s
+plaintext output buffer, sourced from `BlobStore.decodePayload`. The
+encryption-on overhead is small enough that the previously-considered
+"pool the plaintext buffer in BlobStore" refactor (which would have
+added ~50 LOC of buffer lifecycle around `packedReader.Close`) was
+not justified by the measured delta — this bench is what made that
+clear.
 
 ### Removed
 - **`encrypt.Encryptor.SealValue(domain string, plaintext []byte)`** — zero

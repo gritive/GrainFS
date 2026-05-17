@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -120,13 +121,21 @@ func BenchmarkPutObjectIsolated(b *testing.B) {
 
 func setupPackedBackend(b *testing.B, n int) (*PackedBackend, []string) {
 	b.Helper()
+	return setupPackedBackendWithEnc(b, n, nil)
+}
+
+func setupPackedBackendWithEnc(b *testing.B, n int, enc *encrypt.Encryptor) (*PackedBackend, []string) {
+	b.Helper()
 	inner, err := storage.NewLocalBackend(b.TempDir())
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = inner.Close() })
 
-	pb, err := NewPackedBackend(inner, b.TempDir(), 4*1024)
+	pb, err := NewPackedBackendWithOptions(inner, b.TempDir(), 4*1024, PackedBackendOptions{
+		Compress:  true,
+		Encryptor: enc,
+	})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -145,4 +154,39 @@ func setupPackedBackend(b *testing.B, n int) (*PackedBackend, []string) {
 		}
 	}
 	return pb, keys
+}
+
+// BenchmarkParallelGetSmallObjects_Encrypted measures the same workload as
+// BenchmarkParallelGetSmallObjects but with at-rest AES-256-GCM encryption
+// enabled — the production-default configuration per CLAUDE.md. The unencrypted
+// bench reports 4 allocs/op since PR #397; this bench reveals the cost the
+// encryption layer adds on top. It is the baseline for any future work that
+// targets the encrypted GetObject path (the OpenValueAAD plaintext-buffer
+// allocation in BlobStore.decodePayload is the primary residual alloc).
+func BenchmarkParallelGetSmallObjects_Encrypted(b *testing.B) {
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("entries=%d", n), func(b *testing.B) {
+			pb, keys := setupPackedBackendWithEnc(b, n, enc)
+			b.Cleanup(func() { _ = pb.Close() })
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb2 *testing.PB) {
+				rng := rand.New(rand.NewSource(rand.Int63()))
+				ctx := context.Background()
+				for pb2.Next() {
+					k := keys[rng.Intn(len(keys))]
+					rc, _, err := pb.GetObject(ctx, "bench", k)
+					if err != nil {
+						b.Fatal(err)
+					}
+					_ = rc.Close()
+				}
+			})
+		})
+	}
 }
