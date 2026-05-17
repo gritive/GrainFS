@@ -27,7 +27,7 @@ func TestCopyObject_RefcountOverflow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Get the index entry and manually set refcount to near max int64
-	ikey := pb.indexKey("bucket1", "key1")
+	ikey := packedKey{bucket: "bucket1", key: "key1"}
 	v, ok := pb.index.Load(ikey)
 	require.True(t, ok, "key1 should exist in index")
 	entry := v.(*indexEntry)
@@ -71,7 +71,7 @@ func TestCopyObject_RefcountAtMaxValue(t *testing.T) {
 	require.NoError(t, err)
 
 	// Get the index entry and set refcount to max int64
-	ikey := pb.indexKey("bucket1", "key1")
+	ikey := packedKey{bucket: "bucket1", key: "key1"}
 	v, ok := pb.index.Load(ikey)
 	require.True(t, ok, "key1 should exist in index")
 	v.(*indexEntry).Refcount.Store(9223372036854775807) // int64 max
@@ -109,7 +109,7 @@ func TestCopyObject_NormalRefcountIncrement(t *testing.T) {
 	require.NoError(t, err, "CopyObject should succeed for normal refcount")
 
 	// Verify refcount incremented to 2
-	ikey := pb.indexKey("bucket1", "key1")
+	ikey := packedKey{bucket: "bucket1", key: "key1"}
 	v, _ := pb.index.Load(ikey)
 	refcount := v.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(2), refcount, "Refcount should be 2 after one copy")

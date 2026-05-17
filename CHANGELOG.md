@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.0.228.0] - 2026-05-18 - perf(packblob): cut GetObject allocs from 6 to 4 via typed index key + pooled reader
+
+### Changed
+- **`packblob.PackedBackend` in-memory index** is now keyed by a typed
+  `packedKey{bucket, key}` struct instead of the legacy
+  `bucket + "/" + key` string concatenation. Every hot-path lookup
+  (`GetObject`, `HeadObject`, `DeleteObject`, `PutObject`, `CopyObject`)
+  previously allocated a fresh string just to form the index key — that
+  allocation is now gone. Persistence (SaveIndex JSON, blob storage
+  entries) still serialises the tuple back into the legacy string form
+  at boundary crossings, so the on-disk format is unchanged and existing
+  index.json files load without migration. `Range` callbacks now type-
+  assert to `packedKey` so bucket filtering compares fields directly,
+  replacing the previous `strings.HasPrefix(k.(string), bucket+"/")`
+  scan.
+- **`packblob.PackedBackend.GetObject` reader path** now returns a
+  pooled `*packedReader` that embeds `bytes.Reader` and implements
+  `io.Closer`. The prior `io.NopCloser(bytes.NewReader(data))` pair
+  allocated two heap objects per packed read; the combined struct
+  allocates at most one (and is reused across requests via
+  `sync.Pool` so the steady-state count is zero). `Close()` resets the
+  underlying byte slice reference before returning the reader to the
+  pool, so callers that drop the reader on the floor cannot keep the
+  decompressed payload alive.
+
+### Performance
+
+`BenchmarkParallelGetSmallObjects` mixed-load (3-run × 5s median):
+
+| entries | before               | after                | Δ              |
+| ------- | -------------------- | -------------------- | -------------- |
+| 1000    | 1579 ns, 6 allocs/op | 1673 ns, 4 allocs/op | -33% allocs/op |
+| 10000   | 1521 ns, 6 allocs/op | 1504 ns, 4 allocs/op | -33% allocs/op |
+| 100000  | 1560 ns, 6 allocs/op | 1562 ns, 4 allocs/op | -33% allocs/op |
+
+`BenchmarkParallelGetWithWriter` (concurrent writer pressure):
+
+| entries | before               | after                | Δ              |
+| ------- | -------------------- | -------------------- | -------------- |
+| 10000   | 1913 ns, 6 allocs/op | 1929 ns, 4 allocs/op | -33% allocs/op |
+| 100000  | 1923 ns, 6 allocs/op | 1914 ns, 4 allocs/op | -33% allocs/op |
+
+ns/op sits inside the 5s-bench noise band; the measurable win is in
+steady-state allocation churn (−33% allocs, −12% bytes per call). The
+index-size invariance is preserved (1000 / 10000 / 100000 trace one
+another), so the typed-key migration did not regress the sync.Map
+lookup characteristic.
+
+Why this matters: GetObject is the S3 GET hot path. With every packed
+read previously allocating six objects (`indexKey` string, blob read
+buffer, `&storage.Object{}`, `bytes.NewReader`, `io.NopCloser`, plus a
+metadata map clone when present), every active connection drove GC
+pressure on the small-object pool. Cutting the two cheapest-to-remove
+allocations (the index key and the reader/closer pair) removes the
+allocations that were _structurally_ avoidable — the remaining four
+(blob read buffer, storage.Object, metadata clone, internal blob.Read
+helper) are pinned by the public API and the encryption/CRC contract.
+
+### Migration notes
+
+None. The on-disk index format is unchanged and existing index.json
+files load without conversion. `LoadIndex` rebuild-from-blobs and
+JSON paths both parse the legacy "bucket/key" string back into
+`packedKey` via a first-slash split — safe because S3 bucket names
+cannot contain `/`. The parser now returns an error on a missing
+separator (was previously a silent skip via `strings.Cut`), so a
+corrupt index entry now fails LoadIndex loudly rather than silently
+dropping the entry.
+
 ## [0.0.227.0] - 2026-05-17 - perf(pullthrough): lock-free IAMResolver cache via atomic.Pointer
 
 ### Changed

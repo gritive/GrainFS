@@ -66,7 +66,7 @@ func TestPackedBackend_DeleteBucketSeesPackedObjects(t *testing.T) {
 
 	require.NoError(t, pb.ForceDeleteBucket(context.Background(), "test"))
 	require.ErrorIs(t, pb.HeadBucket(context.Background(), "test"), storage.ErrBucketNotFound)
-	_, packed := pb.index.Load(pb.indexKey("test", "small.txt"))
+	_, packed := pb.index.Load(packedKey{bucket: "test", key: "small.txt"})
 	require.False(t, packed, "force delete should remove packed index entries for the bucket")
 }
 
@@ -104,7 +104,7 @@ func TestPackedBackend_SmallObjectWithUserMetadataGoesToBlob(t *testing.T) {
 	require.Equal(t, int64(9), obj.Size)
 	require.Equal(t, map[string]string{"origin": "s3"}, obj.UserMetadata)
 
-	_, packed := pb.index.Load(pb.indexKey("test", "small-meta.txt"))
+	_, packed := pb.index.Load(packedKey{bucket: "test", key: "small-meta.txt"})
 	require.True(t, packed, "metadata-aware small PUT should still use blob storage")
 
 	head, err := pb.HeadObject(context.Background(), "test", "small-meta.txt")

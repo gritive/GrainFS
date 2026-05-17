@@ -43,7 +43,15 @@ copy-on-write publish step.
   profile entirely. CoW with `atomic.Pointer[map]` was rejected
   after measurement — isolated PutObject latency is index-size-
   invariant (11µs through N=100K), so a CoW clone at N=100K would
-  have driven PutObject to ~1ms (~100x regression).
+  have driven PutObject to ~1ms (~100x regression). The in-memory
+  index is now keyed by a typed `packedKey{bucket, key}` struct
+  (was previously `bucket + "/" + key` string concat); persistence
+  serialises the tuple back to the legacy string form at boundary
+  crossings so the on-disk format is unchanged. Combined with a
+  pooled `*packedReader` (embeds `bytes.Reader`, implements
+  `io.Closer`) replacing the prior `io.NopCloser(bytes.NewReader(.))`
+  pair, GetObject hot-path allocations drop from 6 to 4 per call
+  (−33%, 513 → 449 B/op).
 - `internal/volume.Manager.ReadAt` keeps `Manager.mu` while reading block data.
   This is a justified serialization boundary: volume metadata, live maps, and
   physical block objects are not versioned independently, so snapshotting only
