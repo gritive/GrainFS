@@ -58,10 +58,14 @@ where the metadata cache is not saturated.
 (none in tree) must pass bucket and key separately rather than
 pre-concatenating.
 
-The bucket-check fold preserves error semantics exactly. A separate
-race window between the bucket and object probes existed before
-(two `db.View` calls); the new code uses one Badger transaction, so
-the race window is strictly smaller, not larger.
+The bucket-check fold preserves error semantics exactly and, as a
+side benefit, eliminates a prior race: a concurrent
+`ForceDeleteBucket` between the old two-View sequence could surface
+`ErrObjectNotFound` from the second View when `ErrBucketNotFound` was
+the correct answer (the bucket-and-its-objects were gone before the
+second probe ran). Badger's single-View snapshot makes both Gets see
+the same point-in-time state, so the caller now always gets the
+consistent error.
 
 ## [0.0.228.0] - 2026-05-18 - perf(packblob): cut GetObject allocs from 6 to 4 via typed index key + pooled reader
 
