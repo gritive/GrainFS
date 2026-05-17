@@ -28,13 +28,13 @@ func TestIndex_SaveAndLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test data
-	pb.index.Store("bucket1/key1", &indexEntry{
+	pb.index.Store(packedKey{bucket: "bucket1", key: "key1"}, &indexEntry{
 		Location: BlobLocation{BlobID: 1, Offset: 100, Length: 200},
 	})
-	pb.index.Store("bucket1/key2", &indexEntry{
+	pb.index.Store(packedKey{bucket: "bucket1", key: "key2"}, &indexEntry{
 		Location: BlobLocation{BlobID: 1, Offset: 300, Length: 400},
 	})
-	pb.index.Store("bucket2/key1", &indexEntry{
+	pb.index.Store(packedKey{bucket: "bucket2", key: "key1"}, &indexEntry{
 		Location: BlobLocation{BlobID: 2, Offset: 100, Length: 200},
 	})
 
@@ -62,11 +62,11 @@ func TestIndex_SaveAndLoad(t *testing.T) {
 	assert.Equal(t, 3, indexLen(pb2), "Should have 3 entries in restored index")
 
 	// Verify specific entries
-	v1, ok := pb2.index.Load("bucket1/key1")
+	v1, ok := pb2.index.Load(packedKey{bucket: "bucket1", key: "key1"})
 	assert.True(t, ok, "bucket1/key1 should exist")
 	assert.Equal(t, BlobLocation{BlobID: 1, Offset: 100, Length: 200}, v1.(*indexEntry).Location)
 
-	v2, ok := pb2.index.Load("bucket1/key2")
+	v2, ok := pb2.index.Load(packedKey{bucket: "bucket1", key: "key2"})
 	assert.True(t, ok, "bucket1/key2 should exist")
 	assert.Equal(t, BlobLocation{BlobID: 1, Offset: 300, Length: 400}, v2.(*indexEntry).Location)
 }
@@ -197,7 +197,7 @@ func TestIndex_PersistenceWithRefcounts(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify refcount is 2
-	v, _ := pb.index.Load("bucket1/key1")
+	v, _ := pb.index.Load(packedKey{bucket: "bucket1", key: "key1"})
 	refcountBefore := v.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(2), refcountBefore, "Refcount should be 2 after copy")
 
@@ -213,7 +213,7 @@ func TestIndex_PersistenceWithRefcounts(t *testing.T) {
 	require.NoError(t, err)
 
 	// TEST: Verify refcount persisted
-	v2b, _ := pb2.index.Load("bucket1/key1")
+	v2b, _ := pb2.index.Load(packedKey{bucket: "bucket1", key: "key1"})
 	refcountAfter := v2b.(*indexEntry).Refcount.Load()
 	assert.Equal(t, int64(2), refcountAfter, "Refcount should persist across restart")
 }

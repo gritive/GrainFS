@@ -46,11 +46,37 @@ type indexEntryJSON struct {
 	SSEAlgorithm string            `json:"sse_algorithm,omitempty"`
 }
 
+// packedKey identifies a packed object by its (bucket, key) tuple. It is the
+// in-memory key type for PackedBackend.index, replacing an earlier string
+// concatenation ("bucket/key") whose every lookup leaked a heap allocation
+// onto the S3 GET hot path. The string form is reconstructed only at
+// persistence boundaries (SaveIndex/LoadIndex, blob storage interop).
+type packedKey struct {
+	bucket string
+	key    string
+}
+
+// String returns the legacy "bucket/key" form used by the on-disk index JSON
+// and the underlying BlobStore entries.
+func (k packedKey) String() string { return k.bucket + "/" + k.key }
+
+// parsePackedKey splits a legacy "bucket/key" string back into its tuple
+// form. The split is at the first '/' — safe because S3 bucket names cannot
+// contain '/' (DNS-style restrictions). Returns false if the input has no
+// separator (corrupt index entry; caller should skip).
+func parsePackedKey(s string) (packedKey, bool) {
+	i := strings.IndexByte(s, '/')
+	if i < 0 {
+		return packedKey{}, false
+	}
+	return packedKey{bucket: s[:i], key: s[i+1:]}, true
+}
+
 // PackedBackend wraps a storage.Backend and packs small objects into blob files.
 // Objects below the threshold are stored in append-only blob files.
 // Objects at or above the threshold pass through to the inner backend.
 //
-// The index is a sync.Map keyed by "bucket/key" → *indexEntry. Reads
+// The index is a sync.Map keyed by packedKey → *indexEntry. Reads
 // (GetObject/HeadObject) are lock-free; writes (PutObject/DeleteObject)
 // publish via sync.Map.Swap / LoadAndDelete and decrement displaced
 // entries' refcounts atomically. CopyObject preserves the previous
@@ -70,7 +96,7 @@ type PackedBackend struct {
 	blobDir   string
 	threshold int64 // objects below this size go into blobs
 
-	index sync.Map // string "bucket/key" → *indexEntry
+	index sync.Map // packedKey → *indexEntry
 
 	stopSave chan struct{} // signals the background index-save goroutine to stop
 }
@@ -154,15 +180,10 @@ func (pb *PackedBackend) Close() error {
 
 func (pb *PackedBackend) Unwrap() storage.Backend { return pb.inner }
 
-func (pb *PackedBackend) indexKey(bucket, key string) string {
-	return bucket + "/" + key
-}
-
 func (pb *PackedBackend) bucketHasPackedObjects(bucket string) bool {
-	pfx := bucket + "/"
 	found := false
 	pb.index.Range(func(k, v any) bool {
-		if strings.HasPrefix(k.(string), pfx) && v.(*indexEntry).Refcount.Load() > 0 {
+		if k.(packedKey).bucket == bucket && v.(*indexEntry).Refcount.Load() > 0 {
 			found = true
 			return false
 		}
@@ -172,9 +193,8 @@ func (pb *PackedBackend) bucketHasPackedObjects(bucket string) bool {
 }
 
 func (pb *PackedBackend) deleteBucketIndex(bucket string) {
-	pfx := bucket + "/"
 	pb.index.Range(func(k, _ any) bool {
-		if strings.HasPrefix(k.(string), pfx) {
+		if k.(packedKey).bucket == bucket {
 			pb.index.Delete(k)
 		}
 		return true
@@ -190,7 +210,7 @@ func (pb *PackedBackend) SaveIndex() error {
 	m := make(map[string]indexEntryJSON)
 	pb.index.Range(func(k, v any) bool {
 		e := v.(*indexEntry)
-		m[k.(string)] = indexEntryJSON{
+		m[k.(packedKey).String()] = indexEntryJSON{
 			Location:     e.Location,
 			Refcount:     e.Refcount.Load(),
 			OriginalSize: e.OriginalSize,
@@ -226,6 +246,10 @@ func (pb *PackedBackend) LoadIndex() error {
 			return fmt.Errorf("unmarshal index: %w", err)
 		}
 		for k, v := range m {
+			pk, ok := parsePackedKey(k)
+			if !ok {
+				return fmt.Errorf("corrupt index key: %q has no bucket/key separator", k)
+			}
 			e := &indexEntry{
 				Location:     v.Location,
 				OriginalSize: v.OriginalSize,
@@ -236,7 +260,7 @@ func (pb *PackedBackend) LoadIndex() error {
 				SSEAlgorithm: v.SSEAlgorithm,
 			}
 			e.Refcount.Store(v.Refcount)
-			pb.index.Store(k, e)
+			pb.index.Store(pk, e)
 		}
 		return nil
 	}
@@ -250,6 +274,10 @@ func (pb *PackedBackend) LoadIndex() error {
 		return fmt.Errorf("scan blobs: %w", err)
 	}
 	for k, loc := range locs {
+		pk, ok := parsePackedKey(k)
+		if !ok {
+			return fmt.Errorf("corrupt blob entry key: %q has no bucket/key separator", k)
+		}
 		data, readErr := pb.blobStore.Read(loc)
 		if readErr != nil {
 			return fmt.Errorf("read rebuilt blob entry %s: %w", k, readErr)
@@ -262,7 +290,7 @@ func (pb *PackedBackend) LoadIndex() error {
 			LastModified: time.Now().Unix(),
 		}
 		e.Refcount.Store(1)
-		pb.index.Store(k, e)
+		pb.index.Store(pk, e)
 	}
 	return nil
 }
@@ -333,9 +361,11 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return putInnerWithRequest(ctx, pb.inner, req)
 	}
 
-	// Small object → pack into blob
-	ikey := pb.indexKey(bucket, key)
-	loc, err := pb.blobStore.Append(ikey, data)
+	// Small object → pack into blob. The blob storage layer keys entries by
+	// the legacy "bucket/key" string (its on-disk format), so we serialize
+	// the tuple here. The in-memory index uses the typed packedKey below.
+	pk := packedKey{bucket: bucket, key: key}
+	loc, err := pb.blobStore.Append(pk.String(), data)
 	if err != nil {
 		return nil, fmt.Errorf("blob append: %w", err)
 	}
@@ -357,7 +387,7 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 	// Atomic publish: Swap returns the previous value if one was loaded.
 	// Decrement displaced entry's refcount so blob scrubbing can reclaim
 	// space when no live entry references it.
-	if prev, loaded := pb.index.Swap(ikey, e); loaded {
+	if prev, loaded := pb.index.Swap(pk, e); loaded {
 		prev.(*indexEntry).Refcount.Add(-1)
 	}
 
@@ -405,6 +435,35 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+// packedReader is the io.ReadCloser returned by GetObject for packed (small)
+// objects. It embeds bytes.Reader so a pooled instance can be reused across
+// requests; Close releases the underlying data slice and returns the
+// reader to packedReaderPool. Combining the reader and closer into a single
+// pooled struct eliminates the io.NopCloser + bytes.NewReader allocation
+// pair on every packed GetObject.
+type packedReader struct {
+	bytes.Reader
+}
+
+func (r *packedReader) Close() error {
+	r.Reader.Reset(nil)
+	packedReaderPool.Put(r)
+	return nil
+}
+
+var packedReaderPool = sync.Pool{
+	New: func() any { return new(packedReader) },
+}
+
+// newPackedReader returns a pooled *packedReader positioned at the start of
+// data. The caller transfers ownership: Close releases the reader back to
+// the pool, and reusing the returned reader after Close is undefined.
+func newPackedReader(data []byte) *packedReader {
+	r := packedReaderPool.Get().(*packedReader)
+	r.Reader.Reset(data)
+	return r
+}
+
 func packedObjectFromEntry(key string, entry *indexEntry, data []byte) *storage.Object {
 	size := entry.OriginalSize
 	if size == 0 && data != nil {
@@ -431,9 +490,7 @@ func packedObjectFromEntry(key string, entry *indexEntry, data []byte) *storage.
 }
 
 func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	ikey := pb.indexKey(bucket, key)
-
-	v, packed := pb.index.Load(ikey)
+	v, packed := pb.index.Load(packedKey{bucket: bucket, key: key})
 	var entry *indexEntry
 	if packed {
 		entry = v.(*indexEntry)
@@ -446,7 +503,7 @@ func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 		}
 
 		obj := packedObjectFromEntry(key, entry, data)
-		return io.NopCloser(bytes.NewReader(data)), obj, nil
+		return newPackedReader(data), obj, nil
 	}
 
 	// Fall through to inner backend
@@ -454,9 +511,7 @@ func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 }
 
 func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	ikey := pb.indexKey(bucket, key)
-
-	if v, packed := pb.index.Load(ikey); packed {
+	if v, packed := pb.index.Load(packedKey{bucket: bucket, key: key}); packed {
 		entry := v.(*indexEntry)
 		if entry.Refcount.Load() > 0 {
 			return packedObjectFromEntry(key, entry, nil), nil
@@ -467,15 +522,14 @@ func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*s
 }
 
 func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
-	ikey := pb.indexKey(bucket, key)
-
-	if v, loaded := pb.index.Load(ikey); loaded {
+	pk := packedKey{bucket: bucket, key: key}
+	if v, loaded := pb.index.Load(pk); loaded {
 		entry := v.(*indexEntry)
 		if entry.Refcount.Add(-1) <= 0 {
 			// Compare-and-delete only if the entry is still the same
 			// pointer — protects against a concurrent Swap publishing a
 			// new entry under the same key.
-			pb.index.CompareAndDelete(ikey, entry)
+			pb.index.CompareAndDelete(pk, entry)
 		}
 		return nil
 	}
@@ -492,20 +546,18 @@ func (pb *PackedBackend) ListObjects(ctx context.Context, bucket, prefix string,
 
 	// Supplement with packed objects (weakly-consistent Range — listing
 	// semantics tolerate concurrent inserts/deletes appearing or not).
-	pfx := bucket + "/" + prefix
 	pb.index.Range(func(rk, rv any) bool {
-		ikey := rk.(string)
+		pk := rk.(packedKey)
 		entry := rv.(*indexEntry)
 		if entry.Refcount.Load() <= 0 {
 			return true
 		}
-		if len(ikey) < len(pfx) || ikey[:len(pfx)] != pfx {
+		if pk.bucket != bucket || !strings.HasPrefix(pk.key, prefix) {
 			return true
 		}
-		k := ikey[len(bucket)+1:]
-		obj := packedObjectFromEntry(k, entry, nil)
+		obj := packedObjectFromEntry(pk.key, entry, nil)
 		for _, o := range objects {
-			if o.Key == k {
+			if o.Key == pk.key {
 				*o = *obj
 				return true
 			}
@@ -523,17 +575,15 @@ func (pb *PackedBackend) ListObjects(ctx context.Context, bucket, prefix string,
 
 func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
 	// Collect packed-index keys that match so we can fix sizes / emit extras.
-	pfx := bucket + "/" + prefix
 	packed := make(map[string]*indexEntry)
 	pb.index.Range(func(rk, rv any) bool {
-		ikey := rk.(string)
+		pk := rk.(packedKey)
 		entry := rv.(*indexEntry)
 		if entry.Refcount.Load() <= 0 {
 			return true
 		}
-		if len(ikey) >= len(pfx) && ikey[:len(pfx)] == pfx {
-			k := ikey[len(bucket)+1:]
-			packed[k] = entry
+		if pk.bucket == bucket && strings.HasPrefix(pk.key, prefix) {
+			packed[pk.key] = entry
 		}
 		return true
 	})
@@ -583,8 +633,8 @@ func (pb *PackedBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string)
 func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.CopyObjectAccelerationRequest) (*storage.Object, error) {
 	srcBucket, srcKey := req.SourceRef.Bucket, req.SourceRef.Key
 	dstBucket, dstKey := req.DestinationRef.Bucket, req.DestinationRef.Key
-	srcIKey := pb.indexKey(srcBucket, srcKey)
-	dstIKey := pb.indexKey(dstBucket, dstKey)
+	srcIKey := packedKey{bucket: srcBucket, key: srcKey}
+	dstIKey := packedKey{bucket: dstBucket, key: dstKey}
 
 	v, packed := pb.index.Load(srcIKey)
 	if packed {
@@ -701,26 +751,22 @@ func (pb *PackedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{}, len(objects))
+	seen := make(map[packedKey]struct{}, len(objects))
 	for _, obj := range objects {
-		seen[pb.indexKey(obj.Bucket, obj.Key)] = struct{}{}
+		seen[packedKey{bucket: obj.Bucket, key: obj.Key}] = struct{}{}
 	}
 	pb.index.Range(func(rk, rv any) bool {
-		ikey := rk.(string)
+		pk := rk.(packedKey)
 		entry := rv.(*indexEntry)
 		if entry.Refcount.Load() <= 0 {
 			return true
 		}
-		if _, ok := seen[ikey]; ok {
-			return true
-		}
-		bucket, key, ok := strings.Cut(ikey, "/")
-		if !ok {
+		if _, ok := seen[pk]; ok {
 			return true
 		}
 		objects = append(objects, storage.SnapshotObject{
-			Bucket:      bucket,
-			Key:         key,
+			Bucket:      pk.bucket,
+			Key:         pk.key,
 			ETag:        entry.ETag,
 			Size:        entry.OriginalSize,
 			ContentType: entry.ContentType,

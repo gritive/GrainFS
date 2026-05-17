@@ -30,7 +30,7 @@ func TestPackedBackend_CloseCallsSaveIndex(t *testing.T) {
 	_, err = pb.CopyObject("bucket", "key1", "bucket", "key2")
 	require.NoError(t, err)
 
-	v, _ := pb.index.Load("bucket/key1")
+	v, _ := pb.index.Load(packedKey{bucket: "bucket", key: "key1"})
 	refcountBefore := v.(*indexEntry).Refcount.Load()
 	require.Equal(t, int64(2), refcountBefore, "refcount must be 2 after copy")
 
@@ -46,7 +46,7 @@ func TestPackedBackend_CloseCallsSaveIndex(t *testing.T) {
 	require.NoError(t, pb2.LoadIndex())
 
 	// Refcount must be 2 — proves Close() saved the index (not just rebuilt from blobs)
-	v2, _ := pb2.index.Load("bucket/key1")
+	v2, _ := pb2.index.Load(packedKey{bucket: "bucket", key: "key1"})
 	refcountAfter := v2.(*indexEntry).Refcount.Load()
 
 	assert.Equal(t, int64(2), refcountAfter,
