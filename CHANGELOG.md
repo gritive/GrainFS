@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.225.0] - 2026-05-17 - fix(packblob): BlobStore.Close no longer leaks fds or directory lock on partial failure
+
+### Fixed
+- **`BlobStore.Close`** previously returned early on the first
+  `f.Close()` error (active blob or any cached read fd), leaving the
+  remaining read fds open and the directory `flock` held. A subsequent
+  `NewBlobStore()` against the same directory would then fail with
+  `blob dir already locked by another process`. Close now runs every
+  cleanup step unconditionally and returns the joined set of failures
+  via `errors.Join`. The directory lock is always released. Pre-existing
+  bug — surfaced as a follow-up to PR #392 advisor review.
+
+### Tests
+- Two regression tests in `internal/storage/packblob/blob_close_leak_test.go`:
+  one forces the active-blob close to fail (pre-closing the underlying fd),
+  one seeds two pre-closed read fds in the cache. Both assert that the
+  directory lock is released afterward by opening a second `BlobStore`
+  on the same directory, and the multi-fd case asserts both fd errors
+  appear in the joined error message. Verified that the tests fail on
+  master (dir lock leak surfaces as `resource temporarily unavailable`)
+  and pass on this branch.
+
 ## [0.0.224.0] - 2026-05-17 - perf(packblob): replace PackedBackend.mu with sync.Map index
 
 ### Changed

@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -276,7 +277,10 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 	return payload, nil
 }
 
-// Close closes the active blob file and releases the directory lock.
+// Close closes the active blob file, every cached read-fd, and releases
+// the directory lock. All cleanup steps run unconditionally so a single
+// failing Close() does not leak fds or strand the directory lock; the
+// returned error is the joined set of every failure encountered.
 //
 // The caller must guarantee no concurrent Append / Read / getReadFile is
 // in flight. Reads no longer take bs.mu (readFiles is published via
@@ -287,21 +291,22 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 func (bs *BlobStore) Close() error {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
+	var errs []error
 	if bs.active != nil {
 		if err := bs.active.Close(); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("close active blob: %w", err))
 		}
 	}
 	m := bs.readFiles.Load()
-	for _, f := range *m {
+	for id, f := range *m {
 		if err := f.Close(); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("close read fd for blob %d: %w", id, err))
 		}
 	}
 	empty := make(map[uint64]*os.File)
 	bs.readFiles.Store(&empty)
 	releaseBlobDirLock(bs.lockFile)
-	return nil
+	return errors.Join(errs...)
 }
 
 func (bs *BlobStore) getReadFile(blobID uint64) (*os.File, error) {
