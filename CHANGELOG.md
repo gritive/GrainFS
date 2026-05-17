@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.226.0] - 2026-05-17 - perf(policy): lock-free CompiledPolicyStore via atomic.Pointer
+
+### Changed
+- **`policy.CompiledPolicyStore`** no longer uses `sync.RWMutex`. The
+  compiled-policy map and raw-JSON map are bundled into an immutable
+  `policyState` struct published via `atomic.Pointer`. `Allow` (per-S3-
+  request authorization hot path) and `GetRaw` are lock-free atomic
+  loads. `Set` and `Delete` are serialised by a small `writeMu` so
+  concurrent admin writers merge cleanly: each clones the current
+  state, applies the mutation, and atomically publishes the new
+  pointer. `Delete` on a non-present bucket short-circuits without
+  cloning.
+- Audit follow-up: `docs/architecture/lock-free-audit.md` →
+  *"internal/policy/compiled.go - compiled policy map; request
+  evaluation uses short read locks."* Every authorised S3 request was
+  paying that RLock acquire/release on a shared cache line.
+
+### Performance
+
+Apple M3, `internal/policy`, `-benchtime=10s -count=2`, 100 buckets
+preloaded, parallel readers across 8 cores:
+
+| Bench | Before (median) | After (median) | Delta |
+| --- | --- | --- | --- |
+| `BenchmarkParallelAllow` | 174.7 ns/op | 17.7 ns/op | **-90% latency** |
+| `BenchmarkParallelAllowWithWriter` | 99.4 ns/op | 18.7 ns/op | **-81% latency** |
+
+Allocs per call unchanged (1 alloc/op — bench input copy escape, not
+related to the lock). At 8 parallel readers the prior `RWMutex.RLock`
+was paying cache-line bouncing on the shared mutex word; atomic load
+pays a single read of an already-warm pointer. The reader-with-writer
+bench shows the same speedup, confirming the writer no longer starves
+readers (writer-priority RWMutex was forcing readers to wait for `Set`
+calls even though the actual map mutation is a single pointer store).
+
 ## [0.0.225.0] - 2026-05-17 - fix(packblob): BlobStore.Close no longer leaks fds or directory lock on partial failure
 
 ### Fixed
