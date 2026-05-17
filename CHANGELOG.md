@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.0.231.0] - 2026-05-18 - perf(storage): unmarshalObjectInto skips inner Object alloc, big Walk/List win
+
+### Changed
+- **`storage.unmarshalObject`** now delegates to a new `unmarshalObjectInto(data, dst *Object)` that decodes a flatbuffer directly into a caller-provided destination, eliminating the inner `&Object{...}` heap allocation it previously did on every call. The legacy `unmarshalObject(data) (*Object, error)` signature is preserved as a thin wrapper that allocates one Object and delegates.
+- Six call sites in `internal/storage/local.go` (`HeadObject`, `SetObjectACL`, `Truncate`, `ListObjects`, `WalkObjects`, `ListAllObjects` snapshot path) now decode straight into a stack-declared `Object` they already had to allocate for their own use. The `decoded, err := unmarshalObject(...); obj = *decoded` pattern that copied a freshly heap-allocated Object onto a second location is gone.
+
+### Performance
+
+`BenchmarkWalkObjects` (1000 objects, 3-run × 3s median):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 8522 | 7522 | **-12%** |
+| B/op | 530519 | 418508 | **-21%** |
+| ns/op | ~398000 | ~337511 | **-15%** |
+
+`BenchmarkListObjectsLoop` (same workload, bulk-load variant):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| allocs/op | 8533 | 7533 | **-12%** |
+| B/op | 548036 | 436036 | **-20%** |
+| ns/op | ~397000 | ~355577 | **-10%** |
+
+`BenchmarkHeadObject_NoCache` and `BenchmarkGetObject_NoCache` benefit
+inversely-proportionally to their existing alloc count (Walk repeats
+the decode 1000× per call, so an N=1 saving moves the per-object
+fraction more):
+
+| | before | after | Δ |
+| --- | --- | --- | --- |
+| HeadObject allocs/op | 16 | 15 | -6% |
+| GetObject allocs/op | 21 | 19 | -10% |
+
+Why this matters: S3 LIST is one of the most allocation-dense
+operations a metadata service handles. A single LIST page over 1000
+objects previously triggered ~8500 short-lived allocations from
+GrainFS code alone, dominating GC pressure during bucket browsing.
+Cutting one allocation per decoded object across the listing flow
+trims 1000 allocations per page at zero behavior change. The B/op
+reduction (−112KB per page) is a more direct lens on what GC will
+see.
+
+### Migration notes
+
+`unmarshalObject(data []byte) (*Object, error)` keeps its signature
+and behavior — external/test code calling it sees no change. The new
+`unmarshalObjectInto(data []byte, dst *Object) error` is the canonical
+form for hot paths that already own a destination.
+
 ## [0.0.230.0] - 2026-05-18 - perf(s3auth): replace two fmt.Sprintf with append in Verify hot path
 
 ### Changed
