@@ -3,9 +3,13 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -279,6 +283,138 @@ func TestDistributedBackend_PutObjectSpooledShardEncoderPreservesUserMetadata(t 
 	gotObj, err := b.HeadObject(context.Background(), "bucket", "small-meta.bin")
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"x-amz-meta-owner": "me"}, gotObj.UserMetadata)
+}
+
+func TestDistributedBackend_ConvertObjectToECUsesSpooledShardEncoder(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	payload := bytes.Repeat([]byte("convert-spooled-"), 4096)
+	key := "legacy.bin"
+	versionID := ""
+	path := b.objectPath("bucket", key)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, payload, 0o600))
+
+	sum := md5.Sum(payload)
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:      "bucket",
+		Key:         key,
+		VersionID:   versionID,
+		Size:        int64(len(payload)),
+		ContentType: "application/octet-stream",
+		ETag:        hex.EncodeToString(sum[:]),
+		ModTime:     1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.fsm.Apply(raw))
+
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardService(NewShardService(b.root, nil), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+
+	require.NoError(t, b.ConvertObjectToEC(ctx, "bucket", key))
+
+	_, err = os.Stat(b.ecSpoolDir())
+	require.NoError(t, err)
+	_, err = os.Stat(path)
+	require.True(t, os.IsNotExist(err), "legacy full-object copy should be removed after conversion")
+
+	rc, gotObj, err := b.GetObject(ctx, "bucket", key)
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+	require.Equal(t, versionID, gotObj.VersionID)
+	require.Equal(t, int64(1), gotObj.LastModified)
+
+	_, placementMeta, err := b.headObjectMeta(ctx, "bucket", key)
+	require.NoError(t, err)
+	require.Equal(t, uint8(2), placementMeta.ECData)
+	require.Equal(t, uint8(1), placementMeta.ECParity)
+}
+
+func TestDistributedBackend_PutObjectMetaExpectedETagRejectsChangedLatest(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	putMeta := func(etag string, ecData, ecParity uint8, expectedETag string) error {
+		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket:       "bucket",
+			Key:          "race.bin",
+			Size:         1,
+			ContentType:  "application/octet-stream",
+			ETag:         etag,
+			ModTime:      1,
+			ECData:       ecData,
+			ECParity:     ecParity,
+			ExpectedETag: expectedETag,
+		})
+		require.NoError(t, err)
+		return b.fsm.Apply(raw)
+	}
+
+	require.NoError(t, putMeta("old", 0, 0, ""))
+	require.NoError(t, putMeta("new", 0, 0, ""))
+	require.Error(t, putMeta("old", 2, 1, "old"))
+
+	obj, placementMeta, err := b.headObjectMeta(ctx, "bucket", "race.bin")
+	require.NoError(t, err)
+	require.Equal(t, "new", obj.ETag)
+	require.Equal(t, uint8(0), placementMeta.ECData)
+	require.Equal(t, uint8(0), placementMeta.ECParity)
+}
+
+func TestDistributedBackend_PutObjectECSpooledBeforeCommitAbortCleansShards(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cfg   ECConfig
+		nodes []string
+	}{
+		{name: "parity", cfg: ECConfig{DataShards: 2, ParityShards: 1}, nodes: nil},
+		{name: "single-local", cfg: ECConfig{DataShards: 1, ParityShards: 0}, nodes: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestDistributedBackend(t)
+			ctx := context.Background()
+			require.NoError(t, b.CreateBucket(ctx, "bucket"))
+			nodes := tc.nodes
+			if nodes == nil {
+				nodes = make([]string, tc.cfg.NumShards())
+				for i := range nodes {
+					nodes[i] = b.selfAddr
+				}
+			}
+			b.SetECConfig(tc.cfg)
+			b.SetShardService(NewShardService(b.root, nil), nodes)
+
+			payload := bytes.Repeat([]byte("abort-before-commit-"), 1024)
+			sp, err := b.spoolPutObject(ctx, "bucket", bytes.NewReader(payload))
+			require.NoError(t, err)
+			defer sp.Cleanup()
+
+			errChanged := errors.New("metadata changed")
+			_, err = b.putObjectECSpooledWithOptionalModTime(
+				ctx,
+				"bucket",
+				"abort.bin",
+				"",
+				sp,
+				"application/octet-stream",
+				nil,
+				"",
+				1,
+				true,
+				"",
+				func() error { return errChanged },
+			)
+			require.ErrorIs(t, err, errChanged)
+			_, err = b.shardSvc.ReadLocalShard("bucket", "abort.bin", 0)
+			require.True(t, os.IsNotExist(err), "pre-commit abort should remove written EC shards")
+		})
+	}
 }
 
 func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {

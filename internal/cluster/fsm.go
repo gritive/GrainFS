@@ -71,6 +71,9 @@ type PutObjectMetaCmd struct {
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
+	// ExpectedETag makes the metadata write conditional on the latest object
+	// still matching this ETag. Empty means unconditional.
+	ExpectedETag string
 	// PreserveLatest writes this version without moving lat:{bucket}/{key}.
 	// Snapshot restore uses it for non-latest versions.
 	PreserveLatest bool

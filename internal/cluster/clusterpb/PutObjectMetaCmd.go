@@ -218,8 +218,16 @@ func (rcv *PutObjectMetaCmd) SseAlgorithm() []byte {
 	return nil
 }
 
+func (rcv *PutObjectMetaCmd) ExpectedEtag() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(16)
+	builder.StartObject(17)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -274,6 +282,9 @@ func PutObjectMetaCmdStartUserMetadataVector(builder *flatbuffers.Builder, numEl
 }
 func PutObjectMetaCmdAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(sseAlgorithm), 0)
+}
+func PutObjectMetaCmdAddExpectedEtag(builder *flatbuffers.Builder, expectedEtag flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(expectedEtag), 0)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

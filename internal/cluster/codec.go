@@ -116,6 +116,10 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.SSEAlgorithm != "" {
 		sseOff = b.CreateString(c.SSEAlgorithm)
 	}
+	var expectedETagOff flatbuffers.UOffsetT
+	if c.ExpectedETag != "" {
+		expectedETagOff = b.CreateString(c.ExpectedETag)
+	}
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
@@ -147,6 +151,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddPlacementGroupId(b, pgOff)
 	if sseOff != 0 {
 		clusterpb.PutObjectMetaCmdAddSseAlgorithm(b, sseOff)
+	}
+	if expectedETagOff != 0 {
+		clusterpb.PutObjectMetaCmdAddExpectedEtag(b, expectedETagOff)
 	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
@@ -180,6 +187,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
 		SSEAlgorithm:     string(t.SseAlgorithm()),
+		ExpectedETag:     string(t.ExpectedEtag()),
 		PreserveLatest:   t.PreserveLatest(),
 		IsDeleteMarker:   t.IsDeleteMarker(),
 	}, nil

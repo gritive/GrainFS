@@ -1264,7 +1264,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
-	shardKey := key + "/" + versionID
+	shardKey := ecObjectShardKey(key, versionID)
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -1761,7 +1761,7 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 
 	// ShardService's key parameter carries the versionID as a suffix so shards
 	// for different versions land at different paths without changing the API.
-	shardKey := key + "/" + versionID
+	shardKey := ecObjectShardKey(key, versionID)
 
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
@@ -1815,6 +1815,10 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
+	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil)
+}
+
+func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error) (*storage.Object, error) {
 	stageStart := time.Now()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -1832,7 +1836,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		return nil, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
 	}
 
-	shardKey := key + "/" + versionID
+	shardKey := ecObjectShardKey(key, versionID)
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
 	topologyWrite := false
@@ -1857,11 +1861,11 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 	observePutStage("ec", "placement", stageStart)
 
 	selfID := b.currentSelfAddr()
-	if effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
+	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
 		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm)
 	}
 
-	if ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytes {
+	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytes {
 		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
@@ -1876,6 +1880,9 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		Key:              key,
 		VersionID:        versionID,
 		PlacementGroupID: placementGroupID,
+		ModTime:          modTime,
+		PreserveModTime:  preserveModTime,
+		ExpectedETag:     expectedETag,
 		Config:           effectiveCfg,
 		Placement:        placement,
 		RingVersion:      ringVer,
@@ -1890,6 +1897,12 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
 		return nil, err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
+			return nil, err
+		}
 	}
 
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
@@ -1987,13 +2000,17 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	metricPath string,
 ) (*storage.Object, error) {
 	stageStart := time.Now()
+	modTime := result.ModTime
+	if plan.PreserveModTime {
+		modTime = plan.ModTime
+	}
 	if merr := b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket:           plan.Bucket,
 		Key:              plan.Key,
 		Size:             result.Size,
 		ContentType:      plan.ContentType,
 		ETag:             result.ETag,
-		ModTime:          result.ModTime,
+		ModTime:          modTime,
 		VersionID:        plan.VersionID,
 		PlacementGroupID: plan.PlacementGroupID,
 		RingVersion:      result.RingVersion,
@@ -2002,6 +2019,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		NodeIDs:          result.Placement,
 		UserMetadata:     cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm:     plan.SSEAlgorithm,
+		ExpectedETag:     plan.ExpectedETag,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
@@ -2015,7 +2033,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		Size:         result.Size,
 		ContentType:  plan.ContentType,
 		ETag:         result.ETag,
-		LastModified: result.ModTime,
+		LastModified: modTime,
 		VersionID:    plan.VersionID,
 		UserMetadata: cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm: plan.SSEAlgorithm,
@@ -2032,7 +2050,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 ) (*storage.Object, error) {
-	shardKey := key + "/" + versionID
+	shardKey := ecObjectShardKey(key, versionID)
 	stageStart := time.Now()
 	body, err := sp.Open()
 	if err != nil {
@@ -2478,18 +2496,15 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		return fmt.Errorf("ec not active: cluster_size=%d shard_svc=%v",
 			len(liveNodes), b.shardSvc != nil)
 	}
-	existing, lookupErr := b.fsm.LookupShardPlacement(bucket, key)
-	if lookupErr != nil {
-		return fmt.Errorf("lookup shard placement: %w", lookupErr)
-	}
-	if len(existing.Nodes) > 0 {
-		return nil // already converted
-	}
-
 	// Snapshot meta before reading data so we can detect concurrent writes.
-	metaBefore, err := b.HeadObject(ctx, bucket, key)
+	metaBefore, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return fmt.Errorf("head before convert: %w", err)
+	}
+	if _, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta); rerr == nil {
+		return nil // already converted
+	} else if !errors.Is(rerr, ErrNotEC) {
+		return fmt.Errorf("resolve existing placement before convert: %w", rerr)
 	}
 
 	// Read the full object via the legacy N× path. GetObject will fall through
@@ -2498,50 +2513,24 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	if err != nil {
 		return fmt.Errorf("read for convert: %w", err)
 	}
-	data, err := io.ReadAll(rc)
-	_ = rc.Close()
-	if err != nil {
-		return fmt.Errorf("drain for convert: %w", err)
+	sp, spoolErr := b.spoolPutObject(ctx, bucket, rc)
+	closeErr := rc.Close()
+	if spoolErr != nil {
+		return fmt.Errorf("spool for convert: %w", spoolErr)
+	}
+	if closeErr != nil {
+		sp.Cleanup()
+		return fmt.Errorf("close convert source: %w", closeErr)
+	}
+	defer sp.Cleanup()
+	if sp.ETag != metaBefore.ETag {
+		return fmt.Errorf("convert aborted: spool ETag mismatch for %s/%s: got %s, want %s",
+			bucket, key, sp.ETag, metaBefore.ETag)
 	}
 
-	// Split + fan-out shards. Mirrors putObjectEC's write-all semantics.
-	shards, err := ECSplit(effectiveCfg, data)
-	if err != nil {
-		return fmt.Errorf("ec split for convert: %w", err)
-	}
-	// ConvertObjectToEC is a legacy-to-EC migration path for pre-versioned objects,
-	// so placement uses bare key (no versionID suffix).
-	placement := PlacementForNodes(effectiveCfg, liveNodes, key)
-	selfID := b.currentSelfAddr()
-	written := make([]string, 0, len(shards))
-	rollbackShards := func() {
-		for _, n := range written {
-			if n == selfID {
-				_ = b.shardSvc.DeleteLocalShards(bucket, key)
-				continue
-			}
-			_ = b.shardSvc.DeleteShards(ctx, n, bucket, key)
-		}
-	}
-	for i, node := range placement {
-		if node == selfID {
-			if werr := b.shardSvc.WriteLocalShard(bucket, key, i, shards[i]); werr != nil {
-				rollbackShards()
-				return fmt.Errorf("convert write local shard %d: %w", i, werr)
-			}
-		} else {
-			if werr := b.shardSvc.WriteShard(ctx, node, bucket, key, i, shards[i]); werr != nil {
-				rollbackShards()
-				return fmt.Errorf("convert write shard %d to %s: %w", i, node, werr)
-			}
-		}
-		written = append(written, node)
-	}
-
-	// Re-check meta: did a PUT race us while we were writing shards?
+	// Re-check meta: did a PUT race us while we were spooling the source?
 	metaAfter, err := b.HeadObject(ctx, bucket, key)
 	if err != nil || metaAfter.ETag != metaBefore.ETag {
-		rollbackShards()
 		return fmt.Errorf("convert aborted: meta changed mid-conversion (etag %q → %q)",
 			metaBefore.ETag, func() string {
 				if metaAfter != nil {
@@ -2551,18 +2540,29 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 			}())
 	}
 
-	// Commit placement. A concurrent PUT between here and commit will also
-	// propose a placement (putObjectEC), and Raft serializes — whoever lands
-	// first wins. Idempotent applyPutShardPlacement tolerates either order.
-	if perr := b.propose(ctx, CmdPutShardPlacement, PutShardPlacementCmd{
-		Bucket:  bucket,
-		Key:     key,
-		NodeIDs: placement,
-		K:       effectiveCfg.DataShards,
-		M:       effectiveCfg.ParityShards,
-	}); perr != nil {
-		rollbackShards()
-		return fmt.Errorf("convert propose placement: %w", perr)
+	beforeCommit := func() error {
+		metaAfter, err := b.HeadObject(ctx, bucket, key)
+		if err != nil || metaAfter.ETag != metaBefore.ETag {
+			return fmt.Errorf("convert aborted: meta changed mid-conversion (etag %q → %q)",
+				metaBefore.ETag, func() string {
+					if metaAfter != nil {
+						return metaAfter.ETag
+					}
+					return ""
+				}())
+		}
+		return nil
+	}
+	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit); err != nil {
+		return fmt.Errorf("convert write ec shards: %w", err)
+	}
+	_, convertedMeta, err := b.headObjectMeta(ctx, bucket, key)
+	if err != nil {
+		return fmt.Errorf("head after convert: %w", err)
+	}
+	resolved, err := b.ResolvePlacement(ctx, bucket, key, convertedMeta)
+	if err != nil {
+		return fmt.Errorf("resolve converted placement: %w", err)
 	}
 
 	// Cleanup legacy N× replicas on nodes NOT in the placement. The local full-
@@ -2570,8 +2570,12 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 	// the full file is now redundant). Best-effort — failures just leave stale
 	// N× copies that a future sweep can reclaim.
 	_ = os.Remove(b.objectPath(bucket, key))
-	placementSet := make(map[string]bool, len(placement))
-	for _, n := range placement {
+	if metaBefore.VersionID != "" {
+		_ = os.Remove(b.objectPathV(bucket, key, metaBefore.VersionID))
+	}
+	selfID := b.currentSelfAddr()
+	placementSet := make(map[string]bool, len(resolved.Record.Nodes))
+	for _, n := range resolved.Record.Nodes {
 		placementSet[n] = true
 	}
 	for _, peer := range b.liveNodes() {
