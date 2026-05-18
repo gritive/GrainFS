@@ -33,6 +33,10 @@ func init() {
 	serveCmd.Flags().String("node-id", "", "unique node ID (auto-generated if omitted)")
 	serveCmd.Flags().String("raft-addr", "", "Raft listen address for cluster communication (required in cluster mode)")
 	serveCmd.Flags().String("cluster-key", "", "Pre-shared key for cluster peer authentication")
+	serveCmd.Flags().Int64("cluster-append-forward-buffer-total-bytes", 512*1024*1024,
+		"Total byte budget for AppendObject forward-body reservation pool (default 512 MiB).")
+	serveCmd.Flags().Int64("cluster-append-forward-buffer-max-per-request", 64*1024*1024,
+		"Max bytes any single AppendObject forward request may reserve (default 64 MiB).")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated only for solo bootstrap if omitted)")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")

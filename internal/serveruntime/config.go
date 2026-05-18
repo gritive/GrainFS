@@ -63,6 +63,10 @@ type Config struct {
 	HealReceiptGossipInterval time.Duration
 	HealReceiptWindow         int
 
+	// AppendObject forward buffer pool
+	AppendForwardBufferTotalBytes    int64
+	AppendForwardBufferMaxPerRequest int64
+
 	// Lifecycle / dedup / cache
 	LifecycleInterval time.Duration
 	MigrationInterval time.Duration

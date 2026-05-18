@@ -162,6 +162,10 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		WithECConfig(state.effectiveEC).
 		WithObjectIndexProposer(indexProposer).
 		WithCapabilityGate(state.capabilityGate)
+	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
+		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
+		MaxPerRequest: state.cfg.AppendForwardBufferMaxPerRequest,
+	})
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 

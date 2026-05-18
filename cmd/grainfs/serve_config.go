@@ -45,6 +45,9 @@ func buildClusterConfig(
 	cfg.QUICMuxPoolSize, _ = cmd.Flags().GetInt("quic-mux-pool")
 	cfg.QUICMuxFlushWindow, _ = cmd.Flags().GetDuration("quic-mux-flush")
 
+	cfg.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")
+	cfg.AppendForwardBufferMaxPerRequest, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-max-per-request")
+
 	cfg.DirectIO, _ = cmd.Flags().GetBool("direct-io")
 	cfg.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")
 	cfg.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
