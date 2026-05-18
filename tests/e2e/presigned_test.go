@@ -34,8 +34,8 @@ func TestPresignedE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "4-node cluster boot is too slow for -short")
-		runPresignedCases(t, newClusterS3Target(t, 4))
+		skipIfShort(t, "cluster fixture not booted in -short mode")
+		runPresignedCases(t, newSharedClusterS3Target(t))
 	})
 }
 
