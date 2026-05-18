@@ -659,8 +659,15 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 // Idempotent on replay: if the segment's BlobID already appears in
 // existing.Segments (replay of an already-applied entry), this is a no-op.
 //
-// Append objects are NOT versioned in this phase — only the legacy
-// ObjectMetaKey is written (no ObjectMetaKeyV / LatestKey dual-write).
+// When cmd.VersionID is non-empty (the normal AppendObject path), apply
+// dual-writes the versioned key + LatestKey alongside the legacy
+// ObjectMetaKey — matching applyPutObjectMeta — so that headObjectMeta returns
+// obj.VersionID populated and downstream commitObjectIndex can propose a
+// valid MetaPutObjectIndex entry (which rejects empty version_id).
+//
+// When cmd.VersionID is empty (legacy Raft replay or direct apply-test
+// fixtures), only the legacy ObjectMetaKey is written to preserve prior
+// semantics.
 func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 	cmd, err := decodeAppendObjectCmd(data)
 	if err != nil {
@@ -750,6 +757,17 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 		out, err := marshalObjectMeta(updated)
 		if err != nil {
 			return fmt.Errorf("marshal updated objectMeta: %w", err)
+		}
+		// Dual-write: versioned key + latest pointer (when VersionID supplied)
+		// alongside the legacy ObjectMetaKey, matching applyPutObjectMeta so
+		// HeadObject returns a populated obj.VersionID.
+		if cmd.VersionID != "" {
+			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
+				return err
+			}
+			if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
+				return err
+			}
 		}
 		return f.setValue(txn, metaKey, out)
 	})

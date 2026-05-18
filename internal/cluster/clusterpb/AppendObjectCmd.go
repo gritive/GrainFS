@@ -105,8 +105,16 @@ func (rcv *AppendObjectCmd) PlacementGroupId() []byte {
 	return nil
 }
 
+func (rcv *AppendObjectCmd) VersionId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func AppendObjectCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(8)
 }
 func AppendObjectCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -128,6 +136,9 @@ func AppendObjectCmdAddSegmentEtag(builder *flatbuffers.Builder, segmentEtag fla
 }
 func AppendObjectCmdAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(placementGroupId), 0)
+}
+func AppendObjectCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(versionId), 0)
 }
 func AppendObjectCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -220,6 +220,7 @@ table AppendObjectCmd {
   segment_size:int64;
   segment_etag:string;
   placement_group_id:string;
+  version_id:string;
 }
 
 table KeyValue {

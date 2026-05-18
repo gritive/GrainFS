@@ -762,6 +762,7 @@ func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	blobIDOff := b.CreateString(c.BlobID)
 	etagOff := b.CreateString(c.SegmentETag)
 	pgOff := b.CreateString(c.PlacementGroupID)
+	vidOff := b.CreateString(c.VersionID)
 	clusterpb.AppendObjectCmdStart(b)
 	clusterpb.AppendObjectCmdAddBucket(b, bucketOff)
 	clusterpb.AppendObjectCmdAddKey(b, keyOff)
@@ -770,6 +771,7 @@ func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	clusterpb.AppendObjectCmdAddSegmentSize(b, c.SegmentSize)
 	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
 	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
+	clusterpb.AppendObjectCmdAddVersionId(b, vidOff)
 	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
 }
 
@@ -788,6 +790,7 @@ func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
 		SegmentSize:      t.SegmentSize(),
 		SegmentETag:      string(t.SegmentEtag()),
 		PlacementGroupID: string(t.PlacementGroupId()),
+		VersionID:        string(t.VersionId()),
 	}, nil
 }
 

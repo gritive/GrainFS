@@ -21,19 +21,6 @@ import (
 )
 
 func TestAppendObjectE2E_SingleNode(t *testing.T) {
-	// Red 22 currently exposes a follow-up: AppendObject does not produce a
-	// VersionID, but ClusterCoordinator.commitObjectIndex routes through
-	// MetaFSM.applyPutObjectIndex which rejects entries with empty VersionID
-	// (meta_fsm.go: "PutObjectIndex: empty bucket/key/version"). Fixing this
-	// requires extending AppendObjectCmd with a proposer-supplied VersionID and
-	// updating applyAppendObjectFromCmd to write LatestKey + ObjectMetaKeyV
-	// like applyPutObjectMeta does. Tracked as Task 26 follow-up.
-	//
-	// The wrapper-chain wiring (pullthrough/wal/packblob/RecoveryWriteGate)
-	// that this test surfaced has already been fixed; once the VersionID
-	// gap is closed, remove the Skip and the four sub-tests below should pass
-	// without further change.
-	t.Skip("Red 22: blocked on AppendObject VersionID gap — see Task 26 follow-up")
 	bucket := "append-e2e"
 	createBucket(t, bucket)
 

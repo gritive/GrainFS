@@ -181,19 +181,6 @@ Work these in order. Do not run them in parallel.
 - [ ] [nfs-conformance] pynfs-nightly [P1]: run pynfs basic suite on a scheduled
   Linux/Colima host and review `results/summary.json`.
 - [ ] [nfs-conformance] nfstest-runner [P2]: add nfstest after pynfs stabilizes.
-- [ ] **AppendObject VersionID gap (Red 22 follow-up)**: `AppendObjectCmd` does
-  not carry a `VersionID`, so `applyAppendObjectFromCmd` writes only the legacy
-  `objectMeta` key and the post-append `HeadObject` returns `obj.VersionID=""`.
-  `ClusterCoordinator.commitObjectIndex` then proposes a `MetaPutObjectIndex`
-  with empty `VersionID`, which `MetaFSM.applyPutObjectIndex` rejects
-  (`meta_fsm: PutObjectIndex: empty bucket/key/version`). Fix: extend the
-  `AppendObjectCmd` FlatBuffer schema + Go struct with `VersionID`, generate
-  it at propose time in `DistributedBackend.AppendObject` (UUIDv7, mirror
-  `newVersionID()`), and update `applyAppendObjectFromCmd` to write both the
-  versioned `ObjectMetaKeyV` and the `LatestKey` pointer (mirror
-  `applyPutObjectMeta`). Once landed, drop `t.Skip` from
-  `tests/e2e/append_object_test.go` (`TestAppendObjectE2E_SingleNode`).
-
 ## Storage And Volume Backlog
 
 - [ ] **Thin pool quota**: cross-volume physical capacity pool after Phase A

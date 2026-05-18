@@ -2214,6 +2214,14 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	// is a real version. VersionID is non-empty for versioned writes and empty
 	// for legacy log replay.
 
+	// Appendable objects store bytes across per-segment blobs under
+	// <objectPath>_segments/<blobID> (see writeSegmentBlobForAppend). Stitch
+	// them with a multi-segment reader instead of trying to open a single
+	// objectPath file (which never exists for appendables).
+	if len(obj.Segments) > 0 && obj.Size > 0 {
+		return b.openAppendableSegments(bucket, key, obj), obj, nil
+	}
+
 	// EC path: shardKey = key+"/"+versionID for versioned objects.
 	shardKey := key
 	if obj.VersionID != "" {
