@@ -890,6 +890,7 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
 
 		// Cap depth — stall coalesce when the chain grows unbounded.
 		if len(existing.Coalesced) >= MaxCoalescedEntries {
+			metrics.AppendCoalescedEntriesAtCap.Inc()
 			return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
 		}
 

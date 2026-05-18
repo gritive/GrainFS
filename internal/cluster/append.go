@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -114,6 +115,10 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	obj, herr := b.HeadObject(ctx, bucket, key)
 	if herr == nil && obj != nil && obj.IsAppendable {
 		b.maybeTriggerCoalesce(bucket, key, obj.Segments)
+	}
+	if herr == nil && obj != nil {
+		metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
+		metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
 	}
 	return obj, herr
 }
