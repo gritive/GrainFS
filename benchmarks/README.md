@@ -7,11 +7,13 @@ rules, see [`docs/reference/benchmarks.md`](../docs/reference/benchmarks.md).
 
 `make bench`, `make bench-cluster`, and `make bench-s3-compat-compare` run the
 official S3 workload with MinIO `warp`. `make bench` targets a local GrainFS
-single-node server, `make bench-cluster` targets a local GrainFS 3-node cluster,
+single-node server, `make bench-cluster` targets a local GrainFS 4-node cluster,
 and `make bench-s3-compat-compare` compares GrainFS single-node with any native
-MinIO/RustFS binaries available on `PATH`. Set `MINIO_BIN`, `RUSTFS_BIN`,
-`MINIO_URL`, or `RUSTFS_URL` to point at specific released builds or
-already-running endpoints.
+MinIO/RustFS binaries available on `PATH`. The comparison script can also boot
+local 4-node MinIO and RustFS clusters with `TARGETS=minio-cluster` and
+`TARGETS=rustfs-cluster`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`,
+`RUSTFS_URL`, `MINIO_CLUSTER_URL`, or `RUSTFS_CLUSTER_URL` to point at specific
+released builds or already-running endpoints.
 
 ```bash
 make bench-s3-compat-compare
@@ -47,14 +49,20 @@ WARP_OPS=put,get,delete WARP_OBJECTS=4096 WARP_DELETE_BATCH=100 make bench-clust
 `list`, `stat`, `versioned`, `retention`, `multipart`, `multipart-put`,
 `append`. Each op runs in its own bucket (`warp-<target>-<op>`) so the previous
 op does not seed the next one. Multipart workloads use `--part.size`
-automatically. To run a 4-node cluster sweep with multipart support, allow
+automatically. To run a 4-node GrainFS cluster sweep with multipart support, allow
 the gossip-propagated `multipart_listing_v1` capability evidence enough time
 to settle:
 
 ```bash
-GRAINFS_CLUSTER_NODES=4 CLUSTER_WARMUP_SLEEP=45 \
+CLUSTER_WARMUP_SLEEP=45 \
 WARP_OPS=put,get,delete,mixed,list,stat,versioned,multipart,multipart-put \
   make bench-cluster
+```
+
+Run local 4-node comparison baselines with:
+
+```bash
+TARGETS=minio-cluster,rustfs-cluster WARP_OPS=put,get make bench-s3-compat-compare
 ```
 
 For external cluster endpoints, pass a comma-separated host list through

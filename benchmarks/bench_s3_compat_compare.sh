@@ -30,7 +30,7 @@ WARP_OPS="${WARP_OPS:-put,get}"
 WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
-GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-3}"
+GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-4}"
 BENCH_PPROF="${BENCH_PPROF:-0}"
 PPROF_BASE_PORT="${PPROF_BASE_PORT:-16060}"
 PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
@@ -43,6 +43,7 @@ MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
 RUSTFS_BIN="${RUSTFS_BIN:-$(command -v rustfs 2>/dev/null || true)}"
 RUSTFS_ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfsadmin}"
 RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
+RUSTFS_RPC_SECRET="${RUSTFS_RPC_SECRET:-grainfs-bench-rustfs-rpc-secret}"
 
 if [[ -z "$WARP_BIN" ]]; then
   echo "[error] warp is required for S3-compatible comparison benchmarks. Install minio/warp or set WARP_BIN." >&2
@@ -58,6 +59,7 @@ START_BASE_URL=""
 START_ACCESS_KEY=""
 START_SECRET_KEY=""
 START_MODE=""
+STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
 
 set_start_info() {
   START_BASE_URL="$1"
@@ -68,10 +70,8 @@ set_start_info() {
 
 cleanup() {
   echo "[bench] stopping comparison backends..."
-  for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-  wait 2>/dev/null || true
+  stop_pids "${PIDS[@]:-}"
+  stop_child_backends
   if [[ "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
     rm -rf "$BENCH_DIR" 2>/dev/null || true
   else
@@ -80,15 +80,52 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+stop_pids() {
+  local pids=("$@")
+  local live=()
+  local pid deadline
+  for pid in "${pids[@]:-}"; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+  deadline=$((SECONDS + STOP_GRACE_SECONDS))
+  while (( SECONDS < deadline )); do
+    live=()
+    for pid in "${pids[@]:-}"; do
+      [[ -n "$pid" ]] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        live+=("$pid")
+      fi
+    done
+    ((${#live[@]} == 0)) && break
+    sleep 0.2
+  done
+  for pid in "${live[@]:-}"; do
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+
+stop_child_backends() {
+  local children=()
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && children+=("$pid")
+  done < <(pgrep -P "$$" 2>/dev/null || true)
+  ((${#children[@]} == 0)) || stop_pids "${children[@]}"
+}
+
 stop_target_backends() {
   local start_idx="$1"
   local i pid
+  local target_pids=()
   for ((i=${#PIDS[@]} - 1; i >= start_idx; i--)); do
     pid="${PIDS[$i]}"
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    target_pids+=("$pid")
     unset 'PIDS[$i]'
   done
+  stop_pids "${target_pids[@]:-}"
+  stop_child_backends
   PIDS=("${PIDS[@]:-}")
 }
 
@@ -241,6 +278,88 @@ start_minio() {
   set_start_info "http://127.0.0.1:$port" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"
 }
 
+start_minio_cluster() {
+  if [[ "${MINIO_CLUSTER_URL:-}" != "" ]]; then
+    set_start_info "$MINIO_CLUSTER_URL" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "external"
+    return 0
+  fi
+  if [[ -z "$MINIO_BIN" ]]; then
+    return 1
+  fi
+  if "$MINIO_BIN" --version 2>/dev/null | grep -qi 'AIStor'; then
+    echo "minio-cluster: skipped; installed binary is MinIO AIStor and may deny S3 operations without a license." >>"$PROFILE_ROOT/skipped.txt"
+    return 1
+  fi
+
+  local nodes="${MINIO_CLUSTER_NODES:-4}"
+  if [[ "$nodes" -lt 4 ]]; then
+    echo "minio-cluster: requires >= 4 nodes (MinIO distributed minimum); got $nodes" >&2
+    return 1
+  fi
+
+  local base_dir="$BENCH_DIR/minio-cluster"
+  mkdir -p "$base_dir"
+  local ports=()
+  local console_ports=()
+  local volume_specs=()
+  local idx
+  for idx in $(seq 1 "$nodes"); do
+    mkdir -p "$base_dir/n${idx}"
+    ports+=("$(bench_free_port)")
+    console_ports+=("$(bench_free_port)")
+  done
+  # MinIO distributed mode requires every node to be addressed via the SAME
+  # URL list, including its own. Each node binds to its --address and connects
+  # out to the other peers; matching ports against the URL list lets MinIO
+  # detect which slot is local.
+  for idx in $(seq 1 "$nodes"); do
+    volume_specs+=("http://127.0.0.1:${ports[$((idx - 1))]}${base_dir}/n${idx}")
+  done
+
+  local urls=()
+  for idx in $(seq 1 "$nodes"); do
+    local zero_idx=$((idx - 1))
+    MINIO_CI_CD="${MINIO_CI_CD:-1}" \
+    MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
+    MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
+    "$MINIO_BIN" server \
+      --address "127.0.0.1:${ports[$zero_idx]}" \
+      --console-address "127.0.0.1:${console_ports[$zero_idx]}" \
+      "${volume_specs[@]}" \
+      >"$PROFILE_ROOT/minio-cluster-node-${idx}.log" 2>&1 &
+    PIDS+=($!)
+    urls+=("http://127.0.0.1:${ports[$zero_idx]}")
+  done
+  # MinIO needs every node to be reachable before completing initialisation —
+  # so the per-node TCP wait races against peer dial-back. Wait for every
+  # node's port to be open, then poll /minio/health/cluster on node 1 (which
+  # only flips to 200 once the cluster quorum has actually formed).
+  sleep "${MINIO_CLUSTER_WARMUP_SLEEP:-3}"
+  for idx in $(seq 1 "$nodes"); do
+    bench_wait_tcp_port "127.0.0.1" "${ports[$((idx - 1))]}" "minio-cluster node${idx} port" 180 0.2 >&2
+  done
+  local ready_url="http://127.0.0.1:${ports[0]}/minio/health/cluster"
+  local ready_attempts="${MINIO_CLUSTER_READY_ATTEMPTS:-600}"
+  local ready_sleep="${MINIO_CLUSTER_READY_SLEEP:-0.5}"
+  echo "  waiting for minio-cluster S3 cluster-ready..."
+  local ready=0
+  for _ in $(seq 1 "$ready_attempts"); do
+    local code
+    code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$ready_url" 2>/dev/null || echo 000)"
+    if [[ "$code" == "200" ]]; then
+      ready=1
+      break
+    fi
+    sleep "$ready_sleep"
+  done
+  if [[ "$ready" != "1" ]]; then
+    echo "  minio-cluster never reported /minio/health/cluster as 200; aborting" >&2
+    return 1
+  fi
+  echo "  minio-cluster S3 cluster-ready"
+  set_start_info "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"
+}
+
 start_rustfs() {
   if [[ "${RUSTFS_URL:-}" != "" ]]; then
     set_start_info "$RUSTFS_URL" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "external"
@@ -270,6 +389,60 @@ start_rustfs() {
   set_start_info "http://127.0.0.1:$port" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "local"
 }
 
+start_rustfs_cluster() {
+  if [[ "${RUSTFS_CLUSTER_URL:-}" != "" ]]; then
+    set_start_info "$RUSTFS_CLUSTER_URL" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "external"
+    return 0
+  fi
+  if [[ -z "$RUSTFS_BIN" ]]; then
+    return 1
+  fi
+
+  local nodes="${RUSTFS_CLUSTER_NODES:-4}"
+  if [[ "$nodes" -lt 4 ]]; then
+    echo "rustfs-cluster: requires >= 4 nodes; got $nodes" >&2
+    return 1
+  fi
+
+  local base_dir="$BENCH_DIR/rustfs-cluster"
+  mkdir -p "$base_dir"
+  local ports=()
+  local console_ports=()
+  local volume_specs=()
+  local idx
+  for idx in $(seq 1 "$nodes"); do
+    mkdir -p "$base_dir/n${idx}"
+    ports+=("$(bench_free_port)")
+    console_ports+=("$(bench_free_port)")
+  done
+  for idx in $(seq 1 "$nodes"); do
+    volume_specs+=("http://127.0.0.1:${ports[$((idx - 1))]}${base_dir}/n${idx}")
+  done
+
+  local urls=()
+  for idx in $(seq 1 "$nodes"); do
+    local zero_idx=$((idx - 1))
+    RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY" \
+    RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY" \
+    RUSTFS_RPC_SECRET="$RUSTFS_RPC_SECRET" \
+    RUSTFS_REGION="us-east-1" \
+    "$RUSTFS_BIN" server \
+      --address "127.0.0.1:${ports[$zero_idx]}" \
+      --console-enable \
+      --console-address "127.0.0.1:${console_ports[$zero_idx]}" \
+      "${volume_specs[@]}" \
+      >"$PROFILE_ROOT/rustfs-cluster-node-${idx}.log" 2>&1 &
+    PIDS+=($!)
+    urls+=("http://127.0.0.1:${ports[$zero_idx]}")
+  done
+
+  for idx in $(seq 1 "$nodes"); do
+    bench_wait_tcp_port "127.0.0.1" "${ports[$((idx - 1))]}" "rustfs-cluster node${idx} S3" 180 0.2 >&2
+  done
+  sleep "${RUSTFS_CLUSTER_WARMUP_SLEEP:-5}"
+  set_start_info "$(IFS=','; echo "${urls[*]}")" "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" "local"
+}
+
 write_summary_header() {
   local summary="$PROFILE_ROOT/summary.md"
   {
@@ -291,7 +464,7 @@ write_summary_header() {
     echo
     echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. With WARP_NOCLEAR=1, GET measures a warm-read pass over the objects written by the preceding PUT pass; DELETE uses warp's batch delete workload."
     echo
-    echo "> Caveat: GrainFS runs with at-rest encryption. MinIO/RustFS local runs use their default single-node durability unless an external endpoint is supplied."
+    echo "> Caveat: GrainFS runs with at-rest encryption. Local MinIO/RustFS single-node targets use their default single-node durability; local \`*-cluster\` targets boot 4-node distributed clusters unless overridden."
     echo
     echo "| target | mode | op | MiB/s | obj/s | errors | ratio vs MinIO | ratio vs RustFS | artifacts |"
     echo "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
@@ -449,13 +622,18 @@ def ratio(value, base):
         return ""
     return f"{value / base:.2f}x"
 
+def baseline(case, base, target):
+    if target.endswith("-cluster"):
+        return case.get(f"{base}-cluster", case.get(base, 0))
+    return case.get(base, 0)
+
 with open(summary_path, "a") as out:
     for row in rows:
         target, mode, op, mib, objs, errors, artifact_dir = row
         throughput = float(mib)
         case = by_case[op]
-        minio = case.get("minio", 0)
-        rustfs = case.get("rustfs", 0)
+        minio = baseline(case, "minio", target)
+        rustfs = baseline(case, "rustfs", target)
         out.write(
             f"| {target} | {mode} | {op.upper()} | {throughput:.2f} | {float(objs):.2f} | "
             f"{int(errors)} | {ratio(throughput, minio)} | {ratio(throughput, rustfs)} | `{artifact_dir}` |\n"
@@ -476,7 +654,7 @@ write_summary_header
 : >"$PROFILE_ROOT/skipped.txt"
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
-for target in grainfs-single grainfs-cluster minio rustfs; do
+for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-cluster; do
   target_enabled "$target" || continue
   target_pid_start="${#PIDS[@]}"
 
@@ -493,9 +671,23 @@ for target in grainfs-single grainfs-cluster minio rustfs; do
         continue
       fi
       ;;
+    minio-cluster)
+      if ! start_minio_cluster; then
+        echo "minio-cluster: skipped; set MINIO_BIN or MINIO_CLUSTER_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        stop_target_backends "$target_pid_start"
+        continue
+      fi
+      ;;
     rustfs)
       if ! start_rustfs; then
         echo "rustfs: skipped; set RUSTFS_BIN or RUSTFS_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        continue
+      fi
+      ;;
+    rustfs-cluster)
+      if ! start_rustfs_cluster; then
+        echo "rustfs-cluster: skipped; set RUSTFS_BIN or RUSTFS_CLUSTER_URL" | tee -a "$PROFILE_ROOT/skipped.txt"
+        stop_target_backends "$target_pid_start"
         continue
       fi
       ;;

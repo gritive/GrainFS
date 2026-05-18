@@ -87,9 +87,11 @@ host lists to `warp`. The script accepts the full warp op surface through
 `delete` auto-raises `--objects` to `concurrent × batch × 4` so the warp
 minimum-object guard is satisfied; and each op runs in its own bucket
 (`warp-<target>-<op>`) so a later op does not seed against the prior op's
-data. `GRAINFS_CLUSTER_NODES=4` boots a 4-node cluster instead of the default
-3. Note that a freshly bootstrapped cluster needs roughly 30 to 45 seconds for
-the multipart-listing capability evidence to propagate through gossip; set
+data. GrainFS cluster runs default to 4 nodes, and
+`TARGETS=minio-cluster,rustfs-cluster` boots local 4-node distributed baselines
+when native MinIO and RustFS binaries are available. Note that a freshly
+bootstrapped GrainFS cluster needs roughly 30 to 45 seconds for the
+multipart-listing capability evidence to propagate through gossip; set
 `CLUSTER_WARMUP_SLEEP=45` before running multipart workloads (see TODOS for
 the capability-ready probe follow-up). k6-based S3 benchmark scripts have
 been removed; S3 performance claims should use `warp`.
