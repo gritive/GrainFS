@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.239.0] - 2026-05-18 - perf(raft): borrow heartbeat FlatBuffer payloads
+
+Raft heartbeat batch encoding now avoids the per-item owned FlatBuffer payload
+copy while keeping the returned batch payload fully owned by the caller.
+
+### Added
+
+- Added borrowed-vs-owned AppendEntries payload parity coverage for both empty
+  heartbeats and entries-bearing AppendEntries payloads.
+- Added a regression test proving encoded heartbeat batches survive FlatBuffers
+  builder pool reuse after borrowed builders are released.
+
+### Changed
+
+- `encodeHeartbeatBatch` now borrows per-item AppendEntries FlatBuffer bytes,
+  copies them into the final batch buffer, and releases builders after the copy.
+- AppendEntriesArgs FlatBuffer construction is shared between the owned encoder
+  and heartbeat borrowed-payload path to prevent wire-format drift.
+
+### Fixed
+
+- `BenchmarkHeartbeatEncodeBatch` improved from `10 allocs/op` to `1 alloc/op`,
+  `1857 B/op` to `896 B/op`, and `1089.0 ns/op` to `915.6 ns/op` in the saved
+  `benchstat` run.
+
 ## [0.0.238.0] - 2026-05-18 - perf(raft): reduce heartbeat batch encode allocation
 
 Raft heartbeat batch encoding now allocates less on the sender hot path for

@@ -21,12 +21,77 @@ func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	return out
 }
 
+type borrowedRPCPayload struct {
+	data []byte
+	b    *flatbuffers.Builder
+}
+
+func (p borrowedRPCPayload) release() {
+	if p.b == nil {
+		return
+	}
+	p.b.Reset()
+	raftBuilderPool.Put(p.b)
+}
+
+func releaseBorrowedRPCPayloads(payloads []borrowedRPCPayload) {
+	for i := range payloads {
+		payloads[i].release()
+		payloads[i] = borrowedRPCPayload{}
+	}
+}
+
 // encodeAppendEntriesArgs serializes just the AppendEntriesArgs FlatBuffer
 // (no RPCMessage envelope). Used by the heartbeat coalescer where the rpc
 // type is implicit (always AppendEntries) and the envelope overhead per
 // batch item is wasteful.
 func encodeAppendEntriesArgs(args *AppendEntriesArgs) ([]byte, error) {
 	return encodeRPCPayload(rpcTypeAppendEntries, args)
+}
+
+func borrowAppendEntriesArgsPayload(args *AppendEntriesArgs) borrowedRPCPayload {
+	b := raftBuilderPool.Get()
+	root := buildAppendEntriesArgsFlatBuffer(b, args)
+	b.Finish(root)
+
+	return borrowedRPCPayload{data: b.FinishedBytes(), b: b}
+}
+
+func buildAppendEntriesArgsFlatBuffer(b *flatbuffers.Builder, args *AppendEntriesArgs) flatbuffers.UOffsetT {
+	entryOffs := make([]flatbuffers.UOffsetT, len(args.Entries))
+	for i := len(args.Entries) - 1; i >= 0; i-- {
+		e := args.Entries[i]
+		var cmdOff flatbuffers.UOffsetT
+		if len(e.Command) > 0 {
+			cmdOff = b.CreateByteVector(e.Command)
+		}
+		pb.LogEntryStart(b)
+		pb.LogEntryAddTerm(b, e.Term)
+		pb.LogEntryAddIndex(b, e.Index)
+		if len(e.Command) > 0 {
+			pb.LogEntryAddCommand(b, cmdOff)
+		}
+		if e.Type != LogEntryCommand {
+			pb.LogEntryAddEntryType(b, pb.LogEntryType(e.Type))
+		}
+		entryOffs[i] = pb.LogEntryEnd(b)
+	}
+
+	pb.AppendEntriesArgsStartEntriesVector(b, len(entryOffs))
+	for i := len(entryOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(entryOffs[i])
+	}
+	entriesVec := b.EndVector(len(entryOffs))
+
+	leaderIDOff := b.CreateString(args.LeaderID)
+	pb.AppendEntriesArgsStart(b)
+	pb.AppendEntriesArgsAddTerm(b, args.Term)
+	pb.AppendEntriesArgsAddLeaderId(b, leaderIDOff)
+	pb.AppendEntriesArgsAddPrevLogIndex(b, args.PrevLogIndex)
+	pb.AppendEntriesArgsAddPrevLogTerm(b, args.PrevLogTerm)
+	pb.AppendEntriesArgsAddEntries(b, entriesVec)
+	pb.AppendEntriesArgsAddLeaderCommit(b, args.LeaderCommit)
+	return pb.AppendEntriesArgsEnd(b)
 }
 
 // encodeAppendEntriesReply serializes just the AppendEntriesReply FlatBuffer.
@@ -85,42 +150,7 @@ func encodeRPCPayload(rpcType string, msg any) ([]byte, error) {
 	case rpcTypeAppendEntries, metaRPCAppendEntries:
 		args := msg.(*AppendEntriesArgs)
 		b := raftBuilderPool.Get()
-
-		// Build LogEntry objects (must be built before Start)
-		entryOffs := make([]flatbuffers.UOffsetT, len(args.Entries))
-		for i := len(args.Entries) - 1; i >= 0; i-- {
-			e := args.Entries[i]
-			var cmdOff flatbuffers.UOffsetT
-			if len(e.Command) > 0 {
-				cmdOff = b.CreateByteVector(e.Command)
-			}
-			pb.LogEntryStart(b)
-			pb.LogEntryAddTerm(b, e.Term)
-			pb.LogEntryAddIndex(b, e.Index)
-			if len(e.Command) > 0 {
-				pb.LogEntryAddCommand(b, cmdOff)
-			}
-			if e.Type != LogEntryCommand {
-				pb.LogEntryAddEntryType(b, pb.LogEntryType(e.Type))
-			}
-			entryOffs[i] = pb.LogEntryEnd(b)
-		}
-
-		pb.AppendEntriesArgsStartEntriesVector(b, len(entryOffs))
-		for i := len(entryOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(entryOffs[i])
-		}
-		entriesVec := b.EndVector(len(entryOffs))
-
-		leaderIDOff := b.CreateString(args.LeaderID)
-		pb.AppendEntriesArgsStart(b)
-		pb.AppendEntriesArgsAddTerm(b, args.Term)
-		pb.AppendEntriesArgsAddLeaderId(b, leaderIDOff)
-		pb.AppendEntriesArgsAddPrevLogIndex(b, args.PrevLogIndex)
-		pb.AppendEntriesArgsAddPrevLogTerm(b, args.PrevLogTerm)
-		pb.AppendEntriesArgsAddEntries(b, entriesVec)
-		pb.AppendEntriesArgsAddLeaderCommit(b, args.LeaderCommit)
-		root := pb.AppendEntriesArgsEnd(b)
+		root := buildAppendEntriesArgsFlatBuffer(b, args)
 		return fbFinishRPC(b, root), nil
 
 	case rpcTypeAppendEntriesReply, metaRPCAppendEntriesReply:
