@@ -210,8 +210,28 @@ func (rcv *ObjectMeta) SegmentsLength() int {
 	return 0
 }
 
-func (rcv *ObjectMeta) IsAppendable() bool {
+func (rcv *ObjectMeta) Coalesced(obj *CoalescedShardRef, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ObjectMeta) CoalescedLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *ObjectMeta) IsAppendable() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -219,11 +239,11 @@ func (rcv *ObjectMeta) IsAppendable() bool {
 }
 
 func (rcv *ObjectMeta) MutateIsAppendable(n bool) bool {
-	return rcv._tab.MutateBoolSlot(32, n)
+	return rcv._tab.MutateBoolSlot(34, n)
 }
 
 func ObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(15)
+	builder.StartObject(16)
 }
 func ObjectMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -276,8 +296,14 @@ func ObjectMetaAddSegments(builder *flatbuffers.Builder, segments flatbuffers.UO
 func ObjectMetaStartSegmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
+func ObjectMetaAddCoalesced(builder *flatbuffers.Builder, coalesced flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(coalesced), 0)
+}
+func ObjectMetaStartCoalescedVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
 func ObjectMetaAddIsAppendable(builder *flatbuffers.Builder, isAppendable bool) {
-	builder.PrependBoolSlot(14, isAppendable, false)
+	builder.PrependBoolSlot(15, isAppendable, false)
 }
 func ObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

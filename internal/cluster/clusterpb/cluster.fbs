@@ -185,7 +185,34 @@ table ObjectMeta {
   user_metadata:[KeyValue];
   sse_algorithm:string;
   segments:[SegmentRef];
+  coalesced:[CoalescedShardRef];
   is_appendable:bool = false;
+}
+
+// CoalescedShardRef references one coalesced blob produced by merging a
+// prefix of objectMeta.segments. Phase B2 stores it owner-locally; Phase B3
+// distributes it via EC and adds placement params on the same table.
+table CoalescedShardRef {
+  coalesced_id:string;
+  size:int64;
+  etag:string;
+  shard_key:string;
+  version:int32 = 1;
+}
+
+// CoalesceSegmentsCmd records a single coalesce operation: consume the listed
+// segment blob IDs into a single coalesced blob identified by CoalescedID +
+// ShardKey. ConsumedSegmentIDs MUST match a contiguous prefix of
+// objectMeta.segments at apply time; absent IDs are silently skipped
+// (idempotent on Raft replay).
+table CoalesceSegmentsCmd {
+  bucket:string;
+  key:string;
+  coalesced_id:string;
+  shard_key:string;
+  size:int64;
+  etag:string;
+  consumed_segment_ids:[string];
 }
 
 // SegmentRef mirrors storage.SegmentRef — one EC-encoded, encrypted append
