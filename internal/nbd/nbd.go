@@ -24,39 +24,6 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
-// pendingMutation pairs a block key with its deferred Raft commit function.
-// key = offset (exact write-start address), used to group writes to the same block.
-type pendingMutation struct {
-	key uint64
-	fn  func() error
-}
-
-// flushPending runs deferred Raft commits concurrently across distinct block keys
-// but sequentially within each key, preserving per-block write ordering.
-func flushPending(pending []pendingMutation) error {
-	groups := make(map[uint64][]func() error, len(pending))
-	for _, pw := range pending {
-		groups[pw.key] = append(groups[pw.key], pw.fn)
-	}
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(groups))
-	for _, fns := range groups {
-		wg.Add(1)
-		go func(fns []func() error) {
-			defer wg.Done()
-			for _, fn := range fns {
-				if err := fn(); err != nil {
-					errCh <- err
-					return
-				}
-			}
-		}(fns)
-	}
-	wg.Wait()
-	close(errCh)
-	return <-errCh
-}
-
 const (
 	nbdMagic        = uint64(0x4e42444d41474943) // "NBDMAGIC"
 	nbdOptionMagic  = uint64(0x49484156454F5054) // "IHAVEOPT"
@@ -238,14 +205,16 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	// Command loop — pending accumulates deferred Raft commits for write-back.
-	var pending []pendingMutation
+	blockSize := vol.BlockSize
+	if blockSize <= 0 {
+		blockSize = volume.DefaultBlockSize
+	}
+	pending := newMutationQueue(uint64(blockSize))
 	for {
-		if err := s.handleRequest(conn, &pending, state); err != nil {
+		if err := s.handleRequest(conn, pending, state); err != nil {
 			// Drain remaining deferred commits on disconnect so write-back
 			// data reaches Raft even without an explicit NBD_CMD_FLUSH.
-			for _, pw := range pending {
-				pw.fn() //nolint:errcheck
-			}
+			pending.Drain()
 			if err == io.EOF {
 				return
 			}
@@ -280,7 +249,7 @@ func (s *Server) putBuf(buf []byte) {
 	}
 }
 
-func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation, state handshakeState) error {
+func (s *Server) handleRequest(conn net.Conn, pending *mutationQueue, state handshakeState) error {
 	req, err := readNBDRequest(conn)
 	if err != nil {
 		return err
@@ -337,28 +306,22 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation, state 
 		if err != nil {
 			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
-		for _, fn := range commits {
-			*pending = append(*pending, pendingMutation{key: req.offset, fn: fn})
-		}
+		pending.AppendRange(req.offset, uint32(req.length), commits)
 		return s.sendReply(conn, req.handle[:], 0, nil)
 
 	case nbdCmdDisc:
 		return io.EOF
 
 	case nbdCmdFlush:
-		if err := flushPending(*pending); err != nil {
-			*pending = (*pending)[:0]
+		if err := pending.Flush(context.Background()); err != nil {
 			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
-		*pending = (*pending)[:0]
 		return s.sendReply(conn, req.handle[:], 0, nil)
 
 	case nbdCmdTrim:
-		if err := flushPending(*pending); err != nil {
-			*pending = (*pending)[:0]
+		if err := pending.Flush(context.Background()); err != nil {
 			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
-		*pending = (*pending)[:0]
 		if err := s.mgr.Discard(s.volName, int64(req.offset), int64(req.length)); err != nil {
 			return s.sendReply(conn, req.handle[:], nbdErrEIO, nil)
 		}
@@ -384,7 +347,7 @@ func (s *Server) handleRequest(conn net.Conn, pending *[]pendingMutation, state 
 	}
 }
 
-func (s *Server) writeZeroes(offset uint64, length uint32, pending *[]pendingMutation) error {
+func (s *Server) writeZeroes(offset uint64, length uint32, pending *mutationQueue) error {
 	if length == 0 {
 		return nil
 	}
@@ -394,18 +357,21 @@ func (s *Server) writeZeroes(offset uint64, length uint32, pending *[]pendingMut
 
 	remaining := length
 	pos := offset
+	var commits []func() error
 	for remaining > 0 {
 		n := min(remaining, uint32(len(zeroes)))
-		commits, _, err := s.mgr.WriteAtDeferred(s.volName, zeroes[:n], int64(pos))
+		chunkCommits, _, err := s.mgr.WriteAtDeferred(s.volName, zeroes[:n], int64(pos))
 		if err != nil {
+			if pos > offset {
+				pending.AppendRange(offset, uint32(pos-offset), commits)
+			}
 			return err
 		}
-		for _, fn := range commits {
-			*pending = append(*pending, pendingMutation{key: pos, fn: fn})
-		}
+		commits = append(commits, chunkCommits...)
 		remaining -= n
 		pos += uint64(n)
 	}
+	pending.AppendRange(offset, length, commits)
 	return nil
 }
 

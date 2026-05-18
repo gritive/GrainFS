@@ -55,7 +55,18 @@ func (q *mutationQueue) Flush(ctx context.Context) error {
 }
 
 func (q *mutationQueue) Drain() {
-	_ = q.Flush(context.Background())
+	if q == nil || len(q.entries) == 0 {
+		return
+	}
+
+	entries := q.entries
+	q.entries = nil
+
+	for _, entry := range entries {
+		for _, fn := range entry.fns {
+			_ = fn()
+		}
+	}
 }
 
 func (q *mutationQueue) Len() int {

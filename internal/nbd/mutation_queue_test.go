@@ -237,11 +237,20 @@ func TestMutationQueueFlushClearsQueueOnError(t *testing.T) {
 
 func TestMutationQueueDrainIgnoresErrors(t *testing.T) {
 	q := newMutationQueue(4096)
+	var ranAfterFailure atomic.Bool
+
 	q.AppendRange(0, 4096, []func() error{
 		func() error { return errors.New("ignored") },
 	})
+	q.AppendRange(4096, 4096, []func() error{
+		func() error {
+			ranAfterFailure.Store(true)
+			return nil
+		},
+	})
 
 	q.Drain()
+	require.True(t, ranAfterFailure.Load(), "Drain must continue after ignored commit errors")
 	require.Equal(t, 0, q.Len())
 }
 
