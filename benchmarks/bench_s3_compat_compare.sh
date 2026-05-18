@@ -212,6 +212,10 @@ start_grainfs_cluster() {
     if [[ "$BENCH_PPROF" == "1" ]]; then
       extra+=(--pprof-port "${pprof_ports[$zero_idx]}")
     fi
+    local extra_flags=()
+    if [[ -n "${EXTRA_GRAINFS_SERVE_FLAGS:-}" ]]; then
+      read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"
+    fi
     "$BINARY" serve \
       --data "$cluster_dir/n${node_idx}" \
       --port "${http_ports[$zero_idx]}" \
@@ -225,6 +229,7 @@ start_grainfs_cluster() {
       --lifecycle-interval 0 \
       --log-level warn \
       "${extra[@]}" \
+      "${extra_flags[@]}" \
       >"$PROFILE_ROOT/grainfs-cluster-node-${node_idx}.log" 2>&1 &
     PIDS+=($!)
     bench_wait_tcp_port "127.0.0.1" "${http_ports[$zero_idx]}" "grainfs-cluster node${node_idx} S3" 180 0.2 >&2
