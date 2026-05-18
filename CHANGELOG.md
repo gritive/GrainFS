@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.250.0] - 2026-05-19 - perf(nbd): block-range pending mutation queue
+
+NBD write-back flush now orders deferred Raft commits by affected volume block.
+Writes touching the same block flush in append order even when request offsets
+differ, while writes to distinct blocks can still commit concurrently.
+
+### Added
+
+- Private `mutationQueue` for each NBD connection, with block-range wave
+  scheduling, queue clearing on flush, and best-effort disconnect drain.
+- Unit coverage for same-block serialization, distinct-block parallelism,
+  configured block sizes, transitive overlaps, flush error clearing, drain
+  behavior, and copied commit function slices.
+- NBD wire-level smoke coverage proving `FLUSH` runs deferred same-block commit
+  functions after different-offset writes.
+- Mutation queue benchmarks for distinct-block and same-block flush workloads.
+
+### Changed
+
+- `WRITE`, `WRITE_ZEROES`, `FLUSH`, and pre-`TRIM` paths now use the
+  per-connection mutation queue instead of an offset-keyed pending slice.
+- `WRITE_ZEROES` records successful chunk commits as one request-range mutation,
+  so its flush ordering follows the original command range.
+- NBD architecture context now documents pending mutation queue ownership and
+  block-level ordering semantics.
+
 ## [0.0.249.0] - 2026-05-18 - feat(s3): AppendObject API (Phase A + B1 + B2 + B3)
 
 S3 Express AppendObject (`x-amz-write-offset-bytes`)를 single-node와 4-node
