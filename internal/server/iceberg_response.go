@@ -37,7 +37,14 @@ func writeIcebergMappedError(c *app.RequestContext, err error) {
 	case errors.Is(err, icebergcatalog.ErrTableExists):
 		writeIcebergError(c, consts.StatusConflict, "AlreadyExistsException", "table already exists")
 	case errors.Is(err, icebergcatalog.ErrCommitFailed):
-		writeIcebergError(c, consts.StatusConflict, "CommitFailedException", "table metadata pointer changed")
+		// Message intentionally embeds the literal "409 Conflict" so
+		// client-side retry matchers that grep the err.Error() string —
+		// e.g., warp 1.5 pkg/iceberg/commit.go IsConflictError, which
+		// substring-checks "409" / "Conflict" — recognize the response.
+		// iceberg-go's REST client otherwise emits
+		// "CommitFailedException: table metadata pointer changed" with
+		// no 4xx hint in the string, defeating those matchers.
+		writeIcebergError(c, consts.StatusConflict, "CommitFailedException", "409 Conflict: table metadata pointer changed")
 	case errors.Is(err, icebergcatalog.ErrServiceUnavailable):
 		// 503 from the iceberg catalog is rare and structurally important —
 		// surface the full wrapped error in both the log AND the response

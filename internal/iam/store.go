@@ -94,6 +94,77 @@ func (s *Store) LookupSA(saID string) (*ServiceAccount, bool) {
 	return sa, ok
 }
 
+// FirstActiveKeyForSA returns one active, non-expired AccessKey belonging
+// to saID, with the plaintext SecretKey populated. ok=false if the SA has
+// no usable keys. Selection is non-deterministic when more than one key
+// qualifies (Go map iteration order); callers needing stability should
+// pin a specific access_key string and use LookupKey instead.
+func (s *Store) FirstActiveKeyForSA(saID string) (*AccessKey, bool) {
+	st := s.snapshot()
+	now := time.Now()
+	for _, k := range st.keysByAK {
+		if k == nil || k.SAID != saID {
+			continue
+		}
+		if k.Status != KeyStatusActive {
+			continue
+		}
+		if k.ExpiresAt != nil && now.After(*k.ExpiresAt) {
+			continue
+		}
+		return k, true
+	}
+	return nil, false
+}
+
+// FirstActiveKeyForBucketGrant returns an active AccessKey belonging to any
+// ServiceAccount that holds an effective Role >= minRole on the given
+// bucket (per-bucket grant or wildcard, whichever is higher). The intended
+// use is "find a usable credential pair to publish over an
+// already-IAM-authorized data plane" — e.g., the Iceberg REST
+// `/v1/config` overrides for clients that need to read parquet data
+// outside the catalog request path.
+//
+// Selection rules:
+//   - prefer SAs whose effective bucket role is exactly RoleAdmin;
+//   - fall back to the highest-role SA that still satisfies minRole;
+//   - within the same role tier, iteration order is non-deterministic.
+//
+// ok=false when no qualifying SA exists, when the qualifying SA has no
+// active access keys, or when bucket / minRole filter excludes every
+// candidate.
+func (s *Store) FirstActiveKeyForBucketGrant(bucket string, minRole Role) (*AccessKey, bool) {
+	st := s.snapshot()
+	var bestSAID string
+	var bestRole Role
+	for saID := range st.sas {
+		role := RoleNone
+		if perBucket, ok := st.grants[saID]; ok {
+			if r, ok := perBucket[bucket]; ok && r > role {
+				role = r
+			}
+		}
+		if r, ok := st.wildcards[saID]; ok && r > role {
+			role = r
+		}
+		if role < minRole {
+			continue
+		}
+		if role > bestRole {
+			bestRole = role
+			bestSAID = saID
+			if role == RoleAdmin {
+				// Can't beat admin; stop searching once we have one.
+				break
+			}
+		}
+	}
+	if bestSAID == "" {
+		return nil, false
+	}
+	return s.FirstActiveKeyForSA(bestSAID)
+}
+
 // IsEmpty returns true when no SAs are registered. Used by HandleSACreate
 // to decide whether to dispatch IAMInitFirstSA (composite) or the regular
 // SACreate+KeyCreate path.
