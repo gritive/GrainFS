@@ -133,6 +133,17 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 	if err := c.propose(ctx, MetaCmdTypeIcebergCreateTable, payload, cmd.RequestID); err != nil {
 		return nil, err
 	}
+	if !c.meta.IsLeader() && len(in.Metadata) > 0 {
+		metadata := make([]byte, len(in.Metadata))
+		copy(metadata, in.Metadata)
+		c.storeCachedMetadata(ident, in.MetadataLocation, metadata)
+		return &icebergcatalog.Table{
+			Identifier:       ident,
+			MetadataLocation: in.MetadataLocation,
+			Metadata:         metadata,
+			Properties:       cloneStringMap(in.Properties),
+		}, nil
+	}
 	if !c.meta.IsLeader() {
 		return c.LoadTable(ctx, ident)
 	}
