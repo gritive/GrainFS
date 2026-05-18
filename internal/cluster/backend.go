@@ -93,6 +93,7 @@ type DistributedBackend struct {
 	node             RaftNode
 	fsm              *FSM
 	keys             *stateKeyspace
+	groupID          string // non-empty when constructed via NewDistributedBackendForGroup; used by Phase B1 append-segment peer-fetch
 	shared           bool
 	logger           zerolog.Logger
 	lastApplied      atomic.Uint64
@@ -204,7 +205,23 @@ func NewDistributedBackendForGroup(root string, db *badger.DB, node RaftNode, gr
 	if err != nil {
 		return nil, fmt.Errorf("group %s: keyspace: %w", groupID, err)
 	}
-	return NewDistributedBackend(root, db, node, keys, true)
+	b, err := NewDistributedBackend(root, db, node, keys, true)
+	if err != nil {
+		return nil, err
+	}
+	b.groupID = groupID
+	return b, nil
+}
+
+// GroupID returns the placement group this backend serves, or empty for
+// legacy single-group test/tooling constructions.
+func (b *DistributedBackend) GroupID() string { return b.groupID }
+
+// SegmentBlobPath exposes the on-disk path for an append-segment blob so
+// the node-level Phase B1 peer-fetch handler can open it through the
+// right group backend.
+func (b *DistributedBackend) SegmentBlobPath(bucket, key, blobID string) string {
+	return b.segmentBlobPath(bucket, key, blobID)
 }
 
 // ks returns the effective stateKeyspace for this backend. When b.keys is nil

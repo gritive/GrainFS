@@ -115,6 +115,10 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GroupBackend %s: NewDistributedBackend: %w", cfg.ID, err)
 	}
+	// Phase B1: tag the backend with its placement group so the node-level
+	// append-segment peer-fetch RPC can route a (groupID, bucket, key)
+	// triple back to this backend's data root.
+	dist.groupID = cfg.ID
 
 	// selfAddr must equal this node's raft ID so WriteShard/ReadShard self-skip
 	// is correct. instantiateLocalGroup ensures cfg.PeerIDs[0] == cfg.NodeID.

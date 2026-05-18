@@ -183,8 +183,6 @@ func runClusterOnlyAppendCases(t *testing.T, tgt appendTarget) {
 	})
 
 	t.Run("AppendsFromDifferentNodesForwardToOwner", func(t *testing.T) {
-		t.Skip("Task 25: append segment blobs are written to owner's local disk only; " +
-			"non-owner GETs ENOENT on the segment path. Needs cluster-wide segment placement.")
 		// Serial appends, each issued against a different node. The
 		// distributed backend must forward to the owner so the final
 		// object reflects every chunk in order. This validates the

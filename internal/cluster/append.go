@@ -134,24 +134,37 @@ func (b *DistributedBackend) segmentBlobPath(bucket, key, blobID string) string 
 // opened lazily as Read advances; matches LocalBackend.OpenSegmentedReader's
 // behavior for the cluster path. Note: cluster-side segments are written
 // unencrypted by writeSegmentBlobForAppend, so this path mirrors that.
+//
+// Phase B1 (forward-on-read): segment blobs only live on the owner-node's
+// disk. When a non-owner serves the GET, local Open returns ENOENT; we
+// then fetch the segment from a peer over StreamReadAppendSegment.
+// Encryption note: writeSegmentBlobForAppend writes plaintext today; if
+// at-rest encryption is later wired into that path, the peer-fetch path
+// must reuse the same envelope (see append_segment_transport.go).
 func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *storage.Object) io.ReadCloser {
+	blobIDs := make([]string, len(obj.Segments))
+	paths := make([]string, len(obj.Segments))
+	for i, s := range obj.Segments {
+		blobIDs[i] = s.BlobID
+		paths[i] = b.segmentBlobPath(bucket, key, s.BlobID)
+	}
 	return &appendableSegmentReader{
-		paths: collectSegmentPaths(b, bucket, key, obj.Segments),
+		backend: b,
+		bucket:  bucket,
+		key:     key,
+		paths:   paths,
+		blobIDs: blobIDs,
 	}
-}
-
-func collectSegmentPaths(b *DistributedBackend, bucket, key string, segs []storage.SegmentRef) []string {
-	out := make([]string, len(segs))
-	for i, s := range segs {
-		out[i] = b.segmentBlobPath(bucket, key, s.BlobID)
-	}
-	return out
 }
 
 type appendableSegmentReader struct {
-	paths []string
-	idx   int
-	cur   *os.File
+	backend *DistributedBackend
+	bucket  string
+	key     string
+	paths   []string
+	blobIDs []string
+	idx     int
+	cur     io.ReadCloser
 }
 
 func (r *appendableSegmentReader) Read(p []byte) (int, error) {
@@ -160,11 +173,11 @@ func (r *appendableSegmentReader) Read(p []byte) (int, error) {
 			if r.idx >= len(r.paths) {
 				return 0, io.EOF
 			}
-			f, err := os.Open(r.paths[r.idx])
+			rc, err := r.openCurrent()
 			if err != nil {
-				return 0, fmt.Errorf("open segment %s: %w", r.paths[r.idx], err)
+				return 0, err
 			}
-			r.cur = f
+			r.cur = rc
 			r.idx++
 		}
 		n, err := r.cur.Read(p)
@@ -178,6 +191,27 @@ func (r *appendableSegmentReader) Read(p []byte) (int, error) {
 		}
 		return n, err
 	}
+}
+
+// openCurrent opens the segment at r.idx. Tries the local file first;
+// on ENOENT falls back to a peer fetch (Phase B1 forward-on-read).
+func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
+	path := r.paths[r.idx]
+	f, err := os.Open(path)
+	if err == nil {
+		return f, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("open segment %s: %w", path, err)
+	}
+	if r.backend == nil {
+		return nil, fmt.Errorf("open segment %s: %w", path, err)
+	}
+	rc, ferr := r.backend.fetchAppendSegmentFromAnyPeer(context.Background(), r.bucket, r.key, r.blobIDs[r.idx])
+	if ferr != nil {
+		return nil, fmt.Errorf("open segment %s (local missing, peer fetch failed): %w", path, ferr)
+	}
+	return rc, nil
 }
 
 func (r *appendableSegmentReader) Close() error {

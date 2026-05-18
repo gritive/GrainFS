@@ -105,11 +105,37 @@ func bootStreamRouter(state *bootState) error {
 	state.quicTransport.SetStreamHandler(state.streamRouter.Dispatch)
 	state.quicTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
 	state.quicTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
+	// Phase B1: node-level append-segment peer-fetch handler. Each node
+	// hosts multiple group backends — the request payload carries groupID
+	// so the handler resolves the right per-group root via DataGroupManager.
+	// Lookups happen lazily at RPC time, so it's fine that groups are added
+	// to the manager AFTER this registration (bootOwnedGroupsAndEC).
+	cluster.RegisterAppendSegmentHandler(state.quicTransport, dataGroupAppendSegmentLookup{m: state.dgMgr})
 
 	state.node.Start()
 	// state.node.Close() goes through the cluster.RaftNode interface.
 	state.AddCleanup(func() { state.node.Close() })
 	return nil
+}
+
+// dataGroupAppendSegmentLookup adapts *cluster.DataGroupManager to
+// cluster.RegisterAppendSegmentHandler's lookup interface, exposing the
+// embedded *DistributedBackend for each known groupID.
+type dataGroupAppendSegmentLookup struct{ m *cluster.DataGroupManager }
+
+func (a dataGroupAppendSegmentLookup) Backend(groupID string) *cluster.DistributedBackend {
+	if a.m == nil {
+		return nil
+	}
+	dg := a.m.Get(groupID)
+	if dg == nil {
+		return nil
+	}
+	gb := dg.Backend()
+	if gb == nil {
+		return nil
+	}
+	return gb.DistributedBackend
 }
 
 func runtimeTopologyNodes(selfNodeID, selfAddr string, seedPeers []string, nodes []cluster.MetaNodeEntry) []string {

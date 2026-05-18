@@ -30,6 +30,7 @@ const (
 	StreamCapabilityExchange      StreamType = 0x12 // protocol version handshake; first stream on every mux QUIC conn
 	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
+	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 )
 
 type StreamClass byte
@@ -47,7 +48,7 @@ func ClassOf(st StreamType) StreamClass {
 		return StreamClassMeta
 	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
 		return StreamClassData
-	case StreamGroupForwardBody, StreamGroupForwardRead, StreamShardWriteBody, StreamShardReadBody:
+	case StreamGroupForwardBody, StreamGroupForwardRead, StreamShardWriteBody, StreamShardReadBody, StreamReadAppendSegment:
 		return StreamClassBulk
 	default:
 		return StreamClassControl
