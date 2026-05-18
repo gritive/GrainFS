@@ -368,6 +368,34 @@ func writeNodeJoinPending(dataDir, seedRaftAddr string) error {
 	)
 }
 
+// KillNode terminates node i's process via SIGKILL while preserving its
+// dataDir / port assignments. The slot c.procs[i] is set to nil; use
+// RestartNode to bring it back in the same slot. Cleanup safety: the Stop
+// loop below tolerates nil entries (terminateProcess checks for nil).
+func (c *e2eCluster) KillNode(i int) {
+	if c == nil || i < 0 || i >= len(c.procs) {
+		return
+	}
+	if c.procs[i] != nil {
+		terminateProcess(c.procs[i])
+		c.procs[i] = nil
+	}
+}
+
+// RestartNode re-launches node i with the preserved data dir / ports.
+// Mirrors the initial startNode call. Caller should poll waitClusterSettled
+// or getStatusJSON after this to confirm the node has rejoined.
+func (c *e2eCluster) RestartNode(t *testing.T, i int) {
+	t.Helper()
+	if c == nil || i < 0 || i >= len(c.procs) {
+		return
+	}
+	if c.procs[i] != nil {
+		return // already running
+	}
+	c.procs[i] = c.startNode(t, i)
+}
+
 func (c *e2eCluster) Stop() {
 	if c == nil || c.stopped {
 		return
