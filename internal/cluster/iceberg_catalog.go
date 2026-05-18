@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -306,17 +308,45 @@ func (c *MetaCatalog) requestID(prefix string) string {
 	return fmt.Sprintf("%s-%s-%d", prefix, c.idPrefix, c.nextID.Add(1))
 }
 
+// readMetadata fetches a metadata.json from the cluster backend.
+//
+// Under heavy concurrent CommitTable load, an immediately-following LoadTable
+// against the freshly committed metadata location can race the backend's
+// post-write visibility — the FSM entry is durable on raft commit, but the
+// backend write that landed just before the propose is sometimes not yet
+// observable from a different reader. The error surfaces as
+// storage.ErrObjectNotFound on the read side and propagates as a 500 to the
+// client even though the catalog state itself is consistent.
+//
+// Apply a small bounded retry with backoff to bridge the consistency
+// window. The schedule is tuned to stay well under warp's 10 s per-request
+// timeout while absorbing typical millisecond-scale propagation delays:
+// 5 attempts, 5/15/35/75 ms cumulative ≈ 130 ms worst case. Non-ENOENT
+// errors return immediately.
 func (c *MetaCatalog) readMetadata(location string) ([]byte, error) {
 	bucket, key, ok := parseIcebergS3Location(location)
 	if !ok {
 		return nil, fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	rc, _, err := c.backend.GetObject(context.Background(), bucket, key)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	backoffs := []time.Duration{0, 5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond}
+	for _, backoff := range backoffs {
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+		rc, _, err := c.backend.GetObject(context.Background(), bucket, key)
+		if err == nil {
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+		lastErr = err
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			// Only retry the visible "not yet there" race. Anything else
+			// (permission, bucket gone, network) is a real error.
+			return nil, err
+		}
 	}
-	defer rc.Close()
-	return io.ReadAll(rc)
+	return nil, lastErr
 }
 
 func parseIcebergS3Location(location string) (bucket, key string, ok bool) {
