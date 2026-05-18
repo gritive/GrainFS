@@ -178,42 +178,35 @@ Work these in order. Do not run them in parallel.
 
 ## AppendObject Follow-Ups
 
+- [ ] **Forward buffer 512 MiB warp calibration [P1]**: production traffic
+  pattern에 default `--cluster-append-forward-buffer-total-bytes` 512 MiB가
+  적정한지 검증. `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
+  실행, `grainfs_cluster_append_forward_buffer_rejected_total` ratio < 1%
+  확인. 충족 못 하면 default 상향 또는 memory-budget tuning을 separate PR로
+  분리. PR description에 measurement result 또는 미실행 사유 명시.
+
+- [ ] **EC shard orphan cleanup [P2]**: PR #425 (raw segment side)에서 미해결.
+  coalesce 도중 EC 쓰기 후 propose 실패 시 남는 EC shard dir
+  (`<shardRoot>/<bucket>/<userKey>/coalesced/<id>/coalesced/<id>/shard_<i>`)
+  cleanup. 기존 `OrphanWalkable.WalkOrphanShards` 인터페이스는 plain EC만
+  cover — `ScanObjects`가 `lat:` 인덱스로 coalesced shardKey를 yield하지 않아
+  known set 구축이 안 됨. Storage layout (shardRoot vs data root) + coalesced
+  shard tracking mechanism 조사 → `OrphanWalkable` 확장 또는 별도 sweep
+  메커니즘 도입.
+
 - [ ] **Coalesce recoalesce depth audit [P2]**: design open question — 새
   raw segment가 다시 threshold 도달 시 또 coalesce하면 `coalesced[]`에 entry가
   계속 누적된다. `MaxCoalescedEntries=1024` cap 외에 measurement-driven 정책
-  (max depth, periodic 통합) 검토. v0.0.250.x Hardening은 `AppendCoalescedEntriesAtCap`
-  counter로 cap reach 빈도 measurement만 추가.
-
-- [ ] **Forward buffer 512 MiB warp calibration [P1]**: AppendObject Hardening
-  PR ship 전 `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
-  실행, `grainfs_cluster_append_forward_buffer_rejected_total` ratio < 1%
-  확인. 충족 못 하면 default `--cluster-append-forward-buffer-total-bytes`
-  상향 또는 memory-budget tuning을 separate PR로 분리. PR description에
-  measurement result 또는 미실행 사유 명시.
+  (max depth, periodic 통합) 검토. v0.0.253.0 Hardening이 추가한
+  `AppendCoalescedEntriesAtCap` counter로 production cap-reach 빈도 baseline
+  수집 후 판단.
 
 - [ ] **`AwaitWriteFromNonOwner` harness EC-aware 강화 [P2]**: 현재
   AwaitWriteFromNonOwner는 healthy-cluster path 전용 — EC stripe width ==
   cluster size 환경에서 owner kill 후 호출하면 모든 PUT이 ServiceUnavailable.
-  T24 OwnerKillSurvives는 직접 `/api/cluster/status` `leader_id` 폴링으로
-  우회했다. EC degraded write을 인식하는 helper 또는 별도 RotationSettled
+  PR #424 T24 OwnerKillSurvives는 직접 `/api/cluster/status` `leader_id`
+  폴링으로 우회. EC degraded write을 인식하는 helper 또는 별도 RotationSettled
   helper 분리 검토.
-
-- [ ] **Scrubber orphan sweep production wiring [P1]**: `internal/scrubber/orphan.go`
-  `WalkOrphanShards` interface에 production implementation 없음 (mock만).
-  AppendObject best-effort cleanup이 실패하는 race / disk-error 경로에서
-  orphan blob/shard 누적. Required path:
-  - `<root>/data/<bucket>/<key>_segments/<blobID>` (raw segment)
-  - `<root>/data/<bucket>/<key>/coalesced/<id>` (EC shard tree)
-  Surface는 v0.0.249.0 ship-time부터 baseline. v0.0.250.x AppendObject
-  Hardening도 cap reject orphan을 같은 best-effort path로 처리.
-
-- [ ] **EC shard orphan cleanup [P2]**: 본 orphan segment sweep (PR _____)의
-  scope 외. coalesce 도중 EC 쓰기 후 propose 실패 시 남는
-  `<shardRoot>/<bucket>/<userKey>/coalesced/<id>/coalesced/<id>/shard_<i>`
-  shard dir cleanup. 기존 `OrphanWalkable.WalkOrphanShards` 인터페이스는
-  plain EC만 cover (ScanObjects가 `lat:` 인덱스로 coalesced shardKey 미포함
-  yield). Storage layout (shardRoot vs data root) + coalesced shard
-  tracking mechanism 조사 후 별도 cycle에서 처리.
 
 ## Pre-existing Test Failures (Phase B3 무관)
 
