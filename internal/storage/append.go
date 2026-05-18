@@ -23,6 +23,7 @@ var (
 	ErrAppendOffsetMismatch = errors.New("append: write offset does not match object size")
 	ErrAppendCapExceeded    = errors.New("append: segment cap reached")
 	ErrAppendNotSupported   = errors.New("append: object is not appendable")
+	ErrAppendObjectTooLarge = errors.New("append: object total size cap reached")
 )
 
 // AppendObjecter is the optional interface for S3 Express AppendObject support.

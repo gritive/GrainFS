@@ -17,3 +17,11 @@ func TestCoalesceConfigDefaults(t *testing.T) {
 		t.Fatalf("CleanupInterval default = %v, want 60s", cfg.CleanupInterval)
 	}
 }
+
+func TestCoalesceConfigSizeCapDefault(t *testing.T) {
+	cfg := DefaultCoalesceConfig()
+	const fiveTiB = int64(5) * 1024 * 1024 * 1024 * 1024
+	if cfg.SizeCapBytes != fiveTiB {
+		t.Errorf("SizeCapBytes default = %d; want 5 TiB (%d)", cfg.SizeCapBytes, fiveTiB)
+	}
+}

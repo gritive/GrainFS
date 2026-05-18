@@ -16,6 +16,11 @@ type CoalesceConfig struct {
 	// CleanupInterval: periodic backstop scan period that re-enqueues objects
 	// whose in-process trigger was lost (e.g. process restart).
 	CleanupInterval time.Duration
+	// SizeCapBytes is the per-object hard total-size cap. AppendObject
+	// requests that would exceed this are rejected with
+	// storage.ErrAppendObjectTooLarge (HTTP 400 EntityTooLarge). Default
+	// 5 TiB matches the S3 PutObject single-object cap.
+	SizeCapBytes int64
 }
 
 // DefaultCoalesceConfig returns the Phase B2 default trigger thresholds.
@@ -25,5 +30,6 @@ func DefaultCoalesceConfig() CoalesceConfig {
 		SizeBytes:       64 * 1024 * 1024,
 		IdleTimeout:     30 * time.Second,
 		CleanupInterval: 60 * time.Second,
+		SizeCapBytes:    5 * 1024 * 1024 * 1024 * 1024, // 5 TiB
 	}
 }
