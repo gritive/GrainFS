@@ -3004,6 +3004,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
 				Segments:     m.Segments,
+				Parts:        m.Parts,
 				Coalesced:    coalescedRefsToStorage(m.Coalesced),
 				IsAppendable: m.IsAppendable,
 			}
@@ -3286,6 +3287,7 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 					ACL:          m.ACL,
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
+					Parts:        m.Parts,
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3382,6 +3384,7 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 					ACL:          m.ACL,
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
+					Parts:        m.Parts,
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3818,6 +3821,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			ACL:          m.ACL,
 			UserMetadata: cloneStringMap(m.UserMetadata),
 			SSEAlgorithm: m.SSEAlgorithm,
+			Parts:        m.Parts,
 		}
 		placement = PlacementMeta{
 			VersionID:        versionID,

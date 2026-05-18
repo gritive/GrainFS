@@ -370,6 +370,7 @@ func buildObjectIndexEntry(group ShardGroupEntry, bucket, key string, obj *stora
 		ECParity:         uint8(ecCfg.ParityShards),
 		NodeIDs:          objectIndexNodeIDsForGroup(group, ecCfg),
 		IsDeleteMarker:   isDeleteMarker,
+		Parts:            obj.Parts,
 	}
 }
 
