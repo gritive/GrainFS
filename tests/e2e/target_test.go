@@ -83,3 +83,40 @@ func newClusterS3Target(t *testing.T, nodes int) s3Target {
 		isCluster: true,
 	}
 }
+
+// newClusterS3TargetWithExtraArgs mirrors newClusterS3Target but passes
+// extraArgs verbatim to every node's grainfs serve command-line.
+func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string) s3Target {
+	t.Helper()
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      nodes,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-S3-OP-KEY",
+		LogPrefix:  "grainfs-s3op",
+		DisableNFS: true,
+		DisableNBD: true,
+		ExtraArgs:  extraArgs,
+	})
+
+	for i := range c.procs {
+		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+	}
+
+	return s3Target{
+		name:  "cluster4",
+		nodes: nodes,
+		pickNode: func(i int) *s3.Client {
+			return c.S3Client(i % nodes)
+		},
+		endpoint: func(i int) string {
+			return c.httpURLs[i%nodes]
+		},
+		accessKey: c.accessKey,
+		secretKey: c.secretKey,
+		createBkt: func(t *testing.T, bucket string) {
+			c.GrantAdminOnBuckets(bucket)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+		},
+		isCluster: true,
+	}
+}
