@@ -50,7 +50,17 @@ func encodeEvent(e Event) ([]byte, error) {
 }
 
 func decodeEventStorage(data []byte) (out Event, err error) {
-	if len(data) > 0 && data[0] == '{' {
+	// Whitespace-tolerant legacy JSON guard — matches the other 3 storage
+	// decoders (packblob, cluster/quarantine, receipt). encoding/json accepts
+	// leading space/tab/LF/CR, so legacy files that pass through a formatter
+	// would otherwise slip past a strict `data[0] == '{'` check and surface
+	// as a confusing "malformed FB" panic-message instead of the actionable
+	// ErrLegacyStorageFormat sentinel.
+	trimmed := data
+	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '\n' || trimmed[0] == '\r') {
+		trimmed = trimmed[1:]
+	}
+	if len(trimmed) > 0 && trimmed[0] == '{' {
 		return Event{}, ErrLegacyStorageFormat
 	}
 	defer func() {
