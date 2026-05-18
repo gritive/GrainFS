@@ -87,38 +87,6 @@ func TestAppendObjectVersioningBucketRejected(t *testing.T) {
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 }
 
-// Red 21: a plain PUT (no x-amz-write-offset-bytes header) overwrites a
-// previously appendable object — the append-mode flag must not lock subsequent
-// regular writes out.
-func TestAppendableObjectOverwriteByPlainPut(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
-	// Seed via AppendObject path.
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("aaaa")))
-	req.Header.Set(appendOffsetHeader, "0")
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Plain PUT must overwrite cleanly — no header, no offset semantics.
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("zzz")))
-	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "plain PUT must succeed against an appendable object")
-
-	// HEAD reports the new (smaller) size.
-	req, _ = http.NewRequest(http.MethodHead, base+"/b/k", nil)
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "3", resp.Header.Get("Content-Length"))
-}
+// NOTE: TestAppendableObjectOverwriteByPlainPut removed — equivalent SDK
+// coverage already exists in tests/e2e/append_object_test.go as
+// TestAppendObjectE2E/{SingleNode,Cluster4Node}/PlainPutOverwritesAppendable.
