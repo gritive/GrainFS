@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.250.1] - 2026-05-19 - chore(bench): warp iceberg benchmark scaffolding (catalog-read + catalog-commits)
+
+Adds a per-subcommand wrapper around `bench_iceberg_table_cluster.sh` and the
+first two warp iceberg result reports for the 3-node cluster topology. No
+production code changes — bench data and tooling only. Used by the follow-up
+investigation into Iceberg REST commit latency under contention.
+
+### Added
+
+- `benchmarks/run_iceberg_warp.sh`: wrapper that injects `ICEBERG_WARP_COMMAND`,
+  `DURATION` (30s for read/commits/mixed, 2m for sustained), and a per-run
+  `PROFILE_ROOT` so the four warp iceberg subcommands write isolated profile
+  artifacts.
+- `benchmarks/iceberg_warp_catalog-read_report.json`: clean run summary
+  (3 nodes, 27s, concurrency=10) — `failed_requests=0`, total ~4013 ops/s,
+  NS_* ~669 ops/s @ p99 0.7ms, TABLE_* ~669 ops/s @ p99 ~11.7ms.
+- `benchmarks/iceberg_warp_catalog-commits_report.json`: dirty run summary
+  documenting 165 errors / 1988 ops on TABLE_UPDATE with p99=2549ms,
+  slowest=10026ms (warp client timeout). Most errors are spec-compliant
+  `409 CommitFailedException` for optimistic-concurrency conflicts that warp
+  does not retry; the 10s tail indicates server-side commit-path latency
+  worth tracing.
+
+### Notes
+
+- catalog-mixed and sustained are intentionally deferred — same root-cause
+  cluster commit contention is highly likely; they re-open after the commit-
+  path investigation in the linked design spec.
+- One pre-existing flaky test (`TestCoalesceMetricsObserved` in
+  `internal/cluster`) failed under the full parallel suite during ship
+  verification but passes when run alone. Unrelated to this PR.
+
 ## [0.0.250.0] - 2026-05-19 - perf(nbd): block-range pending mutation queue
 
 NBD write-back flush now orders deferred Raft commits by affected volume block.
