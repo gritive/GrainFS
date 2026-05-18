@@ -369,6 +369,22 @@ func (cb *CachedBackend) CompleteMultipartUpload(ctx context.Context, bucket, ke
 	return cb.Backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 }
 
+// AppendObject delegates to the inner backend's AppendObjecter implementation
+// and invalidates the cache entry for (bucket, key) on success so a subsequent
+// HEAD/GET sees the new size + segments rather than the stale pre-append entry.
+func (cb *CachedBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*Object, error) {
+	ap, ok := cb.Backend.(AppendObjecter)
+	if !ok {
+		return nil, ErrAppendNotSupported
+	}
+	obj, err := ap.AppendObject(ctx, bucket, key, expectedOffset, r)
+	if err != nil {
+		return nil, err
+	}
+	cb.invalidate(bucket, key)
+	return obj, nil
+}
+
 // Close closes the underlying backend (e.g., flushing BadgerDB).
 func (cb *CachedBackend) Close() error {
 	if closer, ok := cb.Backend.(interface{ Close() error }); ok {
