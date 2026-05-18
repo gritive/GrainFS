@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -133,7 +132,7 @@ func (f *FSM) applyPutObjectQuarantine(data []byte) error {
 	if c.Bucket == "" || c.Key == "" {
 		return errors.New("quarantine: bucket and key are required")
 	}
-	value, err := json.Marshal(c)
+	value, err := encodePutObjectQuarantineCmd(c)
 	if err != nil {
 		return err
 	}
