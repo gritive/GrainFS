@@ -43,6 +43,20 @@ Include batch delete measurements with:
 WARP_OPS=put,get,delete WARP_OBJECTS=4096 WARP_DELETE_BATCH=100 make bench-cluster
 ```
 
+`WARP_OPS` accepts the full warp op surface: `put`, `get`, `delete`, `mixed`,
+`list`, `stat`, `versioned`, `retention`, `multipart`, `multipart-put`,
+`append`. Each op runs in its own bucket (`warp-<target>-<op>`) so the previous
+op does not seed the next one. Multipart workloads use `--part.size`
+automatically. To run a 4-node cluster sweep with multipart support, allow
+the gossip-propagated `multipart_listing_v1` capability evidence enough time
+to settle:
+
+```bash
+GRAINFS_CLUSTER_NODES=4 CLUSTER_WARMUP_SLEEP=45 \
+WARP_OPS=put,get,delete,mixed,list,stat,versioned,multipart,multipart-put \
+  make bench-cluster
+```
+
 For external cluster endpoints, pass a comma-separated host list through
 `GRAINFS_CLUSTER_URL` or the matching `*_URL` variable; the script strips URL
 schemes before passing the host list to `warp`.

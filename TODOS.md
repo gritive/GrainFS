@@ -83,6 +83,34 @@ Work these in order. Do not run them in parallel.
 - [ ] **Scrub Register boot phase constructor 옵션화**: `BlockSource`/`Verifier`를
   `NewDirector` 옵션으로 주입해 `Register`/`started.Bool` 가드 제거.
   boot phase 의존 그래프 재배치 동반.
+- [ ] **Cluster local pre-check audit (post-SetBucketVersioning fix)**:
+  `DistributedBackend`에 `b.HeadBucket`/`b.HeadObject` 후 `b.propose`
+  패턴이 15곳 남아 있다 (`SetObjectACL`, multipart paths, etc.).
+  follower가 meta-Raft bucket assignment를 받았지만 data-Raft
+  `CmdCreateBucket`을 아직 apply하지 않은 짧은 윈도우에서
+  같은 false-`NoSuchBucket`을 반환한다.
+  `ClusterCoordinator` 단에 cluster-aware pre-check + base에
+  `*ProposeOnly` entrypoint 패턴을 일관 적용. 참조 커밋:
+  `fix(s3auth/cluster): warp versioned workload passes on a 4-node
+  cluster` (`benchmark` branch).
+- [ ] **Iceberg cluster catalog-read/sustained pass**: warp iceberg
+  `catalog-read`/`sustained` prepare 단계의 concurrent
+  CreateTable이 `DistributedBackend.propose`의 5s timeout을
+  넘기면 5xx 반환되고 warp이 abort. discriminator: sequential
+  4-table OK, concurrent 4-table fail (1-table single-node 7.8k
+  ops/s 통과). fix 후보: (a) `b.propose` propose timeout을
+  request ctx 기반으로 조정, (b) iceberg metadata PUT 경로의
+  cluster propose contention 분리 (per-table batching 또는
+  별도 raft group), (c) cluster bootstrap warmup probe로
+  capability/leader 안정화를 보장한 다음 dataset prep 시작.
+  현재 `catalog-mixed`/`catalog-commits`은 통과한다.
+- [ ] **Capability evidence propagation ready probe**: 4-node
+  cluster bootstrap 후 multipart capability evidence가 gossip을
+  통해 propagate되는 데 약 30-45s가 걸린다 (`CLUSTER_WARMUP_SLEEP`
+  default 5s는 부족). 운영/벤치마크 자동화를 위해 (a) gate가
+  capability evidence ready인지 polling endpoint 제공, (b) gossip
+  interval 조정, (c) capability evidence를 raft commit으로
+  immediate propagate. 임시 우회: `CLUSTER_WARMUP_SLEEP=45`.
 
 ## Deferred Until Triggered
 

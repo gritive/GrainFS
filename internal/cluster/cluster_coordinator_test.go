@@ -29,14 +29,74 @@ import (
 // Bucket-scoped methods are unimplemented — the routing tests in T6 use a
 // different fake (with FBS reply injection).
 type fakeBackend struct {
-	calls      []string
-	listResult []string
-	createErr  error
-	headErr    error
-	deleteErr  error
-	listErr    error
-	mpuResult  []*storage.MultipartUpload
-	mpuErr     error
+	calls         []string
+	listResult    []string
+	createErr     error
+	headErr       error
+	deleteErr     error
+	listErr       error
+	versioningErr error
+	mpuResult     []*storage.MultipartUpload
+	mpuErr        error
+}
+
+func (f *fakeBackend) SetBucketVersioning(bucket, state string) error {
+	f.record(fmt.Sprintf("SetBucketVersioning:%s=%s", bucket, state))
+	return f.versioningErr
+}
+
+func (f *fakeBackend) GetBucketVersioning(bucket string) (string, error) {
+	f.record(fmt.Sprintf("GetBucketVersioning:%s", bucket))
+	return "", nil
+}
+
+// fakeShardGroupSourceWithAssignment extends fakeShardGroupSource with
+// BucketAssignments so ClusterCoordinator.bucketAssigned can find the bucket
+// without consulting a real router. Mimics MetaFSM's role on a freshly
+// bootstrapped cluster where a follower has the assignment replicated but the
+// data-Raft bucket meta has not yet been applied locally.
+type fakeShardGroupSourceWithAssignment struct {
+	fakeShardGroupSource
+	assignments map[string]string
+}
+
+func (f *fakeShardGroupSourceWithAssignment) BucketAssignments() map[string]string {
+	return f.assignments
+}
+
+func TestClusterCoordinatorSetBucketVersioningPassesClusterAwareHeadBucket(t *testing.T) {
+	// On a freshly bootstrapped cluster, CreateBucket replicates the bucket
+	// assignment through meta-Raft, but the receiving follower's
+	// DistributedBackend (local Badger) may not have applied the
+	// CmdCreateBucket data-Raft entry yet. ClusterCoordinator.HeadBucket
+	// already handles this by falling back to bucketAssigned. Without the
+	// same cluster-aware pre-check on SetBucketVersioning, the request goes
+	// straight to the base layer's local pre-check, which still returns
+	// ErrBucketNotFound and the warp versioned workload fails at
+	// PutBucketVersioning.
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeShardGroupSourceWithAssignment{
+		assignments: map[string]string{"bk-ver": "g1"},
+	}
+	c := NewClusterCoordinator(base, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "self")
+
+	require.NoError(t, c.SetBucketVersioning("bk-ver", "Enabled"))
+	require.Contains(t, base.calls, "SetBucketVersioning:bk-ver=Enabled")
+}
+
+func TestClusterCoordinatorSetBucketVersioningRejectsUnassignedBucket(t *testing.T) {
+	// When the bucket is not assigned in meta-Raft and the base backend
+	// reports ErrBucketNotFound, SetBucketVersioning must surface
+	// ErrBucketNotFound rather than silently proposing through to the
+	// data-Raft FSM (which would either silently drop the write or store
+	// versioning state against a non-existent bucket).
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeShardGroupSourceWithAssignment{assignments: map[string]string{}}
+	c := NewClusterCoordinator(base, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "self")
+
+	err := c.SetBucketVersioning("bk-missing", "Enabled")
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+	require.NotContains(t, base.calls, "SetBucketVersioning:bk-missing=Enabled")
 }
 
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
@@ -1668,6 +1728,54 @@ func TestClusterCoordinator_ListParts_GateRejectsBeforePeerCall(t *testing.T) {
 	_, err := c.ListParts(context.Background(), "bk", "k", "upload-1", 100)
 	require.ErrorIs(t, err, compat.ErrCapabilityRejected)
 	require.Empty(t, d.calls)
+}
+
+// fakeShardGroupWithAddrBook mimics a *MetaFSM that satisfies both
+// ShardGroupSource and NodeAddressBook so gate callers can resolve
+// PeerIDs (node IDs) to canonical raft addresses, the form gossip
+// uses when keying capability evidence.
+type fakeShardGroupWithAddrBook struct {
+	fakeShardGroupSource
+	nodes []MetaNodeEntry
+}
+
+func (f *fakeShardGroupWithAddrBook) Nodes() []MetaNodeEntry { return f.nodes }
+
+func TestRequireMultipartListingResolvesPeerIDsBeforeGate(t *testing.T) {
+	// On a freshly bootstrapped 4-node cluster the gossip receiver keys
+	// capability evidence by the resolved raft address ("127.0.0.1:7001")
+	// because ResolveNodeAddress maps the canonical NodeID to that addr.
+	// `group.PeerIDs` however publishes the human node ID
+	// ("bench-node-1"). Without a resolve step at the call site,
+	// RequirePeerTransportCapability rejects every CreateMultipartUpload
+	// because no `bench-node-N` key exists in the evidence map.
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	now := time.Now()
+	for _, addr := range []string{"127.0.0.1:7001", "127.0.0.1:7002"} {
+		gate.ReportEvidence(compat.Evidence{
+			NodeID:       compat.NodeID(addr),
+			Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+			LastSeen:     now,
+			Ready:        true,
+		})
+	}
+	meta := &fakeShardGroupWithAddrBook{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"node-1", "node-2"}},
+		}},
+		nodes: []MetaNodeEntry{
+			{ID: "node-1", Address: "127.0.0.1:7001"},
+			{ID: "node-2", Address: "127.0.0.1:7002"},
+		},
+	}
+	c := NewClusterCoordinator(&fakeBackend{}, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "test-node")
+	c.WithCapabilityGate(gate)
+
+	err := c.requireMultipartListingPeerCapability(
+		compat.OperationCreateMultipartUpload,
+		[]string{"node-1", "node-2"},
+	)
+	require.NoError(t, err)
 }
 
 func reportMultipartListingCapability(c *ClusterCoordinator, peers ...string) {

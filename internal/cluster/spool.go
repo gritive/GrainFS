@@ -26,6 +26,19 @@ var spoolCopyBufferPool = sync.Pool{
 	},
 }
 
+// copyToSpoolChunked copies src to dst while forcing chunked Writes no
+// larger than spoolCopyBufferSize. Callers writing into an encrypted
+// spool record stream must use this helper so the receiver-side
+// maxEncryptedSpoolBlobBytes invariant cannot be tripped by readers
+// that implement WriteTo (e.g. *bytes.Reader) or by upstream HTTP
+// frameworks that hand the body in 5 MiB+ slabs.
+func copyToSpoolChunked(dst io.Writer, src io.Reader) (int64, error) {
+	bp := spoolCopyBufferPool.Get().(*[]byte)
+	defer spoolCopyBufferPool.Put(bp)
+	type readerOnly struct{ io.Reader }
+	return io.CopyBuffer(dst, readerOnly{src}, *bp)
+}
+
 type spooledObject struct {
 	Path      string
 	Size      int64

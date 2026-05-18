@@ -1,5 +1,118 @@
 # Changelog
 
+## [0.0.236.0] - 2026-05-18 - fix(cluster/s3auth): warp benchmark passes on a 4-node cluster (versioned + multipart + sigv4 botocore)
+
+Operators running the warp benchmark suite against a 4-node, at-rest-encrypted
+cluster can now exercise versioned, multipart, multipart-put, mixed, list, stat,
+delete, put, get, and iceberg `catalog-mixed`/`catalog-commits` workloads
+end-to-end. The previous release rejected versioned PUT/GET at signature time,
+multipart at the capability gate, and multipart over 5 MiB parts at the
+encrypted spool reader. Each is now traced to a concrete root cause and fixed
+with a regression test. The `benchmarks/bench_s3_compat_compare.sh` helper
+accepts the full warp op surface so a single sweep covers every supported
+workload.
+
+### Fixed
+
+- `s3auth.buildCanonicalRequest` now rebuilds the canonical query
+  string from `r.URL.Query()` instead of passing through
+  `r.URL.RawQuery`. AWS SigV4 requires the canonical query to use
+  `key=` for value-less parameters, AWS-strict URI encoding
+  (`%20` for space, `~` left unencoded), and lexicographically
+  sorted keys. botocore (the AWS CLI / Python SDK) signs against
+  the strict form but transmits the wire form
+  (`PUT /bucket?versioning`), so the previous comparison against
+  `RawQuery` rejected every `PutBucketVersioning` and
+  `GetBucketVersioning` call with `signature mismatch`. The new
+  `awsURIEncode` helper percent-encodes anything outside the AWS
+  unreserved set and is reused by `buildSortedQuery` (presigned URL
+  signing).
+- `ClusterCoordinator.SetBucketVersioning` now runs the
+  cluster-aware `HeadBucket` (which understands meta-Raft bucket
+  assignments) before invoking the backend. On a freshly
+  bootstrapped cluster a follower may have the bucket assignment
+  replicated through meta-Raft but not yet have applied the data-
+  Raft `CmdCreateBucket` entry locally; the previous local-only
+  pre-check inside `DistributedBackend.SetBucketVersioning`
+  rejected the follower with `NoSuchBucket` and warp's `versioned`
+  workload tripped at `PutBucketVersioning`.
+- `DistributedBackend.SetBucketVersioningPropose` is the new
+  coordinator-facing entrypoint. The coordinator calls it after the
+  cluster-aware HeadBucket, so the propose path no longer
+  duplicates the local pre-check. The original
+  `SetBucketVersioning` keeps its local pre-check intact for direct
+  callers (EC unit tests, single-node setups).
+- `ClusterCoordinator.requireMultipartListingPeerCapability` now
+  resolves `group.PeerIDs` (canonical node IDs such as
+  `bench-node-2`) to raft addresses via `ResolveNodeAddresses` when
+  the underlying `ShardGroupSource` also implements
+  `NodeAddressBook`. The gossip receiver keys capability evidence by
+  the resolved raft address (see `gossip.resolveGossipNodeID`), so
+  without the resolve step `CreateMultipartUpload`,
+  `ListMultipartUploads`, and `ListParts` were rejected on every
+  freshly bootstrapped cluster with "capability multipart_listing_v1
+  rejected for operation ...; finish the rolling upgrade before
+  retrying" even though every node had advertised the capability
+  and gossip had observed it. PUT/GET/DELETE were unaffected because
+  those ops are not gated on `multipart_listing_v1`. Resolution
+  falls back to the original peer slice when the meta source does
+  not satisfy `NodeAddressBook` (existing test fakes) or when
+  resolution fails, keeping prior unit-test behaviour intact.
+- `DistributedBackend.UploadPart` previously copied the part body
+  into the encrypted spool record stream with a bare `io.Copy`. When
+  the caller-side reader implemented `WriteTo` (for example
+  `*bytes.Reader`, which warp uses for 5 MiB parts), the writer
+  received the entire part in a single `Write`, producing one sealed
+  record larger than the `maxEncryptedSpoolBlobBytes = 2 MiB`
+  receiver-side invariant. `CompleteMultipartUpload` then failed with
+  `copy part 2: read encrypted spool record: blob too large` and the
+  multipart workload could not run on an at-rest-encrypted cluster.
+  `UploadPart` now copies through `copyToSpoolChunked`, which uses a
+  pooled `spoolCopyBufferSize` buffer and hides any `WriteTo` fast
+  path so every Write to the encrypted spool record writer stays
+  within the chunk invariant. Reader-side reject behaviour is
+  unchanged.
+
+### Changed
+
+- `benchmarks/bench_s3_compat_compare.sh` now accepts the full warp
+  op surface (`put`, `get`, `delete`, `mixed`, `list`, `stat`,
+  `versioned`, `retention`, `multipart`, `multipart-put`, `append`)
+  in `WARP_OPS`. Multipart workloads use `--part.size` instead of
+  `--obj.size`. `delete` auto-raises `--objects` to
+  `concurrent × batch × 4` so warp's minimum-object guard does not
+  reject the run. Buckets are now scoped per op
+  (`warp-<target>-<op>`) so one run does not seed the next op with
+  the previous op's data.
+- The `warp analyze` parser accepts the obj/s-only `Average:` line
+  used by `list` and `stat`, so those ops no longer trip the
+  "missing Average line" fallback.
+
+### Tests
+
+- `TestVerifyAcceptsBareKeyQuery` signs `PUT /bucket?versioning`
+  against the AWS-strict canonical `versioning=` and expects
+  `Verify` to accept it.
+- `TestVerifyAcceptsSpaceAsPercent20` exercises the `%20`
+  encoding path used by AWS-strict canonical queries.
+- `TestClusterCoordinatorSetBucketVersioningPassesClusterAwareHeadBucket`
+  reproduces the follower scenario: base `HeadBucket` returns
+  `ErrBucketNotFound`, meta has the assignment, coordinator must
+  still propose successfully.
+- `TestClusterCoordinatorSetBucketVersioningRejectsUnassignedBucket`
+  pins the reverse: with no assignment the coordinator must
+  surface `ErrBucketNotFound` without proposing.
+- `TestRequireMultipartListingResolvesPeerIDsBeforeGate` registers
+  capability evidence keyed by raft addresses (mimicking gossip),
+  publishes `PeerIDs` as node IDs, and expects the gate to allow
+  `CreateMultipartUpload`. Without the resolve step the gate marks
+  every peer as `unknown`.
+- `TestCopyToSpoolChunkedHandlesLargeReaders` writes a ~5 MiB
+  payload through `copyToSpoolChunked` into the encrypted spool
+  record writer and round-trips it through
+  `openSpoolEncryptedRecordFile`. Without the helper the read would
+  fail on the first record header with `blob too large`.
+
 ## [0.0.235.0] - 2026-05-18 - perf(server): pre-allocate buffered response body (-55% allocs, +137% throughput)
 
 ### Changed

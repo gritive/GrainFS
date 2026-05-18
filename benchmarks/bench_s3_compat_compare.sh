@@ -313,17 +313,33 @@ run_warp_case() {
     --host "$host" \
     --access-key "$access_key" \
     --secret-key "$secret_key" \
-    --bucket "warp-${target}" \
+    --bucket "warp-${target}-${op}" \
     --duration "$WARP_DURATION" \
-    --obj.size "$WARP_OBJ_SIZE" \
     --concurrent "$WARP_CONCURRENT" \
     --lookup path
     --host-select "$WARP_HOST_SELECT"
     --benchdata "$out_dir/warp.data"
   )
-  if [[ "$op" == "get" || "$op" == "delete" ]]; then
-    args+=(--objects "$WARP_OBJECTS")
+  case "$op" in
+    multipart|multipart-put)
+      args+=(--part.size "${WARP_PART_SIZE:-5MiB}")
+      ;;
+    *)
+      args+=(--obj.size "$WARP_OBJ_SIZE")
+      ;;
+  esac
+  local objects="$WARP_OBJECTS"
+  if [[ "$op" == "delete" ]]; then
+    local need=$((WARP_CONCURRENT * WARP_DELETE_BATCH * 4))
+    if (( objects < need )); then
+      objects="$need"
+    fi
   fi
+  case "$op" in
+    get|delete|list|stat|versioned|retention|mixed)
+      args+=(--objects "$objects")
+      ;;
+  esac
   if [[ "$op" == "delete" ]]; then
     args+=(--batch "$WARP_DELETE_BATCH")
   fi
@@ -353,10 +369,17 @@ import sys
 target, mode, op, analyze_path, out_path, artifact_dir, data_path = sys.argv[1:]
 text = open(analyze_path, encoding="utf-8").read()
 avg = re.search(r"Average:\s+([0-9.]+)\s+MiB/s,\s+([0-9.]+)\s+obj/s", text)
+obj_only = re.search(r"Average:\s+([0-9.]+)\s+obj/s", text)
 err = re.search(r"Errors:\s+([0-9]+)", text)
-if not avg:
-    if op != "delete":
-        sys.exit("missing Average line")
+if avg:
+    mib = float(avg.group(1))
+    obj_s = float(avg.group(2))
+    errors = int(err.group(1)) if err else 0
+elif obj_only:
+    mib = 0.0
+    obj_s = float(obj_only.group(1))
+    errors = int(err.group(1)) if err else 0
+elif op == "delete":
     raw = subprocess.check_output(["zstdcat", data_path], text=True)
     data = json.loads(raw)
     delete = data.get("by_op_type", {}).get("DELETE", {})
@@ -369,9 +392,7 @@ if not avg:
     mib = 0.0
     obj_s = objects / (millis / 1000.0)
 else:
-    mib = float(avg.group(1))
-    obj_s = float(avg.group(2))
-    errors = int(err.group(1)) if err else 0
+    sys.exit("missing Average line")
 row = [target, mode, op, f"{mib:.2f}", f"{obj_s:.2f}", str(errors), artifact_dir]
 with open(out_path, "a", encoding="utf-8") as f:
     f.write("\t".join(row) + "\n")
@@ -467,7 +488,9 @@ for target in grainfs-single grainfs-cluster minio rustfs; do
   mode="$START_MODE"
   for op in "${WARP_OP_LIST[@]}"; do
     case "$op" in
-      get|put|delete) run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op" ;;
+      get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)
+        run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"
+        ;;
       *)
         echo "[error] unknown WARP_OPS entry: $op" >&2
         exit 1
