@@ -45,13 +45,20 @@ type SegmentRef struct {
 }
 
 // CoalescedRef identifies one coalesced blob produced by merging a prefix of
-// Object.Segments. Phase B2 stores each entry owner-locally; Phase B3 extends
-// with EC placement params on the cluster-level mirror type.
+// Object.Segments. Phase B2 stores each entry owner-locally; Phase B3 distributes
+// via EC across NodeIDs (k=ECData + m=ECParity) at RingVersion.
+//
+// EC fields are zero-valued for legacy/B2 owner-local entries; reader falls
+// back to owner-local + forward-on-read in that case.
 type CoalescedRef struct {
 	CoalescedID string // UUIDv7
 	Size        int64  // plaintext bytes in this coalesced blob
 	ETag        string // MD5 hex of the concatenated body
 	ShardKey    string // "<key>/coalesced/<coalescedID>" — used by EC reader (B3)
+	RingVersion uint64
+	ECData      uint8
+	ECParity    uint8
+	NodeIDs     []string
 }
 
 // ACLSetter is an optional interface for backends that support per-object ACL updates.

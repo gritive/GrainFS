@@ -868,6 +868,10 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
 			ETag:        cmd.ETag,
 			ShardKey:    cmd.ShardKey,
 			Version:     1,
+			RingVersion: cmd.RingVersion,
+			ECData:      cmd.ECData,
+			ECParity:    cmd.ECParity,
+			NodeIDs:     append([]string(nil), cmd.Placement...),
 		})
 		out, err := marshalObjectMeta(existing)
 		if err != nil {

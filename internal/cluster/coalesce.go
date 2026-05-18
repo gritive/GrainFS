@@ -61,6 +61,10 @@ func coalescedRefsToStorage(in []CoalescedShardRef) []storage.CoalescedRef {
 			Size:        c.Size,
 			ETag:        c.ETag,
 			ShardKey:    c.ShardKey,
+			RingVersion: c.RingVersion,
+			ECData:      c.ECData,
+			ECParity:    c.ECParity,
+			NodeIDs:     append([]string(nil), c.NodeIDs...),
 		}
 	}
 	return out
@@ -120,6 +124,110 @@ func (b *DistributedBackend) mergeSegmentsOwnerLocal(bucket, key, coalescedID st
 		Size: total,
 		ETag: hex.EncodeToString(h.Sum(nil)),
 	}, nil
+}
+
+// coalescedSpoolDir is the on-disk staging area for EC shard spooling
+// during coalesce. Mirrors ecSpoolDir() but isolated so concurrent PutObject
+// + coalesce don't clobber each other's tmp files.
+func (b *DistributedBackend) coalescedSpoolDir() string {
+	return filepath.Join(b.root, "tmp", "coalesced-spool")
+}
+
+// processCoalesceJobB3 is the Phase B3 implementation. Same lifecycle as B2
+// (snapshot → owner-local merge → propose → cleanup) but adds the EC
+// distribute step between merge and propose:
+//
+//  1. HeadObject → snapshot S = current segments.
+//  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
+//  3. selectECPlacement + writeSpooledShards distribute the coalesced blob
+//     across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
+//  4. propose CmdCoalesceSegments with EC params; FSM apply stores them on
+//     the resulting CoalescedShardRef.
+//  5. Remove owner-local coalesced blob + raw segment files. EC shards are
+//     the source of truth from this point.
+//
+// Failure recovery: any error after EC write but before propose leaves
+// orphan EC shards which the scrubber sweeps. Idempotent on retry — apply
+// no-ops if CoalescedID already present.
+func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coalesceJob) error {
+	obj, err := b.HeadObject(ctx, job.Bucket, job.Key)
+	if err != nil || obj == nil {
+		return nil
+	}
+	if !obj.IsAppendable || len(obj.Segments) == 0 {
+		return nil
+	}
+	snapshot := make([]storage.SegmentRef, len(obj.Segments))
+	copy(snapshot, obj.Segments)
+	coalescedID := uuid.Must(uuid.NewV7()).String()
+	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, snapshot)
+	if mErr != nil {
+		return fmt.Errorf("merge: %w", mErr)
+	}
+	// Cleanup intermediate file on every exit path; success path removes it
+	// once EC shards land + propose returns.
+	cleanupMerged := func() { _ = os.Remove(merged.Path) }
+
+	shardKey := job.Key + "/coalesced/" + coalescedID
+	liveNodes := b.ecWriteNodes()
+	cfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
+	if cfg.NumShards() == 0 {
+		cleanupMerged()
+		return fmt.Errorf("coalesce: no effective EC config for %d live nodes", len(liveNodes))
+	}
+	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
+	placement, ringVer := selectECPlacement(currentRing, ringErr, cfg, liveNodes, shardKey)
+	if len(placement) != cfg.NumShards() {
+		cleanupMerged()
+		return fmt.Errorf("coalesce: placement has %d nodes, need %d (k=%d m=%d)",
+			len(placement), cfg.NumShards(), cfg.DataShards, cfg.ParityShards)
+	}
+
+	plan := ecObjectWritePlan{
+		Bucket:      job.Bucket,
+		Key:         job.Key,
+		VersionID:   "coalesced/" + coalescedID,
+		Config:      cfg,
+		Placement:   placement,
+		RingVersion: ringVer,
+	}
+	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
+	if _, err := writer.writeSpooledShards(ctx, plan, b.coalescedSpoolDir(), sp); err != nil {
+		cleanupMerged()
+		return fmt.Errorf("ec write: %w", err)
+	}
+
+	consumedIDs := make([]string, len(snapshot))
+	for i, s := range snapshot {
+		consumedIDs[i] = s.BlobID
+	}
+	cmd := CoalesceSegmentsCmd{
+		Bucket:             job.Bucket,
+		Key:                job.Key,
+		CoalescedID:        coalescedID,
+		ShardKey:           shardKey,
+		Size:               merged.Size,
+		ETag:               merged.ETag,
+		ConsumedSegmentIDs: consumedIDs,
+		Placement:          placement,
+		ECData:             uint8(cfg.DataShards),
+		ECParity:           uint8(cfg.ParityShards),
+		RingVersion:        uint64(ringVer),
+	}
+	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
+		// EC shards committed but never referenced — scrubber sweeps. Keep raw
+		// segments so a future retry can succeed.
+		cleanupMerged()
+		return fmt.Errorf("propose coalesce: %w", err)
+	}
+	// Source of truth is now the EC shards. Remove owner-local intermediate +
+	// raw segments. Best-effort: scrubber sweeps orphans.
+	cleanupMerged()
+	for _, s := range snapshot {
+		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
+	}
+	return nil
 }
 
 // processCoalesceJobB2 is the Phase B2 implementation (no EC). Phase B3

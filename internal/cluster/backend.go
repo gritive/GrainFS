@@ -206,7 +206,7 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 	// Lifecycle is bound to Close() via coalesceCancel.
 	b.coalesceCfg = DefaultCoalesceConfig()
 	b.coalesceCtx, b.coalesceCancel = context.WithCancel(context.Background())
-	b.coalesce = newCoalesceWorker(256, b.processCoalesceJobB2)
+	b.coalesce = newCoalesceWorker(256, b.processCoalesceJobB3)
 	b.coalesce.Start(b.coalesceCtx)
 	go b.coalesceBackstopScan(b.coalesceCtx)
 	return b, nil
