@@ -12,6 +12,28 @@ Table metadata JSON files remain ordinary `GrainFS` objects under the warehouse
 bucket. Meta-Raft stores only the current namespace/table records and metadata
 locations.
 
+## Authentication
+
+GrainFS Iceberg REST Catalog requires SigV4 on every endpoint, the same SigV4
+the S3 endpoint uses. Configure your Iceberg client with the `access_key` and
+`secret_key` of a bootstrapped ServiceAccount (`grainfs iam sa create ...`).
+
+For `apache/iceberg-go`, `pyiceberg`, or the Trino REST connector:
+
+```
+rest.sigv4-enabled  = true
+rest.signing-name   = s3
+rest.signing-region = us-east-1
+```
+
+The DuckDB iceberg extension supports SigV4 from v1.5.2. Use
+`AUTHORIZATION_TYPE 'sigv4'` (see the [Attach from DuckDB](#attach-from-duckdb)
+section below). DuckDB iceberg extension versions before 1.5.2 do not support
+`sigv4` auth — bump the extension to 1.5.2 or later before upgrading GrainFS.
+
+There is no anonymous discovery path: `GET /iceberg/v1/config` also requires
+SigV4.
+
 ## Start `GrainFS`
 
 ```sh
@@ -62,7 +84,9 @@ CREATE OR REPLACE SECRET grainfs_s3 (
 ATTACH 'warehouse' AS grainfs_iceberg (
     TYPE iceberg,
     ENDPOINT 'http://127.0.0.1:9000/iceberg',
-    AUTHORIZATION_TYPE 'none',
+    AUTHORIZATION_TYPE 'sigv4',
+    SIGV4_REGION 'us-east-1',
+    SIGV4_SERVICE 's3',
     ACCESS_DELEGATION_MODE 'none',
     SUPPORT_STAGE_CREATE false
 );
