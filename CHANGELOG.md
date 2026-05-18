@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.242.0] - 2026-05-18 - perf(cluster): spool small parity EC writes
+
+Small parity EC writes now avoid the in-memory full-object split path and reuse
+the existing spooled EC shard encoder, reducing peak memory for small multi-shard
+object writes while preserving the single-local fast path.
+
+### Added
+
+- Added regression coverage for small parity EC writes from both sized readers
+  and streaming readers, including round-trip reads through `GetObject`.
+
+### Changed
+
+- Parity EC object writes now bypass the memory-shard fast path and route
+  through the spooled shard encoder.
+- Metadata preservation coverage now follows the spooled EC shard encoder path.
+
 ## [0.0.241.0] - 2026-05-18 - perf(packblob): reduce blob append allocations
 
 Packed small-object writes now allocate less on the blob append hot path while
