@@ -21,10 +21,14 @@ ICEBERG_BASE_LOCATION="${ICEBERG_BASE_LOCATION:-s3://${ICEBERG_BUCKET}}"
 ICEBERG_NAMESPACE_WIDTH="${ICEBERG_NAMESPACE_WIDTH:-1}"
 ICEBERG_NAMESPACE_DEPTH="${ICEBERG_NAMESPACE_DEPTH:-1}"
 # catalog-commits stress (warp iceberg uses ~5 concurrent workers internally).
-# Default 4 collides on almost every commit → spec-compliant 409s flood
-# failed_requests. spec §5 caps fanout at max(16, VUS*4); the latency sub-gate
-# (p99<1s / max<3s) still surfaces raft/forwarding regressions after spread.
-ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-40}"
+# At 5 workers, P(at least one collision per commit-round) = 1 - 200!/((200-5)! * 200^5)
+# ≈ 0.05% with N=200 tables — well below noise floor. Default 4 floods 409s;
+# even 40 leaves ~11% spec-compliant 409 (verified). Spec §5 caps fanout at
+# max(16, VUS*4) but the strict gate (failed_requests=0) requires near-zero
+# statistical collision; 200 hits that without inflating prepare so much that
+# we exit the 30s window. The latency sub-gate (p99<1s / max<3s) still
+# surfaces raft/forwarding regressions even after the workload is spread.
+ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-200}"
 ICEBERG_VIEWS_PER_NS="${ICEBERG_VIEWS_PER_NS:-0}"
 ICEBERG_COLUMNS="${ICEBERG_COLUMNS:-10}"
 ICEBERG_PROPERTIES="${ICEBERG_PROPERTIES:-5}"
