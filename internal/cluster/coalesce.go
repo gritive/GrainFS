@@ -148,8 +148,9 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 //     the source of truth from this point.
 //
 // Failure recovery: any error after EC write but before propose leaves
-// orphan EC shards which the scrubber sweeps. Idempotent on retry — apply
-// no-ops if CoalescedID already present.
+// orphan EC shards. Best-effort cleanup (full scrubber sweep is deferred —
+// see TODOS.md "Scrubber orphan sweep production wiring [P1]").
+// Idempotent on retry — apply no-ops if CoalescedID already present.
 func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coalesceJob) error {
 	start := time.Now()
 	var resultLabel = "abort"
@@ -237,13 +238,15 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		RingVersion:        uint64(ringVer),
 	}
 	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
-		// EC shards committed but never referenced — scrubber sweeps. Keep raw
-		// segments so a future retry can succeed.
+		// EC shards committed but never referenced. Best-effort orphan cleanup
+		// (full sweep deferred to TODOS.md). Keep raw segments so a future retry
+		// can succeed.
 		cleanupMerged()
 		return fmt.Errorf("propose coalesce: %w", err)
 	}
 	// Source of truth is now the EC shards. Remove owner-local intermediate +
-	// raw segments. Best-effort: scrubber sweeps orphans.
+	// raw segments. Best-effort cleanup; unlink failures leave orphans
+	// (full sweep deferred — see TODOS.md).
 	cleanupMerged()
 	for _, s := range snapshot {
 		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
@@ -263,9 +266,9 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 //  3. propose CmdCoalesceSegments.
 //  4. Unlink raw segment files for blobs in S (owner-local only).
 //
-// Best-effort cleanup: an unlink failure leaves orphan raw segments which the
-// scrubber sweeps. Idempotent on retry because apply skips already-applied
-// CoalescedIDs.
+// Best-effort cleanup: an unlink failure leaves orphan raw segments
+// (full sweep deferred — see TODOS.md "Scrubber orphan sweep production wiring [P1]").
+// Idempotent on retry because apply skips already-applied CoalescedIDs.
 //
 //nolint:unused // referenced from coalesce_process_test.go / coalesce_concurrent_test.go
 func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coalesceJob) error {
@@ -304,8 +307,9 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 		_ = os.Remove(merged.Path)
 		return fmt.Errorf("propose coalesce: %w", err)
 	}
-	// Unlink raw segment files for blobs we just absorbed. Failure → scrubber
-	// sweeps orphans later; apply already removed them from metadata.
+	// Unlink raw segment files for blobs we just absorbed. Failure → orphans
+	// remain (best-effort; full sweep deferred). Apply already removed them
+	// from metadata, so data is safe even if files persist.
 	for _, s := range snapshot {
 		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
 	}
