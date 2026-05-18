@@ -54,3 +54,8 @@ func TestForwardCodec_ForwardReplyMultipartUploads(t *testing.T) {
 		{Bucket: "bucket", Key: "prefix/b.bin", UploadID: "upload-2", ContentType: "application/octet-stream", CreatedAt: 22},
 	}, uploads)
 }
+
+func TestForwardStatusAppendObjectTooLargeRoundTrip(t *testing.T) {
+	require.Equal(t, raftpb.ForwardStatusAppendObjectTooLarge,
+		mapErrorToStatus(storage.ErrAppendObjectTooLarge))
+}

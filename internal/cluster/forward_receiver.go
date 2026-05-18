@@ -864,6 +864,9 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	if errors.Is(err, storage.ErrAppendCapExceeded) {
 		return raftpb.ForwardStatusAppendCapExceeded
 	}
+	if errors.Is(err, storage.ErrAppendObjectTooLarge) {
+		return raftpb.ForwardStatusAppendObjectTooLarge
+	}
 	if errors.Is(err, ErrPlacementTargetsUnavailable) {
 		return raftpb.ForwardStatusInsufficientPlacementTargets
 	}
