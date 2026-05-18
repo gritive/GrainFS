@@ -20,7 +20,11 @@ ICEBERG_BUCKET="${ICEBERG_BUCKET:-grainfs-tables}"
 ICEBERG_BASE_LOCATION="${ICEBERG_BASE_LOCATION:-s3://${ICEBERG_BUCKET}}"
 ICEBERG_NAMESPACE_WIDTH="${ICEBERG_NAMESPACE_WIDTH:-1}"
 ICEBERG_NAMESPACE_DEPTH="${ICEBERG_NAMESPACE_DEPTH:-1}"
-ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-4}"
+# catalog-commits stress (warp iceberg uses ~5 concurrent workers internally).
+# Default 4 collides on almost every commit → spec-compliant 409s flood
+# failed_requests. spec §5 caps fanout at max(16, VUS*4); the latency sub-gate
+# (p99<1s / max<3s) still surfaces raft/forwarding regressions after spread.
+ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-40}"
 ICEBERG_VIEWS_PER_NS="${ICEBERG_VIEWS_PER_NS:-0}"
 ICEBERG_COLUMNS="${ICEBERG_COLUMNS:-10}"
 ICEBERG_PROPERTIES="${ICEBERG_PROPERTIES:-5}"
