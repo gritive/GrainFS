@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // iamSnapshotTrailerMagic is appended after the IAM section so post-fix
@@ -119,6 +120,10 @@ type ObjectIndexEntry struct {
 	ECParity         uint8
 	NodeIDs          []string
 	IsDeleteMarker   bool
+	// Parts is non-empty only for CompleteMultipartUpload objects. The S3
+	// GetObject/HeadObject ?partNumber=N path uses this to translate part
+	// numbers into byte ranges over the assembled body.
+	Parts []storage.MultipartPartEntry
 }
 
 type ObjectIndexSummary struct {
@@ -2611,6 +2616,13 @@ func cloneStringMap(in map[string]string) map[string]string {
 
 func cloneObjectIndexEntry(in ObjectIndexEntry) ObjectIndexEntry {
 	in.NodeIDs = cloneStringSlice(in.NodeIDs)
+	if len(in.Parts) > 0 {
+		cp := make([]storage.MultipartPartEntry, len(in.Parts))
+		copy(cp, in.Parts)
+		in.Parts = cp
+	} else {
+		in.Parts = nil
+	}
 	return in
 }
 
