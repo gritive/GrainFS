@@ -551,8 +551,13 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			}
 			switch entry.Type {
 			case raft.LogEntryCommand:
-				if err := b.fsm.Apply(entry.Command); err != nil {
-					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
+				applyErr := b.fsm.Apply(entry.Command)
+				// Record apply result BEFORE lastApplied.Store so propose
+				// loop sees ApplyError(idx) set by the time it observes
+				// lastApplied >= idx (race-free linearization).
+				b.recordApplyResult(entry.Index, applyErr)
+				if applyErr != nil {
+					b.logger.Error().Uint64("index", entry.Index).Err(applyErr).Msg("fsm apply error")
 				}
 				// Notify cache invalidators and legacy metrics callback.
 				b.notifyOnApply(entry.Command)
@@ -807,6 +812,12 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 			default:
 				time.Sleep(time.Millisecond)
 			}
+		}
+		// Phase A: surface FSM apply errors to the caller. recordApplyResult
+		// runs before lastApplied.Store in the apply loop, so by the time we
+		// observe lastApplied >= idx the entry (if any) is already set.
+		if applyErr := b.ApplyError(idx); applyErr != nil {
+			return applyErr
 		}
 		return nil
 	}
