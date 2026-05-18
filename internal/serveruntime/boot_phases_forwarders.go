@@ -170,6 +170,15 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	coalesceCfg := cluster.DefaultCoalesceConfig()
 	coalesceCfg.SizeCapBytes = state.cfg.AppendSizeCapBytes
 	state.distBackend.SetCoalesceConfig(coalesceCfg)
+	// Propagate the cap to any GroupBackend instances already registered in
+	// dgMgr (groups 1-N created by bootOwnedGroupsAndEC before this phase
+	// ran). Without this they would keep the default 5 TiB cap.
+	for _, dg := range state.dgMgr.All() {
+		if gb := dg.Backend(); gb != nil {
+			gb.SetCoalesceConfig(coalesceCfg)
+		}
+	}
+	state.coalesceCfg = coalesceCfg
 
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)

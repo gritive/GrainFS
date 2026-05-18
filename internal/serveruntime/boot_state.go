@@ -139,6 +139,11 @@ type bootState struct {
 	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
+	// coalesceCfg is the cluster-wide coalesce/cap configuration derived from
+	// CLI flags. Stored here so that GroupBackends instantiated after
+	// bootWALAndForwarders (including dynamically created shard groups) can
+	// inherit the same cap as state.distBackend (group-0).
+	coalesceCfg cluster.CoalesceConfig
 
 	// bootBackendWrap
 	backend          storage.Backend

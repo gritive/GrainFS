@@ -337,6 +337,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}
 		gb.SetShardCache(state.shardCache)
+		// Apply the cluster-wide coalesce/cap config so the per-group backend
+		// honours --append-size-cap-bytes. state.coalesceCfg is set by
+		// bootWALAndForwarders; zero-value is safe (0 cap = no cap).
+		gb.SetCoalesceConfig(state.coalesceCfg)
 		// Register the group's raft handler on the per-server mux. As of M5
 		// PR 29 the v1 dispatch is gone — the group's raft node is always
 		// the cluster-layer v2 adapter, satisfying raft.RaftV2Handler.
