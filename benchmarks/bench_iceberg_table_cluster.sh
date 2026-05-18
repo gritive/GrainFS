@@ -28,7 +28,7 @@ ICEBERG_NAMESPACE_DEPTH="${ICEBERG_NAMESPACE_DEPTH:-1}"
 # statistical collision; 200 hits that without inflating prepare so much that
 # we exit the 30s window. The latency sub-gate (p99<1s / max<3s) still
 # surfaces raft/forwarding regressions even after the workload is spread.
-ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-200}"
+ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-1000}"
 ICEBERG_VIEWS_PER_NS="${ICEBERG_VIEWS_PER_NS:-0}"
 ICEBERG_COLUMNS="${ICEBERG_COLUMNS:-10}"
 ICEBERG_PROPERTIES="${ICEBERG_PROPERTIES:-5}"
