@@ -191,13 +191,6 @@ Work these in order. Do not run them in parallel.
   상향 또는 memory-budget tuning을 separate PR로 분리. PR description에
   measurement result 또는 미실행 사유 명시.
 
-- [ ] **InstantiateLocalGroup SetCoalesceConfig regression guard [P2]**:
-  T20에서 `dgMgr.All()` propagation은 `TestAppendSizeCapE2E/Cluster4Node`로
-  검증되지만, post-boot dynamic group creation 경로 (`InstantiateLocalGroup`
-  caller at `boot_phases_storage_runtime.go:343`)는 명시적 테스트 없음.
-  6번째 group 생성 path 추가 시 `state.coalesceCfg` 전파 누락 가능.
-  dynamic group 부팅 시나리오 e2e 또는 unit 추가 검토.
-
 - [ ] **`AwaitWriteFromNonOwner` harness EC-aware 강화 [P2]**: 현재
   AwaitWriteFromNonOwner는 healthy-cluster path 전용 — EC stripe width ==
   cluster size 환경에서 owner kill 후 호출하면 모든 PUT이 ServiceUnavailable.
