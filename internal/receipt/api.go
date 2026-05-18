@@ -84,8 +84,13 @@ func (a *API) ServeGetReceipt(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	// 1. Local.
-	if raw, ok := a.store.LookupReceiptJSON(id); ok {
-		writeJSON(w, http.StatusOK, raw)
+	if r, ok := a.store.LookupReceipt(id); ok {
+		body, err := json.Marshal(r)
+		if err != nil {
+			http.Error(w, `{"error":"encode failed"}`, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, body)
 		return
 	}
 

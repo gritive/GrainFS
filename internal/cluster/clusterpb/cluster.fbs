@@ -307,14 +307,13 @@ table ReceiptQueryMsg {
   receipt_id:string;
 }
 
-// ReceiptQueryResponseMsg carries either the full receipt JSON (found=true)
-// or empty payload (found=false). JSON chosen over a FlatBuffers mirror
-// because the receipt schema lives in internal/receipt and already has a
-// canonical JSON form used for HMAC signing — re-encoding as FB would
-// create a second source of truth.
+// ReceiptQueryResponseMsg carries either the full FB-encoded receipt (found=true)
+// or empty payload (found=false). Payload is a FlatBuffers-encoded HealReceipt
+// (receiptpb.HealReceipt). The field is named "receipt" (was: receipt_json) so the
+// Go accessor is ReceiptBytes() — the FB Go generator appends "Bytes" to [ubyte] vectors.
 table ReceiptQueryResponseMsg {
   found:bool;
-  receipt_json:[ubyte];
+  receipt:[ubyte];
 }
 
 table MigrateShardCmd {
