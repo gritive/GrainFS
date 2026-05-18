@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -20,8 +22,19 @@ type MetaCatalog struct {
 	read      *MetaCatalogReadSender
 	readPeers func() []string
 	nextID    atomic.Uint64
+	idPrefix  string // 16 hex chars from crypto/rand, unique per instance
 	cacheMu   sync.RWMutex
 	cache     map[string]cachedIcebergMetadata
+}
+
+// newIcebergRequestIDPrefix returns a 16-char hex string from 8 random bytes.
+// Panics on crypto/rand failure — this is boot-time only.
+func newIcebergRequestIDPrefix() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Errorf("newIcebergRequestIDPrefix: crypto/rand failed: %w", err))
+	}
+	return hex.EncodeToString(b[:])
 }
 
 type cachedIcebergMetadata struct {
@@ -30,11 +43,11 @@ type cachedIcebergMetadata struct {
 }
 
 func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, warehouse string) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 func NewMetaCatalogWithForwarder(meta *MetaRaft, backend storage.Backend, warehouse string, forward func(context.Context, []byte) error) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 func NewMetaCatalogWithForwarders(
@@ -45,7 +58,7 @@ func NewMetaCatalogWithForwarders(
 	read *MetaCatalogReadSender,
 	readPeers func() []string,
 ) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 func (c *MetaCatalog) Warehouse() string { return c.warehouse }
@@ -279,7 +292,7 @@ func (c *MetaCatalog) deleteCachedMetadata(ident icebergcatalog.Identifier) {
 }
 
 func (c *MetaCatalog) requestID(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, c.nextID.Add(1))
+	return fmt.Sprintf("%s-%s-%d", prefix, c.idPrefix, c.nextID.Add(1))
 }
 
 func (c *MetaCatalog) readMetadata(location string) ([]byte, error) {
