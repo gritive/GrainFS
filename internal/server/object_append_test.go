@@ -122,3 +122,7 @@ func TestAppendableObjectOverwriteByPlainPut(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "3", resp.Header.Get("Content-Length"))
 }
+
+// TODO T18: TestAppendObjectTooLargeResponse — ErrAppendObjectTooLarge → 400 EntityTooLarge.
+// Requires CoalesceConfig.SizeCapBytes to trigger the backend error.
+// Covered end-to-end in T20 (TestAppendSizeCapE2E).

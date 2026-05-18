@@ -78,6 +78,8 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 	case errors.Is(err, storage.ErrAppendCapExceeded):
 		c.Response.Header.Set("Retry-After", "1")
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append segment cap reached")
+	case errors.Is(err, storage.ErrAppendObjectTooLarge):
+		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", "object total size cap exceeded")
 	case errors.Is(err, cluster.ErrForwardBufferFull):
 		c.Response.Header.Set("Retry-After", "1")
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append forward buffer saturated")
