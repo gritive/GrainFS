@@ -36,9 +36,11 @@ func TestCoalesceCrashRecovery(t *testing.T) {
 	b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr})
 
 	// Disable in-process trigger so we drive the worker manually.
-	b.coalesceCfg.SegmentCount = 1 << 30
-	b.coalesceCfg.SizeBytes = 1 << 30
-	b.coalesceCfg.IdleTimeout = time.Hour
+	crashCfg := *b.coalesceCfg.Load()
+	crashCfg.SegmentCount = 1 << 30
+	crashCfg.SizeBytes = 1 << 30
+	crashCfg.IdleTimeout = time.Hour
+	b.SetCoalesceConfig(crashCfg)
 
 	bucket, key := "b", "k"
 	var off int64

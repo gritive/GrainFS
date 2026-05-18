@@ -49,11 +49,19 @@ func TestCoalesceMetricsObserved(t *testing.T) {
 		return obj != nil && len(obj.Coalesced) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 
-	successAfter := testutil.ToFloat64(metrics.AppendCoalesceTotal.WithLabelValues("success"))
-	bytesAfter := testutil.ToFloat64(metrics.AppendCoalesceBytes)
+	// After: wait for the deferred metric.Inc() in processCoalesceJobB3 to land.
+	// obj.Coalesced becoming visible (the prior Eventually) is set inside the same
+	// function but BEFORE the defer that calls metrics.AppendCoalesceTotal.Inc()
+	// (internal/cluster/coalesce.go:158). Sync the metric read too.
+	require.Eventually(t, func() bool {
+		successAfter := testutil.ToFloat64(metrics.AppendCoalesceTotal.WithLabelValues("success"))
+		return successAfter-successBefore >= 1.0
+	}, 5*time.Second, 20*time.Millisecond, "coalesce success counter must increment")
 
-	require.GreaterOrEqual(t, successAfter-successBefore, 1.0, "coalesce success counter must increment")
-	require.GreaterOrEqual(t, bytesAfter-bytesBefore, float64(totalBytes), "coalesce bytes counter must add at least totalBytes")
+	require.Eventually(t, func() bool {
+		bytesAfter := testutil.ToFloat64(metrics.AppendCoalesceBytes)
+		return bytesAfter-bytesBefore >= float64(totalBytes)
+	}, 5*time.Second, 20*time.Millisecond, "coalesce bytes counter must add at least totalBytes")
 }
 
 // TestCoalesceEncryptedECRoundTrip ensures B3 coalesce + EC reconstruct works

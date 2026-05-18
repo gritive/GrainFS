@@ -118,3 +118,12 @@ func TestAppendObjectRejectsLegacyNonAppendable(t *testing.T) {
 		t.Fatalf("expected ErrAppendNotSupported, got %v", err)
 	}
 }
+
+func TestErrAppendObjectTooLargeSentinel(t *testing.T) {
+	if !errors.Is(ErrAppendObjectTooLarge, ErrAppendObjectTooLarge) {
+		t.Fatalf("sentinel must be self-equal under errors.Is")
+	}
+	if errors.Is(ErrAppendObjectTooLarge, ErrAppendCapExceeded) {
+		t.Fatalf("ErrAppendObjectTooLarge must not alias ErrAppendCapExceeded")
+	}
+}

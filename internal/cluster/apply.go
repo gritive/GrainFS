@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -25,7 +26,8 @@ type FSM struct {
 	keys *stateKeyspace
 	enc  *encrypt.Encryptor
 
-	// Guards onMigrateShard and commitNotifier against concurrent SetMigrationHooks + Apply.
+	// Guards onMigrateShard, commitNotifier, and coalesceCfg against concurrent
+	// Set* calls + Apply.
 	mu sync.RWMutex
 
 	// Optional hooks for Phase 13 balancer. Nil when no peers configured/non-balancer mode.
@@ -37,6 +39,11 @@ type FSM struct {
 	balancerNotifier interface {
 		NotifyMigrationDone(bucket, key, versionID string)
 	}
+
+	// coalesceCfg is the FSM's own copy of the coalesce configuration.
+	// Protected by mu. Updated via SetCoalesceCfg (called from
+	// DistributedBackend.SetCoalesceConfig so the apply loop sees fresh caps).
+	coalesceCfg CoalesceConfig
 
 	rings *ringStore
 }
@@ -54,6 +61,23 @@ func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
 	f.commitNotifier = notifier
 	f.balancerNotifier = bn
 	f.mu.Unlock()
+}
+
+// SetCoalesceCfg updates the FSM's coalesce configuration. Safe to call
+// concurrently with Apply; protected by mu.
+func (f *FSM) SetCoalesceCfg(cfg CoalesceConfig) {
+	f.mu.Lock()
+	f.coalesceCfg = cfg
+	f.mu.Unlock()
+}
+
+// snapshotCoalesceCfg returns a snapshot of the coalesce config under RLock
+// to avoid holding the lock during the cap arithmetic in the hot apply path.
+func (f *FSM) snapshotCoalesceCfg() CoalesceConfig {
+	f.mu.RLock()
+	cfg := f.coalesceCfg
+	f.mu.RUnlock()
+	return cfg
 }
 
 // NewFSM creates a new finite state machine backed by BadgerDB.
@@ -675,6 +699,9 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 		return fmt.Errorf("decode AppendObjectCmd: %w", err)
 	}
 
+	// Snapshot config once; avoids holding mu across the BadgerDB transaction.
+	coalesceCfg := f.snapshotCoalesceCfg()
+
 	return f.db.Update(func(txn *badger.Txn) error {
 		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
 
@@ -746,6 +773,22 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			}
 			if len(existing.Segments) >= storage.MaxAppendSegments {
 				return storage.ErrAppendCapExceeded
+			}
+			// Size cap (design 2026-05-19 § Follow-up 2): deterministic, FSM-side
+			// authoritative. Coordinator pre-check may have passed (stale HeadObject),
+			// but the Raft entry sees the freshest committed state. Pre-check
+			// tolerance contract: false-positive (accept what we reject) is fine —
+			// caller retries are idempotent on BlobID; false-negative (reject what we
+			// would have accepted) is FORBIDDEN because the FSM is the single source
+			// of truth.
+			//
+			// On reject, the segment blob already written by the coordinator becomes
+			// an orphan. Best-effort cleanup; full scrubber sweep is a follow-up
+			// (TODOS.md "Scrubber orphan sweep production wiring [P1]").
+			if coalesceCfg.SizeCapBytes > 0 &&
+				existing.Size+seg.Size > coalesceCfg.SizeCapBytes {
+				metrics.AppendSizeCapRejectedTotal.Inc()
+				return storage.ErrAppendObjectTooLarge
 			}
 			segs := append(existing.Segments, seg)
 			updated = *existing
@@ -846,6 +889,7 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
 
 		// Cap depth — stall coalesce when the chain grows unbounded.
 		if len(existing.Coalesced) >= MaxCoalescedEntries {
+			metrics.AppendCoalescedEntriesAtCap.Inc()
 			return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
 		}
 

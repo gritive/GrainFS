@@ -527,6 +527,8 @@ func parseReplyStatus(reply []byte) error {
 		return storage.ErrAppendNotSupported
 	case raftpb.ForwardStatusAppendCapExceeded:
 		return storage.ErrAppendCapExceeded
+	case raftpb.ForwardStatusAppendObjectTooLarge:
+		return storage.ErrAppendObjectTooLarge
 	case raftpb.ForwardStatusInsufficientPlacementTargets:
 		return &ErrInsufficientPlacementTargets{
 			Operation:     "forwarded_write",

@@ -90,3 +90,6 @@ func TestAppendObjectVersioningBucketRejected(t *testing.T) {
 // NOTE: TestAppendableObjectOverwriteByPlainPut removed — equivalent SDK
 // coverage already exists in tests/e2e/append_object_test.go as
 // TestAppendObjectE2E/{SingleNode,Cluster4Node}/PlainPutOverwritesAppendable.
+
+// NOTE: TestAppendObjectTooLargeResponse — ErrAppendObjectTooLarge → 400 EntityTooLarge
+// covered end-to-end in tests/e2e/append_size_cap_test.go (TestAppendSizeCapE2E).

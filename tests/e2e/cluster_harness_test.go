@@ -378,6 +378,34 @@ func writeNodeJoinPending(dataDir, seedRaftAddr string) error {
 	)
 }
 
+// KillNode terminates node i's process via SIGKILL while preserving its
+// dataDir / port assignments. The slot c.procs[i] is set to nil; use
+// RestartNode to bring it back in the same slot. Cleanup safety: the Stop
+// loop below tolerates nil entries (terminateProcess checks for nil).
+func (c *e2eCluster) KillNode(i int) {
+	if c == nil || i < 0 || i >= len(c.procs) {
+		return
+	}
+	if c.procs[i] != nil {
+		terminateProcess(c.procs[i])
+		c.procs[i] = nil
+	}
+}
+
+// RestartNode re-launches node i with the preserved data dir / ports.
+// Mirrors the initial startNode call. Caller should poll waitClusterSettled
+// or getStatusJSON after this to confirm the node has rejoined.
+func (c *e2eCluster) RestartNode(t *testing.T, i int) {
+	t.Helper()
+	if c == nil || i < 0 || i >= len(c.procs) {
+		return
+	}
+	if c.procs[i] != nil {
+		return // already running
+	}
+	c.procs[i] = c.startNode(t, i)
+}
+
 func (c *e2eCluster) Stop() {
 	if c == nil || c.stopped {
 		return
@@ -393,6 +421,41 @@ func (c *e2eCluster) Stop() {
 
 func (c *e2eCluster) S3Client(i int) *s3.Client {
 	return ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
+}
+
+// AwaitWriteFromNonOwner polls non-leader peers issuing tiny probe writes
+// against an isolated __grainfs_probe internal-prefix namespace until at
+// least one succeeds or deadline expires. Used by fault tests to assert
+// raft leader rotation has completed (a HeadBucket polling proxy can
+// return stale-ack during election; a successful committed write is the
+// direct evidence).
+//
+// The probe bucket is created on first use and is namespace-isolated
+// from user buckets — the __grainfs_ prefix is the GrainFS internal
+// bucket convention.
+func (c *e2eCluster) AwaitWriteFromNonOwner(bucket, key string, deadline time.Duration) error {
+	if c == nil {
+		return fmt.Errorf("nil cluster")
+	}
+	// Ensure probe bucket exists (idempotent).
+	c.GrantAdminOnBuckets(bucket)
+	ctx := context.Background()
+	_ = tryCreateBucket(ctx, c.S3Client(c.leaderIdx), bucket)
+
+	end := time.Now().Add(deadline)
+	body := []byte("probe")
+	for time.Now().Before(end) {
+		for i, p := range c.procs {
+			if p == nil || i == c.leaderIdx {
+				continue
+			}
+			if err := tryPutObject(ctx, c.S3Client(i), bucket, key, body); err == nil {
+				return nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("AwaitWriteFromNonOwner(%q,%q) timed out after %s", bucket, key, deadline)
 }
 
 func (c *e2eCluster) GrantAdminOnBuckets(buckets ...string) {

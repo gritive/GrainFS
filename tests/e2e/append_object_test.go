@@ -9,9 +9,11 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,87 +26,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// appendTarget abstracts a fixture (single-node or cluster) under test.
-//
-// pickNode(i) returns the S3 client bound to node i. For single-node fixtures
-// every i collapses to the same client, so common-case tests can call
-// pickNode(0) uniformly.
-type appendTarget struct {
-	name      string
-	nodes     int
-	pickNode  func(i int) *s3.Client
-	createBkt func(t *testing.T, bucket string)
-	isCluster bool
-	// cluster is non-nil for cluster fixtures and exposes the e2eCluster so
-	// downstream tests can hit /metrics, kill nodes, etc. nil for SingleNode.
-	cluster *e2eCluster
-}
-
 func TestAppendObjectE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-		tgt := newSingleNodeAppendTarget()
+		tgt := newSingleNodeS3Target()
 		runCommonAppendCases(t, tgt)
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
 		skipIfShort(t, "4-node cluster boot is too slow for -short")
-		tgt := newClusterAppendTarget(t, 4)
+		tgt := newClusterS3Target(t, 4)
 		runCommonAppendCases(t, tgt)
 		runClusterOnlyAppendCases(t, tgt)
 	})
 }
 
-// ----- fixtures -----
-
-func newSingleNodeAppendTarget() appendTarget {
-	return appendTarget{
-		name:  "single",
-		nodes: 1,
-		pickNode: func(i int) *s3.Client {
-			return testS3Client
-		},
-		createBkt: func(t *testing.T, bucket string) {
-			createBucket(t, bucket)
-		},
-		isCluster: false,
-	}
-}
-
-func newClusterAppendTarget(t *testing.T, nodes int) appendTarget {
-	t.Helper()
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      nodes,
-		Mode:       ClusterModeDynamicJoin,
-		ClusterKey: "E2E-APPEND-KEY",
-		LogPrefix:  "grainfs-append",
-		DisableNFS: true,
-		DisableNBD: true,
-	})
-
-	// Wait for IAM key propagation across all nodes; otherwise non-leader
-	// nodes 403 on first request.
-	for i := range c.procs {
-		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
-	}
-
-	return appendTarget{
-		name:  "cluster4",
-		nodes: nodes,
-		pickNode: func(i int) *s3.Client {
-			return c.S3Client(i % nodes)
-		},
-		createBkt: func(t *testing.T, bucket string) {
-			c.GrantAdminOnBuckets(bucket)
-			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
-		},
-		isCluster: true,
-		cluster:   c,
-	}
-}
-
 // ----- cases (common) -----
 
-func runCommonAppendCases(t *testing.T, tgt appendTarget) {
+func runCommonAppendCases(t *testing.T, tgt s3Target) {
 	bucket := "append-" + tgt.name
 	tgt.createBkt(t, bucket)
 	client := tgt.pickNode(0)
@@ -148,9 +86,32 @@ func runCommonAppendCases(t *testing.T, tgt appendTarget) {
 	})
 }
 
+// findOwnerForSingleGroup returns the index of the segment owner node
+// under the single-group default configuration. The cluster harness
+// currently has no API to query per-group data-Raft leaders, so this
+// helper assumes the single-group invariant and returns the meta-Raft
+// leaderIdx (which coincides under that invariant).
+//
+// When multi-group support lands, add a NEW helper:
+//
+//	findOwnerForGroup(c *e2eCluster, group string) int
+//
+// that issues a real data-Raft leader query (admin API). Leave this
+// function name in place but deprecated — callers must migrate before
+// removing it. The naming forces the migration to be deliberate, not
+// silent.
+//
+// Design source: 2026-05-19-appendobject-hardening-design.md § Follow-up 1.
+func findOwnerForSingleGroup(c *e2eCluster) int {
+	if c == nil {
+		return -1
+	}
+	return c.leaderIdx
+}
+
 // ----- cases (cluster-only) -----
 
-func runClusterOnlyAppendCases(t *testing.T, tgt appendTarget) {
+func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 	require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
 	bucket := "append-" + tgt.name + "-cluster"
 	tgt.createBkt(t, bucket)
@@ -205,6 +166,77 @@ func runClusterOnlyAppendCases(t *testing.T, tgt appendTarget) {
 			body := getObject(t, tgt.pickNode(i), bucket, key)
 			assert.Equal(t, []byte("alphabetagammadelta"), body, "node %d view", i)
 		}
+	})
+
+	t.Run("OwnerKillSurvives", func(t *testing.T) {
+		require.True(t, tgt.isCluster)
+		c := tgt.cluster
+		require.NotNil(t, c)
+
+		ownerBucket := "append-owner-kill-" + tgt.name
+		tgt.createBkt(t, ownerBucket)
+		key := "obj-survive"
+
+		// Drive 16 appends to trigger coalesce → obj.Coalesced should have
+		// at least 1 entry. The owner is the data-Raft leader.
+		const chunkSize = 1024
+		var off int64
+		var expected []byte
+		for i := 0; i < 16; i++ {
+			chunk := bytes.Repeat([]byte{byte(i + 1)}, chunkSize)
+			require.NoError(t, putAppend(tgt.pickNode(0), ownerBucket, key, off, chunk))
+			off += int64(len(chunk))
+			expected = append(expected, chunk...)
+		}
+		// Wait for coalesce to land (Metrics endpoint reports success).
+		require.Eventually(t, func() bool {
+			for i := 0; i < tgt.nodes; i++ {
+				if metricCounterAtLeast(t, tgt, i, `grainfs_append_coalesce_total{result="success"}`, 1) {
+					return true
+				}
+			}
+			return false
+		}, 10*time.Second, 200*time.Millisecond)
+
+		// Identify the data-Raft leader (Task 23) and kill it.
+		ownerIdx := findOwnerForSingleGroup(c)
+		require.GreaterOrEqual(t, ownerIdx, 0)
+		killedNodeID := c.nodeID(ownerIdx)
+
+		c.KillNode(ownerIdx)
+		// CRITICAL: defer (not t.Cleanup) — sibling sub-tests must see the
+		// fully restored cluster, not an N-1 cluster.
+		defer c.RestartNode(t, ownerIdx)
+
+		// Poll the cluster status on a surviving peer until a new leader is
+		// elected (not the killed node). This is the direct evidence that
+		// leader rotation completed.
+		//
+		// Note: AwaitWriteFromNonOwner is not usable here because the 4-node
+		// cluster uses EC 2+2 which requires all 4 shards for writes; with the
+		// owner dead only 3 nodes are available so new writes fail with
+		// ServiceUnavailable. Status-poll is the correct rotation signal when
+		// EC stripe width equals cluster size.
+		surviving := (ownerIdx + 1) % tgt.nodes
+		require.Eventually(t, func() bool {
+			resp, err := http.Get(c.httpURLs[surviving] + "/api/cluster/status")
+			if err != nil {
+				return false
+			}
+			defer resp.Body.Close()
+			var s map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+				return false
+			}
+			leader, _ := s["leader_id"].(string)
+			return leader != "" && leader != killedNodeID
+		}, 60*time.Second, 500*time.Millisecond, "no new leader elected within 60s")
+
+		// GET from a surviving non-owner peer; EC reconstruct must yield the
+		// full body bytes. With k=2 parity=2, we only need k=2 shards; the
+		// 3 surviving nodes satisfy that constraint.
+		body := getObject(t, tgt.pickNode(surviving), ownerBucket, key)
+		require.Equal(t, expected, body)
 	})
 }
 

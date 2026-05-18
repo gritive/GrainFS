@@ -237,6 +237,23 @@ type ownedGroupsState struct {
 // bootState) because it's a closure over startupDecisions that the run.go
 // body reads for the boot summary; passing it in keeps the phase signature
 // honest about what's mutated.
+
+// instantiateGroupWithConfig is the canonical entry point for booting a
+// per-server GroupBackend in this runtime. It bundles InstantiateLocalGroup
+// with the post-instantiation runtime configuration (currently
+// SetCoalesceConfig for --append-size-cap-bytes propagation), preventing the
+// wiring drift that commit 1895f2d2 fixed. Add additional per-group runtime
+// config here so new flags reach every group, including dynamically-
+// instantiated ones.
+func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleConfig, entry cluster.ShardGroupEntry) (*cluster.GroupBackend, error) {
+	gb, err := cluster.InstantiateLocalGroup(glc, entry)
+	if err != nil {
+		return nil, err
+	}
+	gb.SetCoalesceConfig(state.coalesceCfg)
+	return gb, nil
+}
+
 func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDecision func(badgerrole.Decision)) error {
 	// group-0 main backend: FSM state lives in the per-node shared FSM-state
 	// DB under the "group-0" keyspace prefix (C2 P3). The shared DB is owned
@@ -332,7 +349,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
 			FSMStore:         state.sharedFSMDB,
 		}
-		gb, err := cluster.InstantiateLocalGroup(glc, entry)
+		gb, err := state.instantiateGroupWithConfig(glc, entry)
 		if err != nil {
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}

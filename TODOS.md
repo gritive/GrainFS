@@ -178,27 +178,34 @@ Work these in order. Do not run them in parallel.
 
 ## AppendObject Follow-Ups
 
-- [ ] **Owner-kill real raft leader rotation e2e [P1]**: Phase B3 Task 20 omnibus
-  은 owner-local file 삭제로 EC reconstruct path만 unit 수준 (`TestCoalescedReadAfterOwnerFailure`)
-  검증. multi-node에서 실제 owner 노드 kill 후 raft leader rotation + GET이
-  EC reconstruct로 정합한지 e2e harness로 검증 필요.
-
 - [ ] **Coalesce recoalesce depth audit [P2]**: design open question — 새
   raw segment가 다시 threshold 도달 시 또 coalesce하면 `coalesced[]`에 entry가
   계속 누적된다. `MaxCoalescedEntries=1024` cap 외에 measurement-driven 정책
-  (max depth, periodic 통합) 검토.
+  (max depth, periodic 통합) 검토. v0.0.250.x Hardening은 `AppendCoalescedEntriesAtCap`
+  counter로 cap reach 빈도 measurement만 추가.
 
-- [ ] **AppendObject 5MiB body cap 정합성 [P2]**: HTTP layer는 64MiB까지
-  buffer 후 `ClusterCoordinator.AppendObject`로 전달 (Task 22).
-  ClusterCoordinator는 stale-placement retry용으로 `c.maxBody=5MiB`까지만
-  buffer. 5MiB-64MiB 구간 chunk가 forward 경로로 들어가는 시나리오에서 retry
-  단절. 둘 중 하나로 정합화 (maxBody 64MiB로 올리거나, retry 단념 시 typed
-  error 반환).
+- [ ] **Forward buffer 512 MiB warp calibration [P1]**: AppendObject Hardening
+  PR ship 전 `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
+  실행, `grainfs_cluster_append_forward_buffer_rejected_total` ratio < 1%
+  확인. 충족 못 하면 default `--cluster-append-forward-buffer-total-bytes`
+  상향 또는 memory-budget tuning을 separate PR로 분리. PR description에
+  measurement result 또는 미실행 사유 명시.
 
-- [ ] **`TestCoalesceMetricsObserved` flake [P2]**: full `make test-unit`
-  실행 시 간헐적 fail, isolated 또는 cluster package 단독 실행 (3회 반복) 시
-  PASS. metric counter race 의심. metric increment를 mutex-free atomic으로
-  교체하거나 test에서 counter 검증 전 explicit sync 추가.
+- [ ] **`AwaitWriteFromNonOwner` harness EC-aware 강화 [P2]**: 현재
+  AwaitWriteFromNonOwner는 healthy-cluster path 전용 — EC stripe width ==
+  cluster size 환경에서 owner kill 후 호출하면 모든 PUT이 ServiceUnavailable.
+  T24 OwnerKillSurvives는 직접 `/api/cluster/status` `leader_id` 폴링으로
+  우회했다. EC degraded write을 인식하는 helper 또는 별도 RotationSettled
+  helper 분리 검토.
+
+- [ ] **Scrubber orphan sweep production wiring [P1]**: `internal/scrubber/orphan.go`
+  `WalkOrphanShards` interface에 production implementation 없음 (mock만).
+  AppendObject best-effort cleanup이 실패하는 race / disk-error 경로에서
+  orphan blob/shard 누적. Required path:
+  - `<root>/data/<bucket>/<key>_segments/<blobID>` (raw segment)
+  - `<root>/data/<bucket>/<key>/coalesced/<id>` (EC shard tree)
+  Surface는 v0.0.249.0 ship-time부터 baseline. v0.0.250.x AppendObject
+  Hardening도 cap reject orphan을 같은 best-effort path로 처리.
 
 ## Pre-existing Test Failures (Phase B3 무관)
 

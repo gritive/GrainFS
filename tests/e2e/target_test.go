@@ -40,6 +40,7 @@ type s3Target struct {
 	// t.Cleanup(DeleteBucket). Returns the actual bucket name used.
 	uniqueBucket func(t *testing.T, caseName string) string
 	isCluster    bool
+	cluster      *e2eCluster // non-nil for cluster fixtures
 }
 
 func newSingleNodeS3Target() s3Target {
@@ -159,6 +160,62 @@ func newSharedClusterS3Target(t *testing.T) s3Target {
 			return name
 		},
 		isCluster: true,
+		cluster:   c,
+	}
+}
+
+// newClusterS3Target returns a DEDICATED (non-shared) cluster fixture. Use
+// newSharedClusterS3Target for tests that don't mutate cluster topology;
+// reserve this for tests that kill nodes, change CLI flags, or otherwise
+// need an isolated cluster.
+func newClusterS3Target(t *testing.T, nodes int) s3Target {
+	return newClusterS3TargetWithExtraArgs(t, nodes, nil)
+}
+
+// newClusterS3TargetWithExtraArgs mirrors newClusterS3Target but passes
+// extraArgs verbatim to every node's grainfs serve command-line.
+func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string) s3Target {
+	t.Helper()
+	c := startE2ECluster(t, e2eClusterOptions{
+		Nodes:      nodes,
+		Mode:       ClusterModeDynamicJoin,
+		ClusterKey: "E2E-S3-OP-KEY",
+		LogPrefix:  "grainfs-s3op",
+		DisableNFS: true,
+		DisableNBD: true,
+		ExtraArgs:  extraArgs,
+	})
+
+	for i := range c.procs {
+		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+	}
+
+	return s3Target{
+		name:  "cluster4",
+		nodes: nodes,
+		pickNode: func(i int) *s3.Client {
+			return c.S3Client(i % nodes)
+		},
+		endpoint: func(i int) string {
+			return c.httpURLs[i%nodes]
+		},
+		accessKey: c.accessKey,
+		secretKey: c.secretKey,
+		createBkt: func(t *testing.T, bucket string) {
+			c.GrantAdminOnBuckets(bucket)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("cluster4", t.Name(), caseName)
+			c.GrantAdminOnBuckets(name)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			t.Cleanup(func() {
+				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
+		isCluster: true,
+		cluster:   c,
 	}
 }
 

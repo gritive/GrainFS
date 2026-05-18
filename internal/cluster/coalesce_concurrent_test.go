@@ -24,7 +24,9 @@ func TestCoalesceConcurrentAppendPreserved(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
-	b.coalesceCfg.SegmentCount = 8
+	concCfg := *b.coalesceCfg.Load()
+	concCfg.SegmentCount = 8
+	b.SetCoalesceConfig(concCfg)
 
 	bucket, key := "b", "k"
 
@@ -70,7 +72,9 @@ func TestCoalesceConcurrentRacedAppendKeepsSegment(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "b"))
-	b.coalesceCfg.SegmentCount = 1 << 30 // disable count trigger, drive via explicit call
+	raceCfg := *b.coalesceCfg.Load()
+	raceCfg.SegmentCount = 1 << 30 // disable count trigger, drive via explicit call
+	b.SetCoalesceConfig(raceCfg)
 
 	bucket, key := "b", "k"
 	// Seed two segments.

@@ -1946,12 +1946,12 @@ func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
-// TestClusterCoordinator_PutObject_TooLarge_413 verifies the 5 MB hard cap is
-// enforced BEFORE encoding/forwarding — caller sees ErrEntityTooLarge without
+// TestClusterCoordinator_PutObject_TooLarge_413 verifies the DefaultMaxForwardBodyBytes
+// hard cap is enforced BEFORE encoding/forwarding — caller sees ErrEntityTooLarge without
 // any wire activity (recordingDialer recorded no calls).
 func TestClusterCoordinator_PutObject_TooLarge_413(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("x"), 6*1024*1024) // 6 MB, over cap
+	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardBodyBytes)+1) // one byte over cap
 	_, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "")
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
@@ -1985,7 +1985,7 @@ func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) 
 // TestClusterCoordinator_UploadPart_5MB_Cap — same enforcement on multipart.
 func TestClusterCoordinator_UploadPart_5MB_Cap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("x"), 6*1024*1024)
+	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardBodyBytes)+1) // one byte over cap
 	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
@@ -2176,4 +2176,65 @@ func (r *fullThenUnexpectedEOFReader) Read(p []byte) (int, error) {
 	}
 	r.done = true
 	return copy(p, r.body), nil
+}
+
+// newTestClusterCoordinatorForAppend returns a minimal ClusterCoordinator
+// suitable for testing the forward-buffer semaphore path (no real RPC peers).
+func newTestClusterCoordinatorForAppend(t *testing.T) *ClusterCoordinator {
+	t.Helper()
+	return NewClusterCoordinator(&fakeBackend{}, NewDataGroupManager(), nil, nil, "self")
+}
+
+// newTestClusterCoordinatorWithBuffer returns a ClusterCoordinator whose
+// appendForwardBuffer is pre-configured with the given cfg.
+func newTestClusterCoordinatorWithBuffer(t *testing.T, cfg AppendForwardBufferConfig) *ClusterCoordinator {
+	t.Helper()
+	c := newTestClusterCoordinatorForAppend(t)
+	c.SetAppendForwardBufferConfig(cfg)
+	return c
+}
+
+// forwardAppendObjectForTest exercises the semaphore acquire/release on the
+// forward path without requiring a real RPC peer. It reads the body up to
+// c.maxBody (checking the cap), acquires the semaphore, releases it, and
+// returns — short-circuiting the actual SendStream call.
+func (c *ClusterCoordinator) forwardAppendObjectForTest(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) error {
+	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > c.maxBody {
+		return storage.ErrEntityTooLarge
+	}
+	bodyLen := int64(len(body))
+	if c.appendForwardBuffer != nil {
+		if err := c.appendForwardBuffer.Acquire(ctx, bodyLen); err != nil {
+			return err
+		}
+		defer c.appendForwardBuffer.Release(bodyLen)
+	}
+	// Semaphore acquired and released — RPC not exercised in unit tests.
+	return nil
+}
+
+func TestAppendForward_MidSizeAccepted(t *testing.T) {
+	c := newTestClusterCoordinatorForAppend(t)
+	body := bytes.Repeat([]byte("m"), 8*1024*1024)
+	err := c.forwardAppendObjectForTest(context.Background(), "b", "k", 0, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("8 MiB forward rejected: %v", err)
+	}
+}
+
+func TestAppendForward_BufferSaturation(t *testing.T) {
+	c := newTestClusterCoordinatorWithBuffer(t, AppendForwardBufferConfig{
+		TotalBytes:    8 * 1024 * 1024,
+		MaxPerRequest: 64 * 1024 * 1024,
+	})
+	// Directly hold 6 MiB in the semaphore to simulate an in-flight forward.
+	require.NoError(t, c.appendForwardBuffer.Acquire(context.Background(), 6*1024*1024))
+	// A second 6 MiB forward must be rejected: 6+6 > 8 MiB pool.
+	body2 := bytes.Repeat([]byte("s"), 6*1024*1024)
+	err := c.forwardAppendObjectForTest(context.Background(), "b", "k2", 0, bytes.NewReader(body2))
+	require.ErrorIs(t, err, ErrForwardBufferFull)
 }

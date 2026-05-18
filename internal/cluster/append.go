@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -53,6 +54,30 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		}
 	}
 
+	// Size-cap fast-reject hint (design § Follow-up 2). Tolerance contract:
+	// false-positive (reject what FSM would accept due to stale HeadObject)
+	// is FORBIDDEN — only reject when we are conservative-safe. existing
+	// here comes from HeadObject which can be stale OLDER than reality,
+	// meaning existing.Size <= real.Size. existing.Size+chunkSize > cap is
+	// therefore "real.Size+chunk > cap" — strict-greater on a lower bound
+	// is conservative-safe (real total is at LEAST this large). OK to
+	// reject.
+	//
+	// Body is not yet read; segment blob is not yet written; no orphan.
+	chunkSize := int64(-1)
+	if seek, ok := r.(io.Seeker); ok {
+		if cur, err := seek.Seek(0, io.SeekCurrent); err == nil {
+			if end, err := seek.Seek(0, io.SeekEnd); err == nil {
+				_, _ = seek.Seek(cur, io.SeekStart)
+				chunkSize = end - cur
+			}
+		}
+	}
+	if cfg := b.coalesceCfg.Load(); existing != nil && cfg != nil && chunkSize > 0 && cfg.SizeCapBytes > 0 &&
+		existing.Size+chunkSize > cfg.SizeCapBytes {
+		return nil, storage.ErrAppendObjectTooLarge
+	}
+
 	// Step 2: write segment blob to owner-node disk.
 	seg, err := b.writeSegmentBlobForAppend(bucket, key, r)
 	if err != nil {
@@ -90,6 +115,10 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	obj, herr := b.HeadObject(ctx, bucket, key)
 	if herr == nil && obj != nil && obj.IsAppendable {
 		b.maybeTriggerCoalesce(bucket, key, obj.Segments)
+	}
+	if herr == nil && obj != nil {
+		metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
+		metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
 	}
 	return obj, herr
 }
