@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"strconv"
 	"testing"
 
@@ -91,12 +90,11 @@ func BenchmarkMetaCatalogReadRequest_RoundTrip(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				data, err := json.Marshal(tc.req)
+				data, err := encodeMetaCatalogReadRequest(tc.req)
 				if err != nil {
 					b.Fatal(err)
 				}
-				var out metaCatalogReadRequest
-				if err := json.Unmarshal(data, &out); err != nil {
+				if _, err := decodeMetaCatalogReadRequest(data); err != nil {
 					b.Fatal(err)
 				}
 			}
