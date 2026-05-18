@@ -587,3 +587,58 @@ table MetaScrubTriggerCmd {
   requested_at:long;            // unix seconds
   originator_node_id:string;
 }
+
+// ─── Meta-Raft proposal forwarding (v2 of GFSMFWD wire format) ──────────────
+// Wire prefix: "GFSMFWD2". The legacy "GFSMFWD1" (JSON-bodied) format is
+// detected at decode time and explicitly rejected with a clear error.
+
+enum CompatScope : byte {
+  Unknown = 0,
+  MetaRaft = 1,
+  DataGroup = 2,
+  PeerTransport = 3,
+  Local = 4,
+}
+
+enum CompatSeverity : byte {
+  Unknown = 0,
+  Hard = 1,
+  Soft = 2,
+}
+
+enum CompatOperation : byte {
+  Unknown = 0,
+  MigrationCutover = 1,
+  NfsExportCreate = 2,
+  CreateMultipartUpload = 3,
+  ListMultipartUploads = 4,
+  ListParts = 5,
+}
+
+table StaleNode {
+  node_id:string;
+  last_seen_unix_ms:int64;
+}
+
+table CompatGatePlan {
+  capability:string;
+  scope:CompatScope = Unknown;
+  severity:CompatSeverity = Unknown;
+  operation:CompatOperation = Unknown;
+  config_id:uint64;
+  required:[string];
+  missing:[string];
+  unknown:[string];
+  stale:[StaleNode];
+}
+
+table MetaForwardRequest {
+  command:[ubyte] (required);
+  gate_plan:CompatGatePlan;
+}
+
+table MetaForwardReply {
+  index:uint64;
+  error_type:string;
+  error_message:string;
+}
