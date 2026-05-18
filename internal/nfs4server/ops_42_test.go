@@ -297,6 +297,581 @@ func TestCopy_UsesOffsetsAndCount(t *testing.T) {
 	require.Equal(t, uint64(3), bytesWritten)
 }
 
+func TestCopy_ReadsOnlyRequestedSourceRange(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	src := bytes.Repeat([]byte("x"), 64*1024)
+	copy(src[1024:], []byte("range-data"))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader(src), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
+	require.NoError(t, err)
+
+	limited := &sourceReadLimitBackend{
+		Backend: backend,
+		key:     "src.bin",
+		limit:   1024 + int64(len("range-data")),
+	}
+	d := &Dispatcher{
+		backend:     limited,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(1024, 1, uint64(len("range-data"))))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	require.LessOrEqual(t, limited.read, limited.limit)
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("0range-data"), got)
+}
+
+func TestCopy_UsesReadAtForRequestedSourceRange(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	src := bytes.Repeat([]byte("x"), 64*1024)
+	copy(src[1024:], []byte("range-data"))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader(src), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("0123456789")), "application/octet-stream")
+	require.NoError(t, err)
+
+	wrapped := &sourceReadAtBackend{
+		Backend: backend,
+		partial: backend,
+		key:     "src.bin",
+	}
+	d := &Dispatcher{
+		backend:     wrapped,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(1024, 1, uint64(len("range-data"))))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	require.False(t, wrapped.sourceGetObject)
+	require.Equal(t, int64(1024), wrapped.readAtOffset)
+	require.Equal(t, len("range-data"), wrapped.readAtLen)
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("0range-data"), got)
+}
+
+func TestCopy_RejectsOversizedRequestedSourceRange(t *testing.T) {
+	backend := &copyOversizeBackend{size: maxObjectBytes + 1}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, 0, 0))
+
+	require.Equal(t, NFS4ERR_FBIG, result.Status)
+	require.False(t, backend.getObjectCalled)
+}
+
+func TestCopy_SourceOffsetAtEOFWritesZeroBytes(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("abc")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("dst")), "application/octet-stream")
+	require.NoError(t, err)
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(3, 1, 4))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	r := NewXDRReader(result.Data)
+	_, err = r.ReadUint32()
+	require.NoError(t, err)
+	bytesWritten, err := r.ReadUint64()
+	require.NoError(t, err)
+	require.Zero(t, bytesWritten)
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("dst"), got)
+}
+
+func TestCopy_MissingSourceReturnsIO(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("dst")), "application/octet-stream")
+	require.NoError(t, err)
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/missing.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, 0, 1))
+
+	require.Equal(t, NFS4ERR_IO, result.Status)
+}
+
+func TestCopy_SourceOffsetPastMaxInt64WritesZeroBytes(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("abc")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("dst")), "application/octet-stream")
+	require.NoError(t, err)
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(uint64(1<<63), 1, 1))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	r := NewXDRReader(result.Data)
+	_, err = r.ReadUint32()
+	require.NoError(t, err)
+	bytesWritten, err := r.ReadUint64()
+	require.NoError(t, err)
+	require.Zero(t, bytesWritten)
+}
+
+func TestCopy_RejectsDestinationOffsetOverflow(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("a")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("dst")), "application/octet-stream")
+	require.NoError(t, err)
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, ^uint64(0), 1))
+
+	require.Equal(t, NFS4ERR_FBIG, result.Status)
+}
+
+func TestCopy_ReadAtErrorReturnsIO(t *testing.T) {
+	backend := &copyReadAtErrorBackend{size: 8}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, 0, 1))
+
+	require.Equal(t, NFS4ERR_IO, result.Status)
+	require.True(t, backend.readAtCalled)
+	require.False(t, backend.getObjectCalled)
+}
+
+func TestCopy_FallbackGetObjectErrorReturnsIO(t *testing.T) {
+	backend := &copyGetObjectErrorBackend{size: 8}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, 0, 1))
+
+	require.Equal(t, NFS4ERR_IO, result.Status)
+	require.True(t, backend.getObjectCalled)
+}
+
+func TestCopy_HugeSourceSmallRequestedRangeSucceeds(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = local.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("abc")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = local.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("dst")), "application/octet-stream")
+	require.NoError(t, err)
+	backend := &copyHeadSizeBackend{
+		Backend: local,
+		key:     "src.bin",
+		size:    maxObjectBytes + 1,
+	}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, 1, 1))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	body, _, err := local.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("dat"), got)
+}
+
+func TestCopy_CountZeroCopiesToEOF(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("abcdef")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("012345")), "application/octet-stream")
+	require.NoError(t, err)
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(2, 1, 0))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	r := NewXDRReader(result.Data)
+	_, err = r.ReadUint32()
+	require.NoError(t, err)
+	bytesWritten, err := r.ReadUint64()
+	require.NoError(t, err)
+	require.Equal(t, uint64(4), bytesWritten)
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("0cdef5"), got)
+}
+
+func TestCopy_CountPastEOFClampsToRemaining(t *testing.T) {
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("abcdef")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = backend.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("012345")), "application/octet-stream")
+	require.NoError(t, err)
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(2, 1, 100))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	body, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("0cdef5"), got)
+}
+
+func TestCopy_FallbackSkipErrorReturnsIO(t *testing.T) {
+	backend := &copyStreamErrorBackend{
+		size: 8,
+		body: io.NopCloser(copyFailingReader{}),
+	}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(1, 0, 1))
+
+	require.Equal(t, NFS4ERR_IO, result.Status)
+}
+
+func TestCopy_FallbackReadErrorReturnsIO(t *testing.T) {
+	backend := &copyStreamErrorBackend{
+		size: 8,
+		body: io.NopCloser(&copyFailAfterBytesReader{data: []byte("x")}),
+	}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(1, 0, 1))
+
+	require.Equal(t, NFS4ERR_IO, result.Status)
+}
+
+func TestCopy_ReadAtShortEOFReturnsPartialData(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), legacyNFS4Bucket))
+	_, err = local.PutObject(context.Background(), legacyNFS4Bucket, "src.bin", bytes.NewReader([]byte("abcd")), "application/octet-stream")
+	require.NoError(t, err)
+	_, err = local.PutObject(context.Background(), legacyNFS4Bucket, "dst.bin", bytes.NewReader([]byte("0123")), "application/octet-stream")
+	require.NoError(t, err)
+	backend := &copyReadAtShortEOFBackend{Backend: local, partial: local}
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		savedPath:   "/" + legacyNFS4Bucket + "/src.bin",
+		currentPath: "/" + legacyNFS4Bucket + "/dst.bin",
+	}
+
+	result := d.opCopy(buildCopyArgs42(0, 1, 4))
+
+	require.Equal(t, NFS4_OK, result.Status)
+	r := NewXDRReader(result.Data)
+	_, err = r.ReadUint32()
+	require.NoError(t, err)
+	bytesWritten, err := r.ReadUint64()
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), bytesWritten)
+	body, _, err := local.GetObject(context.Background(), legacyNFS4Bucket, "dst.bin")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("0ab3"), got)
+}
+
+var errSourceReadLimitExceeded = errors.New("source read limit exceeded")
+
+type sourceReadLimitBackend struct {
+	storage.Backend
+	key   string
+	limit int64
+	read  int64
+}
+
+func (b *sourceReadLimitBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	rc, obj, err := b.Backend.GetObject(ctx, bucket, key)
+	if err != nil || key != b.key {
+		return rc, obj, err
+	}
+	return &sourceReadLimitCloser{ReadCloser: rc, backend: b}, obj, nil
+}
+
+type sourceReadLimitCloser struct {
+	io.ReadCloser
+	backend *sourceReadLimitBackend
+}
+
+func (r *sourceReadLimitCloser) Read(p []byte) (int, error) {
+	if r.backend.read >= r.backend.limit {
+		return 0, errSourceReadLimitExceeded
+	}
+	remaining := r.backend.limit - r.backend.read
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err := r.ReadCloser.Read(p)
+	r.backend.read += int64(n)
+	return n, err
+}
+
+var errUnexpectedSourceGetObject = errors.New("source GetObject should not be used")
+
+type sourceReadAtBackend struct {
+	storage.Backend
+	partial         storage.PartialIO
+	key             string
+	sourceGetObject bool
+	readAtOffset    int64
+	readAtLen       int
+}
+
+func (b *sourceReadAtBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	if key == b.key {
+		b.sourceGetObject = true
+		return nil, nil, errUnexpectedSourceGetObject
+	}
+	return b.Backend.GetObject(ctx, bucket, key)
+}
+
+func (b *sourceReadAtBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	if key == b.key {
+		b.readAtOffset = offset
+		b.readAtLen = len(buf)
+	}
+	return b.partial.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+func (b *sourceReadAtBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	return b.partial.WriteAt(ctx, bucket, key, offset, data)
+}
+
+func (b *sourceReadAtBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	return b.partial.Truncate(ctx, bucket, key, size)
+}
+
+type copyOversizeBackend struct {
+	storage.Backend
+	size            int64
+	getObjectCalled bool
+}
+
+func (b *copyOversizeBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return &storage.Object{Size: b.size}, nil
+}
+
+func (b *copyOversizeBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	b.getObjectCalled = true
+	return nil, nil, errSourceReadLimitExceeded
+}
+
+var errCopyReadAtFailed = errors.New("copy readat failed")
+
+type copyReadAtErrorBackend struct {
+	storage.Backend
+	size            int64
+	readAtCalled    bool
+	getObjectCalled bool
+}
+
+func (b *copyReadAtErrorBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return &storage.Object{Size: b.size}, nil
+}
+
+func (b *copyReadAtErrorBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	b.getObjectCalled = true
+	return nil, nil, errSourceReadLimitExceeded
+}
+
+func (b *copyReadAtErrorBackend) ReadAt(context.Context, string, string, int64, []byte) (int, error) {
+	b.readAtCalled = true
+	return 0, errCopyReadAtFailed
+}
+
+func (b *copyReadAtErrorBackend) WriteAt(context.Context, string, string, uint64, []byte) (*storage.Object, error) {
+	return nil, errCopyReadAtFailed
+}
+
+func (b *copyReadAtErrorBackend) Truncate(context.Context, string, string, int64) error {
+	return errCopyReadAtFailed
+}
+
+func (b *copyReadAtErrorBackend) PreferReadAt(string) bool {
+	return true
+}
+
+type copyGetObjectErrorBackend struct {
+	storage.Backend
+	size            int64
+	getObjectCalled bool
+}
+
+func (b *copyGetObjectErrorBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return &storage.Object{Size: b.size}, nil
+}
+
+func (b *copyGetObjectErrorBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	b.getObjectCalled = true
+	return nil, nil, errSourceReadLimitExceeded
+}
+
+type copyHeadSizeBackend struct {
+	storage.Backend
+	key  string
+	size int64
+}
+
+func (b *copyHeadSizeBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	if key == b.key {
+		return &storage.Object{Size: b.size}, nil
+	}
+	return b.Backend.HeadObject(ctx, bucket, key)
+}
+
+type copyStreamErrorBackend struct {
+	storage.Backend
+	size int64
+	body io.ReadCloser
+}
+
+func (b *copyStreamErrorBackend) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return &storage.Object{Size: b.size}, nil
+}
+
+func (b *copyStreamErrorBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	return b.body, &storage.Object{Size: b.size}, nil
+}
+
+type copyFailingReader struct{}
+
+func (copyFailingReader) Read([]byte) (int, error) {
+	return 0, errSourceReadLimitExceeded
+}
+
+type copyFailAfterBytesReader struct {
+	data []byte
+}
+
+func (r *copyFailAfterBytesReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, errSourceReadLimitExceeded
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+type copyReadAtShortEOFBackend struct {
+	storage.Backend
+	partial storage.PartialIO
+}
+
+func (b *copyReadAtShortEOFBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	if key == "src.bin" {
+		return copy(buf, []byte("ab")), io.EOF
+	}
+	return b.partial.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+func (b *copyReadAtShortEOFBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	return b.partial.WriteAt(ctx, bucket, key, offset, data)
+}
+
+func (b *copyReadAtShortEOFBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	return b.partial.Truncate(ctx, bucket, key, size)
+}
+
+func (b *copyReadAtShortEOFBackend) PreferReadAt(string) bool {
+	return true
+}
+
 func TestReadDir_ListsFilesCreatedByPartialWrite(t *testing.T) {
 	backend, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)

@@ -3,8 +3,11 @@ package nfs4server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"math"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 const (
@@ -218,27 +221,18 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	}
 
 	releaseSrc := d.state.LockPath(d.savedPath)
-	srcBody, _, err := d.backend.GetObject(context.Background(), srcBucket, srcKey)
-	if err != nil {
-		releaseSrc()
-		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
-	}
-	srcData, err := io.ReadAll(srcBody)
-	srcBody.Close()
+	srcData, err := d.readCopySourceData(context.Background(), srcBucket, srcKey, srcOffset, count)
 	releaseSrc()
 	if err != nil {
+		if errors.Is(err, errCopyRangeTooLarge) {
+			return OpResult{OpCode: OpCopy, Status: NFS4ERR_FBIG}
+		}
 		return OpResult{OpCode: OpCopy, Status: NFS4ERR_IO}
 	}
-
-	if srcOffset >= uint64(len(srcData)) {
-		srcData = nil
-	} else {
-		srcData = srcData[srcOffset:]
-		if count > 0 && count < uint64(len(srcData)) {
-			srcData = srcData[:count]
-		}
-	}
 	bytesWritten := uint64(len(srcData))
+	if dstEndOverflows(dstOffset, bytesWritten) {
+		return OpResult{OpCode: OpCopy, Status: NFS4ERR_FBIG}
+	}
 
 	release := d.state.LockPath(d.currentPath)
 	defer release()
@@ -279,6 +273,76 @@ func (d *Dispatcher) opCopy(data []byte) OpResult {
 	w.WriteUint32(1)                  // cr_consecutive = TRUE
 	w.WriteUint32(1)                  // cr_synchronous = TRUE
 	return OpResult{OpCode: OpCopy, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+}
+
+var errCopyRangeTooLarge = errors.New("copy source range too large")
+
+func (d *Dispatcher) readCopySourceData(ctx context.Context, bucket, key string, srcOffset, count uint64) ([]byte, error) {
+	copyLen, err := copySourceLength(ctx, d.backend, bucket, key, srcOffset, count)
+	if err != nil || copyLen == 0 {
+		return nil, err
+	}
+	if copyLen > maxObjectBytes {
+		return nil, errCopyRangeTooLarge
+	}
+	if partial, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
+		return readCopySourceAt(ctx, partial, bucket, key, srcOffset, copyLen)
+	}
+	srcBody, _, err := d.backend.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	defer srcBody.Close()
+	return readCopySourceRange(srcBody, srcOffset, copyLen)
+}
+
+func copySourceLength(ctx context.Context, backend storage.Backend, bucket, key string, srcOffset, count uint64) (uint64, error) {
+	if srcOffset > uint64(math.MaxInt64) {
+		return 0, nil
+	}
+	obj, err := backend.HeadObject(ctx, bucket, key)
+	if err != nil {
+		return 0, err
+	}
+	if obj.Size <= 0 || uint64(obj.Size) <= srcOffset {
+		return 0, nil
+	}
+	remaining := uint64(obj.Size) - srcOffset
+	if count > 0 && count < remaining {
+		return count, nil
+	}
+	return remaining, nil
+}
+
+func readCopySourceAt(ctx context.Context, partial storage.PartialIO, bucket, key string, srcOffset, count uint64) ([]byte, error) {
+	if srcOffset > uint64(math.MaxInt64) {
+		return nil, nil
+	}
+	buf := make([]byte, int(count))
+	n, err := partial.ReadAt(ctx, bucket, key, int64(srcOffset), buf)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+func dstEndOverflows(offset, length uint64) bool {
+	return length > 0 && offset > math.MaxUint64-length
+}
+
+func readCopySourceRange(r io.Reader, srcOffset, count uint64) ([]byte, error) {
+	if srcOffset > uint64(math.MaxInt64) {
+		return nil, nil
+	}
+	if srcOffset > 0 {
+		if _, err := io.CopyN(io.Discard, r, int64(srcOffset)); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil, nil
+			}
+			return nil, err
+		}
+	}
+	return io.ReadAll(io.LimitReader(r, int64(count)))
 }
 
 // opIOAdvise handles IO_ADVISE (op 63, RFC 7862 §15.6).
