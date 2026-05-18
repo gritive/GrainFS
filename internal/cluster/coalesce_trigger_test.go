@@ -30,7 +30,7 @@ func TestEvaluateCoalesceTrigger(t *testing.T) {
 		{"count", seg(16, 1), now, true, "count"},
 		{"count_below", seg(15, 1), now, false, ""},
 		{"size", seg(2, 64*1024*1024), now, true, "size"},
-		{"size_below", seg(2, 32*1024*1024), now, false, ""},
+		{"size_below", seg(2, 16*1024*1024), now, false, ""},
 		{"idle", seg(2, 1), now.Add(-31 * time.Second), true, "idle"},
 		{"idle_below", seg(2, 1), now.Add(-29 * time.Second), false, ""},
 		{"empty", nil, now, false, ""},
