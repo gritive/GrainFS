@@ -1,6 +1,7 @@
 package nbd
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -336,6 +337,34 @@ func BenchmarkNBD_BlockStatus4K(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := sendBlockStatus(conn, 0, 4096, req, reply); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMutationQueueFlushDistinctBlocks(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		q := newMutationQueue(4096)
+		for block := 0; block < 64; block++ {
+			q.AppendRange(uint64(block*4096), 4096, []func() error{
+				func() error { return nil },
+			})
+		}
+		if err := q.Flush(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMutationQueueFlushSameBlock(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		q := newMutationQueue(4096)
+		for entry := 0; entry < 64; entry++ {
+			q.AppendRange(0, 4096, []func() error{
+				func() error { return nil },
+			})
+		}
+		if err := q.Flush(context.Background()); err != nil {
 			b.Fatal(err)
 		}
 	}
