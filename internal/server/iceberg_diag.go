@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/rs/zerolog/log"
 )
 
@@ -41,4 +43,36 @@ func (s *Server) applyIcebergDiagEnv() {
 	access, slowNs := parseIcebergDiagEnv()
 	s.icebergAccessLogEnabled.Store(access)
 	s.icebergCommitSlowThresholdNs.Store(slowNs)
+}
+
+// logIcebergAccess emits a single iceberg_access zerolog line.
+// Pulled out as a function so it can be unit-tested without building a
+// real Hertz RequestContext (zero-value RequestContext is fragile in tests).
+func logIcebergAccess(method, path string, status int, elapsed time.Duration) {
+	log.Info().
+		Str("method", method).
+		Str("path", path).
+		Int("status", status).
+		Float64("elapsed_ms", float64(elapsed.Microseconds())/1000.0).
+		Msg("iceberg_access")
+}
+
+// icebergAccessLog wraps a Hertz handler with a single-line zerolog emit
+// describing each request. When the access log flag is OFF, the closure
+// short-circuits with a single atomic.Bool load (zero alloc verified by test).
+func (s *Server) icebergAccessLog(h app.HandlerFunc) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		if !s.icebergAccessLogEnabled.Load() {
+			h(ctx, c)
+			return
+		}
+		start := time.Now()
+		h(ctx, c)
+		logIcebergAccess(
+			string(c.Request.Method()),
+			string(c.Request.Path()),
+			c.Response.StatusCode(),
+			time.Since(start),
+		)
+	}
 }

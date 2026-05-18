@@ -2,10 +2,12 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -51,5 +53,42 @@ func TestParseIcebergDiagEnv(t *testing.T) {
 				t.Errorf("warn emitted: got %v want %v (log=%q)", gotWarn, tc.wantWarn, buf.String())
 			}
 		})
+	}
+}
+
+func TestLogIcebergAccessFormat(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Logger
+	log.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { log.Logger = old })
+
+	logIcebergAccess("POST", "/iceberg/v1/namespaces/n1/tables/t1", 409, 12345*time.Microsecond)
+
+	line := buf.String()
+	for _, key := range []string{
+		`"method":"POST"`,
+		`"path":"/iceberg/v1/namespaces/n1/tables/t1"`,
+		`"status":409`,
+		`"elapsed_ms":12.345`,
+		`"message":"iceberg_access"`,
+	} {
+		if !strings.Contains(line, key) {
+			t.Errorf("access log line missing %q: %s", key, line)
+		}
+	}
+}
+
+func TestIcebergAccessLogDisabledZeroAlloc(t *testing.T) {
+	s := &Server{} // access log OFF (default)
+	handler := s.icebergAccessLog(func(ctx context.Context, c *app.RequestContext) {})
+
+	ctx := context.Background()
+	c := &app.RequestContext{} // OFF path doesn't read from c — safe
+
+	allocs := testing.AllocsPerRun(100, func() {
+		handler(ctx, c)
+	})
+	if allocs > 0 {
+		t.Fatalf("disabled middleware should be zero-alloc, got %.2f allocs/run", allocs)
 	}
 }
