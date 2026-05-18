@@ -1109,10 +1109,24 @@ func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
 	ctx := context.Background()
 	// Pre-check: verify bucket exists locally before proposing. The FSM also
 	// checks, but propose() does not propagate FSM errors back to the caller.
+	// This is the single-DistributedBackend path (tests, single-node EC
+	// setups). The coordinator-driven cluster path uses
+	// SetBucketVersioningPropose to bypass this local check after running its
+	// own cluster-aware HeadBucket.
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	return b.propose(ctx, CmdSetBucketVersioning, SetBucketVersioningCmd{
+	return b.SetBucketVersioningPropose(bucket, state)
+}
+
+// SetBucketVersioningPropose is the coordinator-facing entrypoint: it skips
+// the local bucket-existence pre-check because the coordinator has already
+// run a cluster-aware HeadBucket. On a freshly bootstrapped cluster a
+// follower may have the meta-Raft bucket assignment without having applied
+// the data-Raft CmdCreateBucket entry locally; calling SetBucketVersioning
+// from that follower would falsely reject the request with NoSuchBucket.
+func (b *DistributedBackend) SetBucketVersioningPropose(bucket, state string) error {
+	return b.propose(context.Background(), CmdSetBucketVersioning, SetBucketVersioningCmd{
 		Bucket: bucket,
 		State:  state,
 	})

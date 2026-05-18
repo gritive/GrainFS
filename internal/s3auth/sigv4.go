@@ -244,7 +244,13 @@ func buildCanonicalRequest(r *http.Request, signedHeadersStr string) string {
 	if uri == "" {
 		uri = "/"
 	}
-	query := r.URL.RawQuery
+	// AWS SigV4 canonical query string is *normalised* on both sides: sorted
+	// keys, AWS-strict URI encoding, every key=value. Using the wire-side
+	// r.URL.RawQuery only worked when the client happened to send the same
+	// canonical form it signed. botocore (and S3's PutBucketVersioning in
+	// particular) signs `versioning=` but transmits `?versioning`, which is
+	// why GetBucketVersioning / PutBucketVersioning consistently rejected.
+	query := buildSortedQuery(r.URL.Query())
 
 	headerNames := strings.Split(signedHeadersStr, ";")
 	sort.Strings(headerNames)
@@ -434,7 +440,20 @@ func buildPresignedCanonicalRequest(r *http.Request, signedHeadersStr string) st
 		r.Method, uri, canonicalQuery, canonicalHeaders.String(), signedHeadersStr)
 }
 
-// buildSortedQuery produces a canonical query string (sorted, encoded).
+// buildSortedQuery produces the AWS SigV4 canonical query string: every key
+// (and each repeated value) is sorted, then key=value pairs are joined with
+// `&`. Each component is URI-encoded under AWS canonical rules — unreserved
+// characters (`A-Z a-z 0-9 - _ . ~`) pass through, everything else becomes
+// `%HH` with uppercase hex. Net/url's QueryEscape leaves `~` untouched but
+// emits `+` for space (a `application/x-www-form-urlencoded` historical
+// quirk), which is wrong for AWS canonical: AWS requires `%20`. Using
+// QueryEscape here would have desynced our canonical request from every
+// strict AWS SDK whenever a query carried a space.
+//
+// The function also handles the bare-key case (e.g. `?versioning`): url.Query
+// parses that to `{"versioning": [""]}`, which we render as `versioning=` —
+// matching botocore and the AWS SigV4 spec, where every key must appear with
+// an `=` even when its value is empty.
 func buildSortedQuery(q url.Values) string {
 	keys := make([]string, 0, len(q))
 	for k := range q {
@@ -444,11 +463,33 @@ func buildSortedQuery(q url.Values) string {
 
 	var parts []string
 	for _, k := range keys {
+		ek := awsURIEncode(k)
 		for _, v := range q[k] {
-			parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+			parts = append(parts, ek+"="+awsURIEncode(v))
 		}
 	}
 	return strings.Join(parts, "&")
+}
+
+// awsURIEncode percent-encodes s according to AWS SigV4 canonical request
+// rules. Unreserved characters (A-Z a-z 0-9 `-` `_` `.` `~`) pass through;
+// every other byte becomes `%HH` with uppercase hex.
+func awsURIEncode(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z',
+			c >= 'a' && c <= 'z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.', c == '~':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }
 
 // PresignURL generates a presigned URL valid for the given number of seconds.

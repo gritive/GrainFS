@@ -29,14 +29,74 @@ import (
 // Bucket-scoped methods are unimplemented — the routing tests in T6 use a
 // different fake (with FBS reply injection).
 type fakeBackend struct {
-	calls      []string
-	listResult []string
-	createErr  error
-	headErr    error
-	deleteErr  error
-	listErr    error
-	mpuResult  []*storage.MultipartUpload
-	mpuErr     error
+	calls         []string
+	listResult    []string
+	createErr     error
+	headErr       error
+	deleteErr     error
+	listErr       error
+	versioningErr error
+	mpuResult     []*storage.MultipartUpload
+	mpuErr        error
+}
+
+func (f *fakeBackend) SetBucketVersioning(bucket, state string) error {
+	f.record(fmt.Sprintf("SetBucketVersioning:%s=%s", bucket, state))
+	return f.versioningErr
+}
+
+func (f *fakeBackend) GetBucketVersioning(bucket string) (string, error) {
+	f.record(fmt.Sprintf("GetBucketVersioning:%s", bucket))
+	return "", nil
+}
+
+// fakeShardGroupSourceWithAssignment extends fakeShardGroupSource with
+// BucketAssignments so ClusterCoordinator.bucketAssigned can find the bucket
+// without consulting a real router. Mimics MetaFSM's role on a freshly
+// bootstrapped cluster where a follower has the assignment replicated but the
+// data-Raft bucket meta has not yet been applied locally.
+type fakeShardGroupSourceWithAssignment struct {
+	fakeShardGroupSource
+	assignments map[string]string
+}
+
+func (f *fakeShardGroupSourceWithAssignment) BucketAssignments() map[string]string {
+	return f.assignments
+}
+
+func TestClusterCoordinatorSetBucketVersioningPassesClusterAwareHeadBucket(t *testing.T) {
+	// On a freshly bootstrapped cluster, CreateBucket replicates the bucket
+	// assignment through meta-Raft, but the receiving follower's
+	// DistributedBackend (local Badger) may not have applied the
+	// CmdCreateBucket data-Raft entry yet. ClusterCoordinator.HeadBucket
+	// already handles this by falling back to bucketAssigned. Without the
+	// same cluster-aware pre-check on SetBucketVersioning, the request goes
+	// straight to the base layer's local pre-check, which still returns
+	// ErrBucketNotFound and the warp versioned workload fails at
+	// PutBucketVersioning.
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeShardGroupSourceWithAssignment{
+		assignments: map[string]string{"bk-ver": "g1"},
+	}
+	c := NewClusterCoordinator(base, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "self")
+
+	require.NoError(t, c.SetBucketVersioning("bk-ver", "Enabled"))
+	require.Contains(t, base.calls, "SetBucketVersioning:bk-ver=Enabled")
+}
+
+func TestClusterCoordinatorSetBucketVersioningRejectsUnassignedBucket(t *testing.T) {
+	// When the bucket is not assigned in meta-Raft and the base backend
+	// reports ErrBucketNotFound, SetBucketVersioning must surface
+	// ErrBucketNotFound rather than silently proposing through to the
+	// data-Raft FSM (which would either silently drop the write or store
+	// versioning state against a non-existent bucket).
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeShardGroupSourceWithAssignment{assignments: map[string]string{}}
+	c := NewClusterCoordinator(base, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "self")
+
+	err := c.SetBucketVersioning("bk-missing", "Enabled")
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+	require.NotContains(t, base.calls, "SetBucketVersioning:bk-missing=Enabled")
 }
 
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {

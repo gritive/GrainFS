@@ -378,8 +378,26 @@ func (c *ClusterCoordinator) bucketAssigned(bucket string) bool {
 }
 
 func (c *ClusterCoordinator) SetBucketVersioning(bucket, state string) error {
+	type proposer interface {
+		SetBucketVersioningPropose(bucket, state string) error
+	}
 	type bucketVersioner interface {
 		SetBucketVersioning(bucket, state string) error
+	}
+	// Cluster-aware pre-check: on a freshly bootstrapped cluster the follower
+	// may have the bucket assignment from meta-Raft but not yet have applied
+	// the CmdCreateBucket data-Raft entry locally. The base layer's
+	// local-only pre-check would reject the request with NoSuchBucket and
+	// warp's `versioned` workload would fail at PutBucketVersioning.
+	if err := c.HeadBucket(context.Background(), bucket); err != nil {
+		return err
+	}
+	// Prefer the propose-only entrypoint when the base exposes it; that
+	// skips the duplicate local HeadBucket pre-check inside
+	// DistributedBackend.SetBucketVersioning, which would otherwise reject
+	// the follower path we just allowed through the cluster-aware check.
+	if p, ok := c.base.(proposer); ok {
+		return p.SetBucketVersioningPropose(bucket, state)
 	}
 	v, ok := c.base.(bucketVersioner)
 	if !ok {

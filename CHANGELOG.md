@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased - fix(s3auth/cluster): warp versioned workload passes on a 4-node cluster
+
+### Fixed
+- `s3auth.buildCanonicalRequest` now rebuilds the canonical query
+  string from `r.URL.Query()` instead of passing through
+  `r.URL.RawQuery`. AWS SigV4 requires the canonical query to use
+  `key=` for value-less parameters, AWS-strict URI encoding
+  (`%20` for space, `~` left unencoded), and lexicographically
+  sorted keys. botocore (the AWS CLI / Python SDK) signs against
+  the strict form but transmits the wire form
+  (`PUT /bucket?versioning`), so the previous comparison against
+  `RawQuery` rejected every `PutBucketVersioning` and
+  `GetBucketVersioning` call with `signature mismatch`. The new
+  `awsURIEncode` helper percent-encodes anything outside the AWS
+  unreserved set and is reused by `buildSortedQuery` (presigned URL
+  signing).
+- `ClusterCoordinator.SetBucketVersioning` now runs the
+  cluster-aware `HeadBucket` (which understands meta-Raft bucket
+  assignments) before invoking the backend. On a freshly
+  bootstrapped cluster a follower may have the bucket assignment
+  replicated through meta-Raft but not yet have applied the data-
+  Raft `CmdCreateBucket` entry locally; the previous local-only
+  pre-check inside `DistributedBackend.SetBucketVersioning`
+  rejected the follower with `NoSuchBucket` and warp's `versioned`
+  workload tripped at `PutBucketVersioning`.
+- `DistributedBackend.SetBucketVersioningPropose` is the new
+  coordinator-facing entrypoint. The coordinator calls it after the
+  cluster-aware HeadBucket, so the propose path no longer
+  duplicates the local pre-check. The original
+  `SetBucketVersioning` keeps its local pre-check intact for direct
+  callers (EC unit tests, single-node setups).
+
+### Tests
+- `TestVerifyAcceptsBareKeyQuery` signs `PUT /bucket?versioning`
+  against the AWS-strict canonical `versioning=` and expects
+  `Verify` to accept it.
+- `TestVerifyAcceptsSpaceAsPercent20` exercises the `%20`
+  encoding path used by AWS-strict canonical queries.
+- `TestClusterCoordinatorSetBucketVersioningPassesClusterAwareHeadBucket`
+  reproduces the follower scenario: base `HeadBucket` returns
+  `ErrBucketNotFound`, meta has the assignment, coordinator must
+  still propose successfully.
+- `TestClusterCoordinatorSetBucketVersioningRejectsUnassignedBucket`
+  pins the reverse: with no assignment the coordinator must
+  surface `ErrBucketNotFound` without proposing.
+
 ## Unreleased - fix(cluster): resolve PeerIDs to addresses before consulting the multipart capability gate
 
 ### Fixed

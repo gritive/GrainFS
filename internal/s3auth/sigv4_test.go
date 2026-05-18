@@ -1,6 +1,9 @@
 package s3auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -72,6 +75,62 @@ func TestVerifyPutRequest(t *testing.T) {
 	accessKey, err := v.Verify(req)
 	require.NoError(t, err, "Verify PUT")
 	assert.Equal(t, "mykey", accessKey)
+}
+
+// signWithCanonicalQuery rebuilds a SigV4 Authorization header for r using the
+// supplied canonicalQuery instead of r.URL.RawQuery, so tests can simulate
+// clients (botocore, AWS SDKs) whose wire-side query string differs from the
+// AWS-strict canonical they signed against (bare-key vs `key=`, `+` vs `%20`).
+func signWithCanonicalQuery(r *http.Request, accessKey, secretKey, region, canonicalQuery string) {
+	now := time.Now().UTC()
+	date := now.Format("20060102")
+	amzDate := now.Format("20060102T150405Z")
+	r.Header.Set("X-Amz-Date", amzDate)
+	r.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
+	uri := r.URL.EscapedPath()
+	if uri == "" {
+		uri = "/"
+	}
+	canonicalHeaders := "host:" + r.Host + "\n" +
+		"x-amz-content-sha256:UNSIGNED-PAYLOAD\n" +
+		"x-amz-date:" + amzDate + "\n"
+	canonical := r.Method + "\n" + uri + "\n" + canonicalQuery + "\n" +
+		canonicalHeaders + "\n" + signedHeaders + "\nUNSIGNED-PAYLOAD"
+	h := sha256.Sum256([]byte(canonical))
+	scope := fmt.Sprintf("%s/%s/s3/aws4_request", date, region)
+	stringToSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hex.EncodeToString(h[:])
+	sig := calculateSignature(secretKey, date, region, "s3", stringToSign)
+	credential := fmt.Sprintf("%s/%s/%s/s3/aws4_request", accessKey, date, region)
+	r.Header.Set("Authorization", fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s, SignedHeaders=%s, Signature=%s",
+		credential, signedHeaders, sig))
+}
+
+// TestVerifyAcceptsBareKeyQuery covers botocore's PutBucketVersioning wire
+// shape: aws-cli sends `PUT /bucket?versioning HTTP/1.1` (no `=`) but signs
+// against the AWS-strict canonical `versioning=`. Server-side verification
+// must normalise the wire query to the same strict canonical, otherwise
+// every PutBucketVersioning/GetBucketVersioning is rejected with
+// "signature mismatch".
+func TestVerifyAcceptsBareKeyQuery(t *testing.T) {
+	v := NewVerifier([]Credentials{{AccessKey: "AKID", SecretKey: "SECRET"}})
+	req, _ := http.NewRequest(http.MethodPut, "http://localhost:9000/bucket?versioning", nil)
+	req.Host = "localhost:9000"
+	signWithCanonicalQuery(req, "AKID", "SECRET", "us-east-1", "versioning=")
+	_, err := v.Verify(req)
+	require.NoError(t, err, "bare-key query must verify against AWS-strict canonical")
+}
+
+// TestVerifyAcceptsSpaceAsPercent20 covers any client that URL-encodes spaces
+// in query values as `%20` (AWS-strict canonical) while net/url's QueryEscape
+// renders them as `+`. The server canonical builder must match `%20`.
+func TestVerifyAcceptsSpaceAsPercent20(t *testing.T) {
+	v := NewVerifier([]Credentials{{AccessKey: "AKID", SecretKey: "SECRET"}})
+	req, _ := http.NewRequest(http.MethodGet, "http://localhost:9000/bucket?prefix=hello%20world", nil)
+	req.Host = "localhost:9000"
+	signWithCanonicalQuery(req, "AKID", "SECRET", "us-east-1", "prefix=hello%20world")
+	_, err := v.Verify(req)
+	require.NoError(t, err, "AWS-strict %20-encoded space must verify")
 }
 
 func TestCanonicalRequestUsesEscapedPath(t *testing.T) {
