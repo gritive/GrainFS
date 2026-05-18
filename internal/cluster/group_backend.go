@@ -189,6 +189,13 @@ func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	return g.DistributedBackend.CompleteMultipartUpload(g.placementContext(ctx), bucket, key, uploadID, parts)
 }
 
+// AppendObject delegates to the inner DistributedBackend so the local-exec
+// branch in ClusterCoordinator.AppendObject (Task 21) can dispatch directly
+// without a forward hop.
+func (g *GroupBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	return g.DistributedBackend.AppendObject(g.placementContext(ctx), bucket, key, expectedOffset, r)
+}
+
 // Node returns the RaftNode interface for this group.
 func (g *GroupBackend) Node() RaftNode { return g.node }
 

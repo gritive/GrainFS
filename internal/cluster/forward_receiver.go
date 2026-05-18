@@ -288,6 +288,8 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 		return r.handlePutObjectStream(dg, fbsArgs, body)
 	case raftpb.ForwardOpUploadPart:
 		return r.handleUploadPartStream(dg, fbsArgs, body)
+	case raftpb.ForwardOpAppendObject:
+		return r.handleAppendObjectStream(dg, fbsArgs, body)
 	default:
 		drainForwardBody(body)
 		return errReply(raftpb.ForwardStatusInternal, "")
@@ -722,6 +724,33 @@ func (r *ForwardReceiver) handleUploadPartStream(dg *DataGroup, args []byte, bod
 		return statusReply(mapErrorToStatus(err))
 	}
 	return &transport.Message{Payload: buildPartReply(part)}
+}
+
+// handleAppendObjectStream dispatches a forwarded AppendObject. Body bytes are
+// streamed on the same QUIC stream and consumed by the owner-side
+// DistributedBackend.AppendObject directly (no buffering on the receiver).
+// After successful apply we commit the ObjectIndex entry so the meta-Raft view
+// reflects the new size/etag — mirrors handlePutObject's commit pattern.
+func (r *ForwardReceiver) handleAppendObjectStream(dg *DataGroup, args []byte, body io.Reader) *transport.Message {
+	aa := raftpb.GetRootAsAppendObjectForwardArgs(args, 0)
+	bucket := string(aa.Bucket())
+	key := string(aa.Key())
+	indexProposer, missingIndexReply := r.requireObjectIndexProposer(bucket, key)
+	if missingIndexReply != nil {
+		drainForwardBody(body)
+		return missingIndexReply
+	}
+	ctx := contextForForwardedGroup(context.Background(), dg)
+	obj, err := dg.Backend().AppendObject(ctx, bucket, key, aa.ExpectedOffset(), body)
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	entry := objectIndexEntryForDataGroup(dg, bucket, key, obj, false)
+	if err := indexProposer.ProposeObjectIndex(ctx, entry, false); err != nil {
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("forward: ProposeObjectIndex failed after AppendObject; orphan may be created")
+		return statusReply(raftpb.ForwardStatusInternal)
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
 }
 
 func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) *transport.Message {

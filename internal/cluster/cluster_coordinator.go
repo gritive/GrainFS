@@ -1559,6 +1559,118 @@ func (c *ClusterCoordinator) UploadPart(
 	return part, nil
 }
 
+// AppendObject implements storage.AppendObjecter at the cluster-coordinator
+// level. It routes the append to the owner shard group:
+//   - local path: dispatches into GroupBackend.AppendObject (DistributedBackend
+//     handles the data-Raft propose + apply-error propagation per Phase A)
+//     and then commits ObjectIndex on the meta-Raft so the cluster view is
+//     consistent with the data plane.
+//   - forward path: streams the body to the owner via ForwardSender.SendStream
+//     using AppendObjectForwardArgs; the receiver does the propose + commits
+//     ObjectIndex itself (handleAppendObjectStream) so we don't double-commit.
+//
+// Stale placement retry: the FSM-level ErrStalePlacement signal (see apply.go)
+// is observable on the local-exec branch only because forward replies carry
+// ForwardStatus enums rather than the raw sentinel. Forwarded requests are
+// single-attempt for now; if rebalance races become observable we'll thread a
+// new ForwardStatus value in a follow-up. The local-branch retry is bounded
+// at maxAppendStaleRetries.
+func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
+	target, group, err := c.routeWriteOrBucket(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if c.indexWriter != nil {
+		ctx = contextWithObjectWritePlacement(ctx, group)
+	}
+
+	// Local-exec branch — DistributedBackend.AppendObject already performs the
+	// cluster-aware pre-check (offset/cap/non-appendable). We add a bounded
+	// retry on ErrStalePlacement so a placement rebalance window doesn't
+	// surface as a 503 to the caller.
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
+		obj, err := c.appendObjectLocalWithRetry(ctx, gb, bucket, key, expectedOffset, r)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.commitObjectIndex(ctx, bucket, key, obj, group, false); err != nil {
+			return nil, err
+		}
+		return obj, nil
+	}
+
+	// Forward branch — must have a stream dialer because append bodies are
+	// streamed (no inline-body fallback for AppendObject).
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	if c.forward.streamDialer == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildAppendObjectForwardArgs(bucket, key, expectedOffset)
+	peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
+	reply, err := c.forward.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpAppendObject, args, r)
+	if err != nil {
+		return nil, topologyForwardWriteError(group, err)
+	}
+	// Receiver already committed ObjectIndex — no second commit here.
+	return objectFromReply(reply)
+}
+
+// maxAppendStaleRetries bounds the transparent retry on FSM-level
+// ErrStalePlacement before the coordinator surfaces it to the caller.
+const maxAppendStaleRetries = 2
+
+// appendObjectLocalWithRetry calls gb.AppendObject and retries on
+// ErrStalePlacement up to maxAppendStaleRetries times. The body must be a
+// Seeker so we can rewind between attempts; non-seekable readers are
+// buffered once into memory under the existing c.maxBody cap.
+func (c *ClusterCoordinator) appendObjectLocalWithRetry(
+	ctx context.Context, gb *GroupBackend, bucket, key string, expectedOffset int64, r io.Reader,
+) (*storage.Object, error) {
+	seeker, ok := r.(io.Seeker)
+	var buffered []byte
+	if !ok {
+		body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(body)) > c.maxBody {
+			return nil, storage.ErrEntityTooLarge
+		}
+		buffered = body
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= maxAppendStaleRetries; attempt++ {
+		var body io.Reader
+		if buffered != nil {
+			body = bytes.NewReader(buffered)
+		} else {
+			if attempt > 0 {
+				if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+					return nil, fmt.Errorf("rewind for retry: %w", err)
+				}
+			}
+			body = r
+		}
+		obj, err := gb.AppendObject(ctx, bucket, key, expectedOffset, body)
+		if err == nil {
+			return obj, nil
+		}
+		if !errors.Is(err, ErrStalePlacement) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("append: stale placement after %d retries: %w", maxAppendStaleRetries, lastErr)
+}
+
 func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 	seeker, ok := r.(io.Seeker)
 	if !ok {
