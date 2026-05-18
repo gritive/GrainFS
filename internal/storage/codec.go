@@ -21,6 +21,25 @@ func marshalObject(obj *Object) ([]byte, error) {
 	if obj.SSEAlgorithm != "" {
 		sseOff = b.CreateString(obj.SSEAlgorithm)
 	}
+	var segmentsOff flatbuffers.UOffsetT
+	if len(obj.Segments) > 0 {
+		segOffs := make([]flatbuffers.UOffsetT, len(obj.Segments))
+		for i := len(obj.Segments) - 1; i >= 0; i-- {
+			s := obj.Segments[i]
+			blobOff := b.CreateString(s.BlobID)
+			etOff := b.CreateString(s.ETag)
+			storagepb.SegmentRefStart(b)
+			storagepb.SegmentRefAddBlobId(b, blobOff)
+			storagepb.SegmentRefAddSize(b, s.Size)
+			storagepb.SegmentRefAddEtag(b, etOff)
+			segOffs[i] = storagepb.SegmentRefEnd(b)
+		}
+		storagepb.ObjectStartSegmentsVector(b, len(segOffs))
+		for i := len(segOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(segOffs[i])
+		}
+		segmentsOff = b.EndVector(len(segOffs))
+	}
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -33,6 +52,12 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	if sseOff != 0 {
 		storagepb.ObjectAddSseAlgorithm(b, sseOff)
+	}
+	if segmentsOff != 0 {
+		storagepb.ObjectAddSegments(b, segmentsOff)
+	}
+	if obj.IsAppendable {
+		storagepb.ObjectAddIsAppendable(b, true)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -68,6 +93,22 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 		UserMetadata: readUserMetadata(t.UserMetadataLength(), t.UserMetadata),
 		SSEAlgorithm: string(t.SseAlgorithm()),
 	}
+	if n := t.SegmentsLength(); n > 0 {
+		segs := make([]SegmentRef, n)
+		var seg storagepb.SegmentRef
+		for i := 0; i < n; i++ {
+			if !t.Segments(&seg, i) {
+				continue
+			}
+			segs[i] = SegmentRef{
+				BlobID: string(seg.BlobId()),
+				Size:   seg.Size(),
+				ETag:   string(seg.Etag()),
+			}
+		}
+		dst.Segments = segs
+	}
+	dst.IsAppendable = t.IsAppendable()
 	return nil
 }
 

@@ -184,6 +184,61 @@ table ObjectMeta {
   placement_group_id:string;
   user_metadata:[KeyValue];
   sse_algorithm:string;
+  segments:[SegmentRef];
+  coalesced:[CoalescedShardRef];
+  is_appendable:bool = false;
+}
+
+// CoalescedShardRef references one coalesced blob produced by merging a
+// prefix of objectMeta.segments. Phase B2 stores it owner-locally; Phase B3
+// distributes it via EC and adds placement params on the same table.
+//
+// Phase B3 EC fields (ring_version / ec_data / ec_parity / node_ids) are
+// REQUIRED for coalesced blobs written by B3 worker (EC distribute). Legacy
+// B2 entries (owner-local only) have these fields zero-valued; reader falls
+// back to owner-local path in that case.
+table CoalescedShardRef {
+  coalesced_id:string;
+  size:int64;
+  etag:string;
+  shard_key:string;
+  version:int32 = 1;
+  ring_version:uint64 = 0;
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  node_ids:[string];
+}
+
+// CoalesceSegmentsCmd records a single coalesce operation: consume the listed
+// segment blob IDs into a single coalesced blob identified by CoalescedID +
+// ShardKey. ConsumedSegmentIDs MUST match a contiguous prefix of
+// objectMeta.segments at apply time; absent IDs are silently skipped
+// (idempotent on Raft replay).
+//
+// Phase B3 adds EC placement params so the FSM apply stores them on the
+// resulting CoalescedShardRef. placement[] order matches shard index 0..k+m.
+table CoalesceSegmentsCmd {
+  bucket:string;
+  key:string;
+  coalesced_id:string;
+  shard_key:string;
+  size:int64;
+  etag:string;
+  consumed_segment_ids:[string];
+  placement:[string];
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  ring_version:uint64 = 0;
+}
+
+// SegmentRef mirrors storage.SegmentRef — one EC-encoded, encrypted append
+// segment. Cluster stores its own copy in ObjectMeta because cluster
+// ObjectMeta is the source of truth on the data path; storage.Object is
+// materialized from it on read.
+table SegmentRef {
+  blob_id:string;
+  size:int64;
+  etag:string;
 }
 
 table SetBucketVersioningCmd {
@@ -195,6 +250,20 @@ table SetObjectACLCmd {
   bucket:string;
   key:string;
   acl:uint8;
+}
+
+// AppendObjectCmd records one appended segment. PlacementGroupID is frozen at
+// propose time — FSM apply derives NodeIDs/EC params from the current
+// ShardGroup record (single source of truth, avoids drift).
+table AppendObjectCmd {
+  bucket:string;
+  key:string;
+  expected_offset:int64;
+  blob_id:string;
+  segment_size:int64;
+  segment_etag:string;
+  placement_group_id:string;
+  version_id:string;
 }
 
 table KeyValue {

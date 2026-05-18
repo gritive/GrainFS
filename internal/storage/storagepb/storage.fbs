@@ -12,6 +12,14 @@ table Object {
   acl:uint8;
   user_metadata:[UserMetadata];
   sse_algorithm:string;
+  segments:[SegmentRef];
+  is_appendable:bool;
+}
+
+table SegmentRef {
+  blob_id:string;
+  size:int64;
+  etag:string;
 }
 
 table UserMetadata {

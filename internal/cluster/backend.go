@@ -93,6 +93,7 @@ type DistributedBackend struct {
 	node             RaftNode
 	fsm              *FSM
 	keys             *stateKeyspace
+	groupID          string // non-empty when constructed via NewDistributedBackendForGroup; used by Phase B1 append-segment peer-fetch
 	shared           bool
 	logger           zerolog.Logger
 	lastApplied      atomic.Uint64
@@ -130,6 +131,28 @@ type DistributedBackend struct {
 	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
 	internalDirCache  sync.Map // map[string]struct{}
 	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
+
+	// Phase A: FSM apply error propagation. Mirrors MetaRaft.applyErrs
+	// (meta_raft.go:797). applyErrs keys are Raft log indices; readers consume
+	// entries via ApplyError exactly once per ProposeWait.
+	applyResultMu sync.Mutex
+	applyErrs     map[uint64]error
+
+	// Phase B2 coalesce: lifecycle context + worker + first-seen tracker.
+	// coalesceCfg holds trigger thresholds (count / size / idle / cleanup).
+	// coalesceCancel is invoked from Close to stop both the worker goroutine
+	// and the periodic backstop scanner.
+	coalesceCfg       CoalesceConfig
+	coalesce          *coalesceWorker
+	coalesceCtx       context.Context
+	coalesceCancel    context.CancelFunc
+	coalesceFirstSeen sync.Map // key="<bucket>\x00<key>" → time.Time
+	// coalesceFaultAfterECWrite is a test-only hook: when set to a non-nil
+	// function returning an error, processCoalesceJobB3 calls it after the
+	// EC write but before propose, allowing tests to simulate a crash that
+	// leaves orphan EC shards but no metadata commit. Production builds
+	// leave this nil.
+	coalesceFaultAfterECWrite func() error
 }
 
 type backendTopology struct {
@@ -185,6 +208,13 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
 	}
+	// Phase B2: wire the in-process coalesce worker + periodic backstop scan.
+	// Lifecycle is bound to Close() via coalesceCancel.
+	b.coalesceCfg = DefaultCoalesceConfig()
+	b.coalesceCtx, b.coalesceCancel = context.WithCancel(context.Background())
+	b.coalesce = newCoalesceWorker(256, b.processCoalesceJobB3)
+	b.coalesce.Start(b.coalesceCtx)
+	go b.coalesceBackstopScan(b.coalesceCtx)
 	return b, nil
 }
 
@@ -198,7 +228,23 @@ func NewDistributedBackendForGroup(root string, db *badger.DB, node RaftNode, gr
 	if err != nil {
 		return nil, fmt.Errorf("group %s: keyspace: %w", groupID, err)
 	}
-	return NewDistributedBackend(root, db, node, keys, true)
+	b, err := NewDistributedBackend(root, db, node, keys, true)
+	if err != nil {
+		return nil, err
+	}
+	b.groupID = groupID
+	return b, nil
+}
+
+// GroupID returns the placement group this backend serves, or empty for
+// legacy single-group test/tooling constructions.
+func (b *DistributedBackend) GroupID() string { return b.groupID }
+
+// SegmentBlobPath exposes the on-disk path for an append-segment blob so
+// the node-level Phase B1 peer-fetch handler can open it through the
+// right group backend.
+func (b *DistributedBackend) SegmentBlobPath(bucket, key, blobID string) string {
+	return b.segmentBlobPath(bucket, key, blobID)
 }
 
 // ks returns the effective stateKeyspace for this backend. When b.keys is nil
@@ -545,8 +591,13 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 			}
 			switch entry.Type {
 			case raft.LogEntryCommand:
-				if err := b.fsm.Apply(entry.Command); err != nil {
-					b.logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error")
+				applyErr := b.fsm.Apply(entry.Command)
+				// Record apply result BEFORE lastApplied.Store so propose
+				// loop sees ApplyError(idx) set by the time it observes
+				// lastApplied >= idx (race-free linearization).
+				b.recordApplyResult(entry.Index, applyErr)
+				if applyErr != nil {
+					b.logger.Error().Uint64("index", entry.Index).Err(applyErr).Msg("fsm apply error")
 				}
 				// Notify cache invalidators and legacy metrics callback.
 				b.notifyOnApply(entry.Command)
@@ -629,23 +680,28 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	if err != nil {
 		return 0, fmt.Errorf("forwardPropose: send: %w", err)
 	}
-	if len(resp.Payload) < 12 {
-		return 0, fmt.Errorf("forwardPropose: response too short: %d bytes", len(resp.Payload))
+	index, applyErr, transportErr := decodeProposeForwardReply(resp.Payload)
+	if transportErr != nil {
+		return 0, fmt.Errorf("forwardPropose: %w", transportErr)
 	}
-	index := binary.BigEndian.Uint64(resp.Payload[0:8])
-	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
-	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
-		msg := string(resp.Payload[12 : 12+int(errLen)])
-		if msg == raft.ErrNotLeader.Error() {
+	if applyErr != nil {
+		// raft.ErrNotLeader is a propose-time signal — keep the legacy
+		// string match so callers can errors.Is() the canonical sentinel.
+		if applyErr.Error() == raft.ErrNotLeader.Error() {
 			return 0, raft.ErrNotLeader
 		}
-		return 0, fmt.Errorf("forwardPropose: leader error: %s", msg)
+		return 0, applyErr
 	}
 	return index, nil
 }
 
 // RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 QUIC 라우터에 등록한다.
 // 리더 노드에서 호출해야 하며, 팔로워의 propose를 대신 처리한다.
+//
+// Phase A (Task 16): the leader also waits for the entry to be applied locally
+// and harvests any FSM apply error via ApplyError(idx), encoding it on the wire
+// as a stable code so the follower can reconstruct the original sentinel via
+// decodeApplyError.
 func (b *DistributedBackend) RegisterProposeForwardHandler() {
 	if b.shardSvc == nil {
 		return
@@ -654,17 +710,29 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		idx, err := b.node.ProposeWait(ctx, req.Payload)
-		resp := make([]byte, 12)
-		if err != nil {
-			errBytes := []byte(err.Error())
-			binary.BigEndian.PutUint64(resp[0:8], 0)
-			binary.BigEndian.PutUint32(resp[8:12], uint32(len(errBytes)))
-			resp = append(resp, errBytes...)
-		} else {
-			binary.BigEndian.PutUint64(resp[0:8], idx)
-			binary.BigEndian.PutUint32(resp[8:12], 0)
+		if err == nil {
+			// Wait for apply, then surface FSM apply error (if any).
+			for b.lastApplied.Load() < idx {
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				default:
+				}
+				if err != nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err == nil {
+				if applyErr := b.ApplyError(idx); applyErr != nil {
+					err = applyErr
+				}
+			}
 		}
-		return &transport.Message{Type: transport.StreamProposeForward, Payload: resp}
+		return &transport.Message{
+			Type:    transport.StreamProposeForward,
+			Payload: encodeProposeForwardReply(idx, err),
+		}
 	})
 }
 
@@ -802,6 +870,12 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 				time.Sleep(time.Millisecond)
 			}
 		}
+		// Phase A: surface FSM apply errors to the caller. recordApplyResult
+		// runs before lastApplied.Store in the apply loop, so by the time we
+		// observe lastApplied >= idx the entry (if any) is already set.
+		if applyErr := b.ApplyError(idx); applyErr != nil {
+			return applyErr
+		}
 		return nil
 	}
 
@@ -843,6 +917,14 @@ func proposalForwardPeers(raftPeers, allNodes []string, selfAddr string) []strin
 // Close closes the metadata database. When shared is true the DB is owned by
 // the caller and Close is a no-op for the DB (only internal state is released).
 func (b *DistributedBackend) Close() error {
+	// Stop coalesce worker + backstop scanner before tearing down the DB so
+	// neither outlives the BadgerDB (would panic on closed-DB reads).
+	if b.coalesceCancel != nil {
+		b.coalesceCancel()
+	}
+	if b.coalesce != nil {
+		b.coalesce.Stop()
+	}
 	if b.shared {
 		return nil
 	}
@@ -1559,6 +1641,15 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 		buf = buf[:max]
 	}
 
+	// Appendable objects: dispatch via the stitched reader's range path so we
+	// only read the chunks that intersect [offset, offset+len(buf)). The
+	// generic EC ResolvePlacement returns ErrNotEC for appendables (no
+	// placement record); without this fast path ReadAt falls back to a full
+	// GET + discard which negates range-read efficiency.
+	if (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
+		return b.readAtAppendable(ctx, bucket, key, obj, offset, buf)
+	}
+
 	if b.shardSvc != nil {
 		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
@@ -2180,6 +2271,14 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	// is a real version. VersionID is non-empty for versioned writes and empty
 	// for legacy log replay.
 
+	// Appendable objects store bytes across per-segment blobs under
+	// <objectPath>_segments/<blobID> (see writeSegmentBlobForAppend). Stitch
+	// them with a multi-segment reader instead of trying to open a single
+	// objectPath file (which never exists for appendables).
+	if (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
+		return b.openAppendableSegments(bucket, key, obj), obj, nil
+	}
+
 	// EC path: shardKey = key+"/"+versionID for versioned objects.
 	shardKey := key
 	if obj.VersionID != "" {
@@ -2785,6 +2884,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				ACL:          m.ACL,
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
+				Segments:     m.Segments,
+				Coalesced:    coalescedRefsToStorage(m.Coalesced),
+				IsAppendable: m.IsAppendable,
 			}
 			placement = PlacementMeta{
 				VersionID:        versionID,
@@ -3849,3 +3951,35 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 
 // Node returns the RaftNode interface for leadership and raft control.
 func (b *DistributedBackend) Node() RaftNode { return b.node }
+
+// recordApplyResult records an FSM apply error for the given Raft log index.
+// Mirrors MetaRaft.recordApplyResult (meta_raft.go:797): only non-nil errors
+// are stored, and a 1024-index lookback window self-trims to prevent unbounded
+// growth.
+func (b *DistributedBackend) recordApplyResult(index uint64, err error) {
+	if err == nil {
+		return
+	}
+	b.applyResultMu.Lock()
+	if b.applyErrs == nil {
+		b.applyErrs = make(map[uint64]error)
+	}
+	b.applyErrs[index] = err
+	for old := range b.applyErrs {
+		if old+1024 < index {
+			delete(b.applyErrs, old)
+		}
+	}
+	b.applyResultMu.Unlock()
+}
+
+// ApplyError returns the FSM apply error for the given Raft log index, or nil
+// if no error was recorded. Reading consumes the entry — callers must read
+// exactly once per ProposeWait.
+func (b *DistributedBackend) ApplyError(index uint64) error {
+	b.applyResultMu.Lock()
+	err := b.applyErrs[index]
+	delete(b.applyErrs, index)
+	b.applyResultMu.Unlock()
+	return err
+}

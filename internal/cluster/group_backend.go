@@ -115,6 +115,10 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GroupBackend %s: NewDistributedBackend: %w", cfg.ID, err)
 	}
+	// Phase B1: tag the backend with its placement group so the node-level
+	// append-segment peer-fetch RPC can route a (groupID, bucket, key)
+	// triple back to this backend's data root.
+	dist.groupID = cfg.ID
 
 	// selfAddr must equal this node's raft ID so WriteShard/ReadShard self-skip
 	// is correct. instantiateLocalGroup ensures cfg.PeerIDs[0] == cfg.NodeID.
@@ -189,6 +193,13 @@ func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	return g.DistributedBackend.CompleteMultipartUpload(g.placementContext(ctx), bucket, key, uploadID, parts)
 }
 
+// AppendObject delegates to the inner DistributedBackend so the local-exec
+// branch in ClusterCoordinator.AppendObject (Task 21) can dispatch directly
+// without a forward hop.
+func (g *GroupBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	return g.DistributedBackend.AppendObject(g.placementContext(ctx), bucket, key, expectedOffset, r)
+}
+
 // Node returns the RaftNode interface for this group.
 func (g *GroupBackend) Node() RaftNode { return g.node }
 
@@ -199,6 +210,17 @@ func (g *GroupBackend) Close() error {
 	var err error
 	g.closeOnce.Do(func() {
 		g.closed.Store(true)
+		// Always stop the inner backend's coalesce worker + backstop scan,
+		// even in wrapped mode (caller owns the DB but not these helper
+		// goroutines).
+		if g.DistributedBackend != nil {
+			if g.coalesceCancel != nil {
+				g.coalesceCancel()
+			}
+			if g.coalesce != nil {
+				g.coalesce.Stop()
+			}
+		}
 		if g.wrapped {
 			// Caller owns DB/Node lifecycle.
 			return

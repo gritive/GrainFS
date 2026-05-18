@@ -8,6 +8,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/pool"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var clusterBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
@@ -28,6 +29,33 @@ type objectMeta struct {
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
+	// Segments holds the ordered list of append segments for appendable
+	// objects. Empty/nil for legacy single-blob (non-appendable) objects.
+	Segments []storage.SegmentRef
+	// Coalesced records merged segment blobs. Phase B2 stores each entry
+	// owner-locally; Phase B3 distributes via EC and adds placement params.
+	Coalesced []CoalescedShardRef
+	// IsAppendable indicates the object was created via AppendObject and may
+	// continue to be appended to. False for legacy / multipart / PUT objects.
+	IsAppendable bool
+}
+
+// CoalescedShardRef references a single coalesced blob produced by merging a
+// prefix of objectMeta.Segments. Phase B2 holds it owner-locally; Phase B3
+// distributes it via EC across NodeIDs and the EC params (NodeIDs / ECData /
+// ECParity / RingVersion) are required for the reader to reconstruct.
+//
+// EC fields are zero-valued for legacy/B2 entries (owner-local only).
+type CoalescedShardRef struct {
+	CoalescedID string
+	Size        int64
+	ETag        string
+	ShardKey    string
+	Version     int32
+	RingVersion uint64
+	ECData      uint8
+	ECParity    uint8
+	NodeIDs     []string
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -441,6 +469,59 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
 	}
 	metadataOff := buildKeyValuePropertiesVector(b, m.UserMetadata, clusterpb.ObjectMetaStartUserMetadataVector)
+	// segments — build child SegmentRef tables BEFORE ObjectMetaStart.
+	var segmentsOff flatbuffers.UOffsetT
+	if len(m.Segments) > 0 {
+		segOffs := make([]flatbuffers.UOffsetT, len(m.Segments))
+		for i, s := range m.Segments {
+			blobOff := b.CreateString(s.BlobID)
+			etOff := b.CreateString(s.ETag)
+			clusterpb.SegmentRefStart(b)
+			clusterpb.SegmentRefAddBlobId(b, blobOff)
+			clusterpb.SegmentRefAddSize(b, s.Size)
+			clusterpb.SegmentRefAddEtag(b, etOff)
+			segOffs[i] = clusterpb.SegmentRefEnd(b)
+		}
+		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
+		for i := len(segOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(segOffs[i])
+		}
+		segmentsOff = b.EndVector(len(segOffs))
+	}
+	// coalesced — build child CoalescedShardRef tables BEFORE ObjectMetaStart.
+	// Note: node_ids vector for each ref MUST also be built BEFORE its
+	// owning table Start (flatbuffers nested-vector rule).
+	var coalescedOff flatbuffers.UOffsetT
+	if len(m.Coalesced) > 0 {
+		cOffs := make([]flatbuffers.UOffsetT, len(m.Coalesced))
+		for i, c := range m.Coalesced {
+			idOff := b.CreateString(c.CoalescedID)
+			etOff := b.CreateString(c.ETag)
+			skOff := b.CreateString(c.ShardKey)
+			var nodesOff flatbuffers.UOffsetT
+			if len(c.NodeIDs) > 0 {
+				nodesOff = buildStringVector(b, c.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
+			}
+			clusterpb.CoalescedShardRefStart(b)
+			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
+			clusterpb.CoalescedShardRefAddSize(b, c.Size)
+			clusterpb.CoalescedShardRefAddEtag(b, etOff)
+			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
+			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
+			clusterpb.CoalescedShardRefAddRingVersion(b, c.RingVersion)
+			clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
+			clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
+			if nodesOff != 0 {
+				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
+			}
+			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
+		}
+		clusterpb.ObjectMetaStartCoalescedVector(b, len(cOffs))
+		for i := len(cOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(cOffs[i])
+		}
+		coalescedOff = b.EndVector(len(cOffs))
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -461,6 +542,15 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	if sseOff != 0 {
 		clusterpb.ObjectMetaAddSseAlgorithm(b, sseOff)
 	}
+	if segmentsOff != 0 {
+		clusterpb.ObjectMetaAddSegments(b, segmentsOff)
+	}
+	if coalescedOff != 0 {
+		clusterpb.ObjectMetaAddCoalesced(b, coalescedOff)
+	}
+	if m.IsAppendable {
+		clusterpb.ObjectMetaAddIsAppendable(b, true)
+	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -478,6 +568,49 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			nodeIDs[i] = string(t.NodeIds(i))
 		}
 	}
+	var segments []storage.SegmentRef
+	if n := t.SegmentsLength(); n > 0 {
+		segments = make([]storage.SegmentRef, n)
+		var seg clusterpb.SegmentRef
+		for i := 0; i < n; i++ {
+			if !t.Segments(&seg, i) {
+				continue
+			}
+			segments[i] = storage.SegmentRef{
+				BlobID: string(seg.BlobId()),
+				Size:   seg.Size(),
+				ETag:   string(seg.Etag()),
+			}
+		}
+	}
+	var coalesced []CoalescedShardRef
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced = make([]CoalescedShardRef, n)
+		var c clusterpb.CoalescedShardRef
+		for i := 0; i < n; i++ {
+			if !t.Coalesced(&c, i) {
+				continue
+			}
+			var nodeIDs []string
+			if nn := c.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
+			coalesced[i] = CoalescedShardRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				Version:     c.Version(),
+				RingVersion: c.RingVersion(),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				NodeIDs:     nodeIDs,
+			}
+		}
+	}
 	return objectMeta{
 		Key:              string(t.Key()),
 		Size:             t.Size(),
@@ -492,6 +625,9 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
 		SSEAlgorithm:     string(t.SseAlgorithm()),
+		Segments:         segments,
+		Coalesced:        coalesced,
+		IsAppendable:     t.IsAppendable(),
 	}, nil
 }
 
@@ -706,6 +842,115 @@ func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
 	}, nil
 }
 
+func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	blobIDOff := b.CreateString(c.BlobID)
+	etagOff := b.CreateString(c.SegmentETag)
+	pgOff := b.CreateString(c.PlacementGroupID)
+	vidOff := b.CreateString(c.VersionID)
+	clusterpb.AppendObjectCmdStart(b)
+	clusterpb.AppendObjectCmdAddBucket(b, bucketOff)
+	clusterpb.AppendObjectCmdAddKey(b, keyOff)
+	clusterpb.AppendObjectCmdAddExpectedOffset(b, c.ExpectedOffset)
+	clusterpb.AppendObjectCmdAddBlobId(b, blobIDOff)
+	clusterpb.AppendObjectCmdAddSegmentSize(b, c.SegmentSize)
+	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
+	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
+	clusterpb.AppendObjectCmdAddVersionId(b, vidOff)
+	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
+}
+
+func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.AppendObjectCmd {
+		return clusterpb.GetRootAsAppendObjectCmd(d, 0)
+	})
+	if err != nil {
+		return AppendObjectCmd{}, err
+	}
+	return AppendObjectCmd{
+		Bucket:           string(t.Bucket()),
+		Key:              string(t.Key()),
+		ExpectedOffset:   t.ExpectedOffset(),
+		BlobID:           string(t.BlobId()),
+		SegmentSize:      t.SegmentSize(),
+		SegmentETag:      string(t.SegmentEtag()),
+		PlacementGroupID: string(t.PlacementGroupId()),
+		VersionID:        string(t.VersionId()),
+	}, nil
+}
+
+func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	cidOff := b.CreateString(c.CoalescedID)
+	skOff := b.CreateString(c.ShardKey)
+	etOff := b.CreateString(c.ETag)
+	var consumedOff flatbuffers.UOffsetT
+	if len(c.ConsumedSegmentIDs) > 0 {
+		consumedOff = buildStringVector(b, c.ConsumedSegmentIDs, clusterpb.CoalesceSegmentsCmdStartConsumedSegmentIdsVector)
+	}
+	var placementOff flatbuffers.UOffsetT
+	if len(c.Placement) > 0 {
+		placementOff = buildStringVector(b, c.Placement, clusterpb.CoalesceSegmentsCmdStartPlacementVector)
+	}
+	clusterpb.CoalesceSegmentsCmdStart(b)
+	clusterpb.CoalesceSegmentsCmdAddBucket(b, bucketOff)
+	clusterpb.CoalesceSegmentsCmdAddKey(b, keyOff)
+	clusterpb.CoalesceSegmentsCmdAddCoalescedId(b, cidOff)
+	clusterpb.CoalesceSegmentsCmdAddShardKey(b, skOff)
+	clusterpb.CoalesceSegmentsCmdAddSize(b, c.Size)
+	clusterpb.CoalesceSegmentsCmdAddEtag(b, etOff)
+	if consumedOff != 0 {
+		clusterpb.CoalesceSegmentsCmdAddConsumedSegmentIds(b, consumedOff)
+	}
+	if placementOff != 0 {
+		clusterpb.CoalesceSegmentsCmdAddPlacement(b, placementOff)
+	}
+	clusterpb.CoalesceSegmentsCmdAddEcData(b, c.ECData)
+	clusterpb.CoalesceSegmentsCmdAddEcParity(b, c.ECParity)
+	clusterpb.CoalesceSegmentsCmdAddRingVersion(b, c.RingVersion)
+	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
+}
+
+func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.CoalesceSegmentsCmd {
+		return clusterpb.GetRootAsCoalesceSegmentsCmd(d, 0)
+	})
+	if err != nil {
+		return CoalesceSegmentsCmd{}, err
+	}
+	var consumed []string
+	if n := t.ConsumedSegmentIdsLength(); n > 0 {
+		consumed = make([]string, n)
+		for i := range consumed {
+			consumed[i] = string(t.ConsumedSegmentIds(i))
+		}
+	}
+	var placement []string
+	if n := t.PlacementLength(); n > 0 {
+		placement = make([]string, n)
+		for i := range placement {
+			placement[i] = string(t.Placement(i))
+		}
+	}
+	return CoalesceSegmentsCmd{
+		Bucket:             string(t.Bucket()),
+		Key:                string(t.Key()),
+		CoalescedID:        string(t.CoalescedId()),
+		ShardKey:           string(t.ShardKey()),
+		Size:               t.Size(),
+		ETag:               string(t.Etag()),
+		ConsumedSegmentIDs: consumed,
+		Placement:          placement,
+		ECData:             t.EcData(),
+		ECParity:           t.EcParity(),
+		RingVersion:        t.RingVersion(),
+	}, nil
+}
+
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -789,6 +1034,10 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdSetObjectACL:
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
+	case CmdAppendObject:
+		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
+	case CmdCoalesceSegments:
+		return encodeCoalesceSegmentsCmd(payload.(CoalesceSegmentsCmd))
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:

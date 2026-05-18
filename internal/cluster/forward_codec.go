@@ -253,6 +253,20 @@ func buildListPartsArgs(bucket, key, uploadID string, maxParts int32) []byte {
 	return b.FinishedBytes()
 }
 
+// buildAppendObjectForwardArgs builds the header for an AppendObject forward.
+// Body bytes are streamed separately on the same QUIC stream (forwardBodyStream).
+func buildAppendObjectForwardArgs(bucket, key string, expectedOffset int64) []byte {
+	b := flatbuffers.NewBuilder(64)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	raftpb.AppendObjectForwardArgsStart(b)
+	raftpb.AppendObjectForwardArgsAddBucket(b, bk)
+	raftpb.AppendObjectForwardArgsAddKey(b, k)
+	raftpb.AppendObjectForwardArgsAddExpectedOffset(b, expectedOffset)
+	b.Finish(raftpb.AppendObjectForwardArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildListMultipartUploadsArgs(bucket, prefix string, maxUploads int32) []byte {
 	b := flatbuffers.NewBuilder(80)
 	bk := b.CreateString(bucket)
@@ -507,6 +521,12 @@ func parseReplyStatus(reply []byte) error {
 		return storage.ErrUploadNotFound
 	case raftpb.ForwardStatusEntityTooLarge:
 		return storage.ErrEntityTooLarge
+	case raftpb.ForwardStatusAppendOffsetMismatch:
+		return storage.ErrAppendOffsetMismatch
+	case raftpb.ForwardStatusAppendNotSupported:
+		return storage.ErrAppendNotSupported
+	case raftpb.ForwardStatusAppendCapExceeded:
+		return storage.ErrAppendCapExceeded
 	case raftpb.ForwardStatusInsufficientPlacementTargets:
 		return &ErrInsufficientPlacementTargets{
 			Operation:     "forwarded_write",

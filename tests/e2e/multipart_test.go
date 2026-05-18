@@ -1,3 +1,8 @@
+// Multipart upload S3 API e2e (target table-driven).
+//
+// The same case set runs against a single-node fixture and a 4-node cluster
+// fixture. Listing helpers (exerciseMultipartListingFeature et al.) are
+// retained because cluster_test.go reuses them.
 package e2e
 
 import (
@@ -14,111 +19,200 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMultipart_Complete(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "mp-complete")
-
-	key := "multipart-file.bin"
-	part1Data := bytes.Repeat([]byte("A"), 1024)
-	part2Data := bytes.Repeat([]byte("B"), 512)
-
-	// Initiate
-	initOut, err := testS3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket:      aws.String("mp-complete"),
-		Key:         aws.String(key),
-		ContentType: aws.String("application/octet-stream"),
+func TestMultipartE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runMultipartCases(t, newSingleNodeS3Target())
 	})
-	require.NoError(t, err)
-	require.NotEmpty(t, aws.ToString(initOut.UploadId))
 
-	uploadID := initOut.UploadId
-
-	// Upload parts
-	p1, err := testS3Client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String("mp-complete"),
-		Key:        aws.String(key),
-		UploadId:   uploadID,
-		PartNumber: aws.Int32(1),
-		Body:       bytes.NewReader(part1Data),
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "4-node cluster boot is too slow for -short")
+		runMultipartCases(t, newClusterS3Target(t, 4))
 	})
-	require.NoError(t, err)
+}
 
-	p2, err := testS3Client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String("mp-complete"),
-		Key:        aws.String(key),
-		UploadId:   uploadID,
-		PartNumber: aws.Int32(2),
-		Body:       bytes.NewReader(part2Data),
-	})
-	require.NoError(t, err)
+func runMultipartCases(t *testing.T, tgt s3Target) {
+	client := tgt.pickNode(0)
 
-	// Complete
-	_, err = testS3Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String("mp-complete"),
-		Key:      aws.String(key),
-		UploadId: uploadID,
-		MultipartUpload: &types.CompletedMultipartUpload{
-			Parts: []types.CompletedPart{
-				{PartNumber: aws.Int32(1), ETag: p1.ETag},
-				{PartNumber: aws.Int32(2), ETag: p2.ETag},
+	// Cluster fixtures reject CreateMultipartUpload until the
+	// `multipart_listing_v1` capability has finished its rolling-upgrade
+	// handshake. Gate once on a probe bucket so per-case CreateMultipartUpload
+	// calls don't race the upgrade. Single-node fixtures don't need this
+	// gate; if the shared server ever returns 503 here it indicates a
+	// pre-existing failure in an unrelated test (see TestEncryption_AtRest,
+	// TestPITR_*, TestSnapshot_CreateAndRestore — all known-broken on -short).
+	if tgt.isCluster {
+		probe := tgt.name + "-mp-probe"
+		tgt.createBkt(t, probe)
+		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+		defer cancel()
+		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
+	}
+
+	t.Run("Complete", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.name + "-mp-complete"
+		tgt.createBkt(t, bucket)
+
+		key := "multipart-file.bin"
+		part1Data := bytes.Repeat([]byte("A"), 1024)
+		part2Data := bytes.Repeat([]byte("B"), 512)
+
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket:      aws.String(bucket),
+			Key:         aws.String(key),
+			ContentType: aws.String("application/octet-stream"),
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, aws.ToString(initOut.UploadId))
+
+		uploadID := initOut.UploadId
+
+		p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket:     aws.String(bucket),
+			Key:        aws.String(key),
+			UploadId:   uploadID,
+			PartNumber: aws.Int32(1),
+			Body:       bytes.NewReader(part1Data),
+		})
+		require.NoError(t, err)
+
+		p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket:     aws.String(bucket),
+			Key:        aws.String(key),
+			UploadId:   uploadID,
+			PartNumber: aws.Int32(2),
+			Body:       bytes.NewReader(part2Data),
+		})
+		require.NoError(t, err)
+
+		_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: uploadID,
+			MultipartUpload: &types.CompletedMultipartUpload{
+				Parts: []types.CompletedPart{
+					{PartNumber: aws.Int32(1), ETag: p1.ETag},
+					{PartNumber: aws.Int32(2), ETag: p2.ETag},
+				},
 			},
-		},
-	})
-	require.NoError(t, err)
+		})
+		require.NoError(t, err)
 
-	// Verify assembled object
-	getOut, err := testS3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("mp-complete"),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, err)
-	defer getOut.Body.Close()
+		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		defer getOut.Body.Close()
 
-	body, _ := io.ReadAll(getOut.Body)
-	expected := append(part1Data, part2Data...)
-	assert.Equal(t, expected, body)
-	assert.Equal(t, int64(len(expected)), aws.ToInt64(getOut.ContentLength))
+		body, _ := io.ReadAll(getOut.Body)
+		expected := append(part1Data, part2Data...)
+		assert.Equal(t, expected, body)
+		assert.Equal(t, int64(len(expected)), aws.ToInt64(getOut.ContentLength))
+	})
+
+	t.Run("Abort", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.name + "-mp-abort"
+		tgt.createBkt(t, bucket)
+
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("aborted.bin"),
+		})
+		require.NoError(t, err)
+
+		client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket:     aws.String(bucket),
+			Key:        aws.String("aborted.bin"),
+			UploadId:   initOut.UploadId,
+			PartNumber: aws.Int32(1),
+			Body:       stringReader("data"),
+		})
+
+		_, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String("aborted.bin"),
+			UploadId: initOut.UploadId,
+		})
+		require.NoError(t, err)
+
+		_, err = client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("aborted.bin"),
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("List", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.name + "-mp-list"
+		tgt.createBkt(t, bucket)
+
+		exerciseMultipartListingFeature(t, ctx, client, bucket, "part", tgt.isCluster)
+	})
+
+	t.Run("ThreeParts", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.name + "-mp-three"
+		tgt.createBkt(t, bucket)
+
+		key := "three-parts.bin"
+		partsData := [][]byte{
+			bytes.Repeat([]byte("X"), 256),
+			bytes.Repeat([]byte("Y"), 512),
+			bytes.Repeat([]byte("Z"), 128),
+		}
+
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+
+		completedParts := make([]types.CompletedPart, len(partsData))
+		for i, data := range partsData {
+			pOut, err := client.UploadPart(ctx, &s3.UploadPartInput{
+				Bucket:     aws.String(bucket),
+				Key:        aws.String(key),
+				UploadId:   initOut.UploadId,
+				PartNumber: aws.Int32(int32(i + 1)),
+				Body:       bytes.NewReader(data),
+			})
+			require.NoError(t, err)
+			completedParts[i] = types.CompletedPart{
+				PartNumber: aws.Int32(int32(i + 1)),
+				ETag:       pOut.ETag,
+			}
+		}
+
+		_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: initOut.UploadId,
+			MultipartUpload: &types.CompletedMultipartUpload{
+				Parts: completedParts,
+			},
+		})
+		require.NoError(t, err)
+
+		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		defer getOut.Body.Close()
+
+		body, _ := io.ReadAll(getOut.Body)
+		var expected []byte
+		for _, d := range partsData {
+			expected = append(expected, d...)
+		}
+		assert.Equal(t, expected, body)
+	})
 }
 
-func TestMultipart_Abort(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "mp-abort")
-
-	initOut, err := testS3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String("mp-abort"),
-		Key:    aws.String("aborted.bin"),
-	})
-	require.NoError(t, err)
-
-	testS3Client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String("mp-abort"),
-		Key:        aws.String("aborted.bin"),
-		UploadId:   initOut.UploadId,
-		PartNumber: aws.Int32(1),
-		Body:       stringReader("data"),
-	})
-
-	_, err = testS3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String("mp-abort"),
-		Key:      aws.String("aborted.bin"),
-		UploadId: initOut.UploadId,
-	})
-	require.NoError(t, err)
-
-	// Object should not exist
-	_, err = testS3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("mp-abort"),
-		Key:    aws.String("aborted.bin"),
-	})
-	assert.Error(t, err)
-}
-
-func TestMultipart_List(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "mp-list")
-
-	exerciseMultipartListingFeature(t, ctx, testS3Client, "mp-list", "part", false)
-}
+// ----- listing helpers (also used by cluster_test.go) -----
 
 type multipartListingFixture struct {
 	Bucket  string
@@ -260,62 +354,4 @@ func assertMultipartListingParts(t testing.TB, parts *s3.ListPartsOutput, fixtur
 	assert.Equal(t, fixture.ETagOne, aws.ToString(parts.Parts[0].ETag))
 	assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
 	assert.Equal(t, fixture.ETagTwo, aws.ToString(parts.Parts[1].ETag))
-}
-
-func TestMultipart_ThreeParts(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "mp-three")
-
-	key := "three-parts.bin"
-	partsData := [][]byte{
-		bytes.Repeat([]byte("X"), 256),
-		bytes.Repeat([]byte("Y"), 512),
-		bytes.Repeat([]byte("Z"), 128),
-	}
-
-	initOut, err := testS3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String("mp-three"),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, err)
-
-	completedParts := make([]types.CompletedPart, len(partsData))
-	for i, data := range partsData {
-		pOut, err := testS3Client.UploadPart(ctx, &s3.UploadPartInput{
-			Bucket:     aws.String("mp-three"),
-			Key:        aws.String(key),
-			UploadId:   initOut.UploadId,
-			PartNumber: aws.Int32(int32(i + 1)),
-			Body:       bytes.NewReader(data),
-		})
-		require.NoError(t, err)
-		completedParts[i] = types.CompletedPart{
-			PartNumber: aws.Int32(int32(i + 1)),
-			ETag:       pOut.ETag,
-		}
-	}
-
-	_, err = testS3Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String("mp-three"),
-		Key:      aws.String(key),
-		UploadId: initOut.UploadId,
-		MultipartUpload: &types.CompletedMultipartUpload{
-			Parts: completedParts,
-		},
-	})
-	require.NoError(t, err)
-
-	getOut, err := testS3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("mp-three"),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, err)
-	defer getOut.Body.Close()
-
-	body, _ := io.ReadAll(getOut.Body)
-	var expected []byte
-	for _, d := range partsData {
-		expected = append(expected, d...)
-	}
-	assert.Equal(t, expected, body)
 }

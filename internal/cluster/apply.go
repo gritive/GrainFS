@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
@@ -112,6 +113,10 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketVersioning(cmd.Data)
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
+	case CmdAppendObject:
+		return f.applyAppendObjectFromCmd(cmd.Data)
+	case CmdCoalesceSegments:
+		return f.applyCoalesceSegmentsFromCmd(cmd.Data)
 	case CmdPutObjectQuarantine:
 		return f.applyPutObjectQuarantine(cmd.Data)
 	default:
@@ -646,6 +651,242 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 				return f.setValue(txn, vKey, vNewVal)
 			})
 		})
+	})
+}
+
+// applyAppendObjectFromCmd handles a CmdAppendObject Raft entry. Mirrors the
+// applySetObjectACL read-mutate-write pattern: read existing objectMeta →
+// validate append invariants → write updated objectMeta with the new segment.
+//
+// Idempotent on replay: if the segment's BlobID already appears in
+// existing.Segments (replay of an already-applied entry), this is a no-op.
+//
+// When cmd.VersionID is non-empty (the normal AppendObject path), apply
+// dual-writes the versioned key + LatestKey alongside the legacy
+// ObjectMetaKey — matching applyPutObjectMeta — so that headObjectMeta returns
+// obj.VersionID populated and downstream commitObjectIndex can propose a
+// valid MetaPutObjectIndex entry (which rejects empty version_id).
+//
+// When cmd.VersionID is empty (legacy Raft replay or direct apply-test
+// fixtures), only the legacy ObjectMetaKey is written to preserve prior
+// semantics.
+func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
+	cmd, err := decodeAppendObjectCmd(data)
+	if err != nil {
+		return fmt.Errorf("decode AppendObjectCmd: %w", err)
+	}
+
+	return f.db.Update(func(txn *badger.Txn) error {
+		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+
+		// Read existing objectMeta (if any).
+		var existing *objectMeta
+		item, gerr := txn.Get(metaKey)
+		if gerr == nil {
+			if err := item.Value(func(raw []byte) error {
+				v, oerr := f.openValue(item.Key(), raw)
+				if oerr != nil {
+					return oerr
+				}
+				m, derr := unmarshalObjectMeta(v)
+				if derr != nil {
+					return fmt.Errorf("unmarshal existing objectMeta: %w", derr)
+				}
+				existing = &m
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
+			return fmt.Errorf("get existing objectMeta: %w", gerr)
+		}
+
+		// Placement check: cmd captured PG at propose time; reject if the
+		// existing object's PG has moved since (rebalance window).
+		if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
+			cmd.PlacementGroupID != existing.PlacementGroupID {
+			return ErrStalePlacement
+		}
+
+		seg := storage.SegmentRef{
+			BlobID: cmd.BlobID,
+			Size:   cmd.SegmentSize,
+			ETag:   cmd.SegmentETag,
+		}
+
+		// Idempotency: same BlobID already applied (Raft replay) → no-op.
+		if existing != nil {
+			for _, s := range existing.Segments {
+				if s.BlobID == cmd.BlobID {
+					return nil
+				}
+			}
+		}
+
+		var updated objectMeta
+		if existing == nil {
+			if cmd.ExpectedOffset != 0 {
+				return storage.ErrAppendOffsetMismatch
+			}
+			updated = objectMeta{
+				Key:              cmd.Key,
+				Size:             seg.Size,
+				ContentType:      "application/octet-stream",
+				ETag:             storage.CompositeETag([]storage.SegmentRef{seg}),
+				LastModified:     time.Now().Unix(),
+				PlacementGroupID: cmd.PlacementGroupID,
+				Segments:         []storage.SegmentRef{seg},
+				IsAppendable:     true,
+			}
+		} else {
+			if !existing.IsAppendable {
+				return storage.ErrAppendNotSupported
+			}
+			if existing.Size != cmd.ExpectedOffset {
+				return storage.ErrAppendOffsetMismatch
+			}
+			if len(existing.Segments) >= storage.MaxAppendSegments {
+				return storage.ErrAppendCapExceeded
+			}
+			segs := append(existing.Segments, seg)
+			updated = *existing
+			updated.Segments = segs
+			updated.Size = existing.Size + seg.Size
+			updated.ETag = storage.CompositeETag(segs)
+			updated.LastModified = time.Now().Unix()
+		}
+
+		out, err := marshalObjectMeta(updated)
+		if err != nil {
+			return fmt.Errorf("marshal updated objectMeta: %w", err)
+		}
+		// Dual-write: versioned key + latest pointer (when VersionID supplied)
+		// alongside the legacy ObjectMetaKey, matching applyPutObjectMeta so
+		// HeadObject returns a populated obj.VersionID.
+		if cmd.VersionID != "" {
+			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
+				return err
+			}
+			if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
+				return err
+			}
+		}
+		return f.setValue(txn, metaKey, out)
+	})
+}
+
+// applyCoalesceSegmentsFromCmd handles a CmdCoalesceSegments Raft entry. The
+// command consumes a prefix of objectMeta.Segments and appends a single
+// CoalescedShardRef. Read-modify-write pattern mirroring
+// applyAppendObjectFromCmd.
+//
+// Idempotency rules (replay-safe):
+//   - If CoalescedID already present in objectMeta.Coalesced → no-op.
+//   - ConsumedSegmentIDs are removed by exact BlobID match; missing IDs
+//     are skipped (a concurrent append that arrived between snapshot and
+//     apply is preserved).
+//   - Size/ETag of objectMeta are NOT modified: a coalesce is metadata
+//     reorganization, not a content change.
+func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
+	cmd, err := decodeCoalesceSegmentsCmd(data)
+	if err != nil {
+		return fmt.Errorf("decode CoalesceSegmentsCmd: %w", err)
+	}
+	if cmd.CoalescedID == "" || cmd.ShardKey == "" {
+		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		legacyKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+
+		// Resolve the canonical metaKey: prefer the latest-version pointer (set
+		// by applyAppendObject's dual-write). Falls back to legacy key when no
+		// pointer exists (test fixtures / legacy replay).
+		metaKey := legacyKey
+		versionID := ""
+		if latItem, lerr := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); lerr == nil {
+			_ = latItem.Value(func(v []byte) error {
+				versionID = string(v)
+				return nil
+			})
+			if versionID != "" {
+				metaKey = f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, versionID)
+			}
+		} else if !errors.Is(lerr, badger.ErrKeyNotFound) {
+			return fmt.Errorf("get latest pointer: %w", lerr)
+		}
+
+		item, gerr := txn.Get(metaKey)
+		if gerr != nil {
+			if errors.Is(gerr, badger.ErrKeyNotFound) {
+				return nil // object deleted concurrently — drop silently
+			}
+			return fmt.Errorf("get objectMeta: %w", gerr)
+		}
+		var existing objectMeta
+		if err := item.Value(func(raw []byte) error {
+			v, oerr := f.openValue(item.Key(), raw)
+			if oerr != nil {
+				return oerr
+			}
+			m, derr := unmarshalObjectMeta(v)
+			if derr != nil {
+				return fmt.Errorf("unmarshal: %w", derr)
+			}
+			existing = m
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		// Idempotency: same CoalescedID already applied → no-op.
+		for _, c := range existing.Coalesced {
+			if c.CoalescedID == cmd.CoalescedID {
+				return nil
+			}
+		}
+
+		// Cap depth — stall coalesce when the chain grows unbounded.
+		if len(existing.Coalesced) >= MaxCoalescedEntries {
+			return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
+		}
+
+		// Remove consumed segments by exact BlobID match.
+		consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
+		for _, id := range cmd.ConsumedSegmentIDs {
+			consumed[id] = true
+		}
+		kept := existing.Segments[:0]
+		for _, s := range existing.Segments {
+			if !consumed[s.BlobID] {
+				kept = append(kept, s)
+			}
+		}
+		existing.Segments = kept
+		existing.Coalesced = append(existing.Coalesced, CoalescedShardRef{
+			CoalescedID: cmd.CoalescedID,
+			Size:        cmd.Size,
+			ETag:        cmd.ETag,
+			ShardKey:    cmd.ShardKey,
+			Version:     1,
+			RingVersion: cmd.RingVersion,
+			ECData:      cmd.ECData,
+			ECParity:    cmd.ECParity,
+			NodeIDs:     append([]string(nil), cmd.Placement...),
+		})
+		out, err := marshalObjectMeta(existing)
+		if err != nil {
+			return fmt.Errorf("marshal: %w", err)
+		}
+		// Dual-write parallel to applyAppendObject: keep legacy key in sync
+		// with the versioned key so any code path that reads either sees the
+		// post-coalesce state.
+		if versionID != "" {
+			if err := f.setValue(txn, metaKey, out); err != nil {
+				return err
+			}
+			return f.setValue(txn, legacyKey, out)
+		}
+		return f.setValue(txn, legacyKey, out)
 	})
 }
 

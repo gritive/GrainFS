@@ -176,12 +176,48 @@ Work these in order. Do not run them in parallel.
 - [ ] [nfs-audit] bit 76 charset capability flags [P2] [Skipped]: add after UTF-8
   policy is explicit. Owner: TBD.
 
+## AppendObject Follow-Ups
+
+- [ ] **Owner-kill real raft leader rotation e2e [P1]**: Phase B3 Task 20 omnibus
+  은 owner-local file 삭제로 EC reconstruct path만 unit 수준 (`TestCoalescedReadAfterOwnerFailure`)
+  검증. multi-node에서 실제 owner 노드 kill 후 raft leader rotation + GET이
+  EC reconstruct로 정합한지 e2e harness로 검증 필요.
+
+- [ ] **Coalesce recoalesce depth audit [P2]**: design open question — 새
+  raw segment가 다시 threshold 도달 시 또 coalesce하면 `coalesced[]`에 entry가
+  계속 누적된다. `MaxCoalescedEntries=1024` cap 외에 measurement-driven 정책
+  (max depth, periodic 통합) 검토.
+
+- [ ] **AppendObject 5MiB body cap 정합성 [P2]**: HTTP layer는 64MiB까지
+  buffer 후 `ClusterCoordinator.AppendObject`로 전달 (Task 22).
+  ClusterCoordinator는 stale-placement retry용으로 `c.maxBody=5MiB`까지만
+  buffer. 5MiB-64MiB 구간 chunk가 forward 경로로 들어가는 시나리오에서 retry
+  단절. 둘 중 하나로 정합화 (maxBody 64MiB로 올리거나, retry 단념 시 typed
+  error 반환).
+
+- [ ] **`TestCoalesceMetricsObserved` flake [P2]**: full `make test-unit`
+  실행 시 간헐적 fail, isolated 또는 cluster package 단독 실행 (3회 반복) 시
+  PASS. metric counter race 의심. metric increment를 mutex-free atomic으로
+  교체하거나 test에서 counter 검증 전 explicit sync 추가.
+
+## Pre-existing Test Failures (Phase B3 무관)
+
+- [ ] **`TestBlobStoreAppendNoCompressKeepsAllocationBound` race-mode fail [P2]**:
+  baseline에서도 동일하게 fail (allocations=4 vs ≤1 expected). `-race` 빌드에서
+  추가 alloc churn. packblob 패키지 별도 작업.
+
+- [ ] **`make test-e2e` 9 unrelated failures [P1]**: backup_restic, multipart
+  ("capability multipart_listing_v1 rejected"), cluster_incident,
+  quarantine_incident, dynamic_join_services, cluster_scrubber, no_peers,
+  encryption_at_rest, iam_scoped_key. AppendObject 경로 무관. multipart는
+  capability evidence propagation TODO와 동일 root (cluster bootstrap timing).
+  단독 실행 시 PASS인 케이스 vs 환경 의존 케이스 분리 필요.
+
 ## Conformance Follow-Ups
 
 - [ ] [nfs-conformance] pynfs-nightly [P1]: run pynfs basic suite on a scheduled
   Linux/Colima host and review `results/summary.json`.
 - [ ] [nfs-conformance] nfstest-runner [P2]: add nfstest after pynfs stabilizes.
-
 ## Storage And Volume Backlog
 
 - [ ] **Thin pool quota**: cross-volume physical capacity pool after Phase A
@@ -212,7 +248,6 @@ Work these in order. Do not run them in parallel.
 
 - [ ] Redis protocol.
 - [ ] TSDB.
-- [ ] AppendObject API.
 - [ ] 9P/NFS shared write-back layer.
 - [ ] Blame Mode v2.
 - [ ] PagerDuty native webhook mapping.

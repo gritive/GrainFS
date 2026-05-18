@@ -41,6 +41,12 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// AppendObject (S3 Express): PUT with x-amz-write-offset-bytes header.
+	// Header absence falls through to the normal PutObject path.
+	if s.appendObject(ctx, c, bucket, key) {
+		return
+	}
+
 	sizeClass := cluster.PutTraceSizeUnknown
 	if contentLength := c.Request.Header.ContentLength(); contentLength >= 0 {
 		if contentLength > cluster.DefaultMaxForwardBodyBytes {

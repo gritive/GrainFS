@@ -27,6 +27,38 @@ type Object struct {
 	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
 	UserMetadata   map[string]string
 	SSEAlgorithm   string
+	Segments       []SegmentRef
+	// Coalesced lists merged segment refs produced by background coalesce.
+	// Read path stitches Coalesced first, then Segments. Empty for legacy /
+	// pre-B2 appendable objects.
+	Coalesced    []CoalescedRef
+	IsAppendable bool
+}
+
+// SegmentRef identifies one EC-encoded encrypted segment of an appendable
+// object. Order in Object.Segments is append order; per-segment offset is
+// derived as the prefix-sum of preceding sizes.
+type SegmentRef struct {
+	BlobID string // EC/encrypted blob 식별자 (UUIDv7)
+	Size   int64  // plaintext bytes in this segment
+	ETag   string // plaintext MD5 hex (Object.ETag 누적 재계산 입력)
+}
+
+// CoalescedRef identifies one coalesced blob produced by merging a prefix of
+// Object.Segments. Phase B2 stores each entry owner-locally; Phase B3 distributes
+// via EC across NodeIDs (k=ECData + m=ECParity) at RingVersion.
+//
+// EC fields are zero-valued for legacy/B2 owner-local entries; reader falls
+// back to owner-local + forward-on-read in that case.
+type CoalescedRef struct {
+	CoalescedID string // UUIDv7
+	Size        int64  // plaintext bytes in this coalesced blob
+	ETag        string // MD5 hex of the concatenated body
+	ShardKey    string // "<key>/coalesced/<coalescedID>" — used by EC reader (B3)
+	RingVersion uint64
+	ECData      uint8
+	ECParity    uint8
+	NodeIDs     []string
 }
 
 // ACLSetter is an optional interface for backends that support per-object ACL updates.

@@ -347,6 +347,18 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 		return nil, nil, err
 	}
 
+	// Appendable objects store bytes across multiple segment blobs under
+	// <bucket>/<key>_segments/<blobID>, not a single object file. Stitch
+	// them with SegmentedReader. obj.Size == 0 still passes the legacy
+	// single-file path harmlessly.
+	if obj.Segments != nil && obj.Size > 0 {
+		r, err := b.OpenSegmentedReader(bucket, key, obj, 0, obj.Size-1)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open segmented reader: %w", err)
+		}
+		return r, obj, nil
+	}
+
 	if b.encryptor != nil {
 		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
 		if err != nil {

@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.0.249.0] - 2026-05-18 - feat(s3): AppendObject API (Phase A + B1 + B2 + B3)
+
+S3 Express AppendObject (`x-amz-write-offset-bytes`)를 single-node와 4-node
+cluster 양쪽에서 지원. Sequential append + range read + cluster-wide durability
+via lazy EC 분산. 4-digit version에 큰 surface이지만 patch bump 유지 (기존
+repo 패턴).
+
+### Added
+
+- **HTTP entry point.** `PUT /{bucket}/{key}` + `x-amz-write-offset-bytes: <N>`
+  헤더로 sequential append. Versioning-enabled bucket은 `501 NotImplemented`,
+  잘못된 offset은 `400 InvalidWriteOffset` XML, segment cap 도달은
+  `503 SlowDown` + `Retry-After`. 64 MiB body cap (HTTP layer).
+- **Storage layer.** `storage.Object`에 `Segments []SegmentRef` +
+  `IsAppendable bool` + `Coalesced []CoalescedRef`. `WriteSegmentBlob`,
+  `CompositeETag`, `SegmentedReader` (full-stitch + range across segments)
+  + encrypted-segment tamper detection.
+- **Cluster FSM.** 새 명령 `CmdAppendObject` (B2) + `CmdCoalesceSegments`
+  (B2/B3). AppendObject가 propose-time에 UUIDv7 VersionID 생성 후 legacy
+  + versioned + latest pointer 3-key write.
+- **Phase A 인프라.** Data-Raft generic apply-error propagation
+  (`applyErrs` map + `recordApplyResult` + `ApplyError` exported). Forward
+  response codec 확장 (1-byte trailing wire + backward compatible).
+- **Phase B1 forward-on-read.** `StreamReadAppendSegment` (0x15) transport
+  + `appendableSegmentReader` ENOENT fallback peer fetch.
+- **Phase B2 coalesce.** Background worker queue + in-process trigger
+  (16 segments / 64 MiB / 30s idle / 60s backstop) + snapshot-based atomic
+  apply (concurrent append과의 race 단순화) + idempotent
+  `applyCoalesceSegments`.
+- **Phase B3 lazy EC.** Coalesced blob을 Reed-Solomon 4+2 EC로 분산
+  (`PutObject` 패턴 재사용: `ecObjectShardKey`, `selectECPlacement`,
+  `newECObjectWriter.writeDataShards`). shardKey = `<key>/coalesced/<id>`.
+  `appendableReader` 확장 — coalesced (EC reconstruct) + raw (forward-on-read)
+  chain stitching. Range read는 prefix-sum + binary search across boundaries.
+  Encryption은 PutObject EC와 동일 encryptor 적용.
+- **Metrics.** `grainfs_append_coalesce_total{result}`,
+  `grainfs_append_coalesce_bytes`, `grainfs_append_coalesce_latency_seconds`,
+  `grainfs_append_segments_{raw,coalesced}` (gauge),
+  `grainfs_append_forward_on_read_total`.
+
+### Changed
+
+- **Forward reply codec.** `ForwardStatus` enum에 typed append errors
+  추가 (`AppendOffsetMismatch`, `AppendNotSupported`, `AppendCapExceeded`).
+  cluster forward path가 storage sentinel을 그대로 client까지 전달.
+- **DistributedBackend.GetObject.** Appendable branch가 segment / coalesced
+  / raw 통합 reader 호출.
+- **objectMeta 3-key write.** AppendObject + CoalesceSegments가 legacy
+  `ObjectMetaKey` + versioned `ObjectMetaKeyV` + `LatestKey` pointer 모두
+  업데이트하여 `HeadObject` (latest pointer 따라감)와 일관.
+- **wrapper chain wiring.** Single-node 데이터 plane (`pullthrough → wal →
+  packblob → ClusterCoordinator`)에 AppendObject delegate 추가.
+
+### Tests
+
+- **Storage layer.** OffsetMismatch / Sequential / Cap / Legacy
+  non-appendable / SegmentedReader full + range + encrypted tamper.
+- **Cluster FSM.** AppendObject apply idempotency + concurrent race
+  + ApplyError propagation + objectIndex sync.
+- **HTTP layer.** Invalid header (400 InvalidArgument) + InvalidWriteOffset
+  XML + versioning 501 + plain-PUT overwrite.
+- **e2e 통합 (target table-driven).** `TestAppendObjectE2E` (SingleNode + 
+  Cluster4Node 공통 4 케이스 + cluster-only 2 케이스). 기존
+  `TestBucketsE2E / TestObjectsE2E / TestMultipartE2E / TestPresignedE2E`도
+  같은 패턴으로 통합 — 29 case × 2 target = 58 PASS, 중복 제거.
+- **Coalesce e2e.** `TestAppendObjectCoalesceE2E_Cluster4Node` — coalesce
+  trigger → EC distribute → cross-node read. 
+- **Unit tests.** Owner-local file 삭제 시 EC reconstruct
+  (`TestCoalescedReadAfterOwnerFailure`) + crash recovery
+  (`TestCoalesceRecoveryOnRestart`) + encryption-enabled coalesce verify.
+
+### Known issues / follow-ups (TODOS.md 등록)
+
+- **Owner-kill real raft leader rotation e2e [P1]** — Phase B3 omnibus는
+  owner-local file 삭제로 EC reconstruct path만 unit 수준 검증.
+  multi-node real raft leader rotation 추가 e2e 필요.
+- **Coalesce recoalesce depth audit [P2]** — `MaxCoalescedEntries=1024` cap
+  외 measurement-driven 정책 (max depth, periodic 통합).
+- **5 MiB body cap 정합성 [P2]** — HTTP layer 64 MiB vs ClusterCoordinator
+  `maxBody=5 MiB` retry buffer 사이 불일치. forward retry 단념 시 typed
+  error 또는 maxBody 64 MiB로 정합화.
+- **`TestCoalesceMetricsObserved` flake [P2]** — concurrent test 환경에서
+  간헐적 fail (isolated 실행 시 PASS). metric counter race 의심, 별도
+  안정화 필요.
+
 ## [0.0.248.0] - 2026-05-18 - perf(cluster): reduce forwarded ReadAt allocations
 
 Forwarded `ReadAt` replies now parse directly into the caller buffer on the

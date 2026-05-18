@@ -1,3 +1,11 @@
+// Presigned URL S3 e2e (target table-driven).
+//
+// The four presigned URL cases (GET, PUT, Expired, WrongKey) run against
+// both a single-node fixture and a 4-node cluster fixture. Bucket names are
+// prefixed with tgt.name to avoid collisions.
+//
+// TestMetrics_Endpoint and TestDashboard_Serves are not S3-op tests and stay
+// out of the target-table — they continue to use the shared server.
 package e2e
 
 import (
@@ -19,6 +27,111 @@ import (
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
+
+func TestPresignedE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runPresignedCases(t, newSingleNodeS3Target())
+	})
+
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "4-node cluster boot is too slow for -short")
+		runPresignedCases(t, newClusterS3Target(t, 4))
+	})
+}
+
+func runPresignedCases(t *testing.T, tgt s3Target) {
+	client := tgt.pickNode(0)
+	endpoint := tgt.endpoint(0)
+
+	t.Run("GET", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.name + "-presign-get"
+		tgt.createBkt(t, bucket)
+
+		content := "presigned content"
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("secret.txt"),
+			Body:   strings.NewReader(content),
+		})
+		require.NoError(t, err)
+
+		presigned, err := s3auth.PresignURL(http.MethodGet,
+			endpoint+"/"+bucket+"/secret.txt",
+			tgt.accessKey, tgt.secretKey, "us-east-1", 3600)
+		require.NoError(t, err)
+
+		resp, err := http.Get(presigned)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, content, string(body))
+	})
+
+	t.Run("PUT", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.name + "-presign-put"
+		tgt.createBkt(t, bucket)
+
+		presigned, err := s3auth.PresignURL(http.MethodPut,
+			endpoint+"/"+bucket+"/uploaded.txt",
+			tgt.accessKey, tgt.secretKey, "us-east-1", 3600)
+		require.NoError(t, err)
+
+		content := "uploaded via presigned"
+		var lastErr error
+		var lastStatus int
+		require.Eventually(t, func() bool {
+			req, _ := http.NewRequest(http.MethodPut, presigned, strings.NewReader(content))
+			resp, err := http.DefaultClient.Do(req)
+			lastErr = err
+			if err != nil {
+				return false
+			}
+			defer resp.Body.Close()
+			lastStatus = resp.StatusCode
+			return resp.StatusCode == http.StatusOK
+		}, 30*time.Second, 500*time.Millisecond, "presigned PUT status=%d err=%v", lastStatus, lastErr)
+
+		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("uploaded.txt"),
+		})
+		require.NoError(t, err)
+		defer getOut.Body.Close()
+
+		body, _ := io.ReadAll(getOut.Body)
+		assert.Equal(t, content, string(body))
+	})
+
+	t.Run("Expired", func(t *testing.T) {
+		presigned, err := s3auth.PresignURLAt(http.MethodGet,
+			endpoint+"/"+tgt.name+"-presign-exp/file.txt",
+			tgt.accessKey, tgt.secretKey, "us-east-1", 1, time.Now().Add(-10*time.Second))
+		require.NoError(t, err)
+
+		resp, err := http.Get(presigned)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("WrongKey", func(t *testing.T) {
+		presigned, err := s3auth.PresignURL(http.MethodGet,
+			endpoint+"/"+tgt.name+"-presign-wrong/file.txt",
+			tgt.accessKey, "wrongsecret", "us-east-1", 3600)
+		require.NoError(t, err)
+
+		resp, err := http.Get(presigned)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+}
+
+// ----- non-S3-op tests (kept as-is; not part of the target-table refactor) -----
 
 // authServer is the handle returned by startAuthServer. The credentials
 // are bootstrapped via the admin UDS after server start, so callers must
@@ -79,111 +192,6 @@ func startAuthServer(t *testing.T) authServer {
 		SecretKey: sk,
 		Cleanup:   cleanup,
 	}
-}
-
-func TestPresigned_GET(t *testing.T) {
-	srv := startAuthServer(t)
-	defer srv.Cleanup()
-
-	ctx := context.Background()
-
-	_, err := srv.Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("presign-get"),
-	})
-	require.NoError(t, err)
-
-	content := "presigned content"
-	_, err = srv.Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("presign-get"),
-		Key:    aws.String("secret.txt"),
-		Body:   strings.NewReader(content),
-	})
-	require.NoError(t, err)
-
-	presigned, err := s3auth.PresignURL(http.MethodGet,
-		srv.Endpoint+"/presign-get/secret.txt",
-		srv.AccessKey, srv.SecretKey, "us-east-1", 3600)
-	require.NoError(t, err)
-
-	resp, err := http.Get(presigned)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, _ := io.ReadAll(resp.Body)
-	assert.Equal(t, content, string(body))
-}
-
-func TestPresigned_PUT(t *testing.T) {
-	srv := startAuthServer(t)
-	defer srv.Cleanup()
-
-	ctx := context.Background()
-
-	_, err := srv.Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("presign-put"),
-	})
-	require.NoError(t, err)
-
-	presigned, err := s3auth.PresignURL(http.MethodPut,
-		srv.Endpoint+"/presign-put/uploaded.txt",
-		srv.AccessKey, srv.SecretKey, "us-east-1", 3600)
-	require.NoError(t, err)
-
-	content := "uploaded via presigned"
-	var lastErr error
-	var lastStatus int
-	require.Eventually(t, func() bool {
-		req, _ := http.NewRequest(http.MethodPut, presigned, strings.NewReader(content))
-		resp, err := http.DefaultClient.Do(req)
-		lastErr = err
-		if err != nil {
-			return false
-		}
-		defer resp.Body.Close()
-		lastStatus = resp.StatusCode
-		return resp.StatusCode == http.StatusOK
-	}, 30*time.Second, 500*time.Millisecond, "presigned PUT status=%d err=%v", lastStatus, lastErr)
-
-	getOut, err := srv.Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("presign-put"),
-		Key:    aws.String("uploaded.txt"),
-	})
-	require.NoError(t, err)
-	defer getOut.Body.Close()
-
-	body, _ := io.ReadAll(getOut.Body)
-	assert.Equal(t, content, string(body))
-}
-
-func TestPresigned_Expired(t *testing.T) {
-	srv := startAuthServer(t)
-	defer srv.Cleanup()
-
-	presigned, err := s3auth.PresignURLAt(http.MethodGet,
-		srv.Endpoint+"/presign-exp/file.txt",
-		srv.AccessKey, srv.SecretKey, "us-east-1", 1, time.Now().Add(-10*time.Second))
-	require.NoError(t, err)
-
-	resp, err := http.Get(presigned)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-}
-
-func TestPresigned_WrongKey(t *testing.T) {
-	srv := startAuthServer(t)
-	defer srv.Cleanup()
-
-	presigned, err := s3auth.PresignURL(http.MethodGet,
-		srv.Endpoint+"/presign-wrong/file.txt",
-		srv.AccessKey, "wrongsecret", "us-east-1", 3600)
-	require.NoError(t, err)
-
-	resp, err := http.Get(presigned)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestMetrics_Endpoint(t *testing.T) {

@@ -25,6 +25,7 @@ const (
 	ForwardOpSetObjectACL            ForwardOp = 16
 	ForwardOpListParts               ForwardOp = 17
 	ForwardOpListMultipartUploads    ForwardOp = 18
+	ForwardOpAppendObject            ForwardOp = 19
 )
 
 var EnumNamesForwardOp = map[ForwardOp]string{
@@ -46,6 +47,7 @@ var EnumNamesForwardOp = map[ForwardOp]string{
 	ForwardOpSetObjectACL:            "SetObjectACL",
 	ForwardOpListParts:               "ListParts",
 	ForwardOpListMultipartUploads:    "ListMultipartUploads",
+	ForwardOpAppendObject:            "AppendObject",
 }
 
 var EnumValuesForwardOp = map[string]ForwardOp{
@@ -67,6 +69,7 @@ var EnumValuesForwardOp = map[string]ForwardOp{
 	"SetObjectACL":            ForwardOpSetObjectACL,
 	"ListParts":               ForwardOpListParts,
 	"ListMultipartUploads":    ForwardOpListMultipartUploads,
+	"AppendObject":            ForwardOpAppendObject,
 }
 
 func (v ForwardOp) String() string {

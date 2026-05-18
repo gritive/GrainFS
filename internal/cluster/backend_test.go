@@ -92,6 +92,13 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 	go backend.RunApplyLoop(stopApply)
 
 	t.Cleanup(func() {
+		// Stop coalesce worker / backstop scan before tearing down DB.
+		if backend.coalesceCancel != nil {
+			backend.coalesceCancel()
+		}
+		if backend.coalesce != nil {
+			backend.coalesce.Stop()
+		}
 		close(stopApply)
 		node.Close()
 		db.Close()
