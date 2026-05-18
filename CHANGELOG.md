@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.245.0] - 2026-05-18 - chore: lint cleanup and CopyObject error propagation fix
+
+Made `make build` depend on `make lint` so dead code, unused declarations, and
+gosimple findings surface during normal builds instead of only in CI. Cleared
+the existing lint backlog, and fixed a swallowed-error bug in the streaming
+CopyObject fallback uncovered while running lint.
+
+### Added
+
+- `make build` now runs `make lint` first; `golangci-lint` is required in any
+  environment that compiles GrainFS (noted in README + CLAUDE.md).
+- Regression test asserting `Operations.CopyObject` propagates
+  `putObjectWithRequest` errors through `errors.Is` on the streaming fallback
+  path.
+
+### Changed
+
+- `internal/storage/codec.go`: moved test-only `unmarshalObject` wrapper into
+  `codec_test.go`; production code uses `unmarshalObjectInto` exclusively.
+- `internal/raft/quic_rpc_codec.go`: dropped the test-only
+  `encodeAppendEntriesArgs` wrapper; heartbeat coalescer tests call
+  `encodeRPCPayload` directly.
+- `internal/server/delete_objects_api.go`: replaced
+  `deleteObjectsDeleted{Key: obj.Key}` with `deleteObjectsDeleted(obj)`
+  (gosimple S1016).
+
+### Fixed
+
+- `Operations.CopyObject` streaming fallback now returns errors from
+  `putObjectWithRequest` instead of silently overwriting them with
+  `mutationObjectFacts` failures.
+
+### Removed
+
+- Dropped unused `readEncryptedObjectRecord` wrapper in
+  `internal/storage/encrypted_object_file.go`; only the buffer-reusing
+  `readEncryptedObjectRecordInto` variant remains.
+- Dropped 7 unused Iceberg route path constants from
+  `internal/server/route_paths.go`.
+
 ## [0.0.244.0] - 2026-05-18 - perf(cluster): meta_forward JSON → FlatBuffers (GFSMFWD2)
 
 Cluster-internal meta-Raft proposal forwarding now uses FlatBuffers instead of
