@@ -129,8 +129,40 @@ func (rcv *Object) SseAlgorithm() []byte {
 	return nil
 }
 
+func (rcv *Object) Segments(obj *SegmentRef, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *Object) SegmentsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *Object) IsAppendable() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *Object) MutateIsAppendable(n bool) bool {
+	return rcv._tab.MutateBoolSlot(22, n)
+}
+
 func ObjectStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(10)
 }
 func ObjectAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -158,6 +190,15 @@ func ObjectStartUserMetadataVector(builder *flatbuffers.Builder, numElems int) f
 }
 func ObjectAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(sseAlgorithm), 0)
+}
+func ObjectAddSegments(builder *flatbuffers.Builder, segments flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(segments), 0)
+}
+func ObjectStartSegmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func ObjectAddIsAppendable(builder *flatbuffers.Builder, isAppendable bool) {
+	builder.PrependBoolSlot(9, isAppendable, false)
 }
 func ObjectEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
