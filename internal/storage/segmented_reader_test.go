@@ -44,3 +44,20 @@ func TestSegmentedReaderFullStitch(t *testing.T) {
 		}
 	}
 }
+
+func TestSegmentedReaderRangeWithinSingleSegment(t *testing.T) {
+	b, obj := setupThreeSegmentObject(t)
+	// Range: bytes=100-200 (within seg1)
+	r, err := b.OpenSegmentedReader("test", "k", obj, 100, 200)
+	if err != nil {
+		t.Fatalf("OpenSegmentedReader: %v", err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 101 {
+		t.Fatalf("read %d bytes, want 101", len(got))
+	}
+}
