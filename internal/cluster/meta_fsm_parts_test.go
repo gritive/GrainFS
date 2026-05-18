@@ -3,6 +3,7 @@ package cluster
 import (
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -54,4 +55,28 @@ func TestBuildObjectIndexEntry_CopiesPartsFromObject(t *testing.T) {
 		"b", "k", obj, false,
 	)
 	require.Equal(t, parts, entry.Parts)
+}
+
+func TestMetaFSM_SnapshotRestore_PreservesParts(t *testing.T) {
+	src := NewMetaFSM()
+	entry := ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v", PlacementGroupID: "g",
+		Size: 12, ETag: "e",
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 5, ETag: "p1"},
+			{PartNumber: 2, Size: 7, ETag: "p2"},
+		},
+	}
+	src.objectLatest[objectIndexLatestKey("b", "k")] = "v"
+	src.objectIndex[objectIndexVersionKey("b", "k", "v")] = entry
+
+	snap, err := src.Snapshot()
+	require.NoError(t, err)
+
+	dst := NewMetaFSM()
+	require.NoError(t, dst.Restore(raft.SnapshotMeta{}, snap))
+
+	got, ok := dst.ObjectIndexVersion("b", "k", "v")
+	require.True(t, ok)
+	require.Equal(t, entry.Parts, got.Parts)
 }
