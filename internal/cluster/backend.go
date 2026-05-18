@@ -1339,6 +1339,9 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 ) (*storage.Object, bool, error) {
+	if !b.canUseECMemoryShardFastPath(ctx) {
+		return nil, false, nil
+	}
 	body, size, ok := sizedReaderAtSection(r, maxECMemoryShardFastPathBytes)
 	if !ok {
 		return nil, false, nil
@@ -1354,6 +1357,24 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	obj, err := b.putObjectECData(ctx, bucket, key, versionID, data, contentType, userMetadata, sseAlgorithm)
 	clear(data)
 	return obj, true, err
+}
+
+func (b *DistributedBackend) canUseECMemoryShardFastPath(ctx context.Context) bool {
+	if _, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+		return ecMemoryShardFastPathEnabled(cfg)
+	} else if PlacementGroupHasFullEntry(ctx) {
+		return false
+	}
+	liveNodes := b.ecWriteNodes()
+	cfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
+	if cfg.NumShards() == 0 && !b.bypassBucketCheck {
+		cfg = AutoECConfigForClusterSize(len(liveNodes))
+	}
+	return ecMemoryShardFastPathEnabled(cfg)
+}
+
+func ecMemoryShardFastPathEnabled(cfg ECConfig) bool {
+	return cfg.NumShards() != 0 && cfg.ParityShards == 0
 }
 
 // PutObjectAsync is the write-back variant of PutObject.
@@ -1840,7 +1861,7 @@ func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key
 		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm)
 	}
 
-	if sp.Size <= maxECMemoryShardFastPathBytes {
+	if ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytes {
 		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
