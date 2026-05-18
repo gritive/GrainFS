@@ -108,7 +108,7 @@ start_node() {
     --nbd-port 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
-    --log-level warn \
+    --log-level "${GRAINFS_LOG_LEVEL:-info}" \
     "${extra[@]}" \
     > "$BENCH_DIR/n$i.log" 2>&1 &
   PIDS+=($!)
