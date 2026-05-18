@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - bench(s3-compat): expand warp op coverage for 4-node sweeps
+
+### Changed
+- `benchmarks/bench_s3_compat_compare.sh` now accepts the full warp
+  op surface (`put`, `get`, `delete`, `mixed`, `list`, `stat`,
+  `versioned`, `retention`, `multipart`, `multipart-put`, `append`)
+  in `WARP_OPS`. Multipart workloads use `--part.size` instead of
+  `--obj.size`. `delete` auto-raises `--objects` to
+  `concurrent × batch × 4` so warp's minimum-object guard does not
+  reject the run. Buckets are now scoped per op
+  (`warp-<target>-<op>`) so one run does not seed the next op with
+  the previous op's data.
+- The `warp analyze` parser accepts the obj/s-only `Average:` line
+  used by `list` and `stat`, so those ops no longer trip the
+  "missing Average line" fallback.
+
 ## [0.0.235.0] - 2026-05-18 - perf(server): pre-allocate buffered response body (-55% allocs, +137% throughput)
 
 ### Changed
