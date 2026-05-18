@@ -54,6 +54,10 @@ into the shared storage and cluster layers.
 - Non-leader large-write forwarding over QUIC.
 - CRC-backed shard envelopes.
 - Reshard manager wiring.
+- AppendObject (S3 Express semantics): segments + EC coalesce, owner-routed via
+  data-Raft, forward-on-read across owner/peer, range read across stitches, size
+  cap + memory budget + 503 SlowDown backpressure, scrubber raw-segment orphan
+  sweep.
 
 ### Operations
 
@@ -148,7 +152,6 @@ concrete.
 
 - Redis protocol.
 - TSDB.
-- AppendObject API.
 - io_uring, SPDK, SIMD, and SoA layout work.
 - Control-plane/data-plane process split.
 - Hot/cold auto tiering.

@@ -47,6 +47,8 @@ func init() {
 	serveCmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
 	serveCmd.Flags().Int("shard-pack-threshold", 65537, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65537)")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
+	serveCmd.Flags().Duration("scrub-orphan-age", 5*time.Minute,
+		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
 	serveCmd.Flags().Duration("reshard-interval", defaultReshardInterval, "background EC reshard interval (always on; 0 resets to default 24h)")
 	serveCmd.Flags().Duration("ring-reshard-interval", time.Hour, "ring placement reshard interval — migrates EC objects to current ring when nodes change (always on; 0 resets to default 1h)")
 	serveCmd.Flags().Duration("datagroup-refresh-interval", time.Minute, "how often to scan for new DataGroups and start reshard managers (0 = only scan at startup)")

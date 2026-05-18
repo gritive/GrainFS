@@ -131,6 +131,30 @@ avg(grainfs_node_recovery_duration_seconds)
 **SEV3 (Address within 1 hour):**
 - P99 latency > 100ms for 30 minutes
 - Disk usage > 80% (`grainfs_disk_used_pct{node_id="..."} > 80`)
+- AppendObject forward buffer rejection ratio > 1% over 5 min
+  (`rate(grainfs_cluster_append_forward_buffer_rejected_total[5m]) > 0.01 * rate(grainfs_http_requests_total{handler="append_object"}[5m])`)
+- Orphan segment tombstone backlog growing for 3+ scrub cycles
+  (`grainfs_scrub_orphan_segments_found_total - grainfs_scrub_orphan_segments_deleted_total`
+  monotonically increasing)
+
+### AppendObject SLI metrics (reference)
+
+- `grainfs_cluster_append_forward_buffer_inflight_bytes` (Gauge) — bytes in flight
+  through the QUIC forward buffer pool. Saturation near
+  `--cluster-append-forward-buffer-total-bytes` triggers SlowDown rejections.
+- `grainfs_cluster_append_forward_buffer_rejected_total` (Counter) — HTTP 503
+  SlowDown count.
+- `grainfs_append_coalesced_depth` (Histogram, buckets 1..1024) — number of
+  coalesced entries per object at AppendObject time. Sustained right-shift means
+  recoalesce backstop isn't keeping up.
+- `grainfs_append_coalesced_total_bytes` (Histogram, buckets 1 MiB..1 TiB) — object
+  size at AppendObject time.
+- `grainfs_append_size_cap_rejected_total` (Counter) — per-object size cap hits.
+- `grainfs_append_coalesced_entries_at_cap_total` (Counter) — `MaxCoalescedEntries=1024`
+  cap hits. Sustained increase indicates need for measurement-driven recoalesce
+  policy (TODOS.md P2 follow-up).
+- `grainfs_scrub_orphan_segments_{found,deleted,sweep_capped,walk_errors,delete_errors}_total` —
+  Orphan segment sweep counters (see runbook.md for diagnosis).
 
 ---
 

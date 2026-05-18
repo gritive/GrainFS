@@ -170,6 +170,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	coalesceCfg := cluster.DefaultCoalesceConfig()
 	coalesceCfg.SizeCapBytes = state.cfg.AppendSizeCapBytes
 	state.distBackend.SetCoalesceConfig(coalesceCfg)
+	state.distBackend.SetScrubOrphanAge(state.cfg.ScrubOrphanAge)
 	// Propagate the cap to any GroupBackend instances already registered in
 	// dgMgr (groups 1-N created by bootOwnedGroupsAndEC before this phase
 	// ran). Without this they would keep the default 5 TiB cap.

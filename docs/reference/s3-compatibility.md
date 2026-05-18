@@ -32,7 +32,8 @@ binary and data compatibility across rolling upgrades.
 | Object basics     | ListObjects with prefix                 | Supported     |                                                                                  |
 | Object basics     | Nested keys                             | Supported     |                                                                                  |
 | Object basics     | Overwrite object                        | Supported     |                                                                                  |
-| Object reads      | Range GET                               | Supported     |                                                                                  |
+| Object basics     | AppendObject (S3 Express semantics)     | Supported     | `x-amz-write-offset-bytes` header. Server-side stitching of raw segments + EC-coalesced blobs. Cluster mode routes to data-Raft owner; non-owner appends forward via QUIC. Per-object size cap (default 5 TiB, `--append-size-cap-bytes`). Single-node and 4-node cluster e2e cover write, read, range read, EC coalesce, owner-kill survival. |
+| Object reads      | Range GET                               | Supported     | Including range reads across appendable segment + coalesced EC stitches.        |
 | Object reads      | Conditional headers                     | Supported     |                                                                                  |
 | Multipart         | Create/upload/complete multipart upload | Supported     |                                                                                  |
 | Multipart         | Abort multipart upload                  | Supported     |                                                                                  |

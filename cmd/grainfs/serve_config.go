@@ -73,6 +73,7 @@ func buildClusterConfig(
 	cfg.AdminGroup, _ = cmd.Flags().GetString("admin-group")
 
 	cfg.ScrubInterval, _ = cmd.Flags().GetDuration("scrub-interval")
+	cfg.ScrubOrphanAge, _ = cmd.Flags().GetDuration("scrub-orphan-age")
 	cfg.ReshardInterval, _ = cmd.Flags().GetDuration("reshard-interval")
 	cfg.RingReshardInterval, _ = cmd.Flags().GetDuration("ring-reshard-interval")
 	cfg.DataGroupRefreshInterval, _ = cmd.Flags().GetDuration("datagroup-refresh-interval")

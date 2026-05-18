@@ -207,6 +207,14 @@ Work these in order. Do not run them in parallel.
   Surface는 v0.0.249.0 ship-time부터 baseline. v0.0.250.x AppendObject
   Hardening도 cap reject orphan을 같은 best-effort path로 처리.
 
+- [ ] **EC shard orphan cleanup [P2]**: 본 orphan segment sweep (PR _____)의
+  scope 외. coalesce 도중 EC 쓰기 후 propose 실패 시 남는
+  `<shardRoot>/<bucket>/<userKey>/coalesced/<id>/coalesced/<id>/shard_<i>`
+  shard dir cleanup. 기존 `OrphanWalkable.WalkOrphanShards` 인터페이스는
+  plain EC만 cover (ScanObjects가 `lat:` 인덱스로 coalesced shardKey 미포함
+  yield). Storage layout (shardRoot vs data root) + coalesced shard
+  tracking mechanism 조사 후 별도 cycle에서 처리.
+
 ## Pre-existing Test Failures (Phase B3 무관)
 
 - [ ] **`TestBlobStoreAppendNoCompressKeepsAllocationBound` race-mode fail [P2]**:

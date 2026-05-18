@@ -120,6 +120,35 @@ Metadata directive handling is intentionally narrow until the object metadata
 model grows. `COPY` preserves source `ContentType`, and `REPLACE` uses the
 request `ContentType`; arbitrary user metadata remains unsupported.
 
+### Appendable Object
+
+S3 Express의 `AppendObject` API를 구현한 객체 형태. PutObject로 생성된 객체와 달리
+한 객체에 여러 번 write가 이어지며, 각 write는 raw segment blob 파일로 저장된다.
+HTTP `x-amz-write-offset-bytes` 헤더가 expected offset을 가져오고, 서버는 owner 노드의
+data-Raft 그룹을 통해 단조 증가 offset을 강제한다. 비 owner 노드가 받은 append는
+QUIC forward로 owner에게 위임된다.
+
+객체 metadata는 두 가지 referent slice를 가진다. `Segments[]`는 아직 합쳐지지 않은
+원시 segment blob ID(`<bucket>/<key>_segments/<blobID>` 파일)를 시간순으로 가리키고,
+`Coalesced[]`는 prefix segments를 합쳐 EC로 분산 저장한 결과(`<key>/coalesced/<id>`
+shardKey)를 가리킨다. GET/HEAD는 두 slice를 차례로 스트리밍해서 단일 byte stream으로
+재구성하고, range read는 두 slice의 경계를 가로질러도 지원된다.
+
+Coalesce는 segment 수 16 / 총 64 MiB / 30s idle / 60s backstop 중 먼저 도달한 조건에
+의해 trigger되어 raw segments prefix를 단일 EC 객체로 흡수한다. Coalesce 도중 EC 쓰기는
+성공했지만 propose 실패로 metadata가 update되지 못한 경우, 또는 append propose 거부 시
+남은 raw segment, 또는 coalesce 후 raw segment unlink 실패 — 3개 hot path가 orphan을
+디스크에 남길 수 있다. 이를 청소하기 위해 `internal/scrubber`의 `OrphanSegmentWalkable`
+인터페이스가 도입되어 `<root>/data/<bucket>/<key>_segments/<blobID>` 경로를 per-bucket
+walk하고 2-cycle tombstone + cycle-shared cap 50 + age gate 5분으로 자동 회수한다
+(`--scrub-orphan-age`로 조정).
+
+Production 안전 보장은 4단계: (1) 객체별 size cap (default 5 TiB, `--append-size-cap-bytes`,
+FSM-side authoritative + coordinator pre-check fast-reject), (2) forward buffer 바이트 단위
+세마포어 (default 512 MiB pool, `--cluster-append-forward-buffer-total-bytes`, 포화 시
+HTTP 503 SlowDown), (3) per-request body cap 64 MiB (`--cluster-append-forward-buffer-max-per-request-bytes`),
+(4) HTTP `appendBodyMaxBytes` 64 MiB (S3 layer).
+
 ### Admin API Wire Schema
 
 `internal/adminapi` is the single source of truth for the admin HTTP API. It

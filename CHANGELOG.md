@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.254.0] - 2026-05-19 - feat(scrubber): production orphan raw-segment sweep
+
+AppendObject가 남기는 raw segment 파일의 production-grade orphan cleanup. 기존 EC shard용 `OrphanWalkable`는 변경 없이, 새로운 optional `OrphanSegmentWalkable` 인터페이스 + `DistributedBackend` production impl 추가. AppendObject best-effort cleanup이 실패해도 scrubber cycle 2회 안에 디스크에서 자동 회수.
+
+### Added
+
+- **`OrphanSegmentWalkable` 인터페이스** (`internal/scrubber/orphan_segment.go`): scrubber의 optional 확장. EC shard용 `OrphanWalkable`와 독립적으로 raw segment lifecycle 관리.
+- **`AppendableScannable` 인터페이스** + `AppendableRecord{Bucket, Key, SegmentBlobIDs}` 타입 (`internal/scrubber/scrubber.go`): metadata 인덱스에서 IsAppendable 객체를 streaming하여 known-segment set 구축. `Scrubbable.ScanObjects`의 EC-only 의미 보존.
+- **`DistributedBackend.WalkOrphanSegments` + `DeleteOrphanSegment`** production impl (`internal/cluster/orphan_segment_walker.go`): `<root>/data/<bucket>/<key>_segments/<blobID>` 경로의 disk walker. `filepath.WalkDir` 기반 재귀로 nested S3 key (`folder/sub/file`) 완전 커버. Bucket ENOENT race, 권한 거부, partial-unlink 모두 graceful 처리.
+- **`DistributedBackend.ScanAppendableObjects`** production impl (`internal/cluster/scan_appendable.go`): `lat:` 인덱스 iteration, IsAppendable filter, SegmentBlobIDs 채워서 yield. `deleteMarkerETag` tombstone skip.
+- **`segmentSweepBucket` per-bucket orchestration**: 2-cycle tombstone gate + cycle-shared cap 50 + 5분 age gate. `s.segmentTombstone` cluster-wide map (기존 `s.orphanTombstone`와 parallel).
+- **CLI flag `--scrub-orphan-age <duration>`** (default `5m`): age gate 운영자 조정. Long-running large appends가 5분 초과 시 안전 마진 확보.
+- **5 신규 Prometheus counters:** `grainfs_scrub_orphan_segments_found_total`, `grainfs_scrub_orphan_segments_deleted_total`, `grainfs_scrub_orphan_segment_sweep_capped_total`, `grainfs_scrub_orphan_segment_walk_errors_total`, `grainfs_scrub_orphan_segment_delete_errors_total`.
+- **Test coverage:** 5 scrubber unit tests (Tombstone/AgeGate/Cap/RecoveredBetweenCycles/CapAcrossBuckets) + 5 walker unit tests (Production/NestedKey/BucketENOENT/Delete/ErrorPaths) + 4 ScanAppendable tests + 1 e2e test (`TestOrphanSegmentSweepE2E_Cluster4Node`, 4-node cluster, 4.73s).
+
+### Changed
+
+- **Scrubber main loop**: per-bucket segment sweep을 기존 EC sweep 다음 위치에 추가. 두 메커니즘은 완전 독립 (state, cap, tombstone 모두 분리). 기존 `OrphanWalkable.WalkOrphanShards` 호출 위치 / 시그니처 변경 없음.
+
+### Operations
+
+- **EC shard orphan cleanup은 별도 follow-up** (`TODOS.md` P2). coalesce 도중 EC 쓰기 후 propose 실패로 남는 shard dir (`<shardRoot>/<bucket>/<userKey>/coalesced/<id>/coalesced/<id>/shard_<i>`)은 기존 `OrphanWalkable.WalkOrphanShards`가 plain EC만 cover하는 한계 때문에 이번 PR 범위 외. storage layout 조사 + tracking mechanism 확장 후 별도 cycle에서 처리.
+
 ## [0.0.253.0] - 2026-05-19 - feat(s3): AppendObject hardening — size cap + memory budget + owner-kill e2e
 
 AppendObject (v0.0.249.0)을 production-readiness 단계로 hardening. F1-F5 묶음으로 5개 follow-up을 단일 PR로 처리.
