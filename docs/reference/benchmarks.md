@@ -80,9 +80,19 @@ such as license-gated MinIO AIStor binaries. Set
 separately from `warp analyze`, using the same signed S3 requests, object size,
 concurrency, duration, bucket lookup mode, `roundrobin` host selection, and
 warm-read rule for every target. Cluster endpoints are passed as comma-separated
-host lists to `warp`. The script also accepts `WARP_OPS=put,get,delete` for
-batch delete measurements through `warp delete --batch`. k6-based S3 benchmark
-scripts have been removed; S3 performance claims should use `warp`.
+host lists to `warp`. The script accepts the full warp op surface through
+`WARP_OPS`: `put`, `get`, `delete`, `mixed`, `list`, `stat`, `versioned`,
+`retention`, `multipart`, `multipart-put`, `append`. Multipart workloads pass
+`--part.size` (warp does not accept `--obj.size` for those subcommands);
+`delete` auto-raises `--objects` to `concurrent × batch × 4` so the warp
+minimum-object guard is satisfied; and each op runs in its own bucket
+(`warp-<target>-<op>`) so a later op does not seed against the prior op's
+data. `GRAINFS_CLUSTER_NODES=4` boots a 4-node cluster instead of the default
+3. Note that a freshly bootstrapped cluster needs roughly 30 to 45 seconds for
+the multipart-listing capability evidence to propagate through gossip; set
+`CLUSTER_WARMUP_SLEEP=45` before running multipart workloads (see TODOS for
+the capability-ready probe follow-up). k6-based S3 benchmark scripts have
+been removed; S3 performance claims should use `warp`.
 
 Iceberg catalog benchmarks also use MinIO `warp` through
 `make bench-iceberg-table` and `make bench-iceberg-table-cluster`. The default
