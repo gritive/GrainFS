@@ -159,6 +159,9 @@ type BackgroundScrubber struct {
 	stats           ScrubStats
 	statsSnap       atomic.Value // published at end of each cycle; stores ScrubStats
 	orphanTombstone map[string]struct{}
+	// segmentTombstone tracks raw segment orphan candidates across cycles
+	// (parallel to orphanTombstone for EC shards).
+	segmentTombstone map[string]struct{}
 
 	// mu guards lastStatuses for concurrent reads. The background goroutine is the
 	// sole writer; RWMutex lets multiple concurrent callers of LastStatus() proceed
@@ -210,15 +213,16 @@ func WithEmitter(e Emitter) ScrubberOption {
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
 func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *BackgroundScrubber {
 	s := &BackgroundScrubber{
-		backend:         backend,
-		verifier:        NewShardVerifier(backend),
-		repairer:        NewRepairEngine(backend),
-		emitter:         NoopEmitter{},
-		interval:        interval,
-		resetCh:         make(chan time.Duration, 1),
-		limiter:         rate.NewLimiter(100, 10),
-		lastStatuses:    make(map[string]ShardStatus),
-		orphanTombstone: make(map[string]struct{}),
+		backend:          backend,
+		verifier:         NewShardVerifier(backend),
+		repairer:         NewRepairEngine(backend),
+		emitter:          NoopEmitter{},
+		interval:         interval,
+		resetCh:          make(chan time.Duration, 1),
+		limiter:          rate.NewLimiter(100, 10),
+		lastStatuses:     make(map[string]ShardStatus),
+		orphanTombstone:  make(map[string]struct{}),
+		segmentTombstone: make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -526,6 +530,26 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	// Optional: migrate plain objects to EC if backend supports it.
 	if migrator, ok := s.backend.(Migrator); ok {
 		s.runMigration(ctx, migrator, buckets)
+	}
+
+	// Optional: sweep orphan raw segment files left by interrupted appends.
+	segmentScanner, hasSegScanner := s.backend.(AppendableScannable)
+	segmentWalker, hasSegWalker := s.backend.(OrphanSegmentWalkable)
+	if hasSegScanner && hasSegWalker {
+		segCapRemaining := maxSegmentsPerCycle
+		for _, bucket := range buckets {
+			knownSegmentsB := make(map[string]bool)
+			if appCh, appErr := segmentScanner.ScanAppendableObjects(bucket); appErr != nil {
+				log.Warn().Str("bucket", bucket).Err(appErr).Msg("scrub: scan appendable failed")
+			} else {
+				for rec := range appCh {
+					for _, blobID := range rec.SegmentBlobIDs {
+						knownSegmentsB[rec.Bucket+"/"+rec.Key+"_segments/"+blobID] = true
+					}
+				}
+			}
+			segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
+		}
 	}
 
 	// Optional: sweep orphan shard dirs left by migration crashes.
