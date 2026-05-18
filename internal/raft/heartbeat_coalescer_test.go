@@ -42,17 +42,52 @@ func TestDecodeHeartbeatBatchOwnsDecodedStrings(t *testing.T) {
 }
 
 func TestBorrowAppendEntriesArgsPayloadMatchesOwnedEncoder(t *testing.T) {
-	args := benchmarkHeartbeatItems(1)[0].args
-
-	borrowed := borrowAppendEntriesArgsPayload(args)
-	defer borrowed.release()
-
-	owned, err := encodeAppendEntriesArgs(args)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		args *AppendEntriesArgs
+	}{
+		{
+			name: "heartbeat with no entries",
+			args: benchmarkHeartbeatItems(1)[0].args,
+		},
+		{
+			name: "append entries with commands and non command entry",
+			args: &AppendEntriesArgs{
+				Term:         9,
+				LeaderID:     "node-A",
+				PrevLogIndex: 41,
+				PrevLogTerm:  8,
+				Entries: []LogEntry{
+					{
+						Term:    9,
+						Index:   42,
+						Type:    LogEntryCommand,
+						Command: []byte("set x=1"),
+					},
+					{
+						Term:  9,
+						Index: 43,
+						Type:  LogEntryNoOp,
+					},
+				},
+				LeaderCommit: 42,
+			},
+		},
 	}
-	if !bytes.Equal(borrowed.data, owned) {
-		t.Fatal("borrowed AppendEntriesArgs payload differs from owned encoder")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			borrowed := borrowAppendEntriesArgsPayload(tt.args)
+			defer borrowed.release()
+
+			owned, err := encodeAppendEntriesArgs(tt.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(borrowed.data, owned) {
+				t.Fatal("borrowed AppendEntriesArgs payload differs from owned encoder")
+			}
+		})
 	}
 }
 
