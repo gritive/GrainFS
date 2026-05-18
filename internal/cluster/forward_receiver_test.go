@@ -109,9 +109,11 @@ func TestForwardReceiver_HandleGroupPropose_DispatchesToGroupBackend(t *testing.
 	})
 
 	require.NotNil(t, reply)
-	require.Len(t, reply.Payload, 12)
+	// Phase A (Task 16): success wire is [8B idx][4B errLen=0][1B applyErrCode=0].
+	require.Len(t, reply.Payload, 13)
 	require.Greater(t, binary.BigEndian.Uint64(reply.Payload[0:8]), uint64(0))
 	require.Zero(t, binary.BigEndian.Uint32(reply.Payload[8:12]))
+	require.Equal(t, byte(applyErrCodeNone), reply.Payload[12])
 }
 
 func TestForwardReceiver_HandlePutObject_CommitsObjectIndex(t *testing.T) {

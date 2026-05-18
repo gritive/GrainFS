@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"io"
 	"sync/atomic"
@@ -174,15 +173,12 @@ func (r *ForwardReceiver) HandleGroupPropose(req *transport.Message) *transport.
 }
 
 func groupProposeReply(index uint64, err error) *transport.Message {
-	resp := make([]byte, 12)
-	if err != nil {
-		errBytes := []byte(err.Error())
-		binary.BigEndian.PutUint32(resp[8:12], uint32(len(errBytes)))
-		resp = append(resp, errBytes...)
-	} else {
-		binary.BigEndian.PutUint64(resp[0:8], index)
+	// Phase A (Task 16): wire-compatible with decodeProposeForwardReply.
+	// GroupBackend.ApplyError harvesting will land alongside AppendObject (Task 18+).
+	return &transport.Message{
+		Type:    transport.StreamDataGroupProposeForward,
+		Payload: encodeProposeForwardReply(index, err),
 	}
-	return &transport.Message{Type: transport.StreamDataGroupProposeForward, Payload: resp}
 }
 
 // Handle implements transport.Handler for 0x08 stream.

@@ -640,23 +640,28 @@ func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr stri
 	if err != nil {
 		return 0, fmt.Errorf("forwardPropose: send: %w", err)
 	}
-	if len(resp.Payload) < 12 {
-		return 0, fmt.Errorf("forwardPropose: response too short: %d bytes", len(resp.Payload))
+	index, applyErr, transportErr := decodeProposeForwardReply(resp.Payload)
+	if transportErr != nil {
+		return 0, fmt.Errorf("forwardPropose: %w", transportErr)
 	}
-	index := binary.BigEndian.Uint64(resp.Payload[0:8])
-	errLen := binary.BigEndian.Uint32(resp.Payload[8:12])
-	if errLen > 0 && len(resp.Payload) >= 12+int(errLen) {
-		msg := string(resp.Payload[12 : 12+int(errLen)])
-		if msg == raft.ErrNotLeader.Error() {
+	if applyErr != nil {
+		// raft.ErrNotLeader is a propose-time signal — keep the legacy
+		// string match so callers can errors.Is() the canonical sentinel.
+		if applyErr.Error() == raft.ErrNotLeader.Error() {
 			return 0, raft.ErrNotLeader
 		}
-		return 0, fmt.Errorf("forwardPropose: leader error: %s", msg)
+		return 0, applyErr
 	}
 	return index, nil
 }
 
 // RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 QUIC 라우터에 등록한다.
 // 리더 노드에서 호출해야 하며, 팔로워의 propose를 대신 처리한다.
+//
+// Phase A (Task 16): the leader also waits for the entry to be applied locally
+// and harvests any FSM apply error via ApplyError(idx), encoding it on the wire
+// as a stable code so the follower can reconstruct the original sentinel via
+// decodeApplyError.
 func (b *DistributedBackend) RegisterProposeForwardHandler() {
 	if b.shardSvc == nil {
 		return
@@ -665,17 +670,29 @@ func (b *DistributedBackend) RegisterProposeForwardHandler() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		idx, err := b.node.ProposeWait(ctx, req.Payload)
-		resp := make([]byte, 12)
-		if err != nil {
-			errBytes := []byte(err.Error())
-			binary.BigEndian.PutUint64(resp[0:8], 0)
-			binary.BigEndian.PutUint32(resp[8:12], uint32(len(errBytes)))
-			resp = append(resp, errBytes...)
-		} else {
-			binary.BigEndian.PutUint64(resp[0:8], idx)
-			binary.BigEndian.PutUint32(resp[8:12], 0)
+		if err == nil {
+			// Wait for apply, then surface FSM apply error (if any).
+			for b.lastApplied.Load() < idx {
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				default:
+				}
+				if err != nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err == nil {
+				if applyErr := b.ApplyError(idx); applyErr != nil {
+					err = applyErr
+				}
+			}
 		}
-		return &transport.Message{Type: transport.StreamProposeForward, Payload: resp}
+		return &transport.Message{
+			Type:    transport.StreamProposeForward,
+			Payload: encodeProposeForwardReply(idx, err),
+		}
 	})
 }
 
