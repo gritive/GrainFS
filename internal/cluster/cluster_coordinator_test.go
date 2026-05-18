@@ -1343,6 +1343,36 @@ func TestClusterCoordinator_ReadAt_ForwardSmallRangeUsesSingleFrame(t *testing.T
 	require.Equal(t, int64(len(body)), args.Length())
 }
 
+func TestClusterCoordinator_ReadAt_ForwardMalformedReplyReturnsError(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpReadAt] = []byte{0x01, 0x02, 0x03}
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	buf := make([]byte, 8)
+	n, err := c.ReadAt(context.Background(), "bk", "k", 0, buf)
+
+	require.Zero(t, n)
+	require.Error(t, err)
+}
+
+func TestClusterCoordinator_ReadAt_ForwardLargeRangeUsesReadStream(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("v"), int(DefaultMaxForwardBodyBytes)+1)
+	d.readReplyBy[raftpb.ForwardOpReadAt] = buildOKReply()
+	d.readBodyBy[raftpb.ForwardOpReadAt] = body
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	buf := make([]byte, len(body))
+	n, err := c.ReadAt(context.Background(), "bk", "k", 0, buf)
+
+	require.NoError(t, err)
+	require.Equal(t, len(body), n)
+	require.Equal(t, body, buf)
+	require.Empty(t, d.calls)
+	require.Len(t, d.readCalls, 1)
+	require.Equal(t, raftpb.ForwardOpReadAt, d.readCalls[0].op)
+}
+
 func TestClusterCoordinator_ReadAt_ForwardShortBodyReturnsEOF(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	d.replyByOp[raftpb.ForwardOpReadAt] = buildReadAtReply([]byte("tail"))

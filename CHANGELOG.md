@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.248.0] - 2026-05-18 - perf(cluster): reduce forwarded ReadAt allocations
+
+Forwarded `ReadAt` replies now parse directly into the caller buffer on the
+coordinator side, and follower-side small `ReadAt` buffers reuse zeroed size
+classes instead of allocating a fresh exact-size byte slice for every request.
+
+### Changed
+
+- `internal/cluster/forward_codec.go`: centralized `ReadAt` reply parsing in
+  `readAtReplyInto`, including malformed FlatBuffers recovery and oversized
+  reply body rejection.
+- `internal/cluster/cluster_coordinator.go`: small forwarded `ReadAt` calls now
+  copy reply bytes directly into the caller-owned destination buffer.
+- `internal/cluster/forward_receiver.go`: pooled 4 KiB / 16 KiB / 64 KiB
+  follower read buffers for forwarded `ReadAt` requests; larger requests remain
+  unpooled.
+- `internal/cluster/forward_sender.go`: malformed not-leader FlatBuffers replies
+  no longer panic while extracting leader hints.
+
+### Performance - Forwarded ReadAt 4 KiB (Apple M3, count=6, benchtime=5x)
+
+| Metric | Before | After | Change |
+|---|---:|---:|---:|
+| B/op | 12,742 | 8,576-8,662 | ~32% lower |
+| allocs/op | 63 | 62 | -1 alloc/op |
+
+Latency remains noisy at this short benchtime, so the measured win claimed here
+is allocation reduction rather than stable wall-clock improvement.
+
+### Tests
+
+- Added forwarded `ReadAt` benchmarks covering coordinator and receiver paths.
+- Added tests for direct reply parsing, short/oversized/malformed reply bodies,
+  receiver buffer size classes and zeroing, backend error handling, stream
+  cutoffs, and malformed not-leader leader hints.
+
 ## [0.0.247.0] - 2026-05-18 - perf(cluster): internal RPC JSON → FlatBuffers (catalog_read + join)
 
 Converts the last two cluster-internal RPC paths still on `encoding/json`

@@ -1468,19 +1468,7 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		if err != nil {
 			return 0, err
 		}
-		if err := parseReplyStatus(reply); err != nil {
-			return 0, err
-		}
-		fr := raftpb.GetRootAsForwardReply(reply, 0)
-		body := fr.ReadBodyBytes()
-		n := copy(buf, body)
-		if n != len(body) {
-			return n, ErrForwardBodySizeMismatch
-		}
-		if n < len(buf) {
-			return n, io.EOF
-		}
-		return n, nil
+		return readAtReplyInto(reply, buf)
 	}
 
 	reply, body, err := c.forward.SendReadStream(ctx, target.Peers, target.GroupID, raftpb.ForwardOpReadAt, args)

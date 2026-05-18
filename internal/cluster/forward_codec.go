@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"errors"
+	"io"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -519,6 +520,28 @@ func parseReplyStatus(reply []byte) error {
 	default:
 		return errInternalReply
 	}
+}
+
+func readAtReplyInto(reply []byte, dst []byte) (n int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			n = 0
+			err = errInternalReply
+		}
+	}()
+	if err := parseReplyStatus(reply); err != nil {
+		return 0, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	body := fr.ReadBodyBytes()
+	n = copy(dst, body)
+	if n != len(body) {
+		return n, ErrForwardBodySizeMismatch
+	}
+	if n < len(dst) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // objectFromReply builds a *storage.Object from a ForwardReply with a populated

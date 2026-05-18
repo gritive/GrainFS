@@ -33,6 +33,88 @@ type ForwardReceiver struct {
 	indexProposer objectIndexProposer // nil = no index commit (single-node / test)
 }
 
+const (
+	forwardReadAtBuffer4KiB  = 4 * 1024
+	forwardReadAtBuffer16KiB = 16 * 1024
+	forwardReadAtBuffer64KiB = 64 * 1024
+)
+
+type forwardReadAtBufferPool struct {
+	size int
+	ch   chan []byte
+}
+
+var (
+	forwardReadAtBuffer4KiBPool  = newForwardReadAtBufferPool(forwardReadAtBuffer4KiB)
+	forwardReadAtBuffer16KiBPool = newForwardReadAtBufferPool(forwardReadAtBuffer16KiB)
+	forwardReadAtBuffer64KiBPool = newForwardReadAtBufferPool(forwardReadAtBuffer64KiB)
+)
+
+func newForwardReadAtBufferPool(size int) *forwardReadAtBufferPool {
+	p := &forwardReadAtBufferPool{
+		size: size,
+		ch:   make(chan []byte, 8),
+	}
+	p.ch <- make([]byte, size)
+	return p
+}
+
+func (p *forwardReadAtBufferPool) Get() []byte {
+	select {
+	case buf := <-p.ch:
+		return buf
+	default:
+		return make([]byte, p.size)
+	}
+}
+
+func (p *forwardReadAtBufferPool) Put(buf []byte) {
+	select {
+	case p.ch <- buf:
+	default:
+	}
+}
+
+func getForwardReadAtBuffer(length int64) ([]byte, int) {
+	if length == 0 {
+		return nil, 0
+	}
+	if length <= forwardReadAtBuffer4KiB {
+		buf := forwardReadAtBuffer4KiBPool.Get()
+		return buf[:int(length)], forwardReadAtBuffer4KiB
+	}
+	if length <= forwardReadAtBuffer16KiB {
+		buf := forwardReadAtBuffer16KiBPool.Get()
+		return buf[:int(length)], forwardReadAtBuffer16KiB
+	}
+	if length <= forwardReadAtBuffer64KiB {
+		buf := forwardReadAtBuffer64KiBPool.Get()
+		return buf[:int(length)], forwardReadAtBuffer64KiB
+	}
+	return make([]byte, int(length)), 0
+}
+
+func putForwardReadAtBuffer(buf []byte, class int) {
+	var p *forwardReadAtBufferPool
+	switch class {
+	case 0:
+		return
+	case forwardReadAtBuffer4KiB:
+		p = forwardReadAtBuffer4KiBPool
+	case forwardReadAtBuffer16KiB:
+		p = forwardReadAtBuffer16KiBPool
+	case forwardReadAtBuffer64KiB:
+		p = forwardReadAtBuffer64KiBPool
+	default:
+		return
+	}
+	buf = buf[:class]
+	for i := range buf {
+		buf[i] = 0
+	}
+	p.Put(buf)
+}
+
 func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 	return &ForwardReceiver{groups: groups}
 }
@@ -413,7 +495,8 @@ func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) *transport.Me
 	if ra.Offset() < 0 || length < 0 || length > DefaultMaxForwardReplyBytes {
 		return statusReply(raftpb.ForwardStatusInternal)
 	}
-	buf := make([]byte, int(length))
+	buf, pooled := getForwardReadAtBuffer(length)
+	defer putForwardReadAtBuffer(buf, pooled)
 	n, err := dg.Backend().ReadAt(context.Background(), string(ra.Bucket()), string(ra.Key()), ra.Offset(), buf)
 	if err != nil && !(errors.Is(err, io.EOF) && n > 0) {
 		return statusReply(mapErrorToStatus(err))
