@@ -266,6 +266,8 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 // Best-effort cleanup: an unlink failure leaves orphan raw segments which the
 // scrubber sweeps. Idempotent on retry because apply skips already-applied
 // CoalescedIDs.
+//
+//nolint:unused // referenced from coalesce_process_test.go / coalesce_concurrent_test.go
 func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coalesceJob) error {
 	obj, err := b.HeadObject(ctx, job.Bucket, job.Key)
 	if err != nil || obj == nil {

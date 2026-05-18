@@ -35,6 +35,9 @@ type appendTarget struct {
 	pickNode  func(i int) *s3.Client
 	createBkt func(t *testing.T, bucket string)
 	isCluster bool
+	// cluster is non-nil for cluster fixtures and exposes the e2eCluster so
+	// downstream tests can hit /metrics, kill nodes, etc. nil for SingleNode.
+	cluster *e2eCluster
 }
 
 func TestAppendObjectE2E(t *testing.T) {
@@ -95,6 +98,7 @@ func newClusterAppendTarget(t *testing.T, nodes int) appendTarget {
 			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
 		},
 		isCluster: true,
+		cluster:   c,
 	}
 }
 
