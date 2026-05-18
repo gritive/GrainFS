@@ -44,6 +44,26 @@ func TestWalkOrphanSegments_Production(t *testing.T) {
 	require.ElementsMatch(t, []string{"bucket/key_segments/blob-old"}, found)
 }
 
+func TestWalkOrphanSegments_NestedKey(t *testing.T) {
+	tmpRoot := t.TempDir()
+	// Nested key "folder/sub/file"
+	segDir := filepath.Join(tmpRoot, "data", "bucket", "folder", "sub", "file_segments")
+	require.NoError(t, os.MkdirAll(segDir, 0o755))
+
+	oldPath := filepath.Join(segDir, "blob-old")
+	require.NoError(t, os.WriteFile(oldPath, []byte("seg"), 0o644))
+	backDate(t, oldPath, 10*time.Minute)
+
+	b := &DistributedBackend{root: tmpRoot, scrubOrphanAge: 5 * time.Minute}
+	var found []string
+	err := b.WalkOrphanSegments("bucket", nil, func(p string) error {
+		found = append(found, p)
+		return nil
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"bucket/folder/sub/file_segments/blob-old"}, found)
+}
+
 func TestWalkOrphanSegments_BucketENOENT(t *testing.T) {
 	tmpRoot := t.TempDir()
 	b := &DistributedBackend{root: tmpRoot, scrubOrphanAge: 5 * time.Minute}

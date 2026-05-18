@@ -12,42 +12,55 @@ import (
 
 const segmentsDirSuffix = "_segments"
 
-// WalkOrphanSegments walks <root>/data/<bucket>/<key>_segments/<blobID>
-// returning files older than scrubOrphanAge and not in `known`.
-// Bucket ENOENT (race with bucket delete) is treated as success/empty.
+// WalkOrphanSegments recursively walks <root>/data/<bucket>/<key>_segments/<blobID>
+// (key may contain `/`) returning files older than scrubOrphanAge and not in
+// `known`. Bucket ENOENT (race with bucket delete) is treated as success/empty.
 func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]bool, fn func(string) error) error {
 	bucketDir := filepath.Join(b.root, "data", bucket)
 	cutoff := time.Now().Add(-b.scrubOrphanAge)
 
-	entries, err := os.ReadDir(bucketDir)
-	if err != nil {
+	if _, err := os.Stat(bucketDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil // bucket race with delete
 		}
 		return err
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, segmentsDirSuffix) {
-			continue
-		}
-		keyName := name[:len(name)-len(segmentsDirSuffix)]
-		segDir := filepath.Join(bucketDir, name)
-		segEntries, err := os.ReadDir(segDir)
+	var stopErr error
+	walkErr := filepath.WalkDir(bucketDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			// Swallow per-segDir errors to keep the cycle making progress
-			// across other dirs. Caller increments error metrics if needed.
-			continue
+			// Permission denied or other readdir error: skip this subtree, keep going.
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, segmentsDirSuffix) {
+			return nil
+		}
+		// Reconstruct the S3 key prefix from path relative to bucketDir.
+		// path = bucketDir + "/" + <key>_segments
+		rel, relErr := filepath.Rel(bucketDir, path)
+		if relErr != nil {
+			return nil
+		}
+		// rel = "<key>_segments" (key may contain slashes)
+		keyName := strings.TrimSuffix(rel, segmentsDirSuffix)
+		// Convert backslashes to slashes for cross-platform consistency.
+		keyName = filepath.ToSlash(keyName)
+		segEntries, dirErr := os.ReadDir(path)
+		if dirErr != nil {
+			return filepath.SkipDir
 		}
 		for _, seg := range segEntries {
 			if seg.IsDir() {
 				continue
 			}
-			segPath := filepath.Join(segDir, seg.Name())
+			segPath := filepath.Join(path, seg.Name())
 			info, statErr := os.Stat(segPath)
 			if statErr != nil {
 				continue
@@ -60,11 +73,17 @@ func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]
 				continue
 			}
 			if err := fn(key); err != nil {
-				return err
+				stopErr = err
+				return filepath.SkipAll
 			}
 		}
+		// Don't descend into a *_segments directory.
+		return filepath.SkipDir
+	})
+	if walkErr != nil {
+		return walkErr
 	}
-	return nil
+	return stopErr
 }
 
 // DeleteOrphanSegment removes one raw segment file. ENOENT is swallowed
