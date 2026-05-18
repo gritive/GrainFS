@@ -706,6 +706,42 @@ func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
 	}, nil
 }
 
+func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	blobIDOff := b.CreateString(c.BlobID)
+	etagOff := b.CreateString(c.SegmentETag)
+	pgOff := b.CreateString(c.PlacementGroupID)
+	clusterpb.AppendObjectCmdStart(b)
+	clusterpb.AppendObjectCmdAddBucket(b, bucketOff)
+	clusterpb.AppendObjectCmdAddKey(b, keyOff)
+	clusterpb.AppendObjectCmdAddExpectedOffset(b, c.ExpectedOffset)
+	clusterpb.AppendObjectCmdAddBlobId(b, blobIDOff)
+	clusterpb.AppendObjectCmdAddSegmentSize(b, c.SegmentSize)
+	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
+	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
+	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
+}
+
+func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.AppendObjectCmd {
+		return clusterpb.GetRootAsAppendObjectCmd(d, 0)
+	})
+	if err != nil {
+		return AppendObjectCmd{}, err
+	}
+	return AppendObjectCmd{
+		Bucket:           string(t.Bucket()),
+		Key:              string(t.Key()),
+		ExpectedOffset:   t.ExpectedOffset(),
+		BlobID:           string(t.BlobId()),
+		SegmentSize:      t.SegmentSize(),
+		SegmentETag:      string(t.SegmentEtag()),
+		PlacementGroupID: string(t.PlacementGroupId()),
+	}, nil
+}
+
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -789,6 +825,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdSetObjectACL:
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
+	case CmdAppendObject:
+		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:

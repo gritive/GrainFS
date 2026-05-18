@@ -25,7 +25,7 @@ const (
 	applyErrCodeNone           applyErrorCode = 0
 	applyErrCodeOffsetMismatch applyErrorCode = 1
 	applyErrCodeCapExceeded    applyErrorCode = 2
-	applyErrCodeStalePlacement applyErrorCode = 3 // reserved (Task 17)
+	applyErrCodeStalePlacement applyErrorCode = 3
 	applyErrCodeNotSupported   applyErrorCode = 4
 	applyErrCodeBucketNotFound applyErrorCode = 5
 	applyErrCodeObjectNotFound applyErrorCode = 6
@@ -49,9 +49,8 @@ func encodeApplyError(err error) (applyErrorCode, string) {
 		return applyErrCodeBucketNotFound, err.Error()
 	case errors.Is(err, storage.ErrObjectNotFound):
 		return applyErrCodeObjectNotFound, err.Error()
-	// applyErrCodeStalePlacement: cluster-level sentinel is defined in
-	// Task 17 (ErrStalePlacement). Until then, such errors fall through
-	// to applyErrCodeInternal with the human-readable message.
+	case errors.Is(err, ErrStalePlacement):
+		return applyErrCodeStalePlacement, err.Error()
 	default:
 		return applyErrCodeInternal, err.Error()
 	}
@@ -74,8 +73,8 @@ func decodeApplyError(code applyErrorCode, msg string) error {
 		return storage.ErrBucketNotFound
 	case applyErrCodeObjectNotFound:
 		return storage.ErrObjectNotFound
-	// applyErrCodeStalePlacement: reserved — wire it up in Task 17 once
-	// ErrStalePlacement is defined in the cluster package.
+	case applyErrCodeStalePlacement:
+		return ErrStalePlacement
 	case applyErrCodeInternal:
 		if msg == "" {
 			return errors.New("apply error: internal")

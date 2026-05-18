@@ -25,7 +25,8 @@ enum ForwardOp : byte {
   ReadAt = 15,
   SetObjectACL = 16,
   ListParts = 17,
-  ListMultipartUploads = 18
+  ListMultipartUploads = 18,
+  AppendObject = 19
 }
 
 table ScrubSessionStatArgs {
@@ -161,6 +162,15 @@ table ListMultipartUploadsArgs {
   bucket:string;
   prefix:string;
   max_uploads:int32;
+}
+
+// AppendObjectForwardArgs carries the header for an AppendObject forward.
+// Body bytes are streamed on the same QUIC stream after the FBS args frame
+// (multi-stream forward path) — not embedded inline.
+table AppendObjectForwardArgs {
+  bucket:string;
+  key:string;
+  expected_offset:int64;
 }
 
 enum ForwardStatus : byte {

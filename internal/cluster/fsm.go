@@ -38,6 +38,8 @@ const (
 	CmdSetBucketVersioning CommandType = 15
 	CmdSetObjectACL        CommandType = 16
 	CmdSetRing             CommandType = 17
+	// Phase 4 Append-Object: records one appended segment.
+	CmdAppendObject        CommandType = 18
 	CmdPutObjectQuarantine CommandType = 40
 )
 
@@ -197,6 +199,19 @@ type SetObjectACLCmd struct {
 	Bucket string
 	Key    string
 	ACL    uint8
+}
+
+// AppendObjectCmd records one appended segment. Only PlacementGroupID is
+// frozen at propose time — FSM apply derives NodeIDs/EC params from the
+// current ShardGroup record (single source of truth, avoids drift).
+type AppendObjectCmd struct {
+	Bucket           string
+	Key              string
+	ExpectedOffset   int64
+	BlobID           string
+	SegmentSize      int64
+	SegmentETag      string
+	PlacementGroupID string
 }
 
 // EncodeNoOpCommand returns a serialized CmdNoOp suitable for SetNoOpCommand.
