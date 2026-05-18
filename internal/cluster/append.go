@@ -149,14 +149,17 @@ func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *sto
 	total := len(obj.Coalesced) + len(obj.Segments)
 	paths := make([]string, 0, total)
 	blobIDs := make([]string, 0, total)
+	kinds := make([]byte, 0, total)
 	// Coalesced blobs come first — they represent the older bytes of the object.
 	for _, c := range obj.Coalesced {
 		paths = append(paths, b.coalescedBlobPath(bucket, key, c.CoalescedID))
 		blobIDs = append(blobIDs, c.CoalescedID)
+		kinds = append(kinds, appendSegKindCoalesced)
 	}
 	for _, s := range obj.Segments {
 		paths = append(paths, b.segmentBlobPath(bucket, key, s.BlobID))
 		blobIDs = append(blobIDs, s.BlobID)
+		kinds = append(kinds, appendSegKindSegment)
 	}
 	return &appendableSegmentReader{
 		backend: b,
@@ -164,6 +167,7 @@ func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *sto
 		key:     key,
 		paths:   paths,
 		blobIDs: blobIDs,
+		kinds:   kinds,
 	}
 }
 
@@ -173,6 +177,7 @@ type appendableSegmentReader struct {
 	key     string
 	paths   []string
 	blobIDs []string
+	kinds   []byte // appendSegKindSegment | appendSegKindCoalesced per entry
 	idx     int
 	cur     io.ReadCloser
 }
@@ -205,6 +210,9 @@ func (r *appendableSegmentReader) Read(p []byte) (int, error) {
 
 // openCurrent opens the segment at r.idx. Tries the local file first;
 // on ENOENT falls back to a peer fetch (Phase B1 forward-on-read).
+//
+// Phase B2: the entry may be a coalesced blob — kinds[idx] tells the peer
+// fetch which on-disk path to resolve (segment vs coalesced).
 func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
 	path := r.paths[r.idx]
 	f, err := os.Open(path)
@@ -217,7 +225,11 @@ func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
 	if r.backend == nil {
 		return nil, fmt.Errorf("open segment %s: %w", path, err)
 	}
-	rc, ferr := r.backend.fetchAppendSegmentFromAnyPeer(context.Background(), r.bucket, r.key, r.blobIDs[r.idx])
+	kind := byte(appendSegKindSegment)
+	if r.idx < len(r.kinds) {
+		kind = r.kinds[r.idx]
+	}
+	rc, ferr := r.backend.fetchAppendBlobFromAnyPeer(context.Background(), r.bucket, r.key, r.blobIDs[r.idx], kind)
 	if ferr != nil {
 		return nil, fmt.Errorf("open segment %s (local missing, peer fetch failed): %w", path, ferr)
 	}

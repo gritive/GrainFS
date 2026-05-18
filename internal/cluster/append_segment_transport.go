@@ -29,6 +29,12 @@ import (
 
 // Wire format for the request payload:
 //   [2B BE groupIDLen][groupID][2B BE bucketLen][bucket][2B BE keyLen][key][2B BE blobIDLen][blobID]
+//   (optional, B2+) [1B kind]
+//
+// The kind byte (segment=0, coalesced=1) is appended after blobID for
+// callers that need to fetch coalesced blobs over the same stream. Legacy
+// payloads (no trailing kind byte) decode as kind=segment for backward
+// compatibility — the decoder checks remaining bytes after blobID.
 //
 // Response: framed metadata message followed by raw segment bytes on the
 // same bidirectional stream. The metadata payload is a single status byte:
@@ -41,6 +47,10 @@ const (
 	appendSegStatusNoEnt  byte = 0x01
 	appendSegStatusError  byte = 0x02
 	maxAppendSegFieldSize      = 4096
+
+	// appendSegKind* identify which on-disk blob the peer should open.
+	appendSegKindSegment   byte = 0
+	appendSegKindCoalesced byte = 1
 )
 
 // errPeerAppendSegmentNotFound is returned by the client when a peer
@@ -56,22 +66,34 @@ type appendSegmentGroupLookup interface {
 }
 
 func encodeAppendSegmentRequest(groupID, bucket, key, blobID string) ([]byte, error) {
+	return encodeAppendSegmentRequestKind(groupID, bucket, key, blobID, appendSegKindSegment)
+}
+
+// encodeAppendSegmentRequestKind is the kind-aware variant. Coalesced reads
+// pass appendSegKindCoalesced so the peer resolves coalescedBlobPath
+// instead of segmentBlobPath.
+func encodeAppendSegmentRequestKind(groupID, bucket, key, blobID string, kind byte) ([]byte, error) {
 	for _, s := range []string{groupID, bucket, key, blobID} {
 		if len(s) > maxAppendSegFieldSize {
 			return nil, fmt.Errorf("append segment request field too large: %d", len(s))
 		}
 	}
-	out := make([]byte, 0, 8+len(groupID)+len(bucket)+len(key)+len(blobID))
+	out := make([]byte, 0, 8+len(groupID)+len(bucket)+len(key)+len(blobID)+1)
 	var hdr [2]byte
 	for _, s := range []string{groupID, bucket, key, blobID} {
 		binary.BigEndian.PutUint16(hdr[:], uint16(len(s)))
 		out = append(out, hdr[:]...)
 		out = append(out, s...)
 	}
+	// Append kind byte unconditionally; legacy decoders without the kind
+	// branch ignore trailing bytes (the current decoder already does).
+	out = append(out, kind)
 	return out, nil
 }
 
-func decodeAppendSegmentRequest(buf []byte) (groupID, bucket, key, blobID string, err error) {
+// decodeAppendSegmentRequest decodes a request; kind defaults to
+// appendSegKindSegment when the trailing byte is absent (legacy payloads).
+func decodeAppendSegmentRequest(buf []byte) (groupID, bucket, key, blobID string, kind byte, err error) {
 	read := func(off *int) (string, error) {
 		if *off+2 > len(buf) {
 			return "", fmt.Errorf("short header")
@@ -89,6 +111,7 @@ func decodeAppendSegmentRequest(buf []byte) (groupID, bucket, key, blobID string
 		return s, nil
 	}
 	off := 0
+	kind = appendSegKindSegment // backward-compat default
 	if groupID, err = read(&off); err != nil {
 		return
 	}
@@ -100,6 +123,9 @@ func decodeAppendSegmentRequest(buf []byte) (groupID, bucket, key, blobID string
 	}
 	if blobID, err = read(&off); err != nil {
 		return
+	}
+	if off < len(buf) {
+		kind = buf[off]
 	}
 	return
 }
@@ -114,7 +140,7 @@ func RegisterAppendSegmentHandler(tr *transport.QUICTransport, lookup appendSegm
 		return
 	}
 	tr.HandleRead(transport.StreamReadAppendSegment, func(req *transport.Message) (*transport.Message, io.ReadCloser) {
-		groupID, bucket, key, blobID, err := decodeAppendSegmentRequest(req.Payload)
+		groupID, bucket, key, blobID, kind, err := decodeAppendSegmentRequest(req.Payload)
 		if err != nil {
 			return errorAppendSegmentMeta(req, err.Error()), nil
 		}
@@ -123,7 +149,13 @@ func RegisterAppendSegmentHandler(tr *transport.QUICTransport, lookup appendSegm
 			// Peer doesn't host this group, so it never has the segment.
 			return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: []byte{appendSegStatusNoEnt}}, nil
 		}
-		path := b.SegmentBlobPath(bucket, key, blobID)
+		var path string
+		switch kind {
+		case appendSegKindCoalesced:
+			path = b.coalescedBlobPath(bucket, key, blobID)
+		default:
+			path = b.SegmentBlobPath(bucket, key, blobID)
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -146,6 +178,12 @@ func errorAppendSegmentMeta(req *transport.Message, msg string) *transport.Messa
 // errPeerAppendSegmentNotFound when the peer answers ENOENT; the caller
 // must treat that as "try next peer" rather than as a hard failure.
 func (b *DistributedBackend) readAppendSegmentFromPeer(ctx context.Context, peer, bucket, key, blobID string) (io.ReadCloser, error) {
+	return b.readAppendSegmentFromPeerKind(ctx, peer, bucket, key, blobID, appendSegKindSegment)
+}
+
+// readAppendSegmentFromPeerKind is the kind-aware variant used by the
+// coalesced blob read path. Kind defaults to segment via the wrapper above.
+func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, peer, bucket, key, blobID string, kind byte) (io.ReadCloser, error) {
 	if b.shardSvc == nil || b.shardSvc.transport == nil {
 		return nil, fmt.Errorf("append segment peer fetch: no transport")
 	}
@@ -153,7 +191,7 @@ func (b *DistributedBackend) readAppendSegmentFromPeer(ctx context.Context, peer
 	if err != nil {
 		return nil, err
 	}
-	payload, err := encodeAppendSegmentRequest(b.groupID, bucket, key, blobID)
+	payload, err := encodeAppendSegmentRequestKind(b.groupID, bucket, key, blobID, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +239,13 @@ func (b *DistributedBackend) readAppendSegmentFromPeer(ctx context.Context, peer
 // that resolution into the GET path needs cross-package wiring we are
 // deferring. With 4 nodes this is at most 3 cheap RPCs in the worst case.
 func (b *DistributedBackend) fetchAppendSegmentFromAnyPeer(ctx context.Context, bucket, key, blobID string) (io.ReadCloser, error) {
+	return b.fetchAppendBlobFromAnyPeer(ctx, bucket, key, blobID, appendSegKindSegment)
+}
+
+// fetchAppendBlobFromAnyPeer is the kind-aware variant; coalesced blob
+// fetches pass appendSegKindCoalesced. Same fan-out semantics as the
+// segment-only variant.
+func (b *DistributedBackend) fetchAppendBlobFromAnyPeer(ctx context.Context, bucket, key, blobID string, kind byte) (io.ReadCloser, error) {
 	if b.shardSvc == nil {
 		return nil, fmt.Errorf("no shard service")
 	}
@@ -213,7 +258,7 @@ func (b *DistributedBackend) fetchAppendSegmentFromAnyPeer(ctx context.Context, 
 			continue
 		}
 		tried++
-		rc, err := b.readAppendSegmentFromPeer(ctx, peer, bucket, key, blobID)
+		rc, err := b.readAppendSegmentFromPeerKind(ctx, peer, bucket, key, blobID, kind)
 		if err == nil {
 			return rc, nil
 		}
@@ -222,10 +267,10 @@ func (b *DistributedBackend) fetchAppendSegmentFromAnyPeer(ctx context.Context, 
 		}
 	}
 	if tried == 0 {
-		return nil, fmt.Errorf("no peers to fetch append segment %s", blobID)
+		return nil, fmt.Errorf("no peers to fetch append blob %s", blobID)
 	}
 	if firstNonENOENT != nil {
 		return nil, firstNonENOENT
 	}
-	return nil, fmt.Errorf("append segment %s missing on all peers", blobID)
+	return nil, fmt.Errorf("append blob %s missing on all peers", blobID)
 }
