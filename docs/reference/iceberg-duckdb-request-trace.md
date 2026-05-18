@@ -13,17 +13,18 @@ Extensions loaded: `iceberg`, `httpfs`
 ATTACH 'warehouse' AS grainfs_iceberg (
     TYPE iceberg,
     ENDPOINT 'http://127.0.0.1:18082',
-    AUTHORIZATION_TYPE 'none',
-    ACCESS_DELEGATION_MODE 'none',
-    SUPPORT_STAGE_CREATE false
+    AUTHORIZATION_TYPE 'sigv4',
+    SIGV4_REGION 'us-east-1',
+    SIGV4_SERVICE 's3'
 );
 ```
 
-The official DuckDB 1.5 docs list these options for REST Catalog attach:
+The DuckDB 1.5.2+ iceberg extension supports these options for REST Catalog attach:
 
-- `AUTHORIZATION_TYPE`: default `OAUTH2`, use `none` for unauthenticated catalogs.
-- `ACCESS_DELEGATION_MODE`: default `vended_credentials`, use `none` when the catalog does not vend credentials.
-- `SUPPORT_STAGE_CREATE`: default `false`.
+- `AUTHORIZATION_TYPE`: GrainFS requires `sigv4`. `none` is no longer accepted on `/iceberg/*` after the v0.0.255.0 BREAKING change. `oauth2` is also accepted by DuckDB but GrainFS does not implement an OAuth2 token endpoint.
+- `SIGV4_REGION`: signing region (GrainFS uses `us-east-1`).
+- `SIGV4_SERVICE`: signing service (GrainFS uses `s3` to share scope with the S3 endpoint).
+- Credentials come from a separate `CREATE SECRET ... TYPE s3` statement; the iceberg extension picks them up automatically when `AUTHORIZATION_TYPE 'sigv4'` is in effect.
 
 Source: https://duckdb.org/docs/current/core_extensions/iceberg/iceberg_rest_catalogs
 
@@ -37,9 +38,9 @@ LOAD httpfs;
 ATTACH 'warehouse' AS grainfs_iceberg (
     TYPE iceberg,
     ENDPOINT 'http://127.0.0.1:18082',
-    AUTHORIZATION_TYPE 'none',
-    ACCESS_DELEGATION_MODE 'none',
-    SUPPORT_STAGE_CREATE false
+    AUTHORIZATION_TYPE 'sigv4',
+    SIGV4_REGION 'us-east-1',
+    SIGV4_SERVICE 's3'
 );
 SHOW ALL TABLES;
 ```

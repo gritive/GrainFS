@@ -21,13 +21,89 @@ import (
 // TestIcebergRoute_AnonymousModeRemoved_NoBypass asserts that NO iceberg
 // route surface entry uses routeAuthnAnonymous. Regression guard: any future
 // commit that flips an iceberg prefix back to anonymous fails CI.
+//
+// Also asserts the manifest has at least one iceberg entry so the test cannot
+// pass vacuously if a future refactor accidentally removes all iceberg routes.
 func TestIcebergRoute_AnonymousModeRemoved_NoBypass(t *testing.T) {
+	icebergEntries := 0
 	for _, entry := range routeSurfaceManifest {
 		if entry.surface == routeSurfaceIceberg {
+			icebergEntries++
 			assert.NotEqualf(t, routeAuthnAnonymous, entry.authn,
 				"iceberg route %q/%q must not be anonymous",
 				entry.pathPrefix, entry.pathExact)
 		}
+	}
+	require.Greaterf(t, icebergEntries, 0,
+		"manifest must declare at least one iceberg route — found none")
+}
+
+// TestIcebergSkewReject_MalformedDate covers the parse-error branch.
+// A future regression that swapped time.Parse for a permissive parser would
+// silently bypass the skew gate.
+func TestIcebergSkewReject_MalformedDate(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "http://example.com/iceberg/v1/config", nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Amz-Date", "not-a-date")
+	reason := icebergSkewReject(req)
+	assert.Equal(t, "invalid X-Amz-Date", reason)
+}
+
+// TestIcebergSkewReject_PresignedURLFallback covers the presigned-URL path
+// where X-Amz-Date is in the query string (no header). A regression deleting
+// the query-param fallback would let presigned URLs bypass skew enforcement
+// while still being signed.
+func TestIcebergSkewReject_PresignedURLFallback(t *testing.T) {
+	stale := time.Now().UTC().Add(-30 * time.Minute).Format("20060102T150405Z")
+	u := "http://example.com/iceberg/v1/config?X-Amz-Date=" + stale
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	require.NoError(t, err)
+	require.Empty(t, req.Header.Get("X-Amz-Date"), "test setup: header must be empty")
+	reason := icebergSkewReject(req)
+	assert.Equal(t, "request signature outside allowed time window", reason)
+}
+
+// TestIcebergSkewReject_MissingDate_Defers covers the no-header AND
+// no-query-param path. The skew gate must return "" and let the verifier
+// produce the actual error — failing here would cause a 401 for any request
+// missing the auth headers entirely, double-counting the rejection.
+func TestIcebergSkewReject_MissingDate_Defers(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "http://example.com/iceberg/v1/config", nil)
+	require.NoError(t, err)
+	reason := icebergSkewReject(req)
+	assert.Equal(t, "", reason, "skew gate should defer to verifier when no date is present")
+}
+
+// TestIcebergSkewReject_WindowBoundaries covers the ±15-min boundary in both
+// directions. Catches asymmetric clock-drift bugs (e.g., using time.Since
+// without the negative branch) and off-by-one boundary errors.
+func TestIcebergSkewReject_WindowBoundaries(t *testing.T) {
+	now := time.Now().UTC()
+	cases := []struct {
+		name      string
+		offset    time.Duration
+		wantEmpty bool // true = accept (defer), false = reject
+	}{
+		{"past_within", -14 * time.Minute, true},
+		{"future_within", 14 * time.Minute, true},
+		{"past_outside", -30 * time.Minute, false},
+		{"future_outside", 30 * time.Minute, false},
+		{"past_just_outside", -16 * time.Minute, false},
+		{"future_just_outside", 16 * time.Minute, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "http://example.com/iceberg/v1/config", nil)
+			require.NoError(t, err)
+			req.Header.Set("X-Amz-Date", now.Add(tc.offset).Format("20060102T150405Z"))
+			reason := icebergSkewReject(req)
+			if tc.wantEmpty {
+				assert.Empty(t, reason, "offset %s should accept", tc.offset)
+			} else {
+				assert.Equal(t, "request signature outside allowed time window", reason,
+					"offset %s should reject", tc.offset)
+			}
+		})
 	}
 }
 
