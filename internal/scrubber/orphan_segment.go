@@ -73,6 +73,7 @@ func (s *BackgroundScrubber) segmentSweepBucket(
 		log.Info().Str("path", p).Msg("scrub: orphan segment deleted")
 	}
 	if deferred > 0 {
+		log.Warn().Int("limit", maxSegmentsPerCycle).Int("deferred", deferred).Msg("scrub: orphan segment sweep capped")
 		metrics.OrphanSegmentSweepCappedTotal.Add(float64(deferred))
 	}
 
