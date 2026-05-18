@@ -607,6 +607,55 @@ ss -s
 - Check network bandwidth
 - Check for lock contention (grainfs doctor)
 
+### Issue: AppendObject HTTP 503 SlowDown
+
+**Symptoms:** `503 SlowDown` responses on AppendObject requests; clients reporting
+`Retry-After: 1` backoff loops; `grainfs_cluster_append_forward_buffer_rejected_total`
+counter climbing.
+
+**Diagnosis:**
+```bash
+curl http://<node>:9000/metrics | grep -E 'grainfs_cluster_append_forward_buffer_(inflight_bytes|rejected_total)'
+```
+
+`inflight_bytes` near the configured pool size means the forward buffer is
+saturated. This is expected backpressure under sustained high concurrency, but
+chronic saturation means the pool is undersized for the workload.
+
+**Fix:**
+- Increase pool: `--cluster-append-forward-buffer-total-bytes` (default 512 MiB).
+- If individual requests are large, raise per-request cap:
+  `--cluster-append-forward-buffer-max-per-request-bytes` (default 64 MiB).
+- If clients want bigger objects, raise per-object cap:
+  `--append-size-cap-bytes` (default 5 TiB).
+- Calibrate with `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
+  and target rejection ratio < 1%.
+
+### Issue: Disk usage drift on AppendObject buckets
+
+**Symptoms:** disk consumption growing faster than committed object size;
+`grainfs_scrub_orphan_segments_found_total` increasing across scrub cycles.
+
+**Diagnosis:** AppendObject best-effort cleanup failed on one of the 3 hot paths
+(propose rejection, coalesce-time EC shard write, coalesce post-unlink). The
+scrubber sweeps raw segment orphans automatically — track:
+
+```bash
+curl http://<node>:9000/metrics | grep -E 'grainfs_scrub_orphan_segment(s_found|s_deleted|_sweep_capped|_walk_errors|_delete_errors)'
+```
+
+Found > deleted over multiple cycles indicates the sweep cap is the bottleneck.
+Walk/delete errors > 0 indicates filesystem permission or I/O issues.
+
+**Fix:**
+- Default age gate is 5 minutes. Long-running writes >5min may need a longer
+  gate: `--scrub-orphan-age 10m` (and 1s in tests).
+- Sweep cap is 50 per cycle (cycle-shared across buckets). If
+  `OrphanSegmentSweepCappedTotal` is climbing, shorten scrub interval rather
+  than raising the cap (cap protects I/O burst).
+- EC shard orphans from coalesce-time failures are NOT covered by this sweep
+  (separate follow-up).
+
 ---
 
 ## Host Deployment Procedures

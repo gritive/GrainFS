@@ -81,6 +81,30 @@ aws --endpoint-url http://localhost:9000 s3 mb s3://mybucket
 aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://mybucket/file.txt
 ```
 
+AppendObject (S3 Express semantics) lets you grow an object incrementally without
+multipart upload. Each write supplies the expected current size via
+`x-amz-write-offset-bytes`; the server stitches segments + EC-coalesced blobs on
+read. Use it for log streams, telemetry, or any append-only workload:
+
+```bash
+# First append creates the object.
+curl -X PUT "http://localhost:9000/mybucket/log.bin" \
+  -H "x-amz-write-offset-bytes: 0" \
+  --data-binary @chunk-0.bin
+
+# Subsequent appends supply the expected current size.
+SIZE=$(aws --endpoint-url http://localhost:9000 s3api head-object \
+  --bucket mybucket --key log.bin --query ContentLength --output text)
+curl -X PUT "http://localhost:9000/mybucket/log.bin" \
+  -H "x-amz-write-offset-bytes: $SIZE" \
+  --data-binary @chunk-1.bin
+```
+
+Per-request body cap defaults to 64 MiB; per-object size cap defaults to 5 TiB.
+Tune via `--cluster-append-forward-buffer-max-per-request-bytes` and
+`--append-size-cap-bytes`. Saturation of the forward buffer surfaces as HTTP
+`503 SlowDown` with `Retry-After: 1` — retry with exponential backoff.
+
 Configure per-bucket pull-through upstreams through the admin surface:
 
 ```bash
