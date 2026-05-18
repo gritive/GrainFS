@@ -155,6 +155,9 @@ type DistributedBackend struct {
 	// leaves orphan EC shards but no metadata commit. Production builds
 	// leave this nil.
 	coalesceFaultAfterECWrite func() error
+
+	// scrubOrphanAge is the age gate for WalkOrphanSegments. Set via SetScrubOrphanAge.
+	scrubOrphanAge time.Duration
 }
 
 type backendTopology struct {
@@ -219,6 +222,9 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 	b.coalesce = newCoalesceWorker(256, b.processCoalesceJobB3)
 	b.coalesce.Start(b.coalesceCtx)
 	go b.coalesceBackstopScan(b.coalesceCtx)
+	if b.scrubOrphanAge == 0 {
+		b.scrubOrphanAge = 5 * time.Minute
+	}
 	return b, nil
 }
 
@@ -266,6 +272,14 @@ func (b *DistributedBackend) ks() *stateKeyspace {
 // caching disabled. Must be called before serving traffic.
 func (b *DistributedBackend) SetShardCache(c *shardcache.Cache) {
 	b.shardCache = c
+}
+
+// SetScrubOrphanAge configures the age gate used by WalkOrphanSegments.
+// 0 value is treated as "use default" (5m).
+func (b *DistributedBackend) SetScrubOrphanAge(d time.Duration) {
+	if d > 0 {
+		b.scrubOrphanAge = d
+	}
 }
 
 // shardCacheKey is the canonical cache key for a single EC shard. Must

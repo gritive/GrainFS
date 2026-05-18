@@ -91,6 +91,9 @@ type Config struct {
 	RingReshardInterval      time.Duration
 	DataGroupRefreshInterval time.Duration
 	DegradedInterval         time.Duration
+	// ScrubOrphanAge is the minimum filesystem mtime age before an orphan raw
+	// segment is eligible for sweep. Default 5m.
+	ScrubOrphanAge time.Duration
 
 	// Audit Iceberg log lake
 	AuditIceberg        bool
