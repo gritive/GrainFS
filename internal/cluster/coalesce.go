@@ -198,6 +198,16 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		return fmt.Errorf("ec write: %w", err)
 	}
 
+	// Test-only fault hook: simulate a crash after EC shards land but before
+	// the FSM commit. The next worker iteration must re-coalesce and reach a
+	// consistent final state.
+	if hook := b.coalesceFaultAfterECWrite; hook != nil {
+		if err := hook(); err != nil {
+			cleanupMerged()
+			return fmt.Errorf("fault: %w", err)
+		}
+	}
+
 	consumedIDs := make([]string, len(snapshot))
 	for i, s := range snapshot {
 		consumedIDs[i] = s.BlobID

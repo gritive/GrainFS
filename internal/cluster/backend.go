@@ -147,6 +147,12 @@ type DistributedBackend struct {
 	coalesceCtx       context.Context
 	coalesceCancel    context.CancelFunc
 	coalesceFirstSeen sync.Map // key="<bucket>\x00<key>" → time.Time
+	// coalesceFaultAfterECWrite is a test-only hook: when set to a non-nil
+	// function returning an error, processCoalesceJobB3 calls it after the
+	// EC write but before propose, allowing tests to simulate a crash that
+	// leaves orphan EC shards but no metadata commit. Production builds
+	// leave this nil.
+	coalesceFaultAfterECWrite func() error
 }
 
 type backendTopology struct {
