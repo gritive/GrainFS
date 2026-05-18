@@ -1635,6 +1635,15 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 		buf = buf[:max]
 	}
 
+	// Appendable objects: dispatch via the stitched reader's range path so we
+	// only read the chunks that intersect [offset, offset+len(buf)). The
+	// generic EC ResolvePlacement returns ErrNotEC for appendables (no
+	// placement record); without this fast path ReadAt falls back to a full
+	// GET + discard which negates range-read efficiency.
+	if (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
+		return b.readAtAppendable(ctx, bucket, key, obj, offset, buf)
+	}
+
 	if b.shardSvc != nil {
 		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
