@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]
 		if errors.Is(err, os.ErrNotExist) {
 			return nil // bucket race with delete
 		}
-		return err
+		return fmt.Errorf("stat bucket dir %s: %w", bucket, err)
 	}
 
 	var stopErr error
@@ -81,7 +82,7 @@ func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]
 		return filepath.SkipDir
 	})
 	if walkErr != nil {
-		return walkErr
+		return fmt.Errorf("walk bucket %s: %w", bucket, walkErr)
 	}
 	return stopErr
 }
@@ -91,10 +92,13 @@ func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]
 func (b *DistributedBackend) DeleteOrphanSegment(key string) error {
 	path := filepath.Join(b.root, "data", key)
 	err := os.Remove(path)
-	if err != nil && errors.Is(err, os.ErrNotExist) {
-		return nil
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("remove orphan segment %s: %w", key, err)
 	}
-	return err
+	return nil
 }
 
 // Compile-time assertion: DistributedBackend satisfies OrphanSegmentWalkable.
