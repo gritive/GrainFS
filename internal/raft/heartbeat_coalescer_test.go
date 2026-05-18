@@ -37,3 +37,27 @@ func TestDecodeHeartbeatBatchOwnsDecodedStrings(t *testing.T) {
 		t.Fatalf("LeaderID = %q, want node-A", decoded[0].args.LeaderID)
 	}
 }
+
+func TestEncodeHeartbeatBatchLargeBatchRoundTrip(t *testing.T) {
+	items := benchmarkHeartbeatItems(17)
+	payload, err := encodeHeartbeatBatch(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := decodeHeartbeatBatch(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != len(items) {
+		t.Fatalf("decoded %d items, want %d", len(decoded), len(items))
+	}
+	for i := range items {
+		if decoded[i].groupID != items[i].groupID {
+			t.Fatalf("decoded[%d].groupID = %q, want %q", i, decoded[i].groupID, items[i].groupID)
+		}
+		if decoded[i].args.PrevLogIndex != items[i].args.PrevLogIndex {
+			t.Fatalf("decoded[%d].PrevLogIndex = %d, want %d", i, decoded[i].args.PrevLogIndex, items[i].args.PrevLogIndex)
+		}
+	}
+}

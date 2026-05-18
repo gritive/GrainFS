@@ -1,0 +1,13 @@
+File: raft.test
+Type: alloc_objects
+Time: 2026-05-18 15:06:15 KST
+Showing nodes accounting for 19838683, 99.88% of 19862053 total
+Dropped 40 nodes (cum <= 99310)
+      flat  flat%   sum%        cum   cum%
+  15872087 79.91% 79.91%   15873453 79.92%  github.com/gritive/GrainFS/internal/raft.fbFinishRPC
+   3966596 19.97% 99.88%   19840960 99.89%  github.com/gritive/GrainFS/internal/raft.encodeHeartbeatBatch
+         0     0% 99.88%   19840960 99.89%  github.com/gritive/GrainFS/internal/raft.BenchmarkHeartbeatEncodeBatch
+         0     0% 99.88%   15874364 79.92%  github.com/gritive/GrainFS/internal/raft.encodeAppendEntriesArgs (inline)
+         0     0% 99.88%   15874364 79.92%  github.com/gritive/GrainFS/internal/raft.encodeRPCPayload
+         0     0% 99.88%   19840960 99.89%  testing.(*B).launch
+         0     0% 99.88%   19851883 99.95%  testing.(*B).runN

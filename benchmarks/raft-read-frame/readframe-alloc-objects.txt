@@ -1,0 +1,57 @@
+File: raft.test
+Type: alloc_objects
+Time: 2026-05-18 15:05:57 KST
+Showing nodes accounting for 1146543, 97.64% of 1174264 total
+Dropped 68 nodes (cum <= 5871)
+      flat  flat%   sum%        cum   cum%
+    314579 26.79% 26.79%     590384 50.28%  golang.org/x/net/internal/socket.(*Conn).recvMsg
+    185690 15.81% 42.60%     185690 15.81%  golang.org/x/net/internal/socket.sockaddrToAddr
+    180230 15.35% 57.95%     180230 15.35%  github.com/quic-go/quic-go/internal/wire.ParseStreamFrame
+    131074 11.16% 69.11%     131074 11.16%  github.com/quic-go/quic-go.(*ReceiveStream).handleStreamFrameImpl
+     90115  7.67% 76.79%      90115  7.67%  golang.org/x/sys/unix.anyToSockaddr
+     73731  6.28% 83.07%      73731  6.28%  net.ipToSockaddr
+     65537  5.58% 88.65%      65537  5.58%  github.com/gritive/GrainFS/internal/raft.writeBenchmarkFrame
+     50973  4.34% 92.99%      50973  4.34%  github.com/quic-go/quic-go/internal/ackhandler.(*sentPacketHistory).SentPacket (inline)
+     43691  3.72% 96.71%      43691  3.72%  github.com/gritive/GrainFS/internal/raft.(*RaftStream).readLoop
+     10923  0.93% 97.64%      10923  0.93%  testing.(*B).ResetTimer
+         0     0% 97.64%       6485  0.55%  crypto/tls.(*Conn).HandshakeContext
+         0     0% 97.64%       6485  0.55%  crypto/tls.(*Conn).handshakeContext
+         0     0% 97.64%      66225  5.64%  github.com/gritive/GrainFS/internal/raft.BenchmarkRaftConnReadFrame
+         0     0% 97.64%      50973  4.34%  github.com/quic-go/quic-go.(*Conn).appendOneShortHeaderPacket
+         0     0% 97.64%     311304 26.51%  github.com/quic-go/quic-go.(*Conn).handleFrames
+         0     0% 97.64%     311304 26.51%  github.com/quic-go/quic-go.(*Conn).handleOnePacket
+         0     0% 97.64%     311304 26.51%  github.com/quic-go/quic-go.(*Conn).handlePackets
+         0     0% 97.64%     311304 26.51%  github.com/quic-go/quic-go.(*Conn).handleShortHeaderPacket
+         0     0% 97.64%     311304 26.51%  github.com/quic-go/quic-go.(*Conn).handleUnpackedShortHeaderPacket
+         0     0% 97.64%      50973  4.34%  github.com/quic-go/quic-go.(*Conn).registerPackedShortHeaderPacket
+         0     0% 97.64%     362277 30.85%  github.com/quic-go/quic-go.(*Conn).run
+         0     0% 97.64%      73731  6.28%  github.com/quic-go/quic-go.(*Conn).run.func3
+         0     0% 97.64%      50973  4.34%  github.com/quic-go/quic-go.(*Conn).sendPackets
+         0     0% 97.64%      50973  4.34%  github.com/quic-go/quic-go.(*Conn).sendPacketsWithoutGSO
+         0     0% 97.64%      50973  4.34%  github.com/quic-go/quic-go.(*Conn).triggerSending
+         0     0% 97.64%     131074 11.16%  github.com/quic-go/quic-go.(*ReceiveStream).handleStreamFrame
+         0     0% 97.64%     131074 11.16%  github.com/quic-go/quic-go.(*Stream).handleStreamFrame
+         0     0% 97.64%      49153  4.19%  github.com/quic-go/quic-go.(*Transport).doDial.func1
+         0     0% 97.64%     590384 50.28%  github.com/quic-go/quic-go.(*Transport).init.func1.1
+         0     0% 97.64%     590384 50.28%  github.com/quic-go/quic-go.(*Transport).listen
+         0     0% 97.64%     590384 50.28%  github.com/quic-go/quic-go.(*oobConn).ReadPacket
+         0     0% 97.64%      73731  6.28%  github.com/quic-go/quic-go.(*oobConn).WritePacket
+         0     0% 97.64%      73731  6.28%  github.com/quic-go/quic-go.(*sconn).Write
+         0     0% 97.64%      73731  6.28%  github.com/quic-go/quic-go.(*sconn).writePacket
+         0     0% 97.64%      73731  6.28%  github.com/quic-go/quic-go.(*sendQueue).Run
+         0     0% 97.64%     131074 11.16%  github.com/quic-go/quic-go.(*streamsMap).HandleStreamFrame
+         0     0% 97.64%      50973  4.34%  github.com/quic-go/quic-go/internal/ackhandler.(*sentPacketHandler).SentPacket
+         0     0% 97.64%     180230 15.35%  github.com/quic-go/quic-go/internal/wire.(*FrameParser).ParseStreamFrame
+         0     0% 97.64%     590384 50.28%  golang.org/x/net/internal/socket.(*Conn).RecvMsg (inline)
+         0     0% 97.64%     275805 23.49%  golang.org/x/net/internal/socket.(*Conn).recvMsg.func1
+         0     0% 97.64%     275805 23.49%  golang.org/x/net/internal/socket.recvmsg
+         0     0% 97.64%     590384 50.28%  golang.org/x/net/ipv4.(*payloadHandler).ReadBatch
+         0     0% 97.64%      90115  7.67%  golang.org/x/sys/unix.RecvmsgBuffers
+         0     0% 97.64%     275805 23.49%  internal/poll.(*FD).RawRead
+         0     0% 97.64%      73731  6.28%  net.(*UDPAddr).sockaddr
+         0     0% 97.64%      73731  6.28%  net.(*UDPConn).WriteMsgUDP
+         0     0% 97.64%      73731  6.28%  net.(*UDPConn).writeMsg
+         0     0% 97.64%     275805 23.49%  net.(*rawConn).Read
+         0     0% 97.64%      66225  5.64%  testing.(*B).launch
+         0     0% 97.64%      10923  0.93%  testing.(*B).run1.func1
+         0     0% 97.64%      77148  6.57%  testing.(*B).runN
