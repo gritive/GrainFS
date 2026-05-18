@@ -26,8 +26,13 @@ func setupNBDWithReadIndexer(t *testing.T, ri ReadIndexer) (*Server, net.Conn) {
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 
+	return setupNBDWithBackend(t, backend, ri)
+}
+
+func setupNBDWithBackend(t *testing.T, backend storage.Backend, ri ReadIndexer) (*Server, net.Conn) {
+	t.Helper()
 	mgr := volume.NewManager(backend)
-	_, err = mgr.Create("nbd-test", 1024*1024)
+	_, err := mgr.Create("nbd-test", 1024*1024)
 	require.NoError(t, err)
 
 	srv := NewServer(mgr, "nbd-test")
@@ -78,6 +83,39 @@ func setupNBDWithReadIndexer(t *testing.T, ri ReadIndexer) (*Server, net.Conn) {
 	})
 
 	return srv, client
+}
+
+type asyncCommitTrackingBackend struct {
+	*storage.LocalBackend
+
+	blockCommitFns atomic.Int32
+}
+
+func setupNBDWithAsyncCommitTracking(t *testing.T) (*asyncCommitTrackingBackend, net.Conn) {
+	t.Helper()
+	dir := t.TempDir()
+	local, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+
+	backend := &asyncCommitTrackingBackend{LocalBackend: local}
+	_, conn := setupNBDWithBackend(t, backend, nil)
+	return backend, conn
+}
+
+func (b *asyncCommitTrackingBackend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+	obj, err := b.LocalBackend.PutObject(ctx, bucket, key, r, contentType)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if _, ok := volume.NameFromBlockKey(key); !ok {
+		return obj, func() error { return nil }, nil
+	}
+
+	return obj, func() error {
+		b.blockCommitFns.Add(1)
+		return nil
+	}, nil
 }
 
 func TestServerClosesConnectionWhenConfiguredVolumeMissing(t *testing.T) {
@@ -188,9 +226,8 @@ func sendReadConn(t *testing.T, conn net.Conn, offset uint64, length int) []byte
 	return reply[16:]
 }
 
-// TestNBDFlushWriteOrdering verifies that writing the same block twice then
-// flushing returns the last-written value. This guards against a regression
-// where concurrent flush goroutines could commit out of order.
+// TestNBDFlushWriteOrdering verifies command-level last-write-wins readback
+// across flush using the default local backend.
 func TestNBDFlushWriteOrdering(t *testing.T) {
 	_, conn := setupNBD(t)
 	const blockSize = 4096
@@ -210,6 +247,39 @@ func TestNBDFlushWriteOrdering(t *testing.T) {
 
 	got := sendReadConn(t, conn, 0, blockSize)
 	require.Equal(t, second, got, "second write must win after flush")
+}
+
+func TestNBDFlushRunsDeferredSameBlockDifferentOffsetCommits(t *testing.T) {
+	backend, conn := setupNBDWithAsyncCommitTracking(t)
+	const blockSize = 4096
+	const halfBlockSize = blockSize / 2
+
+	initial := make([]byte, blockSize)
+	for i := range initial {
+		initial[i] = 0x11
+	}
+	front := make([]byte, halfBlockSize)
+	for i := range front {
+		front[i] = 0x22
+	}
+	back := make([]byte, halfBlockSize)
+	for i := range back {
+		back[i] = 0x33
+	}
+
+	sendWriteConn(t, conn, 0, initial)
+	sendWriteConn(t, conn, 0, front)
+	sendWriteConn(t, conn, halfBlockSize, back)
+	sendFlushConn(t, conn)
+
+	require.GreaterOrEqual(t, int(backend.blockCommitFns.Load()), 2, "flush should run deferred block commits")
+
+	// Scheduler ordering is covered by TestMutationQueueSerializesSameBlockDifferentOffsets
+	// and related mutationQueue tests. PutObjectAsync writes local data before FLUSH,
+	// so readback here is command-level data smoke rather than ordering evidence.
+	got := sendReadConn(t, conn, 0, blockSize)
+	require.Equal(t, front, got[:halfBlockSize], "front half must match last front write after flush")
+	require.Equal(t, back, got[halfBlockSize:], "back half must match last back write after flush")
 }
 
 func TestNBDWriteRead(t *testing.T) {
