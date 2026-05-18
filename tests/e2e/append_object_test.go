@@ -83,6 +83,29 @@ func runCommonAppendCases(t *testing.T, tgt s3Target) {
 	})
 }
 
+// findOwnerForSingleGroup returns the index of the segment owner node
+// under the single-group default configuration. The cluster harness
+// currently has no API to query per-group data-Raft leaders, so this
+// helper assumes the single-group invariant and returns the meta-Raft
+// leaderIdx (which coincides under that invariant).
+//
+// When multi-group support lands, add a NEW helper:
+//
+//	findOwnerForGroup(c *e2eCluster, group string) int
+//
+// that issues a real data-Raft leader query (admin API). Leave this
+// function name in place but deprecated — callers must migrate before
+// removing it. The naming forces the migration to be deliberate, not
+// silent.
+//
+// Design source: 2026-05-19-appendobject-hardening-design.md § Follow-up 1.
+func findOwnerForSingleGroup(c *e2eCluster) int {
+	if c == nil {
+		return -1
+	}
+	return c.leaderIdx
+}
+
 // ----- cases (cluster-only) -----
 
 func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
