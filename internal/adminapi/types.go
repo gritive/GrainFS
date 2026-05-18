@@ -484,6 +484,22 @@ type Event struct {
 	Bucket    string `json:"bucket,omitempty"`
 	Key       string `json:"key,omitempty"`
 	Size      int64  `json:"size,omitempty"`
+
+	// Heal-event fields.
+	ID            string `json:"id,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	Outcome       string `json:"outcome,omitempty"`
+	ShardID       int32  `json:"shard_id,omitempty"`
+	PeerID        string `json:"peer_id,omitempty"`
+	BytesRepaired int64  `json:"bytes_repaired,omitempty"`
+	DurationMs    int64  `json:"duration_ms,omitempty"`
+	ErrCode       string `json:"err_code,omitempty"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+
+	// Cluster-membership fields.
+	RemovedID string `json:"removed_id,omitempty"`
+	Force     bool   `json:"force,omitempty"`
 }
 
 // TransferLeaderResult mirrors the 200 response of POST /v1/cluster/transfer-leader.

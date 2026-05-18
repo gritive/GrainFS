@@ -97,8 +97,120 @@ func (rcv *Event) MutateSize(n int64) bool {
 	return rcv._tab.MutateInt64Slot(14, n)
 }
 
+func (rcv *Event) Id() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) Phase() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) Outcome() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) ShardId() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *Event) MutateShardId(n int32) bool {
+	return rcv._tab.MutateInt32Slot(22, n)
+}
+
+func (rcv *Event) PeerId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) BytesRepaired() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *Event) MutateBytesRepaired(n int64) bool {
+	return rcv._tab.MutateInt64Slot(26, n)
+}
+
+func (rcv *Event) DurationMs() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *Event) MutateDurationMs(n int64) bool {
+	return rcv._tab.MutateInt64Slot(28, n)
+}
+
+func (rcv *Event) ErrCode() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) CorrelationId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) VersionId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) RemovedId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *Event) Force() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *Event) MutateForce(n bool) bool {
+	return rcv._tab.MutateBoolSlot(38, n)
+}
+
 func EventStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(18)
 }
 func EventAddTimestampUnixNs(builder *flatbuffers.Builder, timestampUnixNs int64) {
 	builder.PrependInt64Slot(0, timestampUnixNs, 0)
@@ -117,6 +229,42 @@ func EventAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 }
 func EventAddSize(builder *flatbuffers.Builder, size int64) {
 	builder.PrependInt64Slot(5, size, 0)
+}
+func EventAddId(builder *flatbuffers.Builder, id flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(id), 0)
+}
+func EventAddPhase(builder *flatbuffers.Builder, phase flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(phase), 0)
+}
+func EventAddOutcome(builder *flatbuffers.Builder, outcome flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(outcome), 0)
+}
+func EventAddShardId(builder *flatbuffers.Builder, shardId int32) {
+	builder.PrependInt32Slot(9, shardId, 0)
+}
+func EventAddPeerId(builder *flatbuffers.Builder, peerId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(peerId), 0)
+}
+func EventAddBytesRepaired(builder *flatbuffers.Builder, bytesRepaired int64) {
+	builder.PrependInt64Slot(11, bytesRepaired, 0)
+}
+func EventAddDurationMs(builder *flatbuffers.Builder, durationMs int64) {
+	builder.PrependInt64Slot(12, durationMs, 0)
+}
+func EventAddErrCode(builder *flatbuffers.Builder, errCode flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(errCode), 0)
+}
+func EventAddCorrelationId(builder *flatbuffers.Builder, correlationId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(correlationId), 0)
+}
+func EventAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(versionId), 0)
+}
+func EventAddRemovedId(builder *flatbuffers.Builder, removedId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(removedId), 0)
+}
+func EventAddForce(builder *flatbuffers.Builder, force bool) {
+	builder.PrependBoolSlot(17, force, false)
 }
 func EventEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

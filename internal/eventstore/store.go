@@ -29,13 +29,35 @@ const (
 )
 
 // Event represents a single auditable event.
+//
+// Fields below the first 6 are optional and only populated for specific event
+// types (heal events, cluster membership). They are typed top-level fields
+// rather than a polymorphic map[string]any so the FB schema, the BadgerDB
+// storage format, and the /api/eventlog wire format share one definition.
 type Event struct {
-	Timestamp int64
-	Type      string
-	Action    string
-	Bucket    string
-	Key       string
-	Size      int64
+	Timestamp int64  `json:"ts"`
+	Type      string `json:"type"`
+	Action    string `json:"action"`
+	Bucket    string `json:"bucket,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+
+	// Heal-event fields (populated by healEmitter). Mirror scrubber.HealEvent
+	// minus Timestamp/Bucket/Key which already live on the parent Event.
+	ID            string `json:"id,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	Outcome       string `json:"outcome,omitempty"`
+	ShardID       int32  `json:"shard_id,omitempty"`
+	PeerID        string `json:"peer_id,omitempty"`
+	BytesRepaired int64  `json:"bytes_repaired,omitempty"`
+	DurationMs    int64  `json:"duration_ms,omitempty"`
+	ErrCode       string `json:"err_code,omitempty"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+
+	// Cluster-membership fields (populated by removeClusterPeer).
+	RemovedID string `json:"removed_id,omitempty"`
+	Force     bool   `json:"force,omitempty"`
 }
 
 // Store persists events in BadgerDB with "ev:" key prefix.
