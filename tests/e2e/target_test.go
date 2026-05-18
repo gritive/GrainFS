@@ -8,10 +8,18 @@
 package e2e
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
 )
 
 // s3Target abstracts a fixture (single-node or cluster) for e2e tests that
@@ -26,7 +34,11 @@ type s3Target struct {
 	accessKey string
 	secretKey string
 	createBkt func(t *testing.T, bucket string)
-	isCluster bool
+	// uniqueBucket creates a bucket with a name derived from t.Name() + case,
+	// sanitized to S3 spec (lowercase/hyphen, 3-63 chars). Auto-registers
+	// t.Cleanup(DeleteBucket). Returns the actual bucket name used.
+	uniqueBucket func(t *testing.T, caseName string) string
+	isCluster    bool
 }
 
 func newSingleNodeS3Target() s3Target {
@@ -43,6 +55,14 @@ func newSingleNodeS3Target() s3Target {
 		secretKey: testSecretKey,
 		createBkt: func(t *testing.T, bucket string) {
 			createBucket(t, bucket)
+		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("single", t.Name(), caseName)
+			createBucket(t, name)
+			t.Cleanup(func() {
+				testS3Client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
 		},
 		isCluster: false,
 	}
@@ -80,6 +100,50 @@ func newClusterS3Target(t *testing.T, nodes int) s3Target {
 			c.GrantAdminOnBuckets(bucket)
 			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
 		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("cluster4", t.Name(), caseName)
+			c.GrantAdminOnBuckets(name)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			t.Cleanup(func() {
+				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
 		isCluster: true,
 	}
+}
+
+var bucketSanitizeRE = regexp.MustCompile(`[^a-z0-9-]`)
+
+func sanitizeForBucket(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "/", "-")
+	s = bucketSanitizeRE.ReplaceAllString(s, "")
+	return s
+}
+
+// bucketNameFor produces a S3-spec compliant bucket name (3-63 chars,
+// lowercase, hyphens). When the t.Name()+case combination exceeds 50 chars
+// it falls back to <tgt>-<case>-<sha8> to keep names stable per test.
+func bucketNameFor(tgtName, testName, caseName string) string {
+	full := fmt.Sprintf("%s-%s-%s", tgtName, sanitizeForBucket(testName), sanitizeForBucket(caseName))
+	if len(full) > 50 {
+		sum := sha256.Sum256([]byte(testName + "|" + caseName))
+		full = fmt.Sprintf("%s-%s-%s", tgtName, sanitizeForBucket(caseName), hex.EncodeToString(sum[:4]))
+	}
+	if len(full) < 3 {
+		full = full + "-x"
+	}
+	return full
+}
+
+func TestBucketNameFor(t *testing.T) {
+	got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
+	require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
+	require.LessOrEqual(t, len(got), 63)
+
+	long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
+	require.LessOrEqual(t, len(long), 63)
+	require.GreaterOrEqual(t, len(long), 3)
+	require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
 }
