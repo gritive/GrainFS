@@ -62,10 +62,6 @@ func (s *Server) removeClusterPeer(ctx context.Context, req removePeerRequest) e
 	s.emitEvent(eventstore.Event{
 		Type:   eventstore.EventTypeSystem,
 		Action: eventstore.EventActionClusterRemovePeer,
-		Metadata: map[string]any{
-			"removed_id": req.ID,
-			"force":      req.Force,
-		},
 	})
 	return nil
 }

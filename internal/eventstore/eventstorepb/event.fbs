@@ -1,0 +1,12 @@
+namespace eventstorepb;
+
+table Event {
+  timestamp_unix_ns : int64;
+  type              : string;
+  action            : string;
+  bucket            : string;
+  key               : string;
+  size              : int64;
+}
+
+root_type Event;

@@ -478,14 +478,12 @@ type BalancerNodeStatus struct {
 // without importing the server package, which would cycle internal/server ->
 // internal/clusteradmin -> cmd back into internal/server through wiring.
 type Event struct {
-	Timestamp int64          `json:"ts"`
-	Type      string         `json:"type"`
-	Action    string         `json:"action"`
-	Bucket    string         `json:"bucket,omitempty"`
-	Key       string         `json:"key,omitempty"`
-	User      string         `json:"user,omitempty"`
-	Size      int64          `json:"size,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Timestamp int64  `json:"ts"`
+	Type      string `json:"type"`
+	Action    string `json:"action"`
+	Bucket    string `json:"bucket,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Size      int64  `json:"size,omitempty"`
 }
 
 // TransferLeaderResult mirrors the 200 response of POST /v1/cluster/transfer-leader.
