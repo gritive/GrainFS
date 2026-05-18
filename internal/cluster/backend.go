@@ -1538,12 +1538,12 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	if !ok {
 		return nil, false, nil
 	}
-	data, err := io.ReadAll(body)
-	if err != nil {
+	// Pre-size the buffer from the known body length: avoids the geometric
+	// growth churn of io.ReadAll (top alloc_space contributor for this path
+	// in iter1 pprof) and skips zeroing the unused tail.
+	data := make([]byte, size)
+	if _, err := io.ReadFull(body, data); err != nil {
 		return nil, true, fmt.Errorf("read small EC object: %w", err)
-	}
-	if int64(len(data)) != size {
-		return nil, true, fmt.Errorf("read small EC object: got %d bytes, expected %d", len(data), size)
 	}
 
 	obj, err := b.putObjectECData(ctx, bucket, key, versionID, data, contentType, userMetadata, sseAlgorithm)
