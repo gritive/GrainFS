@@ -72,7 +72,16 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		nextCtx, failure := s.authenticateSignedRequest(ctx, r)
 		if failure != nil {
 			s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
-			writeXMLError(c, failure.status, failure.code, failure.message)
+			if routeSurfaceForPath(path) == routeSurfaceIceberg {
+				// Iceberg REST clients distinguish 401 (auth required) from 403
+				// (post-authz forbidden). The S3 verifier returns 403 for every
+				// authn failure; remap to 401 + NotAuthorizedException for Iceberg
+				// callers. failure.code (S3-XML) is dropped to keep S3-specific
+				// codes out of the Iceberg JSON.
+				writeIcebergError(c, 401, "NotAuthorizedException", failure.message)
+			} else {
+				writeXMLError(c, failure.status, failure.code, failure.message)
+			}
 			c.Abort()
 			return
 		}
