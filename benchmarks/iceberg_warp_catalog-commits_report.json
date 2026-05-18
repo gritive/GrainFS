@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-05-19T02:04:03Z",
+  "subcommand": "catalog-commits",
+  "status": "dirty",
+  "duration_s": 29,
+  "concurrency": 5,
+  "nodes": 3,
+  "commit": "78289822",
+  "summary": {
+    "failed_requests": 165,
+    "total_ops": 1988
+  },
+  "TABLE_UPDATE": {
+    "ops_per_s": 68.55,
+    "errors": 165,
+    "p50_ms": "15.0",
+    "p90_ms": "26.1",
+    "p99_ms": "2549.1",
+    "avg_ms": "232.0",
+    "min_ms": "1.6",
+    "max_ms": "10026.0",
+    "stddev_ms": "1035.7"
+  },
+  "analysis": {
+    "spec_compliant_409": "iceberg_response.go:39 maps ErrConcurrentUpdate to 409 CommitFailedException — most errors are likely expected optimistic-concurrency conflicts that warp does not retry.",
+    "concern_10s_slowest": "warp client timeout is 10s; slowest=10026ms indicates some commits hang past that. Real lock contention or raft commit stall.",
+    "next": "see spec §9.1 — add HTTP status histogram + sampled trace before re-running."
+  },
+  "profile_dir": "benchmarks/profiles/iceberg-warp-catalog-commits-3n-20260519-020403/"
+}

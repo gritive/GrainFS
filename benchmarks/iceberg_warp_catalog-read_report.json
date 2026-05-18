@@ -1,0 +1,72 @@
+{
+  "timestamp": "2026-05-19T02:00:53Z",
+  "subcommand": "catalog-read",
+  "duration_s": 27,
+  "concurrency": 10,
+  "nodes": 3,
+  "commit": "749d6f11",
+  "summary": {
+    "total_requests": 108357,
+    "failed_requests": 0,
+    "total_ops_per_s": 4013.22
+  },
+  "NS_GET": {
+    "ops_per_s": 669.15,
+    "p50_ms": "0.2",
+    "p90_ms": "0.3",
+    "p99_ms": "0.7",
+    "avg_ms": "0.2",
+    "min_ms": "0.0",
+    "max_ms": "8.5"
+  },
+  "NS_HEAD": {
+    "ops_per_s": 668.85,
+    "p50_ms": "0.1",
+    "p90_ms": "0.3",
+    "p99_ms": "0.7",
+    "avg_ms": "0.2",
+    "min_ms": "0.0",
+    "max_ms": "15.3"
+  },
+  "NS_LIST": {
+    "ops_per_s": 668.89,
+    "p50_ms": "0.1",
+    "p90_ms": "0.3",
+    "p99_ms": "0.7",
+    "avg_ms": "0.2",
+    "min_ms": "0.0",
+    "max_ms": "21.4"
+  },
+  "TABLE_GET": {
+    "ops_per_s": 668.85,
+    "p50_ms": "10.5",
+    "p90_ms": "10.8",
+    "p99_ms": "11.7",
+    "avg_ms": "7.1",
+    "min_ms": "0.1",
+    "max_ms": "25.6"
+  },
+  "TABLE_HEAD": {
+    "ops_per_s": 668.63,
+    "p50_ms": "10.3",
+    "p90_ms": "10.6",
+    "p99_ms": "11.6",
+    "avg_ms": "7.0",
+    "min_ms": "0.0",
+    "max_ms": "25.5"
+  },
+  "TABLE_LIST": {
+    "ops_per_s": 668.85,
+    "p50_ms": "0.2",
+    "p90_ms": "0.3",
+    "p99_ms": "0.8",
+    "avg_ms": "0.2",
+    "min_ms": "0.0",
+    "max_ms": "21.4"
+  },
+  "notes": [
+    "First run (20260519-015731) failed at prepare step: 'table t3: InternalServerError: context deadline exceeded' — not reproduced on rerun with same env. Suspect cold-start race during cluster boot.",
+    "shutdown phase emits one 'Execute OnShutdownHooks timeout: context deadline exceeded' — terminal cleanup, not hot path.",
+    "TABLE_* p50 latency dominated by cluster raft commit (~10ms baseline)."
+  ]
+}
