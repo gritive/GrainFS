@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.243.0] - 2026-05-18 - perf(cluster): spool EC conversion writes
+
+EC conversion now migrates legacy full-object replicas through the spooled EC
+shard writer instead of reading the whole object into memory, preserving object
+metadata while avoiding full-buffer split/encode during conversion.
+
+### Added
+
+- Added regression coverage for legacy full-object conversion through the
+  spooled EC shard encoder.
+- Added coverage for conversion metadata CAS and pre-commit abort cleanup on
+  parity EC and single-local EC write paths.
+
+### Changed
+
+- `ConvertObjectToEC` now spools the source object and reuses the existing
+  spooled EC shard writer for shard materialization.
+- EC shard key construction now preserves bare keys for pre-versioned legacy
+  objects while keeping versioned shard keys unchanged.
+- Conversion commits now preserve the original object `LastModified` timestamp.
+
+### Fixed
+
+- Prevented EC conversion from committing stale metadata if object metadata
+  changes before the conversion metadata commit.
+
 ## [0.0.242.0] - 2026-05-18 - perf(cluster): spool small parity EC writes
 
 Small parity EC writes now avoid the in-memory full-object split path and reuse
