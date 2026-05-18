@@ -1,0 +1,72 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/gritive/GrainFS/internal/raft
+cpu: Apple M3
+BenchmarkHeartbeatEncodeBatch-8   	 1126137	      1067 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1054 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1074 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1100 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1085 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1076 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1056 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1042 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1041 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1044 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2149603	       566.7 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2128317	       587.1 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2016150	       573.2 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2136144	       579.8 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2158292	       555.2 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2154208	       558.7 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2144817	       559.7 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2009773	       581.7 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2128100	       558.2 ns/op	     960 B/op	      25 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2094944	       554.8 ns/op	     960 B/op	      25 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3969984	       315.3 ns/op	      44 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3557844	       323.4 ns/op	      44 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3826254	       343.1 ns/op	      44 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3460466	       337.0 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3470638	       337.8 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3485518	       345.1 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3550826	       410.4 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3099356	       353.9 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3170670	       395.6 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnSendFrame-8      	 3107782	       418.9 ns/op	      45 B/op	       1 allocs/op
+BenchmarkRaftConnReadFrame-8      	   53708	     19557 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   56684	     20520 ns/op	     629 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   64453	     18748 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   63511	     19263 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   61352	     18742 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   65054	     18273 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   64836	     18528 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   65409	     19968 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   53907	     20820 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   61777	     18821 ns/op	     626 B/op	      20 allocs/op
+PASS
+ok  	github.com/gritive/GrainFS/internal/raft	59.777s
+goos: darwin
+goarch: arm64
+pkg: github.com/gritive/GrainFS/internal/cluster
+cpu: Apple M3
+BenchmarkV2EncodeRPCAppendEntries-8   	 3171732	       370.4 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3211939	       372.8 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3100693	       370.9 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3197038	       380.3 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3209960	       381.8 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3146559	       389.6 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 2791542	       377.6 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3237805	       372.0 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3245818	       375.4 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2EncodeRPCAppendEntries-8   	 3166424	       372.0 ns/op	     512 B/op	       2 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7327450	       170.3 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7172545	       164.8 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7374751	       163.9 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7313448	       167.3 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7281661	       164.6 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7328696	       167.0 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7362147	       166.2 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 6710620	       167.9 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7183650	       166.5 ns/op	     232 B/op	       3 allocs/op
+BenchmarkV2DecodeRPCAppendEntries-8   	 7334886	       162.1 ns/op	     232 B/op	       3 allocs/op
+PASS
+ok  	github.com/gritive/GrainFS/internal/cluster	30.940s
