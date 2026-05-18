@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 // TestIcebergConcurrentCommitsE2E proves the iceberg REST catalog tolerates
@@ -80,7 +82,10 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 	// catches the rare "follower joined but iceberg routes not registered
 	// yet" race during a fresh cluster boot.
 	for i, u := range c.httpURLs {
-		resp, err := http.Get(u + "/iceberg/v1/config?warehouse=warehouse")
+		req, err := http.NewRequest(http.MethodGet, u+"/iceberg/v1/config?warehouse=warehouse", nil)
+		require.NoError(t, err, "node %d config probe build", i)
+		s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
+		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err, "node %d config probe", i)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "node %d config probe", i)
 		resp.Body.Close()
@@ -92,7 +97,8 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 	leaderBase := c.httpURLs[c.leaderIdx] + "/iceberg"
 
 	postIcebergJSONHelper(t, leaderBase+"/v1/namespaces",
-		fmt.Sprintf(`{"namespace":["%s"],"properties":{}}`, nsName), http.StatusOK)
+		fmt.Sprintf(`{"namespace":["%s"],"properties":{}}`, nsName),
+		tgt.accessKey, tgt.secretKey, http.StatusOK)
 
 	const numTables = 4
 	for i := 0; i < numTables; i++ {
@@ -102,7 +108,8 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 				"name":"t%d",
 				"schema":{"type":"struct","fields":[{"name":"a","id":1,"type":"int","required":false}],"schema-id":0},
 				"properties":{"format-version":"2"}
-			}`, i), http.StatusOK)
+			}`, i),
+			tgt.accessKey, tgt.secretKey, http.StatusOK)
 	}
 
 	// Workers stress concurrent commits across the cluster.
@@ -138,7 +145,7 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 						{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":%d}
 					]
 				}`, snapID, snapID, time.Now().UnixMilli(), nsName, tableIdx, snapID, snapID)
-				code := postIcebergCommit(t, path, body)
+				code := postIcebergCommit(t, path, body, tgt.accessKey, tgt.secretKey)
 				switch code {
 				case http.StatusOK:
 					counts.status200.Add(1)
@@ -202,12 +209,14 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 	for i := 0; i < numTables; i++ {
 		req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodDelete,
 			fmt.Sprintf("%s/v1/namespaces/%s/tables/t%d", leaderBase, nsName, i), nil)
+		s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			resp.Body.Close()
 		}
 	}
 	req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodDelete,
 		fmt.Sprintf("%s/v1/namespaces/%s", leaderBase, nsName), nil)
+	s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		resp.Body.Close()
 	}
@@ -215,7 +224,9 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 
 // postIcebergCommit returns the HTTP status code of a CommitTable POST.
 // On non-2xx, the body is read and logged at t.Helper level for diagnosis.
-func postIcebergCommit(t *testing.T, url, body string) int {
+// The iceberg catalog routes require SigV4 auth post-#427, so callers must
+// thread the fixture's access/secret pair through.
+func postIcebergCommit(t *testing.T, url, body, accessKey, secretKey string) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
@@ -223,6 +234,7 @@ func postIcebergCommit(t *testing.T, url, body string) int {
 		return -1
 	}
 	req.Header.Set("Content-Type", "application/json")
+	s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Logf("postIcebergCommit: Do err=%v url=%s", err, url)
@@ -241,11 +253,12 @@ func postIcebergCommit(t *testing.T, url, body string) int {
 // postIcebergJSONHelper posts a JSON body to url and requires the status.
 // Mirrors the in-package postIcebergJSON helper from internal/server/iceberg_api_test.go
 // but lives here because tests/e2e cannot import the server package's test helpers.
-func postIcebergJSONHelper(t *testing.T, url, body string, wantStatus int) {
+func postIcebergJSONHelper(t *testing.T, url, body, accessKey, secretKey string, wantStatus int) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body)))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
