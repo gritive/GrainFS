@@ -2,11 +2,16 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 // TestIcebergS3CredOverrides_CallerIdentity verifies that /v1/config publishes
@@ -77,6 +82,57 @@ func TestIcebergS3CredOverrides_CallerIdentity(t *testing.T) {
 		got := s.icebergS3CredOverrides(ctx, "not-an-s3-url")
 		require.Empty(t, got)
 	})
+}
+
+// TestIcebergConfigHandler_SchemeReflection drives the actual /v1/config
+// handler end-to-end (SigV4 signed) and asserts the published s3.endpoint
+// mirrors the request scheme. Direct calls to icebergS3CredOverrides bypass
+// the handler's scheme logic, so a refactor that drops the scheme line would
+// leave the unit suite green while breaking real clients — this test is the
+// regression guard for that path.
+func TestIcebergConfigHandler_SchemeReflection(t *testing.T) {
+	h := newIAMTestHelper(t)
+	h.applySACreate(t, "sa-bench")
+	h.applyGrantWildcardPut(t, "sa-bench", iam.RoleAdmin)
+	h.applyKeyCreate(t, "AK-bench", "sa-bench", "SK-bench")
+
+	base := setupTestServerWithOptions(t,
+		WithIAMStore(h.store),
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-bench", SecretKey: "SK-bench"}}),
+	)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	s3auth.SignRequest(req, "AK-bench", "SK-bench", "us-east-1")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+
+	var got struct {
+		Defaults  map[string]string `json:"defaults"`
+		Overrides map[string]string `json:"overrides"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+
+	// Test server runs on plain HTTP — scheme published in s3.endpoint
+	// MUST match. A regression that hardcoded "http://" or "https://"
+	// would still pass /v1/config returns-200 tests but break HTTPS
+	// callers (downgrade) or HTTP callers (broken handoff).
+	require.NotEmpty(t, got.Overrides["s3.endpoint"], "creds path engaged, s3.endpoint must be set")
+	require.True(t, strings.HasPrefix(got.Overrides["s3.endpoint"], "http://"),
+		"test server is HTTP, s3.endpoint must mirror that, got %q", got.Overrides["s3.endpoint"])
+	require.NotContains(t, got.Overrides["s3.endpoint"], "https://",
+		"plaintext test server must not be advertised as https")
+
+	// Sanity: caller-identity is propagated end-to-end through the handler too.
+	require.Equal(t, "AK-bench", got.Overrides["s3.access-key-id"])
+	require.Equal(t, "SK-bench", got.Overrides["s3.secret-access-key"])
+	require.Equal(t, "true", got.Overrides["s3.path-style-access"])
 }
 
 // TestIcebergS3CredOverrides_WildcardGrant verifies wildcard (cross-bucket)
