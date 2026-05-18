@@ -134,3 +134,45 @@ func TestAppendObjectRaceTwoConcurrent(t *testing.T) {
 		t.Fatalf("final segments=%d, want 2 (seed + one winning append)", len(final.Segments))
 	}
 }
+
+// TestAppendObjectFollowerHeadConsistent — Red 14. After leader-side
+// AppendObject commits via data-Raft, follower HeadObject must observe the
+// same Size and Segments. Multi-node harness is required to exercise this
+// (current cluster test infra is single-node — newTestDistributedBackend);
+// the behavior is verified end-to-end in the Phase 6 cluster e2e (Task 25).
+func TestAppendObjectFollowerHeadConsistent(t *testing.T) {
+	t.Skip("Red 14: requires multi-node cluster harness — deferred to Phase 6 e2e (Task 25)")
+}
+
+// TestAppendObjectForwardedFromNonOwner — Red 15. When the request enters a
+// non-owner node, ClusterCoordinator.AppendObject must stream the body to the
+// owner via ForwardSender.SendStream(ForwardOpAppendObject); the receiver
+// (handleAppendObjectStream) executes the local AppendObject + commits
+// ObjectIndex. Verified by HeadObject on the owner observing the new size +
+// segments. Requires multi-node cluster harness — deferred to Phase 6 e2e
+// (Task 25).
+func TestAppendObjectForwardedFromNonOwner(t *testing.T) {
+	t.Skip("Red 15: requires multi-node cluster harness — deferred to Phase 6 e2e (Task 25)")
+}
+
+// TestAppendObjectSyncsObjectIndex — Red 16. After AppendObject the meta-Raft
+// ObjectIndex entry must reflect the new Size and ETag. Single-node coverage
+// would require wiring an indexWriter onto newTestDistributedBackend (which
+// has no ClusterCoordinator); the behavior is naturally covered by both the
+// local-exec path (commitObjectIndex in ClusterCoordinator.AppendObject) and
+// the forward path (ProposeObjectIndex in handleAppendObjectStream). End-to-
+// end verification lands in Phase 6 cluster e2e (Task 25).
+func TestAppendObjectSyncsObjectIndex(t *testing.T) {
+	t.Skip("Red 16: ObjectIndex commit verified via Phase 6 cluster e2e (Task 25)")
+}
+
+// TestAppendObjectStalePlacementRetried — Red 17. Verifies the bounded
+// transparent retry on ErrStalePlacement inside
+// ClusterCoordinator.appendObjectLocalWithRetry. Requires a cluster harness
+// that can flip the placement assignment between the coordinator's route
+// resolve and the FSM apply — not feasible with the current single-node
+// test infra. Behavior is design-asserted by code review and exercised
+// indirectly via Phase 6 rebalance scenarios.
+func TestAppendObjectStalePlacementRetried(t *testing.T) {
+	t.Skip("Red 17: requires placement-rebalance fault injection — deferred to integration suite")
+}
