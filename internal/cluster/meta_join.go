@@ -1,13 +1,17 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -174,26 +178,135 @@ func joinMessage(reply JoinReply) *transport.Message {
 	return &transport.Message{Type: transport.StreamMetaJoin, Payload: data}
 }
 
-func encodeJoinRequest(req JoinRequest) ([]byte, error) {
-	return json.Marshal(req)
+var metaJoinRequestMagic = []byte("GFSMJN2")
+
+// 128-byte initial: request is two short strings; reply is one bool + one enum
+// + three short strings. Typical payload fits in one slab.
+var metaJoinBuilderPool = pool.New(func() *flatbuffers.Builder {
+	return flatbuffers.NewBuilder(128)
+})
+
+func newMetaJoinBuilder() *flatbuffers.Builder {
+	b := metaJoinBuilderPool.Get()
+	b.Reset()
+	return b
 }
 
-func decodeJoinRequest(data []byte) (JoinRequest, error) {
-	var req JoinRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return JoinRequest{}, fmt.Errorf("meta_join: decode request: %w", err)
+func releaseMetaJoinBuilder(b *flatbuffers.Builder) {
+	metaJoinBuilderPool.Put(b)
+}
+
+func joinStatusToFB(s JoinStatus) clusterpb.JoinStatus {
+	switch s {
+	case JoinStatusOK:
+		return clusterpb.JoinStatusOK
+	case JoinStatusAlreadyMember:
+		return clusterpb.JoinStatusAlreadyMember
+	case JoinStatusNotLeader:
+		return clusterpb.JoinStatusNotLeader
+	case JoinStatusAddrMismatch:
+		return clusterpb.JoinStatusAddrMismatch
+	case JoinStatusClusterFull:
+		return clusterpb.JoinStatusClusterFull
+	case JoinStatusMixedVersion:
+		return clusterpb.JoinStatusMixedVersion
+	case JoinStatusTimeout:
+		return clusterpb.JoinStatusTimeout
+	case JoinStatusError:
+		return clusterpb.JoinStatusError
+	default:
+		return clusterpb.JoinStatusUnknown
 	}
+}
+
+func joinStatusFromFB(s clusterpb.JoinStatus) JoinStatus {
+	switch s {
+	case clusterpb.JoinStatusOK:
+		return JoinStatusOK
+	case clusterpb.JoinStatusAlreadyMember:
+		return JoinStatusAlreadyMember
+	case clusterpb.JoinStatusNotLeader:
+		return JoinStatusNotLeader
+	case clusterpb.JoinStatusAddrMismatch:
+		return JoinStatusAddrMismatch
+	case clusterpb.JoinStatusClusterFull:
+		return JoinStatusClusterFull
+	case clusterpb.JoinStatusMixedVersion:
+		return JoinStatusMixedVersion
+	case clusterpb.JoinStatusTimeout:
+		return JoinStatusTimeout
+	case clusterpb.JoinStatusError:
+		return JoinStatusError
+	default:
+		return JoinStatus("")
+	}
+}
+
+func encodeJoinRequest(req JoinRequest) ([]byte, error) {
+	b := newMetaJoinBuilder()
+	defer releaseMetaJoinBuilder(b)
+	nodeOff := b.CreateString(req.NodeID)
+	addrOff := b.CreateString(req.Address)
+	clusterpb.JoinRequestStart(b)
+	clusterpb.JoinRequestAddNodeId(b, nodeOff)
+	clusterpb.JoinRequestAddAddress(b, addrOff)
+	b.Finish(clusterpb.JoinRequestEnd(b))
+	fb := b.FinishedBytes()
+	out := make([]byte, 0, len(metaJoinRequestMagic)+len(fb))
+	out = append(out, metaJoinRequestMagic...)
+	out = append(out, fb...)
+	return out, nil
+}
+
+func decodeJoinRequest(data []byte) (req JoinRequest, err error) {
+	if len(data) > 0 && data[0] == '{' {
+		return JoinRequest{}, fmt.Errorf("meta_join: peer sent legacy JSON request (mixed-version)")
+	}
+	if !bytes.HasPrefix(data, metaJoinRequestMagic) {
+		return JoinRequest{}, fmt.Errorf("meta_join: bad magic")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("meta_join: malformed JoinRequest: %v", r)
+		}
+	}()
+	fb := clusterpb.GetRootAsJoinRequest(data[len(metaJoinRequestMagic):], 0)
+	req.NodeID = string(fb.NodeId())
+	req.Address = string(fb.Address())
 	return req, nil
 }
 
 func encodeJoinReply(reply JoinReply) ([]byte, error) {
-	return json.Marshal(reply)
+	b := newMetaJoinBuilder()
+	defer releaseMetaJoinBuilder(b)
+	msgOff := b.CreateString(reply.Message)
+	leaderIDOff := b.CreateString(reply.LeaderID)
+	leaderAddrOff := b.CreateString(reply.LeaderAddr)
+	clusterpb.JoinReplyStart(b)
+	clusterpb.JoinReplyAddAccepted(b, reply.Accepted)
+	clusterpb.JoinReplyAddStatus(b, joinStatusToFB(reply.Status))
+	clusterpb.JoinReplyAddMessage(b, msgOff)
+	clusterpb.JoinReplyAddLeaderId(b, leaderIDOff)
+	clusterpb.JoinReplyAddLeaderAddr(b, leaderAddrOff)
+	b.Finish(clusterpb.JoinReplyEnd(b))
+	return append([]byte(nil), b.FinishedBytes()...), nil
 }
 
-func decodeJoinReply(data []byte) (*JoinReply, error) {
-	var reply JoinReply
-	if err := json.Unmarshal(data, &reply); err != nil {
-		return nil, fmt.Errorf("meta_join: decode reply: %w", err)
+func decodeJoinReply(data []byte) (reply *JoinReply, err error) {
+	if len(data) > 0 && data[0] == '{' {
+		return nil, fmt.Errorf("meta_join: peer returned legacy JSON reply (mixed-version)")
 	}
-	return &reply, nil
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("meta_join: malformed JoinReply: %v", r)
+		}
+	}()
+	fb := clusterpb.GetRootAsJoinReply(data, 0)
+	return &JoinReply{
+		Accepted:   fb.Accepted(),
+		Status:     joinStatusFromFB(fb.Status()),
+		Message:    string(fb.Message()),
+		LeaderID:   string(fb.LeaderId()),
+		LeaderAddr: string(fb.LeaderAddr()),
+	}, nil
 }

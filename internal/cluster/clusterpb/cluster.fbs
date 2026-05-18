@@ -643,3 +643,76 @@ table MetaForwardReply {
   error_type:string;
   error_message:string;
 }
+
+// ============================================================================
+// MetaJoin (cluster join handshake) — see
+// docs/superpowers/specs/2026-05-18-internal-json-fb-design.md
+// ============================================================================
+
+enum JoinStatus : byte {
+  Unknown       = 0,
+  OK            = 1,
+  AlreadyMember = 2,
+  NotLeader     = 3,
+  AddrMismatch  = 4,
+  ClusterFull   = 5,
+  MixedVersion  = 6,
+  Timeout       = 7,
+  Error         = 8,
+}
+
+table JoinRequest {
+  node_id : string;
+  address : string;
+}
+
+table JoinReply {
+  accepted    : bool;
+  status      : JoinStatus = Unknown;
+  message     : string;
+  leader_id   : string;
+  leader_addr : string;
+}
+
+// ============================================================================
+// MetaCatalogRead (iceberg catalog read RPC)
+// ============================================================================
+
+enum CatalogReadOp : byte {
+  Unknown        = 0,
+  LoadNamespace  = 1,
+  ListNamespaces = 2,
+  LoadTable      = 3,
+  ListTables     = 4,
+}
+
+table CatalogKV { k : string; v : string; }
+
+table CatalogNamespace { parts : [string]; }
+
+table CatalogIdentifier {
+  namespace : [string];
+  name      : string;
+}
+
+table CatalogTable {
+  identifier        : CatalogIdentifier;
+  metadata_location : string;
+  metadata          : [ubyte];     // Iceberg spec JSON, opaque passthrough
+  properties        : [CatalogKV];
+}
+
+table MetaCatalogReadRequest {
+  op         : CatalogReadOp = Unknown;
+  namespace  : [string];
+  identifier : CatalogIdentifier;
+}
+
+table MetaCatalogReadReply {
+  error_type    : string;
+  error_message : string;
+  properties    : [CatalogKV];          // op = LoadNamespace
+  namespaces    : [CatalogNamespace];   // op = ListNamespaces
+  loaded_table  : CatalogTable;         // op = LoadTable (renamed from "table" to avoid collision with flatbuffers built-in Table() accessor)
+  tables        : [CatalogIdentifier];  // op = ListTables
+}

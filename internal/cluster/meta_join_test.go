@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -193,4 +194,96 @@ func (f *fakeJoinCoordinator) JoinCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.joinCalls
+}
+
+func TestMetaJoin_RoundTrip_AllStatuses(t *testing.T) {
+	statuses := []JoinStatus{
+		JoinStatusOK, JoinStatusAlreadyMember, JoinStatusNotLeader,
+		JoinStatusAddrMismatch, JoinStatusClusterFull, JoinStatusMixedVersion,
+		JoinStatusTimeout, JoinStatusError,
+	}
+	req := JoinRequest{NodeID: "node-1", Address: "10.0.0.1:9100"}
+	reqBytes, err := encodeJoinRequest(req)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	gotReq, err := decodeJoinRequest(reqBytes)
+	if err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if !reflect.DeepEqual(gotReq, req) {
+		t.Errorf("request roundtrip: got %+v want %+v", gotReq, req)
+	}
+
+	for _, st := range statuses {
+		st := st
+		t.Run(string(st), func(t *testing.T) {
+			reply := JoinReply{
+				Accepted:   st == JoinStatusOK,
+				Status:     st,
+				Message:    "msg for " + string(st),
+				LeaderID:   "leader-1",
+				LeaderAddr: "10.0.0.2:9100",
+			}
+			payload, err := encodeJoinReply(reply)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			out, err := decodeJoinReply(payload)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !reflect.DeepEqual(*out, reply) {
+				t.Errorf("reply roundtrip: got %+v want %+v", *out, reply)
+			}
+		})
+	}
+}
+
+func TestMetaJoinRequest_RejectsLegacyJSON(t *testing.T) {
+	legacy := []byte(`{"node_id":"n1","address":"10.0.0.1:9100"}`)
+	_, err := decodeJoinRequest(legacy)
+	if err == nil {
+		t.Fatal("expected legacy-JSON rejection, got nil")
+	}
+}
+
+func TestMetaJoinReply_RejectsLegacyJSON(t *testing.T) {
+	legacy := []byte(`{"accepted":true,"status":"ok"}`)
+	_, err := decodeJoinReply(legacy)
+	if err == nil {
+		t.Fatal("expected legacy-JSON rejection, got nil")
+	}
+}
+
+func TestMetaJoinRequest_MalformedFB(t *testing.T) {
+	bad := append([]byte(nil), metaJoinRequestMagic...)
+	bad = append(bad, 0xff, 0xff, 0xff, 0xff)
+	_, err := decodeJoinRequest(bad)
+	if err == nil {
+		t.Fatal("expected malformed-FB error, got nil")
+	}
+}
+
+func TestMetaJoinReply_MalformedFB(t *testing.T) {
+	bad := []byte{0xff, 0xff, 0xff, 0xff}
+	_, err := decodeJoinReply(bad)
+	if err == nil {
+		t.Fatal("expected malformed-FB error, got nil")
+	}
+}
+
+func TestJoinStatus_DriftGuard(t *testing.T) {
+	cases := []JoinStatus{
+		JoinStatusOK, JoinStatusAlreadyMember, JoinStatusNotLeader,
+		JoinStatusAddrMismatch, JoinStatusClusterFull, JoinStatusMixedVersion,
+		JoinStatusTimeout, JoinStatusError,
+	}
+	for _, s := range cases {
+		fb := joinStatusToFB(s)
+		back := joinStatusFromFB(fb)
+		if back != s {
+			t.Errorf("drift: %q -> %v -> %q", s, fb, back)
+		}
+	}
 }

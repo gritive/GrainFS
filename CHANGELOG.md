@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.0.247.0] - 2026-05-18 - perf(cluster): internal RPC JSON → FlatBuffers (catalog_read + join)
+
+Converts the last two cluster-internal RPC paths still on `encoding/json`
+to FlatBuffers, mirroring the PR #413 meta_forward pattern. Closes the
+"no internal JSON" rule for in-cluster network RPC.
+
+### Changed
+
+- `internal/cluster/meta_forward.go`: `MetaCatalogReadSender/Receiver`
+  (iceberg catalog read RPC — LoadNamespace / ListNamespaces / LoadTable /
+  ListTables) now encodes with FlatBuffers. Wire format prefixes
+  `GFSMCR2` on requests; replies are bare FB. Legacy JSON shape (`{`)
+  rejected on both request and reply decoders with a typed
+  `ErrServiceUnavailable + mixed-version` error.
+- `internal/cluster/meta_join.go`: cluster join handshake
+  (`MetaJoinSender/Receiver`) now encodes with FlatBuffers. Wire prefix
+  `GFSMJN2` on requests. Same legacy-JSON guard pattern.
+- `internal/cluster/clusterpb/cluster.fbs`: schemas for `JoinStatus`,
+  `JoinRequest`, `JoinReply`, `CatalogReadOp`, `CatalogKV`,
+  `CatalogNamespace`, `CatalogIdentifier`, `CatalogTable`,
+  `MetaCatalogReadRequest`, `MetaCatalogReadReply`. `CatalogTable` is
+  carried in `MetaCatalogReadReply.loaded_table` (not `table`) to avoid
+  colliding with FB Go's built-in `Table()` accessor.
+- `encoding/json` removed from both files; no remaining JSON encode in
+  cluster-internal RPC paths.
+
+### Performance — MetaCatalogRead (Apple M3, benchstat count=6 / 15s)
+
+| Sub-bench | sec/op Δ | allocs/op Δ |
+|---|---|---|
+| Request/load-namespace | −86.4% | −71.4% |
+| Request/load-table | −79.1% | −62.5% |
+| Request/list-tables-1k | −87.7% | −75.0% |
+| Reply/load-namespace | −58.2% | −59.6% |
+| Reply/load-table-64KB | −97.5% | −44.4%¹ |
+| Reply/list-tables-1k | −78.8% | −0.6%² |
+| **geomean** | **−85.9%** | **−57.4%** |
+
+¹ Marginal alloc miss vs strict 50% gate; throughput dominates.
+² Alloc cost dominated by callee-side `[]Identifier{Namespace: []string{…}}` construction, unaffected by wire format. Speed-up still −78.8%.
+
+p-value 0.002 across all six sub-benches.
+
+### Performance — MetaJoin (cold path, alloc snapshot only)
+
+- BenchmarkMetaJoinRequest_RoundTrip: ~123 ns/op, 88 B/op, 3 allocs/op
+- BenchmarkMetaJoinReply_RoundTrip/ok: ~198 ns/op, 200 B/op, 4 allocs/op
+- BenchmarkMetaJoinReply_RoundTrip/not-leader: ~196 ns/op, 216 B/op, 5 allocs/op
+
+### Tests
+
+- 11 new tests covering MetaCatalogRead round-trip (every op + every
+  reply shape), 64KB Iceberg metadata byte fidelity, every iceberg
+  error symbol round-trips via `errors.Is`, legacy JSON shape rejection
+  on both decoders, malformed FB panic recovery, and `CatalogReadOp`
+  drift guard.
+- 6 new tests covering MetaJoin equivalents (every JoinStatus, legacy
+  reject, malformed FB, drift guard). All 6 pre-existing MetaJoin tests
+  still pass against the new FB encoders — proof the helpers are
+  drop-in compatible.
 ## [0.0.246.0] - 2026-05-18 - perf(nfs4): range-read COPY source data
 
 NFSv4.2 `COPY` now reads only the requested source range instead of buffering

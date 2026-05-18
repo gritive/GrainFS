@@ -3,9 +3,9 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -83,6 +83,176 @@ func newMetaForwardBuilder() *flatbuffers.Builder {
 
 func releaseMetaForwardBuilder(b *flatbuffers.Builder) {
 	metaForwardBuilderPool.Put(b)
+}
+
+// metaCatalogReadBuilderPool reuses FlatBuffers builders across MetaCatalogRead
+// encode calls. 4096-byte initial size: LoadTable reply can carry up to ~64KB
+// of Iceberg metadata. Starting at 256 forces ~9 doublings; 4KB cuts that to
+// ~5 while still amortizing across small LoadNamespace replies.
+var metaCatalogReadBuilderPool = pool.New(func() *flatbuffers.Builder {
+	return flatbuffers.NewBuilder(4096)
+})
+
+func newMetaCatalogReadBuilder() *flatbuffers.Builder {
+	b := metaCatalogReadBuilderPool.Get()
+	b.Reset()
+	return b
+}
+
+func releaseMetaCatalogReadBuilder(b *flatbuffers.Builder) {
+	metaCatalogReadBuilderPool.Put(b)
+}
+
+func catalogOpToFB(op string) clusterpb.CatalogReadOp {
+	switch op {
+	case "load-namespace":
+		return clusterpb.CatalogReadOpLoadNamespace
+	case "list-namespaces":
+		return clusterpb.CatalogReadOpListNamespaces
+	case "load-table":
+		return clusterpb.CatalogReadOpLoadTable
+	case "list-tables":
+		return clusterpb.CatalogReadOpListTables
+	default:
+		return clusterpb.CatalogReadOpUnknown
+	}
+}
+
+func catalogOpFromFB(op clusterpb.CatalogReadOp) string {
+	switch op {
+	case clusterpb.CatalogReadOpLoadNamespace:
+		return "load-namespace"
+	case clusterpb.CatalogReadOpListNamespaces:
+		return "list-namespaces"
+	case clusterpb.CatalogReadOpLoadTable:
+		return "load-table"
+	case clusterpb.CatalogReadOpListTables:
+		return "list-tables"
+	default:
+		return ""
+	}
+}
+
+var metaCatalogReadRequestMagic = []byte("GFSMCR2")
+
+// buildStringSliceVec writes a []string vector and returns its offset (or 0
+// when empty).
+func buildStringSliceVec(b *flatbuffers.Builder, ss []string) flatbuffers.UOffsetT {
+	if len(ss) == 0 {
+		return 0
+	}
+	offs := make([]flatbuffers.UOffsetT, len(ss))
+	for i, s := range ss {
+		offs[i] = b.CreateString(s)
+	}
+	b.StartVector(4, len(offs), 4)
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(offs))
+}
+
+// buildCatalogIdentifier returns 0 (absent) when id is zero-valued (Name == ""
+// AND len(Namespace) == 0). The request encoder skips this table on
+// non-LoadTable ops to avoid carrying an empty CatalogIdentifier vtable.
+func buildCatalogIdentifier(b *flatbuffers.Builder, id icebergcatalog.Identifier) flatbuffers.UOffsetT {
+	if id.Name == "" && len(id.Namespace) == 0 {
+		return 0
+	}
+	nsOff := buildStringSliceVec(b, id.Namespace)
+	nameOff := b.CreateString(id.Name)
+	clusterpb.CatalogIdentifierStart(b)
+	if nsOff != 0 {
+		clusterpb.CatalogIdentifierAddNamespace(b, nsOff)
+	}
+	clusterpb.CatalogIdentifierAddName(b, nameOff)
+	return clusterpb.CatalogIdentifierEnd(b)
+}
+
+func buildCatalogKVVec(b *flatbuffers.Builder, m map[string]string) flatbuffers.UOffsetT {
+	if len(m) == 0 {
+		return 0
+	}
+	// Sort keys for deterministic encoding (easier diffs and stable tests).
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	offs := make([]flatbuffers.UOffsetT, len(keys))
+	for i, k := range keys {
+		kOff := b.CreateString(k)
+		vOff := b.CreateString(m[k])
+		clusterpb.CatalogKVStart(b)
+		clusterpb.CatalogKVAddK(b, kOff)
+		clusterpb.CatalogKVAddV(b, vOff)
+		offs[i] = clusterpb.CatalogKVEnd(b)
+	}
+	b.StartVector(4, len(offs), 4)
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(offs))
+}
+
+func buildCatalogNamespaceVec(b *flatbuffers.Builder, nss [][]string) flatbuffers.UOffsetT {
+	if len(nss) == 0 {
+		return 0
+	}
+	offs := make([]flatbuffers.UOffsetT, len(nss))
+	for i, parts := range nss {
+		partsOff := buildStringSliceVec(b, parts)
+		clusterpb.CatalogNamespaceStart(b)
+		if partsOff != 0 {
+			clusterpb.CatalogNamespaceAddParts(b, partsOff)
+		}
+		offs[i] = clusterpb.CatalogNamespaceEnd(b)
+	}
+	b.StartVector(4, len(offs), 4)
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(offs))
+}
+
+func buildCatalogIdentifierVec(b *flatbuffers.Builder, ids []icebergcatalog.Identifier) flatbuffers.UOffsetT {
+	if len(ids) == 0 {
+		return 0
+	}
+	offs := make([]flatbuffers.UOffsetT, len(ids))
+	for i, id := range ids {
+		offs[i] = buildCatalogIdentifier(b, id)
+	}
+	b.StartVector(4, len(offs), 4)
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(offs))
+}
+
+func buildCatalogTable(b *flatbuffers.Builder, t *icebergcatalog.Table) flatbuffers.UOffsetT {
+	if t == nil {
+		return 0
+	}
+	idOff := buildCatalogIdentifier(b, t.Identifier)
+	locOff := b.CreateString(t.MetadataLocation)
+	var metaOff flatbuffers.UOffsetT
+	if len(t.Metadata) > 0 {
+		metaOff = b.CreateByteVector([]byte(t.Metadata))
+	}
+	propsOff := buildCatalogKVVec(b, t.Properties)
+	clusterpb.CatalogTableStart(b)
+	if idOff != 0 {
+		clusterpb.CatalogTableAddIdentifier(b, idOff)
+	}
+	clusterpb.CatalogTableAddMetadataLocation(b, locOff)
+	if metaOff != 0 {
+		clusterpb.CatalogTableAddMetadata(b, metaOff)
+	}
+	if propsOff != 0 {
+		clusterpb.CatalogTableAddProperties(b, propsOff)
+	}
+	return clusterpb.CatalogTableEnd(b)
 }
 
 // scopeToFB converts a compat.Scope to its FlatBuffers enum value.
@@ -611,7 +781,7 @@ func (s *MetaCatalogReadSender) ListTables(ctx context.Context, peers []string, 
 }
 
 func (s *MetaCatalogReadSender) send(ctx context.Context, peers []string, request metaCatalogReadRequest) (*metaLoadTableReply, error) {
-	req, err := json.Marshal(request)
+	req, err := encodeMetaCatalogReadRequest(request)
 	if err != nil {
 		return nil, err
 	}
@@ -645,12 +815,16 @@ func NewMetaCatalogReadReceiver(catalog *MetaCatalog) *MetaCatalogReadReceiver {
 }
 
 func (r *MetaCatalogReadReceiver) Handle(req *transport.Message) *transport.Message {
-	var request metaCatalogReadRequest
 	reply := &metaLoadTableReply{}
+	request, decodeErr := decodeMetaCatalogReadRequest(req.Payload)
+	if decodeErr != nil {
+		return &transport.Message{
+			Type:    transport.StreamMetaCatalogRead,
+			Payload: encodeMetaLoadTableReply(reply, decodeErr),
+		}
+	}
 	var err error
-	if decodeErr := json.Unmarshal(req.Payload, &request); decodeErr != nil {
-		err = decodeErr
-	} else if !r.catalog.meta.IsLeader() {
+	if !r.catalog.meta.IsLeader() {
 		err = raft.ErrNotLeader
 	} else {
 		switch request.Op {
@@ -684,6 +858,74 @@ type metaLoadTableReply struct {
 	Tables       []icebergcatalog.Identifier `json:"tables,omitempty"`
 }
 
+func encodeMetaCatalogReadRequest(req metaCatalogReadRequest) ([]byte, error) {
+	b := newMetaCatalogReadBuilder()
+	defer releaseMetaCatalogReadBuilder(b)
+
+	nsOff := buildStringSliceVec(b, req.Namespace)
+	// Only build identifier when the request actually uses it (LoadTable).
+	// For other ops the zero-value identifier returns 0 offset (absent table),
+	// keeping per-call payload size lean.
+	var idOff flatbuffers.UOffsetT
+	if req.Op == "load-table" {
+		idOff = buildCatalogIdentifier(b, req.Identifier)
+	}
+
+	clusterpb.MetaCatalogReadRequestStart(b)
+	clusterpb.MetaCatalogReadRequestAddOp(b, catalogOpToFB(req.Op))
+	if nsOff != 0 {
+		clusterpb.MetaCatalogReadRequestAddNamespace(b, nsOff)
+	}
+	if idOff != 0 {
+		clusterpb.MetaCatalogReadRequestAddIdentifier(b, idOff)
+	}
+	b.Finish(clusterpb.MetaCatalogReadRequestEnd(b))
+	fb := b.FinishedBytes()
+
+	out := make([]byte, 0, len(metaCatalogReadRequestMagic)+len(fb))
+	out = append(out, metaCatalogReadRequestMagic...)
+	out = append(out, fb...)
+	return out, nil
+}
+
+func decodeMetaCatalogReadRequest(payload []byte) (req metaCatalogReadRequest, err error) {
+	// Mixed-version diagnostic: an old sender encodes raw JSON; surface that
+	// as a typed error rather than a confused "malformed FB" symptom.
+	if len(payload) > 0 && payload[0] == '{' {
+		return metaCatalogReadRequest{}, fmt.Errorf("%w: peer sent legacy JSON request (mixed-version)", icebergcatalog.ErrServiceUnavailable)
+	}
+	if !bytes.HasPrefix(payload, metaCatalogReadRequestMagic) {
+		return metaCatalogReadRequest{}, fmt.Errorf("%w: bad meta_catalog_read magic", icebergcatalog.ErrServiceUnavailable)
+	}
+	// Per-call defer recover, mirrors PR #413 decodeMetaForwardRequest.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: malformed MetaCatalogReadRequest: %v", icebergcatalog.ErrServiceUnavailable, r)
+		}
+	}()
+
+	fb := clusterpb.GetRootAsMetaCatalogReadRequest(payload[len(metaCatalogReadRequestMagic):], 0)
+	req.Op = catalogOpFromFB(fb.Op())
+	nsLen := fb.NamespaceLength()
+	if nsLen > 0 {
+		req.Namespace = make([]string, nsLen)
+		for i := 0; i < nsLen; i++ {
+			req.Namespace[i] = string(fb.Namespace(i))
+		}
+	}
+	if id := fb.Identifier(nil); id != nil {
+		req.Identifier = icebergcatalog.Identifier{Name: string(id.Name())}
+		idNsLen := id.NamespaceLength()
+		if idNsLen > 0 {
+			req.Identifier.Namespace = make([]string, idNsLen)
+			for i := 0; i < idNsLen; i++ {
+				req.Identifier.Namespace[i] = string(id.Namespace(i))
+			}
+		}
+	}
+	return req, nil
+}
+
 func encodeMetaLoadTableReply(reply *metaLoadTableReply, err error) []byte {
 	if reply == nil {
 		reply = &metaLoadTableReply{}
@@ -693,17 +935,141 @@ func encodeMetaLoadTableReply(reply *metaLoadTableReply, err error) []byte {
 		reply.ErrorMessage = err.Error()
 		reply.Table = nil
 	}
-	data, _ := json.Marshal(reply)
-	return data
+
+	b := newMetaCatalogReadBuilder()
+	defer releaseMetaCatalogReadBuilder(b)
+
+	var (
+		errTypeOff flatbuffers.UOffsetT
+		errMsgOff  flatbuffers.UOffsetT
+		propsOff   flatbuffers.UOffsetT
+		nssOff     flatbuffers.UOffsetT
+		tableOff   flatbuffers.UOffsetT
+		tablesOff  flatbuffers.UOffsetT
+	)
+	if reply.ErrorType != "" {
+		errTypeOff = b.CreateString(reply.ErrorType)
+	}
+	if reply.ErrorMessage != "" {
+		errMsgOff = b.CreateString(reply.ErrorMessage)
+	}
+	propsOff = buildCatalogKVVec(b, reply.Properties)
+	nssOff = buildCatalogNamespaceVec(b, reply.Namespaces)
+	tableOff = buildCatalogTable(b, reply.Table)
+	tablesOff = buildCatalogIdentifierVec(b, reply.Tables)
+
+	clusterpb.MetaCatalogReadReplyStart(b)
+	if errTypeOff != 0 {
+		clusterpb.MetaCatalogReadReplyAddErrorType(b, errTypeOff)
+	}
+	if errMsgOff != 0 {
+		clusterpb.MetaCatalogReadReplyAddErrorMessage(b, errMsgOff)
+	}
+	if propsOff != 0 {
+		clusterpb.MetaCatalogReadReplyAddProperties(b, propsOff)
+	}
+	if nssOff != 0 {
+		clusterpb.MetaCatalogReadReplyAddNamespaces(b, nssOff)
+	}
+	if tableOff != 0 {
+		// Field is loaded_table on the wire (avoids collision with the FB
+		// built-in Table() accessor); generator emits AddLoadedTable.
+		clusterpb.MetaCatalogReadReplyAddLoadedTable(b, tableOff)
+	}
+	if tablesOff != 0 {
+		clusterpb.MetaCatalogReadReplyAddTables(b, tablesOff)
+	}
+	b.Finish(clusterpb.MetaCatalogReadReplyEnd(b))
+	return append([]byte(nil), b.FinishedBytes()...)
 }
 
-func decodeMetaLoadTableReply(data []byte) (*metaLoadTableReply, error) {
-	var reply metaLoadTableReply
-	if err := json.Unmarshal(data, &reply); err != nil {
-		return nil, fmt.Errorf("%w: invalid load-table reply: %v", icebergcatalog.ErrServiceUnavailable, err)
+func decodeMetaLoadTableReply(data []byte) (reply *metaLoadTableReply, err error) {
+	// Mixed-version diagnostic: an old receiver encodes the JSON shape.
+	if len(data) > 0 && data[0] == '{' {
+		return nil, fmt.Errorf("%w: peer returned legacy JSON reply (mixed-version)", icebergcatalog.ErrServiceUnavailable)
 	}
-	if reply.ErrorType != "" {
-		return nil, errorFromIcebergType(reply.ErrorType, reply.ErrorMessage)
+	// Per-call defer recover, mirrors PR #413 decodeMetaForwardReplyWithIndex.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: malformed MetaCatalogReadReply: %v", icebergcatalog.ErrServiceUnavailable, r)
+		}
+	}()
+	fb := clusterpb.GetRootAsMetaCatalogReadReply(data, 0)
+	errType := string(fb.ErrorType())
+	if errType != "" {
+		return nil, errorFromIcebergType(errType, string(fb.ErrorMessage()))
 	}
-	return &reply, nil
+
+	r := &metaLoadTableReply{}
+	if propsLen := fb.PropertiesLength(); propsLen > 0 {
+		r.Properties = make(map[string]string, propsLen)
+		var kv clusterpb.CatalogKV
+		for i := 0; i < propsLen; i++ {
+			if fb.Properties(&kv, i) {
+				r.Properties[string(kv.K())] = string(kv.V())
+			}
+		}
+	}
+	if nssLen := fb.NamespacesLength(); nssLen > 0 {
+		r.Namespaces = make([][]string, nssLen)
+		var ns clusterpb.CatalogNamespace
+		for i := 0; i < nssLen; i++ {
+			if fb.Namespaces(&ns, i) {
+				partsLen := ns.PartsLength()
+				parts := make([]string, partsLen)
+				for j := 0; j < partsLen; j++ {
+					parts[j] = string(ns.Parts(j))
+				}
+				r.Namespaces[i] = parts
+			}
+		}
+	}
+	if tbl := fb.LoadedTable(nil); tbl != nil {
+		t := &icebergcatalog.Table{
+			MetadataLocation: string(tbl.MetadataLocation()),
+		}
+		if id := tbl.Identifier(nil); id != nil {
+			t.Identifier = icebergcatalog.Identifier{Name: string(id.Name())}
+			idNsLen := id.NamespaceLength()
+			if idNsLen > 0 {
+				t.Identifier.Namespace = make([]string, idNsLen)
+				for i := 0; i < idNsLen; i++ {
+					t.Identifier.Namespace[i] = string(id.Namespace(i))
+				}
+			}
+		}
+		// MetadataBytes returns the underlying FB-owned slice; copy so the
+		// caller can hold onto Metadata after the FB buffer is released.
+		if mb := tbl.MetadataBytes(); len(mb) > 0 {
+			t.Metadata = append([]byte(nil), mb...)
+		}
+		if propsLen := tbl.PropertiesLength(); propsLen > 0 {
+			t.Properties = make(map[string]string, propsLen)
+			var kv clusterpb.CatalogKV
+			for i := 0; i < propsLen; i++ {
+				if tbl.Properties(&kv, i) {
+					t.Properties[string(kv.K())] = string(kv.V())
+				}
+			}
+		}
+		r.Table = t
+	}
+	if tablesLen := fb.TablesLength(); tablesLen > 0 {
+		r.Tables = make([]icebergcatalog.Identifier, tablesLen)
+		var id clusterpb.CatalogIdentifier
+		for i := 0; i < tablesLen; i++ {
+			if fb.Tables(&id, i) {
+				ident := icebergcatalog.Identifier{Name: string(id.Name())}
+				idNsLen := id.NamespaceLength()
+				if idNsLen > 0 {
+					ident.Namespace = make([]string, idNsLen)
+					for j := 0; j < idNsLen; j++ {
+						ident.Namespace[j] = string(id.Namespace(j))
+					}
+				}
+				r.Tables[i] = ident
+			}
+		}
+	}
+	return r, nil
 }
