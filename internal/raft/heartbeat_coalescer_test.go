@@ -81,7 +81,7 @@ func TestBorrowAppendEntriesArgsPayloadMatchesOwnedEncoder(t *testing.T) {
 			borrowed := borrowAppendEntriesArgsPayload(tt.args)
 			defer borrowed.release()
 
-			owned, err := encodeAppendEntriesArgs(tt.args)
+			owned, err := encodeRPCPayload(rpcTypeAppendEntries, tt.args)
 			if err != nil {
 				t.Fatal(err)
 			}

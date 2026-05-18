@@ -55,12 +55,4 @@ const (
 	routePathAdminUDSTransferLeader = "/transfer-leader"
 	routePathAdminUDSHealth         = "/health"
 	routePathAdminUDSBalancerStatus = "/balancer/status"
-
-	routePathIcebergConfig            = "/iceberg/v1/config"
-	routePathIcebergNamespaces        = "/iceberg/v1/namespaces"
-	routePathIcebergNamespace         = "/iceberg/v1/namespaces/:namespace"
-	routePathIcebergNamespaceTables   = "/iceberg/v1/namespaces/:namespace/tables"
-	routePathIcebergTable             = "/iceberg/v1/namespaces/:namespace/tables/:table"
-	routePathIcebergTransactionCommit = "/iceberg/v1/transactions/commit"
-	routePathIcebergUnsupported       = "/iceberg/*path"
 )

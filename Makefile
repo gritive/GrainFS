@@ -19,7 +19,7 @@ E2E_TEST_JOBS ?= 2
 bin/$(BINARY): $(GO_SRC) $(FBS_STAMPS)
 	go build $(LDFLAGS) -o $@ ./cmd/grainfs/
 
-build: bin/$(BINARY)
+build: lint bin/$(BINARY)
 
 # build-pgo: compile with Profile-Guided Optimization using a previously collected
 # pprof CPU profile from a representative benchmark run. Typically 5-15% faster on hot paths.
