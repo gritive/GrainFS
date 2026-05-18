@@ -130,6 +130,12 @@ type DistributedBackend struct {
 	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
 	internalDirCache  sync.Map // map[string]struct{}
 	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
+
+	// Phase A: FSM apply error propagation. Mirrors MetaRaft.applyErrs
+	// (meta_raft.go:797). applyErrs keys are Raft log indices; readers consume
+	// entries via ApplyError exactly once per ProposeWait.
+	applyResultMu sync.Mutex
+	applyErrs     map[uint64]error
 }
 
 type backendTopology struct {
@@ -3849,3 +3855,35 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 
 // Node returns the RaftNode interface for leadership and raft control.
 func (b *DistributedBackend) Node() RaftNode { return b.node }
+
+// recordApplyResult records an FSM apply error for the given Raft log index.
+// Mirrors MetaRaft.recordApplyResult (meta_raft.go:797): only non-nil errors
+// are stored, and a 1024-index lookback window self-trims to prevent unbounded
+// growth.
+func (b *DistributedBackend) recordApplyResult(index uint64, err error) {
+	if err == nil {
+		return
+	}
+	b.applyResultMu.Lock()
+	if b.applyErrs == nil {
+		b.applyErrs = make(map[uint64]error)
+	}
+	b.applyErrs[index] = err
+	for old := range b.applyErrs {
+		if old+1024 < index {
+			delete(b.applyErrs, old)
+		}
+	}
+	b.applyResultMu.Unlock()
+}
+
+// ApplyError returns the FSM apply error for the given Raft log index, or nil
+// if no error was recorded. Reading consumes the entry — callers must read
+// exactly once per ProposeWait.
+func (b *DistributedBackend) ApplyError(index uint64) error {
+	b.applyResultMu.Lock()
+	err := b.applyErrs[index]
+	delete(b.applyErrs, index)
+	b.applyResultMu.Unlock()
+	return err
+}
