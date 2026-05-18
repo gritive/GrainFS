@@ -104,6 +104,10 @@ type Server struct {
 	blockCache    *blockcache.Cache
 	shardCache    *shardcache.Cache
 
+	// Iceberg §9.1 진단 계측 (default OFF). NewWithServerStorage가 boot 시 ENV에서 읽는다.
+	icebergAccessLogEnabled      atomic.Bool
+	icebergCommitSlowThresholdNs atomic.Int64
+
 	eventWorker *eventWorker
 }
 

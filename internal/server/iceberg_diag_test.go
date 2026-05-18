@@ -1,0 +1,62 @@
+package server
+
+import (
+	"bytes"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+func TestParseIcebergDiagEnv(t *testing.T) {
+	tests := []struct {
+		name          string
+		accessLogEnv  string // "" = unset
+		traceMsEnv    string // "" = unset
+		wantAccessLog bool
+		wantTraceNs   int64
+		wantWarn      bool // D5: parse 실패 시 stderr warn emit
+	}{
+		{"both unset", "", "", false, 0, false},
+		{"access log on", "1", "", true, 0, false},
+		{"access log true", "true", "", true, 0, false},
+		{"trace 2000ms", "", "2000", false, 2 * int64(time.Millisecond) * 1000, false},
+		{"both set", "1", "2000", true, 2 * int64(time.Millisecond) * 1000, false},
+		{"trace abc invalid", "", "abc", false, 0, true},
+		{"trace negative", "", "-5", false, 0, false},
+		{"trace zero", "", "0", false, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GRAINFS_ICEBERG_ACCESS_LOG", tc.accessLogEnv)
+			t.Setenv("GRAINFS_ICEBERG_COMMIT_TRACE_MS", tc.traceMsEnv)
+			if tc.accessLogEnv == "" {
+				os.Unsetenv("GRAINFS_ICEBERG_ACCESS_LOG")
+			}
+			if tc.traceMsEnv == "" {
+				os.Unsetenv("GRAINFS_ICEBERG_COMMIT_TRACE_MS")
+			}
+
+			var buf bytes.Buffer
+			old := log.Logger
+			log.Logger = zerolog.New(&buf)
+			t.Cleanup(func() { log.Logger = old })
+
+			gotAccess, gotTrace := parseIcebergDiagEnv()
+			if gotAccess != tc.wantAccessLog {
+				t.Errorf("accessLog: got %v want %v", gotAccess, tc.wantAccessLog)
+			}
+			if gotTrace != tc.wantTraceNs {
+				t.Errorf("traceNs: got %d want %d", gotTrace, tc.wantTraceNs)
+			}
+			gotWarn := strings.Contains(buf.String(), `"level":"warn"`) &&
+				strings.Contains(buf.String(), "iceberg_diag")
+			if gotWarn != tc.wantWarn {
+				t.Errorf("warn emitted: got %v want %v (log=%q)", gotWarn, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
