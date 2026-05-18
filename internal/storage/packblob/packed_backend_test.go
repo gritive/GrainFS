@@ -1,9 +1,11 @@
 package packblob
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -137,6 +139,153 @@ func TestPackedBackend_LargeObjectPassesThrough(t *testing.T) {
 
 	data, _ := io.ReadAll(rc)
 	assert.Equal(t, len(largeData), len(data))
+}
+
+type thresholdGuardReader struct {
+	data        []byte
+	pos         int
+	limit       int
+	allowBeyond atomic.Bool
+}
+
+func (r *thresholdGuardReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	if !r.allowBeyond.Load() {
+		remaining := r.limit - r.pos
+		if remaining <= 0 {
+			return 0, fmt.Errorf("read past threshold before delegation")
+		}
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+type recordingBackend struct {
+	mockBackend
+	body  []byte
+	guard *thresholdGuardReader
+	puts  atomic.Int64
+}
+
+func (b *recordingBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	_ = ctx
+	_ = bucket
+	_ = contentType
+	b.puts.Add(1)
+	if b.guard != nil {
+		b.guard.allowBeyond.Store(true)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	b.body = append(b.body[:0], data...)
+	return &storage.Object{
+		Key:          key,
+		Size:         int64(len(data)),
+		ContentType:  contentType,
+		ETag:         "recorded-etag",
+		LastModified: 1,
+	}, nil
+}
+
+type streamingBackend struct {
+	mockBackend
+	size int64
+	puts atomic.Int64
+}
+
+func (b *streamingBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	_ = ctx
+	_ = bucket
+	_ = contentType
+	b.puts.Add(1)
+	n, err := io.Copy(io.Discard, r)
+	if err != nil {
+		return nil, err
+	}
+	b.size = n
+	return &storage.Object{
+		Key:          key,
+		Size:         n,
+		ContentType:  contentType,
+		ETag:         "streamed-etag",
+		LastModified: 1,
+	}, nil
+}
+
+func TestPackedBackend_LargeObjectStreamsAfterThreshold(t *testing.T) {
+	const threshold = 8
+	body := []byte("123456789")
+	reader := &thresholdGuardReader{data: body, limit: threshold}
+	inner := &recordingBackend{guard: reader}
+	pb, err := NewPackedBackend(inner, t.TempDir(), threshold)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	obj, err := pb.PutObject(context.Background(), "test", "large.bin", reader, "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Equal(t, body, inner.body)
+	require.Equal(t, int64(1), inner.puts.Load())
+}
+
+func TestPackedBackend_ThresholdRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		body       []byte
+		wantPacked bool
+		wantPuts   int64
+	}{
+		{name: "below threshold packs", body: bytes.Repeat([]byte("a"), 7), wantPacked: true},
+		{name: "at threshold passes through", body: bytes.Repeat([]byte("b"), 8), wantPuts: 1},
+		{name: "above threshold passes through", body: bytes.Repeat([]byte("c"), 9), wantPuts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &recordingBackend{}
+			pb, err := NewPackedBackend(inner, t.TempDir(), 8)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+			_, err = pb.PutObject(context.Background(), "test", "obj", bytes.NewReader(tc.body), "application/octet-stream")
+			require.NoError(t, err)
+
+			_, packed := pb.index.Load(packedKey{bucket: "test", key: "obj"})
+			require.Equal(t, tc.wantPacked, packed)
+			require.Equal(t, tc.wantPuts, inner.puts.Load())
+			if tc.wantPuts > 0 {
+				require.Equal(t, tc.body, inner.body)
+			}
+		})
+	}
+}
+
+func TestPackedBackend_LargeObjectIntakeAllocationBound(t *testing.T) {
+	const threshold = 1024
+	body := bytes.Repeat([]byte("x"), 256*1024)
+	inner := &streamingBackend{}
+	pb, err := NewPackedBackend(inner, t.TempDir(), threshold)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err = pb.PutObject(context.Background(), "test", "large.bin", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(len(body)/2), "large object intake should not allocate proportional to object size")
+	require.Equal(t, int64(len(body)), inner.size)
+	require.Equal(t, int64(1), inner.puts.Load())
 }
 
 func TestPackedBackend_DeleteSmallObject(t *testing.T) {

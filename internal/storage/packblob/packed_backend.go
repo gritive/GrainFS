@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -349,15 +350,14 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return nil, err
 	}
 
-	// Read all data to determine size
-	data, err := io.ReadAll(req.Body)
+	data, large, err := readPackedCandidate(req.Body, pb.threshold)
 	if err != nil {
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
 
 	// Large objects pass through to inner backend
-	if int64(len(data)) >= pb.threshold {
-		req.Body = bytes.NewReader(data)
+	if large {
+		req.Body = io.MultiReader(bytes.NewReader(data), req.Body)
 		return putInnerWithRequest(ctx, pb.inner, req)
 	}
 
@@ -400,6 +400,26 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		UserMetadata: cloneStringMap(req.UserMetadata),
 		SSEAlgorithm: req.SystemMetadata.SSEAlgorithm,
 	}, nil
+}
+
+func readPackedCandidate(r io.Reader, threshold int64) ([]byte, bool, error) {
+	if threshold <= 0 {
+		return nil, true, nil
+	}
+	maxInt := int64(int(^uint(0) >> 1))
+	if threshold > maxInt {
+		return nil, false, fmt.Errorf("packed threshold %d exceeds max int", threshold)
+	}
+	buf := make([]byte, int(threshold))
+	n, err := io.ReadFull(r, buf)
+	switch {
+	case err == nil:
+		return buf, true, nil
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return buf[:n], false, nil
+	default:
+		return nil, false, err
+	}
 }
 
 func putInnerWithUserMetadata(ctx context.Context, inner storage.Backend, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
