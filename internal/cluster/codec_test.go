@@ -423,3 +423,68 @@ func TestCoalesceSegmentsCmdRoundTrip(t *testing.T) {
 		t.Fatalf("CoalesceSegmentsCmd round-trip mismatch: %+v", got)
 	}
 }
+
+// TestCoalescedShardRefECParamsRoundTrip ensures the Phase B3 EC placement
+// params (RingVersion / ECData / ECParity / NodeIDs) survive marshal+unmarshal.
+// These fields are required by appendableReader to reconstruct the coalesced
+// blob via the EC reader (PutObject GET path).
+func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
+	in := objectMeta{
+		Key: "a", Size: 4096, IsAppendable: true,
+		Coalesced: []CoalescedShardRef{{
+			CoalescedID: "c1", Size: 4096, ETag: "etag-c1",
+			ShardKey:    "a/coalesced/c1",
+			Version:     1,
+			RingVersion: 7,
+			ECData:      4, ECParity: 2,
+			NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+		}},
+	}
+	raw, err := marshalObjectMeta(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := unmarshalObjectMeta(raw)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Coalesced) != 1 {
+		t.Fatalf("Coalesced length = %d, want 1", len(got.Coalesced))
+	}
+	c := got.Coalesced[0]
+	if c.RingVersion != 7 || c.ECData != 4 || c.ECParity != 2 {
+		t.Fatalf("EC params mismatch: ringVer=%d ecData=%d ecParity=%d", c.RingVersion, c.ECData, c.ECParity)
+	}
+	if len(c.NodeIDs) != 6 || c.NodeIDs[0] != "n1" || c.NodeIDs[5] != "n6" {
+		t.Fatalf("NodeIDs mismatch: %v", c.NodeIDs)
+	}
+}
+
+// TestCoalesceSegmentsCmdECParamsRoundTrip ensures the Raft command carries
+// the EC placement decision so the FSM apply can store it on the
+// CoalescedShardRef. Without these fields the read path cannot reconstruct
+// the coalesced blob.
+func TestCoalesceSegmentsCmdECParamsRoundTrip(t *testing.T) {
+	in := CoalesceSegmentsCmd{
+		Bucket: "b", Key: "a", CoalescedID: "c1",
+		ShardKey: "a/coalesced/c1", Size: 4096, ETag: "etag",
+		ConsumedSegmentIDs: []string{"s1", "s2"},
+		Placement:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+		ECData:             4, ECParity: 2,
+		RingVersion: 9,
+	}
+	raw, err := encodeCoalesceSegmentsCmd(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := decodeCoalesceSegmentsCmd(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ECData != 4 || got.ECParity != 2 || got.RingVersion != 9 {
+		t.Fatalf("EC params mismatch: ecData=%d ecParity=%d ringVer=%d", got.ECData, got.ECParity, got.RingVersion)
+	}
+	if len(got.Placement) != 6 || got.Placement[0] != "n1" || got.Placement[5] != "n6" {
+		t.Fatalf("Placement mismatch: %v", got.Placement)
+	}
+}

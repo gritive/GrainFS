@@ -110,8 +110,61 @@ func (rcv *CoalesceSegmentsCmd) ConsumedSegmentIdsLength() int {
 	return 0
 }
 
+func (rcv *CoalesceSegmentsCmd) Placement(j int) []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
+	}
+	return nil
+}
+
+func (rcv *CoalesceSegmentsCmd) PlacementLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *CoalesceSegmentsCmd) EcData() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CoalesceSegmentsCmd) MutateEcData(n byte) bool {
+	return rcv._tab.MutateByteSlot(20, n)
+}
+
+func (rcv *CoalesceSegmentsCmd) EcParity() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CoalesceSegmentsCmd) MutateEcParity(n byte) bool {
+	return rcv._tab.MutateByteSlot(22, n)
+}
+
+func (rcv *CoalesceSegmentsCmd) RingVersion() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CoalesceSegmentsCmd) MutateRingVersion(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(24, n)
+}
+
 func CoalesceSegmentsCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(11)
 }
 func CoalesceSegmentsCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -136,6 +189,21 @@ func CoalesceSegmentsCmdAddConsumedSegmentIds(builder *flatbuffers.Builder, cons
 }
 func CoalesceSegmentsCmdStartConsumedSegmentIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func CoalesceSegmentsCmdAddPlacement(builder *flatbuffers.Builder, placement flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(placement), 0)
+}
+func CoalesceSegmentsCmdStartPlacementVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func CoalesceSegmentsCmdAddEcData(builder *flatbuffers.Builder, ecData byte) {
+	builder.PrependByteSlot(8, ecData, 0)
+}
+func CoalesceSegmentsCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
+	builder.PrependByteSlot(9, ecParity, 0)
+}
+func CoalesceSegmentsCmdAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
+	builder.PrependUint64Slot(10, ringVersion, 0)
 }
 func CoalesceSegmentsCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

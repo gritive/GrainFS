@@ -42,14 +42,20 @@ type objectMeta struct {
 
 // CoalescedShardRef references a single coalesced blob produced by merging a
 // prefix of objectMeta.Segments. Phase B2 holds it owner-locally; Phase B3
-// extends this struct with EC placement params (NodeIDs / ECData / ECParity /
-// RingVersion).
+// distributes it via EC across NodeIDs and the EC params (NodeIDs / ECData /
+// ECParity / RingVersion) are required for the reader to reconstruct.
+//
+// EC fields are zero-valued for legacy/B2 entries (owner-local only).
 type CoalescedShardRef struct {
 	CoalescedID string
 	Size        int64
 	ETag        string
 	ShardKey    string
 	Version     int32
+	RingVersion uint64
+	ECData      uint8
+	ECParity    uint8
+	NodeIDs     []string
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -483,6 +489,8 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		segmentsOff = b.EndVector(len(segOffs))
 	}
 	// coalesced — build child CoalescedShardRef tables BEFORE ObjectMetaStart.
+	// Note: node_ids vector for each ref MUST also be built BEFORE its
+	// owning table Start (flatbuffers nested-vector rule).
 	var coalescedOff flatbuffers.UOffsetT
 	if len(m.Coalesced) > 0 {
 		cOffs := make([]flatbuffers.UOffsetT, len(m.Coalesced))
@@ -490,12 +498,22 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 			idOff := b.CreateString(c.CoalescedID)
 			etOff := b.CreateString(c.ETag)
 			skOff := b.CreateString(c.ShardKey)
+			var nodesOff flatbuffers.UOffsetT
+			if len(c.NodeIDs) > 0 {
+				nodesOff = buildStringVector(b, c.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
+			}
 			clusterpb.CoalescedShardRefStart(b)
 			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
 			clusterpb.CoalescedShardRefAddSize(b, c.Size)
 			clusterpb.CoalescedShardRefAddEtag(b, etOff)
 			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
 			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
+			clusterpb.CoalescedShardRefAddRingVersion(b, c.RingVersion)
+			clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
+			clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
+			if nodesOff != 0 {
+				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
+			}
 			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
 		}
 		clusterpb.ObjectMetaStartCoalescedVector(b, len(cOffs))
@@ -573,12 +591,23 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			if !t.Coalesced(&c, i) {
 				continue
 			}
+			var nodeIDs []string
+			if nn := c.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
 			coalesced[i] = CoalescedShardRef{
 				CoalescedID: string(c.CoalescedId()),
 				Size:        c.Size(),
 				ETag:        string(c.Etag()),
 				ShardKey:    string(c.ShardKey()),
 				Version:     c.Version(),
+				RingVersion: c.RingVersion(),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				NodeIDs:     nodeIDs,
 			}
 		}
 	}
@@ -863,6 +892,10 @@ func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
 	if len(c.ConsumedSegmentIDs) > 0 {
 		consumedOff = buildStringVector(b, c.ConsumedSegmentIDs, clusterpb.CoalesceSegmentsCmdStartConsumedSegmentIdsVector)
 	}
+	var placementOff flatbuffers.UOffsetT
+	if len(c.Placement) > 0 {
+		placementOff = buildStringVector(b, c.Placement, clusterpb.CoalesceSegmentsCmdStartPlacementVector)
+	}
 	clusterpb.CoalesceSegmentsCmdStart(b)
 	clusterpb.CoalesceSegmentsCmdAddBucket(b, bucketOff)
 	clusterpb.CoalesceSegmentsCmdAddKey(b, keyOff)
@@ -873,6 +906,12 @@ func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
 	if consumedOff != 0 {
 		clusterpb.CoalesceSegmentsCmdAddConsumedSegmentIds(b, consumedOff)
 	}
+	if placementOff != 0 {
+		clusterpb.CoalesceSegmentsCmdAddPlacement(b, placementOff)
+	}
+	clusterpb.CoalesceSegmentsCmdAddEcData(b, c.ECData)
+	clusterpb.CoalesceSegmentsCmdAddEcParity(b, c.ECParity)
+	clusterpb.CoalesceSegmentsCmdAddRingVersion(b, c.RingVersion)
 	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
 }
 
@@ -890,6 +929,13 @@ func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
 			consumed[i] = string(t.ConsumedSegmentIds(i))
 		}
 	}
+	var placement []string
+	if n := t.PlacementLength(); n > 0 {
+		placement = make([]string, n)
+		for i := range placement {
+			placement[i] = string(t.Placement(i))
+		}
+	}
 	return CoalesceSegmentsCmd{
 		Bucket:             string(t.Bucket()),
 		Key:                string(t.Key()),
@@ -898,6 +944,10 @@ func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
 		Size:               t.Size(),
 		ETag:               string(t.Etag()),
 		ConsumedSegmentIDs: consumed,
+		Placement:          placement,
+		ECData:             t.EcData(),
+		ECParity:           t.EcParity(),
+		RingVersion:        t.RingVersion(),
 	}, nil
 }
 

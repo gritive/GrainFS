@@ -192,12 +192,21 @@ table ObjectMeta {
 // CoalescedShardRef references one coalesced blob produced by merging a
 // prefix of objectMeta.segments. Phase B2 stores it owner-locally; Phase B3
 // distributes it via EC and adds placement params on the same table.
+//
+// Phase B3 EC fields (ring_version / ec_data / ec_parity / node_ids) are
+// REQUIRED for coalesced blobs written by B3 worker (EC distribute). Legacy
+// B2 entries (owner-local only) have these fields zero-valued; reader falls
+// back to owner-local path in that case.
 table CoalescedShardRef {
   coalesced_id:string;
   size:int64;
   etag:string;
   shard_key:string;
   version:int32 = 1;
+  ring_version:uint64 = 0;
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  node_ids:[string];
 }
 
 // CoalesceSegmentsCmd records a single coalesce operation: consume the listed
@@ -205,6 +214,9 @@ table CoalescedShardRef {
 // ShardKey. ConsumedSegmentIDs MUST match a contiguous prefix of
 // objectMeta.segments at apply time; absent IDs are silently skipped
 // (idempotent on Raft replay).
+//
+// Phase B3 adds EC placement params so the FSM apply stores them on the
+// resulting CoalescedShardRef. placement[] order matches shard index 0..k+m.
 table CoalesceSegmentsCmd {
   bucket:string;
   key:string;
@@ -213,6 +225,10 @@ table CoalesceSegmentsCmd {
   size:int64;
   etag:string;
   consumed_segment_ids:[string];
+  placement:[string];
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  ring_version:uint64 = 0;
 }
 
 // SegmentRef mirrors storage.SegmentRef — one EC-encoded, encrypted append

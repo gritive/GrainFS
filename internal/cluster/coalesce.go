@@ -33,6 +33,12 @@ type CoalesceSegmentsCmd struct {
 	Size               int64    // coalesced data total bytes
 	ETag               string   // coalesced body MD5
 	ConsumedSegmentIDs []string // segment blob IDs consumed by this operation
+	// Phase B3 EC placement params. Order in Placement matches shard index
+	// 0..k+m-1. Zero-valued for B2 (owner-local only).
+	Placement   []string
+	ECData      uint8
+	ECParity    uint8
+	RingVersion uint64
 }
 
 // MaxCoalescedEntries caps how many CoalescedShardRef entries a single
