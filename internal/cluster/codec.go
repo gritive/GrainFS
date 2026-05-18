@@ -32,9 +32,24 @@ type objectMeta struct {
 	// Segments holds the ordered list of append segments for appendable
 	// objects. Empty/nil for legacy single-blob (non-appendable) objects.
 	Segments []storage.SegmentRef
+	// Coalesced records merged segment blobs. Phase B2 stores each entry
+	// owner-locally; Phase B3 distributes via EC and adds placement params.
+	Coalesced []CoalescedShardRef
 	// IsAppendable indicates the object was created via AppendObject and may
 	// continue to be appended to. False for legacy / multipart / PUT objects.
 	IsAppendable bool
+}
+
+// CoalescedShardRef references a single coalesced blob produced by merging a
+// prefix of objectMeta.Segments. Phase B2 holds it owner-locally; Phase B3
+// extends this struct with EC placement params (NodeIDs / ECData / ECParity /
+// RingVersion).
+type CoalescedShardRef struct {
+	CoalescedID string
+	Size        int64
+	ETag        string
+	ShardKey    string
+	Version     int32
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -467,6 +482,28 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		}
 		segmentsOff = b.EndVector(len(segOffs))
 	}
+	// coalesced — build child CoalescedShardRef tables BEFORE ObjectMetaStart.
+	var coalescedOff flatbuffers.UOffsetT
+	if len(m.Coalesced) > 0 {
+		cOffs := make([]flatbuffers.UOffsetT, len(m.Coalesced))
+		for i, c := range m.Coalesced {
+			idOff := b.CreateString(c.CoalescedID)
+			etOff := b.CreateString(c.ETag)
+			skOff := b.CreateString(c.ShardKey)
+			clusterpb.CoalescedShardRefStart(b)
+			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
+			clusterpb.CoalescedShardRefAddSize(b, c.Size)
+			clusterpb.CoalescedShardRefAddEtag(b, etOff)
+			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
+			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
+			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
+		}
+		clusterpb.ObjectMetaStartCoalescedVector(b, len(cOffs))
+		for i := len(cOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(cOffs[i])
+		}
+		coalescedOff = b.EndVector(len(cOffs))
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -489,6 +526,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	}
 	if segmentsOff != 0 {
 		clusterpb.ObjectMetaAddSegments(b, segmentsOff)
+	}
+	if coalescedOff != 0 {
+		clusterpb.ObjectMetaAddCoalesced(b, coalescedOff)
 	}
 	if m.IsAppendable {
 		clusterpb.ObjectMetaAddIsAppendable(b, true)
@@ -525,6 +565,23 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			}
 		}
 	}
+	var coalesced []CoalescedShardRef
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced = make([]CoalescedShardRef, n)
+		var c clusterpb.CoalescedShardRef
+		for i := 0; i < n; i++ {
+			if !t.Coalesced(&c, i) {
+				continue
+			}
+			coalesced[i] = CoalescedShardRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				Version:     c.Version(),
+			}
+		}
+	}
 	return objectMeta{
 		Key:              string(t.Key()),
 		Size:             t.Size(),
@@ -540,6 +597,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
 		SSEAlgorithm:     string(t.SseAlgorithm()),
 		Segments:         segments,
+		Coalesced:        coalesced,
 		IsAppendable:     t.IsAppendable(),
 	}, nil
 }

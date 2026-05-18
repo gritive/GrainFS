@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestEncodeDecodeCommand_CreateBucket(t *testing.T) {
@@ -377,4 +379,47 @@ func TestEncodeObjectMeta_AllocsBounded(t *testing.T) {
 		_, _ = marshalObjectMeta(meta)
 	})
 	assert.LessOrEqual(t, allocs, 2.0, "marshalObjectMeta should allocate ≤2 (output slice + copy)")
+}
+
+func TestCoalescedShardRefRoundTrip(t *testing.T) {
+	in := objectMeta{
+		Key: "a", Size: 1024, IsAppendable: true,
+		Segments: []storage.SegmentRef{{BlobID: "s1", Size: 512, ETag: "e1"}},
+		Coalesced: []CoalescedShardRef{{
+			CoalescedID: "c1", Size: 1024, ETag: "etag-c1",
+			ShardKey: "a/coalesced/c1", Version: 1,
+		}},
+	}
+	raw, err := marshalObjectMeta(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, err := unmarshalObjectMeta(raw)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Coalesced) != 1 || got.Coalesced[0].CoalescedID != "c1" ||
+		got.Coalesced[0].ShardKey != "a/coalesced/c1" || got.Coalesced[0].Size != 1024 {
+		t.Fatalf("Coalesced round-trip mismatch: %+v", got.Coalesced)
+	}
+}
+
+func TestCoalesceSegmentsCmdRoundTrip(t *testing.T) {
+	in := CoalesceSegmentsCmd{
+		Bucket: "b", Key: "a", CoalescedID: "c1",
+		ShardKey: "a/coalesced/c1", Size: 1024, ETag: "etag",
+		ConsumedSegmentIDs: []string{"s1", "s2"},
+	}
+	raw, err := encodeCoalesceSegmentsCmd(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := decodeCoalesceSegmentsCmd(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CoalescedID != "c1" || got.ShardKey != "a/coalesced/c1" || got.Size != 1024 ||
+		len(got.ConsumedSegmentIDs) != 2 || got.ConsumedSegmentIDs[0] != "s1" {
+		t.Fatalf("CoalesceSegmentsCmd round-trip mismatch: %+v", got)
+	}
 }
