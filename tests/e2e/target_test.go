@@ -27,6 +27,7 @@ type s3Target struct {
 	secretKey string
 	createBkt func(t *testing.T, bucket string)
 	isCluster bool
+	cluster   *e2eCluster // non-nil for cluster fixtures
 }
 
 func newSingleNodeS3Target() s3Target {
@@ -81,6 +82,7 @@ func newClusterS3Target(t *testing.T, nodes int) s3Target {
 			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
 		},
 		isCluster: true,
+		cluster:   c,
 	}
 }
 
@@ -118,5 +120,6 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
 		},
 		isCluster: true,
+		cluster:   c,
 	}
 }

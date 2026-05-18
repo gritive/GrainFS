@@ -31,7 +31,7 @@ import (
 // real S3 endpoints + multi-node placement.
 func TestAppendObjectCoalesceE2E_Cluster4Node(t *testing.T) {
 	skipIfShort(t, "4-node cluster boot is too slow for -short")
-	tgt := newClusterAppendTarget(t, 4)
+	tgt := newClusterS3Target(t, 4)
 	require.True(t, tgt.isCluster)
 	bucket := "append-coalesce-cluster"
 	tgt.createBkt(t, bucket)
@@ -116,7 +116,7 @@ func getObjectRange(client *s3.Client, bucket, key string, startInclusive, endIn
 // metricCounterAtLeast scrapes the cluster node's /metrics endpoint and
 // returns true when the named counter (with labels) is >= threshold.
 // Lightweight parser — accepts the prometheus text format line "name{labels} value".
-func metricCounterAtLeast(t *testing.T, tgt appendTarget, nodeIdx int, metricLine string, threshold float64) bool {
+func metricCounterAtLeast(t *testing.T, tgt s3Target, nodeIdx int, metricLine string, threshold float64) bool {
 	t.Helper()
 	c := getClusterFromTarget(tgt)
 	if c == nil {
@@ -149,6 +149,6 @@ func metricCounterAtLeast(t *testing.T, tgt appendTarget, nodeIdx int, metricLin
 
 // getClusterFromTarget returns the underlying e2eCluster captured by the
 // fixture; nil for single-node fixtures.
-func getClusterFromTarget(tgt appendTarget) *e2eCluster {
+func getClusterFromTarget(tgt s3Target) *e2eCluster {
 	return tgt.cluster
 }

@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -24,87 +23,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// appendTarget abstracts a fixture (single-node or cluster) under test.
-//
-// pickNode(i) returns the S3 client bound to node i. For single-node fixtures
-// every i collapses to the same client, so common-case tests can call
-// pickNode(0) uniformly.
-type appendTarget struct {
-	name      string
-	nodes     int
-	pickNode  func(i int) *s3.Client
-	createBkt func(t *testing.T, bucket string)
-	isCluster bool
-	// cluster is non-nil for cluster fixtures and exposes the e2eCluster so
-	// downstream tests can hit /metrics, kill nodes, etc. nil for SingleNode.
-	cluster *e2eCluster
-}
-
 func TestAppendObjectE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-		tgt := newSingleNodeAppendTarget()
+		tgt := newSingleNodeS3Target()
 		runCommonAppendCases(t, tgt)
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
 		skipIfShort(t, "4-node cluster boot is too slow for -short")
-		tgt := newClusterAppendTarget(t, 4)
+		tgt := newClusterS3Target(t, 4)
 		runCommonAppendCases(t, tgt)
 		runClusterOnlyAppendCases(t, tgt)
 	})
 }
 
-// ----- fixtures -----
-
-func newSingleNodeAppendTarget() appendTarget {
-	return appendTarget{
-		name:  "single",
-		nodes: 1,
-		pickNode: func(i int) *s3.Client {
-			return testS3Client
-		},
-		createBkt: func(t *testing.T, bucket string) {
-			createBucket(t, bucket)
-		},
-		isCluster: false,
-	}
-}
-
-func newClusterAppendTarget(t *testing.T, nodes int) appendTarget {
-	t.Helper()
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      nodes,
-		Mode:       ClusterModeDynamicJoin,
-		ClusterKey: "E2E-APPEND-KEY",
-		LogPrefix:  "grainfs-append",
-		DisableNFS: true,
-		DisableNBD: true,
-	})
-
-	// Wait for IAM key propagation across all nodes; otherwise non-leader
-	// nodes 403 on first request.
-	for i := range c.procs {
-		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
-	}
-
-	return appendTarget{
-		name:  "cluster4",
-		nodes: nodes,
-		pickNode: func(i int) *s3.Client {
-			return c.S3Client(i % nodes)
-		},
-		createBkt: func(t *testing.T, bucket string) {
-			c.GrantAdminOnBuckets(bucket)
-			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
-		},
-		isCluster: true,
-		cluster:   c,
-	}
-}
-
 // ----- cases (common) -----
 
-func runCommonAppendCases(t *testing.T, tgt appendTarget) {
+func runCommonAppendCases(t *testing.T, tgt s3Target) {
 	bucket := "append-" + tgt.name
 	tgt.createBkt(t, bucket)
 	client := tgt.pickNode(0)
@@ -150,7 +85,7 @@ func runCommonAppendCases(t *testing.T, tgt appendTarget) {
 
 // ----- cases (cluster-only) -----
 
-func runClusterOnlyAppendCases(t *testing.T, tgt appendTarget) {
+func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 	require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
 	bucket := "append-" + tgt.name + "-cluster"
 	tgt.createBkt(t, bucket)
