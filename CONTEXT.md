@@ -84,6 +84,19 @@ If reading previous-object facts returns not-found, the mutation proceeds with
 `Previous.Exists=false`. Any other previous-object read error fails the
 operation before mutation.
 
+### NBD Pending Mutation Queue
+
+The NBD pending mutation queue is the per-connection module that owns deferred
+Raft commit functions for write-back NBD. NBD `WRITE` and `WRITE_ZEROES` may
+ack after the local volume write, but their deferred commit functions remain
+pending until `NBD_CMD_FLUSH` or connection drain.
+
+The queue orders pending mutations by affected volume block, not by the exact
+request start offset. Mutations touching the same volume block must flush in
+append order; mutations touching distinct volume blocks may flush concurrently.
+This keeps persistence ordering aligned with the volume block model rather than
+leaking offset-level implementation details into NBD command handlers.
+
 ### CopyObject Semantics
 
 CopyObject semantics belong to the storage operations facade, not to HTTP
