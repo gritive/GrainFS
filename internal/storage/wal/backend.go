@@ -213,6 +213,31 @@ func (b *Backend) PutObjectWithACL(bucket, key string, r io.Reader, contentType 
 	return obj, nil
 }
 
+// AppendObject forwards the S3 Express append to an inner AppendObjecter and
+// records a WAL OpPut entry on success so PITR replay sees the post-append
+// object state (same shape as PutObject — the WAL is advisory and re-writes
+// the latest object metadata, not the per-segment delta).
+func (b *Backend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	ap, ok := b.Backend.(storage.AppendObjecter)
+	if !ok {
+		return nil, storage.ErrAppendNotSupported
+	}
+	obj, err := ap.AppendObject(ctx, bucket, key, expectedOffset, r)
+	if err != nil {
+		return nil, err
+	}
+	b.w.AppendAsync(Entry{
+		Op:          OpPut,
+		Bucket:      bucket,
+		Key:         key,
+		ETag:        obj.ETag,
+		ContentType: obj.ContentType,
+		Size:        obj.Size,
+		VersionID:   obj.VersionID,
+	})
+	return obj, nil
+}
+
 // WriteAt is a pass-through for pwrite-based partial writes on internal
 // buckets (NFS4, VFS). No WAL entry is written: internal buckets are ephemeral
 // and not subject to PITR replay.

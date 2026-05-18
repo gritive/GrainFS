@@ -334,6 +334,17 @@ func (pb *PackedBackend) PutObject(ctx context.Context, bucket, key string, r io
 	return pb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, nil)
 }
 
+// AppendObject forwards S3 Express AppendObject to the inner backend (the
+// packblob fast-path only handles small whole-object PUT/GET; appendable
+// objects always live on the routed/cluster path).
+func (pb *PackedBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	ap, ok := pb.inner.(storage.AppendObjecter)
+	if !ok {
+		return nil, storage.ErrAppendNotSupported
+	}
+	return ap.AppendObject(ctx, bucket, key, expectedOffset, r)
+}
+
 func (pb *PackedBackend) PutObjectWithUserMetadata(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*storage.Object, error) {
 	return pb.PutObjectWithRequest(ctx, storage.PutObjectRequest{
 		Bucket:       bucket,

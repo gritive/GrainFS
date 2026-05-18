@@ -104,6 +104,17 @@ func (b *Backend) Truncate(ctx context.Context, bucket, key string, size int64) 
 	return partial.Truncate(ctx, bucket, key, size)
 }
 
+// AppendObject forwards the S3 Express append to an inner AppendObjecter when
+// supported. The pull-through decorator does not have its own append semantics
+// (upstream resolution is read-side only), so this is a thin delegate.
+func (b *Backend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	ap, ok := b.Backend.(storage.AppendObjecter)
+	if !ok {
+		return nil, storage.ErrAppendNotSupported
+	}
+	return ap.AppendObject(ctx, bucket, key, expectedOffset, r)
+}
+
 func (b *Backend) PreferReadAt(bucket string) bool {
 	type readAtPreference interface {
 		PreferReadAt(bucket string) bool

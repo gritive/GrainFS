@@ -35,6 +35,9 @@ func (g *RecoveryWriteGate) ForceDeleteBucket(context.Context, string) error { r
 func (g *RecoveryWriteGate) PutObject(context.Context, string, string, io.Reader, string) (*Object, error) {
 	return nil, g.err
 }
+func (g *RecoveryWriteGate) AppendObject(context.Context, string, string, int64, io.Reader) (*Object, error) {
+	return nil, g.err
+}
 func (g *RecoveryWriteGate) DeleteObject(context.Context, string, string) error { return g.err }
 func (g *RecoveryWriteGate) CreateMultipartUpload(context.Context, string, string, string) (*MultipartUpload, error) {
 	return nil, g.err
