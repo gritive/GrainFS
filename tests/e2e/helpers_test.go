@@ -167,6 +167,7 @@ func TestMain(m *testing.M) {
 		dumpE2EProfiles(pprofPort)
 	}
 
+	stopSharedCluster()
 	terminateProcess(cmd)
 	if err := cleanupDataDir(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

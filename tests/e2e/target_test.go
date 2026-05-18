@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,6 +136,75 @@ func bucketNameFor(tgtName, testName, caseName string) string {
 		full = full + "-x"
 	}
 	return full
+}
+
+// Shared cluster fixture — process-global, lazily booted on first cluster-
+// target test (so -short skips boot automatically by skipping cluster tests).
+// Lifetime managed by TestMain teardown via stopSharedCluster.
+var (
+	sharedClusterOnce sync.Once
+	sharedCluster     *e2eCluster
+)
+
+func getOrInitSharedCluster(t *testing.T) *e2eCluster {
+	t.Helper()
+	sharedClusterOnce.Do(func() {
+		c := startE2EClusterNoCleanup(t, e2eClusterOptions{
+			Nodes:      4,
+			Mode:       ClusterModeDynamicJoin,
+			ClusterKey: "E2E-S3-OP-SHARED-KEY",
+			LogPrefix:  "grainfs-s3op-shared",
+			DisableNFS: true,
+			DisableNBD: true,
+		})
+		for i := range c.procs {
+			iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+		}
+		sharedCluster = c
+	})
+	if sharedCluster == nil {
+		t.Fatal("shared cluster initialization failed")
+	}
+	return sharedCluster
+}
+
+// stopSharedCluster is invoked from TestMain teardown to release the shared
+// cluster fixture. No-op when no cluster test triggered initialization.
+func stopSharedCluster() {
+	if sharedCluster != nil {
+		sharedCluster.Stop()
+	}
+}
+
+func newSharedClusterS3Target(t *testing.T) s3Target {
+	t.Helper()
+	c := getOrInitSharedCluster(t)
+	return s3Target{
+		name:  "cluster4",
+		nodes: 4,
+		pickNode: func(i int) *s3.Client {
+			return c.S3Client(i % 4)
+		},
+		endpoint: func(i int) string {
+			return c.httpURLs[i%4]
+		},
+		accessKey: c.accessKey,
+		secretKey: c.secretKey,
+		createBkt: func(t *testing.T, bucket string) {
+			c.GrantAdminOnBuckets(bucket)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("cluster4", t.Name(), caseName)
+			c.GrantAdminOnBuckets(name)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			t.Cleanup(func() {
+				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
+		isCluster: true,
+	}
 }
 
 func TestBucketNameFor(t *testing.T) {
