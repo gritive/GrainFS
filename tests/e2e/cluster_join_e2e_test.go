@@ -67,7 +67,7 @@ func TestE2E_AllServicesAvailableOnJoinedNodes(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
 
 	reqBody := []byte(`{"namespace":["join_ns"],"properties":{"owner":"e2e"}}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader(reqBody))
@@ -151,7 +151,7 @@ func TestE2E_DynamicJoinServices_NodeCounts(t *testing.T) {
 				require.Equal(t, body, got)
 			}
 
-			client := &http.Client{Timeout: 5 * time.Second}
+			client := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
 			namespace := fmt.Sprintf("join_matrix_%d", nodes)
 			reqBody := []byte(fmt.Sprintf(`{"namespace":["%s"],"properties":{"owner":"e2e"}}`, namespace))
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURLs[nodes-1]+"/iceberg/v1/namespaces", bytes.NewReader(reqBody))

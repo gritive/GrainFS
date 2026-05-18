@@ -166,16 +166,6 @@ func TestIcebergConfigUsesInjectedCatalogInterface(t *testing.T) {
 	require.Equal(t, "s3://custom/warehouse", got.Defaults["warehouse"])
 }
 
-func TestIcebergConfigBypassesS3AuthMiddleware(t *testing.T) {
-	base := setupAuthServer(t)
-
-	resp, err := http.Get(base + "/iceberg/v1/config?warehouse=warehouse")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Contains(t, resp.Header.Get("Content-Type"), "application/json")
-}
-
 func TestIcebergCreateNamespaceAndTableTransactionCommit(t *testing.T) {
 	base := setupTestServer(t)
 

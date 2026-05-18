@@ -520,6 +520,20 @@ ACL `private` requires a non-empty access key. Multi-tenant ownership
 (`OwnerKey`) is out of scope until Phase 14+; until then all authenticated
 callers are treated as owners of `private` objects.
 
+### Iceberg REST Auth
+
+Iceberg REST Catalog (`/iceberg/v1/*` and `/_iceberg/v1/*`) shares the S3
+SigV4 trust boundary. `internal/server/authMiddleware` routes Iceberg
+requests through `authenticateSignedRequest` and emits
+`401 NotAuthorizedException` JSON (Iceberg REST ErrorModel) on failure,
+while S3 requests continue to receive `403 + XML`.
+
+Per-action authorization (`iceberg:CreateTable`, etc.) is a separate
+follow-up. This layer establishes identity; authz is still bypassed via
+`skipS3Authz: true` on the iceberg `route_surface` entries.
+
+Reference: `docs/superpowers/specs/2026-05-19-iceberg-rest-auth-design.md`.
+
 ### Volume Block I/O
 
 Volume block I/O is the volume-layer path that turns logical byte-range reads,

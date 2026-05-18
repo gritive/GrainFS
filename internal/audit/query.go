@@ -220,8 +220,9 @@ CREATE OR REPLACE SECRET grainfs_s3 (
 ATTACH 'grainfs' AS grainfs_iceberg (
 	TYPE iceberg,
 	ENDPOINT '%s/iceberg',
-	AUTHORIZATION_TYPE 'none',
-	ACCESS_DELEGATION_MODE 'none'
+	AUTHORIZATION_TYPE 'sigv4',
+	SIGV4_REGION 'us-east-1',
+	SIGV4_SERVICE 's3'
 );
 `, sqlString(s.cfg.AccessKey), sqlString(s.cfg.SecretKey), sqlString(endpointHost), useSSL, sqlString(s.cfg.Endpoint))
 }

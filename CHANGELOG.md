@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.255.0] - 2026-05-19 - feat(iceberg)!: SigV4 required on REST Catalog (BREAKING)
+
+Iceberg REST Catalog now shares the S3 SigV4 trust boundary. Every endpoint
+under `/iceberg/v1/*` and `/_iceberg/v1/*` — including `GET /iceberg/v1/config`
+— requires SigV4 signed by a bootstrapped ServiceAccount's
+`access_key`/`secret_key`. Anonymous catalog discovery is no longer available.
+
+### BREAKING
+
+- **Iceberg REST Catalog requires SigV4** on every endpoint (`/iceberg/v1/*`,
+  `/_iceberg/v1/*`). Clients must configure
+  `rest.sigv4-enabled=true`, `rest.signing-name=s3`,
+  `rest.signing-region=us-east-1` (or the cluster's configured region) and
+  supply a bootstrapped ServiceAccount's `access_key`/`secret_key`. Anonymous
+  catalog discovery via `/v1/config` is no longer available.
+  DuckDB iceberg extension users must bump to v1.5.2+ and switch
+  `AUTHORIZATION_TYPE 'none'` to `'sigv4'`. See
+  `docs/users/iceberg-duckdb.md` for the migration. Spec:
+  `docs/superpowers/specs/2026-05-19-iceberg-rest-auth-design.md`.
+
 ## [0.0.254.0] - 2026-05-19 - feat(scrubber): production orphan raw-segment sweep
 
 AppendObject가 남기는 raw segment 파일의 production-grade orphan cleanup. 기존 EC shard용 `OrphanWalkable`는 변경 없이, 새로운 optional `OrphanSegmentWalkable` 인터페이스 + `DistributedBackend` production impl 추가. AppendObject best-effort cleanup이 실패해도 scrubber cycle 2회 안에 디스크에서 자동 회수.
