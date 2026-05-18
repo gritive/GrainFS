@@ -413,6 +413,41 @@ func (c *e2eCluster) S3Client(i int) *s3.Client {
 	return ecS3Client(c.httpURLs[i], c.accessKey, c.secretKey)
 }
 
+// AwaitWriteFromNonOwner polls non-leader peers issuing tiny probe writes
+// against an isolated __grainfs_probe internal-prefix namespace until at
+// least one succeeds or deadline expires. Used by fault tests to assert
+// raft leader rotation has completed (a HeadBucket polling proxy can
+// return stale-ack during election; a successful committed write is the
+// direct evidence).
+//
+// The probe bucket is created on first use and is namespace-isolated
+// from user buckets — the __grainfs_ prefix is the GrainFS internal
+// bucket convention.
+func (c *e2eCluster) AwaitWriteFromNonOwner(bucket, key string, deadline time.Duration) error {
+	if c == nil {
+		return fmt.Errorf("nil cluster")
+	}
+	// Ensure probe bucket exists (idempotent).
+	c.GrantAdminOnBuckets(bucket)
+	ctx := context.Background()
+	_ = tryCreateBucket(ctx, c.S3Client(c.leaderIdx), bucket)
+
+	end := time.Now().Add(deadline)
+	body := []byte("probe")
+	for time.Now().Before(end) {
+		for i, p := range c.procs {
+			if p == nil || i == c.leaderIdx {
+				continue
+			}
+			if err := tryPutObject(ctx, c.S3Client(i), bucket, key, body); err == nil {
+				return nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("AwaitWriteFromNonOwner(%q,%q) timed out after %s", bucket, key, deadline)
+}
+
 func (c *e2eCluster) GrantAdminOnBuckets(buckets ...string) {
 	c.t.Helper()
 	if len(buckets) == 0 || c.wildcardAdmin {
