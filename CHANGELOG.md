@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.240.0] - 2026-05-18 - perf(packblob): bound large-object intake
+
+Packed object storage now routes large writes after reading only the configured
+packing threshold, so oversized objects can stream through to the inner backend
+without a full-body buffering pass.
+
+### Added
+
+- Added packed-object threshold routing coverage for below-threshold,
+  exact-threshold, and above-threshold writes.
+- Added a large-object intake regression test proving delegation memory does
+  not scale with the full object size.
+
+### Changed
+
+- `PackedBackend.PutObjectWithRequest` now reads only the packing threshold
+  before deciding whether to pack a small object or stream a large object
+  through with the buffered prefix.
+
 ## [0.0.239.0] - 2026-05-18 - perf(raft): borrow heartbeat FlatBuffer payloads
 
 Raft heartbeat batch encoding now avoids the per-item owned FlatBuffer payload
