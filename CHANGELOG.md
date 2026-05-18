@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.253.0] - 2026-05-19 - feat(s3): AppendObject hardening — size cap + memory budget + owner-kill e2e
+
+AppendObject (v0.0.249.0)을 production-readiness 단계로 hardening. F1-F5 묶음으로 5개 follow-up을 단일 PR로 처리.
+
+### Added
+
+- **Per-object size cap** (`storage.ErrAppendObjectTooLarge`, default 5 TiB matching S3 PutObject parity). FSM-side authoritative check in `applyAppendObjectFromCmd` + coordinator pre-check fast-reject (false-negative forbidden tolerance contract). CLI: `--append-size-cap-bytes`. ForwardStatus enum value `AppendObjectTooLarge = 11`. HTTP 400 EntityTooLarge.
+- **Forward-buffer byte-based semaphore** (`cluster.appendForwardBuffer`, default 512 MiB pool). Replaces unbounded body buffering for non-owner → owner AppendObject forwards. Saturation surfaces as HTTP 503 SlowDown with `Retry-After: 1`. CLI: `--cluster-append-forward-buffer-{total-bytes,max-per-request}-bytes`.
+- **6 new Prometheus metrics:** `grainfs_cluster_append_forward_buffer_inflight_bytes` (Gauge), `grainfs_cluster_append_forward_buffer_rejected_total` (Counter), `grainfs_append_coalesced_depth` / `grainfs_append_coalesced_total_bytes` (Histograms), `grainfs_append_size_cap_rejected_total` / `grainfs_append_coalesced_entries_at_cap_total` (Counters).
+- **e2e fault-injection harness:** `e2eCluster.KillNode(i)`, `e2eCluster.RestartNode(t, i)`, `e2eCluster.AwaitWriteFromNonOwner(bucket, key, deadline)` (uses `__grainfs_probe` internal namespace).
+- **e2e coverage:** `TestAppendMidSizeBodyE2E` (8 MiB body proves 64 MiB cap), `TestAppendForwardBufferSaturationE2E` (concurrent forwards trigger 503), `TestAppendSizeCapE2E` (RejectAtCap + ConcurrentRaceAtCap), `TestAppendObjectE2E/Cluster4Node/OwnerKillSurvives` (real raft leader rotation + EC reconstruct).
+
+### Changed
+
+- **`DefaultMaxForwardBodyBytes` raised 5 MiB → 64 MiB** (matches HTTP-layer `appendBodyMaxBytes`). 5 MiB-64 MiB chunks now flow through forward path without stale-placement retry being severed.
+- **`DistributedBackend.coalesceCfg` is now `atomic.Pointer[CoalesceConfig]`** (was plain struct). Closes a latent data race between `coalesceBackstopScan` goroutine and `SetCoalesceConfig` callers. Test setups migrated to `SetCoalesceConfig` (no direct field assignment).
+- **`bootState.instantiateGroupWithConfig` helper** bundles `cluster.InstantiateLocalGroup` + `gb.SetCoalesceConfig(state.coalesceCfg)`. Compile-time guarantee: future per-group config flags reach every group, including dynamically-instantiated shard groups. Fixes a wiring bug where groups 1-N silently inherited the default 5 TiB cap regardless of `--append-size-cap-bytes`.
+- **e2e fixture consolidation:** `appendTarget` removed in favor of `s3Target` (now carries `cluster *e2eCluster` field). `runCommonAppendCases`/`runClusterOnlyAppendCases` take `s3Target` directly. `TestAppendObjectCoalesceE2E_Cluster4Node` renamed to `TestAppendCoalesceE2E`.
+
+### Fixed
+
+- **`TestCoalesceMetricsObserved` flake:** `metrics.AppendCoalesceTotal.Inc()` runs in a `defer` block in `coalesce.go:158` — after `obj.Coalesced` becomes visible to the test's `Eventually`. Test now wraps the counter read in `Eventually` too.
+
+### Operations
+
+- Calibration follow-up: `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'` rejection ratio < 1% for default 512 MiB pool. Deferred to operator validation post-ship (TODOS.md).
+
 ## [0.0.252.0] - 2026-05-19 - chore: drop legacy JSON guards from FB decoders
 
 Wipe-and-restart is the only supported upgrade path (see v0.0.251.0 CHANGELOG),
