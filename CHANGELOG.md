@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.237.0] - 2026-05-18 - perf(raft): reduce heartbeat batch decode allocations
+
+Raft heartbeat batch decoding now allocates less on the receiver hot path while
+preserving owned decoded strings. The release also adds a measured Raft wire
+benchmark matrix so future wire-format and transport allocation work starts from
+saved before/after evidence instead of intuition.
+
+### Added
+
+- Added Raft wire microbenchmarks for `RaftConn` frame send/read,
+  heartbeat batch encode/decode, and v2 QUIC AppendEntries encode/decode.
+- Added saved benchmark artifacts under `benchmarks/raft-wire/` showing the
+  baseline, selected heartbeat decode after run, and `benchstat` comparison.
+- Added a regression test proving decoded heartbeat `groupID` and `LeaderID`
+  strings remain valid after the input payload buffer is mutated.
+
+### Changed
+
+- `decodeHeartbeatBatch` now fills one batch-local `[]AppendEntriesArgs`
+  backing store instead of allocating one `AppendEntriesArgs` per decoded item.
+- Heartbeat AppendEntries decode now reuses repeated `LeaderID` string copies
+  within a single decoded batch while keeping returned strings owned.
+
+### Fixed
+
+- `BenchmarkHeartbeatDecodeBatch` improved from `25 allocs/op` to
+  `11 allocs/op`, `960 B/op` to `904 B/op`, and `563.2 ns/op` to
+  `454.2 ns/op` in the saved `benchstat` run.
+
 ## [0.0.236.0] - 2026-05-18 - fix(cluster/s3auth): warp benchmark passes on a 4-node cluster (versioned + multipart + sigv4 botocore)
 
 Operators running the warp benchmark suite against a 4-node, at-rest-encrypted

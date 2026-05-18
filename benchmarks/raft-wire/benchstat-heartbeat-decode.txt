@@ -1,0 +1,15 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/gritive/GrainFS/internal/raft
+cpu: Apple M3
+                       │ benchmarks/raft-wire/before-heartbeat-decode.txt │ benchmarks/raft-wire/after-heartbeat-decode.txt │
+                       │                      sec/op                      │         sec/op           vs base                │
+HeartbeatDecodeBatch-8                                        563.2n ± 3%               454.2n ± 8%  -19.34% (p=0.000 n=10)
+
+                       │ benchmarks/raft-wire/before-heartbeat-decode.txt │ benchmarks/raft-wire/after-heartbeat-decode.txt │
+                       │                       B/op                       │           B/op            vs base               │
+HeartbeatDecodeBatch-8                                         960.0 ± 0%                 904.0 ± 0%  -5.83% (p=0.000 n=10)
+
+                       │ benchmarks/raft-wire/before-heartbeat-decode.txt │ benchmarks/raft-wire/after-heartbeat-decode.txt │
+                       │                    allocs/op                     │        allocs/op         vs base                │
+HeartbeatDecodeBatch-8                                         25.00 ± 0%                11.00 ± 0%  -56.00% (p=0.000 n=10)

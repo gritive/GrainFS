@@ -248,6 +248,41 @@ func decodeRequestVoteReply(data []byte) (reply *RequestVoteReply, err error) {
 }
 
 func decodeAppendEntriesArgs(data []byte) (args *AppendEntriesArgs, err error) {
+	args = new(AppendEntriesArgs)
+	if err := decodeAppendEntriesArgsInto(data, args, nil); err != nil {
+		return nil, err
+	}
+	return args, nil
+}
+
+type appendEntriesDecodeStringCache struct {
+	leaderID string
+}
+
+func (c *appendEntriesDecodeStringCache) copyLeaderID(b []byte) string {
+	if c != nil && bytesEqualString(c.leaderID, b) {
+		return c.leaderID
+	}
+	s := string(b)
+	if c != nil {
+		c.leaderID = s
+	}
+	return s
+}
+
+func bytesEqualString(s string, b []byte) bool {
+	if len(s) != len(b) {
+		return false
+	}
+	for i := range b {
+		if s[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeAppendEntriesArgsInto(data []byte, dst *AppendEntriesArgs, strings *appendEntriesDecodeStringCache) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode AppendEntriesArgs: invalid flatbuffer: %v", r)
@@ -262,14 +297,15 @@ func decodeAppendEntriesArgs(data []byte) (args *AppendEntriesArgs, err error) {
 		}
 		entries[i] = LogEntry{Term: e.Term(), Index: e.Index(), Command: e.CommandBytes(), Type: LogEntryType(e.EntryType())}
 	}
-	return &AppendEntriesArgs{
+	*dst = AppendEntriesArgs{
 		Term:         a.Term(),
-		LeaderID:     string(a.LeaderId()),
+		LeaderID:     strings.copyLeaderID(a.LeaderId()),
 		PrevLogIndex: a.PrevLogIndex(),
 		PrevLogTerm:  a.PrevLogTerm(),
 		Entries:      entries,
 		LeaderCommit: a.LeaderCommit(),
-	}, nil
+	}
+	return nil
 }
 
 func decodeAppendEntriesReply(data []byte) (reply *AppendEntriesReply, err error) {
