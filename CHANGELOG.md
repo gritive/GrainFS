@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.0.244.0] - 2026-05-18 - perf(cluster): meta_forward JSON → FlatBuffers (GFSMFWD2)
+
+Cluster-internal meta-Raft proposal forwarding now uses FlatBuffers instead of
+JSON on the wire, cutting allocations on every forwarded RPC and lifting the
+throughput ceiling that JSON parsing imposed on large commands. Closes a
+[[feedback_no_internal_json]] policy gap that meta_forward was the last holdout
+for; `MetaCatalogReadSender` in the same file is still on JSON and tracked
+separately.
+
+### Added
+
+- New FB schema in `internal/cluster/clusterpb/cluster.fbs`: `CompatScope`,
+  `CompatSeverity`, `CompatOperation` enums + `StaleNode`, `CompatGatePlan`,
+  `MetaForwardRequest`, `MetaForwardReply` tables.
+- 10 unit tests covering nil/full plan round-trip, unframed passthrough,
+  legacy `GFSMFWD1` magic explicit rejection, malformed FB recovery, every
+  reply error-type discriminator, unknown error-type fallback, enum converter
+  round-trip, and an enum drift guard that fails when a new `compat.Scope` /
+  `Severity` / `Operation` constant lands without a matching FB enum entry.
+- `BenchmarkMetaForward` round-trip microbench (3 request sizes + 2 reply
+  shapes) for ongoing regression measurement.
+
+### Changed
+
+- `encodeMetaForwardRequest` / `decodeMetaForwardRequest` and
+  `encodeMetaForwardReplyWithIndex` / `decodeMetaForwardReplyWithIndex` now
+  build/parse FlatBuffers through a pooled `flatbuffers.Builder` instead of
+  marshaling/unmarshaling JSON. External function signatures are unchanged;
+  no caller in `internal/serveruntime/boot_phases_forwarders.go` needs to
+  change.
+- Request wire magic bumped `GFSMFWD1` → `GFSMFWD2`. The decoder explicitly
+  detects the legacy `GFSMFWD1` prefix and returns a clear
+  `ErrServiceUnavailable`-wrapped error so mixed-version clusters fail loudly
+  rather than silently passing JSON bytes through the raw-command fallback.
+
+### Performance
+
+Benchstat (`-benchtime=15s -count=6`, Apple M3, all metrics `p=0.002 n=6`):
+
+| Path | sec/op delta | B/op delta | allocs/op delta |
+|---|---:|---:|---:|
+| Request 256B   | −92.28 % | −59.28 % | 9 → 2 (−77.78 %) |
+| Request 4 KB   | −96.46 % | −48.59 % | 9 → 2 (−77.78 %) |
+| Request 64 KB  | −97.11 % | −45.18 % | 9 → 2 (−77.78 %) |
+| Reply success  | −83.48 % | −92.84 % | 7 → 1 (−85.71 %) |
+| Reply error    | −78.95 % | −73.21 % | 10 → 3 (−70.00 %) |
+
+64 KB Command round-trip throughput jumps from 147 MB/s to 5.1 GB/s.
 ## [0.0.243.0] - 2026-05-18 - perf(cluster): spool EC conversion writes
 
 EC conversion now migrates legacy full-object replicas through the spooled EC
