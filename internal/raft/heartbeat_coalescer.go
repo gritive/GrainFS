@@ -344,24 +344,21 @@ func encodeHeartbeatBatch(items []hbItem) ([]byte, error) {
 	if len(items) > 0xFFFF {
 		return nil, fmt.Errorf("heartbeat batch too large (%d > 65535)", len(items))
 	}
-	// Pre-encode args so we know total size.
-	var encArgsInline [16][]byte
-	var encArgs [][]byte
+	// Pre-encode args so we know total size. Payloads are borrowed from
+	// FlatBuffers builders and must be released after copying into buf.
+	var encArgsInline [16]borrowedRPCPayload
+	var encArgs []borrowedRPCPayload
 	if len(items) <= len(encArgsInline) {
 		encArgs = encArgsInline[:len(items)]
 	} else {
-		encArgs = make([][]byte, len(items))
+		encArgs = make([]borrowedRPCPayload, len(items))
 	}
 	for i, it := range items {
-		ea, err := encodeAppendEntriesArgs(it.args)
-		if err != nil {
-			return nil, fmt.Errorf("encode args[%d]: %w", i, err)
-		}
-		encArgs[i] = ea
+		encArgs[i] = borrowAppendEntriesArgsPayload(it.args)
 	}
 	size := 2
 	for i, it := range items {
-		size += 2 + len(it.groupID) + 4 + len(encArgs[i])
+		size += 2 + len(it.groupID) + 4 + len(encArgs[i].data)
 	}
 	buf := make([]byte, size)
 	off := 0
@@ -370,17 +367,20 @@ func encodeHeartbeatBatch(items []hbItem) ([]byte, error) {
 	for i, it := range items {
 		gidLen := len(it.groupID)
 		if gidLen > 0xFFFF {
+			releaseBorrowedRPCPayloads(encArgs)
 			return nil, fmt.Errorf("groupID too long (%d)", gidLen)
 		}
 		binary.BigEndian.PutUint16(buf[off:off+2], uint16(gidLen))
 		off += 2
 		copy(buf[off:off+gidLen], it.groupID)
 		off += gidLen
-		binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(encArgs[i])))
+		argData := encArgs[i].data
+		binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(argData)))
 		off += 4
-		copy(buf[off:off+len(encArgs[i])], encArgs[i])
-		off += len(encArgs[i])
+		copy(buf[off:off+len(argData)], argData)
+		off += len(argData)
 	}
+	releaseBorrowedRPCPayloads(encArgs)
 	return buf, nil
 }
 
