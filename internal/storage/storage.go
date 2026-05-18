@@ -27,6 +27,17 @@ type Object struct {
 	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
 	UserMetadata   map[string]string
 	SSEAlgorithm   string
+	Segments       []SegmentRef
+	IsAppendable   bool
+}
+
+// SegmentRef identifies one EC-encoded encrypted segment of an appendable
+// object. Order in Object.Segments is append order; per-segment offset is
+// derived as the prefix-sum of preceding sizes.
+type SegmentRef struct {
+	BlobID string // EC/encrypted blob 식별자 (UUIDv7)
+	Size   int64  // plaintext bytes in this segment
+	ETag   string // plaintext MD5 hex (Object.ETag 누적 재계산 입력)
 }
 
 // ACLSetter is an optional interface for backends that support per-object ACL updates.
