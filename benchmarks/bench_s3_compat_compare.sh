@@ -31,6 +31,10 @@ WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
 GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-3}"
+BENCH_PPROF="${BENCH_PPROF:-0}"
+PPROF_BASE_PORT="${PPROF_BASE_PORT:-16060}"
+PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
+GRAINFS_PPROF_PORTS=()
 
 MINIO_BIN="${MINIO_BIN:-$(command -v minio 2>/dev/null || true)}"
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
@@ -145,6 +149,7 @@ start_grainfs_cluster() {
   local enc_key_file="$cluster_dir/encryption.key"
   local http_ports=()
   local raft_ports=()
+  local pprof_ports=()
   local urls=()
   local idx
   mkdir -p "$cluster_dir"
@@ -152,7 +157,13 @@ start_grainfs_cluster() {
     mkdir -p "$cluster_dir/n${idx}"
     http_ports+=("$(bench_free_port)")
     raft_ports+=("$(bench_free_port)")
+    if [[ "$BENCH_PPROF" == "1" ]]; then
+      pprof_ports+=("$((PPROF_BASE_PORT + idx - 1))")
+    fi
   done
+  if [[ "$BENCH_PPROF" == "1" ]]; then
+    GRAINFS_PPROF_PORTS=("${pprof_ports[@]}")
+  fi
   BENCH_ENCRYPTION_KEY_FILE="$enc_key_file"
   export BENCH_ENCRYPTION_KEY_FILE
   bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
@@ -160,6 +171,10 @@ start_grainfs_cluster() {
   start_grainfs_cluster_node() {
     local node_idx="$1"
     local zero_idx=$((node_idx - 1))
+    local extra=()
+    if [[ "$BENCH_PPROF" == "1" ]]; then
+      extra+=(--pprof-port "${pprof_ports[$zero_idx]}")
+    fi
     "$BINARY" serve \
       --data "$cluster_dir/n${node_idx}" \
       --port "${http_ports[$zero_idx]}" \
@@ -172,9 +187,13 @@ start_grainfs_cluster() {
       --scrub-interval 0 \
       --lifecycle-interval 0 \
       --log-level warn \
+      "${extra[@]}" \
       >"$PROFILE_ROOT/grainfs-cluster-node-${node_idx}.log" 2>&1 &
     PIDS+=($!)
     bench_wait_tcp_port "127.0.0.1" "${http_ports[$zero_idx]}" "grainfs-cluster node${node_idx} S3" 180 0.2 >&2
+    if [[ "$BENCH_PPROF" == "1" ]]; then
+      bench_wait_tcp_port "127.0.0.1" "${pprof_ports[$zero_idx]}" "grainfs-cluster node${node_idx} pprof" 60 0.2 >&2
+    fi
   }
 
   start_grainfs_cluster_node 1
@@ -489,7 +508,22 @@ for target in grainfs-single grainfs-cluster minio rustfs; do
   for op in "${WARP_OP_LIST[@]}"; do
     case "$op" in
       get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)
-        run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"
+        if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
+          cpu_dir="$PROFILE_ROOT/grainfs-cluster/pprof-cpu-$op"
+          mkdir -p "$cpu_dir"
+          cpu_pids=()
+          for i in "${!GRAINFS_PPROF_PORTS[@]}"; do
+            ( curl -sf "http://127.0.0.1:${GRAINFS_PPROF_PORTS[$i]}/debug/pprof/profile?seconds=${PPROF_CPU_SECONDS}" \
+                -o "$cpu_dir/cpu-node$((i+1)).pb.gz" \
+                || echo "[pprof] CPU capture failed for node$((i+1)) ($op)" >&2 ) &
+            cpu_pids+=($!)
+          done
+          run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"
+          wait "${cpu_pids[@]}" 2>/dev/null || true
+          echo "[pprof] CPU profiles for $op saved to $cpu_dir"
+        else
+          run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"
+        fi
         ;;
       *)
         echo "[error] unknown WARP_OPS entry: $op" >&2
@@ -497,6 +531,15 @@ for target in grainfs-single grainfs-cluster minio rustfs; do
         ;;
     esac
   done
+
+  if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
+    for i in "${!GRAINFS_PPROF_PORTS[@]}"; do
+      snap_dir="$PROFILE_ROOT/grainfs-cluster/pprof-snap/node$((i+1))"
+      mkdir -p "$snap_dir"
+      echo "[pprof] collecting node$((i+1)) heap/allocs/goroutine/mutex/block snapshots..."
+      bench_collect_pprof "${GRAINFS_PPROF_PORTS[$i]}" "$snap_dir" heap allocs goroutine mutex block
+    done
+  fi
 
   stop_target_backends "$target_pid_start"
 done
