@@ -150,16 +150,20 @@ func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *sto
 	paths := make([]string, 0, total)
 	blobIDs := make([]string, 0, total)
 	kinds := make([]byte, 0, total)
+	ecRefs := make([]*storage.CoalescedRef, 0, total)
 	// Coalesced blobs come first — they represent the older bytes of the object.
-	for _, c := range obj.Coalesced {
+	for i := range obj.Coalesced {
+		c := obj.Coalesced[i]
 		paths = append(paths, b.coalescedBlobPath(bucket, key, c.CoalescedID))
 		blobIDs = append(blobIDs, c.CoalescedID)
 		kinds = append(kinds, appendSegKindCoalesced)
+		ecRefs = append(ecRefs, &c)
 	}
 	for _, s := range obj.Segments {
 		paths = append(paths, b.segmentBlobPath(bucket, key, s.BlobID))
 		blobIDs = append(blobIDs, s.BlobID)
 		kinds = append(kinds, appendSegKindSegment)
+		ecRefs = append(ecRefs, nil)
 	}
 	return &appendableSegmentReader{
 		backend: b,
@@ -168,7 +172,23 @@ func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *sto
 		paths:   paths,
 		blobIDs: blobIDs,
 		kinds:   kinds,
+		ecRefs:  ecRefs,
 	}
+}
+
+// openCoalescedECReader opens an EC-reconstructed stream for one coalesced
+// blob. Returns nil rc when the ref has no EC params (legacy/B2 owner-local
+// entries) so the caller can fall back to local + forward-on-read.
+func (b *DistributedBackend) openCoalescedECReader(ctx context.Context, bucket string, ref *storage.CoalescedRef) (io.ReadCloser, error) {
+	if ref == nil || len(ref.NodeIDs) == 0 || ref.ECData == 0 {
+		return nil, nil
+	}
+	rec := PlacementRecord{
+		Nodes: append([]string(nil), ref.NodeIDs...),
+		K:     int(ref.ECData),
+		M:     int(ref.ECParity),
+	}
+	return b.newECObjectReader().OpenObject(ctx, bucket, ref.ShardKey, rec, ref.Size)
 }
 
 type appendableSegmentReader struct {
@@ -178,8 +198,12 @@ type appendableSegmentReader struct {
 	paths   []string
 	blobIDs []string
 	kinds   []byte // appendSegKindSegment | appendSegKindCoalesced per entry
-	idx     int
-	cur     io.ReadCloser
+	// ecRefs[i] points to the storage.CoalescedRef when kinds[i] is
+	// appendSegKindCoalesced, otherwise nil. Used to drive EC reconstruct
+	// when the owner-local file is absent (B3 path).
+	ecRefs []*storage.CoalescedRef
+	idx    int
+	cur    io.ReadCloser
 }
 
 func (r *appendableSegmentReader) Read(p []byte) (int, error) {
@@ -208,12 +232,28 @@ func (r *appendableSegmentReader) Read(p []byte) (int, error) {
 	}
 }
 
-// openCurrent opens the segment at r.idx. Tries the local file first;
-// on ENOENT falls back to a peer fetch (Phase B1 forward-on-read).
+// openCurrent opens the segment at r.idx.
 //
-// Phase B2: the entry may be a coalesced blob — kinds[idx] tells the peer
-// fetch which on-disk path to resolve (segment vs coalesced).
+//   - B3 coalesced entry with EC params: open via EC reader (peer shards are
+//     the source of truth).
+//   - Otherwise try the owner-local file first; on ENOENT fall back to
+//     forward-on-read (Phase B1 + B2 owner-local coalesced).
 func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
+	kind := byte(appendSegKindSegment)
+	if r.idx < len(r.kinds) {
+		kind = r.kinds[r.idx]
+	}
+	// B3 coalesced: prefer EC reconstruct when EC params are present. Falls
+	// back to local/forward path when params are absent (legacy/B2 entry).
+	if kind == appendSegKindCoalesced && r.backend != nil && r.idx < len(r.ecRefs) && r.ecRefs[r.idx] != nil {
+		rc, err := r.backend.openCoalescedECReader(context.Background(), r.bucket, r.ecRefs[r.idx])
+		if err == nil && rc != nil {
+			return rc, nil
+		}
+		// Fall through to local/peer-fetch on nil rc (no EC params) or transient
+		// EC reader error; the local/forward path is the legacy fallback.
+	}
+
 	path := r.paths[r.idx]
 	f, err := os.Open(path)
 	if err == nil {
@@ -224,10 +264,6 @@ func (r *appendableSegmentReader) openCurrent() (io.ReadCloser, error) {
 	}
 	if r.backend == nil {
 		return nil, fmt.Errorf("open segment %s: %w", path, err)
-	}
-	kind := byte(appendSegKindSegment)
-	if r.idx < len(r.kinds) {
-		kind = r.kinds[r.idx]
 	}
 	rc, ferr := r.backend.fetchAppendBlobFromAnyPeer(context.Background(), r.bucket, r.key, r.blobIDs[r.idx], kind)
 	if ferr != nil {
