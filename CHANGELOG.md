@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.238.0] - 2026-05-18 - perf(raft): reduce heartbeat batch encode allocation
+
+Raft heartbeat batch encoding now allocates less on the sender hot path for
+typical coalesced heartbeat batches. The release keeps the existing wire format
+and preserves the large-batch fallback path with direct round-trip coverage.
+
+### Added
+
+- Added saved benchmark artifacts under `benchmarks/raft-read-frame/` showing
+  the read-frame attribution, heartbeat encode baseline, after run, and
+  `benchstat` comparison.
+- Added a large heartbeat batch round-trip test covering the heap fallback path
+  used when a batch exceeds the inline encode scratch capacity.
+
+### Changed
+
+- `encodeHeartbeatBatch` now uses an inline `[][]byte` scratch array for common
+  small batches, avoiding one heap allocation per encoded heartbeat batch.
+
+### Fixed
+
+- `BenchmarkHeartbeatEncodeBatch` improved from `10 allocs/op` to `9 allocs/op`,
+  `1.813 KiB/op` to `1.625 KiB/op`, and `1.089 us/op` to `1.004 us/op` in the
+  saved `benchstat` run.
+
 ## [0.0.237.0] - 2026-05-18 - perf(raft): reduce heartbeat batch decode allocations
 
 Raft heartbeat batch decoding now allocates less on the receiver hot path while
