@@ -39,7 +39,10 @@ const (
 	CmdSetObjectACL        CommandType = 16
 	CmdSetRing             CommandType = 17
 	// Phase 4 Append-Object: records one appended segment.
-	CmdAppendObject        CommandType = 18
+	CmdAppendObject CommandType = 18
+	// Phase B2 Coalesce: merges a prefix of appendable object segments into a
+	// single coalesced blob ref.
+	CmdCoalesceSegments    CommandType = 19
 	CmdPutObjectQuarantine CommandType = 40
 )
 

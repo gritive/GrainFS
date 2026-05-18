@@ -852,6 +852,55 @@ func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
 	}, nil
 }
 
+func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	cidOff := b.CreateString(c.CoalescedID)
+	skOff := b.CreateString(c.ShardKey)
+	etOff := b.CreateString(c.ETag)
+	var consumedOff flatbuffers.UOffsetT
+	if len(c.ConsumedSegmentIDs) > 0 {
+		consumedOff = buildStringVector(b, c.ConsumedSegmentIDs, clusterpb.CoalesceSegmentsCmdStartConsumedSegmentIdsVector)
+	}
+	clusterpb.CoalesceSegmentsCmdStart(b)
+	clusterpb.CoalesceSegmentsCmdAddBucket(b, bucketOff)
+	clusterpb.CoalesceSegmentsCmdAddKey(b, keyOff)
+	clusterpb.CoalesceSegmentsCmdAddCoalescedId(b, cidOff)
+	clusterpb.CoalesceSegmentsCmdAddShardKey(b, skOff)
+	clusterpb.CoalesceSegmentsCmdAddSize(b, c.Size)
+	clusterpb.CoalesceSegmentsCmdAddEtag(b, etOff)
+	if consumedOff != 0 {
+		clusterpb.CoalesceSegmentsCmdAddConsumedSegmentIds(b, consumedOff)
+	}
+	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
+}
+
+func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.CoalesceSegmentsCmd {
+		return clusterpb.GetRootAsCoalesceSegmentsCmd(d, 0)
+	})
+	if err != nil {
+		return CoalesceSegmentsCmd{}, err
+	}
+	var consumed []string
+	if n := t.ConsumedSegmentIdsLength(); n > 0 {
+		consumed = make([]string, n)
+		for i := range consumed {
+			consumed[i] = string(t.ConsumedSegmentIds(i))
+		}
+	}
+	return CoalesceSegmentsCmd{
+		Bucket:             string(t.Bucket()),
+		Key:                string(t.Key()),
+		CoalescedID:        string(t.CoalescedId()),
+		ShardKey:           string(t.ShardKey()),
+		Size:               t.Size(),
+		ETag:               string(t.Etag()),
+		ConsumedSegmentIDs: consumed,
+	}, nil
+}
+
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -937,6 +986,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
 	case CmdAppendObject:
 		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
+	case CmdCoalesceSegments:
+		return encodeCoalesceSegmentsCmd(payload.(CoalesceSegmentsCmd))
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:
