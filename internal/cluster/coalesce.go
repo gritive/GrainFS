@@ -1,5 +1,11 @@
 package cluster
 
+import (
+	"time"
+
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
 // CoalesceSegmentsCmd is the Raft payload that records a single coalesce
 // operation: take a prefix of objectMeta.Segments (identified by blobIDs in
 // ConsumedSegmentIDs) and replace them with one CoalescedShardRef.
@@ -23,3 +29,30 @@ type CoalesceSegmentsCmd struct {
 // segments keep arriving after each coalesce. Reaching this cap stalls
 // coalesce until the object is rotated/closed.
 const MaxCoalescedEntries = 1024
+
+// evaluateCoalesceTrigger returns (trigger, reason) for the given segment
+// snapshot. Pure function — no side effects.
+//
+// firstCreatedAt is the timestamp of segments[0] (or the first observed
+// time). Caller passes the wall clock for idle comparison (testable).
+//
+// Precedence: count → size → idle. The first satisfied condition wins.
+func evaluateCoalesceTrigger(segs []storage.SegmentRef, firstCreatedAt, now time.Time, cfg CoalesceConfig) (bool, string) {
+	if len(segs) == 0 {
+		return false, ""
+	}
+	if cfg.SegmentCount > 0 && len(segs) >= cfg.SegmentCount {
+		return true, "count"
+	}
+	var total int64
+	for _, s := range segs {
+		total += s.Size
+	}
+	if cfg.SizeBytes > 0 && total >= cfg.SizeBytes {
+		return true, "size"
+	}
+	if cfg.IdleTimeout > 0 && now.Sub(firstCreatedAt) >= cfg.IdleTimeout {
+		return true, "idle"
+	}
+	return false, ""
+}
