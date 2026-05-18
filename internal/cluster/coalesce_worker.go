@@ -25,8 +25,9 @@ type coalesceWorker struct {
 	inflight map[coalesceJob]bool
 	pending  map[coalesceJob]bool
 
-	stop chan struct{}
-	done chan struct{}
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 func newCoalesceWorker(bufferSize int, fn coalesceProcessFn) *coalesceWorker {
@@ -46,9 +47,13 @@ func (w *coalesceWorker) Start(ctx context.Context) {
 	go w.loop(ctx)
 }
 
-// Stop signals the worker to exit and waits for it. Safe to call after Start.
+// Stop signals the worker to exit and waits for it. Idempotent: subsequent
+// calls observe the already-closed stop channel and return after the worker
+// has drained.
 func (w *coalesceWorker) Stop() {
-	close(w.stop)
+	w.stopOnce.Do(func() {
+		close(w.stop)
+	})
 	<-w.done
 }
 

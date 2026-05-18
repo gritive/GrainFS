@@ -210,6 +210,17 @@ func (g *GroupBackend) Close() error {
 	var err error
 	g.closeOnce.Do(func() {
 		g.closed.Store(true)
+		// Always stop the inner backend's coalesce worker + backstop scan,
+		// even in wrapped mode (caller owns the DB but not these helper
+		// goroutines).
+		if g.DistributedBackend != nil {
+			if g.coalesceCancel != nil {
+				g.coalesceCancel()
+			}
+			if g.coalesce != nil {
+				g.coalesce.Stop()
+			}
+		}
 		if g.wrapped {
 			// Caller owns DB/Node lifecycle.
 			return
