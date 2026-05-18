@@ -2,15 +2,15 @@ goos: darwin
 goarch: arm64
 pkg: github.com/gritive/GrainFS/internal/raft
 cpu: Apple M3
-BenchmarkHeartbeatEncodeBatch-8   	 1180485	      1003 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1200769	      1006 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1035 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1201244	      1002 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1008 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1004 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1000 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1202146	       999.5 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1001 ns/op	    1664 B/op	       9 allocs/op
-BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1022 ns/op	    1664 B/op	       9 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1292738	       912.6 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1311313	       915.4 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1307278	       914.9 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1311436	       946.3 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1313374	       915.7 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1314517	       916.5 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1305553	       914.3 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1314288	       914.0 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1286510	       932.5 ns/op	     896 B/op	       1 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1301950	       915.9 ns/op	     896 B/op	       1 allocs/op
 PASS
-ok  	github.com/gritive/GrainFS/internal/raft	15.026s
+ok  	github.com/gritive/GrainFS/internal/raft	21.518s

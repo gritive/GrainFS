@@ -3,13 +3,13 @@ goarch: arm64
 pkg: github.com/gritive/GrainFS/internal/raft
 cpu: Apple M3
                        │ benchmarks/raft-read-frame/before-heartbeat-encode.txt │ benchmarks/raft-read-frame/after-heartbeat-encode.txt │
-                       │                         sec/op                         │             sec/op              vs base               │
-HeartbeatEncodeBatch-8                                              1.089µ ± 3%                      1.004µ ± 2%  -7.85% (p=0.000 n=10)
+                       │                         sec/op                         │            sec/op              vs base                │
+HeartbeatEncodeBatch-8                                             1089.0n ± 3%                     915.6n ± 2%  -15.93% (p=0.000 n=10)
 
                        │ benchmarks/raft-read-frame/before-heartbeat-encode.txt │ benchmarks/raft-read-frame/after-heartbeat-encode.txt │
                        │                          B/op                          │             B/op               vs base                │
-HeartbeatEncodeBatch-8                                             1.813Ki ± 0%                    1.625Ki ± 0%  -10.39% (p=0.000 n=10)
+HeartbeatEncodeBatch-8                                              1857.0 ± 0%                      896.0 ± 0%  -51.75% (p=0.000 n=10)
 
                        │ benchmarks/raft-read-frame/before-heartbeat-encode.txt │ benchmarks/raft-read-frame/after-heartbeat-encode.txt │
                        │                       allocs/op                        │           allocs/op            vs base                │
-HeartbeatEncodeBatch-8                                              10.000 ± 0%                      9.000 ± 0%  -10.00% (p=0.000 n=10)
+HeartbeatEncodeBatch-8                                              10.000 ± 0%                      1.000 ± 0%  -90.00% (p=0.000 n=10)
