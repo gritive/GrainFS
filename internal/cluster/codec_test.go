@@ -488,3 +488,43 @@ func TestCoalesceSegmentsCmdECParamsRoundTrip(t *testing.T) {
 		t.Fatalf("Placement mismatch: %v", got.Placement)
 	}
 }
+
+func TestPutObjectMetaCmd_PartsRoundtrip(t *testing.T) {
+	cmd := PutObjectMetaCmd{
+		Bucket: "b", Key: "k", VersionID: "v", PlacementGroupID: "g",
+		Size: 12, ETag: "etag-full",
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 5, ETag: "p1"},
+			{PartNumber: 2, Size: 7, ETag: "p2"},
+		},
+	}
+	raw, err := encodePutObjectMetaCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodePutObjectMetaCmd(raw)
+	require.NoError(t, err)
+	require.Equal(t, cmd.Parts, got.Parts)
+}
+
+func TestObjectMeta_PartsRoundtrip(t *testing.T) {
+	m := objectMeta{
+		Key: "k", Size: 12, ETag: "etag-full", PlacementGroupID: "g",
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 5, ETag: "p1"},
+			{PartNumber: 2, Size: 7, ETag: "p2"},
+		},
+	}
+	raw, err := marshalObjectMeta(m)
+	require.NoError(t, err)
+	got, err := unmarshalObjectMeta(raw)
+	require.NoError(t, err)
+	require.Equal(t, m.Parts, got.Parts)
+}
+
+func TestObjectMeta_PartsLegacyDecode(t *testing.T) {
+	m := objectMeta{Key: "k", Size: 1, ETag: "e", PlacementGroupID: "g"}
+	raw, err := marshalObjectMeta(m)
+	require.NoError(t, err)
+	got, err := unmarshalObjectMeta(raw)
+	require.NoError(t, err)
+	require.Nil(t, got.Parts)
+}

@@ -2409,6 +2409,24 @@ func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshot
 	if len(e.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, e.NodeIDs, clusterpb.MetaObjectIndexEntryStartNodeIdsVector)
 	}
+	// parts — build child MultipartPartEntry tables BEFORE MetaObjectIndexEntryStart.
+	var partsOff flatbuffers.UOffsetT
+	if len(e.Parts) > 0 {
+		partOffs := make([]flatbuffers.UOffsetT, len(e.Parts))
+		for i, p := range e.Parts {
+			etOff := b.CreateString(p.ETag)
+			clusterpb.MultipartPartEntryStart(b)
+			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+			clusterpb.MultipartPartEntryAddSize(b, p.Size)
+			clusterpb.MultipartPartEntryAddEtag(b, etOff)
+			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+		}
+		clusterpb.MetaObjectIndexEntryStartPartsVector(b, len(partOffs))
+		for i := len(partOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partOffs[i])
+		}
+		partsOff = b.EndVector(len(partOffs))
+	}
 	clusterpb.MetaObjectIndexEntryStart(b)
 	clusterpb.MetaObjectIndexEntryAddBucket(b, bucketOff)
 	clusterpb.MetaObjectIndexEntryAddKey(b, keyOff)
@@ -2428,6 +2446,9 @@ func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshot
 	}
 	if entry.IsLatest {
 		clusterpb.MetaObjectIndexEntryAddIsLatest(b, true)
+	}
+	if partsOff != 0 {
+		clusterpb.MetaObjectIndexEntryAddParts(b, partsOff)
 	}
 	return clusterpb.MetaObjectIndexEntryEnd(b)
 }
@@ -2449,6 +2470,21 @@ func buildMetaObjectIndexEntriesVector(b *flatbuffers.Builder, entries []objectI
 }
 
 func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndexEntry {
+	var parts []storage.MultipartPartEntry
+	if n := entry.PartsLength(); n > 0 {
+		parts = make([]storage.MultipartPartEntry, n)
+		var pe clusterpb.MultipartPartEntry
+		for i := 0; i < n; i++ {
+			if !entry.Parts(&pe, i) {
+				continue
+			}
+			parts[i] = storage.MultipartPartEntry{
+				PartNumber: int(pe.PartNumber()),
+				Size:       pe.Size(),
+				ETag:       string(pe.Etag()),
+			}
+		}
+	}
 	return ObjectIndexEntry{
 		Bucket:           string(entry.Bucket()),
 		Key:              string(entry.Key()),
@@ -2462,6 +2498,7 @@ func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndex
 		ECParity:         entry.EcParity(),
 		NodeIDs:          readStringVector(entry.NodeIdsLength(), entry.NodeIds),
 		IsDeleteMarker:   entry.IsDeleteMarker(),
+		Parts:            parts,
 	}
 }
 
