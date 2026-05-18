@@ -625,7 +625,7 @@ func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 }
 
 func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
-	return &storage.Object{
+	obj := &storage.Object{
 		Key:          entry.Key,
 		Size:         entry.Size,
 		ContentType:  entry.ContentType,
@@ -633,6 +633,12 @@ func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
 		LastModified: entry.ModTime,
 		VersionID:    entry.VersionID,
 	}
+	if len(entry.Parts) > 0 {
+		parts := make([]storage.MultipartPartEntry, len(entry.Parts))
+		copy(parts, entry.Parts)
+		obj.Parts = parts
+	}
+	return obj
 }
 
 func objectIndexEntryToVersion(entry ObjectIndexEntry, isLatest bool) *storage.ObjectVersion {

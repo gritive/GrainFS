@@ -80,3 +80,16 @@ func TestMetaFSM_SnapshotRestore_PreservesParts(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, entry.Parts, got.Parts)
 }
+
+func TestObjectIndexEntryToObject_CopiesParts(t *testing.T) {
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: 5, ETag: "p1"},
+		{PartNumber: 2, Size: 7, ETag: "p2"},
+	}
+	entry := ObjectIndexEntry{
+		Bucket: "b", Key: "k", VersionID: "v", PlacementGroupID: "g",
+		Size: 12, ETag: "e", Parts: parts,
+	}
+	obj := objectIndexEntryToObject(entry)
+	require.Equal(t, parts, obj.Parts)
+}
