@@ -19,10 +19,12 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// DefaultMaxForwardBodyBytes is the compatibility cap for legacy single-message
-// forwarding. Production wiring uses streamed body forwarding for PutObject and
-// UploadPart so larger objects do not allocate into the forward frame.
-const DefaultMaxForwardBodyBytes = 5 * 1024 * 1024
+// DefaultMaxForwardBodyBytes is the body cap for AppendObject forward buffering.
+// Raised to 64 MiB to match the HTTP-layer appendBodyMaxBytes cap so that
+// large append bodies are not rejected at the coordinator before reaching the
+// forward path. PutObject and UploadPart use streamed forwarding and are
+// unaffected.
+const DefaultMaxForwardBodyBytes = 64 * 1024 * 1024
 
 // DefaultMaxForwardReplyBytes follows the transport frame guard. Forwarded
 // GetObject still returns one framed response; 16 MiB EC smoke reads fit here
@@ -117,7 +119,8 @@ type ClusterCoordinator struct {
 	opRouter  *OpRouter
 	localExec *LocalExecution
 
-	maxBody int64
+	maxBody             int64
+	appendForwardBuffer *appendForwardBuffer
 }
 
 type clusterCoordinatorRuntime struct {
@@ -154,12 +157,13 @@ func NewClusterCoordinator(
 	selfID string,
 ) *ClusterCoordinator {
 	c := &ClusterCoordinator{
-		base:    base,
-		groups:  groups,
-		router:  router,
-		meta:    meta,
-		selfID:  selfID,
-		maxBody: DefaultMaxForwardBodyBytes,
+		base:                base,
+		groups:              groups,
+		router:              router,
+		meta:                meta,
+		selfID:              selfID,
+		maxBody:             DefaultMaxForwardBodyBytes,
+		appendForwardBuffer: newAppendForwardBuffer(DefaultAppendForwardBufferConfig().TotalBytes),
 	}
 	c.rebuild()
 	return c
@@ -197,6 +201,13 @@ func (c *ClusterCoordinator) WithECConfig(cfg ECConfig) *ClusterCoordinator {
 	c.ecConfig = cfg
 	c.rebuild()
 	return c
+}
+
+// SetAppendForwardBufferConfig replaces the appendForwardBuffer semaphore with
+// a new one sized to cfg.TotalBytes. Intended for test wiring and CLI flag
+// injection; not concurrent-safe with in-flight forwards.
+func (c *ClusterCoordinator) SetAppendForwardBufferConfig(cfg AppendForwardBufferConfig) {
+	c.appendForwardBuffer = newAppendForwardBuffer(cfg.TotalBytes)
 }
 
 func (c *ClusterCoordinator) WithObjectIndexProposer(p objectIndexProposer) *ClusterCoordinator {
@@ -1604,17 +1615,32 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 		return obj, nil
 	}
 
-	// Forward branch — must have a stream dialer because append bodies are
-	// streamed (no inline-body fallback for AppendObject).
+	// Forward branch — buffer the body under c.maxBody before acquiring the
+	// semaphore so the reservation size is exact. Buffering here mirrors what
+	// appendObjectLocalWithRetry does on the local-exec branch.
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
 	if c.forward.streamDialer == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
+	forwardBody, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(forwardBody)) > c.maxBody {
+		return nil, storage.ErrEntityTooLarge
+	}
+	bodyLen := int64(len(forwardBody))
+	if c.appendForwardBuffer != nil {
+		if err := c.appendForwardBuffer.Acquire(ctx, bodyLen); err != nil {
+			return nil, err
+		}
+		defer c.appendForwardBuffer.Release(bodyLen)
+	}
 	args := buildAppendObjectForwardArgs(bucket, key, expectedOffset)
 	peers := c.forward.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
-	reply, err := c.forward.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpAppendObject, args, r)
+	reply, err := c.forward.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bytes.NewReader(forwardBody))
 	if err != nil {
 		return nil, topologyForwardWriteError(group, err)
 	}

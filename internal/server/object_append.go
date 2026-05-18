@@ -20,6 +20,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -77,6 +78,9 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 	case errors.Is(err, storage.ErrAppendCapExceeded):
 		c.Response.Header.Set("Retry-After", "1")
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append segment cap reached")
+	case errors.Is(err, cluster.ErrForwardBufferFull):
+		c.Response.Header.Set("Retry-After", "1")
+		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append forward buffer saturated")
 	case err != nil:
 		mapError(c, err)
 	default:
