@@ -2,15 +2,20 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestIcebergRoute_AnonymousModeRemoved_NoBypass asserts that NO iceberg
@@ -105,4 +110,148 @@ func TestIcebergError_JSON_Shape_OnAuthFailure(t *testing.T) {
 	assert.Equal(t, "NotAuthorizedException", env.Error.Type)
 	assert.Equal(t, 401, env.Error.Code)
 	assert.NotEmpty(t, env.Error.Message)
+}
+
+// TestIcebergRoute_ExpiredSignature_Returns401: X-Amz-Date outside the ±15 min
+// skew window is rejected at the iceberg branch of authMiddleware, before the
+// SigV4 verifier runs (header-path s3auth.Verify does not enforce skew on its
+// own; the iceberg branch tightens that here).
+func TestIcebergRoute_ExpiredSignature_Returns401(t *testing.T) {
+	base, ak, sk := setupIcebergTestServer(t)
+
+	req, err := http.NewRequest(http.MethodPost, base+"/iceberg/v1/warehouses", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	s3auth.SignRequestAt(req, ak, sk, "us-east-1", time.Now().UTC().Add(-30*time.Minute))
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+}
+
+// TestIcebergRoute_ValidSigV4_Passes: a properly signed GET /iceberg/v1/config
+// with the bootstrapped key passes the auth gate (not 401, not 403). The
+// handler's specific response status (200, 501, etc.) is downstream-of-auth
+// and intentionally not asserted here.
+func TestIcebergRoute_ValidSigV4_Passes(t *testing.T) {
+	base, ak, sk := setupIcebergTestServer(t)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	s3auth.SignRequest(req, ak, sk, "us-east-1")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode, "auth gate should pass")
+	assert.NotEqual(t, http.StatusForbidden, resp.StatusCode, "auth gate should pass")
+}
+
+// TestIcebergRoute_BearerHeader_Returns401: an `Authorization: Bearer <token>`
+// header is NOT silently accepted by the iceberg branch. Boundary guard against
+// a future OAuth2 PR silently bypassing the SigV4 gate.
+func TestIcebergRoute_BearerHeader_Returns401(t *testing.T) {
+	base, _, _ := setupIcebergTestServer(t)
+
+	req, err := http.NewRequest(http.MethodPost, base+"/iceberg/v1/warehouses", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer some-fake-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+	var env struct {
+		Error struct {
+			Type string `json:"type"`
+			Code int    `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	assert.Equal(t, "NotAuthorizedException", env.Error.Type)
+}
+
+// setupIcebergTestServerNoCache builds a server backed by a CachingVerifier
+// with TTL=0 (effectively no caching: same-instant expiresAt fails the
+// `time.Now().Before(expiresAt)` check), wired to a closure-backed credential
+// store the test can mutate mid-test to simulate KeyRevoke. The no-cache wiring
+// is the spec §5.1 #9 deterministic-by-design requirement — CachingVerifier's
+// production TTL means a revoked key may transiently pass until the cached
+// entry ages out; that staleness behavior is documented and out of scope here.
+func setupIcebergTestServerNoCache(t *testing.T) (base, ak, sk string, revoke func()) {
+	t.Helper()
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	const accessKey = "noCacheKey"
+	const secretKey = "noCacheSecret"
+
+	var mu sync.RWMutex
+	live := map[string]string{accessKey: secretKey}
+
+	inner := s3auth.NewVerifier(nil)
+	inner.SecretLookup = func(k string) (string, bool) {
+		mu.RLock()
+		defer mu.RUnlock()
+		s, ok := live[k]
+		return s, ok
+	}
+	verifier := s3auth.NewCachingVerifier(inner, 4096, 0) // TTL=0 → no caching
+
+	port := freePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	srv := New(addr, backend, WithVerifier(verifier))
+	go srv.Run()
+	for i := 0; i < 50; i++ {
+		conn, err := net.Dial("tcp", addr)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	revoke = func() {
+		mu.Lock()
+		delete(live, accessKey)
+		mu.Unlock()
+	}
+	return "http://" + addr, accessKey, secretKey, revoke
+}
+
+// TestIcebergRoute_RevokedKey_Returns401: a properly signed request with a
+// revoked access key is rejected. Verifier runs with caching disabled (TTL=0)
+// so the assertion is deterministic — see spec §5.1 #9 footnote on
+// CachingVerifier TTL staleness.
+func TestIcebergRoute_RevokedKey_Returns401(t *testing.T) {
+	base, ak, sk, revoke := setupIcebergTestServerNoCache(t)
+
+	// Sanity: before revoke, signed request passes the auth gate.
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	s3auth.SignRequest(req, ak, sk, "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.NotEqual(t, http.StatusUnauthorized, resp.StatusCode, "pre-revoke should not be 401")
+
+	// Revoke the key, then a freshly signed request must be 401.
+	revoke()
+
+	req2, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	s3auth.SignRequest(req2, ak, sk, "us-east-1")
+	resp2, err := http.DefaultClient.Do(req2)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
+	assert.Contains(t, resp2.Header.Get("Content-Type"), "application/json")
 }

@@ -3,11 +3,19 @@ package server
 import (
 	"context"
 	"net"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
+
+// icebergSigV4SkewWindow is the maximum allowed clock drift between a SigV4
+// X-Amz-Date and the server's wall clock for iceberg REST callers. Matches
+// AWS standard (±15 min). Header-path SigV4 in s3auth.Verify does not enforce
+// skew; the iceberg branch tightens that here for the iceberg trust boundary.
+const icebergSigV4SkewWindow = 15 * time.Minute
 
 func isBucketFormPost(c *app.RequestContext) bool {
 	return string(c.Method()) == "POST" &&
@@ -69,10 +77,20 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			return
 		}
 
+		isIceberg := routeSurfaceForPath(path) == routeSurfaceIceberg
+		if isIceberg {
+			if reason := icebergSkewReject(r); reason != "" {
+				s.recordAuditAuthFailure(ctx, c, consts.StatusUnauthorized, "authn")
+				writeIcebergError(c, 401, "NotAuthorizedException", reason)
+				c.Abort()
+				return
+			}
+		}
+
 		nextCtx, failure := s.authenticateSignedRequest(ctx, r)
 		if failure != nil {
 			s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
-			if routeSurfaceForPath(path) == routeSurfaceIceberg {
+			if isIceberg {
 				// Iceberg REST clients distinguish 401 (auth required) from 403
 				// (post-authz forbidden). The S3 verifier returns 403 for every
 				// authn failure; remap to 401 + NotAuthorizedException for Iceberg
@@ -88,6 +106,29 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		ctx = nextCtx
 		c.Next(ctx)
 	}
+}
+
+// icebergSkewReject returns a non-empty rejection reason if the request's
+// X-Amz-Date is outside the ±15 minute skew window. Returns "" to defer to
+// the normal SigV4 verifier (including the "no auth header at all" path —
+// missing X-Amz-Date is the verifier's job to reject, not the skew gate's).
+func icebergSkewReject(r *http.Request) string {
+	amzDate := r.Header.Get("X-Amz-Date")
+	if amzDate == "" {
+		// Also covers presigned URLs where the query carries the date.
+		amzDate = r.URL.Query().Get("X-Amz-Date")
+	}
+	if amzDate == "" {
+		return ""
+	}
+	t, err := time.Parse("20060102T150405Z", amzDate)
+	if err != nil {
+		return "invalid X-Amz-Date"
+	}
+	if d := time.Since(t); d > icebergSigV4SkewWindow || d < -icebergSigV4SkewWindow {
+		return "request signature outside allowed time window"
+	}
+	return ""
 }
 
 // isLocalhostAddr reports whether addr (typically from c.RemoteAddr().String(),

@@ -539,9 +539,16 @@ func PresignURLAt(method, rawURL, accessKey, secretKey, region string, expires i
 
 // SignRequest signs an HTTP request with AWS Signature V4 (for testing and internal use).
 func SignRequest(r *http.Request, accessKey, secretKey, region string) {
-	now := time.Now().UTC()
-	date := now.Format("20060102")
-	amzDate := now.Format("20060102T150405Z")
+	SignRequestAt(r, accessKey, secretKey, region, time.Now().UTC())
+}
+
+// SignRequestAt signs an HTTP request with AWS Signature V4 using an explicit
+// signing time. Used by tests that need to backdate (or future-date) the
+// X-Amz-Date header — e.g. skew-window enforcement tests.
+func SignRequestAt(r *http.Request, accessKey, secretKey, region string, when time.Time) {
+	when = when.UTC()
+	date := when.Format("20060102")
+	amzDate := when.Format("20060102T150405Z")
 
 	r.Header.Set("X-Amz-Date", amzDate)
 	r.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
