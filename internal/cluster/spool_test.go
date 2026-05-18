@@ -120,6 +120,36 @@ func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testin
 	require.Equal(t, bytes.Repeat([]byte("a"), len(buf)), buf)
 }
 
+func TestCopyToSpoolChunkedHandlesLargeReaders(t *testing.T) {
+	// A naive io.Copy(spoolWriter, bytes.NewReader(large)) would invoke
+	// bytes.Reader.WriteTo, producing one giant sealed record that the
+	// reader rejects as "blob too large". multipart UploadPart hit this
+	// when warp pushed 5 MiB parts through the encrypted spool path.
+	// copyToSpoolChunked must keep every record within the invariant.
+	enc := newClusterTestEncryptor(t)
+	dir := t.TempDir()
+	path := dir + "/part"
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	domain := "spool:test-large"
+	w := &encryptedSpoolRecordWriter{w: f, enc: enc, domain: domain}
+
+	// Use a bytes.Reader so WriteTo is implemented; the helper must still
+	// chunk the copy through a spoolCopyBufferSize-sized buffer.
+	payload := bytes.Repeat([]byte("multipart-part-byte"), (5*spoolCopyBufferSize)/19+1)
+	n, err := copyToSpoolChunked(w, bytes.NewReader(payload))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(payload)), n)
+	require.NoError(t, f.Close())
+
+	rc, err := openSpoolEncryptedRecordFile(path, enc, domain)
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, payload, got)
+}
+
 func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
 	enc := newClusterTestEncryptor(t)
 	payload := []byte("sensitive cluster spool payload")

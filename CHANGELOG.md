@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased - fix(cluster): chunk multipart UploadPart writes through the encrypted spool
+
+### Fixed
+- `DistributedBackend.UploadPart` previously copied the part body
+  into the encrypted spool record stream with a bare `io.Copy`. When
+  the caller-side reader implemented `WriteTo` (for example
+  `*bytes.Reader`, which warp uses for 5 MiB parts), the writer
+  received the entire part in a single `Write`, producing one sealed
+  record larger than the `maxEncryptedSpoolBlobBytes = 2 MiB`
+  receiver-side invariant. `CompleteMultipartUpload` then failed with
+  `copy part 2: read encrypted spool record: blob too large` and the
+  multipart workload could not run on an at-rest-encrypted cluster.
+  `UploadPart` now copies through `copyToSpoolChunked`, which uses a
+  pooled `spoolCopyBufferSize` buffer and hides any `WriteTo` fast
+  path so every Write to the encrypted spool record writer stays
+  within the chunk invariant. Reader-side reject behaviour is
+  unchanged.
+
+### Tests
+- New `TestCopyToSpoolChunkedHandlesLargeReaders` writes a
+  ~5 MiB payload through `copyToSpoolChunked` into the encrypted
+  spool record writer and round-trips it through
+  `openSpoolEncryptedRecordFile`. Without the helper the read would
+  fail on the first record header with `blob too large`.
+
 ## Unreleased - bench(s3-compat): expand warp op coverage for 4-node sweeps
 
 ### Changed

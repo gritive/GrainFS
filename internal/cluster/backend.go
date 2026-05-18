@@ -3213,7 +3213,7 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 		}
 	}
 	w := io.MultiWriter(partWriter, h)
-	size, err := io.Copy(w, r)
+	size, err := copyToSpoolChunked(w, r)
 	f.Close()
 	if err != nil {
 		os.Remove(partFile)
