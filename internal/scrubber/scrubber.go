@@ -82,6 +82,21 @@ type PlainRecord struct {
 	ContentType string
 }
 
+// AppendableRecord carries metadata for an appendable object so the scrubber
+// can build the known-segment set for orphan sweep.
+type AppendableRecord struct {
+	Bucket         string
+	Key            string
+	SegmentBlobIDs []string // raw segment blob IDs (bounded by coalesce threshold)
+}
+
+// AppendableScannable is an optional Scrubbable extension that streams
+// appendable objects for a bucket. Cluster backends implement this so the
+// scrubber can build the known-segment set for orphan sweep.
+type AppendableScannable interface {
+	ScanAppendableObjects(bucket string) (<-chan AppendableRecord, error)
+}
+
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
 // If the backend implements this, the scrubber will re-encode plain objects each cycle.
 type Migrator interface {
