@@ -18,7 +18,7 @@ import (
 //	                                           the threshold (0/neg/invalid -> OFF)
 func parseIcebergDiagEnv() (accessLog bool, slowThresholdNs int64) {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRAINFS_ICEBERG_ACCESS_LOG"))) {
-	case "1", "true", "yes", "on":
+	case "1", "true":
 		accessLog = true
 	}
 	raw := strings.TrimSpace(os.Getenv("GRAINFS_ICEBERG_COMMIT_TRACE_MS"))
@@ -41,10 +41,4 @@ func (s *Server) applyIcebergDiagEnv() {
 	access, slowNs := parseIcebergDiagEnv()
 	s.icebergAccessLogEnabled.Store(access)
 	s.icebergCommitSlowThresholdNs.Store(slowNs)
-}
-
-// icebergSlowThresholdNs is a tiny accessor used by tests to flip the
-// threshold without going through the env.
-func (s *Server) icebergSlowThresholdNs() int64 {
-	return s.icebergCommitSlowThresholdNs.Load()
 }

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +22,8 @@ func TestParseIcebergDiagEnv(t *testing.T) {
 		{"both unset", "", "", false, 0, false},
 		{"access log on", "1", "", true, 0, false},
 		{"access log true", "true", "", true, 0, false},
-		{"trace 2000ms", "", "2000", false, 2 * int64(time.Millisecond) * 1000, false},
-		{"both set", "1", "2000", true, 2 * int64(time.Millisecond) * 1000, false},
+		{"trace 2000ms", "", "2000", false, 2 * int64(time.Second), false},
+		{"both set", "1", "2000", true, 2 * int64(time.Second), false},
 		{"trace abc invalid", "", "abc", false, 0, true},
 		{"trace negative", "", "-5", false, 0, false},
 		{"trace zero", "", "0", false, 0, false},
@@ -33,12 +32,6 @@ func TestParseIcebergDiagEnv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GRAINFS_ICEBERG_ACCESS_LOG", tc.accessLogEnv)
 			t.Setenv("GRAINFS_ICEBERG_COMMIT_TRACE_MS", tc.traceMsEnv)
-			if tc.accessLogEnv == "" {
-				os.Unsetenv("GRAINFS_ICEBERG_ACCESS_LOG")
-			}
-			if tc.traceMsEnv == "" {
-				os.Unsetenv("GRAINFS_ICEBERG_COMMIT_TRACE_MS")
-			}
 
 			var buf bytes.Buffer
 			old := log.Logger
