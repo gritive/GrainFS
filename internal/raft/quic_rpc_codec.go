@@ -41,14 +41,6 @@ func releaseBorrowedRPCPayloads(payloads []borrowedRPCPayload) {
 	}
 }
 
-// encodeAppendEntriesArgs serializes just the AppendEntriesArgs FlatBuffer
-// (no RPCMessage envelope). Used by the heartbeat coalescer where the rpc
-// type is implicit (always AppendEntries) and the envelope overhead per
-// batch item is wasteful.
-func encodeAppendEntriesArgs(args *AppendEntriesArgs) ([]byte, error) {
-	return encodeRPCPayload(rpcTypeAppendEntries, args)
-}
-
 func borrowAppendEntriesArgsPayload(args *AppendEntriesArgs) borrowedRPCPayload {
 	b := raftBuilderPool.Get()
 	root := buildAppendEntriesArgsFlatBuffer(b, args)
@@ -94,8 +86,8 @@ func buildAppendEntriesArgsFlatBuffer(b *flatbuffers.Builder, args *AppendEntrie
 	return pb.AppendEntriesArgsEnd(b)
 }
 
-// encodeAppendEntriesReply serializes just the AppendEntriesReply FlatBuffer.
-// Mirror of encodeAppendEntriesArgs for batch reply payloads.
+// encodeAppendEntriesReply serializes just the AppendEntriesReply FlatBuffer
+// (no RPCMessage envelope) for batch reply payloads.
 func encodeAppendEntriesReply(reply *AppendEntriesReply) ([]byte, error) {
 	return encodeRPCPayload(rpcTypeAppendEntriesReply, reply)
 }

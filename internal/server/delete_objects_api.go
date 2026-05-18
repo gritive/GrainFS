@@ -57,7 +57,7 @@ func (s *Server) deleteObjects(ctx context.Context, c *app.RequestContext, bucke
 		switch {
 		case err == nil, errors.Is(err, storage.ErrObjectNotFound):
 			if !req.Quiet {
-				result.Deleted = append(result.Deleted, deleteObjectsDeleted{Key: obj.Key})
+				result.Deleted = append(result.Deleted, deleteObjectsDeleted(obj))
 			}
 		case errors.Is(err, storage.ErrBucketNotFound):
 			mapError(c, err)
