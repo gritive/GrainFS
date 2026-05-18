@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
@@ -112,6 +113,8 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketVersioning(cmd.Data)
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
+	case CmdAppendObject:
+		return f.applyAppendObjectFromCmd(cmd.Data)
 	case CmdPutObjectQuarantine:
 		return f.applyPutObjectQuarantine(cmd.Data)
 	default:
@@ -646,6 +649,109 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 				return f.setValue(txn, vKey, vNewVal)
 			})
 		})
+	})
+}
+
+// applyAppendObjectFromCmd handles a CmdAppendObject Raft entry. Mirrors the
+// applySetObjectACL read-mutate-write pattern: read existing objectMeta →
+// validate append invariants → write updated objectMeta with the new segment.
+//
+// Idempotent on replay: if the segment's BlobID already appears in
+// existing.Segments (replay of an already-applied entry), this is a no-op.
+//
+// Append objects are NOT versioned in this phase — only the legacy
+// ObjectMetaKey is written (no ObjectMetaKeyV / LatestKey dual-write).
+func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
+	cmd, err := decodeAppendObjectCmd(data)
+	if err != nil {
+		return fmt.Errorf("decode AppendObjectCmd: %w", err)
+	}
+
+	return f.db.Update(func(txn *badger.Txn) error {
+		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+
+		// Read existing objectMeta (if any).
+		var existing *objectMeta
+		item, gerr := txn.Get(metaKey)
+		if gerr == nil {
+			if err := item.Value(func(raw []byte) error {
+				v, oerr := f.openValue(item.Key(), raw)
+				if oerr != nil {
+					return oerr
+				}
+				m, derr := unmarshalObjectMeta(v)
+				if derr != nil {
+					return fmt.Errorf("unmarshal existing objectMeta: %w", derr)
+				}
+				existing = &m
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
+			return fmt.Errorf("get existing objectMeta: %w", gerr)
+		}
+
+		// Placement check: cmd captured PG at propose time; reject if the
+		// existing object's PG has moved since (rebalance window).
+		if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
+			cmd.PlacementGroupID != existing.PlacementGroupID {
+			return ErrStalePlacement
+		}
+
+		seg := storage.SegmentRef{
+			BlobID: cmd.BlobID,
+			Size:   cmd.SegmentSize,
+			ETag:   cmd.SegmentETag,
+		}
+
+		// Idempotency: same BlobID already applied (Raft replay) → no-op.
+		if existing != nil {
+			for _, s := range existing.Segments {
+				if s.BlobID == cmd.BlobID {
+					return nil
+				}
+			}
+		}
+
+		var updated objectMeta
+		if existing == nil {
+			if cmd.ExpectedOffset != 0 {
+				return storage.ErrAppendOffsetMismatch
+			}
+			updated = objectMeta{
+				Key:              cmd.Key,
+				Size:             seg.Size,
+				ContentType:      "application/octet-stream",
+				ETag:             storage.CompositeETag([]storage.SegmentRef{seg}),
+				LastModified:     time.Now().Unix(),
+				PlacementGroupID: cmd.PlacementGroupID,
+				Segments:         []storage.SegmentRef{seg},
+				IsAppendable:     true,
+			}
+		} else {
+			if !existing.IsAppendable {
+				return storage.ErrAppendNotSupported
+			}
+			if existing.Size != cmd.ExpectedOffset {
+				return storage.ErrAppendOffsetMismatch
+			}
+			if len(existing.Segments) >= storage.MaxAppendSegments {
+				return storage.ErrAppendCapExceeded
+			}
+			segs := append(existing.Segments, seg)
+			updated = *existing
+			updated.Segments = segs
+			updated.Size = existing.Size + seg.Size
+			updated.ETag = storage.CompositeETag(segs)
+			updated.LastModified = time.Now().Unix()
+		}
+
+		out, err := marshalObjectMeta(updated)
+		if err != nil {
+			return fmt.Errorf("marshal updated objectMeta: %w", err)
+		}
+		return f.setValue(txn, metaKey, out)
 	})
 }
 

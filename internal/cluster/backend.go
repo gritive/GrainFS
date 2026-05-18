@@ -2819,6 +2819,8 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				ACL:          m.ACL,
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
+				Segments:     m.Segments,
+				IsAppendable: m.IsAppendable,
 			}
 			placement = PlacementMeta{
 				VersionID:        versionID,

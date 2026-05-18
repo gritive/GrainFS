@@ -8,6 +8,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/pool"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var clusterBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
@@ -28,6 +29,12 @@ type objectMeta struct {
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
+	// Segments holds the ordered list of append segments for appendable
+	// objects. Empty/nil for legacy single-blob (non-appendable) objects.
+	Segments []storage.SegmentRef
+	// IsAppendable indicates the object was created via AppendObject and may
+	// continue to be appended to. False for legacy / multipart / PUT objects.
+	IsAppendable bool
 }
 
 // clusterMultipartMeta holds metadata about an in-progress multipart upload
@@ -441,6 +448,25 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		nodeIDsOff = buildStringVector(b, m.NodeIDs, clusterpb.ObjectMetaStartNodeIdsVector)
 	}
 	metadataOff := buildKeyValuePropertiesVector(b, m.UserMetadata, clusterpb.ObjectMetaStartUserMetadataVector)
+	// segments — build child SegmentRef tables BEFORE ObjectMetaStart.
+	var segmentsOff flatbuffers.UOffsetT
+	if len(m.Segments) > 0 {
+		segOffs := make([]flatbuffers.UOffsetT, len(m.Segments))
+		for i, s := range m.Segments {
+			blobOff := b.CreateString(s.BlobID)
+			etOff := b.CreateString(s.ETag)
+			clusterpb.SegmentRefStart(b)
+			clusterpb.SegmentRefAddBlobId(b, blobOff)
+			clusterpb.SegmentRefAddSize(b, s.Size)
+			clusterpb.SegmentRefAddEtag(b, etOff)
+			segOffs[i] = clusterpb.SegmentRefEnd(b)
+		}
+		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
+		for i := len(segOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(segOffs[i])
+		}
+		segmentsOff = b.EndVector(len(segOffs))
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -461,6 +487,12 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	if sseOff != 0 {
 		clusterpb.ObjectMetaAddSseAlgorithm(b, sseOff)
 	}
+	if segmentsOff != 0 {
+		clusterpb.ObjectMetaAddSegments(b, segmentsOff)
+	}
+	if m.IsAppendable {
+		clusterpb.ObjectMetaAddIsAppendable(b, true)
+	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -478,6 +510,21 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			nodeIDs[i] = string(t.NodeIds(i))
 		}
 	}
+	var segments []storage.SegmentRef
+	if n := t.SegmentsLength(); n > 0 {
+		segments = make([]storage.SegmentRef, n)
+		var seg clusterpb.SegmentRef
+		for i := 0; i < n; i++ {
+			if !t.Segments(&seg, i) {
+				continue
+			}
+			segments[i] = storage.SegmentRef{
+				BlobID: string(seg.BlobId()),
+				Size:   seg.Size(),
+				ETag:   string(seg.Etag()),
+			}
+		}
+	}
 	return objectMeta{
 		Key:              string(t.Key()),
 		Size:             t.Size(),
@@ -492,6 +539,8 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
 		SSEAlgorithm:     string(t.SseAlgorithm()),
+		Segments:         segments,
+		IsAppendable:     t.IsAppendable(),
 	}, nil
 }
 
