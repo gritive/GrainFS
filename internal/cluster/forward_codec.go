@@ -521,6 +521,12 @@ func parseReplyStatus(reply []byte) error {
 		return storage.ErrUploadNotFound
 	case raftpb.ForwardStatusEntityTooLarge:
 		return storage.ErrEntityTooLarge
+	case raftpb.ForwardStatusAppendOffsetMismatch:
+		return storage.ErrAppendOffsetMismatch
+	case raftpb.ForwardStatusAppendNotSupported:
+		return storage.ErrAppendNotSupported
+	case raftpb.ForwardStatusAppendCapExceeded:
+		return storage.ErrAppendCapExceeded
 	case raftpb.ForwardStatusInsufficientPlacementTargets:
 		return &ErrInsufficientPlacementTargets{
 			Operation:     "forwarded_write",

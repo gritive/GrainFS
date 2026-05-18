@@ -120,10 +120,6 @@ func runCommonAppendCases(t *testing.T, tgt appendTarget) {
 	})
 
 	t.Run("OffsetMismatch", func(t *testing.T) {
-		if tgt.isCluster {
-			t.Skip("Task 25: cluster forward reply codec drops typed S3 error code " +
-				"(returns InternalError instead of InvalidWriteOffset)")
-		}
 		key := "obj-mismatch"
 		require.NoError(t, putAppend(client, bucket, key, 0, []byte("aaa")))
 		err := putAppend(client, bucket, key, 99, []byte("bbb"))
@@ -156,8 +152,6 @@ func runClusterOnlyAppendCases(t *testing.T, tgt appendTarget) {
 	tgt.createBkt(t, bucket)
 
 	t.Run("ConcurrentAppendsFromDifferentNodes", func(t *testing.T) {
-		t.Skip("Task 25: forward reply codec returns 'forward: internal reply error' " +
-			"(InternalError) on the race-loser path instead of typed InvalidWriteOffset")
 		// All N goroutines race for offset 0 from different nodes. Exactly
 		// one must win; the rest must surface InvalidWriteOffset. This
 		// exercises the cluster forwarding + raft-serialized offset check.

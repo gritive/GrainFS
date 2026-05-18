@@ -182,6 +182,9 @@ enum ForwardStatus : byte {
   EntityTooLarge = 5,
   InsufficientPlacementTargets = 6,
   NoSuchUpload = 7,
+  AppendOffsetMismatch = 8,
+  AppendNotSupported = 9,
+  AppendCapExceeded = 10,
   Internal = 99
 }
 
