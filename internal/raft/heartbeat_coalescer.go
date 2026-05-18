@@ -389,7 +389,9 @@ func decodeHeartbeatBatch(buf []byte) ([]hbBatchDecoded, error) {
 	}
 	count := int(binary.BigEndian.Uint16(buf[0:2]))
 	off := 2
-	out := make([]hbBatchDecoded, 0, count)
+	out := make([]hbBatchDecoded, count)
+	argsStorage := make([]AppendEntriesArgs, count)
+	var strings appendEntriesDecodeStringCache
 	for i := 0; i < count; i++ {
 		if off+2 > len(buf) {
 			return nil, fmt.Errorf("heartbeat batch[%d]: truncated groupID len", i)
@@ -409,12 +411,12 @@ func decodeHeartbeatBatch(buf []byte) ([]hbBatchDecoded, error) {
 		if off+argsLen > len(buf) {
 			return nil, fmt.Errorf("heartbeat batch[%d]: truncated args body", i)
 		}
-		args, err := decodeAppendEntriesArgs(buf[off : off+argsLen])
-		if err != nil {
+		args := &argsStorage[i]
+		if err := decodeAppendEntriesArgsInto(buf[off:off+argsLen], args, &strings); err != nil {
 			return nil, fmt.Errorf("heartbeat batch[%d]: decode args: %w", i, err)
 		}
 		off += argsLen
-		out = append(out, hbBatchDecoded{groupID: groupID, args: args})
+		out[i] = hbBatchDecoded{groupID: groupID, args: args}
 	}
 	return out, nil
 }
