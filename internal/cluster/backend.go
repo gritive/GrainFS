@@ -40,7 +40,24 @@ import (
 const shardRPCTimeout = 2 * time.Minute
 
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
-const maxECMemoryShardFastPathBytes = 16 << 20
+
+// EC in-memory shard fast path size caps. Replication (parity == 0) keeps the
+// original 16 MiB cap; parity EC gets a lower 1 MiB cap so concurrent small
+// PUTs cannot stack into a multi-hundred-megabyte burst (the rationale for
+// commit 8d0ecccd #411). Within the cap, parity EC bypasses both the body
+// spool-to-disk and the EC shard spool-to-disk, dropping ~30% CPU on small
+// PUTs that dominate the warp s3 workload.
+const (
+	maxECMemoryShardFastPathBytesReplicated = 16 << 20
+	maxECMemoryShardFastPathBytesParity     = 1 << 20
+)
+
+func maxECMemoryShardFastPathBytesForCfg(cfg ECConfig) int64 {
+	if cfg.ParityShards == 0 {
+		return maxECMemoryShardFastPathBytesReplicated
+	}
+	return maxECMemoryShardFastPathBytesParity
+}
 
 const (
 	ecShardBufferedLimit = 256 * 1024
@@ -1513,10 +1530,11 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 ) (*storage.Object, bool, error) {
-	if !b.canUseECMemoryShardFastPath(ctx) {
+	limit, ok := b.ecMemoryShardFastPathLimit(ctx)
+	if !ok {
 		return nil, false, nil
 	}
-	body, size, ok := sizedReaderAtSection(r, maxECMemoryShardFastPathBytes)
+	body, size, ok := sizedReaderAtSection(r, limit)
 	if !ok {
 		return nil, false, nil
 	}
@@ -1533,22 +1551,31 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	return obj, true, err
 }
 
-func (b *DistributedBackend) canUseECMemoryShardFastPath(ctx context.Context) bool {
+// ecMemoryShardFastPathLimit returns the maximum body size (in bytes) for which
+// the in-memory EC fast path may be used in this request, or ok=false when the
+// fast path is disabled for this placement.
+func (b *DistributedBackend) ecMemoryShardFastPathLimit(ctx context.Context) (int64, bool) {
 	if _, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-		return ecMemoryShardFastPathEnabled(cfg)
+		if !ecMemoryShardFastPathEnabled(cfg) {
+			return 0, false
+		}
+		return maxECMemoryShardFastPathBytesForCfg(cfg), true
 	} else if PlacementGroupHasFullEntry(ctx) {
-		return false
+		return 0, false
 	}
 	liveNodes := b.ecWriteNodes()
 	cfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if cfg.NumShards() == 0 && !b.bypassBucketCheck {
 		cfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
-	return ecMemoryShardFastPathEnabled(cfg)
+	if !ecMemoryShardFastPathEnabled(cfg) {
+		return 0, false
+	}
+	return maxECMemoryShardFastPathBytesForCfg(cfg), true
 }
 
 func ecMemoryShardFastPathEnabled(cfg ECConfig) bool {
-	return cfg.NumShards() != 0 && cfg.ParityShards == 0
+	return cfg.NumShards() != 0
 }
 
 // PutObjectAsync is the write-back variant of PutObject.
@@ -2048,7 +2075,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm)
 	}
 
-	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytes {
+	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
 		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
