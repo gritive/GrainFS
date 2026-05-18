@@ -1,6 +1,12 @@
 package cluster
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -29,6 +35,62 @@ type CoalesceSegmentsCmd struct {
 // segments keep arriving after each coalesce. Reaching this cap stalls
 // coalesce until the object is rotated/closed.
 const MaxCoalescedEntries = 1024
+
+// coalescedBlobPath returns the on-disk path for one coalesced blob.
+// Mirrors segmentBlobPath but under "_coalesced" suffix.
+func (b *DistributedBackend) coalescedBlobPath(bucket, key, coalescedID string) string {
+	return filepath.Join(b.objectPath(bucket, key)+"_coalesced", coalescedID)
+}
+
+// coalesceMergeResult is the owner-local merge output before EC distribution.
+type coalesceMergeResult struct {
+	Path string
+	Size int64
+	ETag string
+}
+
+// mergeSegmentsOwnerLocal reads the given segments owner-locally (no
+// forward-on-read) and writes them concatenated to coalescedBlobPath.
+// Returns size + MD5 of the concatenated body.
+//
+// Caller MUST be the owner node — non-owner cannot satisfy local Open.
+func (b *DistributedBackend) mergeSegmentsOwnerLocal(bucket, key, coalescedID string, segs []storage.SegmentRef) (coalesceMergeResult, error) {
+	out := b.coalescedBlobPath(bucket, key, coalescedID)
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return coalesceMergeResult{}, fmt.Errorf("mkdir: %w", err)
+	}
+	f, err := os.Create(out)
+	if err != nil {
+		return coalesceMergeResult{}, fmt.Errorf("create: %w", err)
+	}
+	h := md5.New()
+	var total int64
+	for _, s := range segs {
+		in, oerr := os.Open(b.segmentBlobPath(bucket, key, s.BlobID))
+		if oerr != nil {
+			_ = f.Close()
+			_ = os.Remove(out)
+			return coalesceMergeResult{}, fmt.Errorf("open segment %s: %w", s.BlobID, oerr)
+		}
+		n, cerr := io.Copy(io.MultiWriter(f, h), in)
+		_ = in.Close()
+		if cerr != nil {
+			_ = f.Close()
+			_ = os.Remove(out)
+			return coalesceMergeResult{}, fmt.Errorf("copy segment %s: %w", s.BlobID, cerr)
+		}
+		total += n
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(out)
+		return coalesceMergeResult{}, fmt.Errorf("close: %w", err)
+	}
+	return coalesceMergeResult{
+		Path: out,
+		Size: total,
+		ETag: hex.EncodeToString(h.Sum(nil)),
+	}, nil
+}
 
 // evaluateCoalesceTrigger returns (trigger, reason) for the given segment
 // snapshot. Pure function — no side effects.
