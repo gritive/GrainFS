@@ -387,6 +387,31 @@ var (
 		Help: "Total orphan shards deferred because maxOrphansPerCycle was reached.",
 	})
 
+	OrphanSegmentsFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_segments_found_total",
+		Help: "Total orphan raw segment files newly tombstoned during scrubbing.",
+	})
+
+	OrphanSegmentsDeletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_segments_deleted_total",
+		Help: "Total orphan raw segment files deleted by the scrubber.",
+	})
+
+	OrphanSegmentSweepCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_segment_sweep_capped_total",
+		Help: "Total orphan segments deferred due to per-cycle cap.",
+	})
+
+	OrphanSegmentWalkErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_segment_walk_errors_total",
+		Help: "Total filesystem errors during orphan segment walk (readdir/stat).",
+	})
+
+	OrphanSegmentDeleteErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_segment_delete_errors_total",
+		Help: "Total delete failures during orphan segment sweep (excludes ENOENT).",
+	})
+
 	// Phase 16 — Self-healing metrics.
 
 	HealEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
