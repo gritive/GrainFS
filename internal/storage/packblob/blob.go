@@ -176,28 +176,27 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	}
 
 	// Write: [key_len:4][key][flags:1][data_len:4][data][crc32:4]
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(key)))
-	if _, err := bs.active.Write(header); err != nil {
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(key)))
+	if _, err := bs.active.Write(header[:]); err != nil {
 		return BlobLocation{}, err
 	}
-	if _, err := bs.active.Write([]byte(key)); err != nil {
+	if _, err := bs.active.WriteString(key); err != nil {
 		return BlobLocation{}, err
 	}
-	if _, err := bs.active.Write([]byte{flags}); err != nil {
-		return BlobLocation{}, err
-	}
-	binary.BigEndian.PutUint32(header, uint32(len(payload)))
-	if _, err := bs.active.Write(header); err != nil {
+	var entryHeader [5]byte
+	entryHeader[0] = flags
+	binary.BigEndian.PutUint32(entryHeader[1:], uint32(len(payload)))
+	if _, err := bs.active.Write(entryHeader[:]); err != nil {
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.Write(payload); err != nil {
 		return BlobLocation{}, err
 	}
 
-	crc := make([]byte, 4)
-	binary.BigEndian.PutUint32(crc, blobEntryCRC([]byte(key), flags, payload))
-	if _, err := bs.active.Write(crc); err != nil {
+	var crc [4]byte
+	binary.BigEndian.PutUint32(crc[:], blobEntryCRC([]byte(key), flags, payload))
+	if _, err := bs.active.Write(crc[:]); err != nil {
 		return BlobLocation{}, err
 	}
 
@@ -488,8 +487,7 @@ func (bs *BlobStore) blobPath(id uint64) string {
 }
 
 func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags byte) []byte {
-	keyBytes := []byte(key)
-	aad := make([]byte, len("packblob:v2:")+8+8+1+4+len(keyBytes))
+	aad := make([]byte, len("packblob:v2:")+8+8+1+4+len(key))
 	copy(aad, "packblob:v2:")
 	off := len("packblob:v2:")
 	binary.BigEndian.PutUint64(aad[off:], blobID)
@@ -498,25 +496,27 @@ func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags by
 	off += 8
 	aad[off] = flags
 	off++
-	binary.BigEndian.PutUint32(aad[off:], uint32(len(keyBytes)))
+	binary.BigEndian.PutUint32(aad[off:], uint32(len(key)))
 	off += 4
-	copy(aad[off:], keyBytes)
+	copy(aad[off:], key)
 	return aad
 }
 
 func blobEntryCRC(key []byte, flags byte, payload []byte) uint32 {
-	h := crc32.NewIEEE()
-	h.Write(key)
-	_, _ = h.Write([]byte{flags})
-	h.Write(payload)
-	return h.Sum32()
+	crc := crc32.Update(0, crc32.IEEETable, key)
+	crc = crc32UpdateIEEEByte(crc, flags)
+	return crc32.Update(crc, crc32.IEEETable, payload)
 }
 
 func legacyBlobEntryCRC(key []byte, payload []byte) uint32 {
-	h := crc32.NewIEEE()
-	h.Write(key)
-	h.Write(payload)
-	return h.Sum32()
+	crc := crc32.Update(0, crc32.IEEETable, key)
+	return crc32.Update(crc, crc32.IEEETable, payload)
+}
+
+func crc32UpdateIEEEByte(crc uint32, b byte) uint32 {
+	crc = ^crc
+	crc = crc32.IEEETable[byte(crc)^b] ^ (crc >> 8)
+	return ^crc
 }
 
 func (bs *BlobStore) rejectEncryptedFlagDowngrade(blobID uint64, offset uint64, key string, flags byte, payload []byte) error {

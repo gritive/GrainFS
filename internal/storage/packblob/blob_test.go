@@ -105,6 +105,34 @@ func TestBlobStore_EmptyData(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestBlobStoreAppendNoCompressKeepsAllocationBound(t *testing.T) {
+	bs, err := NewBlobStore(t.TempDir(), 256*1024*1024)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	key := "bucket/key"
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, err := bs.Append(key, payload)
+		require.NoError(t, err)
+	})
+	require.LessOrEqual(t, allocs, 1.0)
+}
+
+func TestBlobEntryCRCMatchesStandardIEEEStream(t *testing.T) {
+	key := []byte("bucket/key")
+	flags := flagCompressed
+	payload := bytes.Repeat([]byte("x"), 1024)
+
+	h := crc32.NewIEEE()
+	_, _ = h.Write(key)
+	_, _ = h.Write([]byte{flags})
+	_, _ = h.Write(payload)
+
+	require.Equal(t, h.Sum32(), blobEntryCRC(key, flags, payload))
+}
+
 func TestEncryptedBlobStoreHidesPayload(t *testing.T) {
 	enc := newPackblobTestEncryptor(t)
 

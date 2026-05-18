@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -80,6 +81,26 @@ func BenchmarkPutObject64KB(b *testing.B) {
 		}
 	})
 
+}
+
+func BenchmarkBlobStoreAppend64KBNoCompress(b *testing.B) {
+	bs, err := NewBlobStore(b.TempDir(), math.MaxInt64)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = bs.Close() })
+
+	key := "bucket/key"
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := bs.Append(key, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func newPackblobBenchmarkEncryptor(b *testing.B) *encrypt.Encryptor {

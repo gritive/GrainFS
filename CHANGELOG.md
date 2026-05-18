@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.241.0] - 2026-05-18 - perf(packblob): reduce blob append allocations
+
+Packed small-object writes now allocate less on the blob append hot path while
+keeping the on-disk entry format and safe Go memory semantics.
+
+### Added
+
+- Added a `BlobStore.Append` allocation-budget regression test for the
+  non-compressed 64 KiB write path.
+- Added CRC coverage proving the optimized blob-entry checksum matches the
+  standard IEEE CRC32 stream calculation.
+- Added a direct `BlobStore.Append` benchmark to track allocation cost without
+  higher-level `PutObject` overhead.
+
+### Changed
+
+- `BlobStore.Append` now uses stack-backed fixed headers and `WriteString` for
+  entry key writes instead of heap-allocating temporary byte slices.
+- Blob-entry CRC calculation now uses `crc32.Update` directly, avoiding the
+  per-entry hash object and one-byte flag slice allocations.
+- Encrypted blob AAD construction now copies keys directly from string input
+  without an intermediate key byte slice.
+
 ## [0.0.240.0] - 2026-05-18 - perf(packblob): bound large-object intake
 
 Packed object storage now routes large writes after reading only the configured
