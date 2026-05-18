@@ -55,4 +55,5 @@ const (
 	routePathAdminUDSTransferLeader = "/transfer-leader"
 	routePathAdminUDSHealth         = "/health"
 	routePathAdminUDSBalancerStatus = "/balancer/status"
+	routePathAdminUDSCapabilities   = "/capabilities"
 )

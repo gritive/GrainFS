@@ -64,6 +64,9 @@ func (f *fakeClusterInfo) ObjectIndexSummary(string) cluster.ObjectIndexSummary 
 func (f *fakeClusterInfo) PlacementReport(string, string, int) cluster.PlacementReport {
 	return cluster.PlacementReport{}
 }
+func (f *fakeClusterInfo) CapabilityEvidence() map[string]map[string]bool {
+	return map[string]map[string]bool{}
+}
 
 type fakeTopologyClusterInfo struct {
 	*fakeClusterInfo
@@ -110,6 +113,9 @@ func (f *fakeClusterInfoWithoutSnapshot) ObjectIndexSummary(string) cluster.Obje
 }
 func (f *fakeClusterInfoWithoutSnapshot) PlacementReport(string, string, int) cluster.PlacementReport {
 	return cluster.PlacementReport{}
+}
+func (f *fakeClusterInfoWithoutSnapshot) CapabilityEvidence() map[string]map[string]bool {
+	return map[string]map[string]bool{}
 }
 
 func liveMetaSnapshot(ids ...string) []cluster.PeerLivenessRow {

@@ -33,15 +33,15 @@ WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
 GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-4}"
 # Multipart workloads need the multipart_listing_v1 capability evidence to
 # propagate across every cluster node before warp issues create_multipart_upload;
-# the gossip-driven advertise loop takes ~30 to 45 seconds on a freshly booted
-# cluster. Default to 5s for put/get-only runs and auto-bump for multipart to
-# avoid spurious 'rolling upgrade' rejects without slowing the common path.
+# bench_wait_multipart_ready actively probes each endpoint after the base 5s
+# warmup so we no longer block on a fixed 45s sleep.
+CLUSTER_WARMUP_SLEEP="${CLUSTER_WARMUP_SLEEP:-5}"
 case ",$WARP_OPS," in
   *,multipart,*|*,multipart-put,*)
-    CLUSTER_WARMUP_SLEEP="${CLUSTER_WARMUP_SLEEP:-45}"
+    BENCH_MULTIPART_PROBE=1
     ;;
   *)
-    CLUSTER_WARMUP_SLEEP="${CLUSTER_WARMUP_SLEEP:-5}"
+    BENCH_MULTIPART_PROBE=0
     ;;
 esac
 BENCH_PPROF="${BENCH_PPROF:-0}"
@@ -264,6 +264,16 @@ start_grainfs_cluster() {
     urls+=("http://127.0.0.1:${http_ports[$((idx - 1))]}")
   done
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
+
+  if [[ "${BENCH_MULTIPART_PROBE:-0}" == "1" ]]; then
+    local admin_socks=()
+    for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
+      admin_socks+=("$cluster_dir/n${idx}/admin.sock")
+    done
+    bench_wait_capability_ready "$(IFS=':'; echo "${admin_socks[*]}")" "multipart_listing_v1" 120 0.5 >&2 || {
+      echo "[warn] multipart capability probe failed; warp may report 503 'rolling upgrade'" >&2
+    }
+  fi
 }
 
 start_minio() {

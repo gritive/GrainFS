@@ -37,6 +37,11 @@ type ClusterInfo interface {
 	Snapshot() cluster.ClusterStatus
 	ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary
 	PlacementReport(bucket, key string, maxRows int) cluster.PlacementReport
+	// CapabilityEvidence reports each peer's currently-known capability
+	// readiness as `peer → capability → ready`. Empty map when no gate is
+	// wired (e.g. tests using a stub). Used by /v1/cluster/capabilities so
+	// callers can wait for gossip propagation before sending gated traffic.
+	CapabilityEvidence() map[string]map[string]bool
 }
 
 type ClusterMembership interface {
