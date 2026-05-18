@@ -9,12 +9,15 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -163,6 +166,77 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 			body := getObject(t, tgt.pickNode(i), bucket, key)
 			assert.Equal(t, []byte("alphabetagammadelta"), body, "node %d view", i)
 		}
+	})
+
+	t.Run("OwnerKillSurvives", func(t *testing.T) {
+		require.True(t, tgt.isCluster)
+		c := tgt.cluster
+		require.NotNil(t, c)
+
+		ownerBucket := "append-owner-kill-" + tgt.name
+		tgt.createBkt(t, ownerBucket)
+		key := "obj-survive"
+
+		// Drive 16 appends to trigger coalesce → obj.Coalesced should have
+		// at least 1 entry. The owner is the data-Raft leader.
+		const chunkSize = 1024
+		var off int64
+		var expected []byte
+		for i := 0; i < 16; i++ {
+			chunk := bytes.Repeat([]byte{byte(i + 1)}, chunkSize)
+			require.NoError(t, putAppend(tgt.pickNode(0), ownerBucket, key, off, chunk))
+			off += int64(len(chunk))
+			expected = append(expected, chunk...)
+		}
+		// Wait for coalesce to land (Metrics endpoint reports success).
+		require.Eventually(t, func() bool {
+			for i := 0; i < tgt.nodes; i++ {
+				if metricCounterAtLeast(t, tgt, i, `grainfs_append_coalesce_total{result="success"}`, 1) {
+					return true
+				}
+			}
+			return false
+		}, 10*time.Second, 200*time.Millisecond)
+
+		// Identify the data-Raft leader (Task 23) and kill it.
+		ownerIdx := findOwnerForSingleGroup(c)
+		require.GreaterOrEqual(t, ownerIdx, 0)
+		killedNodeID := c.nodeID(ownerIdx)
+
+		c.KillNode(ownerIdx)
+		// CRITICAL: defer (not t.Cleanup) — sibling sub-tests must see the
+		// fully restored cluster, not an N-1 cluster.
+		defer c.RestartNode(t, ownerIdx)
+
+		// Poll the cluster status on a surviving peer until a new leader is
+		// elected (not the killed node). This is the direct evidence that
+		// leader rotation completed.
+		//
+		// Note: AwaitWriteFromNonOwner is not usable here because the 4-node
+		// cluster uses EC 2+2 which requires all 4 shards for writes; with the
+		// owner dead only 3 nodes are available so new writes fail with
+		// ServiceUnavailable. Status-poll is the correct rotation signal when
+		// EC stripe width equals cluster size.
+		surviving := (ownerIdx + 1) % tgt.nodes
+		require.Eventually(t, func() bool {
+			resp, err := http.Get(c.httpURLs[surviving] + "/api/cluster/status")
+			if err != nil {
+				return false
+			}
+			defer resp.Body.Close()
+			var s map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+				return false
+			}
+			leader, _ := s["leader_id"].(string)
+			return leader != "" && leader != killedNodeID
+		}, 60*time.Second, 500*time.Millisecond, "no new leader elected within 60s")
+
+		// GET from a surviving non-owner peer; EC reconstruct must yield the
+		// full body bytes. With k=2 parity=2, we only need k=2 shards; the
+		// 3 surviving nodes satisfy that constraint.
+		body := getObject(t, tgt.pickNode(surviving), ownerBucket, key)
+		require.Equal(t, expected, body)
 	})
 }
 
