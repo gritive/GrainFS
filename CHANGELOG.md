@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.0.251.1] - 2026-05-19 - test: e2e consolidation — shared cluster fixture + integration rename
+
+- Add `tgt.uniqueBucket(t, "case")` helper to `s3Target`: derives a S3-spec
+  bucket name from `t.Name()`+case (sanitize → 50-char SHA8 fallback) and
+  registers auto-cleanup. Prevents bucket-name collisions now that the
+  cluster fixture is process-global.
+- Promote `tests/e2e/` cluster fixture to a process-global shared instance
+  via `sync.Once` lazy boot. First cluster-target test triggers boot;
+  TestMain teardown calls `stopSharedCluster`. `-short` skips boot
+  automatically (cluster-target tests guarded by `skipIfShort`). Migrates
+  `TestBucketsE2E`, `TestS3Multipart*`, `TestS3Presigned*`, `TestS3Objects*`
+  callers; drops the per-test `newClusterS3Target(t, 4)` helper. CI time
+  for adding new S3-domain e2e tests scales sub-linearly.
+- Add `TestS3VersioningE2E` (cluster-only, 2 cases: `PutGet`,
+  `GetByVersionID`) under SDK. Drops the equivalent `_EC` cases from
+  `internal/server/versioning_test.go`. The other 3 `_EC` cases stay in
+  internal — the 4-node cluster's `ListObjectVersions` returns an extra
+  "null" version per `PutObject`, semantically different from the
+  in-process EC fixture, so cluster-fixture SDK assertions don't match.
+- Drop `TestAppendableObjectOverwriteByPlainPut` from
+  `internal/server/object_append_test.go` — the SDK equivalent already
+  exists as `TestAppendObjectE2E/{SingleNode,Cluster4Node}/PlainPutOverwritesAppendable`
+  in `tests/e2e/append_object_test.go`.
+- Rename `internal/*/e2e_test.go` (5 files) → `*_integration_test.go`:
+  `internal/cluster/{ring,meta_raft,meta_raft_mux}`,
+  `internal/server/acl`, `internal/storage/packblob/compression`.
+  These tests wire up a single subsystem in-process — they were never
+  end-to-end. Content unchanged.
+- `tests/e2e/append_object_test.go` (own `appendTarget` abstraction with
+  distinct `ClusterKey: "E2E-APPEND-KEY"`) is intentionally NOT migrated
+  to the shared cluster. Out of scope for this PR.
+
+Operator impact: none (test-only change, production code unchanged).
+Developer impact: `make test-e2e` cluster boot amortizes across S3 domains
+(was per-test 30s+); new S3-domain e2e tests follow the
+`runVersioningCases(t, tgt)` matrix pattern in `tests/e2e/versioning_test.go`.
+
 ## [0.0.251.0] - 2026-05-19 - feat: internal storage v2 (FlatBuffers) (BREAKING)
 
 - BREAKING: internal storage format v2 (FlatBuffers) for quarantine, receipt,

@@ -1,8 +1,8 @@
 // Bucket-level S3 API e2e (target table-driven).
 //
 // The same case set runs against a single-node fixture and a 4-node cluster
-// fixture. Bucket names are prefixed with tgt.name so single + cluster don't
-// collide if they ever share a backend.
+// fixture. Bucket names are derived from t.Name()+case via tgt.uniqueBucket
+// to avoid namespace collisions in the shared cluster fixture.
 package e2e
 
 import (
@@ -23,8 +23,8 @@ func TestBucketsE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "4-node cluster boot is too slow for -short")
-		runBucketCases(t, newClusterS3Target(t, 4))
+		skipIfShort(t, "cluster fixture not booted in -short mode")
+		runBucketCases(t, newSharedClusterS3Target(t))
 	})
 }
 
@@ -32,21 +32,14 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 	client := tgt.pickNode(0)
 
 	t.Run("Create", func(t *testing.T) {
-		ctx := context.Background()
-		name := tgt.name + "-create"
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(name),
-		})
-		require.NoError(t, err)
-		t.Cleanup(func() {
-			client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(name)})
-		})
+		// uniqueBucket exercises CreateBucket internally and registers
+		// auto-cleanup; reaching this line means creation succeeded.
+		_ = tgt.uniqueBucket(t, "create")
 	})
 
 	t.Run("Head", func(t *testing.T) {
 		ctx := context.Background()
-		name := tgt.name + "-head"
-		tgt.createBkt(t, name)
+		name := tgt.uniqueBucket(t, "head")
 
 		_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
 			Bucket: aws.String(name),
@@ -56,8 +49,10 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 	t.Run("HeadNotFound", func(t *testing.T) {
 		ctx := context.Background()
+		// Synthesize a name that won't collide with any uniqueBucket.
+		name := tgt.name + "-headnotfound-missing"
 		_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
-			Bucket: aws.String(tgt.name + "-nonexistent-bucket"),
+			Bucket: aws.String(name),
 		})
 		require.Error(t, err)
 
@@ -68,8 +63,7 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 	t.Run("CreateConflict", func(t *testing.T) {
 		ctx := context.Background()
-		name := tgt.name + "-conflict"
-		tgt.createBkt(t, name)
+		name := tgt.uniqueBucket(t, "conflict")
 
 		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
 			Bucket: aws.String(name),
@@ -83,8 +77,7 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 	t.Run("List", func(t *testing.T) {
 		ctx := context.Background()
-		name := tgt.name + "-list"
-		tgt.createBkt(t, name)
+		name := tgt.uniqueBucket(t, "list")
 
 		out, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 		require.NoError(t, err)
@@ -101,13 +94,11 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 	t.Run("Delete", func(t *testing.T) {
 		ctx := context.Background()
-		name := tgt.name + "-delete"
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(name),
-		})
-		require.NoError(t, err)
+		// uniqueBucket auto-registers t.Cleanup(DeleteBucket) which ignores
+		// "NoSuchBucket" — safe to call DeleteBucket explicitly here.
+		name := tgt.uniqueBucket(t, "delete")
 
-		_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		_, err := client.DeleteBucket(ctx, &s3.DeleteBucketInput{
 			Bucket: aws.String(name),
 		})
 		require.NoError(t, err)
@@ -115,8 +106,7 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 	t.Run("DeleteNotEmpty", func(t *testing.T) {
 		ctx := context.Background()
-		name := tgt.name + "-notempty"
-		tgt.createBkt(t, name)
+		name := tgt.uniqueBucket(t, "notempty")
 
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(name),
@@ -139,7 +129,9 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 		ctx := context.Background()
 
 		// Explicitly create an internal-prefixed bucket so the filter is
-		// exercised even when no NFS/VFS internal bucket exists.
+		// exercised even when no NFS/VFS internal bucket exists. Cannot use
+		// uniqueBucket because the sanitizer strips the leading underscores
+		// that drive the "internal prefix" filter under test.
 		internalName := "__grainfs_review_test_internal_" + tgt.name
 		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(internalName)})
 		require.NoError(t, err)
