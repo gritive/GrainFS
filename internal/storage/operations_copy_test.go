@@ -39,6 +39,19 @@ func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testin
 	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
 }
 
+func TestOperationsCopyObjectFallbackPropagatesPutError(t *testing.T) {
+	putErr := errors.New("put failed")
+	backend := &copyFallbackBackend{putErr: putErr}
+	ops := NewOperations(backend)
+
+	_, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+	})
+
+	require.ErrorIs(t, err, putErr)
+}
+
 func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
 	backend := &copyFallbackBackend{}
 	ops := NewOperations(backend)
@@ -381,7 +394,8 @@ func (b *copyBackend) HeadObject(_ context.Context, bucket, key string) (*Object
 
 type copyFallbackBackend struct {
 	Backend
-	calls []string
+	calls  []string
+	putErr error
 }
 
 func (b *copyFallbackBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
@@ -400,6 +414,9 @@ func (b *copyFallbackBackend) PutObject(_ context.Context, bucket, key string, r
 		return nil, err
 	}
 	b.calls = append(b.calls, "put:"+bucket+"/"+key+":"+contentType+":"+string(data))
+	if b.putErr != nil {
+		return nil, b.putErr
+	}
 	return &Object{Key: key, ETag: "fallback"}, nil
 }
 

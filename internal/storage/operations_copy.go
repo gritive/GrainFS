@@ -144,6 +144,9 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		UserMetadata:   userMetadata,
 		SystemMetadata: systemMetadata,
 	})
+	if err != nil {
+		return nil, err
+	}
 	facts, err := mutationObjectFacts("CopyObject", obj)
 	if err != nil {
 		return nil, err

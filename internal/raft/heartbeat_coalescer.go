@@ -17,7 +17,7 @@
 //	  groupIDLen: uint16 BE  (max 65535, in practice short ASCII)
 //	  groupID: bytes
 //	  argsLen: uint32 BE
-//	  args: encoded AppendEntriesArgs (encodeAppendEntriesArgs)
+//	  args: encoded AppendEntriesArgs (encodeRPCPayload, rpcTypeAppendEntries)
 //
 // Wire format of an opHeartbeatReplyBatch payload (receiver→caller):
 //

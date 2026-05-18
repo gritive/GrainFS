@@ -44,20 +44,10 @@ func marshalObject(obj *Object) ([]byte, error) {
 	return out, nil
 }
 
-func unmarshalObject(data []byte) (*Object, error) {
-	obj := new(Object)
-	if err := unmarshalObjectInto(data, obj); err != nil {
-		return nil, err
-	}
-	return obj, nil
-}
-
-// unmarshalObjectInto decodes data directly into dst, skipping the inner
-// `&Object{...}` allocation that unmarshalObject performs. Hot read paths
-// (HeadObject, WalkObjects, ListObjects) already keep an Object on the
-// heap because they return it; pointing them at the destination directly
-// avoids one extra allocation per decode. Same recover/error semantics as
-// unmarshalObject.
+// unmarshalObjectInto decodes data directly into dst, growing nothing.
+// Hot read paths (HeadObject, WalkObjects, ListObjects) already keep an
+// Object on the heap because they return it; pointing them at the
+// destination directly avoids one extra allocation per decode.
 func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 	if len(data) == 0 {
 		return fmt.Errorf("unmarshal object: empty data")

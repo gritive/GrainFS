@@ -561,10 +561,6 @@ func writeEncryptedObjectRecord(w io.Writer, plainLen uint32, sealed []byte) err
 	return nil
 }
 
-func readEncryptedObjectRecord(r io.Reader) (uint32, []byte, error) {
-	return readEncryptedObjectRecordInto(r, nil)
-}
-
 // readEncryptedObjectRecordInto reads one sealed record into dst, growing
 // dst only when its capacity is too small. Callers in tight chunk loops
 // reuse the same buffer across iterations so the per-chunk

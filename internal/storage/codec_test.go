@@ -7,6 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func unmarshalObject(data []byte) (*Object, error) {
+	obj := new(Object)
+	if err := unmarshalObjectInto(data, obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
 func TestObjectCodecRoundTrip(t *testing.T) {
 	obj := &Object{
 		Key:          "docs/readme.md",

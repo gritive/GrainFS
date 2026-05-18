@@ -3,7 +3,7 @@
 ## Commands
 
 ```bash
-make build               # bin/grainfs 빌드
+make build               # bin/grainfs 빌드 (make lint를 선행으로 실행, golangci-lint 필요)
 make test-unit           # unit 테스트만 (colima/e2e 제외)
 make test                # test-unit + test-colima (colima VM 필요)
 make test-race           # race detector 포함
