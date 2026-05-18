@@ -156,6 +156,26 @@ func TestForwardSender_NotLeaderRedirect_OnceOnly(t *testing.T) {
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
 }
 
+func TestForwardSender_NotLeaderMalformedHintDoesNotPanic(t *testing.T) {
+	replyWithBadHint := notLeaderReplyBytes(t, "peer-B")
+	replyWithBadHint[10] = 0x01
+	require.True(t, isNotLeaderReply(replyWithBadHint))
+	require.Empty(t, extractLeaderHint(replyWithBadHint))
+
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		return replyWithBadHint, nil
+	}
+	s := NewForwardSender(dialer)
+	reply, err := s.Send(context.Background(),
+		[]string{"peer-A"}, "group-1",
+		raftpb.ForwardOpHeadObject, headObjectArgsBytes(t, "b", "k"))
+	require.NoError(t, err)
+	require.Equal(t, replyWithBadHint, reply)
+	require.Equal(t, []string{"peer-A"}, connected)
+}
+
 // TestForwardSender_AllPeersDown_ReturnsErrNoReachable verifies that the
 // caller can distinguish "no peer responded" from "peer responded with error".
 // S3 client retry policy depends on this distinction.
@@ -652,4 +672,46 @@ func TestForwardSender_SendRecordsAttemptsAndNotLeaderRetry(t *testing.T) {
 	}
 	require.Equal(t, 2, send.ForwardAttempts)
 	require.True(t, send.LeaderHintUsed)
+}
+
+func TestReadAtReplyIntoFullBuffer(t *testing.T) {
+	reply := buildReadAtReply([]byte("abcdef"))
+	dst := make([]byte, 6)
+
+	n, err := readAtReplyInto(reply, dst)
+
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	require.Equal(t, []byte("abcdef"), dst)
+}
+
+func TestReadAtReplyIntoShortBodyReturnsEOF(t *testing.T) {
+	reply := buildReadAtReply([]byte("tail"))
+	dst := make([]byte, 128)
+
+	n, err := readAtReplyInto(reply, dst)
+
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 4, n)
+	require.Equal(t, []byte("tail"), dst[:n])
+}
+
+func TestReadAtReplyIntoRejectsOversizedBody(t *testing.T) {
+	reply := buildReadAtReply([]byte("too-large"))
+	dst := make([]byte, 3)
+
+	n, err := readAtReplyInto(reply, dst)
+
+	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
+	require.Equal(t, 3, n)
+	require.Equal(t, []byte("too"), dst)
+}
+
+func TestReadAtReplyIntoMalformedReplyReturnsError(t *testing.T) {
+	dst := make([]byte, 8)
+
+	n, err := readAtReplyInto([]byte{0x01, 0x02, 0x03}, dst)
+
+	require.Zero(t, n)
+	require.Error(t, err)
 }

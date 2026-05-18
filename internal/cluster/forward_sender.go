@@ -577,7 +577,12 @@ func rewindForwardBody(r io.Reader) error {
 }
 
 // isNotLeaderReply parses just enough of the FBS ForwardReply to read status.
-func isNotLeaderReply(reply []byte) bool {
+func isNotLeaderReply(reply []byte) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
 	if len(reply) == 0 {
 		return false
 	}
@@ -586,7 +591,12 @@ func isNotLeaderReply(reply []byte) bool {
 }
 
 // extractLeaderHint pulls the hint string from a NotLeader reply.
-func extractLeaderHint(reply []byte) string {
+func extractLeaderHint(reply []byte) (hint string) {
+	defer func() {
+		if recover() != nil {
+			hint = ""
+		}
+	}()
 	if len(reply) == 0 {
 		return ""
 	}

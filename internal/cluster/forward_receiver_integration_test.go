@@ -144,6 +144,36 @@ func TestForwardReceiver_ReadAtRead_StreamsOnlyRequestedRange(t *testing.T) {
 	require.Equal(t, body[10:10+8192], got)
 }
 
+func TestForwardReceiver_ReadAt_ReturnsFullSmallReply(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	body := []byte("0123456789abcdef")
+	_, err := gb.PutObject(context.Background(), "bk", "small", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "small", 4, 6))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	require.NoError(t, parseReplyStatus(reply.Payload))
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, []byte("456789"), fr.ReadBodyBytes())
+}
+
+func TestForwardReceiver_ReadAt_BackendErrorMapsToStatus(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+	gb := newTestGroupBackend(t, "g1")
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "missing", 0, 8))
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	require.ErrorIs(t, parseReplyStatus(reply.Payload), storage.ErrObjectNotFound)
+}
+
 func TestForwardReceiver_ReadAt_AllowsShortEOFReply(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
 	gb := newTestGroupBackend(t, "g1")
