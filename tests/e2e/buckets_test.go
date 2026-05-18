@@ -1,3 +1,8 @@
+// Bucket-level S3 API e2e (target table-driven).
+//
+// The same case set runs against a single-node fixture and a 4-node cluster
+// fixture. Bucket names are prefixed with tgt.name so single + cluster don't
+// collide if they ever share a backend.
 package e2e
 
 import (
@@ -12,122 +17,143 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuckets_Create(t *testing.T) {
-	ctx := context.Background()
-	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("create-test"),
+func TestBucketsE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBucketCases(t, newSingleNodeS3Target())
 	})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String("create-test")})
+
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "4-node cluster boot is too slow for -short")
+		runBucketCases(t, newClusterS3Target(t, 4))
 	})
 }
 
-func TestBuckets_Head(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "head-test")
+func runBucketCases(t *testing.T, tgt s3Target) {
+	client := tgt.pickNode(0)
 
-	_, err := testS3Client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String("head-test"),
+	t.Run("Create", func(t *testing.T) {
+		ctx := context.Background()
+		name := tgt.name + "-create"
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(name)})
+		})
 	})
-	require.NoError(t, err)
-}
 
-func TestBuckets_HeadNotFound(t *testing.T) {
-	ctx := context.Background()
-	_, err := testS3Client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String("nonexistent-bucket"),
+	t.Run("Head", func(t *testing.T) {
+		ctx := context.Background()
+		name := tgt.name + "-head"
+		tgt.createBkt(t, name)
+
+		_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.NoError(t, err)
 	})
-	require.Error(t, err)
 
-	var apiErr smithy.APIError
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, "NotFound", apiErr.ErrorCode())
-}
+	t.Run("HeadNotFound", func(t *testing.T) {
+		ctx := context.Background()
+		_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
+			Bucket: aws.String(tgt.name + "-nonexistent-bucket"),
+		})
+		require.Error(t, err)
 
-func TestBuckets_CreateConflict(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "conflict-test")
-
-	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("conflict-test"),
+		var apiErr smithy.APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, "NotFound", apiErr.ErrorCode())
 	})
-	require.Error(t, err)
 
-	var apiErr smithy.APIError
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, "BucketAlreadyOwnedByYou", apiErr.ErrorCode())
-}
+	t.Run("CreateConflict", func(t *testing.T) {
+		ctx := context.Background()
+		name := tgt.name + "-conflict"
+		tgt.createBkt(t, name)
 
-func TestBuckets_List(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "list-test")
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.Error(t, err)
 
-	out, err := testS3Client.ListBuckets(ctx, &s3.ListBucketsInput{})
-	require.NoError(t, err)
+		var apiErr smithy.APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, "BucketAlreadyOwnedByYou", apiErr.ErrorCode())
+	})
 
-	found := false
-	for _, b := range out.Buckets {
-		if aws.ToString(b.Name) == "list-test" {
-			found = true
-			break
+	t.Run("List", func(t *testing.T) {
+		ctx := context.Background()
+		name := tgt.name + "-list"
+		tgt.createBkt(t, name)
+
+		out, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
+		require.NoError(t, err)
+
+		found := false
+		for _, b := range out.Buckets {
+			if aws.ToString(b.Name) == name {
+				found = true
+				break
+			}
 		}
-	}
-	assert.True(t, found, "bucket list-test should appear in ListBuckets")
-}
-
-func TestBuckets_Delete(t *testing.T) {
-	ctx := context.Background()
-	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("delete-test"),
-	})
-	require.NoError(t, err)
-
-	_, err = testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-		Bucket: aws.String("delete-test"),
-	})
-	require.NoError(t, err)
-}
-
-func TestBuckets_DeleteNotEmpty(t *testing.T) {
-	ctx := context.Background()
-	createBucket(t, "notempty-test")
-
-	_, err := testS3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("notempty-test"),
-		Key:    aws.String("file.txt"),
-		Body:   stringReader("data"),
-	})
-	require.NoError(t, err)
-
-	_, err = testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-		Bucket: aws.String("notempty-test"),
-	})
-	require.Error(t, err)
-
-	var apiErr smithy.APIError
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, "BucketNotEmpty", apiErr.ErrorCode())
-}
-
-func TestBuckets_ListExcludesInternal(t *testing.T) {
-	ctx := context.Background()
-
-	// Explicitly create an internal-prefixed bucket so the filter is exercised
-	// even when no NFS/VFS internal bucket exists in the test environment.
-	internalName := "__grainfs_review_test_internal"
-	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(internalName)})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		testS3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(internalName)})
+		assert.True(t, found, "bucket %q should appear in ListBuckets", name)
 	})
 
-	out, err := testS3Client.ListBuckets(ctx, &s3.ListBucketsInput{})
-	require.NoError(t, err)
-	for _, b := range out.Buckets {
-		name := aws.ToString(b.Name)
-		if strings.HasPrefix(name, "__grainfs_") {
-			t.Errorf("ListBuckets exposed internal bucket %q", name)
+	t.Run("Delete", func(t *testing.T) {
+		ctx := context.Background()
+		name := tgt.name + "-delete"
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.NoError(t, err)
+
+		_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("DeleteNotEmpty", func(t *testing.T) {
+		ctx := context.Background()
+		name := tgt.name + "-notempty"
+		tgt.createBkt(t, name)
+
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(name),
+			Key:    aws.String("file.txt"),
+			Body:   stringReader("data"),
+		})
+		require.NoError(t, err)
+
+		_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.Error(t, err)
+
+		var apiErr smithy.APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, "BucketNotEmpty", apiErr.ErrorCode())
+	})
+
+	t.Run("ListExcludesInternal", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Explicitly create an internal-prefixed bucket so the filter is
+		// exercised even when no NFS/VFS internal bucket exists.
+		internalName := "__grainfs_review_test_internal_" + tgt.name
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(internalName)})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(internalName)})
+		})
+
+		out, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
+		require.NoError(t, err)
+		for _, b := range out.Buckets {
+			name := aws.ToString(b.Name)
+			if strings.HasPrefix(name, "__grainfs_") {
+				t.Errorf("ListBuckets exposed internal bucket %q", name)
+			}
 		}
-	}
+	})
 }
