@@ -31,6 +31,19 @@ WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
 GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-4}"
+# Multipart workloads need the multipart_listing_v1 capability evidence to
+# propagate across every cluster node before warp issues create_multipart_upload;
+# the gossip-driven advertise loop takes ~30 to 45 seconds on a freshly booted
+# cluster. Default to 5s for put/get-only runs and auto-bump for multipart to
+# avoid spurious 'rolling upgrade' rejects without slowing the common path.
+case ",$WARP_OPS," in
+  *,multipart,*|*,multipart-put,*)
+    CLUSTER_WARMUP_SLEEP="${CLUSTER_WARMUP_SLEEP:-45}"
+    ;;
+  *)
+    CLUSTER_WARMUP_SLEEP="${CLUSTER_WARMUP_SLEEP:-5}"
+    ;;
+esac
 BENCH_PPROF="${BENCH_PPROF:-0}"
 PPROF_BASE_PORT="${PPROF_BASE_PORT:-16060}"
 PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
