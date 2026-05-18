@@ -18,20 +18,25 @@ func (s *Server) requireIceberg(c *app.RequestContext) (icebergcatalog.Catalog, 
 	return s.icebergCatalogStore(), true
 }
 
-func (s *Server) icebergConfig(_ context.Context, c *app.RequestContext) {
+func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
 	}
-	overrides := s.icebergS3CredOverrides(store.Warehouse())
+	overrides := s.icebergS3CredOverrides(ctx, store.Warehouse())
 	if len(overrides) > 0 {
 		// Publish the same host:port the client just connected to as
 		// s3.endpoint. iceberg-go's REST catalog reads this to build
 		// its data-plane S3 client; without it the client falls back
 		// to the AWS public endpoint and our local parquet reads
-		// return 403 InvalidAccessKeyId.
+		// return 403 InvalidAccessKeyId. Mirror the scheme the client
+		// used so an HTTPS caller doesn't get downgraded to plaintext.
 		if host := string(c.Request.Host()); host != "" {
-			overrides["s3.endpoint"] = "http://" + host
+			scheme := string(c.Request.Scheme())
+			if scheme == "" {
+				scheme = "http"
+			}
+			overrides["s3.endpoint"] = scheme + "://" + host
 		}
 	}
 	c.JSON(consts.StatusOK, map[string]map[string]string{
@@ -40,37 +45,42 @@ func (s *Server) icebergConfig(_ context.Context, c *app.RequestContext) {
 	})
 }
 
-// icebergS3CredOverrides picks one IAM ServiceAccount that already has at
-// least write-role access to the warehouse bucket (per the same per-bucket
-// grants that gate S3 SigV4 requests) and publishes its active
-// access_key / secret_key in the Iceberg REST `/v1/config` "overrides"
-// map. iceberg-go's REST client uses these to build the S3 client that
-// reads parquet footers during transaction.AddFiles — without them the
-// client falls back to the ambient AWS credential chain and our bench
-// gets `403 InvalidAccessKeyId` long before any CommitTable hits this
-// server (observed in warp iceberg `sustained`: 1832/1870 ops failed,
-// 0 commits reached the server).
+// icebergS3CredOverrides publishes the *caller's own* IAM access_key /
+// secret_key in the Iceberg REST `/v1/config` "overrides" map so that
+// iceberg-go's REST client can build a data-plane S3 client that reads
+// parquet footers during transaction.AddFiles. Without these the client
+// falls back to the ambient AWS credential chain and gets `403
+// InvalidAccessKeyId` long before any CommitTable hits this server
+// (observed in warp iceberg `sustained`: 1832/1870 ops failed, 0 commits
+// reached the server).
 //
 // The bucket is parsed from the catalog's warehouse location (e.g.
-// `s3://grainfs-tables/warehouse` → `grainfs-tables`). The SA selection
-// honours the existing IAM model: whichever account already holds the
-// authority to write into that bucket is the right principal to also
-// expose for data-plane access. No separate "iceberg data plane SA"
-// concept is needed — and no env var or CLI flag — because IAM already
-// expresses the trust relationship.
+// `s3://grainfs-tables/warehouse` → `grainfs-tables`). The caller's
+// access_key is taken from ctx (set by the authn middleware after SigV4
+// verification) and looked up to retrieve the matching secret_key. The
+// caller must hold at least RoleRead on the warehouse bucket — otherwise
+// we publish nothing rather than handing out useful creds to a principal
+// that wouldn't be able to use them anyway.
+//
+// This deliberately does NOT pick "some other SA that has the right grant
+// already" — that would amplify a RoleRead caller into RoleAdmin-class
+// data-plane credentials, which is a privilege escalation. The caller
+// gets the same authority on the data plane that they already authn'd
+// for on the catalog plane.
 //
 // Returns an empty map when:
 //   - the IAM store is missing,
 //   - the catalog warehouse location does not parse as `s3://bucket/...`,
-//   - no SA holds RoleWrite or higher on the bucket (including
-//     wildcards), or
-//   - the qualifying SA has no active access key.
+//   - the request has no resolved caller access key (e.g., the authn
+//     middleware was skipped — should not happen on the SigV4-gated
+//     iceberg routes),
+//   - the caller's access key is unknown, revoked, or expired,
+//   - the caller holds less than RoleRead on the warehouse bucket
+//     (including via wildcard).
 //
 // All lookups are read-only against the IAM store snapshot — no secrets
-// touch disk or env state in this path. Production deployments that want
-// to prevent credential publication can revoke the relevant grants or
-// gate this endpoint behind authn (a separate follow-up).
-func (s *Server) icebergS3CredOverrides(warehouse string) map[string]string {
+// touch disk or env state in this path.
+func (s *Server) icebergS3CredOverrides(ctx context.Context, warehouse string) map[string]string {
 	if s.iamStore == nil {
 		return map[string]string{}
 	}
@@ -78,8 +88,15 @@ func (s *Server) icebergS3CredOverrides(warehouse string) map[string]string {
 	if bucket == "" {
 		return map[string]string{}
 	}
-	key, ok := s.iamStore.FirstActiveKeyForBucketGrant(bucket, iam.RoleWrite)
+	accessKey := AccessKeyFromContext(ctx)
+	if accessKey == "" {
+		return map[string]string{}
+	}
+	key, ok := s.iamStore.LookupKey(accessKey)
 	if !ok || key == nil || key.SecretKey == "" {
+		return map[string]string{}
+	}
+	if s.iamStore.LookupGrant(key.SAID, bucket) < iam.RoleRead {
 		return map[string]string{}
 	}
 	return map[string]string{
