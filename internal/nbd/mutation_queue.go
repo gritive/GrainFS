@@ -8,12 +8,10 @@ import (
 
 type mutationQueue struct {
 	blockSize uint64
-	nextSeq   uint64
 	entries   []mutationEntry
 }
 
 type mutationEntry struct {
-	seq        uint64
 	firstBlock uint64
 	lastBlock  uint64
 	fns        []func() error
@@ -34,9 +32,7 @@ func (q *mutationQueue) AppendRange(offset uint64, length uint32, fns []func() e
 	firstBlock, lastBlock := q.blockRange(offset, length)
 	copiedFns := append([]func() error(nil), fns...)
 
-	q.nextSeq++
 	q.entries = append(q.entries, mutationEntry{
-		seq:        q.nextSeq,
 		firstBlock: firstBlock,
 		lastBlock:  lastBlock,
 		fns:        copiedFns,
