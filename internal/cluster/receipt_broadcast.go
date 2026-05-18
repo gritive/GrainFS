@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -23,9 +24,9 @@ type Caller interface {
 
 // ReceiptLookup is the server-side dependency of the query handler — the
 // broadcaster peer looks up the receipt in its local store and returns
-// the signed JSON. Implementations live in internal/receipt.
+// the decoded receipt. Implementations live in internal/receipt.
 type ReceiptLookup interface {
-	LookupReceiptJSON(id string) ([]byte, bool)
+	LookupReceipt(id string) (*receipt.HealReceipt, bool)
 }
 
 // ReceiptBroadcaster fans out a "do you have this receipt?" query to every
@@ -126,7 +127,7 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 	req := &transport.Message{Type: transport.StreamReceiptQuery, Payload: payload}
 
 	type result struct {
-		json  []byte
+		bytes []byte
 		found bool
 		err   error
 	}
@@ -151,12 +152,12 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 				results <- result{}
 				return
 			}
-			// Fresh copy of the JSON payload — FlatBuffers byte views
+			// Fresh copy of the FB payload — FlatBuffers byte views
 			// alias into `resp.Payload`, which would get reused.
-			j := parsed.ReceiptJsonBytes()
-			cp := make([]byte, len(j))
-			copy(cp, j)
-			results <- result{json: cp, found: true}
+			fbBytes := parsed.ReceiptBytes()
+			cp := make([]byte, len(fbBytes))
+			copy(cp, fbBytes)
+			results <- result{bytes: cp, found: true}
 		}(peer)
 	}
 
@@ -192,7 +193,7 @@ func (b *ReceiptBroadcaster) Query(ctx context.Context, receiptID string) ([]byt
 					b.metrics.OnBroadcastPartialSuccess(responded+failed, len(peers))
 				}
 				b.metrics.OnBroadcastHit()
-				return r.json, true, nil
+				return r.bytes, true, nil
 			}
 		}
 	}
@@ -222,9 +223,9 @@ func (b *ReceiptBroadcaster) QuerySingle(ctx context.Context, peer, receiptID st
 	if !parsed.Found() {
 		return nil, false, nil
 	}
-	j := parsed.ReceiptJsonBytes()
-	cp := make([]byte, len(j))
-	copy(cp, j)
+	fbBytes := parsed.ReceiptBytes()
+	cp := make([]byte, len(fbBytes))
+	copy(cp, fbBytes)
 	return cp, true, nil
 }
 
@@ -256,8 +257,13 @@ func NewReceiptQueryHandler(lookup ReceiptLookup) func(req *transport.Message) *
 			logger.Warn().Err(err).Msg("receipt-query: invalid payload")
 			return buildQueryResponseMsg(false, nil)
 		}
-		data, found := lookup.LookupReceiptJSON(id)
+		r, found := lookup.LookupReceipt(id)
 		if !found {
+			return buildQueryResponseMsg(false, nil)
+		}
+		data, err := receipt.EncodeReceipt(r)
+		if err != nil {
+			logger.Warn().Err(err).Msg("receipt-query: encode failed")
 			return buildQueryResponseMsg(false, nil)
 		}
 		return buildQueryResponseMsg(true, data)
@@ -274,16 +280,16 @@ func decodeReceiptQueryID(data []byte) (id string, err error) {
 	return string(msg.ReceiptId()), nil
 }
 
-func buildQueryResponseMsg(found bool, receiptJSON []byte) *transport.Message {
+func buildQueryResponseMsg(found bool, receiptBytes []byte) *transport.Message {
 	b := flatbuffers.NewBuilder(128)
-	var jsonOff flatbuffers.UOffsetT
-	if len(receiptJSON) > 0 {
-		jsonOff = b.CreateByteVector(receiptJSON)
+	var receiptOff flatbuffers.UOffsetT
+	if len(receiptBytes) > 0 {
+		receiptOff = b.CreateByteVector(receiptBytes)
 	}
 	clusterpb.ReceiptQueryResponseMsgStart(b)
 	clusterpb.ReceiptQueryResponseMsgAddFound(b, found)
-	if len(receiptJSON) > 0 {
-		clusterpb.ReceiptQueryResponseMsgAddReceiptJson(b, jsonOff)
+	if len(receiptBytes) > 0 {
+		clusterpb.ReceiptQueryResponseMsgAddReceipt(b, receiptOff)
 	}
 	b.Finish(clusterpb.ReceiptQueryResponseMsgEnd(b))
 	raw := b.FinishedBytes()

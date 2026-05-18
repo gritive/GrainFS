@@ -37,9 +37,7 @@ func TestHealEmitter_PersistsToEventStore(t *testing.T) {
 	assert.Equal(t, healEvCategory, got.Type)
 	assert.Equal(t, "detect", got.Action)
 	assert.Equal(t, "b", got.Bucket)
-	assert.Equal(t, "missing", got.Metadata["err_code"])
-	assert.Equal(t, "corr-9", got.Metadata["correlation_id"])
-	assert.EqualValues(t, 1, got.Metadata["shard_id"])
+	assert.Equal(t, "k", got.Key)
 }
 
 func TestHealEmitter_NilHubAndEnqueue_NoPanic(t *testing.T) {

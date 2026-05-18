@@ -1079,6 +1079,30 @@ func decodePutObjectQuarantineCmd(data []byte) (PutObjectQuarantineCmd, error) {
 	}, nil
 }
 
+// decodePutObjectQuarantineCmdStorage is the storage-safe variant of
+// decodePutObjectQuarantineCmd. Unlike the RPC version, it wraps BOTH
+// GetRootAs AND all field access in defer-recover so a malformed FB blob
+// produces a typed error instead of panicking through callers. (Existing
+// fbSafe only wraps the GetRootAs call.)
+//
+// Used by FSM apply paths that read raft-derived badger values.
+func decodePutObjectQuarantineCmdStorage(data []byte) (cmd PutObjectQuarantineCmd, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode quarantine storage: malformed FB: %v", r)
+		}
+	}()
+	t := clusterpb.GetRootAsPutObjectQuarantineCmd(data, 0)
+	cmd = PutObjectQuarantineCmd{
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+		Cause:     string(t.Cause()),
+		Reason:    string(t.Reason()),
+	}
+	return cmd, nil
+}
+
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)

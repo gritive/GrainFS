@@ -2,7 +2,6 @@ package clusteradmin
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,21 +81,4 @@ func TestFilterEventsByAction(t *testing.T) {
 	// empty filter returns input as-is
 	all := FilterEventsByAction(events, nil)
 	assert.Equal(t, events, all)
-}
-
-func TestEventDetail_RendersMetadataDeterministically(t *testing.T) {
-	e := Event{
-		Action: "cluster-remove-peer",
-		Metadata: map[string]any{
-			"removed_id": "n3",
-			"force":      false,
-		},
-	}
-	d := EventDetail(e)
-	// metadata keys sorted alphabetically: force, removed_id
-	idxForce := strings.Index(d, "force=")
-	idxRemoved := strings.Index(d, "removed_id=")
-	require.GreaterOrEqual(t, idxForce, 0)
-	require.GreaterOrEqual(t, idxRemoved, 0)
-	assert.Less(t, idxForce, idxRemoved, "metadata keys must render in sorted order")
 }

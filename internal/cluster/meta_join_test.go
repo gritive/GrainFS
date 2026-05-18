@@ -240,22 +240,6 @@ func TestMetaJoin_RoundTrip_AllStatuses(t *testing.T) {
 	}
 }
 
-func TestMetaJoinRequest_RejectsLegacyJSON(t *testing.T) {
-	legacy := []byte(`{"node_id":"n1","address":"10.0.0.1:9100"}`)
-	_, err := decodeJoinRequest(legacy)
-	if err == nil {
-		t.Fatal("expected legacy-JSON rejection, got nil")
-	}
-}
-
-func TestMetaJoinReply_RejectsLegacyJSON(t *testing.T) {
-	legacy := []byte(`{"accepted":true,"status":"ok"}`)
-	_, err := decodeJoinReply(legacy)
-	if err == nil {
-		t.Fatal("expected legacy-JSON rejection, got nil")
-	}
-}
-
 func TestMetaJoinRequest_MalformedFB(t *testing.T) {
 	bad := append([]byte(nil), metaJoinRequestMagic...)
 	bad = append(bad, 0xff, 0xff, 0xff, 0xff)

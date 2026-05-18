@@ -66,12 +66,22 @@ type e2eCluster struct {
 
 func startE2ECluster(t *testing.T, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
+	c := startE2EClusterNoCleanup(t, opts)
+	t.Cleanup(c.Stop)
+	return c
+}
+
+// startE2EClusterNoCleanup is identical to startE2ECluster except it does NOT
+// register t.Cleanup(c.Stop). Intended for process-global shared fixtures
+// whose lifetime is managed by TestMain teardown. The caller is responsible
+// for calling c.Stop() exactly once.
+func startE2EClusterNoCleanup(t *testing.T, opts e2eClusterOptions) *e2eCluster {
+	t.Helper()
 	opts = normalizeE2EClusterOptions(opts)
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		c, err := tryStartE2ECluster(t, opts)
 		if err == nil {
-			t.Cleanup(c.Stop)
 			return c
 		}
 		lastErr = err

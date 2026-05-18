@@ -1,0 +1,25 @@
+namespace receiptpb;
+
+table ObjectRef {
+  bucket     : string;
+  key        : string;
+  version_id : string;
+}
+
+table HealReceipt {
+  receipt_id        : string;
+  key_id            : string;
+  timestamp_unix_ns : int64;
+  object            : ObjectRef;
+  shards_lost       : [int32];
+  shards_rebuilt    : [int32];
+  parity_used       : int32;
+  peers_involved    : [string];
+  duration_ms       : uint32;
+  event_ids         : [string];
+  correlation_id    : string;
+  canonical_payload : string;
+  signature         : string;
+}
+
+root_type HealReceipt;

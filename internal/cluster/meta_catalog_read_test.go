@@ -169,28 +169,6 @@ func TestMetaCatalogReadReply_AllErrorTypes(t *testing.T) {
 	}
 }
 
-func TestMetaCatalogReadRequest_RejectsLegacyJSON(t *testing.T) {
-	legacy := []byte(`{"op":"load-namespace","namespace":["a"]}`)
-	_, err := decodeMetaCatalogReadRequest(legacy)
-	if err == nil {
-		t.Fatal("expected legacy-JSON rejection, got nil")
-	}
-	if !errors.Is(err, icebergcatalog.ErrServiceUnavailable) {
-		t.Errorf("expected ErrServiceUnavailable, got %v", err)
-	}
-}
-
-func TestMetaCatalogReadReply_RejectsLegacyJSON(t *testing.T) {
-	legacy := []byte(`{"error_type":"namespace-not-found","error_message":"x"}`)
-	_, err := decodeMetaLoadTableReply(legacy)
-	if err == nil {
-		t.Fatal("expected legacy-JSON rejection, got nil")
-	}
-	if !errors.Is(err, icebergcatalog.ErrServiceUnavailable) {
-		t.Errorf("expected ErrServiceUnavailable, got %v", err)
-	}
-}
-
 func TestMetaCatalogReadRequest_MalformedFB(t *testing.T) {
 	bad := append([]byte(nil), metaCatalogReadRequestMagic...)
 	bad = append(bad, []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}...)

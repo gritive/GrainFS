@@ -59,22 +59,20 @@ func (e *healEmitter) Emit(ev scrubber.HealEvent) {
 
 	if e.enqueueEvt != nil {
 		e.enqueueEvt(eventstore.Event{
-			Type:   healEvCategory,
-			Action: string(ev.Phase),
-			Bucket: ev.Bucket,
-			Key:    ev.Key,
-			Metadata: map[string]any{
-				"id":             ev.ID,
-				"phase":          string(ev.Phase),
-				"outcome":        string(ev.Outcome),
-				"shard_id":       ev.ShardID,
-				"peer_id":        ev.PeerID,
-				"bytes_repaired": ev.BytesRepaired,
-				"duration_ms":    ev.DurationMs,
-				"err_code":       ev.ErrCode,
-				"correlation_id": ev.CorrelationID,
-				"version_id":     ev.VersionID,
-			},
+			Type:          healEvCategory,
+			Action:        string(ev.Phase),
+			Bucket:        ev.Bucket,
+			Key:           ev.Key,
+			ID:            ev.ID,
+			Phase:         string(ev.Phase),
+			Outcome:       string(ev.Outcome),
+			ShardID:       ev.ShardID,
+			PeerID:        ev.PeerID,
+			BytesRepaired: ev.BytesRepaired,
+			DurationMs:    int64(ev.DurationMs),
+			ErrCode:       ev.ErrCode,
+			CorrelationID: ev.CorrelationID,
+			VersionID:     ev.VersionID,
 		})
 	}
 }

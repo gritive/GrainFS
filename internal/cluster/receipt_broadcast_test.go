@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -14,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -75,17 +75,17 @@ func (m *mockCaller) Call(ctx context.Context, addr string, req *transport.Messa
 }
 
 // buildQueryResponse constructs a FB-encoded ReceiptQueryResponseMsg for tests.
-func buildQueryResponse(t *testing.T, found bool, receiptJSON []byte) *transport.Message {
+func buildQueryResponse(t *testing.T, found bool, receiptBytes []byte) *transport.Message {
 	t.Helper()
 	b := flatbuffers.NewBuilder(128)
-	var jsonOff flatbuffers.UOffsetT
-	if len(receiptJSON) > 0 {
-		jsonOff = b.CreateByteVector(receiptJSON)
+	var receiptOff flatbuffers.UOffsetT
+	if len(receiptBytes) > 0 {
+		receiptOff = b.CreateByteVector(receiptBytes)
 	}
 	clusterpb.ReceiptQueryResponseMsgStart(b)
 	clusterpb.ReceiptQueryResponseMsgAddFound(b, found)
-	if len(receiptJSON) > 0 {
-		clusterpb.ReceiptQueryResponseMsgAddReceiptJson(b, jsonOff)
+	if len(receiptBytes) > 0 {
+		clusterpb.ReceiptQueryResponseMsgAddReceipt(b, receiptOff)
 	}
 	b.Finish(clusterpb.ReceiptQueryResponseMsgEnd(b))
 	raw := b.FinishedBytes()
@@ -225,17 +225,20 @@ func TestReceiptBroadcaster_Query_CancelsRemainingAfterFirstSuccess(t *testing.T
 
 // fakeReceiptLookup is a ReceiptLookup implementation for handler tests.
 type fakeReceiptLookup struct {
-	data map[string][]byte // id → JSON
+	receipts map[string]*receipt.HealReceipt // id → decoded receipt
 }
 
-func (f *fakeReceiptLookup) LookupReceiptJSON(id string) ([]byte, bool) {
-	v, ok := f.data[id]
-	return v, ok
+func (f *fakeReceiptLookup) LookupReceipt(id string) (*receipt.HealReceipt, bool) {
+	r, ok := f.receipts[id]
+	return r, ok
 }
 
 func TestReceiptQueryHandler_ReturnsReceiptWhenFound(t *testing.T) {
-	lookup := &fakeReceiptLookup{data: map[string][]byte{
-		"rcpt-here": []byte(`{"receipt_id":"rcpt-here","payload":"x"}`),
+	lookup := &fakeReceiptLookup{receipts: map[string]*receipt.HealReceipt{
+		"rcpt-here": {
+			ReceiptID:        "rcpt-here",
+			CanonicalPayload: "x",
+		},
 	}}
 
 	handler := NewReceiptQueryHandler(lookup)
@@ -254,13 +257,13 @@ func TestReceiptQueryHandler_ReturnsReceiptWhenFound(t *testing.T) {
 
 	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
 	assert.True(t, parsed.Found())
-	var decoded map[string]any
-	require.NoError(t, json.Unmarshal(parsed.ReceiptJsonBytes(), &decoded))
-	assert.Equal(t, "rcpt-here", decoded["receipt_id"])
+	gotReceipt, err := receipt.DecodeReceiptStorage(parsed.ReceiptBytes())
+	require.NoError(t, err)
+	assert.Equal(t, "rcpt-here", gotReceipt.ReceiptID)
 }
 
 func TestReceiptQueryHandler_ReturnsNotFound(t *testing.T) {
-	lookup := &fakeReceiptLookup{data: map[string][]byte{}}
+	lookup := &fakeReceiptLookup{receipts: map[string]*receipt.HealReceipt{}}
 	handler := NewReceiptQueryHandler(lookup)
 
 	b := flatbuffers.NewBuilder(64)
@@ -274,7 +277,7 @@ func TestReceiptQueryHandler_ReturnsNotFound(t *testing.T) {
 	require.NotNil(t, resp)
 	parsed := clusterpb.GetRootAsReceiptQueryResponseMsg(resp.Payload, 0)
 	assert.False(t, parsed.Found())
-	assert.Empty(t, parsed.ReceiptJsonBytes())
+	assert.Empty(t, parsed.ReceiptBytes())
 }
 
 func TestReceiptQueryHandler_RejectsInvalidPayload(t *testing.T) {

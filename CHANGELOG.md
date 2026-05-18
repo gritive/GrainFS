@@ -1,5 +1,89 @@
 # Changelog
 
+## [0.0.252.0] - 2026-05-19 - chore: drop legacy JSON guards from FB decoders
+
+Wipe-and-restart is the only supported upgrade path (see v0.0.251.0 CHANGELOG),
+and pre-FlatBuffers JSON bytes will not appear in storage or on the wire after
+upgrade. The diagnostic `'{'` legacy-byte guards in 8 FB decoders were dead
+defense:
+
+- 4 storage decoders — packblob `decodeIndexStorage`, cluster
+  `decodePutObjectQuarantineCmdStorage`, `receipt.DecodeReceiptStorage`,
+  `eventstore.decodeEventStorage`.
+- 4 RPC decoders — `decodeMetaCatalogReadRequest`,
+  `decodeMetaLoadTableReply`, `decodeJoinRequest`, `decodeJoinReply`.
+
+Removed all 8 guards plus the four per-package `ErrLegacyStorageFormat`
+sentinels (packblob, cluster, receipt, eventstore) and the eight
+`Test*RejectsLegacyJSON` / `Test*LegacyJSONRejected` tests that exercised
+them. defer-recover already catches malformed-FB panics — the legacy guard
+only added a separate error message for a class of bytes that cannot exist
+in supported deployments.
+
+Closes Task #19 (PR #413 meta_forward reply legacy guard review — answer:
+guard removed entirely, not strengthened).
+
+## [0.0.251.1] - 2026-05-19 - test: e2e consolidation — shared cluster fixture + integration rename
+
+- Add `tgt.uniqueBucket(t, "case")` helper to `s3Target`: derives a S3-spec
+  bucket name from `t.Name()`+case (sanitize → 50-char SHA8 fallback) and
+  registers auto-cleanup. Prevents bucket-name collisions now that the
+  cluster fixture is process-global.
+- Promote `tests/e2e/` cluster fixture to a process-global shared instance
+  via `sync.Once` lazy boot. First cluster-target test triggers boot;
+  TestMain teardown calls `stopSharedCluster`. `-short` skips boot
+  automatically (cluster-target tests guarded by `skipIfShort`). Migrates
+  `TestBucketsE2E`, `TestS3Multipart*`, `TestS3Presigned*`, `TestS3Objects*`
+  callers; drops the per-test `newClusterS3Target(t, 4)` helper. CI time
+  for adding new S3-domain e2e tests scales sub-linearly.
+- Add `TestS3VersioningE2E` (cluster-only, 2 cases: `PutGet`,
+  `GetByVersionID`) under SDK. Drops the equivalent `_EC` cases from
+  `internal/server/versioning_test.go`. The other 3 `_EC` cases stay in
+  internal — the 4-node cluster's `ListObjectVersions` returns an extra
+  "null" version per `PutObject`, semantically different from the
+  in-process EC fixture, so cluster-fixture SDK assertions don't match.
+- Drop `TestAppendableObjectOverwriteByPlainPut` from
+  `internal/server/object_append_test.go` — the SDK equivalent already
+  exists as `TestAppendObjectE2E/{SingleNode,Cluster4Node}/PlainPutOverwritesAppendable`
+  in `tests/e2e/append_object_test.go`.
+- Rename `internal/*/e2e_test.go` (5 files) → `*_integration_test.go`:
+  `internal/cluster/{ring,meta_raft,meta_raft_mux}`,
+  `internal/server/acl`, `internal/storage/packblob/compression`.
+  These tests wire up a single subsystem in-process — they were never
+  end-to-end. Content unchanged.
+- `tests/e2e/append_object_test.go` (own `appendTarget` abstraction with
+  distinct `ClusterKey: "E2E-APPEND-KEY"`) is intentionally NOT migrated
+  to the shared cluster. Out of scope for this PR.
+
+Operator impact: none (test-only change, production code unchanged).
+Developer impact: `make test-e2e` cluster boot amortizes across S3 domains
+(was per-test 30s+); new S3-domain e2e tests follow the
+`runVersioningCases(t, tgt)` matrix pattern in `tests/e2e/versioning_test.go`.
+
+## [0.0.251.0] - 2026-05-19 - feat: internal storage v2 (FlatBuffers) (BREAKING)
+
+- BREAKING: internal storage format v2 (FlatBuffers) for quarantine, receipt,
+  eventstore badger values, and packblob index.
+  Upgrade procedure:
+    1. Stop cluster.
+    2. WIPE `<data>/raft/` and `<data>/meta/` ONLY.
+    3. PRESERVE packblob `*.blob` files (contain user object data).
+       Optionally delete legacy `<data>/<packblob_dir>/index.json`
+       (ignored by new binary).
+    4. Restart. packblob `index.bin` rebuilds automatically from blob scan.
+- eventstore.Event drops the `User` field and the polymorphic
+  `map[string]any` `Metadata` field. The 12 audit keys previously stored
+  under `Metadata` are promoted to typed top-level fields: `id`, `phase`,
+  `outcome`, `shard_id`, `peer_id`, `bytes_repaired`, `duration_ms`,
+  `err_code`, `correlation_id`, `version_id`, `removed_id`, `force`.
+  Wire format: top-level keys (e.g. `event.phase` instead of
+  `event.metadata.phase`).
+- LookupReceiptJSON renamed to LookupReceipt (returns *HealReceipt). HTTP API
+  re-marshals to JSON at the boundary; intra-cluster broadcast encodes FB.
+- Wire field ReceiptQueryResponseMsg.receipt_json_bytes renamed to receipt_bytes
+  (FB Go accessor: ReceiptBytes()).
+- Internal RPC remains FlatBuffers (PR #406, #416 unchanged).
+
 ## [0.0.250.1] - 2026-05-19 - chore(bench): warp iceberg benchmark scaffolding (catalog-read + catalog-commits)
 
 Adds a per-subcommand wrapper around `bench_iceberg_table_cluster.sh` and the

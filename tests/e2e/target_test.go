@@ -8,10 +8,19 @@
 package e2e
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"regexp"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
 )
 
 // s3Target abstracts a fixture (single-node or cluster) for e2e tests that
@@ -26,8 +35,12 @@ type s3Target struct {
 	accessKey string
 	secretKey string
 	createBkt func(t *testing.T, bucket string)
-	isCluster bool
-	cluster   *e2eCluster // non-nil for cluster fixtures
+	// uniqueBucket creates a bucket with a name derived from t.Name() + case,
+	// sanitized to S3 spec (lowercase/hyphen, 3-63 chars). Auto-registers
+	// t.Cleanup(DeleteBucket). Returns the actual bucket name used.
+	uniqueBucket func(t *testing.T, caseName string) string
+	isCluster    bool
+	cluster      *e2eCluster // non-nil for cluster fixtures
 }
 
 func newSingleNodeS3Target() s3Target {
@@ -45,35 +58,91 @@ func newSingleNodeS3Target() s3Target {
 		createBkt: func(t *testing.T, bucket string) {
 			createBucket(t, bucket)
 		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("single", t.Name(), caseName)
+			createBucket(t, name)
+			t.Cleanup(func() {
+				testS3Client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
 		isCluster: false,
 	}
 }
 
-func newClusterS3Target(t *testing.T, nodes int) s3Target {
-	t.Helper()
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      nodes,
-		Mode:       ClusterModeDynamicJoin,
-		ClusterKey: "E2E-S3-OP-KEY",
-		LogPrefix:  "grainfs-s3op",
-		DisableNFS: true,
-		DisableNBD: true,
-	})
+var bucketSanitizeRE = regexp.MustCompile(`[^a-z0-9-]`)
 
-	// Wait for IAM key propagation across all nodes; otherwise non-leader
-	// nodes 403 on first request.
-	for i := range c.procs {
-		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+func sanitizeForBucket(s string) string {
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "/", "-")
+	s = bucketSanitizeRE.ReplaceAllString(s, "")
+	return s
+}
+
+// bucketNameFor produces a S3-spec compliant bucket name (3-63 chars,
+// lowercase, hyphens). When the t.Name()+case combination exceeds 50 chars
+// it falls back to <tgt>-<case>-<sha8> to keep names stable per test.
+func bucketNameFor(tgtName, testName, caseName string) string {
+	full := fmt.Sprintf("%s-%s-%s", tgtName, sanitizeForBucket(testName), sanitizeForBucket(caseName))
+	if len(full) > 50 {
+		sum := sha256.Sum256([]byte(testName + "|" + caseName))
+		full = fmt.Sprintf("%s-%s-%s", tgtName, sanitizeForBucket(caseName), hex.EncodeToString(sum[:4]))
 	}
+	if len(full) < 3 {
+		full = full + "-x"
+	}
+	return full
+}
 
+// Shared cluster fixture — process-global, lazily booted on first cluster-
+// target test (so -short skips boot automatically by skipping cluster tests).
+// Lifetime managed by TestMain teardown via stopSharedCluster.
+var (
+	sharedClusterOnce sync.Once
+	sharedCluster     *e2eCluster
+)
+
+func getOrInitSharedCluster(t *testing.T) *e2eCluster {
+	t.Helper()
+	sharedClusterOnce.Do(func() {
+		c := startE2EClusterNoCleanup(t, e2eClusterOptions{
+			Nodes:      4,
+			Mode:       ClusterModeDynamicJoin,
+			ClusterKey: "E2E-S3-OP-SHARED-KEY",
+			LogPrefix:  "grainfs-s3op-shared",
+			DisableNFS: true,
+			DisableNBD: true,
+		})
+		for i := range c.procs {
+			iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
+		}
+		sharedCluster = c
+	})
+	if sharedCluster == nil {
+		t.Fatal("shared cluster initialization failed")
+	}
+	return sharedCluster
+}
+
+// stopSharedCluster is invoked from TestMain teardown to release the shared
+// cluster fixture. No-op when no cluster test triggered initialization.
+func stopSharedCluster() {
+	if sharedCluster != nil {
+		sharedCluster.Stop()
+	}
+}
+
+func newSharedClusterS3Target(t *testing.T) s3Target {
+	t.Helper()
+	c := getOrInitSharedCluster(t)
 	return s3Target{
 		name:  "cluster4",
-		nodes: nodes,
+		nodes: 4,
 		pickNode: func(i int) *s3.Client {
-			return c.S3Client(i % nodes)
+			return c.S3Client(i % 4)
 		},
 		endpoint: func(i int) string {
-			return c.httpURLs[i%nodes]
+			return c.httpURLs[i%4]
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
@@ -81,9 +150,26 @@ func newClusterS3Target(t *testing.T, nodes int) s3Target {
 			c.GrantAdminOnBuckets(bucket)
 			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
 		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("cluster4", t.Name(), caseName)
+			c.GrantAdminOnBuckets(name)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			t.Cleanup(func() {
+				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
 		isCluster: true,
 		cluster:   c,
 	}
+}
+
+// newClusterS3Target returns a DEDICATED (non-shared) cluster fixture. Use
+// newSharedClusterS3Target for tests that don't mutate cluster topology;
+// reserve this for tests that kill nodes, change CLI flags, or otherwise
+// need an isolated cluster.
+func newClusterS3Target(t *testing.T, nodes int) s3Target {
+	return newClusterS3TargetWithExtraArgs(t, nodes, nil)
 }
 
 // newClusterS3TargetWithExtraArgs mirrors newClusterS3Target but passes
@@ -119,7 +205,27 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 			c.GrantAdminOnBuckets(bucket)
 			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
 		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("cluster4", t.Name(), caseName)
+			c.GrantAdminOnBuckets(name)
+			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			t.Cleanup(func() {
+				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
 		isCluster: true,
 		cluster:   c,
 	}
+}
+
+func TestBucketNameFor(t *testing.T) {
+	got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
+	require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
+	require.LessOrEqual(t, len(got), 63)
+
+	long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
+	require.LessOrEqual(t, len(long), 63)
+	require.GreaterOrEqual(t, len(long), 3)
+	require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
 }

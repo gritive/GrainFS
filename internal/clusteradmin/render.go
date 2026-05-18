@@ -104,18 +104,5 @@ func EventDetail(e Event) string {
 	if e.Key != "" {
 		parts = append(parts, "key="+e.Key)
 	}
-	if e.User != "" {
-		parts = append(parts, "user="+e.User)
-	}
-	if len(e.Metadata) > 0 {
-		keys := make([]string, 0, len(e.Metadata))
-		for k := range e.Metadata {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			parts = append(parts, fmt.Sprintf("%s=%v", k, e.Metadata[k]))
-		}
-	}
 	return strings.Join(parts, " ")
 }

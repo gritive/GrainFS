@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,18 +32,6 @@ type indexEntry struct {
 	LastModified int64
 	UserMetadata map[string]string
 	SSEAlgorithm string
-}
-
-// indexEntryJSON is a serializable form of indexEntry.
-type indexEntryJSON struct {
-	Location     BlobLocation      `json:"location"`
-	Refcount     int64             `json:"refcount"`
-	OriginalSize int64             `json:"original_size"`
-	ContentType  string            `json:"content_type,omitempty"`
-	ETag         string            `json:"etag,omitempty"`
-	LastModified int64             `json:"last_modified,omitempty"`
-	UserMetadata map[string]string `json:"user_metadata,omitempty"`
-	SSEAlgorithm string            `json:"sse_algorithm,omitempty"`
 }
 
 // packedKey identifies a packed object by its (bucket, key) tuple. It is the
@@ -202,18 +189,18 @@ func (pb *PackedBackend) deleteBucketIndex(bucket string) {
 	})
 }
 
-// SaveIndex persists the in-memory index to {blobDir}/index.json.
+// SaveIndex persists the in-memory index to {blobDir}/index.bin (FlatBuffers).
 // Range produces a weakly-consistent snapshot; entries inserted or deleted
 // concurrently may or may not appear, which is acceptable for the
 // periodic on-disk checkpoint (recovery rebuilds from blob scan if the
 // snapshot is incomplete).
 func (pb *PackedBackend) SaveIndex() error {
-	m := make(map[string]indexEntryJSON)
+	m := make(map[packedKey]*indexEntry)
 	pb.index.Range(func(k, v any) bool {
+		pk := k.(packedKey)
 		e := v.(*indexEntry)
-		m[k.(packedKey).String()] = indexEntryJSON{
+		copyE := &indexEntry{
 			Location:     e.Location,
-			Refcount:     e.Refcount.Load(),
 			OriginalSize: e.OriginalSize,
 			ContentType:  e.ContentType,
 			ETag:         e.ETag,
@@ -221,46 +208,35 @@ func (pb *PackedBackend) SaveIndex() error {
 			UserMetadata: cloneStringMap(e.UserMetadata),
 			SSEAlgorithm: e.SSEAlgorithm,
 		}
+		copyE.Refcount.Store(e.Refcount.Load())
+		m[pk] = copyE
 		return true
 	})
 
-	data, err := json.Marshal(m)
+	data, err := encodeIndex(m)
 	if err != nil {
-		return fmt.Errorf("marshal index: %w", err)
+		return fmt.Errorf("encode index: %w", err)
 	}
-	// Write to temp file then rename for atomic update (prevents corrupt index on crash).
-	tmp := filepath.Join(pb.blobDir, "index.json.tmp")
+	tmp := filepath.Join(pb.blobDir, "index.bin.tmp")
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return fmt.Errorf("write index tmp: %w", err)
 	}
-	return os.Rename(tmp, filepath.Join(pb.blobDir, "index.json"))
+	return os.Rename(tmp, filepath.Join(pb.blobDir, "index.bin"))
 }
 
-// LoadIndex loads the index from {blobDir}/index.json.
-// If the file doesn't exist, it rebuilds the index by scanning all blob files.
+// LoadIndex loads the index from {blobDir}/index.bin.
+// If the file doesn't exist, rebuilds via blob scan (existing fallback).
+// Malformed FB bytes surface as a wrapped error via defer-recover in
+// decodeIndexStorage — fail-fast, no rebuild attempt on corrupt input.
 func (pb *PackedBackend) LoadIndex() error {
-	indexFile := filepath.Join(pb.blobDir, "index.json")
+	indexFile := filepath.Join(pb.blobDir, "index.bin")
 	data, err := os.ReadFile(indexFile)
 	if err == nil {
-		var m map[string]indexEntryJSON
-		if err := json.Unmarshal(data, &m); err != nil {
-			return fmt.Errorf("unmarshal index: %w", err)
+		entries, decErr := decodeIndexStorage(data)
+		if decErr != nil {
+			return fmt.Errorf("load index: %w", decErr)
 		}
-		for k, v := range m {
-			pk, ok := parsePackedKey(k)
-			if !ok {
-				return fmt.Errorf("corrupt index key: %q has no bucket/key separator", k)
-			}
-			e := &indexEntry{
-				Location:     v.Location,
-				OriginalSize: v.OriginalSize,
-				ContentType:  v.ContentType,
-				ETag:         v.ETag,
-				LastModified: v.LastModified,
-				UserMetadata: cloneStringMap(v.UserMetadata),
-				SSEAlgorithm: v.SSEAlgorithm,
-			}
-			e.Refcount.Store(v.Refcount)
+		for pk, e := range entries {
 			pb.index.Store(pk, e)
 		}
 		return nil
@@ -269,7 +245,7 @@ func (pb *PackedBackend) LoadIndex() error {
 		return fmt.Errorf("read index file: %w", err)
 	}
 
-	// Rebuild from blob files
+	// Rebuild from blob files (unchanged from JSON era).
 	locs, err := pb.blobStore.ScanAll()
 	if err != nil {
 		return fmt.Errorf("scan blobs: %w", err)

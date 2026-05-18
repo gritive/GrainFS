@@ -889,11 +889,6 @@ func encodeMetaCatalogReadRequest(req metaCatalogReadRequest) ([]byte, error) {
 }
 
 func decodeMetaCatalogReadRequest(payload []byte) (req metaCatalogReadRequest, err error) {
-	// Mixed-version diagnostic: an old sender encodes raw JSON; surface that
-	// as a typed error rather than a confused "malformed FB" symptom.
-	if len(payload) > 0 && payload[0] == '{' {
-		return metaCatalogReadRequest{}, fmt.Errorf("%w: peer sent legacy JSON request (mixed-version)", icebergcatalog.ErrServiceUnavailable)
-	}
 	if !bytes.HasPrefix(payload, metaCatalogReadRequestMagic) {
 		return metaCatalogReadRequest{}, fmt.Errorf("%w: bad meta_catalog_read magic", icebergcatalog.ErrServiceUnavailable)
 	}
@@ -984,10 +979,6 @@ func encodeMetaLoadTableReply(reply *metaLoadTableReply, err error) []byte {
 }
 
 func decodeMetaLoadTableReply(data []byte) (reply *metaLoadTableReply, err error) {
-	// Mixed-version diagnostic: an old receiver encodes the JSON shape.
-	if len(data) > 0 && data[0] == '{' {
-		return nil, fmt.Errorf("%w: peer returned legacy JSON reply (mixed-version)", icebergcatalog.ErrServiceUnavailable)
-	}
 	// Per-call defer recover, mirrors PR #413 decodeMetaForwardReplyWithIndex.
 	defer func() {
 		if r := recover(); r != nil {

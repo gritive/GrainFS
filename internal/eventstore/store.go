@@ -2,7 +2,6 @@ package eventstore
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -30,15 +29,35 @@ const (
 )
 
 // Event represents a single auditable event.
+//
+// Fields below the first 6 are optional and only populated for specific event
+// types (heal events, cluster membership). They are typed top-level fields
+// rather than a polymorphic map[string]any so the FB schema, the BadgerDB
+// storage format, and the /api/eventlog wire format share one definition.
 type Event struct {
-	Timestamp int64          `json:"ts"`
-	Type      string         `json:"type"`
-	Action    string         `json:"action"`
-	Bucket    string         `json:"bucket,omitempty"`
-	Key       string         `json:"key,omitempty"`
-	User      string         `json:"user,omitempty"`
-	Size      int64          `json:"size,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Timestamp int64  `json:"ts"`
+	Type      string `json:"type"`
+	Action    string `json:"action"`
+	Bucket    string `json:"bucket,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+
+	// Heal-event fields (populated by healEmitter). Mirror scrubber.HealEvent
+	// minus Timestamp/Bucket/Key which already live on the parent Event.
+	ID            string `json:"id,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	Outcome       string `json:"outcome,omitempty"`
+	ShardID       int32  `json:"shard_id,omitempty"`
+	PeerID        string `json:"peer_id,omitempty"`
+	BytesRepaired int64  `json:"bytes_repaired,omitempty"`
+	DurationMs    int64  `json:"duration_ms,omitempty"`
+	ErrCode       string `json:"err_code,omitempty"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+	VersionID     string `json:"version_id,omitempty"`
+
+	// Cluster-membership fields (populated by removeClusterPeer).
+	RemovedID string `json:"removed_id,omitempty"`
+	Force     bool   `json:"force,omitempty"`
 }
 
 // Store persists events in BadgerDB with "ev:" key prefix.
@@ -53,7 +72,7 @@ func (s *Store) Append(e Event) error {
 	if e.Timestamp == 0 {
 		e.Timestamp = time.Now().UnixNano()
 	}
-	data, err := json.Marshal(e)
+	data, err := encodeEvent(e)
 	if err != nil {
 		return err
 	}
@@ -108,7 +127,9 @@ func (s *Store) Query(since, until time.Time, limit int, types []string) ([]Even
 
 			var e Event
 			if err := item.Value(func(v []byte) error {
-				return json.Unmarshal(v, &e)
+				var decErr error
+				e, decErr = decodeEventStorage(v)
+				return decErr
 			}); err != nil {
 				continue
 			}

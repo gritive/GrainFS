@@ -107,11 +107,11 @@ type DeleteObjectVersionCmd struct {
 }
 
 type PutObjectQuarantineCmd struct {
-	Bucket    string `json:"bucket"`
-	Key       string `json:"key"`
-	VersionID string `json:"version_id,omitempty"`
-	Cause     string `json:"cause"`
-	Reason    string `json:"reason"`
+	Bucket    string
+	Key       string
+	VersionID string
+	Cause     string
+	Reason    string
 }
 
 type CreateMultipartUploadCmd struct {
