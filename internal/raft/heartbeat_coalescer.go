@@ -345,7 +345,13 @@ func encodeHeartbeatBatch(items []hbItem) ([]byte, error) {
 		return nil, fmt.Errorf("heartbeat batch too large (%d > 65535)", len(items))
 	}
 	// Pre-encode args so we know total size.
-	encArgs := make([][]byte, len(items))
+	var encArgsInline [16][]byte
+	var encArgs [][]byte
+	if len(items) <= len(encArgsInline) {
+		encArgs = encArgsInline[:len(items)]
+	} else {
+		encArgs = make([][]byte, len(items))
+	}
 	for i, it := range items {
 		ea, err := encodeAppendEntriesArgs(it.args)
 		if err != nil {

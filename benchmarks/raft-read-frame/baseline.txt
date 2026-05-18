@@ -1,0 +1,36 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/gritive/GrainFS/internal/raft
+cpu: Apple M3
+BenchmarkHeartbeatEncodeBatch-8   	 1096788	      1093 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1116 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1098 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1121 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1059 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1049 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1057 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1060 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1091 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	  953019	      1087 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2620719	       461.9 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2640302	       477.1 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2531181	       454.6 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2633410	       458.2 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2652723	       457.1 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2624815	       455.2 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2609761	       454.6 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2631711	       465.0 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2498820	       459.5 ns/op	     904 B/op	      11 allocs/op
+BenchmarkHeartbeatDecodeBatch-8   	 2641405	       455.4 ns/op	     904 B/op	      11 allocs/op
+BenchmarkRaftConnReadFrame-8      	   57022	     19833 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   59152	     20253 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   58782	     19863 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   58880	     19816 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   59263	     20284 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   58459	     20728 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   56242	     20688 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   62500	     20596 ns/op	     627 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   50169	     20012 ns/op	     626 B/op	      20 allocs/op
+BenchmarkRaftConnReadFrame-8      	   59035	     20068 ns/op	     626 B/op	      20 allocs/op
+PASS
+ok  	github.com/gritive/GrainFS/internal/raft	42.752s

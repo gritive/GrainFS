@@ -1,0 +1,14 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/gritive/GrainFS/internal/raft
+cpu: Apple M3
+BenchmarkHeartbeatEncodeBatch-8   	 1096788	      1093 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1116 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1098 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1121 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1059 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1049 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1057 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1060 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	 1000000	      1091 ns/op	    1857 B/op	      10 allocs/op
+BenchmarkHeartbeatEncodeBatch-8   	  953019	      1087 ns/op	    1857 B/op	      10 allocs/op
