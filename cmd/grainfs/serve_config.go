@@ -47,6 +47,7 @@ func buildClusterConfig(
 
 	cfg.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")
 	cfg.AppendForwardBufferMaxPerRequest, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-max-per-request")
+	cfg.AppendSizeCapBytes, _ = cmd.Flags().GetInt64("append-size-cap-bytes")
 
 	cfg.DirectIO, _ = cmd.Flags().GetBool("direct-io")
 	cfg.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")

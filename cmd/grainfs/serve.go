@@ -37,6 +37,8 @@ func init() {
 		"Total byte budget for AppendObject forward-body reservation pool (default 512 MiB).")
 	serveCmd.Flags().Int64("cluster-append-forward-buffer-max-per-request", 64*1024*1024,
 		"Max bytes any single AppendObject forward request may reserve (default 64 MiB).")
+	serveCmd.Flags().Int64("append-size-cap-bytes", 5*1024*1024*1024*1024,
+		"Per-object total size cap for AppendObject in bytes (default 5 TiB, S3 PutObject parity).")
 	serveCmd.Flags().String("encryption-key-file", "", "path to 32-byte encryption key file (auto-generated only for solo bootstrap if omitted)")
 	serveCmd.Flags().Int("nfs4-port", 2049, "NFSv4 server port (0 = disabled); binds 0.0.0.0 — use firewall or set 0 when exposing public interfaces")
 	serveCmd.Flags().Int("nbd-port", 10809, "NBD server port (0 = disabled). Client-side nbd-client still requires Linux.")

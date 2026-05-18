@@ -166,6 +166,11 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
 		MaxPerRequest: state.cfg.AppendForwardBufferMaxPerRequest,
 	})
+
+	coalesceCfg := cluster.DefaultCoalesceConfig()
+	coalesceCfg.SizeCapBytes = state.cfg.AppendSizeCapBytes
+	state.distBackend.SetCoalesceConfig(coalesceCfg)
+
 	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 

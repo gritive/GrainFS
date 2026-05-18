@@ -67,6 +67,9 @@ type Config struct {
 	AppendForwardBufferTotalBytes    int64
 	AppendForwardBufferMaxPerRequest int64
 
+	// AppendObject size cap
+	AppendSizeCapBytes int64
+
 	// Lifecycle / dedup / cache
 	LifecycleInterval time.Duration
 	MigrationInterval time.Duration
