@@ -43,7 +43,7 @@ func TestIndex_SaveAndLoad(t *testing.T) {
 	assert.NoError(t, err, "SaveIndex should succeed")
 
 	// TEST: Verify index file exists
-	indexFile := filepath.Join(tmpDir, "index.json")
+	indexFile := filepath.Join(tmpDir, "index.bin")
 	_, err = os.Stat(indexFile)
 	assert.NoError(t, err, "Index file should exist")
 
@@ -151,7 +151,7 @@ func TestIndex_RebuildAfterCrash(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate crash by deleting index file
-	indexFile := filepath.Join(tmpDir, "index.json")
+	indexFile := filepath.Join(tmpDir, "index.bin")
 	err = os.Remove(indexFile)
 	require.NoError(t, err)
 
