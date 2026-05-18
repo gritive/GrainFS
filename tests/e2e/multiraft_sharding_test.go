@@ -1297,8 +1297,12 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 		return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
 	}, 30*time.Second, 500*time.Millisecond, "grainfs-tables bucket grant did not become writable")
 
-	req := bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`))
-	resp, err := http.Post(c.httpURLs[1]+"/iceberg/v1/namespaces", "application/json", req)
+	icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
+
+	nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
+	require.NoError(t, err)
+	nsReq.Header.Set("Content-Type", "application/json")
+	resp, err := icebergClient.Do(nsReq)
 	require.NoError(t, err)
 	require.Less(t, resp.StatusCode, 300)
 	require.NoError(t, resp.Body.Close())
@@ -1308,12 +1312,17 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 		"schema":{"type":"struct","schema-id":0,"fields":[]},
 		"properties":{}
 	}`
-	resp, err = http.Post(c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", "application/json", bytes.NewReader([]byte(createTableBody)))
+	tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
+	require.NoError(t, err)
+	tblReq.Header.Set("Content-Type", "application/json")
+	resp, err = icebergClient.Do(tblReq)
 	require.NoError(t, err)
 	require.Less(t, resp.StatusCode, 300)
 	require.NoError(t, resp.Body.Close())
 
-	loadResp, err := http.Get(c.httpURLs[2] + "/iceberg/v1/namespaces/ns/tables/t")
+	loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
+	require.NoError(t, err)
+	loadResp, err := icebergClient.Do(loadReq)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, loadResp.StatusCode)
 	loadBody, err := io.ReadAll(loadResp.Body)
