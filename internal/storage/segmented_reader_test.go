@@ -61,3 +61,23 @@ func TestSegmentedReaderRangeWithinSingleSegment(t *testing.T) {
 		t.Fatalf("read %d bytes, want 101", len(got))
 	}
 }
+
+func TestSegmentedReaderRangeAcrossSegments(t *testing.T) {
+	b, obj := setupThreeSegmentObject(t)
+	// Range: bytes=5MiB - 15MiB → seg1[5MiB..10MiB) + seg2[0..5MiB]
+	start := int64(5 << 20)
+	end := int64(15<<20) - 1
+	r, err := b.OpenSegmentedReader("test", "k", obj, start, end)
+	if err != nil {
+		t.Fatalf("OpenSegmentedReader: %v", err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	want := end - start + 1
+	if int64(len(got)) != want {
+		t.Fatalf("read %d, want %d", len(got), want)
+	}
+}
