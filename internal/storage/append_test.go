@@ -33,3 +33,24 @@ func TestAppendObjectRejectsMismatchedOffset(t *testing.T) {
 		t.Fatalf("expected ErrAppendOffsetMismatch, got %v", err)
 	}
 }
+
+func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
+	b := newTestLocalBackend(t)
+	body := bytes.Repeat([]byte("A"), 10<<20) // 10 MiB
+	obj, err := b.AppendObject(context.Background(), "test", "k", 0, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if obj.Size != int64(10<<20) {
+		t.Fatalf("size=%d", obj.Size)
+	}
+	if len(obj.Segments) != 1 {
+		t.Fatalf("segments=%d", len(obj.Segments))
+	}
+	if !obj.IsAppendable {
+		t.Fatal("IsAppendable=false")
+	}
+	if !strings.HasSuffix(obj.ETag, "-1") {
+		t.Fatalf("etag=%q", obj.ETag)
+	}
+}

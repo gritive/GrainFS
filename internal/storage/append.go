@@ -2,9 +2,17 @@ package storage
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 )
 
 // MaxAppendSegments caps appendable segments per object.
@@ -55,9 +63,99 @@ func (b *LocalBackend) AppendObject(ctx context.Context, bucket, key string, exp
 }
 
 func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.Reader) (*Object, error) {
-	return nil, fmt.Errorf("not implemented")
+	seg, err := b.WriteSegmentBlob(bucket, key, r)
+	if err != nil {
+		return nil, fmt.Errorf("write segment: %w", err)
+	}
+	obj := &Object{
+		Key:          key,
+		Size:         seg.Size,
+		ContentType:  "application/octet-stream",
+		ETag:         CompositeETag([]SegmentRef{seg}),
+		LastModified: time.Now().Unix(),
+		Segments:     []SegmentRef{seg},
+		IsAppendable: true,
+	}
+	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
+		return nil, fmt.Errorf("persist: %w", err)
+	}
+	return obj, nil
 }
 
 func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, existing *Object, r io.Reader) (*Object, error) {
 	return nil, fmt.Errorf("not implemented")
+}
+
+// WriteSegmentBlob writes one segment blob to disk under
+// objects/<bucket>/<key>_segments/<blobID>. Returns SegmentRef with
+// BlobID (UUIDv7) + Size + plaintext-MD5 ETag.
+// Exported so cluster.DistributedBackend.AppendObject can call directly.
+func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (SegmentRef, error) {
+	blobID := uuid.Must(uuid.NewV7()).String()
+	path := b.segmentPath(bucket, key, blobID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return SegmentRef{}, err
+	}
+	h := md5.New()
+	domain := encryptedObjectFileDomain(bucket, key+"/segments/"+blobID)
+	var (
+		size int64
+		err  error
+	)
+	if b.encryptor != nil {
+		// Encrypted writer writes plaintext into h itself.
+		size, _, err = writeEncryptedObjectFileWithHash(path, b.encryptor, domain, r, h)
+	} else {
+		var f *os.File
+		f, err = os.Create(path)
+		if err == nil {
+			tr := io.TeeReader(r, h)
+			size, err = io.Copy(f, tr)
+			cerr := f.Close()
+			if err == nil {
+				err = cerr
+			}
+		}
+	}
+	if err != nil {
+		os.Remove(path)
+		return SegmentRef{}, err
+	}
+	return SegmentRef{
+		BlobID: blobID,
+		Size:   size,
+		ETag:   hex.EncodeToString(h.Sum(nil)),
+	}, nil
+}
+
+func (b *LocalBackend) segmentPath(bucket, key, blobID string) string {
+	return filepath.Join(b.objectPath(bucket, key)+"_segments", blobID)
+}
+
+// CompositeETag returns the S3-multipart-style composite ETag:
+// md5(concat(decode_hex(segment.ETag for each))) + "-<N>".
+func CompositeETag(segs []SegmentRef) string {
+	h := md5.New()
+	for _, s := range segs {
+		raw, _ := hex.DecodeString(s.ETag)
+		h.Write(raw)
+	}
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), len(segs))
+}
+
+// PutObjectRecord persists Object into the backend's BadgerDB. Self-managed txn.
+func (b *LocalBackend) PutObjectRecord(ctx context.Context, bucket, key string, obj *Object) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		return b.PutObjectRecordInTxn(txn, bucket, key, obj)
+	})
+}
+
+// PutObjectRecordInTxn persists Object within a caller-provided txn.
+// Cluster FSM apply will use this for atomic write within a larger txn.
+func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string, obj *Object) error {
+	data, err := marshalObject(obj)
+	if err != nil {
+		return err
+	}
+	return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), data)
 }
