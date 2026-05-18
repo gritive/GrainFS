@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -246,6 +247,7 @@ func (b *DistributedBackend) fetchAppendBlobFromAnyPeer(ctx context.Context, buc
 		tried++
 		rc, err := b.readAppendSegmentFromPeerKind(ctx, peer, bucket, key, blobID, kind)
 		if err == nil {
+			metrics.AppendForwardOnReadTotal.Inc()
 			return rc, nil
 		}
 		if !errors.Is(err, errPeerAppendSegmentNotFound) && firstNonENOENT == nil {

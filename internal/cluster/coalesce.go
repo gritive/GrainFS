@@ -14,6 +14,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -150,6 +151,16 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 // orphan EC shards which the scrubber sweeps. Idempotent on retry — apply
 // no-ops if CoalescedID already present.
 func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coalesceJob) error {
+	start := time.Now()
+	var resultLabel = "abort"
+	var coalescedBytes int64
+	defer func() {
+		metrics.AppendCoalesceTotal.WithLabelValues(resultLabel).Inc()
+		metrics.AppendCoalesceLatencySeconds.Observe(time.Since(start).Seconds())
+		if coalescedBytes > 0 {
+			metrics.AppendCoalesceBytes.Add(float64(coalescedBytes))
+		}
+	}()
 	obj, err := b.HeadObject(ctx, job.Bucket, job.Key)
 	if err != nil || obj == nil {
 		return nil
@@ -237,6 +248,8 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 	for _, s := range snapshot {
 		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
 	}
+	resultLabel = "success"
+	coalescedBytes = merged.Size
 	return nil
 }
 
