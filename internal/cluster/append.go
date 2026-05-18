@@ -87,7 +87,11 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	}
 
 	// Step 5: re-HeadObject for fresh result.
-	return b.HeadObject(ctx, bucket, key)
+	obj, herr := b.HeadObject(ctx, bucket, key)
+	if herr == nil && obj != nil && obj.IsAppendable {
+		b.maybeTriggerCoalesce(bucket, key, obj.Segments)
+	}
+	return obj, herr
 }
 
 // writeSegmentBlobForAppend writes one segment blob to owner-node disk under

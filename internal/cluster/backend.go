@@ -137,6 +137,16 @@ type DistributedBackend struct {
 	// entries via ApplyError exactly once per ProposeWait.
 	applyResultMu sync.Mutex
 	applyErrs     map[uint64]error
+
+	// Phase B2 coalesce: lifecycle context + worker + first-seen tracker.
+	// coalesceCfg holds trigger thresholds (count / size / idle / cleanup).
+	// coalesceCancel is invoked from Close to stop both the worker goroutine
+	// and the periodic backstop scanner.
+	coalesceCfg       CoalesceConfig
+	coalesce          *coalesceWorker
+	coalesceCtx       context.Context
+	coalesceCancel    context.CancelFunc
+	coalesceFirstSeen sync.Map // key="<bucket>\x00<key>" → time.Time
 }
 
 type backendTopology struct {
@@ -192,6 +202,13 @@ func NewDistributedBackend(root string, db *badger.DB, node RaftNode, keys *stat
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
 	}
+	// Phase B2: wire the in-process coalesce worker + periodic backstop scan.
+	// Lifecycle is bound to Close() via coalesceCancel.
+	b.coalesceCfg = DefaultCoalesceConfig()
+	b.coalesceCtx, b.coalesceCancel = context.WithCancel(context.Background())
+	b.coalesce = newCoalesceWorker(256, b.processCoalesceJobB2)
+	b.coalesce.Start(b.coalesceCtx)
+	go b.coalesceBackstopScan(b.coalesceCtx)
 	return b, nil
 }
 
@@ -894,6 +911,14 @@ func proposalForwardPeers(raftPeers, allNodes []string, selfAddr string) []strin
 // Close closes the metadata database. When shared is true the DB is owned by
 // the caller and Close is a no-op for the DB (only internal state is released).
 func (b *DistributedBackend) Close() error {
+	// Stop coalesce worker + backstop scanner before tearing down the DB so
+	// neither outlives the BadgerDB (would panic on closed-DB reads).
+	if b.coalesceCancel != nil {
+		b.coalesceCancel()
+	}
+	if b.coalesce != nil {
+		b.coalesce.Stop()
+	}
 	if b.shared {
 		return nil
 	}

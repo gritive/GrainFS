@@ -1,8 +1,12 @@
 package cluster
 
 import (
+	"bytes"
+	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -46,4 +50,25 @@ func TestEvaluateCoalesceTrigger(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAppendObjectTriggersCoalesceOnCount(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	// Override threshold to 3 segments so the test stays fast.
+	b.coalesceCfg.SegmentCount = 3
+
+	bucket, key := "b", "k"
+	for i := 0; i < 3; i++ {
+		off := currentSize(t, b, bucket, key)
+		_, err := b.AppendObject(ctx, bucket, key, off, bytes.NewReader([]byte("a")))
+		require.NoError(t, err)
+	}
+
+	require.Eventually(t, func() bool {
+		obj, _ := b.HeadObject(ctx, bucket, key)
+		return obj != nil && len(obj.Segments) == 0 && len(obj.Coalesced) == 1
+	}, 2*time.Second, 10*time.Millisecond, "coalesce never ran")
 }

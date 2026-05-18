@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/google/uuid"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -169,6 +171,113 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
 	}
 	return nil
+}
+
+// maybeTriggerCoalesce evaluates the trigger thresholds against the supplied
+// segment slice and enqueues a coalesce job if any threshold is met. The
+// caller passes the live segments (e.g. post-AppendObject HeadObject result)
+// so we never re-read BadgerDB on the hot path.
+//
+// first-seen tracking: a sync.Map keyed by "<bucket>\x00<key>" records the
+// timestamp of the first segment observed in the current batch so that the
+// idle-timeout branch fires for low-volume objects.
+func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segs []storage.SegmentRef) {
+	if b.coalesce == nil || len(segs) == 0 {
+		return
+	}
+	cacheKey := bucket + "\x00" + key
+	nowT := time.Now()
+	firstT := nowT
+	if v, ok := b.coalesceFirstSeen.LoadOrStore(cacheKey, nowT); ok {
+		firstT = v.(time.Time)
+	}
+	trig, _ := evaluateCoalesceTrigger(segs, firstT, nowT, b.coalesceCfg)
+	if !trig {
+		return
+	}
+	b.coalesce.Enqueue(coalesceJob{Bucket: bucket, Key: key})
+	// Reset the first-seen marker so the next batch starts a fresh window.
+	b.coalesceFirstSeen.Delete(cacheKey)
+}
+
+// coalesceBackstopScan periodically scans appendable objects and re-enqueues
+// any whose in-process trigger was missed (process restart, dropped enqueue
+// when the worker buffer was full). Cleanup interval is set from
+// coalesceCfg.CleanupInterval; zero/negative values disable the scanner.
+func (b *DistributedBackend) coalesceBackstopScan(ctx context.Context) {
+	if b.coalesceCfg.CleanupInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(b.coalesceCfg.CleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.scanAppendableAndTrigger(ctx)
+		}
+	}
+}
+
+// scanAppendableAndTrigger iterates ObjectMetaKey prefix entries and enqueues
+// any appendable object with raw segments whose threshold is satisfied. Each
+// object is enqueued at most once per batch thanks to coalesceFirstSeen +
+// worker dedup.
+//
+// Best-effort: decode errors / corrupt entries are skipped silently. The
+// scanner is the safety-net for missed in-process triggers (process restart,
+// dropped enqueue when buffer is full) — not a strong consistency primitive.
+func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
+	if b.db == nil || b.fsm == nil {
+		return
+	}
+	rawPrefix := []byte("obj:")
+	_ = b.db.View(func(txn *badger.Txn) error {
+		return b.ks().scanGroupPrefix(txn, rawPrefix, func(rawKey []byte, item *badger.Item) error {
+			select {
+			case <-ctx.Done():
+				return errStopScan
+			default:
+			}
+			// rawKey format: "obj:<bucket>/<key>" or "obj:<bucket>/<key>/<ver>".
+			// Skip versioned entries (legacy + latest share the same body via
+			// dual-write; iterating both is redundant work).
+			rest := rawKey[len("obj:"):]
+			slash := bytes.IndexByte(rest, '/')
+			if slash <= 0 {
+				return nil
+			}
+			bucket := string(rest[:slash])
+			afterBucket := rest[slash+1:]
+			// Versioned key has a second '/'; skip those — we already see the
+			// canonical legacy mirror via the bucket/key entry.
+			if bytes.IndexByte(afterBucket, '/') >= 0 {
+				return nil
+			}
+			key := string(afterBucket)
+			var meta objectMeta
+			if err := item.Value(func(raw []byte) error {
+				v, oerr := b.fsm.openValue(item.Key(), raw)
+				if oerr != nil {
+					return oerr
+				}
+				m, derr := unmarshalObjectMeta(v)
+				if derr != nil {
+					return derr
+				}
+				meta = m
+				return nil
+			}); err != nil {
+				return nil // skip undecodable
+			}
+			if !meta.IsAppendable || len(meta.Segments) == 0 {
+				return nil
+			}
+			b.maybeTriggerCoalesce(bucket, key, meta.Segments)
+			return nil
+		})
+	})
 }
 
 // evaluateCoalesceTrigger returns (trigger, reason) for the given segment
