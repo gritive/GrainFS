@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"testing"
 )
 
@@ -101,5 +102,46 @@ func TestSegmentedReaderRangeAtBoundary(t *testing.T) {
 	}
 	if got[0] != 'S' || got[1] != 'S' {
 		t.Fatalf("bytes=%v, want [S S]", got)
+	}
+}
+
+func TestSegmentedReaderEncryptedTamperRejected(t *testing.T) {
+	enc := testEncryptor(t)
+	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
+	if err != nil {
+		t.Fatalf("NewEncryptedLocalBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	ctx := context.Background()
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	body := bytes.Repeat([]byte("Z"), 1<<20)
+	obj, err := b.AppendObject(ctx, "test", "k", 0, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	// segment blob 1바이트 tamper → AES-GCM tag mismatch
+	path := b.segmentPath("test", "k", obj.Segments[0].BlobID)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{0xff}, 100); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r, err := b.OpenSegmentedReader("test", "k", obj, 0, obj.Size-1)
+	if err != nil {
+		t.Fatalf("OpenSegmentedReader: %v", err)
+	}
+	defer r.Close()
+	if _, err := io.ReadAll(r); err == nil {
+		t.Fatal("expected decrypt error, got nil")
 	}
 }
