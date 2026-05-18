@@ -142,11 +142,17 @@ func (b *DistributedBackend) segmentBlobPath(bucket, key, blobID string) string 
 // at-rest encryption is later wired into that path, the peer-fetch path
 // must reuse the same envelope (see append_segment_transport.go).
 func (b *DistributedBackend) openAppendableSegments(bucket, key string, obj *storage.Object) io.ReadCloser {
-	blobIDs := make([]string, len(obj.Segments))
-	paths := make([]string, len(obj.Segments))
-	for i, s := range obj.Segments {
-		blobIDs[i] = s.BlobID
-		paths[i] = b.segmentBlobPath(bucket, key, s.BlobID)
+	total := len(obj.Coalesced) + len(obj.Segments)
+	paths := make([]string, 0, total)
+	blobIDs := make([]string, 0, total)
+	// Coalesced blobs come first — they represent the older bytes of the object.
+	for _, c := range obj.Coalesced {
+		paths = append(paths, b.coalescedBlobPath(bucket, key, c.CoalescedID))
+		blobIDs = append(blobIDs, c.CoalescedID)
+	}
+	for _, s := range obj.Segments {
+		paths = append(paths, b.segmentBlobPath(bucket, key, s.BlobID))
+		blobIDs = append(blobIDs, s.BlobID)
 	}
 	return &appendableSegmentReader{
 		backend: b,

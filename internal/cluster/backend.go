@@ -2235,7 +2235,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	// <objectPath>_segments/<blobID> (see writeSegmentBlobForAppend). Stitch
 	// them with a multi-segment reader instead of trying to open a single
 	// objectPath file (which never exists for appendables).
-	if len(obj.Segments) > 0 && obj.Size > 0 {
+	if (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil
 	}
 
@@ -2845,6 +2845,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
 				Segments:     m.Segments,
+				Coalesced:    coalescedRefsToStorage(m.Coalesced),
 				IsAppendable: m.IsAppendable,
 			}
 			placement = PlacementMeta{

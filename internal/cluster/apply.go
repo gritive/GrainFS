@@ -796,7 +796,25 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
 		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
-		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+		legacyKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+
+		// Resolve the canonical metaKey: prefer the latest-version pointer (set
+		// by applyAppendObject's dual-write). Falls back to legacy key when no
+		// pointer exists (test fixtures / legacy replay).
+		metaKey := legacyKey
+		versionID := ""
+		if latItem, lerr := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); lerr == nil {
+			_ = latItem.Value(func(v []byte) error {
+				versionID = string(v)
+				return nil
+			})
+			if versionID != "" {
+				metaKey = f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, versionID)
+			}
+		} else if !errors.Is(lerr, badger.ErrKeyNotFound) {
+			return fmt.Errorf("get latest pointer: %w", lerr)
+		}
+
 		item, gerr := txn.Get(metaKey)
 		if gerr != nil {
 			if errors.Is(gerr, badger.ErrKeyNotFound) {
@@ -855,7 +873,16 @@ func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
 		if err != nil {
 			return fmt.Errorf("marshal: %w", err)
 		}
-		return f.setValue(txn, metaKey, out)
+		// Dual-write parallel to applyAppendObject: keep legacy key in sync
+		// with the versioned key so any code path that reads either sees the
+		// post-coalesce state.
+		if versionID != "" {
+			if err := f.setValue(txn, metaKey, out); err != nil {
+				return err
+			}
+			return f.setValue(txn, legacyKey, out)
+		}
+		return f.setValue(txn, legacyKey, out)
 	})
 }
 

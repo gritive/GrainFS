@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -35,6 +38,25 @@ type CoalesceSegmentsCmd struct {
 // segments keep arriving after each coalesce. Reaching this cap stalls
 // coalesce until the object is rotated/closed.
 const MaxCoalescedEntries = 1024
+
+// coalescedRefsToStorage projects cluster-level CoalescedShardRef entries
+// onto the storage-package mirror type so that storage.Object stays
+// independent of cluster wire types.
+func coalescedRefsToStorage(in []CoalescedShardRef) []storage.CoalescedRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]storage.CoalescedRef, len(in))
+	for i, c := range in {
+		out[i] = storage.CoalescedRef{
+			CoalescedID: c.CoalescedID,
+			Size:        c.Size,
+			ETag:        c.ETag,
+			ShardKey:    c.ShardKey,
+		}
+	}
+	return out
+}
 
 // coalescedBlobPath returns the on-disk path for one coalesced blob.
 // Mirrors segmentBlobPath but under "_coalesced" suffix.
@@ -90,6 +112,63 @@ func (b *DistributedBackend) mergeSegmentsOwnerLocal(bucket, key, coalescedID st
 		Size: total,
 		ETag: hex.EncodeToString(h.Sum(nil)),
 	}, nil
+}
+
+// processCoalesceJobB2 is the Phase B2 implementation (no EC). Phase B3
+// will replace the owner-local merge with an EC encode + WriteShard
+// distribution.
+//
+// Steps:
+//  1. HeadObject → snapshot S = current segments (must be owner).
+//  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
+//  3. propose CmdCoalesceSegments.
+//  4. Unlink raw segment files for blobs in S (owner-local only).
+//
+// Best-effort cleanup: an unlink failure leaves orphan raw segments which the
+// scrubber sweeps. Idempotent on retry because apply skips already-applied
+// CoalescedIDs.
+func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coalesceJob) error {
+	obj, err := b.HeadObject(ctx, job.Bucket, job.Key)
+	if err != nil || obj == nil {
+		return nil // object gone — drop
+	}
+	if !obj.IsAppendable || len(obj.Segments) == 0 {
+		return nil
+	}
+	// Snapshot segments — concurrent appends after this point are preserved
+	// by applyCoalesceSegments (consumed-set match is exact BlobID).
+	snapshot := make([]storage.SegmentRef, len(obj.Segments))
+	copy(snapshot, obj.Segments)
+	coalescedID := uuid.Must(uuid.NewV7()).String()
+	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, snapshot)
+	if mErr != nil {
+		return fmt.Errorf("merge: %w", mErr)
+	}
+	consumedIDs := make([]string, len(snapshot))
+	for i, s := range snapshot {
+		consumedIDs[i] = s.BlobID
+	}
+	cmd := CoalesceSegmentsCmd{
+		Bucket:             job.Bucket,
+		Key:                job.Key,
+		CoalescedID:        coalescedID,
+		ShardKey:           job.Key + "/coalesced/" + coalescedID,
+		Size:               merged.Size,
+		ETag:               merged.ETag,
+		ConsumedSegmentIDs: consumedIDs,
+	}
+	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
+		// Cleanup intermediate coalesced blob; raw segments remain intact
+		// so a future retry can succeed.
+		_ = os.Remove(merged.Path)
+		return fmt.Errorf("propose coalesce: %w", err)
+	}
+	// Unlink raw segment files for blobs we just absorbed. Failure → scrubber
+	// sweeps orphans later; apply already removed them from metadata.
+	for _, s := range snapshot {
+		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
+	}
+	return nil
 }
 
 // evaluateCoalesceTrigger returns (trigger, reason) for the given segment
