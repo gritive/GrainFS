@@ -83,7 +83,20 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 }
 
 func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, existing *Object, r io.Reader) (*Object, error) {
-	return nil, fmt.Errorf("not implemented")
+	seg, err := b.WriteSegmentBlob(bucket, key, r)
+	if err != nil {
+		return nil, fmt.Errorf("write segment: %w", err)
+	}
+	segs := append(existing.Segments, seg)
+	obj := *existing
+	obj.Segments = segs
+	obj.Size = existing.Size + seg.Size
+	obj.ETag = CompositeETag(segs)
+	obj.LastModified = time.Now().Unix()
+	if err := b.PutObjectRecord(ctx, bucket, key, &obj); err != nil {
+		return nil, fmt.Errorf("persist: %w", err)
+	}
+	return &obj, nil
 }
 
 // WriteSegmentBlob writes one segment blob to disk under

@@ -54,3 +54,28 @@ func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
 		t.Fatalf("etag=%q", obj.ETag)
 	}
 }
+
+func TestAppendObjectSequentialThreeSegments(t *testing.T) {
+	b := newTestLocalBackend(t)
+	body := bytes.Repeat([]byte("X"), 10<<20) // 10 MiB
+
+	off := int64(0)
+	var obj *Object
+	for i := 0; i < 3; i++ {
+		var err error
+		obj, err = b.AppendObject(context.Background(), "test", "k", off, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		off = obj.Size
+	}
+	if obj.Size != int64(30<<20) {
+		t.Fatalf("size=%d, want %d", obj.Size, 30<<20)
+	}
+	if len(obj.Segments) != 3 {
+		t.Fatalf("segments=%d, want 3", len(obj.Segments))
+	}
+	if !strings.HasSuffix(obj.ETag, "-3") {
+		t.Fatalf("etag=%q, want suffix -3", obj.ETag)
+	}
+}
