@@ -122,6 +122,7 @@ Operational details live in [docs/index.md](docs/index.md#operators).
 Requirements:
 
 - Go 1.26+
+- `golangci-lint` (run by `make lint`, which `make build` depends on)
 - `warp` for S3-compatible comparison benchmarks
 - Linux client tooling for NFS, NBD, 9P, and FUSE-over-S3 integration tests
 
