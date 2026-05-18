@@ -2,6 +2,7 @@ package raft
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +146,14 @@ func TestEncodeHeartbeatBatchReturnsOwnedPayloadAfterBuilderReuse(t *testing.T) 
 	}
 	if decoded[0].args.LeaderID != items[0].args.LeaderID {
 		t.Fatalf("LeaderID = %q, want %q", decoded[0].args.LeaderID, items[0].args.LeaderID)
+	}
+}
+
+func TestEncodeHeartbeatBatchRejectsTooLongGroupID(t *testing.T) {
+	items := benchmarkHeartbeatItems(1)
+	items[0].groupID = strings.Repeat("g", 0x10000)
+
+	if _, err := encodeHeartbeatBatch(items); err == nil {
+		t.Fatal("expected groupID too long error")
 	}
 }
