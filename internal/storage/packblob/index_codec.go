@@ -1,7 +1,6 @@
 package packblob
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 
@@ -9,10 +8,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/storage/packblob/packblobpb"
 )
-
-// ErrLegacyStorageFormat is returned when a read encounters pre-FB bytes.
-// Operators must wipe metadata stores (per upgrade runbook) before restart.
-var ErrLegacyStorageFormat = errors.New("packblob: legacy storage format detected (wipe-and-restart required)")
 
 func encodeIndex(entries map[packedKey]*indexEntry) ([]byte, error) {
 	b := flatbuffers.NewBuilder(1024)
@@ -92,13 +87,6 @@ func encodeIndex(entries map[packedKey]*indexEntry) ([]byte, error) {
 }
 
 func decodeIndexStorage(data []byte) (out map[packedKey]*indexEntry, err error) {
-	trimmed := data
-	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '\n' || trimmed[0] == '\r') {
-		trimmed = trimmed[1:]
-	}
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		return nil, ErrLegacyStorageFormat
-	}
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("packblob: malformed index.bin: %v", r)

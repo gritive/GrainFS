@@ -1,7 +1,6 @@
 package receipt
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -32,10 +31,4 @@ func TestReceipt_RoundTripFB(t *testing.T) {
 	got, err := DecodeReceiptStorage(data)
 	require.NoError(t, err)
 	require.Equal(t, r, got, "all 13 fields should round-trip")
-}
-
-func TestReceipt_DecodeRejectsLegacyJSON(t *testing.T) {
-	legacy := []byte(`{"receipt_id":"rcpt-1"}`)
-	_, err := DecodeReceiptStorage(legacy)
-	require.True(t, errors.Is(err, ErrLegacyStorageFormat))
 }

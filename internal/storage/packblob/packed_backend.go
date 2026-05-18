@@ -226,7 +226,8 @@ func (pb *PackedBackend) SaveIndex() error {
 
 // LoadIndex loads the index from {blobDir}/index.bin.
 // If the file doesn't exist, rebuilds via blob scan (existing fallback).
-// If legacy JSON bytes are detected, returns ErrLegacyStorageFormat (fail-fast).
+// Malformed FB bytes surface as a wrapped error via defer-recover in
+// decodeIndexStorage — fail-fast, no rebuild attempt on corrupt input.
 func (pb *PackedBackend) LoadIndex() error {
 	indexFile := filepath.Join(pb.blobDir, "index.bin")
 	data, err := os.ReadFile(indexFile)

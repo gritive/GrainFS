@@ -1,7 +1,6 @@
 package packblob
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -56,15 +55,6 @@ func TestPackedBackend_SaveLoadIndex_FB(t *testing.T) {
 	require.Equal(t, entry.LastModified, loaded.LastModified)
 	require.Equal(t, entry.SSEAlgorithm, loaded.SSEAlgorithm)
 	require.EqualValues(t, 1, loaded.Refcount.Load())
-}
-
-func TestPackedBackend_LoadIndex_LegacyJSONRejected(t *testing.T) {
-	pb := newTestPackedBackend(t)
-	// Write legacy JSON bytes to where new code expects index.bin.
-	require.NoError(t, os.WriteFile(filepath.Join(pb.blobDir, "index.bin"), []byte("{\"b1/k1\":{}}"), 0o644))
-
-	err := pb.LoadIndex()
-	require.ErrorIs(t, err, ErrLegacyStorageFormat)
 }
 
 func TestPackedBackend_LoadIndex_MissingFile_TriggersScanAll(t *testing.T) {

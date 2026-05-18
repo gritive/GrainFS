@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.252.0] - 2026-05-19 - chore: drop legacy JSON guards from FB decoders
+
+Wipe-and-restart is the only supported upgrade path (see v0.0.251.0 CHANGELOG),
+and pre-FlatBuffers JSON bytes will not appear in storage or on the wire after
+upgrade. The diagnostic `'{'` legacy-byte guards in 8 FB decoders were dead
+defense:
+
+- 4 storage decoders — packblob `decodeIndexStorage`, cluster
+  `decodePutObjectQuarantineCmdStorage`, `receipt.DecodeReceiptStorage`,
+  `eventstore.decodeEventStorage`.
+- 4 RPC decoders — `decodeMetaCatalogReadRequest`,
+  `decodeMetaLoadTableReply`, `decodeJoinRequest`, `decodeJoinReply`.
+
+Removed all 8 guards plus the four per-package `ErrLegacyStorageFormat`
+sentinels (packblob, cluster, receipt, eventstore) and the eight
+`Test*RejectsLegacyJSON` / `Test*LegacyJSONRejected` tests that exercised
+them. defer-recover already catches malformed-FB panics — the legacy guard
+only added a separate error message for a class of bytes that cannot exist
+in supported deployments.
+
+Closes Task #19 (PR #413 meta_forward reply legacy guard review — answer:
+guard removed entirely, not strengthened).
+
 ## [0.0.251.1] - 2026-05-19 - test: e2e consolidation — shared cluster fixture + integration rename
 
 - Add `tgt.uniqueBucket(t, "case")` helper to `s3Target`: derives a S3-spec

@@ -1,15 +1,12 @@
 package eventstore
 
 import (
-	"errors"
 	"fmt"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/eventstore/eventstorepb"
 )
-
-var ErrLegacyStorageFormat = errors.New("eventstore: legacy storage format detected (wipe-and-restart required)")
 
 func encodeEvent(e Event) ([]byte, error) {
 	b := flatbuffers.NewBuilder(256)
@@ -50,19 +47,6 @@ func encodeEvent(e Event) ([]byte, error) {
 }
 
 func decodeEventStorage(data []byte) (out Event, err error) {
-	// Whitespace-tolerant legacy JSON guard — matches the other 3 storage
-	// decoders (packblob, cluster/quarantine, receipt). encoding/json accepts
-	// leading space/tab/LF/CR, so legacy files that pass through a formatter
-	// would otherwise slip past a strict `data[0] == '{'` check and surface
-	// as a confusing "malformed FB" panic-message instead of the actionable
-	// ErrLegacyStorageFormat sentinel.
-	trimmed := data
-	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '\n' || trimmed[0] == '\r') {
-		trimmed = trimmed[1:]
-	}
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		return Event{}, ErrLegacyStorageFormat
-	}
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode event storage: malformed FB: %v", r)
