@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // ErrForwardBufferFull signals the AppendObject forward buffer pool cannot
@@ -46,6 +48,7 @@ func (s *appendForwardBuffer) Acquire(ctx context.Context, n int64) error {
 	}
 	s.used += n
 	s.inflight.Store(s.used)
+	metrics.AppendForwardBufferInflightBytes.Set(float64(s.used))
 	s.mu.Unlock()
 	return nil
 }
@@ -60,6 +63,7 @@ func (s *appendForwardBuffer) Release(n int64) {
 		s.used = 0
 	}
 	s.inflight.Store(s.used)
+	metrics.AppendForwardBufferInflightBytes.Set(float64(s.used))
 	s.mu.Unlock()
 }
 

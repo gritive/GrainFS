@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -1634,6 +1635,7 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	bodyLen := int64(len(forwardBody))
 	if c.appendForwardBuffer != nil {
 		if err := c.appendForwardBuffer.Acquire(ctx, bodyLen); err != nil {
+			metrics.AppendForwardBufferRejectedTotal.Inc()
 			return nil, err
 		}
 		defer c.appendForwardBuffer.Release(bodyLen)
