@@ -232,7 +232,7 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	follower := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = follower.Close() })
 	receiver := NewMetaProposeForwardReceiver(leader)
-	sender := NewMetaProposeForwardSender(func(_ string, payload []byte) ([]byte, error) {
+	sender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
 		return receiver.Handle(&transport.Message{Payload: payload}).Payload, nil
 	})
 	catalog := NewMetaCatalogWithForwarder(follower, nil, "s3://grainfs-tables/warehouse", func(ctx context.Context, command []byte) error {
@@ -269,11 +269,11 @@ func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) 
 
 	leaderCatalog := NewMetaCatalog(leader, backend, "s3://grainfs-tables/warehouse")
 	leaderReceiver := NewMetaProposeForwardReceiver(leader)
-	forwardSender := NewMetaProposeForwardSender(func(_ string, payload []byte) ([]byte, error) {
+	forwardSender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
 		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
 	})
 	readReceiver := NewMetaCatalogReadReceiver(leaderCatalog)
-	readSender := NewMetaCatalogReadSender(func(_ string, payload []byte) ([]byte, error) {
+	readSender := NewMetaCatalogReadSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
 		return readReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
 	})
 	followerCatalog := NewMetaCatalogWithForwarders(
@@ -313,7 +313,7 @@ func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 	require.NoError(t, err)
 
 	leaderReceiver := NewMetaProposeForwardReceiver(leader)
-	sender := NewMetaProposeForwardSender(func(peer string, payload []byte) ([]byte, error) {
+	sender := NewMetaProposeForwardSender(func(_ context.Context, peer string, payload []byte) ([]byte, error) {
 		if peer == "follower" {
 			return encodeMetaForwardReply(raft.ErrNotLeader), nil
 		}

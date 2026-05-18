@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -22,7 +23,7 @@ var (
 	metaForwardLegacyV1Magic = []byte("GFSMFWD1")
 )
 
-type MetaForwardDialer func(peer string, payload []byte) ([]byte, error)
+type MetaForwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 type MetaProposeForwardSender struct {
 	dialer MetaForwardDialer
@@ -47,11 +48,15 @@ func (s *MetaProposeForwardSender) SendWithGate(ctx context.Context, peers []str
 
 func (s *MetaProposeForwardSender) sendPayloadWithIndex(ctx context.Context, peers []string, payload []byte) (uint64, error) {
 	if len(peers) == 0 {
+		log.Warn().
+			Str("component", "meta-forward").
+			Str("path", "empty-peers").
+			Msg("meta-forward: no peers to forward to — likely no known leader; returning 503")
 		return 0, icebergcatalog.ErrServiceUnavailable
 	}
 	var lastErr error
 	for _, peer := range peers {
-		reply, err := s.dialer(peer, payload)
+		reply, err := s.dialer(ctx, peer, payload)
 		if err != nil {
 			lastErr = err
 			continue
@@ -64,8 +69,19 @@ func (s *MetaProposeForwardSender) sendPayloadWithIndex(ctx context.Context, pee
 		return idx, err
 	}
 	if lastErr != nil {
+		log.Warn().
+			Str("component", "meta-forward").
+			Str("path", "all-peers-failed").
+			Int("peers_tried", len(peers)).
+			Err(lastErr).
+			Msg("meta-forward: every peer rejected the proposal; returning 503")
 		return 0, fmt.Errorf("%w: %v", icebergcatalog.ErrServiceUnavailable, lastErr)
 	}
+	log.Warn().
+		Str("component", "meta-forward").
+		Str("path", "no-error-no-success").
+		Int("peers_tried", len(peers)).
+		Msg("meta-forward: loop exited without success or recorded error (unreachable); returning 503")
 	return 0, icebergcatalog.ErrServiceUnavailable
 }
 
@@ -793,7 +809,7 @@ func (s *MetaCatalogReadSender) send(ctx context.Context, peers []string, reques
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		reply, err := s.dialer(peer, req)
+		reply, err := s.dialer(ctx, peer, req)
 		if err != nil {
 			lastErr = err
 			continue

@@ -104,9 +104,9 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		WithObjectIndexProposer(indexProposer)
 	state.forwardReceiver.Register(state.shardSvc)
 
-	metaForwardDialer := func(peer string, payload []byte) ([]byte, error) {
+	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaProposeForward, Payload: payload}
-		reply, err := quicTransport.Call(ctx, peer, msg)
+		reply, err := quicTransport.Call(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -140,9 +140,9 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
 	})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
-	metaReadDialer := func(peer string, payload []byte) ([]byte, error) {
+	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
-		reply, err := quicTransport.Call(ctx, peer, msg)
+		reply, err := quicTransport.Call(callCtx, peer, msg)
 		if err != nil {
 			return nil, err
 		}

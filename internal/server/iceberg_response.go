@@ -6,6 +6,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -38,8 +39,23 @@ func writeIcebergMappedError(c *app.RequestContext, err error) {
 	case errors.Is(err, icebergcatalog.ErrCommitFailed):
 		writeIcebergError(c, consts.StatusConflict, "CommitFailedException", "table metadata pointer changed")
 	case errors.Is(err, icebergcatalog.ErrServiceUnavailable):
-		writeIcebergError(c, consts.StatusServiceUnavailable, "ServiceUnavailableException", "Iceberg catalog service unavailable")
+		// 503 from the iceberg catalog is rare and structurally important —
+		// surface the full wrapped error in both the log AND the response
+		// body so investigators can tell empty-peers from all-peers-failed
+		// from a stray leader-side error type. The wrapped message is
+		// already safe to expose (no PII, no internal addresses); the
+		// outer error sentinel guarantees stable type matching for
+		// clients that need it.
+		log.Warn().
+			Str("component", "iceberg").
+			Err(err).
+			Msg("iceberg: returning 503 ServiceUnavailable")
+		writeIcebergError(c, consts.StatusServiceUnavailable, "ServiceUnavailableException", err.Error())
 	default:
+		log.Warn().
+			Str("component", "iceberg").
+			Err(err).
+			Msg("iceberg: returning 500 InternalServerError")
 		writeIcebergError(c, consts.StatusInternalServerError, "InternalServerError", err.Error())
 	}
 }
