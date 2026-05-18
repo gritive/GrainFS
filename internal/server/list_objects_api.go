@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"strconv"
@@ -47,17 +48,48 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 
-	objects, err := s.listBucketObjects(ctx, bucket, prefix, maxKeys)
+	// ListObjectsV2 is opted in via ?list-type=2. minio-go and the AWS SDKs
+	// default to V2; V1 stays available for the handful of legacy clients
+	// that still send Marker pagination instead of ContinuationToken.
+	isV2 := string(c.QueryArgs().Peek("list-type")) == "2"
+	var marker, startAfter, continuationToken string
+	if isV2 {
+		continuationToken = string(c.QueryArgs().Peek("continuation-token"))
+		startAfter = string(c.QueryArgs().Peek("start-after"))
+		// ContinuationToken is opaque to the client; we encode the resume
+		// point as base64(lastKey) on response and decode it here.
+		if continuationToken != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(continuationToken); err == nil {
+				marker = string(decoded)
+			}
+		}
+		if marker == "" && startAfter != "" {
+			// start-after acts as an exclusive marker for the first page.
+			marker = startAfter
+		}
+	} else {
+		marker = string(c.QueryArgs().Peek("marker"))
+	}
+
+	objects, truncated, err := s.listBucketObjectsPage(ctx, bucket, prefix, marker, maxKeys)
 	if err != nil {
 		mapError(c, err)
 		return
 	}
 
 	result := listObjectsResult{
-		Xmlns:   "http://s3.amazonaws.com/doc/2006-03-01/",
-		Name:    bucket,
-		Prefix:  prefix,
-		MaxKeys: maxKeys,
+		Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
+		Name:        bucket,
+		Prefix:      prefix,
+		MaxKeys:     maxKeys,
+		IsTruncated: truncated,
+	}
+	if isV2 {
+		result.KeyCount = len(objects)
+		result.ContinuationToken = continuationToken
+		result.StartAfter = startAfter
+	} else {
+		result.Marker = marker
 	}
 	for _, obj := range objects {
 		result.Contents = append(result.Contents, objectResult{
@@ -66,6 +98,14 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 			ETag:         fmt.Sprintf("\"%s\"", obj.ETag),
 			Size:         obj.Size,
 		})
+	}
+	if truncated && len(result.Contents) > 0 {
+		lastKey := result.Contents[len(result.Contents)-1].Key
+		if isV2 {
+			result.NextContinuationToken = base64.StdEncoding.EncodeToString([]byte(lastKey))
+		} else {
+			result.NextMarker = lastKey
+		}
 	}
 
 	data, _ := xml.Marshal(result)

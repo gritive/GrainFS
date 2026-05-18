@@ -1448,12 +1448,26 @@ func (f *MetaFSM) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndex
 }
 
 func (f *MetaFSM) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	entries, _ := f.ObjectIndexLatestEntriesPage(bucket, prefix, "", maxKeys)
+	return entries
+}
+
+// ObjectIndexLatestEntriesPage returns objects ordered by key for a single
+// pagination page. Entries whose key is greater than `marker` (excluding the
+// marker itself) up to `maxKeys` results are returned. `truncated` reports
+// whether more entries match beyond the returned slice — callers use it to
+// emit S3's IsTruncated/NextMarker fields. `maxKeys <= 0` disables the cap
+// (used by WalkObjects-style callers that want every match).
+func (f *MetaFSM) ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) (entries []ObjectIndexEntry, truncated bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	entries := make([]ObjectIndexEntry, 0)
+	entries = make([]ObjectIndexEntry, 0)
 	for lkey, versionID := range f.objectLatest {
 		parts := strings.SplitN(lkey, "\x00", 2)
 		if len(parts) != 2 || parts[0] != bucket || !strings.HasPrefix(parts[1], prefix) {
+			continue
+		}
+		if marker != "" && parts[1] <= marker {
 			continue
 		}
 		entry, ok := f.objectIndex[objectIndexVersionKey(bucket, parts[1], versionID)]
@@ -1467,8 +1481,9 @@ func (f *MetaFSM) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) [
 	})
 	if maxKeys > 0 && len(entries) > maxKeys {
 		entries = entries[:maxKeys]
+		truncated = true
 	}
-	return entries
+	return entries, truncated
 }
 
 func (f *MetaFSM) ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {

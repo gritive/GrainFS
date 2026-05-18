@@ -137,6 +137,7 @@ type objectIndexSource interface {
 
 type objectIndexListSource interface {
 	ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
+	ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) (entries []ObjectIndexEntry, truncated bool)
 	ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry
 }
 
@@ -916,37 +917,80 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 }
 
 func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	objects, _, err := c.ListObjectsPage(ctx, bucket, prefix, "", maxKeys)
+	return objects, err
+}
+
+// ListObjectsPage returns one S3 ListObjects page. Entries with key > marker
+// are returned, up to maxKeys. truncated reports whether more entries match
+// beyond the returned slice — the S3 handler maps this to IsTruncated and
+// NextMarker.
+func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) (objects []*storage.Object, truncated bool, err error) {
 	if !storage.IsInternalBucket(bucket) {
 		if src, ok := c.objectIndexListSource(); ok {
 			if err := c.HeadBucket(ctx, bucket); err != nil {
-				return nil, err
+				return nil, false, err
 			}
-			entries := src.ObjectIndexLatestEntries(bucket, prefix, maxKeys)
-			objects := make([]*storage.Object, 0, len(entries))
+			entries, more := src.ObjectIndexLatestEntriesPage(bucket, prefix, marker, maxKeys)
+			objects = make([]*storage.Object, 0, len(entries))
 			for _, entry := range entries {
 				objects = append(objects, objectIndexEntryToObject(entry))
 			}
-			return objects, nil
+			return objects, more, nil
 		}
 	}
 	target, err := c.runtimeState().opRouter.RouteBucket(bucket)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if gb != nil {
-		return gb.ListObjects(ctx, bucket, prefix, maxKeys)
+		objs, err := gb.ListObjects(ctx, bucket, prefix, maxKeys)
+		if err != nil {
+			return nil, false, err
+		}
+		if marker != "" {
+			filtered := objs[:0]
+			for _, o := range objs {
+				if o.Key > marker {
+					filtered = append(filtered, o)
+				}
+			}
+			objs = filtered
+		}
+		more := maxKeys > 0 && len(objs) > maxKeys
+		if more {
+			objs = objs[:maxKeys]
+		}
+		return objs, more, nil
 	}
 	if c.forward == nil {
-		return nil, ErrCoordinatorNoRouter
+		return nil, false, ErrCoordinatorNoRouter
 	}
 	args := buildListObjectsArgs(bucket, prefix, int32(maxKeys))
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjects, args)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return objectsFromReply(reply)
+	objs, err := objectsFromReply(reply)
+	if err != nil {
+		return nil, false, err
+	}
+	if marker != "" {
+		filtered := objs[:0]
+		for _, o := range objs {
+			if o.Key > marker {
+				filtered = append(filtered, o)
+			}
+		}
+		objs = filtered
+	}
+	more := maxKeys > 0 && len(objs) > maxKeys
+	if more {
+		objs = objs[:maxKeys]
+	}
+	return objs, more, nil
 }
 
 func (c *ClusterCoordinator) ListObjectVersions(

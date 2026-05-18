@@ -132,6 +132,48 @@ func (o *Operations) ListObjects(ctx context.Context, bucket, prefix string, max
 	return o.backend.ListObjects(ctx, bucket, prefix, maxKeys)
 }
 
+// ListObjectsPage returns one S3 ListObjects page. Entries with key strictly
+// greater than `marker` are returned, capped at `maxKeys`. `truncated` is true
+// when more entries match beyond the returned slice — the S3 handler maps it
+// to <IsTruncated> and <NextMarker>. If any backend in the wrapper chain
+// supports native pagination (e.g. cluster meta-FSM with a sorted index), the
+// call is forwarded there; otherwise the operation falls back to a single
+// ListObjects call with the requested cap and filters in-process.
+func (o *Operations) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error) {
+	type pager interface {
+		ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error)
+	}
+	type unwrapper interface{ Unwrap() Backend }
+	for b := o.backend; b != nil; {
+		if p, ok := b.(pager); ok {
+			return p.ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
+		}
+		u, ok := b.(unwrapper)
+		if !ok {
+			break
+		}
+		b = u.Unwrap()
+	}
+	objects, err := o.backend.ListObjects(ctx, bucket, prefix, maxKeys+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if marker != "" {
+		filtered := objects[:0]
+		for _, obj := range objects {
+			if obj.Key > marker {
+				filtered = append(filtered, obj)
+			}
+		}
+		objects = filtered
+	}
+	truncated := maxKeys > 0 && len(objects) > maxKeys
+	if truncated {
+		objects = objects[:maxKeys]
+	}
+	return objects, truncated, nil
+}
+
 func (o *Operations) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error {
 	return o.backend.WalkObjects(ctx, bucket, prefix, fn)
 }

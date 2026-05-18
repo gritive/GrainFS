@@ -14,13 +14,19 @@ type bucketResult struct {
 }
 
 type listObjectsResult struct {
-	XMLName     xml.Name       `xml:"ListBucketResult"`
-	Xmlns       string         `xml:"xmlns,attr"`
-	Name        string         `xml:"Name"`
-	Prefix      string         `xml:"Prefix"`
-	MaxKeys     int            `xml:"MaxKeys"`
-	IsTruncated bool           `xml:"IsTruncated"`
-	Contents    []objectResult `xml:"Contents"`
+	XMLName               xml.Name       `xml:"ListBucketResult"`
+	Xmlns                 string         `xml:"xmlns,attr"`
+	Name                  string         `xml:"Name"`
+	Prefix                string         `xml:"Prefix"`
+	Marker                string         `xml:"Marker,omitempty"`
+	NextMarker            string         `xml:"NextMarker,omitempty"`
+	KeyCount              int            `xml:"KeyCount,omitempty"`
+	ContinuationToken     string         `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string         `xml:"NextContinuationToken,omitempty"`
+	StartAfter            string         `xml:"StartAfter,omitempty"`
+	MaxKeys               int            `xml:"MaxKeys"`
+	IsTruncated           bool           `xml:"IsTruncated"`
+	Contents              []objectResult `xml:"Contents"`
 }
 
 type objectResult struct {
