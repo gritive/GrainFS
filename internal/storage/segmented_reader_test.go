@@ -81,3 +81,25 @@ func TestSegmentedReaderRangeAcrossSegments(t *testing.T) {
 		t.Fatalf("read %d, want %d", len(got), want)
 	}
 }
+
+func TestSegmentedReaderRangeAtBoundary(t *testing.T) {
+	b, obj := setupThreeSegmentObject(t)
+	// 정확히 segment 경계: 1 byte from seg1 + 1 byte from seg2
+	start := int64(10<<20) - 1
+	end := int64(10 << 20)
+	r, err := b.OpenSegmentedReader("test", "k", obj, start, end)
+	if err != nil {
+		t.Fatalf("OpenSegmentedReader: %v", err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("read %d, want 2", len(got))
+	}
+	if got[0] != 'S' || got[1] != 'S' {
+		t.Fatalf("bytes=%v, want [S S]", got)
+	}
+}
