@@ -195,6 +195,11 @@ Work these in order. Do not run them in parallel.
   단절. 둘 중 하나로 정합화 (maxBody 64MiB로 올리거나, retry 단념 시 typed
   error 반환).
 
+- [ ] **`TestCoalesceMetricsObserved` flake [P2]**: full `make test-unit`
+  실행 시 간헐적 fail, isolated 또는 cluster package 단독 실행 (3회 반복) 시
+  PASS. metric counter race 의심. metric increment를 mutex-free atomic으로
+  교체하거나 test에서 counter 검증 전 explicit sync 추가.
+
 ## Pre-existing Test Failures (Phase B3 무관)
 
 - [ ] **`TestBlobStoreAppendNoCompressKeepsAllocationBound` race-mode fail [P2]**:
