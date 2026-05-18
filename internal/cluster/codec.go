@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
@@ -1077,6 +1078,43 @@ func decodePutObjectQuarantineCmd(data []byte) (PutObjectQuarantineCmd, error) {
 		Cause:     string(t.Cause()),
 		Reason:    string(t.Reason()),
 	}, nil
+}
+
+// ErrLegacyStorageFormat indicates pre-FB JSON storage bytes were encountered
+// at read time. Operators must wipe metadata stores per the upgrade runbook
+// (see docs/superpowers/specs/2026-05-18-internal-storage-json-fb-design.md).
+var ErrLegacyStorageFormat = errors.New("cluster: legacy storage format detected (wipe-and-restart required)")
+
+// decodePutObjectQuarantineCmdStorage is the storage-safe variant of
+// decodePutObjectQuarantineCmd. Unlike the RPC version, it:
+//  1. Rejects legacy JSON bytes via a '{' first-byte guard (typed sentinel).
+//  2. Wraps BOTH GetRootAs AND all field access in defer-recover, so a
+//     malformed FB blob produces a typed error instead of panicking through
+//     callers. (Existing fbSafe only wraps the GetRootAs call.)
+//
+// Used by FSM apply paths that read raft-derived badger values.
+func decodePutObjectQuarantineCmdStorage(data []byte) (cmd PutObjectQuarantineCmd, err error) {
+	trimmed := data
+	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '\n' || trimmed[0] == '\r') {
+		trimmed = trimmed[1:]
+	}
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return PutObjectQuarantineCmd{}, ErrLegacyStorageFormat
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("decode quarantine storage: malformed FB: %v", r)
+		}
+	}()
+	t := clusterpb.GetRootAsPutObjectQuarantineCmd(data, 0)
+	cmd = PutObjectQuarantineCmd{
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+		Cause:     string(t.Cause()),
+		Reason:    string(t.Reason()),
+	}
+	return cmd, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {

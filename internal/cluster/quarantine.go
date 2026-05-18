@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -61,7 +60,9 @@ func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) 
 				return err
 			}
 			return item.Value(func(v []byte) error {
-				return json.Unmarshal(v, &out)
+				var decErr error
+				out, decErr = decodePutObjectQuarantineCmdStorage(v)
+				return decErr
 			})
 		}
 		return nil

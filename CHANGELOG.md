@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.251.0] - 2026-05-19 - feat: internal storage v2 (FlatBuffers) (BREAKING)
+
+- BREAKING: internal storage format v2 (FlatBuffers) for quarantine, receipt,
+  eventstore badger values, and packblob index.
+  Upgrade procedure:
+    1. Stop cluster.
+    2. WIPE `<data>/raft/` and `<data>/meta/` ONLY.
+    3. PRESERVE packblob `*.blob` files (contain user object data).
+       Optionally delete legacy `<data>/<packblob_dir>/index.json`
+       (ignored by new binary).
+    4. Restart. packblob `index.bin` rebuilds automatically from blob scan.
+- eventstore.Event drops the `User` field and the polymorphic
+  `map[string]any` `Metadata` field. The 12 audit keys previously stored
+  under `Metadata` are promoted to typed top-level fields: `id`, `phase`,
+  `outcome`, `shard_id`, `peer_id`, `bytes_repaired`, `duration_ms`,
+  `err_code`, `correlation_id`, `version_id`, `removed_id`, `force`.
+  Wire format: top-level keys (e.g. `event.phase` instead of
+  `event.metadata.phase`).
+- LookupReceiptJSON renamed to LookupReceipt (returns *HealReceipt). HTTP API
+  re-marshals to JSON at the boundary; intra-cluster broadcast encodes FB.
+- Wire field ReceiptQueryResponseMsg.receipt_json_bytes renamed to receipt_bytes
+  (FB Go accessor: ReceiptBytes()).
+- Internal RPC remains FlatBuffers (PR #406, #416 unchanged).
+
 ## [0.0.250.1] - 2026-05-19 - chore(bench): warp iceberg benchmark scaffolding (catalog-read + catalog-commits)
 
 Adds a per-subcommand wrapper around `bench_iceberg_table_cluster.sh` and the

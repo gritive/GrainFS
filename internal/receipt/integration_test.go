@@ -66,8 +66,12 @@ func (c *stitchedCluster) QuerySingle(ctx context.Context, peer, id string) ([]b
 	if !ok {
 		return nil, false, errors.New("no such peer")
 	}
-	raw, found := s.LookupReceiptJSON(id)
-	return raw, found, nil
+	r, found := s.LookupReceipt(id)
+	if !found {
+		return nil, false, nil
+	}
+	body, err := json.Marshal(r)
+	return body, found, err
 }
 
 // Query satisfies PeerQuerier: fans out to all peers, first-hit wins.
@@ -82,11 +86,16 @@ func (c *stitchedCluster) Query(ctx context.Context, id string) ([]byte, bool, e
 		wg.Add(1)
 		go func(s *Store) {
 			defer wg.Done()
-			if raw, ok := s.LookupReceiptJSON(id); ok {
+			r, ok := s.LookupReceipt(id)
+			if ok {
+				body, err := json.Marshal(r)
+				if err != nil {
+					return
+				}
 				mu.Lock()
 				if !found {
 					found = true
-					winner = raw
+					winner = body
 				}
 				mu.Unlock()
 			}

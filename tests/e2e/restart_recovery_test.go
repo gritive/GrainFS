@@ -116,14 +116,10 @@ func fetchHealEvents(endpoint string) ([]map[string]any, error) {
 
 func scanForRestartCleanups(events []map[string]any) (orphanTmp, orphanMulti bool) {
 	for _, e := range events {
-		meta, _ := e["metadata"].(map[string]any)
-		if meta == nil {
+		if e["phase"] != "startup" {
 			continue
 		}
-		if meta["phase"] != "startup" {
-			continue
-		}
-		switch meta["err_code"] {
+		switch e["err_code"] {
 		case "orphan_tmp":
 			orphanTmp = true
 		case "orphan_multipart":

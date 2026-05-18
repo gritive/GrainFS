@@ -153,8 +153,7 @@ func TestBalancerStatus_JSONRoundTrip(t *testing.T) {
 func TestEvent_JSONRoundTrip(t *testing.T) {
 	in := Event{
 		Timestamp: 1747008000, Type: "audit", Action: "put_object",
-		Bucket: "b", Key: "k", User: "sa-1", Size: 1024,
-		Metadata: map[string]any{"etag": "abc"},
+		Bucket: "b", Key: "k", Size: 1024,
 	}
 	b1, err := json.Marshal(in)
 	require.NoError(t, err)

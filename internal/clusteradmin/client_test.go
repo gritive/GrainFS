@@ -211,7 +211,7 @@ func TestClient_EventLog_ParsesArray(t *testing.T) {
 		assert.NotEmpty(t, r.URL.Query().Get("since"))
 		assert.NotEmpty(t, r.URL.Query().Get("limit"))
 		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"ts": 100, "type": "system", "action": "cluster-remove-peer", "metadata": map[string]any{"removed_id": "n3"}},
+			{"ts": 100, "type": "system", "action": "cluster-remove-peer"},
 		})
 	}))
 	defer srv.Close()
@@ -221,7 +221,6 @@ func TestClient_EventLog_ParsesArray(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, "cluster-remove-peer", events[0].Action)
-	assert.Equal(t, "n3", events[0].Metadata["removed_id"])
 }
 
 func TestClient_TransferLeader_Happy(t *testing.T) {

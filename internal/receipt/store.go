@@ -1,7 +1,6 @@
 package receipt
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -155,11 +154,11 @@ func (s *Store) Get(id string) (*HealReceipt, error) {
 			return fmt.Errorf("receipt: badger get: %w", err)
 		}
 		return item.Value(func(val []byte) error {
-			var r HealReceipt
-			if err := json.Unmarshal(val, &r); err != nil {
-				return fmt.Errorf("receipt: decode %q: %w", id, err)
+			r, decErr := DecodeReceiptStorage(val)
+			if decErr != nil {
+				return fmt.Errorf("receipt: decode %q: %w", id, decErr)
 			}
-			out = &r
+			out = r
 			return nil
 		})
 	})
@@ -232,12 +231,12 @@ func (s *Store) drain() error {
 	return nil
 }
 
-// writeBatch writes each receipt's primary key (receipt:<id> → JSON),
+// writeBatch writes each receipt's primary key (receipt:<id> → FlatBuffers bytes),
 // secondary time-index key (ts:<unix_nano>:<id> → id), and optional
 // correlation-index key (cidx:<correlation_id> → id) inside the same txn.
 func writeBatch(txn *badger.Txn, batch []*HealReceipt, ttl time.Duration) error {
 	for _, r := range batch {
-		data, err := json.Marshal(r)
+		data, err := EncodeReceipt(r)
 		if err != nil {
 			return fmt.Errorf("receipt: encode %q: %w", r.ReceiptID, err)
 		}
@@ -259,16 +258,15 @@ func writeBatch(txn *badger.Txn, batch []*HealReceipt, ttl time.Duration) error 
 	return nil
 }
 
-// LookupReceiptJSON fetches the raw JSON-encoded receipt bytes for id.
-// Used by the cluster's ReceiptQueryHandler to answer broadcast-fallback
-// queries; returns (nil, false) when the id is unknown or its TTL expired.
-// Cheaper than Get when the caller only needs to forward bytes across the
-// network — no json.Unmarshal → re-marshal round trip.
-func (s *Store) LookupReceiptJSON(id string) ([]byte, bool) {
+// LookupReceipt fetches the FlatBuffers-decoded receipt for id.
+// Used by the cluster's ReceiptQueryHandler (encodes for transport) and
+// receipt/api.go HTTP endpoint (re-marshals to JSON at the API boundary).
+// Returns (nil, false) when the id is unknown or its TTL expired.
+func (s *Store) LookupReceipt(id string) (*HealReceipt, bool) {
 	if id == "" {
 		return nil, false
 	}
-	var out []byte
+	var out *HealReceipt
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(receiptKey(id))
 		if errors.Is(err, badger.ErrKeyNotFound) {
@@ -278,8 +276,11 @@ func (s *Store) LookupReceiptJSON(id string) ([]byte, bool) {
 			return err
 		}
 		return item.Value(func(v []byte) error {
-			out = make([]byte, len(v))
-			copy(out, v)
+			r, decErr := DecodeReceiptStorage(v)
+			if decErr != nil {
+				return decErr
+			}
+			out = r
 			return nil
 		})
 	})
@@ -367,13 +368,15 @@ func (s *Store) List(from, to time.Time, limit int) ([]*HealReceipt, error) {
 			if err != nil {
 				return fmt.Errorf("receipt: fetch primary %q: %w", id, err)
 			}
-			var r HealReceipt
+			var r *HealReceipt
 			if err := item.Value(func(v []byte) error {
-				return json.Unmarshal(v, &r)
+				var decErr error
+				r, decErr = DecodeReceiptStorage(v)
+				return decErr
 			}); err != nil {
 				return fmt.Errorf("receipt: decode %q: %w", id, err)
 			}
-			out = append(out, &r)
+			out = append(out, r)
 		}
 		return nil
 	})
@@ -422,11 +425,11 @@ func (s *Store) GetByCorrelationID(correlationID string) (*HealReceipt, error) {
 			return fmt.Errorf("receipt: badger get receipt: %w", err)
 		}
 		return item.Value(func(val []byte) error {
-			var r HealReceipt
-			if err := json.Unmarshal(val, &r); err != nil {
-				return fmt.Errorf("receipt: decode %q: %w", receiptID, err)
+			r, decErr := DecodeReceiptStorage(val)
+			if decErr != nil {
+				return fmt.Errorf("receipt: decode %q: %w", receiptID, decErr)
 			}
-			out = &r
+			out = r
 			return nil
 		})
 	})

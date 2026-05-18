@@ -1,0 +1,24 @@
+namespace eventstorepb;
+
+table Event {
+  timestamp_unix_ns : int64;
+  type              : string;
+  action            : string;
+  bucket            : string;
+  key               : string;
+  size              : int64;
+  id                : string;
+  phase             : string;
+  outcome           : string;
+  shard_id          : int32;
+  peer_id           : string;
+  bytes_repaired    : int64;
+  duration_ms       : int64;
+  err_code          : string;
+  correlation_id    : string;
+  version_id        : string;
+  removed_id        : string;
+  force             : bool;
+}
+
+root_type Event;

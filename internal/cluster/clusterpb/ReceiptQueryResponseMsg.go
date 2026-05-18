@@ -53,7 +53,7 @@ func (rcv *ReceiptQueryResponseMsg) MutateFound(n bool) bool {
 	return rcv._tab.MutateBoolSlot(4, n)
 }
 
-func (rcv *ReceiptQueryResponseMsg) ReceiptJson(j int) byte {
+func (rcv *ReceiptQueryResponseMsg) Receipt(j int) byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -62,7 +62,7 @@ func (rcv *ReceiptQueryResponseMsg) ReceiptJson(j int) byte {
 	return 0
 }
 
-func (rcv *ReceiptQueryResponseMsg) ReceiptJsonLength() int {
+func (rcv *ReceiptQueryResponseMsg) ReceiptLength() int {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
@@ -70,7 +70,7 @@ func (rcv *ReceiptQueryResponseMsg) ReceiptJsonLength() int {
 	return 0
 }
 
-func (rcv *ReceiptQueryResponseMsg) ReceiptJsonBytes() []byte {
+func (rcv *ReceiptQueryResponseMsg) ReceiptBytes() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -78,7 +78,7 @@ func (rcv *ReceiptQueryResponseMsg) ReceiptJsonBytes() []byte {
 	return nil
 }
 
-func (rcv *ReceiptQueryResponseMsg) MutateReceiptJson(j int, n byte) bool {
+func (rcv *ReceiptQueryResponseMsg) MutateReceipt(j int, n byte) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -93,10 +93,10 @@ func ReceiptQueryResponseMsgStart(builder *flatbuffers.Builder) {
 func ReceiptQueryResponseMsgAddFound(builder *flatbuffers.Builder, found bool) {
 	builder.PrependBoolSlot(0, found, false)
 }
-func ReceiptQueryResponseMsgAddReceiptJson(builder *flatbuffers.Builder, receiptJson flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(receiptJson), 0)
+func ReceiptQueryResponseMsgAddReceipt(builder *flatbuffers.Builder, receipt flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(receipt), 0)
 }
-func ReceiptQueryResponseMsgStartReceiptJsonVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+func ReceiptQueryResponseMsgStartReceiptVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
 func ReceiptQueryResponseMsgEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

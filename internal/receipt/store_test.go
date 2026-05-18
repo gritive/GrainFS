@@ -1,7 +1,6 @@
 package receipt
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -318,7 +317,7 @@ func TestStore_List_HalfOpenInterval(t *testing.T) {
 	require.Equal(t, "rcpt-at-from", got[0].ReceiptID)
 }
 
-func TestStore_LookupReceiptJSON_Found(t *testing.T) {
+func TestStore_LookupReceipt_Found(t *testing.T) {
 	db := openTestDB(t)
 	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
 	require.NoError(t, err)
@@ -330,24 +329,21 @@ func TestStore_LookupReceiptJSON_Found(t *testing.T) {
 	require.NoError(t, s.Put(r))
 	require.NoError(t, s.Flush())
 
-	raw, ok := s.LookupReceiptJSON("rcpt-json-1")
+	got, ok := s.LookupReceipt("rcpt-json-1")
 	require.True(t, ok)
-	require.NotEmpty(t, raw)
-	// The returned bytes must decode back to the same receipt.
-	var decoded HealReceipt
-	require.NoError(t, json.Unmarshal(raw, &decoded))
-	require.Equal(t, "rcpt-json-1", decoded.ReceiptID)
+	require.NotNil(t, got)
+	require.Equal(t, "rcpt-json-1", got.ReceiptID)
 }
 
-func TestStore_LookupReceiptJSON_NotFound(t *testing.T) {
+func TestStore_LookupReceipt_NotFound(t *testing.T) {
 	db := openTestDB(t)
 	s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	raw, ok := s.LookupReceiptJSON("nonexistent")
+	got, ok := s.LookupReceipt("nonexistent")
 	require.False(t, ok)
-	require.Nil(t, raw)
+	require.Nil(t, got)
 }
 
 func TestStore_RecentReceiptIDs_NewestFirst(t *testing.T) {

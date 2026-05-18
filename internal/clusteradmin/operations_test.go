@@ -491,7 +491,7 @@ func TestEvents_RendersAndAppliesFilter(t *testing.T) {
 	stub := &stubServer{
 		eventsBody: []map[string]any{
 			{"ts": 1, "type": "system", "action": "cluster-join"},
-			{"ts": 2, "type": "system", "action": "cluster-remove-peer", "metadata": map[string]any{"removed_id": "n3"}},
+			{"ts": 2, "type": "system", "action": "cluster-remove-peer"},
 			{"ts": 3, "type": "s3", "action": "create-bucket", "bucket": "logs"},
 		},
 	}
