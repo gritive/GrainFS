@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.245.0] - 2026-05-18 - perf(nfs4): range-read COPY source data
+
+NFSv4.2 `COPY` now reads only the requested source range instead of buffering
+the whole source object before slicing. Counted copies use `ReadAt` when the
+backend advertises it, and the fallback path streams only the needed
+`srcOffset+count` bytes.
+
+### Added
+
+- Added targeted COPY coverage for bounded fallback reads, `ReadAt` fast-path
+  reads, copy-to-EOF/count-clamp semantics, EOF/huge-offset zero-byte copies,
+  oversized copy rejection, destination offset overflow, and source read error
+  mapping.
+
+### Fixed
+
+- Oversized COPY source ranges now return `NFS4ERR_FBIG` before reading source
+  data, avoiding full-object buffering and truncated success on requests larger
+  than the object RMW cap.
+- Destination offset arithmetic is checked before writing so overflow returns
+  `NFS4ERR_FBIG` instead of wrapping.
+
+### Performance
+
+Benchstat (`-benchtime=5x -count=6`, Apple M3, 4 KiB COPY):
+
+| Source size | sec/op delta | B/op delta | allocs/op delta |
+|---|---:|---:|---:|
+| 16 MiB | 8523.3 µs → 470.1 µs (−94.48 %) | 35401.65 KiB → 29.09 KiB (−99.92 %) | 163.0 → 128.5 (−21.17 %) |
+| 64 MiB | 22409.5 µs → 448.0 µs (−98.00 %) | 161502.00 KiB → 29.11 KiB (−99.98 %) | 257.5 → 129.0 (−49.90 %) |
+
 ## [0.0.244.0] - 2026-05-18 - perf(cluster): meta_forward JSON → FlatBuffers (GFSMFWD2)
 
 Cluster-internal meta-Raft proposal forwarding now uses FlatBuffers instead of
