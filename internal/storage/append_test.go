@@ -79,3 +79,42 @@ func TestAppendObjectSequentialThreeSegments(t *testing.T) {
 		t.Fatalf("etag=%q, want suffix -3", obj.ETag)
 	}
 }
+
+func TestAppendObjectRejectsAtCap(t *testing.T) {
+	// Save and restore cap for fast test
+	orig := MaxAppendSegments
+	t.Cleanup(func() { MaxAppendSegments = orig })
+	MaxAppendSegments = 4 // local override
+
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+	body := []byte("ABC")
+
+	off := int64(0)
+	for i := 0; i < 4; i++ {
+		obj, err := b.AppendObject(ctx, "test", "k", off, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		off = obj.Size
+	}
+	_, err := b.AppendObject(ctx, "test", "k", off, bytes.NewReader(body))
+	if !errors.Is(err, ErrAppendCapExceeded) {
+		t.Fatalf("expected ErrAppendCapExceeded, got %v", err)
+	}
+}
+
+func TestAppendObjectRejectsLegacyNonAppendable(t *testing.T) {
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+
+	// 일반 PutObject (헤더 없음) → legacy single-blob (Segments=nil, IsAppendable=false)
+	if _, err := b.PutObject(ctx, "test", "k", strings.NewReader("hello"), "text/plain"); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	_, err := b.AppendObject(ctx, "test", "k", 5, bytes.NewReader([]byte("world")))
+	if !errors.Is(err, ErrAppendNotSupported) {
+		t.Fatalf("expected ErrAppendNotSupported, got %v", err)
+	}
+}
