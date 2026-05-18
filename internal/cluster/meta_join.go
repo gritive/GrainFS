@@ -259,9 +259,6 @@ func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 }
 
 func decodeJoinRequest(data []byte) (req JoinRequest, err error) {
-	if len(data) > 0 && data[0] == '{' {
-		return JoinRequest{}, fmt.Errorf("meta_join: peer sent legacy JSON request (mixed-version)")
-	}
 	if !bytes.HasPrefix(data, metaJoinRequestMagic) {
 		return JoinRequest{}, fmt.Errorf("meta_join: bad magic")
 	}
@@ -293,9 +290,6 @@ func encodeJoinReply(reply JoinReply) ([]byte, error) {
 }
 
 func decodeJoinReply(data []byte) (reply *JoinReply, err error) {
-	if len(data) > 0 && data[0] == '{' {
-		return nil, fmt.Errorf("meta_join: peer returned legacy JSON reply (mixed-version)")
-	}
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("meta_join: malformed JoinReply: %v", r)

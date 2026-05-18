@@ -1,7 +1,6 @@
 package receipt
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -9,8 +8,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/receipt/receiptpb"
 )
-
-var ErrLegacyStorageFormat = errors.New("receipt: legacy storage format detected (wipe-and-restart required)")
 
 // EncodeReceipt and DecodeReceiptStorage are exported because
 // internal/cluster/receipt_broadcast.go consumes them. Other storage codecs
@@ -57,15 +54,6 @@ func EncodeReceipt(r *HealReceipt) ([]byte, error) {
 }
 
 func DecodeReceiptStorage(data []byte) (out *HealReceipt, err error) {
-	// Whitespace-tolerant legacy guard: skip leading space/tab/LF/CR then
-	// detect JSON by '{'. Matches Task 1/2 pattern (packblob/apply-quarantine).
-	trimmed := data
-	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t' || trimmed[0] == '\n' || trimmed[0] == '\r') {
-		trimmed = trimmed[1:]
-	}
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		return nil, ErrLegacyStorageFormat
-	}
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("decode receipt storage: malformed FB: %v", r)

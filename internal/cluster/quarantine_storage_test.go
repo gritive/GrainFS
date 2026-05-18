@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -23,16 +22,10 @@ func TestDecodePutObjectQuarantineCmdStorage_RoundTrip(t *testing.T) {
 	require.Equal(t, cmd, got)
 }
 
-func TestDecodePutObjectQuarantineCmdStorage_LegacyJSON(t *testing.T) {
-	legacy := []byte(`{"bucket":"b","key":"k","version_id":"","cause":"x","reason":"y"}`)
-	_, err := decodePutObjectQuarantineCmdStorage(legacy)
-	require.True(t, errors.Is(err, ErrLegacyStorageFormat), "got %v", err)
-}
-
 func TestDecodePutObjectQuarantineCmdStorage_Corrupt(t *testing.T) {
-	// Bytes that look FB-ish but are truncated/garbled.
+	// Bytes that look FB-ish but are truncated/garbled. defer-recover must
+	// turn the inevitable panic into a typed error.
 	garbage := []byte{0x10, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff}
 	_, err := decodePutObjectQuarantineCmdStorage(garbage)
 	require.Error(t, err)
-	require.False(t, errors.Is(err, ErrLegacyStorageFormat))
 }
