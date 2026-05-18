@@ -65,13 +65,10 @@ type appendSegmentGroupLookup interface {
 	Backend(groupID string) *DistributedBackend
 }
 
-func encodeAppendSegmentRequest(groupID, bucket, key, blobID string) ([]byte, error) {
-	return encodeAppendSegmentRequestKind(groupID, bucket, key, blobID, appendSegKindSegment)
-}
-
-// encodeAppendSegmentRequestKind is the kind-aware variant. Coalesced reads
-// pass appendSegKindCoalesced so the peer resolves coalescedBlobPath
-// instead of segmentBlobPath.
+// encodeAppendSegmentRequestKind is the kind-aware encoder. Phase B1 callers
+// pass appendSegKindSegment; Phase B2 coalesced reads pass
+// appendSegKindCoalesced so the peer resolves coalescedBlobPath instead of
+// segmentBlobPath.
 func encodeAppendSegmentRequestKind(groupID, bucket, key, blobID string, kind byte) ([]byte, error) {
 	for _, s := range []string{groupID, bucket, key, blobID} {
 		if len(s) > maxAppendSegFieldSize {
@@ -174,15 +171,10 @@ func errorAppendSegmentMeta(req *transport.Message, msg string) *transport.Messa
 	return &transport.Message{Type: req.Type, ID: req.ID, Status: transport.StatusOK, Payload: payload}
 }
 
-// readAppendSegmentFromPeer issues a single-peer fetch. Returns
-// errPeerAppendSegmentNotFound when the peer answers ENOENT; the caller
-// must treat that as "try next peer" rather than as a hard failure.
-func (b *DistributedBackend) readAppendSegmentFromPeer(ctx context.Context, peer, bucket, key, blobID string) (io.ReadCloser, error) {
-	return b.readAppendSegmentFromPeerKind(ctx, peer, bucket, key, blobID, appendSegKindSegment)
-}
-
-// readAppendSegmentFromPeerKind is the kind-aware variant used by the
-// coalesced blob read path. Kind defaults to segment via the wrapper above.
+// readAppendSegmentFromPeerKind issues a single-peer fetch for either a raw
+// segment or a coalesced blob (selected via kind). Returns
+// errPeerAppendSegmentNotFound when the peer answers ENOENT so the caller
+// can iterate to the next peer.
 func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, peer, bucket, key, blobID string, kind byte) (io.ReadCloser, error) {
 	if b.shardSvc == nil || b.shardSvc.transport == nil {
 		return nil, fmt.Errorf("append segment peer fetch: no transport")
@@ -230,21 +222,15 @@ func (b *DistributedBackend) readAppendSegmentFromPeerKind(ctx context.Context, 
 	}
 }
 
-// fetchAppendSegmentFromAnyPeer iterates over live peers (excluding self)
-// and returns the first peer that holds the segment. Returns ENOENT-style
-// error only when every peer reports missing.
+// fetchAppendBlobFromAnyPeer iterates over live peers (excluding self) and
+// returns the first peer that holds the blob (raw segment or coalesced,
+// selected via kind). Returns an ENOENT-style error only when every peer
+// reports missing.
 //
 // Phase B1: we do not pre-resolve the owner address; the owner of an
 // append group is the one peer that actually has the blob, but threading
 // that resolution into the GET path needs cross-package wiring we are
 // deferring. With 4 nodes this is at most 3 cheap RPCs in the worst case.
-func (b *DistributedBackend) fetchAppendSegmentFromAnyPeer(ctx context.Context, bucket, key, blobID string) (io.ReadCloser, error) {
-	return b.fetchAppendBlobFromAnyPeer(ctx, bucket, key, blobID, appendSegKindSegment)
-}
-
-// fetchAppendBlobFromAnyPeer is the kind-aware variant; coalesced blob
-// fetches pass appendSegKindCoalesced. Same fan-out semantics as the
-// segment-only variant.
 func (b *DistributedBackend) fetchAppendBlobFromAnyPeer(ctx context.Context, bucket, key, blobID string, kind byte) (io.ReadCloser, error) {
 	if b.shardSvc == nil {
 		return nil, fmt.Errorf("no shard service")
