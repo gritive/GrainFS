@@ -115,6 +115,8 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetObjectACL(cmd.Data)
 	case CmdAppendObject:
 		return f.applyAppendObjectFromCmd(cmd.Data)
+	case CmdCoalesceSegments:
+		return f.applyCoalesceSegmentsFromCmd(cmd.Data)
 	case CmdPutObjectQuarantine:
 		return f.applyPutObjectQuarantine(cmd.Data)
 	default:
@@ -768,6 +770,90 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
 				return err
 			}
+		}
+		return f.setValue(txn, metaKey, out)
+	})
+}
+
+// applyCoalesceSegmentsFromCmd handles a CmdCoalesceSegments Raft entry. The
+// command consumes a prefix of objectMeta.Segments and appends a single
+// CoalescedShardRef. Read-modify-write pattern mirroring
+// applyAppendObjectFromCmd.
+//
+// Idempotency rules (replay-safe):
+//   - If CoalescedID already present in objectMeta.Coalesced → no-op.
+//   - ConsumedSegmentIDs are removed by exact BlobID match; missing IDs
+//     are skipped (a concurrent append that arrived between snapshot and
+//     apply is preserved).
+//   - Size/ETag of objectMeta are NOT modified: a coalesce is metadata
+//     reorganization, not a content change.
+func (f *FSM) applyCoalesceSegmentsFromCmd(data []byte) error {
+	cmd, err := decodeCoalesceSegmentsCmd(data)
+	if err != nil {
+		return fmt.Errorf("decode CoalesceSegmentsCmd: %w", err)
+	}
+	if cmd.CoalescedID == "" || cmd.ShardKey == "" {
+		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
+		item, gerr := txn.Get(metaKey)
+		if gerr != nil {
+			if errors.Is(gerr, badger.ErrKeyNotFound) {
+				return nil // object deleted concurrently — drop silently
+			}
+			return fmt.Errorf("get objectMeta: %w", gerr)
+		}
+		var existing objectMeta
+		if err := item.Value(func(raw []byte) error {
+			v, oerr := f.openValue(item.Key(), raw)
+			if oerr != nil {
+				return oerr
+			}
+			m, derr := unmarshalObjectMeta(v)
+			if derr != nil {
+				return fmt.Errorf("unmarshal: %w", derr)
+			}
+			existing = m
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		// Idempotency: same CoalescedID already applied → no-op.
+		for _, c := range existing.Coalesced {
+			if c.CoalescedID == cmd.CoalescedID {
+				return nil
+			}
+		}
+
+		// Cap depth — stall coalesce when the chain grows unbounded.
+		if len(existing.Coalesced) >= MaxCoalescedEntries {
+			return fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
+		}
+
+		// Remove consumed segments by exact BlobID match.
+		consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
+		for _, id := range cmd.ConsumedSegmentIDs {
+			consumed[id] = true
+		}
+		kept := existing.Segments[:0]
+		for _, s := range existing.Segments {
+			if !consumed[s.BlobID] {
+				kept = append(kept, s)
+			}
+		}
+		existing.Segments = kept
+		existing.Coalesced = append(existing.Coalesced, CoalescedShardRef{
+			CoalescedID: cmd.CoalescedID,
+			Size:        cmd.Size,
+			ETag:        cmd.ETag,
+			ShardKey:    cmd.ShardKey,
+			Version:     1,
+		})
+		out, err := marshalObjectMeta(existing)
+		if err != nil {
+			return fmt.Errorf("marshal: %w", err)
 		}
 		return f.setValue(txn, metaKey, out)
 	})
