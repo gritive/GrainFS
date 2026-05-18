@@ -330,7 +330,7 @@ func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segs []sto
 	if v, ok := b.coalesceFirstSeen.LoadOrStore(cacheKey, nowT); ok {
 		firstT = v.(time.Time)
 	}
-	trig, _ := evaluateCoalesceTrigger(segs, firstT, nowT, b.coalesceCfg)
+	trig, _ := evaluateCoalesceTrigger(segs, firstT, nowT, *b.coalesceCfg.Load())
 	if !trig {
 		return
 	}
@@ -344,10 +344,11 @@ func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segs []sto
 // when the worker buffer was full). Cleanup interval is set from
 // coalesceCfg.CleanupInterval; zero/negative values disable the scanner.
 func (b *DistributedBackend) coalesceBackstopScan(ctx context.Context) {
-	if b.coalesceCfg.CleanupInterval <= 0 {
+	cfg := b.coalesceCfg.Load()
+	if cfg.CleanupInterval <= 0 {
 		return
 	}
-	ticker := time.NewTicker(b.coalesceCfg.CleanupInterval)
+	ticker := time.NewTicker(cfg.CleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {

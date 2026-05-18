@@ -58,7 +58,9 @@ func TestAppendObjectTriggersCoalesceOnCount(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
 	// Override threshold to 3 segments so the test stays fast.
-	b.coalesceCfg.SegmentCount = 3
+	cfg := *b.coalesceCfg.Load()
+	cfg.SegmentCount = 3
+	b.SetCoalesceConfig(cfg)
 
 	bucket, key := "b", "k"
 	for i := 0; i < 3; i++ {

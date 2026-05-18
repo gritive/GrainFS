@@ -45,9 +45,11 @@ func TestAppendableReadAtAcrossCoalescedAndRaw(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond, "coalesce did not complete")
 
 	// 4 more raw appends — these stay in Segments[].
-	b.coalesceCfg.SegmentCount = 1 << 30 // disable count trigger
-	b.coalesceCfg.SizeBytes = 1 << 30
-	b.coalesceCfg.IdleTimeout = time.Hour
+	rangeDisableCfg := *b.coalesceCfg.Load()
+	rangeDisableCfg.SegmentCount = 1 << 30 // disable count trigger
+	rangeDisableCfg.SizeBytes = 1 << 30
+	rangeDisableCfg.IdleTimeout = time.Hour
+	b.SetCoalesceConfig(rangeDisableCfg)
 	for i := 16; i < 20; i++ {
 		chunk := []byte(fmt.Sprintf("r%02d-", i))
 		_, err := b.AppendObject(ctx, bucket, key, off, bytes.NewReader(chunk))
