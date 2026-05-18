@@ -1694,7 +1694,13 @@ func (c *ClusterCoordinator) requireMultipartListingPeerCapability(op compat.Ope
 	if c.capGate == nil {
 		return nil
 	}
-	_, err := c.capGate.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, op, peers, time.Now())
+	resolved := peers
+	if book, ok := c.meta.(NodeAddressBook); ok && book != nil {
+		if addrs, err := ResolveNodeAddresses(book, peers); err == nil {
+			resolved = addrs
+		}
+	}
+	_, err := c.capGate.RequirePeerTransportCapability(compat.CapabilityMultipartListingV1, op, resolved, time.Now())
 	return err
 }
 

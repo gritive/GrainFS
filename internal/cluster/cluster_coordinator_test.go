@@ -1670,6 +1670,54 @@ func TestClusterCoordinator_ListParts_GateRejectsBeforePeerCall(t *testing.T) {
 	require.Empty(t, d.calls)
 }
 
+// fakeShardGroupWithAddrBook mimics a *MetaFSM that satisfies both
+// ShardGroupSource and NodeAddressBook so gate callers can resolve
+// PeerIDs (node IDs) to canonical raft addresses, the form gossip
+// uses when keying capability evidence.
+type fakeShardGroupWithAddrBook struct {
+	fakeShardGroupSource
+	nodes []MetaNodeEntry
+}
+
+func (f *fakeShardGroupWithAddrBook) Nodes() []MetaNodeEntry { return f.nodes }
+
+func TestRequireMultipartListingResolvesPeerIDsBeforeGate(t *testing.T) {
+	// On a freshly bootstrapped 4-node cluster the gossip receiver keys
+	// capability evidence by the resolved raft address ("127.0.0.1:7001")
+	// because ResolveNodeAddress maps the canonical NodeID to that addr.
+	// `group.PeerIDs` however publishes the human node ID
+	// ("bench-node-1"). Without a resolve step at the call site,
+	// RequirePeerTransportCapability rejects every CreateMultipartUpload
+	// because no `bench-node-N` key exists in the evidence map.
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	now := time.Now()
+	for _, addr := range []string{"127.0.0.1:7001", "127.0.0.1:7002"} {
+		gate.ReportEvidence(compat.Evidence{
+			NodeID:       compat.NodeID(addr),
+			Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+			LastSeen:     now,
+			Ready:        true,
+		})
+	}
+	meta := &fakeShardGroupWithAddrBook{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"node-1", "node-2"}},
+		}},
+		nodes: []MetaNodeEntry{
+			{ID: "node-1", Address: "127.0.0.1:7001"},
+			{ID: "node-2", Address: "127.0.0.1:7002"},
+		},
+	}
+	c := NewClusterCoordinator(&fakeBackend{}, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "test-node")
+	c.WithCapabilityGate(gate)
+
+	err := c.requireMultipartListingPeerCapability(
+		compat.OperationCreateMultipartUpload,
+		[]string{"node-1", "node-2"},
+	)
+	require.NoError(t, err)
+}
+
 func reportMultipartListingCapability(c *ClusterCoordinator, peers ...string) {
 	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
 	now := time.Now()

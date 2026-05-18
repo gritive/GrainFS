@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased - fix(cluster): resolve PeerIDs to addresses before consulting the multipart capability gate
+
+### Fixed
+- `ClusterCoordinator.requireMultipartListingPeerCapability` now
+  resolves `group.PeerIDs` (canonical node IDs such as
+  `bench-node-2`) to raft addresses via `ResolveNodeAddresses` when
+  the underlying `ShardGroupSource` also implements
+  `NodeAddressBook`. The gossip receiver keys capability evidence by
+  the resolved raft address (see `gossip.resolveGossipNodeID`), so
+  without the resolve step `CreateMultipartUpload`,
+  `ListMultipartUploads`, and `ListParts` were rejected on every
+  freshly bootstrapped cluster with "capability multipart_listing_v1
+  rejected for operation ...; finish the rolling upgrade before
+  retrying" — even though every node had advertised the capability
+  and gossip had observed it. PUT/GET/DELETE were unaffected because
+  those ops are not gated on `multipart_listing_v1`.
+- Resolution falls back to the original peer slice when the meta
+  source does not satisfy `NodeAddressBook` (existing test fakes)
+  or when resolution fails, keeping prior unit-test behaviour
+  intact.
+
+### Tests
+- `TestRequireMultipartListingResolvesPeerIDsBeforeGate` registers
+  capability evidence keyed by raft addresses (mimicking gossip),
+  publishes `PeerIDs` as node IDs, and expects the gate to allow
+  `CreateMultipartUpload`. Without the resolve step the gate marks
+  every peer as `unknown`.
+
 ## Unreleased - fix(cluster): chunk multipart UploadPart writes through the encrypted spool
 
 ### Fixed
