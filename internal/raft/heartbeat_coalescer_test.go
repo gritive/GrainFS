@@ -1,6 +1,9 @@
 package raft
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestDecodeHeartbeatBatchOwnsDecodedStrings(t *testing.T) {
 	items := []hbItem{{
@@ -38,6 +41,21 @@ func TestDecodeHeartbeatBatchOwnsDecodedStrings(t *testing.T) {
 	}
 }
 
+func TestBorrowAppendEntriesArgsPayloadMatchesOwnedEncoder(t *testing.T) {
+	args := benchmarkHeartbeatItems(1)[0].args
+
+	borrowed := borrowAppendEntriesArgsPayload(args)
+	defer borrowed.release()
+
+	owned, err := encodeAppendEntriesArgs(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(borrowed.data, owned) {
+		t.Fatal("borrowed AppendEntriesArgs payload differs from owned encoder")
+	}
+}
+
 func TestEncodeHeartbeatBatchLargeBatchRoundTrip(t *testing.T) {
 	items := benchmarkHeartbeatItems(17)
 	payload, err := encodeHeartbeatBatch(items)
@@ -59,5 +77,38 @@ func TestEncodeHeartbeatBatchLargeBatchRoundTrip(t *testing.T) {
 		if decoded[i].args.PrevLogIndex != items[i].args.PrevLogIndex {
 			t.Fatalf("decoded[%d].PrevLogIndex = %d, want %d", i, decoded[i].args.PrevLogIndex, items[i].args.PrevLogIndex)
 		}
+	}
+}
+
+func TestEncodeHeartbeatBatchReturnsOwnedPayloadAfterBuilderReuse(t *testing.T) {
+	items := benchmarkHeartbeatItems(8)
+	payload, err := encodeHeartbeatBatch(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte(nil), payload...)
+
+	for i := 0; i < 128; i++ {
+		reuseItems := benchmarkHeartbeatItems(8)
+		reuseItems[0].args.LeaderID = "node-reuse"
+		reuseItems[0].args.PrevLogIndex = uint64(1000 + i)
+		if _, err := encodeHeartbeatBatch(reuseItems); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !bytes.Equal(payload, want) {
+		t.Fatal("heartbeat batch payload mutated after FlatBuffers builder reuse")
+	}
+
+	decoded, err := decodeHeartbeatBatch(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != len(items) {
+		t.Fatalf("decoded %d items, want %d", len(decoded), len(items))
+	}
+	if decoded[0].args.LeaderID != items[0].args.LeaderID {
+		t.Fatalf("LeaderID = %q, want %q", decoded[0].args.LeaderID, items[0].args.LeaderID)
 	}
 }
