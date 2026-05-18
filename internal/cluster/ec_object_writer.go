@@ -42,6 +42,9 @@ type ecObjectWritePlan struct {
 	Key              string
 	VersionID        string
 	PlacementGroupID string
+	ModTime          int64
+	PreserveModTime  bool
+	ExpectedETag     string
 	Config           ECConfig
 	Placement        []string
 	RingVersion      RingVersion
@@ -83,6 +86,13 @@ func newECObjectWriter(selfID string, shards ecObjectShardStore, peerHealth ecOb
 		writeAttempts: ecShardWriteAttempts,
 		writeBackoff:  ecShardWriteBackoff,
 	}
+}
+
+func ecObjectShardKey(key, versionID string) string {
+	if versionID == "" {
+		return key
+	}
+	return key + "/" + versionID
 }
 
 //nolint:unused // referenced by ec_object_writer_test.go.
@@ -187,7 +197,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	shardSize func(idx int) (int64, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
-	shardKey := plan.Key + "/" + plan.VersionID
+	shardKey := ecObjectShardKey(plan.Key, plan.VersionID)
 	written := make(chan string, len(plan.Placement))
 
 	cleanup := func() {
@@ -299,7 +309,7 @@ func (w ecObjectWriter) writeSingleLocalReader(
 	metricPath string,
 	bodyHash hash.Hash,
 ) (ecObjectWriteResult, error) {
-	shardKey := plan.Key + "/" + plan.VersionID
+	shardKey := ecObjectShardKey(plan.Key, plan.VersionID)
 	stageStart := time.Now()
 
 	header := encodeShardHeader(sp.Size)

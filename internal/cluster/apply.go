@@ -232,6 +232,25 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	if err := f.db.Update(func(txn *badger.Txn) error {
+		if c.ExpectedETag != "" {
+			item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key))
+			if gerr != nil {
+				return fmt.Errorf("put object meta CAS: read current meta: %w", gerr)
+			}
+			if err := item.Value(func(val []byte) error {
+				current, derr := unmarshalObjectMeta(val)
+				if derr != nil {
+					return fmt.Errorf("put object meta CAS: decode current meta: %w", derr)
+				}
+				if current.ETag != c.ExpectedETag {
+					return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
+						c.Bucket, c.Key, current.ETag, c.ExpectedETag)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
 		// Versioned entries are only written when a VersionID is supplied. Legacy
 		// replay (empty VersionID) gets the single legacy key only.
 		if c.VersionID != "" {
