@@ -185,6 +185,13 @@ func (g *GroupBackend) CreateMultipartUpload(ctx context.Context, bucket, key, c
 	return g.DistributedBackend.CreateMultipartUpload(g.placementContext(ctx), bucket, key, contentType)
 }
 
+// CreateMultipartUploadWithTags mirrors CreateMultipartUpload's placementContext
+// injection so the tags-carrying path also receives the resolved placement
+// group ID before reaching DistributedBackend's bypassBucketCheck branch.
+func (g *GroupBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	return g.DistributedBackend.CreateMultipartUploadWithTags(g.placementContext(ctx), bucket, key, contentType, tags)
+}
+
 func (g *GroupBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	return g.DistributedBackend.UploadPart(g.placementContext(ctx), bucket, key, uploadID, partNumber, r)
 }

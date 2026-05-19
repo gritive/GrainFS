@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.267.0] - 2026-05-20 - feat(cluster): CreateMultipartUploadWithTags real support
+
+Object Tagging API Phase 2 cluster gap 종결. `CreateMultipartUploadWithTags`가 cluster 모드에서 실제로 동작 (Phase 1의 `len(tags) > 0` fail-fast 제거).
+
+### Changed
+
+- **Cluster `CreateMultipartUploadWithTags` 본격 지원**: `clusterpb.MultipartMeta` + `CreateMultipartUploadCmd` FBS schema에 `tags:[Tag]` 추가. Initiate 시 `clusterMultipartMeta`에 Tags 저장, `CompleteMultipartUpload` 시 production Raft path (`CmdPutObjectMeta`)에 Tags propagation해서 finalised `objectMeta.Tags` 직접 materialise (single Raft entry — 별도 `CmdSetObjectTags` proposal 불필요).
+- **Tag copy discipline 통일**: defensive copy는 cluster API boundary 한 곳 (`createMultipartUploadInternal`)에만 존재. apply / EC commit path는 alias 그대로 전달 (`Parts` 패턴과 일치). hot-path alloc 감소.
+- **`CreateMultipartUpload[WithTags]` dedupe**: 두 public 메서드가 `createMultipartUploadInternal` 헬퍼로 통일되어 placement-group 부트스트랩/rollback 로직 ~30줄 중복 제거.
+- **Cluster forward path Tags 전파**: `ForwardObjectMeta` / `ForwardObjectVersionMeta` FBS schema에 `tags:[Tag]` 추가. 모든 cross-node forwarded read (Get/Head/List/ListVersions)가 Tags 보존. `ClusterCoordinator.GetObjectTags`가 `ForwardOpGetObjectTags` op으로 multi-group routed read 지원 (이전엔 "peer forwarding not implemented" 에러). Regression guards: `TestForwardObjectMeta_CarriesTags`, `TestClusterCoordinator_GetObjectTags_Forwarded`.
+- **`DistributedBackend` List paths Tags**: `ListObjects` / `ListObjectsPage` / `WalkObjects`가 `storage.Object.Tags`를 채움 (이전엔 `HeadObject` + `ListObjectVersions`만 propagate → single/cluster parity 위배). Regression guard: `TestDistributedBackend_ListObjects_PreservesTags`.
+- **`wal.Backend` / `pullthrough.Backend` / `packblob.PackedBackend` `CreateMultipartUploadWithTags` pass-through**: production hot path wraps `storage.Backend` (interface) inside `wal.Backend`, `pullthrough.Backend`, 그리고 single-node packed mode에서는 `PackedBackend` (non-embedded `inner` field). 어느 wrapper도 underlying concrete type의 method를 promote하지 않아서 `Operations.CreateMultipartUploadWithTags`의 `(tagsCreator)` type assertion이 wrapper에서 실패 → silently no-tags overload로 fallback → `x-amz-tagging` on multipart-initiate가 drop되던 문제 해결. Regression guards: `TestWALBackend_CreateMultipartUploadWithTags_DelegatesToInner`, `TestPullthroughBackend_CreateMultipartUploadWithTags_DelegatesToInner`, `TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner`.
+- **`ClusterCoordinator.CreateMultipartUploadWithTags`**: cluster mode 진입점. local data group은 `GroupBackend.CreateMultipartUploadWithTags`로 직접 dispatch, remote는 `ForwardOpCreateMultipartUpload`로 routing. forward schema `CreateMultipartUploadArgs`에 `tags:[Tag]` 필드 추가 (FBS regenerated), receiver는 `TagsLength() > 0`에 따라 `CreateMultipartUploadWithTags` / `CreateMultipartUpload` 분기 (older sender wire-compat). Regression guard: `TestClusterCoordinator_CreateMultipartUploadWithTags_PreservesTags`.
+
+### Fixed
+
+- **`upgradeObjectEC` Tags propagation**: EC config upgrade 시 `CmdPutObjectMeta` propose에 기존 `objectMeta.Tags`를 forward. `applyPutObjectMeta`가 `c.Tags`를 unconditional하게 write하므로, 이 fix 없이는 reshard 경로가 사용자 tag를 nil로 clobber. `headObjectMeta`가 `storage.Object.Tags`를 채우도록 보강하여 callers (현재는 `upgradeObjectEC`)가 tag를 propose에 실어보낼 수 있게 함. Regression guard: `TestUpgradeObjectEC_PreservesTags` (`internal/cluster/reshard_manager_test.go`).
+- **Chunked PUT Tags propagation**: large-object PUT (≥ chunked threshold) via
+  `putObjectChunked` was dropping the `tags` argument before reaching
+  `PutObjectMetaCmd`. Threaded through, with regression test
+  `TestChunkedPut_PreservesTags`.
+- **Snapshot restore Tags**: `RestoreObjects` propose path was building
+  `PutObjectMetaCmd` without `Tags: snap.Tags`. Fixed; regression test
+  `TestRestoreObjects_PreservesTags`.
+
+### Verified (no code change)
+
+- Cluster versioned-record tags (`SetObjectTags`/`GetObjectTags` with `versionID != ""`) — 이미 v0.0.264.0에 구현되어 있음 (`apply.go:691-721` versionID-branch, `backend.go:1377-1379` versioned-key GET). Unit 테스트 통과: `TestFSM_SetObjectTags`, `TestFSM_SetObjectTags_NotFound`, `TestFSM_SetObjectTags_VersionedBucket`, `TestFSM_SetObjectTags_SpecificVersion`.
+
+### Known limitations
+
+- **E2E harness IAM bootstrap probe regression** (v0.0.263.0 이후 cluster e2e 전체가 `IAM bootstrap not ready within 30s`로 실패). Phase 2와 무관, 본 릴리스에서 별도 fix 필요.
+- **E2E 검증 갭**: 위 harness regression으로 인해 `MultipartCreate_TagsMaterialiseOnComplete` cluster assertion (Phase 2 Task Step 12에서 fail-fast bypass 제거)이 **code-only-verified** 상태 — bypass 제거 + cluster apply unit tests (`TestFSM_CreateMultipartUpload_PersistsTags`, `TestFSM_CompleteMultipartUpload_MaterialisesTags`) PASS는 확인했으나 실제 S3 클라이언트 round-trip은 harness fix 전까지 runtime-verify 불가.
+
 ## [0.0.266.0] - 2026-05-19 - feat(cluster): segment-backed large object chunking phase 2
 
 Cluster large-object chunking phase 2. Chunked PUT/GET now routes object metadata through the cluster raft path while segment payloads are stored and read through the segment store. The branch also hardens the single-node segment-backed storage compatibility paths that were exposed after rebasing onto `origin/master`.

@@ -28,7 +28,8 @@ enum ForwardOp : byte {
   ListMultipartUploads = 18,
   AppendObject = 19,
   HeadObjectVersion = 20,  // reserved: matches origin/master 4722a758; do not reuse
-  SetObjectTags = 21
+  SetObjectTags = 21,
+  GetObjectTags = 22
 }
 
 // Tag mirrors storagepb.Tag (key/value) for the Raft forward path.
@@ -119,6 +120,12 @@ table SetObjectTagsArgs {
   tags:[Tag];          // empty/nil -> delete all tags
 }
 
+table GetObjectTagsArgs {
+  bucket:string;
+  key:string;
+  version_id:string;   // empty -> current version
+}
+
 table DeleteObjectVersionArgs {
   bucket:string;
   key:string;
@@ -147,6 +154,7 @@ table CreateMultipartUploadArgs {
   bucket:string;
   key:string;
   content_type:string;
+  tags:[Tag];          // empty/nil -> no tags (CreateMultipartUpload), non-empty -> CreateMultipartUploadWithTags
 }
 
 table UploadPartArgs {
@@ -227,6 +235,10 @@ table ForwardObjectMeta {
   // range. Empty for non-multipart and legacy objects (back-compat:
   // ForwardObjectMeta written before this field reads as len()==0 here).
   parts:[ForwardPartMeta];
+  // tags mirrors storage.Object.Tags so every cross-node forwarded
+  // Get/Head/List response carries S3 object tags. Empty/missing reads
+  // as len()==0 (back-compat: appended field; older peers send no tags).
+  tags:[Tag];
 }
 
 table ForwardObjectVersionMeta {
@@ -237,6 +249,9 @@ table ForwardObjectVersionMeta {
   etag:string;
   size:long;
   modified_unix_ms:long;
+  // tags carried so ListObjectVersions over forwarded reads preserves
+  // S3 object tags on every version. Back-compat: appended trailing field.
+  tags:[Tag];
 }
 
 table ForwardPartMeta {
@@ -266,6 +281,7 @@ table ForwardReply {
   scrub_session:ScrubSessionStatReply; // ScrubSessionStat
   parts:[ForwardPartMeta];           // ListParts
   uploads:[ForwardMultipartUploadMeta]; // ListMultipartUploads
+  tags:[Tag];                        // GetObjectTags
 }
 
 root_type ForwardReply;

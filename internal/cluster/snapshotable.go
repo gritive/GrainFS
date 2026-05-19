@@ -69,6 +69,10 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 					IsLatest:       latest[key] == versionID,
 					ACL:            meta.ACL,
 					SSEAlgorithm:   meta.SSEAlgorithm,
+					// Tags copied (not aliased) — meta's backing bytes are reused
+					// by badger once the View tx returns. Mirror of LocalBackend
+					// fix in b64521bf so snapshot Tags survive ListAllObjects.
+					Tags: append([]storage.Tag(nil), meta.Tags...),
 				})
 				return nil
 			})
@@ -212,6 +216,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			SSEAlgorithm:     snap.SSEAlgorithm,
 			PreserveLatest:   preserveLatest,
 			IsDeleteMarker:   snap.IsDeleteMarker,
+			Tags:             snap.Tags,
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore meta %s/%s: %w", snap.Bucket, snap.Key, err)
 		}

@@ -707,3 +707,28 @@ func TestCodec_SetObjectTagsCmd_EmptyTags_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, cmd, got)
 }
+
+func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
+	orig := clusterMultipartMeta{
+		Bucket: "b", Key: "k", CreatedAt: 123, ContentType: "text/plain",
+		PlacementGroupID: "pg-1",
+		Tags:             []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
+	}
+	raw, err := marshalClusterMultipartMeta(orig)
+	require.NoError(t, err)
+	got, err := unmarshalClusterMultipartMeta(raw)
+	require.NoError(t, err)
+	require.Equal(t, orig, got)
+}
+
+func TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags(t *testing.T) {
+	cmd := CreateMultipartUploadCmd{
+		Bucket: "b", Key: "k", UploadID: "u1", ContentType: "text/plain",
+		Tags: []storage.Tag{{Key: "env", Value: "prod"}},
+	}
+	raw, err := encodeCreateMultipartUploadCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodeCreateMultipartUploadCmd(raw)
+	require.NoError(t, err)
+	require.Equal(t, cmd, got)
+}

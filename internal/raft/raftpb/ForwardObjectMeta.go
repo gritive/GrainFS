@@ -125,8 +125,28 @@ func (rcv *ForwardObjectMeta) PartsLength() int {
 	return 0
 }
 
+func (rcv *ForwardObjectMeta) Tags(obj *Tag, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ForwardObjectMeta) TagsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func ForwardObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func ForwardObjectMetaAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -153,6 +173,12 @@ func ForwardObjectMetaAddParts(builder *flatbuffers.Builder, parts flatbuffers.U
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(parts), 0)
 }
 func ForwardObjectMetaStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func ForwardObjectMetaAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(tags), 0)
+}
+func ForwardObjectMetaStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ForwardObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

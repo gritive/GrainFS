@@ -104,6 +104,23 @@ func (b *Backend) Truncate(ctx context.Context, bucket, key string, size int64) 
 	return partial.Truncate(ctx, bucket, key, size)
 }
 
+// CreateMultipartUploadWithTags forwards to the inner backend when it supports
+// the tagsCreator extension. Without this method the embedded storage.Backend
+// interface does not promote CreateMultipartUploadWithTags from the underlying
+// concrete type, so Operations.CreateMultipartUploadWithTags' type assertion
+// fails on the pullthrough.Backend wrapper and silently falls back to the
+// no-tags overload — dropping x-amz-tagging on multipart-initiate.
+func (b *Backend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	type tagsCreator interface {
+		CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error)
+	}
+	inner, ok := b.Backend.(tagsCreator)
+	if !ok {
+		return "", storage.UnsupportedOperationError{Op: "CreateMultipartUploadWithTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return inner.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+}
+
 // AppendObject forwards the S3 Express append to an inner AppendObjecter when
 // supported. The pull-through decorator does not have its own append semantics
 // (upstream resolution is read-side only), so this is a thin delegate.

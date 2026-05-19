@@ -267,6 +267,7 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		SSEAlgorithm:     c.SSEAlgorithm,
 		Parts:            c.Parts,
 		Segments:         segmentMetaEntriesToRefs(c.Segments),
+		Tags:             c.Tags,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
@@ -525,6 +526,7 @@ func (f *FSM) applyCreateMultipartUpload(data []byte) error {
 		CreatedAt:        c.CreatedAt,
 		ContentType:      c.ContentType,
 		PlacementGroupID: c.PlacementGroupID,
+		Tags:             c.Tags,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal multipart meta: %w", err)

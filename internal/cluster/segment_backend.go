@@ -185,6 +185,7 @@ func (b *DistributedBackend) putObjectChunked(
 	expectedETag string,
 	beforeCommit func() error,
 	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
 ) (*storage.Object, error) {
 	if parts != nil {
 		return nil, fmt.Errorf("chunked PUT with multipart parts: deferred to Phase 3")
@@ -216,7 +217,7 @@ func (b *DistributedBackend) putObjectChunked(
 		return nil, fmt.Errorf("open spool: %w", err)
 	}
 	defer body.Close()
-	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit)
+	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, tags)
 }
 
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
@@ -234,6 +235,7 @@ func runChunkedPut(
 	preserveModTime bool,
 	expectedETag string,
 	beforeCommit func() error,
+	tags []storage.Tag,
 ) (*storage.Object, error) {
 
 	// Best-effort blob cleanup on any error path before raft commit.
@@ -296,6 +298,7 @@ func runChunkedPut(
 		ECParity:         uint8(csb.placements[0].Config.ParityShards),
 		PlacementGroupID: csb.placements[0].PlacementGroupID,
 		Segments:         buildSegmentMetaEntries(csb.placements, obj.Segments),
+		Tags:             tags,
 	}
 
 	// 6. Single atomic raft commit.
@@ -304,6 +307,10 @@ func runChunkedPut(
 	}
 	metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 	committed = true
+	// Symmetric with commitECObjectWriteResult: the returned *storage.Object
+	// must carry Tags even though PutObjectMetaCmd above already persists them.
+	// Defensive copy because callers may outlive the cmd's tags slice.
+	obj.Tags = append([]storage.Tag(nil), tags...)
 	return obj, nil
 }
 

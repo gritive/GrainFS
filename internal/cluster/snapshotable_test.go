@@ -215,6 +215,73 @@ func TestRestoreObjects_PreservesCurrentECPlacementMetadata(t *testing.T) {
 	}))
 }
 
+// TestListAllObjects_PreservesTags asserts the snapshot read path copies
+// meta.Tags into SnapshotObject.Tags. Pre-fix, ListAllObjects's literal at
+// snapshotable.go:60 omitted Tags, which made the RestoreObjects Tags-forward
+// fix dead code: a full snapshot+restore round-trip would lose tags because
+// snap.Tags was always nil on the read side. End-to-end round-trip guard.
+func TestListAllObjects_PreservesTags(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "tagrt"))
+
+	obj, err := b.PutObject(context.Background(), "tagrt", "doc.txt", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+
+	tags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	require.NoError(t, b.SetObjectTags("tagrt", "doc.txt", obj.VersionID, tags))
+
+	snap, err := b.ListAllObjects()
+	require.NoError(t, err)
+	require.NotEmpty(t, snap, "expected at least one snapshot object")
+
+	var found *storage.SnapshotObject
+	for i := range snap {
+		if snap[i].VersionID == obj.VersionID {
+			found = &snap[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "snapshot must include the tagged version")
+	require.Equal(t, tags, found.Tags, "ListAllObjects must populate SnapshotObject.Tags from meta.Tags")
+}
+
+// TestRestoreObjects_PreservesTags asserts the snapshot restore propose path
+// forwards SnapshotObject.Tags into PutObjectMetaCmd. Pre-fix the literal at
+// snapshotable.go:199 omitted Tags, which applyPutObjectMeta then wrote as
+// empty, clobbering the snapshot's tag history.
+func TestRestoreObjects_PreservesTags(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "tagsnap"))
+	createBlob(t, b, "tagsnap", "doc.bin", "v1")
+
+	snapTags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+
+	count, stale, err := b.RestoreObjects([]storage.SnapshotObject{{
+		Bucket:      "tagsnap",
+		Key:         "doc.bin",
+		ETag:        "etag-tag",
+		Size:        4,
+		ContentType: "application/octet-stream",
+		Modified:    time.Now().UnixMilli(),
+		VersionID:   "v1",
+		IsLatest:    true,
+		Tags:        snapTags,
+	}})
+	require.NoError(t, err)
+	require.Empty(t, stale)
+	require.Equal(t, 1, count)
+
+	got, err := b.GetObjectTags("tagsnap", "doc.bin", "v1")
+	require.NoError(t, err)
+	require.Equal(t, snapTags, got, "snapshot Tags must round-trip through restore propose")
+}
+
 func TestRestoreObjects_RemovesExtraObjects(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "extra"))

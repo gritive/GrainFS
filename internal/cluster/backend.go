@@ -1574,6 +1574,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		"ec_single_memory",
 		h,
 		nil,
+		nil,
 	)
 	return obj, true, err
 }
@@ -2122,10 +2123,10 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
-	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil, nil)
+	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil, nil, nil)
 }
 
-func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error, parts []storage.MultipartPartEntry) (*storage.Object, error) {
+func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error, parts []storage.MultipartPartEntry, tags []storage.Tag) (*storage.Object, error) {
 	stageStart := time.Now()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -2157,7 +2158,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm,
-			modTime, preserveModTime, expectedETag, beforeCommit, parts,
+			modTime, preserveModTime, expectedETag, beforeCommit, parts, tags,
 		)
 	}
 
@@ -2187,11 +2188,11 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 
 	selfID := b.currentSelfAddr()
 	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm, parts)
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm, parts, tags)
 	}
 
 	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts)
+		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts, tags)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
@@ -2231,6 +2232,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	result.Parts = parts
+	result.Tags = tags
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
@@ -2282,6 +2284,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
 ) (*storage.Object, bool, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
@@ -2301,6 +2304,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	}
 
 	result.Parts = parts
+	result.Tags = tags
 	obj, err := b.commitECObjectWriteResult(
 		ctx,
 		ecObjectWritePlan{
@@ -2349,6 +2353,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		SSEAlgorithm:     plan.SSEAlgorithm,
 		ExpectedETag:     plan.ExpectedETag,
 		Parts:            result.Parts,
+		Tags:             result.Tags,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
@@ -2357,6 +2362,8 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage(metricPath, "propose_meta", stageStart)
 
+	// result.Tags aliases the caller's slice; do not introduce concurrent
+	// readers/writers on result after this point.
 	return &storage.Object{
 		Key:          plan.Key,
 		Size:         result.Size,
@@ -2367,6 +2374,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		UserMetadata: cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm: plan.SSEAlgorithm,
 		Parts:        result.Parts,
+		Tags:         result.Tags,
 	}, nil
 }
 
@@ -2380,6 +2388,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
 ) (*storage.Object, error) {
 	shardKey := ecObjectShardKey(key, versionID)
 	stageStart := time.Now()
@@ -2403,6 +2412,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 		"ec_single",
 		nil,
 		parts,
+		tags,
 	)
 	closeErr := body.Close()
 	if writeErr != nil {
@@ -2429,6 +2439,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	metricPath string,
 	bodyHash hash.Hash,
 	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
 ) (*storage.Object, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSingleLocalReader(ctx, ecObjectWritePlan{
@@ -2464,6 +2475,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
 		Parts:            parts,
+		Tags:             tags,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
@@ -2482,6 +2494,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		UserMetadata: cloneStringMap(userMetadata),
 		SSEAlgorithm: sseAlgorithm,
 		Parts:        parts,
+		Tags:         tags,
 	}, nil
 }
 
@@ -2900,7 +2913,9 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		}
 		return nil
 	}
-	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil); err != nil {
+	// applyPutObjectMeta writes Tags unconditionally; forward metaBefore.Tags
+	// so a legacy N×→EC conversion doesn't clobber existing user tags.
+	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil, metaBefore.Tags); err != nil {
 		return fmt.Errorf("convert write ec shards: %w", err)
 	}
 	_, convertedMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -3072,6 +3087,9 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		ECParity:         uint8(newCfg.ParityShards),
 		NodeIDs:          newPlacement,
 		UserMetadata:     cloneStringMap(obj.UserMetadata),
+		// applyPutObjectMeta writes Tags unconditionally; forward the existing
+		// tags so an EC config upgrade doesn't clobber them to nil.
+		Tags: obj.Tags,
 	}); perr != nil {
 		cleanup()
 		return fmt.Errorf("upgrade propose object meta: %w", perr)
@@ -3136,6 +3154,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				Parts:        m.Parts,
 				Coalesced:    coalescedRefsToStorage(m.Coalesced),
 				IsAppendable: m.IsAppendable,
+				// Tags copied (not aliased) — m's backing bytes are reused by
+				// badger once the View tx returns.
+				Tags: append([]storage.Tag(nil), m.Tags...),
 			}
 			placement = PlacementMeta{
 				VersionID:        versionID,
@@ -3417,6 +3438,9 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
 					Parts:        m.Parts,
+					// Tags copied (not aliased) — m's backing bytes are reused
+					// by badger once the View tx returns.
+					Tags: append([]storage.Tag(nil), m.Tags...),
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3543,6 +3567,9 @@ func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
 				Parts:        m.Parts,
+				// Tags copied (not aliased) — m's backing bytes are reused by
+				// badger once the View tx returns.
+				Tags: append([]storage.Tag(nil), m.Tags...),
 			}
 			if isVersioned {
 				obj.VersionID = latMap[baseKey]
@@ -3634,6 +3661,9 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
 					Parts:        m.Parts,
+					// Tags copied (not aliased) — m's backing bytes are reused
+					// by badger once the View tx returns.
+					Tags: append([]storage.Tag(nil), m.Tags...),
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3654,13 +3684,45 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 // --- Multipart operations ---
 
 func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
-	if err := b.HeadBucket(ctx, bucket); err != nil {
+	uploadID, createdAt, err := b.createMultipartUploadInternal(ctx, bucket, key, contentType, nil)
+	if err != nil {
 		return nil, err
+	}
+	return &storage.MultipartUpload{
+		UploadID:    uploadID,
+		Bucket:      bucket,
+		Key:         key,
+		ContentType: contentType,
+		CreatedAt:   createdAt,
+	}, nil
+}
+
+// CreateMultipartUploadWithTags creates a multipart upload with tags in cluster mode.
+// Tags travel through CreateMultipartUploadCmd (Raft replicated) and live on
+// clusterMultipartMeta until CompleteMultipartUpload, where they are materialised
+// onto the finalised object's objectMeta.Tags via the same Raft path that
+// materialises content (CmdPutObjectMeta carries the Tags vector — no separate
+// SetObjectTags proposal).
+func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	uploadID, _, err := b.createMultipartUploadInternal(ctx, bucket, key, contentType, tags)
+	if err != nil {
+		return "", err
+	}
+	return uploadID, nil
+}
+
+// createMultipartUploadInternal is the shared body for CreateMultipartUpload and
+// CreateMultipartUploadWithTags. If tags is non-empty it is defensively copied at
+// this cluster API boundary so the propose path can safely retain it (propose is
+// async); downstream code must not introduce further copies.
+func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, int64, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return "", 0, err
 	}
 
 	uploadID := uuid.New().String()
 	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
-		return nil, fmt.Errorf("create part dir: %w", err)
+		return "", 0, fmt.Errorf("create part dir: %w", err)
 	}
 
 	now := time.Now().Unix()
@@ -3670,7 +3732,13 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 	// callers (bypassBucketCheck=false) may omit it — putObjectECSpooled resolves
 	// placement from the stored empty string using the object's bucket assignment.
 	if !ok && b.shardSvc != nil && b.bypassBucketCheck {
-		return nil, fmt.Errorf("create multipart: missing placement_group_id")
+		return "", 0, fmt.Errorf("create multipart: missing placement_group_id")
+	}
+
+	var tagsCopy []storage.Tag
+	if len(tags) > 0 {
+		tagsCopy = make([]storage.Tag, len(tags))
+		copy(tagsCopy, tags)
 	}
 
 	err := b.propose(ctx, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
@@ -3680,40 +3748,13 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 		ContentType:      contentType,
 		CreatedAt:        now,
 		PlacementGroupID: placementGroupID,
+		Tags:             tagsCopy,
 	})
 	if err != nil {
 		os.RemoveAll(b.partDir(uploadID))
-		return nil, err
+		return "", 0, err
 	}
-
-	return &storage.MultipartUpload{
-		UploadID:    uploadID,
-		Bucket:      bucket,
-		Key:         key,
-		ContentType: contentType,
-		CreatedAt:   now,
-	}, nil
-}
-
-// CreateMultipartUploadWithTags creates a multipart upload with tags in cluster mode.
-// When tags are non-empty, returns UnsupportedOperationError: the cluster multipart
-// metadata (clusterMultipartMeta FBS + CreateMultipartUploadCmd) does not yet carry
-// tag fields; widening those is a future task.
-// When tags are empty, delegates to CreateMultipartUpload (no tags to carry).
-// TODO(future): widen clusterMultipartMeta FBS + CreateMultipartUploadCmd to carry tags,
-// then remove the fail-fast guard and materialise tags at CompleteMultipartUpload.
-func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
-	if len(tags) > 0 {
-		return "", storage.UnsupportedOperationError{
-			Op:     "CreateMultipartUploadWithTags",
-			Reason: storage.UnsupportedReasonNoAdapter,
-		}
-	}
-	mpu, err := b.CreateMultipartUpload(ctx, bucket, key, contentType)
-	if err != nil {
-		return "", err
-	}
-	return mpu.UploadID, nil
+	return uploadID, now, nil
 }
 
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
@@ -3866,7 +3907,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
-		obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, partsMeta)
+		obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, partsMeta, meta.Tags)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")
 	}
@@ -4125,6 +4166,9 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			Parts:        m.Parts,
 			Coalesced:    coalescedRefsToStorage(m.Coalesced),
 			IsAppendable: m.IsAppendable,
+			// Tags copied (not aliased) — m's backing bytes are reused by
+			// badger once the View tx returns. Mirror of headObjectMeta.
+			Tags: append([]storage.Tag(nil), m.Tags...),
 		}
 		placement = PlacementMeta{
 			VersionID:        versionID,

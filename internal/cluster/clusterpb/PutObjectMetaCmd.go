@@ -266,8 +266,28 @@ func (rcv *PutObjectMetaCmd) SegmentsLength() int {
 	return 0
 }
 
+func (rcv *PutObjectMetaCmd) Tags(obj *Tag, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) TagsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(19)
+	builder.StartObject(20)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -336,6 +356,12 @@ func PutObjectMetaCmdAddSegments(builder *flatbuffers.Builder, segments flatbuff
 	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(segments), 0)
 }
 func PutObjectMetaCmdStartSegmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func PutObjectMetaCmdAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(19, flatbuffers.UOffsetT(tags), 0)
+}
+func PutObjectMetaCmdStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

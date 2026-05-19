@@ -71,6 +71,7 @@ type ecObjectWriteResult struct {
 	ECData      uint8
 	ECParity    uint8
 	Parts       []storage.MultipartPartEntry // populated by CompleteMultipartUpload
+	Tags        []storage.Tag                // populated by CompleteMultipartUpload (carried from multipartMeta.Tags)
 }
 
 type ecObjectShardWriteError struct {

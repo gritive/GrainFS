@@ -936,6 +936,67 @@ func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *
 	require.Equal(t, "text/plain", byVersion[v2.VersionID].ContentType)
 }
 
+// TestClusterCoordinator_ListAllObjects_PreservesTags is the regression guard
+// for adversarial review pass #2: the routed-multi-group snapshot path in
+// ClusterCoordinator.ListAllObjects (cluster_coordinator.go:485) previously
+// omitted Tags from the SnapshotObject literal even though the single-group
+// Snapshotable path had been fixed in e7c7114d. Result before the fix: full
+// snapshot+restore in real cluster deployments silently dropped object tags.
+func TestClusterCoordinator_ListAllObjects_PreservesTags(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"tagged"}}
+	gb := newTestGroupBackend(t, "group-1")
+	obj, err := gb.PutObject(context.Background(), "tagged", "doc.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	tags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	require.NoError(t, gb.SetObjectTags("tagged", "doc.txt", obj.VersionID, tags))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("tagged", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, tags, objs[0].Tags,
+		"ClusterCoordinator.ListAllObjects must propagate Tags so the RestoreObjects "+
+			"Tags-forward fix isn't dead code on the routed cluster path")
+}
+
+// TestClusterCoordinator_GetObjectTags_Forwarded is the regression guard for
+// adversarial review pass #3: ClusterCoordinator.GetObjectTags previously
+// returned "not implemented" when no local replica resolved, breaking S3
+// GetObjectTagging on real multi-group clusters. Now mirrors SetObjectTags
+// by routing through ForwardOpGetObjectTags.
+func TestClusterCoordinator_GetObjectTags_Forwarded(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+
+	want := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	d.replyByOp[raftpb.ForwardOpGetObjectTags] = buildGetObjectTagsReply(want)
+
+	got, err := c.GetObjectTags("bk", "key.txt", "")
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	require.Len(t, d.calls, 1, "GetObjectTags must route through forward.Send")
+	require.Equal(t, raftpb.ForwardOpGetObjectTags, d.calls[0].op)
+	args := raftpb.GetRootAsGetObjectTagsArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "key.txt", string(args.Key()))
+	require.Equal(t, "", string(args.VersionId()))
+}
+
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")
@@ -1640,6 +1701,45 @@ func TestClusterCoordinator_CreateMultipartUpload_Forward(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "upload-1", up.UploadID)
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+}
+
+// TestClusterCoordinator_CreateMultipartUploadWithTags_PreservesTags is the
+// regression guard for adversarial review pass #4: ClusterCoordinator had no
+// CreateMultipartUploadWithTags method at all, so Operations'
+// (tagsCreator) type assertion failed against the cluster front door and
+// silently dropped x-amz-tagging on multipart-initiate in cluster mode.
+//
+// Verifies (a) the coordinator dispatches the forward op when the target
+// resolves remote and (b) the encoded args carry the tags vector so the
+// receiver can route to GroupBackend.CreateMultipartUploadWithTags.
+func TestClusterCoordinator_CreateMultipartUploadWithTags_PreservesTags(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	reportMultipartListingCapability(c, "a")
+	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
+
+	want := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	uploadID, err := c.CreateMultipartUploadWithTags(context.Background(), "bk", "k", "text/plain", want)
+	require.NoError(t, err)
+	require.Equal(t, "upload-1", uploadID)
+
+	require.Len(t, d.calls, 1, "CreateMultipartUploadWithTags must route through forward.Send when target is remote")
+	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+
+	args := raftpb.GetRootAsCreateMultipartUploadArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Key()))
+	require.Equal(t, "text/plain", string(args.ContentType()))
+	require.Equal(t, len(want), args.TagsLength(),
+		"forward args must carry tags vector so the receiver dispatches to CreateMultipartUploadWithTags")
+	for i := 0; i < args.TagsLength(); i++ {
+		var tag raftpb.Tag
+		require.True(t, args.Tags(&tag, i))
+		require.Equal(t, want[i].Key, string(tag.Key()))
+		require.Equal(t, want[i].Value, string(tag.Value()))
+	}
 }
 
 func TestClusterCoordinator_CreateMultipartUpload_GateRejectsBeforePeerCall(t *testing.T) {

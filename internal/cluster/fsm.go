@@ -101,6 +101,11 @@ type PutObjectMetaCmd struct {
 	// backward-compatible single-segment readers; per-segment placements live
 	// in Segments[].
 	Segments []SegmentMetaEntry
+	// Tags carries tagging metadata to materialise onto objectMeta.Tags at
+	// finalisation. Currently populated on the CompleteMultipartUpload path
+	// (carried from clusterMultipartMeta.Tags) so cluster reaches single-node
+	// parity for CreateMultipartUploadWithTags.
+	Tags []storage.Tag
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The
@@ -156,6 +161,9 @@ type CreateMultipartUploadCmd struct {
 	CreatedAt   int64
 	// PlacementGroupID is selected at upload creation and reused on complete.
 	PlacementGroupID string
+	// Tags are carried through Raft and persisted on clusterMultipartMeta.
+	// Materialised onto the finalised object at CompleteMultipartUpload.
+	Tags []storage.Tag
 }
 
 type CompleteMultipartCmd struct {

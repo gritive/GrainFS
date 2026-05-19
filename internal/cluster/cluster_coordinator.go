@@ -491,6 +491,12 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				VersionID:      version.VersionID,
 				IsDeleteMarker: version.IsDeleteMarker,
 				IsLatest:       version.IsLatest,
+				// Tags copied (not aliased) so snapshot survives even if the
+				// enrichment block below is skipped (delete marker or
+				// GetObjectVersion error). Mirror of snapshotable.go fix in
+				// e7c7114d — otherwise the previously-fixed RestoreObjects
+				// Tags-forward path is dead code on the coordinator route.
+				Tags: append([]storage.Tag(nil), version.Tags...),
 			}
 			if !version.IsDeleteMarker {
 				// Enrich metadata from the data file when readable. A metadata
@@ -504,6 +510,9 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 					snap.ContentType = obj.ContentType
 					snap.Modified = obj.LastModified
 					snap.ACL = obj.ACL
+					// Parity with ACL enrichment: prefer the authoritative
+					// obj.Tags over the version-listing fallback when readable.
+					snap.Tags = append([]storage.Tag(nil), obj.Tags...)
 				} else {
 					log.Warn().Str("bucket", bucket).Str("key", version.Key).
 						Str("version", version.VersionID).Err(err).
@@ -1134,12 +1143,50 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	args := buildCreateMultipartUploadArgs(bucket, key, contentType)
+	args := buildCreateMultipartUploadArgs(bucket, key, contentType, nil)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
 	if err != nil {
 		return nil, err
 	}
 	return uploadFromReply(reply)
+}
+
+// CreateMultipartUploadWithTags routes to the resolved data group, mirroring
+// CreateMultipartUpload but carrying tags. Tags materialise onto the finalised
+// object via the existing Raft-replicated CmdPutObjectMeta path on Complete
+// (clusterMultipartMeta.Tags → objectMeta.Tags). When the resolved target is
+// remote the tags ride along in CreateMultipartUploadArgs.tags so the receiver
+// dispatches to GroupBackend.CreateMultipartUploadWithTags.
+func (c *ClusterCoordinator) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return "", err
+	}
+	target, group, err := c.routeWriteOrBucket(bucket, key)
+	if err != nil {
+		return "", err
+	}
+	ctx = contextWithObjectWritePlacement(ctx, group)
+	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, c.multipartListingCapabilityPeers(target, group)); err != nil {
+		return "", err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+		return "", err
+	} else if gb != nil {
+		return gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+	}
+	if c.forward == nil {
+		return "", ErrCoordinatorNoRouter
+	}
+	args := buildCreateMultipartUploadArgs(bucket, key, contentType, tags)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
+	if err != nil {
+		return "", err
+	}
+	upload, err := uploadFromReply(reply)
+	if err != nil {
+		return "", err
+	}
+	return upload.UploadID, nil
 }
 
 func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
@@ -1468,9 +1515,11 @@ func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags [
 	return parseReplyStatus(reply)
 }
 
-// GetObjectTags satisfies storage.ObjectTagsGetter. Reads from the locally-
-// resolvable group backend; the local FSM-consistent view is sufficient per
-// replication design (writes flow through Raft and replicate to every node).
+// GetObjectTags satisfies storage.ObjectTagsGetter. Routes the tag read to
+// the locally-resolvable group backend when available, otherwise forwards to
+// the owning peer via ForwardOpGetObjectTags. Mirrors SetObjectTags's forward
+// path so multi-group cluster deployments serve S3 GetObjectTagging instead
+// of erroring with "not implemented".
 func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
 	ctx := context.Background()
 	target, err := c.routeReadOrBucket(bucket, key, "")
@@ -1485,7 +1534,12 @@ func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]sto
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	return nil, fmt.Errorf("GetObjectTags: no local replica available; peer forwarding not implemented for read-only tag ops")
+	args := buildGetObjectTagsArgs(bucket, key, versionID)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObjectTags, args)
+	if err != nil {
+		return nil, err
+	}
+	return tagsFromReply(reply)
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as

@@ -227,8 +227,28 @@ func (rcv *ForwardReply) UploadsLength() int {
 	return 0
 }
 
+func (rcv *ForwardReply) Tags(obj *Tag, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ForwardReply) TagsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func ForwardReplyStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(12)
 }
 func ForwardReplyAddStatus(builder *flatbuffers.Builder, status ForwardStatus) {
 	builder.PrependInt8Slot(0, int8(status), 0)
@@ -276,6 +296,12 @@ func ForwardReplyAddUploads(builder *flatbuffers.Builder, uploads flatbuffers.UO
 	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(uploads), 0)
 }
 func ForwardReplyStartUploadsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func ForwardReplyAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(tags), 0)
+}
+func ForwardReplyStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ForwardReplyEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
