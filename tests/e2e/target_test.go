@@ -12,6 +12,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -216,6 +218,84 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 		},
 		isCluster: true,
 		cluster:   c,
+	}
+}
+
+// newDedicatedSingleNodeS3Target boots a per-test single-node grainfs with
+// the given extra args. Use this only for tests that need non-default flags
+// (e.g. --append-size-cap-bytes, alternate EC profile) — vanilla single-node
+// tests should keep using the package-global newSingleNodeS3Target() fixture
+// since it amortises one boot across the whole package. Cluster has the same
+// dedicated/shared split via newClusterS3Target vs newSharedClusterS3Target;
+// this completes the mirror for single.
+//
+// Lifetime: process is launched on call, terminated + tmpdir removed via
+// t.Cleanup. Each call gets its own port + data dir.
+func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "grainfs-e2e-single-dedicated-")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(dir)
+	})
+
+	port := freePort()
+	nfsPort := freePort()
+	nbdPort := freePort()
+	args := []string{
+		"serve", "--data", dir,
+		"--port", fmt.Sprintf("%d", port),
+		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
+		"--nbd-port", fmt.Sprintf("%d", nbdPort),
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+	}
+	args = append(args, extraArgs...)
+
+	cmd := exec.Command(getBinary(), args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start(), "start single-node grainfs")
+	t.Cleanup(func() {
+		terminateProcess(cmd)
+	})
+
+	require.NoError(t, waitForPortM(port, 30*time.Second), "wait for HTTP port")
+
+	ak, sk, err := bootstrapAdminViaUDSForTestMain(dir, 30*time.Second)
+	require.NoError(t, err, "bootstrap admin SA via UDS")
+
+	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
+
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+	client := ecS3Client(endpoint, ak, sk)
+	require.NoError(t, waitForIAMReady(client, 30*time.Second), "wait for IAM ready")
+
+	return s3Target{
+		name:  "single-dedicated",
+		nodes: 1,
+		pickNode: func(int) *s3.Client {
+			return client
+		},
+		endpoint: func(int) string {
+			return endpoint
+		},
+		accessKey: ak,
+		secretKey: sk,
+		createBkt: func(t *testing.T, bucket string) {
+			createBucketWithClient(t, client, bucket)
+		},
+		uniqueBucket: func(t *testing.T, caseName string) string {
+			name := bucketNameFor("single-dedicated", t.Name(), caseName)
+			createBucketWithClient(t, client, name)
+			t.Cleanup(func() {
+				client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
+			})
+			return name
+		},
+		isCluster: false,
 	}
 }
 
