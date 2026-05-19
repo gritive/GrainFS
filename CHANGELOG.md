@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.262.4] - 2026-05-19 - test(e2e): merge colima cluster_mount {9P,NBD,NFS4} onto shared fixture
+
+`tests/{9p,nbd,nfs4}_colima/cluster_mount_test.go` each booted its own 3-node colima cluster via per-package `sync.Once` + `clusterRef *colimafixture.Cluster` — three separate `go test` invocations, three cluster boots, three teardowns. The cluster_mount tests are bucket-isolated and the fixture supports `EnableP9 + EnableNBD + EnableNFS` simultaneously, so the three protocols can share a single boot.
+
+Changes:
+
+- Moved the three `cluster_mount_test.go` files into `tests/e2e/`:
+  - `cluster_mount_9p_test.go` (TestColimaCluster9PWriteVisibleAcrossNodesE2E)
+  - `cluster_mount_nbd_test.go` (TestColimaClusterNBDWriteReplicatesAcrossNodesE2E)
+  - `cluster_mount_nfs4_test.go` (TestColimaClusterNFS4WriteVisibleAcrossNodesE2E)
+  - `cluster_mount_colima_fixture_test.go` (shared sync.Once fixture + admin CLI helper + envOrDefault).
+- All three tests now share a single 3-node grainfs process group with 9P + NBD + NFSv4 listeners enabled. Net **3 cluster boots → 1**. Total `make test-cluster-mount-colima` wall-clock: ~25s for all three protocols vs ~3 × cluster-boot before.
+- `colimafixture.Options` gained `SkipCleanup bool`. When true, `StartCluster` does NOT register `t.Cleanup(c.Stop)`. This unblocks the process-global `sync.Once` pattern — without it the first caller's `t.Cleanup` would stop the cluster before the next protocol test runs (the failure mode the per-package layout never hit because each package had a single cluster_mount test).
+- `tests/e2e/helpers_test.go` `TestMain` now invokes `shutdownSharedColimaCluster()` after `m.Run()` alongside `stopSharedCluster` / `stopSharedMRCluster`, so the process-global colima cluster is stopped at binary exit.
+- Build tag removed: the migrated files do NOT carry `//go:build colima` (none of their imports require it). They follow the same policy as the NFSv4 mount block in `multiraft_sharding_test.go` — colima is expected to be running for full e2e runs.
+- New Makefile target `test-cluster-mount-colima` runs only the three migrated tests (`-run TestColimaCluster`). The top-level `test-colima` target now depends on it.
+
+The `tests/{9p,nbd,nfs4}_colima/` directories keep their single-node `*_colima_test.go` variants (10 + 6 + 9 tests). A follow-up session can fold those into `tests/e2e/` as well so the per-protocol directories disappear entirely.
+
+### Changed
+
+- **`TestP9Cluster_WriteVisibleAcrossNodes` → `TestColimaCluster9PWriteVisibleAcrossNodesE2E`** (`tests/e2e/cluster_mount_9p_test.go`).
+- **`TestNBDCluster_WriteReplicatesAcrossNodes` → `TestColimaClusterNBDWriteReplicatesAcrossNodesE2E`** (`tests/e2e/cluster_mount_nbd_test.go`).
+- **`TestNFS4Cluster_WriteVisibleAcrossNodes` → `TestColimaClusterNFS4WriteVisibleAcrossNodesE2E`** (`tests/e2e/cluster_mount_nfs4_test.go`).
+- `colimafixture.Options.SkipCleanup` (new field).
+- `Makefile`: new `test-cluster-mount-colima` target; `test-colima` depends on it.
+
+### Removed
+
+- `tests/9p_colima/cluster_mount_test.go`
+- `tests/nbd_colima/cluster_mount_test.go`
+- `tests/nfs4_colima/cluster_mount_test.go`
+
 ## [0.0.262.3] - 2026-05-19 - test(e2e): unify Cache + CoW suites + drop all skipIfShort
 
 Three bundled changes:

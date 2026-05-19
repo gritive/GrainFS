@@ -73,6 +73,12 @@ type Options struct {
 
 	// Binary overrides the grainfs binary path (default: ../../bin/grainfs).
 	Binary string
+
+	// SkipCleanup disables the automatic t.Cleanup(c.Stop) registration.
+	// Callers using a process-global sync.Once fixture pattern must set
+	// this true and arrange Stop from TestMain (or an equivalent
+	// package-lifetime hook) so the cluster outlives the first caller's t.
+	SkipCleanup bool
 }
 
 // StartCluster boots a 3-node grainfs cluster on the macOS host with all
@@ -105,7 +111,9 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		logs:      make([]*os.File, numNodes),
 		tempEnc:   makeEncryptionKeyFile(t),
 	}
-	t.Cleanup(c.Stop)
+	if !opts.SkipCleanup {
+		t.Cleanup(c.Stop)
+	}
 
 	// Allocate up to 5 ports/node (http, raft, nfs4, nbd, 9p). Even when a
 	// protocol is disabled we still reserve the slot so port indices are
