@@ -1840,25 +1840,7 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	}
 	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
-		refs, startOff, err := chunkedSegmentWindow(obj.Segments, offset, len(buf))
-		if err != nil {
-			return 0, err
-		}
-		rc := storage.NewSegmentReaderCtx(ctx, store, refs)
-		defer rc.Close()
-		if startOff > 0 {
-			if _, err := io.CopyN(io.Discard, rc, startOff); err != nil {
-				return 0, fmt.Errorf("chunked ReadAt seek: %w", err)
-			}
-		}
-		n, err := io.ReadFull(rc, buf)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return n, io.EOF
-		}
-		if err != nil {
-			return n, fmt.Errorf("chunked ReadAt read: %w", err)
-		}
-		return n, nil
+		return readAtChunkedSegments(ctx, store, obj.Segments, offset, buf)
 	}
 
 	if b.shardSvc != nil {

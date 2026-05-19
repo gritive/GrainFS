@@ -266,18 +266,28 @@ func (c *ClusterCoordinator) runtimeState() clusterCoordinatorRuntime {
 // without an objectIndexProposer / objectIndexSource). Preserves the legacy
 // routeObjectLatest/Version dispatch behavior that callers depended on.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
+	target, _, _, err := c.routeReadOrBucketWithEntry(bucket, key, versionID)
+	return target, err
+}
+
+func (c *ClusterCoordinator) routeReadOrBucketWithEntry(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, bool, error) {
 	state := c.runtimeState()
 	if c.indexWriter == nil {
-		return state.opRouter.RouteBucket(bucket)
+		target, err := state.opRouter.RouteBucket(bucket)
+		return target, ObjectIndexEntry{}, false, err
 	}
-	target, _, err := state.opRouter.RouteObjectRead(bucket, key, versionID)
+	target, entry, err := state.opRouter.RouteObjectRead(bucket, key, versionID)
+	hasEntry := err == nil
+	if err == nil {
+		return target, entry, true, nil
+	}
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
 		if fallbackErr == nil {
-			return fallback, nil
+			return fallback, ObjectIndexEntry{}, false, nil
 		}
 	}
-	return target, err
+	return target, entry, hasEntry, err
 }
 
 // routeWriteOrBucket picks RouteObjectWrite (EC-aware placement) when an
@@ -1621,13 +1631,14 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 }
 
 // ReadAt implements the pread fast path for routed internal buckets. Local
-// leaders use the group backend's zero-copy path; non-leaders fall back through
-// regular routed GetObject for correctness.
+// leaders use the group backend's zero-copy path. Follower voters may serve
+// immutable object-index reads locally only after their local metadata matches
+// the cluster object-index entry; stale followers still forward to the leader.
 func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, entry, hasEntry, err := c.routeReadOrBucketWithEntry(bucket, key, "")
 	if err != nil {
 		return 0, err
 	}
@@ -1635,6 +1646,11 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return 0, err
 	} else if gb != nil {
 		return gb.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if hasEntry {
+		if n, ok, err := c.readAtLocalCurrentFollower(ctx, bucket, key, target, entry, offset, buf); ok {
+			return n, err
+		}
 	}
 
 	if c.forward == nil {
@@ -1670,6 +1686,42 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return 0, err
 	}
 	return io.ReadFull(body, buf)
+}
+
+func (c *ClusterCoordinator) readAtLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry, offset int64, buf []byte) (int, bool, error) {
+	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
+		return 0, false, nil
+	}
+	dg := c.groups.Get(target.GroupID)
+	if dg == nil || dg.Backend() == nil {
+		return 0, false, nil
+	}
+	gb := dg.Backend()
+	obj, err := gb.HeadObject(ctx, bucket, key)
+	if err != nil {
+		return 0, false, nil
+	}
+	if !objectMatchesIndexForFollowerRead(obj, entry) {
+		return 0, false, nil
+	}
+	n, err := gb.ReadAt(ctx, bucket, key, offset, buf)
+	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
+		return 0, false, nil
+	}
+	return n, true, err
+}
+
+func objectMatchesIndexForFollowerRead(obj *storage.Object, entry ObjectIndexEntry) bool {
+	if obj == nil {
+		return false
+	}
+	if obj.Size != entry.Size || obj.ETag != entry.ETag {
+		return false
+	}
+	if entry.VersionID != "" && obj.VersionID != entry.VersionID {
+		return false
+	}
+	return true
 }
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {

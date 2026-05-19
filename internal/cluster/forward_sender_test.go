@@ -516,6 +516,43 @@ func TestForwardSender_SendStreamReadinessRetryAddsDeadlineForBackgroundCaller(t
 	require.Equal(t, []string{"a", "b", "a"}, connected)
 }
 
+func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *testing.T) {
+	const concurrency = 32
+	started := make(chan struct{}, concurrency)
+	release := make(chan struct{})
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		started <- struct{}{}
+		<-release
+		_, _ = io.Copy(io.Discard, body)
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+	defer close(release)
+
+	done := make(chan error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		i := i
+		go func() {
+			_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
+				raftpb.ForwardOpUploadPart, buildUploadPartArgs("b", "k", "upload-id", int32(i+1), nil), bytes.NewReader([]byte("part")))
+			done <- err
+		}()
+	}
+
+	for i := 0; i < concurrency; i++ {
+		select {
+		case <-started:
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent streams to start")
+		}
+	}
+}
+
 func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

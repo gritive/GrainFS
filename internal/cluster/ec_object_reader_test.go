@@ -15,8 +15,11 @@ import (
 
 // fakeECObjectShardFetcher records calls and returns configurable data/errors.
 type fakeECObjectShardFetcher struct {
-	localShards map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
-	remoteErr   map[string]error  // node → error to return
+	localShards          map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
+	remoteErr            map[string]error  // node → error to return
+	mu                   sync.Mutex
+	readShardCalls       int
+	readShardStreamCalls int
 }
 
 func (f *fakeECObjectShardFetcher) key(bucket, key string, idx int) string {
@@ -32,6 +35,13 @@ func (f *fakeECObjectShardFetcher) ReadLocalShard(bucket, key string, shardIdx i
 }
 
 func (f *fakeECObjectShardFetcher) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
+	f.mu.Lock()
+	f.readShardCalls++
+	f.mu.Unlock()
+	return f.readShardData(peer, bucket, key, shardIdx)
+}
+
+func (f *fakeECObjectShardFetcher) readShardData(peer, bucket, key string, shardIdx int) ([]byte, error) {
 	if err := f.remoteErr[peer]; err != nil {
 		return nil, err
 	}
@@ -51,7 +61,10 @@ func (f *fakeECObjectShardFetcher) OpenLocalShard(bucket, key string, shardIdx i
 }
 
 func (f *fakeECObjectShardFetcher) ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error) {
-	data, err := f.ReadShard(ctx, peer, bucket, key, shardIdx)
+	f.mu.Lock()
+	f.readShardStreamCalls++
+	f.mu.Unlock()
+	data, err := f.readShardData(peer, bucket, key, shardIdx)
 	if err != nil {
 		return nil, err
 	}
@@ -344,6 +357,27 @@ func TestECObjectReader_OpenObject_AllLocal(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
+}
+
+func TestECObjectReader_OpenObject_StreamsMultipartSizedObject(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	data := bytes.Repeat([]byte("x"), 5<<20)
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(data)))
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	require.Greater(t, fetcher.readShardStreamCalls, 0)
+	require.Zero(t, fetcher.readShardCalls)
 }
 
 func TestECObjectReader_OpenObject_NilShardService_ReturnsError(t *testing.T) {

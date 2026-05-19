@@ -24,8 +24,8 @@ const (
 	MaxAutoDataShards = 6
 	AutoParityShards  = 2
 	// maxECPooledReadObjectSize caps the all-data-present read prefetch path so
-	// large object GETs keep the previous streaming memory profile.
-	maxECPooledReadObjectSize = 128 << 20
+	// multipart-sized and larger GETs keep the streaming memory profile.
+	maxECPooledReadObjectSize = 4 << 20
 )
 
 // ECConfig controls cluster erasure coding behavior.

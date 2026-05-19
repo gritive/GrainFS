@@ -32,6 +32,8 @@ var (
 	ErrNoReachablePeer = errors.New("forward: no reachable peer")
 )
 
+const defaultMaxForwardStreams = 64
+
 // forwardDialer abstracts the request-response QUIC transport for testability.
 // Production wires it to quicTransport.Call; tests pass a fake that returns
 // canned replies.
@@ -60,7 +62,7 @@ func NewForwardSender(d forwardDialer) *ForwardSender {
 		dialer:        d,
 		leaderByGroup: map[string]string{},
 		timeout:       2 * time.Minute,
-		streamSlots:   make(chan struct{}, 8),
+		streamSlots:   make(chan struct{}, defaultMaxForwardStreams),
 		readSlots:     make(chan struct{}, 64),
 	}
 }
