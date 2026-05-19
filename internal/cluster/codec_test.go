@@ -575,3 +575,26 @@ func TestCodec_ObjectMeta_TagsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, original.Tags, got.Tags)
 }
+
+func TestCodec_SetObjectTagsCmd_RoundTrip(t *testing.T) {
+	cmd := SetObjectTagsCmd{
+		Bucket:    "b",
+		Key:       "k",
+		VersionID: "v1",
+		Tags:      []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
+	}
+	raw, err := encodeSetObjectTagsCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodeSetObjectTagsCmd(raw)
+	require.NoError(t, err)
+	require.Equal(t, cmd, got)
+}
+
+func TestCodec_SetObjectTagsCmd_EmptyTags_RoundTrip(t *testing.T) {
+	cmd := SetObjectTagsCmd{Bucket: "b", Key: "k", VersionID: ""}
+	raw, err := encodeSetObjectTagsCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodeSetObjectTagsCmd(raw)
+	require.NoError(t, err)
+	require.Equal(t, cmd, got)
+}

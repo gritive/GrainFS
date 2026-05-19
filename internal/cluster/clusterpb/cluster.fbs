@@ -267,6 +267,13 @@ table SetObjectACLCmd {
   acl:uint8;
 }
 
+table SetObjectTagsCmd {
+  bucket:string;
+  key:string;
+  version_id:string;
+  tags:[Tag];
+}
+
 // AppendObjectCmd records one appended segment. PlacementGroupID is frozen at
 // propose time — FSM apply derives NodeIDs/EC params from the current
 // ShardGroup record (single source of truth, avoids drift).

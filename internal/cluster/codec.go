@@ -969,6 +969,64 @@ func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
 	}, nil
 }
 
+func encodeSetObjectTagsCmd(c SetObjectTagsCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	keyOff := b.CreateString(c.Key)
+	verOff := b.CreateString(c.VersionID)
+
+	var tagsVec flatbuffers.UOffsetT
+	if len(c.Tags) > 0 {
+		tagOffs := make([]flatbuffers.UOffsetT, len(c.Tags))
+		for i, t := range c.Tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			clusterpb.TagStart(b)
+			clusterpb.TagAddKey(b, kOff)
+			clusterpb.TagAddValue(b, vOff)
+			tagOffs[i] = clusterpb.TagEnd(b)
+		}
+		clusterpb.SetObjectTagsCmdStartTagsVector(b, len(tagOffs))
+		for i := len(tagOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(tagOffs[i])
+		}
+		tagsVec = b.EndVector(len(tagOffs))
+	}
+
+	clusterpb.SetObjectTagsCmdStart(b)
+	clusterpb.SetObjectTagsCmdAddBucket(b, bucketOff)
+	clusterpb.SetObjectTagsCmdAddKey(b, keyOff)
+	clusterpb.SetObjectTagsCmdAddVersionId(b, verOff)
+	if tagsVec != 0 {
+		clusterpb.SetObjectTagsCmdAddTags(b, tagsVec)
+	}
+	return fbFinish(b, clusterpb.SetObjectTagsCmdEnd(b)), nil
+}
+
+func decodeSetObjectTagsCmd(data []byte) (SetObjectTagsCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetObjectTagsCmd {
+		return clusterpb.GetRootAsSetObjectTagsCmd(d, 0)
+	})
+	if err != nil {
+		return SetObjectTagsCmd{}, err
+	}
+	out := SetObjectTagsCmd{
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+	}
+	if n := t.TagsLength(); n > 0 {
+		out.Tags = make([]storage.Tag, n)
+		for i := 0; i < n; i++ {
+			var tg clusterpb.Tag
+			if t.Tags(&tg, i) {
+				out.Tags[i] = storage.Tag{Key: string(tg.Key()), Value: string(tg.Value())}
+			}
+		}
+	}
+	return out, nil
+}
+
 func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -1161,6 +1219,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdSetObjectACL:
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
+	case CmdSetObjectTags:
+		return encodeSetObjectTagsCmd(payload.(SetObjectTagsCmd))
 	case CmdAppendObject:
 		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
 	case CmdCoalesceSegments:
