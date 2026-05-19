@@ -15,62 +15,62 @@ import (
 
 func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	t.Run("Cluster", func(t *testing.T) {
-	// Skip in short mode
+		// Skip in short mode
 
-	dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+		dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
 
-	binary := getBinary()
-	port := freePort()
+		binary := getBinary()
+		port := freePort()
 
-	// Start no-peers server
-	cmd := exec.Command(binary, "serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-	defer terminateProcess(cmd)
+		// Start no-peers server
+		cmd := exec.Command(binary, "serve",
+			"--data", dir,
+			"--port", fmt.Sprintf("%d", port),
+			"--nfs4-port", fmt.Sprintf("%d", freePort()),
+			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
+			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		require.NoError(t, cmd.Start())
+		defer terminateProcess(cmd)
 
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 30*time.Second)
+		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+		waitForPort(t, port, 30*time.Second)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
 
-	ak, sk := bootstrapAdminViaUDS(t, dir)
+		ak, sk := bootstrapAdminViaUDS(t, dir)
 
-	// Create test bucket
-	client := s3ClientFor(endpoint, ak, sk)
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("jepsen-test"),
-	})
-	require.NoError(t, err)
-	waitForS3Write(t, client, "jepsen-test", "__grainfs_e2e_ready", 30*time.Second)
+		// Create test bucket
+		client := s3ClientFor(endpoint, ak, sk)
+		_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String("jepsen-test"),
+		})
+		require.NoError(t, err)
+		waitForS3Write(t, client, "jepsen-test", "__grainfs_e2e_ready", 30*time.Second)
 
-	// Run Jepsen test: 10 clients, 100 ops each
-	t.Log("Starting concurrent writes with 10 clients...")
-	runner := NewJepsenTestRunner(endpoint, ak, sk, 10, 100)
-	errors := runner.RunConcurrentPuts(ctx, "jepsen-test", "conflict-key")
+		// Run Jepsen test: 10 clients, 100 ops each
+		t.Log("Starting concurrent writes with 10 clients...")
+		runner := NewJepsenTestRunner(endpoint, ak, sk, 10, 100)
+		errors := runner.RunConcurrentPuts(ctx, "jepsen-test", "conflict-key")
 
-	// All operations should succeed
-	for i, err := range errors {
-		require.NoError(t, err, "client %d put should succeed", i)
-	}
+		// All operations should succeed
+		for i, err := range errors {
+			require.NoError(t, err, "client %d put should succeed", i)
+		}
 
-	t.Log("✓ All concurrent writes succeeded")
+		t.Log("✓ All concurrent writes succeeded")
 
-	// Verify linearizability: all clients see same value
-	t.Log("Verifying linearizability...")
-	runner.VerifyLinearizable(ctx, t, "jepsen-test", "conflict-key")
+		// Verify linearizability: all clients see same value
+		t.Log("Verifying linearizability...")
+		runner.VerifyLinearizable(ctx, t, "jepsen-test", "conflict-key")
 
-	t.Log("✅ Jepsen test passed - linearizability verified")
+		t.Log("✅ Jepsen test passed - linearizability verified")
 	})
 }

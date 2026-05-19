@@ -694,70 +694,70 @@ func TestGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t *testing.T) {
 // PUT/GET/DELETE bob's bucket policy — multi-team escape hatch.
 func TestIAM_E2E_PolicyBypassClosed(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-	srv := startIAMTestServer(t)
-	defer srv.Stop()
+		srv := startIAMTestServer(t)
+		defer srv.Stop()
 
-	ctx := context.Background()
+		ctx := context.Background()
 
-	// alice has Read on alice-policy-bkt only.
-	alice := iamCreateSA(t, srv.AdminSock, "alice-policy")
-	iamGrantPut(t, srv.AdminSock, alice.SAID, "alice-policy-bkt", "Read")
-	iamWaitKeyReady(t, srv.S3URL, alice.AccessKey, alice.SecretKey, 10*time.Second)
+		// alice has Read on alice-policy-bkt only.
+		alice := iamCreateSA(t, srv.AdminSock, "alice-policy")
+		iamGrantPut(t, srv.AdminSock, alice.SAID, "alice-policy-bkt", "Read")
+		iamWaitKeyReady(t, srv.S3URL, alice.AccessKey, alice.SecretKey, 10*time.Second)
 
-	// bob has Admin on bob-policy-bkt and creates the bucket.
-	bob := iamCreateSA(t, srv.AdminSock, "bob-policy")
-	iamGrantPut(t, srv.AdminSock, bob.SAID, "bob-policy-bkt", "Admin")
-	iamWaitKeyReady(t, srv.S3URL, bob.AccessKey, bob.SecretKey, 10*time.Second)
+		// bob has Admin on bob-policy-bkt and creates the bucket.
+		bob := iamCreateSA(t, srv.AdminSock, "bob-policy")
+		iamGrantPut(t, srv.AdminSock, bob.SAID, "bob-policy-bkt", "Admin")
+		iamWaitKeyReady(t, srv.S3URL, bob.AccessKey, bob.SecretKey, 10*time.Second)
 
-	bobCli := s3ClientFor(srv.S3URL, bob.AccessKey, bob.SecretKey)
-	if _, err := bobCli.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("bob-policy-bkt"),
-	}); err != nil {
-		t.Fatalf("bob CreateBucket: %v", err)
-	}
+		bobCli := s3ClientFor(srv.S3URL, bob.AccessKey, bob.SecretKey)
+		if _, err := bobCli.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String("bob-policy-bkt"),
+		}); err != nil {
+			t.Fatalf("bob CreateBucket: %v", err)
+		}
 
-	aliceCli := s3ClientFor(srv.S3URL, alice.AccessKey, alice.SecretKey)
+		aliceCli := s3ClientFor(srv.S3URL, alice.AccessKey, alice.SecretKey)
 
-	// 1) alice attempting to PUT bob-bucket policy must 403.
-	_, err := aliceCli.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-		Bucket: aws.String("bob-policy-bkt"),
-		Policy: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
-	})
-	if err == nil {
-		t.Fatal("alice (Read on alice-bucket) was allowed to PutBucketPolicy on bob-bucket; expected 403")
-	}
-	if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
-		t.Fatalf("alice PutBucketPolicy: status=%d err=%v; want 401/403", status, err)
-	}
+		// 1) alice attempting to PUT bob-bucket policy must 403.
+		_, err := aliceCli.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+			Bucket: aws.String("bob-policy-bkt"),
+			Policy: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
+		})
+		if err == nil {
+			t.Fatal("alice (Read on alice-bucket) was allowed to PutBucketPolicy on bob-bucket; expected 403")
+		}
+		if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
+			t.Fatalf("alice PutBucketPolicy: status=%d err=%v; want 401/403", status, err)
+		}
 
-	// 2) alice GET bob-bucket?policy must also 403 (no Read grant on bob-bucket).
-	_, err = aliceCli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-		Bucket: aws.String("bob-policy-bkt"),
-	})
-	if err == nil {
-		t.Fatal("alice was allowed to GetBucketPolicy on bob-bucket; expected 403")
-	}
-	if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
-		t.Fatalf("alice GetBucketPolicy: status=%d err=%v; want 401/403", status, err)
-	}
+		// 2) alice GET bob-bucket?policy must also 403 (no Read grant on bob-bucket).
+		_, err = aliceCli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
+			Bucket: aws.String("bob-policy-bkt"),
+		})
+		if err == nil {
+			t.Fatal("alice was allowed to GetBucketPolicy on bob-bucket; expected 403")
+		}
+		if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
+			t.Fatalf("alice GetBucketPolicy: status=%d err=%v; want 401/403", status, err)
+		}
 
-	// 3) alice DELETE bob-bucket?policy must also 403 (no Admin grant on bob-bucket).
-	_, err = aliceCli.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
-		Bucket: aws.String("bob-policy-bkt"),
-	})
-	if err == nil {
-		t.Fatal("alice was allowed to DeleteBucketPolicy on bob-bucket; expected 403")
-	}
-	if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
-		t.Fatalf("alice DeleteBucketPolicy: status=%d err=%v; want 401/403", status, err)
-	}
+		// 3) alice DELETE bob-bucket?policy must also 403 (no Admin grant on bob-bucket).
+		_, err = aliceCli.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
+			Bucket: aws.String("bob-policy-bkt"),
+		})
+		if err == nil {
+			t.Fatal("alice was allowed to DeleteBucketPolicy on bob-bucket; expected 403")
+		}
+		if status := httpStatusFrom(err); status != http.StatusForbidden && status != http.StatusUnauthorized {
+			t.Fatalf("alice DeleteBucketPolicy: status=%d err=%v; want 401/403", status, err)
+		}
 
-	// 4) bob (Admin on bob-bucket) can PUT his own bucket's policy.
-	if _, err = bobCli.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-		Bucket: aws.String("bob-policy-bkt"),
-		Policy: aws.String(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::bob-policy-bkt/*"]}]}`),
-	}); err != nil {
-		t.Fatalf("bob (Admin) PutBucketPolicy on own bucket: %v", err)
-	}
+		// 4) bob (Admin on bob-bucket) can PUT his own bucket's policy.
+		if _, err = bobCli.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+			Bucket: aws.String("bob-policy-bkt"),
+			Policy: aws.String(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::bob-policy-bkt/*"]}]}`),
+		}); err != nil {
+			t.Fatalf("bob (Admin) PutBucketPolicy on own bucket: %v", err)
+		}
 	})
 }

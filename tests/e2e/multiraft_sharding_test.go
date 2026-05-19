@@ -1263,74 +1263,74 @@ func TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E(t *testing.T) {
 func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *testing.T) {
 	t.Run("MRCluster3Node", func(t *testing.T) {
 
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeStaticPeers,
-		DisableNFS: true,
-		DisableNBD: true,
-	})
+		c := startE2ECluster(t, e2eClusterOptions{
+			Nodes:      3,
+			Mode:       ClusterModeStaticPeers,
+			DisableNFS: true,
+			DisableNBD: true,
+		})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	c.GrantAdminOnBuckets("grainfs-tables")
-	require.Eventually(t, func() bool {
-		err := tryCreateBucket(ctx, c.S3Client(0), "grainfs-tables")
-		return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
-	}, 30*time.Second, 500*time.Millisecond, "grainfs-tables bucket grant did not become writable")
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		c.GrantAdminOnBuckets("grainfs-tables")
+		require.Eventually(t, func() bool {
+			err := tryCreateBucket(ctx, c.S3Client(0), "grainfs-tables")
+			return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
+		}, 30*time.Second, 500*time.Millisecond, "grainfs-tables bucket grant did not become writable")
 
-	icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
+		icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
 
-	nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
-	require.NoError(t, err)
-	nsReq.Header.Set("Content-Type", "application/json")
-	resp, err := icebergClient.Do(nsReq)
-	require.NoError(t, err)
-	require.Less(t, resp.StatusCode, 300)
-	require.NoError(t, resp.Body.Close())
+		nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
+		require.NoError(t, err)
+		nsReq.Header.Set("Content-Type", "application/json")
+		resp, err := icebergClient.Do(nsReq)
+		require.NoError(t, err)
+		require.Less(t, resp.StatusCode, 300)
+		require.NoError(t, resp.Body.Close())
 
-	createTableBody := `{
+		createTableBody := `{
 		"name":"t",
 		"schema":{"type":"struct","schema-id":0,"fields":[]},
 		"properties":{}
 	}`
-	tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
-	require.NoError(t, err)
-	tblReq.Header.Set("Content-Type", "application/json")
-	resp, err = icebergClient.Do(tblReq)
-	require.NoError(t, err)
-	require.Less(t, resp.StatusCode, 300)
-	require.NoError(t, resp.Body.Close())
+		tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
+		require.NoError(t, err)
+		tblReq.Header.Set("Content-Type", "application/json")
+		resp, err = icebergClient.Do(tblReq)
+		require.NoError(t, err)
+		require.Less(t, resp.StatusCode, 300)
+		require.NoError(t, resp.Body.Close())
 
-	loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
-	require.NoError(t, err)
-	loadResp, err := icebergClient.Do(loadReq)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, loadResp.StatusCode)
-	loadBody, err := io.ReadAll(loadResp.Body)
-	require.NoError(t, err)
-	require.NoError(t, loadResp.Body.Close())
-	require.Contains(t, string(loadBody), `"metadata-location"`)
-	require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
+		loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
+		require.NoError(t, err)
+		loadResp, err := icebergClient.Do(loadReq)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, loadResp.StatusCode)
+		loadBody, err := io.ReadAll(loadResp.Body)
+		require.NoError(t, err)
+		require.NoError(t, loadResp.Body.Close())
+		require.Contains(t, string(loadBody), `"metadata-location"`)
+		require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
 
-	var got []byte
-	var readErr error
-	readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer readCancel()
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		for i := range c.httpURLs {
-			got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
+		var got []byte
+		var readErr error
+		readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer readCancel()
+		deadline := time.Now().Add(60 * time.Second)
+		for time.Now().Before(deadline) {
+			for i := range c.httpURLs {
+				got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
+				if readErr == nil {
+					break
+				}
+			}
 			if readErr == nil {
 				break
 			}
+			time.Sleep(time.Second)
 		}
-		if readErr == nil {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-	require.NoError(t, readErr)
-	require.Contains(t, string(got), `"format-version"`)
+		require.NoError(t, readErr)
+		require.Contains(t, string(got), `"format-version"`)
 	})
 }
 
@@ -1341,44 +1341,44 @@ func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *test
 func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
 	t.Run("MRCluster2Node", func(t *testing.T) {
 
-	c := startMRCluster(t, 2, mrClusterOptions{
-		FastBootstrap: true,
-		disableNFS4:   true,
-		disableNBD:    true,
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+		c := startMRCluster(t, 2, mrClusterOptions{
+			FastBootstrap: true,
+			disableNFS4:   true,
+			disableNBD:    true,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
 
-	const bucket = "availability-trap-test"
-	requireMRCreateBucketEventually(t, ctx, c, bucket)
-	cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
+		const bucket = "availability-trap-test"
+		requireMRCreateBucketEventually(t, ctx, c, bucket)
+		cli := ecS3Client(c.httpURLs[c.leaderIdx], c.accessKey, c.secretKey)
 
-	// Write should succeed with both nodes alive.
-	requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
+		// Write should succeed with both nodes alive.
+		requireMRPutObjectEventually(t, ctx, cli, bucket, "before-kill", []byte("alive"))
 
-	// Kill the non-leader node to break metaRaft quorum (needs 2/2).
-	followerIdx := 1 - c.leaderIdx
-	t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
-	require.NotNil(t, c.procs[followerIdx])
-	require.NotNil(t, c.procs[followerIdx].Process)
-	require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
-	_ = c.procs[followerIdx].Wait()
-	c.procs[followerIdx] = nil
+		// Kill the non-leader node to break metaRaft quorum (needs 2/2).
+		followerIdx := 1 - c.leaderIdx
+		t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
+		require.NotNil(t, c.procs[followerIdx])
+		require.NotNil(t, c.procs[followerIdx].Process)
+		require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
+		_ = c.procs[followerIdx].Wait()
+		c.procs[followerIdx] = nil
 
-	// Write must now fail — quorum is lost.
-	// In a 2-node raft cluster, the surviving leader blocks waiting for
-	// 2/2 acknowledgment that never arrives, so requests time out with
-	// context.DeadlineExceeded rather than a fast 503. A fast 503 preflight
-	// ("not enough voters") would require a separate quorum-check feature.
-	// This test documents the current reality (hang = trap), not a bug.
-	writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer writeCancel()
-	_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String("after-quorum-loss"),
-		Body:   bytes.NewReader([]byte("blocked")),
-	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
-	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
+		// Write must now fail — quorum is lost.
+		// In a 2-node raft cluster, the surviving leader blocks waiting for
+		// 2/2 acknowledgment that never arrives, so requests time out with
+		// context.DeadlineExceeded rather than a fast 503. A fast 503 preflight
+		// ("not enough voters") would require a separate quorum-check feature.
+		// This test documents the current reality (hang = trap), not a bug.
+		writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer writeCancel()
+		_, writeErr := cli.PutObject(writeCtx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("after-quorum-loss"),
+			Body:   bytes.NewReader([]byte("blocked")),
+		}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
+		require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
 	})
 }
 
@@ -1397,44 +1397,44 @@ func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
 func TestDynamicGroupSeeding1to5E2E(t *testing.T) {
 	t.Run("MRCluster1to5", func(t *testing.T) {
 
-	// Start with 1 node; pre-allocate ports for 5.
-	c := startMRCluster(t, 1, mrClusterOptions{
-		FastBootstrap: true,
-		MaxNodes:      5,
-		disableNFS4:   true,
-		disableNBD:    true,
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+		// Start with 1 node; pre-allocate ports for 5.
+		c := startMRCluster(t, 1, mrClusterOptions{
+			FastBootstrap: true,
+			MaxNodes:      5,
+			disableNFS4:   true,
+			disableNBD:    true,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
 
-	const bucket = "dyn-seed-1to5"
-	requireMRCreateBucketEventually(t, ctx, c, bucket)
+		const bucket = "dyn-seed-1to5"
+		requireMRCreateBucketEventually(t, ctx, c, bucket)
 
-	// Step helper: after each addNode, verify group count and PUT+GET.
-	type step struct {
-		afterNodes     int
-		expectedGroups int
-	}
-	steps := []step{
-		{1, 8}, // initial seed
-		{2, 8}, // no new groups
-		{3, 12},
-		{4, 16},
-		{5, 20},
-	}
+		// Step helper: after each addNode, verify group count and PUT+GET.
+		type step struct {
+			afterNodes     int
+			expectedGroups int
+		}
+		steps := []step{
+			{1, 8}, // initial seed
+			{2, 8}, // no new groups
+			{3, 12},
+			{4, 16},
+			{5, 20},
+		}
 
-	// Verify step 1 (already started).
-	waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], steps[0].expectedGroups, 30*time.Second)
-	requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
-		fmt.Sprintf("key-after-%d-nodes", steps[0].afterNodes), []byte("data"))
-
-	// Steps 2–5: add a node then verify.
-	for _, s := range steps[1:] {
-		c.addNode(t)
-		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], s.expectedGroups, 60*time.Second)
-		t.Logf("nodes=%d: shard groups >= %d confirmed", s.afterNodes, s.expectedGroups)
+		// Verify step 1 (already started).
+		waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], steps[0].expectedGroups, 30*time.Second)
 		requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
-			fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
-	}
+			fmt.Sprintf("key-after-%d-nodes", steps[0].afterNodes), []byte("data"))
+
+		// Steps 2–5: add a node then verify.
+		for _, s := range steps[1:] {
+			c.addNode(t)
+			waitForShardGroupCount(t, c.dataDirs[c.leaderIdx], s.expectedGroups, 60*time.Second)
+			t.Logf("nodes=%d: shard groups >= %d confirmed", s.afterNodes, s.expectedGroups)
+			requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
+				fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
+		}
 	})
 }

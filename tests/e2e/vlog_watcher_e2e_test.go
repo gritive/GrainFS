@@ -261,7 +261,6 @@ func runVlogStrictRegistryCases(t *testing.T, tgt s3Target) {
 	})
 }
 
-
 // fetchIncidentsSafe is fetchIncidents that returns nil instead of failing
 // the test when the endpoint is briefly unreachable (e.g. process is exiting).
 func fetchIncidentsSafe(t *testing.T, endpoint string) []incidentState {

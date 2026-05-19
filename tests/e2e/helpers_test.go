@@ -178,50 +178,58 @@ func TestMain(m *testing.M) {
 }
 
 func TestWaitForPortsParallelErrWithProcessesReturnsWhenProcessExits(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "exit 7")
-	require.NoError(t, cmd.Start())
+	t.Run("SingleNode", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "exit 7")
+		require.NoError(t, cmd.Start())
 
-	started := time.Now()
-	err := waitForPortsParallelErrWithProcesses([]int{freePort()}, []*exec.Cmd{cmd}, 5*time.Second)
+		started := time.Now()
+		err := waitForPortsParallelErrWithProcesses([]int{freePort()}, []*exec.Cmd{cmd}, 5*time.Second)
 
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "process exited")
-	require.Less(t, time.Since(started), time.Second)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "process exited")
+		require.Less(t, time.Since(started), time.Second)
+	})
 }
 
 func TestCombinedOutputWithWaitDelayReturnsWhenDescendantKeepsPipeOpen(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+	t.Run("SingleNode", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 5 & wait")
-	started := time.Now()
-	out, err := combinedOutputWithWaitDelay(cmd)
+		cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 5 & wait")
+		started := time.Now()
+		out, err := combinedOutputWithWaitDelay(cmd)
 
-	require.Error(t, err)
-	require.Empty(t, out)
-	require.Less(t, time.Since(started), 2*time.Second)
+		require.Error(t, err)
+		require.Empty(t, out)
+		require.Less(t, time.Since(started), 2*time.Second)
+	})
 }
 
 func TestE2EClusterStopTerminatesSignalIgnoringProcesses(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 60")
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() { terminateProcess(cmd) })
+	t.Run("SingleNode", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 60")
+		require.NoError(t, cmd.Start())
+		t.Cleanup(func() { terminateProcess(cmd) })
 
-	c := &e2eCluster{
-		procs:    []*exec.Cmd{cmd},
-		dataDirs: []string{t.TempDir()},
-	}
-	started := time.Now()
-	c.Stop()
+		c := &e2eCluster{
+			procs:    []*exec.Cmd{cmd},
+			dataDirs: []string{t.TempDir()},
+		}
+		started := time.Now()
+		c.Stop()
 
-	require.Less(t, time.Since(started), time.Second)
-	require.Error(t, cmd.Process.Signal(syscall.Signal(0)))
+		require.Less(t, time.Since(started), time.Second)
+		require.Error(t, cmd.Process.Signal(syscall.Signal(0)))
+	})
 }
 
 func TestShortTempDirKeepsAdminSocketPathShort(t *testing.T) {
-	dir := shortTempDir(t)
-	require.Less(t, len(filepath.Join(dir, "admin.sock")), 104)
-	require.Less(t, len(filepath.Join(dir, "rotate.sock")), 104)
+	t.Run("SingleNode", func(t *testing.T) {
+		dir := shortTempDir(t)
+		require.Less(t, len(filepath.Join(dir, "admin.sock")), 104)
+		require.Less(t, len(filepath.Join(dir, "rotate.sock")), 104)
+	})
 }
 
 func combinedOutputWithWaitDelay(cmd *exec.Cmd) ([]byte, error) {

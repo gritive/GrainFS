@@ -807,24 +807,26 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 // correctly: HeadBucket on a missing bucket returns NotFound (not 401),
 // proving the SigV4 verifier accepts the bootstrap key pair.
 func TestIAMHelpers_StartServer_BootstrapAccepted(t *testing.T) {
-	srv := startIAMTestServer(t)
-	defer srv.Stop()
+	t.Run("SingleNode", func(t *testing.T) {
+		srv := startIAMTestServer(t)
+		defer srv.Stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String("__bootstrap_probe__"),
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
+			Bucket: aws.String("__bootstrap_probe__"),
+		})
+		if err == nil {
+			// 200 also means auth succeeded (probe bucket somehow existed).
+			return
+		}
+		// NotFound / NoSuchBucket → auth passed, just no such bucket.
+		// 401/403 → auth failed, fail the test.
+		msg := err.Error()
+		if !(contains(msg, "NotFound") || contains(msg, "NoSuchBucket") || contains(msg, "404")) {
+			t.Fatalf("HeadBucket with bootstrap creds returned non-auth error: %v", err)
+		}
 	})
-	if err == nil {
-		// 200 also means auth succeeded (probe bucket somehow existed).
-		return
-	}
-	// NotFound / NoSuchBucket → auth passed, just no such bucket.
-	// 401/403 → auth failed, fail the test.
-	msg := err.Error()
-	if !(contains(msg, "NotFound") || contains(msg, "NoSuchBucket") || contains(msg, "404")) {
-		t.Fatalf("HeadBucket with bootstrap creds returned non-auth error: %v", err)
-	}
 }
 
 func contains(s, sub string) bool {
