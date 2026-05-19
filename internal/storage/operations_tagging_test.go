@@ -28,11 +28,26 @@ func TestOperations_SetGetDeleteObjectTags(t *testing.T) {
 	require.Empty(t, got)
 }
 
+type tagsNoCapabilityBackend struct {
+	storage.Backend
+}
+
 func TestOperations_SetObjectTags_NoAdapter(t *testing.T) {
-	b := newBackend(t)
-	ops := storage.NewOperations(b)
-	// LocalBackend does implement ObjectTagsSetter, so use a wrapper that doesn't.
-	// Just verify the happy-path compiles and runs; no-adapter is tested by
-	// the internal package tests that use stub backends.
-	_ = ops
+	ops := storage.NewOperations(&tagsNoCapabilityBackend{})
+
+	err := ops.SetObjectTags("b", "k", "", []storage.Tag{{Key: "x", Value: "y"}})
+	require.ErrorIs(t, err, storage.ErrUnsupportedOperation)
+	var typed storage.UnsupportedOperationError
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, "SetObjectTags", typed.Op)
+	require.Equal(t, storage.UnsupportedReasonNoAdapter, typed.Reason)
+
+	var typed2 storage.UnsupportedOperationError
+	_, err = ops.GetObjectTags("b", "k", "")
+	require.ErrorIs(t, err, storage.ErrUnsupportedOperation)
+	require.ErrorAs(t, err, &typed2)
+	require.Equal(t, "GetObjectTags", typed2.Op)
+
+	err = ops.DeleteObjectTags("b", "k", "")
+	require.ErrorIs(t, err, storage.ErrUnsupportedOperation)
 }
