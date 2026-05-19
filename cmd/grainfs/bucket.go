@@ -33,19 +33,29 @@ func init() {
 }
 
 func bucketCreateCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a bucket",
 		Args:  cobra.ExactArgs(1),
 		Example: `  grainfs bucket create my-bucket
-  GRAINFS_ADMIN_SOCKET=./tmp/admin.sock grainfs bucket create my-bucket`,
+  GRAINFS_ADMIN_SOCKET=./tmp/admin.sock grainfs bucket create my-bucket
+  grainfs bucket create my-bucket --attach-sa sa_123 --attach-policy bucket-admin`,
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {
 				return err
 			}
+			attachSA, _ := c.Flags().GetString("attach-sa")
+			attachPolicy, _ := c.Flags().GetString("attach-policy")
+			if (attachSA == "") != (attachPolicy == "") {
+				return fmt.Errorf("--attach-sa and --attach-policy must be provided together")
+			}
 			out, err := iamRequest(c.Context(), sock, "POST", "/v1/buckets",
-				map[string]string{"name": args[0]})
+				adminapi.CreateBucketAdminReq{
+					Name:         args[0],
+					AttachSA:     attachSA,
+					AttachPolicy: attachPolicy,
+				})
 			if err != nil {
 				return err
 			}
@@ -58,6 +68,9 @@ func bucketCreateCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().String("attach-sa", "", "service account ID to attach an initial bucket policy to")
+	cmd.Flags().String("attach-policy", "", "built-in policy name to attach with --attach-sa")
+	return cmd
 }
 
 func bucketListCmd() *cobra.Command {
