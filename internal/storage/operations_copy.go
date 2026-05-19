@@ -171,10 +171,13 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 
 // applyCopyObjectTags applies the tag set to the destination object according
 // to the TaggingDirective: COPY inherits source tags, REPLACE uses req.Tags.
-// A nil newTags means "no-op" (REPLACE with no tags specified).
+// REPLACE with nil Tags clears all destination tags (AWS S3 spec).
 // If the backend does not support tagging the call is silently skipped.
 func (o *Operations) applyCopyObjectTags(req CopyObjectRequest) error {
-	var newTags []Tag
+	var (
+		newTags []Tag
+		apply   bool
+	)
 	switch req.TaggingDirective {
 	case TaggingDirectiveCopy:
 		srcTags, err := o.GetObjectTags(req.Source.Bucket, req.Source.Key, req.Source.VersionID)
@@ -192,11 +195,15 @@ func (o *Operations) applyCopyObjectTags(req CopyObjectRequest) error {
 		if err != nil {
 			return err
 		}
-		newTags = srcTags
+		if len(srcTags) > 0 {
+			newTags = srcTags
+			apply = true
+		}
 	case TaggingDirectiveReplace:
 		newTags = req.Tags
+		apply = true // always apply on REPLACE: nil/empty means clear all tags
 	}
-	if newTags != nil {
+	if apply {
 		if err := o.SetObjectTags(req.Destination.Bucket, req.Destination.Key, "", newTags); err != nil {
 			if errors.Is(err, ErrUnsupportedOperation) {
 				return nil
