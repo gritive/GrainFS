@@ -326,3 +326,4 @@ Work these in order. Do not run them in parallel.
 - [ ] SIMD.
 - [ ] SoA layout.
 - [ ] Control-plane/data-plane split.
+- [ ] fix(cluster/forward): relay storage.ErrMethodNotAllowed from ForwardReceiver back through ClusterCoordinator so HEAD ?versionId=<deleteMarker> returns 405 instead of 500. Unskip tests/e2e/versioning_test.go HeadByVersionID_DeleteMarker once fixed.
