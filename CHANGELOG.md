@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.257.2] - 2026-05-19 - fix(storage/packblob): ListObjectsPage to supplement packed in-memory index
+
+v0.0.257.0의 `Operations.ListObjectsPage` walk-and-find-pager 로직이 PackedBackend 계층을 건너뛰고 inner ClusterCoordinator로 바로 가서, single-node packblob fast path에 저장된 작은 객체가 LIST에 안 나오던 회귀 수정. e2e fail 24건 중 동일 root cause(packblob index 우회) 3건 회복: TestObjectsE2E/SingleNode/{List,ListWithPrefix} (Cluster A), TestS3ClientSmoke, TestMigrationInjector. 같은 cluster A의 나머지 5건(TestSnapshot/PITR×2/Backup_Restic/IAM_ScopedKey/QuarantineIncident)은 restore-후-ObjectIndex 재활성화 갭으로 별도 fix 필요.
+
+### Fixed
+
+- **`PackedBackend.ListObjectsPage`** (`internal/storage/packblob/packed_backend.go`) — 신규 메서드. inner 페이저(있으면) 호출 → packed in-memory index에서 prefix+marker 매칭 entries 보충 → key 정렬 → marker/maxKeys 적용 + truncated flag. 기존 `ListObjects`와 동일한 supplementation 의미 유지.
+- **회귀 테스트** `TestPackedBackend_ListObjectsPage` (`internal/storage/packblob/packed_backend_test.go`) — empty marker / prefix filter / marker resume / maxKeys truncation 네 시나리오.
+
+### Notes
+
+- 영향: SingleNode write→list 경로 (8 tests 중 3 회복: TestObjectsE2E, TestS3ClientSmoke, TestMigrationInjector). 나머지 5 tests (TestSnapshot/PITR/Backup/IAM Scoped Key/QuarantineIncident)는 restore-후-ObjectIndex 재활성화 갭 (별도 issue).
+- DuckDB Iceberg `https://http://` 이중 스킴 (v0.0.255.0 SigV4 BREAKING의 부작용, 6 tests), Volume Scrub on-disk block 누락 (5 tests), Encryption/Versioning/NBD multi-node replication 등은 별도 follow-up.
+
 ## [0.0.257.1] - 2026-05-19 - fix(storage): persist Parts on LocalBackend CompleteMultipartUpload
 
 v0.0.257.0의 single-node (LocalBackend) follow-up. `CompleteMultipartUpload`이 완료 객체를 `Parts` 없이 저장해서, 이후 HeadObject (또는 프로세스 재시작) 시 part 레이아웃이 사라지고 `?partNumber=N`이 legacy single-PUT으로 degrade되던 문제 해소. cluster 경로는 이미 `PutObjectMetaCmd`로 Parts를 영속화했음 — 이제 single-node도 동일 동작.
