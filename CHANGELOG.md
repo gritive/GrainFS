@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.262.11] - 2026-05-19 - test(e2e): collapse BucketPolicy into single TestBucketPolicyE2E + 3 sub-tests
+
+Follow-up to v0.0.262.10. That PR landed three separate `TestBucketPolicy*E2E` entry functions, each with its own `SingleNode/Cluster4Node` split — three trees, three single boots, three cluster boots. The correct shape is **one entry point that owns the test set and applies it to both fixtures**, the TestBucketsE2E pattern: a single `TestBucketPolicyE2E` with `t.Run("SingleNode") + t.Run("Cluster4Node")` calling one `runBucketPolicyCases(t, tgt s3Target)` set helper, which in turn runs three sub-tests (`SetAndGet`, `InvalidJSON`, `DenyAction`).
+
+### Changed
+
+- **`TestBucketPolicy{SetAndGet,InvalidJSON,DenyAction}E2E` → single `TestBucketPolicyE2E`** (`tests/e2e/policy_test.go`).
+- New shape: `TestBucketPolicyE2E` -> `t.Run("SingleNode") | t.Run("Cluster4Node")` -> `runBucketPolicyCases(t, tgt)` -> `t.Run("SetAndGet") | t.Run("InvalidJSON") | t.Run("DenyAction")`. Six fixture-paths run from one entry point.
+- `signedPolicyRequest(t, tgt, ...)` signature unchanged from v0.0.262.10.
+
+Verified: `make build` clean; full tree `TestBucketPolicyE2E` runs all six paths (6.83s incl. shared cluster boot for the first cluster sub-test).
+
 ## [0.0.262.10] - 2026-05-19 - test(e2e): dual-integrate BucketPolicy onto TestBucketsE2E pattern
 
 First PR-D batch shifts from rename-only to **dual integration** — the actual goal is to prove single-node and 4-node cluster paths run the same test set and the policy plane is at parity. PR-A/B/C cluster-only renames stay; this PR (and follow-ups) reshape single-or-mixed groups into the proper dual pattern.
