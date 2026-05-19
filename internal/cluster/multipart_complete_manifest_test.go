@@ -153,6 +153,27 @@ func TestMultipartCompleteManifestReaderDefersCloseErrorAfterReturningBytes(t *t
 	require.NoError(t, rc.Close())
 }
 
+func TestMultipartCompleteManifestReaderCloseReturnsPendingCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 3, ETag: "etag"}},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			require.Equal(t, 1, partNumber)
+			return &bytesEOFReadCloser{body: []byte("abc"), closeErr: closeErr}, nil
+		},
+	}
+	rc, err := manifest.Open()
+	require.NoError(t, err)
+
+	buf := make([]byte, 8)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "abc", string(buf[:n]))
+
+	require.ErrorIs(t, rc.Close(), closeErr)
+}
+
 func TestMultipartCompleteManifestEncryptedReaderReturnsPlaintext(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enc := testEncryptor(t)

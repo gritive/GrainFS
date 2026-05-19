@@ -79,12 +79,19 @@ func (r *multipartCompleteReader) Read(p []byte) (int, error) {
 }
 
 func (r *multipartCompleteReader) Close() error {
-	r.closed = true
-	if r.current == nil {
-		return nil
+	var err error
+	if r.err != nil {
+		err = r.err
+		r.err = nil
 	}
-	err := r.current.Close()
-	r.current = nil
+	if r.current != nil {
+		closeErr := r.current.Close()
+		r.current = nil
+		if err == nil {
+			err = closeErr
+		}
+	}
+	r.closed = true
 	return err
 }
 
