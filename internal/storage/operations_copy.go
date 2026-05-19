@@ -178,6 +178,14 @@ func (o *Operations) applyCopyObjectTags(req CopyObjectRequest) error {
 	switch req.TaggingDirective {
 	case TaggingDirectiveCopy:
 		srcTags, err := o.GetObjectTags(req.Source.Bucket, req.Source.Key, req.Source.VersionID)
+		// Silently skip:
+		//   - ErrUnsupportedOperation: backend (e.g., packblob) doesn't implement
+		//     ObjectTagsGetter; nothing to propagate.
+		//   - ErrObjectNotFound: load-bearing for the packblob path. Packed small
+		//     objects exist in packblob's in-memory index but have no objectMetaKey
+		//     row in the underlying LocalBackend's BadgerDB, so GetObjectTags
+		//     misses them. Future Task 6 follow-up could split this into a distinct
+		//     "no tags" return; until then, treat NotFound here as "no source tags".
 		if errors.Is(err, ErrUnsupportedOperation) || errors.Is(err, ErrObjectNotFound) {
 			return nil
 		}
