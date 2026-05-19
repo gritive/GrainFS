@@ -84,6 +84,7 @@ type Server struct {
 	mutations        *MutationBroker
 
 	hertz       *server.Hertz
+	tlsListener *HotTLSListener // §5 T43: SIGHUP-driven cert reload
 	hub         *Hub
 	volMgr      *volume.Manager
 	policyStore *CompiledPolicyStore
