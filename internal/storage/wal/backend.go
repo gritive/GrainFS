@@ -327,6 +327,28 @@ func (b *Backend) DeleteObjectReturningMarker(bucket, key string) (string, error
 	return markerID, nil
 }
 
+// CreateMultipartUploadWithTags forwards to the inner backend when it supports
+// the tagsCreator extension. Without this method the embedded storage.Backend
+// interface does not promote CreateMultipartUploadWithTags from the underlying
+// concrete type, so Operations.CreateMultipartUploadWithTags' type assertion
+// fails on the wal.Backend wrapper and silently falls back to the no-tags
+// overload — dropping x-amz-tagging on multipart-initiate.
+//
+// No WAL entry is written here. Tags only materialise on
+// CompleteMultipartUpload (where the existing OpPut WAL entry covers the
+// finalised object); recording tags at create time would not survive a crash
+// before Complete anyway because the upload itself is abandoned.
+func (b *Backend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	type tagsCreator interface {
+		CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error)
+	}
+	inner, ok := b.Backend.(tagsCreator)
+	if !ok {
+		return "", storage.UnsupportedOperationError{Op: "CreateMultipartUploadWithTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return inner.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+}
+
 func (b *Backend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
 	obj, err := b.Backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 	if err != nil {

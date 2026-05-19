@@ -154,6 +154,7 @@ table CreateMultipartUploadArgs {
   bucket:string;
   key:string;
   content_type:string;
+  tags:[Tag];          // empty/nil -> no tags (CreateMultipartUpload), non-empty -> CreateMultipartUploadWithTags
 }
 
 table UploadPartArgs {

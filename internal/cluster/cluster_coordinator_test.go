@@ -1703,6 +1703,45 @@ func TestClusterCoordinator_CreateMultipartUpload_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
 }
 
+// TestClusterCoordinator_CreateMultipartUploadWithTags_PreservesTags is the
+// regression guard for adversarial review pass #4: ClusterCoordinator had no
+// CreateMultipartUploadWithTags method at all, so Operations'
+// (tagsCreator) type assertion failed against the cluster front door and
+// silently dropped x-amz-tagging on multipart-initiate in cluster mode.
+//
+// Verifies (a) the coordinator dispatches the forward op when the target
+// resolves remote and (b) the encoded args carry the tags vector so the
+// receiver can route to GroupBackend.CreateMultipartUploadWithTags.
+func TestClusterCoordinator_CreateMultipartUploadWithTags_PreservesTags(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	reportMultipartListingCapability(c, "a")
+	d.replyByOp[raftpb.ForwardOpCreateMultipartUpload] = buildUploadReply("bk", "k", "upload-1")
+
+	want := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	uploadID, err := c.CreateMultipartUploadWithTags(context.Background(), "bk", "k", "text/plain", want)
+	require.NoError(t, err)
+	require.Equal(t, "upload-1", uploadID)
+
+	require.Len(t, d.calls, 1, "CreateMultipartUploadWithTags must route through forward.Send when target is remote")
+	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+
+	args := raftpb.GetRootAsCreateMultipartUploadArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Key()))
+	require.Equal(t, "text/plain", string(args.ContentType()))
+	require.Equal(t, len(want), args.TagsLength(),
+		"forward args must carry tags vector so the receiver dispatches to CreateMultipartUploadWithTags")
+	for i := 0; i < args.TagsLength(); i++ {
+		var tag raftpb.Tag
+		require.True(t, args.Tags(&tag, i))
+		require.Equal(t, want[i].Key, string(tag.Key()))
+		require.Equal(t, want[i].Value, string(tag.Value()))
+	}
+}
+
 func TestClusterCoordinator_CreateMultipartUpload_GateRejectsBeforePeerCall(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.WithCapabilityGate(NewCapabilityGate(compat.DefaultRegistry, time.Minute))

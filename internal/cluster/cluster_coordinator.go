@@ -1143,12 +1143,50 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	args := buildCreateMultipartUploadArgs(bucket, key, contentType)
+	args := buildCreateMultipartUploadArgs(bucket, key, contentType, nil)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
 	if err != nil {
 		return nil, err
 	}
 	return uploadFromReply(reply)
+}
+
+// CreateMultipartUploadWithTags routes to the resolved data group, mirroring
+// CreateMultipartUpload but carrying tags. Tags materialise onto the finalised
+// object via the existing Raft-replicated CmdPutObjectMeta path on Complete
+// (clusterMultipartMeta.Tags → objectMeta.Tags). When the resolved target is
+// remote the tags ride along in CreateMultipartUploadArgs.tags so the receiver
+// dispatches to GroupBackend.CreateMultipartUploadWithTags.
+func (c *ClusterCoordinator) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	if err := c.requireObjectBucket(ctx, bucket); err != nil {
+		return "", err
+	}
+	target, group, err := c.routeWriteOrBucket(bucket, key)
+	if err != nil {
+		return "", err
+	}
+	ctx = contextWithObjectWritePlacement(ctx, group)
+	if err := c.requireMultipartListingPeerCapability(compat.OperationCreateMultipartUpload, c.multipartListingCapabilityPeers(target, group)); err != nil {
+		return "", err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+		return "", err
+	} else if gb != nil {
+		return gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+	}
+	if c.forward == nil {
+		return "", ErrCoordinatorNoRouter
+	}
+	args := buildCreateMultipartUploadArgs(bucket, key, contentType, tags)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
+	if err != nil {
+		return "", err
+	}
+	upload, err := uploadFromReply(reply)
+	if err != nil {
+		return "", err
+	}
+	return upload.UploadID, nil
 }
 
 func (c *ClusterCoordinator) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {

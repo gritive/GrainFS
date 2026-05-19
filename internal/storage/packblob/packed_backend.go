@@ -969,6 +969,22 @@ func (pb *PackedBackend) CreateMultipartUpload(ctx context.Context, bucket, key,
 	return pb.inner.CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
+// CreateMultipartUploadWithTags forwards to the inner backend when it supports
+// the tagsCreator extension. PackedBackend uses a non-embedded inner field, so
+// no method is promoted — without this explicit pass-through the wal.Backend
+// wrapping us in the single-node packed hot path would fail its type assertion
+// (tagsCreator) and silently drop x-amz-tagging on multipart-initiate.
+func (pb *PackedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	type tagsCreator interface {
+		CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error)
+	}
+	inner, ok := pb.inner.(tagsCreator)
+	if !ok {
+		return "", storage.UnsupportedOperationError{Op: "CreateMultipartUploadWithTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return inner.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+}
+
 func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	return pb.inner.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
 }

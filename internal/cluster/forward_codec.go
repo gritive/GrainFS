@@ -252,15 +252,42 @@ func buildWalkObjectsArgs(bucket, prefix string) []byte {
 	return b.FinishedBytes()
 }
 
-func buildCreateMultipartUploadArgs(bucket, key, contentType string) []byte {
+// buildCreateMultipartUploadArgs encodes the forward args for both
+// CreateMultipartUpload (tags == nil) and CreateMultipartUploadWithTags
+// (tags non-empty). An empty/nil tags slice is encoded as an absent vector
+// so the receiver's TagsLength() check cleanly distinguishes the two paths
+// — mirrors the SetObjectTagsArgs builder convention.
+func buildCreateMultipartUploadArgs(bucket, key, contentType string, tags []storage.Tag) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
+
+	var tagsVec flatbuffers.UOffsetT
+	if len(tags) > 0 {
+		offs := make([]flatbuffers.UOffsetT, len(tags))
+		for i, t := range tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			raftpb.TagStart(b)
+			raftpb.TagAddKey(b, kOff)
+			raftpb.TagAddValue(b, vOff)
+			offs[i] = raftpb.TagEnd(b)
+		}
+		raftpb.CreateMultipartUploadArgsStartTagsVector(b, len(offs))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		tagsVec = b.EndVector(len(offs))
+	}
+
 	raftpb.CreateMultipartUploadArgsStart(b)
 	raftpb.CreateMultipartUploadArgsAddBucket(b, bk)
 	raftpb.CreateMultipartUploadArgsAddKey(b, k)
 	raftpb.CreateMultipartUploadArgsAddContentType(b, ct)
+	if tagsVec != 0 {
+		raftpb.CreateMultipartUploadArgsAddTags(b, tagsVec)
+	}
 	b.Finish(raftpb.CreateMultipartUploadArgsEnd(b))
 	return b.FinishedBytes()
 }

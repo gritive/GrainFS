@@ -766,12 +766,33 @@ func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) *transpo
 func (r *ForwardReceiver) handleCreateMultipartUpload(dg *DataGroup, args []byte) *transport.Message {
 	ctx := context.Background()
 	ca := raftpb.GetRootAsCreateMultipartUploadArgs(args, 0)
-	upload, err := dg.Backend().CreateMultipartUpload(
-		ctx,
-		string(ca.Bucket()),
-		string(ca.Key()),
-		string(ca.ContentType()),
-	)
+	bucket := string(ca.Bucket())
+	key := string(ca.Key())
+	contentType := string(ca.ContentType())
+
+	// Tags vector absent (older senders) or empty: route to the no-tags
+	// overload to preserve wire compatibility. Non-empty: dispatch to the
+	// tags-carrying overload so tags reach clusterMultipartMeta on the
+	// resolved data group.
+	if n := ca.TagsLength(); n > 0 {
+		tags := make([]storage.Tag, 0, n)
+		for i := 0; i < n; i++ {
+			var t raftpb.Tag
+			if ca.Tags(&t, i) {
+				tags = append(tags, storage.Tag{
+					Key:   string(t.Key()),
+					Value: string(t.Value()),
+				})
+			}
+		}
+		uploadID, err := dg.Backend().CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+		if err != nil {
+			return statusReply(mapErrorToStatus(err))
+		}
+		return &transport.Message{Payload: buildUploadReply(bucket, key, uploadID)}
+	}
+
+	upload, err := dg.Backend().CreateMultipartUpload(ctx, bucket, key, contentType)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
