@@ -56,27 +56,14 @@ func buildKeyCreatePayloadForTest(ak, saID string, encBytes []byte, ts time.Time
 	return b.FinishedBytes()
 }
 
-func buildGrantWildcardPutPayloadForTest(saID string, role iam.Role, ts time.Time) []byte {
-	b := flatbuffers.NewBuilder(64)
-	saOff := b.CreateString(saID)
-	cbOff := b.CreateString("")
-	iampb.GrantWildcardPutPayloadStart(b)
-	iampb.GrantWildcardPutPayloadAddSaId(b, saOff)
-	iampb.GrantWildcardPutPayloadAddRole(b, iampb.Role(role))
-	iampb.GrantWildcardPutPayloadAddCreatedAtUnixNs(b, ts.UnixNano())
-	iampb.GrantWildcardPutPayloadAddCreatedBy(b, cbOff)
-	b.Finish(iampb.GrantWildcardPutPayloadEnd(b))
-	return b.FinishedBytes()
-}
-
 // TestMetaFSM_Snapshot_IncludesIAMState round-trips an IAM-populated FSM
-// through Snapshot+Restore on a fresh FSM and verifies that SAs, keys,
-// wildcard grants, and the sticky auth_enabled bit all survive.
+// through Snapshot+Restore on a fresh FSM and verifies that SAs and keys
+// survive. (WildcardGrant snapshot coverage removed in §2: Role/Grant model gone.)
 //
 // Pre-fix: MetaFSM.Snapshot serialized only 8 in-memory fields and dropped
 // the IAM substore entirely. Raft log compaction (default 30s
 // LogGCInterval) then truncated the IAM raft entries → restart restored a
-// permissive cluster despite operators having set up SAs/grants.
+// permissive cluster despite operators having set up SAs/keys.
 func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 	enc := newIAMTestEncryptor(t)
 	store := iam.NewStore()
@@ -93,9 +80,6 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 	}
 	if err := applier.ApplyKeyCreate(buildKeyCreatePayloadForTest("AKTEST123", "sa-test", wrapped, now)); err != nil {
 		t.Fatalf("ApplyKeyCreate: %v", err)
-	}
-	if err := applier.ApplyGrantWildcardPut(buildGrantWildcardPutPayloadForTest("sa-test", iam.RoleAdmin, now)); err != nil {
-		t.Fatalf("ApplyGrantWildcardPut: %v", err)
 	}
 
 	f := NewMetaFSM()
@@ -117,9 +101,6 @@ func TestMetaFSM_Snapshot_IncludesIAMState(t *testing.T) {
 
 	if _, ok := store2.LookupSA("sa-test"); !ok {
 		t.Fatal("SA lost across snapshot round-trip")
-	}
-	if got := store2.LookupGrant("sa-test", "any-bucket"); got != iam.RoleAdmin {
-		t.Fatalf("wildcard grant lost: got %v, want RoleAdmin", got)
 	}
 	k, ok := store2.LookupKey("AKTEST123")
 	if !ok {

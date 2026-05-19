@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"io"
 	"net/http"
 	"sync"
@@ -121,38 +120,6 @@ func (h *iamTestHelper) applySACreate(t *testing.T, saID string) {
 	require.NoError(t, h.applier.ApplySACreate(b.FinishedBytes()))
 }
 
-func (h *iamTestHelper) applyGrantPut(t *testing.T, saID, bucket string, role iam.Role) {
-	t.Helper()
-	b := flatbuffers.NewBuilder(64)
-	saOff := b.CreateString(saID)
-	bkOff := b.CreateString(bucket)
-	cbOff := b.CreateString("")
-	iampb.GrantPutPayloadStart(b)
-	iampb.GrantPutPayloadAddSaId(b, saOff)
-	iampb.GrantPutPayloadAddBucket(b, bkOff)
-	iampb.GrantPutPayloadAddRole(b, iampb.Role(role))
-	iampb.GrantPutPayloadAddCreatedAtUnixNs(b, time.Now().UnixNano())
-	iampb.GrantPutPayloadAddCreatedBy(b, cbOff)
-	end := iampb.GrantPutPayloadEnd(b)
-	b.Finish(end)
-	require.NoError(t, h.applier.ApplyGrantPut(b.FinishedBytes()))
-}
-
-func (h *iamTestHelper) applyGrantWildcardPut(t *testing.T, saID string, role iam.Role) {
-	t.Helper()
-	b := flatbuffers.NewBuilder(64)
-	saOff := b.CreateString(saID)
-	cbOff := b.CreateString("")
-	iampb.GrantWildcardPutPayloadStart(b)
-	iampb.GrantWildcardPutPayloadAddSaId(b, saOff)
-	iampb.GrantWildcardPutPayloadAddRole(b, iampb.Role(role))
-	iampb.GrantWildcardPutPayloadAddCreatedAtUnixNs(b, time.Now().UnixNano())
-	iampb.GrantWildcardPutPayloadAddCreatedBy(b, cbOff)
-	end := iampb.GrantWildcardPutPayloadEnd(b)
-	b.Finish(end)
-	require.NoError(t, h.applier.ApplyGrantWildcardPut(b.FinishedBytes()))
-}
-
 func (h *iamTestHelper) applyKeyCreateScoped(t *testing.T, ak, saID, secret string, scope []string) {
 	t.Helper()
 	wrapped, err := iam.WrapSecret(h.enc, saID, secret)
@@ -209,8 +176,6 @@ func TestAuthz_Layer0_ScopeMismatch_403(t *testing.T) {
 
 	h := newIAMTestHelper(t)
 	h.applySACreate(t, "sa-alice")
-	// SA has grant on "logs" (which key scope allows), but NOT "reports".
-	h.applyGrantPut(t, "sa-alice", "logs", iam.RoleAdmin)
 	// Key is scoped only to "logs".
 	h.applyKeyCreateScoped(t, "AK-scoped", "sa-alice", "secret123", []string{"logs"})
 
@@ -233,161 +198,30 @@ func TestAuthz_Layer0_ScopeMismatch_403(t *testing.T) {
 	assert.Equal(t, "key_scope_mismatch", cap.lastReason())
 }
 
-// TestAuthz_Layer0_ScopeMatch_PassToLayer1 verifies that a scoped key targeting
-// a bucket within its scope passes Layer 0 and proceeds to Layer 1.
-func TestAuthz_Layer0_ScopeMatch_PassToLayer1(t *testing.T) {
-	cap := &captureAuditEmitter{}
-	audit := iam.NewAuditLogger(cap)
-
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-alice")
-	// Grant RoleAdmin on "logs" so Layer 1 allows the request.
-	h.applyGrantPut(t, "sa-alice", "logs", iam.RoleAdmin)
-	// Key scoped to "logs".
-	h.applyKeyCreateScoped(t, "AK-scoped", "sa-alice", "secret123", []string{"logs"})
-
-	base := setupTestServerWithOptions(t,
-		WithIAMStore(h.store),
-		WithIAMAudit(audit),
-		WithAuth([]s3auth.Credentials{{AccessKey: "AK-scoped", SecretKey: "secret123"}}),
+func TestAuthz_InternalAuditBucket_RejectsRegularSignedReadWithoutIAM(t *testing.T) {
+	base, backend := setupTestServerWithBackend(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK", SecretKey: "secret"}}),
+		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
 	)
-
-	// PUT /logs — bucket IS in scope → Layer 0 passes, Layer 1 has Admin grant → 200.
-	req, _ := http.NewRequest(http.MethodPut, base+"/logs", nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK-scoped", "secret123", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
+	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
 	require.NoError(t, err)
-	resp.Body.Close()
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	// No deny emitted — scope passed and Layer 1 allowed.
-	assert.Empty(t, cap.lastReason())
-}
-
-// TestAuthz_Layer0_NilScope_PassToLayer1 verifies that a legacy key (nil
-// BucketScope) passes Layer 0 unrestricted; Layer 1 still gates.
-func TestAuthz_Layer0_NilScope_PassToLayer1(t *testing.T) {
-	cap := &captureAuditEmitter{}
-	audit := iam.NewAuditLogger(cap)
-
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-legacy")
-	// Wildcard Admin grant → Layer 1 will allow any bucket.
-	h.applyGrantWildcardPut(t, "sa-legacy", iam.RoleAdmin)
-	// Legacy key with nil scope.
-	h.applyKeyCreate(t, "AK-legacy", "sa-legacy", "secret456")
-
-	base := setupTestServerWithOptions(t,
-		WithIAMStore(h.store),
-		WithIAMAudit(audit),
-		WithAuth([]s3auth.Credentials{{AccessKey: "AK-legacy", SecretKey: "secret456"}}),
-	)
-
-	// PUT /anybucket — nil scope → Layer 0 passes, wildcard Layer 1 allows → 200.
-	req, _ := http.NewRequest(http.MethodPut, base+"/anybucket", nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK-legacy", "secret456", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
+	req, err := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
 	require.NoError(t, err)
-	resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Empty(t, cap.lastReason())
-}
-
-// TestListBuckets_ScopedKey_FiltersToScope verifies that a scoped key can only
-// see buckets within its scope via GET / (ListBuckets). CR1 fix.
-func TestListBuckets_ScopedKey_FiltersToScope(t *testing.T) {
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-admin")
-	h.applySACreate(t, "sa-alice")
-
-	// Admin: wildcard grant to create all three buckets.
-	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
-	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
-
-	// Alice: grant on bucket "alpha" only, scoped key to ["alpha"].
-	h.applyGrantPut(t, "sa-alice", "alpha", iam.RoleAdmin)
-	h.applyKeyCreateScoped(t, "AK-alice", "sa-alice", "aliceSecret", []string{"alpha"})
-
-	base := setupTestServerWithOptions(t,
-		WithIAMStore(h.store),
-		WithAuth([]s3auth.Credentials{
-			{AccessKey: "AK-admin", SecretKey: "adminSecret"},
-			{AccessKey: "AK-alice", SecretKey: "aliceSecret"},
-		}),
-	)
-
-	// Create buckets alpha, bravo, charlie using admin key.
-	for _, bkt := range []string{"alpha", "bravo", "charlie"} {
-		req, _ := http.NewRequest(http.MethodPut, base+"/"+bkt, nil)
-		req.Host = req.URL.Host
-		s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
-		require.Equal(t, http.StatusOK, resp.StatusCode, "create bucket %s", bkt)
-	}
-
-	// List buckets using Alice's scoped key — should see only "alpha".
-	req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
 	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK-alice", "aliceSecret", "us-east-1")
+	s3auth.SignRequest(req, "AK", "secret", "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var result listBucketsResult
-	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
-
-	names := make([]string, 0, len(result.Buckets))
-	for _, b := range result.Buckets {
-		names = append(names, b.Name)
-	}
-	assert.Equal(t, []string{"alpha"}, names, "scoped key must only see buckets in its scope")
-}
-
-// TestAuthz_InternalAuditBucket_Denied verifies that any request targeting the
-// internal grainfs-audit bucket is rejected with 403 and reason "internal_bucket",
-// even when the principal holds a wildcard Admin grant.
-func TestAuthz_InternalAuditBucket_Denied(t *testing.T) {
-	cap := &captureAuditEmitter{}
-	iamAudit := iam.NewAuditLogger(cap)
-
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-admin")
-	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
-	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
-
-	base := setupTestServerWithOptions(t,
-		WithIAMStore(h.store),
-		WithIAMAudit(iamAudit),
-		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
-	)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/"+auditpkg.BucketName, nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-	assert.Equal(t, "internal_bucket", cap.lastReason())
 }
 
 func TestAuthz_InternalAuditBucket_ReadArtifactAllowed(t *testing.T) {
 	iamAudit := iam.NewAuditLogger(&captureAuditEmitter{})
 
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-admin")
-	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
-	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
-
 	base, backend := setupTestServerWithBackend(t,
-		WithIAMStore(h.store),
 		WithIAMAudit(iamAudit),
 		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
 		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
@@ -407,45 +241,10 @@ func TestAuthz_InternalAuditBucket_ReadArtifactAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
 }
 
-func TestAuthz_InternalAuditBucket_AuthorizedSignedReadArtifactAllowed(t *testing.T) {
-	iamAudit := iam.NewAuditLogger(&captureAuditEmitter{})
-
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-admin")
-	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
-	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
-
-	base, backend := setupTestServerWithBackend(t,
-		WithIAMStore(h.store),
-		WithIAMAudit(iamAudit),
-		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
-		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
-	)
-	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
-	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
-	require.NoError(t, err)
-
-	req, _ := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-}
-
 func TestAuthz_InternalAuditBucket_RejectsUnsignedLocalRead(t *testing.T) {
 	iamAudit := iam.NewAuditLogger(&captureAuditEmitter{})
 
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-admin")
-	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
-	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
-
 	base, backend := setupTestServerWithBackend(t,
-		WithIAMStore(h.store),
 		WithIAMAudit(iamAudit),
 		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
 		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
@@ -455,26 +254,6 @@ func TestAuthz_InternalAuditBucket_RejectsUnsignedLocalRead(t *testing.T) {
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-}
-
-func TestAuthz_InternalAuditBucket_RejectsRegularSignedReadWithoutIAM(t *testing.T) {
-	base, backend := setupTestServerWithBackend(t,
-		WithAuth([]s3auth.Credentials{{AccessKey: "AK", SecretKey: "secret"}}),
-		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
-	)
-	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
-	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
-	require.NoError(t, err)
-
-	req, err := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
-	require.NoError(t, err)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK", "secret", "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

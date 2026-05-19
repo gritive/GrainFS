@@ -7,9 +7,6 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/rs/zerolog/log"
-
-	"github.com/gritive/GrainFS/internal/iam"
 )
 
 func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
@@ -55,29 +52,10 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 	c.Status(consts.StatusOK)
 }
 
-// issueCreatorGrant issues an explicit Admin grant to the request principal
-// on the newly-created bucket. Best-effort: if the proposer is not wired or the
-// propose fails, the bucket is still created.
-func (s *Server) issueCreatorGrant(ctx context.Context, bucket string) {
-	if s.iamProposer == nil {
-		return
-	}
-	principal := iam.PrincipalFromContext(ctx)
-	if principal == "" {
-		return
-	}
-	g := iam.Grant{
-		SAID:      principal,
-		Bucket:    bucket,
-		Role:      iam.RoleAdmin,
-		CreatedAt: time.Now().UTC(),
-		CreatedBy: principal,
-	}
-	if err := s.iamProposer.ProposeGrantPut(ctx, g); err != nil {
-		log.Warn().Err(err).Str("sa", principal).Str("bucket", bucket).
-			Msg("iam: failed to issue creator grant; bucket created without explicit grant")
-	}
-}
+// issueCreatorGrant was the legacy auto-grant path (Role/Grant model removed in §2).
+// Kept as a no-op so call sites in bucket_mutation_runtime.go compile unchanged;
+// bucket ownership is now enforced via policy.Evaluate on subsequent requests.
+func (s *Server) issueCreatorGrant(_ context.Context, _ string) {}
 
 func (s *Server) headBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")

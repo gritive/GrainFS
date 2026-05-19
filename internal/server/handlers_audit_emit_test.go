@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/audit"
-	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
@@ -374,48 +373,6 @@ func TestAuditEnvelope_RecordsStreamedGetBytesOut(t *testing.T) {
 	}
 	require.True(t, gotFull, "full streamed GET audit event not found")
 	require.True(t, gotRange, "range streamed GET audit event not found")
-}
-
-func TestAuditEnvelope_RecordsSignedAuditBucketRead(t *testing.T) {
-	outbox, err := audit.OpenOutbox(t.TempDir())
-	require.NoError(t, err)
-	defer outbox.Close()
-
-	h := newIAMTestHelper(t)
-	h.applySACreate(t, "sa-admin")
-	h.applyGrantWildcardPut(t, "sa-admin", iam.RoleAdmin)
-	h.applyKeyCreate(t, "AK-admin", "sa-admin", "adminSecret")
-
-	base, backend := setupTestServerWithBackend(t,
-		WithIAMStore(h.store),
-		WithAuth([]s3auth.Credentials{{AccessKey: "AK-admin", SecretKey: "adminSecret"}}),
-		WithAuditOutbox(outbox),
-		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
-	)
-	require.NoError(t, backend.CreateBucket(context.Background(), audit.BucketName))
-	_, err = backend.PutObject(context.Background(), audit.BucketName, "metadata/s3/readable.avro", bytes.NewReader([]byte("ok")), "application/octet-stream")
-	require.NoError(t, err)
-
-	req, err := http.NewRequest(http.MethodGet, base+"/"+audit.BucketName+"/metadata/s3/readable.avro", nil)
-	require.NoError(t, err)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "AK-admin", "adminSecret", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	events, err := outbox.Pending(context.Background(), 100)
-	require.NoError(t, err)
-	for _, ev := range events {
-		if ev.Operation == "GetObject" && ev.Bucket == audit.BucketName && ev.Key == "metadata/s3/readable.avro" {
-			require.Equal(t, int32(http.StatusOK), ev.Status)
-			require.Equal(t, "allow", ev.AuthStatus)
-			require.Equal(t, "sa-admin", ev.SAID)
-			return
-		}
-	}
-	t.Fatal("signed audit bucket read event not found")
 }
 
 func TestAuditEnvelope_RecordsAuthFailure(t *testing.T) {

@@ -37,14 +37,6 @@ func inProcessPropose(applier *iam.Applier) iam.ProposeFunc {
 			return applier.ApplyKeyCreate(payload)
 		case clusterpb.MetaCmdTypeIAMKeyRevoke:
 			return applier.ApplyKeyRevoke(payload)
-		case clusterpb.MetaCmdTypeIAMGrantPut:
-			return applier.ApplyGrantPut(payload)
-		case clusterpb.MetaCmdTypeIAMGrantDelete:
-			return applier.ApplyGrantDelete(payload)
-		case clusterpb.MetaCmdTypeIAMGrantWildcardPut:
-			return applier.ApplyGrantWildcardPut(payload)
-		case clusterpb.MetaCmdTypeIAMInitFirstSA:
-			return applier.ApplyInitFirstSA(payload)
 		default:
 			return fmt.Errorf("inProcessPropose: unhandled cmd type %v", t)
 		}
@@ -196,68 +188,5 @@ func TestRegisterIAMAdminRoutes_SAGetAndDelete(t *testing.T) {
 	}
 	if _, ok := store.LookupSA(created.SAID); ok {
 		t.Fatalf("SA not deleted")
-	}
-}
-
-// TestRegisterIAMAdminRoutes_WildcardGrantForbidden verifies that PUT /v1/iam/grant
-// with bucket:"*" on a non-default SA returns 403 (not 500).
-// Regression: statusForCode was missing the "forbidden" case and fell through to 500.
-func TestRegisterIAMAdminRoutes_WildcardGrantForbidden(t *testing.T) {
-	api, _ := newAdminAPIWithStore(t)
-	cli := startIAMAdminTestServer(t, api)
-
-	sa := createSAViaAPI(t, cli, "nondefault")
-
-	body, _ := json.Marshal(iam.GrantPutRequest{SAID: sa.SAID, Bucket: "*", Role: "Admin"})
-	req, _ := http.NewRequest("PUT", "http://unix/v1/iam/grant", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := cli.Do(req)
-	if err != nil {
-		t.Fatalf("grant put wildcard: %v", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden for wildcard grant on non-default SA, got %d", resp.StatusCode)
-	}
-}
-
-func TestRegisterIAMAdminRoutes_GrantListQuery(t *testing.T) {
-	api, _ := newAdminAPIWithStore(t)
-	cli := startIAMAdminTestServer(t, api)
-
-	sa := createSAViaAPI(t, cli, "alice")
-
-	for _, b := range []string{"b1", "b2"} {
-		body, _ := json.Marshal(iam.GrantPutRequest{SAID: sa.SAID, Bucket: b, Role: "Read"})
-		req, _ := http.NewRequest("PUT", "http://unix/v1/iam/grant", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := cli.Do(req)
-		if err != nil {
-			t.Fatalf("grant put %s: %v", b, err)
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("grant put %s status=%d body=%s", b, resp.StatusCode, respBody)
-		}
-	}
-
-	// Query string passes through.
-	resp, err := cli.Get("http://unix/v1/iam/grant?sa=" + sa.SAID + "&bucket=b1")
-	if err != nil {
-		t.Fatalf("grant list: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("list status=%d body=%s", resp.StatusCode, body)
-	}
-	var items []iam.GrantListItem
-	if err := json.Unmarshal(body, &items); err != nil {
-		t.Fatalf("decode: %v body=%s", err, body)
-	}
-	if len(items) != 1 || items[0].Bucket != "b1" {
-		t.Fatalf("grant filter mismatch: %+v", items)
 	}
 }

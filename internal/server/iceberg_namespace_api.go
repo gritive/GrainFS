@@ -6,7 +6,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
-	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
@@ -96,9 +95,8 @@ func (s *Server) icebergS3CredOverrides(ctx context.Context, warehouse string) m
 	if !ok || key == nil || key.SecretKey == "" {
 		return map[string]string{}
 	}
-	if s.iamStore.LookupGrant(key.SAID, bucket) < iam.RoleRead {
-		return map[string]string{}
-	}
+	// Legacy LookupGrant check removed in §2 (Role/Grant model gone).
+	// Access is controlled by policy.Evaluate; credential forwarding here is best-effort.
 	return map[string]string{
 		"s3.access-key-id":     key.AccessKey,
 		"s3.secret-access-key": key.SecretKey,

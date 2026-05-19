@@ -1,7 +1,5 @@
 package s3auth
 
-import "context"
-
 // ACLGrant is a bitmask for S3 canned ACL values.
 // Wire format: stored as uint32 in Protobuf field 12 of ECObjectMeta.
 type ACLGrant uint8
@@ -30,8 +28,8 @@ const (
 	ListMultipartUploads
 	// Phase 5d: policy CRUD becomes IAM-gated. Read maps to GetBucketPolicy
 	// (Read+ on bucket); Put/Delete map to Admin-only operations. Append
-	// only — never renumber existing values; iampb.Role and on-disk grant
-	// state both pin these enum values.
+	// only — never renumber existing values; the on-disk MetaCmd numbering
+	// pins these enum values.
 	GetBucketPolicy
 	PutBucketPolicy
 	DeleteBucketPolicy
@@ -54,11 +52,6 @@ type PermCheckInput struct {
 	Resource  ResourceRef
 	Action    S3Action
 	ObjectACL ACLGrant // 0 if metadata not yet loaded
-}
-
-// Authorizer evaluates whether a request is permitted.
-type Authorizer interface {
-	Allow(ctx context.Context, in PermCheckInput) bool
 }
 
 // ParseACLHeader converts an x-amz-acl header value to ACLGrant.

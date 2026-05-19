@@ -89,12 +89,10 @@ func (s *Server) buildAuthorizer() {
 	}
 	s.authz = s3auth.NewRequestAuthorizer(
 		iamStore,
-		func(saID, bucket string, action s3auth.S3Action) bool {
-			if s.iamStore == nil {
-				return false
-			}
-			return iam.CheckAccess(s.iamStore, saID, bucket, action)
-		},
+		// iamCheck: legacy Role/Grant path removed in §2. Returning false here
+		// causes Layer 1 to deny when auth is enabled and no bucket policy allows.
+		// This is intentional — new callers use policy.Evaluate via Authorizer.
+		func(_ string, _ string, _ s3auth.S3Action) bool { return false },
 		s.policyStore,
 		s.iamAudit,
 		iam.PrincipalFromContext,

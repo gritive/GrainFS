@@ -649,16 +649,9 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyCreateScoped)
 	case clusterpb.MetaCmdTypeIAMKeyRevoke:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyRevoke)
-	case clusterpb.MetaCmdTypeIAMGrantPut:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantPut)
-	case clusterpb.MetaCmdTypeIAMGrantDelete:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantDelete)
-	case clusterpb.MetaCmdTypeIAMGrantWildcardPut:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardPut)
-	case clusterpb.MetaCmdTypeIAMGrantWildcardDelete:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardDelete)
-	case clusterpb.MetaCmdTypeIAMInitFirstSA:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyInitFirstSA)
+	// IAMGrantPut/Delete/WildcardPut/WildcardDelete/InitFirstSA (enum 25-31) are
+	// retained in cluster.fbs for backcompat with pre-§2 snapshots but no longer
+	// have apply branches. Legacy cmd types fall through to default (skip).
 	case clusterpb.MetaCmdTypeIAMBucketUpstreamPut:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyBucketUpstreamPut)
 	case clusterpb.MetaCmdTypeIAMBucketUpstreamDelete:

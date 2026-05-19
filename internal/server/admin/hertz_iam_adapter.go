@@ -82,34 +82,6 @@ func iamRevokeKeyHandler(d *Deps) app.HandlerFunc {
 	}
 }
 
-func iamDeleteGrantHandler(d *Deps) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		var req iam.GrantDeleteRequest
-		if err := decodeOptionalJSON(c.Request.Body(), &req); err != nil {
-			writeError(c, err)
-			return
-		}
-		if err := DeleteGrant(ctx, d, req); err != nil {
-			writeError(c, err)
-			return
-		}
-		c.SetStatusCode(consts.StatusNoContent)
-	}
-}
-
-func iamListGrantsHandler(d *Deps) app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		sa := string(c.Query("sa"))
-		bucket := string(c.Query("bucket"))
-		resp, err := ListGrants(ctx, d, sa, bucket)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		writeOK(c, consts.StatusOK, resp)
-	}
-}
-
 func iamDeleteBucketUpstreamHandler(d *Deps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		if err := DeleteBucketUpstream(ctx, d, c.Param("bucket")); err != nil {
