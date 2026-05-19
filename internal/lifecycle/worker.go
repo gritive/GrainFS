@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,9 +23,15 @@ type ObjectDeleter interface {
 }
 
 // Scrubbable is the subset of scrubber.Scrubbable used by the lifecycle worker.
+//
+// ScanObjects stays on the interface for backward compatibility with the
+// scrubber package; the lifecycle worker itself no longer uses it as of
+// Task 9 (it now drives ScanObjectsGrouped instead).
 type Scrubbable interface {
 	ListBuckets(ctx context.Context) ([]string, error)
 	ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error)
+	ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+	ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
 }
 
 // Stats tracks lifecycle worker activity.
@@ -87,6 +92,11 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
+// RunCycleForTest is a thin public wrapper around runCycle so package-external
+// tests (and the in-package regression test asserting no N×ListVersions calls)
+// can drive a single cycle deterministically.
+func (w *Worker) RunCycleForTest(ctx context.Context) { w.runCycle(ctx) }
+
 // Stats returns a copy of the current worker statistics.
 func (w *Worker) Stats() Stats {
 	var lastRun time.Time
@@ -122,26 +132,28 @@ func (w *Worker) runCycle(ctx context.Context) {
 			continue
 		}
 
-		objs, err := w.backend.ScanObjects(bucket)
+		groups, err := w.backend.ScanObjectsGrouped(bucket)
 		if err != nil {
-			log.Error().Str("bucket", bucket).Err(err).Msg("lifecycle: scan objects")
+			log.Error().Str("bucket", bucket).Err(err).Msg("lifecycle: scan objects grouped")
 			continue
 		}
 
-		for obj := range objs {
+		for g := range groups {
 			if ctx.Err() != nil {
-				go func() {
-					for range objs {
-					}
-				}() // drain producer to prevent goroutine leak
+				go drainGroups(groups) // drain producer to prevent goroutine leak
 				return
 			}
-			w.objectsChecked.Add(1)
-			w.applyRules(ctx, obj, cfg.Rules, now)
+			w.objectsChecked.Add(int64(len(g.Versions)))
+			w.applyRulesToGroup(ctx, g, cfg.Rules, now)
 		}
 	}
 
 	w.lastRunNano.Store(now.UnixNano())
+}
+
+func drainGroups(ch <-chan storage.ObjectKeyGroup) {
+	for range ch {
+	}
 }
 
 func (w *Worker) currentTime() time.Time {
@@ -151,67 +163,94 @@ func (w *Worker) currentTime() time.Time {
 	return time.Now()
 }
 
-func (w *Worker) applyRules(ctx context.Context, obj scrubber.ObjectRecord, rules []Rule, now time.Time) {
-	for _, rule := range rules {
-		if rule.Status != StatusEnabled {
+// applyRulesToGroup folds Filter + Expiration + NoncurrentVersionExpiration
+// evaluation over a single ObjectKeyGroup. Per S3 spec the Filter scopes the
+// per-current-version expiration path; NoncurrentVersionExpiration still
+// applies to noncurrent versions regardless of the filter match on the
+// current version (this is a behavior change from the pre-Task-9 worker,
+// which gated both paths on the filter).
+func (w *Worker) applyRulesToGroup(ctx context.Context, g storage.ObjectKeyGroup, rules []Rule, now time.Time) {
+	if len(g.Versions) == 0 {
+		return
+	}
+	var current *storage.ObjectVersionRecord
+	if g.Versions[0].IsLatest {
+		current = &g.Versions[0]
+	}
+	for _, r := range rules {
+		if r.Status != StatusEnabled {
 			continue
 		}
-		if rule.Filter != nil && rule.Filter.Prefix != "" {
-			if !strings.HasPrefix(obj.Key, rule.Filter.Prefix) {
-				continue
-			}
+		if current != nil && r.Expiration != nil && MatchFilter(current, g.Key, r.Filter) {
+			w.applyExpiration(ctx, g, current, r.Expiration, now)
 		}
-
-		if exp := rule.Expiration; exp != nil && exp.Days > 0 && !obj.IsDeleteMarker {
-			objTime := time.Unix(obj.LastModified, 0)
-			if now.Sub(objTime) >= time.Duration(exp.Days)*24*time.Hour {
-				if err := w.limiter.Wait(ctx); err != nil {
-					return // ctx cancelled
-				}
-				if err := w.deleter.DeleteObject(ctx, obj.Bucket, obj.Key); err != nil {
-					log.Error().Str("bucket", obj.Bucket).Str("key", obj.Key).Err(err).Msg("lifecycle: delete object")
-				} else {
-					w.expired.Add(1)
-				}
-				continue // skip version expiration for deleted current object
-			}
-		}
-
-		if nce := rule.NoncurrentVersionExpiration; nce != nil {
-			all, err := w.deleter.ListObjectVersions(obj.Bucket, obj.Key, 0)
-			if err != nil {
-				log.Error().Str("bucket", obj.Bucket).Str("key", obj.Key).Err(err).Msg("lifecycle: list versions")
-				continue
-			}
-			// Narrow to exact-key matches — ListObjectVersions does prefix match.
-			versions := all[:0]
-			for _, v := range all {
-				if v.Key == obj.Key {
-					versions = append(versions, v)
-				}
-			}
-			// versions expected newest-first (as returned by ListObjectVersions)
-			noncurrentIdx := 0
-			for _, v := range versions {
-				if v.IsLatest {
-					continue
-				}
-				// S3 spec: when both fields are set, both conditions must be met (AND).
-				// An unset field (0) is treated as "no constraint" (always satisfied).
-				beyondCount := nce.NewerNoncurrentVersions <= 0 || noncurrentIdx >= nce.NewerNoncurrentVersions
-				beyondAge := nce.NoncurrentDays <= 0 || now.Sub(time.Unix(v.LastModified, 0)) >= time.Duration(nce.NoncurrentDays)*24*time.Hour
-				if (nce.NewerNoncurrentVersions > 0 || nce.NoncurrentDays > 0) && beyondCount && beyondAge {
-					if err := w.limiter.Wait(ctx); err != nil {
-						return // ctx cancelled
-					}
-					if err := w.deleter.DeleteObjectVersion(obj.Bucket, obj.Key, v.VersionID); err != nil {
-						log.Error().Str("key", obj.Key).Str("versionID", v.VersionID).Err(err).Msg("lifecycle: delete version")
-					} else {
-						w.versionsPruned.Add(1)
-					}
-				}
-				noncurrentIdx++
-			}
+		if r.NoncurrentVersionExpiration != nil {
+			w.applyNoncurrent(ctx, g, r.NoncurrentVersionExpiration, now)
 		}
 	}
+}
+
+func (w *Worker) applyExpiration(ctx context.Context, g storage.ObjectKeyGroup, current *storage.ObjectVersionRecord, exp *Expiration, now time.Time) {
+	if current.IsDeleteMarker {
+		if exp.ExpiredObjectDeleteMarker != nil && *exp.ExpiredObjectDeleteMarker && len(g.Versions) == 1 {
+			w.deleteVersion(ctx, g.Bucket, g.Key, current.VersionID)
+		}
+		return
+	}
+	var trigger time.Time
+	switch {
+	case exp.Date != nil:
+		trigger = ExpirationTriggerDate(*exp.Date)
+	case exp.Days > 0:
+		trigger = ExpirationTriggerDays(current.LastModified, exp.Days)
+	default:
+		return
+	}
+	if !now.Before(trigger) {
+		w.deleteObject(ctx, g.Bucket, g.Key)
+	}
+}
+
+func (w *Worker) applyNoncurrent(ctx context.Context, g storage.ObjectKeyGroup, nce *NoncurrentVersionExpiration, now time.Time) {
+	if nce.NewerNoncurrentVersions <= 0 && nce.NoncurrentDays <= 0 {
+		return
+	}
+	noncurrentIdx := 0
+	for i := range g.Versions {
+		v := &g.Versions[i]
+		if v.IsLatest {
+			continue
+		}
+		// S3 spec: when both fields are set, both conditions must be met (AND).
+		// An unset field (<=0) is treated as "no constraint" (always satisfied).
+		beyondCount := nce.NewerNoncurrentVersions <= 0 || noncurrentIdx >= nce.NewerNoncurrentVersions
+		beyondAge := nce.NoncurrentDays <= 0 ||
+			now.Sub(time.Unix(v.LastModified, 0)) >= time.Duration(nce.NoncurrentDays)*24*time.Hour
+		if beyondCount && beyondAge {
+			w.deleteVersion(ctx, g.Bucket, g.Key, v.VersionID)
+		}
+		noncurrentIdx++
+	}
+}
+
+func (w *Worker) deleteObject(ctx context.Context, bucket, key string) {
+	if err := w.limiter.Wait(ctx); err != nil {
+		return // ctx cancelled
+	}
+	if err := w.deleter.DeleteObject(ctx, bucket, key); err != nil {
+		log.Error().Str("bucket", bucket).Str("key", key).Err(err).Msg("lifecycle: delete object")
+		return
+	}
+	w.expired.Add(1)
+}
+
+func (w *Worker) deleteVersion(ctx context.Context, bucket, key, versionID string) {
+	if err := w.limiter.Wait(ctx); err != nil {
+		return // ctx cancelled
+	}
+	if err := w.deleter.DeleteObjectVersion(bucket, key, versionID); err != nil {
+		log.Error().Str("bucket", bucket).Str("key", key).Str("versionID", versionID).Err(err).Msg("lifecycle: delete version")
+		return
+	}
+	w.versionsPruned.Add(1)
 }

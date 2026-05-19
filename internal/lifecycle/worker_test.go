@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +17,16 @@ import (
 
 // --- mock backend ---
 
+// mockBackend implements lifecycle.Scrubbable for unit tests. When `groups`
+// is set for a bucket, ScanObjectsGrouped returns those groups directly;
+// otherwise it synthesises one group per entry in `objects` (one synthetic
+// version each, marked IsLatest=true, propagating IsDeleteMarker). The
+// scrubber-style `objects` field stays for ScanObjects compatibility and
+// for tests that pre-date Task 9.
 type mockBackend struct {
 	buckets []string
 	objects map[string][]scrubber.ObjectRecord
+	groups  map[string][]storage.ObjectKeyGroup
 }
 
 func (m *mockBackend) ListBuckets(ctx context.Context) ([]string, error) {
@@ -36,13 +44,46 @@ func (m *mockBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, 
 	return ch, nil
 }
 
+func (m *mockBackend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	var groups []storage.ObjectKeyGroup
+	if g, ok := m.groups[bucket]; ok {
+		groups = append([]storage.ObjectKeyGroup(nil), g...)
+	} else {
+		for _, r := range m.objects[bucket] {
+			groups = append(groups, storage.ObjectKeyGroup{
+				Bucket: r.Bucket,
+				Key:    r.Key,
+				Versions: []storage.ObjectVersionRecord{{
+					IsLatest:       true,
+					IsDeleteMarker: r.IsDeleteMarker,
+					LastModified:   r.LastModified,
+				}},
+			})
+		}
+	}
+	ch := make(chan storage.ObjectKeyGroup, len(groups))
+	for _, g := range groups {
+		ch <- g
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *mockBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	_ = bucket
+	ch := make(chan storage.MultipartUploadRecord)
+	close(ch)
+	return ch, nil
+}
+
 // --- mock deleter ---
 
 type mockDeleter struct {
-	mu              sync.Mutex
-	deleted         []string                            // "bucket/key"
-	deletedVersions []string                            // "bucket/key/versionID"
-	versions        map[string][]*storage.ObjectVersion // "bucket/key" → versions
+	mu                      sync.Mutex
+	deleted                 []string                            // "bucket/key"
+	deletedVersions         []string                            // "bucket/key/versionID"
+	versions                map[string][]*storage.ObjectVersion // "bucket/key" → versions
+	listObjectVersionsCalls int
 }
 
 func (m *mockDeleter) DeleteObject(ctx context.Context, bucket, key string) error {
@@ -63,6 +104,7 @@ func (m *mockDeleter) DeleteObjectVersion(bucket, key, versionID string) error {
 func (m *mockDeleter) ListObjectVersions(bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.listObjectVersionsCalls++
 	return m.versions[bucket+"/"+prefix], nil
 }
 
@@ -302,7 +344,8 @@ func TestWorker_NoBucketConfig(t *testing.T) {
 }
 
 // TestWorker_NoncurrentVersionExpiration_ByCount verifies that keeping only
-// NewerNoncurrentVersions versions works.
+// NewerNoncurrentVersions versions works. Drives the post-Task-9 worker which
+// walks g.Versions directly (no per-object ListObjectVersions call).
 func TestWorker_NoncurrentVersionExpiration_ByCount(t *testing.T) {
 	db := newTestDB(t)
 	store := NewStore(db)
@@ -321,20 +364,20 @@ func TestWorker_NoncurrentVersionExpiration_ByCount(t *testing.T) {
 	oldTime := time.Now().Add(-100 * 24 * time.Hour).Unix()
 	backend := &mockBackend{
 		buckets: []string{"bucket"},
-		objects: map[string][]scrubber.ObjectRecord{
-			"bucket": {{Bucket: "bucket", Key: "obj", DataShards: 4, LastModified: oldTime}},
+		groups: map[string][]storage.ObjectKeyGroup{
+			"bucket": {{
+				Bucket: "bucket",
+				Key:    "obj",
+				Versions: []storage.ObjectVersionRecord{
+					{VersionID: "v4", IsLatest: true, LastModified: oldTime},
+					{VersionID: "v3", LastModified: oldTime}, // keep (noncurrentIdx 0 < 2)
+					{VersionID: "v2", LastModified: oldTime}, // keep (noncurrentIdx 1 < 2)
+					{VersionID: "v1", LastModified: oldTime}, // delete (noncurrentIdx 2 >= 2)
+				},
+			}},
 		},
 	}
-	deleter := &mockDeleter{
-		versions: map[string][]*storage.ObjectVersion{
-			"bucket/obj": {
-				{Key: "obj", VersionID: "v4", IsLatest: true, LastModified: oldTime},
-				{Key: "obj", VersionID: "v3", IsLatest: false, LastModified: oldTime}, // keep (index 1 < 2+1=3)
-				{Key: "obj", VersionID: "v2", IsLatest: false, LastModified: oldTime}, // keep (index 2 < 3)
-				{Key: "obj", VersionID: "v1", IsLatest: false, LastModified: oldTime}, // delete (index 3 >= 3)
-			},
-		},
-	}
+	deleter := &mockDeleter{}
 
 	w := newWorker(store, backend, deleter)
 	w.runCycle(context.Background())
@@ -363,18 +406,18 @@ func TestWorker_NoncurrentVersionExpiration_ByAge(t *testing.T) {
 
 	backend := &mockBackend{
 		buckets: []string{"bucket"},
-		objects: map[string][]scrubber.ObjectRecord{
-			"bucket": {{Bucket: "bucket", Key: "obj", DataShards: 4, LastModified: recentTime}},
+		groups: map[string][]storage.ObjectKeyGroup{
+			"bucket": {{
+				Bucket: "bucket",
+				Key:    "obj",
+				Versions: []storage.ObjectVersionRecord{
+					{VersionID: "v2", IsLatest: true, LastModified: recentTime},
+					{VersionID: "v1", LastModified: oldTime},
+				},
+			}},
 		},
 	}
-	deleter := &mockDeleter{
-		versions: map[string][]*storage.ObjectVersion{
-			"bucket/obj": {
-				{Key: "obj", VersionID: "v2", IsLatest: true, LastModified: recentTime},
-				{Key: "obj", VersionID: "v1", IsLatest: false, LastModified: oldTime},
-			},
-		},
-	}
+	deleter := &mockDeleter{}
 
 	w := newWorker(store, backend, deleter)
 	w.runCycle(context.Background())
@@ -410,4 +453,99 @@ func TestWorker_Stats(t *testing.T) {
 	stats := w.Stats()
 	assert.Equal(t, int64(2), stats.ObjectsChecked)
 	assert.Equal(t, int64(2), stats.Expired)
+}
+
+// --- regression guard: post-Task-9 worker drives ScanObjectsGrouped and
+// must NOT call ListObjectVersions on the per-object path. ---
+
+type countingBackend struct {
+	buckets               []string
+	keys                  int
+	scanObjectsGroupedHit atomic.Int64
+	scanLocalMPUHit       atomic.Int64
+	listBucketsHit        atomic.Int64
+}
+
+func newCountingBackend(_ *testing.T, n int) *countingBackend {
+	return &countingBackend{buckets: []string{"b"}, keys: n}
+}
+
+func (c *countingBackend) ListBuckets(_ context.Context) ([]string, error) {
+	c.listBucketsHit.Add(1)
+	return c.buckets, nil
+}
+
+func (c *countingBackend) ScanObjects(_ string) (<-chan scrubber.ObjectRecord, error) {
+	ch := make(chan scrubber.ObjectRecord)
+	close(ch)
+	return ch, nil
+}
+
+func (c *countingBackend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	c.scanObjectsGroupedHit.Add(1)
+	old := time.Now().Add(-30 * 24 * time.Hour).Unix()
+	ch := make(chan storage.ObjectKeyGroup, c.keys)
+	for i := 0; i < c.keys; i++ {
+		ch <- storage.ObjectKeyGroup{
+			Bucket: bucket,
+			Key:    "k" + itoa(i),
+			Versions: []storage.ObjectVersionRecord{{
+				VersionID:    "v",
+				IsLatest:     true,
+				LastModified: old,
+			}},
+		}
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (c *countingBackend) ScanLocalMultipartUploads(_ string) (<-chan storage.MultipartUploadRecord, error) {
+	c.scanLocalMPUHit.Add(1)
+	ch := make(chan storage.MultipartUploadRecord)
+	close(ch)
+	return ch, nil
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	const digits = "0123456789"
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = digits[i%10]
+		i /= 10
+	}
+	return string(buf[pos:])
+}
+
+// TestWorker_NoNListVersionsCalls asserts that one cycle over N keys does not
+// trigger any ListObjectVersions calls on the deleter — the post-Task-9 worker
+// must derive everything from ScanObjectsGrouped. Also asserts the grouped
+// scan was actually invoked, so the test cannot pass by silently doing nothing.
+func TestWorker_NoNListVersionsCalls(t *testing.T) {
+	const N = 100
+	db := newTestDB(t)
+	store := NewStore(db)
+	raw := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>`)
+	require.NoError(t, store.PutRaw("b", raw))
+
+	backend := newCountingBackend(t, N)
+	deleter := &mockDeleter{}
+
+	w := NewWorker(store, backend, deleter, time.Minute)
+	w.limiter = rate.NewLimiter(rate.Inf, 0) // disable rate-limit pacing in tests
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	w.RunCycleForTest(ctx)
+
+	deleter.mu.Lock()
+	calls := deleter.listObjectVersionsCalls
+	deleter.mu.Unlock()
+	assert.Zero(t, calls, "new worker must not call ListObjectVersions on the per-object path")
+	assert.GreaterOrEqual(t, backend.scanObjectsGroupedHit.Load(), int64(1),
+		"worker must drive ScanObjectsGrouped — non-vacuous guard")
 }
