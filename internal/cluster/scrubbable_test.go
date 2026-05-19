@@ -16,6 +16,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
@@ -309,4 +310,217 @@ func TestReadShard_MissingFile(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	_, err := b.ReadShard("bkt", "k", filepath.Join(t.TempDir(), "nope"))
 	require.Error(t, err)
+}
+
+// --- Task 6: ScanObjectsGrouped / ScanLocalMultipartUploads ---
+
+// writeVersionedObjectMetaTagged seeds a versioned object metadata entry with
+// an optional Tags slice. Used by ScanObjectsGrouped tests to verify Tags
+// flow end-to-end through ListObjectVersions → ScanObjectsGrouped.
+func writeVersionedObjectMetaTagged(t *testing.T, b *DistributedBackend, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
+	t.Helper()
+	meta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         size,
+		ContentType:  "application/octet-stream",
+		ETag:         etag,
+		LastModified: time.Now().Unix(),
+		Tags:         tags,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
+			return err
+		}
+		if err := txn.Set(objectMetaKeyV(bucket, key, versionID), meta); err != nil {
+			return err
+		}
+		return txn.Set(latestKey(bucket, key), []byte(versionID))
+	}))
+}
+
+func drainObjectKeyGroups(t *testing.T, ch <-chan storage.ObjectKeyGroup) []storage.ObjectKeyGroup {
+	t.Helper()
+	var out []storage.ObjectKeyGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		select {
+		case g, ok := <-ch:
+			if !ok {
+				return out
+			}
+			// Copy Versions to defeat pool reuse caveat in scan_types.go.
+			cp := append([]storage.ObjectVersionRecord(nil), g.Versions...)
+			out = append(out, storage.ObjectKeyGroup{Bucket: g.Bucket, Key: g.Key, Versions: cp})
+		case <-ctx.Done():
+			t.Fatalf("ObjectKeyGroup channel did not close within timeout")
+			return out
+		}
+	}
+}
+
+func drainMultipartRecords(t *testing.T, ch <-chan storage.MultipartUploadRecord) []storage.MultipartUploadRecord {
+	t.Helper()
+	var out []storage.MultipartUploadRecord
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		select {
+		case rec, ok := <-ch:
+			if !ok {
+				return out
+			}
+			out = append(out, rec)
+		case <-ctx.Done():
+			t.Fatalf("MultipartUploadRecord channel did not close within timeout")
+			return out
+		}
+	}
+}
+
+func TestDistributedBackend_ScanObjectsGrouped_EmptyBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+
+	ch, err := b.ScanObjectsGrouped("bkt")
+	require.NoError(t, err)
+	groups := drainObjectKeyGroups(t, ch)
+	assert.Empty(t, groups)
+}
+
+func TestDistributedBackend_ScanObjectsGrouped_MissingBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	_, err := b.ScanObjectsGrouped("no-such-bucket")
+	assert.Error(t, err)
+}
+
+func TestDistributedBackend_ScanObjectsGrouped_GroupsByKey(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+
+	// Two versions of "a" and one of "b". UUIDv7 is lex-ASC-by-time; the
+	// scan returns newest-first within a key, so v2 > v1 lexically.
+	writeVersionedObjectMeta(t, b, "bkt", "a", "01AAAA0001", "etag-a-v1", 11)
+	writeVersionedObjectMeta(t, b, "bkt", "a", "01AAAA0002", "etag-a-v2", 22)
+	writeVersionedObjectMeta(t, b, "bkt", "b", "01BBBB0001", "etag-b-v1", 33)
+
+	ch, err := b.ScanObjectsGrouped("bkt")
+	require.NoError(t, err)
+	groups := drainObjectKeyGroups(t, ch)
+
+	require.Len(t, groups, 2)
+
+	// Groups should arrive in key-ASC order ("a" before "b").
+	assert.Equal(t, "a", groups[0].Key)
+	assert.Equal(t, "bkt", groups[0].Bucket)
+	require.Len(t, groups[0].Versions, 2)
+	// Newest-first inside the group: VersionID DESC.
+	assert.Equal(t, "01AAAA0002", groups[0].Versions[0].VersionID)
+	assert.Equal(t, "etag-a-v2", groups[0].Versions[0].ETag)
+	assert.True(t, groups[0].Versions[0].IsLatest, "newest version must be IsLatest=true")
+	assert.Equal(t, "01AAAA0001", groups[0].Versions[1].VersionID)
+	assert.False(t, groups[0].Versions[1].IsLatest, "older version must be IsLatest=false")
+
+	assert.Equal(t, "b", groups[1].Key)
+	require.Len(t, groups[1].Versions, 1)
+	assert.Equal(t, "01BBBB0001", groups[1].Versions[0].VersionID)
+}
+
+func TestDistributedBackend_ScanObjectsGrouped_PassesDeleteMarkers(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+
+	// One live version + one delete marker on the same key. Lifecycle
+	// noncurrent expiration needs to see both.
+	writeVersionedObjectMeta(t, b, "bkt", "k", "01AAAA0001", "etag-live", 10)
+	writeVersionedObjectMeta(t, b, "bkt", "k", "01AAAA0002", deleteMarkerETag, 0)
+
+	ch, err := b.ScanObjectsGrouped("bkt")
+	require.NoError(t, err)
+	groups := drainObjectKeyGroups(t, ch)
+
+	require.Len(t, groups, 1)
+	require.Len(t, groups[0].Versions, 2, "delete markers must pass through")
+	// Newest is the delete marker.
+	assert.True(t, groups[0].Versions[0].IsDeleteMarker)
+	assert.False(t, groups[0].Versions[1].IsDeleteMarker)
+}
+
+// Phase 2 invariant: Tags written into objectMeta surface through
+// ListObjectVersions and therefore through ScanObjectsGrouped.
+func TestDistributedBackend_ScanObjectsGrouped_PreservesTags(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+
+	tags := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "team", Value: "data"}}
+	writeVersionedObjectMetaTagged(t, b, "bkt", "tagged", "01AAAA0001", "etag", 5, tags)
+
+	ch, err := b.ScanObjectsGrouped("bkt")
+	require.NoError(t, err)
+	groups := drainObjectKeyGroups(t, ch)
+
+	require.Len(t, groups, 1)
+	require.Len(t, groups[0].Versions, 1)
+	assert.Equal(t, tags, groups[0].Versions[0].Tags)
+}
+
+func TestDistributedBackend_ScanLocalMultipartUploads_EmptyBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+
+	ch, err := b.ScanLocalMultipartUploads("bkt")
+	require.NoError(t, err)
+	recs := drainMultipartRecords(t, ch)
+	assert.Empty(t, recs)
+}
+
+func TestDistributedBackend_ScanLocalMultipartUploads_MissingBucket(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	_, err := b.ScanLocalMultipartUploads("no-such-bucket")
+	assert.Error(t, err)
+}
+
+func TestDistributedBackend_ScanLocalMultipartUploads_EmitsActiveUploads(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+	require.NoError(t, b.CreateBucket(context.Background(), "other"))
+
+	writeMultipartMeta(t, b, "upload-aaa", clusterMultipartMeta{
+		Bucket:      "bkt",
+		Key:         "a.bin",
+		ContentType: "application/octet-stream",
+		CreatedAt:   100,
+	})
+	writeMultipartMeta(t, b, "upload-bbb", clusterMultipartMeta{
+		Bucket:      "bkt",
+		Key:         "b.bin",
+		ContentType: "application/octet-stream",
+		CreatedAt:   200,
+	})
+	// Different-bucket upload must be filtered out.
+	writeMultipartMeta(t, b, "upload-other", clusterMultipartMeta{
+		Bucket:      "other",
+		Key:         "x.bin",
+		ContentType: "application/octet-stream",
+		CreatedAt:   300,
+	})
+
+	ch, err := b.ScanLocalMultipartUploads("bkt")
+	require.NoError(t, err)
+	recs := drainMultipartRecords(t, ch)
+
+	require.Len(t, recs, 2)
+	got := map[string]storage.MultipartUploadRecord{}
+	for _, r := range recs {
+		got[r.UploadID] = r
+	}
+	require.Contains(t, got, "upload-aaa")
+	assert.Equal(t, "bkt", got["upload-aaa"].Bucket)
+	assert.Equal(t, "a.bin", got["upload-aaa"].Key)
+	assert.Equal(t, int64(100), got["upload-aaa"].InitiatedAt)
+
+	require.Contains(t, got, "upload-bbb")
+	assert.Equal(t, "b.bin", got["upload-bbb"].Key)
+	assert.Equal(t, int64(200), got["upload-bbb"].InitiatedAt)
 }
