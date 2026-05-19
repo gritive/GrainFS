@@ -32,13 +32,12 @@ func NewRewrapScrubber(k *DEKKeeper, be Backend) *RewrapScrubber {
 // reseals with the active DEK, and atomic-swaps payload+gen on the backend.
 // The function is safe to call while other goroutines read records; atomicity
 // of the (payload, gen) update is enforced by the Backend implementation.
+//
+// Uses DEKKeeper.Rewrap which folds Open+Seal into a single RLock acquisition,
+// halving the per-record locking overhead.
 func (s *RewrapScrubber) RewrapGeneration(ctx context.Context, oldGen uint32) error {
 	return s.be.IterByDEKGen(ctx, oldGen, func(key string, payload []byte) error {
-		plain, err := s.k.Open(payload, oldGen)
-		if err != nil {
-			return err
-		}
-		newCT, newGen, err := s.k.Seal(plain)
+		newCT, newGen, err := s.k.Rewrap(payload, oldGen)
 		if err != nil {
 			return err
 		}

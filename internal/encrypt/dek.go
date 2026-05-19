@@ -71,12 +71,16 @@ func NewDEKKeeper(kek []byte) (*DEKKeeper, error) {
 	}, nil
 }
 
-// Active returns the current active generation number and its wrapped DEK bytes.
-// The returned []byte is a reference into internal state — do NOT mutate.
+// Active returns the current active generation number and a copy of its
+// wrapped DEK bytes. The copy prevents callers from accidentally mutating
+// internal keeper state.
 func (k *DEKKeeper) Active() (uint32, []byte) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	return k.active, k.wrap[k.active]
+	w := k.wrap[k.active]
+	out := make([]byte, len(w))
+	copy(out, w)
+	return k.active, out
 }
 
 // Seal encrypts plain using the active generation's cached AEAD.
@@ -161,6 +165,37 @@ func (k *DEKKeeper) Versions() map[uint32][]byte {
 		out[g] = append([]byte(nil), w...)
 	}
 	return out
+}
+
+// Rewrap decrypts ct with the DEK for oldGen and reseals it with the active
+// DEK in a single RLock acquisition. Used by the rewrap scrubber so each
+// record costs one lock + one AEAD-open + one AEAD-seal — half the locking
+// of separate Open+Seal calls.
+func (k *DEKKeeper) Rewrap(ct []byte, oldGen uint32) ([]byte, uint32, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	oldAEAD, ok := k.aead[oldGen]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	ns := oldAEAD.NonceSize()
+	if len(ct) < ns {
+		return nil, 0, ErrCiphertextTooShort
+	}
+	plain, err := oldAEAD.Open(nil, ct[:ns], ct[ns:], nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer zeroize(plain)
+	activeAEAD, ok := k.aead[k.active]
+	if !ok {
+		return nil, 0, ErrDEKGenUnknown
+	}
+	nonce := make([]byte, activeAEAD.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, 0, err
+	}
+	return activeAEAD.Seal(nonce, nonce, plain, nil), k.active, nil
 }
 
 // VersionsAndActive returns a deep copy of the wrapped-DEK map AND the active

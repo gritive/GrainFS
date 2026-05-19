@@ -3,7 +3,10 @@ package encrypt
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestDEKKeeper_GenerateInitial(t *testing.T) {
@@ -140,4 +143,98 @@ func TestDEKKeeper_VersionsIsDeepCopy(t *testing.T) {
 	if _, _, err := k.Seal([]byte("after-mutate")); err != nil {
 		t.Fatalf("Versions() returned a reference, not a copy; Seal failed: %v", err)
 	}
+}
+
+func TestDEKKeeper_ActiveReturnsCopy(t *testing.T) {
+	kek := make([]byte, 32)
+	rand.Read(kek)
+	k, _ := NewDEKKeeper(kek)
+	_, w := k.Active()
+	for i := range w {
+		w[i] = 0
+	}
+	// Mutated copy must not affect internal state.
+	if _, _, err := k.Seal([]byte("after-mutate")); err != nil {
+		t.Fatalf("Active() returned a reference, not a copy: %v", err)
+	}
+	_, w2 := k.Active()
+	for i := range w2 {
+		if w2[i] != 0 || true {
+			// w2 may have any value, but it must NOT be the same backing array as w
+			// (we just zeroed w; if shared, w2 would also be all zeros, but that
+			// would also be true if the wrapped DEK actually contained zeros — so
+			// instead, mutate w to a marker and verify w2 differs).
+			break
+		}
+	}
+	// Stronger test: zero w to a sentinel byte and confirm w2 doesn't pick it up.
+	_, w3 := k.Active()
+	for i := range w3 {
+		w3[i] = 0xAB
+	}
+	_, w4 := k.Active()
+	if len(w4) > 0 && w4[0] == 0xAB {
+		t.Fatal("Active() shares backing array across calls — internal state leaked")
+	}
+}
+
+func TestDEKKeeper_ConcurrentSealOpenRotate(t *testing.T) {
+	// Exercises the RWMutex contract under -race. 50 goroutines call Seal/Open in
+	// a loop while a ticker calls Rotate every 1ms for 200ms. Failure mode caught:
+	// any data race the RWMutex contract should prevent.
+	kek := make([]byte, 32)
+	rand.Read(kek)
+	k, _ := NewDEKKeeper(kek)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				ct, gen, err := k.Seal([]byte("payload"))
+				if err != nil {
+					t.Errorf("seal: %v", err)
+					return
+				}
+				if _, err := k.Open(ct, gen); err != nil {
+					// gen may have been pruned in a future iteration; only fail on unrelated errors
+					if !errors.Is(err, ErrDEKGenUnknown) {
+						t.Errorf("open: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	rotateStop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tick := time.NewTicker(1 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-rotateStop:
+				return
+			case <-tick.C:
+				if err := k.Rotate(); err != nil {
+					t.Errorf("rotate: %v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	close(rotateStop)
+	close(stop)
+	wg.Wait()
 }
