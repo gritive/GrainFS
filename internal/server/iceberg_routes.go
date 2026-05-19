@@ -1,8 +1,29 @@
 package server
 
-import "github.com/cloudwego/hertz/pkg/app/server"
+import (
+	"github.com/cloudwego/hertz/pkg/app/server"
+
+	"github.com/gritive/GrainFS/internal/iam/oauth"
+)
+
+const routePathOAuthTokenSuffix = "v1/oauth/tokens"
 
 func (s *Server) registerIcebergAPI(h *server.Hertz) {
+	// Build the OAuth handler once all options have been applied.
+	// iamStore and policyAuthorizer may be nil in tests that don't wire them.
+	if s.oauthHandler == nil && s.jwtKeys != nil && s.iamStore != nil && s.policyAuthorizer != nil {
+		s.oauthHandler = newIcebergOAuthHandler(
+			oauth.NewStoreResolver(s.iamStore),
+			s.jwtKeys,
+			s.policyAuthorizer,
+		)
+	}
+
+	// OAuth2 token endpoint — SigV4-free (carries own credentials in body).
+	oauthHandle := s.oauthHandlerFunc()
+	h.POST(routePrefixIceberg+routePathOAuthTokenSuffix, oauthHandle)
+	h.POST(routePrefixIcebergAIStor+routePathOAuthTokenSuffix, oauthHandle)
+
 	s.registerIcebergAPIAt(h, routePrefixIceberg)
 	s.registerIcebergAPIAt(h, routePrefixIcebergAIStor)
 }
