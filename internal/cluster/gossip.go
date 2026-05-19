@@ -31,14 +31,17 @@ type CapabilityEvidenceSource interface {
 
 // GossipSender broadcasts local node stats to all peers at a configurable interval via StreamAdmin.
 type GossipSender struct {
-	nodeID         string
-	peers          []string
-	peerProvider   func() []string
-	tr             transport.Transport
-	store          *NodeStatsStore
-	interval       time.Duration
-	logger         zerolog.Logger
-	evidenceSource CapabilityEvidenceSource
+	nodeID          string
+	peers           []string
+	peerProvider    func() []string
+	tr              transport.Transport
+	store           *NodeStatsStore
+	interval        time.Duration
+	logger          zerolog.Logger
+	evidenceSource  CapabilityEvidenceSource
+	capabilityGate  *CapabilityGate
+	evidenceAliases []string
+	aliasProvider   func() []string
 }
 
 // NewGossipSender creates a sender that broadcasts nodeID's stats at the given interval.
@@ -55,6 +58,21 @@ func NewGossipSender(nodeID string, peers []string, tr transport.Transport, stor
 
 func (s *GossipSender) WithCapabilityEvidenceSource(source CapabilityEvidenceSource) *GossipSender {
 	s.evidenceSource = source
+	return s
+}
+
+func (s *GossipSender) WithCapabilityGate(gate *CapabilityGate) *GossipSender {
+	s.capabilityGate = gate
+	return s
+}
+
+func (s *GossipSender) WithCapabilityEvidenceAliases(aliases ...string) *GossipSender {
+	s.evidenceAliases = append(s.evidenceAliases[:0], aliases...)
+	return s
+}
+
+func (s *GossipSender) WithCapabilityEvidenceAliasProvider(provider func() []string) *GossipSender {
+	s.aliasProvider = provider
 	return s
 }
 
@@ -89,7 +107,10 @@ func (s *GossipSender) Run(ctx context.Context) {
 func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	stats, ok := s.store.Get(s.nodeID)
 	if !ok {
-		return // local stats not yet populated; skip to avoid broadcasting DiskUsedPct=0
+		if s.evidenceSource == nil {
+			return // local stats not yet populated; skip to avoid broadcasting DiskUsedPct=0
+		}
+		stats = NodeStats{NodeID: s.nodeID}
 	}
 
 	var joinedAtUnix int64
@@ -101,6 +122,26 @@ func (s *GossipSender) broadcastOnce(ctx context.Context) {
 	var capabilitiesVec flatbuffers.UOffsetT
 	if s.evidenceSource != nil {
 		ev := s.evidenceSource.CapabilityEvidence(s.nodeID, time.Now())
+		if s.capabilityGate != nil {
+			s.capabilityGate.ReportEvidence(ev)
+			aliases := append([]string(nil), s.evidenceAliases...)
+			if s.aliasProvider != nil {
+				aliases = append(aliases, s.aliasProvider()...)
+			}
+			seenAliases := map[string]struct{}{s.nodeID: {}}
+			for _, alias := range aliases {
+				if alias == "" || alias == s.nodeID {
+					continue
+				}
+				if _, seen := seenAliases[alias]; seen {
+					continue
+				}
+				seenAliases[alias] = struct{}{}
+				aliasEv := ev
+				aliasEv.NodeID = compat.NodeID(alias)
+				s.capabilityGate.ReportEvidence(aliasEv)
+			}
+		}
 		if ev.Ready && len(ev.Capabilities) > 0 {
 			capabilities := make([]string, 0, len(ev.Capabilities))
 			for capability, ready := range ev.Capabilities {

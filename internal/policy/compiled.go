@@ -12,13 +12,24 @@ import (
 // actionStrings maps S3Action enum to its string representation.
 // Used at policy compile time to index rules by action.
 var actionStrings = map[string]s3auth.S3Action{
-	"s3:GetObject":    s3auth.GetObject,
-	"s3:HeadObject":   s3auth.HeadObject,
-	"s3:ListBucket":   s3auth.ListBucket,
-	"s3:PutObject":    s3auth.PutObject,
-	"s3:CreateBucket": s3auth.CreateBucket,
-	"s3:DeleteObject": s3auth.DeleteObject,
-	"s3:DeleteBucket": s3auth.DeleteBucket,
+	"s3:GetObject":                        s3auth.GetObject,
+	"s3:HeadObject":                       s3auth.HeadObject,
+	"s3:ListBucket":                       s3auth.ListBucket,
+	"s3:PutObject":                        s3auth.PutObject,
+	"s3:CreateBucket":                     s3auth.CreateBucket,
+	"s3:DeleteObject":                     s3auth.DeleteObject,
+	"s3:DeleteBucket":                     s3auth.DeleteBucket,
+	"s3:CopyObject":                       s3auth.CopyObject,
+	"s3:ListMultipartUploads":             s3auth.ListMultipartUploads,
+	"s3:GetBucketPolicy":                  s3auth.GetBucketPolicy,
+	"s3:PutBucketPolicy":                  s3auth.PutBucketPolicy,
+	"s3:DeleteBucketPolicy":               s3auth.DeleteBucketPolicy,
+	"s3:GetBucketVersioning":              s3auth.GetBucketVersioning,
+	"s3:PutBucketVersioning":              s3auth.PutBucketVersioning,
+	"s3:ListBucketVersions":               s3auth.ListBucketVersions,
+	"s3:GetObjectRetention":               s3auth.GetObjectRetention,
+	"s3:PutObjectRetention":               s3auth.PutObjectRetention,
+	"s3:GetBucketObjectLockConfiguration": s3auth.GetBucketObjectLockConfiguration,
 }
 
 // actionAliases lists additional S3Action values covered by an action at compile time.

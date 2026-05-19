@@ -81,3 +81,37 @@ func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 		t.Fatalf("partial PUT must not appear in meta: %v", getErr)
 	}
 }
+
+type bytesOnlySegmentBackend struct {
+	calls int
+}
+
+func (b *bytesOnlySegmentBackend) WriteSegment(context.Context, string, string, int, io.Reader) (SegmentRef, error) {
+	return SegmentRef{}, errors.New("reader path should not be used")
+}
+
+func (b *bytesOnlySegmentBackend) WriteSegmentBytes(_ context.Context, _ string, _ string, idx int, data []byte) (SegmentRef, error) {
+	b.calls++
+	return SegmentRef{
+		BlobID:   string(rune('a' + idx)),
+		Size:     int64(len(data)),
+		Checksum: ChecksumOf(data),
+	}, nil
+}
+
+func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
+	t.Parallel()
+	b := &bytesOnlySegmentBackend{}
+	data := makePattern((16 << 20) + 7)
+
+	obj, err := NewSegmentWriter(b).Write(context.Background(), "test", "fast", "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if b.calls != 2 {
+		t.Fatalf("byte fast path calls: want 2, got %d", b.calls)
+	}
+	if obj.Size != int64(len(data)) {
+		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
+	}
+}

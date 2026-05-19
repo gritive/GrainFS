@@ -84,9 +84,21 @@ func StartBalancer(
 
 	fsm.SetMigrationHooks(taskCh, exec, balancer)
 
+	capabilityEvidenceAliasProvider := func() []string {
+		if addrBook == nil {
+			return nil
+		}
+		addr, ok := cluster.ResolveNodeAddress(addrBook, nodeID)
+		if !ok || addr == "" || addr == nodeID {
+			return nil
+		}
+		return []string{addr}
+	}
 	sender := cluster.NewGossipSender(nodeID, peers, quicTransport, statsStore, gossipInterval).
 		WithPeerProvider(gossipPeerProvider).
-		WithCapabilityEvidenceSource(capabilityEvidence)
+		WithCapabilityEvidenceSource(capabilityEvidence).
+		WithCapabilityGate(capabilityGate).
+		WithCapabilityEvidenceAliasProvider(capabilityEvidenceAliasProvider)
 	receiver := cluster.NewGossipReceiver(quicTransport, statsStore).
 		WithCapabilityGate(capabilityGate).
 		WithNodeAddressBook(addrBook)

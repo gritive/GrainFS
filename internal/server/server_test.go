@@ -120,6 +120,9 @@ func TestMapError_PlacementTargetsUnavailable(t *testing.T) {
 	mapError(c, err)
 
 	require.Equal(t, consts.StatusServiceUnavailable, c.Response.StatusCode())
+	reason, ok := c.Get(auditErrReasonKey)
+	require.True(t, ok)
+	assert.Contains(t, reason, "shard write failed")
 	var got s3Error
 	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
 	assert.Equal(t, "ServiceUnavailable", got.Code)

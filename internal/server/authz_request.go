@@ -19,10 +19,20 @@ func s3AuthzRequestFromHertz(c *app.RequestContext) s3AuthzRequest {
 	bucket := c.Param("bucket")
 	key := strings.TrimPrefix(c.Param("key"), "/")
 	method := string(c.Method())
+	args := c.QueryArgs()
 	return s3AuthzRequest{
 		Bucket: bucket,
 		Key:    key,
 		Method: method,
-		Action: s3ActionEnum(method, string(c.URI().Path()), key != "", c.QueryArgs().Has("policy")),
+		Action: s3ActionEnum(
+			method,
+			string(c.URI().Path()),
+			key != "",
+			args.Has("policy"),
+			args.Has("versioning"),
+			args.Has("versions"),
+			args.Has("retention"),
+			args.Has("object-lock"),
+		),
 	}
 }

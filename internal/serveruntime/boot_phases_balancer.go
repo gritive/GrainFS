@@ -63,7 +63,9 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 		statsStore.Set(cluster.NodeStats{NodeID: state.nodeID, JoinedAt: time.Now()})
 		sender := cluster.NewGossipSender(state.nodeID, state.peers, state.quicTransport, statsStore, ccfg.BalancerGossipInterval()).
 			WithPeerProvider(gossipPeerProvider).
-			WithCapabilityEvidenceSource(state.metaRaft.FSM())
+			WithCapabilityEvidenceSource(state.metaRaft.FSM()).
+			WithCapabilityGate(state.capabilityGate).
+			WithCapabilityEvidenceAliases(state.raftAddr)
 		go sender.Run(ctx)
 		log.Info().Str("component", "gossip").Msg("capability evidence gossip sender started")
 	}

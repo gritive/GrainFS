@@ -31,6 +31,8 @@ WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
 GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-4}"
+GRAINFS_ADMIN_DATA_DIR=""
+GRAINFS_SA_ID=""
 # Cluster start-up uses bench_wait_cluster_leader per node (replaces the
 # legacy fixed CLUSTER_WARMUP_SLEEP). Multipart workloads additionally probe
 # the multipart_listing_v1 capability via admin.sock after leader election.
@@ -174,6 +176,8 @@ start_grainfs_single() {
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "grainfs-single S3" 180 0.2 >&2
   bench_bootstrap_iam_credentials "$BINARY" "$data_dir" "bench-s3-compat" >&2
+  GRAINFS_ADMIN_DATA_DIR="$data_dir"
+  GRAINFS_SA_ID="$SA_ID"
   set_start_info "http://127.0.0.1:$port" "$ACCESS_KEY" "$SECRET_KEY" "local"
 }
 
@@ -267,6 +271,8 @@ start_grainfs_cluster() {
   # × 0.25s = 30s budget; the legacy fixed 45s sleep is gone. Followers
   # report state="Follower" on the same endpoint, so we don't poll them.
   bench_wait_cluster_leader "${urls[0]}" 120 0.25 >&2
+  GRAINFS_ADMIN_DATA_DIR="$cluster_dir/n1"
+  GRAINFS_SA_ID="$SA_ID"
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
 
   if [[ "${BENCH_MULTIPART_PROBE:-0}" == "1" ]]; then
@@ -634,6 +640,19 @@ PY
   fi
 }
 
+prepare_grainfs_warp_bucket() {
+  local target="$1"
+  local op="$2"
+
+  case "$target" in
+    grainfs-single|grainfs-cluster)
+      if [[ -n "$GRAINFS_ADMIN_DATA_DIR" ]]; then
+        bench_create_bucket_with_policy_admin_retry "$BINARY" "$GRAINFS_ADMIN_DATA_DIR" "warp-${target}-${op}" "$GRAINFS_SA_ID" bucket-admin
+      fi
+      ;;
+  esac
+}
+
 append_summary_rows() {
   local summary="$PROFILE_ROOT/summary.md"
   python3 - "$PROFILE_ROOT/warp-results.tsv" "$summary" <<'PY'
@@ -740,6 +759,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
   for op in "${WARP_OP_LIST[@]}"; do
     case "$op" in
       get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)
+        prepare_grainfs_warp_bucket "$target" "$op"
         if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
           cpu_dir="$PROFILE_ROOT/grainfs-cluster/pprof-cpu-$op"
           mkdir -p "$cpu_dir"
