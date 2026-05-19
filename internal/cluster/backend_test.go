@@ -449,6 +449,7 @@ func TestDistributedBackend_PutObjectECSpooledBeforeCommitAbortCleansShards(t *t
 				"",
 				func() error { return errChanged },
 				nil,
+				nil,
 			)
 			require.ErrorIs(t, err, errChanged)
 			_, err = b.shardSvc.ReadLocalShard("bucket", "abort.bin", 0)

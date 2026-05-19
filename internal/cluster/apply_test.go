@@ -894,3 +894,70 @@ func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 		t.Fatalf("expected bucket:b1 present with raw layout, got %v", err)
 	}
 }
+
+func TestFSM_CreateMultipartUpload_PersistsTags(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID:    "upload-tags-1",
+		Bucket:      "b",
+		Key:         "k",
+		ContentType: "text/plain",
+		CreatedAt:   100,
+		Tags:        []storage.Tag{{Key: "env", Value: "prod"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(multipartKey("upload-tags-1"))
+		require.NoError(t, err)
+		raw, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		meta, err := unmarshalClusterMultipartMeta(raw)
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "env", Value: "prod"}}, meta.Tags)
+		return nil
+	}))
+}
+
+// TestFSM_CompleteMultipartUpload_MaterialisesTags verifies that the
+// finalisation command (CmdPutObjectMeta — what production proposes from
+// CompleteMultipartUpload) writes Tags onto objectMeta. The Raft path for
+// completion goes through commitECObjectWriteResult → CmdPutObjectMeta, not
+// the legacy CmdCompleteMultipart, so this is where parity must hold.
+func TestFSM_CompleteMultipartUpload_MaterialisesTags(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	// 1) create multipart with tags
+	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID: "upload-mat-1", Bucket: "b", Key: "k", ContentType: "text/plain", CreatedAt: 100,
+		Tags: []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	// 2) finalise via the production cmd that materialises object meta on
+	// CompleteMultipartUpload (CmdPutObjectMeta with Parts + Tags).
+	data, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "k", Size: 1024, ContentType: "text/plain",
+		ETag: "final-etag", ModTime: 200,
+		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 1024, ETag: "p1"}},
+		Tags:  []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKey("b", "k"))
+		require.NoError(t, err)
+		raw, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		m, err := unmarshalObjectMeta(raw)
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}}, m.Tags)
+		return nil
+	}))
+}

@@ -71,6 +71,9 @@ type clusterMultipartMeta struct {
 	CreatedAt        int64
 	ContentType      string
 	PlacementGroupID string
+	// Tags carried from CreateMultipartUploadWithTags; materialised onto the
+	// finalised object at CompleteMultipartUpload.
+	Tags []storage.Tag
 }
 
 // --- helpers ---
@@ -227,6 +230,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		}
 		partsOff = b.EndVector(len(partOffs))
 	}
+	tagsVec := buildTagsVector(b, c.Tags, clusterpb.PutObjectMetaCmdStartTagsVector)
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -262,6 +266,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	}
 	if segmentsOff != 0 {
 		clusterpb.PutObjectMetaCmdAddSegments(b, segmentsOff)
+	}
+	if tagsVec != 0 {
+		clusterpb.PutObjectMetaCmdAddTags(b, tagsVec)
 	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
@@ -348,6 +355,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		IsDeleteMarker:   t.IsDeleteMarker(),
 		Parts:            parts,
 		Segments:         segments,
+		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 	}, nil
 }
 
@@ -410,6 +418,7 @@ func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) 
 	keyOff := b.CreateString(c.Key)
 	ctOff := b.CreateString(c.ContentType)
 	pgOff := b.CreateString(c.PlacementGroupID)
+	tagsVec := buildTagsVector(b, c.Tags, clusterpb.CreateMultipartUploadCmdStartTagsVector)
 	clusterpb.CreateMultipartUploadCmdStart(b)
 	clusterpb.CreateMultipartUploadCmdAddUploadId(b, uidOff)
 	clusterpb.CreateMultipartUploadCmdAddBucket(b, bucketOff)
@@ -417,6 +426,9 @@ func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) 
 	clusterpb.CreateMultipartUploadCmdAddContentType(b, ctOff)
 	clusterpb.CreateMultipartUploadCmdAddCreatedAt(b, c.CreatedAt)
 	clusterpb.CreateMultipartUploadCmdAddPlacementGroupId(b, pgOff)
+	if tagsVec != 0 {
+		clusterpb.CreateMultipartUploadCmdAddTags(b, tagsVec)
+	}
 	return fbFinish(b, clusterpb.CreateMultipartUploadCmdEnd(b)), nil
 }
 
@@ -434,6 +446,7 @@ func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, erro
 		ContentType:      string(t.ContentType()),
 		CreatedAt:        t.CreatedAt(),
 		PlacementGroupID: string(t.PlacementGroupId()),
+		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 	}, nil
 }
 
@@ -565,6 +578,47 @@ func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
 		return DeleteBucketPolicyCmd{}, err
 	}
 	return DeleteBucketPolicyCmd{Bucket: string(t.Bucket())}, nil
+}
+
+// buildTagsVector encodes []storage.Tag as a FlatBuffers Tag vector using the
+// provided parent-table startVector func (e.g.
+// clusterpb.CreateMultipartUploadCmdStartTagsVector). Returns 0 when len==0
+// so callers can guard the Add call. Tag child tables MUST be built BEFORE
+// the parent table's Start.
+func buildTagsVector(b *flatbuffers.Builder, tags []storage.Tag, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(tags) == 0 {
+		return 0
+	}
+	tagOffs := make([]flatbuffers.UOffsetT, len(tags))
+	for i, t := range tags {
+		kOff := b.CreateString(t.Key)
+		vOff := b.CreateString(t.Value)
+		clusterpb.TagStart(b)
+		clusterpb.TagAddKey(b, kOff)
+		clusterpb.TagAddValue(b, vOff)
+		tagOffs[i] = clusterpb.TagEnd(b)
+	}
+	startVec(b, len(tagOffs))
+	for i := len(tagOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(tagOffs[i])
+	}
+	return b.EndVector(len(tagOffs))
+}
+
+// readTagsVector decodes a FlatBuffers Tag vector via the accessor (length,
+// element-by-mutating-receiver). Returns nil when length==0.
+func readTagsVector(length int, get func(*clusterpb.Tag, int) bool) []storage.Tag {
+	if length == 0 {
+		return nil
+	}
+	out := make([]storage.Tag, length)
+	for i := 0; i < length; i++ {
+		var tag clusterpb.Tag
+		if get(&tag, i) {
+			out[i] = storage.Tag{Key: string(tag.Key()), Value: string(tag.Value())}
+		}
+	}
+	return out
 }
 
 // buildStringVector encodes a []string as a FlatBuffers vector using the
@@ -952,12 +1006,16 @@ func marshalClusterMultipartMeta(m clusterMultipartMeta) ([]byte, error) {
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
 	pgOff := b.CreateString(m.PlacementGroupID)
+	tagsVec := buildTagsVector(b, m.Tags, clusterpb.MultipartMetaStartTagsVector)
 	clusterpb.MultipartMetaStart(b)
 	clusterpb.MultipartMetaAddContentType(b, ctOff)
 	clusterpb.MultipartMetaAddPlacementGroupId(b, pgOff)
 	clusterpb.MultipartMetaAddBucket(b, bucketOff)
 	clusterpb.MultipartMetaAddKey(b, keyOff)
 	clusterpb.MultipartMetaAddCreatedAt(b, m.CreatedAt)
+	if tagsVec != 0 {
+		clusterpb.MultipartMetaAddTags(b, tagsVec)
+	}
 	return fbFinish(b, clusterpb.MultipartMetaEnd(b)), nil
 }
 
@@ -974,6 +1032,7 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 		CreatedAt:        t.CreatedAt(),
 		ContentType:      string(t.ContentType()),
 		PlacementGroupID: string(t.PlacementGroupId()),
+		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 	}, nil
 }
 

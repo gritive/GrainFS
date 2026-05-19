@@ -115,6 +115,7 @@ table PutObjectMetaCmd {
   // node_ids / ec_data / ec_parity / placement_group_id mirror segments[0]
   // for backward-compatible readers.
   segments:[SegmentMetaEntry];
+  tags:[Tag];
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked
@@ -163,6 +164,7 @@ table CreateMultipartUploadCmd {
   content_type:string;
   created_at:int64;
   placement_group_id:string;
+  tags:[Tag];
 }
 
 table CompleteMultipartCmd {
@@ -333,6 +335,7 @@ table MultipartMeta {
   bucket:string;
   key:string;
   created_at:int64;
+  tags:[Tag];
 }
 
 table NodeStatsMsg {
