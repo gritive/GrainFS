@@ -88,127 +88,125 @@ func createSnapshotE2E(t *testing.T, serverURL, reason string) snapshotResponse 
 	return snapshotResponse{}
 }
 
-// TestSnapshot_CreateAndRestore is the primary E2E: put objects, snapshot,
-// add extra objects, restore, verify only snapshot-time objects remain.
-// Note: DeleteObject immediately removes blobs, so restore of deleted objects
-// reports stale blobs. This test uses PUT-after-snapshot instead.
-func TestSnapshot_CreateAndRestore(t *testing.T) {
+// TestSnapshotE2E exercises the /admin/snapshots HTTP surface (create / list
+// / restore / 404) against both single-node and 4-node cluster fixtures.
+// /admin/snapshots restore mutates global metadata state, so this group
+// uses a dedicated per-branch fixture (single boot per fixture, sub-tests
+// run in sequence on it) to avoid contaminating the shared fixtures.
+func TestSnapshotE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runSnapshotCases(t, newDedicatedSingleNodeS3Target(t, nil))
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runSnapshotCases(t, newClusterS3TargetWithExtraArgs(t, 4, nil))
+	})
+}
+
+func runSnapshotCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	serverURL := tgt.endpoint(0)
+	client := tgt.pickNode(0)
 	ctx := context.Background()
-	bucket := "snapshot-e2e"
-	serverURL, client := startIsolatedE2EServer(t)
-	createBucketWithClient(t, client, bucket)
 
-	// Put 5 objects
-	objects := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}
-	for _, key := range objects {
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+	t.Run("CreateAndRestore", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "create")
+
+		objects := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}
+		for _, key := range objects {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   strings.NewReader("content-" + key),
+			})
+			require.NoError(t, err, "put %s", key)
+		}
+
+		snap := createSnapshotE2E(t, serverURL, "e2e-test")
+		require.NotZero(t, snap.Seq, "snapshot seq must be non-zero")
+		require.NotEmpty(t, snap.Timestamp)
+		require.Positive(t, snap.ObjectCount, "snapshot must contain objects")
+
+		extras := []string{"extra1.txt", "extra2.txt"}
+		for _, key := range extras {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   strings.NewReader("extra-" + key),
+			})
+			require.NoError(t, err, "put extra %s", key)
+		}
+
+		listOut, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-			Body:   strings.NewReader("content-" + key),
 		})
-		require.NoError(t, err, "put %s", key)
-	}
+		require.NoError(t, err)
+		require.Len(t, listOut.Contents, 7, "7 objects before restore")
 
-	// POST /admin/snapshots — create snapshot
-	snap := createSnapshotE2E(t, serverURL, "e2e-test")
-	require.NotZero(t, snap.Seq, "snapshot seq must be non-zero")
-	require.NotEmpty(t, snap.Timestamp)
-	require.Positive(t, snap.ObjectCount, "snapshot must contain objects")
+		restoreURL := fmt.Sprintf("%s/admin/snapshots/%d/restore", serverURL, snap.Seq)
+		restoreResp, err := postJSON(restoreURL, nil)
+		require.NoError(t, err)
+		defer restoreResp.Body.Close()
+		require.Equal(t, http.StatusOK, restoreResp.StatusCode, "restore status")
 
-	// Add 2 extra objects AFTER the snapshot
-	extras := []string{"extra1.txt", "extra2.txt"}
-	for _, key := range extras {
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		var rr restoreResponse
+		require.NoError(t, json.NewDecoder(restoreResp.Body).Decode(&rr))
+		require.GreaterOrEqual(t, rr.RestoredObjects, 5, "at least 5 objects restored")
+		require.Empty(t, rr.StaleBlobs, "no stale blobs: blobs still exist")
+
+		listOut2, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-			Body:   strings.NewReader("extra-" + key),
 		})
-		require.NoError(t, err, "put extra %s", key)
-	}
+		require.NoError(t, err)
+		require.Len(t, listOut2.Contents, 5, "5 objects after restore (extras removed)")
 
-	// Verify 7 objects exist before restore
-	listOut, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
+		for _, key := range objects {
+			getResp, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			})
+			require.NoError(t, err, "get %s after restore", key)
+			body, _ := io.ReadAll(getResp.Body)
+			getResp.Body.Close()
+			require.Equal(t, "content-"+key, string(body))
+		}
+
+		for _, key := range extras {
+			_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			})
+			require.Error(t, err, "extra object %s should be gone after restore", key)
+		}
 	})
-	require.NoError(t, err)
-	require.Len(t, listOut.Contents, 7, "7 objects before restore")
 
-	// POST /admin/snapshots/{seq}/restore — go back to snapshot point
-	restoreURL := fmt.Sprintf("%s/admin/snapshots/%d/restore", serverURL, snap.Seq)
-	restoreResp, err := postJSON(restoreURL, nil)
-	require.NoError(t, err)
-	defer restoreResp.Body.Close()
-	require.Equal(t, http.StatusOK, restoreResp.StatusCode, "restore status")
+	t.Run("List", func(t *testing.T) {
+		for i := 0; i < 2; i++ {
+			createSnapshotE2E(t, serverURL, fmt.Sprintf("list-test-%d", i))
+		}
 
-	var rr restoreResponse
-	require.NoError(t, json.NewDecoder(restoreResp.Body).Decode(&rr))
-	require.GreaterOrEqual(t, rr.RestoredObjects, 5, "at least 5 objects restored")
-	require.Empty(t, rr.StaleBlobs, "no stale blobs: blobs still exist")
+		listResp, err := http.Get(serverURL + "/admin/snapshots") //nolint:noctx
+		require.NoError(t, err)
+		defer listResp.Body.Close()
+		require.Equal(t, http.StatusOK, listResp.StatusCode)
 
-	// Verify exactly 5 original objects remain
-	listOut2, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
+		var lr snapshotListResponse
+		require.NoError(t, json.NewDecoder(listResp.Body).Decode(&lr))
+		require.GreaterOrEqual(t, len(lr.Snapshots), 2)
+
+		for i := 1; i < len(lr.Snapshots); i++ {
+			require.Less(t, lr.Snapshots[i-1].Seq, lr.Snapshots[i].Seq)
+		}
 	})
-	require.NoError(t, err)
-	require.Len(t, listOut2.Contents, 5, "5 objects after restore (extras removed)")
 
-	// Verify content of original objects
-	for _, key := range objects {
-		getResp, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-		})
-		require.NoError(t, err, "get %s after restore", key)
-		body, _ := io.ReadAll(getResp.Body)
-		getResp.Body.Close()
-		require.Equal(t, "content-"+key, string(body))
-	}
+	t.Run("NotFound", func(t *testing.T) {
+		restoreResp, err := postJSON(serverURL+"/admin/snapshots/999999/restore", nil)
+		require.NoError(t, err)
+		defer restoreResp.Body.Close()
+		require.Equal(t, http.StatusNotFound, restoreResp.StatusCode)
 
-	// Verify extra objects are gone
-	for _, key := range extras {
-		_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-		})
-		require.Error(t, err, "extra object %s should be gone after restore", key)
-	}
-}
-
-// TestSnapshot_List verifies GET /admin/snapshots returns sorted list.
-func TestSnapshot_List(t *testing.T) {
-	serverURL, _ := startIsolatedE2EServer(t)
-
-	// Create 2 snapshots
-	for i := 0; i < 2; i++ {
-		createSnapshotE2E(t, serverURL, fmt.Sprintf("list-test-%d", i))
-	}
-
-	listResp, err := http.Get(serverURL + "/admin/snapshots") //nolint:noctx
-	require.NoError(t, err)
-	defer listResp.Body.Close()
-	require.Equal(t, http.StatusOK, listResp.StatusCode)
-
-	var lr snapshotListResponse
-	require.NoError(t, json.NewDecoder(listResp.Body).Decode(&lr))
-	require.GreaterOrEqual(t, len(lr.Snapshots), 2)
-
-	// Verify sorted by seq ascending
-	for i := 1; i < len(lr.Snapshots); i++ {
-		require.Less(t, lr.Snapshots[i-1].Seq, lr.Snapshots[i].Seq)
-	}
-}
-
-// TestSnapshot_NotFound verifies restore of nonexistent snapshot returns 404.
-func TestSnapshot_NotFound(t *testing.T) {
-	serverURL, _ := startIsolatedE2EServer(t)
-
-	restoreResp, err := postJSON(serverURL+"/admin/snapshots/999999/restore", nil)
-	require.NoError(t, err)
-	defer restoreResp.Body.Close()
-	require.Equal(t, http.StatusNotFound, restoreResp.StatusCode)
-
-	var er errorResponse
-	require.NoError(t, json.NewDecoder(restoreResp.Body).Decode(&er))
-	require.NotEmpty(t, er.Error)
-	require.NotEmpty(t, er.Hint)
+		var er errorResponse
+		require.NoError(t, json.NewDecoder(restoreResp.Body).Decode(&er))
+		require.NotEmpty(t, er.Error)
+		require.NotEmpty(t, er.Hint)
+	})
 }
