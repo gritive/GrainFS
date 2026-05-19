@@ -31,12 +31,18 @@ type multipartCompleteReader struct {
 	manifest multipartCompleteManifest
 	idx      int
 	current  io.ReadCloser
+	err      error
 	closed   bool
 }
 
 func (r *multipartCompleteReader) Read(p []byte) (int, error) {
 	if r.closed {
 		return 0, io.ErrClosedPipe
+	}
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return 0, err
 	}
 	for {
 		if r.current == nil {
@@ -56,6 +62,7 @@ func (r *multipartCompleteReader) Read(p []byte) (int, error) {
 				r.current = nil
 				r.idx++
 				if n > 0 {
+					r.err = fmt.Errorf("close part %d: %w", r.manifest.Parts[r.idx-1].PartNumber, closeErr)
 					return n, nil
 				}
 				return 0, fmt.Errorf("close part %d: %w", r.manifest.Parts[r.idx-1].PartNumber, closeErr)

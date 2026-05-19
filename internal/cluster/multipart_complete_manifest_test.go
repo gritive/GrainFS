@@ -129,6 +129,30 @@ func TestMultipartCompleteManifestReaderPropagatesDeletedPartOnOpen(t *testing.T
 	require.NoError(t, closeErr)
 }
 
+func TestMultipartCompleteManifestReaderDefersCloseErrorAfterReturningBytes(t *testing.T) {
+	closeErr := errors.New("close failed")
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 3, ETag: "etag"}},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			require.Equal(t, 1, partNumber)
+			return &bytesEOFReadCloser{body: []byte("abc"), closeErr: closeErr}, nil
+		},
+	}
+	rc, err := manifest.Open()
+	require.NoError(t, err)
+
+	buf := make([]byte, 8)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "abc", string(buf[:n]))
+
+	n, err = rc.Read(buf)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, closeErr)
+	require.NoError(t, rc.Close())
+}
+
 func TestMultipartCompleteManifestEncryptedReaderReturnsPlaintext(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	enc := testEncryptor(t)
@@ -167,4 +191,22 @@ func testEncryptor(t *testing.T) *encrypt.Encryptor {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x45}, 32))
 	require.NoError(t, err)
 	return enc
+}
+
+type bytesEOFReadCloser struct {
+	body     []byte
+	closeErr error
+	read     bool
+}
+
+func (r *bytesEOFReadCloser) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.EOF
+	}
+	r.read = true
+	return copy(p, r.body), io.EOF
+}
+
+func (r *bytesEOFReadCloser) Close() error {
+	return r.closeErr
 }
