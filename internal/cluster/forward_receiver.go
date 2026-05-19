@@ -880,6 +880,9 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		return raftpb.ForwardStatusNoSuchKey
 	}
+	if errors.Is(err, storage.ErrMethodNotAllowed) {
+		return raftpb.ForwardStatusMethodNotAllowed
+	}
 	if errors.Is(err, storage.ErrUploadNotFound) {
 		return raftpb.ForwardStatusNoSuchUpload
 	}

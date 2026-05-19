@@ -593,6 +593,8 @@ func parseReplyStatus(reply []byte) error {
 		return storage.ErrNoSuchBucket
 	case raftpb.ForwardStatusNoSuchKey:
 		return storage.ErrObjectNotFound
+	case raftpb.ForwardStatusMethodNotAllowed:
+		return storage.ErrMethodNotAllowed
 	case raftpb.ForwardStatusNoSuchUpload:
 		return storage.ErrUploadNotFound
 	case raftpb.ForwardStatusEntityTooLarge:
