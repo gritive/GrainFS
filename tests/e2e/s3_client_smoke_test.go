@@ -17,45 +17,58 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestS3ClientSmoke(t *testing.T) {
-	t.Run("MinIOMC", testS3ClientSmokeMinIOMC)
-	t.Run("S3FS", testS3ClientSmokeS3FS)
-	t.Run("Goofys", testS3ClientSmokeGoofys)
+// TestS3ClientSmokeE2E exercises three external S3-compatible clients
+// (mc, s3fs, goofys) against both shared single + shared cluster fixtures.
+// Each client gets its own sub-test and its own bucket via uniqueBucket.
+func TestS3ClientSmokeE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runS3ClientSmokeCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runS3ClientSmokeCases(t, newSharedClusterS3Target(t))
+	})
 }
 
-func testS3ClientSmokeMinIOMC(t *testing.T) {
+func runS3ClientSmokeCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	t.Run("MinIOMC", func(t *testing.T) { testS3ClientSmokeMinIOMC(t, tgt) })
+	t.Run("S3FS", func(t *testing.T) { testS3ClientSmokeS3FS(t, tgt) })
+	t.Run("Goofys", func(t *testing.T) { testS3ClientSmokeGoofys(t, tgt) })
+}
+
+func testS3ClientSmokeMinIOMC(t *testing.T, tgt s3Target) {
 	if _, err := exec.LookPath("mc"); err != nil {
 	}
 
-	bucket := "client-smoke-mc"
-	createBucket(t, bucket)
+	bucket := tgt.uniqueBucket(t, "mc")
+	endpoint := tgt.endpoint(0)
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "mc-config")
 	require.NoError(t, os.MkdirAll(configDir, 0o700))
 	srcPath := filepath.Join(tmpDir, "src.txt")
 	require.NoError(t, os.WriteFile(srcPath, []byte("mc smoke"), 0o600))
 
-	runClientCommand(t, nil, "mc", "--config-dir", configDir, "alias", "set", "grainfs", testServerURL, testAccessKey, testSecretKey, "--api", "S3v4", "--path", "on")
+	runClientCommand(t, nil, "mc", "--config-dir", configDir, "alias", "set", "grainfs", endpoint, tgt.accessKey, tgt.secretKey, "--api", "S3v4", "--path", "on")
 	runClientCommand(t, nil, "mc", "--config-dir", configDir, "cp", srcPath, "grainfs/"+bucket+"/smoke.txt")
 	out := runClientCommand(t, nil, "mc", "--config-dir", configDir, "cat", "grainfs/"+bucket+"/smoke.txt")
 	require.Equal(t, "mc smoke", string(out))
 	out = runClientCommand(t, nil, "mc", "--config-dir", configDir, "ls", "grainfs/"+bucket)
 	require.Contains(t, string(out), "smoke.txt")
 	runClientCommand(t, nil, "mc", "--config-dir", configDir, "rm", "grainfs/"+bucket+"/smoke.txt")
-	requireObjectDeleted(t, bucket, "smoke.txt")
+	requireObjectDeleted(t, tgt, bucket, "smoke.txt")
 }
 
-func testS3ClientSmokeS3FS(t *testing.T) {
+func testS3ClientSmokeS3FS(t *testing.T, tgt s3Target) {
 	if runtime.GOOS == "windows" {
 	}
 	if _, err := exec.LookPath("s3fs"); err != nil {
 	}
 
-	bucket := "client-smoke-s3fs"
-	createBucket(t, bucket)
+	bucket := tgt.uniqueBucket(t, "s3fs")
+	endpoint := tgt.endpoint(0)
 	tmpDir := t.TempDir()
 	passwdPath := filepath.Join(tmpDir, "passwd")
-	require.NoError(t, os.WriteFile(passwdPath, []byte(testAccessKey+":"+testSecretKey), 0o600))
+	require.NoError(t, os.WriteFile(passwdPath, []byte(tgt.accessKey+":"+tgt.secretKey), 0o600))
 	mountDir := filepath.Join(tmpDir, "mnt")
 	require.NoError(t, os.MkdirAll(mountDir, 0o700))
 
@@ -63,7 +76,7 @@ func testS3ClientSmokeS3FS(t *testing.T) {
 		bucket,
 		mountDir,
 		"-o", "passwd_file=" + passwdPath,
-		"-o", "url=" + testServerURL,
+		"-o", "url=" + endpoint,
 		"-o", "use_path_request_style",
 		"-o", "nomultipart",
 	}
@@ -76,27 +89,27 @@ func testS3ClientSmokeS3FS(t *testing.T) {
 	})
 
 	exerciseMountedClient(t, mountDir, "s3fs smoke")
-	requireObjectDeleted(t, bucket, "smoke.txt")
+	requireObjectDeleted(t, tgt, bucket, "smoke.txt")
 }
 
-func testS3ClientSmokeGoofys(t *testing.T) {
+func testS3ClientSmokeGoofys(t *testing.T, tgt s3Target) {
 	if runtime.GOOS == "windows" {
 	}
 	if _, err := exec.LookPath("goofys"); err != nil {
 	}
 
-	bucket := "client-smoke-goofys"
-	createBucket(t, bucket)
+	bucket := tgt.uniqueBucket(t, "goofys")
+	endpoint := tgt.endpoint(0)
 	mountDir := filepath.Join(t.TempDir(), "mnt")
 	require.NoError(t, os.MkdirAll(mountDir, 0o700))
 	env := []string{
-		"AWS_ACCESS_KEY_ID=" + testAccessKey,
-		"AWS_SECRET_ACCESS_KEY=" + testSecretKey,
+		"AWS_ACCESS_KEY_ID=" + tgt.accessKey,
+		"AWS_SECRET_ACCESS_KEY=" + tgt.secretKey,
 		"AWS_REGION=us-east-1",
 	}
 
 	args := []string{
-		"--endpoint", testServerURL,
+		"--endpoint", endpoint,
 		"--region", "us-east-1",
 		bucket,
 		mountDir,
@@ -110,7 +123,7 @@ func testS3ClientSmokeGoofys(t *testing.T) {
 	})
 
 	exerciseMountedClient(t, mountDir, "goofys smoke")
-	requireObjectDeleted(t, bucket, "smoke.txt")
+	requireObjectDeleted(t, tgt, bucket, "smoke.txt")
 }
 
 func exerciseMountedClient(t *testing.T, mountDir, content string) {
@@ -137,12 +150,13 @@ func hasDirEntry(entries []os.DirEntry, name string) bool {
 	return false
 }
 
-func requireObjectDeleted(t *testing.T, bucket, key string) {
+func requireObjectDeleted(t *testing.T, tgt s3Target, bucket, key string) {
 	t.Helper()
+	cli := tgt.pickNode(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.Eventually(t, func() bool {
-		_, err := testS3Client.HeadObject(ctx, &s3.HeadObjectInput{
+		_, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
