@@ -96,15 +96,19 @@ func (s *Server) buildAuthorizer() {
 	var iamCheck s3auth.IAMChecker
 	if s.policyAuthorizer != nil {
 		pa := s.policyAuthorizer
-		iamCheck = func(saID, bucket string, action s3auth.S3Action) bool {
+		iamCheck = func(saID, bucket, key string, action s3auth.S3Action) bool {
+			resource := "arn:aws:s3:::" + bucket
+			if key != "" {
+				resource += "/" + key
+			}
 			result := pa.Authorize(context.Background(), saID, bucket, policy.RequestContext{
 				Action:   action.PolicyActionString(),
-				Resource: "arn:aws:s3:::" + bucket,
+				Resource: resource,
 			})
 			return result.Decision == policy.DecisionAllow
 		}
 	} else {
-		iamCheck = func(_ string, _ string, _ s3auth.S3Action) bool { return false }
+		iamCheck = func(_ string, _ string, _ string, _ s3auth.S3Action) bool { return false }
 	}
 
 	s.authz = s3auth.NewRequestAuthorizer(

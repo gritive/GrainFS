@@ -26,9 +26,13 @@ type IAMStore interface {
 	AuthEnabled() bool
 }
 
-// IAMChecker checks whether a service-account ID has a grant for (bucket, action).
-// iam.CheckAccess satisfies this signature when bound to a *iam.Store.
-type IAMChecker func(saID, bucket string, action S3Action) bool
+// IAMChecker is the Layer 1 policy gate. saID is "" for anonymous requests.
+// bucket is the target bucket name; key is the object key (empty for
+// bucket-level actions like ListBucket). Passing the key is required for
+// object-scope Deny statements (Resource: arn:aws:s3:::bucket/path/*) to
+// match at L1 — without it a paired "Allow Resource:*" silently bypasses
+// the Deny.
+type IAMChecker func(saID, bucket, key string, action S3Action) bool
 
 // PolicyChecker evaluates bucket policy. *policy.CompiledPolicyStore satisfies this.
 type PolicyChecker interface {
@@ -91,7 +95,7 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 
 	// Layer 1: IAM grant.
 	if authEnabled {
-		ok := r.iamCheck != nil && r.iamCheck(saID, in.Resource.Bucket, in.Action)
+		ok := r.iamCheck != nil && r.iamCheck(saID, in.Resource.Bucket, in.Resource.Key, in.Action)
 		if !ok {
 			r.recordDeny(ctx, saID, in, "no_grant")
 			return Decision{Allow: false, Layer: "iam_grant", Reason: "no_grant"}

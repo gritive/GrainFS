@@ -70,7 +70,7 @@ func TestRequestAuthorizer_PreLoad_AuthDisabled_AllowsViaPolicy(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: false},
-		func(_, _ string, _ S3Action) bool { return false }, // would deny if consulted
+		func(_, _, _ string, _ S3Action) bool { return false }, // would deny if consulted
 		stubPolicy{allow: true},
 		audit,
 		func(_ context.Context) string { return "" },
@@ -86,7 +86,7 @@ func TestRequestAuthorizer_PreLoad_AuthEnabled_NoGrant_Denies(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: true},
-		func(_, _ string, _ S3Action) bool { return false },
+		func(_, _, _ string, _ S3Action) bool { return false },
 		stubPolicy{allow: true},
 		audit,
 		func(_ context.Context) string { return "sa-1" },
@@ -106,7 +106,7 @@ func TestRequestAuthorizer_PreLoad_AuthEnabled_GrantOnly_Allows(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: true},
-		func(saID, bucket string, a S3Action) bool {
+		func(saID, bucket, _ string, a S3Action) bool {
 			return saID == "sa-1" && bucket == "b" && a == GetObject
 		},
 		stubPolicy{allow: true},
@@ -127,7 +127,7 @@ func TestRequestAuthorizer_PreLoad_PolicyDenies(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: true},
-		func(_, _ string, _ S3Action) bool { return true },
+		func(_, _, _ string, _ S3Action) bool { return true },
 		stubPolicy{allow: false},
 		audit,
 		func(_ context.Context) string { return "sa-1" },
@@ -145,8 +145,8 @@ func TestRequestAuthorizer_PreLoad_PolicyExempt_BucketPolicyCRUD(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: true},
-		func(_, _ string, _ S3Action) bool { return true }, // IAM allows
-		stubPolicy{allow: false},                           // policy would deny
+		func(_, _, _ string, _ S3Action) bool { return true }, // IAM allows
+		stubPolicy{allow: false},                              // policy would deny
 		audit,
 		func(_ context.Context) string { return "sa-1" },
 	)
@@ -161,7 +161,7 @@ func TestRequestAuthorizer_PreLoad_AnonymousMode_PolicyDenies(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: false}, // auth disabled
-		func(_, _ string, _ S3Action) bool { return false },
+		func(_, _, _ string, _ S3Action) bool { return false },
 		stubPolicy{allow: false},
 		audit,
 		func(_ context.Context) string { return "" },
@@ -202,7 +202,7 @@ func TestRequestAuthorizer_PostLoad_ACLMatrix(t *testing.T) {
 			audit := &fakeAudit{}
 			r := NewRequestAuthorizer(
 				stubStore{enabled: false}, // skip Layer 1 to isolate Layer 3
-				func(_, _ string, _ S3Action) bool { return true },
+				func(_, _, _ string, _ S3Action) bool { return true },
 				stubPolicy{allow: true},
 				audit,
 				func(_ context.Context) string { return "" },
@@ -231,7 +231,7 @@ func TestRequestAuthorizer_PostLoad_ReRunsLayer1(t *testing.T) {
 	audit := &fakeAudit{}
 	r := NewRequestAuthorizer(
 		stubStore{enabled: true},
-		func(_, _ string, _ S3Action) bool { return false },
+		func(_, _, _ string, _ S3Action) bool { return false },
 		stubPolicy{allow: true},
 		audit,
 		func(_ context.Context) string { return "sa-1" },
