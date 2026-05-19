@@ -535,6 +535,22 @@ func (m *MetaRaft) ProposeConfigDelete(ctx context.Context, key string) error {
 	return m.Propose(ctx, MetaCmdTypeConfigDelete, payload)
 }
 
+// ProposeDEKRotate proposes a DEKRotate command (no payload) to the cluster,
+// blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeDEKRotate(ctx context.Context) error {
+	return m.Propose(ctx, MetaCmdTypeDEKRotate, nil)
+}
+
+// ProposeDEKVersionPrune proposes a DEKVersionPrune command for the given
+// generation, blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeDEKVersionPrune(ctx context.Context, gen uint32) error {
+	payload, err := encodeMetaDEKVersionPruneCmd(gen)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode DEKVersionPrune: %w", err)
+	}
+	return m.Propose(ctx, MetaCmdTypeDEKVersionPrune, payload)
+}
+
 func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) error {
 	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
 	requestID, err := icebergRequestID(cmd.Type(), cmd.DataBytes())

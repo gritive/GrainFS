@@ -423,6 +423,8 @@ enum MetaCmdType : uint8 {
   NfsExportCreate         = 45, // NFSv4 multi-export: create only, reject existing export
   ConfigPut               = 46, // cluster-wide config: set key=value
   ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
+  DEKRotate               = 48, // DEK key rotation: generate new active generation
+  DEKVersionPrune         = 49, // DEK version prune: drop old wrapped DEK after rewrap scrub
 }
 
 table MetaNodeEntry {
@@ -462,6 +464,26 @@ table MetaConfigPutCmd {
 // cluster-wide config: unset key (revert to default)
 table MetaConfigDeleteCmd {
   key:string;
+}
+
+// DEKVersionPrune payload: which generation to prune.
+// DEKRotate has no payload — just the type byte.
+table MetaDEKVersionPruneCmd {
+  gen:uint32;
+}
+
+// DEK snapshot trailer entry: one wrapped DEK generation.
+table DEKVersionEntry {
+  gen:uint32;
+  wrapped:[ubyte];
+}
+
+// MetaDEKVersionSnapshot is the DKVS trailer payload: all wrapped DEK versions
+// plus the active generation at snapshot time.
+// Wire position: appended after the GCFG trailer (if any).
+table MetaDEKVersionSnapshot {
+  versions:[DEKVersionEntry];
+  active:uint32;
 }
 
 // PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.

@@ -59,6 +59,27 @@ const cfgSnapshotTrailerMagic uint32 = 0x47464347
 // [u32 payload_len][u32 magic]. Always 8 bytes when present.
 const cfgSnapshotTrailerLen = 8
 
+// dekSnapshotTrailerMagic identifies the DKVS trailer appended after the GCFG
+// trailer (or after IAM when GCFG absent, or after FB root when both absent).
+// Hex pairs spell "DKVS" (0x44=D, 0x4B=K, 0x56=V, 0x53=S, little-endian uint32).
+//
+// Wire layout (appended after existing trailers):
+//
+//	[FB root bytes]
+//	[IAM trailer bytes]       (optional, magic 0x47414D49)
+//	[GCFG trailer bytes]      (optional, magic 0x47464347)
+//	[dekPayloadBytes]
+//	[uint32 payloadLen  LE]
+//	[uint32 magic DKVS  LE]
+//
+// Restore reads from the end: check last 4 bytes for DKVS magic, if present
+// read payloadLen, strip DKVS payload+footer, then continue GCFG/IAM detection.
+const dekSnapshotTrailerMagic uint32 = 0x53564B44
+
+// dekSnapshotTrailerLen is the on-disk size of the DKVS footer:
+// [u32 payload_len][u32 magic]. Always 8 bytes when present.
+const dekSnapshotTrailerLen = 8
+
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
 
@@ -105,6 +126,8 @@ const (
 	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
 	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
 	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
+	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
+	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -277,6 +300,21 @@ type MetaFSM struct {
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
 	cfgStore *config.Store
+
+	// dekKeeper holds the in-memory DEK generation table. nil until SetDEKKeeper
+	// is called; DEKRotate/DEKVersionPrune commands are safe no-ops when nil.
+	dekKeeper *encrypt.DEKKeeper
+
+	// dekRefCounts is used by dekRefCount to check per-gen reference counts.
+	// nil by default; production never writes (always returns 0). Task 12 will
+	// plug real per-record ref counting.
+	dekRefCounts map[uint32]uint64
+
+	// pendingDEKVersions and pendingDEKActive hold the DEK snapshot state decoded
+	// during Restore. The runtime uses PendingDEKVersions() after Restore to wire
+	// a new DEKKeeper via LoadFromFSM(kek, versions).
+	pendingDEKVersions map[uint32][]byte
+	pendingDEKActive   uint32
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -333,6 +371,35 @@ func (f *MetaFSM) SetConfigStore(s *config.Store) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cfgStore = s
+}
+
+// SetDEKKeeper wires the DEK keeper into the MetaFSM. Must be called before
+// the raft log starts replaying. nil means DEKRotate/DEKVersionPrune are safe
+// no-ops (not configured yet).
+func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dekKeeper = k
+}
+
+// dekRefCount returns the reference count for a DEK generation.
+// Returns 0 always until Task 12 plugs per-record ref counting.
+// TODO Task 12: plug per-record ref counting.
+func (f *MetaFSM) dekRefCount(gen uint32) uint64 {
+	if f.dekRefCounts == nil {
+		return 0
+	}
+	return f.dekRefCounts[gen]
+}
+
+// PendingDEKVersions returns the DEK versions decoded during the last Restore
+// call, along with the active generation. The runtime calls this after Restore
+// to construct a DEKKeeper via encrypt.LoadFromFSM(kek, versions).
+// Returns nil, 0 if no DKVS trailer was present in the snapshot.
+func (f *MetaFSM) PendingDEKVersions() (map[uint32][]byte, uint32) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.pendingDEKVersions, f.pendingDEKActive
 }
 
 // SetLifecycle wires the lifecycle store into the MetaFSM. Must be called
@@ -504,6 +571,21 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyConfigPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeConfigDelete:
 		return f.applyConfigDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDEKRotate:
+		if f.dekKeeper == nil {
+			return nil
+		}
+		return f.dekKeeper.Rotate()
+	case clusterpb.MetaCmdTypeDEKVersionPrune:
+		if f.dekKeeper == nil {
+			return nil
+		}
+		gen, err := decodeMetaDEKVersionPruneCmd(cmd.DataBytes())
+		if err != nil {
+			return fmt.Errorf("meta_fsm: DEKVersionPrune: %w", err)
+		}
+		safe := f.dekRefCount(gen) == 0
+		return f.dekKeeper.Prune(gen, safe)
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
@@ -1942,6 +2024,25 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 			out = append(out, cfgFooter[:]...)
 		}
 	}
+
+	// Append DKVS trailer after the GCFG trailer. Only emit when a DEKKeeper
+	// is wired — absent keeper or empty versions skips the trailer for
+	// forward-compat with nodes that have not yet wired a keeper.
+	if f.dekKeeper != nil {
+		dekVersions := f.dekKeeper.Versions()
+		if len(dekVersions) > 0 {
+			dekActive, _ := f.dekKeeper.Active()
+			dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive)
+			if err != nil {
+				return nil, fmt.Errorf("meta_fsm: Snapshot: encode DEK versions: %w", err)
+			}
+			var dekFooter [dekSnapshotTrailerLen]byte
+			binary.LittleEndian.PutUint32(dekFooter[0:4], uint32(len(dekPayload)))
+			binary.LittleEndian.PutUint32(dekFooter[4:8], dekSnapshotTrailerMagic)
+			out = append(out, dekPayload...)
+			out = append(out, dekFooter[:]...)
+		}
+	}
 	return out, nil
 }
 
@@ -1954,11 +2055,29 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
 
-	// Peel GCFG trailer first (it is at the absolute end when present).
+	// Peel DKVS trailer first (it is the absolute newest trailer when present).
+	// Layout: [FB bytes][IAM trailer][GCFG trailer][dekPayload][u32 dekLen][u32 dekMagic].
+	// After stripping DKVS, the remaining bytes look like a pre-Task-11 snapshot.
+	remaining := data
+	var dekData []byte
+	if len(remaining) >= dekSnapshotTrailerLen {
+		dekFooter := remaining[len(remaining)-dekSnapshotTrailerLen:]
+		if binary.LittleEndian.Uint32(dekFooter[4:8]) == dekSnapshotTrailerMagic {
+			dekLen := binary.LittleEndian.Uint32(dekFooter[0:4])
+			if int(dekLen)+dekSnapshotTrailerLen > len(remaining) {
+				return fmt.Errorf("meta_fsm: Restore: DKVS trailer length %d exceeds snapshot size %d", dekLen, len(remaining))
+			}
+			dekEnd := len(remaining) - dekSnapshotTrailerLen
+			dekStart := dekEnd - int(dekLen)
+			dekData = remaining[dekStart:dekEnd]
+			remaining = remaining[:dekStart]
+		}
+	}
+
+	// Peel GCFG trailer next (it is at the end after DKVS is stripped).
 	// Layout: [FB bytes][IAM trailer][cfgPayload][u32 cfgLen][u32 cfgMagic].
 	// After stripping GCFG, the remaining bytes look exactly like a pre-Task-10
 	// snapshot, so the IAM detection below runs unmodified.
-	remaining := data
 	var cfgData []byte
 	if len(remaining) >= cfgSnapshotTrailerLen {
 		cfgFooter := remaining[len(remaining)-cfgSnapshotTrailerLen:]
@@ -2243,6 +2362,20 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			}
 			f.cfgStore.Restore(values)
 		}
+	}
+
+	// DKVS restore — decode the DEK versions into pendingDEKVersions so the
+	// runtime can wire a new DEKKeeper via encrypt.LoadFromFSM(kek, versions)
+	// after Restore returns.
+	if len(dekData) > 0 {
+		versions, active, err := decodeMetaDEKVersionSnapshot(dekData)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
+		}
+		f.mu.Lock()
+		f.pendingDEKVersions = versions
+		f.pendingDEKActive = active
+		f.mu.Unlock()
 	}
 	return nil
 }
