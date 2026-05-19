@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -41,7 +43,11 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 
 	versionID := string(c.QueryArgs().Peek("versionId"))
 	rangeHeader := string(c.GetHeader("Range"))
-	if versionID == "" && rangeHeader != "" {
+	partN, handled := readPartNumber(c, rangeHeader)
+	if handled && partN < 0 {
+		return
+	}
+	if partN == 0 && versionID == "" && rangeHeader != "" {
 		if s.getObjectRangeReadAt(ctx, c, bucket, key, rangeHeader) {
 			return
 		}
@@ -72,6 +78,21 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 
 	s.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionGet, Bucket: bucket, Key: key, Size: obj.Size})
 	etag := s.writeObjectReadHeaders(c, obj, false)
+
+	if partN > 0 {
+		start, end, partETag, partsCount, ok := partRange(obj, partN)
+		if !ok {
+			c.Header("Content-Range", fmt.Sprintf("bytes */%d", obj.Size))
+			writeXMLError(c, consts.StatusRequestedRangeNotSatisfiable,
+				"InvalidPartNumber",
+				"the requested partnumber is not satisfiable for this object")
+			return
+		}
+		rangeHeader = fmt.Sprintf("bytes=%d-%d", start, end)
+		etag = fmt.Sprintf("\"%s\"", partETag)
+		c.Header("ETag", etag)
+		c.Header("x-amz-mp-parts-count", strconv.Itoa(partsCount))
+	}
 
 	if !checkConditionals(c, etag, obj.LastModified) {
 		return
