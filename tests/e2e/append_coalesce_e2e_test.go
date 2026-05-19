@@ -1,8 +1,19 @@
-// AppendObject + Phase B3 coalesce + EC distribute end-to-end.
+// AppendObject + Phase B3 coalesce end-to-end.
 //
-// Drives a 4-node cluster: enough appends to trigger coalesce, then
-// validates the read survives owner-local-style failures via EC reconstruct,
-// range reads land on chunk boundaries, and metrics report success.
+// Runs the same case set against single-node and a 4-node cluster: enough
+// appends to trigger coalesce, observe convergence across every node, range-
+// read across the coalesced/raw boundary, and assert the
+// grainfs_append_coalesce_total{result="success"} counter ticks. Single is
+// the degenerate-EC control (k=1, no cross-node distribute); cluster adds
+// the EC distribute aspect to the same case.
+//
+// SingleNode currently fails (intentionally): post-coalesce appendable read
+// goes through PartialIO/ReadAt on the storage stack, but single-node
+// LocalBackend does not implement PartialIO — the wal wrapper surfaces
+// `wal: inner backend does not support ReadAt` as EOF on the post-coalesce
+// GET. Tracked in TODOS.md → AppendObject Follow-Ups → "Single-node
+// LocalBackend missing PartialIO". The failing subtest is the regression
+// signal that unblocks closing the gap.
 package e2e
 
 import (
@@ -25,25 +36,25 @@ import (
 // endpoint reports grainfs_append_coalesce_total{result="success"} >= 1.
 //
 // Owner-kill scenarios are exercised by the unit-level coverage in
-// internal/cluster/coalesce_owner_failure_test.go (single-node fixture
-// with EC reconstruct against shardSvc); the e2e here focuses on the
-// happy-path observable behavior (round-trip + metrics) that requires
-// real S3 endpoints + multi-node placement.
+// internal/cluster/coalesce_owner_failure_test.go; this e2e focuses on the
+// happy-path observable behavior (round-trip + metrics) on both deployment
+// shapes.
 func TestAppendCoalesceE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runCoalesceCase(t, newSingleNodeS3Target())
+	})
 	t.Run("Cluster4Node", func(t *testing.T) {
 		skipIfShort(t, "shared cluster fixture skipped in -short mode")
-		tgt := newSharedClusterS3Target(t)
-		runCoalesceCase(t, tgt)
+		runCoalesceCase(t, newSharedClusterS3Target(t))
 	})
-	// SingleNode intentionally absent: coalesce + EC distribute requires
-	// multi-node placement; design § Follow-up 5.
 }
 
-// runCoalesceCase runs the coalesce e2e case with the given cluster fixture.
+// runCoalesceCase drives N appends through tgt, waits for coalesce, and
+// asserts the metric ticks on at least one node. Loops over tgt.nodes for
+// per-node convergence and metric scraping — single has nodes=1, cluster
+// has nodes=4.
 func runCoalesceCase(t *testing.T, tgt s3Target) {
-	require.True(t, tgt.isCluster, "coalesce e2e requires cluster fixture")
-	bucket := "append-coalesce-cluster"
-	tgt.createBkt(t, bucket)
+	bucket := tgt.uniqueBucket(t, "coalesce")
 	client := tgt.pickNode(0)
 	key := "obj-coalesce"
 
@@ -122,16 +133,14 @@ func getObjectRange(client *s3.Client, bucket, key string, startInclusive, endIn
 	return io.ReadAll(resp.Body)
 }
 
-// metricCounterAtLeast scrapes the cluster node's /metrics endpoint and
-// returns true when the named counter (with labels) is >= threshold.
+// metricCounterAtLeast scrapes the target node's /metrics endpoint and
+// returns true when the named counter (with labels) is >= threshold. Works
+// for both single (1 endpoint) and cluster (N endpoints) targets via
+// tgt.endpoint(i).
 // Lightweight parser — accepts the prometheus text format line "name{labels} value".
 func metricCounterAtLeast(t *testing.T, tgt s3Target, nodeIdx int, metricLine string, threshold float64) bool {
 	t.Helper()
-	c := getClusterFromTarget(tgt)
-	if c == nil {
-		return false
-	}
-	url := c.httpURLs[nodeIdx] + "/metrics"
+	url := tgt.endpoint(nodeIdx) + "/metrics"
 	resp, err := http.Get(url)
 	if err != nil {
 		return false
@@ -154,10 +163,4 @@ func metricCounterAtLeast(t *testing.T, tgt s3Target, nodeIdx int, metricLine st
 		}
 	}
 	return false
-}
-
-// getClusterFromTarget returns the underlying e2eCluster captured by the
-// fixture; nil for single-node fixtures.
-func getClusterFromTarget(tgt s3Target) *e2eCluster {
-	return tgt.cluster
 }

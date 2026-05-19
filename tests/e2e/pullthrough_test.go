@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,207 +18,187 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPullThrough_FetchesFromUpstream verifies that a GrainFS instance configured
-// with --upstream pulls objects from the upstream S3 source on cache miss and
-// serves them as if they were local.
-func TestPullThrough_FetchesFromUpstream(t *testing.T) {
-	binary := getBinary()
-	ctx := context.Background()
-
-	// --- Start upstream GrainFS (acts as MinIO/S3 source) ---
-	upDir, err := os.MkdirTemp("", "grainfs-pt-upstream-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(upDir)
-
-	upPort := freePort()
-	upCmd := exec.Command(binary, "serve",
-		"--data", upDir,
-		"--port", fmt.Sprintf("%d", upPort),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	upCmd.Stdout = os.Stdout
-	upCmd.Stderr = os.Stderr
-	require.NoError(t, upCmd.Start())
-	defer terminateProcess(upCmd)
-
-	waitForPort(t, upPort, 30*time.Second)
-	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
-	upAK, upSK := bootstrapAdminViaUDS(t, upDir)
-	upClient := s3ClientFor(upEndpoint, upAK, upSK)
-
-	// Put an object in the upstream
-	_, err = upClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("shared")})
-	require.NoError(t, err)
-	waitForS3Write(t, upClient, "shared", "__grainfs_e2e_ready", 30*time.Second)
-	_, err = upClient.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("shared"),
-		Key:    aws.String("data/file.txt"),
-		Body:   strings.NewReader("upstream-content"),
+// TestPullthroughE2E exercises the pull-through cache layer end-to-end
+// against both deployment shapes. The local grainfs (single or 4-node
+// cluster, depending on subtest) is the e2e target; an in-test throwaway
+// single-node grainfs plays the upstream S3 source. Cache miss on the
+// local target pulls bytes from the upstream and serves them as if local;
+// the second GET is satisfied from the local cache.
+//
+// Two cases — both run on both targets:
+//   - FetchesFromUpstream: small text payload — basic round-trip.
+//   - LargeObject: 5 MiB random payload — exercises the 2-pass streaming
+//     fetch path (regression for the original io.ReadAll OOM bug).
+//
+// Cluster4Node/LargeObject currently fails: cluster pull-through truncates
+// or corrupts large payloads. The failure is intentional and surfaces a
+// real parity gap with single (single passes the identical case). Tracked
+// in TODOS.md → Pull-through Parity Follow-Ups; the failing assertion is
+// the regression signal that unblocks closing the gap.
+func TestPullthroughE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runPullthroughCases(t, newDedicatedSingleNodeS3Target(t, nil))
 	})
-	require.NoError(t, err)
 
-	// --- Start local GrainFS with --upstream pointing to upEndpoint ---
-	localDir, err := os.MkdirTemp("", "grainfs-pt-local-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(localDir)
-
-	localPort := freePort()
-	localCmd := exec.Command(binary, "serve",
-		"--data", localDir,
-		"--port", fmt.Sprintf("%d", localPort),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	localCmd.Stdout = os.Stdout
-	localCmd.Stderr = os.Stderr
-	require.NoError(t, localCmd.Start())
-	defer terminateProcess(localCmd)
-
-	waitForPort(t, localPort, 30*time.Second)
-	localAK, localSK := bootstrapAdminViaUDS(t, localDir)
-
-	// Register the upstream credentials for the "shared" bucket via admin UDS.
-	localSock := filepath.Join(localDir, "admin.sock")
-	iamPutBucketUpstream(t, localSock, "shared", upEndpoint, upAK, upSK)
-
-	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
-
-	// Bucket must exist on local (pull-through creates it if needed)
-	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("shared")})
-	require.NoError(t, err)
-	waitForS3Write(t, localClient, "shared", "__grainfs_e2e_ready", 30*time.Second)
-
-	// GET from local — should pull from upstream (cache miss)
-	getResp, err := localClient.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("shared"),
-		Key:    aws.String("data/file.txt"),
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "cluster fixture not booted in -short mode")
+		runPullthroughCases(t, newSharedClusterS3Target(t))
 	})
-	require.NoError(t, err, "pull-through GET must succeed")
-	defer getResp.Body.Close()
-
-	body, _ := io.ReadAll(getResp.Body)
-	assert.Equal(t, "upstream-content", string(body), "pull-through must return upstream content")
-
-	// Second GET — should now be served from local cache (no upstream needed)
-	getResp2, err := localClient.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("shared"),
-		Key:    aws.String("data/file.txt"),
-	})
-	require.NoError(t, err, "cached GET must succeed")
-	defer getResp2.Body.Close()
-	body2, _ := io.ReadAll(getResp2.Body)
-	assert.Equal(t, "upstream-content", string(body2))
 }
 
-// TestPullthrough_LargeObjectE2E verifies that the 2-pass streaming pull-through
-// correctly returns bytes-identical content for a large object (~5 MB).
-// This is a regression test for the A1 fix: io.ReadAll OOM → 2-pass streaming.
-func TestPullthrough_LargeObjectE2E(t *testing.T) {
-	binary := getBinary()
+// pullthroughUpstream is a throwaway single-node grainfs that acts as the
+// pull-through source. One per runPullthroughCases call, cleaned up via
+// t.Cleanup at end-of-subtest.
+type pullthroughUpstream struct {
+	endpoint  string
+	accessKey string
+	secretKey string
+	client    *s3.Client
+}
+
+// startPullthroughUpstream boots a throwaway single-node grainfs and
+// returns a handle to it. Cleanup is registered on t.Cleanup.
+func startPullthroughUpstream(t *testing.T) *pullthroughUpstream {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "grainfs-pullthrough-upstream-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	port := freePort()
+	cmd := exec.Command(getBinary(), "serve",
+		"--data", dir,
+		"--port", fmt.Sprintf("%d", port),
+		"--nfs4-port", fmt.Sprintf("%d", freePort()),
+		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
+		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start(), "start upstream grainfs")
+	t.Cleanup(func() { terminateProcess(cmd) })
+
+	require.NoError(t, waitForPortM(port, 30*time.Second))
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+	ak, sk := bootstrapAdminViaUDS(t, dir)
+	client := s3ClientFor(endpoint, ak, sk)
+	require.NoError(t, waitForIAMReady(client, 30*time.Second))
+
+	return &pullthroughUpstream{
+		endpoint:  endpoint,
+		accessKey: ak,
+		secretKey: sk,
+		client:    client,
+	}
+}
+
+// prepareBucket creates the bucket on upstream (matching name to the local
+// bucket the case will configure pull-through for) and registers cleanup.
+func (u *pullthroughUpstream) prepareBucket(t *testing.T, bucket string) {
+	t.Helper()
 	ctx := context.Background()
-
-	// --- Upstream GrainFS ---
-	upDir, err := os.MkdirTemp("", "grainfs-pt-large-up-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(upDir)
-
-	upPort := freePort()
-	upCmd := exec.Command(binary, "serve",
-		"--data", upDir,
-		"--port", fmt.Sprintf("%d", upPort),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	upCmd.Stdout = os.Stdout
-	upCmd.Stderr = os.Stderr
-	require.NoError(t, upCmd.Start())
-	defer terminateProcess(upCmd)
-
-	waitForPort(t, upPort, 30*time.Second)
-	upEndpoint := fmt.Sprintf("http://127.0.0.1:%d", upPort)
-	upAK, upSK := bootstrapAdminViaUDS(t, upDir)
-	upClient := s3ClientFor(upEndpoint, upAK, upSK)
-
-	_, err = upClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
-	require.NoError(t, err)
-	waitForS3Write(t, upClient, "large", "__grainfs_e2e_ready", 30*time.Second)
-
-	// 5 MB random payload exercises the 2-pass streaming path.
-	payload := make([]byte, 5*1024*1024)
-	_, err = rand.Read(payload)
-	require.NoError(t, err)
-
-	_, err = upClient.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String("large"),
-		Key:           aws.String("bigfile.bin"),
-		Body:          bytes.NewReader(payload),
-		ContentLength: aws.Int64(int64(len(payload))),
+	_, err := u.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	if err != nil && !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") &&
+		!strings.Contains(err.Error(), "BucketAlreadyExists") {
+		require.NoError(t, err)
+	}
+	waitForS3Write(t, u.client, bucket, "__grainfs_e2e_ready", 30*time.Second)
+	t.Cleanup(func() {
+		u.client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	})
-	require.NoError(t, err)
+}
 
-	// --- Local GrainFS with --upstream ---
-	localDir, err := os.MkdirTemp("", "grainfs-pt-large-local-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(localDir)
+func runPullthroughCases(t *testing.T, tgt s3Target) {
+	t.Helper()
 
-	localPort := freePort()
-	localCmd := exec.Command(binary, "serve",
-		"--data", localDir,
-		"--port", fmt.Sprintf("%d", localPort),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	localCmd.Stdout = os.Stdout
-	localCmd.Stderr = os.Stderr
-	require.NoError(t, localCmd.Start())
-	defer terminateProcess(localCmd)
+	upstream := startPullthroughUpstream(t)
 
-	waitForPort(t, localPort, 30*time.Second)
-	localAK, localSK := bootstrapAdminViaUDS(t, localDir)
+	t.Run("FetchesFromUpstream", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "fetch")
+		upstream.prepareBucket(t, bucket)
 
-	// Register the upstream credentials for the "large" bucket via admin UDS.
-	localSock := filepath.Join(localDir, "admin.sock")
-	iamPutBucketUpstream(t, localSock, "large", upEndpoint, upAK, upSK)
+		// Put canonical payload on upstream.
+		ctx := context.Background()
+		_, err := upstream.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("data/file.txt"),
+			Body:   strings.NewReader("upstream-content"),
+		})
+		require.NoError(t, err)
 
-	localClient := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", localPort), localAK, localSK)
+		// Wire the local bucket to the upstream via admin UDS.
+		iamPutBucketUpstream(t, tgt.adminSockPath(), bucket, upstream.endpoint, upstream.accessKey, upstream.secretKey)
 
-	_, err = localClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("large")})
-	require.NoError(t, err)
-	waitForS3Write(t, localClient, "large", "__grainfs_e2e_ready", 30*time.Second)
+		local := tgt.pickNode(0)
 
-	// First GET: cache miss → pull-through streaming fetch.
-	getResp, err := localClient.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("large"),
-		Key:    aws.String("bigfile.bin"),
+		// First GET on the local target — cache miss, must pull from upstream.
+		getResp, err := local.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("data/file.txt"),
+		})
+		require.NoError(t, err, "pull-through GET must succeed")
+		defer getResp.Body.Close()
+		body, _ := io.ReadAll(getResp.Body)
+		assert.Equal(t, "upstream-content", string(body), "pull-through must return upstream content")
+
+		// Second GET — local cache hit, no upstream needed.
+		getResp2, err := local.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("data/file.txt"),
+		})
+		require.NoError(t, err, "cached GET must succeed")
+		defer getResp2.Body.Close()
+		body2, _ := io.ReadAll(getResp2.Body)
+		assert.Equal(t, "upstream-content", string(body2))
 	})
-	require.NoError(t, err, "pull-through GET must succeed for large object")
-	defer getResp.Body.Close()
 
-	got, err := io.ReadAll(getResp.Body)
-	require.NoError(t, err)
-	assert.Equal(t, payload, got, "pull-through must return bytes-identical content for large object")
+	t.Run("LargeObject", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "large")
+		upstream.prepareBucket(t, bucket)
 
-	// Second GET: served from local cache, no upstream needed.
-	getResp2, err := localClient.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("large"),
-		Key:    aws.String("bigfile.bin"),
+		// 5 MiB random payload — exercises the 2-pass streaming fetch
+		// path on the local target. Regression for the original
+		// io.ReadAll OOM bug. Cluster4Node currently fails this case
+		// (parity gap with single tracked in TODOS.md).
+		payload := make([]byte, 5*1024*1024)
+		_, err := rand.Read(payload)
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		_, err = upstream.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(bucket),
+			Key:           aws.String("bigfile.bin"),
+			Body:          bytes.NewReader(payload),
+			ContentLength: aws.Int64(int64(len(payload))),
+		})
+		require.NoError(t, err)
+
+		iamPutBucketUpstream(t, tgt.adminSockPath(), bucket, upstream.endpoint, upstream.accessKey, upstream.secretKey)
+
+		local := tgt.pickNode(0)
+
+		// First GET: cache miss → streaming pull-through.
+		getResp, err := local.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("bigfile.bin"),
+		})
+		require.NoError(t, err, "pull-through GET must succeed for large object")
+		defer getResp.Body.Close()
+		got, err := io.ReadAll(getResp.Body)
+		require.NoError(t, err)
+		assert.Equal(t, payload, got, "pull-through must return bytes-identical content for large object")
+
+		// Second GET: cache hit.
+		getResp2, err := local.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("bigfile.bin"),
+		})
+		require.NoError(t, err, "cached GET must succeed")
+		defer getResp2.Body.Close()
+		got2, err := io.ReadAll(getResp2.Body)
+		require.NoError(t, err)
+		assert.Equal(t, payload, got2, "cached object must be bytes-identical to original")
 	})
-	require.NoError(t, err, "cached GET must succeed")
-	defer getResp2.Body.Close()
-	got2, err := io.ReadAll(getResp2.Body)
-	require.NoError(t, err)
-	assert.Equal(t, payload, got2, "cached object must be bytes-identical to original")
 }

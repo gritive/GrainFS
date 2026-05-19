@@ -18,13 +18,19 @@ import (
 //     single source of truth, exactly the first to fit succeeds; the
 //     remainder must surface EntityTooLarge or InvalidWriteOffset.
 //
-// SingleNode intentionally absent: the single-node testbed uses a package-
-// global server fixture, so --append-size-cap-bytes overrides would race
-// across tests. Cap behavior is identical to cluster (FSM-side check is
-// the same code path); cluster coverage is sufficient.
+// Both subtests run on a dedicated single-node fixture and on a dedicated
+// 4-node cluster. Per-test dedicated single fixture is needed because the
+// package-global single fixture cannot accept per-test --append-size-cap-bytes
+// without races across tests; newDedicatedSingleNodeS3Target spawns its own
+// grainfs process with the cap arg threaded through.
 func TestAppendSizeCapE2E(t *testing.T) {
 	smallCap := int64(4 * 1024)
 	capArg := []string{"--append-size-cap-bytes", fmt.Sprintf("%d", smallCap)}
+
+	t.Run("SingleNode", func(t *testing.T) {
+		tgt := newDedicatedSingleNodeS3Target(t, capArg)
+		runSizeCapCases(t, tgt, smallCap)
+	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
 		skipIfShort(t, "4-node cluster boot is too slow for -short")
@@ -49,10 +55,6 @@ func runSizeCapCases(t *testing.T, tgt s3Target, smallCap int64) {
 		require.Equal(t, "EntityTooLarge", apiErr.ErrorCode(),
 			"over-cap append must surface EntityTooLarge, got %s", apiErr.ErrorCode())
 	})
-
-	if !tgt.isCluster {
-		return
-	}
 
 	t.Run("ConcurrentRaceAtCap", func(t *testing.T) {
 		key := "obj-race"

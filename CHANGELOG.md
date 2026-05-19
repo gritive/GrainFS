@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.261.0] - 2026-05-19 - test(e2e): unify protocol-surface tests onto TestBucketsE2E dual pattern + expose latent parity gaps
+
+`tests/e2e/` 의 protocol-surface 테스트를 `TestBucketsE2E` 스타일 (단일 `TestXxxE2E` + SingleNode/Cluster4Node 듀얼 + 단일 `runXxxCases` 헬퍼) 로 통일. 통일의 부산물로 그동안 single-only 또는 cluster-only 로 가려져 있던 **두 개의 진짜 single↔cluster parity 격차**가 failing subtest 로 노출됨 — 이게 통일의 주된 목적 ([[feedback-single-cluster-parity]] 정책: surface 는 양쪽 동일 동작). 본 PR 은 신호를 켜는 데 집중하고 격차 자체의 backend fix 는 follow-up PR.
+
+### Changed
+
+- **`TestE2E_NBDCases{SingleNode,Cluster}` → `TestNBDMatrixE2E`** (`tests/e2e/nbd_matrix_cases_test.go`) — 두 top-level 함수를 한 `TestNBDMatrixE2E` + `t.Run("SingleNode")` + `t.Run("Cluster4Node")` 로 통합. 본문은 기존 `runNBDCases` 헬퍼 그대로 — 패턴 정렬만, 동작 무변.
+- **`TestIcebergConcurrentCommitsE2E`** (`tests/e2e/iceberg_concurrent_commits_test.go`) — ENV-gate (`GRAINFS_TEST_ICEBERG_STRESS`) + in-helper `if !tgt.isCluster { t.Skip(...) }` 두 skip 제거. 본문이 `tgt.endpoint(i)` 로 양쪽 target 의 N 노드 (single=1, cluster=4) 를 fan-out — single 은 forward path 가 없어 503 이 구조적으로 발생하지 않는 control, cluster 는 spec §8 `iceberg-rare-quic-stream-local-cancel-under-load` 의 ≤0.5% 임계로 회귀 검지. 검증: SingleNode 1600 ops → 1438/162/0, Cluster4Node 1600 ops → 1220/377/3 (≤8 임계).
+- **`TestAppendSizeCapE2E`** (`tests/e2e/append_size_cap_test.go`) — Cluster4Node 단독에서 SingleNode + Cluster4Node 듀얼로. 케이스 두 개 (`RejectAtCap`, `ConcurrentRaceAtCap`) 모두 양쪽에서 의미 있는 동작. 가능해진 이유는 아래 새 fixture.
+- **`TestPullthroughE2E`** (`tests/e2e/pullthrough_test.go`) — 두 절차적 top-level (`TestPullThrough_FetchesFromUpstream`, `TestPullthrough_LargeObjectE2E`) 을 한 `TestPullthroughE2E` + 듀얼 + `runPullthroughCases` 헬퍼 + `startPullthroughUpstream(t)` (throwaway single-node grainfs upstream + t.Cleanup) 로 통합. 사례명도 `FetchesFromUpstream` / `LargeObject` 로 정리.
+
+### Added
+
+- **`newDedicatedSingleNodeS3Target(t, extraArgs []string) s3Target`** (`tests/e2e/target_test.go`) — per-test single-node grainfs spawn + admin UDS bootstrap + auto-snapshot disable + `t.Cleanup` 종료/정리. cluster 측의 `newClusterS3Target` (dedicated) vs `newSharedClusterS3Target` (process-global) 의 대칭을 single 측에 미러링. ExtraArgs 가 필요한 케이스만 비용 (per-test boot) 부담, 일반 케이스는 기존 package-global single 그대로.
+- **`s3Target.adminSockPath() string`** (`tests/e2e/target_test.go`) — 모든 fixture 변종 (single-package-global / single-dedicated / shared-cluster / dedicated-cluster) 에서 "writable 노드" (single = 유일 노드, cluster = elected leader) 의 admin UDS 경로 노출. per-bucket admin PUT (e.g. `iamPutBucketUpstream`) 이 필요한 surface 테스트가 fixture 종류에 무관하게 동작.
+
+### Pre-existing — exposed via unification (follow-up PR)
+
+다음 두 격차는 본 PR 의 통일 작업이 노출한 **사전 존재** parity bug 임. 이번 PR 의 회귀 아님 — 통일 전에는 한쪽이 missing 이라 숨어 있던 격차. 통일 후 그 missing side 가 failing subtest 가 됨. 실패가 의도된 신호이며, follow-up PR 에서 backend 측에서 닫는다 (`TODOS.md` 참조).
+
+- **`TestPullthroughE2E/Cluster4Node/LargeObject`** — cluster pull-through 가 5 MiB 페이로드를 truncate / corrupt. SingleNode 는 동일 케이스 통과. cluster 측 2-pass streaming write 경로의 race / 미완료-닫힘 의심. TODOS → "Pull-through Parity Follow-Ups → Cluster pull-through large-object parity".
+- **`TestAppendCoalesceE2E/SingleNode`** — single-node `LocalBackend` 가 `storage.PartialIO` 미구현이라 post-coalesce appendable GET 이 `wal: inner backend does not support ReadAt` EOF. Cluster4Node 통과. TODOS → "AppendObject Follow-Ups → Single-node LocalBackend missing PartialIO (ReadAt)".
+
+### Tracking
+
+- TODOS.md → 신규 `Pull-through Parity Follow-Ups` 섹션 + `AppendObject Follow-Ups` 의 PartialIO 항목.
+- 본 PR 은 `make test-e2e` 의 두 subtest (`TestPullthroughE2E/Cluster4Node/LargeObject`, `TestAppendCoalesceE2E/SingleNode`) 가 의도적으로 실패한 상태로 land — 신호가 켜져 있어야 backend fix PR 이 그것을 끄는 시그널을 받음.
+
 ## [0.0.260.0] - 2026-05-19 - feat(auth): zero-config progressive application — §1 Foundation slice
 
 Auth redesign §1 Foundation slice. Spec/plan: `docs/superpowers/specs/2026-05-19-auth-redesign.md` (D#1, D#4, D#5). 5 new internal packages, 5 new FSM MetaCmds + 2 backward-compatible snapshot trailers, 21 commits, +4069 -13 lines. **Runtime wiring deferred** — admin UDS surface, server hot-swap, scrubber→storage adapter는 후속 슬라이스 (§2-§9). data-plane 영향 없음, snapshot 호환 유지.
