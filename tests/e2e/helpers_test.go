@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +22,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,6 +32,8 @@ var (
 	testServerNBDPort int
 	testAccessKey     string
 	testSecretKey     string
+	testSAID          string
+	testWildcardAdmin bool
 	testS3Client      *s3.Client
 	freePortCursor    uint32 = initialFreePortCursor()
 )
@@ -105,7 +108,7 @@ func TestMain(m *testing.M) {
 	// Bootstrap admin SA via UDS (replaces legacy --access-key/--secret-key
 	// flags). Stash the resulting creds in package-level vars so newS3Client
 	// and other helpers can sign with them.
-	ak, sk, err := bootstrapAdminViaUDSForTestMain(dir, 30*time.Second)
+	admin, err := bootstrapAdminResultViaUDSForTestMain(dir, 30*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bootstrap admin SA: %v\n", err)
 		terminateProcess(cmd)
@@ -114,8 +117,10 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(1)
 	}
-	testAccessKey = ak
-	testSecretKey = sk
+	testAccessKey = admin.AccessKey
+	testSecretKey = admin.SecretKey
+	testSAID = admin.SAID
+	testWildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
 
 	// Disable auto-snapshot for deterministic e2e behavior. Tests that need
 	// the auto-snapshot loop (e.g. auto_snapshot_test.go) PATCH it back to a
@@ -302,6 +307,14 @@ func e2eNoKeepAliveHTTPClient(timeout time.Duration) *http.Client {
 // bootstrapAdminViaUDSForTestMain is a TestMain-friendly variant of
 // bootstrapAdminViaUDS — no *testing.T because TestMain doesn't have one.
 func bootstrapAdminViaUDSForTestMain(dataDir string, timeout time.Duration) (string, string, error) {
+	out, err := bootstrapAdminResultViaUDSForTestMain(dataDir, timeout)
+	if err != nil {
+		return "", "", err
+	}
+	return out.AccessKey, out.SecretKey, nil
+}
+
+func bootstrapAdminResultViaUDSForTestMain(dataDir string, timeout time.Duration) (iamSAResult, error) {
 	sock := dataDir + "/admin.sock"
 	deadline := time.Now().Add(timeout)
 	for {
@@ -309,11 +322,11 @@ func bootstrapAdminViaUDSForTestMain(dataDir string, timeout time.Duration) (str
 			break
 		}
 		if time.Now().After(deadline) {
-			return "", "", fmt.Errorf("admin socket %s did not appear within %v", sock, timeout)
+			return iamSAResult{}, fmt.Errorf("admin socket %s did not appear within %v", sock, timeout)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return tryBootstrapAdminViaUDS(sock)
+	return tryBootstrapAdminViaUDSResult(sock)
 }
 
 func freePort() int {
@@ -583,28 +596,24 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	return url, cli
 }
 
-// waitForIAMReady polls HeadBucket against a probe bucket name until the IAM
-// bootstrap shim has registered the static test/test credentials. The shim
-// runs in a goroutine after the data port opens, so the brief gap between
-// "port up" and "auth ready" must be absorbed here. Returns nil once any
-// auth-ready response (200 or 404 for a non-existent bucket) is observed,
-// or the latest error on timeout.
+// waitForIAMReady polls until the IAM verifier recognizes the bootstrap key.
+// A key can be recognized before it has grants for an arbitrary probe bucket,
+// so readiness is "not unknown access key" rather than "HeadBucket allowed".
 func waitForIAMReady(cli *s3.Client, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, err := cli.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String("__bootstrap_probe__")})
+		_, err := cli.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String("__iam_key_probe__"),
+			Key:    aws.String("__probe__"),
+		})
 		cancel()
 		if err == nil {
 			return nil
 		}
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			switch apiErr.ErrorCode() {
-			case "NotFound", "NoSuchBucket":
-				return nil
-			}
+		if !strings.Contains(err.Error(), "unknown access key") {
+			return nil
 		}
 		lastErr = err
 		if time.Now().After(deadline) {
@@ -646,6 +655,61 @@ func createBucketWithClient(t testing.TB, client *s3.Client, name string) {
 	})
 }
 
+func createBucketWithAdminPolicyAttachViaUDSAny(t testing.TB, dataDirs []string, saID, name string, client *s3.Client) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		for _, dir := range dataDirs {
+			sock := filepath.Join(dir, "admin.sock")
+			if _, err := os.Stat(sock); err != nil {
+				lastErr = err
+				continue
+			}
+			if err := tryAdminCreateBucketWithPolicyAttach(sock, name, saID, "bucket-admin"); err != nil {
+				lastErr = err
+				continue
+			}
+			waitForS3Write(t, client, name, "__grainfs_e2e_ready", 30*time.Second)
+			_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+				Bucket: aws.String(name),
+				Key:    aws.String("__grainfs_e2e_ready"),
+			})
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("admin create bucket %s with bucket-admin attach for %s did not succeed: %v", name, saID, lastErr)
+}
+
+func tryAdminCreateBucketWithPolicyAttach(sock, bucket, saID, policy string) error {
+	body, err := json.Marshal(map[string]string{
+		"name":          bucket,
+		"attach_sa":     saID,
+		"attach_policy": policy,
+	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://unix/v1/buckets", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := iamUDSClient(sock).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("admin create bucket %s attach %s/%s via %s -> %d: %s", bucket, saID, policy, sock, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 func terminateProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil {
 		return
@@ -658,10 +722,14 @@ func terminateProcess(cmd *exec.Cmd) {
 func createBucket(t *testing.T, name string) {
 	t.Helper()
 	ctx := context.Background()
-	_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(name),
-	})
-	require.NoError(t, err, "create bucket %s", name)
+	if !testWildcardAdmin {
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{testServerDataDir}, testSAID, name, testS3Client)
+	} else {
+		_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(name),
+		})
+		require.NoError(t, err, "create bucket %s", name)
+	}
 
 	t.Cleanup(func() {
 		// delete all objects first

@@ -157,13 +157,19 @@ func newSharedClusterS3Target(t *testing.T) s3Target {
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t *testing.T, bucket string) {
-			c.GrantAdminOnBuckets(bucket)
-			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+			if c.wildcardAdmin {
+				createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+			} else {
+				createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			}
 		},
 		uniqueBucket: func(t *testing.T, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			c.GrantAdminOnBuckets(name)
-			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			if c.wildcardAdmin {
+				createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			} else {
+				createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			}
 			t.Cleanup(func() {
 				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
@@ -215,13 +221,19 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
 		createBkt: func(t *testing.T, bucket string) {
-			c.GrantAdminOnBuckets(bucket)
-			createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+			if c.wildcardAdmin {
+				createBucketWithClient(t, c.S3Client(c.leaderIdx), bucket)
+			} else {
+				createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
+			}
 		},
 		uniqueBucket: func(t *testing.T, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			c.GrantAdminOnBuckets(name)
-			createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			if c.wildcardAdmin {
+				createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
+			} else {
+				createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
+			}
 			t.Cleanup(func() {
 				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
@@ -278,8 +290,10 @@ func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
 
 	require.NoError(t, waitForPortM(port, 30*time.Second), "wait for HTTP port")
 
-	ak, sk, err := bootstrapAdminViaUDSForTestMain(dir, 30*time.Second)
+	admin, err := bootstrapAdminResultViaUDSForTestMain(dir, 30*time.Second)
 	require.NoError(t, err, "bootstrap admin SA via UDS")
+	ak, sk := admin.AccessKey, admin.SecretKey
+	wildcardAdmin := bootstrapResultHasWildcardAdmin(admin)
 
 	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
 
@@ -299,11 +313,19 @@ func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
 		accessKey: ak,
 		secretKey: sk,
 		createBkt: func(t *testing.T, bucket string) {
+			if !wildcardAdmin {
+				createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, bucket, client)
+				return
+			}
 			createBucketWithClient(t, client, bucket)
 		},
 		uniqueBucket: func(t *testing.T, caseName string) string {
 			name := bucketNameFor("single-dedicated", t.Name(), caseName)
-			createBucketWithClient(t, client, name)
+			if !wildcardAdmin {
+				createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, name, client)
+			} else {
+				createBucketWithClient(t, client, name)
+			}
 			t.Cleanup(func() {
 				client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
