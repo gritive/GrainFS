@@ -15,16 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestS3VersioningE2E exercises the versioning surface against the shared
-// 4-node cluster.
-//
-// Cluster-only: the single-node grainfs fixture accepts PutBucketVersioning
-// but does not actually version object writes — its backend is not EC. The
-// SDK-equivalent of internal/server/versioning_test.go _EC cases runs against
-// the cluster only.
+// TestS3VersioningE2E exercises the versioning surface against both single-node
+// and the shared 4-node cluster. Subtests that genuinely require the cluster
+// (cross-node fan-out) opt out via tgt.isCluster checks.
 func TestS3VersioningE2E(t *testing.T) {
-	skipIfShort(t, "cluster fixture not booted in -short mode")
-	runVersioningCases(t, newSharedClusterS3Target(t))
+	t.Run("SingleNode", func(t *testing.T) {
+		runVersioningCases(t, newSingleNodeS3Target())
+	})
+
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "cluster fixture not booted in -short mode")
+		runVersioningCases(t, newSharedClusterS3Target(t))
+	})
 }
 
 func runVersioningCases(t *testing.T, tgt s3Target) {
@@ -72,6 +74,9 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("PutGetByVersionID", func(t *testing.T) {
+		if !tgt.isCluster {
+			t.Skip("single-node fixture accepts PutBucketVersioning but PutObject does not return a VersionId (backend is not EC)")
+		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "putget")
 		enableVersioning(t, bkt)
@@ -97,6 +102,9 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("HeadByVersionID", func(t *testing.T) {
+		if !tgt.isCluster {
+			t.Skip("single-node fixture accepts PutBucketVersioning but PutObject does not return a VersionId (backend is not EC)")
+		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "headvid")
 		enableVersioning(t, bkt)
@@ -180,6 +188,9 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("SoftDelete", func(t *testing.T) {
+		if !tgt.isCluster {
+			t.Skip("single-node fixture accepts PutBucketVersioning but PutObject does not return a VersionId (backend is not EC)")
+		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "softdel")
 		enableVersioning(t, bkt)
@@ -201,6 +212,9 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("HardDeleteByVersionID", func(t *testing.T) {
+		if !tgt.isCluster {
+			t.Skip("single-node fixture accepts PutBucketVersioning but PutObject does not return a VersionId (backend is not EC)")
+		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "harddel")
 		enableVersioning(t, bkt)
@@ -220,6 +234,9 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("ListVersions", func(t *testing.T) {
+		if !tgt.isCluster {
+			t.Skip("single-node fixture accepts PutBucketVersioning but PutObject does not return a VersionId (backend is not EC)")
+		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "list")
 		enableVersioning(t, bkt)
@@ -254,6 +271,9 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("ListVersionsWithDeleteMarker", func(t *testing.T) {
+		if !tgt.isCluster {
+			t.Skip("single-node fixture accepts PutBucketVersioning but PutObject does not return a VersionId (backend is not EC)")
+		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "listmark")
 		enableVersioning(t, bkt)
