@@ -89,10 +89,8 @@ const (
 
 func TestE2E_ClusterDistributionBench(t *testing.T) {
 	if os.Getenv("GRAINFS_DISTRIBUTION_BENCH") != "1" {
-		t.Skip("set GRAINFS_DISTRIBUTION_BENCH=1 to run cluster distribution benchmark")
 	}
 	if _, err := os.Stat(getBinary()); err != nil {
-		t.Skipf("grainfs binary not found at %s - run `make build` first", getBinary())
 	}
 
 	outRoot := os.Getenv("GRAINFS_DISTRIBUTION_DIR")

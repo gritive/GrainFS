@@ -59,7 +59,6 @@ func TestIcebergE2E_AfterBootstrap_Accepts(t *testing.T) {
 // internal/server/handlers_audit_emit_test.go::TestAuditEnvelope_RecordsAuthFailure.
 // The scaffolding below stays so the follow-up PR can flip Skip → assertion.
 func TestIcebergE2E_AuthFailures_Audited(t *testing.T) {
-	t.Skip("audit pipeline for iceberg paths deferred per spec §6.5 (follow-up PR); see TestAuditEnvelope_RecordsAuthFailure for S3-path coverage. Empirically verified 0 audit events surface for iceberg auth failures in this PR's code state.")
 
 	srv := startIAMTestServer(t)
 	defer srv.Stop()

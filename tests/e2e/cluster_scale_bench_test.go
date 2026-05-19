@@ -25,7 +25,6 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
 	const (
@@ -173,7 +172,6 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 // default e2e suite where correctness tests should remain deterministic.
 func TestE2E_ClusterScaleBench_N8(t *testing.T) {
 	if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
-		t.Skip("set GRAINFS_BENCH_FULL=1 to run scale bench")
 	}
 	r := runScaleBench(t, 8)
 	t.Logf("N=8 result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",
@@ -194,7 +192,6 @@ func TestE2E_ClusterScaleBench_N8(t *testing.T) {
 
 func runScaleBenchTest(t *testing.T, n int) {
 	if os.Getenv("GRAINFS_BENCH_FULL") != "1" && n > 8 {
-		t.Skip("set GRAINFS_BENCH_FULL=1 to run N>8 scale bench")
 	}
 	r := runScaleBench(t, n)
 	t.Logf("N=%d result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",

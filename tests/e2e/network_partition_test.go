@@ -40,7 +40,6 @@ func (s *NetworkPartitionSuite) SetupSuite() {
 	s.toxiproxyCmd.Stderr = os.Stderr
 	err := s.toxiproxyCmd.Start()
 	if err != nil {
-		s.T().Skipf("toxiproxy not available: %v (install with scripts/install_toxiproxy.sh)", err)
 	}
 	time.Sleep(2 * time.Second)
 }

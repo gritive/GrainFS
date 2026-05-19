@@ -20,7 +20,6 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 
 	// Skip if restic not installed
 	if _, err := exec.LookPath("restic"); err != nil {
-		t.Skip("restic not installed - skipping backup test")
 	}
 
 	dir, err := os.MkdirTemp("", "grainfs-backup-test-*")

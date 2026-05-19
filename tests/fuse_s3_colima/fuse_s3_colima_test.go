@@ -88,10 +88,8 @@ func withRcloneMount(t *testing.T, fn func(mnt string)) {
 	// Make sure rclone + fuse are available in the VM.
 	out, err := colimaSSH("which", "rclone").CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
-		t.Skip("rclone not installed in colima VM (try: colima ssh -- sudo apt install -y rclone fuse3)")
 	}
 	if _, err := colimaSSH("test", "-e", "/dev/fuse").CombinedOutput(); err != nil {
-		t.Skip("/dev/fuse not present in colima VM")
 	}
 
 	name := strings.ReplaceAll(t.Name(), "/", "-")
@@ -223,10 +221,8 @@ func withGoofysMount(t *testing.T, fn func(mnt string)) {
 func requireColimaFUSEClient(t *testing.T, binary, installHint string) {
 	t.Helper()
 	if out, err := colimaSSH("which", binary).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) == "" {
-		t.Skipf("%s not installed in Colima VM (try: %s)", binary, installHint)
 	}
 	if _, err := colimaSSH("test", "-e", "/dev/fuse").CombinedOutput(); err != nil {
-		t.Skip("/dev/fuse not present in Colima VM")
 	}
 }
 

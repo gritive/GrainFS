@@ -82,7 +82,6 @@ func TestForwardRead(t *testing.T) {
 func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort int, encKeyFile string) *exec.Cmd {
 	t.Helper()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run make build first", binary)
 	}
 
 	logFile, err := os.CreateTemp("", "grainfs-compat-node-*.log")

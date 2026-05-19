@@ -65,7 +65,6 @@ func TestSnapshotLegacyGzipRejectedByCurrent(t *testing.T) {
 	legacyPath := fmt.Sprintf("%s/snapshots/snapshot-%d.json.gz", dataDir, seq)
 	if _, err := os.Stat(legacyPath); err != nil {
 		terminateProcess(cmd1)
-		t.Skip("previous binary no longer writes legacy gzip snapshots")
 	}
 
 	terminateProcess(cmd1)

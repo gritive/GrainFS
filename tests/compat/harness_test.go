@@ -109,7 +109,6 @@ func startCompatCluster(t *testing.T, binaries []string) *compatCluster {
 func (c *compatCluster) startNode(i int) *exec.Cmd {
 	c.t.Helper()
 	if _, err := os.Stat(c.binaries[i]); err != nil {
-		c.t.Skipf("grainfs binary not found at %s — run make build first", c.binaries[i])
 	}
 
 	logFile, err := os.CreateTemp("", fmt.Sprintf("grainfs-compat-node-%d-*.log", i))

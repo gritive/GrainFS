@@ -151,7 +151,6 @@ func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, erro
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s - run `make build` first", binary)
 	}
 
 	c := &e2eCluster{

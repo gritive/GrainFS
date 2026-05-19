@@ -13,10 +13,8 @@ func prevBinary(t *testing.T) string {
 	t.Helper()
 	path := os.Getenv("COMPAT_PREV_BIN")
 	if path == "" {
-		t.Skip("COMPAT_PREV_BIN not set — previous-binary tests skipped")
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Skipf("COMPAT_PREV_BIN=%s not found: %v", path, err)
 	}
 	return path
 }

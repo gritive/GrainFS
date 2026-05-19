@@ -71,7 +71,6 @@ func startStaticMRClusterWithOptions(t *testing.T, numNodes int, opts mrClusterO
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
 	// Legacy static-peer multi-process e2e: freePort() TOCTOU + meta-Raft
@@ -1136,7 +1135,6 @@ func runNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody stri
 	case "darwin":
 		runColimaNFSv4SmokeClient(t, nfsPort, bucket, s3Body, nfsBody)
 	default:
-		t.Skipf("NFSv4 smoke requires Linux local mount or Colima VM client; unsupported GOOS=%s", runtime.GOOS)
 	}
 }
 
@@ -1158,7 +1156,6 @@ func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody
 	out, err := mountCmd.CombinedOutput()
 	if err != nil {
 		t.Logf("NFSv4 mount failed (may require sudo): %v\n%s", err, string(out))
-		t.Skip("NFSv4 smoke requires local NFS mount permissions")
 	}
 
 	nfsFilePath := filepath.Join(mountDir, bucket, "s3-file.txt")
@@ -1174,12 +1171,8 @@ func runLocalNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody
 func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBody string) {
 	t.Helper()
 
-	if _, err := exec.LookPath("colima"); err != nil {
-		t.Skip("colima not found; macOS NFSv4 smoke requires a Colima Linux VM client")
-	}
-	if out, err := exec.Command("colima", "status").CombinedOutput(); err != nil {
-		t.Skipf("colima not running; macOS NFSv4 smoke requires a Colima Linux VM client: %s", out)
-	}
+	_, _ = exec.LookPath("colima")
+	_, _ = exec.Command("colima", "status").CombinedOutput()
 
 	hostIP := os.Getenv("HOST_IP")
 	if hostIP == "" {
@@ -1194,13 +1187,11 @@ func runColimaNFSv4SmokeClient(t *testing.T, nfsPort int, bucket, s3Body, nfsBod
 		_ = colimaSSH("sudo", "rmdir", mountDir).Run()
 	})
 
-	if out, err := colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
+	_, _ = colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
 		"-o", fmt.Sprintf("vers=4.1,port=%d,rw,hard,intr,timeo=600,retrans=2", nfsPort),
 		fmt.Sprintf("%s:/", hostIP),
 		mountDir,
-	); err != nil {
-		t.Skipf("Colima NFSv4 mount failed; macOS smoke requires a working Colima NFS client: %v\n%s", err, out)
-	}
+	)
 
 	nfsFilePath := mountDir + "/" + bucket + "/s3-file.txt"
 	require.Eventually(t, func() bool {
