@@ -335,6 +335,27 @@ Work these in order. Do not run them in parallel.
   capability evidence propagation TODO와 동일 root (cluster bootstrap timing).
   단독 실행 시 PASS인 케이스 vs 환경 의존 케이스 분리 필요.
 
+## Chunking Phase 1 Follow-Ups
+
+- [ ] **Cluster path: 100 MiB simple PUT round-trip corrupts body [P1]**:
+  `TestLargeObjectE2E/Cluster4Node/RoundTrip100MiB` consistently fails
+  byte-equality — length matches, content does not. The 256 MiB sibling
+  (16 even chunks) and the 64 MiB Range sub-case (4 even chunks) PASS on
+  the same cluster fixture, so the corruption is specific to a partial
+  trailing chunk: 100 MiB / 16 MiB = 6 full + 1 × 4 MiB tail. Phase 2 cluster
+  fan-out must handle non-aligned tail chunks. Case is left as a permanent
+  red flag in the e2e suite (not skipped) so Phase 2 work has a regression
+  target.
+
+- [ ] **PackedBackend PartialIO pass-through [P2]**: single-node Range GET on
+  objects above `--pack-threshold` fails with `wal: inner backend does not
+  support ReadAt` because `packblob.PackedBackend` does not implement
+  `storage.PartialIO`. The wal wrapper type-asserts and refuses. Cluster path
+  routes through `ClusterCoordinator.ReadAt` directly and works.
+  `TestLargeObjectE2E/SingleNode/RangeAcrossChunkBoundary` is currently
+  skipped for this reason; cluster sub-case still exercises the chunk-boundary
+  range. Design call: delegate-when-unpacked vs unpack-and-read.
+
 ## Conformance Follow-Ups
 
 - [ ] [nfs-conformance] pynfs-nightly [P1]: run pynfs basic suite on a scheduled
