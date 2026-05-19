@@ -463,6 +463,61 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.CompleteMultipartCmdStartNodeIdsVector)
 	}
+	var partsOff flatbuffers.UOffsetT
+	if len(c.Parts) > 0 {
+		partOffs := make([]flatbuffers.UOffsetT, len(c.Parts))
+		for i, p := range c.Parts {
+			etOff := b.CreateString(p.ETag)
+			clusterpb.MultipartPartEntryStart(b)
+			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+			clusterpb.MultipartPartEntryAddSize(b, p.Size)
+			clusterpb.MultipartPartEntryAddEtag(b, etOff)
+			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+		}
+		clusterpb.CompleteMultipartCmdStartPartsVector(b, len(partOffs))
+		for i := len(partOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partOffs[i])
+		}
+		partsOff = b.EndVector(len(partOffs))
+	}
+	var segmentsOff flatbuffers.UOffsetT
+	if len(c.Segments) > 0 {
+		segOffs := make([]flatbuffers.UOffsetT, len(c.Segments))
+		for i, s := range c.Segments {
+			blobOff := b.CreateString(s.BlobID)
+			pgOff := b.CreateString(s.PlacementGroupID)
+			var checksumOff flatbuffers.UOffsetT
+			if len(s.Checksum) > 0 {
+				checksumOff = b.CreateByteVector(s.Checksum)
+			}
+			var nodeIdsOff flatbuffers.UOffsetT
+			if len(s.NodeIDs) > 0 {
+				nodeIdsOff = buildStringVector(b, s.NodeIDs, clusterpb.SegmentMetaEntryStartNodeIdsVector)
+			}
+			clusterpb.SegmentMetaEntryStart(b)
+			clusterpb.SegmentMetaEntryAddBlobId(b, blobOff)
+			clusterpb.SegmentMetaEntryAddSize(b, s.Size)
+			if checksumOff != 0 {
+				clusterpb.SegmentMetaEntryAddChecksum(b, checksumOff)
+			}
+			clusterpb.SegmentMetaEntryAddPlacementGroupId(b, pgOff)
+			clusterpb.SegmentMetaEntryAddShardSize(b, s.ShardSize)
+			clusterpb.SegmentMetaEntryAddSegmentIdx(b, s.SegmentIdx)
+			if nodeIdsOff != 0 {
+				clusterpb.SegmentMetaEntryAddNodeIds(b, nodeIdsOff)
+			}
+			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
+			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
+			clusterpb.SegmentMetaEntryAddRingVersion(b, uint64(s.RingVersion))
+			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
+		}
+		clusterpb.CompleteMultipartCmdStartSegmentsVector(b, len(segOffs))
+		for i := len(segOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(segOffs[i])
+		}
+		segmentsOff = b.EndVector(len(segOffs))
+	}
+	tagsOff := buildTagsVector(b, c.Tags, clusterpb.CompleteMultipartCmdStartTagsVector)
 	clusterpb.CompleteMultipartCmdStart(b)
 	clusterpb.CompleteMultipartCmdAddBucket(b, bucketOff)
 	clusterpb.CompleteMultipartCmdAddKey(b, keyOff)
@@ -477,6 +532,15 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	clusterpb.CompleteMultipartCmdAddEcParity(b, c.ECParity)
 	if nodeIDsOff != 0 {
 		clusterpb.CompleteMultipartCmdAddNodeIds(b, nodeIDsOff)
+	}
+	if partsOff != 0 {
+		clusterpb.CompleteMultipartCmdAddParts(b, partsOff)
+	}
+	if segmentsOff != 0 {
+		clusterpb.CompleteMultipartCmdAddSegments(b, segmentsOff)
+	}
+	if tagsOff != 0 {
+		clusterpb.CompleteMultipartCmdAddTags(b, tagsOff)
 	}
 	return fbFinish(b, clusterpb.CompleteMultipartCmdEnd(b)), nil
 }
@@ -495,6 +559,54 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 			nodeIDs[i] = string(t.NodeIds(i))
 		}
 	}
+	var parts []storage.MultipartPartEntry
+	if n := t.PartsLength(); n > 0 {
+		parts = make([]storage.MultipartPartEntry, n)
+		var pe clusterpb.MultipartPartEntry
+		for i := 0; i < n; i++ {
+			if !t.Parts(&pe, i) {
+				return CompleteMultipartCmd{}, fmt.Errorf("decode complete multipart parts[%d]", i)
+			}
+			parts[i] = storage.MultipartPartEntry{
+				PartNumber: int(pe.PartNumber()),
+				Size:       pe.Size(),
+				ETag:       string(pe.Etag()),
+			}
+		}
+	}
+	var segments []SegmentMetaEntry
+	if n := t.SegmentsLength(); n > 0 {
+		segments = make([]SegmentMetaEntry, n)
+		var se clusterpb.SegmentMetaEntry
+		for i := 0; i < n; i++ {
+			if !t.Segments(&se, i) {
+				return CompleteMultipartCmd{}, fmt.Errorf("decode complete multipart segments[%d]", i)
+			}
+			var nodeIDs []string
+			if nn := se.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(se.NodeIds(j))
+				}
+			}
+			var checksum []byte
+			if cb := se.ChecksumBytes(); len(cb) > 0 {
+				checksum = append([]byte(nil), cb...)
+			}
+			segments[i] = SegmentMetaEntry{
+				BlobID:           string(se.BlobId()),
+				Size:             se.Size(),
+				Checksum:         checksum,
+				PlacementGroupID: string(se.PlacementGroupId()),
+				ShardSize:        se.ShardSize(),
+				SegmentIdx:       se.SegmentIdx(),
+				NodeIDs:          nodeIDs,
+				ECData:           se.EcData(),
+				ECParity:         se.EcParity(),
+				RingVersion:      RingVersion(se.RingVersion()),
+			}
+		}
+	}
 	return CompleteMultipartCmd{
 		Bucket:           string(t.Bucket()),
 		Key:              string(t.Key()),
@@ -508,6 +620,9 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
+		Parts:            parts,
+		Segments:         segments,
+		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 	}, nil
 }
 

@@ -287,6 +287,86 @@ func TestFSM_MultipartCycle(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID: "upload-layout", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
+		{PartNumber: 2, Size: 7 << 20, ETag: "part-2"},
+	}
+	tags := []storage.Tag{{Key: "env", Value: "prod"}}
+	segments := []SegmentMetaEntry{
+		{
+			BlobID:           "blob-0",
+			Size:             6 << 20,
+			Checksum:         []byte{0x01, 0x02},
+			PlacementGroupID: "group-a",
+			ShardSize:        4 << 20,
+			SegmentIdx:       0,
+			NodeIDs:          []string{"n1", "n2", "n3"},
+			ECData:           2,
+			ECParity:         1,
+			RingVersion:      11,
+		},
+		{
+			BlobID:           "blob-1",
+			Size:             6 << 20,
+			Checksum:         []byte{0x03, 0x04},
+			PlacementGroupID: "group-b",
+			ShardSize:        4 << 20,
+			SegmentIdx:       1,
+			NodeIDs:          []string{"n4", "n5", "n6"},
+			ECData:           2,
+			ECParity:         1,
+			RingVersion:      12,
+		},
+	}
+
+	data, err = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+		Bucket:           "b",
+		Key:              "mp.bin",
+		UploadID:         "upload-layout",
+		Size:             12 << 20,
+		ContentType:      "application/octet-stream",
+		ETag:             "complete-etag",
+		ModTime:          200,
+		VersionID:        "v1",
+		PlacementGroupID: "group-a",
+		ECData:           2,
+		ECParity:         1,
+		NodeIDs:          []string{"n1", "n2", "n3"},
+		Parts:            parts,
+		Segments:         segments,
+		Tags:             tags,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	err = db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(multipartKey("upload-layout"))
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+
+		item, err := txn.Get(objectMetaKey("b", "mp.bin"))
+		require.NoError(t, err)
+		raw, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		meta, err := unmarshalObjectMeta(raw)
+		require.NoError(t, err)
+		require.Equal(t, parts, meta.Parts)
+		require.Equal(t, segmentMetaEntriesToRefs(segments), meta.Segments)
+		require.Equal(t, tags, meta.Tags)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())

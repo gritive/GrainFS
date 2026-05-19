@@ -223,7 +223,7 @@ func (b *DistributedBackend) putObjectChunked(
 
 func (b *DistributedBackend) putMultipartObjectChunked(
 	ctx context.Context,
-	bucket, key, versionID string,
+	bucket, key, versionID, uploadID string,
 	manifest multipartCompleteManifest,
 	contentType string,
 	userMetadata map[string]string,
@@ -260,7 +260,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	}
 	defer body.Close()
 	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
-		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags)
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags, uploadID)
 }
 
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
@@ -281,7 +281,7 @@ func runChunkedPut(
 	tags []storage.Tag,
 ) (*storage.Object, error) {
 	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
-		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, nil, tags)
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, nil, tags, "")
 }
 
 func runChunkedPutWithParts(
@@ -297,6 +297,7 @@ func runChunkedPutWithParts(
 	beforeCommit func() error,
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
+	completeUploadID string,
 ) (*storage.Object, error) {
 
 	// Best-effort blob cleanup on any error path before raft commit.
@@ -344,30 +345,52 @@ func runChunkedPutWithParts(
 	commitModTime := chunkedChooseModTime(modTime, preserveModTime, time.Now().Unix())
 	obj.LastModified = commitModTime
 	obj.VersionID = versionID
-	cmd := PutObjectMetaCmd{
-		Bucket:           bucket,
-		Key:              key,
-		Size:             obj.Size,
-		ETag:             obj.ETag,
-		VersionID:        versionID,
-		ContentType:      contentType,
-		ModTime:          commitModTime,
-		UserMetadata:     userMetadata,
-		SSEAlgorithm:     sseAlgorithm,
-		ExpectedETag:     expectedETag,
-		IsDeleteMarker:   false,
-		Parts:            partsMeta,
-		NodeIDs:          csb.placements[0].NodeIDs,
-		ECData:           uint8(csb.placements[0].Config.DataShards),
-		ECParity:         uint8(csb.placements[0].Config.ParityShards),
-		PlacementGroupID: csb.placements[0].PlacementGroupID,
-		Segments:         buildSegmentMetaEntries(csb.placements, obj.Segments),
-		Tags:             tags,
-	}
+	segments := buildSegmentMetaEntries(csb.placements, obj.Segments)
 
 	// 6. Single atomic raft commit.
-	if err := csb.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
-		return nil, fmt.Errorf("commit meta: %w", err)
+	var commitErr error
+	if completeUploadID != "" {
+		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
+			Bucket:           bucket,
+			Key:              key,
+			UploadID:         completeUploadID,
+			Size:             obj.Size,
+			ETag:             obj.ETag,
+			VersionID:        versionID,
+			ContentType:      contentType,
+			ModTime:          commitModTime,
+			Parts:            partsMeta,
+			NodeIDs:          csb.placements[0].NodeIDs,
+			ECData:           uint8(csb.placements[0].Config.DataShards),
+			ECParity:         uint8(csb.placements[0].Config.ParityShards),
+			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			Segments:         segments,
+			Tags:             tags,
+		})
+	} else {
+		commitErr = csb.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket:           bucket,
+			Key:              key,
+			Size:             obj.Size,
+			ETag:             obj.ETag,
+			VersionID:        versionID,
+			ContentType:      contentType,
+			ModTime:          commitModTime,
+			UserMetadata:     userMetadata,
+			SSEAlgorithm:     sseAlgorithm,
+			ExpectedETag:     expectedETag,
+			IsDeleteMarker:   false,
+			Parts:            partsMeta,
+			NodeIDs:          csb.placements[0].NodeIDs,
+			ECData:           uint8(csb.placements[0].Config.DataShards),
+			ECParity:         uint8(csb.placements[0].Config.ParityShards),
+			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			Segments:         segments,
+			Tags:             tags,
+		})
+	}
+	if commitErr != nil {
+		return nil, fmt.Errorf("commit meta: %w", commitErr)
 	}
 	metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 	committed = true

@@ -30,6 +30,29 @@ type blockingSnapshotter struct {
 	closed  atomic.Bool
 }
 
+type recordingRaftNode struct {
+	RaftNode
+	mu    sync.Mutex
+	types []CommandType
+}
+
+func (n *recordingRaftNode) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
+	if cmd, err := DecodeCommand(command); err == nil {
+		n.mu.Lock()
+		n.types = append(n.types, cmd.Type)
+		n.mu.Unlock()
+	}
+	return n.RaftNode.ProposeWait(ctx, command)
+}
+
+func (n *recordingRaftNode) commandTypes() []CommandType {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]CommandType, len(n.types))
+	copy(out, n.types)
+	return out
+}
+
 func newBlockingSnapshotter() *blockingSnapshotter {
 	return &blockingSnapshotter{
 		entered: make(chan struct{}),
@@ -450,12 +473,33 @@ func TestDistributedBackend_PutObjectECSpooledBeforeCommitAbortCleansShards(t *t
 				func() error { return errChanged },
 				nil,
 				nil,
+				"",
 			)
 			require.ErrorIs(t, err, errChanged)
 			_, err = b.shardSvc.ReadLocalShard("bucket", "abort.bin", 0)
 			require.True(t, os.IsNotExist(err), "pre-commit abort should remove written EC shards")
 		})
 	}
+}
+
+func TestDistributedBackend_CompleteMultipartDoesNotProposeSeparateAbort(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("small-final-part")))
+	require.NoError(t, err)
+
+	rec := &recordingRaftNode{RaftNode: b.node}
+	b.node = rec
+
+	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+
+	require.Equal(t, []CommandType{CmdCompleteMultipart}, rec.commandTypes())
 }
 
 func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {

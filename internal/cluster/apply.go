@@ -551,6 +551,9 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		ECParity:         c.ECParity,
 		NodeIDs:          c.NodeIDs,
 		PlacementGroupID: c.PlacementGroupID,
+		Parts:            c.Parts,
+		Segments:         segmentMetaEntriesToRefs(c.Segments),
+		Tags:             c.Tags,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)

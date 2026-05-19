@@ -50,7 +50,7 @@ type deleteCall struct {
 
 type proposeCall struct {
 	cmdType CommandType
-	cmd     PutObjectMetaCmd
+	cmd     any
 }
 
 func (f *fakeSegmentBackendDeps) groupSelector(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
@@ -93,8 +93,7 @@ func (f *fakeSegmentBackendDeps) deleteShards(ctx context.Context, peer, bucket,
 func (f *fakeSegmentBackendDeps) propose(ctx context.Context, cmdType CommandType, payload any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cmd, _ := payload.(PutObjectMetaCmd)
-	f.proposeCalls = append(f.proposeCalls, proposeCall{cmdType: cmdType, cmd: cmd})
+	f.proposeCalls = append(f.proposeCalls, proposeCall{cmdType: cmdType, cmd: payload})
 	return f.proposeErr
 }
 
@@ -229,8 +228,8 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	assert.Len(t, obj.Segments, 4)
 
 	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
-	cmd := deps.proposeCalls[0].cmd
 	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
+	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
 	require.Len(t, cmd.Segments, 4)
 	for i, seg := range cmd.Segments {
 		assert.Equal(t, int32(i), seg.SegmentIdx, "Segments[%d].SegmentIdx deterministic", i)
@@ -266,13 +265,15 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	defer body.Close()
 	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
 		"bucket", "large-mp.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil, parts, nil)
+		nil, "", 0, false, "", nil, parts, nil, "upload-1")
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	require.Equal(t, parts, obj.Parts)
 
 	require.Len(t, deps.proposeCalls, 1)
-	cmd := deps.proposeCalls[0].cmd
+	require.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
+	cmd := deps.proposeCalls[0].cmd.(CompleteMultipartCmd)
+	require.Equal(t, "upload-1", cmd.UploadID)
 	require.Len(t, cmd.Segments, 2)
 	require.Equal(t, parts, cmd.Parts)
 
@@ -495,8 +496,8 @@ func TestChunkedPut_PreservesTags(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
-	cmd := deps.proposeCalls[0].cmd
 	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
+	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
 	require.Equal(t, wantTags, cmd.Tags,
 		"chunked-PUT must thread tags into PutObjectMetaCmd; clobbering this drops tags on every large object")
 }

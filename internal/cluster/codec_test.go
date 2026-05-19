@@ -209,6 +209,63 @@ func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
 	assert.Equal(t, []string{"n1", "n2", "n3"}, decoded.NodeIDs)
 }
 
+func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
+	orig := CompleteMultipartCmd{
+		Bucket:           "uploads",
+		Key:              "large-video.mp4",
+		UploadID:         "upload-with-layout",
+		Size:             40 << 20,
+		ContentType:      "video/mp4",
+		ETag:             "complete-etag",
+		ModTime:          1700001001,
+		VersionID:        "v-complete",
+		PlacementGroupID: "group-a",
+		ECData:           4,
+		ECParity:         2,
+		NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+		Tags:             []storage.Tag{{Key: "env", Value: "prod"}},
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
+			{PartNumber: 2, Size: 35 << 20, ETag: "part-2"},
+		},
+		Segments: []SegmentMetaEntry{
+			{
+				BlobID:           "blob-0",
+				Size:             16 << 20,
+				Checksum:         []byte{0x01, 0x02, 0x03, 0x04},
+				PlacementGroupID: "group-a",
+				ShardSize:        4 << 20,
+				SegmentIdx:       0,
+				NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+				ECData:           4,
+				ECParity:         2,
+				RingVersion:      7,
+			},
+			{
+				BlobID:           "blob-1",
+				Size:             24 << 20,
+				Checksum:         []byte{0x05, 0x06, 0x07, 0x08},
+				PlacementGroupID: "group-b",
+				ShardSize:        4 << 20,
+				SegmentIdx:       1,
+				NodeIDs:          []string{"n2", "n3", "n4", "n5", "n6", "n7"},
+				ECData:           4,
+				ECParity:         2,
+				RingVersion:      8,
+			},
+		},
+	}
+
+	raw, err := encodeCompleteMultipartCmd(orig)
+	require.NoError(t, err)
+	got, err := decodeCompleteMultipartCmd(raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, orig.Parts, got.Parts)
+	assert.Equal(t, orig.Segments, got.Segments)
+	assert.Equal(t, orig.Tags, got.Tags)
+}
+
 func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	orig := objectMeta{
 		Key:              "docs/readme.md",
