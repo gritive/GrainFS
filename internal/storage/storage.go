@@ -269,6 +269,14 @@ type Syncable interface {
 	Sync(bucket, key string) error
 }
 
+// TaggingDirective controls how tags are applied on CopyObject.
+type TaggingDirective uint8
+
+const (
+	TaggingDirectiveCopy    TaggingDirective = 0 // default: inherit source tags
+	TaggingDirectiveReplace TaggingDirective = 1 // use request.Tags
+)
+
 // Tag is a single object tag key/value pair.
 type Tag struct {
 	Key   string `json:"k"`
