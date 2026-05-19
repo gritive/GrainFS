@@ -41,7 +41,7 @@ func (rcv *Tag) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-func (rcv *Tag) K() []byte {
+func (rcv *Tag) Key() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -49,7 +49,7 @@ func (rcv *Tag) K() []byte {
 	return nil
 }
 
-func (rcv *Tag) V() []byte {
+func (rcv *Tag) Value() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -60,11 +60,11 @@ func (rcv *Tag) V() []byte {
 func TagStart(builder *flatbuffers.Builder) {
 	builder.StartObject(2)
 }
-func TagAddK(builder *flatbuffers.Builder, k flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(k), 0)
+func TagAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
 }
-func TagAddV(builder *flatbuffers.Builder, v flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(v), 0)
+func TagAddValue(builder *flatbuffers.Builder, value flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(value), 0)
 }
 func TagEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

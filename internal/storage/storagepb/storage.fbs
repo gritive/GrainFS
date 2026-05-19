@@ -4,8 +4,8 @@
 namespace storagepb;
 
 table Tag {
-  k:string;
-  v:string;
+  key:string;
+  value:string;
 }
 
 table Object {
