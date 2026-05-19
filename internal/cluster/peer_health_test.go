@@ -28,7 +28,10 @@ func TestPeerHealth_RecoverAfterCooldown(t *testing.T) {
 	ph.MarkUnhealthy("node-a")
 	assert.False(t, ph.IsHealthy("node-a"))
 
-	time.Sleep(60 * time.Millisecond)
+	ph.mu.Lock()
+	ph.peers["node-a"] = time.Now().Add(-60 * time.Millisecond)
+	ph.mu.Unlock()
+
 	assert.True(t, ph.IsHealthy("node-a"))
 }
 

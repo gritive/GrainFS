@@ -24,7 +24,7 @@ func makeTTLExecutor(ttl time.Duration) (*MigrationExecutor, context.CancelFunc)
 
 // TestMigrationExecutor_PendingTTL: expired entry → cancel() called, removed from pending.
 func TestMigrationExecutor_PendingTTL(t *testing.T) {
-	ttl := 50 * time.Millisecond
+	ttl := 5 * time.Millisecond
 	e, cancel := makeTTLExecutor(ttl)
 	defer cancel()
 	defer e.Stop()
@@ -34,8 +34,9 @@ func TestMigrationExecutor_PendingTTL(t *testing.T) {
 	entryCtx, entryCancel := context.WithCancel(context.Background())
 	e.registerPending(id, entryCancel)
 
-	// Wait for sweep to expire it.
-	time.Sleep(ttl*3 + 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		return entryCtx.Err() == context.Canceled && !e.hasPending(id)
+	}, 100*time.Millisecond, time.Millisecond, "sweep must cancel and remove the expired entry")
 
 	// Entry should be cancelled and removed.
 	assert.ErrorIs(t, entryCtx.Err(), context.Canceled, "sweep must cancel the entry context")
@@ -45,15 +46,15 @@ func TestMigrationExecutor_PendingTTL(t *testing.T) {
 // TestMigrationExecutor_TTLDuringPhase3: sweep fires after Phase 2 (proposedAt set)
 // but before Raft commit → must NOT cancel on first sweep, must cancel after extension.
 // Option A: 1 extension of TTL duration, then cancel.
-// Timeline (TTL=100ms, sweep=50ms):
+// Timeline (TTL=10ms, sweep=5ms):
 //
-//	t=0:    register + markProposed (deadline = t+100ms)
-//	t=50:   sweep1 — not expired → skip
-//	t=100:  sweep2 — expired, proposedAt!=0 → extend to ~200ms
-//	t=150:  sweep3 — not expired (deadline=200ms) → skip  ← check1 here
-//	t=200:  sweep4 — extended deadline expired, extended=true → CANCEL ← check2 after this
+//	t=0:    register + markProposed (deadline = t+10ms)
+//	t=5:    sweep1 — not expired → skip
+//	t=10:   sweep2 — expired, proposedAt!=0 → extend to ~20ms
+//	t=15:   sweep3 — not expired (deadline=20ms) → skip  ← check1 here
+//	t=20:   sweep4 — extended deadline expired, extended=true → CANCEL ← check2 after this
 func TestMigrationExecutor_TTLDuringPhase3(t *testing.T) {
-	ttl := 100 * time.Millisecond
+	ttl := 10 * time.Millisecond
 	e, cancel := makeTTLExecutor(ttl)
 	defer cancel()
 	defer e.Stop()
@@ -65,15 +66,13 @@ func TestMigrationExecutor_TTLDuringPhase3(t *testing.T) {
 	// Simulate Phase 2: mark proposedAt immediately
 	e.markProposed(id)
 
-	// Check 1: after ttl + ttl/2 + margin — extension should be active, NOT cancelled
-	time.Sleep(ttl + ttl/2 + 20*time.Millisecond) // ~170ms
-
-	require.NoError(t, entryCtx.Err(), "sweep must NOT cancel entry that has proposedAt set")
+	time.Sleep(ttl + ttl/2)
+	require.NoError(t, entryCtx.Err(), "sweep must NOT cancel entry immediately after proposedAt extension")
 	assert.True(t, e.hasPending(id), "entry must still exist after first sweep with proposedAt")
 
-	// Check 2: after another ttl + margin — extension should have expired, CANCELLED
-	time.Sleep(ttl + 20*time.Millisecond) // +120ms = total ~290ms
-
+	require.Eventually(t, func() bool {
+		return entryCtx.Err() == context.Canceled
+	}, 100*time.Millisecond, time.Millisecond, "sweep must eventually cancel after extension")
 	assert.ErrorIs(t, entryCtx.Err(), context.Canceled, "sweep must eventually cancel after extension")
 }
 
@@ -83,14 +82,14 @@ func TestMigrationExecutor_SweepLoopStopsOnCtxDone(t *testing.T) {
 	defer e.Stop()
 	cancel() // cancel immediately
 
-	// sweepLoop goroutine should exit; no deadlock or panic
-	time.Sleep(20 * time.Millisecond)
-	// If we reach here without deadlock, test passes.
+	require.Eventually(t, func() bool {
+		return e.stopOnce.Load()
+	}, 100*time.Millisecond, time.Millisecond, "sweepLoop goroutine should exit")
 }
 
 // TestMigrationExecutor_SweepDoesNotCloseCh: ensure sweep doesn't close channels (panic prevention).
 func TestMigrationExecutor_SweepDoesNotCloseCh(t *testing.T) {
-	ttl := 50 * time.Millisecond
+	ttl := 5 * time.Millisecond
 	e, cancel := makeTTLExecutor(ttl)
 	defer cancel()
 	defer e.Stop()
@@ -99,8 +98,9 @@ func TestMigrationExecutor_SweepDoesNotCloseCh(t *testing.T) {
 	_, entryCancel := context.WithCancel(context.Background())
 	e.registerPending(id, entryCancel)
 
-	// Let sweep fire
-	time.Sleep(ttl*3 + 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		return !e.hasPending(id)
+	}, 100*time.Millisecond, time.Millisecond, "sweep must remove expired entry")
 
 	// Register again with same id — must not panic
 	_, entryCancel2 := context.WithCancel(context.Background())

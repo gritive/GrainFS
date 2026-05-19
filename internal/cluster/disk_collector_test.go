@@ -121,16 +121,18 @@ func TestDiskCollector_RunCallsCollectOnInterval(t *testing.T) {
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Millisecond, nil)
 
 	var count atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	dc.SetStatFunc(func(string) (float64, uint64) {
-		count.Add(1)
+		if count.Add(1) >= 3 {
+			cancel()
+		}
 		return 50.0, 1000
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
 	dc.Run(ctx)
-
-	assert.GreaterOrEqual(t, count.Load(), int64(3))
+	assert.Equal(t, int64(3), count.Load())
 }
 
 // thresholdCall captures one OnThreshold invocation for assertion.

@@ -201,9 +201,9 @@ func TestV2QUICCluster_ThreeNode_Propose_Replicate(t *testing.T) {
 // The test observes TimeoutNow at the receiver-side handler, then separately
 // waits for the cluster to converge on a new leader.
 func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
-	const transferDeadline = 2 * time.Second
+	const transferDeadline = 450 * time.Millisecond
 
-	cluster := newV2QUICCluster(t, 3, 2500*time.Millisecond)
+	cluster := newV2QUICCluster(t, 3, 600*time.Millisecond)
 	timeoutNowHandled := make(chan string, 1)
 	for _, rpc := range cluster.rpcs {
 		rpc.SetNode(timeoutNowObservingNode{
@@ -213,12 +213,12 @@ func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
 	}
 	cluster.startAll()
 
-	// Initial leader election: with ET=2500ms the window is [2500ms, 5000ms);
+	// Initial leader election: with ET=600ms the window is [600ms, 1.2s);
 	// allow extra room for scheduler noise and QUIC setup.
-	leader := cluster.waitForLeader(7 * time.Second)
+	leader := cluster.waitForLeader(2 * time.Second)
 	require.NotNil(t, leader, "initial leader required")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err := leader.ProposeWait(ctx, []byte("v2-quic-transfer-barrier"))
 	require.NoError(t, err)
@@ -239,7 +239,7 @@ func TestV2QUICCluster_ThreeNode_TransferLeadership(t *testing.T) {
 
 	// TimeoutNow was already observed at the receiver. Requiring the new leader
 	// within the original transfer window keeps natural election outside the pass
-	// condition: ET=2500ms, transferDeadline=2s.
+	// condition: ET=600ms, transferDeadline=450ms.
 	require.Eventually(t, func() bool {
 		for _, n := range cluster.nodes {
 			if n != leader && n.IsLeader() {

@@ -189,6 +189,10 @@ func TestDegradedMonitor_CheckUsesTopologyShardGroupsAfterDynamicJoin(t *testing
 }
 
 func TestDegradedMonitor_CountLiveNodesProbesPeerHealthUnhealthyNodes(t *testing.T) {
+	oldProbeTimeout := probeTimeout
+	probeTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = oldProbeTimeout })
+
 	listeners := make([]net.PacketConn, 0, 4)
 	nodes := []string{"self"}
 	for range 4 {

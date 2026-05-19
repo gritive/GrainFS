@@ -39,12 +39,14 @@ type MetaTransport interface {
 
 // MetaRaftConfig configures a MetaRaft instance.
 type MetaRaftConfig struct {
-	NodeID    string
-	RaftID    string   // raft peer ID; production uses the QUIC address
-	Peers     []string // raft peer IDs; production uses peer QUIC addresses
-	JoinMode  bool     // suppresses solo self-election until dynamic join installs membership
-	DataDir   string   // directory for BadgerDB; meta store lives at DataDir/meta_raft
-	Transport MetaTransport
+	NodeID           string
+	RaftID           string   // raft peer ID; production uses the QUIC address
+	Peers            []string // raft peer IDs; production uses peer QUIC addresses
+	JoinMode         bool     // suppresses solo self-election until dynamic join installs membership
+	DataDir          string   // directory for BadgerDB; meta store lives at DataDir/meta_raft
+	Transport        MetaTransport
+	ElectionTimeout  time.Duration // zero uses MetaRaftElectionTimeout
+	HeartbeatTimeout time.Duration // zero uses MetaRaftHeartbeatInterval
 }
 
 // metaProposerNode abstracts the raft.Node methods used by proposeOrForward
@@ -108,7 +110,13 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	// wider election window so local/CI CPU contention does not leave bucket
 	// assignment without a stable leader during multi-process cold starts.
 	nodeCfg.ElectionTimeout = MetaRaftElectionTimeout
+	if cfg.ElectionTimeout > 0 {
+		nodeCfg.ElectionTimeout = cfg.ElectionTimeout
+	}
 	nodeCfg.HeartbeatTimeout = MetaRaftHeartbeatInterval
+	if cfg.HeartbeatTimeout > 0 {
+		nodeCfg.HeartbeatTimeout = cfg.HeartbeatTimeout
+	}
 	node, closeDB, err := newRaftNodeV2(nodeCfg, storePath)
 	if err != nil {
 		return nil, fmt.Errorf("meta_raft: new raft v2 node: %w", err)

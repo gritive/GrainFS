@@ -43,9 +43,7 @@ func TestWarmupComplete_StaleAllPeers(t *testing.T) {
 	// n2 never gossiped
 
 	p := testBalancerProposerForWarmup(store, peers, 30*time.Second)
-
-	// Wait for n1's entry to expire
-	time.Sleep(ttl + 20*time.Millisecond)
+	ageNodeStatsForTest(t, store, "n1", ttl+20*time.Millisecond)
 
 	// store.Len() < len(peers)+1 AND timeout not reached → not complete
 	assert.False(t, p.warmupComplete(peers), "stale/missing peers → warmup incomplete")

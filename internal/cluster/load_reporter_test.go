@@ -64,11 +64,7 @@ func TestLoadReporter_SkipsIfNotLeader(t *testing.T) {
 	proposer := &nonLeaderProposer{}
 	r := NewLoadReporterWithLeaderCheck("n1", store, &proposer.mockLoadProposer, proposer, 50*time.Millisecond)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	go r.Run(ctx)
-
-	<-ctx.Done()
+	r.reportOnce(context.Background())
 	assert.Equal(t, int32(0), proposer.calls.Load(), "non-leader must not propose")
 }
 
@@ -77,10 +73,6 @@ func TestLoadReporter_EmptyStoreSkips(t *testing.T) {
 	proposer := &mockLoadProposer{}
 	r := NewLoadReporter("n1", store, proposer, 50*time.Millisecond)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	go r.Run(ctx)
-
-	<-ctx.Done()
+	r.reportOnce(context.Background())
 	assert.Equal(t, int32(0), proposer.calls.Load(), "empty store must not propose")
 }

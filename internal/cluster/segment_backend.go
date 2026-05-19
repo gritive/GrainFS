@@ -40,6 +40,7 @@ type clusterSegmentBackend struct {
 	deleteShardsFn  func(ctx context.Context, peer, bucket, shardKey string) error
 	proposeFn       func(ctx context.Context, cmdType CommandType, payload any) error
 	ecConfigFn      func() ECConfig
+	chunkSize       int
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -75,13 +76,13 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: out of range (allocated %d)", idx, len(c.blobIDs))
 	}
 
-	// 2. Pick PG for this segment.
+	// 1. Pick PG for this segment.
 	group, err := c.selectGroup(bucket, key, idx, c.blobIDs[idx])
 	if err != nil {
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: pick PG: %w", idx, err)
 	}
 
-	// 3. Delegate to writeOneSegment.
+	// 2. Delegate to writeOneSegment.
 	cfg := c.currentECConfig()
 	in := writeSegmentInput{
 		Bucket:        bucket,
@@ -98,7 +99,7 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: EC write: %w", idx, werr)
 	}
 
-	// 4. Record placement. Workers receive unique idx, so the slot write
+	// 3. Record placement. Workers receive unique idx, so the slot write
 	// is race-free without a mutex.
 	shardSize := int32(0)
 	if cfg.DataShards > 0 {
@@ -113,7 +114,7 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		ShardSize:        shardSize,
 	}
 
-	// 5. xxhash3-128 over plaintext.
+	// 4. xxhash3-128 over plaintext.
 	sum := storage.ChecksumOf(data)
 	return storage.SegmentRef{
 		BlobID:           blobID,
@@ -169,6 +170,10 @@ func chunkedPathThresholdMet(spSize int64) bool {
 	return spSize > int64(storage.DefaultChunkSize)
 }
 
+func (b *DistributedBackend) chunkedPathThresholdMet(size int64) bool {
+	return size > int64(b.effectiveChunkedPutChunkSize())
+}
+
 // putObjectChunked is the chunked-PUT cluster pipeline: split the spooled
 // body into N segments via storage.SegmentWriter, fan out per-segment EC
 // writes across placement groups (best-effort, defer cleanup on any error),
@@ -189,7 +194,7 @@ func (b *DistributedBackend) putObjectChunked(
 	tags []storage.Tag,
 ) (*storage.Object, error) {
 	// Pre-allocate blobIDs + placements sized to exact segment count.
-	chunkSize := int64(storage.DefaultChunkSize)
+	chunkSize := int64(b.effectiveChunkedPutChunkSize())
 	numSegments := int((sp.Size + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		return nil, fmt.Errorf("putObjectChunked: sp.Size=%d below chunk threshold; caller should not have routed here", sp.Size)
@@ -208,6 +213,7 @@ func (b *DistributedBackend) putObjectChunked(
 		userMetadata: userMetadata,
 		sseAlgorithm: sseAlgorithm,
 		placements:   make([]segmentPlacement, numSegments),
+		chunkSize:    int(chunkSize),
 	}
 	body, err := sp.Open()
 	if err != nil {
@@ -230,7 +236,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	beforeCommit func() error,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	chunkSize := int64(storage.DefaultChunkSize)
+	chunkSize := int64(b.effectiveChunkedPutChunkSize())
 	numSegments := int((manifest.TotalSize + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1
@@ -249,6 +255,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 		userMetadata: userMetadata,
 		sseAlgorithm: sseAlgorithm,
 		placements:   make([]segmentPlacement, numSegments),
+		chunkSize:    int(chunkSize),
 	}
 	body, err := manifest.Open()
 	if err != nil {
@@ -257,6 +264,13 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	defer body.Close()
 	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
 		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags, uploadID)
+}
+
+func (b *DistributedBackend) effectiveChunkedPutChunkSize() int {
+	if b != nil && b.chunkedPutChunkSize > 0 {
+		return b.chunkedPutChunkSize
+	}
+	return storage.DefaultChunkSize
 }
 
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
@@ -318,6 +332,9 @@ func runChunkedPutWithParts(
 
 	// 3. Stream the body through Phase 1 SegmentWriter.
 	sw := storage.NewSegmentWriter(csb)
+	if csb.chunkSize > 0 {
+		sw = storage.NewSegmentWriterWithChunkSize(csb, csb.chunkSize)
+	}
 	obj, err := sw.Write(ctx, bucket, key, contentType, body)
 	if err != nil {
 		return nil, fmt.Errorf("segment write: %w", err)

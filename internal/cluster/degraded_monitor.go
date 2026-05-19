@@ -30,7 +30,7 @@ type AlertSender interface {
 // peer's QUIC port. On a loopback interface "connection refused" arrives in
 // microseconds; using 200 ms gives plenty of headroom while keeping the total
 // probe round short.
-const probeTimeout = 200 * time.Millisecond
+var probeTimeout = 200 * time.Millisecond
 
 // DegradedMonitor periodically checks whether live node count is sufficient
 // to satisfy the EC data shard threshold and reports degraded state via the
