@@ -88,6 +88,7 @@ type bootState struct {
 	rotationWorker   *cluster.RotationWorker
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
+	iamPolicyStores  *IAMStores
 	nfsExportSvc     *nfsexport.ExportService
 
 	// Storage runtime (populated by storage phases — bootShardService,

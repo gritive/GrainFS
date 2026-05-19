@@ -85,6 +85,19 @@ func bootMetaRaftWiring(state *bootState) error {
 	if state.cfg.Encryptor != nil {
 		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
 	}
+
+	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
+	// Must run before bootMetaRaftStart so apply hooks for MetaCmds 50-61 land
+	// on the same store instances that authz (T26) will read from.
+	//
+	// NOTE: SetConfigStore and SetDEKKeeper are defined on MetaFSM but are NOT
+	// called here — the corresponding cfgStore and dekKeeper are never constructed
+	// in the production boot path (§1 gap, out of scope for T25.5).
+	iamStores, err := WireIAMPolicyStores(context.Background(), metaRaft.FSM(), 0)
+	if err != nil {
+		return fmt.Errorf("wire IAM policy stores: %w", err)
+	}
+	state.iamPolicyStores = iamStores
 	return nil
 }
 
