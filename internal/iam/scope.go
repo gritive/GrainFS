@@ -29,7 +29,7 @@ func NormalizeScope(in []string) ([]string, error) {
 		if trimmed == "" {
 			return nil, fmt.Errorf("%w: %q", ErrScopeEmptyEntry, b)
 		}
-		if trimmed == WildcardBucket || trimmed == SystemBucket {
+		if trimmed == "*" || trimmed == "__system__" {
 			return nil, fmt.Errorf("%w: %q", ErrScopeSentinel, trimmed)
 		}
 		if _, dup := seen[trimmed]; dup {

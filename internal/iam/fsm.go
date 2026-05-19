@@ -52,7 +52,7 @@ func (a *Applier) ApplySACreate(payload []byte) error {
 	return nil
 }
 
-// ApplySADelete removes the SA, cascading its keys, grants, and wildcard.
+// ApplySADelete removes the SA, cascading its keys.
 func (a *Applier) ApplySADelete(payload []byte) error {
 	p := iampb.GetRootAsSADeletePayload(payload, 0)
 	saID := string(p.SaId())
@@ -77,8 +77,7 @@ func (a *Applier) ApplyKeyCreate(payload []byte) error {
 }
 
 // ApplyKeyCreateScoped decrypts SecretKeyEnc and inserts the AccessKey with
-// bucket_scope enforced. If the scope contains a bucket for which the SA has
-// no grant, the apply is a noop (return nil) for raft determinism.
+// bucket_scope enforced.
 func (a *Applier) ApplyKeyCreateScoped(payload []byte) error {
 	p := iampb.GetRootAsKeyCreatePayload(payload, 0)
 	encBytes := readEncBytes(p)
@@ -90,8 +89,8 @@ func (a *Applier) ApplyKeyCreateScoped(payload []byte) error {
 }
 
 // applyKeyCreateInternal is the shared implementation for ApplyKeyCreate and
-// ApplyKeyCreateScoped. Noops (return nil) on missing SA or scope overgrant
-// to keep raft replay deterministic.
+// ApplyKeyCreateScoped. Noops (return nil) on missing SA to keep raft replay
+// deterministic.
 func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
 	if saID == "" || ak == "" {
 		return fmt.Errorf("iam: KeyCreate missing sa_id or access_key")
@@ -103,9 +102,6 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 		return nil
 	}
 	// Defensive: re-validate scope shape (sentinels, empty entries, dedup).
-	// In production this duplicates the admin handler's NormalizeScope call,
-	// but it guards against any propose path that bypasses the handler
-	// (e.g., direct raft injection).
 	if len(scope) > 0 {
 		normalized, err := NormalizeScope(scope)
 		if err != nil {
@@ -114,14 +110,6 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 			return nil
 		}
 		scope = normalized
-	}
-	// Scope validation: every bucket in scope must have a grant on the SA.
-	for _, b := range scope {
-		if a.store.LookupGrant(saID, b) == RoleNone {
-			log.Warn().Str("sa_id", saID).Str("ak", ak).Str("bucket", b).
-				Msg("iam: KeyCreateScoped apply: scope contains bucket without grant, noop (race)")
-			return nil
-		}
 	}
 	plain, err := UnwrapSecret(a.enc, saID, encBytes)
 	if err != nil {
@@ -142,10 +130,8 @@ func (a *Applier) applyKeyCreateInternal(saID, ak string, encBytes []byte, creat
 
 // applyKeyCreateFromSnapshot persists an AccessKey during snapshot restore.
 // Unlike applyKeyCreateInternal, it skips scope validation because snapshot
-// restore reads SA → Keys → Grants in order — at key-restore time, grants
-// haven't loaded yet, so a `scope ⊄ grants` check would always false-noop.
-// Validation already happened at issue time (admin handler 422 + FSM
-// determinism guard); persisted state is trusted.
+// restore reads SA → Keys in order.
+// Validation already happened at issue time; persisted state is trusted.
 func (a *Applier) applyKeyCreateFromSnapshot(saID, ak string, encBytes []byte, createdAt time.Time, expires *time.Time, scope []string) error {
 	if saID == "" || ak == "" {
 		return fmt.Errorf("iam: snapshot restore: KeyCreate missing sa_id or access_key")
@@ -204,85 +190,6 @@ func (a *Applier) ApplyKeyRevoke(payload []byte) error {
 	return nil
 }
 
-// ApplyGrantPut inserts or replaces a (sa_id, bucket, role) grant.
-// Rejects WildcardBucket — wildcards must use ApplyGrantWildcardPut so
-// the admin API cannot accidentally promote a regular SA to superuser.
-func (a *Applier) ApplyGrantPut(payload []byte) error {
-	p := iampb.GetRootAsGrantPutPayload(payload, 0)
-	saID := string(p.SaId())
-	bucket := string(p.Bucket())
-	if saID == "" || bucket == "" {
-		return fmt.Errorf("iam: GrantPut missing sa_id or bucket")
-	}
-	if bucket == WildcardBucket {
-		return fmt.Errorf("iam: GrantPut cannot use wildcard bucket; use GrantWildcardPut")
-	}
-	a.store.applyGrantPut(Grant{
-		SAID:      saID,
-		Bucket:    bucket,
-		Role:      Role(p.Role()),
-		CreatedAt: time.Unix(0, p.CreatedAtUnixNs()),
-		CreatedBy: string(p.CreatedBy()),
-	})
-	return nil
-}
-
-// ApplyGrantDelete removes a (sa_id, bucket) grant. Idempotent.
-func (a *Applier) ApplyGrantDelete(payload []byte) error {
-	p := iampb.GetRootAsGrantDeletePayload(payload, 0)
-	a.store.applyGrantDelete(string(p.SaId()), string(p.Bucket()))
-	return nil
-}
-
-// ApplyGrantWildcardPut sets the wildcard role for an SA. Used by the
-// bootstrap shim only; admin API guards regular SAs from this path.
-func (a *Applier) ApplyGrantWildcardPut(payload []byte) error {
-	p := iampb.GetRootAsGrantWildcardPutPayload(payload, 0)
-	saID := string(p.SaId())
-	if saID == "" {
-		return fmt.Errorf("iam: GrantWildcardPut missing sa_id")
-	}
-	a.store.applyGrantWildcardPut(Grant{
-		SAID:      saID,
-		Role:      Role(p.Role()),
-		CreatedAt: time.Unix(0, p.CreatedAtUnixNs()),
-		CreatedBy: string(p.CreatedBy()),
-	})
-	return nil
-}
-
-// ApplyGrantWildcardDelete removes the wildcard grant for the given SA.
-// Idempotent on missing entries.
-//
-// Lockout invariant: refuse to remove the wildcard from sa-default when
-// no explicit per-bucket grants exist. The admin layer (HandleGrantDelete)
-// already checks NumExplicitGrants before proposing, but raft is
-// concurrent — two admin clients could both pass the read-side guard and
-// both propose. Single-applier raft serialization makes the apply check
-// race-free: at most one of the two applies sees explicit grants present;
-// the second sees the first's mutation reflected in store state.
-//
-// Determinism: the check reads from the same Store every node mirrors,
-// so all replicas reach the same decision. We log + skip-mutation rather
-// than return error so historical commits (pre-fix) replay cleanly across
-// rolling upgrades and the apply loop's per-entry error path doesn't
-// poison consensus telemetry.
-func (a *Applier) ApplyGrantWildcardDelete(payload []byte) error {
-	p := iampb.GetRootAsGrantWildcardDeletePayload(payload, 0)
-	saID := string(p.SaId())
-	if saID == "" {
-		return fmt.Errorf("iam: GrantWildcardDelete missing sa_id")
-	}
-	if saID == DefaultSAID && a.store.NumExplicitGrants(saID) == 0 {
-		log.Warn().
-			Str("sa_id", saID).
-			Msg("iam: refusing to apply wildcard delete on sa-default with no explicit grants — would lock cluster out of S3 plane")
-		return nil
-	}
-	a.store.applyGrantWildcardDelete(saID)
-	return nil
-}
-
 // ApplyBucketUpstreamPut decodes a BucketUpstreamPutPayload and stores the
 // upstream record. SecretKeyEnc is decrypted with AAD = "bucket-upstream:"+bucket
 // (per /plan-eng-review override A2 — namespace-prefixed AAD provably disjoint
@@ -294,7 +201,7 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 	if bucket == "" {
 		return fmt.Errorf("iam: BucketUpstreamPut missing bucket")
 	}
-	if bucket == WildcardBucket || bucket == SystemBucket {
+	if bucket == "*" || bucket == "__system__" {
 		return fmt.Errorf("iam: BucketUpstreamPut rejects sentinel bucket %q", bucket)
 	}
 	// Defense-in-depth: admin handler enforces this too, but a direct raft

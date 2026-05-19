@@ -6,7 +6,6 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,26 +26,12 @@ type SACreateRequest struct {
 
 // SACreateResponse returns the new SA along with the access_key/secret_key
 // pair created for it. SecretKey is plaintext, returned ONCE.
-//
-// Grants is populated only on the first-SA bootstrap path: the empty-store
-// branch atomically commits SA + Key + WildcardGrant via ProposeInitFirstSA
-// and echoes the auto-issued grants back so the operator sees what role
-// was provisioned. On the regular path (non-empty store) Grants is nil
-// — admins issue grants explicitly via PUT /admin/iam/grant.
 type SACreateResponse struct {
-	SAID      string             `json:"sa_id"`
-	Name      string             `json:"name"`
-	AccessKey string             `json:"access_key"`
-	SecretKey string             `json:"secret_key"`
-	CreatedAt time.Time          `json:"created_at"`
-	Grants    []SACreateGrantOut `json:"grants,omitempty"`
-}
-
-// SACreateGrantOut is the wire shape for an auto-issued grant on the
-// first-SA bootstrap response.
-type SACreateGrantOut struct {
-	Bucket string `json:"bucket"`
-	Role   string `json:"role"`
+	SAID      string    `json:"sa_id"`
+	Name      string    `json:"name"`
+	AccessKey string    `json:"access_key"`
+	SecretKey string    `json:"secret_key"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type SAListItem struct {
@@ -55,7 +40,6 @@ type SAListItem struct {
 	Description string    `json:"description,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	NumKeys     int       `json:"num_keys"`
-	NumGrants   int       `json:"num_grants"`
 }
 
 // AdminAPI hosts HTTP handlers for /admin/iam/* endpoints. Stdlib handlers
@@ -70,37 +54,14 @@ func NewAdminAPI(store *Store, proposer Proposer, enc *encrypt.Encryptor) *Admin
 	return &AdminAPI{store: store, proposer: proposer, enc: enc}
 }
 
-// CreateSA creates a new ServiceAccount. Returns *adminapi.Error on validation
-// or conflict; use errors.As to inspect.
+// CreateSA creates a new ServiceAccount and an initial access key for it.
+// Returns *adminapi.Error on validation or conflict; use errors.As to inspect.
 func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateResponse, error) {
 	if req.Name == "" {
 		return SACreateResponse{}, &adminapi.Error{Code: "invalid", Message: "name required"}
 	}
 	now := time.Now().UTC()
 	accessKey, secretKey := genCredentialPair()
-	if a.store.IsEmpty() {
-		sa := ServiceAccount{
-			ID: DefaultSAID, Name: req.Name, Description: req.Description,
-			CreatedAt: now, CreatedBy: PrincipalFromContext(ctx),
-		}
-		wrapped, err := WrapSecret(a.enc, sa.ID, secretKey)
-		if err != nil {
-			return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "wrap secret: " + err.Error()}
-		}
-		k := AccessKey{
-			AccessKey: accessKey, SecretKey: secretKey, SecretKeyEnc: wrapped,
-			SAID: sa.ID, Status: KeyStatusActive, CreatedAt: now,
-		}
-		g := Grant{SAID: sa.ID, Bucket: WildcardBucket, Role: RoleAdmin, CreatedAt: now, CreatedBy: PrincipalFromContext(ctx)}
-		if err := a.proposer.ProposeInitFirstSA(ctx, sa, k, g); err != nil {
-			return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "propose init first SA: " + err.Error()}
-		}
-		if _, ok := a.store.LookupKey(accessKey); !ok {
-			return SACreateResponse{}, &adminapi.Error{Code: "conflict", Message: "cluster already initialized — use existing admin credentials"}
-		}
-		resp := buildSACreateResponse(sa, accessKey, secretKey, now, []Grant{g})
-		return resp, nil
-	}
 	sa := ServiceAccount{
 		ID: NewUUIDv7(), Name: req.Name, Description: req.Description,
 		CreatedAt: now, CreatedBy: PrincipalFromContext(ctx),
@@ -119,22 +80,7 @@ func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateR
 	if err := a.proposer.ProposeKeyCreate(ctx, k); err != nil {
 		return SACreateResponse{}, &adminapi.Error{Code: "internal", Message: "propose key: " + err.Error()}
 	}
-	return buildSACreateResponse(sa, accessKey, secretKey, now, nil), nil
-}
-
-func buildSACreateResponse(sa ServiceAccount, accessKey, secretKey string, now time.Time, grants []Grant) SACreateResponse {
-	resp := SACreateResponse{SAID: sa.ID, Name: sa.Name, AccessKey: accessKey, SecretKey: secretKey, CreatedAt: now}
-	for _, g := range grants {
-		role := "admin"
-		switch g.Role {
-		case RoleRead:
-			role = "read"
-		case RoleWrite:
-			role = "write"
-		}
-		resp.Grants = append(resp.Grants, SACreateGrantOut{Bucket: g.Bucket, Role: role})
-	}
-	return resp
+	return SACreateResponse{SAID: sa.ID, Name: sa.Name, AccessKey: accessKey, SecretKey: secretKey, CreatedAt: now}, nil
 }
 
 func (a *AdminAPI) HandleSACreate(w http.ResponseWriter, r *http.Request) {
@@ -162,11 +108,7 @@ func (a *AdminAPI) ListSA(_ context.Context) ([]SAListItem, error) {
 				nKeys++
 			}
 		}
-		nGrants := len(st.grants[id])
-		if _, ok := st.wildcards[id]; ok {
-			nGrants++
-		}
-		out = append(out, SAListItem{SAID: sa.ID, Name: sa.Name, Description: sa.Description, CreatedAt: sa.CreatedAt, NumKeys: nKeys, NumGrants: nGrants})
+		out = append(out, SAListItem{SAID: sa.ID, Name: sa.Name, Description: sa.Description, CreatedAt: sa.CreatedAt, NumKeys: nKeys})
 	}
 	return out, nil
 }
@@ -251,11 +193,6 @@ func (a *AdminAPI) CreateKey(ctx context.Context, saID string, req KeyCreateRequ
 	if err != nil {
 		return KeyCreateResponse{}, &adminapi.Error{Code: "invalid", Message: err.Error()}
 	}
-	for _, b := range scope {
-		if a.store.LookupGrant(saID, b) == RoleNone {
-			return KeyCreateResponse{}, &adminapi.Error{Code: "invalid", Message: fmt.Sprintf("scope contains %q but SA has no grant on it", b)}
-		}
-	}
 	accessKey, secretKey := genCredentialPair()
 	wrapped, err := WrapSecret(a.enc, saID, secretKey)
 	if err != nil {
@@ -309,137 +246,6 @@ func (a *AdminAPI) HandleKeyRevoke(w http.ResponseWriter, r *http.Request, saID,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-type GrantPutRequest struct {
-	SAID   string `json:"sa_id"`
-	Bucket string `json:"bucket"`
-	Role   string `json:"role"`
-}
-
-type GrantDeleteRequest struct {
-	SAID   string `json:"sa_id"`
-	Bucket string `json:"bucket"`
-}
-
-type GrantListItem struct {
-	SAID   string `json:"sa_id"`
-	Bucket string `json:"bucket"`
-	Role   string `json:"role"`
-}
-
-func (a *AdminAPI) PutGrant(ctx context.Context, req GrantPutRequest) error {
-	if req.SAID == "" || req.Bucket == "" || req.Role == "" {
-		return &adminapi.Error{Code: "invalid", Message: "sa_id, bucket, role required"}
-	}
-	if req.Bucket == WildcardBucket {
-		return &adminapi.Error{Code: "forbidden", Message: "wildcard grant is reserved for bootstrap default SA only"}
-	}
-	role, err := parseRoleString(req.Role)
-	if err != nil {
-		return &adminapi.Error{Code: "invalid", Message: err.Error()}
-	}
-	if _, ok := a.store.LookupSA(req.SAID); !ok {
-		return &adminapi.Error{Code: "not_found", Message: "SA not found"}
-	}
-	g := Grant{SAID: req.SAID, Bucket: req.Bucket, Role: role, CreatedAt: time.Now().UTC(), CreatedBy: PrincipalFromContext(ctx)}
-	if err := a.proposer.ProposeGrantPut(ctx, g); err != nil {
-		return &adminapi.Error{Code: "internal", Message: "propose: " + err.Error()}
-	}
-	return nil
-}
-
-func (a *AdminAPI) HandleGrantPut(w http.ResponseWriter, r *http.Request) {
-	var req GrantPutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := a.PutGrant(r.Context(), req); err != nil {
-		writeAdminError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *AdminAPI) DeleteGrant(ctx context.Context, req GrantDeleteRequest) error {
-	if req.SAID == "" || req.Bucket == "" {
-		return &adminapi.Error{Code: "invalid", Message: "sa_id and bucket required"}
-	}
-	if req.Bucket == WildcardBucket {
-		if req.SAID == DefaultSAID && a.store.NumExplicitGrants(req.SAID) == 0 {
-			return &adminapi.Error{Code: "conflict", Message: "refusing to remove wildcard from sa-default with no explicit grants — issue at least one explicit grant first to avoid lockout"}
-		}
-		if err := a.proposer.ProposeGrantWildcardDelete(ctx, req.SAID); err != nil {
-			return &adminapi.Error{Code: "internal", Message: "propose: " + err.Error()}
-		}
-		return nil
-	}
-	if err := a.proposer.ProposeGrantDelete(ctx, req.SAID, req.Bucket); err != nil {
-		return &adminapi.Error{Code: "internal", Message: "propose: " + err.Error()}
-	}
-	return nil
-}
-
-func (a *AdminAPI) HandleGrantDelete(w http.ResponseWriter, r *http.Request) {
-	var req GrantDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := a.DeleteGrant(r.Context(), req); err != nil {
-		writeAdminError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *AdminAPI) ListGrants(_ context.Context, saFilter, bucketFilter string) ([]GrantListItem, error) {
-	st := a.store.snapshot()
-	out := make([]GrantListItem, 0)
-	for saID, per := range st.grants {
-		if saFilter != "" && saFilter != saID {
-			continue
-		}
-		for bucket, role := range per {
-			if bucketFilter != "" && bucketFilter != bucket {
-				continue
-			}
-			out = append(out, GrantListItem{SAID: saID, Bucket: bucket, Role: role.String()})
-		}
-	}
-	if bucketFilter == "" {
-		for saID, role := range st.wildcards {
-			if saFilter != "" && saFilter != saID {
-				continue
-			}
-			out = append(out, GrantListItem{SAID: saID, Bucket: WildcardBucket, Role: role.String()})
-		}
-	}
-	return out, nil
-}
-
-// HandleGrantList serves both ?sa= and ?bucket= filters. Linear scan over the
-// in-memory state — sub-ms up to ~1000 SAs per design doc.
-func (a *AdminAPI) HandleGrantList(w http.ResponseWriter, r *http.Request) {
-	saFilter := r.URL.Query().Get("sa")
-	bucketFilter := r.URL.Query().Get("bucket")
-	out, _ := a.ListGrants(r.Context(), saFilter, bucketFilter)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
-}
-
-func parseRoleString(s string) (Role, error) {
-	switch s {
-	case "Read":
-		return RoleRead, nil
-	case "Write":
-		return RoleWrite, nil
-	case "Admin":
-		return RoleAdmin, nil
-	default:
-		return RoleNone, fmt.Errorf("invalid role %q (want Read|Write|Admin)", s)
-	}
-}
-
 // BucketUpstreamPutRequest is the JSON body for PUT /v1/buckets/upstream.
 // Both creds are required; secret_key is plaintext on input and wrap-encrypted
 // before raft propose. Never echoed back in any response.
@@ -469,7 +275,7 @@ func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutR
 	if req.Bucket == "" {
 		return &adminapi.Error{Code: "invalid", Message: "bucket required"}
 	}
-	if req.Bucket == WildcardBucket || req.Bucket == SystemBucket {
+	if req.Bucket == "*" || req.Bucket == "__system__" {
 		return &adminapi.Error{Code: "invalid", Message: "bucket must not be a sentinel name"}
 	}
 	if len(req.Bucket) < 3 || len(req.Bucket) > 63 {
