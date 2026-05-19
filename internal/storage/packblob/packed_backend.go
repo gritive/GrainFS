@@ -359,6 +359,19 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return putInnerWithRequest(ctx, pb.inner, req)
 	}
 
+	// Versioning-enabled buckets must round-trip through the inner backend so
+	// the version index is updated and the response carries x-amz-version-id.
+	// Packblob's keyspace is (bucket,key) only; without this bypass small
+	// objects would be packed under the latest-only key and the version index
+	// would never see them. Errors from GetBucketVersioning are treated as
+	// "not enabled" so a transiently unavailable versioner does not block PUTs.
+	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
+		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
+			req.Body = bytes.NewReader(data)
+			return putInnerWithRequest(ctx, pb.inner, req)
+		}
+	}
+
 	// Small object → pack into blob. The blob storage layer keys entries by
 	// the legacy "bucket/key" string (its on-disk format), so we serialize
 	// the tuple here. The in-memory index uses the typed packedKey below.
@@ -540,6 +553,18 @@ func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*s
 }
 
 func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
+	// Versioning-enabled buckets must route DELETE through the inner backend
+	// so a delete marker (with a freshly minted versionId) is recorded. The
+	// packblob fast path knows nothing about the version index; deleting from
+	// the packed index in place would silently drop the soft-delete semantics
+	// and the caller would see an empty x-amz-version-id on the response.
+	// Mirrors the same bypass in PutObjectWithRequest.
+	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
+		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
+			return pb.inner.DeleteObject(ctx, bucket, key)
+		}
+	}
+
 	pk := packedKey{bucket: bucket, key: key}
 	if v, loaded := pb.index.Load(pk); loaded {
 		entry := v.(*indexEntry)
@@ -553,6 +578,31 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 	}
 
 	return pb.inner.DeleteObject(ctx, bucket, key)
+}
+
+// DeleteObjectReturningMarker forwards to the inner backend so the wal.Backend
+// soft-delete path can obtain the freshly minted delete-marker versionId. This
+// method is only invoked on versioning-enabled buckets (the server's
+// object_mutation_runtime gates on bucket state), so unconditional delegation
+// is correct: the packed fast path never owns versioned keys.
+func (pb *PackedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	sd, ok := pb.inner.(storage.VersionedSoftDeleter)
+	if !ok {
+		return "", storage.UnsupportedOperationError{Op: "DeleteObjectReturningMarker", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sd.DeleteObjectReturningMarker(bucket, key)
+}
+
+// DeleteObjectVersion forwards version-specific hard deletes to the inner
+// backend. Required so wal.Backend.DeleteObjectVersion's type assertion
+// (b.Backend.(versionDeleter)) succeeds when packblob sits between WAL and
+// the version-aware backend (DistributedBackend / ClusterCoordinator).
+func (pb *PackedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
+	vd, ok := pb.inner.(storage.ObjectVersionDeleter)
+	if !ok {
+		return storage.UnsupportedOperationError{Op: "DeleteObjectVersion", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return vd.DeleteObjectVersion(bucket, key, versionID)
 }
 
 func (pb *PackedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {

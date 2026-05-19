@@ -1458,6 +1458,27 @@ func TestClusterCoordinator_GetObjectVersion_Forward(t *testing.T) {
 	require.Equal(t, "vid-1", string(args.VersionId()))
 }
 
+func TestClusterCoordinator_HeadObjectVersion_Forward(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpHeadObjectVersion] = buildObjectReply(
+		&storage.Object{Key: "k", Size: 2, ETag: "etag-v1", ContentType: "text/plain", VersionID: "vid-1"},
+		"bk",
+	)
+
+	obj, err := c.HeadObjectVersion("bk", "k", "vid-1")
+	require.NoError(t, err)
+	require.Equal(t, "vid-1", obj.VersionID)
+	require.Equal(t, "etag-v1", obj.ETag)
+	require.Equal(t, int64(2), obj.Size)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpHeadObjectVersion, d.calls[0].op)
+	require.Equal(t, "g1", d.calls[0].gid)
+	args := raftpb.GetRootAsHeadObjectVersionArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Key()))
+	require.Equal(t, "vid-1", string(args.VersionId()))
+}
+
 func TestClusterCoordinator_GetObjectVersion_ForwardUsesReadStream(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := bytes.Repeat([]byte("v"), int(DefaultMaxForwardReplyBytes)+1024)

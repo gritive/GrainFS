@@ -247,6 +247,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleDeleteObjectVersion(dg, fbsArgs)
 	case raftpb.ForwardOpListObjectVersions:
 		return r.handleListObjectVersions(dg, fbsArgs)
+	case raftpb.ForwardOpHeadObjectVersion:
+		return r.handleHeadObjectVersion(dg, fbsArgs)
 	default:
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
@@ -591,6 +593,16 @@ func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transpor
 	return &transport.Message{Payload: buildObjectReply(obj, string(ha.Bucket()))}
 }
 
+func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) *transport.Message {
+	ha := raftpb.GetRootAsHeadObjectVersionArgs(args, 0)
+	bucket := string(ha.Bucket())
+	obj, err := dg.Backend().HeadObjectVersion(bucket, string(ha.Key()), string(ha.VersionId()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildObjectReply(obj, bucket)}
+}
+
 func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transport.Message {
 	da := raftpb.GetRootAsDeleteObjectArgs(args, 0)
 	bucket := string(da.Bucket())
@@ -867,6 +879,9 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	}
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		return raftpb.ForwardStatusNoSuchKey
+	}
+	if errors.Is(err, storage.ErrMethodNotAllowed) {
+		return raftpb.ForwardStatusMethodNotAllowed
 	}
 	if errors.Is(err, storage.ErrUploadNotFound) {
 		return raftpb.ForwardStatusNoSuchUpload
