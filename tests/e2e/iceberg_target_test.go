@@ -118,7 +118,9 @@ func newSingleNodeIcebergTargetWithAudit(t *testing.T, commitInterval time.Durat
 
 	ak, sk := bootstrapAdminViaUDS(t, dataDir)
 	createE2EBucketWithCreds(t, server.endpoint, "grainfs-tables", ak, sk)
-	createE2EBucketWithCreds(t, server.endpoint, "grainfs-audit", ak, sk)
+	// NOTE: grainfs-audit is an internal bucket — the audit committer creates
+	// and owns it. Tests must not create it via the public S3 API (returns 403
+	// AccessDenied). Matches the pre-matrix single-node audit test behavior.
 
 	return &icebergTarget{
 		name:      "single-audit",
@@ -144,9 +146,11 @@ func newSharedClusterIcebergTargetWithAudit(t *testing.T, commitInterval time.Du
 	})
 	cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables")
 	return &icebergTarget{
-		name:      "cluster-audit",
-		endpoint:  func(i int) string { return cluster.httpURLs[i%cluster.nodeCount] },
-		s3Client:  func(i int) *s3.Client { return ecS3Client(cluster.httpURLs[i%cluster.nodeCount], cluster.accessKey, cluster.secretKey) },
+		name:     "cluster-audit",
+		endpoint: func(i int) string { return cluster.httpURLs[i%cluster.nodeCount] },
+		s3Client: func(i int) *s3.Client {
+			return ecS3Client(cluster.httpURLs[i%cluster.nodeCount], cluster.accessKey, cluster.secretKey)
+		},
 		accessKey: cluster.accessKey,
 		secretKey: cluster.secretKey,
 		isCluster: true,
