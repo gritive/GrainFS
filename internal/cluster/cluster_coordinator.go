@@ -32,6 +32,8 @@ const DefaultMaxForwardBodyBytes = 64 * 1024 * 1024
 // without reintroducing the request-body buffering fixed for writes.
 const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
+const minMultipartForwardStreamBytes = 5 * 1024 * 1024
+
 // ErrCoordinatorNoRouter is returned when OpRouter is called on a
 // coordinator that was constructed without a router (test/solo-node configs
 // that should not be reaching the routing path).
@@ -1795,7 +1797,7 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, ErrCoordinatorNoRouter
 	}
 
-	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
+	if c.forward.streamDialer != nil && shouldStreamUploadPartForward(r, c.maxBody) {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
 		streamCtx := ctx
 		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
@@ -1992,6 +1994,28 @@ func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 		return true
 	}
 	return end-cur > maxBody
+}
+
+func shouldStreamUploadPartForward(r io.Reader, maxBody int64) bool {
+	if forwardBodyExceedsSingleFrameCap(r, maxBody) {
+		return true
+	}
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return true
+	}
+	cur, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return true
+	}
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if _, seekErr := seeker.Seek(cur, io.SeekStart); err == nil && seekErr != nil {
+		err = seekErr
+	}
+	if err != nil {
+		return true
+	}
+	return end-cur >= minMultipartForwardStreamBytes
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

@@ -2358,6 +2358,57 @@ func BenchmarkClusterCoordinatorUploadPartForwardExposed_5MiB(b *testing.B) {
 	benchmarkClusterCoordinatorUploadPartForward5MiB(b, true)
 }
 
+func BenchmarkClusterCoordinatorUploadPartForwardStream_5MiB(b *testing.B) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"a"}},
+	}}
+	reply := buildPartReply(&storage.Part{PartNumber: 1, ETag: "etag-part", Size: 5 * 1024 * 1024})
+	dial := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		return buildSimpleReply(raftpb.ForwardStatusNotLeader, "a"), nil
+	}
+	stream := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		_, op, args, err := decodeForwardPayload(payload)
+		if err != nil {
+			return nil, err
+		}
+		if op != raftpb.ForwardOpUploadPart {
+			return nil, errors.New("unexpected forward op")
+		}
+		if got := raftpb.GetRootAsUploadPartArgs(args, 0).BodyLength(); got != 0 {
+			return nil, fmt.Errorf("unexpected upload part body length %d", got)
+		}
+		n, err := io.Copy(io.Discard, body)
+		if err != nil {
+			return nil, err
+		}
+		if n != 5*1024*1024 {
+			return nil, fmt.Errorf("streamed body length %d", n)
+		}
+		return reply, nil
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(dial).WithStreamDialer(stream))
+	body := bytes.Repeat([]byte("p"), 5*1024*1024)
+
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if part.Size != int64(len(body)) {
+			b.Fatalf("part size %d != body size %d", part.Size, len(body))
+		}
+	}
+}
+
 func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := []byte("part-body")
@@ -2426,6 +2477,26 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) 
 	c.forward.WithStreamDialer(d.stream)
 	c.maxBody = 128 * 1024
 	body := bytes.Repeat([]byte("p"), int(c.maxBody)+1024)
+	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
+	)
+
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), part.Size)
+	require.Len(t, d.calls, 1, "streamed UploadPart should only use single-message preflight")
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+	require.Len(t, d.streamCalls, 1)
+	require.Equal(t, body, d.streamCalls[0].rawly)
+
+	args := raftpb.GetRootAsUploadPartArgs(d.streamCalls[0].args, 0)
+	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
+}
+
+func TestClusterCoordinator_UploadPart_StreamForward_AtMultipartPartFloor(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	body := bytes.Repeat([]byte("p"), minMultipartForwardStreamBytes)
 	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
