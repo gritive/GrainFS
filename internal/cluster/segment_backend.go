@@ -221,6 +221,48 @@ func (b *DistributedBackend) putObjectChunked(
 	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, tags)
 }
 
+func (b *DistributedBackend) putMultipartObjectChunked(
+	ctx context.Context,
+	bucket, key, versionID string,
+	manifest multipartCompleteManifest,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	tags []storage.Tag,
+) (*storage.Object, error) {
+	chunkSize := int64(storage.DefaultChunkSize)
+	numSegments := int((manifest.TotalSize + chunkSize - 1) / chunkSize)
+	if numSegments < 1 {
+		numSegments = 1
+	}
+	blobIDs := make([]string, numSegments)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := &clusterSegmentBackend{
+		b:            b,
+		bucket:       bucket,
+		key:          key,
+		versionID:    versionID,
+		blobIDs:      blobIDs,
+		contentType:  contentType,
+		userMetadata: userMetadata,
+		sseAlgorithm: sseAlgorithm,
+		placements:   make([]segmentPlacement, numSegments),
+	}
+	body, err := manifest.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open multipart manifest: %w", err)
+	}
+	defer body.Close()
+	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags)
+}
+
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
 // supplies a fully wired clusterSegmentBackend and the already-opened body
 // reader (production: from putObjectChunked which opens sp.Open(); tests:
@@ -239,7 +281,7 @@ func runChunkedPut(
 	tags []storage.Tag,
 ) (*storage.Object, error) {
 	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
-		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, nil)
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, nil, tags)
 }
 
 func runChunkedPutWithParts(
@@ -254,6 +296,7 @@ func runChunkedPutWithParts(
 	expectedETag string,
 	beforeCommit func() error,
 	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
 ) (*storage.Object, error) {
 
 	// Best-effort blob cleanup on any error path before raft commit.

@@ -266,7 +266,7 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	defer body.Close()
 	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
 		"bucket", "large-mp.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil, parts)
+		nil, "", 0, false, "", nil, parts, nil)
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	require.Equal(t, parts, obj.Parts)
