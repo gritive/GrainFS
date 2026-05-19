@@ -28,12 +28,16 @@ type nbdTarget struct {
 	cluster    *e2eCluster // non-nil for cluster fixtures
 }
 
-// uniqueDevice creates a per-case NBD volume (via volumeadmin) and returns the
-// device/volume name.
+// uniqueDevice ensures the boot-time NBD volume exists in metadata and returns
+// its name. The NBD server exports a single fixed volume name (see
+// internal/nbd/handshake.go: exportNameMatches), so we cannot create per-case
+// unique exports. The atomic seq is preserved for future per-case offset
+// isolation if additional matrix cases need it.
 func (tgt *nbdTarget) uniqueDevice(t *testing.T, caseName string, sizeBytes int64) string {
 	t.Helper()
-	id := tgt.caseSeq.Add(1)
-	device := fmt.Sprintf("nbd-%s-%s-%d", tgt.name, sanitizeForBucket(caseName), id)
+	_ = tgt.caseSeq.Add(1) // reserved for future per-case offset isolation
+	_ = caseName
+	const device = "default" // NBD server is bound to a single export
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
