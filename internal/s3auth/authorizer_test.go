@@ -77,3 +77,40 @@ func TestAuthorize_SAWithReadonlyPolicy(t *testing.T) {
 		t.Fatalf("sa-1 readonly should Allow GetObject, got %v: %s", r.Decision, r.Reason)
 	}
 }
+
+func TestAuthorize_DefaultBucketImplicitAnon(t *testing.T) {
+	a, _, _, _ := newTestAuthorizer(t, false /* anon-disabled */, false)
+	r := a.Authorize(context.Background(), "", "default", policy.RequestContext{Action: "s3:PutObject", Resource: "arn:aws:s3:::default/x"})
+	if r.Decision != policy.DecisionAllow {
+		t.Fatalf("anon to default should Allow via implicit policy, got %v: %s", r.Decision, r.Reason)
+	}
+}
+
+func TestAuthorize_DefaultBucketExplicitPolicyOverridesImplicit(t *testing.T) {
+	a, _, _, bp := newTestAuthorizer(t, false, false)
+	// Operator attaches an explicit policy that only allows sa-admin.
+	_ = bp.Put(context.Background(), "default", []byte(`{"Statement":[{"Effect":"Allow","Principal":{"AWS":["admin"]},"Action":"s3:*","Resource":"arn:aws:s3:::default/*"}]}`))
+	r := a.Authorize(context.Background(), "", "default", policy.RequestContext{Action: "s3:PutObject", Resource: "arn:aws:s3:::default/x"})
+	if r.Decision == policy.DecisionAllow {
+		t.Fatal("anon should NOT be allowed once explicit policy is attached")
+	}
+}
+
+func TestAuthorize_DefaultBucketOtherActionStillAllowedByImplicit(t *testing.T) {
+	a, _, _, _ := newTestAuthorizer(t, false, false)
+	for _, act := range []string{"s3:GetObject", "s3:ListBucket", "s3:HeadObject"} {
+		r := a.Authorize(context.Background(), "", "default", policy.RequestContext{Action: act, Resource: "arn:aws:s3:::default/x"})
+		if r.Decision != policy.DecisionAllow {
+			t.Errorf("anon %s on default = %v, want Allow", act, r.Decision)
+		}
+	}
+}
+
+func TestAuthorize_DefaultBucketAuthenticatedSANotImplicit(t *testing.T) {
+	// SA-authenticated request to default should NOT bypass — goes through normal eval.
+	a, _, _, _ := newTestAuthorizer(t, false, false)
+	r := a.Authorize(context.Background(), "sa-1", "default", policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::default/x"})
+	if r.Decision == policy.DecisionAllow {
+		t.Fatal("SA with no policies should NOT inherit default implicit anon")
+	}
+}

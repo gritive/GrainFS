@@ -37,6 +37,14 @@ func MetaProposalTargets(leader string, peers []string) []string {
 // CreateDefaultBucketWithRetry attempts CreateBucket with exponential
 // backoff up to timeout. ErrBucketAlreadyExists is treated as success so
 // concurrent startup of multiple peers does not race-fail.
+//
+// TODO(T30/T32): FSM.applyCreateBucket now rejects reserved names (including
+// "default") when called via the public API path. The bootstrap path currently
+// reaches FSM through the full stack (wal → pullthrough → ClusterCoordinator →
+// DistributedBackend → FSM propose). A bypass mechanism (e.g. a
+// BootstrapBucket direct-to-FSM helper or an inBootstrap atomic flag) is
+// needed here and at T32 (_grainfs seeding) to avoid a startup failure on
+// first-run. Tracked as T32; both reserved seeds can be solved together.
 func CreateDefaultBucketWithRetry(ctx context.Context, backend storage.Backend, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	backoff := 100 * time.Millisecond

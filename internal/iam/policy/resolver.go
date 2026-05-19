@@ -86,6 +86,19 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInpu
 	return EvalInput{PrincipalPolicies: pp, ResourcePolicy: bp, Principal: saID}, nil
 }
 
+// HasBucketPolicy reports whether an explicit bucket policy exists for bucket.
+// Implicit policies (e.g. the "default" bucket's anon Allow per spec D#2) are
+// NOT counted — only explicit operator-attached policies via BucketPolicyPut.
+//
+// Returns (false, nil) if the underlying store reports not-found.
+func (r *Resolver) HasBucketPolicy(ctx context.Context, bucket string) (bool, error) {
+	d, err := r.store.BucketPolicy(ctx, bucket)
+	if err != nil {
+		return false, err
+	}
+	return d != nil, nil
+}
+
 // Invalidate removes cache entries matching any of the given SA IDs or bucket names.
 // Passing empty slices for both arguments nukes the entire cache (global mutation path,
 // e.g. a policy document body edit that affects unknown consumers).

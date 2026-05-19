@@ -49,6 +49,15 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 	if saID == "" && reservedname.IsInternalBucket(bucket) {
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (F-A2)"}
 	}
+	// D#2: "default" bucket carries an implicit anon policy unless the operator
+	// has attached an explicit bucket policy. Implicit policy survives Phase 0→2
+	// transitions (i.e., it does NOT depend on iam.anon-enabled).
+	if saID == "" && bucket == "default" {
+		hasExplicit, err := a.resolver.HasBucketPolicy(ctx, "default")
+		if err == nil && !hasExplicit {
+			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: "default bucket implicit anon (D#2)"}
+		}
+	}
 	if saID == "" {
 		if anon, ok := a.cfg.GetBool("iam.anon-enabled"); ok && anon {
 			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: "iam.anon-enabled=true"}

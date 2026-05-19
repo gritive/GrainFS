@@ -68,6 +68,23 @@ func TestResolver_CachesUntilTTL(t *testing.T) {
 	}
 }
 
+func TestResolver_HasBucketPolicy(t *testing.T) {
+	s := &fakeStore{
+		bucketPols: map[string]string{
+			"explicit": `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::explicit/*"}]}`,
+		},
+	}
+	r := NewResolver(s, time.Hour)
+	has, err := r.HasBucketPolicy(context.Background(), "explicit")
+	if err != nil || !has {
+		t.Fatalf("explicit: has=%v err=%v", has, err)
+	}
+	has, err = r.HasBucketPolicy(context.Background(), "no-such")
+	if err != nil || has {
+		t.Fatalf("no-such: has=%v err=%v", has, err)
+	}
+}
+
 func TestResolver_InvalidateClearsImmediately(t *testing.T) {
 	s := &fakeStore{
 		saToPols: map[string][]string{"sa-1": {"readonly"}},
