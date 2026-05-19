@@ -499,6 +499,47 @@ func (b *LocalBackend) ListParts(ctx context.Context, bucket, key, uploadID stri
 	return out, nil
 }
 
+// MultipartUploadPartCount returns the number of uploaded parts for an
+// in-progress multipart upload without re-hashing the part files. Used by
+// the lifecycle MPU worker to weight rate-limiter waits.
+//
+// Returns ErrUploadNotFound when no matching multipart record exists. A
+// missing part directory (record exists but no parts uploaded yet) returns
+// (0, nil).
+func (b *LocalBackend) MultipartUploadPartCount(bucket, key, uploadID string) (int, error) {
+	_ = bucket
+	_ = key
+	err := b.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(b.multipartKey(uploadID))
+		if err == badger.ErrKeyNotFound {
+			return ErrUploadNotFound
+		}
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(b.partDir(uploadID))
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read part dir: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		n, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil || n <= 0 {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 func (b *LocalBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
 	_ = ctx
 	err := b.db.Update(func(txn *badger.Txn) error {

@@ -1005,6 +1005,15 @@ func (pb *PackedBackend) ListParts(ctx context.Context, bucket, key, uploadID st
 	return pb.inner.ListParts(ctx, bucket, key, uploadID, maxParts)
 }
 
+// MultipartUploadPartCount forwards to the inner backend when it implements
+// storage.MultipartPartCounter. Returns (0, nil) otherwise.
+func (pb *PackedBackend) MultipartUploadPartCount(bucket, key, uploadID string) (int, error) {
+	if c, ok := pb.inner.(storage.MultipartPartCounter); ok {
+		return c.MultipartUploadPartCount(bucket, key, uploadID)
+	}
+	return 0, nil
+}
+
 func (pb *PackedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	snap, ok := pb.inner.(storage.Snapshotable)
 	if !ok {

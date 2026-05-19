@@ -108,6 +108,14 @@ func (m *mockDeleter) ListObjectVersions(bucket, prefix string, _ int) ([]*stora
 	return m.versions[bucket+"/"+prefix], nil
 }
 
+func (m *mockDeleter) AbortMultipartUpload(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockDeleter) MultipartUploadPartCount(_, _, _ string) (int, error) {
+	return 0, nil
+}
+
 func newWorker(store *Store, backend *mockBackend, deleter *mockDeleter) *Worker {
 	return &Worker{
 		store:   store,

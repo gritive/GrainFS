@@ -16,10 +16,17 @@ import (
 // ListObjectVersions signature matches server.ObjectVersionLister so a single
 // backend type can satisfy both — the worker passes key as prefix with
 // maxKeys=0 (unlimited) and filters to exact-key matches itself.
+//
+// AbortMultipartUpload + MultipartUploadPartCount are used by MPUWorker for
+// AbortIncompleteMultipartUpload evaluation. MultipartUploadPartCount returns
+// 0 (no error) when the backend doesn't expose a counter — the MPUWorker
+// treats 0 as "weight unknown" and uses 1.
 type ObjectDeleter interface {
 	DeleteObject(ctx context.Context, bucket, key string) error
 	DeleteObjectVersion(bucket, key, versionID string) error
 	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error)
+	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
+	MultipartUploadPartCount(bucket, key, uploadID string) (int, error)
 }
 
 // Scrubbable is the subset of scrubber.Scrubbable used by the lifecycle worker.

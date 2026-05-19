@@ -92,3 +92,22 @@ func (o *Operations) ListMultipartUploads(ctx context.Context, bucket, prefix st
 func (o *Operations) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error) {
 	return o.backend.ListParts(ctx, bucket, key, uploadID, maxParts)
 }
+
+// MultipartPartCounter is an optional interface backends may implement to
+// return the number of uploaded parts for an in-progress multipart upload
+// without re-hashing the part files. Used by the lifecycle MPU worker to
+// weight rate-limiter waits.
+type MultipartPartCounter interface {
+	MultipartUploadPartCount(bucket, key, uploadID string) (int, error)
+}
+
+// MultipartUploadPartCount returns the number of uploaded parts for an
+// in-progress multipart upload. Returns (0, nil) when the backend chain
+// does not implement MultipartPartCounter. Callers that use the count as
+// a weight should treat 0 as "unknown" and fall back to weight=1.
+func (o *Operations) MultipartUploadPartCount(bucket, key, uploadID string) (int, error) {
+	if c, ok := o.backend.(MultipartPartCounter); ok {
+		return c.MultipartUploadPartCount(bucket, key, uploadID)
+	}
+	return 0, nil
+}
