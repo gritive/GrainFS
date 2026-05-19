@@ -1,8 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.259.0] - 2026-05-19 - fix(cluster+storage): warp `versioned` benchmark passes; single-node versioning fully wired
 
-- fix(cluster/s3): implement HeadObjectVersion forward path so warp `versioned` benchmark passes on 4-node cluster (HEAD `?versionId=<id>` previously returned 501)
+Warp `versioned` 워크로드가 cluster 에서 STAT 100% 501 로 깨지던 갭과, 단일 노드 fixture 에서 versioning 이 사실상 동작하지 않던 갭을 한 번에 정리. 결과: 4-node cluster warp `versioned` 0 STAT-501 errors, SingleNode + Cluster4Node e2e versioning suite 17/17 통과 (1 cluster-only skip).
+
+### Fixed
+
+- **cluster HEAD by versionId returned 501** (`internal/cluster/cluster_coordinator.go`, `internal/cluster/forward_*.go`, `internal/raft/raftpb/forward_cmd.fbs`) — `ClusterCoordinator` 에 `HeadObjectVersion` 이 빠져 있어 `storage.Operations` 어댑터 체인이 `VersionedHeader` 인터페이스를 못 찾고 `UnsupportedOperationError → 501` 을 반환. warp `versioned` 의 STAT(HEAD ?versionId=) 가 8663/8663 으로 100% 실패. 신규 `ForwardOpHeadObjectVersion = 20` + `HeadObjectVersionArgs{bucket,key,version_id}` FBS 추가, coordinator/receiver/dispatch/codec 에 frame-only 경로 와이어링. 같은 패턴인 `GetObjectVersion` 과 동형. 검증 후 STAT 8663 errors → 0.
+- **forward 경로의 `storage.ErrMethodNotAllowed` 손실 → 500** (`internal/cluster/forward_codec.go`, `internal/cluster/forward_receiver.go`, `internal/raft/raftpb/forward_cmd.fbs`) — `mapErrorToStatus` 가 `ErrMethodNotAllowed` 를 매핑 안 해서 cluster forward 의 delete-marker HEAD 가 405 대신 500 을 반환. 신규 `ForwardStatusMethodNotAllowed = 12` 추가하고 `parseReplyStatus` 양방향 매핑. delete-marker HEAD 가 정상적으로 405 + `x-amz-delete-marker: true` 를 돌려줌.
+- **single-node PUT 이 versioning-enabled 버킷에서 VersionId 를 안 돌려줌** (`internal/storage/packblob/packed_backend.go`) — `--pack-threshold=65537` 기본값 때문에 작은 오브젝트가 packblob fast path 로 흘러가 `*storage.Object{VersionID:""}` 를 반환, `DistributedBackend` 의 `newVersionID()` 우회. `PutObjectWithRequest` 에 `BucketVersioner.GetBucketVersioning(bucket) == "Enabled"` 일 때 inner 백엔드로 위임하는 bypass 추가. 응답 헤더 `x-amz-version-id` 정상화. cluster 모드는 packblob 미사용이라 영향 없음.
+- **single-node DELETE 가 versioning-enabled 버킷에서 marker VersionId 누락 + `wal: inner backend does not support DeleteObjectVersion`** (`internal/storage/packblob/packed_backend.go`) — packblob 이 wal 과 version-aware inner 사이에 끼어 `ObjectVersionDeleter` / `VersionedSoftDeleter` 인터페이스를 만족하지 못해 wal 의 타입 assertion 이 실패. `DeleteObject` 에 동일한 versioning bypass + 신규 `DeleteObjectReturningMarker` / `DeleteObjectVersion` pass-through 추가. SoftDelete (marker 생성) / HardDeleteByVersionID 모두 동작.
+
+### Tests
+
+- **`tests/e2e/versioning_test.go` 전면 재구성** — 기존 절차적 `TestE2E_Versioning_Full` 을 제거하고 `TestS3VersioningE2E` 하나의 entry 로 통일. `TestBucketsE2E` 스타일의 SingleNode + Cluster4Node 듀얼 분기 + `runVersioningCases(tgt s3Target)` 헬퍼 + t.Run sub-test 구조. 9개 케이스: EnableAndStatus, PutGetByVersionID, HeadByVersionID, HeadByVersionID_AllNodes (cluster fan-out), HeadByVersionID_DeleteMarker, SoftDelete, HardDeleteByVersionID, ListVersions, ListVersionsWithDeleteMarker.
+- **신규 단위 테스트** (`internal/cluster/cluster_coordinator_test.go`, `internal/cluster/forward_codec_test.go`, `internal/cluster/forward_dispatch_test.go`, `internal/cluster/forward_receiver_integration_test.go`) — coordinator forward routing, codec roundtrip, dispatch coverage, receiver dispatch 검증.
+
+### Follow-ups (별도 PR)
+
+- packblob bypass 의 `state == "Enabled"` 체크를 `Enabled || Suspended` 로 확장 (Suspended 버킷은 여전히 packed fast path 를 탐). TODOS.md 에 추적.
 
 ## [0.0.258.0] - 2026-05-19 - fix(s3+cluster): warp multipart correctness on the 4-node cluster
 
