@@ -24,7 +24,13 @@ func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 		key := getKey(c)
 		query := string(c.URI().QueryString())
 		op := audit.ClassifyS3Operation(string(c.Method()), key != "", query, toHTTPRequest(c).Header)
-		requestID := string(c.Response.Header.Peek("x-amz-request-id"))
+		// Prefer the rid attached by WithRequestID; fall back to the response
+		// header for the rare in-process test fixture that builds *Server
+		// without installMiddlewares.
+		requestID := RequestIDFromContext(ctx)
+		if requestID == "" {
+			requestID = string(c.Response.Header.Peek("x-amz-request-id"))
+		}
 		start := time.Now()
 
 		c.Next(ctx)

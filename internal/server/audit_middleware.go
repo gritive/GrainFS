@@ -12,6 +12,17 @@ import (
 	"github.com/gritive/GrainFS/internal/audit"
 )
 
+// auditRequestID returns the rid attached by WithRequestID, falling back to
+// a fresh UUID if the middleware was not wired (defensive — production
+// installMiddlewares always installs WithRequestID first, but a handful of
+// in-process test fixtures construct *Server without it).
+func auditRequestID(ctx context.Context) string {
+	if rid := RequestIDFromContext(ctx); rid != "" {
+		return rid
+	}
+	return uuid.NewString()
+}
+
 const auditErrReasonKey = "audit.err_reason"
 const auditObjectKeyKey = "audit.object_key"
 const auditBytesOutKey = "audit.bytes_out"
@@ -33,7 +44,9 @@ func (s *Server) auditEnvelopeMiddleware() app.HandlerFunc {
 		}
 
 		key := getKey(c)
-		requestID := uuid.NewString()
+		requestID := auditRequestID(ctx)
+		// WithRequestID already dual-wrote X-GrainFS-Request-Id and
+		// x-amz-request-id; re-set defensively for the fallback path.
 		c.Header("x-amz-request-id", requestID)
 		start := time.Now()
 		ev := s.newAuditEnvelopeEvent(ctx, c, auditEnvelopeInput{
@@ -89,7 +102,7 @@ func (s *Server) recordAuditAuthFailure(ctx context.Context, c *app.RequestConte
 	if bucket == "" || bucket == audit.BucketName {
 		return
 	}
-	requestID := uuid.NewString()
+	requestID := auditRequestID(ctx)
 	c.Header("x-amz-request-id", requestID)
 	ev := s.newAuditAuthFailureEvent(ctx, c, bucket, key, requestID, status, reason)
 	s.appendFinalizedAuditEvent(context.Background(), ev)

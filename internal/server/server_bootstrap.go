@@ -62,6 +62,9 @@ func (s *Server) newHertzEngine(addr string) *server.Hertz {
 }
 
 func (s *Server) installMiddlewares(h *server.Hertz) {
+	// WithRequestID must run first so every downstream middleware
+	// (metrics, auth, audit, request_log) sees the same rid in context.
+	h.Use(WithRequestID())
 	h.Use(s.metricsMiddleware())
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())
