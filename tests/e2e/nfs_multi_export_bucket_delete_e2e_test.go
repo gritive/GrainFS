@@ -3,7 +3,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -12,37 +11,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestE2E_NFSMultiExportBucketDeleteCascade(t *testing.T) {
-	bucket := fmt.Sprintf("nfs-cascade-e2e-%d", freePort())
-	createBucket(t, bucket)
-	runNfsExportJSON(t, "add", bucket)
-
-	out, code := runCLI(t, testServerDataDir, "bucket", "delete", bucket, "--force")
-	require.Equalf(t, 0, code, "bucket delete failed: %s", out)
-
-	require.Eventually(t, func() bool {
-		return !exportListHasBucket(listNfsExports(t), bucket)
-	}, 5*time.Second, 100*time.Millisecond)
-}
-
-func TestE2E_NFSMultiExportBucketDeleteFailureKeepsExport(t *testing.T) {
-	bucket := fmt.Sprintf("nfs-cascade-notempty-e2e-%d", freePort())
-	createBucket(t, bucket)
-	_, err := testS3Client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String("key.txt"),
-		Body:   bytes.NewReader([]byte("still here")),
+func runNFSExportCases(t *testing.T, tgt *nfsTarget) {
+	t.Run("BucketDeleteCascade", func(t *testing.T) {
+		bucket, _ := tgt.uniqueExport(t, "delete-cascade")
+		out, code := runCLI(t, tgt.dataDir(tgt.leaderIdx), "bucket", "delete", bucket, "--force")
+		require.Equalf(t, 0, code, "bucket delete failed: %s", out)
+		require.Eventually(t, func() bool {
+			return !exportListHasBucketOnDataDir(t, tgt.dataDir(0), bucket)
+		}, 5*time.Second, 100*time.Millisecond)
 	})
-	require.NoError(t, err)
-	runNfsExportJSON(t, "add", bucket)
 
-	out, code := runCLI(t, testServerDataDir, "bucket", "delete", bucket)
-	require.NotEqual(t, 0, code, out)
-	require.Contains(t, out, "conflict")
-	require.True(t, exportListHasBucket(listNfsExports(t), bucket), "export must remain when bucket delete fails")
+	t.Run("BucketDeleteFailureKeepsExport", func(t *testing.T) {
+		bucket, _ := tgt.uniqueExport(t, "delete-failure")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("key.txt"),
+			Body:   bytes.NewReader([]byte("still here")),
+		})
+		require.NoError(t, err)
+		out, code := runCLI(t, tgt.dataDir(tgt.leaderIdx), "bucket", "delete", bucket)
+		require.NotEqual(t, 0, code, out)
+		require.Contains(t, out, "conflict")
+		require.True(t, exportListHasBucketOnDataDir(t, tgt.dataDir(0), bucket))
+	})
 }
 
-func exportListHasBucket(rows []e2eNfsExport, bucket string) bool {
+func TestE2E_NFSExportCasesSingleNode(t *testing.T) {
+	skipIfShort(t, "skipping NFS export single e2e in short mode")
+	runNFSExportCases(t, newSingleNodeNFSTarget(t))
+}
+
+func TestE2E_NFSExportCasesCluster(t *testing.T) {
+	skipIfShort(t, "skipping NFS export cluster e2e in short mode")
+	runNFSExportCases(t, newSharedClusterNFSTarget(t))
+}
+
+// exportListHasBucketOnDataDir is the dataDir-parameterized form of
+// exportListHasBucket from the old single-fixture tests.
+func exportListHasBucketOnDataDir(t *testing.T, dataDir, bucket string) bool {
+	t.Helper()
+	rows := listNfsExportsOnDataDir(t, dataDir)
 	for _, row := range rows {
 		if row.Bucket == bucket {
 			return true
