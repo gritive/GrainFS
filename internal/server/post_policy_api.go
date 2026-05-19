@@ -5,6 +5,9 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/tagging"
 )
 
 // handleFormUpload processes S3 POST form-based uploads (browser direct upload).
@@ -33,6 +36,21 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 		contentType = cts[0]
 	}
 
+	// S3 POST policy: tagging field contains XML (not URL-encoded key=value).
+	var formTags []storage.Tag
+	if tagFields := form.Value["tagging"]; len(tagFields) > 0 && tagFields[0] != "" {
+		parsed, err := ParseTaggingXML([]byte(tagFields[0]))
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "MalformedXML", err.Error())
+			return
+		}
+		if err := tagging.Validate(parsed); err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+			return
+		}
+		formTags = parsed
+	}
+
 	files := form.File["file"]
 	if len(files) == 0 {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "missing 'file' form field")
@@ -52,6 +70,13 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 		return
 	}
 	obj := result.Object
+
+	if len(formTags) > 0 {
+		if err := s.ops.SetObjectTags(bucket, key, obj.VersionID, formTags); err != nil {
+			mapError(c, err)
+			return
+		}
+	}
 
 	if obj.VersionID != "" {
 		c.Header("X-Amz-Version-Id", obj.VersionID)

@@ -3639,14 +3639,20 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 	}, nil
 }
 
-// CreateMultipartUploadWithTags creates a multipart upload with tags.
-// Tags are persisted in the upload entry and materialised on the object at
-// CompleteMultipartUpload via SetObjectTags.
-// TODO(task-17): plumb Tags through CreateMultipartUploadCmd + clusterMultipartMeta
-// so that CompleteMultipartUpload on any node can materialise them. For now this
-// path delegates to CreateMultipartUpload and applies SetObjectTags after
-// completion — callers using the cluster path should wire tags via Task 17.
+// CreateMultipartUploadWithTags creates a multipart upload with tags in cluster mode.
+// When tags are non-empty, returns UnsupportedOperationError: the cluster multipart
+// metadata (clusterMultipartMeta FBS + CreateMultipartUploadCmd) does not yet carry
+// tag fields; widening those is a future task.
+// When tags are empty, delegates to CreateMultipartUpload (no tags to carry).
+// TODO(future): widen clusterMultipartMeta FBS + CreateMultipartUploadCmd to carry tags,
+// then remove the fail-fast guard and materialise tags at CompleteMultipartUpload.
 func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	if len(tags) > 0 {
+		return "", storage.UnsupportedOperationError{
+			Op:     "CreateMultipartUploadWithTags",
+			Reason: storage.UnsupportedReasonNoAdapter,
+		}
+	}
 	mpu, err := b.CreateMultipartUpload(ctx, bucket, key, contentType)
 	if err != nil {
 		return "", err

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/tagging"
 )
 
 // handleCopyObject processes PUT with x-amz-copy-source header (S3 CopyObject).
@@ -53,16 +54,41 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-metadata-directive")
 		return
 	}
+	taggingDirective, ok := parseCopyTaggingDirective(string(c.GetHeader("x-amz-tagging-directive")))
+	if !ok {
+		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-tagging-directive")
+		return
+	}
 	preconditions, ok := copyPreconditions(c)
 	if !ok {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid copy source condition date")
 		return
 	}
+
+	// Parse x-amz-tagging only when directive is REPLACE; header is ignored on COPY.
+	var copyTags []storage.Tag
+	if taggingDirective == storage.TaggingDirectiveReplace {
+		if raw := string(c.GetHeader("x-amz-tagging")); raw != "" {
+			parsed, err := ParseTaggingHeader(raw)
+			if err != nil {
+				writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+				return
+			}
+			if err := tagging.Validate(parsed); err != nil {
+				writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+				return
+			}
+			copyTags = parsed
+		}
+	}
+
 	req := storage.CopyObjectRequest{
 		Source:            src,
 		Destination:       storage.ObjectRef{Bucket: dstBucket, Key: dstKey},
 		ACL:               acl,
 		MetadataDirective: directive,
+		TaggingDirective:  taggingDirective,
+		Tags:              copyTags,
 		ContentType:       string(c.GetHeader("Content-Type")),
 		UserMetadata:      copyUserMetadata(c),
 		SystemMetadata:    systemMetadata,

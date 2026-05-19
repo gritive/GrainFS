@@ -10,6 +10,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/tagging"
 )
 
 func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
@@ -77,6 +79,21 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		writeSSEHeaderError(c, sseErr)
 		return
 	}
+
+	var tags []storage.Tag
+	if raw := string(c.GetHeader("x-amz-tagging")); raw != "" {
+		parsed, err := ParseTaggingHeader(raw)
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+			return
+		}
+		if err := tagging.Validate(parsed); err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+			return
+		}
+		tags = parsed
+	}
+
 	contentType := putObjectContentType(c)
 	rawBody, err := putObjectBody(c)
 	if err != nil {
@@ -96,6 +113,14 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	obj := result.Object
+
+	if len(tags) > 0 {
+		versionID := obj.VersionID
+		if err := s.ops.SetObjectTags(bucket, key, versionID, tags); err != nil {
+			mapError(c, err)
+			return
+		}
+	}
 
 	responseStart := time.Now()
 	c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))

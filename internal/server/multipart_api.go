@@ -9,6 +9,9 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/tagging"
 )
 
 // handlePost routes POST requests for multipart upload operations.
@@ -56,7 +59,29 @@ func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContex
 		contentType = "application/octet-stream"
 	}
 
-	upload, err := s.createMultipartSession(ctx, bucket, key, contentType)
+	var tags []storage.Tag
+	if raw := string(c.GetHeader("x-amz-tagging")); raw != "" {
+		parsed, err := ParseTaggingHeader(raw)
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+			return
+		}
+		if err := tagging.Validate(parsed); err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidTag", err.Error())
+			return
+		}
+		tags = parsed
+	}
+
+	var (
+		upload *storage.MultipartUpload
+		err    error
+	)
+	if len(tags) > 0 {
+		upload, err = s.createMultipartSessionWithTags(ctx, bucket, key, contentType, tags)
+	} else {
+		upload, err = s.createMultipartSession(ctx, bucket, key, contentType)
+	}
 	if err != nil {
 		mapError(c, err)
 		return
