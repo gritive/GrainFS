@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.265.0] - 2026-05-19 - cleanup(auth): §1-§3 잔재 fix — DEK boot wiring, SA→_grainfs deny, IPST snapshot trailer
+
+§1-§3 deferred 잔재 정리 cleanup 슬라이스. v0.0.263.0 (§2 IAM Core + §3 Bucket Lifecycle) 머지 후 review-forever Pass에서 발견된 boot-wiring 갭 2건과 snapshot 누락 1건을 정리. 새 기능 추가 없음 — 기존 §1-§3 구현의 wiring/coverage 완성.
+
+### Added
+
+- `cluster.IPST` snapshot trailer (magic `0x54535049`): PolicyStore + GroupStore + PolicyAttachStore + BucketPolicyStore 4개를 단일 FlatBuffers payload로 묶어 `meta_fsm.Snapshot`/`Restore` 체인의 outermost trailer로 추가. cluster 재시작 시 Raft log 전체 replay 의존을 제거하고, snapshot install로 정책 상태를 빠르게 복원. peel chain: IPST → DKVS → GCFG → IAMG.
+- 4개 store에 `Snapshot()` / `ReplaceAll()` API 추가 (`policystore`, `group`, `policyattach`, `bucketpolicy`). `policyattach`는 SA-attach + group-attach가 하나의 단위로 직렬화돼야 하므로 `AttachSnapshot` 구조체 wrap.
+- `cluster.ApplyCmdForTest` + `cluster.EncodeMetaCmdForTest`: 외부 패키지에서 FSM apply 경로 단위 검증을 위해 노출. 프로덕션 코드 호출 금지.
+- `serveruntime.wireDEKKeeper(state, fsm)` 추출: bootMetaRaftWiring의 DEK wiring을 unit-testable 함수로 분리.
+
+### Changed
+
+- `serveruntime/boot_phases_raft.go`: §1 잔재 갭 fix (C2). `nodeconfig.KEKSource()` → `encrypt.LoadOrGenerateKEK` → `encrypt.NewDEKKeeper` → `MetaFSM.SetDEKKeeper` → `WireDEKPostCommit` 호출이 production boot에 연결됨. 이전엔 `MetaFSM.dekKeeper`가 nil로 남아 `DEKRotate` / `DEKVersionPrune` MetaCmd가 silent no-op이었음.
+- `s3auth.Authorizer.Authorize`: 내부 버킷 (`_grainfs/*`) deny가 익명에 더해 인증된 SA에도 적용 (C3). 이전엔 `readonly` builtin policy를 attach한 SA가 `_grainfs/audit.evaluations`를 읽을 수 있었음. audit-internal SA의 localhost 경로는 `authenticateAuditInternalRequest` early-return으로 Authorize 우회하므로 영향 없음.
+- `meta_fsm.go` Restore IPST 경로: partial-nil store 시 per-store WARN 로그 추가. 이전엔 all-nil만 warn했고 일부 nil은 silent skip해 다른 store와 desync 위험.
+
+### Tests
+
+- `internal/cluster/meta_fsm_iam_policy_stores_snapshot_test.go`: IPST snapshot RoundTrip + LegacySnapshot_NoIPST + NilStores_WarnOnly + EmptyStores + WithAllTrailers (5건). WithAllTrailers는 IAMG/GCFG/DKVS/IPST 4개 trailer 공존 시 peel chain 검증.
+- `internal/serveruntime/dek_keeper_wiring_test.go`: LoadOrGenerateKEK 멱등성 + WireDEKKeeper_InjectsAndRegistersHook (DEKRotate apply가 keeper generation을 0→1로 증가).
+- `internal/s3auth/authorizer_test.go`: SA가 readonly policy로 `_grainfs/*` 접근 시 Deny 검증.
+- `internal/server/authz_test.go`: IAM-enabled mode에서 인증 SA의 `_grainfs/*` 접근이 403 검증.
+
+### Documentation
+
+- `meta_fsm.go` IPST trailer 상수 doc: GCFG/DKVS 패턴과 일관되게 Wire layout ASCII 다이어그램 추가.
+
 ## [0.0.264.0] - 2026-05-19 - feat(s3): Object Tagging API
 
 MinIO-parity S3 Object Tagging API 구현. PUT/GET/DELETE `?tagging` 엔드포인트 + `x-amz-tagging` 헤더 (PutObject / POST / CreateMultipartUpload / CopyObject) + `x-amz-tagging-directive` (COPY/REPLACE). Tags는 FBS `Object` table inline 저장; 클러스터 모드에서 `CmdSetObjectTags` Raft cmd로 versionID-aware 복제.
