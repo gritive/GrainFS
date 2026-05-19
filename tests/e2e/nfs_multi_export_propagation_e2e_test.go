@@ -10,28 +10,37 @@ import (
 )
 
 func TestNFSMultiExportPropagationMultiNodeE2E(t *testing.T) {
+	t.Run("MRCluster3Node", func(t *testing.T) {
+		runNFSMultiExportPropagationCases(t)
+	})
+}
+
+func runNFSMultiExportPropagationCases(t *testing.T) {
+	t.Helper()
 	c := startMRCluster(t, 3, mrClusterOptions{
 		disableNFS4:   true,
 		disableNBD:    true,
 		FastBootstrap: true,
 	})
 
-	bucket := fmt.Sprintf("nfs-prop-e2e-%d", freePort())
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	requireMRCreateBucketEventually(t, ctx, c, bucket)
+	t.Run("AdminAddPropagatesToAllNodes", func(t *testing.T) {
+		bucket := fmt.Sprintf("nfs-prop-e2e-%d", freePort())
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		requireMRCreateBucketEventually(t, ctx, c, bucket)
 
-	adminNode := (c.leaderIdx + 1) % c.nodeCount
-	created := runNfsExportJSONOnDataDir(t, c.dataDirs[adminNode], "add", bucket)
-	require.Equal(t, bucket, created.Bucket)
-	require.NotZero(t, created.Generation)
+		adminNode := (c.leaderIdx + 1) % c.nodeCount
+		created := runNfsExportJSONOnDataDir(t, c.dataDirs[adminNode], "add", bucket)
+		require.Equal(t, bucket, created.Bucket)
+		require.NotZero(t, created.Generation)
 
-	for i := 0; i < c.nodeCount; i++ {
-		dataDir := c.dataDirs[i]
-		require.Eventually(t, func() bool {
-			return jsonExportListContains(t, dataDir, bucket, created.Generation)
-		}, 10*time.Second, 100*time.Millisecond, "node %d did not observe export", i)
-	}
+		for i := 0; i < c.nodeCount; i++ {
+			dataDir := c.dataDirs[i]
+			require.Eventually(t, func() bool {
+				return jsonExportListContains(t, dataDir, bucket, created.Generation)
+			}, 10*time.Second, 100*time.Millisecond, "node %d did not observe export", i)
+		}
+	})
 }
 
 func runNfsExportJSONOnDataDir(t *testing.T, dataDir, verb, bucket string, flags ...string) e2eNfsExport {

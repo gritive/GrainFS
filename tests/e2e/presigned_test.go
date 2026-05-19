@@ -193,30 +193,40 @@ func startAuthServer(t *testing.T) authServer {
 	}
 }
 
-func TestMetrics_Endpoint(t *testing.T) {
-	srv := startAuthServer(t)
-	defer srv.Cleanup()
-
-	ctx := context.Background()
-
-	// Make some API calls to populate metrics
-	srv.Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("metrics-test")})
-	srv.Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("metrics-test"),
-		Key:    aws.String("file.txt"),
-		Body:   strings.NewReader("data"),
+func TestMetricsEndpointE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runMetricsEndpointCases(t, newSingleNodeS3Target())
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runMetricsEndpointCases(t, newSharedClusterS3Target(t))
+	})
+}
 
-	req, _ := http.NewRequest(http.MethodGet, srv.Endpoint+"/metrics", nil)
-	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
+func runMetricsEndpointCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	ctx := context.Background()
+	cli := tgt.pickNode(0)
+	endpoint := tgt.endpoint(0)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, _ := io.ReadAll(resp.Body)
-	bodyStr := string(body)
+	t.Run("ExposesHTTPMetrics", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "metrics")
+		_, _ = cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("file.txt"),
+			Body:   strings.NewReader("data"),
+		})
 
-	assert.Contains(t, bodyStr, "grainfs_http_requests_total")
-	assert.Contains(t, bodyStr, "grainfs_http_request_duration_seconds")
+		req, _ := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
+		req.Header.Set("Accept-Encoding", "identity")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		bodyStr := string(body)
+
+		assert.Contains(t, bodyStr, "grainfs_http_requests_total")
+		assert.Contains(t, bodyStr, "grainfs_http_request_duration_seconds")
+	})
 }

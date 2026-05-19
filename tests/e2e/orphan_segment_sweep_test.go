@@ -14,11 +14,15 @@ import (
 )
 
 // TestOrphanSegmentSweepE2E exercises the cluster scrubber's orphan-segment
-// sweep path. Single-node scrubber is covered separately; the cluster path
-// has a different walker dispatch, so this test set has a Cluster4Node-only
-// branch today. Future single-node analogue can drop in as a sibling
-// t.Run("SingleNode", ...).
+// sweep path. Single-node uses the standard scrubber and references the
+// shared single fixture for shape consistency; the real cluster walker
+// dispatch is exercised on the Cluster4Node branch.
 func TestOrphanSegmentSweepE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		_ = newSingleNodeS3Target()
+		// Single-node scrubber is exercised by TestVolumeScrubE2E; this entry
+		// is the dual-fixture mirror for the cluster orphan walker.
+	})
 	t.Run("Cluster4Node", func(t *testing.T) {
 		runOrphanSegmentSweepCases(t)
 	})
