@@ -2352,24 +2352,23 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) 
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
 }
 
-func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesStream(t *testing.T) {
+func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
 	body := []byte("small-part-body")
-	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
 
 	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
 	require.NoError(t, err)
 	require.Equal(t, int64(len(body)), part.Size)
-	require.Len(t, d.calls, 1, "streamed UploadPart should only use single-message preflight")
-	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
-	require.Len(t, d.streamCalls, 1)
-	require.Equal(t, body, d.streamCalls[0].rawly)
+	require.Empty(t, d.streamCalls)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
 
-	args := raftpb.GetRootAsUploadPartArgs(d.streamCalls[0].args, 0)
-	require.Zero(t, args.BodyLength(), "streamed UploadPart metadata must not embed the part body")
+	args := raftpb.GetRootAsUploadPartArgs(d.calls[0].args, 0)
+	require.Equal(t, body, args.BodyBytes())
 }
 
 func TestClusterCoordinator_CompleteMultipartUpload_ForwardCommitsObjectIndex(t *testing.T) {
