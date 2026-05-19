@@ -212,6 +212,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			SSEAlgorithm:     snap.SSEAlgorithm,
 			PreserveLatest:   preserveLatest,
 			IsDeleteMarker:   snap.IsDeleteMarker,
+			Tags:             snap.Tags,
 		}); err != nil {
 			return count, stale, fmt.Errorf("restore meta %s/%s: %w", snap.Bucket, snap.Key, err)
 		}

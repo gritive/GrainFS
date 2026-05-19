@@ -170,6 +170,8 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 			logger.Warn().Str("bucket", obj.bucket).Str("key", obj.key).Err(err).Msg("skip malformed object meta")
 			continue
 		}
+		// Legacy JSON objectMeta predates the Tags field; tags genuinely don't
+		// exist on these records, so the empty Tags here is not a clobber.
 		data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 			Bucket:      obj.bucket,
 			Key:         meta.Key,

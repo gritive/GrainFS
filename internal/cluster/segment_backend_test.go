@@ -220,7 +220,7 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	defer body.Close()
 	obj, err := runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil)
+		nil, "", 0, false, "", nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	assert.Equal(t, int64(len(payload)), obj.Size)
@@ -266,7 +266,7 @@ func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
 	defer body.Close()
 	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil)
+		nil, "", 0, false, "", nil, nil)
 	require.NoError(t, err)
 
 	after := chunkFanoutMetricCount(t)
@@ -291,7 +291,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {
 	defer body.Close()
 	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil)
+		nil, "", 0, false, "", nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "segment write")
 
@@ -335,7 +335,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
 		nil, "", 0, false, "",
-		func() error { return hookErr })
+		func() error { return hookErr }, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, hookErr)
 
@@ -367,7 +367,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	defer body.Close()
 	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil)
+		nil, "", 0, false, "", nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "commit meta")
 
@@ -403,7 +403,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_DeleteShardsBestEffort(t *te
 	defer body.Close()
 	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil)
+		nil, "", 0, false, "", nil, nil)
 	require.Error(t, err)
 	// PUT errors cleanly even though cleanup also failed (no panic).
 	assert.Empty(t, deps.proposeCalls)
@@ -415,7 +415,7 @@ func TestPutObjectChunked_RejectsMultipartParts(t *testing.T) {
 	_, err := b.putObjectChunked(context.Background(),
 		"bucket", "k", "v", sp, "ct", nil, "",
 		0, false, "", nil,
-		[]storage.MultipartPartEntry{{PartNumber: 1, Size: 1, ETag: "e"}})
+		[]storage.MultipartPartEntry{{PartNumber: 1, Size: 1, ETag: "e"}}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multipart parts: deferred to Phase 3")
 }
@@ -427,8 +427,45 @@ func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 	b := &DistributedBackend{}
 	_, err := b.putObjectChunked(context.Background(),
 		"bucket", "k", "v", sp, "ct", nil, "",
-		0, false, "", nil, nil)
+		0, false, "", nil, nil, nil)
 	require.Error(t, err)
+}
+
+// TestChunkedPut_PreservesTags asserts the chunked-PUT cluster pipeline
+// threads the tags argument into PutObjectMetaCmd. Pre-fix, putObjectChunked
+// did not accept tags and the inner runChunkedPut built PutObjectMetaCmd
+// without a Tags field — applyPutObjectMeta then wrote empty Tags,
+// clobbering any caller-supplied tags on every large-object PUT.
+func TestChunkedPut_PreservesTags(t *testing.T) {
+	chunk := storage.DefaultChunkSize
+	payload := bytes.Repeat([]byte("T"), 2*chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+
+	blobIDs := make([]string, 2)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := newCSBWithDeps(deps, blobIDs)
+
+	wantTags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "owner", Value: "platform"},
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, wantTags)
+	require.NoError(t, err)
+
+	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
+	cmd := deps.proposeCalls[0].cmd
+	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
+	require.Equal(t, wantTags, cmd.Tags,
+		"chunked-PUT must thread tags into PutObjectMetaCmd; clobbering this drops tags on every large object")
 }
 
 func TestChunkedChooseModTime(t *testing.T) {
@@ -523,7 +560,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 
 	_, err = runChunkedPut(context.Background(), csb, wrapped,
 		"bucket", "large.bin", "v1", "application/octet-stream",
-		nil, "", 0, false, "", nil)
+		nil, "", 0, false, "", nil, nil)
 	require.Error(t, err)
 	// Chunker error must surface through the segment write wrap.
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF,

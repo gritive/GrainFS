@@ -215,6 +215,40 @@ func TestRestoreObjects_PreservesCurrentECPlacementMetadata(t *testing.T) {
 	}))
 }
 
+// TestRestoreObjects_PreservesTags asserts the snapshot restore propose path
+// forwards SnapshotObject.Tags into PutObjectMetaCmd. Pre-fix the literal at
+// snapshotable.go:199 omitted Tags, which applyPutObjectMeta then wrote as
+// empty, clobbering the snapshot's tag history.
+func TestRestoreObjects_PreservesTags(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "tagsnap"))
+	createBlob(t, b, "tagsnap", "doc.bin", "v1")
+
+	snapTags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+
+	count, stale, err := b.RestoreObjects([]storage.SnapshotObject{{
+		Bucket:      "tagsnap",
+		Key:         "doc.bin",
+		ETag:        "etag-tag",
+		Size:        4,
+		ContentType: "application/octet-stream",
+		Modified:    time.Now().UnixMilli(),
+		VersionID:   "v1",
+		IsLatest:    true,
+		Tags:        snapTags,
+	}})
+	require.NoError(t, err)
+	require.Empty(t, stale)
+	require.Equal(t, 1, count)
+
+	got, err := b.GetObjectTags("tagsnap", "doc.bin", "v1")
+	require.NoError(t, err)
+	require.Equal(t, snapTags, got, "snapshot Tags must round-trip through restore propose")
+}
+
 func TestRestoreObjects_RemovesExtraObjects(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "extra"))

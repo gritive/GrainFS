@@ -2158,7 +2158,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm,
-			modTime, preserveModTime, expectedETag, beforeCommit, parts,
+			modTime, preserveModTime, expectedETag, beforeCommit, parts, tags,
 		)
 	}
 
