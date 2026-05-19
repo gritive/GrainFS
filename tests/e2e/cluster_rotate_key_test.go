@@ -26,126 +26,130 @@ import (
 //
 // Total wall time bounded by RotationPhaseGrace (5s × 2 phases) + slack.
 func TestRotateKeyHappyPathE2E(t *testing.T) {
-	dir := shortTempDir(t)
-	httpPort := freePort()
-	raftPort := freePort()
-	oldKey := strings.Repeat("a", 64)
-	encKeyFile := makeSharedEncryptionKeyFile(t)
+	t.Run("Cluster3Node", func(t *testing.T) {
+		dir := shortTempDir(t)
+		httpPort := freePort()
+		raftPort := freePort()
+		oldKey := strings.Repeat("a", 64)
+		encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	args := []string{
-		"serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", httpPort),
-		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--node-id", "rotate-test",
-		"--cluster-key", oldKey,
-		"--nfs4-port", "0",
-		"--nbd-port", "0",
-		"--encryption-key-file", encKeyFile,
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-	}
-	logFile, err := os.CreateTemp("", "rotate-test-*.log")
-	require.NoError(t, err)
-	defer os.Remove(logFile.Name())
-
-	srv := exec.CommandContext(ctx, getBinary(), args...)
-	srv.Stdout = logFile
-	srv.Stderr = logFile
-	require.NoError(t, srv.Start())
-	t.Cleanup(func() {
-		cancel()
-		_ = srv.Wait()
-	})
-
-	// Wait for HTTP + rotate.sock to be ready.
-	waitHTTPReady(t, httpPort, 20*time.Second)
-	waitSocketReady(t, filepath.Join(dir, "rotate.sock"), 10*time.Second)
-
-	// Initial status: must be steady.
-	st := runRotateKeyCLI(t, dir, "status")
-	require.Equal(t, 1, st.Phase, "initial phase should be steady, got %d", st.Phase)
-
-	// Begin rotation with --generate so the test doesn't hardcode a key.
-	beginOut := runRotateKeyCLIBeginGenerate(t, dir)
-	require.Empty(t, beginOut.Error, "begin error: %s", beginOut.Error)
-	require.NotEmpty(t, beginOut.RotationID)
-	require.NotEmpty(t, beginOut.NewSPKI)
-	require.NotEqual(t, beginOut.OldSPKI, beginOut.NewSPKI, "OLD and NEW SPKI must differ")
-
-	// Poll until steady-on-NEW (phase=1, OldSPKI = previous NEW). Auto-progress
-	// is RotationPhaseGrace=5s per transition; allow 30s slack.
-	deadline := time.Now().Add(45 * time.Second)
-	var final rotationCLIResp
-	for time.Now().Before(deadline) {
-		final = runRotateKeyCLI(t, dir, "status")
-		if final.Phase == 1 && final.OldSPKI == beginOut.NewSPKI {
-			break
+		args := []string{
+			"serve",
+			"--data", dir,
+			"--port", fmt.Sprintf("%d", httpPort),
+			"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
+			"--node-id", "rotate-test",
+			"--cluster-key", oldKey,
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
+			"--encryption-key-file", encKeyFile,
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Equal(t, 1, final.Phase, "expected steady after auto-progress; got phase=%d (rotation_id=%s)", final.Phase, final.RotationID)
-	require.Equal(t, beginOut.NewSPKI, final.OldSPKI, "active SPKI should now be NEW")
+		logFile, err := os.CreateTemp("", "rotate-test-*.log")
+		require.NoError(t, err)
+		defer os.Remove(logFile.Name())
 
-	// Verify keystore on disk reflects the rotation.
-	currentKeyBytes, err := os.ReadFile(filepath.Join(dir, "keys.d", "current.key"))
-	require.NoError(t, err)
-	currentKey := strings.TrimSpace(string(currentKeyBytes))
-	require.Len(t, currentKey, 64, "current.key should be 64 hex chars")
-	require.NotEqual(t, oldKey, currentKey, "current.key should have rotated away from initial key")
+		srv := exec.CommandContext(ctx, getBinary(), args...)
+		srv.Stdout = logFile
+		srv.Stderr = logFile
+		require.NoError(t, srv.Start())
+		t.Cleanup(func() {
+			cancel()
+			_ = srv.Wait()
+		})
 
-	previousKeyBytes, err := os.ReadFile(filepath.Join(dir, "keys.d", "previous.key"))
-	require.NoError(t, err, "previous.key should exist after Drop")
-	previousKey := strings.TrimSpace(string(previousKeyBytes))
-	require.Equal(t, oldKey, previousKey, "previous.key should hold the OLD PSK")
+		// Wait for HTTP + rotate.sock to be ready.
+		waitHTTPReady(t, httpPort, 20*time.Second)
+		waitSocketReady(t, filepath.Join(dir, "rotate.sock"), 10*time.Second)
+
+		// Initial status: must be steady.
+		st := runRotateKeyCLI(t, dir, "status")
+		require.Equal(t, 1, st.Phase, "initial phase should be steady, got %d", st.Phase)
+
+		// Begin rotation with --generate so the test doesn't hardcode a key.
+		beginOut := runRotateKeyCLIBeginGenerate(t, dir)
+		require.Empty(t, beginOut.Error, "begin error: %s", beginOut.Error)
+		require.NotEmpty(t, beginOut.RotationID)
+		require.NotEmpty(t, beginOut.NewSPKI)
+		require.NotEqual(t, beginOut.OldSPKI, beginOut.NewSPKI, "OLD and NEW SPKI must differ")
+
+		// Poll until steady-on-NEW (phase=1, OldSPKI = previous NEW). Auto-progress
+		// is RotationPhaseGrace=5s per transition; allow 30s slack.
+		deadline := time.Now().Add(45 * time.Second)
+		var final rotationCLIResp
+		for time.Now().Before(deadline) {
+			final = runRotateKeyCLI(t, dir, "status")
+			if final.Phase == 1 && final.OldSPKI == beginOut.NewSPKI {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		require.Equal(t, 1, final.Phase, "expected steady after auto-progress; got phase=%d (rotation_id=%s)", final.Phase, final.RotationID)
+		require.Equal(t, beginOut.NewSPKI, final.OldSPKI, "active SPKI should now be NEW")
+
+		// Verify keystore on disk reflects the rotation.
+		currentKeyBytes, err := os.ReadFile(filepath.Join(dir, "keys.d", "current.key"))
+		require.NoError(t, err)
+		currentKey := strings.TrimSpace(string(currentKeyBytes))
+		require.Len(t, currentKey, 64, "current.key should be 64 hex chars")
+		require.NotEqual(t, oldKey, currentKey, "current.key should have rotated away from initial key")
+
+		previousKeyBytes, err := os.ReadFile(filepath.Join(dir, "keys.d", "previous.key"))
+		require.NoError(t, err, "previous.key should exist after Drop")
+		previousKey := strings.TrimSpace(string(previousKeyBytes))
+		require.Equal(t, oldKey, previousKey, "previous.key should hold the OLD PSK")
+	})
 }
 
 // TestRotateKeyStatusOnlyOnSoloModeE2E verifies the rotate.sock is reachable
 // even on a solo (peers=[]) node and reports steady. Quick smoke before the
 // longer happy-path test.
 func TestRotateKeyStatusOnlyOnSoloModeE2E(t *testing.T) {
-	dir := shortTempDir(t)
-	httpPort := freePort()
-	raftPort := freePort()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
+	t.Run("SingleNode", func(t *testing.T) {
+		dir := shortTempDir(t)
+		httpPort := freePort()
+		raftPort := freePort()
+		encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	args := []string{
-		"serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", httpPort),
-		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--node-id", "rotate-status-test",
-		"--cluster-key", strings.Repeat("c", 64),
-		"--nfs4-port", "0",
-		"--nbd-port", "0",
-		"--encryption-key-file", encKeyFile,
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-	}
-	logFile, _ := os.CreateTemp("", "rotate-status-*.log")
-	defer os.Remove(logFile.Name())
+		args := []string{
+			"serve",
+			"--data", dir,
+			"--port", fmt.Sprintf("%d", httpPort),
+			"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
+			"--node-id", "rotate-status-test",
+			"--cluster-key", strings.Repeat("c", 64),
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
+			"--encryption-key-file", encKeyFile,
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
+		}
+		logFile, _ := os.CreateTemp("", "rotate-status-*.log")
+		defer os.Remove(logFile.Name())
 
-	srv := exec.CommandContext(ctx, getBinary(), args...)
-	srv.Stdout = logFile
-	srv.Stderr = logFile
-	require.NoError(t, srv.Start())
-	t.Cleanup(func() {
-		cancel()
-		_ = srv.Wait()
+		srv := exec.CommandContext(ctx, getBinary(), args...)
+		srv.Stdout = logFile
+		srv.Stderr = logFile
+		require.NoError(t, srv.Start())
+		t.Cleanup(func() {
+			cancel()
+			_ = srv.Wait()
+		})
+
+		waitHTTPReady(t, httpPort, 15*time.Second)
+		waitSocketReady(t, filepath.Join(dir, "rotate.sock"), 10*time.Second)
+
+		st := runRotateKeyCLI(t, dir, "status")
+		require.Equal(t, 1, st.Phase, "solo node should report steady")
+		require.Empty(t, st.RotationID, "no in-flight rotation")
 	})
-
-	waitHTTPReady(t, httpPort, 15*time.Second)
-	waitSocketReady(t, filepath.Join(dir, "rotate.sock"), 10*time.Second)
-
-	st := runRotateKeyCLI(t, dir, "status")
-	require.Equal(t, 1, st.Phase, "solo node should report steady")
-	require.Empty(t, st.RotationID, "no in-flight rotation")
 }
 
 // rotationCLIResp mirrors the CLI's rotationSocketResponse but lives here to

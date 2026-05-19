@@ -129,22 +129,26 @@ func rejectRemovedECExtraArgs(args []string) {
 }
 
 func TestNormalizeE2EClusterOptionsRejectsRemovedZeroConfigFlags(t *testing.T) {
-	for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity", "--seed-groups=2", "--seed-groups"} {
-		t.Run(arg, func(t *testing.T) {
-			require.PanicsWithValue(t,
-				fmt.Sprintf("removed zero-config flag %q: use Nodes to select the automatic profile", arg),
-				func() {
-					normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
-				})
-		})
-	}
+	t.Run("SingleNode", func(t *testing.T) {
+		for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity", "--seed-groups=2", "--seed-groups"} {
+			t.Run(arg, func(t *testing.T) {
+				require.PanicsWithValue(t,
+					fmt.Sprintf("removed zero-config flag %q: use Nodes to select the automatic profile", arg),
+					func() {
+						normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
+					})
+			})
+		}
+	})
 }
 
 func TestNormalizeE2EClusterOptionsAllowsNonECExtraArgs(t *testing.T) {
-	opts := normalizeE2EClusterOptions(e2eClusterOptions{
-		ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
+	t.Run("SingleNode", func(t *testing.T) {
+		opts := normalizeE2EClusterOptions(e2eClusterOptions{
+			ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
+		})
+		require.Equal(t, []string{"--vlog-warn-ratio=0.001"}, opts.ExtraArgs)
 	})
-	require.Equal(t, []string{"--vlog-warn-ratio=0.001"}, opts.ExtraArgs)
 }
 
 func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, error) {
