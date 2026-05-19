@@ -211,12 +211,21 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	}
 	now := time.Now().Unix()
 
+	partsCopy := make([]MultipartPartEntry, len(parts))
+	for i, p := range parts {
+		partsCopy[i] = MultipartPartEntry{
+			PartNumber: p.PartNumber,
+			Size:       p.Size,
+			ETag:       p.ETag,
+		}
+	}
 	obj := &Object{
 		Key:          key,
 		Size:         totalSize,
 		ContentType:  meta.ContentType,
 		ETag:         etag,
 		LastModified: now,
+		Parts:        partsCopy,
 	}
 
 	objMeta, _ := marshalObject(obj)

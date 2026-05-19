@@ -2,7 +2,9 @@ package raft
 
 import (
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -13,6 +15,26 @@ const defaultMaxEntriesPerAE = 512
 const maxProposeAppendBatch = 64
 
 var proposeAppendBatchLimit = maxProposeAppendBatch
+
+// defaultProposeLingerWindow is the default linger time the leader's actor
+// waits for additional proposes to coalesce into a single batch when the
+// command queue drains. 200 µs is well below the network round trips on the
+// PUT critical path (sub-millisecond LAN), so it does not regress p50/p99 in
+// practice — but it lets the actor accumulate multi-entry batches, amortizing
+// log-store fsync, AppendEntries broadcast, and QUIC sendmsg overhead.
+const defaultProposeLingerWindow = 200 * time.Microsecond
+
+// proposeLingerWindow is mutable so tests can disable the linger for
+// determinism by setting it to 0. Overridable at process start with
+// GRAINFS_RAFT_PROPOSE_LINGER_US (microseconds; 0 disables).
+var proposeLingerWindow = func() time.Duration {
+	if v, ok := os.LookupEnv("GRAINFS_RAFT_PROPOSE_LINGER_US"); ok {
+		if us, err := strconv.Atoi(v); err == nil && us >= 0 {
+			return time.Duration(us) * time.Microsecond
+		}
+	}
+	return defaultProposeLingerWindow
+}()
 
 // mustEntry retrieves the log entry at 1-based logical index idx from the
 // actor's log. Panics if the index is out of range — log indexing bugs are
@@ -707,8 +729,12 @@ func (n *Node) handleProposeBatch(first command) (command, bool) {
 	cmds = append(cmds, first)
 	var postponed command
 	var hasPostponed bool
+	var lingerDeadline <-chan time.Time
 drain:
 	for len(cmds) < batchLimit {
+		// Phase 1: non-blocking drain of anything already queued. The common
+		// case under burst load — multiple producers have already enqueued
+		// proposes — exits here without waiting.
 		select {
 		case next := <-n.cmdCh:
 			if next.kind != cmdPropose {
@@ -717,7 +743,27 @@ drain:
 				break drain
 			}
 			cmds = append(cmds, next)
+			continue drain
 		default:
+		}
+		// Phase 2: queue is empty. If linger is disabled, commit what we have.
+		if proposeLingerWindow <= 0 {
+			break drain
+		}
+		// Arm the linger deadline once; keep waiting on the same deadline
+		// across subsequent loop iterations so the total wait is bounded.
+		if lingerDeadline == nil {
+			lingerDeadline = time.After(proposeLingerWindow)
+		}
+		select {
+		case next := <-n.cmdCh:
+			if next.kind != cmdPropose {
+				postponed = next
+				hasPostponed = true
+				break drain
+			}
+			cmds = append(cmds, next)
+		case <-lingerDeadline:
 			break drain
 		}
 	}

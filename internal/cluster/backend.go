@@ -40,7 +40,24 @@ import (
 const shardRPCTimeout = 2 * time.Minute
 
 const maxSingleLocalShardMemoryFastPathBytes = 16 << 20
-const maxECMemoryShardFastPathBytes = 16 << 20
+
+// EC in-memory shard fast path size caps. Replication (parity == 0) keeps the
+// original 16 MiB cap; parity EC gets a lower 1 MiB cap so concurrent small
+// PUTs cannot stack into a multi-hundred-megabyte burst (the rationale for
+// commit 8d0ecccd #411). Within the cap, parity EC bypasses both the body
+// spool-to-disk and the EC shard spool-to-disk, dropping ~30% CPU on small
+// PUTs that dominate the warp s3 workload.
+const (
+	maxECMemoryShardFastPathBytesReplicated = 16 << 20
+	maxECMemoryShardFastPathBytesParity     = 1 << 20
+)
+
+func maxECMemoryShardFastPathBytesForCfg(cfg ECConfig) int64 {
+	if cfg.ParityShards == 0 {
+		return maxECMemoryShardFastPathBytesReplicated
+	}
+	return maxECMemoryShardFastPathBytesParity
+}
 
 const (
 	ecShardBufferedLimit = 256 * 1024
@@ -1482,6 +1499,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		sseAlgorithm,
 		"ec_single_memory",
 		h,
+		nil,
 	)
 	return obj, true, err
 }
@@ -1513,19 +1531,20 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	userMetadata map[string]string,
 	sseAlgorithm string,
 ) (*storage.Object, bool, error) {
-	if !b.canUseECMemoryShardFastPath(ctx) {
-		return nil, false, nil
-	}
-	body, size, ok := sizedReaderAtSection(r, maxECMemoryShardFastPathBytes)
+	limit, ok := b.ecMemoryShardFastPathLimit(ctx)
 	if !ok {
 		return nil, false, nil
 	}
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return nil, true, fmt.Errorf("read small EC object: %w", err)
+	body, size, ok := sizedReaderAtSection(r, limit)
+	if !ok {
+		return nil, false, nil
 	}
-	if int64(len(data)) != size {
-		return nil, true, fmt.Errorf("read small EC object: got %d bytes, expected %d", len(data), size)
+	// Pre-size the buffer from the known body length: avoids the geometric
+	// growth churn of io.ReadAll (top alloc_space contributor for this path
+	// in iter1 pprof) and skips zeroing the unused tail.
+	data := make([]byte, size)
+	if _, err := io.ReadFull(body, data); err != nil {
+		return nil, true, fmt.Errorf("read small EC object: %w", err)
 	}
 
 	obj, err := b.putObjectECData(ctx, bucket, key, versionID, data, contentType, userMetadata, sseAlgorithm)
@@ -1533,22 +1552,31 @@ func (b *DistributedBackend) tryPutObjectECDataInMemory(
 	return obj, true, err
 }
 
-func (b *DistributedBackend) canUseECMemoryShardFastPath(ctx context.Context) bool {
+// ecMemoryShardFastPathLimit returns the maximum body size (in bytes) for which
+// the in-memory EC fast path may be used in this request, or ok=false when the
+// fast path is disabled for this placement.
+func (b *DistributedBackend) ecMemoryShardFastPathLimit(ctx context.Context) (int64, bool) {
 	if _, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
-		return ecMemoryShardFastPathEnabled(cfg)
+		if !ecMemoryShardFastPathEnabled(cfg) {
+			return 0, false
+		}
+		return maxECMemoryShardFastPathBytesForCfg(cfg), true
 	} else if PlacementGroupHasFullEntry(ctx) {
-		return false
+		return 0, false
 	}
 	liveNodes := b.ecWriteNodes()
 	cfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
 	if cfg.NumShards() == 0 && !b.bypassBucketCheck {
 		cfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
-	return ecMemoryShardFastPathEnabled(cfg)
+	if !ecMemoryShardFastPathEnabled(cfg) {
+		return 0, false
+	}
+	return maxECMemoryShardFastPathBytesForCfg(cfg), true
 }
 
 func ecMemoryShardFastPathEnabled(cfg ECConfig) bool {
-	return cfg.NumShards() != 0 && cfg.ParityShards == 0
+	return cfg.NumShards() != 0
 }
 
 // PutObjectAsync is the write-back variant of PutObject.
@@ -1998,10 +2026,10 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
-	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil)
+	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil, nil)
 }
 
-func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error) (*storage.Object, error) {
+func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error, parts []storage.MultipartPartEntry) (*storage.Object, error) {
 	stageStart := time.Now()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -2045,11 +2073,11 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 
 	selfID := b.currentSelfAddr()
 	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm)
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm, parts)
 	}
 
-	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytes {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm)
+	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
+		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
@@ -2088,6 +2116,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		}
 	}
 
+	result.Parts = parts
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
@@ -2138,6 +2167,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	parts []storage.MultipartPartEntry,
 ) (*storage.Object, bool, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
@@ -2156,6 +2186,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 		return nil, true, err
 	}
 
+	result.Parts = parts
 	obj, err := b.commitECObjectWriteResult(
 		ctx,
 		ecObjectWritePlan{
@@ -2203,6 +2234,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		UserMetadata:     cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm:     plan.SSEAlgorithm,
 		ExpectedETag:     plan.ExpectedETag,
+		Parts:            result.Parts,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
@@ -2220,6 +2252,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		VersionID:    plan.VersionID,
 		UserMetadata: cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm: plan.SSEAlgorithm,
+		Parts:        result.Parts,
 	}, nil
 }
 
@@ -2232,6 +2265,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	parts []storage.MultipartPartEntry,
 ) (*storage.Object, error) {
 	shardKey := ecObjectShardKey(key, versionID)
 	stageStart := time.Now()
@@ -2254,6 +2288,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 		sseAlgorithm,
 		"ec_single",
 		nil,
+		parts,
 	)
 	closeErr := body.Close()
 	if writeErr != nil {
@@ -2279,6 +2314,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	sseAlgorithm string,
 	metricPath string,
 	bodyHash hash.Hash,
+	parts []storage.MultipartPartEntry,
 ) (*storage.Object, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSingleLocalReader(ctx, ecObjectWritePlan{
@@ -2313,6 +2349,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		NodeIDs:          result.Placement,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
+		Parts:            parts,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
@@ -2330,6 +2367,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		VersionID:    versionID,
 		UserMetadata: cloneStringMap(userMetadata),
 		SSEAlgorithm: sseAlgorithm,
+		Parts:        parts,
 	}, nil
 }
 
@@ -2744,7 +2782,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		}
 		return nil
 	}
-	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit); err != nil {
+	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil); err != nil {
 		return fmt.Errorf("convert write ec shards: %w", err)
 	}
 	_, convertedMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -2977,6 +3015,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
 				Segments:     m.Segments,
+				Parts:        m.Parts,
 				Coalesced:    coalescedRefsToStorage(m.Coalesced),
 				IsAppendable: m.IsAppendable,
 			}
@@ -3259,6 +3298,7 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 					ACL:          m.ACL,
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
+					Parts:        m.Parts,
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3278,6 +3318,126 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 		return nil
 	})
 	return objects, err
+}
+
+// ListObjectsPage returns one S3 ListObjects page from this DistributedBackend's
+// local meta store, honoring marker. truncated is true when the iterator
+// stopped because maxKeys was reached and at least one more matching base
+// key would have followed. Used by GroupBackend on forwarded reads and by
+// ClusterCoordinator's fallback path when bucket has no FSM object-index
+// source; without this the fallback silently truncated pages whose marker
+// fell past the first maxKeys+1 prefix-matching keys.
+func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return nil, false, err
+	}
+	var (
+		objects   []*storage.Object
+		truncated bool
+	)
+	err := b.db.View(func(txn *badger.Txn) error {
+		latMap := make(map[string]string)
+		rawLatPrefix := []byte("lat:" + bucket + "/")
+		latPrefix := b.ks().Prefix(rawLatPrefix)
+		itLat := txn.NewIterator(badger.DefaultIteratorOptions)
+		for itLat.Seek(latPrefix); itLat.ValidForPrefix(latPrefix); itLat.Next() {
+			rawKey := b.ks().MustStrip(itLat.Item().Key())
+			baseKey := string(rawKey[len(rawLatPrefix):])
+			_ = itLat.Item().Value(func(v []byte) error {
+				latMap[baseKey] = string(v)
+				return nil
+			})
+		}
+		itLat.Close()
+
+		emitted := make(map[string]bool)
+		rawBucketPfx := []byte("obj:" + bucket + "/")
+		pfx := b.ks().Prefix([]byte("obj:" + bucket + "/" + prefix))
+		bucketPfx := b.ks().Prefix(rawBucketPfx)
+		seek := pfx
+		if marker != "" {
+			// Resume strictly after `marker`. Append NUL so we land on the
+			// first key whose suffix sorts past marker — versions of marker
+			// itself ("marker/<vid>") also sort past "marker\x00", so they
+			// remain reachable and the dedupe logic below filters them
+			// against `emitted` and `latMap`.
+			seek = b.ks().Prefix(append([]byte("obj:"+bucket+"/"+marker), 0))
+		}
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(seek); it.ValidForPrefix(bucketPfx); it.Next() {
+			if !it.ValidForPrefix(pfx) {
+				break
+			}
+			rawKey := b.ks().MustStrip(it.Item().Key())
+			rest := string(rawKey[len(rawBucketPfx):])
+
+			baseKey := rest
+			isVersioned := false
+			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
+				candidateBase := rest[:slash]
+				candidateVID := rest[slash+1:]
+				if lat, ok := latMap[candidateBase]; ok && lat == candidateVID {
+					baseKey = candidateBase
+					isVersioned = true
+				} else if _, baseInLat := latMap[candidateBase]; baseInLat {
+					continue
+				}
+			}
+			if !strings.HasPrefix(baseKey, prefix) {
+				continue
+			}
+			if marker != "" && baseKey <= marker {
+				continue
+			}
+			if emitted[baseKey] {
+				continue
+			}
+			if !isVersioned {
+				if _, inLat := latMap[baseKey]; inLat {
+					continue
+				}
+			}
+			if len(objects) >= maxKeys {
+				truncated = true
+				break
+			}
+
+			var obj storage.Object
+			val, err := b.itemValueCopy(it.Item())
+			if err != nil {
+				return err
+			}
+			m, err := unmarshalObjectMeta(val)
+			if err != nil {
+				return err
+			}
+			if m.ETag == deleteMarkerETag {
+				continue
+			}
+			obj = storage.Object{
+				Key:          m.Key,
+				Size:         m.Size,
+				ContentType:  m.ContentType,
+				ETag:         m.ETag,
+				LastModified: m.LastModified,
+				ACL:          m.ACL,
+				UserMetadata: cloneStringMap(m.UserMetadata),
+				SSEAlgorithm: m.SSEAlgorithm,
+				Parts:        m.Parts,
+			}
+			if isVersioned {
+				obj.VersionID = latMap[baseKey]
+			}
+			if obj.Key == "" {
+				continue
+			}
+			objects = append(objects, &obj)
+			emitted[baseKey] = true
+		}
+		return nil
+	})
+	return objects, truncated, err
 }
 
 func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
@@ -3355,6 +3515,7 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 					ACL:          m.ACL,
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
+					Parts:        m.Parts,
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3525,6 +3686,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	h := md5.New()
 	mw := io.MultiWriter(spoolWriter, h)
 
+	partsMeta := make([]storage.MultipartPartEntry, 0, len(parts))
 	for _, p := range parts {
 		f, err := b.openMultipartPart(uploadID, p.PartNumber)
 		if err != nil {
@@ -3538,6 +3700,11 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 			return nil, fmt.Errorf("copy part %d: %w", p.PartNumber, err)
 		}
 		sp.Size += n
+		partsMeta = append(partsMeta, storage.MultipartPartEntry{
+			PartNumber: p.PartNumber,
+			Size:       n,
+			ETag:       p.ETag,
+		})
 	}
 	if err := out.Close(); err != nil {
 		return nil, err
@@ -3546,7 +3713,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
-		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "")
+		obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, partsMeta)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")
 	}
@@ -3791,6 +3958,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			ACL:          m.ACL,
 			UserMetadata: cloneStringMap(m.UserMetadata),
 			SSEAlgorithm: m.SSEAlgorithm,
+			Parts:        m.Parts,
 		}
 		placement = PlacementMeta{
 			VersionID:        versionID,

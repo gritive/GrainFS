@@ -119,7 +119,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		// cluster status / remove-peer must reflect *meta-raft* membership —
 		// that is the cluster-wide membership ledger that `serve --join`
 		// updates via performMetaJoin.
-		server.WithClusterInfo(NewRaftClusterInfo(metaRaft.Node(), peers, state.distBackend, metaRaft.FSM())),
+		server.WithClusterInfo(NewRaftClusterInfo(metaRaft.Node(), peers, state.distBackend, metaRaft.FSM()).WithCapabilityGate(state.capabilityGate)),
 		server.WithClusterMembership(NewRaftMembership(metaRaft.Node(), metaRaft.FSM())),
 		server.WithEventStore(eventstore.New(state.db)),
 		server.WithAlerts(clusterAlerts),

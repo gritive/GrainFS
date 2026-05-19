@@ -251,6 +251,57 @@ bench_put_object_retry() {
   return 1
 }
 
+bench_wait_capability_ready() {
+  # Polls /v1/cluster/capabilities on every node's admin UDS until each voter
+  # has gossiped the named capability as ready. Replaces a blind sleep that
+  # had to budget for the ~30–45s gossip propagation. The admin UDS is
+  # localhost+filemode-gated, so curl needs no SigV4 — Authorization headers
+  # are not enforced there.
+  local admin_socks="$1"        # colon-separated paths (a:b:c)
+  local capability="$2"
+  local attempts="${3:-120}"    # default 120 × 0.5s = 60s ceiling
+  local sleep_seconds="${4:-0.5}"
+  local IFS=':'
+  read -r -a socks <<<"$admin_socks"
+  unset IFS
+
+  if (( ${#socks[@]} == 0 )); then
+    echo "bench_wait_capability_ready: no admin sockets supplied" >&2
+    return 1
+  fi
+
+  local attempt sock body all_ready expected
+  expected="${#socks[@]}"
+  for attempt in $(seq 1 "$attempts"); do
+    all_ready=1
+    for sock in "${socks[@]}"; do
+      body=$(curl -s --unix-socket "$sock" http://_/v1/cluster/capabilities 2>/dev/null || true)
+      if [[ -z "$body" ]]; then
+        all_ready=0
+        break
+      fi
+      # The gate reports peer→capability→ready. The capability is ready when
+      # every voter peer has reported it true. python3 keeps the parse
+      # readable; the bench env already uses it for IAM bootstrap JSON.
+      python3 - <<EOF "$body" "$capability" "$expected" || { all_ready=0; break; }
+import json, sys
+body, cap, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])
+peers = (json.loads(body) or {}).get("peers", {}) or {}
+ready = sum(1 for caps in peers.values() if caps.get(cap))
+sys.exit(0 if ready >= expected else 1)
+EOF
+    done
+    if [[ "$all_ready" == "1" ]]; then
+      [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "[bench] capability $capability ready across ${#socks[@]} nodes (attempt $attempt)"
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  echo "bench_wait_capability_ready: $capability not ready after $(awk -v a="$attempts" -v s="$sleep_seconds" 'BEGIN{printf "%.1fs", a*s}') across ${#socks[@]} nodes" >&2
+  return 1
+}
+
 bench_collect_pprof() {
   local port="$1"
   local out_dir="$2"

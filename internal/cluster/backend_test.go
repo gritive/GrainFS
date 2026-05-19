@@ -219,7 +219,7 @@ func TestDistributedBackend_PutAndGetObject(t *testing.T) {
 	require.Equal(t, obj.Size, gotObj.Size)
 }
 
-func TestDistributedBackend_PutObjectSmallSizedReaderUsesSpooledShardEncoderForParityEC(t *testing.T) {
+func TestDistributedBackend_PutObjectSmallSizedReaderSkipsBothSpoolsForParityEC(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
@@ -238,13 +238,15 @@ func TestDistributedBackend_PutObjectSmallSizedReaderUsesSpooledShardEncoderForP
 	require.Equal(t, payload, got)
 	require.Equal(t, obj.ETag, gotObj.ETag)
 
+	// Small sized-reader parity EC must engage the in-memory fast path —
+	// neither the body spool nor the EC shard spool directories should exist.
 	_, err = os.Stat(b.spoolDir())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = os.Stat(b.ecSpoolDir())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
-func TestDistributedBackend_PutObjectSmallParityECUsesSpooledShardEncoder(t *testing.T) {
+func TestDistributedBackend_PutObjectSmallStreamingParityECSkipsECSpool(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
@@ -252,11 +254,41 @@ func TestDistributedBackend_PutObjectSmallParityECUsesSpooledShardEncoder(t *tes
 
 	payload := bytes.Repeat([]byte("a"), 64<<10)
 	body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
-	obj, err := b.PutObject(context.Background(), "bucket", "small-spooled.bin", body, "application/octet-stream")
+	obj, err := b.PutObject(context.Background(), "bucket", "small-streaming.bin", body, "application/octet-stream")
 	require.NoError(t, err)
 	require.Equal(t, int64(len(payload)), obj.Size)
 
-	rc, gotObj, err := b.GetObject(context.Background(), "bucket", "small-spooled.bin")
+	rc, gotObj, err := b.GetObject(context.Background(), "bucket", "small-streaming.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+	require.Equal(t, obj.ETag, gotObj.ETag)
+
+	// Non-sized readers still hit the body spool, but the EC shard spool is
+	// avoided because writeMemoryShards engages within the parity size cap.
+	_, err = os.Stat(b.spoolDir())
+	require.NoError(t, err)
+	_, err = os.Stat(b.ecSpoolDir())
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestDistributedBackend_PutObjectLargeParityECUsesSpooledShardEncoder(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardService(NewShardService(b.root, nil), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+
+	// 2 MiB exceeds the parity in-memory cap (maxECMemoryShardFastPathBytesParity = 1 MiB),
+	// forcing the EC shard encoder to spool to disk to bound peak memory.
+	payload := bytes.Repeat([]byte("b"), 2<<20)
+	body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+	obj, err := b.PutObject(context.Background(), "bucket", "large-spooled.bin", body, "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(payload)), obj.Size)
+
+	rc, gotObj, err := b.GetObject(context.Background(), "bucket", "large-spooled.bin")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -416,6 +448,7 @@ func TestDistributedBackend_PutObjectECSpooledBeforeCommitAbortCleansShards(t *t
 				true,
 				"",
 				func() error { return errChanged },
+				nil,
 			)
 			require.ErrorIs(t, err, errChanged)
 			_, err = b.shardSvc.ReadLocalShard("bucket", "abort.bin", 0)

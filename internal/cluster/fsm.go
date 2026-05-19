@@ -6,6 +6,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // CommandType identifies the type of FSM command replicated through Raft.
@@ -83,6 +84,11 @@ type PutObjectMetaCmd struct {
 	// Snapshot restore uses it for non-latest versions.
 	PreserveLatest bool
 	IsDeleteMarker bool
+	// Parts carries the multipart parts list when this command commits a
+	// CompleteMultipartUpload object; nil for ordinary PUT and AppendObject
+	// commits. Replicas write the slice onto ObjectIndexEntry.Parts so any
+	// node can answer GET ?partNumber=N without re-reading the body.
+	Parts []storage.MultipartPartEntry
 }
 
 // SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.

@@ -45,6 +45,40 @@ func TestCreateAndCompleteMultipartUpload(t *testing.T) {
 	assert.Equal(t, "application/octet-stream", meta.ContentType)
 }
 
+// TestCompleteMultipartUploadPersistsParts verifies the single-node LocalBackend
+// path persists Object.Parts so that a subsequent HeadObject can resolve
+// ?partNumber=N. The cluster path already did this; this test guards the
+// non-cluster path so a restart (or any HeadObject after Complete) returns
+// Parts populated, not nil.
+func TestCompleteMultipartUploadPersistsParts(t *testing.T) {
+	b := setupTestBackend(t)
+	b.CreateBucket(context.Background(), "test-bucket")
+
+	upload, err := b.CreateMultipartUpload(context.Background(), "test-bucket", "parts.bin", "application/octet-stream")
+	require.NoError(t, err)
+
+	part1 := bytes.Repeat([]byte("A"), 5*1024*1024)
+	part2 := bytes.Repeat([]byte("B"), 3*1024*1024)
+	p1, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 1, bytes.NewReader(part1))
+	require.NoError(t, err)
+	p2, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 2, bytes.NewReader(part2))
+	require.NoError(t, err)
+
+	_, err = b.CompleteMultipartUpload(context.Background(), "test-bucket", "parts.bin", upload.UploadID, []Part{*p1, *p2})
+	require.NoError(t, err)
+
+	// Head AFTER Complete — must read back Parts through the codec round-trip.
+	head, err := b.HeadObject(context.Background(), "test-bucket", "parts.bin")
+	require.NoError(t, err)
+	require.Len(t, head.Parts, 2, "Parts must persist for partNumber resolution")
+	assert.Equal(t, 1, head.Parts[0].PartNumber)
+	assert.Equal(t, int64(len(part1)), head.Parts[0].Size)
+	assert.Equal(t, p1.ETag, head.Parts[0].ETag)
+	assert.Equal(t, 2, head.Parts[1].PartNumber)
+	assert.Equal(t, int64(len(part2)), head.Parts[1].Size)
+	assert.Equal(t, p2.ETag, head.Parts[1].ETag)
+}
+
 func TestAbortMultipartUpload(t *testing.T) {
 	b := setupTestBackend(t)
 	b.CreateBucket(context.Background(), "test-bucket")

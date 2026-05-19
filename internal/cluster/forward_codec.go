@@ -134,14 +134,21 @@ func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
 	return b.FinishedBytes()
 }
 
-func buildListObjectsArgs(bucket, prefix string, maxKeys int32) []byte {
+func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
+	var mk flatbuffers.UOffsetT
+	if marker != "" {
+		mk = b.CreateString(marker)
+	}
 	raftpb.ListObjectsArgsStart(b)
 	raftpb.ListObjectsArgsAddBucket(b, bk)
 	raftpb.ListObjectsArgsAddPrefix(b, pf)
 	raftpb.ListObjectsArgsAddMaxKeys(b, maxKeys)
+	if mk != 0 {
+		raftpb.ListObjectsArgsAddMarker(b, mk)
+	}
 	b.Finish(raftpb.ListObjectsArgsEnd(b))
 	return b.FinishedBytes()
 }

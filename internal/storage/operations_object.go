@@ -132,6 +132,48 @@ func (o *Operations) ListObjects(ctx context.Context, bucket, prefix string, max
 	return o.backend.ListObjects(ctx, bucket, prefix, maxKeys)
 }
 
+// ListObjectsPage returns one S3 ListObjects page. Entries with key strictly
+// greater than `marker` are returned, capped at `maxKeys`. `truncated` is true
+// when more entries match beyond the returned slice — the S3 handler maps it
+// to <IsTruncated> and <NextMarker>. Walks the backend wrapper chain looking
+// for a native pager; LocalBackend and DistributedBackend both implement one,
+// so production deployments never hit the fallback. The fallback path
+// (Unwrap-less, no-pager backend) fetches maxKeys+1 unpaged entries and
+// applies `marker` in-process — this is only correct when `marker` falls
+// within the first maxKeys matches and silently truncates the listing
+// otherwise; we surface the gap with an error rather than mis-paginate.
+func (o *Operations) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error) {
+	type pager interface {
+		ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error)
+	}
+	type unwrapper interface{ Unwrap() Backend }
+	for b := o.backend; b != nil; {
+		if p, ok := b.(pager); ok {
+			return p.ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
+		}
+		u, ok := b.(unwrapper)
+		if !ok {
+			break
+		}
+		b = u.Unwrap()
+	}
+	if marker != "" {
+		return nil, false, UnsupportedOperationError{
+			Op:     "ListObjectsPage",
+			Reason: "backend has no native pager; passing a non-empty marker would silently truncate beyond the first window",
+		}
+	}
+	objects, err := o.backend.ListObjects(ctx, bucket, prefix, maxKeys+1)
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := maxKeys > 0 && len(objects) > maxKeys
+	if truncated {
+		objects = objects[:maxKeys]
+	}
+	return objects, truncated, nil
+}
+
 func (o *Operations) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error {
 	return o.backend.WalkObjects(ctx, bucket, prefix, fn)
 }

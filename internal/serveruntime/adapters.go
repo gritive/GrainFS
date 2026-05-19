@@ -333,6 +333,7 @@ type RaftClusterInfo struct {
 	peers    []string
 	backend  *cluster.DistributedBackend
 	addrBook cluster.NodeAddressBook
+	capGate  *cluster.CapabilityGate
 }
 
 // peerReplicationEvidenceSource is a v1-only extension. v2 does not expose
@@ -346,6 +347,22 @@ type peerReplicationEvidenceSource interface {
 
 func NewRaftClusterInfo(node cluster.RaftNode, peers []string, backend *cluster.DistributedBackend, addrBook cluster.NodeAddressBook) *RaftClusterInfo {
 	return &RaftClusterInfo{node: node, peers: peers, backend: backend, addrBook: addrBook}
+}
+
+// WithCapabilityGate wires a CapabilityGate so /v1/cluster/capabilities can
+// report per-peer evidence. nil keeps the adapter silent (returns empty map).
+func (r *RaftClusterInfo) WithCapabilityGate(g *cluster.CapabilityGate) *RaftClusterInfo {
+	r.capGate = g
+	return r
+}
+
+// CapabilityEvidence implements server.ClusterInfo. Returns empty map when no
+// gate is wired.
+func (r *RaftClusterInfo) CapabilityEvidence() map[string]map[string]bool {
+	if r.capGate == nil {
+		return map[string]map[string]bool{}
+	}
+	return r.capGate.EvidenceSnapshot()
 }
 
 func (r *RaftClusterInfo) NodeID() string { return r.node.ID() }

@@ -24,6 +24,7 @@ import (
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // iamSnapshotTrailerMagic is appended after the IAM section so post-fix
@@ -119,6 +120,10 @@ type ObjectIndexEntry struct {
 	ECParity         uint8
 	NodeIDs          []string
 	IsDeleteMarker   bool
+	// Parts is non-empty only for CompleteMultipartUpload objects. The S3
+	// GetObject/HeadObject ?partNumber=N path uses this to translate part
+	// numbers into byte ranges over the assembled body.
+	Parts []storage.MultipartPartEntry
 }
 
 type ObjectIndexSummary struct {
@@ -1448,12 +1453,26 @@ func (f *MetaFSM) ObjectIndexVersion(bucket, key, versionID string) (ObjectIndex
 }
 
 func (f *MetaFSM) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
+	entries, _ := f.ObjectIndexLatestEntriesPage(bucket, prefix, "", maxKeys)
+	return entries
+}
+
+// ObjectIndexLatestEntriesPage returns objects ordered by key for a single
+// pagination page. Entries whose key is greater than `marker` (excluding the
+// marker itself) up to `maxKeys` results are returned. `truncated` reports
+// whether more entries match beyond the returned slice — callers use it to
+// emit S3's IsTruncated/NextMarker fields. `maxKeys <= 0` disables the cap
+// (used by WalkObjects-style callers that want every match).
+func (f *MetaFSM) ObjectIndexLatestEntriesPage(bucket, prefix, marker string, maxKeys int) (entries []ObjectIndexEntry, truncated bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	entries := make([]ObjectIndexEntry, 0)
+	entries = make([]ObjectIndexEntry, 0)
 	for lkey, versionID := range f.objectLatest {
 		parts := strings.SplitN(lkey, "\x00", 2)
 		if len(parts) != 2 || parts[0] != bucket || !strings.HasPrefix(parts[1], prefix) {
+			continue
+		}
+		if marker != "" && parts[1] <= marker {
 			continue
 		}
 		entry, ok := f.objectIndex[objectIndexVersionKey(bucket, parts[1], versionID)]
@@ -1467,8 +1486,9 @@ func (f *MetaFSM) ObjectIndexLatestEntries(bucket, prefix string, maxKeys int) [
 	})
 	if maxKeys > 0 && len(entries) > maxKeys {
 		entries = entries[:maxKeys]
+		truncated = true
 	}
-	return entries
+	return entries, truncated
 }
 
 func (f *MetaFSM) ObjectIndexVersionEntries(bucket, prefix string, maxKeys int) []ObjectIndexEntry {
@@ -2389,6 +2409,24 @@ func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshot
 	if len(e.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, e.NodeIDs, clusterpb.MetaObjectIndexEntryStartNodeIdsVector)
 	}
+	// parts — build child MultipartPartEntry tables BEFORE MetaObjectIndexEntryStart.
+	var partsOff flatbuffers.UOffsetT
+	if len(e.Parts) > 0 {
+		partOffs := make([]flatbuffers.UOffsetT, len(e.Parts))
+		for i, p := range e.Parts {
+			etOff := b.CreateString(p.ETag)
+			clusterpb.MultipartPartEntryStart(b)
+			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+			clusterpb.MultipartPartEntryAddSize(b, p.Size)
+			clusterpb.MultipartPartEntryAddEtag(b, etOff)
+			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+		}
+		clusterpb.MetaObjectIndexEntryStartPartsVector(b, len(partOffs))
+		for i := len(partOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partOffs[i])
+		}
+		partsOff = b.EndVector(len(partOffs))
+	}
 	clusterpb.MetaObjectIndexEntryStart(b)
 	clusterpb.MetaObjectIndexEntryAddBucket(b, bucketOff)
 	clusterpb.MetaObjectIndexEntryAddKey(b, keyOff)
@@ -2408,6 +2446,9 @@ func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshot
 	}
 	if entry.IsLatest {
 		clusterpb.MetaObjectIndexEntryAddIsLatest(b, true)
+	}
+	if partsOff != 0 {
+		clusterpb.MetaObjectIndexEntryAddParts(b, partsOff)
 	}
 	return clusterpb.MetaObjectIndexEntryEnd(b)
 }
@@ -2429,6 +2470,21 @@ func buildMetaObjectIndexEntriesVector(b *flatbuffers.Builder, entries []objectI
 }
 
 func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndexEntry {
+	var parts []storage.MultipartPartEntry
+	if n := entry.PartsLength(); n > 0 {
+		parts = make([]storage.MultipartPartEntry, n)
+		var pe clusterpb.MultipartPartEntry
+		for i := 0; i < n; i++ {
+			if !entry.Parts(&pe, i) {
+				continue
+			}
+			parts[i] = storage.MultipartPartEntry{
+				PartNumber: int(pe.PartNumber()),
+				Size:       pe.Size(),
+				ETag:       string(pe.Etag()),
+			}
+		}
+	}
 	return ObjectIndexEntry{
 		Bucket:           string(entry.Bucket()),
 		Key:              string(entry.Key()),
@@ -2442,6 +2498,7 @@ func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndex
 		ECParity:         entry.EcParity(),
 		NodeIDs:          readStringVector(entry.NodeIdsLength(), entry.NodeIds),
 		IsDeleteMarker:   entry.IsDeleteMarker(),
+		Parts:            parts,
 	}
 }
 
@@ -2596,6 +2653,13 @@ func cloneStringMap(in map[string]string) map[string]string {
 
 func cloneObjectIndexEntry(in ObjectIndexEntry) ObjectIndexEntry {
 	in.NodeIDs = cloneStringSlice(in.NodeIDs)
+	if len(in.Parts) > 0 {
+		cp := make([]storage.MultipartPartEntry, len(in.Parts))
+		copy(cp, in.Parts)
+		in.Parts = cp
+	} else {
+		in.Parts = nil
+	}
 	return in
 }
 

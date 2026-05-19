@@ -107,6 +107,7 @@ table PutObjectMetaCmd {
   user_metadata:[KeyValue];
   sse_algorithm:string;
   expected_etag:string;
+  parts:[MultipartPartEntry];
 }
 
 table DeleteObjectCmd {
@@ -170,6 +171,12 @@ table DeleteBucketPolicyCmd {
   bucket:string;
 }
 
+table MultipartPartEntry {
+  part_number: int32;
+  size: int64;
+  etag: string;
+}
+
 table ObjectMeta {
   key:string;
   size:int64;
@@ -187,6 +194,7 @@ table ObjectMeta {
   segments:[SegmentRef];
   coalesced:[CoalescedShardRef];
   is_appendable:bool = false;
+  parts:[MultipartPartEntry];
 }
 
 // CoalescedShardRef references one coalesced blob produced by merging a
@@ -480,6 +488,7 @@ table MetaObjectIndexEntry {
   node_ids:[string];
   is_delete_marker:bool = false;
   is_latest:bool = false;
+  parts:[MultipartPartEntry];
 }
 
 table MetaPutObjectIndexCmd {

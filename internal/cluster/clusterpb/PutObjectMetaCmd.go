@@ -226,8 +226,28 @@ func (rcv *PutObjectMetaCmd) ExpectedEtag() []byte {
 	return nil
 }
 
+func (rcv *PutObjectMetaCmd) Parts(obj *MultipartPartEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) PartsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(17)
+	builder.StartObject(18)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -285,6 +305,12 @@ func PutObjectMetaCmdAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm 
 }
 func PutObjectMetaCmdAddExpectedEtag(builder *flatbuffers.Builder, expectedEtag flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(expectedEtag), 0)
+}
+func PutObjectMetaCmdAddParts(builder *flatbuffers.Builder, parts flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(parts), 0)
+}
+func PutObjectMetaCmdStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -14,10 +14,17 @@ table Object {
   sse_algorithm:string;
   segments:[SegmentRef];
   is_appendable:bool;
+  parts:[MultipartPartEntry];
 }
 
 table SegmentRef {
   blob_id:string;
+  size:int64;
+  etag:string;
+}
+
+table MultipartPartEntry {
+  part_number:int32;
   size:int64;
   etag:string;
 }
