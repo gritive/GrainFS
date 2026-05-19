@@ -13,14 +13,19 @@ import (
 )
 
 type s3Error struct {
-	XMLName xml.Name `xml:"Error"`
-	Code    string   `xml:"Code"`
-	Message string   `xml:"Message"`
+	XMLName   xml.Name `xml:"Error"`
+	Code      string   `xml:"Code"`
+	Message   string   `xml:"Message"`
+	RequestID string   `xml:"RequestId,omitempty"`
 }
 
 func writeXMLError(c *app.RequestContext, status int, code, message string) {
 	c.SetContentType("application/xml")
-	data, _ := xml.Marshal(s3Error{Code: code, Message: message})
+	data, _ := xml.Marshal(s3Error{
+		Code:      code,
+		Message:   message,
+		RequestID: requestIDFromHertz(c),
+	})
 	c.Data(status, "application/xml", data)
 }
 

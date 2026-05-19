@@ -25,6 +25,13 @@ const amzRequestIDHeader = "x-amz-request-id"
 
 type reqIDKey struct{}
 
+// requestIDHertzKey is the c.Set/c.Get key under which WithRequestID stashes
+// the rid for synchronous read by writers that only hold *app.RequestContext
+// (e.g. S3 / Iceberg error envelopes). This dual-write is atomic with the
+// context.WithValue write inside WithRequestID, so there is only one writer
+// and no drift risk.
+const requestIDHertzKey = "grainfs.request_id"
+
 // WithRequestID returns a Hertz middleware that ensures every request has a
 // rid in context and on the response. Must run first in the middleware chain
 // so auth / audit / request_log all observe the same rid.
@@ -40,6 +47,7 @@ func WithRequestID() app.HandlerFunc {
 		}
 		c.Header(RequestIDHeader, rid)
 		c.Header(amzRequestIDHeader, rid)
+		c.Set(requestIDHertzKey, rid)
 		ctx = context.WithValue(ctx, reqIDKey{}, rid)
 		c.Next(ctx)
 	}
@@ -50,4 +58,17 @@ func WithRequestID() app.HandlerFunc {
 func RequestIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(reqIDKey{}).(string)
 	return v
+}
+
+// requestIDFromHertz reads the rid from the Hertz request context's K/V store.
+// Returns empty if WithRequestID did not run. Used by error envelope writers
+// (S3 XML, Iceberg JSON) that only hold *app.RequestContext and would
+// otherwise need ctx plumbed through hundreds of call sites.
+func requestIDFromHertz(c *app.RequestContext) string {
+	v, ok := c.Get(requestIDHertzKey)
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }
