@@ -526,7 +526,7 @@ func (f *FSM) applyCreateMultipartUpload(data []byte) error {
 		CreatedAt:        c.CreatedAt,
 		ContentType:      c.ContentType,
 		PlacementGroupID: c.PlacementGroupID,
-		Tags:             append([]storage.Tag(nil), c.Tags...),
+		Tags:             c.Tags,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal multipart meta: %w", err)

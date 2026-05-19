@@ -2362,6 +2362,8 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage(metricPath, "propose_meta", stageStart)
 
+	// result.Tags aliases the caller's slice; do not introduce concurrent
+	// readers/writers on result after this point.
 	return &storage.Object{
 		Key:          plan.Key,
 		Size:         result.Size,
@@ -2372,7 +2374,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		UserMetadata: cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm: plan.SSEAlgorithm,
 		Parts:        result.Parts,
-		Tags:         append([]storage.Tag(nil), result.Tags...),
+		Tags:         result.Tags,
 	}, nil
 }
 
@@ -2492,7 +2494,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		UserMetadata: cloneStringMap(userMetadata),
 		SSEAlgorithm: sseAlgorithm,
 		Parts:        parts,
-		Tags:         append([]storage.Tag(nil), tags...),
+		Tags:         tags,
 	}, nil
 }
 
@@ -3665,44 +3667,16 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 // --- Multipart operations ---
 
 func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
-	if err := b.HeadBucket(ctx, bucket); err != nil {
-		return nil, err
-	}
-
-	uploadID := uuid.New().String()
-	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
-		return nil, fmt.Errorf("create part dir: %w", err)
-	}
-
-	now := time.Now().Unix()
-	placementGroupID, ok := PlacementGroupFromContext(ctx)
-	// GroupBackend (bypassBucketCheck=true) always injects a placement-group ID via
-	// context; missing one there is a programming error. Direct DistributedBackend
-	// callers (bypassBucketCheck=false) may omit it — putObjectECSpooled resolves
-	// placement from the stored empty string using the object's bucket assignment.
-	if !ok && b.shardSvc != nil && b.bypassBucketCheck {
-		return nil, fmt.Errorf("create multipart: missing placement_group_id")
-	}
-
-	err := b.propose(ctx, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID:         uploadID,
-		Bucket:           bucket,
-		Key:              key,
-		ContentType:      contentType,
-		CreatedAt:        now,
-		PlacementGroupID: placementGroupID,
-	})
+	uploadID, createdAt, err := b.createMultipartUploadInternal(ctx, bucket, key, contentType, nil)
 	if err != nil {
-		os.RemoveAll(b.partDir(uploadID))
 		return nil, err
 	}
-
 	return &storage.MultipartUpload{
 		UploadID:    uploadID,
 		Bucket:      bucket,
 		Key:         key,
 		ContentType: contentType,
-		CreatedAt:   now,
+		CreatedAt:   createdAt,
 	}, nil
 }
 
@@ -3713,19 +3687,35 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 // materialises content (CmdPutObjectMeta carries the Tags vector — no separate
 // SetObjectTags proposal).
 func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
-	if err := b.HeadBucket(ctx, bucket); err != nil {
+	uploadID, _, err := b.createMultipartUploadInternal(ctx, bucket, key, contentType, tags)
+	if err != nil {
 		return "", err
+	}
+	return uploadID, nil
+}
+
+// createMultipartUploadInternal is the shared body for CreateMultipartUpload and
+// CreateMultipartUploadWithTags. If tags is non-empty it is defensively copied at
+// this cluster API boundary so the propose path can safely retain it (propose is
+// async); downstream code must not introduce further copies.
+func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, int64, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return "", 0, err
 	}
 
 	uploadID := uuid.New().String()
 	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
-		return "", fmt.Errorf("create part dir: %w", err)
+		return "", 0, fmt.Errorf("create part dir: %w", err)
 	}
 
 	now := time.Now().Unix()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	// GroupBackend (bypassBucketCheck=true) always injects a placement-group ID via
+	// context; missing one there is a programming error. Direct DistributedBackend
+	// callers (bypassBucketCheck=false) may omit it — putObjectECSpooled resolves
+	// placement from the stored empty string using the object's bucket assignment.
 	if !ok && b.shardSvc != nil && b.bypassBucketCheck {
-		return "", fmt.Errorf("create multipart: missing placement_group_id")
+		return "", 0, fmt.Errorf("create multipart: missing placement_group_id")
 	}
 
 	var tagsCopy []storage.Tag
@@ -3745,9 +3735,9 @@ func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, 
 	})
 	if err != nil {
 		os.RemoveAll(b.partDir(uploadID))
-		return "", err
+		return "", 0, err
 	}
-	return uploadID, nil
+	return uploadID, now, nil
 }
 
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
