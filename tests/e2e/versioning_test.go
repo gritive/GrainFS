@@ -153,7 +153,6 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("HeadByVersionID_DeleteMarker", func(t *testing.T) {
-		t.Skip("known gap: cluster forward path returns 500 instead of relaying storage.ErrMethodNotAllowed for HEAD on delete marker; tracked separately. Coverage stays here for when the mapping is fixed.")
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "headmark")
 		enableVersioning(t, bkt)
