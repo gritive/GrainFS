@@ -198,6 +198,11 @@ table ForwardObjectMeta {
   content_type:string;
   modified_unix_ms:long;
   version_id:string;
+  // parts mirrors storage.Object.Parts so ?partNumber=N over forwarded
+  // GET/HEAD/CompleteMultipartUpload replies can resolve the per-part
+  // range. Empty for non-multipart and legacy objects (back-compat:
+  // ForwardObjectMeta written before this field reads as len()==0 here).
+  parts:[ForwardPartMeta];
 }
 
 table ForwardObjectVersionMeta {

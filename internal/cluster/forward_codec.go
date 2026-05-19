@@ -288,6 +288,54 @@ func buildListMultipartUploadsArgs(bucket, prefix string, maxUploads int32) []by
 
 // --- Reply builders (response side — used by ForwardReceiver in T8 + tests) ---
 
+// appendPartsVector builds the per-part FBS tables for storage.Object.Parts
+// and returns the parent vector offset. Returns 0 when there is nothing to
+// encode so callers can skip the AddParts call. MUST be invoked BEFORE
+// ForwardObjectMetaStart on the same builder (flatbuffers nested-vector
+// rule: child tables/vector must finish before parent Start).
+func appendPartsVector(b *flatbuffers.Builder, parts []storage.MultipartPartEntry) flatbuffers.UOffsetT {
+	if len(parts) == 0 {
+		return 0
+	}
+	offs := make([]flatbuffers.UOffsetT, len(parts))
+	for i, p := range parts {
+		etOff := b.CreateString(p.ETag)
+		raftpb.ForwardPartMetaStart(b)
+		raftpb.ForwardPartMetaAddPartNumber(b, int32(p.PartNumber))
+		raftpb.ForwardPartMetaAddEtag(b, etOff)
+		raftpb.ForwardPartMetaAddSize(b, p.Size)
+		offs[i] = raftpb.ForwardPartMetaEnd(b)
+	}
+	raftpb.ForwardObjectMetaStartPartsVector(b, len(offs))
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(offs))
+}
+
+// readPartsVector inverse of appendPartsVector — decodes ForwardObjectMeta.parts
+// into storage.Object.Parts. Returns nil for empty/missing vectors so the
+// caller's Object.Parts stays nil-clean for non-multipart objects.
+func readPartsVector(meta *raftpb.ForwardObjectMeta) []storage.MultipartPartEntry {
+	n := meta.PartsLength()
+	if n == 0 {
+		return nil
+	}
+	out := make([]storage.MultipartPartEntry, n)
+	var pe raftpb.ForwardPartMeta
+	for i := 0; i < n; i++ {
+		if !meta.Parts(&pe, i) {
+			continue
+		}
+		out[i] = storage.MultipartPartEntry{
+			PartNumber: int(pe.PartNumber()),
+			Size:       pe.Size(),
+			ETag:       string(pe.Etag()),
+		}
+	}
+	return out
+}
+
 // buildObjectReply builds an OK reply with a populated ForwardObjectMeta —
 // used by PutObject and HeadObject (no body).
 func buildObjectReply(obj *storage.Object, bucket string) []byte {
@@ -297,6 +345,7 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	etag := b.CreateString(obj.ETag)
 	ct := b.CreateString(obj.ContentType)
 	vid := b.CreateString(obj.VersionID)
+	partsOff := appendPartsVector(b, obj.Parts)
 	raftpb.ForwardObjectMetaStart(b)
 	raftpb.ForwardObjectMetaAddBucket(b, bk)
 	raftpb.ForwardObjectMetaAddKey(b, k)
@@ -305,6 +354,9 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	raftpb.ForwardObjectMetaAddContentType(b, ct)
 	raftpb.ForwardObjectMetaAddModifiedUnixMs(b, obj.LastModified)
 	raftpb.ForwardObjectMetaAddVersionId(b, vid)
+	if partsOff != 0 {
+		raftpb.ForwardObjectMetaAddParts(b, partsOff)
+	}
 	metaOff := raftpb.ForwardObjectMetaEnd(b)
 
 	raftpb.ForwardReplyStart(b)
@@ -323,6 +375,7 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	ct := b.CreateString(obj.ContentType)
 	vid := b.CreateString(obj.VersionID)
 	bodyOff := b.CreateByteVector(body)
+	partsOff := appendPartsVector(b, obj.Parts)
 
 	raftpb.ForwardObjectMetaStart(b)
 	raftpb.ForwardObjectMetaAddBucket(b, bk)
@@ -332,6 +385,9 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	raftpb.ForwardObjectMetaAddContentType(b, ct)
 	raftpb.ForwardObjectMetaAddModifiedUnixMs(b, obj.LastModified)
 	raftpb.ForwardObjectMetaAddVersionId(b, vid)
+	if partsOff != 0 {
+		raftpb.ForwardObjectMetaAddParts(b, partsOff)
+	}
 	metaOff := raftpb.ForwardObjectMetaEnd(b)
 
 	raftpb.ForwardReplyStart(b)
@@ -591,6 +647,7 @@ func objectFromReply(reply []byte) (*storage.Object, error) {
 		ContentType:  string(meta.ContentType()),
 		LastModified: meta.ModifiedUnixMs(),
 		VersionID:    string(meta.VersionId()),
+		Parts:        readPartsVector(meta),
 	}, nil
 }
 
@@ -615,6 +672,7 @@ func objectsFromReply(reply []byte) ([]*storage.Object, error) {
 			ContentType:  string(meta.ContentType()),
 			LastModified: meta.ModifiedUnixMs(),
 			VersionID:    string(meta.VersionId()),
+			Parts:        readPartsVector(&meta),
 		})
 	}
 	return out, nil
