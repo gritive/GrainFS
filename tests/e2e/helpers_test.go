@@ -27,6 +27,8 @@ import (
 var (
 	testServerURL     string
 	testServerDataDir string
+	testServerNFSPort int
+	testServerNBDPort int
 	testAccessKey     string
 	testSecretKey     string
 	testS3Client      *s3.Client
@@ -68,9 +70,11 @@ func TestMain(m *testing.M) {
 	}
 	testServerDataDir = dir
 
+	testServerNFSPort = freePort()
+	testServerNBDPort = freePort()
 	args := []string{"serve", "--data", dir, "--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
+		"--nfs4-port", fmt.Sprintf("%d", testServerNFSPort),
+		"--nbd-port", fmt.Sprintf("%d", testServerNBDPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}
@@ -168,6 +172,7 @@ func TestMain(m *testing.M) {
 	}
 
 	stopSharedCluster()
+	stopSharedMRCluster()
 	terminateProcess(cmd)
 	if err := cleanupDataDir(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
