@@ -41,8 +41,13 @@ type s3Target struct {
 	// sanitized to S3 spec (lowercase/hyphen, 3-63 chars). Auto-registers
 	// t.Cleanup(DeleteBucket). Returns the actual bucket name used.
 	uniqueBucket func(t *testing.T, caseName string) string
-	isCluster    bool
-	cluster      *e2eCluster // non-nil for cluster fixtures
+	// adminSockPath returns the path to the admin UDS for the "writable"
+	// node — node-0 on single, the elected leader on cluster. Tests that
+	// drive per-bucket admin config (e.g., pull-through upstream
+	// registration) use it; vanilla S3-surface tests can ignore.
+	adminSockPath func() string
+	isCluster     bool
+	cluster       *e2eCluster // non-nil for cluster fixtures
 }
 
 func newSingleNodeS3Target() s3Target {
@@ -67,6 +72,9 @@ func newSingleNodeS3Target() s3Target {
 				testS3Client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
+		},
+		adminSockPath: func() string {
+			return testServerDataDir + "/admin.sock"
 		},
 		isCluster: false,
 	}
@@ -161,6 +169,9 @@ func newSharedClusterS3Target(t *testing.T) s3Target {
 			})
 			return name
 		},
+		adminSockPath: func() string {
+			return c.dataDirs[c.leaderIdx] + "/admin.sock"
+		},
 		isCluster: true,
 		cluster:   c,
 	}
@@ -215,6 +226,9 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
+		},
+		adminSockPath: func() string {
+			return c.dataDirs[c.leaderIdx] + "/admin.sock"
 		},
 		isCluster: true,
 		cluster:   c,
@@ -294,6 +308,9 @@ func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
 				client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
+		},
+		adminSockPath: func() string {
+			return dir + "/admin.sock"
 		},
 		isCluster: false,
 	}
