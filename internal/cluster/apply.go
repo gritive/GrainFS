@@ -560,6 +560,26 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
 	if err := f.db.Update(func(txn *badger.Txn) error {
+		mpuKey := f.keys.MultipartKey(c.UploadID)
+		item, err := txn.Get(mpuKey)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrUploadNotFound
+		}
+		if err != nil {
+			return err
+		}
+		raw, err := f.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		mpu, err := unmarshalClusterMultipartMeta(raw)
+		if err != nil {
+			return err
+		}
+		if mpu.Bucket != c.Bucket || mpu.Key != c.Key {
+			return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
+		}
+
 		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
 		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
@@ -572,7 +592,7 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 				return err
 			}
 		}
-		return txn.Delete(f.keys.MultipartKey(c.UploadID))
+		return txn.Delete(mpuKey)
 	}); err != nil {
 		return err
 	}

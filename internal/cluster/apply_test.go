@@ -370,6 +370,77 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 	require.Equal(t, int64(1), fsm.GetRingStore().refCount[RingVersion(17)])
 }
 
+func TestFSM_CompleteMultipartRejectsDuplicateApply(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID: "upload-once", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	first, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+		Bucket: "b", Key: "mp.bin", UploadID: "upload-once", Size: 1024,
+		ContentType: "application/octet-stream", ETag: "first-etag", ModTime: 200, VersionID: "v1",
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(first))
+
+	duplicate, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+		Bucket: "b", Key: "mp.bin", UploadID: "upload-once", Size: 2048,
+		ContentType: "application/octet-stream", ETag: "second-etag", ModTime: 300, VersionID: "v2",
+	})
+	require.NoError(t, err)
+	require.ErrorIs(t, fsm.Apply(duplicate), storage.ErrUploadNotFound)
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKey("b", "mp.bin"))
+		require.NoError(t, err)
+		raw, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		meta, err := unmarshalObjectMeta(raw)
+		require.NoError(t, err)
+		require.Equal(t, "first-etag", meta.ETag)
+
+		item, err = txn.Get(fsm.keys.LatestKey("b", "mp.bin"))
+		require.NoError(t, err)
+		latest, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		require.Equal(t, "v1", string(latest))
+
+		_, err = txn.Get(objectMetaKeyV("b", "mp.bin", "v2"))
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		return nil
+	}))
+}
+
+func TestFSM_CompleteMultipartRejectsUploadMismatch(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+		UploadID: "upload-other", Bucket: "b", Key: "expected.bin", ContentType: "application/octet-stream", CreatedAt: 100,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	data, err = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+		Bucket: "b", Key: "wrong.bin", UploadID: "upload-other", Size: 1024,
+		ContentType: "application/octet-stream", ETag: "etag", ModTime: 200, VersionID: "v1",
+	})
+	require.NoError(t, err)
+	require.Error(t, fsm.Apply(data))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(fsm.keys.MultipartKey("upload-other"))
+		require.NoError(t, err)
+		_, err = txn.Get(objectMetaKey("b", "wrong.bin"))
+		require.ErrorIs(t, err, badger.ErrKeyNotFound)
+		return nil
+	}))
+}
+
 func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())

@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.0.269.0] - 2026-05-20 - feat(cluster): zero-spool chunked multipart complete
+
+Large multipart completion in cluster mode now streams completed parts directly
+into the segment writer and commits the final object with one atomic raft
+command. The slice removes the old large-object complete spool path while
+preserving segment metadata, multipart part metadata, tags, and ring-version
+placement evidence.
+
+### Added
+
+- **Multipart complete manifest reader**: validates requested parts, enforces S3
+  part-number limits, streams part bodies in order, and surfaces pending close
+  errors instead of buffering the completed object into a temp spool.
+- **Atomic `CmdCompleteMultipart` segment commit**: chunked multipart completion
+  now proposes `CompleteMultipartCmd` with final object metadata, multipart
+  parts, segment refs, tags, placement, and ring version in the same raft entry.
+- **Chunked multipart e2e coverage**: verifies large multipart upload completion
+  through the cluster chunked path, including `GET ?partNumber=N` reads.
+
+### Changed
+
+- **Large multipart complete hot path**: routes chunk-threshold completions
+  through `putMultipartObjectChunked` so payload bytes are streamed from part
+  files to segment writes without materializing a full completed object spool.
+- **Chunked PUT parts support**: keeps regular chunked PUT able to commit
+  multipart part metadata via `PutObjectMetaCmd`, while multipart completion
+  uses the atomic `CmdCompleteMultipart` path.
+- **Multipart part metadata copies**: clones part metadata at command/object
+  boundaries so caller mutation cannot rewrite committed object state.
+
+### Fixed
+
+- **Ring-version preservation**: `CompleteMultipartCmd` now carries placement
+  ring version for multipart segment metadata, avoiding stale placement records
+  after completion.
+- **Duplicate complete guard**: `applyCompleteMultipart` now verifies the upload
+  row still exists and matches the target bucket/key in the same Badger
+  transaction before writing final object metadata, preventing stale duplicate
+  complete commands from overwriting latest metadata.
+- **Multipart validation correctness**: rejects out-of-range part numbers and
+  aligns cluster tests with the S3 multipart part-size rules.
+
+### Verified
+
+- `go test ./internal/cluster -run 'PutObjectChunked|RunChunkedPutWithParts|CompleteMultipart|Chunked|Segment|Tags|Ring_CompleteMultipartEC_UsesRingVersion' -count=1`
+- `go test ./internal/cluster -count=1`
+- `go build -o bin/grainfs ./cmd/grainfs`
+- `go test ./tests/e2e -run 'TestMultipartsE2E/ChunkedUploadPart' -count=1`
+
+### Known limitations
+
+- Full `go test ./... -count=1` currently fails in unrelated `tests/e2e`
+  bucket/IAM bootstrap and admin-grant cases (`AccessDenied` / admin UDS 404
+  patterns). The focused chunked multipart e2e path passes.
+
 ## [0.0.268.0] - 2026-05-20 - fix(s3): stabilize warp benchmark coverage
 
 Short 4-node S3 and Iceberg benchmark runs now cover the full requested matrix without multipart destabilizing the cluster. The branch also keeps benchmark setup closer to production behavior by precreating service-account buckets, attaching the Iceberg warehouse policy, and using 4-node Iceberg defaults.
