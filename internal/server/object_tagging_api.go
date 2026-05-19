@@ -9,12 +9,18 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/tagging"
 )
 
+const maxTaggingBodyBytes = 64 * 1024
+
 func (s *Server) putObjectTagging(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 	key := getKey(c)
 	versionID := string(c.QueryArgs().Peek("versionId"))
 
 	body := c.Request.Body()
+	if len(body) > maxTaggingBodyBytes {
+		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", "tagging body too large")
+		return
+	}
 	tags, err := ParseTaggingXML(body)
 	if err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", err.Error())
