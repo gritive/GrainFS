@@ -1348,6 +1348,13 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	})
 }
 
+// SetObjectTags replicates a tag mutation through Raft so every replica sees
+// the update. Implemented fully in Task 12; this stub satisfies the receiver
+// handler compile-time dependency introduced in Task 11.
+func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
+	return fmt.Errorf("SetObjectTags: not yet implemented")
+}
+
 // GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"
 // when no state has been set so the S3 semantic matches ECBackend's default.
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {

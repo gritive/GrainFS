@@ -54,6 +54,12 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		transport: forwardFrameOnly,
 		mutates:   true,
 	},
+	raftpb.ForwardOpSetObjectTags: {
+		op:        raftpb.ForwardOpSetObjectTags,
+		name:      raftpb.ForwardOpSetObjectTags.String(),
+		transport: forwardFrameOnly,
+		mutates:   true,
+	},
 	raftpb.ForwardOpListObjects: {
 		op:        raftpb.ForwardOpListObjects,
 		name:      raftpb.ForwardOpListObjects.String(),

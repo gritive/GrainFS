@@ -225,6 +225,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleDeleteObject(dg, fbsArgs)
 	case raftpb.ForwardOpSetObjectACL:
 		return r.handleSetObjectACL(dg, fbsArgs)
+	case raftpb.ForwardOpSetObjectTags:
+		return r.handleSetObjectTags(dg, fbsArgs)
 	case raftpb.ForwardOpListObjects:
 		return r.handleListObjects(dg, fbsArgs)
 	case raftpb.ForwardOpWalkObjects:
@@ -631,6 +633,26 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) *transp
 func (r *ForwardReceiver) handleSetObjectACL(dg *DataGroup, args []byte) *transport.Message {
 	sa := raftpb.GetRootAsSetObjectACLArgs(args, 0)
 	if err := dg.Backend().SetObjectACL(string(sa.Bucket()), string(sa.Key()), sa.Acl()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildOKReply()}
+}
+
+func (r *ForwardReceiver) handleSetObjectTags(dg *DataGroup, args []byte) *transport.Message {
+	sa := raftpb.GetRootAsSetObjectTagsArgs(args, 0)
+
+	tags := make([]storage.Tag, 0, sa.TagsLength())
+	for i := 0; i < sa.TagsLength(); i++ {
+		var t raftpb.Tag
+		if sa.Tags(&t, i) {
+			tags = append(tags, storage.Tag{
+				Key:   string(t.Key()),
+				Value: string(t.Value()),
+			})
+		}
+	}
+
+	if err := dg.Backend().SetObjectTags(string(sa.Bucket()), string(sa.Key()), string(sa.VersionId()), tags); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
 	return &transport.Message{Payload: buildOKReply()}
