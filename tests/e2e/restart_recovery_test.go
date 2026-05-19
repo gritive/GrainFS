@@ -28,7 +28,14 @@ import (
 // to the SSE stream because SSE clients can only join AFTER boot, while
 // startup HealEvents fire DURING boot — the persisted store is the only
 // source-of-truth a freshly-loaded dashboard can read.
-func TestRestartRecovery_SweepsOrphanArtifacts(t *testing.T) {
+func TestRestartRecoveryOrphanSweepE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runRestartRecoveryOrphanSweepCases(t)
+	})
+}
+
+func runRestartRecoveryOrphanSweepCases(t *testing.T) {
+	t.Helper()
 	binary := getBinary()
 	dir, err := os.MkdirTemp("", "grainfs-restart-recovery-*")
 	require.NoError(t, err)

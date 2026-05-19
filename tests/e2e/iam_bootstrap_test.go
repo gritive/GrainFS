@@ -18,12 +18,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// F1: empty IAM → first sa create returns wildcard grant.
-//
-// Verifies the bootstrap path uses the new InitFirstSA dispatch:
-//   - The SA id is the well-known sa-default.
-//   - A wildcard grant (bucket="*", role="admin") is created for that SA.
-func TestE2E_Bootstrap_F1_FirstSACreateReturnsWildcardGrant(t *testing.T) {
+// TestBootstrapFirstSAWildcardGrantE2E (was F1): empty IAM → first sa
+// create returns wildcard grant. Verifies the bootstrap path uses the
+// InitFirstSA dispatch (SA id = sa-default + wildcard admin grant).
+// Single-node only: bootstrap dispatch is single-process state.
+func TestBootstrapFirstSAWildcardGrantE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBootstrapFirstSAWildcardGrantCases(t)
+	})
+}
+
+func runBootstrapFirstSAWildcardGrantCases(t *testing.T) {
+	t.Helper()
 	dir, _, _, _ := startUnbootstrappedE2EServer(t)
 	sock := filepath.Join(dir, "admin.sock")
 
@@ -54,11 +60,16 @@ func TestE2E_Bootstrap_F1_FirstSACreateReturnsWildcardGrant(t *testing.T) {
 	require.True(t, found, "first SA must have wildcard admin grant; got %+v", grants)
 }
 
-// F2: non-empty store → SA create does NOT auto-issue a wildcard grant.
-//
-// The dispatch in HandleSACreate uses the InitFirstSA composite only when
-// store.IsEmpty(); a follow-up create takes the regular SA + Key path.
-func TestE2E_Bootstrap_F2_SecondSACreate_NoAutoGrant(t *testing.T) {
+// TestBootstrapSecondSANoAutoGrantE2E (was F2): non-empty store → SA
+// create does NOT auto-issue a wildcard grant. Single-node only.
+func TestBootstrapSecondSANoAutoGrantE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBootstrapSecondSANoAutoGrantCases(t)
+	})
+}
+
+func runBootstrapSecondSANoAutoGrantCases(t *testing.T) {
+	t.Helper()
 	dir, _, _, _ := startUnbootstrappedE2EServer(t)
 	sock := filepath.Join(dir, "admin.sock")
 
@@ -82,13 +93,17 @@ func TestE2E_Bootstrap_F2_SecondSACreate_NoAutoGrant(t *testing.T) {
 	require.Empty(t, grants, "second SA must have no persisted grants; got %+v", grants)
 }
 
-// F3: pre-bootstrap sigv4 traffic → authentication failure.
-//
-// With no SA in the store, every access_key is unknown and the verifier
-// must reject. We don't pin a specific status code (project comments
-// suggest 401 InvalidAccessKeyId) — only that auth fails with an
-// AccessDenied / InvalidAccessKeyId class error in the 4xx range.
-func TestE2E_Bootstrap_F3_BeforeBootstrap_S3Returns401(t *testing.T) {
+// TestBootstrapPreBootstrapDeniedE2E (was F3): pre-bootstrap sigv4 traffic
+// → AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch class error.
+// Single-node only: pre-bootstrap state.
+func TestBootstrapPreBootstrapDeniedE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBootstrapPreBootstrapDeniedCases(t)
+	})
+}
+
+func runBootstrapPreBootstrapDeniedCases(t *testing.T) {
+	t.Helper()
 	_, s3URL, _, _ := startUnbootstrappedE2EServer(t)
 
 	cli := s3ClientFor(s3URL, "AKIA-fake-bootstrap-test", "fake-secret-bootstrap-test")
@@ -110,9 +125,17 @@ func TestE2E_Bootstrap_F3_BeforeBootstrap_S3Returns401(t *testing.T) {
 	)
 }
 
-// F4: post-bootstrap, the bootstrap creds successfully drive ListBuckets,
-// CreateBucket, PutObject, and GetObject end-to-end.
-func TestE2E_Bootstrap_F4_PostBootstrap_ThreeVerbs(t *testing.T) {
+// TestBootstrapPostBootstrapVerbsE2E (was F4): post-bootstrap, the bootstrap
+// creds drive ListBuckets, CreateBucket, PutObject, and GetObject end-to-end.
+// Single-node only: tests bootstrap completion against a fresh single binary.
+func TestBootstrapPostBootstrapVerbsE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBootstrapPostBootstrapVerbsCases(t)
+	})
+}
+
+func runBootstrapPostBootstrapVerbsCases(t *testing.T) {
+	t.Helper()
 	dir, s3URL, _, _ := startUnbootstrappedE2EServer(t)
 
 	ak, sk := bootstrapAdminViaUDS(t, dir)

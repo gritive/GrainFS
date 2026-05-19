@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.0.262.1] - 2026-05-19 - test(e2e): unify cluster-only onto shared fixture + admin CLI duals + single-only convention
+
+Three changes bundled:
+
+1. **Cluster-only → shared fixture (3 tests)**: `TestAwaitWriteFromNonOwnerProbe` and `TestCluster_Multipart_ListFanoutAcrossNodes` moved off their dedicated `startE2ECluster` bootstrap onto the shared 4-node cluster fixture (`newSharedClusterS3Target`). Each was creating its own 3-node cluster (~5-10s boot per test); they now share one process group that boots once on the first cluster-target test. Removed `TestCluster_Multipart_List` as a duplicate of `TestMultipartE2E/Cluster4Node/List` (same `exerciseMultipartListingFeature` helper, same surface).
+
+2. **Cluster admin CLI duals (3 files, 6 tests)**: `TestClusterStatusCLI_*`, `TestClusterBalancerStatusCLI_*`, `TestClusterHealthCLI_*` were single-fixture only (`testServerDataDir/admin.sock`). They probe the admin UDS surface which is identical on single + cluster — so they now run dual (`SingleNode` + `Cluster4Node`) via `tgt.adminSockPath()`. Peer count expectation switches on `tgt.isCluster` / `tgt.nodes`. Catches "admin sock works on singleton but breaks on cluster" regressions.
+
+3. **Single-only naming convention (8 tests, 6 files)**: tests with no cluster analogue (restart-on-same-dataDir, IAM bootstrap dispatch, deployment smoke, removed-flag rejection) renamed to `TestXxxE2E` and wrapped in a `t.Run("SingleNode", ...)` subtest. Bodies unchanged — they still spawn their own single binary. Future cluster equivalents drop in as a sibling `t.Run("Cluster4Node", ...)`. `TestE2E_DegradedMode_WritesBlocked` was originally tagged here but turned out to be cluster-only (5-node, kills 3); left untouched for separate handling.
+
+Other cluster-only tests with special startup flags (ScrubInterval / lifecycle / StaticPeers / opt-in benchmark) stay on dedicated clusters; tracked for follow-up.
+
+### Changed
+
+- **`TestAwaitWriteFromNonOwnerProbe` → `TestClusterAwaitWriteFromNonOwnerE2E`** (`tests/e2e/cluster_harness_await_write_test.go`) — TestXxxE2E + Cluster4Node subtest + `runAwaitWriteFromNonOwnerCases(t, tgt s3Target)` helper. `tgt.cluster.AwaitWriteFromNonOwner` reaches into the cluster handle on the shared target.
+- **`TestCluster_Multipart_ListFanoutAcrossNodes` → `TestClusterMultipartListFanoutE2E`** (`tests/e2e/cluster_test.go`) — same dual-pattern shape, runs against `tgt.pickNode(i)` per node (4 in shared). `tgt.uniqueBucket(t, "mpfanout")` replaces the hard-coded `"mp-list-fanout"` bucket so reruns and other tests can't collide.
+- **`TestClusterStatusCLI_{NoPeers,HumanReadable}` → `TestClusterStatusCLIE2E`** (`tests/e2e/cluster_status_cli_test.go`) — dual-pattern. Inner `JSON` + `HumanReadable` subtests. Peer-count assertion derived from `tgt.isCluster ? tgt.nodes-1 : 0`.
+- **`TestClusterBalancerStatusCLI{,_TextRender}` → `TestClusterBalancerStatusCLIE2E`** (`tests/e2e/cluster_balancer_status_test.go`) — dual-pattern. Inner `JSON` + `TextRender`.
+- **`TestClusterHealthCLI_{NoPeers,TextRender}` → `TestClusterHealthCLIE2E`** (`tests/e2e/cluster_health_test.go`) — dual-pattern. Inner `JSON` + `TextRender`.
+- **`TestCluster_NoPeers_BasicOperations` → `TestNoPeersRestartPersistenceE2E`** (`tests/e2e/cluster_test.go`) — single-only wrapper.
+- **`TestCluster_NoPeers_Multipart` → `TestNoPeersMultipartE2E`** (`tests/e2e/cluster_test.go`) — single-only wrapper.
+- **`TestRestartRecovery_SweepsOrphanArtifacts` → `TestRestartRecoveryOrphanSweepE2E`** (`tests/e2e/restart_recovery_test.go`).
+- **`TestSmoke_DeploymentVerification` → `TestSmokeDeploymentE2E`** (`tests/e2e/smoke_test.go`).
+- **`TestServe_RejectsRemovedUpstreamFlags` → `TestServeFlagsRejectionE2E`** (`tests/e2e/serve_flags_test.go`).
+- **`TestE2E_Bootstrap_F1..F4` → `TestBootstrap{FirstSAWildcardGrant,SecondSANoAutoGrant,PreBootstrapDenied,PostBootstrapVerbs}E2E`** (`tests/e2e/iam_bootstrap_test.go`).
+
+### Removed
+
+- **`TestCluster_Multipart_List`** — duplicate of `TestMultipartE2E/Cluster4Node/List` (same `exerciseMultipartListingFeature`).
+- **`startMultipartListingCluster` helper** — replaced by `tgt.uniqueBucket` + `waitForMultipartListingCreate`. No more bespoke cluster bootstrap for multipart listing tests.
+
+### Tests
+
+- Cluster-only on shared:
+  - `TestClusterAwaitWriteFromNonOwnerE2E/Cluster4Node` PASS (6.89s)
+  - `TestClusterMultipartListFanoutE2E/Cluster4Node/{node-1,2,3,4}` PASS (27.04s total; per-node assertions ≤0.04s)
+  - `TestMultipartE2E/Cluster4Node/List` unchanged PASS — list helpers untouched.
+- Admin CLI duals (SingleNode + Cluster4Node × JSON + Text):
+  - `TestClusterStatusCLIE2E` 4/4 PASS
+  - `TestClusterBalancerStatusCLIE2E` 4/4 PASS (7.03s incl. cluster boot)
+  - `TestClusterHealthCLIE2E` 4/4 PASS
+- Single-only renames (SingleNode wrappers only, bodies unchanged):
+  - `TestNoPeersRestartPersistenceE2E/SingleNode` PASS (0.93s)
+  - `TestNoPeersMultipartE2E/SingleNode` PASS (0.47s)
+  - `TestRestartRecoveryOrphanSweepE2E/SingleNode` PASS (0.42s)
+  - `TestServeFlagsRejectionE2E/SingleNode/{--upstream,--upstream-access-key,--upstream-secret-key}` PASS (0.07s)
+  - `TestBootstrap{FirstSAWildcardGrant,SecondSANoAutoGrant,PreBootstrapDenied,PostBootstrapVerbs}E2E/SingleNode` PASS (~0.45s each)
+  - `TestSmokeDeploymentE2E/SingleNode/ListObjects` FAILS — pre-existing regression from master's versioning PR (delete-marker shows in listing); flagged in TODOS, unrelated to rename.
+
 ## [0.0.262.0] - 2026-05-19 - feat(storage): Phase 1 large-object chunking foundation — segment-based PUT/GET, xxhash3 integrity
 
 Every object now persists as a sequence of one or more `SegmentRef` instead of a single flat file. PUT/GET stream through 8-worker chunker/fetcher pipelines that produce 16 MiB chunks (default). Internal segment integrity moves from MD5 to xxhash3-128, eliminating dual hashing on the hot path. Range GET, sendfile zero-copy, multipart, AppendObject, packblob, and PITR snapshot/restore all stay correct under the new layout. Single-node and 4-node cluster e2e round-trips byte-identical for 100 MiB / 256 MiB / cross-chunk Range. Cluster `RoundTrip100MiB` is intentionally skipped pending Phase 2 (non-aligned tail chunk fanout); 256 MiB and 64 MiB Range pass.

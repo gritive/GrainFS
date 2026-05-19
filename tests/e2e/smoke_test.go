@@ -15,9 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSmoke_DeploymentVerification is a fast smoke test to verify deployment.
-// This test should complete in under 2 minutes and covers the critical path.
-func TestSmoke_DeploymentVerification(t *testing.T) {
+// TestSmokeDeploymentE2E is a fast deployment smoke test (under 2 minutes,
+// critical path only). Single-node-only: probes the single-binary install
+// surface; cluster smoke is covered by the cluster_bootstrap/cluster_join
+// suites.
+func TestSmokeDeploymentE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runSmokeDeploymentCases(t)
+	})
+}
+
+func runSmokeDeploymentCases(t *testing.T) {
+	t.Helper()
 	skipIfShort(t, "skipping smoke test in short mode")
 
 	dir, err := os.MkdirTemp("", "grainfs-smoke-*")
