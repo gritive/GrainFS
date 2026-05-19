@@ -103,121 +103,102 @@ func cowReadAt(t *testing.T, dataDir, volName string, offset, length int64) stri
 	return out
 }
 
-func TestCoWSnapshotRollbackRestoresDataE2E(t *testing.T) {
+// TestCoWE2E groups the three CoW CLI flows (snapshot rollback, list/delete,
+// clone lifecycle independence) under one entry. Shared single + shared
+// cluster fixtures; each sub-test picks a unique volume name.
+func TestCoWE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-		runCoWSnapshotRollbackCases(t, newSingleNodeS3Target())
+		runCoWCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		runCoWSnapshotRollbackCases(t, newSharedClusterS3Target(t))
+		runCoWCases(t, newSharedClusterS3Target(t))
 	})
 }
 
-func runCoWSnapshotRollbackCases(t *testing.T, tgt s3Target) {
+func runCoWCases(t *testing.T, tgt s3Target) {
 	t.Helper()
 	const volSize = 4 * 1024 * 1024
 	dataDir := cowDataDir(tgt)
-	volName := fmt.Sprintf("cow-rollback-vol-%d", time.Now().UnixNano())
-	original := "cow-original-content"
-	modified := "cow-modified-content"
 
-	cowCreateVolume(t, dataDir, volName, volSize)
-	t.Cleanup(func() { cowCleanupVolume(t, dataDir, volName) })
+	t.Run("SnapshotRollbackRestoresData", func(t *testing.T) {
+		volName := fmt.Sprintf("cow-rollback-vol-%d", time.Now().UnixNano())
+		original := "cow-original-content"
+		modified := "cow-modified-content"
 
-	cowWriteAt(t, dataDir, volName, 0, original)
-	snapID := cowCreateSnapshot(t, dataDir, volName)
+		cowCreateVolume(t, dataDir, volName, volSize)
+		t.Cleanup(func() { cowCleanupVolume(t, dataDir, volName) })
 
-	cowWriteAt(t, dataDir, volName, 0, modified)
-	got := cowReadAt(t, dataDir, volName, 0, int64(len(modified)))
-	require.Equal(t, modified, got)
+		cowWriteAt(t, dataDir, volName, 0, original)
+		snapID := cowCreateSnapshot(t, dataDir, volName)
 
-	cowRollback(t, dataDir, volName, snapID)
-	got = cowReadAt(t, dataDir, volName, 0, int64(len(original)))
-	require.Equal(t, original, got)
-}
+		cowWriteAt(t, dataDir, volName, 0, modified)
+		got := cowReadAt(t, dataDir, volName, 0, int64(len(modified)))
+		require.Equal(t, modified, got)
 
-func TestCoWSnapshotListAndDeleteE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runCoWSnapshotListAndDeleteCases(t, newSingleNodeS3Target())
+		cowRollback(t, dataDir, volName, snapID)
+		got = cowReadAt(t, dataDir, volName, 0, int64(len(original)))
+		require.Equal(t, original, got)
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runCoWSnapshotListAndDeleteCases(t, newSharedClusterS3Target(t))
-	})
-}
 
-func runCoWSnapshotListAndDeleteCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	const volSize = 4 * 1024 * 1024
-	dataDir := cowDataDir(tgt)
-	volName := fmt.Sprintf("cow-snaplist-vol-%d", time.Now().UnixNano())
+	t.Run("SnapshotListAndDelete", func(t *testing.T) {
+		volName := fmt.Sprintf("cow-snaplist-vol-%d", time.Now().UnixNano())
 
-	cowCreateVolume(t, dataDir, volName, volSize)
-	t.Cleanup(func() { cowCleanupVolume(t, dataDir, volName) })
+		cowCreateVolume(t, dataDir, volName, volSize)
+		t.Cleanup(func() { cowCleanupVolume(t, dataDir, volName) })
 
-	var ids []string
-	for i := 0; i < 3; i++ {
-		ids = append(ids, cowCreateSnapshot(t, dataDir, volName))
-	}
+		var ids []string
+		for i := 0; i < 3; i++ {
+			ids = append(ids, cowCreateSnapshot(t, dataDir, volName))
+		}
 
-	snaps := cowListSnapshots(t, dataDir, volName)
-	require.Len(t, snaps, 3, "expected 3 snapshots after creation")
+		snaps := cowListSnapshots(t, dataDir, volName)
+		require.Len(t, snaps, 3, "expected 3 snapshots after creation")
 
-	cowDeleteSnapshot(t, dataDir, volName, ids[1])
+		cowDeleteSnapshot(t, dataDir, volName, ids[1])
 
-	snaps = cowListSnapshots(t, dataDir, volName)
-	require.Len(t, snaps, 2, "expected 2 snapshots after deleting one")
+		snaps = cowListSnapshots(t, dataDir, volName)
+		require.Len(t, snaps, 2, "expected 2 snapshots after deleting one")
 
-	for _, s := range snaps {
-		require.NotEqual(t, ids[1], s.ID, "deleted snapshot must not appear in list")
-	}
-}
-
-// TestCoWCloneLifecycleIndependenceE2E verifies that source and clone are
-// independent at the lifecycle level: deleting one does not delete the other.
-//
-// Note: full block-data independence (write to clone, verify source unchanged)
-// requires NFS access to the cloned volume and is covered in NBD E2E.
-func TestCoWCloneLifecycleIndependenceE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runCoWCloneLifecycleCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runCoWCloneLifecycleCases(t, newSharedClusterS3Target(t))
-	})
-}
-
-func runCoWCloneLifecycleCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	const volSize = 4 * 1024 * 1024
-	dataDir := cowDataDir(tgt)
-	srcName := fmt.Sprintf("cow-clone-src-%d", time.Now().UnixNano())
-	dstName := fmt.Sprintf("cow-clone-dst-%d", time.Now().UnixNano())
-	original := "clone-original-content"
-	modified := "clone-modified-content"
-
-	cowCreateVolume(t, dataDir, srcName, volSize)
-	srcDeleted := false
-	t.Cleanup(func() {
-		if !srcDeleted {
-			cowDeleteVolume(t, dataDir, srcName)
+		for _, s := range snaps {
+			require.NotEqual(t, ids[1], s.ID, "deleted snapshot must not appear in list")
 		}
 	})
-	cowWriteAt(t, dataDir, srcName, 0, original)
 
-	out, code := runCLI(t, dataDir, "volume", "clone", srcName, dstName)
-	require.Equal(t, 0, code, out)
-	t.Cleanup(func() { cowCleanupVolume(t, dataDir, dstName) })
+	// CloneLifecycleIndependence verifies source and clone are independent at
+	// the lifecycle level: deleting one does not delete the other. Full
+	// block-data independence (write to clone, verify source unchanged)
+	// requires NFS access to the cloned volume and is covered in NBD E2E.
+	t.Run("CloneLifecycleIndependence", func(t *testing.T) {
+		srcName := fmt.Sprintf("cow-clone-src-%d", time.Now().UnixNano())
+		dstName := fmt.Sprintf("cow-clone-dst-%d", time.Now().UnixNano())
+		original := "clone-original-content"
+		modified := "clone-modified-content"
 
-	got := cowReadAt(t, dataDir, dstName, 0, int64(len(original)))
-	require.Equal(t, original, got)
+		cowCreateVolume(t, dataDir, srcName, volSize)
+		srcDeleted := false
+		t.Cleanup(func() {
+			if !srcDeleted {
+				cowDeleteVolume(t, dataDir, srcName)
+			}
+		})
+		cowWriteAt(t, dataDir, srcName, 0, original)
 
-	cowWriteAt(t, dataDir, dstName, 0, modified)
-	got = cowReadAt(t, dataDir, srcName, 0, int64(len(original)))
-	require.Equal(t, original, got, "clone writes must not modify source")
+		out, code := runCLI(t, dataDir, "volume", "clone", srcName, dstName)
+		require.Equal(t, 0, code, out)
+		t.Cleanup(func() { cowCleanupVolume(t, dataDir, dstName) })
 
-	cowDeleteVolume(t, dataDir, srcName)
-	srcDeleted = true
-	out, code = runCLI(t, dataDir, "volume", "info", dstName)
-	require.Equal(t, 0, code, "clone must survive deletion of its source: %s", out)
-	got = cowReadAt(t, dataDir, dstName, 0, int64(len(modified)))
-	require.Equal(t, modified, got)
+		got := cowReadAt(t, dataDir, dstName, 0, int64(len(original)))
+		require.Equal(t, original, got)
+
+		cowWriteAt(t, dataDir, dstName, 0, modified)
+		got = cowReadAt(t, dataDir, srcName, 0, int64(len(original)))
+		require.Equal(t, original, got, "clone writes must not modify source")
+
+		cowDeleteVolume(t, dataDir, srcName)
+		srcDeleted = true
+		out, code = runCLI(t, dataDir, "volume", "info", dstName)
+		require.Equal(t, 0, code, "clone must survive deletion of its source: %s", out)
+		got = cowReadAt(t, dataDir, dstName, 0, int64(len(modified)))
+		require.Equal(t, modified, got)
+	})
 }
