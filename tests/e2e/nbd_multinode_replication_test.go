@@ -21,6 +21,7 @@ import (
 // router-registration bug fixed in v0.0.43.3 (PR #170). This test catches that
 // class of regression by checking holders on disk, not metadata.
 func TestNBDMultiNodeByteLevelReplicationE2E(t *testing.T) {
+	t.Run("Cluster3Node", func(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -73,4 +74,5 @@ func TestNBDMultiNodeByteLevelReplicationE2E(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, holders, 2,
 		"need ≥2 holders on disk for byte-level NBD replication; got %d (replication broken?)", holders)
+	})
 }

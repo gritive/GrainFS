@@ -1261,6 +1261,7 @@ func TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E(t *testing.T) {
 }
 
 func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *testing.T) {
+	t.Run("MRCluster3Node", func(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -1330,6 +1331,7 @@ func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *test
 	}
 	require.NoError(t, readErr)
 	require.Contains(t, string(got), `"format-version"`)
+	})
 }
 
 // TestTwoNodeAvailabilityTrapE2E verifies the well-known 2-node quorum trap:
@@ -1337,6 +1339,7 @@ func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *test
 // quorum entirely. This is intentional — 2-node clusters are functionally
 // worse than single-node for availability.
 func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
+	t.Run("MRCluster2Node", func(t *testing.T) {
 
 	c := startMRCluster(t, 2, mrClusterOptions{
 		FastBootstrap: true,
@@ -1376,6 +1379,7 @@ func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
 		Body:   bytes.NewReader([]byte("blocked")),
 	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
 	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
+	})
 }
 
 // TestDynamicGroupSeeding1to5E2E verifies that each dynamic node join
@@ -1391,6 +1395,7 @@ func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
 // After each expansion, a PUT (with internal GET round-trip) is verified to
 // confirm routing works.
 func TestDynamicGroupSeeding1to5E2E(t *testing.T) {
+	t.Run("MRCluster1to5", func(t *testing.T) {
 
 	// Start with 1 node; pre-allocate ports for 5.
 	c := startMRCluster(t, 1, mrClusterOptions{
@@ -1431,4 +1436,5 @@ func TestDynamicGroupSeeding1to5E2E(t *testing.T) {
 		requireMRPutObjectFromAnyNodeEventually(t, ctx, c, bucket,
 			fmt.Sprintf("key-after-%d-nodes", s.afterNodes), []byte("data"))
 	}
+	})
 }

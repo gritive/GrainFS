@@ -14,6 +14,7 @@ import (
 )
 
 func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
+	t.Run("Cluster", func(t *testing.T) {
 	// Skip in short mode
 
 	dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
@@ -71,4 +72,5 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	runner.VerifyLinearizable(ctx, t, "jepsen-test", "conflict-key")
 
 	t.Log("✅ Jepsen test passed - linearizability verified")
+	})
 }

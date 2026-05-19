@@ -19,6 +19,7 @@ import (
 // TestMigrationInjector_CopiesFromSourceToDest verifies the `grainfs migrate inject`
 // command copies all objects from a source GrainFS to a destination GrainFS.
 func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
 	binary := getBinary()
 	ctx := context.Background()
 
@@ -116,4 +117,5 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		getResp.Body.Close()
 		assert.True(t, strings.Contains(string(body), "source"), "content must match source")
 	}
+	})
 }
