@@ -1,0 +1,35 @@
+package storage
+
+import (
+	"context"
+	"io"
+	"os"
+)
+
+// localBackendAdapter routes each SegmentWriter chunk through
+// LocalBackend.WriteSegmentBlob.
+type localBackendAdapter struct{ b *LocalBackend }
+
+func (a localBackendAdapter) WriteSegment(ctx context.Context, bucket, key string, idx int, r io.Reader) (SegmentRef, error) {
+	_ = ctx
+	_ = idx
+	return a.b.WriteSegmentBlob(bucket, key, r)
+}
+
+// localSegmentStore opens individual segment blobs for the parallel
+// SegmentReader. Each call returns a fresh ReadCloser positioned at the
+// start of the segment.
+type localSegmentStore struct {
+	b      *LocalBackend
+	bucket string
+	key    string
+}
+
+func (s localSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	_ = ctx
+	path := s.b.segmentPath(s.bucket, s.key, ref.BlobID)
+	if s.b.encryptor != nil {
+		return openEncryptedObjectFile(path, s.b.encryptor, encryptedObjectFileDomain(s.bucket, s.key+"/segments/"+ref.BlobID), ref.Size)
+	}
+	return os.Open(path)
+}

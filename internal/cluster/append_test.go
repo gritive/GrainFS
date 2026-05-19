@@ -22,10 +22,11 @@ func TestAppendObjectFSMApplyIdempotent(t *testing.T) {
 		t.Fatalf("CreateBucket: %v", err)
 	}
 
+	const segETag = "deadbeefcafebabedeadbeefcafebabe"
 	seg := storage.SegmentRef{
-		BlobID: "blob-1",
-		Size:   4,
-		ETag:   "deadbeefcafebabedeadbeefcafebabe",
+		BlobID:   "blob-1",
+		Size:     4,
+		Checksum: bytes.Repeat([]byte{0xde}, storage.ChecksumLen),
 	}
 	cmd := AppendObjectCmd{
 		Bucket:         "test",
@@ -33,7 +34,7 @@ func TestAppendObjectFSMApplyIdempotent(t *testing.T) {
 		ExpectedOffset: 0,
 		BlobID:         seg.BlobID,
 		SegmentSize:    seg.Size,
-		SegmentETag:    seg.ETag,
+		SegmentETag:    segETag,
 	}
 	data, err := encodeAppendObjectCmd(cmd)
 	if err != nil {

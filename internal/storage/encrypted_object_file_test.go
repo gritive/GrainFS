@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
@@ -26,10 +27,12 @@ func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
 	enc := testEncryptor(t)
 	plaintext := bytes.Repeat([]byte("sensitive-local-object-"), 4096)
 
-	size, etag, err := writeEncryptedObjectFile(path, enc, "local-object:physical-1", bytes.NewReader(plaintext))
+	h, release := hashForBucket("")
+	defer release()
+	size, err := writeEncryptedObjectFile(path, enc, "local-object:physical-1", bytes.NewReader(plaintext), h)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
-	require.NotEmpty(t, etag)
+	require.NotEmpty(t, etagFromHash(h))
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -48,7 +51,7 @@ func TestEncryptedObjectFileWriteKeepsRecordsBoundedForReadAt(t *testing.T) {
 	enc := testEncryptor(t)
 	plaintext := bytes.Repeat([]byte("x"), 2*(1<<20)+1)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, "local-object:large-records", bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, "local-object:large-records", bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
 
@@ -61,7 +64,7 @@ func TestEncryptedObjectFileReadAtWriteAtAndTruncate(t *testing.T) {
 	enc := testEncryptor(t)
 	domain := "local-object:physical-2"
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(26), size)
 
@@ -94,7 +97,7 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	domain := "local-object:physical-readat"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -125,7 +128,7 @@ func TestEncryptedObjectFileReadAtRejectsSkippedChunkHeaderTamper(t *testing.T) 
 	domain := "local-object:physical-readat-header-tamper"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -149,7 +152,7 @@ func TestEncryptedObjectFileReadAtRejectsCorruptRequestedChunk(t *testing.T) {
 	domain := "local-object:physical-readat-corrupt"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -198,7 +201,7 @@ func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.
 	domain := "local-object:physical-stream"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -229,7 +232,7 @@ func TestEncryptedObjectFileOpenRejectsTruncatedExpectedObject(t *testing.T) {
 	enc := testEncryptor(t)
 	domain := "local-object:physical-truncated"
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("payload")))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("payload")), io.Discard)
 	require.NoError(t, err)
 	require.NoError(t, os.Truncate(path, int64(len(encryptedObjectMagic))))
 
@@ -246,7 +249,7 @@ func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
 	domain := "local-object:physical-whole-record-truncated"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), 32)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.Open(path)
@@ -262,4 +265,68 @@ func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
 
 	_, _, err = writeAtEncryptedObjectFile(path, enc, domain, 0, []byte("z"), size)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+// corruptByteAt flips one byte at the given offset in the file at path.
+// Used to simulate on-disk ciphertext tampering for AEAD-verify regression
+// tests.
+func corruptByteAt(t *testing.T, path string, off int64) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err, "open for corrupt")
+	defer f.Close()
+	var b [1]byte
+	_, err = f.ReadAt(b[:], off)
+	require.NoError(t, err, "read at")
+	b[0] ^= 0xFF
+	_, err = f.WriteAt(b[:], off)
+	require.NoError(t, err, "write at")
+}
+
+// TestEncryptedSegment_PerSegmentAADIsolation locks in the AAD-isolation
+// contract documented on WriteSegmentBlob: each segment's encryption domain
+// includes its unique blob_id, so corrupting one segment's ciphertext must
+// NOT affect another segment's ability to decrypt. If a future refactor
+// accidentally collapses the per-segment domain (e.g. drops blob_id and
+// reuses object-level AAD), this test fails immediately.
+func TestEncryptedSegment_PerSegmentAADIsolation(t *testing.T) {
+	enc := testEncryptor(t)
+	dir := t.TempDir()
+	b, err := NewEncryptedLocalBackend(dir, enc)
+	require.NoError(t, err, "NewEncryptedLocalBackend")
+	t.Cleanup(func() { _ = b.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "test"), "CreateBucket")
+
+	// 2 segments: exactly one full 16 MiB chunk + 100-byte tail.
+	data := makePattern((16 << 20) + 100)
+	obj, err := b.PutObject(ctx, "test", "k", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err, "PutObject")
+	require.Len(t, obj.Segments, 2, "expected 2 segments")
+
+	// Corrupt one byte of segment[1]'s ciphertext on disk. Offset 64 is well
+	// inside the first AEAD record's ciphertext for any reasonable header
+	// layout, so AES-GCM verify must fail on segment[1] and only segment[1].
+	path := b.segmentPath("test", "k", obj.Segments[1].BlobID)
+	corruptByteAt(t, path, 64)
+
+	// GetObject should successfully decrypt segment[0] (16 MiB of correct
+	// plaintext), then fail on segment[1]. The first segment's bytes must
+	// match the original exactly — proving the AAD does not leak across
+	// segments.
+	rc, _, err := b.GetObject(ctx, "test", "k")
+	require.NoError(t, err, "GetObject")
+	defer rc.Close()
+
+	first := make([]byte, 16<<20)
+	_, err = io.ReadFull(rc, first)
+	require.NoError(t, err, "first segment must decrypt cleanly")
+	require.True(t, bytes.Equal(first, data[:16<<20]),
+		"first segment bytes differ — AAD isolation broken")
+
+	// Reading further should error (segment 2 ciphertext corrupted).
+	rest, err := io.ReadAll(rc)
+	require.Error(t, err, "corrupted segment 2 must surface as an error")
+	require.Empty(t, rest, "no partial plaintext from corrupted segment expected")
 }

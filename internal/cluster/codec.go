@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sort"
 
@@ -515,7 +516,10 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		segOffs := make([]flatbuffers.UOffsetT, len(m.Segments))
 		for i, s := range m.Segments {
 			blobOff := b.CreateString(s.BlobID)
-			etOff := b.CreateString(s.ETag)
+			// TODO(Phase 2): clusterpb.SegmentRef still uses Etag on the wire;
+			// hex-encode Checksum (MD5 in cluster Phase 1) for backwards compat
+			// until the cluster schema migrates to Checksum bytes.
+			etOff := b.CreateString(hex.EncodeToString(s.Checksum))
 			clusterpb.SegmentRefStart(b)
 			clusterpb.SegmentRefAddBlobId(b, blobOff)
 			clusterpb.SegmentRefAddSize(b, s.Size)
@@ -637,10 +641,13 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			if !t.Segments(&seg, i) {
 				continue
 			}
+			// TODO(Phase 2): wire Etag is hex-encoded MD5 (cluster Phase 1);
+			// decode into Checksum bytes to match storage.SegmentRef shape.
+			checksum, _ := hex.DecodeString(string(seg.Etag()))
 			segments[i] = storage.SegmentRef{
-				BlobID: string(seg.BlobId()),
-				Size:   seg.Size(),
-				ETag:   string(seg.Etag()),
+				BlobID:   string(seg.BlobId()),
+				Size:     seg.Size(),
+				Checksum: checksum,
 			}
 		}
 	}

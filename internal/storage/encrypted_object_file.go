@@ -25,22 +25,22 @@ func encryptedChunkAADBytes(dst []byte, domain string, chunk uint64) []byte {
 	return strconv.AppendUint(dst, chunk, 10)
 }
 
-func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, r io.Reader) (int64, string, error) {
-	h, release := hashForBucket("")
-	defer release()
-	return writeEncryptedObjectFileWithHash(path, enc, domain, r, h)
-}
-
-func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domain string, r io.Reader, h hash.Hash) (int64, string, error) {
+// writeEncryptedObjectFile streams r into the encrypted on-disk format at
+// path, sealing each plaintext chunk with enc and tee'ing the plaintext
+// through plainSink so the caller can compute a digest (MD5, xxhash3, …)
+// over the unsealed bytes. Returns the plaintext byte count.
+//
+// Pass io.Discard for plainSink when no digest is needed.
+func writeEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, r io.Reader, plainSink io.Writer) (int64, error) {
 	f, err := os.Create(path)
 	if err != nil {
-		return 0, "", fmt.Errorf("create encrypted object: %w", err)
+		return 0, fmt.Errorf("create encrypted object: %w", err)
 	}
 	defer f.Close()
 	bw := bufio.NewWriterSize(f, 1<<20)
 
 	if _, err := bw.Write([]byte(encryptedObjectMagic)); err != nil {
-		return 0, "", fmt.Errorf("write encrypted object magic: %w", err)
+		return 0, fmt.Errorf("write encrypted object magic: %w", err)
 	}
 
 	buf := make([]byte, encryptedChunkSize)
@@ -52,14 +52,16 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 		n, readErr := r.Read(buf)
 		if n > 0 {
 			plain := buf[:n]
-			_, _ = h.Write(plain)
+			if plainSink != nil {
+				_, _ = plainSink.Write(plain)
+			}
 			aadBuf = encryptedChunkAADBytes(aadBuf, domain, chunk)
 			sealed, err := enc.SealValueAADTo(sealedBuf[:0], aadBuf, plain)
 			if err != nil {
-				return 0, "", fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
+				return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
 			}
 			if err := writeEncryptedObjectRecord(bw, uint32(n), sealed); err != nil {
-				return 0, "", err
+				return 0, err
 			}
 			sealedBuf = sealed
 			size += int64(n)
@@ -69,16 +71,16 @@ func writeEncryptedObjectFileWithHash(path string, enc *encrypt.Encryptor, domai
 			break
 		}
 		if readErr != nil {
-			return 0, "", fmt.Errorf("read object plaintext: %w", readErr)
+			return 0, fmt.Errorf("read object plaintext: %w", readErr)
 		}
 	}
 	if err := bw.Flush(); err != nil {
-		return 0, "", fmt.Errorf("flush encrypted object: %w", err)
+		return 0, fmt.Errorf("flush encrypted object: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		return 0, "", fmt.Errorf("sync encrypted object: %w", err)
+		return 0, fmt.Errorf("sync encrypted object: %w", err)
 	}
-	return size, etagFromHash(h), nil
+	return size, nil
 }
 
 func openEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, size int64) (io.ReadCloser, error) {
@@ -332,7 +334,13 @@ func writeAtEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain stri
 		plain = extended
 	}
 	copy(plain[off:], data)
-	return writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain))
+	h, release := hashForBucket("")
+	defer release()
+	size, err := writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain), h)
+	if err != nil {
+		return 0, "", err
+	}
+	return size, etagFromHash(h), nil
 }
 
 func truncateEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, currentSize int64, newSize int64) (int64, error) {
@@ -353,42 +361,42 @@ func truncateEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain str
 		copy(extended, plain)
 		plain = extended
 	}
-	_, _, err = writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain))
+	_, err = writeEncryptedObjectFileAtomic(path, enc, domain, bytes.NewReader(plain), io.Discard)
 	if err != nil {
 		return 0, err
 	}
 	return newSize, nil
 }
 
-func writeEncryptedObjectFileAtomic(path string, enc *encrypt.Encryptor, domain string, r io.Reader) (int64, string, error) {
+func writeEncryptedObjectFileAtomic(path string, enc *encrypt.Encryptor, domain string, r io.Reader, plainSink io.Writer) (int64, error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".encrypted-object-*")
 	if err != nil {
-		return 0, "", fmt.Errorf("create encrypted object temp: %w", err)
+		return 0, fmt.Errorf("create encrypted object temp: %w", err)
 	}
 	tmpPath := tmp.Name()
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return 0, "", fmt.Errorf("close encrypted object temp: %w", err)
+		return 0, fmt.Errorf("close encrypted object temp: %w", err)
 	}
 	cleanup := func() {
 		_ = os.Remove(tmpPath)
 	}
 
-	size, etag, err := writeEncryptedObjectFile(tmpPath, enc, domain, r)
+	size, err := writeEncryptedObjectFile(tmpPath, enc, domain, r, plainSink)
 	if err != nil {
 		cleanup()
-		return 0, "", err
+		return 0, err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		cleanup()
-		return 0, "", fmt.Errorf("rename encrypted object: %w", err)
+		return 0, fmt.Errorf("rename encrypted object: %w", err)
 	}
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
-	return size, etag, nil
+	return size, nil
 }
 
 func readEncryptedObjectFile(path string, enc *encrypt.Encryptor, domain string, expectedSize int64) ([]byte, error) {

@@ -27,11 +27,26 @@ func marshalObject(obj *Object) ([]byte, error) {
 		for i := len(obj.Segments) - 1; i >= 0; i-- {
 			s := obj.Segments[i]
 			blobOff := b.CreateString(s.BlobID)
-			etOff := b.CreateString(s.ETag)
+			var checksumOff flatbuffers.UOffsetT
+			if len(s.Checksum) > 0 {
+				checksumOff = b.CreateByteVector(s.Checksum)
+			}
+			var pgOff flatbuffers.UOffsetT
+			if s.PlacementGroupID != "" {
+				pgOff = b.CreateString(s.PlacementGroupID)
+			}
 			storagepb.SegmentRefStart(b)
 			storagepb.SegmentRefAddBlobId(b, blobOff)
 			storagepb.SegmentRefAddSize(b, s.Size)
-			storagepb.SegmentRefAddEtag(b, etOff)
+			if checksumOff != 0 {
+				storagepb.SegmentRefAddChecksum(b, checksumOff)
+			}
+			if pgOff != 0 {
+				storagepb.SegmentRefAddPlacementGroupId(b, pgOff)
+			}
+			if s.ShardSize != 0 {
+				storagepb.SegmentRefAddShardSize(b, s.ShardSize)
+			}
 			segOffs[i] = storagepb.SegmentRefEnd(b)
 		}
 		storagepb.ObjectStartSegmentsVector(b, len(segOffs))
@@ -58,6 +73,21 @@ func marshalObject(obj *Object) ([]byte, error) {
 		}
 		partsOff = b.EndVector(len(partOffs))
 	}
+	var appendMD5sOff flatbuffers.UOffsetT
+	if len(obj.AppendCallMD5s) > 0 {
+		md5Offs := make([]flatbuffers.UOffsetT, len(obj.AppendCallMD5s))
+		for i := len(obj.AppendCallMD5s) - 1; i >= 0; i-- {
+			vOff := b.CreateByteVector(obj.AppendCallMD5s[i])
+			storagepb.BytesValueStart(b)
+			storagepb.BytesValueAddV(b, vOff)
+			md5Offs[i] = storagepb.BytesValueEnd(b)
+		}
+		storagepb.ObjectStartAppendCallMd5sVector(b, len(md5Offs))
+		for i := len(md5Offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(md5Offs[i])
+		}
+		appendMD5sOff = b.EndVector(len(md5Offs))
+	}
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -79,6 +109,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	if partsOff != 0 {
 		storagepb.ObjectAddParts(b, partsOff)
+	}
+	if appendMD5sOff != 0 {
+		storagepb.ObjectAddAppendCallMd5s(b, appendMD5sOff)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -121,10 +154,16 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 			if !t.Segments(&seg, i) {
 				continue
 			}
+			var checksum []byte
+			if cb := seg.ChecksumBytes(); len(cb) > 0 {
+				checksum = append([]byte(nil), cb...)
+			}
 			segs[i] = SegmentRef{
-				BlobID: string(seg.BlobId()),
-				Size:   seg.Size(),
-				ETag:   string(seg.Etag()),
+				BlobID:           string(seg.BlobId()),
+				Size:             seg.Size(),
+				Checksum:         checksum,
+				PlacementGroupID: string(seg.PlacementGroupId()),
+				ShardSize:        seg.ShardSize(),
 			}
 		}
 		dst.Segments = segs
@@ -145,6 +184,19 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 		dst.Parts = parts
 	}
 	dst.IsAppendable = t.IsAppendable()
+	if n := t.AppendCallMd5sLength(); n > 0 {
+		md5s := make([][]byte, n)
+		var bv storagepb.BytesValue
+		for i := 0; i < n; i++ {
+			if !t.AppendCallMd5s(&bv, i) {
+				continue
+			}
+			if v := bv.VBytes(); len(v) > 0 {
+				md5s[i] = append([]byte(nil), v...)
+			}
+		}
+		dst.AppendCallMD5s = md5s
+	}
 	return nil
 }
 

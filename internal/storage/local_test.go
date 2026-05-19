@@ -95,6 +95,45 @@ func TestPutAndGetObject(t *testing.T) {
 	assert.Equal(t, int64(len(data)), meta.Size)
 }
 
+func TestPutObject_AlwaysProducesSegments(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"small", 1024},
+		{"under_chunk", 15 << 20},
+		{"two_chunks", (16 << 20) + 1},
+		{"large", 256 << 20},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestLocalBackend(t)
+			data := makePattern(tc.size)
+			obj, err := b.PutObject(context.Background(), "test", "key-"+tc.name, bytes.NewReader(data), "application/octet-stream")
+			if err != nil {
+				t.Fatalf("put: %v", err)
+			}
+			if len(obj.Segments) < 1 {
+				t.Fatalf("segments must be >=1, got %d", len(obj.Segments))
+			}
+			if obj.Size != int64(tc.size) {
+				t.Fatalf("size: want %d, got %d", tc.size, obj.Size)
+			}
+			rc, _, err := b.GetObject(context.Background(), "test", "key-"+tc.name)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			got, _ := io.ReadAll(rc)
+			rc.Close()
+			if !bytes.Equal(got, data) {
+				t.Fatalf("round-trip differs at offset %d (got %d bytes, want %d)", firstDiff(got, data), len(got), len(data))
+			}
+		})
+	}
+}
+
 func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 	enc := testEncryptor(t)
 	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
@@ -104,10 +143,13 @@ func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	plaintext := []byte("sensitive object payload")
 	key := "sensitive-meta-key"
-	_, err = b.PutObject(context.Background(), "bkt", key, bytes.NewReader(plaintext), "text/plain")
+	obj, err := b.PutObject(context.Background(), "bkt", key, bytes.NewReader(plaintext), "text/plain")
 	require.NoError(t, err)
 
-	raw, err := os.ReadFile(b.objectPath("bkt", key))
+	// Plaintext now lives in segment blobs, not at objectPath. Read the
+	// first segment off disk and assert plaintext is absent.
+	require.NotEmpty(t, obj.Segments, "encrypted PUT must produce segments")
+	raw, err := os.ReadFile(b.segmentPath("bkt", key, obj.Segments[0].BlobID))
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), string(plaintext))
 
@@ -322,9 +364,10 @@ func TestLargeObject(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	assert.Equal(t, data, got)
 
-	// verify file on disk
-	_, err = os.Stat(b.objectPath("test-bucket", "large.bin"))
-	require.NoError(t, err, "expected file on disk")
+	// verify segment blobs on disk (objects now flow through SegmentWriter,
+	// so the legacy single-file objectPath no longer exists).
+	_, err = os.Stat(b.objectPath("test-bucket", "large.bin") + "_segments")
+	require.NoError(t, err, "expected segments dir on disk")
 }
 
 func TestLocalBackend_BucketPolicy(t *testing.T) {
@@ -366,8 +409,10 @@ func TestLocalBackend_WriteAt(t *testing.T) {
 
 	full := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
 
-	// Seed the file via PutObject.
-	_, err := b.PutObject(context.Background(), "bkt", "key", bytes.NewReader(full), "application/octet-stream")
+	// Seed the legacy single-file path via WriteAt. PutObject now flows
+	// through SegmentWriter, which the WriteAt/ReadAt fast paths do not
+	// (yet) read; cross-path tests must seed via WriteAt directly.
+	_, err := b.WriteAt(context.Background(), "bkt", "key", 0, full)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -439,7 +484,9 @@ func TestCachedBackend_WriteAt(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	cached := NewCachedBackend(b)
 
-	_, err := cached.PutObject(context.Background(), "bkt", "key", bytes.NewReader([]byte("hello world")), "text/plain")
+	// Seed via WriteAt to stay on the legacy single-file path that
+	// CachedBackend.WriteAt patches in place.
+	_, err := cached.WriteAt(context.Background(), "bkt", "key", 0, []byte("hello world"))
 	require.NoError(t, err)
 
 	// Warm the cache.
@@ -472,7 +519,9 @@ func TestLocalBackend_ReadAt(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	data := []byte("hello world")
-	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	// Seed via WriteAt (legacy single-file path) so ReadAt's pread can find
+	// the bytes at objectPath. Task 1.8 will make ReadAt segment-aware.
+	_, err := b.WriteAt(context.Background(), "bkt", "obj", 0, data)
 	require.NoError(t, err)
 
 	buf := make([]byte, 5)
@@ -486,7 +535,8 @@ func TestLocalBackend_ReadAt_EOF(t *testing.T) {
 	b := setupTestBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
-	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader([]byte("abc")), "application/octet-stream")
+	// Seed via WriteAt (legacy single-file path). See TestLocalBackend_ReadAt.
+	_, err := b.WriteAt(context.Background(), "bkt", "obj", 0, []byte("abc"))
 	require.NoError(t, err)
 
 	buf := make([]byte, 10)
@@ -530,7 +580,8 @@ func TestCachedBackend_ReadAt_CacheMiss(t *testing.T) {
 	require.NoError(t, cb.CreateBucket(context.Background(), "bkt"))
 
 	data := []byte("uncached data")
-	_, err := cb.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	// Seed via WriteAt so ReadAt's pread hits the legacy single-file path.
+	_, err := cb.WriteAt(context.Background(), "bkt", "obj", 0, data)
 	require.NoError(t, err)
 
 	buf := make([]byte, 8)
@@ -600,4 +651,131 @@ func TestDeleteBucket_ClearsPolicy(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, "reuse-bucket"))
 	_, err := b.GetBucketPolicy("reuse-bucket")
 	assert.ErrorIs(t, err, ErrBucketNotFound, "ghost policy must be gone after bucket delete+recreate")
+}
+
+// TestSnapshotRestore_ChunkedObjectRoundTrip exercises the Phase 1.6
+// segment-aware PITR path: ListAllObjects must capture per-object segment
+// refs, and RestoreObjects must (a) verify each segment blob exists on disk
+// at <key>_segments/<blob_id>, and (b) rebuild Object.Segments so a follow-up
+// GetObject yields byte-identical bytes.
+//
+// Two sizes:
+//   - 32 MiB → 2 × 16 MiB segments (multi-chunk case).
+//   - 100 KiB → 1 segment (single-chunk case).
+func TestSnapshotRestore_ChunkedObjectRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{name: "multi_segment_32MiB", size: 32 << 20},
+		{name: "single_segment_100KiB", size: 100 << 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := setupTestBackend(t)
+			ctx := context.Background()
+			const bucket = "bkt"
+			const key = "blob"
+			require.NoError(t, b.CreateBucket(ctx, bucket))
+
+			payload := make([]byte, tc.size)
+			for i := range payload {
+				payload[i] = byte(i * 31)
+			}
+
+			putObj, err := b.PutObject(ctx, bucket, key, bytes.NewReader(payload), "application/octet-stream")
+			require.NoError(t, err)
+			require.NotEmpty(t, putObj.Segments, "PutObject must produce segments")
+			if tc.size >= int(DefaultChunkSize)*2 {
+				require.GreaterOrEqual(t, len(putObj.Segments), 2, "32 MiB must split into ≥ 2 segments")
+			}
+
+			// Snapshot: ListAllObjects must include Segments.
+			snaps, err := b.ListAllObjects()
+			require.NoError(t, err)
+			var snap SnapshotObject
+			for _, s := range snaps {
+				if s.Bucket == bucket && s.Key == key {
+					snap = s
+					break
+				}
+			}
+			require.Equal(t, key, snap.Key)
+			require.Equal(t, len(putObj.Segments), len(snap.Segments), "snapshot must carry segment refs")
+			for i, seg := range snap.Segments {
+				require.Equal(t, putObj.Segments[i].BlobID, seg.BlobID)
+				require.Equal(t, putObj.Segments[i].Size, seg.Size)
+			}
+
+			// Wipe the badger object record but leave the segment blobs on
+			// disk. RestoreObjects must rebuild the metadata.
+			require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+				return txn.Delete(b.objectMetaKey(bucket, key))
+			}))
+			_, _, err = b.GetObject(ctx, bucket, key)
+			require.ErrorIs(t, err, ErrObjectNotFound, "meta wipe must precede restore")
+
+			// Verify each segment blob is still on disk after the wipe.
+			for _, seg := range snap.Segments {
+				_, statErr := os.Stat(b.segmentPath(bucket, key, seg.BlobID))
+				require.NoError(t, statErr, "segment blob %s must survive meta wipe", seg.BlobID)
+			}
+
+			restored, stale, err := b.RestoreObjects([]SnapshotObject{snap})
+			require.NoError(t, err)
+			require.Equal(t, 1, restored)
+			require.Empty(t, stale, "all segment blobs are present — no stale entries")
+
+			// Round-trip: GetObject must reproduce the original bytes.
+			rc, _, err := b.GetObject(ctx, bucket, key)
+			require.NoError(t, err)
+			got, err := io.ReadAll(rc)
+			require.NoError(t, err)
+			rc.Close()
+			require.Equal(t, payload, got, "restored object must round-trip byte-identical")
+		})
+	}
+}
+
+// TestSnapshotRestore_ChunkedObject_StaleWhenSegmentMissing locks in the
+// segment-aware stale-blob detection: if any segment file is gone from disk,
+// RestoreObjects must report the object as stale rather than restoring
+// unreadable metadata.
+func TestSnapshotRestore_ChunkedObject_StaleWhenSegmentMissing(t *testing.T) {
+	b := setupTestBackend(t)
+	ctx := context.Background()
+	const bucket = "bkt"
+	const key = "missing-seg"
+	require.NoError(t, b.CreateBucket(ctx, bucket))
+
+	payload := make([]byte, 32<<20) // 2 segments
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	putObj, err := b.PutObject(ctx, bucket, key, bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(putObj.Segments), 2)
+
+	snaps, err := b.ListAllObjects()
+	require.NoError(t, err)
+	var snap SnapshotObject
+	for _, s := range snaps {
+		if s.Key == key {
+			snap = s
+		}
+	}
+	require.NotEmpty(t, snap.Segments)
+
+	// Wipe meta + remove ONE segment blob.
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(b.objectMetaKey(bucket, key))
+	}))
+	require.NoError(t, os.Remove(b.segmentPath(bucket, key, snap.Segments[1].BlobID)))
+
+	restored, stale, err := b.RestoreObjects([]SnapshotObject{snap})
+	require.NoError(t, err)
+	require.Equal(t, 0, restored)
+	require.Len(t, stale, 1)
+	require.Equal(t, key, stale[0].Key)
+	require.Equal(t, snap.ETag, stale[0].ExpectedETag)
 }

@@ -95,12 +95,14 @@ func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID str
 	partFile := b.partPath(uploadID, partNumber)
 	if b.encryptor != nil {
 		h, release := hashForBucket(bucket)
-		size, etag, err := writeEncryptedObjectFileWithHash(partFile, b.encryptor, b.multipartPartDomain(uploadID, partNumber), r, h)
-		release()
+		size, err := writeEncryptedObjectFile(partFile, b.encryptor, b.multipartPartDomain(uploadID, partNumber), r, h)
 		if err != nil {
+			release()
 			os.Remove(partFile)
 			return nil, fmt.Errorf("write encrypted part: %w", err)
 		}
+		etag := etagFromHash(h)
+		release()
 		return &Part{
 			PartNumber: partNumber,
 			ETag:       etag,
@@ -171,12 +173,14 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 		partReader := &encryptedMultipartPartsReader{backend: b, uploadID: uploadID, parts: parts}
 		defer partReader.Close()
 		h, release := hashForBucket(bucket)
-		totalSize, etag, err = writeEncryptedObjectFileWithHash(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), partReader, h)
-		release()
+		totalSize, err = writeEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), partReader, h)
 		if err != nil {
+			release()
 			os.Remove(objPath)
 			return nil, fmt.Errorf("write encrypted final object: %w", err)
 		}
+		etag = etagFromHash(h)
+		release()
 	} else {
 		out, err := os.Create(objPath)
 		if err != nil {

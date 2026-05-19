@@ -50,8 +50,12 @@ func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
 	if !obj.IsAppendable {
 		t.Fatal("IsAppendable=false")
 	}
+	// Until Task 3.1 wires real per-call MD5s, the prefix is an MD5 of segment-checksum bytes — assert structure only.
 	if !strings.HasSuffix(obj.ETag, "-1") {
-		t.Fatalf("etag=%q", obj.ETag)
+		t.Fatalf("etag=%q, want suffix -1", obj.ETag)
+	}
+	if idx := strings.IndexByte(obj.ETag, '-'); idx != 32 {
+		t.Fatalf("etag=%q, want 32 hex chars before '-'", obj.ETag)
 	}
 }
 
@@ -75,8 +79,12 @@ func TestAppendObjectSequentialThreeSegments(t *testing.T) {
 	if len(obj.Segments) != 3 {
 		t.Fatalf("segments=%d, want 3", len(obj.Segments))
 	}
+	// Until Task 3.1 wires real per-call MD5s, the prefix is an MD5 of segment-checksum bytes — assert structure only.
 	if !strings.HasSuffix(obj.ETag, "-3") {
 		t.Fatalf("etag=%q, want suffix -3", obj.ETag)
+	}
+	if idx := strings.IndexByte(obj.ETag, '-'); idx != 32 {
+		t.Fatalf("etag=%q, want 32 hex chars before '-'", obj.ETag)
 	}
 }
 
@@ -116,6 +124,23 @@ func TestAppendObjectRejectsLegacyNonAppendable(t *testing.T) {
 	_, err := b.AppendObject(ctx, "test", "k", 5, bytes.NewReader([]byte("world")))
 	if !errors.Is(err, ErrAppendNotSupported) {
 		t.Fatalf("expected ErrAppendNotSupported, got %v", err)
+	}
+}
+
+func TestWriteSegmentBlob_PopulatesChecksum(t *testing.T) {
+	b := newTestLocalBackend(t)
+
+	data := []byte("hello segment world")
+	ref, err := b.WriteSegmentBlob("test", "key-a", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(ref.Checksum) != ChecksumLen {
+		t.Fatalf("checksum length: want %d, got %d", ChecksumLen, len(ref.Checksum))
+	}
+	want := ChecksumOf(data)
+	if !bytes.Equal(ref.Checksum, want) {
+		t.Fatalf("checksum mismatch: want %x, got %x", want, ref.Checksum)
 	}
 }
 

@@ -33,6 +33,11 @@ type Object struct {
 	// pre-B2 appendable objects.
 	Coalesced    []CoalescedRef
 	IsAppendable bool
+	// AppendCallMD5s holds one MD5 digest per AppendObject call (per S3
+	// AppendObject semantics) so Object.ETag can be recomputed independent
+	// of how many segment blobs each call produced. Empty for non-appendable
+	// objects. Wire-up is Task 3.1.
+	AppendCallMD5s [][]byte
 	// Parts is non-empty only for objects produced by CompleteMultipartUpload.
 	// Entries are sorted ascending by PartNumber. The S3 GetObject/HeadObject
 	// ?partNumber=N handler uses this to compute the byte range for part N.
@@ -52,9 +57,11 @@ type MultipartPartEntry struct {
 // object. Order in Object.Segments is append order; per-segment offset is
 // derived as the prefix-sum of preceding sizes.
 type SegmentRef struct {
-	BlobID string // EC/encrypted blob 식별자 (UUIDv7)
-	Size   int64  // plaintext bytes in this segment
-	ETag   string // plaintext MD5 hex (Object.ETag 누적 재계산 입력)
+	BlobID           string // EC/encrypted blob 식별자 (UUIDv7)
+	Size             int64  // plaintext bytes in this segment
+	Checksum         []byte // xxhash3-128 of plaintext segment bytes (16 B)
+	PlacementGroupID string // placement group (EC stripe) identifier; empty for legacy
+	ShardSize        int32  // EC shard size for this segment; 0 for legacy
 }
 
 // CoalescedRef identifies one coalesced blob produced by merging a prefix of
@@ -150,18 +157,26 @@ type Copier interface {
 }
 
 // SnapshotObject is a point-in-time metadata record for a stored object.
+//
+// Segments carries the per-object chunk refs introduced in Phase 1.6: a
+// chunked object's blobs live under <key>_segments/<blob_id>, not at the
+// legacy objectPath. Snapshots must capture Segments so PITR restore can
+// verify the right blobs and rehydrate Object metadata. Older snapshots
+// without this field are still readable; they fall back to the legacy
+// single-file blob check during restore.
 type SnapshotObject struct {
-	Bucket         string `json:"bucket"`
-	Key            string `json:"key"`
-	ETag           string `json:"etag"`
-	Size           int64  `json:"size"`
-	ContentType    string `json:"content_type"`
-	Modified       int64  `json:"modified"`
-	VersionID      string `json:"version_id,omitempty"`
-	IsDeleteMarker bool   `json:"is_delete_marker,omitempty"`
-	IsLatest       bool   `json:"is_latest,omitempty"`
-	ACL            uint8  `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
-	SSEAlgorithm   string `json:"sse_algorithm,omitempty"`
+	Bucket         string       `json:"bucket"`
+	Key            string       `json:"key"`
+	ETag           string       `json:"etag"`
+	Size           int64        `json:"size"`
+	ContentType    string       `json:"content_type"`
+	Modified       int64        `json:"modified"`
+	VersionID      string       `json:"version_id,omitempty"`
+	IsDeleteMarker bool         `json:"is_delete_marker,omitempty"`
+	IsLatest       bool         `json:"is_latest,omitempty"`
+	ACL            uint8        `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
+	SSEAlgorithm   string       `json:"sse_algorithm,omitempty"`
+	Segments       []SegmentRef `json:"segments,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.

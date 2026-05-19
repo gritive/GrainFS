@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 )
@@ -9,9 +10,9 @@ func TestObjectCodecRoundTripWithSegments(t *testing.T) {
 	orig := &Object{
 		Key: "k", Size: 30 * 1024 * 1024, ETag: "cafef00d-3",
 		Segments: []SegmentRef{
-			{BlobID: "b1", Size: 10 << 20, ETag: "aa"},
-			{BlobID: "b2", Size: 10 << 20, ETag: "bb"},
-			{BlobID: "b3", Size: 10 << 20, ETag: "cc"},
+			{BlobID: "b1", Size: 10 << 20, Checksum: bytes.Repeat([]byte{0xaa}, ChecksumLen), PlacementGroupID: "pg1", ShardSize: 1 << 20},
+			{BlobID: "b2", Size: 10 << 20, Checksum: bytes.Repeat([]byte{0xbb}, ChecksumLen), PlacementGroupID: "pg1", ShardSize: 1 << 20},
+			{BlobID: "b3", Size: 10 << 20, Checksum: bytes.Repeat([]byte{0xcc}, ChecksumLen), PlacementGroupID: "pg2", ShardSize: 1 << 20},
 		},
 		IsAppendable: true,
 	}

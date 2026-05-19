@@ -61,7 +61,24 @@ func (rcv *SegmentRef) MutateSize(n int64) bool {
 	return rcv._tab.MutateInt64Slot(6, n)
 }
 
-func (rcv *SegmentRef) Etag() []byte {
+func (rcv *SegmentRef) Checksum(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *SegmentRef) ChecksumLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *SegmentRef) ChecksumBytes() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -69,8 +86,37 @@ func (rcv *SegmentRef) Etag() []byte {
 	return nil
 }
 
+func (rcv *SegmentRef) MutateChecksum(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+func (rcv *SegmentRef) PlacementGroupId() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *SegmentRef) ShardSize() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SegmentRef) MutateShardSize(n int32) bool {
+	return rcv._tab.MutateInt32Slot(12, n)
+}
+
 func SegmentRefStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(5)
 }
 func SegmentRefAddBlobId(builder *flatbuffers.Builder, blobId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(blobId), 0)
@@ -78,8 +124,17 @@ func SegmentRefAddBlobId(builder *flatbuffers.Builder, blobId flatbuffers.UOffse
 func SegmentRefAddSize(builder *flatbuffers.Builder, size int64) {
 	builder.PrependInt64Slot(1, size, 0)
 }
-func SegmentRefAddEtag(builder *flatbuffers.Builder, etag flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(etag), 0)
+func SegmentRefAddChecksum(builder *flatbuffers.Builder, checksum flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(checksum), 0)
+}
+func SegmentRefStartChecksumVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func SegmentRefAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(placementGroupId), 0)
+}
+func SegmentRefAddShardSize(builder *flatbuffers.Builder, shardSize int32) {
+	builder.PrependInt32Slot(4, shardSize, 0)
 }
 func SegmentRefEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

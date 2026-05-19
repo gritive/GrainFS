@@ -58,9 +58,9 @@ func TestApplyCoalesceSegmentsHappyPath(t *testing.T) {
 	seed := objectMeta{
 		Key: "k", Size: 30, IsAppendable: true,
 		Segments: []storage.SegmentRef{
-			{BlobID: "s1", Size: 10, ETag: "e1"},
-			{BlobID: "s2", Size: 10, ETag: "e2"},
-			{BlobID: "s3", Size: 10, ETag: "e3"},
+			{BlobID: "s1", Size: 10, Checksum: []byte("e1")},
+			{BlobID: "s2", Size: 10, Checksum: []byte("e2")},
+			{BlobID: "s3", Size: 10, Checksum: []byte("e3")},
 		},
 	}
 	coalesceWriteMeta(t, f, "b", "k", seed)
@@ -91,7 +91,7 @@ func TestApplyCoalesceSegmentsIdempotentReplay(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 	seed := objectMeta{
 		Key: "k", Size: 30, IsAppendable: true,
-		Segments:  []storage.SegmentRef{{BlobID: "s3", Size: 10, ETag: "e3"}},
+		Segments:  []storage.SegmentRef{{BlobID: "s3", Size: 10, Checksum: []byte("e3")}},
 		Coalesced: []CoalescedShardRef{{CoalescedID: "c1", ShardKey: "k/coalesced/c1", Size: 20, ETag: "etag-c1", Version: 1}},
 	}
 	coalesceWriteMeta(t, f, "b", "k", seed)
@@ -117,9 +117,9 @@ func TestApplyCoalesceSegmentsRaceAppendPreserved(t *testing.T) {
 	seed := objectMeta{
 		Key: "k", Size: 30, IsAppendable: true,
 		Segments: []storage.SegmentRef{
-			{BlobID: "s1", Size: 10, ETag: "e1"},
-			{BlobID: "s2", Size: 10, ETag: "e2"},
-			{BlobID: "s3", Size: 10, ETag: "e3"}, // raced in
+			{BlobID: "s1", Size: 10, Checksum: []byte("e1")},
+			{BlobID: "s2", Size: 10, Checksum: []byte("e2")},
+			{BlobID: "s3", Size: 10, Checksum: []byte("e3")}, // raced in
 		},
 	}
 	coalesceWriteMeta(t, f, "b", "k", seed)
