@@ -27,6 +27,9 @@ func Run(ctx context.Context, cfg Config) error {
 	defer cancel()
 	state := newBootState(cfg)
 	state.cancel = cancel
+	// §5 T46: default banner sink. Tests using bootstrap.Run override
+	// state.bannerWriter to a buffer before phase dispatch.
+	state.bannerWriter = os.Stdout
 	defer state.Cleanup()
 
 	// PR 2: config + storage open.
@@ -186,6 +189,12 @@ func Run(ctx context.Context, cfg Config) error {
 	// populated) and BEFORE bootResharderAndDegraded (which goroutines
 	// srv.Run() — the listener actually starts there).
 	if err := bootTLSPostureGate(state); err != nil {
+		return err
+	}
+	// §5 T46: print Phase 0 anonymous-access banner once at startup. Placed
+	// AFTER bootTLSPostureGate so a refused boot does not contradict itself
+	// by also printing the warning.
+	if err := bootPhase0Banner(state); err != nil {
 		return err
 	}
 	if err := bootRecoveryAndScrubber(ctx, state); err != nil {

@@ -131,7 +131,14 @@ func bootMetaRaftWiring(state *bootState) error {
 	// touching the hook plumbing.
 	proxyTrust := server.NewProxyTrust(nil)
 	state.proxyTrust = proxyTrust
-	hooks.OnAnonEnabledChange = onAnon
+	// §5 T46: wrap the posture-check hook so the operator gets a one-shot
+	// "s3://default remains public" INFO banner on a successful true→false
+	// flip. Initial value is the registered default (true) — anon-enabled
+	// has not yet been Set at wire time, so the BoolSpec default is the
+	// correct seed. state.bannerWriter is os.Stdout in production (set in
+	// Run); tests that route through bootstrap.Run can substitute a buffer
+	// before phase dispatch.
+	hooks.OnAnonEnabledChange = composeAnonHookWithBanner(onAnon, true, state.bannerWriter)
 	hooks.OnTrustedProxyCIDR = func(ctx context.Context, v string) error {
 		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
 		return onProxy(ctx, v)
