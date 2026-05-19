@@ -26,6 +26,11 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	if c.QueryArgs().Has("tagging") {
+		s.putObjectTagging(ctx, c)
+		return
+	}
+
 	// Check if this is an UploadPart request
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	partNumberStr := string(c.QueryArgs().Peek("partNumber"))
@@ -112,6 +117,11 @@ func (s *Server) deleteObject(ctx context.Context, c *app.RequestContext) {
 	key := getKey(c)
 	if key == "" {
 		s.deleteBucket(ctx, c)
+		return
+	}
+
+	if c.QueryArgs().Has("tagging") {
+		s.deleteObjectTagging(ctx, c)
 		return
 	}
 
