@@ -25,7 +25,6 @@ func TestS3ClientSmoke(t *testing.T) {
 
 func testS3ClientSmokeMinIOMC(t *testing.T) {
 	if _, err := exec.LookPath("mc"); err != nil {
-		t.Skip("mc binary not found; install MinIO Client to run TestS3ClientSmoke/MinIOMC")
 	}
 
 	bucket := "client-smoke-mc"
@@ -48,10 +47,8 @@ func testS3ClientSmokeMinIOMC(t *testing.T) {
 
 func testS3ClientSmokeS3FS(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("s3fs smoke requires a Unix-like FUSE environment")
 	}
 	if _, err := exec.LookPath("s3fs"); err != nil {
-		t.Skip("s3fs binary not found; install s3fs to run TestS3ClientSmoke/S3FS")
 	}
 
 	bucket := "client-smoke-s3fs"
@@ -84,10 +81,8 @@ func testS3ClientSmokeS3FS(t *testing.T) {
 
 func testS3ClientSmokeGoofys(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("goofys smoke requires a Unix-like FUSE environment")
 	}
 	if _, err := exec.LookPath("goofys"); err != nil {
-		t.Skip("goofys binary not found; install goofys to run TestS3ClientSmoke/Goofys")
 	}
 
 	bucket := "client-smoke-goofys"
@@ -186,7 +181,6 @@ func skipIfMissingFUSE(t *testing.T, client string, out []byte, err error) {
 		"no such file or directory",
 	} {
 		if strings.Contains(msg, marker) {
-			t.Skipf("%s mount capability unavailable: %v\n%s", client, err, out)
 		}
 	}
 }

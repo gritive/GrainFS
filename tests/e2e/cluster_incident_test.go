@@ -131,7 +131,6 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 func TestE2E_QuarantineIncident(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s - run `make build` first", binary)
 	}
 
 	const (

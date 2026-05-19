@@ -97,7 +97,6 @@ func waitClusterSettled(t *testing.T, leaderURL string) {
 // 리더에서 GET으로 조회 가능해야 한다 (ADR 0011 복제 요건).
 func TestLifecycle_FollowerPutLeaderGet(t *testing.T) {
 	if _, err := os.Stat(getBinary()); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", getBinary())
 	}
 
 	// lifecycle-interval을 24h로 설정: 서비스와 메타데이터 복제는 활성화하되
@@ -155,7 +154,6 @@ func TestLifecycle_FollowerPutLeaderGet(t *testing.T) {
 // 완료하길 기다리는 방식으로 즉각 crash 시나리오를 검증한다.
 func TestLifecycle_LeaderChangePreservesConfig(t *testing.T) {
 	if _, err := os.Stat(getBinary()); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", getBinary())
 	}
 
 	// lifecycle-interval을 24h로 설정: 서비스와 메타데이터 복제는 활성화하되

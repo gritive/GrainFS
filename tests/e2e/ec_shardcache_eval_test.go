@@ -54,11 +54,9 @@ import (
 //     all cold. Simulator must report 0% hit at every cache size.
 func TestE2E_ECShardCacheEval(t *testing.T) {
 	if os.Getenv("GRAINFS_EC_SHARDCACHE_EVAL") != "1" {
-		t.Skip("set GRAINFS_EC_SHARDCACHE_EVAL=1 to run EC shard-cache measurement workload")
 	}
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
 	const (
@@ -334,7 +332,6 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 func TestE2E_ECShardCacheActive(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
 	const (

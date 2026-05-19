@@ -133,7 +133,6 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 
 	t.Run("HeadByVersionID_AllNodes", func(t *testing.T) {
 		if !tgt.isCluster {
-			t.Skip("requires cluster fixture for fan-out")
 		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "headvidfan")

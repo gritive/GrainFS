@@ -28,7 +28,6 @@ func startTestServerOnPort(t *testing.T, port int, extraArgs ...string) (dataDir
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build`", binary)
 	}
 
 	dir, err := os.MkdirTemp("/tmp", "grainfs-vol-cli-")

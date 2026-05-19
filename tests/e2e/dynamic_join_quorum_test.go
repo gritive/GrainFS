@@ -18,7 +18,6 @@ import (
 // stuck. Regression for TODOS.md "DynamicJoin quorum inflation".
 func TestE2E_DynamicJoinTwoSurvivorReelect(t *testing.T) {
 	if _, err := os.Stat(getBinary()); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", getBinary())
 	}
 
 	c := startE2ECluster(t, e2eClusterOptions{

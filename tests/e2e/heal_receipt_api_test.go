@@ -42,7 +42,6 @@ import (
 func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
-		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
 	}
 
 	const clusterKey = "E2E-RECEIPT-CLUSTER-KSJGH45"
