@@ -31,6 +31,10 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		s.listObjectVersions(ctx, c, bucket)
 		return
 	}
+	if c.QueryArgs().Has("object-lock") {
+		s.getBucketObjectLockConfiguration(ctx, c, bucket)
+		return
+	}
 	if c.QueryArgs().Has("location") {
 		s.getBucketLocation(ctx, c, bucket)
 		return

@@ -143,6 +143,33 @@ func TestCompiledPolicyStore_WildcardAction(t *testing.T) {
 	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.PutObject, "mybucket", "k")))
 }
 
+func TestCompiledPolicyStore_AllowsVersioningAndRetentionActions(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	ctx := context.Background()
+
+	doc := makePolicy(t, PolicyStatement{
+		Effect:    "Allow",
+		Principal: PolicyPrincipal{AWS: []string{"admin"}},
+		Action: []string{
+			"s3:GetBucketVersioning",
+			"s3:PutBucketVersioning",
+			"s3:ListBucketVersions",
+			"s3:GetObjectRetention",
+			"s3:PutObjectRetention",
+			"s3:GetBucketObjectLockConfiguration",
+		},
+		Resource: []string{"arn:aws:s3:::mybucket/*"},
+	})
+	require.NoError(t, cs.Set("mybucket", doc))
+
+	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.GetBucketVersioning, "mybucket", "")))
+	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.PutBucketVersioning, "mybucket", "")))
+	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.ListBucketVersions, "mybucket", "")))
+	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.GetObjectRetention, "mybucket", "k")))
+	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.PutObjectRetention, "mybucket", "k")))
+	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.GetBucketObjectLockConfiguration, "mybucket", "")))
+}
+
 func TestCompiledPolicyStore_ImplementsPolicyChecker(t *testing.T) {
 	var _ s3auth.PolicyChecker = NewCompiledPolicyStore()
 }
