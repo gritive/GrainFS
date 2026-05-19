@@ -103,7 +103,17 @@ func principalMatches(p *StringOrMap, principal string, allowAnon bool) bool {
 	}
 	for _, vs := range p.Named {
 		for _, v := range vs {
-			if v == principal || v == "*" {
+			if v == "*" {
+				// Named-form wildcard (e.g. Principal:{"AWS":["*"]}) must obey the same
+				// AllowAnonBucket gate as the top-level Star form. Without this, an
+				// operator could write a bucket policy with {"Principal":{"AWS":["*"]}}
+				// and bypass both iam.anon-enabled and iam.allow-anonymous-bucket-policy.
+				if allowAnon {
+					return true
+				}
+				continue
+			}
+			if v == principal {
 				return true
 			}
 		}

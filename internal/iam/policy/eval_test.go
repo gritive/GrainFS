@@ -56,6 +56,24 @@ func TestEvaluate_Matrix(t *testing.T) {
 			allowAnonBucket: true,
 			want:            DecisionAllow,
 		},
+		{
+			// Security regression test: the Named-form wildcard MUST honor the same
+			// AllowAnonBucket gate as the top-level Star form. Previously,
+			// {"Principal":{"AWS":["*"]}} bypassed the gate by hitting the
+			// `v == "*"` branch in principalMatches without consulting allowAnon.
+			name:        "Principal:{AWS:[*]} on bucket policy ignored without allow-anon flag",
+			resourcePol: `{"Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":"s3:GetObject","Resource":"arn:aws:s3:::p/*"}]}`,
+			action:      "s3:GetObject", resource: "arn:aws:s3:::p/x",
+			allowAnonBucket: false,
+			want:            DecisionDeny,
+		},
+		{
+			name:        "Principal:{AWS:[*]} honored when allow-anon flag is on",
+			resourcePol: `{"Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":"s3:GetObject","Resource":"arn:aws:s3:::p/*"}]}`,
+			action:      "s3:GetObject", resource: "arn:aws:s3:::p/x",
+			allowAnonBucket: true,
+			want:            DecisionAllow,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
