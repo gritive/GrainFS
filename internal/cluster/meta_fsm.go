@@ -19,6 +19,8 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -128,6 +130,8 @@ const (
 	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
 	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
+	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
+	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -301,6 +305,15 @@ type MetaFSM struct {
 	// via SetEncryptor before the raft log starts replaying.
 	encryptor *encrypt.Encryptor
 
+	// policyStore is the IAM policy document store. nil until SetPolicyStore is
+	// called; PolicyPut/PolicyDelete commands are safe no-ops when nil.
+	policyStore *policystore.InMemoryStore
+
+	// policyResolver is the IAM effective-policy resolver. nil until
+	// SetPolicyResolver is called. When non-nil its cache is invalidated on
+	// every PolicyPut/PolicyDelete apply.
+	policyResolver *policy.Resolver
+
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
 	cfgStore *config.Store
@@ -391,6 +404,24 @@ func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dekKeeper = k
+}
+
+// SetPolicyStore wires the IAM policy store into the MetaFSM. Must be called
+// before the raft log starts replaying. nil means PolicyPut/PolicyDelete
+// commands are safe no-ops (not configured yet).
+func (f *MetaFSM) SetPolicyStore(s *policystore.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyStore = s
+}
+
+// SetPolicyResolver wires the effective-policy resolver into the MetaFSM.
+// When non-nil, its cache is invalidated on every PolicyPut/PolicyDelete apply.
+// nil is safe (no-op invalidation).
+func (f *MetaFSM) SetPolicyResolver(r *policy.Resolver) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyResolver = r
 }
 
 // dekRefCount returns the number of ObjectIndexEntry records that reference
@@ -608,6 +639,10 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyConfigPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeConfigDelete:
 		return f.applyConfigDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyPut:
+		return f.applyPolicyPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyDelete:
+		return f.applyPolicyDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		if f.dekKeeper == nil {
 			return nil
@@ -873,6 +908,42 @@ func (f *MetaFSM) applyConfigDelete(payload []byte) error {
 		return fmt.Errorf("meta_fsm: ConfigDelete: %w", err)
 	}
 	return f.cfgStore.Unset(context.Background(), key)
+}
+
+func (f *MetaFSM) applyPolicyPut(payload []byte) error {
+	if f.policyStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, docJSON, builtin, err := DecodePolicyPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyPut: %w", err)
+	}
+	if err := f.policyStore.Put(context.Background(), name, docJSON, builtin); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// A policy doc body change can affect any cached entry that references it;
+		// invalidate the entire cache (passing both nil slices nukes all entries).
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyDelete(payload []byte) error {
+	if f.policyStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, err := DecodePolicyDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyDelete: %w", err)
+	}
+	if err := f.policyStore.Delete(context.Background(), name); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {
@@ -2060,6 +2131,10 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	binary.LittleEndian.PutUint32(footer[4:8], iamSnapshotTrailerMagic)
 	out = append(out, footer[:]...)
 
+	// TODO(T23/T24): include policyStore in snapshot/restore — deferred until
+	// PolicyAttachStore and BucketPolicyStore are wired so a single trailer can
+	// carry all three IAM policy tables atomically.
+
 	// Append GCFG trailer after the IAM trailer. Only emit when there are
 	// explicit config values to persist — an empty map produces no trailer so
 	// old snapshots (taken from a fresh cluster with no overrides) remain
@@ -2403,6 +2478,8 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			}
 		}
 	}
+
+	// TODO(T23/T24): restore policyStore from snapshot trailer — deferred, see Snapshot comment.
 
 	// GCFG restore — populate the config store from the GCFG trailer.
 	// If no trailer was present (legacy snapshot or no overrides), leave the

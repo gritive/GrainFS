@@ -425,6 +425,8 @@ enum MetaCmdType : uint8 {
   ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
   DEKRotate               = 48, // DEK key rotation: generate new active generation
   DEKVersionPrune         = 49, // DEK version prune: drop old wrapped DEK after rewrap scrub
+  PolicyPut               = 50, // IAM: policy document upsert (name + doc JSON + builtin flag)
+  PolicyDelete            = 51, // IAM: policy document delete
 }
 
 table MetaNodeEntry {
@@ -852,4 +854,16 @@ table MetaCatalogReadReply {
   namespaces    : [CatalogNamespace];   // op = ListNamespaces
   loaded_table  : CatalogTable;         // op = LoadTable (renamed from "table" to avoid collision with flatbuffers built-in Table() accessor)
   tables        : [CatalogIdentifier];  // op = ListTables
+}
+
+// PolicyPut payload: upsert a named policy document.
+table MetaPolicyPutCmd {
+  name:string;
+  doc_json:[ubyte];
+  builtin:bool;
+}
+
+// PolicyDelete payload: remove a named policy document.
+table MetaPolicyDeleteCmd {
+  name:string;
 }
