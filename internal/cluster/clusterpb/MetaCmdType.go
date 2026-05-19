@@ -53,6 +53,10 @@ const (
 	MetaCmdTypeCapabilityActivate           MetaCmdType = 43
 	MetaCmdTypeMigrationCutover             MetaCmdType = 44
 	MetaCmdTypeNfsExportCreate              MetaCmdType = 45
+	MetaCmdTypeConfigPut                    MetaCmdType = 46
+	MetaCmdTypeConfigDelete                 MetaCmdType = 47
+	MetaCmdTypeDEKRotate                    MetaCmdType = 48
+	MetaCmdTypeDEKVersionPrune              MetaCmdType = 49
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -102,6 +106,10 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeCapabilityActivate:           "CapabilityActivate",
 	MetaCmdTypeMigrationCutover:             "MigrationCutover",
 	MetaCmdTypeNfsExportCreate:              "NfsExportCreate",
+	MetaCmdTypeConfigPut:                    "ConfigPut",
+	MetaCmdTypeConfigDelete:                 "ConfigDelete",
+	MetaCmdTypeDEKRotate:                    "DEKRotate",
+	MetaCmdTypeDEKVersionPrune:              "DEKVersionPrune",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -151,6 +159,10 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"CapabilityActivate":           MetaCmdTypeCapabilityActivate,
 	"MigrationCutover":             MetaCmdTypeMigrationCutover,
 	"NfsExportCreate":              MetaCmdTypeNfsExportCreate,
+	"ConfigPut":                    MetaCmdTypeConfigPut,
+	"ConfigDelete":                 MetaCmdTypeConfigDelete,
+	"DEKRotate":                    MetaCmdTypeDEKRotate,
+	"DEKVersionPrune":              MetaCmdTypeDEKVersionPrune,
 }
 
 func (v MetaCmdType) String() string {

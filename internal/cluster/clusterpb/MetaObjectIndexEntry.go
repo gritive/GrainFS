@@ -198,8 +198,20 @@ func (rcv *MetaObjectIndexEntry) PartsLength() int {
 	return 0
 }
 
+func (rcv *MetaObjectIndexEntry) DekGen() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaObjectIndexEntry) MutateDekGen(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(32, n)
+}
+
 func MetaObjectIndexEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(14)
+	builder.StartObject(15)
 }
 func MetaObjectIndexEntryAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -248,6 +260,9 @@ func MetaObjectIndexEntryAddParts(builder *flatbuffers.Builder, parts flatbuffer
 }
 func MetaObjectIndexEntryStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func MetaObjectIndexEntryAddDekGen(builder *flatbuffers.Builder, dekGen uint32) {
+	builder.PrependUint32Slot(14, dekGen, 0)
 }
 func MetaObjectIndexEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

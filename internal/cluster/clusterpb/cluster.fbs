@@ -421,6 +421,10 @@ enum MetaCmdType : uint8 {
   CapabilityActivate      = 43, // Rolling-upgrade capability: active persisted feature marker
   MigrationCutover        = 44, // Migration job: mark bucket upstream cutover semantics active
   NfsExportCreate         = 45, // NFSv4 multi-export: create only, reject existing export
+  ConfigPut               = 46, // cluster-wide config: set key=value
+  ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
+  DEKRotate               = 48, // DEK key rotation: generate new active generation
+  DEKVersionPrune         = 49, // DEK version prune: drop old wrapped DEK after rewrap scrub
 }
 
 table MetaNodeEntry {
@@ -449,6 +453,46 @@ table MetaCapabilityActivateCmd {
 table MetaMigrationCutoverCmd {
   bucket:string;
   updated_at_unix_ns:int64;
+}
+
+// cluster-wide config: set key=value
+table MetaConfigPutCmd {
+  key:string;
+  value:string;
+}
+
+// cluster-wide config: unset key (revert to default)
+table MetaConfigDeleteCmd {
+  key:string;
+}
+
+// DEKVersionPrune payload: which generation to prune.
+// DEKRotate has no payload — just the type byte.
+table MetaDEKVersionPruneCmd {
+  gen:uint32;
+}
+
+// DEK snapshot trailer entry: one wrapped DEK generation.
+table DEKVersionEntry {
+  gen:uint32;
+  wrapped:[ubyte];
+}
+
+// DEKRefEntry records how many object-index records reference a DEK generation.
+// Used for prune-safety: a generation can only be pruned when its ref count is 0.
+table DEKRefEntry {
+  gen:uint32;
+  count:int64;
+}
+
+// MetaDEKVersionSnapshot is the DKVS trailer payload: all wrapped DEK versions
+// plus the active generation at snapshot time.
+// Wire position: appended after the GCFG trailer (if any).
+// ref_counts field added in Task 12 (append-only; old readers decode as empty list).
+table MetaDEKVersionSnapshot {
+  versions:[DEKVersionEntry];
+  active:uint32;
+  ref_counts:[DEKRefEntry];
 }
 
 // PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.
@@ -489,6 +533,9 @@ table MetaObjectIndexEntry {
   is_delete_marker:bool = false;
   is_latest:bool = false;
   parts:[MultipartPartEntry];
+  // dek_gen records which DEK generation sealed this object's blobs.
+  // Default 0 = legacy (pre-Task-12) objects use generation 0.
+  dek_gen:uint32 = 0;
 }
 
 table MetaPutObjectIndexCmd {
@@ -636,6 +683,19 @@ table NfsExportDeleteCmd {
 table NfsExportBucketDeleteCascadeCmd {
   bucket:string;
   force:bool = false;
+}
+
+// MetaConfigSnapshot is the GCFG trailer payload: a snapshot of all
+// explicitly-set cluster-wide config key→value pairs (config.Store).
+// Wire position: appended after the IAM trailer (if any) as described by
+// the GCFG trailer convention in meta_fsm.go.
+table ConfigEntry {
+  key:string;
+  value:string;
+}
+
+table MetaConfigSnapshot {
+  entries:[ConfigEntry];
 }
 
 table MetaStateSnapshot {

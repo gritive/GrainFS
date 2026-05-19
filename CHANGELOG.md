@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.0.260.0] - 2026-05-19 - feat(auth): zero-config progressive application — §1 Foundation slice
+
+Auth redesign §1 Foundation slice. Spec/plan: `docs/superpowers/specs/2026-05-19-auth-redesign.md` (D#1, D#4, D#5). 5 new internal packages, 5 new FSM MetaCmds + 2 backward-compatible snapshot trailers, 21 commits, +4069 -13 lines. **Runtime wiring deferred** — admin UDS surface, server hot-swap, scrubber→storage adapter는 후속 슬라이스 (§2-§9). data-plane 영향 없음, snapshot 호환 유지.
+
+### Added
+
+- **`internal/nodeconfig`** (Tasks 1-2) — node-local resource resolver. `TLSCertPath()` / `TLSKeyPath()` / `KEKSource()` / `LogLevel()` 4개 메서드, 각각 `<data>/...` convention path + env override (`GRAINFS_TLS_CERT`, `GRAINFS_KEK_SOURCE`, `GRAINFS_LOG_LEVEL`). KEK source는 `file://` URI 반환 (kms://는 v2 이연).
+- **`internal/encrypt`** (Tasks 3-5, 13) — KEK/DEK 분리 모델. `LoadOrGenerateKEK(file://path)` 로 32B 키 자동 생성 (mode 0600, O_NOFOLLOW, absolute-path 검증, looser-perm 거부). `AESGCMSeal/Open` 저수준 프리미티브. `DEKKeeper`는 `dek_gen uint32` 세대별 wrapped DEK 맵을 들고, AEAD를 한 번 캐싱 — `Seal/Open` hot-path는 매 호출마다 `aes.NewCipher`/`cipher.NewGCM` 재빌드 안 함 (S3 object I/O당 ~4 heap alloc 절감). plaintext DEK는 AEAD 빌드 직후 즉시 zeroize. `Rewrap(ct, oldGen)`은 RLock 1회로 open+seal 동시 처리. `RewrapScrubber`는 Backend interface 추상화로 gen 단위 재암호화 (F#17 atomic-swap 컨트랙트).
+- **`internal/config`** (Tasks 6-7) — FSM-backed cluster-wide config registry. `Store.Register/Set/Unset/GetString/GetBool/ListAll/Snapshot/Restore`. `BoolSpec`/`StringSpec`/`TriggerSpec`/`Uint32Spec` 타입별 spec + reload-hook 콜백. `Set/Unset`은 reload-hook panic 시 자동 rollback + recover (FSM apply goroutine 보호). `Restore`는 spec validator 통과 값만 적용 (tampered snapshot 방어). 9개 cluster 키 등록 (`iam.anon-enabled`, `iam.allow-anonymous-bucket-policy`, `trusted-proxy.cidr`, `jwt.signing-key-rotate/prune`, `encryption.rotate-dek` (no-op reload), `encryption.prune-dek-version` (no-op reload), `cluster.read-only`, `audit.deny-only`).
+- **`internal/cluster` 확장** (Tasks 9-12) — 4개 새 MetaCmd: `MetaCmdTypeConfigPut=46`, `ConfigDelete=47`, `DEKRotate=48`, `DEKVersionPrune=49`. FlatBuffers 스키마 `MetaConfigPutCmd`/`MetaConfigDeleteCmd`/`MetaDEKVersionPruneCmd`/`MetaConfigSnapshot`/`MetaDEKVersionSnapshot`/`ConfigEntry`/`DEKVersionEntry`/`DEKRefEntry` 추가. snapshot에 두 trailer 추가: **GCFG** (0x47464347) — config 값 직렬화, **DKVS** (0x53564B44) — DEK versions + ref counts + active gen. 둘 다 root + IAM trailer 뒤에 append, restore는 역순 peel. backward-compat: pre-Task-10 snapshot (GCFG 없음) / pre-Task-11 (DKVS 없음) / pre-Task-12 (DKVS에 ref_counts 필드 없음) 모두 로드. 마지막은 `objectIndex`에서 ref count 재구축. `MetaObjectIndexEntry.dek_gen:uint32=0` 추가 — FlatBuffer 기본값이 마이그레이션 역할.
+- **`internal/cluster/post_commit.go`** — FSM 일반 post-commit hook surface. `RegisterPostCommit(h)` copy-on-write CAS, `firePostCommitHooks`는 `atomic.Pointer[[]PostCommitHook]` lock-free load. 0-hook 클러스터는 매 apply마다 single atomic load만 부담.
+- **`internal/serveruntime/dek_post_commit.go`** — `DEKPostCommitDispatcher` + `WireDEKPostCommit`. `MetaCmdConfigPut(encryption.rotate-dek=now)` → goroutine으로 `ProposeDEKRotate` deferred dispatch (Pass 1 F-A1: apply goroutine 내부에서 propose 금지, raft deadlock 방어). `MetaCmdDEKRotate` apply 후 per-node scrubber kick — leader-only가 아니라 모든 노드가 자기 로컬 shard 처리 (Pass 1 F-A3).
+
+### Security
+
+- KEK 파일 모드 0o600이 아니면 거부 (`ErrKEKPermissionsTooLoose`). 0o644로 chmod된 KEK는 클러스터 identity 유출 위험.
+- KEK 경로 symlink 거부 (`ErrKEKSymlink`, `O_NOFOLLOW`). data 디렉토리 쓰기 권한 attacker가 kek.key → 임의 32B 파일 symlink 공격 차단.
+- `LoadFromFSM`이 `len(kek) == KEKSize` 검증. malformed key가 keeper에 silently 저장돼서 모든 Seal/Open 실패하는 시나리오 차단.
+- `DEKRefEntry.Count()`의 `int64 → uint64` 캐스팅에서 음수 거부. tampered/bit-flipped snapshot에서 -1이 max-uint64로 변환돼 prune이 영원히 막히는 DEK leak 차단.
+
+### Performance
+
+- `config_codec.encodeMetaConfigSnapshot`은 키를 정렬 후 직렬화 — replica 간 snapshot byte 결정성 보장 (raft hash 비교 통과). `dek_codec`은 gen + ref_counts 둘 다 정렬.
+- `config.Store.ListAll`은 Key 기준 정렬 — CLI/admin API 일관된 순서.
+- `DEKKeeper`의 generation별 `cipher.AEAD` 캐싱 (위 Added 참조). `Rewrap`은 single-lock open+seal로 scrubber 처리량 2배 개선.
+- `MetaFSM.firePostCommitHooks`는 `atomic.Pointer` load — 0-hook fast path는 lock 획득 0회.
+
+### Tests
+
+- 새 패키지마다 단위 테스트 동반. 핵심 보강: `TestAESGCMOpen_RejectsShortCiphertext`/`RejectsWrongKeyLength`, `TestLoadOrGenerateKEK_RejectsLoosePermissions`/`RejectsSymlink`/`RejectsWrongSizeFile`/`RejectsRelativePath`, `TestDEKKeeper_PruneRefusesActiveGen`/`ActiveReturnsCopy`/`VersionsIsDeepCopy`/`ConcurrentSealOpenRotate` (`-race` 50 goroutine × 200ms × Rotate every 1ms), `TestLoadFromFSM_EmptyVersions`/`RoundTrip`, `TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing` (gen 0 + gen 1 multi-gen rebuild), `TestSnapshot_GCFGTrailerByteDeterminism` (16x encode 동일 결과), `TestSnapshot_RestoreConfigValues`/`LegacyWithoutConfigTrailer`, `TestRewrapScrubber_AtomicSwap_NoCorruptMidUpdate` (50 reader vs scrubber). `TestApply_*` 시리즈로 모든 MetaCmd apply path + nil-store/keeper 가드 + 트레일러 인코딩 검증.
+- `make test-unit`/`make lint`/`make build` 모두 green. `internal/cluster` race-clean (50s × `-race`).
+
+### Deferred (후속 §)
+
+- 사용자 facing surface 없음 — admin UDS 명령 (`grainfs iam ...`, `grainfs config set ...`, `grainfs cluster join`), server 통합 (TLS hot-swap, OAuth2 endpoint, bearer middleware), real storage backend `IterByDEKGen`/`AtomicSwap` 어댑터, runtime의 `WireDEKPostCommit` invocation은 후속 슬라이스 (§2 IAM core, §3 Bucket lifecycle, §4 Iceberg auth, §5 Server posture, §6 Audit, §7 Cluster lifecycle, §8 CLI, §9 E2E + docs). 이 슬라이스는 후속 task들의 의존성을 미리 안정화.
+
 ## [0.0.259.0] - 2026-05-19 - fix(cluster+storage): warp `versioned` benchmark passes; single-node versioning fully wired
 
 Warp `versioned` 워크로드가 cluster 에서 STAT 100% 501 로 깨지던 갭과, 단일 노드 fixture 에서 versioning 이 사실상 동작하지 않던 갭을 한 번에 정리. 결과: 4-node cluster warp `versioned` 0 STAT-501 errors, SingleNode + Cluster4Node e2e versioning suite 17/17 통과 (1 cluster-only skip).

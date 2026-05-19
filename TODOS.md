@@ -60,6 +60,31 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
+- [ ] **Auth redesign §1 Foundation post-ship cleanup** (v0.0.260.0 review-forever
+  Pass 1 INFO findings — non-blocking, ship after §2/§3 to keep blast radius small):
+    - Maintainability M#2: extract `peelTrailer(data, magic, trailerLen)` helper in
+      `meta_fsm.go` (3 structurally identical DKVS/GCFG/IAM peel blocks).
+    - Maintainability M#4: rename `encrypt.LoadFromFSM` → `NewDEKKeeperFromVersions`
+      (caller-context leaking into callee package name).
+    - Maintainability M#6: extract common pattern from `applyConfigPut` /
+      `applyConfigDelete` (nil-guard + decode + dispatch).
+    - Maintainability M#7: drop the `safe bool` param on `DEKKeeper.Prune` —
+      callee should expose `PruneUnchecked` and the FSM guard does its own
+      ref-count check before calling.
+    - Maintainability M#8: drop the `snapshotMetaFSMToBytes` /
+      `restoreMetaFSMFromBytes` one-line wrappers in `config_snapshot_test.go`.
+    - Maintainability M#10: register `encryption.rotate-dek` /
+      `prune-dek-version` with `OnTrigger: nil` instead of no-op closures.
+    - Testing F#11: end-to-end `ProposeConfigPut → Apply → cfgStore.Set → hook`
+      test through a real `MetaRaft` (only unit-level apply path covered today).
+    - Testing F#12: `applyConfigPut` with a corrupt inner FlatBuffer payload
+      (decode-error gate currently untested).
+    - Performance P#8: `Snapshot()` acquires 3 separate locks (FSM mu, cfgStore mu,
+      DEKKeeper mu) in sequence — document the single-writer guarantee or fold
+      into one acquisition if snapshot latency becomes measurable.
+    - Tracking: `docs/superpowers/plans/2026-05-19-auth-redesign.md` §10 R-notes
+      + §11 decisions log.
+
 - [ ] **Auth redesign DX follow-ups** (from `docs/superpowers/specs/2026-05-19-auth-redesign.md`
   Codex review, medium+cosmetic tier). All single-PR-sized, ship after the main
   redesign lands:
