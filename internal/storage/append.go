@@ -114,6 +114,14 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 // objects/<bucket>/<key>_segments/<blobID>. Returns SegmentRef with
 // BlobID (UUIDv7) + Size + xxhash3-128 Checksum of the plaintext bytes.
 // Exported so cluster.DistributedBackend.AppendObject can call directly.
+//
+// AAD ISOLATION: the encryption domain includes the segment's unique
+// blob_id (via encryptedObjectFileDomain(bucket, key+"/segments/"+blobID)).
+// Because blobID is a fresh UUIDv7 per segment, segments belonging to the
+// same object cannot be successfully decrypted under each other's AAD,
+// even if their plaintext or ciphertext happens to be identical. The
+// regression test TestEncryptedSegment_PerSegmentAADIsolation locks in
+// this contract — do not collapse the domain to a per-object value.
 func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (SegmentRef, error) {
 	blobID := uuid.Must(uuid.NewV7()).String()
 	path := b.segmentPath(bucket, key, blobID)
