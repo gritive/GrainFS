@@ -110,6 +110,38 @@ func BenchmarkBuildPutObjectArgs_64KiB(b *testing.B) {
 	}
 }
 
+func TestBuildUploadPartArgs_5MiBAllocationBound(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 5*1024*1024)
+	const runs = 20
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		require.Greater(t, len(args), len(body))
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	avgAlloc := float64(after.TotalAlloc-before.TotalAlloc) / runs
+	require.Lessf(t, avgAlloc, float64(len(body))*2.5, "avg allocation per buildUploadPartArgs call = %.0f bytes", avgAlloc)
+}
+
+func BenchmarkBuildUploadPartArgs_5MiB(b *testing.B) {
+	body := bytes.Repeat([]byte("x"), 5*1024*1024)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		if len(args) <= len(body) {
+			b.Fatalf("args length %d <= body length %d", len(args), len(body))
+		}
+	}
+}
+
 // TestForwardSender_TryEachPeer_FirstDownNextSucceeds verifies the recovery
 // path when the first peer in the candidate list is unreachable. Without
 // this, a single down node renders the entire group unreachable to non-voters

@@ -293,7 +293,7 @@ func buildCreateMultipartUploadArgs(bucket, key, contentType string, tags []stor
 }
 
 func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []byte) []byte {
-	b := flatbuffers.NewBuilder(64 + len(body))
+	b := flatbuffers.NewBuilder(uploadPartArgsBuilderSize(bucket, key, uploadID, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	u := b.CreateString(uploadID)
@@ -306,6 +306,15 @@ func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []
 	raftpb.UploadPartArgsAddBody(b, bodyOff)
 	b.Finish(raftpb.UploadPartArgsEnd(b))
 	return b.FinishedBytes()
+}
+
+func uploadPartArgsBuilderSize(bucket, key, uploadID string, bodyLen int) int {
+	const tableOverhead = 128
+	n := bodyLen + len(bucket) + len(key) + len(uploadID) + tableOverhead
+	if bodyLen > 0 {
+		n += bodyLen
+	}
+	return n
 }
 
 func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []storage.Part) []byte {
