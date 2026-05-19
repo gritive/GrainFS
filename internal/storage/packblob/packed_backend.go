@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -578,6 +579,90 @@ func (pb *PackedBackend) ListObjects(ctx context.Context, bucket, prefix string,
 	}
 
 	return objects, nil
+}
+
+// ListObjectsPage mirrors ListObjects but honors a marker (S3 V1 Marker / V2
+// ContinuationToken) and reports truncation. Required for
+// Operations.ListObjectsPage's walk-and-find-pager logic — without it, the
+// caller skips the packed-index supplementation and packed-only objects
+// disappear from List on the single-node packblob fast path.
+func (pb *PackedBackend) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error) {
+	if maxKeys < 0 {
+		maxKeys = 0
+	}
+	inner, innerTruncated, err := pb.innerListObjectsPage(ctx, bucket, prefix, marker, maxKeys+1)
+	if err != nil {
+		return nil, false, err
+	}
+	// Collect packed-index matches past marker. Sort happens after merge so
+	// inner ordering and packed-only entries interleave correctly by key.
+	packed := make(map[string]*storage.Object)
+	pb.index.Range(func(rk, rv any) bool {
+		pk := rk.(packedKey)
+		entry := rv.(*indexEntry)
+		if entry.Refcount.Load() <= 0 {
+			return true
+		}
+		if pk.bucket != bucket || !strings.HasPrefix(pk.key, prefix) {
+			return true
+		}
+		if marker != "" && pk.key <= marker {
+			return true
+		}
+		packed[pk.key] = packedObjectFromEntry(pk.key, entry, nil)
+		return true
+	})
+
+	// Merge: packed entries override inner when same key, plus packed-only.
+	seen := make(map[string]bool, len(inner))
+	merged := make([]*storage.Object, 0, len(inner)+len(packed))
+	for _, o := range inner {
+		if p, ok := packed[o.Key]; ok {
+			merged = append(merged, p)
+			seen[o.Key] = true
+			continue
+		}
+		merged = append(merged, o)
+	}
+	for k, p := range packed {
+		if !seen[k] {
+			merged = append(merged, p)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
+
+	truncated := innerTruncated
+	if maxKeys > 0 && len(merged) > maxKeys {
+		merged = merged[:maxKeys]
+		truncated = true
+	}
+	return merged, truncated, nil
+}
+
+// innerListObjectsPage prefers inner's native pager when available, falling
+// back to ListObjects + in-process marker filtering for backends without a
+// pager (PartialIO-only test stubs).
+func (pb *PackedBackend) innerListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error) {
+	type pager interface {
+		ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error)
+	}
+	if p, ok := pb.inner.(pager); ok {
+		return p.ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
+	}
+	objects, err := pb.inner.ListObjects(ctx, bucket, prefix, maxKeys)
+	if err != nil {
+		return nil, false, err
+	}
+	if marker == "" {
+		return objects, false, nil
+	}
+	filtered := objects[:0]
+	for _, o := range objects {
+		if o.Key > marker {
+			filtered = append(filtered, o)
+		}
+	}
+	return filtered, false, nil
 }
 
 func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {

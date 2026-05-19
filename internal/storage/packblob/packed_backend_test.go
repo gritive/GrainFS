@@ -332,6 +332,47 @@ func TestPackedBackend_ListObjects(t *testing.T) {
 	assert.Len(t, objects, 3)
 }
 
+// TestPackedBackend_ListObjectsPage covers the Operations.ListObjectsPage
+// dispatch path introduced in v0.0.257.0 (S3 marker-aware pagination). Without
+// a PackedBackend-level ListObjectsPage method the walk-and-find-pager logic
+// skips this layer entirely and returns 0 results for objects only living in
+// the packed in-memory index, regressing every SingleNode List/Restore test
+// (TestObjectsE2E/SingleNode/List, TestSnapshot, TestPITR, etc.).
+func TestPackedBackend_ListObjectsPage(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+
+	for _, kv := range []struct{ key, val string }{
+		{"docs/a.txt", "a"},
+		{"docs/b.txt", "b"},
+		{"images/c.png", "c"},
+	} {
+		_, err := pb.PutObject(context.Background(), "test", kv.key, strings.NewReader(kv.val), "text/plain")
+		require.NoError(t, err)
+	}
+
+	objs, truncated, err := pb.ListObjectsPage(context.Background(), "test", "", "", 100)
+	require.NoError(t, err)
+	require.Len(t, objs, 3, "all packed entries must be returned")
+	assert.False(t, truncated)
+
+	objs, truncated, err = pb.ListObjectsPage(context.Background(), "test", "docs/", "", 100)
+	require.NoError(t, err)
+	assert.Len(t, objs, 2, "prefix filter must reach packed entries")
+	assert.False(t, truncated)
+
+	objs, _, err = pb.ListObjectsPage(context.Background(), "test", "", "docs/a.txt", 100)
+	require.NoError(t, err)
+	require.Len(t, objs, 2)
+	assert.Equal(t, "docs/b.txt", objs[0].Key)
+	assert.Equal(t, "images/c.png", objs[1].Key)
+
+	objs, truncated, err = pb.ListObjectsPage(context.Background(), "test", "", "", 2)
+	require.NoError(t, err)
+	require.Len(t, objs, 2)
+	assert.True(t, truncated, "should report truncated when more entries remain")
+}
+
 func TestPackedBackend_BucketOperations(t *testing.T) {
 	pb := newTestPackedBackend(t)
 
