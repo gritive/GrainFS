@@ -166,13 +166,15 @@ collect_resource_snapshot() {
     [[ -n "$pid" ]] || continue
     ps_out="$(ps -o rss=,pcpu= -p "$pid" 2>/dev/null || true)"
     [[ -n "$ps_out" ]] || continue
-    read -r rss_kb cpu_pct <<<"$ps_out"
+    if ! read -r rss_kb cpu_pct <<<"$ps_out"; then
+      continue
+    fi
     [[ -n "${rss_kb:-}" && -n "${cpu_pct:-}" ]] || continue
-    rss_mib="$(awk -v kb="$rss_kb" 'BEGIN { printf "%.2f", kb / 1024 }')"
+    rss_mib="$(awk -v kb="$rss_kb" 'BEGIN { printf "%.2f", kb / 1024 }' || true)"
     data_dir="${TARGET_DATA_DIRS[$idx]:-}"
     disk_mib=""
     if [[ -n "$data_dir" && -d "$data_dir" ]]; then
-      disk_mib="$(du -sk "$data_dir" 2>/dev/null | awk '{ printf "%.2f", $1 / 1024 }')"
+      disk_mib="$(du -sk "$data_dir" 2>/dev/null | awk '{ printf "%.2f", $1 / 1024 }' || true)"
     fi
     printf '%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n' \
       "$target" "$op" "$((idx + 1))" "$pid" "$rss_mib" "$cpu_pct" "${disk_mib:-0}" "$data_dir" >>"$out"
