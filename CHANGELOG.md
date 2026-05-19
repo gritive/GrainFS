@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased] - test(reorg): binary-vs-in-process classification + per-protocol matrix
+
+테스트 정리 PR (코드 변경 없음, test-only). e2e/integration/unit 경계 명확화 + S3 외 4개 protocol(iceberg/NFS/NBD/9p)에 single/cluster matrix 패턴 확장 + colima cluster mount 신규 커버리지.
+
+### Changed
+
+- **분류 정정 (rename, 5 files)**: in-process 컴포넌트만 결합하는 `internal/**/*_e2e_test.go`는 `bin/grainfs` 자식 프로세스 + 외부 wire client 기준으로 보면 integration. `internal/{nbd,nfs4server}/e2e_test.go`, `internal/nfs4server/nfs4_e2e_coverage_test.go`, `internal/server/sendfile_e2e_require_test.go`, `internal/raft/learner_promote_e2e_race_test.go` → `*_integration_test.go` rename (함수명은 git blame 보존을 위해 유지). `internal/server/sendfile_zerocopy_integration_test.go`는 동명 기존 파일과 충돌 회피용 정밀화.
+- **misclassified file 역이동**: `tests/e2e/nfs4_largefile_test.go`는 `storage.NewLocalBackend` 직접 호출이라 binary 없음 → `internal/nfs4server/largefile_integration_test.go`로 이동. `skipIfShort` → `testing.Short()` 인라인 치환.
+- **`getOrInitSharedCluster`에서 `DisableNBD: true` 제거** (`tests/e2e/target_test.go`). NBD가 S3 generic shared fixture에서도 가동 → `newSharedClusterNBDTarget`이 별도 cluster boot 없이 재사용.
+
+### Added
+
+- **Per-protocol matrix Target 인프라 (s3Target 패턴 확장)**:
+  - `tests/e2e/iceberg_target_test.go` — `icebergTarget` + `newSingleNodeIcebergTarget*`/`newSharedClusterIcebergTarget*` (audit-enabled variants 포함). `runIcebergAuditCases`로 `TestAuditIcebergSingleDuckDB`/`TestAuditIcebergClusterDuckDB` 통합. `uniqueNamespace`로 per-case isolation.
+  - `tests/e2e/nfs_target_test.go` — `nfsTarget` + factories. `uniqueExport`로 per-case bucket+export 격리. `listNfsExportsOnDataDir`로 dataDir-parameterized variant.
+  - `tests/e2e/nbd_target_test.go` — `nbdTarget` + factories. NBD wire export name은 `"default"` 고정 (handshake 제약, `internal/nbd/handshake.go:36`).
+  - `tests/e2e/shared_mrcluster_test.go` — `getOrInitSharedMRCluster` (iceberg + NFS 공용 *mrCluster). static-peer boot 후 `c.nodeCount = 3` + `c.stopped = true` 명시 (TestMain teardown까지 lifecycle 보존; 미설정 시 첫 caller t.Cleanup이 fixture 조기 종료).
+- **NEW cluster coverage**: `tests/e2e/nfs_multi_export_bucket_delete_e2e_test.go` BucketDelete cases (이전 single-only)를 `runNFSExportCases` matrix로 승격. `tests/e2e/nbd_matrix_cases_test.go` ReadWriteRoundTrip 신설 (single + cluster).
+- **Colima cluster mount 테스트** (`tests/colimafixture/` 신규 패키지 + 3 protocol):
+  - `tests/colimafixture/cluster.go` — macOS host에 3-node grainfs cluster 부팅, 모든 protocol port를 `0.0.0.0`에 바인딩해서 colima VM이 `192.168.5.2:<port>`로 접근. `StartCluster(t, Options)` + `Stop()` public API. macOS-side `TestColimaClusterFixtureBoots`로 6초 boot 검증.
+  - `tests/nfs4_colima/cluster_mount_test.go` — NFS4 mount → write → 3-node S3 visibility 검증 (12.4s PASS).
+  - `tests/9p_colima/cluster_mount_test.go` — 9p mount → write → 각 노드 9p 재마운트 read-back 검증 (12.1s PASS).
+  - `tests/nbd_colima/cluster_mount_test.go` — NBD write via node 0 → 각 노드 `__vol/default/` S3 ListObjectsV2 raft 복제 검증 (15.0s PASS). NBD read는 leader-only가 cluster contract — 기존 `TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator` 패턴 미러.
+- **`testServerNFSPort`/`testServerNBDPort` 패키지 var 노출** (`tests/e2e/helpers_test.go`). 이전엔 TestMain inline `freePort()` 호출만 했음 → Target single fixture 재사용에 필요.
+
+### Notes
+
+- **VERSION bump 없음** — test-only 변경.
+- **Pre-existing 미해결**: `TestAuditIcebergSingleDuckDB`/`TestAuditIcebergClusterDuckDB`/`TestNFS4_Allocate`는 master에서도 fail (각각 #427/#428 audit 회귀, fallocate 회귀로 추정). 본 reorg 작업 무관.
+- 운영 모델 명문화 (CONTEXT.md 후속 후보): server = macOS, mount client = colima VM. 모든 `*_colima` 디렉토리가 이 구조.
+
 ## [0.0.256.1] - 2026-05-19 - fix(cluster): retry follower propose during data-group election convergence
 
 3-노드 cluster에서 비리더 노드로 들어온 첫 S3 PutObject가 500 "not the leader"로 떨어지던 회귀 수정. 갓 instantiate된 data-group raft가 첫 election 완료 전에 propose를 받으면 모든 peer가 ErrNotLeader 반환 → `b.propose` follower 분기가 peer 한 바퀴만 돌고 surface. iceberg metadata-object PUT을 follower로 보내는 e2e 2건 (`TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit`, `TestE2E_DynamicJoinServices_NodeCounts/3_nodes`)이 PR #427 이후 RED 상태였던 원인.
