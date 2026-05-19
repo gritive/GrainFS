@@ -259,6 +259,7 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 		{PartNumber: 1, Size: int64(chunk), ETag: "etag-1"},
 		{PartNumber: 2, Size: 1, ETag: "etag-2"},
 	}
+	wantParts := append([]storage.MultipartPartEntry(nil), parts...)
 
 	body, err := sp.Open()
 	require.NoError(t, err)
@@ -274,6 +275,10 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	cmd := deps.proposeCalls[0].cmd
 	require.Len(t, cmd.Segments, 2)
 	require.Equal(t, parts, cmd.Parts)
+
+	parts[0].ETag = "mutated"
+	require.Equal(t, wantParts, obj.Parts)
+	require.Equal(t, wantParts, cmd.Parts)
 }
 
 func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {

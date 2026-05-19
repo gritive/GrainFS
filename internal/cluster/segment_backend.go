@@ -172,7 +172,8 @@ func chunkedPathThresholdMet(spSize int64) bool {
 // then commit a single PutObjectMetaCmd carrying all per-segment placements.
 // The single raft commit is the atomic point.
 //
-// Multipart parts are deferred to Phase 3; callers must pass parts == nil.
+// The old spooled chunked entry point rejects multipart parts; multipart
+// callers must use the zero-spool Complete path.
 func (b *DistributedBackend) putObjectChunked(
 	ctx context.Context,
 	bucket, key, versionID string,
