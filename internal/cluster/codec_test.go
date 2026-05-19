@@ -223,6 +223,7 @@ func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
 		ECData:           4,
 		ECParity:         2,
 		NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+		RingVersion:      17,
 		Tags:             []storage.Tag{{Key: "env", Value: "prod"}},
 		Parts: []storage.MultipartPartEntry{
 			{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
@@ -263,6 +264,7 @@ func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
 
 	assert.Equal(t, orig.Parts, got.Parts)
 	assert.Equal(t, orig.Segments, got.Segments)
+	assert.Equal(t, orig.RingVersion, got.RingVersion)
 	assert.Equal(t, orig.Tags, got.Tags)
 }
 

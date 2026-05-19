@@ -2430,6 +2430,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		ECData:           result.ECData,
 		ECParity:         result.ECParity,
 		NodeIDs:          result.Placement,
+		RingVersion:      result.RingVersion,
 		Parts:            result.Parts,
 		Tags:             result.Tags,
 	}); merr != nil {

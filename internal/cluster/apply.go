@@ -547,6 +547,7 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		ContentType:      c.ContentType,
 		ETag:             c.ETag,
 		LastModified:     c.ModTime,
+		RingVersion:      uint64(c.RingVersion),
 		ECData:           c.ECData,
 		ECParity:         c.ECParity,
 		NodeIDs:          c.NodeIDs,
@@ -558,7 +559,7 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
+	if err := f.db.Update(func(txn *badger.Txn) error {
 		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
 		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
@@ -572,7 +573,13 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 			}
 		}
 		return txn.Delete(f.keys.MultipartKey(c.UploadID))
-	})
+	}); err != nil {
+		return err
+	}
+	if c.RingVersion != 0 {
+		f.rings.incRef(c.RingVersion)
+	}
+	return nil
 }
 
 func (f *FSM) applyAbortMultipart(data []byte) error {

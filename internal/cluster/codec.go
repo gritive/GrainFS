@@ -530,6 +530,7 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	clusterpb.CompleteMultipartCmdAddPlacementGroupId(b, pgOff)
 	clusterpb.CompleteMultipartCmdAddEcData(b, c.ECData)
 	clusterpb.CompleteMultipartCmdAddEcParity(b, c.ECParity)
+	clusterpb.CompleteMultipartCmdAddRingVersion(b, uint64(c.RingVersion))
 	if nodeIDsOff != 0 {
 		clusterpb.CompleteMultipartCmdAddNodeIds(b, nodeIDsOff)
 	}
@@ -620,6 +621,7 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
 		NodeIDs:          nodeIDs,
+		RingVersion:      RingVersion(t.RingVersion()),
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),

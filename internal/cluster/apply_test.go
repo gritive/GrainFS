@@ -342,6 +342,7 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 		ECData:           2,
 		ECParity:         1,
 		NodeIDs:          []string{"n1", "n2", "n3"},
+		RingVersion:      17,
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             tags,
@@ -361,10 +362,12 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 		require.NoError(t, err)
 		require.Equal(t, parts, meta.Parts)
 		require.Equal(t, segmentMetaEntriesToRefs(segments), meta.Segments)
+		require.Equal(t, uint64(17), meta.RingVersion)
 		require.Equal(t, tags, meta.Tags)
 		return nil
 	})
 	require.NoError(t, err)
+	require.Equal(t, int64(1), fsm.GetRingStore().refCount[RingVersion(17)])
 }
 
 func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {

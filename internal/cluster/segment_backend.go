@@ -364,6 +364,7 @@ func runChunkedPutWithParts(
 			ECData:           uint8(csb.placements[0].Config.DataShards),
 			ECParity:         uint8(csb.placements[0].Config.ParityShards),
 			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			RingVersion:      csb.placements[0].RingVersion,
 			Segments:         segments,
 			Tags:             tags,
 		})

@@ -183,6 +183,7 @@ table CompleteMultipartCmd {
   parts:[MultipartPartEntry];
   segments:[SegmentMetaEntry];
   tags:[Tag];
+  ring_version:uint64 = 0;
 }
 
 table AbortMultipartCmd {

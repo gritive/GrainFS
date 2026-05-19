@@ -180,6 +180,7 @@ type CompleteMultipartCmd struct {
 	ECData           uint8
 	ECParity         uint8
 	NodeIDs          []string
+	RingVersion      RingVersion
 	Parts            []storage.MultipartPartEntry
 	Segments         []SegmentMetaEntry
 	Tags             []storage.Tag

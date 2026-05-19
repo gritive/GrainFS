@@ -222,8 +222,20 @@ func (rcv *CompleteMultipartCmd) TagsLength() int {
 	return 0
 }
 
+func (rcv *CompleteMultipartCmd) RingVersion() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) MutateRingVersion(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(34, n)
+}
+
 func CompleteMultipartCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(15)
+	builder.StartObject(16)
 }
 func CompleteMultipartCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -281,6 +293,9 @@ func CompleteMultipartCmdAddTags(builder *flatbuffers.Builder, tags flatbuffers.
 }
 func CompleteMultipartCmdStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func CompleteMultipartCmdAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
+	builder.PrependUint64Slot(15, ringVersion, 0)
 }
 func CompleteMultipartCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
