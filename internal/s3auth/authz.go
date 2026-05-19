@@ -1,7 +1,5 @@
 package s3auth
 
-import "context"
-
 // ACLGrant is a bitmask for S3 canned ACL values.
 // Wire format: stored as uint32 in Protobuf field 12 of ECObjectMeta.
 type ACLGrant uint8
@@ -30,8 +28,8 @@ const (
 	ListMultipartUploads
 	// Phase 5d: policy CRUD becomes IAM-gated. Read maps to GetBucketPolicy
 	// (Read+ on bucket); Put/Delete map to Admin-only operations. Append
-	// only — never renumber existing values; iampb.Role and on-disk grant
-	// state both pin these enum values.
+	// only — never renumber existing values; the on-disk MetaCmd numbering
+	// pins these enum values.
 	GetBucketPolicy
 	PutBucketPolicy
 	DeleteBucketPolicy
@@ -56,11 +54,6 @@ type PermCheckInput struct {
 	ObjectACL ACLGrant // 0 if metadata not yet loaded
 }
 
-// Authorizer evaluates whether a request is permitted.
-type Authorizer interface {
-	Allow(ctx context.Context, in PermCheckInput) bool
-}
-
 // ParseACLHeader converts an x-amz-acl header value to ACLGrant.
 // Unknown or empty values fall back to ACLPrivate.
 func ParseACLHeader(s string) ACLGrant {
@@ -71,6 +64,39 @@ func ParseACLHeader(s string) ACLGrant {
 		return ACLPublicReadWrite
 	default:
 		return ACLPrivate
+	}
+}
+
+// PolicyActionString returns the canonical "s3:Xxx" string for a given S3Action.
+// Unknown or unmapped actions return "s3:Unknown".
+func (a S3Action) PolicyActionString() string {
+	switch a {
+	case GetObject:
+		return "s3:GetObject"
+	case HeadObject:
+		return "s3:HeadObject"
+	case ListBucket:
+		return "s3:ListBucket"
+	case PutObject:
+		return "s3:PutObject"
+	case CreateBucket:
+		return "s3:CreateBucket"
+	case DeleteObject:
+		return "s3:DeleteObject"
+	case DeleteBucket:
+		return "s3:DeleteBucket"
+	case CopyObject:
+		return "s3:CopyObject"
+	case ListMultipartUploads:
+		return "s3:ListMultipartUploads"
+	case GetBucketPolicy:
+		return "s3:GetBucketPolicy"
+	case PutBucketPolicy:
+		return "s3:PutBucketPolicy"
+	case DeleteBucketPolicy:
+		return "s3:DeleteBucketPolicy"
+	default:
+		return "s3:Unknown"
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/resourceguard"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -144,6 +145,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
+	// T33: wire the policy authorizer so Layer 1 (iamCheck) evaluates
+	// policy.Evaluate. Both iamPolicyStores and cfgStore are populated by
+	// bootMetaRaftWiring before this phase runs.
+	if state.iamPolicyStores != nil && state.cfgStore != nil {
+		policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
+		srvOpts = append(srvOpts, server.WithPolicyAuthorizer(policyAuthz))
+	}
 	if state.balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(NewBalancerInfoAdapter(state.balancerProposer)))
 	}

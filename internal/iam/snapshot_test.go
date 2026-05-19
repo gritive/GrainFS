@@ -16,8 +16,6 @@ func TestSnapshot_Roundtrip(t *testing.T) {
 		AccessKey: "AK1", SecretKey: "secret-alice", SecretKeyEnc: wrapped,
 		SAID: "sa-1", Status: KeyStatusActive, CreatedAt: time.Unix(2, 0),
 	})
-	src.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleWrite})
-	src.applyGrantWildcardPut(Grant{SAID: "sa-default", Role: RoleAdmin})
 
 	var buf bytes.Buffer
 	if err := WriteSnapshot(&buf, src); err != nil {
@@ -29,18 +27,19 @@ func TestSnapshot_Roundtrip(t *testing.T) {
 		t.Fatalf("ReadSnapshot: %v", err)
 	}
 
-	if got := dst.LookupGrant("sa-1", "logs"); got != RoleWrite {
-		t.Fatalf("grant after restore = %v, want RoleWrite", got)
-	}
-	if got := dst.LookupGrant("sa-default", "any"); got != RoleAdmin {
-		t.Fatalf("wildcard after restore = %v, want RoleAdmin", got)
-	}
 	k, ok := dst.LookupKey("AK1")
 	if !ok {
 		t.Fatal("LookupKey miss after restore")
 	}
 	if k.SecretKey != "secret-alice" {
 		t.Fatalf("secret after restore = %q, want secret-alice", k.SecretKey)
+	}
+	sa, ok := dst.LookupSA("sa-1")
+	if !ok {
+		t.Fatal("LookupSA miss after restore")
+	}
+	if sa.Name != "alice" {
+		t.Fatalf("sa.Name after restore = %q, want alice", sa.Name)
 	}
 }
 
@@ -84,7 +83,6 @@ func TestSnapshot_PreservesBucketScope(t *testing.T) {
 	enc := newTestEncryptor(t)
 	src := NewStore()
 	src.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice", CreatedAt: time.Unix(1, 0)})
-	src.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleRead})
 	wrapped, err := WrapSecret(enc, "sa-1", "secret-scoped")
 	if err != nil {
 		t.Fatalf("WrapSecret: %v", err)
@@ -151,15 +149,15 @@ func TestSnapshot_RevokedKeyStatusPreserved(t *testing.T) {
 	}
 }
 
-func TestSnapshot_Version3_HeaderByte(t *testing.T) {
+func TestSnapshot_Version4_HeaderByte(t *testing.T) {
 	store := NewStore()
 	var buf bytes.Buffer
 	if err := WriteSnapshot(&buf, store); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	b := buf.Bytes()
-	if len(b) == 0 || b[0] != 3 {
-		t.Fatalf("first byte = %d, want 3", b[0])
+	if len(b) == 0 || b[0] != 4 {
+		t.Fatalf("first byte = %d, want 4 (v4)", b[0])
 	}
 }
 
@@ -210,28 +208,8 @@ func TestSnapshot_BucketUpstream_TrailerAppendRoundtrip(t *testing.T) {
 	}
 }
 
-// TestSnapshot_PreTrailerCompat_NoBucketUpstreamSection verifies that a snapshot
-// emitted before the bucket-upstreams trailer is appended (5 sections + EOF)
-// is still readable. This guards the A1 backward-compat property: v3 emitters
-// without the trailer remain readable by v3 readers WITH the trailer logic.
-func TestSnapshot_PreTrailerCompat_NoBucketUpstreamSection(t *testing.T) {
-	// Construct a manual snapshot with only the existing 5 sections (sas, keys,
-	// grants, wildcards, revoked), all empty.
-	var buf bytes.Buffer
-	buf.WriteByte(3) // version
-	for i := 0; i < 5; i++ {
-		var u32 [4]byte // each section: count = 0
-		buf.Write(u32[:])
-	}
-	dst := NewStore()
-	enc := newTestEncryptor(t)
-	if err := ReadSnapshot(bytes.NewReader(buf.Bytes()), dst, enc); err != nil {
-		t.Fatalf("ReadSnapshot v3 (pre-trailer): %v", err)
-	}
-}
-
 // TestSnapshot_PostTrailerReadsForward verifies a snapshot WITH bucket-upstreams
-// trailer is readable.
+// section is readable.
 func TestSnapshot_PostTrailerReadsForward(t *testing.T) {
 	src := NewStore()
 	enc := newTestEncryptor(t)

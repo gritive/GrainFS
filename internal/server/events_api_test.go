@@ -21,6 +21,12 @@ import (
 
 func setupTestServerWithEvents(t *testing.T) (string, *eventstore.Store) {
 	t.Helper()
+	base, _, evStore := setupTestServerWithEventsAndBackend(t)
+	return base, evStore
+}
+
+func setupTestServerWithEventsAndBackend(t *testing.T) (string, *storage.LocalBackend, *eventstore.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
@@ -44,7 +50,7 @@ func setupTestServerWithEvents(t *testing.T) (string, *eventstore.Store) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return "http://" + addr, evStore
+	return "http://" + addr, backend, evStore
 }
 
 func TestQueryEventLog_NilStore(t *testing.T) {
@@ -132,13 +138,8 @@ func TestEmitEvent_BoundedQueueNoGoroutineLeak(t *testing.T) {
 }
 
 func TestFormUpload_EmitsEvent(t *testing.T) {
-	base, evStore := setupTestServerWithEvents(t)
-
-	// Create bucket first
-	req, _ := http.NewRequest(http.MethodPut, base+"/form-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, backend, evStore := setupTestServerWithEventsAndBackend(t)
+	mustCreateBucket(t, backend, "form-bucket")
 
 	// POST multipart/form-data upload
 	var buf bytes.Buffer
@@ -151,9 +152,9 @@ func TestFormUpload_EmitsEvent(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	req, _ = http.NewRequest(http.MethodPost, base+"/form-bucket", &buf)
+	req, _ := http.NewRequest(http.MethodPost, base+"/form-bucket", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)

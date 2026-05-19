@@ -118,7 +118,7 @@ type policyState struct {
 
 // CompiledPolicyStore is a policy store that pre-compiles policies at Set() time
 // for O(1) action lookup and deny-first evaluation.
-// Implements s3auth.Authorizer.
+// Implements s3auth.PolicyChecker.
 //
 // Reads (Allow, GetRaw) are lock-free: they load an immutable *policyState
 // via atomic.Pointer and consult its maps directly. Writes (Set, Delete) are

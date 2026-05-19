@@ -11,9 +11,6 @@ func TestStore_EmptyReads(t *testing.T) {
 	if _, ok := s.LookupKey("missing"); ok {
 		t.Fatal("LookupKey on empty store returned ok")
 	}
-	if r := s.LookupGrant("sa-1", "bucket-1"); r != RoleNone {
-		t.Fatalf("LookupGrant on empty store = %v, want RoleNone", r)
-	}
 }
 
 func TestStore_PutSAAndKey_Read(t *testing.T) {
@@ -39,22 +36,6 @@ func TestStore_PutSAAndKey_Read(t *testing.T) {
 	}
 	if k.SecretKey != "secret-alice" {
 		t.Fatalf("k.SecretKey = %q, want secret-alice", k.SecretKey)
-	}
-}
-
-func TestStore_GrantAndWildcard(t *testing.T) {
-	s := NewStore()
-	s.applyGrantPut(Grant{SAID: "sa-1", Bucket: "logs", Role: RoleRead})
-	s.applyGrantWildcardPut(Grant{SAID: "sa-default", Role: RoleAdmin})
-
-	if r := s.LookupGrant("sa-1", "logs"); r != RoleRead {
-		t.Fatalf("explicit grant = %v, want RoleRead", r)
-	}
-	if r := s.LookupGrant("sa-1", "missing"); r != RoleNone {
-		t.Fatalf("missing grant = %v, want RoleNone", r)
-	}
-	if r := s.LookupGrant("sa-default", "any-bucket"); r != RoleAdmin {
-		t.Fatalf("wildcard fallback = %v, want RoleAdmin", r)
 	}
 }
 

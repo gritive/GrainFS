@@ -16,7 +16,7 @@ func TestHandleCopyObject_PrivateSource_AnonymousIsDenied(t *testing.T) {
 	base, backend := setupTestServerWithBackend(t)
 
 	// Create source bucket.
-	createBucket(t, base, "src-bkt")
+	mustCreateBucket(t, backend, "src-bkt")
 
 	// Seed source object with default private ACL.
 	require.NoError(t, putWithACL(t, base, "src-bkt", "src-key", []byte("secret"), s3auth.ACLPrivate))
@@ -40,8 +40,8 @@ func TestHandleCopyObject_PublicReadSource_IsAllowed(t *testing.T) {
 	base, backend := setupTestServerWithBackend(t)
 
 	// Create source and destination buckets.
-	createBucket(t, base, "src-bkt")
-	createBucket(t, base, "dst-bkt")
+	mustCreateBucket(t, backend, "src-bkt")
+	mustCreateBucket(t, backend, "dst-bkt")
 
 	require.NoError(t, putWithACL(t, base, "src-bkt", "src-key", []byte("public"), s3auth.ACLPublicRead))
 	require.NoError(t, backend.SetObjectACL("src-bkt", "src-key", uint8(s3auth.ACLPublicRead)))
@@ -56,17 +56,6 @@ func TestHandleCopyObject_PublicReadSource_IsAllowed(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode,
 		"copy of public-read source must succeed; body=%s", string(body))
-}
-
-// createBucket creates a bucket via the S3 API and fails the test on error.
-func createBucket(t *testing.T, base, bucket string) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, base+"/"+bucket, nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "create bucket %s", bucket)
 }
 
 // putWithACL is a helper that PUTs an object with the given ACL via the S3 API.

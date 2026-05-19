@@ -19,12 +19,18 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
+	"github.com/gritive/GrainFS/internal/iam/group"
+	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/policyattach"
+	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -128,6 +134,19 @@ const (
 	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
 	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
+	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
+	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
+	MetaCmdTypeGroupPut                     = clusterpb.MetaCmdTypeGroupPut
+	MetaCmdTypeGroupDelete                  = clusterpb.MetaCmdTypeGroupDelete
+	MetaCmdTypeGroupMemberPut               = clusterpb.MetaCmdTypeGroupMemberPut
+	MetaCmdTypeGroupMemberDelete            = clusterpb.MetaCmdTypeGroupMemberDelete
+	MetaCmdTypePolicyAttachToSAPut          = clusterpb.MetaCmdTypePolicyAttachToSAPut
+	MetaCmdTypePolicyAttachToSADelete       = clusterpb.MetaCmdTypePolicyAttachToSADelete
+	MetaCmdTypePolicyAttachToGroupPut       = clusterpb.MetaCmdTypePolicyAttachToGroupPut
+	MetaCmdTypePolicyAttachToGroupDelete    = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
+	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
+	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
+	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -301,6 +320,27 @@ type MetaFSM struct {
 	// via SetEncryptor before the raft log starts replaying.
 	encryptor *encrypt.Encryptor
 
+	// policyStore is the IAM policy document store. nil until SetPolicyStore is
+	// called; PolicyPut/PolicyDelete commands are safe no-ops when nil.
+	policyStore *policystore.InMemoryStore
+
+	// policyResolver is the IAM effective-policy resolver. nil until
+	// SetPolicyResolver is called. When non-nil its cache is invalidated on
+	// every PolicyPut/PolicyDelete apply.
+	policyResolver *policy.Resolver
+
+	// groupStore is the IAM group store. nil until SetGroupStore is called;
+	// Group* commands are safe no-ops when nil.
+	groupStore *group.InMemoryStore
+
+	// policyAttachStore is the SA/group→policy attachment store. nil until
+	// SetPolicyAttachStore is called; PolicyAttach* commands are safe no-ops when nil.
+	policyAttachStore *policyattach.InMemoryStore
+
+	// bucketPolicyStore is the per-bucket policy document store. nil until
+	// SetBucketPolicyStore is called; BucketPolicy* commands are safe no-ops when nil.
+	bucketPolicyStore *bucketpolicy.InMemoryStore
+
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
 	cfgStore *config.Store
@@ -391,6 +431,51 @@ func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dekKeeper = k
+}
+
+// SetPolicyStore wires the IAM policy store into the MetaFSM. Must be called
+// before the raft log starts replaying. nil means PolicyPut/PolicyDelete
+// commands are safe no-ops (not configured yet).
+func (f *MetaFSM) SetPolicyStore(s *policystore.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyStore = s
+}
+
+// SetPolicyResolver wires the effective-policy resolver into the MetaFSM.
+// When non-nil, its cache is invalidated on every PolicyPut/PolicyDelete apply.
+// nil is safe (no-op invalidation).
+func (f *MetaFSM) SetPolicyResolver(r *policy.Resolver) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyResolver = r
+}
+
+// SetGroupStore wires the IAM group store into the MetaFSM. Must be called
+// before the raft log starts replaying. nil means Group* commands are safe
+// no-ops (not configured yet).
+func (f *MetaFSM) SetGroupStore(s *group.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groupStore = s
+}
+
+// SetPolicyAttachStore wires the SA/group→policy attachment store into the
+// MetaFSM. Must be called before the raft log starts replaying. nil means
+// PolicyAttach* commands are safe no-ops.
+func (f *MetaFSM) SetPolicyAttachStore(s *policyattach.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyAttachStore = s
+}
+
+// SetBucketPolicyStore wires the per-bucket policy document store into the
+// MetaFSM. Must be called before the raft log starts replaying. nil means
+// BucketPolicy* commands are safe no-ops.
+func (f *MetaFSM) SetBucketPolicyStore(s *bucketpolicy.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bucketPolicyStore = s
 }
 
 // dekRefCount returns the number of ObjectIndexEntry records that reference
@@ -557,7 +642,27 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 	case clusterpb.MetaCmdTypeScrubTrigger:
 		return f.applyScrubTrigger(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeIAMSACreate:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplySACreate)
+		if f.iamApplier == nil {
+			return fmt.Errorf("meta_fsm: IAM applier not configured")
+		}
+		wasEmpty := f.iamStore.IsEmpty()
+		if err := f.iamApplier.ApplySACreate(cmd.DataBytes()); err != nil {
+			return err
+		}
+		// D#3 + F#16: first SA create atomically flips iam.anon-enabled → false.
+		// Subsequent SA creates leave the flag untouched so an operator who
+		// re-enables anon stays in control. ApplySACreate is idempotent on
+		// duplicate sa_id (returns nil without inserting), so we guard the
+		// store is actually non-empty after the call.
+		if wasEmpty && f.cfgStore != nil && !f.iamStore.IsEmpty() {
+			if err := f.cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
+				log.Warn().Err(err).Msg("meta_fsm: failed to flip iam.anon-enabled on first SA create")
+				// Don't fail the apply — the SA is committed. Operator can re-set manually.
+			} else if f.policyResolver != nil {
+				f.policyResolver.Invalidate(nil, nil)
+			}
+		}
+		return nil
 	case clusterpb.MetaCmdTypeIAMSADelete:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplySADelete)
 	case clusterpb.MetaCmdTypeIAMKeyCreate:
@@ -566,16 +671,9 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyCreateScoped)
 	case clusterpb.MetaCmdTypeIAMKeyRevoke:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyKeyRevoke)
-	case clusterpb.MetaCmdTypeIAMGrantPut:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantPut)
-	case clusterpb.MetaCmdTypeIAMGrantDelete:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantDelete)
-	case clusterpb.MetaCmdTypeIAMGrantWildcardPut:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardPut)
-	case clusterpb.MetaCmdTypeIAMGrantWildcardDelete:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyGrantWildcardDelete)
-	case clusterpb.MetaCmdTypeIAMInitFirstSA:
-		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyInitFirstSA)
+	// IAMGrantPut/Delete/WildcardPut/WildcardDelete/InitFirstSA (enum 25-31) are
+	// retained in cluster.fbs for backcompat with pre-§2 snapshots but no longer
+	// have apply branches. Legacy cmd types fall through to default (skip).
 	case clusterpb.MetaCmdTypeIAMBucketUpstreamPut:
 		return f.applyIAM(cmd.DataBytes(), (*iam.Applier).ApplyBucketUpstreamPut)
 	case clusterpb.MetaCmdTypeIAMBucketUpstreamDelete:
@@ -608,6 +706,32 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyConfigPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeConfigDelete:
 		return f.applyConfigDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyPut:
+		return f.applyPolicyPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyDelete:
+		return f.applyPolicyDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupPut:
+		return f.applyGroupPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupDelete:
+		return f.applyGroupDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupMemberPut:
+		return f.applyGroupMemberPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupMemberDelete:
+		return f.applyGroupMemberDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToSAPut:
+		return f.applyPolicyAttachToSAPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToSADelete:
+		return f.applyPolicyAttachToSADelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToGroupPut:
+		return f.applyPolicyAttachToGroupPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToGroupDelete:
+		return f.applyPolicyAttachToGroupDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeBucketPolicyPut:
+		return f.applyBucketPolicyPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeBucketPolicyDelete:
+		return f.applyBucketPolicyDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
+		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		if f.dekKeeper == nil {
 			return nil
@@ -873,6 +997,277 @@ func (f *MetaFSM) applyConfigDelete(payload []byte) error {
 		return fmt.Errorf("meta_fsm: ConfigDelete: %w", err)
 	}
 	return f.cfgStore.Unset(context.Background(), key)
+}
+
+func (f *MetaFSM) applyPolicyPut(payload []byte) error {
+	if f.policyStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, docJSON, builtin, err := DecodePolicyPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyPut: %w", err)
+	}
+	if err := f.policyStore.Put(context.Background(), name, docJSON, builtin); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// A policy doc body change can affect any cached entry that references it;
+		// invalidate the entire cache (passing both nil slices nukes all entries).
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyDelete(payload []byte) error {
+	if f.policyStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, err := DecodePolicyDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyDelete: %w", err)
+	}
+	if err := f.policyStore.Delete(context.Background(), name); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupPut(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, policies, err := DecodeGroupPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupPut: %w", err)
+	}
+	if err := f.groupStore.Put(context.Background(), name, policies); err != nil {
+		return fmt.Errorf("meta_fsm: GroupPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Group policy attachment changes can affect any cached entry; nuke all.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupDelete(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, err := DecodeGroupDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupDelete: %w", err)
+	}
+	if err := f.groupStore.Delete(context.Background(), name); err != nil {
+		return fmt.Errorf("meta_fsm: GroupDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupMemberPut(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, saID, err := DecodeGroupMemberPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberPut: %w", err)
+	}
+	if err := f.groupStore.AddMember(context.Background(), grp, saID); err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only the affected SA's cached entries need to be dropped.
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupMemberDelete(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, saID, err := DecodeGroupMemberDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberDelete: %w", err)
+	}
+	if err := f.groupStore.RemoveMember(context.Background(), grp, saID); err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToSAPut(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	saID, pol, err := DecodePolicyAttachToSAPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSAPut: %w", err)
+	}
+	if err := f.policyAttachStore.AttachToSA(context.Background(), saID, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSAPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only the affected SA's cached entries need to be dropped.
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToSADelete(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	saID, pol, err := DecodePolicyAttachToSADeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSADelete: %w", err)
+	}
+	if err := f.policyAttachStore.DetachFromSA(context.Background(), saID, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSADelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only the affected SA's cached entries need to be dropped.
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToGroupPut(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, pol, err := DecodePolicyAttachToGroupPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupPut: %w", err)
+	}
+	if err := f.policyAttachStore.AttachToGroup(context.Background(), grp, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// TODO(opt): nuke only SAs that are members of grp once we can enumerate
+		// them cheaply from this apply path. For now a nuclear invalidate is safe
+		// and cache rebuild is cheap.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToGroupDelete(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, pol, err := DecodePolicyAttachToGroupDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupDelete: %w", err)
+	}
+	if err := f.policyAttachStore.DetachFromGroup(context.Background(), grp, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// TODO(opt): nuke only SAs that are members of grp once we can enumerate
+		// them cheaply from this apply path. For now a nuclear invalidate is safe
+		// and cache rebuild is cheap.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyBucketPolicyPut(payload []byte) error {
+	if f.bucketPolicyStore == nil {
+		return nil // safe no-op until wired
+	}
+	bucket, docJSON, err := DecodeBucketPolicyPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyPut: %w", err)
+	}
+	if reservedname.IsInternalBucket(bucket) {
+		return fmt.Errorf("meta_fsm: BucketPolicyPut: bucket %q is internal and cannot receive policy mutations via public API", bucket)
+	}
+	if err := f.bucketPolicyStore.Put(context.Background(), bucket, docJSON); err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only cache entries for this bucket are stale.
+		f.policyResolver.Invalidate(nil, []string{bucket})
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyBucketPolicyDelete(payload []byte) error {
+	if f.bucketPolicyStore == nil {
+		return nil // safe no-op until wired
+	}
+	bucket, err := DecodeBucketPolicyDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyDelete: %w", err)
+	}
+	if reservedname.IsInternalBucket(bucket) {
+		return fmt.Errorf("meta_fsm: BucketPolicyDelete: bucket %q is internal and cannot receive policy mutations via public API", bucket)
+	}
+	if err := f.bucketPolicyStore.Delete(context.Background(), bucket); err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only cache entries for this bucket are stale.
+		f.policyResolver.Invalidate(nil, []string{bucket})
+	}
+	return nil
+}
+
+// applyCreateBucketWithPolicyAttach handles MetaCmd 62 — the IAM half of the
+// sequenced bucket-create + policy-attach operation (D#13, F#2).
+//
+// Approach: sequenced (not cross-FSM atomic). The bucket itself is created by
+// the data-plane FSM via the existing CreateBucket path; this MetaCmd only
+// handles the IAM side: validate SA + policy existence, then attach the policy
+// to the SA. The admin handler is responsible for rolling back via DeleteBucket
+// if this propose fails.
+//
+// If both attach_sa and attach_policy are empty, this is a no-op (create-only
+// caller path; the bucket was already created by the prior CreateBucket propose).
+func (f *MetaFSM) applyCreateBucketWithPolicyAttach(payload []byte) error {
+	bucket, sa, pol, err := decodeMetaCreateBucketWithPolicyAttachCmd(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach decode: %w", err)
+	}
+	if sa == "" {
+		// create-only path: no IAM half to apply.
+		return nil
+	}
+	// F#2: validate SA existence before any mutation.
+	if f.iamApplier == nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: iam applier not configured")
+	}
+	if !f.iamApplier.SAExists(sa) {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: SA %q does not exist (F#2)", sa)
+	}
+	// F#2: validate policy existence before any mutation.
+	if f.policyStore == nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: policy store not configured")
+	}
+	if _, perr := f.policyStore.GetRaw(context.Background(), pol); perr != nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: policy %q does not exist: %w", pol, perr)
+	}
+	// Attach policy to SA.
+	if f.policyAttachStore == nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: policy attach store not configured")
+	}
+	if attachErr := f.policyAttachStore.AttachToSA(context.Background(), sa, pol); attachErr != nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: attach: %w", attachErr)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate([]string{sa}, []string{bucket})
+	}
+	return nil
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {
@@ -2060,6 +2455,10 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	binary.LittleEndian.PutUint32(footer[4:8], iamSnapshotTrailerMagic)
 	out = append(out, footer[:]...)
 
+	// TODO(T23/T24): include policyStore in snapshot/restore — deferred until
+	// PolicyAttachStore and BucketPolicyStore are wired so a single trailer can
+	// carry all three IAM policy tables atomically.
+
 	// Append GCFG trailer after the IAM trailer. Only emit when there are
 	// explicit config values to persist — an empty map produces no trailer so
 	// old snapshots (taken from a fresh cluster with no overrides) remain
@@ -2403,6 +2802,8 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			}
 		}
 	}
+
+	// TODO(T23/T24): restore policyStore from snapshot trailer — deferred, see Snapshot comment.
 
 	// GCFG restore — populate the config store from the GCFG trailer.
 	// If no trailer was present (legacy snapshot or no overrides), leave the

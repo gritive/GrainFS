@@ -83,6 +83,7 @@ table MetaClusterConfigPatchCmd {
 
 table CreateBucketCmd {
   bucket:string;
+  bypass_reserved:bool = false;
 }
 
 table DeleteBucketCmd {
@@ -425,6 +426,19 @@ enum MetaCmdType : uint8 {
   ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
   DEKRotate               = 48, // DEK key rotation: generate new active generation
   DEKVersionPrune         = 49, // DEK version prune: drop old wrapped DEK after rewrap scrub
+  PolicyPut               = 50, // IAM: policy document upsert (name + doc JSON + builtin flag)
+  PolicyDelete            = 51, // IAM: policy document delete
+  GroupPut                = 52, // IAM: group upsert (name + attached policies)
+  GroupDelete             = 53, // IAM: group delete
+  GroupMemberPut          = 54, // IAM: group member add (sa_id)
+  GroupMemberDelete       = 55, // IAM: group member remove (sa_id)
+  PolicyAttachToSAPut     = 56, // IAM: attach policy to service account
+  PolicyAttachToSADelete  = 57, // IAM: detach policy from service account
+  PolicyAttachToGroupPut  = 58, // IAM: attach policy to group
+  PolicyAttachToGroupDelete = 59, // IAM: detach policy from group
+  BucketPolicyPut         = 60, // IAM: set bucket policy document
+  BucketPolicyDelete      = 61, // IAM: delete bucket policy document
+  CreateBucketWithPolicyAttach = 62, // IAM: atomic create-bucket + attach initial policy to SA (D#13, F#2)
 }
 
 table MetaNodeEntry {
@@ -852,4 +866,84 @@ table MetaCatalogReadReply {
   namespaces    : [CatalogNamespace];   // op = ListNamespaces
   loaded_table  : CatalogTable;         // op = LoadTable (renamed from "table" to avoid collision with flatbuffers built-in Table() accessor)
   tables        : [CatalogIdentifier];  // op = ListTables
+}
+
+// PolicyPut payload: upsert a named policy document.
+table MetaPolicyPutCmd {
+  name:string;
+  doc_json:[ubyte];
+  builtin:bool;
+}
+
+// PolicyDelete payload: remove a named policy document.
+table MetaPolicyDeleteCmd {
+  name:string;
+}
+
+// GroupPut payload: upsert a named group with attached policies.
+table MetaGroupPutCmd {
+  name:string;
+  policies:[string];
+}
+
+// GroupDelete payload: remove a named group.
+table MetaGroupDeleteCmd {
+  name:string;
+}
+
+// GroupMemberPut payload: add sa_id to a group.
+table MetaGroupMemberPutCmd {
+  group:string;
+  sa_id:string;
+}
+
+// GroupMemberDelete payload: remove sa_id from a group.
+table MetaGroupMemberDeleteCmd {
+  group:string;
+  sa_id:string;
+}
+
+// PolicyAttachToSAPut payload: attach a policy to a service account.
+table MetaPolicyAttachToSAPutCmd {
+  sa_id:string;
+  policy:string;
+}
+
+// PolicyAttachToSADelete payload: detach a policy from a service account.
+table MetaPolicyAttachToSADeleteCmd {
+  sa_id:string;
+  policy:string;
+}
+
+// PolicyAttachToGroupPut payload: attach a policy to a group.
+table MetaPolicyAttachToGroupPutCmd {
+  group:string;
+  policy:string;
+}
+
+// PolicyAttachToGroupDelete payload: detach a policy from a group.
+table MetaPolicyAttachToGroupDeleteCmd {
+  group:string;
+  policy:string;
+}
+
+// BucketPolicyPut payload: upsert a bucket policy document.
+table MetaBucketPolicyPutCmd {
+  bucket:string;
+  doc_json:[ubyte];
+}
+
+// BucketPolicyDelete payload: remove a bucket policy document.
+table MetaBucketPolicyDeleteCmd {
+  bucket:string;
+}
+
+// MetaCreateBucketWithPolicyAttachCmd payload: sequenced bucket-create + IAM-half attach.
+// Bucket creation itself happens in the data-plane FSM (CreateBucket MetaCmd on the data
+// group); this MetaCmd only handles the IAM half: validate SA + policy exist, then attach.
+// attach_sa and attach_policy both empty = policy attach skipped (create-only path, no IAM).
+table MetaCreateBucketWithPolicyAttachCmd {
+  bucket:string;
+  attach_sa:string;
+  attach_policy:string;
 }

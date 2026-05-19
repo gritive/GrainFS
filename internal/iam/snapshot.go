@@ -12,18 +12,19 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/iampb"
 )
 
-// Snapshot binary format (current: v3):
+// Snapshot binary format (current: v4):
 //
-//	[u8 version=3]
+//	[u8 version=4]
 //	[u32 N_sas] [N_sas × (u32 len, FB SACreatePayload)]
 //	[u32 N_keys] [N_keys × (u32 len, FB KeyCreatePayload)]   // SecretKeyEnc only, never plaintext
-//	[u32 N_grants] [N_grants × (u32 len, FB GrantPutPayload)]
-//	[u32 N_wildcards] [N_wildcards × (u32 len, FB GrantWildcardPutPayload)]
 //	[u32 N_revoked] [N_revoked × (u32 len, raw access_key bytes)]
+//	[u32 N_upstreams] [N_upstreams × (u32 len, FB BucketUpstreamPutPayload)]
 //
-// v3 dropped the authBit byte (sticky auth_enabled removed). v1/v2 readers are NOT supported.
+// v4 drops the grant and wildcard sections present in v3. The legacy
+// Role/Grant model is superseded by the policy sub-package (§2 auth redesign).
+// v3 and earlier are NOT supported.
 // All sizes are little-endian u32. Each FB blob is independently parseable.
-const snapshotVersion uint8 = 3
+const snapshotVersion uint8 = 4
 
 // WriteSnapshot serializes the entire IAM store to w. SecretKey plaintexts
 // are NEVER written; only SecretKeyEnc bytes are emitted.
@@ -51,30 +52,6 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 		}
 	}
 
-	totalGrants := 0
-	for _, per := range st.grants {
-		totalGrants += len(per)
-	}
-	if err := writeUint32(w, uint32(totalGrants)); err != nil {
-		return err
-	}
-	for saID, per := range st.grants {
-		for bucket, role := range per {
-			if err := writeBlob(w, buildGrantPutPayload(Grant{SAID: saID, Bucket: bucket, Role: role})); err != nil {
-				return err
-			}
-		}
-	}
-
-	if err := writeUint32(w, uint32(len(st.wildcards))); err != nil {
-		return err
-	}
-	for saID, role := range st.wildcards {
-		if err := writeBlob(w, buildGrantWildcardPutPayload(Grant{SAID: saID, Role: role})); err != nil {
-			return err
-		}
-	}
-
 	// Revoked AKs section — preserve revocation across restore.
 	revokedAKs := make([]string, 0)
 	for ak, k := range st.keysByAK {
@@ -91,11 +68,7 @@ func WriteSnapshot(w io.Writer, s *Store) error {
 		}
 	}
 
-	// Trailer (added in v0.0.123.0 for bucket-scoped upstream credentials).
-	// Forward-compatible: pre-v0.0.123 readers stop after the revoked-AKs
-	// section and ignore trailing bytes (their ReadSnapshot ends with `return
-	// nil` immediately after the revoked loop). Per /plan-eng-review override
-	// A1 — keep version at 3 to preserve bidirectional rolling upgrade.
+	// Bucket upstreams.
 	if err := writeUint32(w, uint32(len(st.bucketUpstreams))); err != nil {
 		return err
 	}
@@ -116,8 +89,8 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		return err
 	}
 	ver := hdr[0]
-	if ver != 3 {
-		return fmt.Errorf("iam: snapshot version %d not supported (only v3)", ver)
+	if ver != 4 {
+		return fmt.Errorf("iam: snapshot version %d not supported (only v4)", ver)
 	}
 	ap := NewApplier(dst, enc)
 
@@ -155,34 +128,6 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		}
 	}
 
-	nG, err := readUint32(r)
-	if err != nil {
-		return err
-	}
-	for i := uint32(0); i < nG; i++ {
-		blob, err := readBlob(r)
-		if err != nil {
-			return err
-		}
-		if err := ap.ApplyGrantPut(blob); err != nil {
-			return err
-		}
-	}
-
-	nW, err := readUint32(r)
-	if err != nil {
-		return err
-	}
-	for i := uint32(0); i < nW; i++ {
-		blob, err := readBlob(r)
-		if err != nil {
-			return err
-		}
-		if err := ap.ApplyGrantWildcardPut(blob); err != nil {
-			return err
-		}
-	}
-
 	nR, err := readUint32(r)
 	if err != nil {
 		// Older snapshots without the revoked section: io.EOF means zero bytes
@@ -201,9 +146,7 @@ func ReadSnapshot(r io.Reader, dst *Store, enc *encrypt.Encryptor) error {
 		dst.applyKeyRevoke(string(blob))
 	}
 
-	// Trailer: bucket-upstreams. EOF here means the snapshot was emitted by a
-	// pre-v0.0.123 binary that didn't write the trailer — treat as zero
-	// records (per A1 bidirectional-compat property).
+	// Bucket upstreams. EOF here means end of stream — treat as zero records.
 	nU, err := readUint32(r)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -273,51 +216,6 @@ func buildKeyCreatePayload(k AccessKey) []byte {
 	return b.FinishedBytes()
 }
 
-func buildGrantPutPayload(g Grant) []byte {
-	b := flatbuffers.NewBuilder(64)
-	sa := b.CreateString(g.SAID)
-	bk := b.CreateString(g.Bucket)
-	cb := b.CreateString(g.CreatedBy)
-	iampb.GrantPutPayloadStart(b)
-	iampb.GrantPutPayloadAddSaId(b, sa)
-	iampb.GrantPutPayloadAddBucket(b, bk)
-	iampb.GrantPutPayloadAddRole(b, iampb.Role(g.Role))
-	iampb.GrantPutPayloadAddCreatedAtUnixNs(b, g.CreatedAt.UnixNano())
-	iampb.GrantPutPayloadAddCreatedBy(b, cb)
-	b.Finish(iampb.GrantPutPayloadEnd(b))
-	return b.FinishedBytes()
-}
-
-func buildGrantWildcardPutPayload(g Grant) []byte {
-	b := flatbuffers.NewBuilder(64)
-	sa := b.CreateString(g.SAID)
-	cb := b.CreateString(g.CreatedBy)
-	iampb.GrantWildcardPutPayloadStart(b)
-	iampb.GrantWildcardPutPayloadAddSaId(b, sa)
-	iampb.GrantWildcardPutPayloadAddRole(b, iampb.Role(g.Role))
-	iampb.GrantWildcardPutPayloadAddCreatedAtUnixNs(b, g.CreatedAt.UnixNano())
-	iampb.GrantWildcardPutPayloadAddCreatedBy(b, cb)
-	b.Finish(iampb.GrantWildcardPutPayloadEnd(b))
-	return b.FinishedBytes()
-}
-
-func buildInitFirstSAPayload(sa ServiceAccount, k AccessKey, g Grant) []byte {
-	saBlob := buildSACreatePayload(sa)
-	keyBlob := buildKeyCreatePayload(k)
-	gwBlob := buildGrantWildcardPutPayload(g)
-
-	b := flatbuffers.NewBuilder(256)
-	saOff := b.CreateByteVector(saBlob)
-	kOff := b.CreateByteVector(keyBlob)
-	gOff := b.CreateByteVector(gwBlob)
-	iampb.InitFirstSAPayloadStart(b)
-	iampb.InitFirstSAPayloadAddSaCreateBlob(b, saOff)
-	iampb.InitFirstSAPayloadAddKeyCreateBlob(b, kOff)
-	iampb.InitFirstSAPayloadAddGrantWildcardBlob(b, gOff)
-	b.Finish(iampb.InitFirstSAPayloadEnd(b))
-	return b.FinishedBytes()
-}
-
 func buildSADeletePayload(saID string) []byte {
 	b := flatbuffers.NewBuilder(32)
 	idOff := b.CreateString(saID)
@@ -333,26 +231,6 @@ func buildKeyRevokePayload(accessKey string) []byte {
 	iampb.KeyRevokePayloadStart(b)
 	iampb.KeyRevokePayloadAddAccessKey(b, akOff)
 	b.Finish(iampb.KeyRevokePayloadEnd(b))
-	return b.FinishedBytes()
-}
-
-func buildGrantWildcardDeletePayload(saID string) []byte {
-	b := flatbuffers.NewBuilder(32)
-	saOff := b.CreateString(saID)
-	iampb.GrantWildcardDeletePayloadStart(b)
-	iampb.GrantWildcardDeletePayloadAddSaId(b, saOff)
-	b.Finish(iampb.GrantWildcardDeletePayloadEnd(b))
-	return b.FinishedBytes()
-}
-
-func buildGrantDeletePayload(saID, bucket string) []byte {
-	b := flatbuffers.NewBuilder(64)
-	saOff := b.CreateString(saID)
-	bkOff := b.CreateString(bucket)
-	iampb.GrantDeletePayloadStart(b)
-	iampb.GrantDeletePayloadAddSaId(b, saOff)
-	iampb.GrantDeletePayloadAddBucket(b, bkOff)
-	b.Finish(iampb.GrantDeletePayloadEnd(b))
 	return b.FinishedBytes()
 }
 

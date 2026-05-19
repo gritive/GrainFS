@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/incident"
@@ -88,6 +89,8 @@ type bootState struct {
 	rotationWorker   *cluster.RotationWorker
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
+	iamPolicyStores  *IAMStores
+	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 
 	// Storage runtime (populated by storage phases — bootShardService,

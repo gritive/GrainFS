@@ -1067,6 +1067,16 @@ func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGr
 // --- Bucket operations ---
 
 func (b *DistributedBackend) CreateBucket(ctx context.Context, bucket string) error {
+	return b.createBucketInternal(ctx, bucket, false)
+}
+
+// CreateBucketBypassReserved creates a bucket even when its name is reserved.
+// Use only from the bootstrap/seed path. Public API callers must use CreateBucket.
+func (b *DistributedBackend) CreateBucketBypassReserved(ctx context.Context, bucket string) error {
+	return b.createBucketInternal(ctx, bucket, true)
+}
+
+func (b *DistributedBackend) createBucketInternal(ctx context.Context, bucket string, bypassReserved bool) error {
 	// Check if already exists (read local)
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(b.ks().BucketKey(bucket))
@@ -1126,7 +1136,7 @@ func (b *DistributedBackend) CreateBucket(ctx context.Context, bucket string) er
 		}
 	}
 
-	return b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+	return b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: bucket, BypassReserved: bypassReserved})
 }
 
 func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) error {

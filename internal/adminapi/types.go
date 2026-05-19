@@ -525,8 +525,14 @@ type ListBucketsAdminResp struct {
 }
 
 // CreateBucketAdminReq is the body for POST /v1/buckets.
+// AttachSA and AttachPolicy are optional: when both are provided the admin
+// handler routes through MetaCmd 62 (CreateBucketWithPolicyAttach) to attach
+// an initial policy to a SA after the bucket is created. If either is empty
+// the handler falls back to the existing create-only path.
 type CreateBucketAdminReq struct {
-	Name string `json:"name"`
+	Name         string `json:"name"`
+	AttachSA     string `json:"attach_sa,omitempty"`
+	AttachPolicy string `json:"attach_policy,omitempty"`
 }
 
 // BucketPolicyResp is the JSON body returned by GET /v1/buckets/:name/policy.

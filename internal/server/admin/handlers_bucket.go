@@ -3,8 +3,10 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -16,11 +18,28 @@ func AdminCreateBucket(ctx context.Context, d *Deps, req CreateBucketAdminReq) (
 	if !storage.ValidBucketName(req.Name) {
 		return BucketInfo{}, NewInvalid("invalid bucket name: 3–63 lowercase alphanumeric/dot/hyphen, start and end with alnum")
 	}
+	if reservedname.IsReservedBucketName(req.Name) {
+		return BucketInfo{}, NewInvalid(fmt.Sprintf("bucket name %q is reserved", req.Name))
+	}
 	if err := d.Buckets.CreateBucket(ctx, req.Name); err != nil {
 		if errors.Is(err, storage.ErrBucketAlreadyExists) {
 			return BucketInfo{}, NewConflict("bucket already exists", nil)
 		}
 		return BucketInfo{}, NewInternal("create bucket: " + err.Error())
+	}
+	// Attach path: when both attach_sa and attach_policy are provided, propose
+	// MetaCmd 62 (IAM half). On failure, roll back by deleting the bucket so
+	// the caller sees a clean error (D#13 sequenced approach, F#2 atomicity).
+	if req.AttachSA != "" && req.AttachPolicy != "" {
+		if d.BucketWithPolicyProp == nil {
+			// Best-effort rollback before returning.
+			_ = d.Buckets.DeleteBucket(ctx, req.Name)
+			return BucketInfo{}, NewInternal("bucket-with-policy proposer not configured")
+		}
+		if err := d.BucketWithPolicyProp.ProposeCreateBucketWithPolicyAttach(ctx, req.Name, req.AttachSA, req.AttachPolicy); err != nil {
+			_ = d.Buckets.DeleteBucket(ctx, req.Name)
+			return BucketInfo{}, NewInternal("attach policy: " + err.Error())
+		}
 	}
 	return BucketInfo{Name: req.Name}, nil
 }
@@ -82,6 +101,9 @@ func checkBucketExists(ctx context.Context, d *Deps, name string) error {
 func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) error {
 	if storage.IsInternalBucket(name) {
 		return NewForbidden("cannot delete internal bucket")
+	}
+	if reservedname.IsReservedBucketName(name) {
+		return NewInvalid(fmt.Sprintf("bucket name %q is reserved and cannot be deleted via public API", name))
 	}
 	var hadNfsExport bool
 	if d.NfsExports != nil {

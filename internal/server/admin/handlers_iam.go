@@ -34,18 +34,6 @@ func RevokeKey(ctx context.Context, d *Deps, saID, accessKey string) error {
 	return d.IAM.RevokeKey(ctx, saID, accessKey)
 }
 
-func PutGrant(ctx context.Context, d *Deps, req iam.GrantPutRequest) error {
-	return d.IAM.PutGrant(ctx, req)
-}
-
-func DeleteGrant(ctx context.Context, d *Deps, req iam.GrantDeleteRequest) error {
-	return d.IAM.DeleteGrant(ctx, req)
-}
-
-func ListGrants(ctx context.Context, d *Deps, saFilter, bucketFilter string) ([]iam.GrantListItem, error) {
-	return d.IAM.ListGrants(ctx, saFilter, bucketFilter)
-}
-
 func PutBucketUpstream(ctx context.Context, d *Deps, req iam.BucketUpstreamPutRequest) error {
 	return d.IAM.PutBucketUpstream(ctx, req)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -53,16 +52,41 @@ func TestAuthRejectsUnsigned(t *testing.T) {
 }
 
 func TestAuthAcceptsValidSignature(t *testing.T) {
-	base := setupAuthServer(t)
+	// D#8: CreateBucket is admin-UDS-only. Pre-create via backend; verify signed
+	// object PUT still works.
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+	require.NoError(t, backend.CreateBucket(t.Context(), "mybucket"))
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	base := "http://" + func() string {
+		port := freePort(t)
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		creds := []s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}
+		srv := New(addr, backend, WithAuth(creds))
+		go srv.Run()
+		for i := 0; i < 50; i++ {
+			conn, err2 := net.Dial("tcp", addr)
+			if err2 == nil {
+				conn.Close()
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		return addr
+	}()
+
+	// D#8: CreateBucket via S3 returns 403.
+	req, _ := http.NewRequest(http.MethodPut, base+"/newbucket", nil)
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err, "request")
+	require.NoError(t, err, "create bucket S3")
 	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 
+	// Object PUT still works.
 	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("data")))
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
@@ -73,61 +97,60 @@ func TestAuthAcceptsValidSignature(t *testing.T) {
 }
 
 func TestAuthBucketPolicyCRUDRequiresSignature(t *testing.T) {
+	// D#8: bucket policy mutation is admin-UDS-only on the S3 data plane.
+	// Both signed and unsigned PUT/DELETE ?policy return 403 unconditionally.
 	base := setupAuthServer(t)
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/policy-bucket", nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err, "create bucket")
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
 	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::policy-bucket/*"]}]}`
-	req, _ = http.NewRequest(http.MethodPut, base+"/policy-bucket?policy", bytes.NewReader([]byte(policy)))
-	resp, err = http.DefaultClient.Do(req)
+
+	// Unsigned PUT policy → 403 (D#8, before any auth check).
+	req, _ := http.NewRequest(http.MethodPut, base+"/policy-bucket?policy", bytes.NewReader([]byte(policy)))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err, "unsigned put policy")
 	resp.Body.Close()
-	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 
+	// Signed PUT policy → still 403 (D#8 handler fires before policy logic).
 	req, _ = http.NewRequest(http.MethodPut, base+"/policy-bucket?policy", bytes.NewReader([]byte(policy)))
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err, "signed put policy")
 	resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 
-	req, _ = http.NewRequest(http.MethodGet, base+"/policy-bucket?policy", nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err, "signed get policy")
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Contains(t, string(body), "s3:GetObject")
-
+	// Signed DELETE policy → 403 (D#8).
 	req, _ = http.NewRequest(http.MethodDelete, base+"/policy-bucket?policy", nil)
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err, "signed delete policy")
 	resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestAuthAcceptsSignedPostPolicyFormUpload(t *testing.T) {
-	base := setupAuthServer(t)
+	// D#8: pre-create the bucket via backend; test only the form upload path.
+	dir := t.TempDir()
+	backend, err := storage.NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+	require.NoError(t, backend.CreateBucket(t.Context(), "form-auth"))
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/form-auth", nil)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, "testkey", "testsecret", "us-east-1")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err, "create bucket")
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	port := freePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	creds := []s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}
+	srv := New(addr, backend, WithAuth(creds))
+	go srv.Run()
+	for i := 0; i < 50; i++ {
+		conn, err2 := net.Dial("tcp", addr)
+		if err2 == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	base := "http://" + addr
 
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
@@ -141,9 +164,9 @@ func TestAuthAcceptsSignedPostPolicyFormUpload(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	req, _ = http.NewRequest(http.MethodPost, base+"/form-auth", &buf)
+	req, _ := http.NewRequest(http.MethodPost, base+"/form-auth", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -183,10 +206,22 @@ func TestAuthRejectsWrongKey(t *testing.T) {
 }
 
 func TestNoAuthServerAllowsAll(t *testing.T) {
-	base := setupTestServer(t)
+	// D#8: CreateBucket returns 403 even on a no-auth server. Object reads
+	// (GET/HEAD with public-read ACL) are still allowed. Verify the no-auth
+	// server still allows object operations on a pre-created bucket.
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "mybucket")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
+	// D#8: CreateBucket → 403.
+	req, _ := http.NewRequest(http.MethodPut, base+"/anotherbucket", nil)
 	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	// Object PUT still works on the pre-created bucket.
+	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket/file.txt", bytes.NewReader([]byte("hello")))
+	req.Header.Set("x-amz-acl", "public-read")
+	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

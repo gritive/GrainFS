@@ -49,11 +49,26 @@ func (rcv *CreateBucketCmd) Bucket() []byte {
 	return nil
 }
 
+func (rcv *CreateBucketCmd) BypassReserved() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *CreateBucketCmd) MutateBypassReserved(n bool) bool {
+	return rcv._tab.MutateBoolSlot(6, n)
+}
+
 func CreateBucketCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(2)
 }
 func CreateBucketCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
+}
+func CreateBucketCmdAddBypassReserved(builder *flatbuffers.Builder, bypassReserved bool) {
+	builder.PrependBoolSlot(1, bypassReserved, false)
 }
 func CreateBucketCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

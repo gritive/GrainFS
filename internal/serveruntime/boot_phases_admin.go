@@ -22,7 +22,7 @@ import (
 // opens the admin Unix Domain Socket. Spec A5 invariant: admin routes are
 // registered BEFORE the data-plane Hertz starts serving.
 //
-// Inputs:  state.cfg.Addr, state.backend, state.srvOpts, state.iamProposer,
+// Inputs:  state.cfg.Addr, state.backend, state.srvOpts,
 //
 //	state.cfg.DataDir, state.cfg.PublicURL, state.nodeID,
 //	state.distBackend, state.cfg.VlogWatchEnabled/* ratios */,
@@ -40,12 +40,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 
 	srv := server.New(cfg.Addr, state.backend, state.srvOpts...)
 	state.srv = srv
-
-	// P5: wire IAM proposer so CreateBucket auto-issues an Admin grant to
-	// the creator SA. nil-safe when iamProposer was not built above.
-	if state.iamProposer != nil {
-		srv.SetIAMProposer(state.iamProposer)
-	}
 
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	tokenStore, err := dashboard.Open(filepath.Join(cfg.DataDir, "dashboard.token"))

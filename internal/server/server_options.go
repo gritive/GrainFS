@@ -39,16 +39,12 @@ func WithIAMAudit(audit *iam.AuditLogger) Option {
 	}
 }
 
-// WithIAMProposer wires the IAM proposer used for auto-grants on CreateBucket.
-func WithIAMProposer(p iam.Proposer) Option {
+// WithPolicyAuthorizer wires the IAM policy authorizer so Layer 1 (iamCheck)
+// evaluates policy.Evaluate for authenticated requests instead of deny-by-default.
+func WithPolicyAuthorizer(a *s3auth.Authorizer) Option {
 	return func(s *Server) {
-		s.iamProposer = p
+		s.policyAuthorizer = a
 	}
-}
-
-// SetIAMProposer installs the IAM proposer after construction.
-func (s *Server) SetIAMProposer(p iam.Proposer) {
-	s.iamProposer = p
 }
 
 func WithMutationGate(gate *MutationGate) Option {

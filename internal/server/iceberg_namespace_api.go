@@ -6,7 +6,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
-	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 )
 
@@ -96,8 +95,14 @@ func (s *Server) icebergS3CredOverrides(ctx context.Context, warehouse string) m
 	if !ok || key == nil || key.SecretKey == "" {
 		return map[string]string{}
 	}
-	if s.iamStore.LookupGrant(key.SAID, bucket) < iam.RoleRead {
-		return map[string]string{}
+	// T33: gate cred forwarding on iceberg:GetCatalogConfig policy check.
+	// If no authorizer is wired (e.g. test fixtures), skip the gate and
+	// forward creds as before (fail-open for legacy/test paths only).
+	if s.policyAuthorizer != nil {
+		result := s.policyAuthorizer.Authorize(ctx, key.SAID, bucket, policyIcebergConfigContext(bucket))
+		if result.Decision != policyDecisionAllow {
+			return map[string]string{}
+		}
 	}
 	return map[string]string{
 		"s3.access-key-id":     key.AccessKey,

@@ -326,6 +326,19 @@ func (c *ClusterCoordinator) matchSelfPeer(id string) bool {
 func (c *ClusterCoordinator) CreateBucket(ctx context.Context, bucket string) error {
 	return c.base.CreateBucket(ctx, bucket)
 }
+
+// CreateBucketBypassReserved seeds a reserved bucket via the meta-Raft, bypassing
+// the reserved-name guard. Called only during bootstrap to create "default" and "_grainfs".
+func (c *ClusterCoordinator) CreateBucketBypassReserved(ctx context.Context, bucket string) error {
+	type bypassSeeder interface {
+		CreateBucketBypassReserved(ctx context.Context, bucket string) error
+	}
+	if s, ok := c.base.(bypassSeeder); ok {
+		return s.CreateBucketBypassReserved(ctx, bucket)
+	}
+	return c.base.CreateBucket(ctx, bucket)
+}
+
 func (c *ClusterCoordinator) HeadBucket(ctx context.Context, bucket string) error {
 	err := c.base.HeadBucket(ctx, bucket)
 	if err == nil {

@@ -15,7 +15,7 @@ var (
 )
 
 // NormalizeScope returns a sorted, deduplicated, validated copy of the input.
-// nil/empty → nil (unrestricted). Wildcard "*" or SystemBucket "__system__"
+// nil/empty → nil (unrestricted). Wildcard "*" or the internal sentinel "__system__"
 // in the list → ErrScopeSentinel. Empty/whitespace-only entries →
 // ErrScopeEmptyEntry. Otherwise sorted ascending, no duplicates.
 func NormalizeScope(in []string) ([]string, error) {
@@ -29,7 +29,7 @@ func NormalizeScope(in []string) ([]string, error) {
 		if trimmed == "" {
 			return nil, fmt.Errorf("%w: %q", ErrScopeEmptyEntry, b)
 		}
-		if trimmed == WildcardBucket || trimmed == SystemBucket {
+		if trimmed == "*" || trimmed == "__system__" {
 			return nil, fmt.Errorf("%w: %q", ErrScopeSentinel, trimmed)
 		}
 		if _, dup := seen[trimmed]; dup {

@@ -1,5 +1,8 @@
 // internal/iam/iampb/iam.fbs — IAM payload schema for cluster-internal RPC.
 // Used as the body of MetaCmd entries for IAM state mutations.
+//
+// Role/Grant tables retained for backcompat with pre-§2 snapshots; new code uses internal/iam/policy.
+// Do not extend.
 
 namespace iampb;
 
@@ -71,10 +74,9 @@ table AuthEnablePayload {
 
 // InitFirstSAPayload is the composite payload for MetaCmdTypeIAMInitFirstSA.
 // It atomically wraps SA + Key + WildcardGrant blobs so a single FSM Apply
-// commits all three records together. Race guard: handler always sets
-// sa_create.sa_id = DefaultSAID ("sa-default"), so concurrent proposes on
-// an empty cluster collapse to one SA via FSM idempotency.
+// commits all three records together.
 //
+// SA bootstrap is now zero-config via admin UDS; no implicit default SA.
 // secret_key plaintext is NEVER in this payload — handler wraps via
 // encrypt.Encryptor before encoding key_create_blob.
 table InitFirstSAPayload {

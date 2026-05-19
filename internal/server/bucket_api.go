@@ -7,9 +7,6 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/rs/zerolog/log"
-
-	"github.com/gritive/GrainFS/internal/iam"
 )
 
 func (s *Server) listBuckets(ctx context.Context, c *app.RequestContext) {
@@ -35,7 +32,8 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
 	if c.QueryArgs().Has("policy") {
-		s.putBucketPolicy(c, bucket)
+		// D#8: bucket-policy mutation is admin-UDS-only on the data plane.
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket policy is admin-UDS-only (D#8)")
 		return
 	}
 	if c.QueryArgs().Has("lifecycle") {
@@ -47,36 +45,8 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.createS3Bucket(ctx, bucket); err != nil {
-		mapError(c, err)
-		return
-	}
-	c.Header("Location", "/"+bucket)
-	c.Status(consts.StatusOK)
-}
-
-// issueCreatorGrant issues an explicit Admin grant to the request principal
-// on the newly-created bucket. Best-effort: if the proposer is not wired or the
-// propose fails, the bucket is still created.
-func (s *Server) issueCreatorGrant(ctx context.Context, bucket string) {
-	if s.iamProposer == nil {
-		return
-	}
-	principal := iam.PrincipalFromContext(ctx)
-	if principal == "" {
-		return
-	}
-	g := iam.Grant{
-		SAID:      principal,
-		Bucket:    bucket,
-		Role:      iam.RoleAdmin,
-		CreatedAt: time.Now().UTC(),
-		CreatedBy: principal,
-	}
-	if err := s.iamProposer.ProposeGrantPut(ctx, g); err != nil {
-		log.Warn().Err(err).Str("sa", principal).Str("bucket", bucket).
-			Msg("iam: failed to issue creator grant; bucket created without explicit grant")
-	}
+	// D#8: bucket creation is admin-UDS-only on the data plane.
+	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket lifecycle is admin-UDS-only (D#8)")
 }
 
 func (s *Server) headBucket(ctx context.Context, c *app.RequestContext) {
@@ -96,13 +66,11 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	if c.QueryArgs().Has("policy") {
-		s.deleteBucketPolicy(c, bucket)
+		// D#8: bucket-policy mutation is admin-UDS-only on the data plane.
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket policy is admin-UDS-only (D#8)")
 		return
 	}
 
-	if err := s.deleteS3Bucket(ctx, bucket); err != nil {
-		mapError(c, err)
-		return
-	}
-	c.Status(consts.StatusNoContent)
+	// D#8: bucket deletion is admin-UDS-only on the data plane.
+	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket lifecycle is admin-UDS-only (D#8)")
 }

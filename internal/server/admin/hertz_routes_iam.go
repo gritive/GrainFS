@@ -14,10 +14,6 @@ func registerIAM(g router, d *Deps) {
 	// Key
 	g.POST(routePathIAMSAKey, iamCreateKeyHandler(d))
 	g.DELETE(routePathIAMSAKeyByAK, iamRevokeKeyHandler(d))
-	// Grant (PUT upsert -> 204)
-	g.PUT(routePathIAMGrant, wrapBodyNoOut204[iam.GrantPutRequest](d, PutGrant))
-	g.DELETE(routePathIAMGrant, iamDeleteGrantHandler(d))
-	g.GET(routePathIAMGrant, iamListGrantsHandler(d))
 	// Bucket upstream (PUT upsert -> 204). Routes under /upstreams (not
 	// /buckets/upstream) to avoid Hertz static-beats-param collision with
 	// GET /buckets/:name used by AdminGetBucket.

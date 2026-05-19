@@ -19,26 +19,21 @@ type deleteObjectsTestDeleted struct {
 }
 
 func TestDeleteObjectsDeletesRequestedKeys(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "bucket")
 
 	for _, key := range []string{"one.txt", "two.txt"} {
-		req, _ = http.NewRequest(http.MethodPut, base+"/bucket/"+key, bytes.NewReader([]byte("data")))
+		req, _ := http.NewRequest(http.MethodPut, base+"/bucket/"+key, bytes.NewReader([]byte("data")))
 		req.Header.Set("x-amz-acl", "public-read")
-		resp, err = http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		resp.Body.Close()
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 	}
 
 	body := []byte(`<Delete><Object><Key>one.txt</Key></Object><Object><Key>missing.txt</Key></Object></Delete>`)
-	req, _ = http.NewRequest(http.MethodPost, base+"/bucket?delete", bytes.NewReader(body))
-	resp, err = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPost, base+"/bucket?delete", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	respBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()

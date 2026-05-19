@@ -54,7 +54,8 @@ type Command struct {
 }
 
 type CreateBucketCmd struct {
-	Bucket string
+	Bucket         string
+	BypassReserved bool
 }
 
 type DeleteBucketCmd struct {

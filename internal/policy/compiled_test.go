@@ -143,6 +143,6 @@ func TestCompiledPolicyStore_WildcardAction(t *testing.T) {
 	assert.True(t, cs.Allow(ctx, inp("admin", s3auth.PutObject, "mybucket", "k")))
 }
 
-func TestCompiledPolicyStore_ImplementsAuthorizer(t *testing.T) {
-	var _ s3auth.Authorizer = NewCompiledPolicyStore()
+func TestCompiledPolicyStore_ImplementsPolicyChecker(t *testing.T) {
+	var _ s3auth.PolicyChecker = NewCompiledPolicyStore()
 }

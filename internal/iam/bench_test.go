@@ -5,8 +5,6 @@ import (
 	"sort"
 	"testing"
 	"time"
-
-	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 // BenchmarkApplySACreate (SC#9) measures FSM apply latency for the most
@@ -56,10 +54,9 @@ func BenchmarkApplySACreate(b *testing.B) {
 	}
 }
 
-// BenchmarkResolveSA_CheckAccess (SC#10) measures the IAM hot path
-// (ResolveSA + CheckAccess) at 10k-SA / 100-bucket scale. Budget:
-// p99 < 1ms. Enforced as a bench-time assertion.
-func BenchmarkResolveSA_CheckAccess(b *testing.B) {
+// BenchmarkResolveSA (SC#10) measures the IAM hot path (ResolveSA) at
+// 10k-SA scale. Budget: p99 < 1ms. Enforced as a bench-time assertion.
+func BenchmarkResolveSA(b *testing.B) {
 	s := NewStore()
 	enc := newTestEncryptor(b)
 	ap := NewApplier(s, enc)
@@ -93,25 +90,16 @@ func BenchmarkResolveSA_CheckAccess(b *testing.B) {
 		if err := ap.ApplyKeyCreate(buildKeyCreatePayload(k)); err != nil {
 			b.Fatal(err)
 		}
-		bk := fmt.Sprintf("bucket-%d", i%100)
-		g := Grant{SAID: sa.ID, Bucket: bk, Role: RoleWrite, CreatedAt: time.Now()}
-		if err := ap.ApplyGrantPut(buildGrantPutPayload(g)); err != nil {
-			b.Fatal(err)
-		}
 	}
 
 	samples := make([]time.Duration, 0, b.N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ak := aks[i%N]
-		bk := fmt.Sprintf("bucket-%d", (i%N)%100)
 		start := time.Now()
-		_, saID, ok := ResolveSA(s, ak)
+		_, _, ok := ResolveSA(s, ak)
 		if !ok {
 			b.Fatalf("ResolveSA failed for %s", ak)
-		}
-		if !CheckAccess(s, saID, bk, s3auth.PutObject) {
-			b.Fatalf("CheckAccess denied for %s/%s", saID, bk)
 		}
 		samples = append(samples, time.Since(start))
 	}
@@ -122,7 +110,7 @@ func BenchmarkResolveSA_CheckAccess(b *testing.B) {
 	b.ReportMetric(float64(p50.Nanoseconds()), "p50_ns/op")
 	b.ReportMetric(float64(p99.Nanoseconds()), "p99_ns/op")
 	if p99 > time.Millisecond {
-		b.Fatalf("ResolveSA+CheckAccess p99 = %v, want < 1ms (SC#10 budget)", p99)
+		b.Fatalf("ResolveSA p99 = %v, want < 1ms (SC#10 budget)", p99)
 	}
 }
 

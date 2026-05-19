@@ -9,26 +9,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func (s *Server) putBucketPolicy(c *app.RequestContext, bucket string) {
-	body := c.Request.Body()
-	if len(body) == 0 {
-		writeXMLError(c, consts.StatusBadRequest, "MalformedPolicy", "empty request body")
-		return
-	}
-
-	// Validate policy JSON
-	if _, err := ParsePolicy(body); err != nil {
-		writeXMLError(c, consts.StatusBadRequest, "MalformedPolicy", err.Error())
-		return
-	}
-
-	if err := s.storeBucketPolicy(bucket, body); err != nil {
-		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
-		return
-	}
-	c.Status(consts.StatusNoContent)
-}
-
 func (s *Server) getBucketPolicy(c *app.RequestContext, bucket string) {
 	data, err := s.loadBucketPolicy(bucket)
 	if err != nil {
@@ -40,12 +20,4 @@ func (s *Server) getBucketPolicy(c *app.RequestContext, bucket string) {
 		return
 	}
 	c.Data(consts.StatusOK, "application/json", data)
-}
-
-func (s *Server) deleteBucketPolicy(c *app.RequestContext, bucket string) {
-	if err := s.deleteBucketPolicyStorage(bucket); err != nil {
-		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
-		return
-	}
-	c.Status(consts.StatusNoContent)
 }
