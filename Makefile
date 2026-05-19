@@ -66,7 +66,7 @@ test-e2e: bin/$(BINARY)
 	' sh {}
 
 test-e2e-iceberg: bin/$(BINARY)
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -tags duckdb_e2e ./tests/e2e/ -run TestIcebergDuckDB -v -count=1 -timeout 5m
+	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestIceberg -v -count=1 -timeout 5m
 
 test-nfs4-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4

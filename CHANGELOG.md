@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.0.256.0] - 2026-05-19 - feat(iceberg)!: warp catalog-commits/mixed/sustained clean — caller-identity creds + concurrency hardening (BREAKING)
+
+`warp iceberg` 3-subcommand 측정이 4-node cluster에서 strict gate (failed_requests≈0, p99<1s, max<3s) 통과. catalog-commits 11 240 ops × 0 errors, catalog-mixed 123 850 ops × 3 (0.0024%), sustained 3 500 ops × 1 (0.029%) — 잔존 에러는 모두 알려진 QUIC stream transient. `/v1/config` 자격증명 publish는 호출자 본인의 IAM 키만 반환하도록 변경 (privilege amplification 차단).
+
+### BREAKING
+
+- **`/v1/config`이 호출자 본인의 access/secret 키만 publish.** 이전엔 warehouse bucket에 RoleWrite 이상을 가진 *임의의* SA 키를 publish해서, RoleRead 호출자가 RoleAdmin 자격증명을 받아갈 수 있었음 (privilege amplification). 이제 SigV4로 식별된 호출자 본인의 키만 lookup해서 반환하며, 호출자가 warehouse bucket에 RoleRead 이상 권한 없으면 빈 `overrides` 반환. 호출자가 RoleRead 미만이면 iceberg-go가 ambient AWS chain fallback 후 `403 InvalidAccessKeyId` (fail-closed). 데이터 평면 access는 호출자가 catalog 평면에서 이미 authn한 권한과 동일.
+
+### Added
+
+- **`/v1/config` `s3.endpoint` scheme 미러:** `c.Request.Scheme()`을 반영해서 HTTPS 호출자가 HTTP로 downgrade되지 않음.
+- **ENV-gated 진단 미들웨어:** `GRAINFS_ICEBERG_ACCESS_LOG=1`로 iceberg REST 호출 단위 zerolog access line (`method`/`path`/`status`/`elapsed_ms`) 활성화. atomic.Bool 분기로 비활성 시 zero alloc.
+- **ENV-gated slow-commit 진단 scaffolding:** `GRAINFS_ICEBERG_COMMIT_TRACE_MS=<ms>`로 임계값 초과 commit에 대한 trace 활성화 (parse + boot wire, 실제 trace 로직은 후속).
+- **Per-instance MetaCatalog requestID prefix:** `crypto/rand` 8-byte hex prefix. 4-node cluster에서 모든 노드가 동일한 "create-table-1" requestID를 생성해 waiter map collision으로 10s hang하던 버그 해결.
+- **`internal/iam.LookupKey`** access_key 직접 lookup helper (caller-identity cred publish 경로용).
+- **E2E stress repro:** `tests/e2e/iceberg_concurrent_commits_test.go` (16 goroutine × 100 commits × 4 tables, `GRAINFS_TEST_ICEBERG_STRESS=1` opt-in). 503 임계점 추적용 — spec §8 `iceberg-rare-quic-stream-local-cancel-under-load` follow-up과 페어링.
+
+### Changed
+
+- **Server-side bounded retry on `ErrCommitFailed` for unconditional commits:** `requirements` 비어있는 CommitTable에 한해 최대 5회 reload+retry. warp 1.5의 `IsConflictError`가 iceberg-go의 `CommitFailedException` 문자열을 매칭 못해 retry 안 하던 갭을 server-side에서 흡수. requirements 있으면 spec-compliant 409 그대로 surface.
+- **409 응답 메시지 포맷:** `"table metadata pointer changed"` → `"409 Conflict: table metadata pointer changed"`. warp `IsConflictError`의 substring matcher가 "409"/"Conflict" 모두 인식하도록 bridge.
+- **`MetaForwardDialer` 시그니처:** `(peer, payload)` → `(ctx, peer, payload)`. QUIC stream call이 호출자 ctx의 deadline/cancel을 존중하도록.
+- **`MetaCatalog.readMetadata` bounded retry on `storage.ErrObjectNotFound`:** 5/15/35/75ms cumulative (~130ms worst case). 고동시성 CommitTable 직후 LoadTable에서 backend visibility race로 500 떨어지던 회귀를 catalog state 일관성 유지하며 흡수.
+- **Follower `CreateTable` early-return with request metadata:** propose 후 즉시 LoadTable round-trip 대신, 요청 body의 metadata를 클라이언트에 반환. follower→leader propose→follower fetch round-trip race로 100k+ ops 중 hang 발생하던 패턴 해결.
+- **Bench 스크립트 log level configurable:** `GRAINFS_LOG_LEVEL` env var, default `info` (기존 `warn`). 4-node cluster 디버깅 가시성 확보.
+
+### Fixed
+
+- **`storage.ErrObjectNotFound` cross-forward 분류:** meta-forward boundary에서 storage sentinel을 `service-unavailable` wire type으로 lossy하게 인코딩하던 버그. 새로운 `storage-not-found` wire type 추가. 결과: 503 flood (catalog 살아있는데도) → 500 (정상적 storage error) 또는 404 (NoSuchBucket).
+- **503 응답 body에 wrapped error message embed:** `ErrServiceUnavailable`만 반환하던 곳에서 `err.Error()` full chain 포함. empty-peers vs all-peers-failed 구분 가능.
+- **`io` import:** 새 retry loop에서 사용.
+
+### Removed
+
+- **`internal/iam.FirstActiveKeyForBucketGrant`** / **`FirstActiveKeyForSA`** 헬퍼: caller-identity 전환 후 사용처 없음. amplification 위험 코드 경로를 빌드에서 제거.
+
+### Tests
+
+- **`TestIcebergS3CredOverrides_CallerIdentity` (7 케이스):** RoleRead caller 본인 키 반환, RoleAdmin caller 본인 키 반환 (admin SA 키 아님), no-grant=empty, no-identity=empty, unknown-ak=empty, malformed-warehouse=empty, wildcard-grant=OK.
+- **`TestIcebergConfigHandler_SchemeReflection`:** SigV4-signed GET `/iceberg/v1/config` end-to-end. `s3.endpoint`이 test server scheme (`http://`)을 미러하는지, caller-identity가 핸들러 경로까지 propagate되는지 검증. helper 단위 테스트가 못 잡는 scheme reflection 회귀 가드.
+- **`TestRequestIDPerInstanceUnique`:** MetaCatalog 인스턴스 N개의 prefix가 distinct함을 검증.
+- **`iceberg_diag_test.go`:** access log middleware의 ENV 분기/zero-alloc 검증.
+
+### Docs
+
+- **`docs/cluster`:** orphan sweep status 정정 — best-effort 처리, full sweep은 deferred. 잘못된 "production-ready full sweep" 표현 수정.
+
+### Deferred (TODOS.md entry)
+
+- **HTTP plaintext에서 `/v1/config` secret 노출:** `s3.secret-access-key`가 응답 JSON에 평문으로 들어가므로 HTTP catalog 호출 시 secret이 와이어로 노출. branch가 도입한 회귀는 아니나 (pre-Option-B에서는 admin SA secret 누출, 이제는 호출자 본인 키), reopen 조건과 3 옵션 (TLS gate / docs / `--iceberg-allow-http-creds`)을 TODOS.md `## Deferred Until Triggered`에 기록.
+- **QUIC `local cancel error code 1` transient:** catalog-mixed/sustained의 잔존 0.002~0.029% 에러. transport-layer 별도 audit (spec §8 `iceberg-rare-quic-stream-local-cancel-under-load`).
+
 ## [0.0.255.0] - 2026-05-19 - feat(iceberg)!: SigV4 required on REST Catalog (BREAKING)
 
 Iceberg REST Catalog now shares the S3 SigV4 trust boundary. Every endpoint

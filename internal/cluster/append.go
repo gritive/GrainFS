@@ -106,7 +106,8 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		VersionID:        versionID,
 	}
 	if err := b.propose(ctx, CmdAppendObject, cmd); err != nil {
-		// Best-effort cleanup of orphan segment blob on apply rejection.
+		// Best-effort cleanup of orphan segment blob on apply rejection
+		// (full sweep deferred — see TODOS.md "Scrubber orphan sweep production wiring [P1]").
 		_ = os.Remove(b.segmentBlobPath(bucket, key, seg.BlobID))
 		return nil, err
 	}

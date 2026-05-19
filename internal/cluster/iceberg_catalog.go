@@ -2,11 +2,15 @@ package cluster
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -20,8 +24,19 @@ type MetaCatalog struct {
 	read      *MetaCatalogReadSender
 	readPeers func() []string
 	nextID    atomic.Uint64
+	idPrefix  string // 16 hex chars from crypto/rand, unique per instance
 	cacheMu   sync.RWMutex
 	cache     map[string]cachedIcebergMetadata
+}
+
+// newIcebergRequestIDPrefix returns a 16-char hex string from 8 random bytes.
+// Panics on crypto/rand failure — this is boot-time only.
+func newIcebergRequestIDPrefix() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Errorf("newIcebergRequestIDPrefix: crypto/rand failed: %w", err))
+	}
+	return hex.EncodeToString(b[:])
 }
 
 type cachedIcebergMetadata struct {
@@ -30,11 +45,11 @@ type cachedIcebergMetadata struct {
 }
 
 func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, warehouse string) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 func NewMetaCatalogWithForwarder(meta *MetaRaft, backend storage.Backend, warehouse string, forward func(context.Context, []byte) error) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 func NewMetaCatalogWithForwarders(
@@ -45,7 +60,7 @@ func NewMetaCatalogWithForwarders(
 	read *MetaCatalogReadSender,
 	readPeers func() []string,
 ) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 func (c *MetaCatalog) Warehouse() string { return c.warehouse }
@@ -119,6 +134,17 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 	}
 	if err := c.propose(ctx, MetaCmdTypeIcebergCreateTable, payload, cmd.RequestID); err != nil {
 		return nil, err
+	}
+	if !c.meta.IsLeader() && len(in.Metadata) > 0 {
+		metadata := make([]byte, len(in.Metadata))
+		copy(metadata, in.Metadata)
+		c.storeCachedMetadata(ident, in.MetadataLocation, metadata)
+		return &icebergcatalog.Table{
+			Identifier:       ident,
+			MetadataLocation: in.MetadataLocation,
+			Metadata:         metadata,
+			Properties:       cloneStringMap(in.Properties),
+		}, nil
 	}
 	if !c.meta.IsLeader() {
 		return c.LoadTable(ctx, ident)
@@ -279,20 +305,48 @@ func (c *MetaCatalog) deleteCachedMetadata(ident icebergcatalog.Identifier) {
 }
 
 func (c *MetaCatalog) requestID(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, c.nextID.Add(1))
+	return fmt.Sprintf("%s-%s-%d", prefix, c.idPrefix, c.nextID.Add(1))
 }
 
+// readMetadata fetches a metadata.json from the cluster backend.
+//
+// Under heavy concurrent CommitTable load, an immediately-following LoadTable
+// against the freshly committed metadata location can race the backend's
+// post-write visibility — the FSM entry is durable on raft commit, but the
+// backend write that landed just before the propose is sometimes not yet
+// observable from a different reader. The error surfaces as
+// storage.ErrObjectNotFound on the read side and propagates as a 500 to the
+// client even though the catalog state itself is consistent.
+//
+// Apply a small bounded retry with backoff to bridge the consistency
+// window. The schedule is tuned to stay well under warp's 10 s per-request
+// timeout while absorbing typical millisecond-scale propagation delays:
+// 5 attempts, 5/15/35/75 ms cumulative ≈ 130 ms worst case. Non-ENOENT
+// errors return immediately.
 func (c *MetaCatalog) readMetadata(location string) ([]byte, error) {
 	bucket, key, ok := parseIcebergS3Location(location)
 	if !ok {
 		return nil, fmt.Errorf("invalid Iceberg metadata location: %s", location)
 	}
-	rc, _, err := c.backend.GetObject(context.Background(), bucket, key)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	backoffs := []time.Duration{0, 5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond}
+	for _, backoff := range backoffs {
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+		rc, _, err := c.backend.GetObject(context.Background(), bucket, key)
+		if err == nil {
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+		lastErr = err
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			// Only retry the visible "not yet there" race. Anything else
+			// (permission, bucket gone, network) is a real error.
+			return nil, err
+		}
 	}
-	defer rc.Close()
-	return io.ReadAll(rc)
+	return nil, lastErr
 }
 
 func parseIcebergS3Location(location string) (bucket, key string, ok bool) {

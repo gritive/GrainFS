@@ -232,7 +232,7 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	follower := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = follower.Close() })
 	receiver := NewMetaProposeForwardReceiver(leader)
-	sender := NewMetaProposeForwardSender(func(_ string, payload []byte) ([]byte, error) {
+	sender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
 		return receiver.Handle(&transport.Message{Payload: payload}).Payload, nil
 	})
 	catalog := NewMetaCatalogWithForwarder(follower, nil, "s3://grainfs-tables/warehouse", func(ctx context.Context, command []byte) error {
@@ -269,11 +269,11 @@ func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) 
 
 	leaderCatalog := NewMetaCatalog(leader, backend, "s3://grainfs-tables/warehouse")
 	leaderReceiver := NewMetaProposeForwardReceiver(leader)
-	forwardSender := NewMetaProposeForwardSender(func(_ string, payload []byte) ([]byte, error) {
+	forwardSender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
 		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
 	})
 	readReceiver := NewMetaCatalogReadReceiver(leaderCatalog)
-	readSender := NewMetaCatalogReadSender(func(_ string, payload []byte) ([]byte, error) {
+	readSender := NewMetaCatalogReadSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
 		return readReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
 	})
 	followerCatalog := NewMetaCatalogWithForwarders(
@@ -298,6 +298,59 @@ func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) 
 	require.JSONEq(t, string(metadata), string(tbl.Metadata))
 }
 
+func TestMetaCatalogFollowerCreateTableReturnsProvidedMetadataWithoutLeaderObjectRead(t *testing.T) {
+	leader := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = leader.Close() })
+	require.NoError(t, leader.Bootstrap())
+	require.NoError(t, leader.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return leader.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	follower := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = follower.Close() })
+
+	leaderBackend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { leaderBackend.Close() })
+	require.NoError(t, leaderBackend.CreateBucket(context.Background(), "grainfs-tables"))
+
+	leaderCatalog := NewMetaCatalog(leader, leaderBackend, "s3://grainfs-tables/warehouse")
+	leaderReceiver := NewMetaProposeForwardReceiver(leader)
+	forwardSender := NewMetaProposeForwardSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		return leaderReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+	})
+	readReceiver := NewMetaCatalogReadReceiver(leaderCatalog)
+	readSender := NewMetaCatalogReadSender(func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		return readReceiver.Handle(&transport.Message{Payload: payload}).Payload, nil
+	})
+	followerCatalog := NewMetaCatalogWithForwarders(
+		follower,
+		nil,
+		"s3://grainfs-tables/warehouse",
+		func(ctx context.Context, command []byte) error {
+			return forwardSender.Send(ctx, []string{"leader"}, command)
+		},
+		readSender,
+		func() []string { return []string{"leader"} },
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, leaderCatalog.CreateNamespace(ctx, []string{"analytics"}, nil))
+	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
+	metadata := json.RawMessage(`{"format-version":2,"current-snapshot-id":7}`)
+	tbl, err := followerCatalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
+		Metadata:         metadata,
+		Properties:       map[string]string{"format-version": "2"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, ident, tbl.Identifier)
+	require.JSONEq(t, string(metadata), string(tbl.Metadata))
+	require.Equal(t, "2", tbl.Properties["format-version"])
+}
+
 func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
@@ -313,7 +366,7 @@ func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 	require.NoError(t, err)
 
 	leaderReceiver := NewMetaProposeForwardReceiver(leader)
-	sender := NewMetaProposeForwardSender(func(peer string, payload []byte) ([]byte, error) {
+	sender := NewMetaProposeForwardSender(func(_ context.Context, peer string, payload []byte) ([]byte, error) {
 		if peer == "follower" {
 			return encodeMetaForwardReply(raft.ErrNotLeader), nil
 		}

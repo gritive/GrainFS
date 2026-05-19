@@ -71,6 +71,7 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 
 	h := s.newHertzEngine(addr)
 	s.ensureRuntimeDefaults(ss)
+	s.applyIcebergDiagEnv()
 	s.registerRoutes(h)
 	s.hertz = h
 	s.initMetrics()

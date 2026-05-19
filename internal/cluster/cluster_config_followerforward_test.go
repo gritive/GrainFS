@@ -66,7 +66,7 @@ func TestClusterConfig_FollowerForward_E2E(t *testing.T) {
 	// (the only acceptable target — leader) to node-0's MetaProposeForwardReceiver,
 	// matching the production sender→receiver contract.
 	leaderReceiver := NewMetaProposeForwardReceiver(m0)
-	dialer := func(peer string, payload []byte) ([]byte, error) {
+	dialer := func(_ context.Context, peer string, payload []byte) ([]byte, error) {
 		if peer != "node-0" {
 			return encodeMetaForwardReply(raft.ErrNotLeader), nil
 		}
