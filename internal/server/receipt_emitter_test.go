@@ -9,13 +9,14 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
 func openTmpBadger(t *testing.T) *badger.DB {
 	t.Helper()
-	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })

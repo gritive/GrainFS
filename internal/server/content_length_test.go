@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -42,8 +41,8 @@ func TestGetObject_ContentLengthHeader(t *testing.T) {
 
 	s := New("127.0.0.1:14875", backend)
 	go func() { s.Run() }()
-	defer s.Shutdown(context.Background())
-	time.Sleep(100 * time.Millisecond)
+	defer shutdownTestServer(t, s)
+	waitForTCP(t, "127.0.0.1:14875")
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

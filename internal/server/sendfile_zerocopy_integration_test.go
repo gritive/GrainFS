@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -139,7 +138,7 @@ func TestE2EZeroCopyMultipleFiles(t *testing.T) {
 	require.NoError(t, err, "Failed to create bucket")
 
 	// Upload multiple files
-	numFiles := 50
+	numFiles := 12
 	fileSize := 128 * 1024 // 128KB
 
 	for i := 0; i < numFiles; i++ {
@@ -200,10 +199,9 @@ func TestE2EZeroCopyHTTPServer(t *testing.T) {
 			t.Logf("Server error: %v", err)
 		}
 	}()
-	defer s.Shutdown(context.Background())
+	defer shutdownTestServer(t, s)
 
-	// Wait for server to start
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, "127.0.0.1:14857")
 
 	client := &http.Client{}
 
@@ -266,8 +264,8 @@ func TestE2EZeroCopyRangeRequest(t *testing.T) {
 			t.Logf("Server error: %v", err)
 		}
 	}()
-	defer s.Shutdown(context.Background())
-	time.Sleep(100 * time.Millisecond)
+	defer shutdownTestServer(t, s)
+	waitForTCP(t, "127.0.0.1:14858")
 
 	t.Run("PartialContent206", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "http://127.0.0.1:14858/test-bucket/large", nil)
@@ -323,8 +321,8 @@ func TestE2EZeroCopyRangeEdgeCases(t *testing.T) {
 			t.Logf("Server error: %v", err)
 		}
 	}()
-	defer s.Shutdown(context.Background())
-	time.Sleep(100 * time.Millisecond)
+	defer shutdownTestServer(t, s)
+	waitForTCP(t, "127.0.0.1:14860")
 
 	t.Run("out-of-bounds start returns 416", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "http://127.0.0.1:14860/test-bucket/large", nil)

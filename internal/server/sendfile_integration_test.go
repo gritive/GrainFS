@@ -43,7 +43,7 @@ func TestSendfileIntegration(t *testing.T) {
 
 	// Create server
 	s := New("127.0.0.1:0", backend)
-	defer s.Shutdown(context.Background())
+	defer shutdownTestServer(t, s)
 
 	// Test small object
 	t.Run("SmallObject", func(t *testing.T) {

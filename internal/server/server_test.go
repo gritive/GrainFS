@@ -36,6 +36,55 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+const testServerShutdownTimeout = 10 * time.Millisecond
+
+func waitForTCP(t testing.TB, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("server %s did not become ready: %v", addr, lastErr)
+}
+
+func shutdownTestServer(t testing.TB, srv interface {
+	Shutdown(context.Context) error
+}) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testServerShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Logf("test server shutdown: %v", err)
+	}
+}
+
+func withoutReadAfterWriteRetry() Option {
+	return func(s *Server) {
+		s.readAfterWriteRetryTimeout = 0
+	}
+}
+
+func startTestServer(t testing.TB, addr string, backend storage.Backend, opts ...Option) *Server {
+	t.Helper()
+	testOpts := make([]Option, 0, len(opts)+1)
+	testOpts = append(testOpts, withoutReadAfterWriteRetry())
+	testOpts = append(testOpts, opts...)
+	srv := New(addr, backend, testOpts...)
+	go func() { _ = srv.Run() }()
+	waitForTCP(t, addr)
+	t.Cleanup(func() {
+		shutdownTestServer(t, srv)
+	})
+	return srv
+}
+
 func setupTestServer(t *testing.T) string {
 	t.Helper()
 	return setupTestServerWithOptions(t)
@@ -56,17 +105,7 @@ func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, backend, opts...)
-	go srv.Run() //nolint:errcheck
-	// wait for server to start
-	for i := 0; i < 50; i++ {
-		conn, err := net.Dial("tcp", addr)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	startTestServer(t, addr, backend, opts...)
 	return "http://" + addr, backend
 }
 

@@ -59,7 +59,7 @@ func startTestAlertsServer(t *testing.T, st *AlertsState) string {
 
 	h := hertz.Default(
 		hertz.WithHostPorts(addr),
-		hertz.WithExitWaitTime(time.Second),
+		hertz.WithExitWaitTime(testServerShutdownTimeout),
 	)
 	srv := &Server{alerts: st}
 	srv.registerAlertsAPI(h)
@@ -76,24 +76,13 @@ func startTestAlertsServer(t *testing.T, st *AlertsState) string {
 	}
 
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = h.Shutdown(ctx)
+		shutdownTestServer(t, h)
 	})
 	t.Cleanup(st.Close)
 
 	base := "http://" + addr
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return base
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("test alerts server never came up on %s", addr)
-	return ""
+	waitForTCP(t, addr)
+	return base
 }
 
 func freeLocalPort(t *testing.T) int {
