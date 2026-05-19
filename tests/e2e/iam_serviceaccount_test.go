@@ -693,6 +693,7 @@ func TestGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t *testing.T) {
 // short-circuiting it. Pre-fix, alice (Read on her own bucket) could
 // PUT/GET/DELETE bob's bucket policy — multi-team escape hatch.
 func TestIAM_E2E_PolicyBypassClosed(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
 	srv := startIAMTestServer(t)
 	defer srv.Stop()
 
@@ -758,4 +759,5 @@ func TestIAM_E2E_PolicyBypassClosed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("bob (Admin) PutBucketPolicy on own bucket: %v", err)
 	}
+	})
 }
