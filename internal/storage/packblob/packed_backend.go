@@ -359,6 +359,19 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return putInnerWithRequest(ctx, pb.inner, req)
 	}
 
+	// Versioning-enabled buckets must round-trip through the inner backend so
+	// the version index is updated and the response carries x-amz-version-id.
+	// Packblob's keyspace is (bucket,key) only; without this bypass small
+	// objects would be packed under the latest-only key and the version index
+	// would never see them. Errors from GetBucketVersioning are treated as
+	// "not enabled" so a transiently unavailable versioner does not block PUTs.
+	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
+		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
+			req.Body = bytes.NewReader(data)
+			return putInnerWithRequest(ctx, pb.inner, req)
+		}
+	}
+
 	// Small object → pack into blob. The blob storage layer keys entries by
 	// the legacy "bucket/key" string (its on-disk format), so we serialize
 	// the tuple here. The in-memory index uses the typed packedKey below.
