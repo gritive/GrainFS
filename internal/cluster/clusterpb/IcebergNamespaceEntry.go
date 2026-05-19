@@ -78,8 +78,16 @@ func (rcv *IcebergNamespaceEntry) PropertiesLength() int {
 	return 0
 }
 
+func (rcv *IcebergNamespaceEntry) Warehouse() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func IcebergNamespaceEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func IcebergNamespaceEntryAddNamespace(builder *flatbuffers.Builder, namespace flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(namespace), 0)
@@ -92,6 +100,9 @@ func IcebergNamespaceEntryAddProperties(builder *flatbuffers.Builder, properties
 }
 func IcebergNamespaceEntryStartPropertiesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func IcebergNamespaceEntryAddWarehouse(builder *flatbuffers.Builder, warehouse flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(warehouse), 0)
 }
 func IcebergNamespaceEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -659,6 +659,7 @@ table MetaAbortPlanCmd {
 table IcebergNamespaceEntry {
   namespace:[string];
   properties:[KeyValue];
+  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
 }
 
 table IcebergIdentifier {
@@ -670,6 +671,7 @@ table IcebergTableEntry {
   identifier:IcebergIdentifier;
   metadata_location:string;
   properties:[KeyValue];
+  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
 }
 
 table MetaIcebergCreateNamespaceCmd {
@@ -780,6 +782,7 @@ table MetaStateSnapshot {
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
   nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
+  iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's
