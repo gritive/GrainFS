@@ -278,9 +278,31 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 	}
 
 	// Every object — including zero-byte ones (which have one empty
-	// trailing segment) — is now segment-backed. Stream the segments in
-	// order via the parallel SegmentReader.
+	// trailing segment) — is now segment-backed.
 	if obj.Segments != nil {
+		// Fast path: single-segment objects (everything under the 16 MiB
+		// chunk threshold) stream directly from the segment file. For
+		// unencrypted segments this returns *os.File, which Hertz's
+		// SetBodyStream upgrades to sendfile(2). For encrypted segments
+		// the AEAD reader avoids the SegmentReader fan-out overhead.
+		if len(obj.Segments) == 1 {
+			seg := obj.Segments[0]
+			segPath := b.segmentPath(bucket, key, seg.BlobID)
+			if b.encryptor != nil {
+				domain := encryptedObjectFileDomain(bucket, key+"/segments/"+seg.BlobID)
+				rc, err := openEncryptedObjectFile(segPath, b.encryptor, domain, seg.Size)
+				if err != nil {
+					return nil, nil, fmt.Errorf("open encrypted segment: %w", err)
+				}
+				return rc, obj, nil
+			}
+			f, err := os.Open(segPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("open segment: %w", err)
+			}
+			return f, obj, nil
+		}
+		// Multi-segment: stream via the parallel SegmentReader.
 		store := localSegmentStore{b: b, bucket: bucket, key: key}
 		return io.NopCloser(NewSegmentReader(store, obj.Segments)), obj, nil
 	}
@@ -553,23 +575,122 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	return obj, nil
 }
 
-// ReadAt reads len(buf) bytes from the object at the given offset via pread(2).
+// ReadAt reads up to len(buf) bytes from the object at the given offset.
+//
+// Segment-backed objects (every object produced by PutObject since Task 1.6)
+// walk obj.Segments and dispatch a per-segment pread for each overlapping
+// segment. Legacy single-file objects (Volume Device blocks via WriteAt) still
+// pread the flat backing file.
 func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	_ = ctx
-	objPath := b.objectPath(bucket, key)
-	if b.encryptor != nil {
-		obj, err := b.HeadObject(context.Background(), bucket, key)
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	if err != nil {
+		// Preserve the os.Open-style "file not found" contract that
+		// callers (and tests) rely on via os.IsNotExist. The legacy ReadAt
+		// returned *os.PathError from os.Open; emit one here so wrappers
+		// like CachedBackend continue to satisfy os.IsNotExist.
+		if errors.Is(err, ErrObjectNotFound) {
+			return 0, &os.PathError{Op: "open", Path: b.objectPath(bucket, key), Err: os.ErrNotExist}
+		}
+		return 0, err
+	}
+
+	// Legacy single-file path: pre-segment objects (Volume Device blocks).
+	if obj.Segments == nil {
+		objPath := b.objectPath(bucket, key)
+		if b.encryptor != nil {
+			return readAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size, offset, buf)
+		}
+		f, err := os.Open(objPath)
 		if err != nil {
 			return 0, err
 		}
-		return readAtEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size, offset, buf)
+		defer f.Close()
+		return f.ReadAt(buf, offset)
 	}
-	f, err := os.Open(objPath)
-	if err != nil {
-		return 0, err
+
+	// Segment-backed: match os.File.ReadAt semantics — out-of-range offset
+	// returns (0, io.EOF) so callers (e.g. readAtRangeReader) don't loop.
+	if offset < 0 {
+		return 0, fmt.Errorf("ReadAt: negative offset")
 	}
-	defer f.Close()
-	return f.ReadAt(buf, offset)
+	if offset >= obj.Size {
+		return 0, io.EOF
+	}
+
+	want := int64(len(buf))
+	if offset+want > obj.Size {
+		want = obj.Size - offset
+	}
+
+	var (
+		written    int
+		cumulative int64
+	)
+	for _, seg := range obj.Segments {
+		segStart := cumulative
+		segEnd := cumulative + seg.Size
+		cumulative = segEnd
+
+		if segEnd <= offset {
+			continue // segment is entirely before the requested range
+		}
+		if segStart >= offset+want {
+			break // segment is entirely past the requested range
+		}
+
+		// Intra-segment offset and length.
+		var intraOff int64
+		if offset > segStart {
+			intraOff = offset - segStart
+		}
+		intraEnd := seg.Size
+		if offset+want < segEnd {
+			intraEnd = offset + want - segStart
+		}
+		chunkLen := int(intraEnd - intraOff)
+		if chunkLen <= 0 {
+			continue
+		}
+
+		segPath := b.segmentPath(bucket, key, seg.BlobID)
+		dst := buf[written : written+chunkLen]
+		if b.encryptor != nil {
+			domain := encryptedObjectFileDomain(bucket, key+"/segments/"+seg.BlobID)
+			n, rerr := readAtEncryptedObjectFile(segPath, b.encryptor, domain, seg.Size, intraOff, dst)
+			written += n
+			if rerr != nil && rerr != io.EOF {
+				return written, rerr
+			}
+			if n < chunkLen {
+				// short read inside the segment is unexpected; treat as EOF
+				return written, io.EOF
+			}
+		} else {
+			f, oerr := os.Open(segPath)
+			if oerr != nil {
+				return written, oerr
+			}
+			n, rerr := f.ReadAt(dst, intraOff)
+			_ = f.Close()
+			written += n
+			if rerr != nil && rerr != io.EOF {
+				return written, rerr
+			}
+			if n < chunkLen {
+				return written, io.EOF
+			}
+		}
+	}
+
+	if int64(written) < int64(len(buf)) {
+		// Caller asked for more than the object holds.
+		return written, io.EOF
+	}
+	return written, nil
 }
 
 func (b *LocalBackend) PreferWriteAt(bucket string) bool {
