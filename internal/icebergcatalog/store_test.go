@@ -137,3 +137,54 @@ func TestStore_ErrorsAreTyped(t *testing.T) {
 	_, err = store.LoadTable(ctx, "", Identifier{Namespace: []string{"missing"}, Name: "t"})
 	require.True(t, errors.Is(err, ErrNamespaceNotFound) || errors.Is(err, ErrTableNotFound))
 }
+
+// TestLegacyStore_RejectsNonDefaultWarehouse verifies that F22 is fixed:
+// Store is a single-warehouse implementation and must reject calls for any
+// warehouse other than "default" or "". Accepting silently would allow writes
+// intended for warehouse-A to be read back as warehouse-B data.
+func TestLegacyStore_RejectsNonDefaultWarehouse(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+
+	// Non-default warehouse must always error.
+	err := store.CreateNamespace(ctx, "warehouse-a", []string{"ns"}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	_, err = store.LoadNamespace(ctx, "warehouse-a", []string{"ns"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	_, err = store.ListNamespaces(ctx, "warehouse-a")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	err = store.DeleteNamespace(ctx, "warehouse-a", []string{"ns"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	ident := Identifier{Namespace: []string{"ns"}, Name: "t"}
+	_, err = store.CreateTable(ctx, "warehouse-a", ident, CreateTableInput{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	_, err = store.LoadTable(ctx, "warehouse-a", ident)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	_, err = store.ListTables(ctx, "warehouse-a", []string{"ns"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	err = store.DeleteTable(ctx, "warehouse-a", ident)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	_, err = store.CommitTable(ctx, "warehouse-a", ident, CommitTableInput{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot handle warehouse")
+
+	// "" and "default" must be accepted (no error from warehouse check).
+	require.NoError(t, store.CreateNamespace(ctx, "", []string{"ns"}, nil))
+	require.NoError(t, store.CreateNamespace(ctx, "default", []string{"ns2"}, nil))
+}

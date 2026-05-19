@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -47,7 +46,7 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 	if p, ok := store.(s3URLPrefixProvider); ok {
 		s3Prefix = p.S3URLPrefix()
 	}
-	location := fmt.Sprintf("%s/%s/%s", s3Prefix, ns[0], req.Name)
+	location := icebergTableBasePath(s3Prefix, wh, ns[0], req.Name)
 	metadataLocation := location + "/metadata/00000.json"
 	metadata := buildInitialIcebergMetadata(location, req.Schema, req.Properties)
 	if _, err := store.LoadTable(ctx, wh, ident); err == nil {

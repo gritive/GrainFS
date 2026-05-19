@@ -3195,6 +3195,12 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
 	}
 	restoredNfsExports := false
+	// NOTE: nfsexport.Store.ReplaceAll touches BadgerDB and may return an error
+	// after the core FSM fields are already committed. Making this fully atomic
+	// requires refactoring nfsexport.Store behind an interface for staged-commit.
+	// Deferred to a follow-up — see TODOS for the design discussion. In practice
+	// a BadgerDB error here would indicate disk failure during snapshot restore,
+	// which warrants operator intervention regardless of atomicity.
 	if f.exportStore != nil && hasNfsExports {
 		if err := f.exportStore.ReplaceAll(newNfsExports); err != nil {
 			return fmt.Errorf("meta_fsm: Restore: NFS exports: %w", err)
