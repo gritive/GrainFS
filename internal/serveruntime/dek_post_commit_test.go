@@ -44,7 +44,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 
 func TestDispatcher_RotateConfigTriggersPropose(t *testing.T) {
 	p := &fakeDEKProposer{}
-	d := &DEKPostCommitDispatcher{proposer: p}
+	d := &dekPostCommitDispatcher{proposer: p}
 
 	payload, err := cluster.EncodeConfigPutPayload("encryption.rotate-dek", "now")
 	if err != nil {
@@ -57,7 +57,7 @@ func TestDispatcher_RotateConfigTriggersPropose(t *testing.T) {
 
 func TestDispatcher_PruneConfigTriggersPropose(t *testing.T) {
 	p := &fakeDEKProposer{}
-	d := &DEKPostCommitDispatcher{proposer: p}
+	d := &dekPostCommitDispatcher{proposer: p}
 
 	payload, err := cluster.EncodeConfigPutPayload("encryption.prune-dek-version", "3")
 	if err != nil {
@@ -86,7 +86,7 @@ func TestDispatcher_DEKRotate_KicksScrubber(t *testing.T) {
 	}
 
 	var called atomic.Int32
-	d := &DEKPostCommitDispatcher{
+	d := &dekPostCommitDispatcher{
 		keeper: keeper,
 		scrubberKick: func(_ context.Context, oldGen uint32) {
 			called.Add(1)
@@ -100,7 +100,7 @@ func TestDispatcher_DEKRotate_KicksScrubber(t *testing.T) {
 
 func TestDispatcher_UnrelatedConfigKey_NoOp(t *testing.T) {
 	p := &fakeDEKProposer{}
-	d := &DEKPostCommitDispatcher{proposer: p}
+	d := &dekPostCommitDispatcher{proposer: p}
 
 	payload, err := cluster.EncodeConfigPutPayload("audit.deny-only", "true")
 	if err != nil {
@@ -128,7 +128,7 @@ func TestDispatcher_NilScrubberKick_NoOp(t *testing.T) {
 	}
 
 	// scrubberKick is nil — must not panic.
-	d := &DEKPostCommitDispatcher{keeper: keeper}
+	d := &dekPostCommitDispatcher{keeper: keeper}
 	d.Handle(clusterpb.MetaCmdTypeDEKRotate, nil)
 	time.Sleep(50 * time.Millisecond)
 }

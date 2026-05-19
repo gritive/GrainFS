@@ -133,6 +133,21 @@ func (k *DEKKeeper) Versions() map[uint32][]byte {
 	return out
 }
 
+// VersionsAndActive returns a deep copy of the wrapped-DEK map AND the active
+// generation under a single RLock acquisition. Snapshot callers MUST use this
+// instead of Versions()+Active() — otherwise a Rotate() between the two calls
+// produces a snapshot whose `active` references a generation not yet in the
+// map (silent FSM inconsistency).
+func (k *DEKKeeper) VersionsAndActive() (versions map[uint32][]byte, active uint32) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	out := make(map[uint32][]byte, len(k.wrap))
+	for g, w := range k.wrap {
+		out[g] = append([]byte(nil), w...)
+	}
+	return out, k.active
+}
+
 // LoadFromFSM reconstructs a DEKKeeper from persisted wrapped DEKs (used after raft restore).
 // Active gen is set to the maximum key in versions.
 //

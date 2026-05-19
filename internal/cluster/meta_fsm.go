@@ -321,9 +321,10 @@ type MetaFSM struct {
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
 
-	// postCommitHooks is a list of hooks fired after each successful applyCmd.
-	// Protected by mu for registration; read under RLock at fire time.
-	postCommitHooks []PostCommitHook
+	// postCommitHooks is an atomic pointer to the slice of post-commit hooks.
+	// Read on every apply via a single atomic load (no mutex). Register path
+	// uses copy-on-write CAS; see post_commit.go for the contract.
+	postCommitHooks postCommitHooksField
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -2081,9 +2082,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// is wired — absent keeper or empty versions skips the trailer for
 	// forward-compat with nodes that have not yet wired a keeper.
 	if f.dekKeeper != nil {
-		dekVersions := f.dekKeeper.Versions()
+		// VersionsAndActive snapshots both fields under a single RLock so a
+		// concurrent Rotate() can't insert a new gen between the two reads
+		// (TOCTOU — active would reference a gen absent from versions map).
+		dekVersions, dekActive := f.dekKeeper.VersionsAndActive()
 		if len(dekVersions) > 0 {
-			dekActive, _ := f.dekKeeper.Active()
 			dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive, dekRefCountsCopy)
 			if err != nil {
 				return nil, fmt.Errorf("meta_fsm: Snapshot: encode DEK versions: %w", err)

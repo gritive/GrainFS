@@ -17,7 +17,7 @@ type ReloadHooks struct {
 	OnAuditDenyOnly         func(context.Context, bool) error
 }
 
-// RegisterClusterKeys registers the 9 cluster-wide config keys into s.
+// RegisterClusterKeys registers every cluster-wide config key into s.
 // Subsystem reload-hook fields in h may be nil; absent hooks are no-ops.
 func RegisterClusterKeys(s *Store, h ReloadHooks) {
 	s.Register("iam.anon-enabled", BoolSpec{

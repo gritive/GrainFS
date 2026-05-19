@@ -11,18 +11,18 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-// DEKProposer is the subset of *cluster.MetaRaft needed by DEKPostCommitDispatcher.
+// dekProposer is the subset of *cluster.MetaRaft needed by dekPostCommitDispatcher.
 // Defined here so MetaRaft satisfies it implicitly without import cycles.
-type DEKProposer interface {
+type dekProposer interface {
 	ProposeDEKRotate(ctx context.Context) error
 	ProposeDEKVersionPrune(ctx context.Context, gen uint32) error
 }
 
-// DEKPostCommitDispatcher handles post-commit hooks related to DEK lifecycle.
+// dekPostCommitDispatcher handles post-commit hooks related to DEK lifecycle.
 // It decodes ConfigPut payloads for DEK-related keys and dispatches proposals
 // asynchronously (via goroutines) so the FSM apply loop is never blocked.
-type DEKPostCommitDispatcher struct {
-	proposer     DEKProposer
+type dekPostCommitDispatcher struct {
+	proposer     dekProposer
 	keeper       *encrypt.DEKKeeper
 	scrubberKick func(ctx context.Context, oldGen uint32)
 }
@@ -30,7 +30,7 @@ type DEKPostCommitDispatcher struct {
 // Handle implements cluster.PostCommitHook. It is called from the FSM apply
 // goroutine after a command commits; it MUST NOT block. All side-effectful
 // work (proposals, scrubber kicks) is dispatched in goroutines.
-func (d *DEKPostCommitDispatcher) Handle(cmdType clusterpb.MetaCmdType, payload []byte) {
+func (d *dekPostCommitDispatcher) Handle(cmdType clusterpb.MetaCmdType, payload []byte) {
 	switch cmdType {
 	case clusterpb.MetaCmdTypeConfigPut:
 		d.handleConfigPut(payload)
@@ -39,7 +39,7 @@ func (d *DEKPostCommitDispatcher) Handle(cmdType clusterpb.MetaCmdType, payload 
 	}
 }
 
-func (d *DEKPostCommitDispatcher) handleConfigPut(payload []byte) {
+func (d *dekPostCommitDispatcher) handleConfigPut(payload []byte) {
 	if d.proposer == nil {
 		return
 	}
@@ -72,7 +72,7 @@ func (d *DEKPostCommitDispatcher) handleConfigPut(payload []byte) {
 	}
 }
 
-func (d *DEKPostCommitDispatcher) handleDEKRotate() {
+func (d *dekPostCommitDispatcher) handleDEKRotate() {
 	if d.scrubberKick == nil || d.keeper == nil {
 		return
 	}
@@ -84,20 +84,20 @@ func (d *DEKPostCommitDispatcher) handleDEKRotate() {
 	go d.scrubberKick(context.Background(), oldGen)
 }
 
-// WireDEKPostCommit constructs a DEKPostCommitDispatcher and registers it as a
+// wireDEKPostCommit constructs a dekPostCommitDispatcher and registers it as a
 // post-commit hook on fsm. The scrubberKick parameter may be nil (used in §1
 // before the storage-layer adapter is implemented).
 //
 // NOTE: This function exists for future use. It is NOT wired into the real
 // server startup in §1; that wiring happens when the runtime is assembled in a
 // later section.
-func WireDEKPostCommit(
+func wireDEKPostCommit(
 	fsm *cluster.MetaFSM,
-	proposer DEKProposer,
+	proposer dekProposer,
 	keeper *encrypt.DEKKeeper,
 	scrubberKick func(ctx context.Context, oldGen uint32),
 ) {
-	d := &DEKPostCommitDispatcher{
+	d := &dekPostCommitDispatcher{
 		proposer:     proposer,
 		keeper:       keeper,
 		scrubberKick: scrubberKick,
