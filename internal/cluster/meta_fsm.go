@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
+	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -94,7 +96,7 @@ const dekSnapshotTrailerLen = 8
 // a single FlatBuffers payload. One trailer for all 4 §2 stores keeps the chain
 // depth manageable and reflects that the stores always serialize together.
 //
-// Wire layout (appended after every other trailer; IPST is the outermost trailer):
+// Wire layout (appended before JKEY; JKEY is now the outermost trailer):
 //
 //	[FB root bytes]
 //	[IAM trailer bytes]       (optional, magic 0x47414D49)
@@ -104,13 +106,39 @@ const dekSnapshotTrailerLen = 8
 //	[uint32 payloadLen  LE]
 //	[uint32 magic IPST  LE]
 //
-// Restore reads from the end: check last 4 bytes for IPST magic, if present
-// read payloadLen, strip IPST payload+footer, then continue DKVS/GCFG/IAM peel.
+// Restore reads from the end: peel JKEY first, then check for IPST magic,
+// if present read payloadLen, strip IPST payload+footer, then continue DKVS/GCFG/IAM peel.
 const ipstSnapshotTrailerMagic uint32 = 0x54535049
 
 // ipstSnapshotTrailerLen is the on-disk size of the IPST footer:
 // [u32 payload_len][u32 magic]. Always 8 bytes when present.
 const ipstSnapshotTrailerLen = 8
+
+// jkeySnapshotTrailerMagic identifies the JKEY trailer appended after the IPST
+// trailer (outermost trailer). Hex pairs spell "JKEY"
+// (0x4A=J, 0x4B=K, 0x45=E, 0x59=Y, little-endian uint32 = 0x59454B4A).
+//
+// Carries: JWTKeyStore — current + previous wrapped JWT signing keys.
+// Only appended when at least one key exists (nil/nil is skipped for back-compat).
+//
+// Wire layout (JKEY is the newest/outermost trailer):
+//
+//	[FB root bytes]
+//	[IAM trailer bytes]       (optional, magic 0x47414D49)
+//	[GCFG trailer bytes]      (optional, magic 0x47464347)
+//	[DKVS trailer bytes]      (optional, magic 0x53564B44)
+//	[IPST trailer bytes]      (optional, magic 0x54535049)
+//	[jkeyPayloadBytes]
+//	[uint32 payloadLen  LE]
+//	[uint32 magic JKEY  LE]
+//
+// Restore reads from the end: check last 4 bytes for JKEY magic, if present
+// read payloadLen, strip JKEY payload+footer, then continue IPST/DKVS/GCFG/IAM peel.
+const jkeySnapshotTrailerMagic uint32 = 0x59454B4A
+
+// jkeySnapshotTrailerLen is the on-disk size of the JKEY footer:
+// [u32 payload_len][u32 magic]. Always 8 bytes when present.
+const jkeySnapshotTrailerLen = 8
 
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
@@ -173,6 +201,8 @@ const (
 	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
 	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
 	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
+	MetaCmdTypeJWTSigningKeyRotate          = clusterpb.MetaCmdTypeJWTSigningKeyRotate
+	MetaCmdTypeJWTSigningKeyPrune           = clusterpb.MetaCmdTypeJWTSigningKeyPrune
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -387,6 +417,14 @@ type MetaFSM struct {
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
 
+	// jwtKeyStore holds the wrapped JWT signing key seeds persisted in the JKEY
+	// snapshot trailer. Always non-nil after NewMetaFSM.
+	jwtKeyStore *JWTKeyStore
+
+	// jwtKeys is the in-process JWT KeySet reconstructed from jwtKeyStore seeds
+	// on Restore. SetJWTKeySet allows serveruntime to swap in its own instance.
+	jwtKeys *iamjwt.KeySet
+
 	// postCommitHooks is an atomic pointer to the slice of post-commit hooks.
 	// Read on every apply via a single atomic load (no mutex). Register path
 	// uses copy-on-write CAS; see post_commit.go for the contract.
@@ -408,6 +446,8 @@ func NewMetaFSM() *MetaFSM {
 		activeFeatures:    compat.NewActiveFeatures(),
 		clusterCfg:        NewClusterConfig(),
 		dekRefCounts:      make(map[uint32]uint64),
+		jwtKeyStore:       NewJWTKeyStore(),
+		jwtKeys:           iamjwt.NewKeySet(),
 	}
 }
 
@@ -457,6 +497,19 @@ func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dekKeeper = k
+}
+
+// SetJWTKeySet replaces the in-process JWT KeySet used by the FSM apply path
+// to reflect newly installed/demoted keys into memory. Must be called before
+// the raft log starts replaying. Passing nil resets to the internal default.
+func (f *MetaFSM) SetJWTKeySet(ks *iamjwt.KeySet) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ks == nil {
+		f.jwtKeys = iamjwt.NewKeySet()
+	} else {
+		f.jwtKeys = ks
+	}
 }
 
 // SetPolicyStore wires the IAM policy store into the MetaFSM. Must be called
@@ -773,6 +826,41 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		}
 		safe := f.dekRefCount(gen) == 0
 		return f.dekKeeper.Prune(gen, safe)
+	case clusterpb.MetaCmdTypeJWTSigningKeyRotate:
+		if f.dekKeeper == nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: DEK keeper not wired")
+		}
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: rand secret: %w", err)
+		}
+		wrapped, gen, err := f.dekKeeper.Seal(secret)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: seal jwt secret: %w", err)
+		}
+		kid, err := iamjwt.NewKid()
+		if err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: %w", err)
+		}
+		now := time.Now()
+		// Demote old current in the persistent store
+		f.jwtKeyStore.Demote(now)
+		// Install new current in the persistent store
+		seed := iamjwt.KeySeed{Kid: kid, WrappedSecret: wrapped, DekGen: gen, Role: "current"}
+		f.jwtKeyStore.Put(seed)
+		// Reflect into the local in-process KeySet
+		f.jwtKeys.DemoteCurrentToPrevious(now)
+		if err := f.jwtKeys.InstallCurrent(seed, f.dekKeeper); err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: install jwt key locally: %w", err)
+		}
+		return nil
+	case clusterpb.MetaCmdTypeJWTSigningKeyPrune:
+		if !f.jwtKeyStore.PrunePrevSafe(time.Now()) {
+			return iamjwt.ErrPrunePrev
+		}
+		f.jwtKeyStore.RemovePrev()
+		_ = f.jwtKeys.Prune(true)
+		return nil
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
@@ -2552,6 +2640,19 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		out = append(out, ipstPayload...)
 		out = append(out, ipstFooter[:]...)
 	}
+
+	// Append JKEY trailer after the IPST trailer. Only emit when at least one
+	// JWT signing key exists — an empty key store produces no trailer for
+	// back-compat with nodes that have not yet run JWTSigningKeyRotate.
+	jkeyCurrent, jkeyPrevious := f.jwtKeyStore.Snapshot()
+	if jkeyCurrent != nil || jkeyPrevious != nil {
+		jkeyPayload := encodeJWTKeyStore(jkeyCurrent, jkeyPrevious)
+		var jkeyFooter [jkeySnapshotTrailerLen]byte
+		binary.LittleEndian.PutUint32(jkeyFooter[0:4], uint32(len(jkeyPayload)))
+		binary.LittleEndian.PutUint32(jkeyFooter[4:8], jkeySnapshotTrailerMagic)
+		out = append(out, jkeyPayload...)
+		out = append(out, jkeyFooter[:]...)
+	}
 	return out, nil
 }
 
@@ -2564,10 +2665,28 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
 
-	// Peel IPST trailer first (it is the absolute newest / outermost trailer when present).
+	// Peel JKEY trailer first (it is the absolute newest / outermost trailer when present).
+	// Layout: [FB bytes][IAM][GCFG][DKVS][IPST][jkeyPayload][u32 jkeyLen][u32 jkeyMagic].
+	// After stripping JKEY, the remaining bytes look like a pre-T35 snapshot.
+	remaining := data
+	var jkeyData []byte
+	if len(remaining) >= jkeySnapshotTrailerLen {
+		jkeyFooter := remaining[len(remaining)-jkeySnapshotTrailerLen:]
+		if binary.LittleEndian.Uint32(jkeyFooter[4:8]) == jkeySnapshotTrailerMagic {
+			jkeyLen := binary.LittleEndian.Uint32(jkeyFooter[0:4])
+			if int(jkeyLen)+jkeySnapshotTrailerLen > len(remaining) {
+				return fmt.Errorf("meta_fsm: Restore: JKEY trailer length %d exceeds snapshot size %d", jkeyLen, len(remaining))
+			}
+			jkeyEnd := len(remaining) - jkeySnapshotTrailerLen
+			jkeyStart := jkeyEnd - int(jkeyLen)
+			jkeyData = remaining[jkeyStart:jkeyEnd]
+			remaining = remaining[:jkeyStart]
+		}
+	}
+
+	// Peel IPST trailer next (second-newest trailer when present).
 	// Layout: [FB bytes][IAM trailer][GCFG trailer][DKVS trailer][ipstPayload][u32 ipstLen][u32 ipstMagic].
 	// After stripping IPST, the remaining bytes look like a pre-C1 snapshot.
-	remaining := data
 	var ipstData []byte
 	if len(remaining) >= ipstSnapshotTrailerLen {
 		ipstFooter := remaining[len(remaining)-ipstSnapshotTrailerLen:]
@@ -2961,6 +3080,33 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 				f.policyResolver.Invalidate(nil, nil)
 			}
 		}
+	}
+
+	// JKEY restore — decode the JWT signing keys from the JKEY trailer.
+	// If no trailer was present (legacy snapshot or no keys generated yet),
+	// clear the store for back-compat.
+	if len(jkeyData) > 0 {
+		jkeyCurrent, jkeyPrevious, err := decodeJWTKeyStore(jkeyData)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode JKEY: %w", err)
+		}
+		f.jwtKeyStore.ReplaceAll(jkeyCurrent, jkeyPrevious)
+		// Rebuild the local in-process KeySet so same-process callers can
+		// verify tokens without another Seal/Open round-trip.
+		if f.dekKeeper != nil {
+			var seeds []iamjwt.KeySeed
+			if jkeyCurrent != nil {
+				seeds = append(seeds, *jkeyCurrent)
+			}
+			if jkeyPrevious != nil {
+				seeds = append(seeds, *jkeyPrevious)
+			}
+			if err := f.jwtKeys.LoadFromSeeds(seeds, f.dekKeeper); err != nil {
+				return fmt.Errorf("meta_fsm: Restore: rebuild jwt KeySet: %w", err)
+			}
+		}
+	} else {
+		f.jwtKeyStore.ReplaceAll(nil, nil)
 	}
 	return nil
 }

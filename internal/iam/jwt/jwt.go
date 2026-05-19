@@ -17,6 +17,12 @@ import (
 const (
 	algHS256       = "HS256"
 	clockSkewLimit = 30 * time.Second
+
+	// MaxJWTTokenTTL is the conservative upper bound on any minted token's TTL.
+	// Used by JWTKeyStore.PrunePrevSafe to ensure no live tokens reference a
+	// demoted previous key. Matches the default TTL in MintAt and the OAuth
+	// handler at 3600s.
+	MaxJWTTokenTTL = time.Hour
 )
 
 var (
@@ -209,4 +215,77 @@ func newKid() (string, error) {
 		return "", fmt.Errorf("generate kid: %w", err)
 	}
 	return fmt.Sprintf("k_%x", b), nil
+}
+
+// NewKid generates a new random key ID. Exported for use by the meta-FSM apply path.
+func NewKid() (string, error) { return newKid() }
+
+// KeySeed is the persisted, wrapped representation of a JWT signing key stored
+// in the meta-FSM snapshot. WrappedSecret is sealed with the DEK identified by DekGen.
+type KeySeed struct {
+	Kid           string
+	WrappedSecret []byte
+	DekGen        uint32
+	Role          string // "current" or "previous"
+	DemotedAt     int64  // unix seconds; 0 for "current"; set when demoted to "previous"
+}
+
+// Unwrapper is the minimal interface needed to unseal a wrapped JWT signing secret.
+// *encrypt.DEKKeeper satisfies this interface.
+type Unwrapper interface {
+	Open(ct []byte, gen uint32) ([]byte, error)
+}
+
+// LoadFromSeeds replaces the in-memory keyset with seeds unwrapped via u.
+// Roles other than "current"/"previous" are ignored. Multiple "current" seeds:
+// the last one in iteration order wins (FSM emits at most one).
+func (ks *KeySet) LoadFromSeeds(seeds []KeySeed, u Unwrapper) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.current = nil
+	ks.previous = nil
+	for _, s := range seeds {
+		plain, err := u.Open(s.WrappedSecret, s.DekGen)
+		if err != nil {
+			return fmt.Errorf("jwt: LoadFromSeeds: unwrap kid %s: %w", s.Kid, err)
+		}
+		entry := &keyEntry{kid: s.Kid, secret: plain}
+		switch s.Role {
+		case "current":
+			ks.current = entry
+		case "previous":
+			if s.DemotedAt != 0 {
+				entry.expires = time.Unix(s.DemotedAt, 0).Add(MaxJWTTokenTTL)
+			}
+			ks.previous = entry
+		}
+	}
+	return nil
+}
+
+// InstallCurrent installs s as the new current key without touching previous.
+// Used by the FSM apply path. Grabs ks.mu.Lock() internally.
+func (ks *KeySet) InstallCurrent(s KeySeed, u Unwrapper) error {
+	plain, err := u.Open(s.WrappedSecret, s.DekGen)
+	if err != nil {
+		return fmt.Errorf("jwt: InstallCurrent: unwrap kid %s: %w", s.Kid, err)
+	}
+	ks.mu.Lock()
+	ks.current = &keyEntry{kid: s.Kid, secret: plain}
+	ks.mu.Unlock()
+	return nil
+}
+
+// DemoteCurrentToPrevious moves current → previous with the demotion timestamp.
+// No-op if current is nil. Used by the FSM apply path.
+func (ks *KeySet) DemoteCurrentToPrevious(now time.Time) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	if ks.current == nil {
+		return
+	}
+	demoted := ks.current
+	demoted.expires = now.Add(MaxJWTTokenTTL)
+	ks.previous = demoted
+	ks.current = nil
 }
