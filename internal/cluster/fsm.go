@@ -94,6 +94,29 @@ type PutObjectMetaCmd struct {
 	// commits. Replicas write the slice onto ObjectIndexEntry.Parts so any
 	// node can answer GET ?partNumber=N without re-reading the body.
 	Parts []storage.MultipartPartEntry
+	// Segments carries per-segment placement metadata for chunked PUTs
+	// (sp.Size > storage.DefaultChunkSize). Empty/nil for legacy single-segment,
+	// appendable, and multipart objects. When non-empty, top-level
+	// NodeIDs/ECData/ECParity/PlacementGroupID mirror Segments[0] for
+	// backward-compatible single-segment readers; per-segment placements live
+	// in Segments[].
+	Segments []SegmentMetaEntry
+}
+
+// SegmentMetaEntry records the placement of one chunked-PUT segment. The
+// per-segment EC params (NodeIDs/ECData/ECParity/RingVersion) are required
+// for Task 2.4 GETs to read segments outside the segment-0 mirror.
+type SegmentMetaEntry struct {
+	BlobID           string
+	Size             int64
+	Checksum         []byte // xxhash3-128 (16 B)
+	PlacementGroupID string
+	ShardSize        int32
+	SegmentIdx       int32 // index in Segments[]; ensures deterministic ordering on apply
+	NodeIDs          []string
+	ECData           uint8
+	ECParity         uint8
+	RingVersion      RingVersion
 }
 
 // SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.

@@ -2121,6 +2121,24 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		return nil, fmt.Errorf("putObjectEC: EC profile cannot place on %d nodes", len(liveNodes))
 	}
 
+	// Phase 2 chunked PUT routing: objects larger than DefaultChunkSize
+	// (16 MiB) take the segmented path — N×16 MiB segments fanned across
+	// placement groups, single atomic metadata commit, best-effort blob
+	// fanout with defer cleanup on error. <= 16 MiB stays on the existing
+	// single-segment EC path.
+	//
+	// Chunked PUT requires a ShardGroupSource for SelectSegmentPlacementGroup;
+	// legacy single-group setups (b.shardGroup == nil) fall back to the
+	// existing single-blob EC path even for large objects. Once a cluster
+	// wires SetShardGroupSource, large objects automatically segment.
+	if sp.Size > int64(storage.DefaultChunkSize) && b.shardGroup != nil {
+		return b.putObjectChunked(
+			ctx, bucket, key, versionID, sp,
+			contentType, userMetadata, sseAlgorithm,
+			modTime, preserveModTime, expectedETag, beforeCommit, parts,
+		)
+	}
+
 	shardKey := ecObjectShardKey(key, versionID)
 	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
 	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)

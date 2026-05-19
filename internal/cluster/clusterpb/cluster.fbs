@@ -109,6 +109,29 @@ table PutObjectMetaCmd {
   sse_algorithm:string;
   expected_etag:string;
   parts:[MultipartPartEntry];
+  // Phase 2 chunked PUT: per-segment placement records, populated only for
+  // chunked PUTs (sp.Size > storage.DefaultChunkSize). Empty/absent for
+  // legacy single-segment EC, appendable, and multipart paths. Top-level
+  // node_ids / ec_data / ec_parity / placement_group_id mirror segments[0]
+  // for backward-compatible readers.
+  segments:[SegmentMetaEntry];
+}
+
+// SegmentMetaEntry carries the per-segment placement metadata for a chunked
+// PUT. Distinct from the legacy SegmentRef (appendable / coalesce) so this
+// table can carry placement fields without disturbing the appendable wire
+// format.
+table SegmentMetaEntry {
+  blob_id:string;
+  size:int64;
+  checksum:[ubyte];           // xxhash3-128 of plaintext segment bytes (16 B)
+  placement_group_id:string;
+  shard_size:int32 = 0;
+  segment_idx:int32 = 0;      // 0-based chunk index; deterministic ordering on apply
+  node_ids:[string];
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  ring_version:uint64 = 0;
 }
 
 table DeleteObjectCmd {

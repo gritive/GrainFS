@@ -120,8 +120,6 @@ func ecObjectSegmentShardKey(plan ecObjectWritePlan) string {
 // writeSegmentInput bundles the per-segment write parameters consumed by
 // writeOneSegment. Caller (clusterSegmentBackend.WriteSegment) buffers the
 // SegmentWriter chunk into Data; segments are ≤ DefaultChunkSize.
-//
-//nolint:unused // wired up by clusterSegmentBackend.WriteSegment in Task 2.3.
 type writeSegmentInput struct {
 	Bucket, Key, VersionID string
 	SegmentBlobID          string
@@ -135,8 +133,6 @@ type writeSegmentInput struct {
 // segment-scoped fields on ecObjectWritePlan. Returns the PlacementRecord
 // (synthesized from the chosen K+M peers), the data-shard etag, and the same
 // blobID echoed back for caller convenience.
-//
-//nolint:unused // wired up by clusterSegmentBackend.WriteSegment in Task 2.3.
 func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInput) (PlacementRecord, string, string, error) {
 	nShards := in.Cfg.DataShards + in.Cfg.ParityShards
 	if len(in.Group.PeerIDs) < nShards {

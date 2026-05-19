@@ -86,6 +86,92 @@ func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 	assert.Equal(t, "AES256", decoded.SSEAlgorithm)
 }
 
+// Phase 2 Task 2.3: PutObjectMetaCmd.Segments[] survives encode/decode and
+// preserves per-segment placement metadata.
+func TestPutObjectMetaCmd_SegmentsRoundTrip(t *testing.T) {
+	orig := PutObjectMetaCmd{
+		Bucket:           "test-bucket",
+		Key:              "large.bin",
+		Size:             64 << 20,
+		ContentType:      "application/octet-stream",
+		ETag:             "etag-md5-of-whole",
+		ModTime:          1700000000,
+		VersionID:        "v1",
+		ECData:           4,
+		ECParity:         2,
+		NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+		PlacementGroupID: "group-a",
+		Segments: []SegmentMetaEntry{
+			{
+				BlobID:           "blob-0",
+				Size:             16 << 20,
+				Checksum:         []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+				PlacementGroupID: "group-a",
+				ShardSize:        4 << 20,
+				SegmentIdx:       0,
+				NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
+				ECData:           4,
+				ECParity:         2,
+				RingVersion:      0,
+			},
+			{
+				BlobID:           "blob-1",
+				Size:             16 << 20,
+				Checksum:         []byte{0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01},
+				PlacementGroupID: "group-b",
+				ShardSize:        4 << 20,
+				SegmentIdx:       1,
+				NodeIDs:          []string{"n2", "n3", "n4", "n5", "n6", "n7"},
+				ECData:           4,
+				ECParity:         2,
+				RingVersion:      0,
+			},
+		},
+	}
+
+	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	require.NoError(t, err)
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	require.NoError(t, err)
+
+	require.Len(t, decoded.Segments, 2)
+	for i, seg := range decoded.Segments {
+		assert.Equal(t, orig.Segments[i].BlobID, seg.BlobID, "segment %d BlobID", i)
+		assert.Equal(t, orig.Segments[i].Size, seg.Size, "segment %d Size", i)
+		assert.Equal(t, orig.Segments[i].Checksum, seg.Checksum, "segment %d Checksum", i)
+		assert.Equal(t, orig.Segments[i].PlacementGroupID, seg.PlacementGroupID, "segment %d PG", i)
+		assert.Equal(t, orig.Segments[i].ShardSize, seg.ShardSize, "segment %d ShardSize", i)
+		assert.Equal(t, orig.Segments[i].SegmentIdx, seg.SegmentIdx, "segment %d SegmentIdx", i)
+		assert.Equal(t, orig.Segments[i].NodeIDs, seg.NodeIDs, "segment %d NodeIDs", i)
+		assert.Equal(t, orig.Segments[i].ECData, seg.ECData, "segment %d ECData", i)
+		assert.Equal(t, orig.Segments[i].ECParity, seg.ECParity, "segment %d ECParity", i)
+	}
+}
+
+// Legacy PutObjectMetaCmd payloads (no Segments) decode unchanged.
+func TestPutObjectMetaCmd_EmptySegmentsLegacyCompatible(t *testing.T) {
+	orig := PutObjectMetaCmd{
+		Bucket:           "test-bucket",
+		Key:              "small.txt",
+		Size:             1024,
+		ContentType:      "text/plain",
+		ETag:             "abc",
+		ModTime:          1700000000,
+		PlacementGroupID: "group-0",
+	}
+	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	require.NoError(t, err)
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Empty(t, decoded.Segments)
+	assert.Equal(t, "test-bucket", decoded.Bucket)
+	assert.Equal(t, "small.txt", decoded.Key)
+}
+
 func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
 	orig := CompleteMultipartCmd{
 		Bucket:           "uploads",

@@ -168,6 +168,47 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
 	}
 	metadataOff := buildKeyValuePropertiesVector(b, c.UserMetadata, clusterpb.PutObjectMetaCmdStartUserMetadataVector)
+	// segments — build child SegmentMetaEntry tables BEFORE
+	// PutObjectMetaCmdStart. Per the flatbuffers nested-vector rule, each
+	// segment's checksum + node_ids vector + strings must also be built
+	// before that segment's SegmentMetaEntryStart.
+	var segmentsOff flatbuffers.UOffsetT
+	if len(c.Segments) > 0 {
+		segOffs := make([]flatbuffers.UOffsetT, len(c.Segments))
+		for i, s := range c.Segments {
+			blobOff := b.CreateString(s.BlobID)
+			pgOff := b.CreateString(s.PlacementGroupID)
+			var checksumOff flatbuffers.UOffsetT
+			if len(s.Checksum) > 0 {
+				checksumOff = b.CreateByteVector(s.Checksum)
+			}
+			var nodeIdsOff flatbuffers.UOffsetT
+			if len(s.NodeIDs) > 0 {
+				nodeIdsOff = buildStringVector(b, s.NodeIDs, clusterpb.SegmentMetaEntryStartNodeIdsVector)
+			}
+			clusterpb.SegmentMetaEntryStart(b)
+			clusterpb.SegmentMetaEntryAddBlobId(b, blobOff)
+			clusterpb.SegmentMetaEntryAddSize(b, s.Size)
+			if checksumOff != 0 {
+				clusterpb.SegmentMetaEntryAddChecksum(b, checksumOff)
+			}
+			clusterpb.SegmentMetaEntryAddPlacementGroupId(b, pgOff)
+			clusterpb.SegmentMetaEntryAddShardSize(b, s.ShardSize)
+			clusterpb.SegmentMetaEntryAddSegmentIdx(b, s.SegmentIdx)
+			if nodeIdsOff != 0 {
+				clusterpb.SegmentMetaEntryAddNodeIds(b, nodeIdsOff)
+			}
+			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
+			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
+			clusterpb.SegmentMetaEntryAddRingVersion(b, uint64(s.RingVersion))
+			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
+		}
+		clusterpb.PutObjectMetaCmdStartSegmentsVector(b, len(segOffs))
+		for i := len(segOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(segOffs[i])
+		}
+		segmentsOff = b.EndVector(len(segOffs))
+	}
 	// parts — build child MultipartPartEntry tables BEFORE PutObjectMetaCmdStart.
 	var partsOff flatbuffers.UOffsetT
 	if len(c.Parts) > 0 {
@@ -219,6 +260,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if partsOff != 0 {
 		clusterpb.PutObjectMetaCmdAddParts(b, partsOff)
 	}
+	if segmentsOff != 0 {
+		clusterpb.PutObjectMetaCmdAddSegments(b, segmentsOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -251,6 +295,39 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 			}
 		}
 	}
+	var segments []SegmentMetaEntry
+	if n := t.SegmentsLength(); n > 0 {
+		segments = make([]SegmentMetaEntry, n)
+		var se clusterpb.SegmentMetaEntry
+		for i := 0; i < n; i++ {
+			if !t.Segments(&se, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode segments[%d]", i)
+			}
+			var nodeIDs []string
+			if nn := se.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(se.NodeIds(j))
+				}
+			}
+			var checksum []byte
+			if cb := se.ChecksumBytes(); len(cb) > 0 {
+				checksum = append([]byte(nil), cb...)
+			}
+			segments[i] = SegmentMetaEntry{
+				BlobID:           string(se.BlobId()),
+				Size:             se.Size(),
+				Checksum:         checksum,
+				PlacementGroupID: string(se.PlacementGroupId()),
+				ShardSize:        se.ShardSize(),
+				SegmentIdx:       se.SegmentIdx(),
+				NodeIDs:          nodeIDs,
+				ECData:           se.EcData(),
+				ECParity:         se.EcParity(),
+				RingVersion:      RingVersion(se.RingVersion()),
+			}
+		}
+	}
 	return PutObjectMetaCmd{
 		Bucket:           string(t.Bucket()),
 		Key:              string(t.Key()),
@@ -270,6 +347,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		PreserveLatest:   t.PreserveLatest(),
 		IsDeleteMarker:   t.IsDeleteMarker(),
 		Parts:            parts,
+		Segments:         segments,
 	}, nil
 }
 
