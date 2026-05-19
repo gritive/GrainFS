@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -43,10 +44,12 @@ type Scrubbable interface {
 
 // Stats tracks lifecycle worker activity.
 type Stats struct {
-	LastRun        time.Time
-	ObjectsChecked int64
-	Expired        int64
-	VersionsPruned int64
+	LastRun                time.Time
+	LastCycleSeconds       float64
+	ObjectsChecked         int64
+	Expired                int64
+	VersionsPruned         int64
+	DeleteMarkersReclaimed int64
 }
 
 // Worker periodically scans buckets and applies lifecycle rules.
@@ -64,10 +67,14 @@ type Worker struct {
 	// lastRunNano stores time.UnixNano of the most recently completed cycle;
 	// 0 means "never run". Stats() translates 0 to a zero-value time.Time{}
 	// so admin callers that rely on IsZero see the same behaviour.
-	lastRunNano    atomic.Int64
-	objectsChecked atomic.Int64
-	expired        atomic.Int64
-	versionsPruned atomic.Int64
+	lastRunNano atomic.Int64
+	// lastCycleSecondsBits stores math.Float64bits of the most recent cycle's
+	// wall-clock duration in seconds. atomic.Uint64 keeps Stats() lock-free.
+	lastCycleSecondsBits   atomic.Uint64
+	objectsChecked         atomic.Int64
+	expired                atomic.Int64
+	versionsPruned         atomic.Int64
+	deleteMarkersReclaimed atomic.Int64
 }
 
 // NewWorker creates a lifecycle Worker. interval controls how often rules are
@@ -113,15 +120,22 @@ func (w *Worker) Stats() Stats {
 		lastRun = time.Unix(0, n)
 	}
 	return Stats{
-		LastRun:        lastRun,
-		ObjectsChecked: w.objectsChecked.Load(),
-		Expired:        w.expired.Load(),
-		VersionsPruned: w.versionsPruned.Load(),
+		LastRun:                lastRun,
+		LastCycleSeconds:       math.Float64frombits(w.lastCycleSecondsBits.Load()),
+		ObjectsChecked:         w.objectsChecked.Load(),
+		Expired:                w.expired.Load(),
+		VersionsPruned:         w.versionsPruned.Load(),
+		DeleteMarkersReclaimed: w.deleteMarkersReclaimed.Load(),
 	}
 }
 
 func (w *Worker) runCycle(ctx context.Context) {
-	now := w.currentTime()
+	start := w.currentTime()
+	defer func() {
+		elapsed := w.currentTime().Sub(start).Seconds()
+		w.lastCycleSecondsBits.Store(math.Float64bits(elapsed))
+	}()
+	now := start
 	buckets, err := w.backend.ListBuckets(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("lifecycle: list buckets")
@@ -202,7 +216,9 @@ func (w *Worker) applyRulesToGroup(ctx context.Context, g storage.ObjectKeyGroup
 func (w *Worker) applyExpiration(ctx context.Context, g storage.ObjectKeyGroup, current *storage.ObjectVersionRecord, exp *Expiration, now time.Time) {
 	if current.IsDeleteMarker {
 		if exp.ExpiredObjectDeleteMarker != nil && *exp.ExpiredObjectDeleteMarker && len(g.Versions) == 1 {
-			w.deleteVersion(ctx, g.Bucket, g.Key, current.VersionID)
+			if w.deleteVersion(ctx, g.Bucket, g.Key, current.VersionID) {
+				w.deleteMarkersReclaimed.Add(1)
+			}
 		}
 		return
 	}
@@ -253,13 +269,16 @@ func (w *Worker) deleteObject(ctx context.Context, bucket, key string) {
 	w.expired.Add(1)
 }
 
-func (w *Worker) deleteVersion(ctx context.Context, bucket, key, versionID string) {
+// deleteVersion deletes a specific object version, observing the limiter.
+// Returns true when the delete was applied (counters updated).
+func (w *Worker) deleteVersion(ctx context.Context, bucket, key, versionID string) bool {
 	if err := w.limiter.Wait(ctx); err != nil {
-		return // ctx cancelled
+		return false // ctx cancelled
 	}
 	if err := w.deleter.DeleteObjectVersion(bucket, key, versionID); err != nil {
 		log.Error().Str("bucket", bucket).Str("key", key).Str("versionID", versionID).Err(err).Msg("lifecycle: delete version")
-		return
+		return false
 	}
 	w.versionsPruned.Add(1)
+	return true
 }

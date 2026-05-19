@@ -99,20 +99,28 @@ func (s *Service) GetRaw(bucket string) ([]byte, error) {
 
 // Status is a point-in-time view of the lifecycle executor for the
 // /api/cluster/lifecycle/status admin endpoint. When the node is not the
-// leader the executor is not running and all counters are zero.
+// leader the object-side executor is not running and its counters are
+// zero; the per-node MPU worker runs on every node so MPUWorkerRunning /
+// AbortedUploads are populated independently of leadership.
 type Status struct {
-	Running        bool      `json:"running"`
-	LastRun        time.Time `json:"last_run,omitempty"`
-	ObjectsChecked int64     `json:"objects_checked"`
-	Expired        int64     `json:"expired"`
-	VersionsPruned int64     `json:"versions_pruned"`
-	Buckets        []string  `json:"buckets"` // buckets with a lifecycle config persisted locally
+	Running                bool      `json:"running"`
+	MPUWorkerRunning       bool      `json:"mpu_worker_running"`
+	LastRun                time.Time `json:"last_run,omitempty"`
+	LastCycleSeconds       float64   `json:"last_cycle_seconds"`
+	ObjectsChecked         int64     `json:"objects_checked"`
+	Expired                int64     `json:"expired"`
+	VersionsPruned         int64     `json:"versions_pruned"`
+	AbortedUploads         int64     `json:"aborted_uploads"`
+	DeleteMarkersReclaimed int64     `json:"delete_markers_reclaimed"`
+	Buckets                []string  `json:"buckets"` // buckets with a lifecycle config persisted locally
 }
 
 // Status returns the current executor status. Safe to call on any node; a
-// follower returns Status{Running: false}.
+// follower returns Status{Running: false} but still surfaces MPU-side
+// fields populated by the per-node MPU worker.
 func (s *Service) Status() Status {
 	w := s.worker.Load()
+	mpu := s.mpuWorker.Load()
 	buckets, err := s.store.ListBuckets()
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("lifecycle status: ListBuckets failed")
@@ -120,18 +128,24 @@ func (s *Service) Status() Status {
 	if buckets == nil {
 		buckets = []string{}
 	}
-	if w == nil {
-		return Status{Running: false, Buckets: buckets}
+	st := Status{
+		MPUWorkerRunning: mpu != nil,
+		Buckets:          buckets,
 	}
-	st := w.Stats()
-	return Status{
-		Running:        true,
-		LastRun:        st.LastRun,
-		ObjectsChecked: st.ObjectsChecked,
-		Expired:        st.Expired,
-		VersionsPruned: st.VersionsPruned,
-		Buckets:        buckets,
+	if mpu != nil {
+		st.AbortedUploads = mpu.AbortedTotal()
 	}
+	if w != nil {
+		ws := w.Stats()
+		st.Running = true
+		st.LastRun = ws.LastRun
+		st.LastCycleSeconds = ws.LastCycleSeconds
+		st.ObjectsChecked = ws.ObjectsChecked
+		st.Expired = ws.Expired
+		st.VersionsPruned = ws.VersionsPruned
+		st.DeleteMarkersReclaimed = ws.DeleteMarkersReclaimed
+	}
+	return st
 }
 
 // Apply validates a raw S3 wire XML lifecycle configuration and proposes it
