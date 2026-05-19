@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_ClusterTransferLeader spins up a 3-node cluster and exercises
+// TestClusterTransferLeaderE2E spins up a 3-node cluster and exercises
 // `grainfs cluster transfer-leader --wait` against the leader's admin
 // socket. Verifies the leader changes and term advances.
-func TestE2E_ClusterTransferLeader(t *testing.T) {
+func TestClusterTransferLeaderE2E(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -80,10 +80,10 @@ func TestE2E_ClusterTransferLeader(t *testing.T) {
 	assert.Contains(t, output, "new leader")
 }
 
-// TestE2E_ClusterTransferLeader_NoPeers exercises the single-node 503 path.
+// TestClusterTransferLeaderNoPeersE2E exercises the single-node 503 path.
 // The shared test server in testServerDataDir is single-node, so we can hit
 // it directly without spinning up startE2ECluster.
-func TestE2E_ClusterTransferLeader_NoPeers(t *testing.T) {
+func TestClusterTransferLeaderNoPeersE2E(t *testing.T) {
 
 	binary := getBinary()
 	sock := filepath.Join(testServerDataDir, "admin.sock")

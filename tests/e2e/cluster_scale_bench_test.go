@@ -167,10 +167,10 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	}
 }
 
-// TestE2E_ClusterScaleBench_N8 is an opt-in scale measurement.
+// TestClusterScaleBenchN8E2E is an opt-in scale measurement.
 // It boots five processes and samples pprof for 30s, so keep it out of the
 // default e2e suite where correctness tests should remain deterministic.
-func TestE2E_ClusterScaleBench_N8(t *testing.T) {
+func TestClusterScaleBenchN8E2E(t *testing.T) {
 	if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
 	}
 	r := runScaleBench(t, 8)
@@ -185,7 +185,7 @@ func TestE2E_ClusterScaleBench_N8(t *testing.T) {
 // 권장 실행:
 //   GRAINFS_BENCH_FULL=1 for N in 8 32 64 128; do
 //     go test -count=1 -timeout 600s -v \
-//       -run "^TestE2E_ClusterScaleBench_N${N}$" ./tests/e2e/ |\
+//       -run "^TestClusterScaleBenchN${N}E2E$" ./tests/e2e/ |\
 //       tee -a /tmp/grainfs-bench/sweep.log
 //     sleep 5
 //   done
@@ -199,6 +199,6 @@ func runScaleBenchTest(t *testing.T, n int) {
 	t.Logf("BENCH_ROW: %s", formatRow(r.n, r.perProc, r.bootSec, r.elections))
 }
 
-func TestE2E_ClusterScaleBench_N32(t *testing.T)  { runScaleBenchTest(t, 32) }
-func TestE2E_ClusterScaleBench_N64(t *testing.T)  { runScaleBenchTest(t, 64) }
-func TestE2E_ClusterScaleBench_N128(t *testing.T) { runScaleBenchTest(t, 128) }
+func TestClusterScaleBenchN32E2E(t *testing.T)  { runScaleBenchTest(t, 32) }
+func TestClusterScaleBenchN64E2E(t *testing.T)  { runScaleBenchTest(t, 64) }
+func TestClusterScaleBenchN128E2E(t *testing.T) { runScaleBenchTest(t, 128) }

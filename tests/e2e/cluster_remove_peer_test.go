@@ -14,12 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_ClusterRemovePeer_DeadFollower spins up a 3-node cluster, kills a
+// TestClusterRemovePeerDeadFollowerE2E spins up a 3-node cluster, kills a
 // follower, and verifies the operator can evict it via the new
 // /api/cluster/remove-peer endpoint. Validates the full chain: pre-flight
 // allows it (alive_after >= new_quorum), joint consensus commits, status
 // reflects the shrunk voter set, audit event surfaces.
-func TestE2E_ClusterRemovePeer_DeadFollower(t *testing.T) {
+func TestClusterRemovePeerDeadFollowerE2E(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

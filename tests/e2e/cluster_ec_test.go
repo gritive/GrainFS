@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_ClusterEC_PutGet_5Node verifies Phase 18 Cluster EC end-to-end with
+// TestClusterECPutGet5NodeE2E verifies Phase 18 Cluster EC end-to-end with
 // a 3+2 configuration on a 5-node cluster (k+m = 5 = node count, so shards
 // land on 5 distinct nodes). PUT → shards spread across nodes → GET
 // reconstructs. Killing one node still allows reads (read-k tolerance of 2).
@@ -26,7 +26,7 @@ import (
 // We use 5 nodes instead of 6 because 6-node Raft bootstrap on loopback
 // is noisy in CI; 5 nodes converge faster and still exercise the full EC
 // code path (ecK=3, ecM=2, placement across all 5 nodes).
-func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
+func TestClusterECPutGet5NodeE2E(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 	}
@@ -223,13 +223,13 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 	t.Logf("cluster EC: %d/%d objects reconstructed after single-node failure", len(objects), len(objects))
 }
 
-// TestE2E_ClusterEC_3Node_ActiveKM21 verifies dynamic EC activation on a 3-node
+// TestClusterEC3NodeActiveKM21E2E verifies dynamic EC activation on a 3-node
 // cluster. The zero-config profile for 3 nodes is k=2, m=1. EC must be active:
 // - PUT stores 3 shards (k+m=3) distributed across all nodes.
 // - GET reconstructs correctly from 2 available shards (k=2 minimum).
 // - Killing one node (1 out of 3) leaves k=2 shards: GET must still succeed.
 // - Killing a second node leaves only 1 shard (< k=2): GET must fail.
-func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
+func TestClusterEC3NodeActiveKM21E2E(t *testing.T) {
 	const (
 		clusterKey = "E2E-EC-3NODE-KEY"
 		bucketName = "3n-test"
@@ -356,7 +356,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 	t.Logf("3-node EC dynamic: k=2,m=1 verified — 1 node killed, GET reconstructed from 2 shards")
 }
 
-// TestE2E_ClusterEC_TopologyChange verifies that placement FSM records remain
+// TestClusterECTopologyChangeE2E verifies that placement FSM records remain
 // valid (immutable) through a topology change, AND that EC stays active after
 // the change. We use 6 nodes with k=3, m=2 (k+m=5): killing one non-leader
 // node leaves 5 live nodes (5 >= k+m=5), so ECActive() remains true throughout.
@@ -368,7 +368,7 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 //
 // This validates the TODOS.md requirement:
 // "N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오."
-func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
+func TestClusterECTopologyChangeE2E(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 	}

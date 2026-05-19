@@ -41,10 +41,10 @@ func joinViaUDS(t *testing.T, sock, peerAddr string) (int, map[string]string) {
 	return resp.StatusCode, out
 }
 
-// TestE2E_Bootstrap_JoinUDS_AlreadyMember verifies that calling the admin UDS
+// TestBootstrapJoinUDSAlreadyMemberE2E verifies that calling the admin UDS
 // /v1/cluster/join endpoint on a node that is already part of a multi-node
 // cluster returns status "already_member" (no-op, idempotent).
-func TestE2E_Bootstrap_JoinUDS_AlreadyMember(t *testing.T) {
+func TestBootstrapJoinUDSAlreadyMemberE2E(t *testing.T) {
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -61,10 +61,10 @@ func TestE2E_Bootstrap_JoinUDS_AlreadyMember(t *testing.T) {
 		"expected already_member for a joined node; got %v", body)
 }
 
-// TestE2E_Bootstrap_JoinCLI_Idempotent verifies that running `grainfs join`
+// TestBootstrapJoinCLIIdempotentE2E verifies that running `grainfs join`
 // twice for the same peer on an already-joined node prints "already_member"
 // and exits zero both times.
-func TestE2E_Bootstrap_JoinCLI_Idempotent(t *testing.T) {
+func TestBootstrapJoinCLIIdempotentE2E(t *testing.T) {
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -97,10 +97,10 @@ func runGrainFSJoin(ctx context.Context, sock, peerAddr string) (string, error) 
 	return fmt.Sprintf("%s", out), err
 }
 
-// TestE2E_Bootstrap_DataPresent_BlocksJoin verifies that a solo node with
+// TestBootstrapDataPresentBlocksJoinE2E verifies that a solo node with
 // existing user data rejects a join request with 409 data_present when
 // force=false (the default).
-func TestE2E_Bootstrap_DataPresent_BlocksJoin(t *testing.T) {
+func TestBootstrapDataPresentBlocksJoinE2E(t *testing.T) {
 	// Nodes:1 + ClusterModeDynamicJoin → single solo node with admin SA bootstrapped.
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      1,

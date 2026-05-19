@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_ClusterScrubber_AutoRepair runs a 3-node 2+1 cluster, puts one
+// TestClusterScrubberAutoRepairE2E runs a 3-node 2+1 cluster, puts one
 // object, kills an on-disk shard on one node, and asserts the scrubber
 // restores it from peer survivors within a few scrub cycles. A GET after
 // repair must return byte-identical content.
@@ -30,7 +30,7 @@ import (
 // 5-node Raft bootstrap on loopback is flaky in CI; 3 nodes converge
 // quickly and still exercise the full repair code path (read survivors
 // from peers, reconstruct, write back locally).
-func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
+func TestClusterScrubberAutoRepairE2E(t *testing.T) {
 
 	const (
 		bucketName = "sc-bucket"

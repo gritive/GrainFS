@@ -48,7 +48,7 @@ func fetchIncidents(t *testing.T, endpoint string) []incidentState {
 	return out
 }
 
-func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
+func TestClusterIncidentMissingShardFixedWithReceiptE2E(t *testing.T) {
 	const (
 		clusterKey = "E2E-CLUSTER-INCIDENT-KEY"
 		bucketName = "incident-bucket"
