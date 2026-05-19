@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -161,57 +160,4 @@ func TestVolumeDataPlaneGuardE2E(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	require.NotContains(t, string(body), `"volumes":`,
 		"data plane should no longer expose the admin volumes endpoint")
-}
-
-func TestE2E_Dashboard_TokenURLAndRotate(t *testing.T) {
-	publicPort := freePort()
-	dataDir, port, _ := startTestServerOnPort(t, publicPort,
-		"--public-url", fmt.Sprintf("http://127.0.0.1:%d", publicPort),
-	)
-	require.Equal(t, publicPort, port)
-
-	// Get token via CLI.
-	out1, code := runCLI(t, dataDir, "dashboard", "--format", "json")
-	require.Equal(t, 0, code, out1)
-	var resp1 struct {
-		Token string `json:"token"`
-		URL   string `json:"url"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out1), &resp1))
-	require.NotEmpty(t, resp1.Token)
-	require.Contains(t, resp1.URL, "#token="+resp1.Token)
-
-	// Old token works.
-	require.True(t, callUI(t, port, resp1.Token) == http.StatusOK)
-
-	// No token → 401.
-	require.True(t, callUI(t, port, "") == http.StatusUnauthorized)
-
-	// Rotate.
-	out2, code := runCLI(t, dataDir, "dashboard", "--rotate", "--format", "json")
-	require.Equal(t, 0, code, out2)
-	var resp2 struct {
-		Token string `json:"token"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out2), &resp2))
-	require.NotEqual(t, resp1.Token, resp2.Token)
-
-	// Old token is dead.
-	require.True(t, callUI(t, port, resp1.Token) == http.StatusUnauthorized)
-	// New token works.
-	require.True(t, callUI(t, port, resp2.Token) == http.StatusOK)
-}
-
-func callUI(t *testing.T, port int, token string) int {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ui/api/volumes", port), nil)
-	require.NoError(t, err)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode
 }

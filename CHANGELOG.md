@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.262.15] - 2026-05-19 - test(e2e): dual-integrate Dashboard set
+
+Three Dashboard entry points (scattered across three files) collapsed into one entry, `TestDashboardE2E`, with the canonical dual fixture pattern.
+
+### Shape
+
+```
+TestDashboardE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runDashboardCases(t, mk dashboardFactory)
+                                ├─ t.Run("Serves")                (GET /ui/ → HTML)
+                                ├─ t.Run("HealingCardHTMLMarkup") (Phase 16 Self-Healing card markup)
+                                ├─ t.Run("HealingCardSSEStream")  (GET /api/events/heal/stream → text/event-stream)
+                                └─ t.Run("TokenURLAndRotate")     (dashboard CLI token + rotate)
+```
+
+### Changed
+
+- **`TestDashboard_Serves` (`presigned_test.go`) + `TestDashboardHealingCard_HTMLAndStream` (`dashboard_healing_card_test.go`) + `TestE2E_Dashboard_TokenURLAndRotate` (`volume_cli_test.go`) → single `TestDashboardE2E`** (`tests/e2e/dashboard_test.go`, new).
+- `dashboardFactory` mirrors `volumeScrubFactory` — each case gets a dedicated fixture so `TokenURLAndRotate`'s rotate cannot invalidate another case's expectations.
+- `TokenURLAndRotate` simplified: dropped the `--public-url` plumbing. URL assertion is `Contains(t, resp1.URL, "#token="+resp1.Token)` — token suffix only — which holds regardless of the URL prefix.
+- `dashboardDataDir(tgt)` and `dashboardPort(tgt, nodeIdx)` helpers extract the admin dataDir and HTTP port from any target.
+- `callUI(t, port, token)` moved into `dashboard_test.go`.
+- Deleted `tests/e2e/dashboard_healing_card_test.go`.
+
+### Known parity risks (cluster branch)
+
+`Cluster4Node` is the first end-to-end coverage of these endpoints on a 4-node DynamicJoin fixture. The dashboard token is per-node state in some prior implementations; if it isn't replicated/leader-canonical, `TokenURLAndRotate` cluster branch may flap (rotated token on leader vs. callUI hitting the same node). Captured as signal — not fixed here per the e2e-unify session policy.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
 ## [0.0.262.14] - 2026-05-19 - test(e2e): absorb TestE2E_VolumeCLI_* into TestVolumeE2E (single admin CLI entry)
 
 `TestE2E_VolumeCLI_*` and `TestVolumeE2E` (landed in v0.0.262.12) covered the same admin-CLI volume surface from two entry points. This PR collapses the admin-CLI case set into one entry — `TestVolumeE2E` — and pulls out the two genuinely-not-admin-CLI tests as standalone E2Es.

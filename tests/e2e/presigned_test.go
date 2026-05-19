@@ -220,15 +220,3 @@ func TestMetrics_Endpoint(t *testing.T) {
 	assert.Contains(t, bodyStr, "grainfs_http_requests_total")
 	assert.Contains(t, bodyStr, "grainfs_http_request_duration_seconds")
 }
-
-func TestDashboard_Serves(t *testing.T) {
-	resp, err := http.Get(testServerURL + "/ui/")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, _ := io.ReadAll(resp.Body)
-	bodyStr := string(body)
-	assert.Contains(t, bodyStr, "GrainFS")
-	assert.Contains(t, bodyStr, "<!DOCTYPE html>")
-}
