@@ -1688,6 +1688,28 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 	return io.ReadFull(body, buf)
 }
 
+func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if obj == nil {
+		return c.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if obj.Key != "" && obj.Key != key {
+		return 0, fmt.Errorf("coordinator: ReadAt object key mismatch: got %q, want %q", obj.Key, key)
+	}
+	if offset < 0 {
+		return 0, errors.New("coordinator: negative ReadAt offset")
+	}
+	target, _, _, err := c.routeReadOrBucketWithEntry(bucket, key, "")
+	if err != nil {
+		return 0, err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+		return 0, err
+	} else if gb != nil {
+		return gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return c.ReadAt(ctx, bucket, key, offset, buf)
+}
+
 func (c *ClusterCoordinator) readAtLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry, offset int64, buf []byte) (int, bool, error) {
 	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
 		return 0, false, nil

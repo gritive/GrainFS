@@ -1826,6 +1826,33 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 }
 
+func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if obj == nil {
+		return b.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if obj.Key != "" && obj.Key != key {
+		return 0, fmt.Errorf("ReadAt object key mismatch: got %q, want %q", obj.Key, key)
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("ReadAt negative offset %d", offset)
+	}
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	if storage.IsInternalBucket(bucket) {
+		return b.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if !obj.IsAppendable && len(obj.Segments) == 0 {
+		return b.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+		return 0, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return 0, objectQuarantinedError(bucket, key, q)
+	}
+	return b.readAtPreparedObject(ctx, bucket, key, obj, PlacementMeta{VersionID: obj.VersionID}, offset, buf)
+}
+
 func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, key string, obj *storage.Object, placementMeta PlacementMeta, offset int64, buf []byte) (int, error) {
 	if offset >= obj.Size {
 		return 0, io.EOF
