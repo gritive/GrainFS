@@ -41,12 +41,18 @@ func runNBDCases(t *testing.T, tgt *nbdTarget) {
 	})
 }
 
-func TestE2E_NBDCasesSingleNode(t *testing.T) {
-	skipIfShort(t, "skipping NBD matrix single-node in short mode")
-	runNBDCases(t, newSingleNodeNBDTarget(t))
-}
+// TestNBDMatrixE2E runs the NBD matrix case set against the single-node and
+// the shared 4-node cluster fixtures, mirroring the TestBucketsE2E dual-target
+// convention so the same NBD client-side behaviors are exercised against both
+// deployment shapes.
+func TestNBDMatrixE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		skipIfShort(t, "skipping NBD matrix single-node in short mode")
+		runNBDCases(t, newSingleNodeNBDTarget(t))
+	})
 
-func TestE2E_NBDCasesCluster(t *testing.T) {
-	skipIfShort(t, "skipping NBD matrix cluster in short mode")
-	runNBDCases(t, newSharedClusterNBDTarget(t))
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "cluster fixture not booted in -short mode")
+		runNBDCases(t, newSharedClusterNBDTarget(t))
+	})
 }
