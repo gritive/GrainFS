@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.268.0] - 2026-05-20 - fix(s3): stabilize warp benchmark coverage
+
+Short 4-node S3 and Iceberg benchmark runs now cover the full requested matrix without multipart destabilizing the cluster. The branch also keeps benchmark setup closer to production behavior by precreating service-account buckets, attaching the Iceberg warehouse policy, and using 4-node Iceberg defaults.
+
+### Changed
+
+- **S3 benchmark harness bootstrap**: precreates warp buckets with service-account policy and attaches the Iceberg warehouse policy so signed benchmark clients exercise the intended auth path instead of failing during setup.
+- **Iceberg cluster parity**: changed Iceberg benchmark defaults to 4 nodes, matching the S3 cluster benchmark topology.
+- **Server request logging**: added structured S3 request logs with operation, subresource, bucket/key, status, byte counts, latency, service-account ID, and mapped error reason without draining streamed request bodies or reading streamed response bodies into memory.
+
+### Fixed
+
+- **Retention/versioning auth compatibility**: added IAM/action mapping and policy compile coverage for bucket versioning, versions listing, object retention, and object-lock configuration APIs used by warp compatibility runs.
+- **Object-lock/retention compatibility endpoints**: accepts object-lock configuration reads and retention PUTs without overwriting object data, allowing compatibility workloads to complete while retention enforcement remains out of scope.
+- **Cluster forwarding correctness**: shifted follower-forwarded data-group proposals so the leader waits for apply errors and followers no longer wait on their own unrelated apply index.
+- **Multipart capability gossip**: reports local capability evidence under dynamic address aliases even when node stats are not yet populated, preventing localhost node-ID/address mismatches from blocking multipart runs.
+- **Large multipart completion metadata**: chunked large-object completion now commits multipart part metadata together with segment metadata, preserving `?partNumber=N` semantics.
+- **Multipart read memory pressure**: non-versioned `GET ?partNumber=N` now computes the part range from `HeadObject` and streams only that byte range through `ReadAt`, instead of opening and reconstructing the whole object first.
+- **SegmentWriter allocation pressure**: added a byte fast path for segment backends that can consume owned chunk bytes directly, avoiding a redundant `io.ReadAll` copy on the cluster write hot path.
+- **Audit status classification**: 404 object-not-found audit envelope records are classified as request errors, not authorization denies.
+
+### Verified
+
+- `make test-unit`
+- `make build`
+- `go test ./internal/server ./internal/storage ./internal/cluster ./internal/serveruntime ./internal/s3auth ./internal/policy ./internal/iam/builtin ./benchmarks ./cmd/grainfs -count=1`
+- Full S3 warp matrix on 4-node GrainFS cluster: `put`, `get`, `delete`, `mixed`, `list`, `stat`, `versioned`, `retention`, `multipart`, `multipart-put`, and `append` all completed with `errors=0` in `benchmarks/profiles/s3bench-all-readat-20260520-021246`.
+
 ## [0.0.267.0] - 2026-05-20 - feat(cluster): CreateMultipartUploadWithTags real support
 
 Object Tagging API Phase 2 cluster gap 종결. `CreateMultipartUploadWithTags`가 cluster 모드에서 실제로 동작 (Phase 1의 `len(tags) > 0` fail-fast 제거).
