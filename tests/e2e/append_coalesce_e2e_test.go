@@ -35,8 +35,14 @@ func TestAppendCoalesceE2E(t *testing.T) {
 		tgt := newSharedClusterS3Target(t)
 		runCoalesceCase(t, tgt)
 	})
-	// SingleNode intentionally absent: coalesce + EC distribute requires
-	// multi-node placement; design § Follow-up 5.
+	// SingleNode intentionally absent: post-coalesce appendable GET goes
+	// through PartialIO/ReadAt on the storage stack, but single-node
+	// LocalBackend does not implement PartialIO — `wal: inner backend does
+	// not support ReadAt` surfaces as an EOF on GET after the coalesce
+	// worker turns segment files into a coalesced blob. Promoting this to
+	// TestBucketsE2E dual is blocked on the parity fix tracked in
+	// TODOS.md → AppendObject Follow-Ups → "Single-node LocalBackend
+	// missing PartialIO (ReadAt)".
 }
 
 // runCoalesceCase runs the coalesce e2e case with the given cluster fixture.

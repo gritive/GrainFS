@@ -262,6 +262,21 @@ Work these in order. Do not run them in parallel.
 
 ## AppendObject Follow-Ups
 
+- [ ] **Single-node LocalBackend missing PartialIO (`ReadAt`) [P1]**: AppendObject
+  body reads after coalesce trigger `wal: inner backend does not support ReadAt`
+  in `internal/storage/wal/backend.go:257` (type-assert `b.Backend.(storage.PartialIO)`
+  fails because `LocalBackend` does not implement it). Cluster works because
+  `DistributedBackend` has its own ReadAt path; single-node hits this gap once
+  the coalesce worker turns N segment files into a single coalesced blob whose
+  read uses ReadAt-based partial fetch. Symptom: `TestAppendCoalesceE2E/SingleNode`
+  passes the immediate-after-append GET (segment-file read) and fails the
+  post-coalesce convergence loop with `EOF` (HERTZ logs the WAL ReadAt error).
+  Fix: implement `(b *LocalBackend) ReadAt(ctx, bucket, key, offset, buf) (int, error)`
+  in `internal/storage/local.go` (open the on-disk object file, pread offset/len),
+  then turn `TestAppendCoalesceE2E` into the `TestBucketsE2E` dual pattern. This
+  is a feature-parity gap per [[feedback-single-cluster-parity]] — the appendable
+  surface should produce the same observable behavior on both deployment shapes.
+
 - [ ] **Forward buffer 512 MiB warp calibration [P1]**: production traffic
   pattern에 default `--cluster-append-forward-buffer-total-bytes` 512 MiB가
   적정한지 검증. `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
