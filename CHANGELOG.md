@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.258.0] - 2026-05-19 - fix(s3+cluster): warp multipart correctness on the 4-node cluster
+
+Warp `multipart` 워크로드가 4-node cluster 에서 두 가지 다른 이유로 깨지던 것을 한 번에 정리한 PR. e2e (`TestMultipartChunkedUploadPartE2E`, `TestMultipartGetPartNumberE2E`) 를 SingleNode + Cluster4Node `TestBucketsE2E` 스타일로 추가하여 회귀 잠금. 부차적으로 `bench_s3_compat_compare.sh` 의 cluster startup 과 warp delete 샘플 부족 워닝을 정리하고, `append_coalesce` / `append_mid_size_body` e2e 를 dedicated cluster → shared cluster fixture 로 옮겨 fixture 부팅 비용을 제거.
+
+### Fixed
+
+- **`UploadPart` aws-chunked framing leak** (`internal/server/multipart_api.go`) — warp 의 multipart workload 는 모든 part 를 `X-Amz-Content-Sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD` + aws-chunked body framing 으로 전송하는데, prior 구현은 `c.Request.Body()` 를 그대로 storage 에 저장해 chunk header + per-chunk signature 가 part payload 로 섞여 들어갔다. `Part.Size` 와 cluster object `Size` 가 framing overhead 만큼 부풀고 `?partNumber=N` GET 이 framed bytes 를 반환. 같은 helper (`putObjectBody`) 를 사용해 framing 을 decode 하고 실패 시 400 `InvalidArgument` 반환 — PutObject 와 동일한 경로.
+- **forward 경로의 `storage.Object.Parts` 손실** (`internal/raft/raftpb/forward_cmd.fbs`, `internal/cluster/forward_codec.go`) — `ForwardObjectMeta` FlatBuffers schema 에 `parts` vector 가 없어, HEAD / GET / CompleteMultipartUpload 가 다른 data group 으로 routed 될 때 leader 가 만든 reply 가 wire 인코딩에서 Parts 를 떨궜다. 클라이언트 `objectFromReply` 가 empty `Parts` 로 Object 를 재구성 → S3 server 의 `partRange` 가 "no parts → 단일 가상 part 취급" fast path 로 빠져, warp multipart 가 cluster 에서 `PartsCount=1` 을 보고 `?partNumber>=2` 에 416 `InvalidPartNumber` 를 받았다. `parts:[ForwardPartMeta]` 를 schema 에 추가하고 `appendPartsVector` / `readPartsVector` helper 로 `buildObjectReply` / `buildGetObjectReply` / `objectFromReply` / `objectsFromReply` 양방향에 와이어링. backward-compat: vector 가 없거나 빈 reply 는 `Parts=nil` 로 decode 되어 single-PUT / append / pre-fix legacy entry 가 그대로 동작.
+
+### Changed
+
+- **`bench_s3_compat_compare.sh` cluster readiness** — fixed `CLUSTER_WARMUP_SLEEP` (default 5s, 종종 override 로 45s 까지) 제거. `bench_wait_cluster_leader` (이미 `bench_iceberg_table.sh` / `bench_nfs_cluster_profile.sh` 에서 사용 중) 를 bootstrap 노드 (node-1, meta-group leader) 에 한 번 호출해 `/api/cluster/status` 의 `state == "Leader"` 를 폴링. follower 들은 자체 `state == "Follower"` 라 같은 endpoint 에서 leader probe 가 실패하므로 노드별 폴링은 부적절. 데이터 그룹 leader 는 첫 write 에서 자연스럽게 elect.
+- **warp delete `--objects` 하한** (`bench_s3_compat_compare.sh`) — `WARP_CONCURRENT × WARP_DELETE_BATCH × 4` (≈6400) 에서 16× (≈25600, warp 자체 default 와 일치) 로 상향. local-disk packblob 에서 6400 batched delete 가 1-2 초에 끝나 warp analyze 가 `Skipping DELETE too few samples` 를 출력하던 것을 해결. 64KiB object 기준 pre-upload 도 몇 초 늘어나는 정도.
+
+### Tests
+
+- **신규 e2e** `TestMultipartChunkedUploadPartE2E` (`tests/e2e/multipart_chunked_e2e_test.go`) — `TestBucketsE2E` 스타일 SingleNode + Cluster4Node. aws-sdk-go-v2 의 `bytes.NewReader` 경로는 body 를 in-memory 해싱해 streaming transport 를 트리거하지 않으므로, raw `http.Request` + SigV4 sign 으로 aws-chunked UploadPart 를 손수 작성해 full GET + `?partNumber=1` GET 둘 다 plaintext bytes 를 반환하는지 확인.
+- **신규 e2e** `TestMultipartGetPartNumberE2E` (`tests/e2e/multipart_part_number_test.go`) — 동일 듀얼 스타일. 2 × 5 MiB part 업로드 → Complete → full GET / `?partNumber=1` / `?partNumber=2` / `?partNumber=3` (416) 검증. cluster Parts forward 버그를 정확히 노출한 테스트.
+- **신규 단위 테스트** `TestForwardCodec_ObjectReply_PartsRoundTrip` / `_GetObjectReply_PartsRoundTrip` / `_NoParts` (`internal/cluster/forward_codec_test.go`) — schema 변경 round-trip 잠금. nil Parts 입력은 디코딩 후 `Parts: nil` 로 유지되어 `partRange` 의 "no parts" fast-path 가 그대로 작동하는 것까지 보장.
+- **fixture refactor** — `TestAppendCoalesceE2E` / `TestAppendMidSizeBodyE2E` 를 `newClusterS3Target(t, 4)` (dedicated, 매 테스트 4-node 부팅/철거) 에서 `newSharedClusterS3Target(t)` (process-global, lazy boot) 로 전환. `TestBucketsE2E` 외 8 개 테스트가 같은 shared fixture 를 재사용해 42s 에 PASS (각자 별도 부팅하면 +30s 이상). `TestAppendObjectE2E` 의 `OwnerKillSurvives` 는 cluster topology 를 mutate (KillNode + defer RestartNode) 하므로 dedicated 유지 — 분리해 shared 로 옮기는 것은 follow-up. `append_size_cap_test` 는 `--append-size-cap-bytes` extraArgs 때문에 dedicated 유지.
+
+### Follow-ups (별도 PR)
+
+- `TestAppendObjectE2E` 의 `OwnerKillSurvives` 만 별도 파일 + dedicated fixture 로 떼어내면 common case 들도 shared cluster 로 이동 가능.
+- `append_coalesce` / `append_size_cap` 의 SingleNode 의도적 부재를 `t.Run("SingleNode", t.Skip("reason"))` 형태로 통일 ([[feedback-e2e-test-style]] 컨벤션).
+- `pullthrough_test.go`, `versioning_test.go` 의 `TestE2E_Versioning_Full` 은 `TestBucketsE2E` 패턴이 아닌 절차적 구조. `runXxxCases(tgt)` 헬퍼 + dual SingleNode/Cluster4Node 로 정렬 필요.
+- warp `multipart`, `multipart-put` op 의 cluster sanity-mode 통과는 별도 세션 (각각 무거워 본 PR scope 에서 제외).
+- warp `versioned` op 의 501 — bucket versioning feature 자체 별도 plan.
+
 ## [0.0.257.3] - 2026-05-19 - fix(storage/packblob): ListObjectsPage to supplement packed in-memory index
 
 v0.0.257.0의 `Operations.ListObjectsPage` walk-and-find-pager 로직이 PackedBackend 계층을 건너뛰고 inner ClusterCoordinator로 바로 가서, single-node packblob fast path에 저장된 작은 객체가 LIST에 안 나오던 회귀 수정. e2e fail 24건 중 동일 root cause(packblob index 우회) 3건 회복: TestObjectsE2E/SingleNode/{List,ListWithPrefix} (Cluster A), TestS3ClientSmoke, TestMigrationInjector. 같은 cluster A의 나머지 5건(TestSnapshot/PITR×2/Backup_Restic/IAM_ScopedKey/QuarantineIncident)은 restore-후-ObjectIndex 재활성화 갭으로 별도 fix 필요.

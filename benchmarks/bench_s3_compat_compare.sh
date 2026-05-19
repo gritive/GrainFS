@@ -31,11 +31,9 @@ WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_DELETE_BATCH="${WARP_DELETE_BATCH:-100}"
 GRAINFS_CLUSTER_NODES="${GRAINFS_CLUSTER_NODES:-4}"
-# Multipart workloads need the multipart_listing_v1 capability evidence to
-# propagate across every cluster node before warp issues create_multipart_upload;
-# bench_wait_multipart_ready actively probes each endpoint after the base 5s
-# warmup so we no longer block on a fixed 45s sleep.
-CLUSTER_WARMUP_SLEEP="${CLUSTER_WARMUP_SLEEP:-5}"
+# Cluster start-up uses bench_wait_cluster_leader per node (replaces the
+# legacy fixed CLUSTER_WARMUP_SLEEP). Multipart workloads additionally probe
+# the multipart_listing_v1 capability via admin.sock after leader election.
 case ",$WARP_OPS," in
   *,multipart,*|*,multipart-put,*)
     BENCH_MULTIPART_PROBE=1
@@ -258,11 +256,17 @@ start_grainfs_cluster() {
     chmod 600 "$cluster_dir/n${idx}/.join-pending"
     start_grainfs_cluster_node "$idx"
   done
-  sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
   for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
     urls+=("http://127.0.0.1:${http_ports[$((idx - 1))]}")
   done
+  # Replace the fixed CLUSTER_WARMUP_SLEEP with an explicit leader probe on
+  # node-1 — it bootstraps the meta raft group, so once /api/cluster/status
+  # reports state="Leader" the join handshake is far enough along for warp
+  # to issue S3 calls (data-group leaders elect on first write). 120 attempts
+  # × 0.25s = 30s budget; the legacy fixed 45s sleep is gone. Followers
+  # report state="Follower" on the same endpoint, so we don't poll them.
+  bench_wait_cluster_leader "${urls[0]}" 120 0.25 >&2
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
 
   if [[ "${BENCH_MULTIPART_PROBE:-0}" == "1" ]]; then
@@ -550,7 +554,15 @@ run_warp_case() {
   esac
   local objects="$WARP_OBJECTS"
   if [[ "$op" == "delete" ]]; then
-    local need=$((WARP_CONCURRENT * WARP_DELETE_BATCH * 4))
+    # warp delete pre-uploads --objects, deletes them in --batch chunks, then
+    # analyzes per-segment throughput (default 1s segments). With concurrent=16
+    # and batch=100 the previous floor (concurrent * batch * 4 = 6400) finished
+    # in roughly 1-2s on local-disk packblob and warp reported "Skipping DELETE
+    # too few samples." The 16× floor (≈25600 objects, matching warp's own
+    # default) keeps the delete phase busy long enough for analyze to bucket
+    # meaningful samples without bloating the pre-upload phase past a few
+    # seconds even at 64KiB objects.
+    local need=$((WARP_CONCURRENT * WARP_DELETE_BATCH * 16))
     if (( objects < need )); then
       objects="$need"
     fi

@@ -59,3 +59,66 @@ func TestForwardStatusAppendObjectTooLargeRoundTrip(t *testing.T) {
 	require.Equal(t, raftpb.ForwardStatusAppendObjectTooLarge,
 		mapErrorToStatus(storage.ErrAppendObjectTooLarge))
 }
+
+// Regression: forwarded HEAD/CompleteMultipartUpload replies must carry
+// storage.Object.Parts so the request-side ClusterCoordinator can drive
+// `?partNumber=N` resolution. Before parts was wired into ForwardObjectMeta
+// the cluster path returned PartsCount=1 and PartNumber>=2 → 416 even though
+// the underlying object meta had two parts.
+func TestForwardCodec_ObjectReply_PartsRoundTrip(t *testing.T) {
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: 5 * 1024 * 1024, ETag: "etag-1"},
+		{PartNumber: 2, Size: 5 * 1024 * 1024, ETag: "etag-2"},
+	}
+	src := &storage.Object{
+		Key:          "warp-multipart.bin",
+		Size:         10 * 1024 * 1024,
+		ETag:         "complete-etag",
+		ContentType:  "application/octet-stream",
+		LastModified: 1715000000000,
+		VersionID:    "v0",
+		Parts:        parts,
+	}
+
+	got, err := objectFromReply(buildObjectReply(src, "bucket"))
+	require.NoError(t, err)
+	require.Equal(t, parts, got.Parts, "buildObjectReply must round-trip Parts")
+	require.Equal(t, src.Size, got.Size)
+	require.Equal(t, src.ETag, got.ETag)
+}
+
+func TestForwardCodec_GetObjectReply_PartsRoundTrip(t *testing.T) {
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: 7, ETag: "p1"},
+		{PartNumber: 2, Size: 13, ETag: "p2"},
+		{PartNumber: 3, Size: 0, ETag: "p3-empty"},
+	}
+	body := []byte("hello world!\x00trailing-body-bytes")
+	src := &storage.Object{
+		Key:          "mp.bin",
+		Size:         int64(len(body)),
+		ETag:         "ce",
+		ContentType:  "text/plain",
+		LastModified: 1,
+		VersionID:    "v1",
+		Parts:        parts,
+	}
+
+	reply := buildGetObjectReply(src, "bucket", body)
+	got, err := objectFromReply(reply)
+	require.NoError(t, err)
+	require.Equal(t, parts, got.Parts)
+
+	gotBody := raftpb.GetRootAsForwardReply(reply, 0).ReadBodyBytes()
+	require.Equal(t, body, gotBody, "GetObject body must remain alongside Parts")
+}
+
+// Back-compat: an Object with no Parts (single-PUT, append, legacy) must
+// round-trip with Parts=nil, never an empty non-nil slice — partRange's
+// "no parts" fast-path relies on len==0.
+func TestForwardCodec_ObjectReply_NoParts(t *testing.T) {
+	src := &storage.Object{Key: "single.bin", Size: 100, ETag: "e", LastModified: 1}
+	got, err := objectFromReply(buildObjectReply(src, "bucket"))
+	require.NoError(t, err)
+	require.Nil(t, got.Parts)
+}

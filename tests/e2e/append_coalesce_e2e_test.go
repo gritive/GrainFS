@@ -31,8 +31,8 @@ import (
 // real S3 endpoints + multi-node placement.
 func TestAppendCoalesceE2E(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "4-node cluster boot is too slow for -short")
-		tgt := newClusterS3Target(t, 4)
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		tgt := newSharedClusterS3Target(t)
 		runCoalesceCase(t, tgt)
 	})
 	// SingleNode intentionally absent: coalesce + EC distribute requires

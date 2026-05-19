@@ -34,6 +34,11 @@ func TestAppendObjectE2E(t *testing.T) {
 
 	t.Run("Cluster4Node", func(t *testing.T) {
 		skipIfShort(t, "4-node cluster boot is too slow for -short")
+		// Dedicated (non-shared) — runClusterOnlyAppendCases contains
+		// OwnerKillSurvives which kills + restarts a node; running that on
+		// the shared fixture would temporarily degrade subsequent tests
+		// reading from sharedCluster. Split off once that case is moved
+		// to its own file.
 		tgt := newClusterS3Target(t, 4)
 		runCommonAppendCases(t, tgt)
 		runClusterOnlyAppendCases(t, tgt)
