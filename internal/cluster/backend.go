@@ -908,22 +908,85 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 		return nil
 	}
 
-	// Follower / edge node: forward to configured peers. Dynamic join edge
-	// nodes may not have a top-level data-Raft leader hint yet, but they still
-	// know the seed/join peer address and must try it instead of failing early.
+	// Follower / edge node: forward to the data-group leader. When the
+	// leader hint is known we forward only there; otherwise we fan out to
+	// the configured peer set (covers dynamic-join edge nodes that don't
+	// know the raft topology yet).
+	//
+	// A freshly-instantiated multi-voter data group may not have completed
+	// its first election by the time a write arrives (raft tick + heartbeat
+	// race the very first request to land on a non-leader). Retry on
+	// ErrNotLeader with bounded backoff so the propose converges as soon
+	// as the election settles rather than failing with a 500.
 	proposeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	peers := proposalForwardPeers(b.node.Peers(), b.configuredNodeList(), b.currentSelfAddr())
-	if len(peers) == 0 {
-		return raft.ErrNotLeader
-	}
+	const retryInterval = 50 * time.Millisecond
 	var lastErr error
-	for _, peer := range peers {
-		if _, lastErr = b.forwardPropose(proposeCtx, peer, data); lastErr == nil {
+	for {
+		if b.node.IsLeader() {
+			idx, err := b.node.ProposeWait(proposeCtx, data)
+			if err != nil {
+				return err
+			}
+			for b.lastApplied.Load() < idx {
+				select {
+				case <-proposeCtx.Done():
+					return proposeCtx.Err()
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+			if applyErr := b.ApplyError(idx); applyErr != nil {
+				return applyErr
+			}
 			return nil
 		}
+		peers := b.forwardPeersForPropose()
+		if len(peers) == 0 {
+			lastErr = raft.ErrNotLeader
+		} else {
+			lastErr = nil
+			allNotLeader := true
+			for _, peer := range peers {
+				_, err := b.forwardPropose(proposeCtx, peer, data)
+				if err == nil {
+					return nil
+				}
+				lastErr = err
+				if !errors.Is(err, raft.ErrNotLeader) {
+					allNotLeader = false
+				}
+			}
+			// Preserve the original try-all-peers semantics: a non-ErrNotLeader
+			// error from any peer is surfaced only after the full peer list has
+			// been attempted, so a transient transport error on peer #1 doesn't
+			// mask peer #2 being the actual leader.
+			if !allNotLeader {
+				return lastErr
+			}
+		}
+		select {
+		case <-proposeCtx.Done():
+			if lastErr != nil {
+				return lastErr
+			}
+			return proposeCtx.Err()
+		case <-time.After(retryInterval):
+		}
 	}
-	return lastErr
+}
+
+// forwardPeersForPropose returns the preferred set of peers for forwarding a
+// follower propose. When the raft layer knows the leader (LeaderID non-empty),
+// only the leader is returned to avoid futile round-robin to other followers.
+// Otherwise falls back to the full peer set (raft membership when available,
+// configured node list otherwise).
+func (b *DistributedBackend) forwardPeersForPropose() []string {
+	selfAddr := b.currentSelfAddr()
+	if leader := b.node.LeaderID(); leader != "" && leader != selfAddr {
+		return []string{leader}
+	}
+	return proposalForwardPeers(b.node.Peers(), b.configuredNodeList(), selfAddr)
 }
 
 func proposalForwardPeers(raftPeers, allNodes []string, selfAddr string) []string {
