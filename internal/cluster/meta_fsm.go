@@ -93,6 +93,19 @@ const dekSnapshotTrailerLen = 8
 // Carries: PolicyStore + GroupStore + PolicyAttachStore + BucketPolicyStore in
 // a single FlatBuffers payload. One trailer for all 4 §2 stores keeps the chain
 // depth manageable and reflects that the stores always serialize together.
+//
+// Wire layout (appended after every other trailer; IPST is the outermost trailer):
+//
+//	[FB root bytes]
+//	[IAM trailer bytes]       (optional, magic 0x47414D49)
+//	[GCFG trailer bytes]      (optional, magic 0x47464347)
+//	[DKVS trailer bytes]      (optional, magic 0x53564B44)
+//	[ipstPayloadBytes]
+//	[uint32 payloadLen  LE]
+//	[uint32 magic IPST  LE]
+//
+// Restore reads from the end: check last 4 bytes for IPST magic, if present
+// read payloadLen, strip IPST payload+footer, then continue DKVS/GCFG/IAM peel.
 const ipstSnapshotTrailerMagic uint32 = 0x54535049
 
 // ipstSnapshotTrailerLen is the on-disk size of the IPST footer:
@@ -2917,16 +2930,29 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			if err != nil {
 				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
 			}
-			if f.policyStore != nil {
+			// Warn per nil store. The 4 stores form a single coherent unit
+			// (group memberships, attached policies, bucket policies all reference
+			// each other); silently dropping one half desyncs the others against
+			// the snapshot. The all-nil path warns once above; here we surface
+			// per-store gaps so the operator sees exactly what was lost.
+			if f.policyStore == nil {
+				log.Warn().Int("entries", len(polSnap)).Msg("meta_fsm: Restore: IPST has policy entries but policyStore not wired; entries dropped")
+			} else {
 				f.policyStore.ReplaceAll(polSnap)
 			}
-			if f.groupStore != nil {
+			if f.groupStore == nil {
+				log.Warn().Int("entries", len(grpSnap)).Msg("meta_fsm: Restore: IPST has group entries but groupStore not wired; entries dropped")
+			} else {
 				f.groupStore.ReplaceAll(grpSnap)
 			}
-			if f.policyAttachStore != nil {
+			if f.policyAttachStore == nil {
+				log.Warn().Int("sa_entries", len(attachSnap.SAAttachments)).Int("group_entries", len(attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
+			} else {
 				f.policyAttachStore.ReplaceAll(attachSnap)
 			}
-			if f.bucketPolicyStore != nil {
+			if f.bucketPolicyStore == nil {
+				log.Warn().Int("entries", len(bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
+			} else {
 				f.bucketPolicyStore.ReplaceAll(bpSnap)
 			}
 			// Invalidate the resolver cache so stale pre-restore entries don't
