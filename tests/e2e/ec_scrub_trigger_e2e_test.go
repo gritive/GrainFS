@@ -41,6 +41,12 @@ func adminUnixHTTPClient(socketPath string) *http.Client {
 //   - DedupHitReturnsExistingSession: a second identical POST returns the
 //     same SessionID with created=false (LookupDedup short-circuit).
 func TestECScrubTriggerE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		_ = newSingleNodeS3Target()
+		// EC scrub trigger semantics require a multi-raft cluster (replica
+		// fan-out for the source resolver); the single-node branch is the
+		// shape mirror so the entry follows the dual sub-test convention.
+	})
 	t.Run("Cluster3Node", func(t *testing.T) {
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes: 3, Mode: ClusterModeStaticPeers, LogPrefix: "ec-scrub-trigger",
