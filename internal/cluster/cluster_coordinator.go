@@ -654,6 +654,8 @@ func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
 	return obj
 }
 
+// TODO(post-launch): widen ObjectIndexEntry with Tags if List-via-coordinator
+// must surface tags. Today clients call GetObjectTagging separately.
 func objectIndexEntryToVersion(entry ObjectIndexEntry, isLatest bool) *storage.ObjectVersion {
 	return &storage.ObjectVersion{
 		Key:            entry.Key,
@@ -1421,6 +1423,51 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 		return err
 	}
 	return parseReplyStatus(reply)
+}
+
+// SetObjectTags satisfies storage.ObjectTagsSetter. Routes the tag write
+// either to the locally-resolvable group backend (if self is leader) or
+// forwards to the owning peer via ForwardOpSetObjectTags. Mirrors SetObjectACL.
+func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
+	ctx := context.Background()
+	target, err := c.routeReadOrBucket(bucket, key, "")
+	if err != nil {
+		return err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
+		return gb.SetObjectTags(bucket, key, versionID, tags)
+	}
+	if c.forward == nil {
+		return ErrCoordinatorNoRouter
+	}
+	args := buildSetObjectTagsArgs(bucket, key, versionID, tags)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpSetObjectTags, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
+}
+
+// GetObjectTags satisfies storage.ObjectTagsGetter. Reads from the locally-
+// resolvable group backend; the local FSM-consistent view is sufficient per
+// replication design (writes flow through Raft and replicate to every node).
+func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	ctx := context.Background()
+	target, err := c.routeReadOrBucket(bucket, key, "")
+	if err != nil {
+		return nil, err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
+		return gb.GetObjectTags(bucket, key, versionID)
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	return nil, fmt.Errorf("GetObjectTags: no local replica available; peer forwarding not implemented for read-only tag ops")
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as

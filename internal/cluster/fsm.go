@@ -43,7 +43,11 @@ const (
 	CmdAppendObject CommandType = 18
 	// Phase B2 Coalesce: merges a prefix of appendable object segments into a
 	// single coalesced blob ref.
-	CmdCoalesceSegments    CommandType = 19
+	CmdCoalesceSegments CommandType = 19
+	// CmdSetObjectTags replaces the tag set on an object version.
+	// VersionID="" targets the current (legacy + latest) records;
+	// VersionID!="" targets a specific versioned record only.
+	CmdSetObjectTags       CommandType = 20
 	CmdPutObjectQuarantine CommandType = 40
 )
 
@@ -209,6 +213,16 @@ type SetObjectACLCmd struct {
 	Bucket string
 	Key    string
 	ACL    uint8
+}
+
+// SetObjectTagsCmd replaces the tag set on an object version.
+// VersionID="" targets the current (legacy + latest) records;
+// VersionID!="" targets a specific versioned record only.
+type SetObjectTagsCmd struct {
+	Bucket    string
+	Key       string
+	VersionID string
+	Tags      []storage.Tag
 }
 
 // AppendObjectCmd records one appended segment. Only PlacementGroupID is

@@ -42,6 +42,8 @@ type Object struct {
 	// Entries are sorted ascending by PartNumber. The S3 GetObject/HeadObject
 	// ?partNumber=N handler uses this to compute the byte range for part N.
 	Parts []MultipartPartEntry
+	// Tags holds the user-defined object tags (up to 10 per AWS S3 spec).
+	Tags []Tag
 }
 
 // MultipartPartEntry records one part of a CompleteMultipartUpload object.
@@ -147,6 +149,7 @@ type ObjectVersion struct {
 	LastModified   int64
 	ETag           string
 	Size           int64
+	Tags           []Tag
 }
 
 // Copier is an optional primitive for backends that support metadata-only copy.
@@ -177,6 +180,7 @@ type SnapshotObject struct {
 	ACL            uint8        `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
 	SSEAlgorithm   string       `json:"sse_algorithm,omitempty"`
 	Segments       []SegmentRef `json:"segments,omitempty"`
+	Tags           []Tag        `json:"tags,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.
@@ -263,4 +267,30 @@ type PartialIO interface {
 // Backends that do not implement this interface skip the fsync in COMMIT.
 type Syncable interface {
 	Sync(bucket, key string) error
+}
+
+// TaggingDirective controls how tags are applied on CopyObject.
+type TaggingDirective uint8
+
+const (
+	TaggingDirectiveCopy    TaggingDirective = 0 // default: inherit source tags
+	TaggingDirectiveReplace TaggingDirective = 1 // use request.Tags
+)
+
+// Tag is a single object tag key/value pair.
+type Tag struct {
+	Key   string `json:"k"`
+	Value string `json:"v"`
+}
+
+// ObjectTagsSetter is the per-version tag mutation contract. versionID=""
+// targets the current version. Passing nil clears all tags. Does not
+// modify ETag or LastModified — matches AWS S3 semantics.
+type ObjectTagsSetter interface {
+	SetObjectTags(bucket, key, versionID string, tags []Tag) error
+}
+
+// ObjectTagsGetter returns the current tag set on a target version.
+type ObjectTagsGetter interface {
+	GetObjectTags(bucket, key, versionID string) ([]Tag, error)
 }

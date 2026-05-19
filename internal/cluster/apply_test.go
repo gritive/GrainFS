@@ -12,6 +12,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func newTestDB(t *testing.T) *badger.DB {
@@ -742,6 +743,142 @@ func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
 	}))
 	assert.Equal(t, aclPublicRead, legacyACL, "legacy key ACL")
 	assert.Equal(t, aclPublicRead, versionedACL, "versioned key ACL")
+}
+
+func TestFSM_SetObjectTags(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	// Seed an object.
+	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 10, ETag: "etag1", ModTime: 1000,
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	tags := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}}
+	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "file.txt", Tags: tags})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	var m objectMeta
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKey("b", "file.txt"))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			m, err = unmarshalObjectMeta(val)
+			return err
+		})
+	}))
+	assert.Equal(t, tags, m.Tags, "tags should be updated")
+	assert.Equal(t, "etag1", m.ETag, "ETag must be unchanged")
+	assert.Equal(t, int64(10), m.Size, "Size must be unchanged")
+}
+
+func TestFSM_SetObjectTags_NotFound(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, _ := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "ghost.txt", Tags: nil})
+	err := fsm.Apply(data)
+	assert.Error(t, err, "should fail when object does not exist")
+}
+
+func TestFSM_SetObjectTags_VersionedBucket(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	// Create bucket and enable versioning.
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(data))
+	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
+	require.NoError(t, fsm.Apply(data))
+
+	const vid = "v1"
+	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v", ModTime: 2000, VersionID: vid,
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	tags := []storage.Tag{{Key: "env", Value: "staging"}}
+	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "file.txt", Tags: tags})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	// Both legacy and versioned records should have the tags.
+	var legacyTags, versionedTags []storage.Tag
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(objectMetaKey("b", "file.txt"))
+		if err != nil {
+			return err
+		}
+		if err := item.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			if merr != nil {
+				return merr
+			}
+			legacyTags = m.Tags
+			return nil
+		}); err != nil {
+			return err
+		}
+		vItem, err := txn.Get(objectMetaKeyV("b", "file.txt", vid))
+		if err != nil {
+			return err
+		}
+		return vItem.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			if merr != nil {
+				return merr
+			}
+			versionedTags = m.Tags
+			return nil
+		})
+	}))
+	assert.Equal(t, tags, legacyTags, "legacy key tags")
+	assert.Equal(t, tags, versionedTags, "versioned key tags")
+}
+
+func TestFSM_SetObjectTags_SpecificVersion(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	// Create bucket and enable versioning.
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(data))
+	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
+	require.NoError(t, fsm.Apply(data))
+
+	const vid = "v1"
+	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v", ModTime: 2000, VersionID: vid,
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	tags := []storage.Tag{{Key: "tier", Value: "archive"}}
+	// Target the specific version only.
+	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{
+		Bucket: "b", Key: "file.txt", VersionID: vid, Tags: tags,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	// Only versioned record should have tags; legacy may or may not — but versioned must.
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		vItem, err := txn.Get(objectMetaKeyV("b", "file.txt", vid))
+		if err != nil {
+			return err
+		}
+		return vItem.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			if merr != nil {
+				return merr
+			}
+			assert.Equal(t, tags, m.Tags, "versioned key tags when VersionID specified")
+			return nil
+		})
+	}))
 }
 
 func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {

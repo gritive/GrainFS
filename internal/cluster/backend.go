@@ -1348,6 +1348,58 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	})
 }
 
+// SetObjectTags satisfies storage.ObjectTagsSetter. Replicates the tag
+// mutation through Raft so every replica converges on the same tag set.
+// VersionID="" targets the current version; VersionID!="" targets a
+// specific version. Passing nil tags clears the tag set. Does not modify
+// ETag, LastModified, ACL, or blob bytes.
+func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
+	ctx := context.Background()
+	// Pre-check: object must exist locally before we propose. Mirrors SetObjectACL.
+	if _, err := b.HeadObject(ctx, bucket, key); err != nil {
+		return err
+	}
+	return b.propose(ctx, CmdSetObjectTags, SetObjectTagsCmd{
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: versionID,
+		Tags:      tags,
+	})
+}
+
+// GetObjectTags satisfies storage.ObjectTagsGetter. Reads from the local
+// FSM-consistent view; writes flow through Raft and replicate to every
+// node, so the local view is always current modulo replication lag.
+func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	var result []storage.Tag
+	err := b.db.View(func(txn *badger.Txn) error {
+		dbKey := b.ks().ObjectMetaKey(bucket, key)
+		if versionID != "" {
+			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)
+		}
+		item, err := txn.Get(dbKey)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		val, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalObjectMeta(val)
+		if err != nil {
+			return err
+		}
+		if len(m.Tags) > 0 {
+			result = append([]storage.Tag(nil), m.Tags...)
+		}
+		return nil
+	})
+	return result, err
+}
+
 // GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"
 // when no state has been set so the S3 semantic matches ECBackend's default.
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
@@ -3587,6 +3639,27 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 	}, nil
 }
 
+// CreateMultipartUploadWithTags creates a multipart upload with tags in cluster mode.
+// When tags are non-empty, returns UnsupportedOperationError: the cluster multipart
+// metadata (clusterMultipartMeta FBS + CreateMultipartUploadCmd) does not yet carry
+// tag fields; widening those is a future task.
+// When tags are empty, delegates to CreateMultipartUpload (no tags to carry).
+// TODO(future): widen clusterMultipartMeta FBS + CreateMultipartUploadCmd to carry tags,
+// then remove the fail-fast guard and materialise tags at CompleteMultipartUpload.
+func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	if len(tags) > 0 {
+		return "", storage.UnsupportedOperationError{
+			Op:     "CreateMultipartUploadWithTags",
+			Reason: storage.UnsupportedReasonNoAdapter,
+		}
+	}
+	mpu, err := b.CreateMultipartUpload(ctx, bucket, key, contentType)
+	if err != nil {
+		return "", err
+	}
+	return mpu.UploadID, nil
+}
+
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	// Verify upload exists (read local metadata)
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -4107,6 +4180,7 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 				LastModified:   m.LastModified,
 				ETag:           m.ETag,
 				Size:           m.Size,
+				Tags:           append([]storage.Tag(nil), m.Tags...), // Task 7 carry-over
 			}
 			versions = append(versions, &v)
 		}

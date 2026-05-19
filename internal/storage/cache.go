@@ -222,6 +222,26 @@ func (cb *CachedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	return setter.SetObjectACL(bucket, key, acl)
 }
 
+func (cb *CachedBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) error {
+	setter, ok := cb.Backend.(ObjectTagsSetter)
+	if !ok {
+		return UnsupportedOperationError{Op: "SetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	if err := setter.SetObjectTags(bucket, key, versionID, tags); err != nil {
+		return err
+	}
+	cb.invalidate(bucket, key)
+	return nil
+}
+
+func (cb *CachedBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, error) {
+	getter, ok := cb.Backend.(ObjectTagsGetter)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "GetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	return getter.GetObjectTags(bucket, key, versionID)
+}
+
 // PutObject invalidates the cache entry for the key.
 func (cb *CachedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
 	cb.invalidate(bucket, key)
@@ -367,6 +387,16 @@ func (cb *CachedBackend) DeleteObjectVersion(bucket, key, versionID string) erro
 func (cb *CachedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
 	cb.invalidate(bucket, key)
 	return cb.Backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
+}
+
+func (cb *CachedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []Tag) (string, error) {
+	inner, ok := cb.Backend.(interface {
+		CreateMultipartUploadWithTags(context.Context, string, string, string, []Tag) (string, error)
+	})
+	if !ok {
+		return "", UnsupportedOperationError{Op: "CreateMultipartUploadWithTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	return inner.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
 }
 
 // AppendObject delegates to the inner backend's AppendObjecter implementation

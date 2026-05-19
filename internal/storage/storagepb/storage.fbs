@@ -3,6 +3,11 @@
 
 namespace storagepb;
 
+table Tag {
+  key:string;
+  value:string;
+}
+
 table Object {
   key:string;
   size:int64;
@@ -18,6 +23,7 @@ table Object {
   append_call_md5s:[BytesValue];   // new: one md5 per AppendObject call;
                                    // CompositeETag input. Empty for non-appendable.
                                    // (FlatBuffers has no [bytes]; wrapper table preserves list-of-blobs semantics.)
+  tags:[Tag];
 }
 
 table BytesValue {
@@ -50,6 +56,7 @@ table MultipartMeta {
   key:string;
   content_type:string;
   created_at:int64;
+  tags:[Tag];
 }
 
 root_type Object;

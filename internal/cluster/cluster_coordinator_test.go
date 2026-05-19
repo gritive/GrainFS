@@ -2259,3 +2259,12 @@ func TestAppendForward_BufferSaturation(t *testing.T) {
 	err := c.forwardAppendObjectForTest(context.Background(), "b", "k2", 0, bytes.NewReader(body2))
 	require.ErrorIs(t, err, ErrForwardBufferFull)
 }
+
+// TestClusterCoordinator_ImplementsTagInterfaces is a compile-time assertion
+// that *ClusterCoordinator satisfies storage.ObjectTagsSetter and
+// storage.ObjectTagsGetter. If either method is missing this test will fail
+// to compile, catching the 501 regression immediately.
+func TestClusterCoordinator_ImplementsTagInterfaces(t *testing.T) {
+	var _ storage.ObjectTagsSetter = (*ClusterCoordinator)(nil)
+	var _ storage.ObjectTagsGetter = (*ClusterCoordinator)(nil)
+}

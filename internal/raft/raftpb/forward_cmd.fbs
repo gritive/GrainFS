@@ -27,7 +27,16 @@ enum ForwardOp : byte {
   ListParts = 17,
   ListMultipartUploads = 18,
   AppendObject = 19,
-  HeadObjectVersion = 20
+  HeadObjectVersion = 20,  // reserved: matches origin/master 4722a758; do not reuse
+  SetObjectTags = 21
+}
+
+// Tag mirrors storagepb.Tag (key/value) for the Raft forward path.
+// FBS cross-file includes are not used in this codebase so we
+// declare a local equivalent with identical field names.
+table Tag {
+  key:string;
+  value:string;
 }
 
 table ScrubSessionStatArgs {
@@ -101,6 +110,13 @@ table SetObjectACLArgs {
   bucket:string;
   key:string;
   acl:ubyte;
+}
+
+table SetObjectTagsArgs {
+  bucket:string;
+  key:string;
+  version_id:string;   // empty -> current version
+  tags:[Tag];          // empty/nil -> delete all tags
 }
 
 table DeleteObjectVersionArgs {

@@ -10,6 +10,22 @@ func (o *Operations) CreateMultipartUpload(ctx context.Context, bucket, key, con
 	return o.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
+// CreateMultipartUploadWithTags creates a multipart upload and stores the given tags,
+// to be applied to the object on CompleteMultipartUpload.
+func (o *Operations) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []Tag) (*MultipartUpload, error) {
+	type tagsCreator interface {
+		CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []Tag) (string, error)
+	}
+	if tc, ok := o.backend.(tagsCreator); ok {
+		uploadID, err := tc.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+		if err != nil {
+			return nil, err
+		}
+		return &MultipartUpload{UploadID: uploadID, Bucket: bucket, Key: key, ContentType: contentType}, nil
+	}
+	return o.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
+}
+
 // SweepOrphanMultiparts walks the decorator stack for an OrphanMultipartSweeper
 // and runs the sweep against entries whose mtime is at or before the cutoff.
 // Returns a zero-value result when no sweeper is reachable (no-op for backends

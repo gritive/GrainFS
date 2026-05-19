@@ -138,6 +138,8 @@ func (f *FSM) Apply(raw []byte) error {
 		return f.applySetBucketVersioning(cmd.Data)
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(cmd.Data)
+	case CmdSetObjectTags:
+		return f.applySetObjectTags(cmd.Data)
 	case CmdAppendObject:
 		return f.applyAppendObjectFromCmd(cmd.Data)
 	case CmdCoalesceSegments:
@@ -683,6 +685,66 @@ func (f *FSM) applySetObjectACL(data []byte) error {
 				return f.setValue(txn, vKey, vNewVal)
 			})
 		})
+	})
+}
+
+func (f *FSM) applySetObjectTags(data []byte) error {
+	c, err := decodeSetObjectTagsCmd(data)
+	if err != nil {
+		return err
+	}
+	return f.db.Update(func(txn *badger.Txn) error {
+		if c.VersionID != "" {
+			// Target ONLY the specific versioned record.
+			vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
+			return mutateVersionTags(f, txn, vKey, c.Tags)
+		}
+		// VersionID == "" → mutate legacy (current) record, and if LatestKey
+		// exists also dual-write the latest versioned record.
+		legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
+		if err := mutateVersionTags(f, txn, legacyKey, c.Tags); err != nil {
+			return err
+		}
+		// Best-effort dual-write to latest versioned record (mirrors SetObjectACL semantics).
+		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
+		if lerr != nil {
+			return nil //nolint:nilerr // no versioning, nothing more to do
+		}
+		var versionID string
+		_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
+		if versionID == "" {
+			return nil
+		}
+		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
+		return mutateVersionTags(f, txn, vKey, c.Tags)
+	})
+}
+
+// mutateVersionTags reads the objectMeta at key, replaces .Tags, writes back.
+// Returns storage.ErrObjectNotFound if the key doesn't exist.
+func mutateVersionTags(f *FSM, txn *badger.Txn, key []byte, tags []storage.Tag) error {
+	item, err := txn.Get(key)
+	if err == badger.ErrKeyNotFound {
+		return storage.ErrObjectNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return item.Value(func(raw []byte) error {
+		val, err := f.openValue(item.Key(), raw)
+		if err != nil {
+			return err
+		}
+		m, merr := unmarshalObjectMeta(val)
+		if merr != nil {
+			return merr
+		}
+		m.Tags = append([]storage.Tag(nil), tags...) // defensive copy
+		newVal, merr := marshalObjectMeta(m)
+		if merr != nil {
+			return merr
+		}
+		return f.setValue(txn, key, newVal)
 	})
 }
 

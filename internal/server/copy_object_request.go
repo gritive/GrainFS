@@ -39,6 +39,17 @@ func parseCopyMetadataDirective(raw string) (storage.CopyMetadataDirective, bool
 	}
 }
 
+func parseCopyTaggingDirective(raw string) (storage.TaggingDirective, bool) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "", "COPY":
+		return storage.TaggingDirectiveCopy, true
+	case "REPLACE":
+		return storage.TaggingDirectiveReplace, true
+	default:
+		return storage.TaggingDirectiveCopy, false
+	}
+}
+
 func copyUserMetadata(c *app.RequestContext) map[string]string {
 	var metadata map[string]string
 	c.Request.Header.VisitAll(func(k, v []byte) {

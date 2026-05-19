@@ -56,6 +56,8 @@ type operationsPlan struct {
 	versionedSoftDeleter       VersionedSoftDeleter
 	policyBackend              PolicyBackend
 	deleteObjectVersionForUndo ObjectVersionDeleter
+	tagsSetter                 ObjectTagsSetter
+	tagsGetter                 ObjectTagsGetter
 }
 
 type BucketVersioner interface {
@@ -190,6 +192,16 @@ func buildOperationsPlan(backend Backend) operationsPlan {
 				if v, ok := b.(ObjectVersionDeleter); ok {
 					p.deleteObjectVersionForUndo = v
 				}
+			}
+		}
+		if p.tagsSetter == nil {
+			if v, ok := b.(ObjectTagsSetter); ok {
+				p.tagsSetter = v
+			}
+		}
+		if p.tagsGetter == nil {
+			if v, ok := b.(ObjectTagsGetter); ok {
+				p.tagsGetter = v
 			}
 		}
 	}

@@ -42,6 +42,9 @@ func (g *RecoveryWriteGate) DeleteObject(context.Context, string, string) error 
 func (g *RecoveryWriteGate) CreateMultipartUpload(context.Context, string, string, string) (*MultipartUpload, error) {
 	return nil, g.err
 }
+func (g *RecoveryWriteGate) CreateMultipartUploadWithTags(context.Context, string, string, string, []Tag) (string, error) {
+	return "", g.err
+}
 func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader) (*Part, error) {
 	return nil, g.err
 }
@@ -54,7 +57,8 @@ func (g *RecoveryWriteGate) AbortMultipartUpload(context.Context, string, string
 func (g *RecoveryWriteGate) CopyObject(string, string, string, string) (*Object, error) {
 	return nil, g.err
 }
-func (g *RecoveryWriteGate) SetObjectACL(string, string, uint8) error { return g.err }
+func (g *RecoveryWriteGate) SetObjectACL(string, string, uint8) error          { return g.err }
+func (g *RecoveryWriteGate) SetObjectTags(string, string, string, []Tag) error { return g.err }
 func (g *RecoveryWriteGate) PutObjectWithACL(string, string, io.Reader, string, uint8) (*Object, error) {
 	return nil, g.err
 }

@@ -391,6 +391,71 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	})
 }
 
+// SetObjectTags satisfies storage.ObjectTagsSetter. Replaces the tag set on
+// the target version. versionID="" targets the current version. Passing nil
+// clears all tags. Does not modify ETag, LastModified, or blob bytes —
+// matches AWS S3 semantics.
+func (b *LocalBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) error {
+	if versionID != "" {
+		return UnsupportedOperationError{Op: "SetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	mk := b.objectMetaKey(bucket, key)
+	return b.db.Update(func(txn *badger.Txn) error {
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+		if err == badger.ErrKeyNotFound {
+			return ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var obj Object
+		if err := unmarshalObjectInto(val, &obj); err != nil {
+			return err
+		}
+		if len(tags) == 0 {
+			obj.Tags = nil
+		} else {
+			cp := make([]Tag, len(tags))
+			copy(cp, tags)
+			obj.Tags = cp
+		}
+		newVal, err := marshalObject(&obj)
+		if err != nil {
+			return err
+		}
+		return setBadgerValue(txn, b.encryptor, badgerDomainObject, mk, newVal)
+	})
+}
+
+// GetObjectTags satisfies storage.ObjectTagsGetter. Returns a defensive copy
+// of the tag set on the target version. versionID="" targets the current version.
+func (b *LocalBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, error) {
+	if versionID != "" {
+		return nil, UnsupportedOperationError{Op: "GetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	mk := b.objectMetaKey(bucket, key)
+	var result []Tag
+	err := b.db.View(func(txn *badger.Txn) error {
+		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
+		if err == badger.ErrKeyNotFound {
+			return ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var obj Object
+		if err := unmarshalObjectInto(val, &obj); err != nil {
+			return err
+		}
+		if len(obj.Tags) > 0 {
+			result = make([]Tag, len(obj.Tags))
+			copy(result, obj.Tags)
+		}
+		return nil
+	})
+	return result, err
+}
+
 // Truncate implements storage.Truncatable.
 func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	_ = ctx
@@ -972,6 +1037,7 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 				Modified:     obj.LastModified,
 				SSEAlgorithm: obj.SSEAlgorithm,
 				Segments:     segments,
+				Tags:         obj.Tags,
 			})
 		}
 		return nil
@@ -1051,7 +1117,7 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 		if len(snap.Segments) > 0 {
 			segments = append(segments, snap.Segments...)
 		}
-		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm, Segments: segments}
+		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm, Segments: segments, Tags: snap.Tags}
 		meta, err := marshalObject(obj)
 		if err != nil {
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)

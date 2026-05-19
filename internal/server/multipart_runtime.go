@@ -11,6 +11,10 @@ func (s *Server) createMultipartSession(ctx context.Context, bucket, key, conten
 	return s.ops.CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
+func (s *Server) createMultipartSessionWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (*storage.MultipartUpload, error) {
+	return s.ops.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+}
+
 func (s *Server) uploadMultipartPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (*storage.Part, error) {
 	return s.ops.UploadPart(ctx, bucket, key, uploadID, partNumber, body)
 }

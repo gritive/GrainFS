@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"time"
@@ -36,6 +37,8 @@ type CopyObjectRequest struct {
 	SystemMetadata    ObjectSystemMetadata
 	Preconditions     CopyPreconditions
 	ACL               *uint8
+	TaggingDirective  TaggingDirective
+	Tags              []Tag
 }
 
 type CopyObjectResult struct {
@@ -114,7 +117,11 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}, nil
+		result := &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}
+		if err := o.applyCopyObjectTags(req); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 
 	if req.ACL == nil && len(userMetadata) == 0 && systemMetadata.empty() && canUseSimpleCopier(req) && plan.copier != nil {
@@ -126,7 +133,11 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		if err != nil {
 			return nil, err
 		}
-		return &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}, nil
+		result := &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}
+		if err := o.applyCopyObjectTags(req); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 
 	rc, _, err := o.openCopySource(ctx, plan, req.Source)
@@ -151,7 +162,56 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 	if err != nil {
 		return nil, err
 	}
-	return &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}, nil
+	result := &CopyObjectResult{Object: facts, Previous: previous, SSEAlgorithm: facts.SSEAlgorithm}
+	if err := o.applyCopyObjectTags(req); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// applyCopyObjectTags applies the tag set to the destination object according
+// to the TaggingDirective: COPY inherits source tags, REPLACE uses req.Tags.
+// REPLACE with nil Tags clears all destination tags (AWS S3 spec).
+// If the backend does not support tagging the call is silently skipped.
+func (o *Operations) applyCopyObjectTags(req CopyObjectRequest) error {
+	var (
+		newTags []Tag
+		apply   bool
+	)
+	switch req.TaggingDirective {
+	case TaggingDirectiveCopy:
+		srcTags, err := o.GetObjectTags(req.Source.Bucket, req.Source.Key, req.Source.VersionID)
+		// Silently skip:
+		//   - ErrUnsupportedOperation: backend (e.g., packblob) doesn't implement
+		//     ObjectTagsGetter; nothing to propagate.
+		//   - ErrObjectNotFound: load-bearing for the packblob path. Packed small
+		//     objects exist in packblob's in-memory index but have no objectMetaKey
+		//     row in the underlying LocalBackend's BadgerDB, so GetObjectTags
+		//     misses them. Future Task 6 follow-up could split this into a distinct
+		//     "no tags" return; until then, treat NotFound here as "no source tags".
+		if errors.Is(err, ErrUnsupportedOperation) || errors.Is(err, ErrObjectNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if len(srcTags) > 0 {
+			newTags = srcTags
+			apply = true
+		}
+	case TaggingDirectiveReplace:
+		newTags = req.Tags
+		apply = true // always apply on REPLACE: nil/empty means clear all tags
+	}
+	if apply {
+		if err := o.SetObjectTags(req.Destination.Bucket, req.Destination.Key, "", newTags); err != nil {
+			if errors.Is(err, ErrUnsupportedOperation) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeCopyObjectRequest(req CopyObjectRequest) CopyObjectRequest {

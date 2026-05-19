@@ -33,6 +33,11 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	if c.QueryArgs().Has("tagging") {
+		s.getObjectTagging(ctx, c)
+		return
+	}
+
 	// GET /:bucket/:key?uploadId=<id> — list parts for one in-progress multipart.
 	// Checked before versionId / Range because S3 routes the request to ListParts
 	// whenever uploadId is present, even when other query strings appear.

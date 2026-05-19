@@ -88,6 +88,23 @@ func marshalObject(obj *Object) ([]byte, error) {
 		}
 		appendMD5sOff = b.EndVector(len(md5Offs))
 	}
+	var tagsOff flatbuffers.UOffsetT
+	if len(obj.Tags) > 0 {
+		tagOffs := make([]flatbuffers.UOffsetT, len(obj.Tags))
+		for i, t := range obj.Tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			storagepb.TagStart(b)
+			storagepb.TagAddKey(b, kOff)
+			storagepb.TagAddValue(b, vOff)
+			tagOffs[i] = storagepb.TagEnd(b)
+		}
+		storagepb.ObjectStartTagsVector(b, len(tagOffs))
+		for i := len(tagOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(tagOffs[i])
+		}
+		tagsOff = b.EndVector(len(tagOffs))
+	}
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -112,6 +129,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	if appendMD5sOff != 0 {
 		storagepb.ObjectAddAppendCallMd5s(b, appendMD5sOff)
+	}
+	if tagsOff != 0 {
+		storagepb.ObjectAddTags(b, tagsOff)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -197,6 +217,16 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 		}
 		dst.AppendCallMD5s = md5s
 	}
+	if n := t.TagsLength(); n > 0 {
+		tags := make([]Tag, n)
+		var tag storagepb.Tag
+		for i := 0; i < n; i++ {
+			if t.Tags(&tag, i) {
+				tags[i] = Tag{Key: string(tag.Key()), Value: string(tag.Value())}
+			}
+		}
+		dst.Tags = tags
+	}
 	return nil
 }
 
@@ -246,12 +276,32 @@ func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {
 	bucketOff := b.CreateString(m.Bucket)
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
+	var tagsOff flatbuffers.UOffsetT
+	if len(m.Tags) > 0 {
+		tagOffs := make([]flatbuffers.UOffsetT, len(m.Tags))
+		for i, t := range m.Tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			storagepb.TagStart(b)
+			storagepb.TagAddKey(b, kOff)
+			storagepb.TagAddValue(b, vOff)
+			tagOffs[i] = storagepb.TagEnd(b)
+		}
+		storagepb.MultipartMetaStartTagsVector(b, len(tagOffs))
+		for i := len(tagOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(tagOffs[i])
+		}
+		tagsOff = b.EndVector(len(tagOffs))
+	}
 	storagepb.MultipartMetaStart(b)
 	storagepb.MultipartMetaAddUploadId(b, uidOff)
 	storagepb.MultipartMetaAddBucket(b, bucketOff)
 	storagepb.MultipartMetaAddKey(b, keyOff)
 	storagepb.MultipartMetaAddContentType(b, ctOff)
 	storagepb.MultipartMetaAddCreatedAt(b, m.CreatedAt)
+	if tagsOff != 0 {
+		storagepb.MultipartMetaAddTags(b, tagsOff)
+	}
 	root := storagepb.MultipartMetaEnd(b)
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -272,11 +322,22 @@ func unmarshalMultipartMeta(data []byte) (m *multipartMeta, err error) {
 		}
 	}()
 	t := storagepb.GetRootAsMultipartMeta(data, 0)
-	return &multipartMeta{
+	out := &multipartMeta{
 		UploadID:    string(t.UploadId()),
 		Bucket:      string(t.Bucket()),
 		Key:         string(t.Key()),
 		ContentType: string(t.ContentType()),
 		CreatedAt:   t.CreatedAt(),
-	}, nil
+	}
+	if n := t.TagsLength(); n > 0 {
+		tags := make([]Tag, n)
+		var tag storagepb.Tag
+		for i := 0; i < n; i++ {
+			if t.Tags(&tag, i) {
+				tags[i] = Tag{Key: string(tag.Key()), Value: string(tag.Value())}
+			}
+		}
+		out.Tags = tags
+	}
+	return out, nil
 }
