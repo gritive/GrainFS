@@ -10,10 +10,8 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/config"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfsexport"
-	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -89,25 +87,14 @@ func bootMetaRaftWiring(state *bootState) error {
 		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
 	}
 
-	// C2 gap fix: construct the cluster DEK Keeper from the node KEK and inject
-	// it into the FSM. Without this, DEKRotate/DEKVersionPrune MetaCmds are
-	// silent no-ops at apply time. LoadOrGenerateKEK handles the file://
-	// scheme check and returns ErrUnsupportedKEKSource for anything else, so
-	// kms:// hits a clear failure mode rather than a silent fall-through.
-	dekSrc := nodeconfig.New(state.cfg.DataDir).KEKSource()
-	kek, err := encrypt.LoadOrGenerateKEK(dekSrc)
-	if err != nil {
-		return fmt.Errorf("load KEK from %s: %w", dekSrc, err)
+	// C2 §1 gap fix: construct the cluster DEK Keeper from the node KEK and
+	// inject it into the FSM. Without this wireDEKKeeper call, DEKRotate /
+	// DEKVersionPrune MetaCmds are silent no-ops at apply time. Extracted as a
+	// function so the wiring contract is directly unit-testable (see
+	// dek_keeper_wiring_test.go::TestWireDEKKeeper_InjectsAndRegistersHook).
+	if err := wireDEKKeeper(state, metaRaft.FSM()); err != nil {
+		return err
 	}
-	dekKeeper, err := encrypt.NewDEKKeeper(kek)
-	if err != nil {
-		return fmt.Errorf("init DEK keeper: %w", err)
-	}
-	metaRaft.FSM().SetDEKKeeper(dekKeeper)
-	state.dekKeeper = dekKeeper
-	// proposer and scrubberKick stay nil pending the §6 audit lane that owns
-	// the rewrap scrubber; the dispatch path is nil-safe per dek_post_commit.go.
-	WireDEKPostCommit(metaRaft.FSM(), nil /* proposer (§6) */, dekKeeper, nil /* scrubberKick (§6) */)
 
 	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
 	// Must run before bootMetaRaftStart so apply hooks for MetaCmds 50-61 land
