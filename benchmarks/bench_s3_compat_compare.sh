@@ -68,6 +68,7 @@ rm -rf "$BENCH_DIR"
 mkdir -p "$BENCH_DIR"
 
 PIDS=()
+TARGET_DATA_DIRS=()
 START_BASE_URL=""
 START_ACCESS_KEY=""
 START_SECRET_KEY=""
@@ -142,6 +143,42 @@ stop_target_backends() {
   PIDS=("${PIDS[@]:-}")
 }
 
+reset_target_resources() {
+  TARGET_DATA_DIRS=()
+}
+
+register_target_data_dir() {
+  TARGET_DATA_DIRS+=("$1")
+}
+
+collect_resource_snapshot() {
+  local target="$1"
+  local op="$2"
+  local start_idx="$3"
+  local out="$PROFILE_ROOT/resource-results.tsv"
+  local target_pids=("${PIDS[@]:$start_idx}")
+  local idx pid ps_out rss_kb cpu_pct rss_mib data_dir disk_mib
+
+  ((${#target_pids[@]} > 0)) || return 0
+
+  for idx in "${!target_pids[@]}"; do
+    pid="${target_pids[$idx]}"
+    [[ -n "$pid" ]] || continue
+    ps_out="$(ps -o rss=,pcpu= -p "$pid" 2>/dev/null || true)"
+    [[ -n "$ps_out" ]] || continue
+    read -r rss_kb cpu_pct <<<"$ps_out"
+    [[ -n "${rss_kb:-}" && -n "${cpu_pct:-}" ]] || continue
+    rss_mib="$(awk -v kb="$rss_kb" 'BEGIN { printf "%.2f", kb / 1024 }')"
+    data_dir="${TARGET_DATA_DIRS[$idx]:-}"
+    disk_mib=""
+    if [[ -n "$data_dir" && -d "$data_dir" ]]; then
+      disk_mib="$(du -sk "$data_dir" 2>/dev/null | awk '{ printf "%.2f", $1 / 1024 }')"
+    fi
+    printf '%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n' \
+      "$target" "$op" "$((idx + 1))" "$pid" "$rss_mib" "$cpu_pct" "${disk_mib:-0}" "$data_dir" >>"$out"
+  done
+}
+
 start_grainfs_single() {
   if [[ "${GRAINFS_SINGLE_URL:-}" != "" ]]; then
     set_start_info "$GRAINFS_SINGLE_URL" "${GRAINFS_ACCESS_KEY:-}" "${GRAINFS_SECRET_KEY:-}" "external"
@@ -158,6 +195,7 @@ start_grainfs_single() {
   local port
   port="$(bench_free_port)"
   mkdir -p "$data_dir"
+  register_target_data_dir "$data_dir"
   BENCH_ENCRYPTION_KEY_FILE="$data_dir/encryption.key"
   export BENCH_ENCRYPTION_KEY_FILE
   bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
@@ -207,6 +245,7 @@ start_grainfs_cluster() {
   mkdir -p "$cluster_dir"
   for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
     mkdir -p "$cluster_dir/n${idx}"
+    register_target_data_dir "$cluster_dir/n${idx}"
     http_ports+=("$(bench_free_port)")
     raft_ports+=("$(bench_free_port)")
     if [[ "$BENCH_PPROF" == "1" ]]; then
@@ -304,6 +343,7 @@ start_minio() {
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
   mkdir -p "$data_dir"
+  register_target_data_dir "$data_dir"
 
   MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
   MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
@@ -343,6 +383,7 @@ start_minio_cluster() {
   local idx
   for idx in $(seq 1 "$nodes"); do
     mkdir -p "$base_dir/n${idx}"
+    register_target_data_dir "$base_dir/n${idx}"
     ports+=("$(bench_free_port)")
     console_ports+=("$(bench_free_port)")
   done
@@ -412,6 +453,7 @@ start_rustfs() {
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
   mkdir -p "$data_dir"
+  register_target_data_dir "$data_dir"
 
   RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY" \
   RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY" \
@@ -450,6 +492,7 @@ start_rustfs_cluster() {
   local idx
   for idx in $(seq 1 "$nodes"); do
     mkdir -p "$base_dir/n${idx}"
+    register_target_data_dir "$base_dir/n${idx}"
     ports+=("$(bench_free_port)")
     console_ports+=("$(bench_free_port)")
   done
@@ -700,6 +743,59 @@ with open(summary_path, "a") as out:
 PY
 }
 
+append_resource_summary() {
+  local summary="$PROFILE_ROOT/summary.md"
+  python3 - "$PROFILE_ROOT/resource-results.tsv" "$summary" <<'PY'
+import statistics
+import sys
+from collections import defaultdict
+
+results_path, summary_path = sys.argv[1:]
+groups = defaultdict(lambda: {"rss": [], "cpu": [], "disk": []})
+
+try:
+    with open(results_path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 8:
+                continue
+            target, op, _, _, rss, cpu, disk, _ = parts
+            key = (target, op)
+            groups[key]["rss"].append(float(rss))
+            groups[key]["cpu"].append(float(cpu))
+            groups[key]["disk"].append(float(disk))
+except FileNotFoundError:
+    groups = {}
+
+def avg(values):
+    return sum(values) / len(values) if values else 0.0
+
+def skew(values):
+    if not values:
+        return ""
+    med = statistics.median(values)
+    if med <= 0:
+        return ""
+    return f"{max(values) / med:.2f}x"
+
+with open(summary_path, "a", encoding="utf-8") as out:
+    out.write("\n## Resource Snapshot\n\n")
+    out.write("| target | op | nodes | avg RSS MiB | max RSS MiB | RSS skew | avg CPU % | max CPU % | CPU skew | avg disk MiB | max disk MiB | disk skew |\n")
+    out.write("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+    for target, op in sorted(groups):
+        data = groups[(target, op)]
+        rss = data["rss"]
+        cpu = data["cpu"]
+        disk = data["disk"]
+        out.write(
+            f"| {target} | {op.upper()} | {len(rss)} | "
+            f"{avg(rss):.2f} | {max(rss) if rss else 0.0:.2f} | {skew(rss)} | "
+            f"{avg(cpu):.2f} | {max(cpu) if cpu else 0.0:.2f} | {skew(cpu)} | "
+            f"{avg(disk):.2f} | {max(disk) if disk else 0.0:.2f} | {skew(disk)} |\n"
+        )
+PY
+}
+
 target_enabled() {
   local needle="$1"
   case ",$TARGETS," in
@@ -710,12 +806,14 @@ target_enabled() {
 
 write_summary_header
 : >"$PROFILE_ROOT/warp-results.tsv"
+: >"$PROFILE_ROOT/resource-results.tsv"
 : >"$PROFILE_ROOT/skipped.txt"
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
 for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-cluster; do
   target_enabled "$target" || continue
   target_pid_start="${#PIDS[@]}"
+  reset_target_resources
 
   case "$target" in
     grainfs-single)
@@ -776,6 +874,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
         else
           run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"
         fi
+        collect_resource_snapshot "$target" "$op" "$target_pid_start"
         ;;
       *)
         echo "[error] unknown WARP_OPS entry: $op" >&2
@@ -797,6 +896,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
 done
 
 append_summary_rows
+append_resource_summary
 
 echo
 echo "=================================================================="

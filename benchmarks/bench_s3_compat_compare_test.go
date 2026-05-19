@@ -33,6 +33,27 @@ func TestBenchS3CompatPrecreatesLocalGrainFSWarpBuckets(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatRecordsResourceSkew(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	if !strings.Contains(script, "collect_resource_snapshot()") {
+		t.Fatalf("bench_s3_compat_compare.sh must define collect_resource_snapshot")
+	}
+	if !strings.Contains(script, `"$PROFILE_ROOT/resource-results.tsv"`) {
+		t.Fatalf("bench_s3_compat_compare.sh must write resource-results.tsv")
+	}
+	if !strings.Contains(script, "append_resource_summary") {
+		t.Fatalf("bench_s3_compat_compare.sh must append resource skew summary rows")
+	}
+	if !strings.Contains(script, `collect_resource_snapshot "$target" "$op" "$target_pid_start"`) {
+		t.Fatalf("bench_s3_compat_compare.sh must collect a resource snapshot after each warp op")
+	}
+}
+
 func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
 	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
 	if err != nil {
