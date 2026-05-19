@@ -86,3 +86,66 @@ func (s *InMemoryStore) GroupPolicies(_ context.Context, group string) ([]string
 	}
 	return out, nil
 }
+
+// SAAttachEntry is a snapshot of one SA's policy attachments.
+type SAAttachEntry struct {
+	SAID     string
+	Policies []string
+}
+
+// GroupAttachEntry is a snapshot of one group's policy attachments.
+type GroupAttachEntry struct {
+	Group    string
+	Policies []string
+}
+
+// AttachSnapshot is the full snapshot of an InMemoryStore.
+type AttachSnapshot struct {
+	SAAttachments    []SAAttachEntry
+	GroupAttachments []GroupAttachEntry
+}
+
+// Snapshot returns a copy of all attach mappings for serialization.
+func (s *InMemoryStore) Snapshot() AttachSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	saEntries := make([]SAAttachEntry, 0, len(s.saToPols))
+	for saID, pols := range s.saToPols {
+		ps := make([]string, 0, len(pols))
+		for p := range pols {
+			ps = append(ps, p)
+		}
+		saEntries = append(saEntries, SAAttachEntry{SAID: saID, Policies: ps})
+	}
+	grpEntries := make([]GroupAttachEntry, 0, len(s.grpToPol))
+	for grp, pols := range s.grpToPol {
+		ps := make([]string, 0, len(pols))
+		for p := range pols {
+			ps = append(ps, p)
+		}
+		grpEntries = append(grpEntries, GroupAttachEntry{Group: grp, Policies: ps})
+	}
+	return AttachSnapshot{SAAttachments: saEntries, GroupAttachments: grpEntries}
+}
+
+// ReplaceAll atomically replaces all attach mappings with the provided snapshot.
+func (s *InMemoryStore) ReplaceAll(snap AttachSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saToPols = make(map[string]map[string]struct{}, len(snap.SAAttachments))
+	for _, e := range snap.SAAttachments {
+		pols := make(map[string]struct{}, len(e.Policies))
+		for _, p := range e.Policies {
+			pols[p] = struct{}{}
+		}
+		s.saToPols[e.SAID] = pols
+	}
+	s.grpToPol = make(map[string]map[string]struct{}, len(snap.GroupAttachments))
+	for _, e := range snap.GroupAttachments {
+		pols := make(map[string]struct{}, len(e.Policies))
+		for _, p := range e.Policies {
+			pols[p] = struct{}{}
+		}
+		s.grpToPol[e.Group] = pols
+	}
+}

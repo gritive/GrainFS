@@ -103,3 +103,47 @@ func (s *InMemoryStore) MembersOf(_ context.Context, groupName string) ([]string
 	}
 	return out, nil
 }
+
+// GroupEntry is a snapshot representation of one group store entry.
+type GroupEntry struct {
+	Name             string
+	AttachedPolicies []string
+	Members          []string
+}
+
+// Snapshot returns a copy of all groups for serialization.
+func (s *InMemoryStore) Snapshot() []GroupEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]GroupEntry, 0, len(s.g))
+	for _, g := range s.g {
+		members := make([]string, 0, len(g.Members))
+		for m := range g.Members {
+			members = append(members, m)
+		}
+		out = append(out, GroupEntry{
+			Name:             g.Name,
+			AttachedPolicies: append([]string(nil), g.AttachedPolicies...),
+			Members:          members,
+		})
+	}
+	return out
+}
+
+// ReplaceAll atomically replaces all group entries with the provided snapshot.
+func (s *InMemoryStore) ReplaceAll(entries []GroupEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.g = make(map[string]*Group, len(entries))
+	for _, e := range entries {
+		members := make(map[string]struct{}, len(e.Members))
+		for _, m := range e.Members {
+			members[m] = struct{}{}
+		}
+		s.g[e.Name] = &Group{
+			Name:             e.Name,
+			AttachedPolicies: append([]string(nil), e.AttachedPolicies...),
+			Members:          members,
+		}
+	}
+}

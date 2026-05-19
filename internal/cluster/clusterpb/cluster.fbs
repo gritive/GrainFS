@@ -960,3 +960,48 @@ table MetaCreateBucketWithPolicyAttachCmd {
   attach_sa:string;
   attach_policy:string;
 }
+
+// ─── IPST snapshot trailer ────────────────────────────────────────────────────
+// MetaIAMPolicyStoresSnapshot is the IPST trailer payload: all 4 §2 in-memory
+// IAM policy stores (policystore, group, policyattach, bucketpolicy) serialized
+// into a single FlatBuffers table. One trailer for all 4 stores keeps the chain
+// depth manageable and reflects that the stores always serialize together.
+// Wire position: appended after the DKVS trailer (outermost when both present).
+//
+// Sorted-key serialization throughout (policy/group/sa-id/bucket names sorted;
+// attached_policies and members sorted within each entry) for byte determinism.
+
+table MetaIAMPolicyEntry {
+  name:string;
+  doc_json:[ubyte];
+  builtin:bool;
+}
+
+table MetaIAMGroupEntry {
+  name:string;
+  attached_policies:[string];
+  members:[string];
+}
+
+table MetaIAMPolicyAttachSAEntry {
+  sa_id:string;
+  policies:[string];
+}
+
+table MetaIAMPolicyAttachGroupEntry {
+  group:string;
+  policies:[string];
+}
+
+table MetaIAMBucketPolicyEntry {
+  bucket:string;
+  doc_json:[ubyte];
+}
+
+table MetaIAMPolicyStoresSnapshot {
+  policies:[MetaIAMPolicyEntry];
+  groups:[MetaIAMGroupEntry];
+  sa_attachments:[MetaIAMPolicyAttachSAEntry];
+  group_attachments:[MetaIAMPolicyAttachGroupEntry];
+  bucket_policies:[MetaIAMBucketPolicyEntry];
+}
