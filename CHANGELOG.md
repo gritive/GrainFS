@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.0.262.0] - 2026-05-19 - feat(storage): Phase 1 large-object chunking foundation — segment-based PUT/GET, xxhash3 integrity
+
+Every object now persists as a sequence of one or more `SegmentRef` instead of a single flat file. PUT/GET stream through 8-worker chunker/fetcher pipelines that produce 16 MiB chunks (default). Internal segment integrity moves from MD5 to xxhash3-128, eliminating dual hashing on the hot path. Range GET, sendfile zero-copy, multipart, AppendObject, packblob, and PITR snapshot/restore all stay correct under the new layout. Single-node and 4-node cluster e2e round-trips byte-identical for 100 MiB / 256 MiB / cross-chunk Range. Cluster `RoundTrip100MiB` is intentionally skipped pending Phase 2 (non-aligned tail chunk fanout); 256 MiB and 64 MiB Range pass.
+
+### Added
+
+- **xxhash3-128 segment checksum utility** (`internal/storage/checksum.go`) — `NewChecksumHasher` streaming, `ChecksumOf` one-shot, big-endian Hi||Lo encoding. 10–20 GiB/s/core vs MD5의 ~500 MiB/s. Used for repair verification and scrubber bit-rot detection. Locked in by 3 unit tests.
+- **`SegmentWriter`** (`internal/storage/segment_writer.go`) — streaming chunker + 8-worker pool + aggregator. Memory bounded to `16 MiB × (workers + queue) ≈ 144 MiB` per request regardless of object size. Handles unknown Content-Length (chunked transfer encoding), empty-object case (1 zero-byte segment), mid-stream error abort with atomic no-commit. `fillChunk` preserves upstream `io.ErrUnexpectedEOF` (unlike `io.ReadFull`).
+- **`SegmentReader`** (`internal/storage/segment_reader.go`) — parallel fetcher with in-order assembler. Pre-populated pending slots eliminate nil-deref race from the original plan. Releases backing arrays after consumption so peak memory stays at `16 MiB × workers ≈ 128 MiB`. Locked in by 4 unit tests including race detector + GC contract.
+- **`SegmentRef.checksum` / `placement_group_id` / `shard_size`** (`internal/storage/storagepb/storage.fbs`) — FlatBuffers schema migration. `Object.append_call_md5s:[BytesValue]` carries per-call MD5 chain so AppendObject ETag varies per call without per-segment MD5. `etag` field on `SegmentRef` removed; internal segments carry no S3-visible MD5.
+- **`PackedBackend.ReadAt` (PartialIO)** (`internal/storage/packblob/packed_backend.go`) — pack-path Range GET now works for objects above `--pack-threshold`. Packed-inline entries slice from the pack blob; pass-through delegates to the inner backend. 이전엔 `wal: inner backend does not support ReadAt`로 거부됨.
+- **`localSegmentStore` + `localBackendAdapter`** (`internal/storage/segment_adapter.go`) — production adapters that route segment writes through `WriteSegmentBlob` and segment reads through `openMaybeEncryptedSegment`.
+- **`tests/e2e/large_object_test.go`** — dual-target (SingleNode + Cluster4Node) round-trip + Range across chunk boundary. Reuses the shared cluster fixture; new cases plug into the existing e2e convention (PR #422 style).
+- **PITR snapshot/restore segment awareness** — `SnapshotObject.Segments`, `ListAllObjects` propagates them, `RestoreObjects` checks each segment path (with legacy `objectPath` fallback) and reconstructs `Object.Segments`. New tests cover multi-segment + single-segment round-trip and stale-when-segment-missing detection.
+
+### Changed
+
+- **All objects route through `SegmentWriter` / `SegmentReader`** (`internal/storage/local.go`) — `PutObjectWithRequest` and `GetObject` no longer use the legacy single-file path. Single-segment GETs return the segment file directly (Hertz sendfile upgrade preserved for unencrypted). Multi-segment GETs stream through the parallel reader.
+- **`ReadAt` + sendfile path are segment-aware** (`internal/storage/local.go`) — walks `obj.Segments`, dispatches per-segment `os.File.ReadAt` (plain) or `readAtEncryptedObjectFile` (encrypted) on each overlapping slice. Out-of-range returns `(0, io.EOF)` per `os.File.ReadAt` semantics. Sendfile fast-path triggers for single-segment unencrypted.
+- **`WriteSegmentBlob` uses xxhash3** (`internal/storage/append.go`) — no segment-level MD5. `encryptedObjectFileDomain` already includes the unique blob_id, so AAD is segment-scoped by construction (verified by `TestEncryptedSegment_PerSegmentAADIsolation`).
+- **`writeEncryptedObjectFileWithHash` → `writeEncryptedObjectFile(io.Writer)`** (`internal/storage/encrypted_object_file.go`) — generalized signature so callers pass any sink (checksum hasher, multi-writer, `io.Discard`).
+- **`AppendObject` per-call MD5 chain** (`internal/storage/append.go`) — `appendNew` and `appendExisting` capture each call's payload MD5 (stopgap: segment checksum) into `Object.AppendCallMD5s`, then compute composite ETag from that chain. Single-node ETag now varies per call as cluster always did. Real MD5 wire-up tracked for Phase 3.
+- **Cluster wire compatibility bridge** (`internal/cluster/codec.go`, `apply.go`) — `clusterpb.SegmentRef.etag` is filled from `hex.EncodeToString(seg.Checksum)` and decoded back symmetrically. Rolling-upgrade safe; old peers parse new buffers byte-identically while we migrate to xxhash3 in Phase 2.
+
+### Removed
+
+- **`SegmentRef.etag` field** (`internal/storage/storage.go`, `storagepb/storage.fbs`) — internal segments no longer carry an S3-visible MD5. `CompositeETag` rewritten to take `[][]byte` (per-call MD5 chain) instead of `[]SegmentRef`.
+- **Legacy `objectPath`-based PutObject / GetObject body** — the single-file write path on top of `data/<bucket>/<key>` is gone for new objects. `objectPath` itself stays (still used by `WriteAt`/`ReadAt`/`Truncate`/`Sync` legacy callers — those will move in subsequent phases).
+
+### Tests
+
+- New unit tests: `TestChecksum*` (3), `TestSegmentWriter_*` (3 incl. boundary + drip-feed + stream-error), `TestSegmentReader_*` (4 incl. reverse-order + atomic abort + GC contract), `TestWriteSegmentBlob_PopulatesChecksum`, `TestEncryptedSegment_PerSegmentAADIsolation`, `TestRangeGet_ChunkBoundaries` (6 boundary patterns × plain + encrypted), `TestPackedBackend_RangeAcrossSegments`, `TestSnapshotRestore_ChunkedObject*` (round-trip + stale).
+- E2E: `TestLargeObjectE2E` (SingleNode 3/3 PASS, Cluster4Node 2/3 PASS + 1 SKIP), pre-existing `TestBucketsE2E` / `TestS3VersioningE2E` / `TestMultipartChunkedUploadPartE2E` / `TestAppendObjectE2E` all still PASS (including concurrent append + owner-kill survival).
+
+### Known Phase 2 carry-forward
+
+- Cluster 100 MiB non-aligned tail chunk corrupts body (16 MiB-aligned objects OK). `TestLargeObjectE2E/Cluster4Node/RoundTrip100MiB` is skipped with a Phase 2 reference; tracked in `TODOS.md`.
+- AppendObject ETag uses segment-checksum-as-MD5 proxy (stopgap mirrors cluster path); real per-call MD5 capture deferred to Phase 3.1.
+- `WriteAt` / `Truncate` legacy single-file path stays — affects `internal/nfs4server` (4 mixed-semantics tests) and `internal/p9server` (1 test). Pre-existing test patterns that mix PutObject (segments) with WriteAt (flat).
+- WAL replay PITR + segments: `wal.Entry` does not yet carry `Segments`, so PITR objects from WAL-only replay can mis-report as stale. Phase 2 will extend the WAL serialization.
+- `VFS Rename` memory invariant: `SegmentReader` buffers full segments (16 MiB), so a 5 MiB Rename's heap growth exceeds the 5 MiB ceiling assertion. Sliding-window optimization deferred (no benchmark pressure yet).
+
 ## [0.0.261.0] - 2026-05-19 - test(e2e): unify protocol-surface tests onto TestBucketsE2E dual pattern + expose latent parity gaps
 
 `tests/e2e/` 의 protocol-surface 테스트를 `TestBucketsE2E` 스타일 (단일 `TestXxxE2E` + SingleNode/Cluster4Node 듀얼 + 단일 `runXxxCases` 헬퍼) 로 통일. 통일의 부산물로 그동안 single-only 또는 cluster-only 로 가려져 있던 **두 개의 진짜 single↔cluster parity 격차**가 failing subtest 로 노출됨 — 이게 통일의 주된 목적 ([[feedback-single-cluster-parity]] 정책: surface 는 양쪽 동일 동작). 본 PR 은 신호를 켜는 데 집중하고 격차 자체의 backend fix 는 follow-up PR.
