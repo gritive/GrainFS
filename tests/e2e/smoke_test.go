@@ -27,7 +27,6 @@ func TestSmokeDeploymentE2E(t *testing.T) {
 
 func runSmokeDeploymentCases(t *testing.T) {
 	t.Helper()
-	skipIfShort(t, "skipping smoke test in short mode")
 
 	dir, err := os.MkdirTemp("", "grainfs-smoke-*")
 	require.NoError(t, err)

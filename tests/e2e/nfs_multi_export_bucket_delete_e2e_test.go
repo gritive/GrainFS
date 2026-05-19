@@ -39,12 +39,10 @@ func runNFSExportCases(t *testing.T, tgt *nfsTarget) {
 }
 
 func TestE2E_NFSExportCasesSingleNode(t *testing.T) {
-	skipIfShort(t, "skipping NFS export single e2e in short mode")
 	runNFSExportCases(t, newSingleNodeNFSTarget(t))
 }
 
 func TestE2E_NFSExportCasesCluster(t *testing.T) {
-	skipIfShort(t, "skipping NFS export cluster e2e in short mode")
 	runNFSExportCases(t, newSharedClusterNFSTarget(t))
 }
 

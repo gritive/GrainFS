@@ -21,7 +21,6 @@ import (
 // router-registration bug fixed in v0.0.43.3 (PR #170). This test catches that
 // class of regression by checking holders on disk, not metadata.
 func TestE2E_NBDMultiNode_ByteLevelReplication(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

@@ -31,7 +31,6 @@ import (
 // quickly and still exercise the full repair code path (read survivors
 // from peers, reconstruct, write back locally).
 func TestE2E_ClusterScrubber_AutoRepair(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 
 	const (
 		bucketName = "sc-bucket"

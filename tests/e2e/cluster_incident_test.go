@@ -49,7 +49,6 @@ func fetchIncidents(t *testing.T, endpoint string) []incidentState {
 }
 
 func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 	const (
 		clusterKey = "E2E-CLUSTER-INCIDENT-KEY"
 		bucketName = "incident-bucket"
@@ -130,7 +129,6 @@ func TestE2E_ClusterIncident_MissingShardFixedWithReceipt(t *testing.T) {
 }
 
 func TestE2E_QuarantineIncident(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s - run `make build` first", binary)

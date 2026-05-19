@@ -23,7 +23,6 @@ func TestBucketsE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "cluster fixture not booted in -short mode")
 		runBucketCases(t, newSharedClusterS3Target(t))
 	})
 }

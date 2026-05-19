@@ -25,7 +25,6 @@ func nodeSettled(baseURL string) bool {
 }
 
 func TestE2EClusterKillAndRestart(t *testing.T) {
-	skipIfShort(t, "3-node cluster kill/restart harness test")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
 		Mode:       ClusterModeDynamicJoin,

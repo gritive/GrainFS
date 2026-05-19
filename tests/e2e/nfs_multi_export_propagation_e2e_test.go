@@ -10,7 +10,6 @@ import (
 )
 
 func TestE2E_NFSMultiExportPropagation_MultiNode(t *testing.T) {
-	skipIfShort(t, "skipping multi-node NFS export propagation e2e in -short mode")
 	c := startMRCluster(t, 3, mrClusterOptions{
 		disableNFS4:   true,
 		disableNBD:    true,

@@ -131,7 +131,6 @@ func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.
 // and returns identical bytes after reconstruction, plus measure client-side
 // p95 latency for 16MB PUT to drive the go/no-go decision.
 func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
-	skipIfShort(t, "ecspike: requires full cluster bootstrap, skipped in -short")
 
 	nodes, cleanup := startEcspikeCluster(t)
 	defer cleanup()

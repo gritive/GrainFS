@@ -16,7 +16,6 @@ func TestAppendMidSizeBodyE2E(t *testing.T) {
 		runMidSizeAppendCase(t, tgt)
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		tgt := newSharedClusterS3Target(t)
 		runMidSizeAppendCase(t, tgt)
 	})

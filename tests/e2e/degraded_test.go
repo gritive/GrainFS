@@ -23,7 +23,6 @@ import (
 // The monitor waits for the first interval tick to avoid startup false
 // positives, then checks at the configured interval.
 func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
-	skipIfShort(t, "skipping degraded-mode e2e in -short mode")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)

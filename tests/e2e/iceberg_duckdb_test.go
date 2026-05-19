@@ -24,7 +24,6 @@ import (
 )
 
 func TestIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
-	skipIfShort(t, "skipping DuckDB Iceberg e2e in short mode")
 
 	dataDir, err := os.MkdirTemp("", "grainfs-iceberg-duckdb-*")
 	require.NoError(t, err)
@@ -56,7 +55,6 @@ DROP SCHEMA grainfs_iceberg.ns_e2e;
 }
 
 func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
-	skipIfShort(t, "skipping DuckDB Iceberg cluster e2e in short mode")
 
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,
@@ -144,7 +142,6 @@ func runIcebergAuditCases(t *testing.T, tgt *icebergTarget, commitInterval time.
 // PUTs, waits for the committer to flush, then verifies the audit.s3 Iceberg
 // table via DuckDB.
 func TestAuditIcebergSingleDuckDB(t *testing.T) {
-	skipIfShort(t, "skipping single-node audit Iceberg DuckDB e2e in short mode")
 	const commitInterval = 8 * time.Second
 	tgt := newSingleNodeIcebergTargetWithAudit(t, commitInterval)
 	runIcebergAuditCases(t, tgt, commitInterval)
@@ -322,7 +319,6 @@ func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey,
 // short commit interval, performs S3 PUTs, waits for the committer to flush,
 // then verifies the audit.s3 Iceberg table contains the expected rows via DuckDB.
 func TestAuditIcebergClusterDuckDB(t *testing.T) {
-	skipIfShort(t, "skipping audit Iceberg DuckDB e2e in short mode")
 	const commitInterval = 8 * time.Second
 	tgt := newSharedClusterIcebergTargetWithAudit(t, commitInterval)
 	runIcebergAuditCases(t, tgt, commitInterval)
@@ -331,7 +327,6 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 // TestAuditIcebergClusterFollowerShipDuckDB verifies that audit events emitted
 // on a follower are shipped to the leader and become readable through DuckDB.
 func TestAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
-	skipIfShort(t, "skipping audit Iceberg follower shipping DuckDB e2e in short mode")
 
 	const commitInterval = 8 * time.Second
 	start := time.Now()
@@ -382,7 +377,6 @@ func TestAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
 // TestAuditIcebergClusterLeaderFlap verifies that audit events captured on followers
 // are forwarded and committed after leader re-election.
 func TestAuditIcebergClusterLeaderFlap(t *testing.T) {
-	skipIfShort(t, "skipping audit Iceberg leader-flap e2e in short mode")
 
 	const commitInterval = 8 * time.Second
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{

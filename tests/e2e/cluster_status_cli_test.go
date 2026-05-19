@@ -21,7 +21,6 @@ func TestClusterStatusCLIE2E(t *testing.T) {
 		runClusterStatusCLICases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runClusterStatusCLICases(t, newSharedClusterS3Target(t))
 	})
 }

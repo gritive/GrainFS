@@ -13,7 +13,6 @@ import (
 // shared 4-node cluster fixture; no single-node analogue.
 func TestClusterAwaitWriteFromNonOwnerE2E(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runAwaitWriteFromNonOwnerCases(t, newSharedClusterS3Target(t))
 	})
 }
