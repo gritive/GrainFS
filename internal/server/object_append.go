@@ -26,6 +26,7 @@ import (
 
 const (
 	appendOffsetHeader = "x-amz-write-offset-bytes"
+	appendSizeHeader   = "x-amz-object-size"
 	// appendBodyMaxBytes matches the AppendObject spec v3 hard cap. Keeping the
 	// body in memory simplifies stale-placement retry inside ClusterCoordinator.
 	appendBodyMaxBytes = 64 << 20
@@ -87,6 +88,7 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 		mapError(c, err)
 	default:
 		c.Header("ETag", fmt.Sprintf("\"%s\"", obj.ETag))
+		c.Header(appendSizeHeader, strconv.FormatInt(obj.Size, 10))
 		c.Status(consts.StatusOK)
 	}
 	return true

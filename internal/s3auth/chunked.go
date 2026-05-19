@@ -3,25 +3,22 @@ package s3auth
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"strconv"
 )
 
 // DecodeAWSChunkedBody decodes an aws-chunked encoded body.
 // Format: hex_size;chunk-signature=...\r\ndata\r\n...0;chunk-signature=...\r\n\r\n
 func DecodeAWSChunkedBody(data []byte) ([]byte, error) {
-	r := bytes.NewReader(data)
-	var result bytes.Buffer
-	result.Grow(len(data)) // 청크 합산 크기 ≤ len(data) → 재할당 방지
+	readAt := 0
+	writeAt := 0
 
 	for {
-		// Read chunk header line: "hex_size;chunk-signature=...\r\n"
-		line, err := readLine(r)
+		line, next, err := readLineSlice(data, readAt)
 		if err != nil {
 			return nil, fmt.Errorf("read chunk header: %w", err)
 		}
+		readAt = next
 
-		// Extract hex size (before the semicolon)
 		sizeStr := line
 		if idx := bytes.IndexByte(line, ';'); idx >= 0 {
 			sizeStr = line[:idx]
@@ -31,42 +28,56 @@ func DecodeAWSChunkedBody(data []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse chunk size %q: %w", sizeStr, err)
 		}
-
 		if size == 0 {
-			break // last chunk
+			break
+		}
+		if size < 0 || size > int64(len(data)-readAt) {
+			return nil, fmt.Errorf("read chunk data: unexpected EOF")
 		}
 
-		// Read chunk data
-		chunk := make([]byte, size)
-		if _, err := io.ReadFull(r, chunk); err != nil {
-			return nil, fmt.Errorf("read chunk data: %w", err)
-		}
-		result.Write(chunk)
+		chunkEnd := readAt + int(size)
+		copy(data[writeAt:], data[readAt:chunkEnd])
+		writeAt += int(size)
+		readAt = chunkEnd
 
-		// Read trailing \r\n
-		if _, err := readLine(r); err != nil && err != io.EOF {
+		next, err = skipLineEnding(data, readAt)
+		if err != nil {
 			return nil, fmt.Errorf("read chunk trailer: %w", err)
 		}
+		readAt = next
 	}
 
-	return result.Bytes(), nil
+	return data[:writeAt], nil
 }
 
-// readLine reads until \r\n or \n.
-func readLine(r *bytes.Reader) ([]byte, error) {
-	var line []byte
-	for {
-		b, err := r.ReadByte()
-		if err != nil {
-			return line, err
-		}
-		if b == '\n' {
-			// Strip trailing \r
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
-			}
-			return line, nil
-		}
-		line = append(line, b)
+func readLineSlice(data []byte, start int) ([]byte, int, error) {
+	if start >= len(data) {
+		return nil, start, fmt.Errorf("EOF")
 	}
+	rel := bytes.IndexByte(data[start:], '\n')
+	if rel < 0 {
+		return nil, start, fmt.Errorf("EOF")
+	}
+	end := start + rel
+	line := data[start:end]
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	return line, end + 1, nil
+}
+
+func skipLineEnding(data []byte, start int) (int, error) {
+	if start >= len(data) {
+		return start, fmt.Errorf("unexpected EOF")
+	}
+	if data[start] == '\n' {
+		return start + 1, nil
+	}
+	if data[start] == '\r' {
+		if start+1 >= len(data) || data[start+1] != '\n' {
+			return start, fmt.Errorf("invalid CRLF")
+		}
+		return start + 2, nil
+	}
+	return start, fmt.Errorf("invalid line ending")
 }

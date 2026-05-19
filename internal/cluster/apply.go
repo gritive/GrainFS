@@ -825,6 +825,22 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			}
 		}
 
+		existingVersionID := ""
+		if existing != nil {
+			if item, err := txn.Get(f.keys.LatestKey(cmd.Bucket, cmd.Key)); err == nil {
+				if err := item.Value(func(raw []byte) error {
+					if string(raw) != deleteMarkerETag {
+						existingVersionID = string(raw)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, badger.ErrKeyNotFound) {
+				return fmt.Errorf("get latest version: %w", err)
+			}
+		}
+
 		var updated objectMeta
 		if existing == nil {
 			if cmd.ExpectedOffset != 0 {
@@ -845,9 +861,6 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 				IsAppendable:     true,
 			}
 		} else {
-			if !existing.IsAppendable {
-				return storage.ErrAppendNotSupported
-			}
 			if existing.Size != cmd.ExpectedOffset {
 				return storage.ErrAppendOffsetMismatch
 			}
@@ -872,6 +885,12 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			}
 			segs := append(existing.Segments, seg)
 			updated = *existing
+			if !updated.IsAppendable {
+				updated.IsAppendable = true
+				if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
+					updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, existingVersionID, existing)}
+				}
+			}
 			updated.Segments = segs
 			updated.Size = existing.Size + seg.Size
 			// TODO(Task 3.1 / Phase 2): once cluster persists AppendCallMD5s,
@@ -905,6 +924,23 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 		}
 		return f.setValue(txn, metaKey, out)
 	})
+}
+
+func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
+	coalescedID := "base"
+	if versionID != "" {
+		coalescedID = "base-" + versionID
+	}
+	return CoalescedShardRef{
+		CoalescedID: coalescedID,
+		Size:        existing.Size,
+		ETag:        existing.ETag,
+		ShardKey:    ecObjectShardKey(key, versionID),
+		RingVersion: existing.RingVersion,
+		ECData:      existing.ECData,
+		ECParity:    existing.ECParity,
+		NodeIDs:     append([]string(nil), existing.NodeIDs...),
+	}
 }
 
 // applyCoalesceSegmentsFromCmd handles a CmdCoalesceSegments Raft entry. The

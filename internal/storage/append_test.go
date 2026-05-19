@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -112,18 +113,36 @@ func TestAppendObjectRejectsAtCap(t *testing.T) {
 	}
 }
 
-func TestAppendObjectRejectsLegacyNonAppendable(t *testing.T) {
+func TestAppendObjectConvertsPlainPutAtCurrentOffset(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
 
-	// 일반 PutObject (헤더 없음) → legacy single-blob (Segments=nil, IsAppendable=false)
 	if _, err := b.PutObject(ctx, "test", "k", strings.NewReader("hello"), "text/plain"); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
 
-	_, err := b.AppendObject(ctx, "test", "k", 5, bytes.NewReader([]byte("world")))
-	if !errors.Is(err, ErrAppendNotSupported) {
-		t.Fatalf("expected ErrAppendNotSupported, got %v", err)
+	obj, err := b.AppendObject(ctx, "test", "k", 5, bytes.NewReader([]byte("world")))
+	if err != nil {
+		t.Fatalf("AppendObject: %v", err)
+	}
+	if !obj.IsAppendable {
+		t.Fatal("IsAppendable=false")
+	}
+	if obj.Size != 10 {
+		t.Fatalf("size=%d, want 10", obj.Size)
+	}
+
+	rc, _, err := b.GetObject(ctx, "test", "k")
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "helloworld" {
+		t.Fatalf("body=%q, want helloworld", string(got))
 	}
 }
 

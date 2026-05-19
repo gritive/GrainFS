@@ -53,6 +53,58 @@ func TestAppendObjectInvalidWriteOffsetResponse(t *testing.T) {
 	assert.Contains(t, string(body), "<Code>InvalidWriteOffset</Code>")
 }
 
+func TestAppendObjectReturnsFinalObjectSizeHeader(t *testing.T) {
+	base := setupTestServer(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
+	req.Header.Set(appendOffsetHeader, "0")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "5", resp.Header.Get(appendSizeHeader))
+
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("world")))
+	req.Header.Set(appendOffsetHeader, "5")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "10", resp.Header.Get(appendSizeHeader))
+}
+
+func TestAppendObjectDecodesStreamingTrailerBody(t *testing.T) {
+	base, backend := setupTestServerWithBackend(t)
+
+	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body := "5;chunk-signature=abc\r\nhello\r\n0;chunk-signature=def\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n"
+	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", strings.NewReader(body))
+	req.Header.Set(appendOffsetHeader, "0")
+	req.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "5", resp.Header.Get(appendSizeHeader))
+
+	rc, _, err := backend.GetObject(t.Context(), "b", "k")
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	assert.Equal(t, "hello", string(got))
+}
+
 // Red 20: AppendObject against a versioning-enabled bucket is rejected with 501.
 func TestAppendObjectVersioningBucketRejected(t *testing.T) {
 	base, b := setupECTestServer(t)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -133,6 +134,42 @@ func TestAppendObjectRaceTwoConcurrent(t *testing.T) {
 	}
 	if len(final.Segments) != 2 {
 		t.Fatalf("final segments=%d, want 2 (seed + one winning append)", len(final.Segments))
+	}
+}
+
+func TestAppendObjectConvertsPlainPutAtCurrentOffset(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if _, err := b.PutObject(ctx, "test", "k", bytes.NewReader([]byte("hello")), "text/plain"); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	obj, err := b.AppendObject(ctx, "test", "k", 5, bytes.NewReader([]byte("world")))
+	if err != nil {
+		t.Fatalf("AppendObject: %v", err)
+	}
+	if !obj.IsAppendable {
+		t.Fatal("IsAppendable=false")
+	}
+	if obj.Size != 10 {
+		t.Fatalf("size=%d, want 10", obj.Size)
+	}
+
+	rc, _, err := b.GetObject(ctx, "test", "k")
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "helloworld" {
+		t.Fatalf("body=%q, want helloworld", string(got))
 	}
 }
 

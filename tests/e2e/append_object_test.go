@@ -88,6 +88,19 @@ func runCommonAppendCases(t *testing.T, tgt s3Target) {
 		require.NoError(t, err)
 		require.Equal(t, []byte("xx"), getObject(t, client, bucket, key))
 	})
+
+	t.Run("AppendToExistingPlainPutAtCurrentOffset", func(t *testing.T) {
+		key := "obj-plain-then-append"
+		_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader([]byte("plain")),
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, putAppend(client, bucket, key, 5, []byte("-append")))
+		require.Equal(t, []byte("plain-append"), getObject(t, client, bucket, key))
+	})
 }
 
 // findOwnerForSingleGroup returns the index of the segment owner node
@@ -170,6 +183,75 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 			body := getObject(t, tgt.pickNode(i), bucket, key)
 			assert.Equal(t, []byte("alphabetagammadelta"), body, "node %d view", i)
 		}
+	})
+
+	t.Run("StatThenAppendAcrossNodesIsLinearizable", func(t *testing.T) {
+		key := "obj-stat-append-roundrobin"
+		chunk := []byte("0123456789abcdef")
+		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, chunk))
+
+		for i := 1; i < 64; i++ {
+			cli := tgt.pickNode(i)
+			head, err := cli.HeadObject(context.Background(), &s3.HeadObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			})
+			require.NoError(t, err, "head via node %d", i%tgt.nodes)
+			require.NotNil(t, head.ContentLength)
+
+			observed := *head.ContentLength
+			if err := putAppend(cli, bucket, key, observed, chunk); err != nil {
+				nodeSizes := make([]int64, tgt.nodes)
+				for node := 0; node < tgt.nodes; node++ {
+					nodeHead, nodeErr := tgt.pickNode(node).HeadObject(context.Background(), &s3.HeadObjectInput{
+						Bucket: aws.String(bucket),
+						Key:    aws.String(key),
+					})
+					if nodeErr != nil || nodeHead.ContentLength == nil {
+						nodeSizes[node] = -1
+						continue
+					}
+					nodeSizes[node] = *nodeHead.ContentLength
+				}
+				after, headErr := cli.HeadObject(context.Background(), &s3.HeadObjectInput{
+					Bucket: aws.String(bucket),
+					Key:    aws.String(key),
+				})
+				if headErr == nil && after.ContentLength != nil {
+					t.Fatalf("append via node %d at observed offset %d failed: %v; size after failure=%d; node sizes=%v",
+						i%tgt.nodes, observed, err, *after.ContentLength, nodeSizes)
+				}
+				require.NoError(t, err, "append via node %d at observed offset %d", i%tgt.nodes, observed)
+			}
+			expectedSize := observed + int64(len(chunk))
+			nodeSizes := make([]int64, tgt.nodes)
+			allFresh := true
+			for node := 0; node < tgt.nodes; node++ {
+				nodeHead, nodeErr := tgt.pickNode(node).HeadObject(context.Background(), &s3.HeadObjectInput{
+					Bucket: aws.String(bucket),
+					Key:    aws.String(key),
+				})
+				if nodeErr != nil || nodeHead.ContentLength == nil {
+					nodeSizes[node] = -1
+					allFresh = false
+					continue
+				}
+				nodeSizes[node] = *nodeHead.ContentLength
+				if nodeSizes[node] != expectedSize {
+					allFresh = false
+				}
+			}
+			require.True(t, allFresh, "append via node %d returned before all nodes observed size %d; node sizes=%v",
+				i%tgt.nodes, expectedSize, nodeSizes)
+		}
+
+		head, err := tgt.pickNode(0).HeadObject(context.Background(), &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, head.ContentLength)
+		assert.Equal(t, int64(64*len(chunk)), *head.ContentLength)
 	})
 
 	t.Run("OwnerKillSurvives", func(t *testing.T) {

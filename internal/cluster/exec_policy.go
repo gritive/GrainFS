@@ -31,7 +31,7 @@ func NewLocalExecution(groups localBackendLookup) *LocalExecution {
 }
 
 const (
-	localExecFollowerReadDeadline = 10 * time.Millisecond
+	localExecFollowerReadDeadline = 5 * time.Second
 	localExecSelfOnlyLeaderWait   = 5 * time.Second
 )
 
@@ -42,13 +42,30 @@ func (e *LocalExecution) ResolveRead(ctx context.Context, target RouteTarget) (*
 	if gb == nil {
 		return nil, nil
 	}
-	if target.CanReadLocal() {
-		return gb, nil
-	}
-	if !target.SelfIsVoter {
+	if gb.DistributedBackend == nil {
+		if target.CanReadLocal() {
+			probe := gb.testLeaderProbe
+			if probe == nil || probe.IsLeader() {
+				return gb, nil
+			}
+		}
 		return nil, nil
 	}
-	if gb.Node() == nil {
+	if target.SelfIsOnlyVoter {
+		probe := gb.leaderProbe()
+		if probe == nil || probe.IsLeader() {
+			return gb, nil
+		}
+		return nil, nil
+	}
+	if !target.SelfIsLeader {
+		return nil, nil
+	}
+	if gb.DistributedBackend == nil || gb.Node() == nil {
+		return nil, nil
+	}
+	probe := gb.leaderProbe()
+	if probe != nil && !probe.IsLeader() {
 		return nil, nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, localExecFollowerReadDeadline)

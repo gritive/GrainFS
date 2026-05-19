@@ -204,9 +204,12 @@ args=(
   --host "$hosts"
   --access-key "$ACCESS_KEY"
   --secret-key "$SECRET_KEY"
-  --catalog-prop "rest.sigv4-enabled=true"
-  --catalog-prop "rest.signing-name=s3"
-  --catalog-prop "rest.signing-region=us-east-1"
+  # warp 1.5.0 has no --catalog-prop flag — the AIStor catalog driver always
+  # signs REST calls with AWS SigV4 (service=s3tables, region=cfg.Region).
+  # GrainFS's SigV4 verifier accepts any service name the client signs with,
+  # so the signing-name property would have been a no-op here even if warp
+  # supported it. Region is supplied via the env-default --region flag below
+  # if non-default values are needed.
   --bucket "$ICEBERG_BUCKET"
   --catalog-name "$ICEBERG_CATALOG"
   --base-location "$ICEBERG_BASE_LOCATION"

@@ -831,6 +831,19 @@ func TestDistributedBackend_MultipartAbort(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
+func TestDistributedBackend_UploadPartRecreatesActiveUploadDir(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+
+	upload, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(b.partDir(upload.UploadID)))
+
+	part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", upload.UploadID, 1, strings.NewReader("data"))
+	require.NoError(t, err)
+	require.Equal(t, 1, part.PartNumber)
+}
+
 func TestDistributedBackend_MultipartBadUploadID(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))

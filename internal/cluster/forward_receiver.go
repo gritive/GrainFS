@@ -36,6 +36,7 @@ const (
 	forwardReadAtBuffer4KiB  = 4 * 1024
 	forwardReadAtBuffer16KiB = 16 * 1024
 	forwardReadAtBuffer64KiB = 64 * 1024
+	forwardReadFenceTimeout  = 5 * time.Second
 )
 
 type forwardReadAtBufferPool struct {
@@ -468,6 +469,9 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) (*transport.Message, io.ReadCloser) {
 	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
+	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err)), nil
+	}
 	rc, obj, err := dg.Backend().GetObject(ctx, string(ga.Bucket()), string(ga.Key()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
@@ -538,6 +542,9 @@ func (r *backendReadAtStream) Close() error { return nil }
 func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport.Message {
 	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
+	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
 	rc, obj, err := dg.Backend().GetObject(ctx, string(ga.Bucket()), string(ga.Key()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
@@ -588,11 +595,27 @@ func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *tr
 func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) *transport.Message {
 	ctx := context.Background()
 	ha := raftpb.GetRootAsHeadObjectArgs(args, 0)
+	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
 	obj, err := dg.Backend().HeadObject(ctx, string(ha.Bucket()), string(ha.Key()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
 	return &transport.Message{Payload: buildObjectReply(obj, string(ha.Bucket()))}
+}
+
+func waitForwardReadFence(ctx context.Context, gb *GroupBackend) error {
+	if gb == nil {
+		return ErrNoGroup
+	}
+	readCtx, cancel := context.WithTimeout(ctx, forwardReadFenceTimeout)
+	defer cancel()
+	idx, err := gb.ReadIndex(readCtx)
+	if err != nil {
+		return err
+	}
+	return gb.WaitApplied(readCtx, idx)
 }
 
 func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) *transport.Message {

@@ -88,7 +88,6 @@ func TestECReconstructStreamTo_MissingDataShardAllocBytesBounded(t *testing.T) {
 	})
 	allocedBytes := res.AllocedBytesPerOp()
 	t.Logf("ECReconstructStreamTo missing data shard alloc bytes: %d", allocedBytes)
-	if allocedBytes > 12*1024*1024 {
-		t.Errorf("ECReconstructStreamTo missing data shard allocates %d B/op (want ≤12MiB)", allocedBytes)
-	}
+	require.LessOrEqualf(t, allocedBytes, int64(12*1024*1024),
+		"ECReconstructStreamTo missing data shard allocates %d B/op (want ≤12MiB)", allocedBytes)
 }
