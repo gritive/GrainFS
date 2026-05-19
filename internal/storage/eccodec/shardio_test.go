@@ -200,6 +200,30 @@ func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {
 	assert.Equal(t, data[offset:offset+length], got)
 }
 
+func TestEncryptedShardRangeReader_CloseReleasesChunkBuffers(t *testing.T) {
+	enc := testEncryptor(t)
+	data := bytes.Repeat([]byte("0123456789abcdef"), 512)
+	aad := []byte("v2/bucket/key/3")
+	const chunkSize = 1024
+
+	var encoded bytes.Buffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), enc, aad, chunkSize))
+
+	reader, err := NewEncryptedShardRangeReader(bytes.NewReader(encoded.Bytes()), enc, aad, 0, int64(len(data)))
+	require.NoError(t, err)
+	rangeReader := reader.(*encryptedShardRangeReader)
+	_, err = io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NotNil(t, rangeReader.plainBuf)
+	require.NotNil(t, rangeReader.cipherBuf)
+
+	closer, ok := reader.(io.Closer)
+	require.True(t, ok)
+	require.NoError(t, closer.Close())
+	require.Nil(t, rangeReader.plainBuf)
+	require.Nil(t, rangeReader.cipherBuf)
+}
+
 func TestReadEncryptedShardRangeAt_DoesNotReadSkippedChunks(t *testing.T) {
 	enc := testEncryptor(t)
 	data := bytes.Repeat([]byte("0123456789abcdef"), 512)

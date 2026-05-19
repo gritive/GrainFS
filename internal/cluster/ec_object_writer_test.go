@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -310,6 +311,7 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 }
 
 type fakeECObjectWriterShards struct {
+	mu                  sync.Mutex
 	writeShardErr       map[string]error
 	localWrites         []fakeECObjectWriterLocalWrite
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
@@ -343,6 +345,8 @@ type fakeECObjectWriterStreamWrite struct {
 
 func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
 	data, _ := io.ReadAll(body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.localWrites = append(f.localWrites, fakeECObjectWriterLocalWrite{
 		bucket:   bucket,
 		key:      key,
@@ -357,6 +361,8 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStreamContext(ctx context.Cont
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bufferedLocalWrites = append(f.bufferedLocalWrites, fakeECObjectWriterLocalWrite{
 		bucket:   bucket,
 		key:      key,
@@ -371,6 +377,8 @@ func (f *fakeECObjectWriterShards) WriteLocalShardContext(ctx context.Context, b
 }
 
 func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bufferedWrites = append(f.bufferedWrites, fakeECObjectWriterBufferedWrite{
 		peer:     peer,
 		bucket:   bucket,
@@ -386,6 +394,8 @@ func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket,
 
 func (f *fakeECObjectWriterShards) WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error {
 	_, _ = io.Copy(io.Discard, body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.streamWrites = append(f.streamWrites, fakeECObjectWriterStreamWrite{
 		peer:     peer,
 		bucket:   bucket,
@@ -399,11 +409,15 @@ func (f *fakeECObjectWriterShards) WriteShardStream(ctx context.Context, peer, b
 }
 
 func (f *fakeECObjectWriterShards) DeleteLocalShards(bucket, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.deleteLocalCalls = append(f.deleteLocalCalls, bucket+"/"+key)
 	return nil
 }
 
 func (f *fakeECObjectWriterShards) DeleteShards(ctx context.Context, peer, bucket, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.deleteRemoteCalls = append(f.deleteRemoteCalls, peer+"/"+bucket+"/"+key)
 	return nil
 }
