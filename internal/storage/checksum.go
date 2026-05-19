@@ -2,7 +2,6 @@ package storage
 
 import (
 	"encoding/binary"
-	"hash"
 
 	"github.com/zeebo/xxh3"
 )
@@ -54,14 +53,3 @@ func ChecksumOf(buf []byte) []byte {
 	binary.BigEndian.PutUint64(out[8:16], sum128.Lo)
 	return out
 }
-
-// hashHashShim adapts ChecksumHasher when a hash.Hash interface is needed.
-// Sum(b []byte) returns append(b, digest...).
-type hashHashShim struct{ *ChecksumHasher }
-
-func (s hashHashShim) Sum(b []byte) []byte { return append(b, s.ChecksumHasher.Sum()...) }
-func (s hashHashShim) Size() int           { return ChecksumLen }
-func (s hashHashShim) BlockSize() int      { return 64 }
-
-// AsHash returns a hash.Hash view of the hasher.
-func (c *ChecksumHasher) AsHash() hash.Hash { return hashHashShim{c} }

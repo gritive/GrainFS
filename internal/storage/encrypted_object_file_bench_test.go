@@ -27,7 +27,7 @@ func BenchmarkEncryptedObjectFileWrite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		size, _, err := writeEncryptedObjectFile(path, enc, "bench:object", bytes.NewReader(payload))
+		size, err := writeEncryptedObjectFile(path, enc, "bench:object", bytes.NewReader(payload), io.Discard)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -41,7 +41,7 @@ func BenchmarkEncryptedObjectFileRead(b *testing.B) {
 	enc := benchmarkStorageEncryptor(b)
 	payload := bytes.Repeat([]byte("r"), 8<<20)
 	path := filepath.Join(b.TempDir(), "object.enc")
-	size, _, err := writeEncryptedObjectFile(path, enc, "bench:object", bytes.NewReader(payload))
+	size, err := writeEncryptedObjectFile(path, enc, "bench:object", bytes.NewReader(payload), io.Discard)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func BenchmarkEncryptedObjectFileReadAt(b *testing.B) {
 	enc := benchmarkStorageEncryptor(b)
 	payload := bytes.Repeat([]byte("a"), 8<<20)
 	path := filepath.Join(b.TempDir(), "object.enc")
-	size, _, err := writeEncryptedObjectFile(path, enc, "bench:object", bytes.NewReader(payload))
+	size, err := writeEncryptedObjectFile(path, enc, "bench:object", bytes.NewReader(payload), io.Discard)
 	if err != nil {
 		b.Fatal(err)
 	}

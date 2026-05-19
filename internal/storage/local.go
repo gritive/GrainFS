@@ -266,7 +266,10 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 	if b.encryptor != nil {
 		_ = tmp.Close()
 		h, release := hashForBucket(bucket)
-		size, etag, cerr = writeEncryptedObjectFileWithHash(tmpPath, b.encryptor, encryptedObjectFileDomain(bucket, key), req.Body, h)
+		size, cerr = writeEncryptedObjectFile(tmpPath, b.encryptor, encryptedObjectFileDomain(bucket, key), req.Body, h)
+		if cerr == nil {
+			etag = etagFromHash(h)
+		}
 		release()
 		if cerr != nil {
 			cleanupTmp()

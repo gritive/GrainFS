@@ -384,7 +384,7 @@ func TestEncodeObjectMeta_AllocsBounded(t *testing.T) {
 func TestCoalescedShardRefRoundTrip(t *testing.T) {
 	in := objectMeta{
 		Key: "a", Size: 1024, IsAppendable: true,
-		Segments: []storage.SegmentRef{{BlobID: "s1", Size: 512, ETag: "e1"}},
+		Segments: []storage.SegmentRef{{BlobID: "s1", Size: 512, Checksum: []byte("e1")}},
 		Coalesced: []CoalescedShardRef{{
 			CoalescedID: "c1", Size: 1024, ETag: "etag-c1",
 			ShardKey: "a/coalesced/c1", Version: 1,

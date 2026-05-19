@@ -68,11 +68,13 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 	if err != nil {
 		return nil, fmt.Errorf("write segment: %w", err)
 	}
+	// TODO(Task 3.1): capture per-call MD5 during WriteSegmentBlob and pass
+	// it here so Object.ETag is computed from AppendCallMD5s.
 	obj := &Object{
 		Key:          key,
 		Size:         seg.Size,
 		ContentType:  "application/octet-stream",
-		ETag:         CompositeETag([]SegmentRef{seg}),
+		ETag:         CompositeETag(nil),
 		LastModified: time.Now().Unix(),
 		Segments:     []SegmentRef{seg},
 		IsAppendable: true,
@@ -92,7 +94,8 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 	obj := *existing
 	obj.Segments = segs
 	obj.Size = existing.Size + seg.Size
-	obj.ETag = CompositeETag(segs)
+	// TODO(Task 3.1): recompute Object.ETag from AppendCallMD5s.
+	obj.ETag = CompositeETag(obj.AppendCallMD5s)
 	obj.LastModified = time.Now().Unix()
 	if err := b.PutObjectRecord(ctx, bucket, key, &obj); err != nil {
 		return nil, fmt.Errorf("persist: %w", err)
@@ -102,7 +105,7 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 
 // WriteSegmentBlob writes one segment blob to disk under
 // objects/<bucket>/<key>_segments/<blobID>. Returns SegmentRef with
-// BlobID (UUIDv7) + Size + plaintext-MD5 ETag.
+// BlobID (UUIDv7) + Size + xxhash3-128 Checksum of the plaintext bytes.
 // Exported so cluster.DistributedBackend.AppendObject can call directly.
 func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (SegmentRef, error) {
 	blobID := uuid.Must(uuid.NewV7()).String()
@@ -110,20 +113,20 @@ func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (Segmen
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return SegmentRef{}, err
 	}
-	h := md5.New()
+	checksumHasher := NewChecksumHasher()
 	domain := encryptedObjectFileDomain(bucket, key+"/segments/"+blobID)
 	var (
 		size int64
 		err  error
 	)
 	if b.encryptor != nil {
-		// Encrypted writer writes plaintext into h itself.
-		size, _, err = writeEncryptedObjectFileWithHash(path, b.encryptor, domain, r, h)
+		// Encrypted writer tees plaintext through checksumHasher.
+		size, err = writeEncryptedObjectFile(path, b.encryptor, domain, r, checksumHasher)
 	} else {
 		var f *os.File
 		f, err = os.Create(path)
 		if err == nil {
-			tr := io.TeeReader(r, h)
+			tr := io.TeeReader(r, checksumHasher)
 			size, err = io.Copy(f, tr)
 			cerr := f.Close()
 			if err == nil {
@@ -136,9 +139,9 @@ func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (Segmen
 		return SegmentRef{}, err
 	}
 	return SegmentRef{
-		BlobID: blobID,
-		Size:   size,
-		ETag:   hex.EncodeToString(h.Sum(nil)),
+		BlobID:   blobID,
+		Size:     size,
+		Checksum: checksumHasher.Sum(),
 	}, nil
 }
 
@@ -147,14 +150,18 @@ func (b *LocalBackend) segmentPath(bucket, key, blobID string) string {
 }
 
 // CompositeETag returns the S3-multipart-style composite ETag:
-// md5(concat(decode_hex(segment.ETag for each))) + "-<N>".
-func CompositeETag(segs []SegmentRef) string {
+// md5(concat(callMD5s)) + "-<N>".
+//
+// callMD5s is one raw 16-byte MD5 digest per AppendObject call (S3
+// AppendObject semantics). nil/empty input is allowed: it produces the
+// stable "<md5 of empty>-0" placeholder used by Task 3.1 wire-up until
+// per-call MD5s are captured.
+func CompositeETag(callMD5s [][]byte) string {
 	h := md5.New()
-	for _, s := range segs {
-		raw, _ := hex.DecodeString(s.ETag)
-		h.Write(raw)
+	for _, d := range callMD5s {
+		h.Write(d)
 	}
-	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), len(segs))
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), len(callMD5s))
 }
 
 // PutObjectRecord persists Object into the backend's BadgerDB. Self-managed txn.

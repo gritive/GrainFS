@@ -96,12 +96,14 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// MetaPutObjectIndex entry against meta-Raft.
 	versionID := uuid.Must(uuid.NewV7()).String()
 	cmd := AppendObjectCmd{
-		Bucket:           bucket,
-		Key:              key,
-		ExpectedOffset:   expectedOffset,
-		BlobID:           seg.BlobID,
-		SegmentSize:      seg.Size,
-		SegmentETag:      seg.ETag,
+		Bucket:         bucket,
+		Key:            key,
+		ExpectedOffset: expectedOffset,
+		BlobID:         seg.BlobID,
+		SegmentSize:    seg.Size,
+		// TODO(Phase 2): cluster's segment writer still produces MD5; reuse as
+		// SegmentETag wire field until Phase 2 migrates cluster to xxhash3.
+		SegmentETag:      hex.EncodeToString(seg.Checksum),
 		PlacementGroupID: pgID,
 		VersionID:        versionID,
 	}
@@ -151,10 +153,14 @@ func (b *DistributedBackend) writeSegmentBlobForAppend(bucket, key string, r io.
 		return storage.SegmentRef{}, closeErr
 	}
 
+	// TODO(Phase 2): replace MD5 with xxhash3-128 to match storage-side
+	// segment checksum. For now, the raw 16-byte MD5 digest is stashed in
+	// Checksum so the cluster wire path (AppendObjectCmd.SegmentETag) can
+	// still propagate the per-segment digest in hex form.
 	return storage.SegmentRef{
-		BlobID: blobID,
-		Size:   size,
-		ETag:   hex.EncodeToString(h.Sum(nil)),
+		BlobID:   blobID,
+		Size:     size,
+		Checksum: h.Sum(nil),
 	}, nil
 }
 

@@ -18,7 +18,7 @@ func TestEvaluateCoalesceTrigger(t *testing.T) {
 	seg := func(n int, sz int64) []storage.SegmentRef {
 		out := make([]storage.SegmentRef, n)
 		for i := range out {
-			out[i] = storage.SegmentRef{BlobID: "s", Size: sz, ETag: "e"}
+			out[i] = storage.SegmentRef{BlobID: "s", Size: sz, Checksum: []byte("e")}
 		}
 		return out
 	}

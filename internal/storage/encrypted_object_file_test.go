@@ -26,10 +26,12 @@ func TestEncryptedObjectFileRoundTripAndNoPlaintext(t *testing.T) {
 	enc := testEncryptor(t)
 	plaintext := bytes.Repeat([]byte("sensitive-local-object-"), 4096)
 
-	size, etag, err := writeEncryptedObjectFile(path, enc, "local-object:physical-1", bytes.NewReader(plaintext))
+	h, release := hashForBucket("")
+	defer release()
+	size, err := writeEncryptedObjectFile(path, enc, "local-object:physical-1", bytes.NewReader(plaintext), h)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
-	require.NotEmpty(t, etag)
+	require.NotEmpty(t, etagFromHash(h))
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -48,7 +50,7 @@ func TestEncryptedObjectFileWriteKeepsRecordsBoundedForReadAt(t *testing.T) {
 	enc := testEncryptor(t)
 	plaintext := bytes.Repeat([]byte("x"), 2*(1<<20)+1)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, "local-object:large-records", bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, "local-object:large-records", bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(plaintext)), size)
 
@@ -61,7 +63,7 @@ func TestEncryptedObjectFileReadAtWriteAtAndTruncate(t *testing.T) {
 	enc := testEncryptor(t)
 	domain := "local-object:physical-2"
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ")), io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, int64(26), size)
 
@@ -94,7 +96,7 @@ func TestEncryptedObjectFileReadAtDoesNotDecryptUnneededChunks(t *testing.T) {
 	domain := "local-object:physical-readat"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -125,7 +127,7 @@ func TestEncryptedObjectFileReadAtRejectsSkippedChunkHeaderTamper(t *testing.T) 
 	domain := "local-object:physical-readat-header-tamper"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -149,7 +151,7 @@ func TestEncryptedObjectFileReadAtRejectsCorruptRequestedChunk(t *testing.T) {
 	domain := "local-object:physical-readat-corrupt"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -198,7 +200,7 @@ func TestEncryptedObjectFileOpenStreamsWithoutDecryptingFutureChunks(t *testing.
 	domain := "local-object:physical-stream"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), encryptedChunkSize)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -229,7 +231,7 @@ func TestEncryptedObjectFileOpenRejectsTruncatedExpectedObject(t *testing.T) {
 	enc := testEncryptor(t)
 	domain := "local-object:physical-truncated"
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("payload")))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader([]byte("payload")), io.Discard)
 	require.NoError(t, err)
 	require.NoError(t, os.Truncate(path, int64(len(encryptedObjectMagic))))
 
@@ -246,7 +248,7 @@ func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
 	domain := "local-object:physical-whole-record-truncated"
 	plaintext := append(bytes.Repeat([]byte("a"), encryptedChunkSize), bytes.Repeat([]byte("b"), 32)...)
 
-	size, _, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext))
+	size, err := writeEncryptedObjectFile(path, enc, domain, bytes.NewReader(plaintext), io.Discard)
 	require.NoError(t, err)
 
 	f, err := os.Open(path)

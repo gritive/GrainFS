@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -735,10 +736,15 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			return ErrStalePlacement
 		}
 
+		// TODO(Phase 2): Phase 1 dropped SegmentRef.ETag. Cluster still
+		// receives a hex-encoded MD5 in cmd.SegmentETag; stash it in
+		// Checksum so the FB segment vector keeps the digest. Phase 2 will
+		// migrate cluster to xxhash3 like the storage layer.
+		segDigest, _ := hex.DecodeString(cmd.SegmentETag)
 		seg := storage.SegmentRef{
-			BlobID: cmd.BlobID,
-			Size:   cmd.SegmentSize,
-			ETag:   cmd.SegmentETag,
+			BlobID:   cmd.BlobID,
+			Size:     cmd.SegmentSize,
+			Checksum: segDigest,
 		}
 
 		// Idempotency: same BlobID already applied (Raft replay) → no-op.
@@ -755,11 +761,15 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			if cmd.ExpectedOffset != 0 {
 				return storage.ErrAppendOffsetMismatch
 			}
+			// TODO(Task 3.1 / Phase 2): wire AppendCallMD5s on the cluster side
+			// so Object.ETag composes from per-call MD5 digests instead of from
+			// the segment vector. For now reuse segDigest as the single-call
+			// digest to preserve appendable-ETag semantics on first call.
 			updated = objectMeta{
 				Key:              cmd.Key,
 				Size:             seg.Size,
 				ContentType:      "application/octet-stream",
-				ETag:             storage.CompositeETag([]storage.SegmentRef{seg}),
+				ETag:             storage.CompositeETag([][]byte{segDigest}),
 				LastModified:     time.Now().Unix(),
 				PlacementGroupID: cmd.PlacementGroupID,
 				Segments:         []storage.SegmentRef{seg},
@@ -795,7 +805,17 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 			updated = *existing
 			updated.Segments = segs
 			updated.Size = existing.Size + seg.Size
-			updated.ETag = storage.CompositeETag(segs)
+			// TODO(Task 3.1 / Phase 2): once cluster persists AppendCallMD5s,
+			// recompute Object.ETag from those per-call digests. For now,
+			// rebuild from the per-segment digests in Checksum to preserve
+			// the legacy "ETag changes per append" wire semantic.
+			callDigests := make([][]byte, 0, len(segs))
+			for _, s := range segs {
+				if len(s.Checksum) > 0 {
+					callDigests = append(callDigests, s.Checksum)
+				}
+			}
+			updated.ETag = storage.CompositeETag(callDigests)
 			updated.LastModified = time.Now().Unix()
 		}
 
