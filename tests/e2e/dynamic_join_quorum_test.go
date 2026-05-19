@@ -11,12 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_DynamicJoinTwoSurvivorReelect spins up a 3-node ClusterModeDynamicJoin
+// TestDynamicJoinTwoSurvivorReelectE2E spins up a 3-node ClusterModeDynamicJoin
 // cluster, SIGKILLs the leader, and asserts the two survivors elect a new
 // leader. Before the config.Peers self-exclusion fix the joined nodes carried a
 // phantom self-address so currentVoters had 4 strings → quorum 3 → 2 survivors
 // stuck. Regression for TODOS.md "DynamicJoin quorum inflation".
-func TestE2E_DynamicJoinTwoSurvivorReelect(t *testing.T) {
+func TestDynamicJoinTwoSurvivorReelectE2E(t *testing.T) {
 	if _, err := os.Stat(getBinary()); err != nil {
 	}
 

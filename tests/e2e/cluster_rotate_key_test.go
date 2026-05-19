@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_RotateKey_HappyPath drives a single-node cluster through a full
+// TestRotateKeyHappyPathE2E drives a single-node cluster through a full
 // online rotation:
 //   - generate a new 32-byte PSK
 //   - submit `cluster rotate-key begin --new-key=...`
@@ -25,7 +25,7 @@ import (
 //   - verify keys.d/current.key now contains the NEW key and previous.key has OLD
 //
 // Total wall time bounded by RotationPhaseGrace (5s × 2 phases) + slack.
-func TestE2E_RotateKey_HappyPath(t *testing.T) {
+func TestRotateKeyHappyPathE2E(t *testing.T) {
 	dir := shortTempDir(t)
 	httpPort := freePort()
 	raftPort := freePort()
@@ -103,10 +103,10 @@ func TestE2E_RotateKey_HappyPath(t *testing.T) {
 	require.Equal(t, oldKey, previousKey, "previous.key should hold the OLD PSK")
 }
 
-// TestE2E_RotateKey_StatusOnlyOnSoloMode verifies the rotate.sock is reachable
+// TestRotateKeyStatusOnlyOnSoloModeE2E verifies the rotate.sock is reachable
 // even on a solo (peers=[]) node and reports steady. Quick smoke before the
 // longer happy-path test.
-func TestE2E_RotateKey_StatusOnlyOnSoloMode(t *testing.T) {
+func TestRotateKeyStatusOnlyOnSoloModeE2E(t *testing.T) {
 	dir := shortTempDir(t)
 	httpPort := freePort()
 	raftPort := freePort()

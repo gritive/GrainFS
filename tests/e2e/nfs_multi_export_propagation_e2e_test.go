@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestE2E_NFSMultiExportPropagation_MultiNode(t *testing.T) {
+func TestNFSMultiExportPropagationMultiNodeE2E(t *testing.T) {
 	c := startMRCluster(t, 3, mrClusterOptions{
 		disableNFS4:   true,
 		disableNBD:    true,

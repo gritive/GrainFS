@@ -128,7 +128,7 @@ func TestClusterIncidentMissingShardFixedWithReceiptE2E(t *testing.T) {
 	require.Equal(t, http.StatusOK, receiptStatus)
 }
 
-func TestE2E_QuarantineIncident(t *testing.T) {
+func TestQuarantineIncidentE2E(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 	}

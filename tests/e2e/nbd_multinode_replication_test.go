@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_NBDMultiNode_ByteLevelReplication writes a block via NBD on node 0
+// TestNBDMultiNodeByteLevelReplicationE2E writes a block via NBD on node 0
 // in a 3-node cluster, reads it back through NBD, then walks every node's
 // dataDir to confirm the bytes physically replicated to ≥2 nodes.
 //
@@ -20,7 +20,7 @@ import (
 // a single replica, exactly the failure mode caused by the StreamShardWriteBody
 // router-registration bug fixed in v0.0.43.3 (PR #170). This test catches that
 // class of regression by checking holders on disk, not metadata.
-func TestE2E_NBDMultiNode_ByteLevelReplication(t *testing.T) {
+func TestNBDMultiNodeByteLevelReplicationE2E(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
