@@ -98,6 +98,11 @@ type bootState struct {
 	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
 	// start (so any snapshot Restore has already populated cfgStore).
 	refreshProxyCIDR func(string)
+	// proxyTrust validates Forwarded / X-Forwarded-* headers when the request
+	// arrives from a trusted upstream (trusted-proxy.cidr). Built at raft-phase
+	// wire time so its SetCIDRs is also driven by OnTrustedProxyCIDR. Passed
+	// into server.New via WithProxyTrust. §5 T45.
+	proxyTrust *server.ProxyTrust
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard

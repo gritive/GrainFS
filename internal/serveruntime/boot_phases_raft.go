@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -12,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -120,13 +122,35 @@ func bootMetaRaftWiring(state *bootState) error {
 	// cfgStore — trusted-proxy.cidr is tracked in an atomic snapshot kept
 	// fresh by a sibling OnTrustedProxyCIDR hook.
 	onAnon, onProxy, refreshProxy := wireTLSPostureHooks("")
+
+	// §5 T45: construct the ProxyTrust validator and wrap onProxy so a single
+	// OnTrustedProxyCIDR firing updates BOTH (a) the TLS-posture atomic
+	// snapshot used by the anon-change hook and (b) the live CIDR set used by
+	// (*Server).authoritativeClientIP. ReloadHooks.OnTrustedProxyCIDR is
+	// single-slot (one func), so we compose at the wire site rather than
+	// touching the hook plumbing.
+	proxyTrust := server.NewProxyTrust(nil)
+	state.proxyTrust = proxyTrust
 	hooks.OnAnonEnabledChange = onAnon
-	hooks.OnTrustedProxyCIDR = onProxy
+	hooks.OnTrustedProxyCIDR = func(ctx context.Context, v string) error {
+		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
+		return onProxy(ctx, v)
+	}
 	state.refreshProxyCIDR = refreshProxy
 	config.RegisterClusterKeys(cfgStore, hooks)
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
 	return nil
+}
+
+// splitTrustedProxyCIDRSpec splits the comma-separated trusted-proxy.cidr value
+// into entries suitable for ProxyTrust.SetCIDRs. Empty entries are tolerated;
+// ProxyTrust.SetCIDRs additionally trims and silently drops invalid CIDRs.
+func splitTrustedProxyCIDRSpec(v string) []string {
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
 }
 
 func refreshCapabilityGate(state *bootState) {

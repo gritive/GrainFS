@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"net"
-	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -93,13 +91,14 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 		return nil, false
 	}
 
-	// Policy gate (F#5).
+	// Policy gate (F#5). §5 T45: SourceIP uses ProxyTrust-validated authoritative
+	// client IP rather than naive X-Forwarded-For first-hop — that prevents
+	// spoofing by direct clients and rejects untrusted-proxy forwarding chains.
 	if s.policyAuthorizer != nil {
-		ip := icebergClientIP(c)
 		result := s.policyAuthorizer.Authorize(ctx, claims.Sub, claims.Warehouse, policy.RequestContext{
 			Action:   action,
 			Resource: "arn:aws:s3:::" + claims.Warehouse,
-			SourceIP: ip,
+			SourceIP: s.authoritativeClientIP(c),
 		})
 		if result.Decision != policy.DecisionAllow {
 			writeIcebergError(c, 403, "ForbiddenException", "policy denied: "+result.Reason)
@@ -109,22 +108,6 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 	}
 
 	return claims, true
-}
-
-// icebergClientIP extracts the client IP from a Hertz RequestContext.
-func icebergClientIP(c *app.RequestContext) string {
-	if fwd := string(c.GetHeader("X-Forwarded-For")); fwd != "" {
-		if idx := strings.IndexByte(fwd, ','); idx >= 0 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	addr := c.RemoteAddr().String()
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return host
 }
 
 // IcebergClaimsFromContext retrieves the *iamjwt.Claims stored by icebergGuarded.

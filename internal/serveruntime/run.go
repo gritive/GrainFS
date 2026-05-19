@@ -157,6 +157,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if state.refreshProxyCIDR != nil && state.cfgStore != nil {
 		v, _ := state.cfgStore.GetString("trusted-proxy.cidr")
 		state.refreshProxyCIDR(v)
+		// §5 T45: same snapshot-Restore-doesn't-fire-hooks problem — seed the
+		// ProxyTrust CIDR set from the restored cfgStore so authoritativeClientIP
+		// is correct from the first request post-Restore.
+		if state.proxyTrust != nil {
+			state.proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
+		}
 	}
 
 	// PR-final: services + shutdown.

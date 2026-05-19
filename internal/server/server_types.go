@@ -114,6 +114,7 @@ type Server struct {
 	jwtKeys       *iamjwt.KeySet
 	oauthHandler  *icebergOAuthHandler
 	bearerCfg     s3auth.ConfigReader // iam.anon-enabled check for bearer JWT path
+	proxyTrust    *ProxyTrust         // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration
