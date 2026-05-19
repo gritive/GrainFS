@@ -478,12 +478,21 @@ table DEKVersionEntry {
   wrapped:[ubyte];
 }
 
+// DEKRefEntry records how many object-index records reference a DEK generation.
+// Used for prune-safety: a generation can only be pruned when its ref count is 0.
+table DEKRefEntry {
+  gen:uint32;
+  count:int64;
+}
+
 // MetaDEKVersionSnapshot is the DKVS trailer payload: all wrapped DEK versions
 // plus the active generation at snapshot time.
 // Wire position: appended after the GCFG trailer (if any).
+// ref_counts field added in Task 12 (append-only; old readers decode as empty list).
 table MetaDEKVersionSnapshot {
   versions:[DEKVersionEntry];
   active:uint32;
+  ref_counts:[DEKRefEntry];
 }
 
 // PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.
@@ -524,6 +533,9 @@ table MetaObjectIndexEntry {
   is_delete_marker:bool = false;
   is_latest:bool = false;
   parts:[MultipartPartEntry];
+  // dek_gen records which DEK generation sealed this object's blobs.
+  // Default 0 = legacy (pre-Task-12) objects use generation 0.
+  dek_gen:uint32 = 0;
 }
 
 table MetaPutObjectIndexCmd {

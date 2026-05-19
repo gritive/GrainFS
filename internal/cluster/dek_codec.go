@@ -28,10 +28,11 @@ func decodeMetaDEKVersionPruneCmd(data []byte) (gen uint32, err error) {
 	return t.Gen(), nil
 }
 
-// encodeMetaDEKVersionSnapshot serializes the DEK versions map + active gen into
-// a MetaDEKVersionSnapshot FlatBuffers buffer used as the DKVS trailer payload.
-// Entries are emitted in ascending gen order for byte-determinism across replicas.
-func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32) ([]byte, error) {
+// encodeMetaDEKVersionSnapshot serializes the DEK versions map + active gen +
+// per-generation ref counts into a MetaDEKVersionSnapshot FlatBuffers buffer
+// used as the DKVS trailer payload. Entries are emitted in ascending gen order
+// for byte-determinism across replicas. refCounts may be nil (emits empty list).
+func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
 	// Sort gens for deterministic output.
@@ -58,20 +59,44 @@ func encodeMetaDEKVersionSnapshot(versions map[uint32][]byte, active uint32) ([]
 	}
 	versionsVec := b.EndVector(len(entryOffs))
 
+	// Build DEKRefEntry offsets for per-gen ref counts (ascending gen order).
+	refGens := make([]uint32, 0, len(refCounts))
+	for g := range refCounts {
+		if refCounts[g] > 0 {
+			refGens = append(refGens, g)
+		}
+	}
+	sort.Slice(refGens, func(i, j int) bool { return refGens[i] < refGens[j] })
+	refOffs := make([]flatbuffers.UOffsetT, len(refGens))
+	for i := len(refGens) - 1; i >= 0; i-- {
+		g := refGens[i]
+		clusterpb.DEKRefEntryStart(b)
+		clusterpb.DEKRefEntryAddGen(b, g)
+		clusterpb.DEKRefEntryAddCount(b, int64(refCounts[g]))
+		refOffs[i] = clusterpb.DEKRefEntryEnd(b)
+	}
+	clusterpb.MetaDEKVersionSnapshotStartRefCountsVector(b, len(refOffs))
+	for i := len(refOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(refOffs[i])
+	}
+	refVec := b.EndVector(len(refOffs))
+
 	clusterpb.MetaDEKVersionSnapshotStart(b)
 	clusterpb.MetaDEKVersionSnapshotAddVersions(b, versionsVec)
 	clusterpb.MetaDEKVersionSnapshotAddActive(b, active)
+	clusterpb.MetaDEKVersionSnapshotAddRefCounts(b, refVec)
 	return fbFinish(b, clusterpb.MetaDEKVersionSnapshotEnd(b)), nil
 }
 
 // decodeMetaDEKVersionSnapshot parses a MetaDEKVersionSnapshot FlatBuffers buffer
-// and returns the versions map and active generation.
-func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, err error) {
+// and returns the versions map, active generation, and per-generation ref counts.
+// refCounts is nil when the field was absent (pre-Task-12 snapshot backward compat).
+func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, active uint32, refCounts map[uint32]uint64, err error) {
 	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaDEKVersionSnapshot {
 		return clusterpb.GetRootAsMetaDEKVersionSnapshot(d, 0)
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("dek_codec: MetaDEKVersionSnapshot: %w", err)
+		return nil, 0, nil, fmt.Errorf("dek_codec: MetaDEKVersionSnapshot: %w", err)
 	}
 
 	out := make(map[uint32][]byte, snap.VersionsLength())
@@ -82,5 +107,16 @@ func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, acti
 			out[entry.Gen()] = wrapped
 		}
 	}
-	return out, snap.Active(), nil
+
+	var refs map[uint32]uint64
+	if n := snap.RefCountsLength(); n > 0 {
+		refs = make(map[uint32]uint64, n)
+		var refEntry clusterpb.DEKRefEntry
+		for i := 0; i < n; i++ {
+			if snap.RefCounts(&refEntry, i) {
+				refs[refEntry.Gen()] = uint64(refEntry.Count())
+			}
+		}
+	}
+	return out, snap.Active(), refs, nil
 }

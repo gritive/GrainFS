@@ -172,6 +172,10 @@ type ObjectIndexEntry struct {
 	// GetObject/HeadObject ?partNumber=N path uses this to translate part
 	// numbers into byte ranges over the assembled body.
 	Parts []storage.MultipartPartEntry
+	// DekGen is the DEK generation that sealed this object's blobs.
+	// 0 means the legacy (pre-Task-12) key. FlatBuffer default is 0 so
+	// pre-Task-12 records automatically decode as generation 0.
+	DekGen uint32
 }
 
 type ObjectIndexSummary struct {
@@ -305,9 +309,10 @@ type MetaFSM struct {
 	// is called; DEKRotate/DEKVersionPrune commands are safe no-ops when nil.
 	dekKeeper *encrypt.DEKKeeper
 
-	// dekRefCounts is used by dekRefCount to check per-gen reference counts.
-	// nil by default; production never writes (always returns 0). Task 12 will
-	// plug real per-record ref counting.
+	// dekRefCounts holds the per-generation reference count: how many
+	// ObjectIndexEntry records reference each DEK generation. Incremented on
+	// applyPutObjectIndex, decremented on applyDeleteObjectIndex. Persisted
+	// in the DKVS snapshot trailer alongside DEK versions (Task 12).
 	dekRefCounts map[uint32]uint64
 
 	// pendingDEKVersions and pendingDEKActive hold the DEK snapshot state decoded
@@ -331,6 +336,7 @@ func NewMetaFSM() *MetaFSM {
 		iamStore:          iam.NewStore(),
 		activeFeatures:    compat.NewActiveFeatures(),
 		clusterCfg:        NewClusterConfig(),
+		dekRefCounts:      make(map[uint32]uint64),
 	}
 }
 
@@ -382,14 +388,28 @@ func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.dekKeeper = k
 }
 
-// dekRefCount returns the reference count for a DEK generation.
-// Returns 0 always until Task 12 plugs per-record ref counting.
-// TODO Task 12: plug per-record ref counting.
+// dekRefCount returns the number of ObjectIndexEntry records that reference
+// the given DEK generation. Returns 0 if the generation has no entries.
 func (f *MetaFSM) dekRefCount(gen uint32) uint64 {
-	if f.dekRefCounts == nil {
-		return 0
-	}
 	return f.dekRefCounts[gen]
+}
+
+// incDEKRef increments the ref count for the given DEK generation.
+// Must be called with f.mu held.
+func (f *MetaFSM) incDEKRef(gen uint32) {
+	f.dekRefCounts[gen]++
+}
+
+// decDEKRef decrements the ref count for the given DEK generation.
+// Clamps at zero to guard against double-decrement on buggy replay.
+// Must be called with f.mu held.
+func (f *MetaFSM) decDEKRef(gen uint32) {
+	if f.dekRefCounts[gen] > 0 {
+		f.dekRefCounts[gen]--
+		if f.dekRefCounts[gen] == 0 {
+			delete(f.dekRefCounts, gen)
+		}
+	}
 }
 
 // PendingDEKVersions returns the DEK versions decoded during the last Restore
@@ -1042,7 +1062,12 @@ func (f *MetaFSM) applyPutObjectIndex(data []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	vkey := objectIndexVersionKey(e.Bucket, e.Key, e.VersionID)
+	// Overwrite: decrement ref for old entry's generation before replacing.
+	if old, ok := f.objectIndex[vkey]; ok {
+		f.decDEKRef(old.DekGen)
+	}
 	f.objectIndex[vkey] = cloneObjectIndexEntry(e)
+	f.incDEKRef(e.DekGen)
 	if !c.PreserveLatest {
 		f.objectLatest[objectIndexLatestKey(e.Bucket, e.Key)] = e.VersionID
 	}
@@ -1063,7 +1088,11 @@ func (f *MetaFSM) applyDeleteObjectIndex(data []byte) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.objectIndex, objectIndexVersionKey(bucket, key, versionID))
+	vkey := objectIndexVersionKey(bucket, key, versionID)
+	if old, ok := f.objectIndex[vkey]; ok {
+		f.decDEKRef(old.DekGen)
+	}
+	delete(f.objectIndex, vkey)
 	lkey := objectIndexLatestKey(bucket, key)
 	if f.objectLatest[lkey] != versionID {
 		return nil
@@ -1850,6 +1879,13 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		icebergTables = append(icebergTables, cloneIcebergTableEntry(entry))
 	}
 	exportStore := f.exportStore
+	// Snapshot dekRefCounts while holding the read lock.
+	dekRefCountsCopy := make(map[uint32]uint64, len(f.dekRefCounts))
+	for g, c := range f.dekRefCounts {
+		if c > 0 {
+			dekRefCountsCopy[g] = c
+		}
+	}
 	f.mu.RUnlock()
 
 	nfsExports := map[string]nfsexport.Config(nil)
@@ -2032,7 +2068,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		dekVersions := f.dekKeeper.Versions()
 		if len(dekVersions) > 0 {
 			dekActive, _ := f.dekKeeper.Active()
-			dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive)
+			dekPayload, err := encodeMetaDEKVersionSnapshot(dekVersions, dekActive, dekRefCountsCopy)
 			if err != nil {
 				return nil, fmt.Errorf("meta_fsm: Snapshot: encode DEK versions: %w", err)
 			}
@@ -2366,15 +2402,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 
 	// DKVS restore — decode the DEK versions into pendingDEKVersions so the
 	// runtime can wire a new DEKKeeper via encrypt.LoadFromFSM(kek, versions)
-	// after Restore returns.
+	// after Restore returns. Also restore dekRefCounts from the snapshot so
+	// DEK prune-safety checks reflect the stored object count.
 	if len(dekData) > 0 {
-		versions, active, err := decodeMetaDEKVersionSnapshot(dekData)
+		versions, active, refs, err := decodeMetaDEKVersionSnapshot(dekData)
 		if err != nil {
 			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
 		}
 		f.mu.Lock()
 		f.pendingDEKVersions = versions
 		f.pendingDEKActive = active
+		if refs != nil {
+			f.dekRefCounts = refs
+		} else {
+			f.dekRefCounts = make(map[uint32]uint64)
+		}
 		f.mu.Unlock()
 	}
 	return nil
@@ -2700,6 +2742,9 @@ func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshot
 	if partsOff != 0 {
 		clusterpb.MetaObjectIndexEntryAddParts(b, partsOff)
 	}
+	if e.DekGen != 0 {
+		clusterpb.MetaObjectIndexEntryAddDekGen(b, e.DekGen)
+	}
 	return clusterpb.MetaObjectIndexEntryEnd(b)
 }
 
@@ -2749,6 +2794,7 @@ func readMetaObjectIndexEntry(entry *clusterpb.MetaObjectIndexEntry) ObjectIndex
 		NodeIDs:          readStringVector(entry.NodeIdsLength(), entry.NodeIds),
 		IsDeleteMarker:   entry.IsDeleteMarker(),
 		Parts:            parts,
+		DekGen:           entry.DekGen(),
 	}
 }
 
