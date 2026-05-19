@@ -118,4 +118,7 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 			assert.True(t, strings.Contains(string(body), "source"), "content must match source")
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }

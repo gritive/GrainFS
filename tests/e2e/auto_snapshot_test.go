@@ -53,6 +53,9 @@ func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
 		assert.GreaterOrEqual(t, len(snapshots), 2,
 			"at least 2 auto-snapshots should have been created with 1s interval")
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 func waitForAutoSnapshots(t *testing.T, endpoint string, want int, timeout time.Duration) []map[string]any {

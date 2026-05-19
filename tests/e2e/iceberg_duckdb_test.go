@@ -54,6 +54,9 @@ DROP TABLE grainfs_iceberg.ns_e2e.t;
 DROP SCHEMA grainfs_iceberg.ns_e2e;
 	`)
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
@@ -150,6 +153,9 @@ func TestAuditIcebergSingleDuckDB(t *testing.T) {
 		const commitInterval = 8 * time.Second
 		tgt := newSingleNodeIcebergTargetWithAudit(t, commitInterval)
 		runIcebergAuditCases(t, tgt, commitInterval)
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 

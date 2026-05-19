@@ -36,4 +36,7 @@ func TestObjectBrowser_ServesUI(t *testing.T) {
 			t.Fatal("expected 'Volumes' tab in UI response")
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }

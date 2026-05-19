@@ -37,4 +37,7 @@ func TestDefaultBucket_ExistsOnStartup(t *testing.T) {
 			t.Fatalf("head default bucket: %v", err)
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }

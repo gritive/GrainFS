@@ -56,4 +56,7 @@ func TestE2EDedupSnapshot(t *testing.T) {
 			require.NotEqual(t, snap2, s.ID, "deleted snap must not reappear")
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }

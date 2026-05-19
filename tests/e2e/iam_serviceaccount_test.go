@@ -85,6 +85,9 @@ func TestIAM_E2E_ET1_RevokedKey_Returns401(t *testing.T) {
 			t.Fatalf("GET after revoke: status=%d err=%v; want 401/403", status, err)
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestIAM_E2E_ET1_ExpiredKey_Returns401 — rotate a short-TTL key for the
@@ -134,6 +137,9 @@ func TestIAM_E2E_ET1_ExpiredKey_Returns401(t *testing.T) {
 		if status != http.StatusUnauthorized && status != http.StatusForbidden {
 			t.Fatalf("HEAD after expiry: status=%d err=%v; want 401/403", status, err)
 		}
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 
@@ -247,6 +253,9 @@ func TestIAM_E2E_ET2_RoleOpMatrix(t *testing.T) {
 			})
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestIAM_E2E_ET3_PresignedURL_RevokedKey_401 — alice presigns a GET, admin
@@ -309,6 +318,9 @@ func TestIAM_E2E_ET3_PresignedURL_RevokedKey_401(t *testing.T) {
 				resp2.StatusCode, string(got))
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestIAM_E2E_SC8_NoPlaintextSecretOnDisk asserts the at-rest invariant on
@@ -327,6 +339,9 @@ func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
 		if len(hits) > 0 {
 			t.Fatalf("alice.SecretKey appears in IAM control-plane persistence: %v", hits)
 		}
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 
@@ -426,6 +441,9 @@ func TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA(t *testing.T) {
 			t.Fatal("default SA still has access to other-sa's bucket after wildcard removal; expected 403")
 		}
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // iamKeyCreateScoped issues a new scoped key for saID restricted to buckets.
@@ -497,6 +515,9 @@ func TestE2E_IAM_ScopedKey_RightBucket_OK(t *testing.T) {
 		got, _ := io.ReadAll(out.Body)
 		require.Equal(t, "hello", string(got), "GetObject body")
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestE2E_IAM_ScopedKey_WrongBucket_403 — scoped key for "logs" is blocked on
@@ -539,6 +560,9 @@ func TestE2E_IAM_ScopedKey_WrongBucket_403(t *testing.T) {
 		// Audit reason key_scope_mismatch is asserted by server unit tests; here
 		// the 403 response is the observable contract.
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestE2E_IAM_KeyCreate_OverScope_400 — requesting a key scoped to a bucket
@@ -560,6 +584,9 @@ func TestE2E_IAM_KeyCreate_OverScope_400(t *testing.T) {
 		)
 		require.Equalf(t, http.StatusBadRequest, status, "KeyCreate over-scope: body=%s", string(body))
 		require.Containsf(t, string(body), "st3-reports", "400 body does not mention denied bucket: body=%s", string(body))
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 
@@ -604,6 +631,9 @@ func TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
 			require.NoErrorf(t, err, "legacy key GetObject on %s (backward compat broken)", bkt)
 			out.Body.Close()
 		}
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 
@@ -656,6 +686,9 @@ func TestE2E_IAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
 		})
 		require.Error(t, err2, "GetObject on out-of-scope bucket after restart succeeded; expected 403")
 		require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err2), "GetObject out-of-scope after restart: want 403")
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 
@@ -783,5 +816,8 @@ func TestIAM_E2E_PolicyBypassClosed(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("bob (Admin) PutBucketPolicy on own bucket: %v", err)
 		}
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }

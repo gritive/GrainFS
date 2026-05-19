@@ -23,6 +23,9 @@ func TestIcebergE2E_NoAuth_Rejected(t *testing.T) {
 		defer resp.Body.Close()
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestIcebergE2E_AfterBootstrap_Accepts: bootstrap an admin SA via UDS,
@@ -43,6 +46,9 @@ func TestIcebergE2E_AfterBootstrap_Accepts(t *testing.T) {
 			"signed request should pass authn (got 401)")
 		require.NotEqual(t, http.StatusForbidden, resp.StatusCode,
 			"signed request should not be 403 either")
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }
 
@@ -72,5 +78,8 @@ func TestIcebergE2E_AuthFailures_Audited(t *testing.T) {
 		}
 		require.GreaterOrEqual(t, failures, 3,
 			"expected ≥3 iceberg auth failures audited with non-empty action+reason")
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
 }

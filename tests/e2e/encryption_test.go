@@ -110,4 +110,7 @@ func TestEncryption_AtRest(t *testing.T) {
 		body, _ := io.ReadAll(getOut.Body)
 		assert.Equal(t, content, string(body))
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }

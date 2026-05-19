@@ -200,4 +200,7 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 
 		t.Log("✅ Backup and restore test passed - data integrity verified")
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
