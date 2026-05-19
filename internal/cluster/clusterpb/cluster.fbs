@@ -431,6 +431,12 @@ enum MetaCmdType : uint8 {
   GroupDelete             = 53, // IAM: group delete
   GroupMemberPut          = 54, // IAM: group member add (sa_id)
   GroupMemberDelete       = 55, // IAM: group member remove (sa_id)
+  PolicyAttachToSAPut     = 56, // IAM: attach policy to service account
+  PolicyAttachToSADelete  = 57, // IAM: detach policy from service account
+  PolicyAttachToGroupPut  = 58, // IAM: attach policy to group
+  PolicyAttachToGroupDelete = 59, // IAM: detach policy from group
+  BucketPolicyPut         = 60, // IAM: set bucket policy document
+  BucketPolicyDelete      = 61, // IAM: delete bucket policy document
 }
 
 table MetaNodeEntry {
@@ -893,4 +899,39 @@ table MetaGroupMemberPutCmd {
 table MetaGroupMemberDeleteCmd {
   group:string;
   sa_id:string;
+}
+
+// PolicyAttachToSAPut payload: attach a policy to a service account.
+table MetaPolicyAttachToSAPutCmd {
+  sa_id:string;
+  policy:string;
+}
+
+// PolicyAttachToSADelete payload: detach a policy from a service account.
+table MetaPolicyAttachToSADeleteCmd {
+  sa_id:string;
+  policy:string;
+}
+
+// PolicyAttachToGroupPut payload: attach a policy to a group.
+table MetaPolicyAttachToGroupPutCmd {
+  group:string;
+  policy:string;
+}
+
+// PolicyAttachToGroupDelete payload: detach a policy from a group.
+table MetaPolicyAttachToGroupDeleteCmd {
+  group:string;
+  policy:string;
+}
+
+// BucketPolicyPut payload: upsert a bucket policy document.
+table MetaBucketPolicyPutCmd {
+  bucket:string;
+  doc_json:[ubyte];
+}
+
+// BucketPolicyDelete payload: remove a bucket policy document.
+table MetaBucketPolicyDeleteCmd {
+  bucket:string;
 }

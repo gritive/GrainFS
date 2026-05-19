@@ -19,8 +19,10 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -137,6 +139,12 @@ const (
 	MetaCmdTypeGroupDelete                  = clusterpb.MetaCmdTypeGroupDelete
 	MetaCmdTypeGroupMemberPut               = clusterpb.MetaCmdTypeGroupMemberPut
 	MetaCmdTypeGroupMemberDelete            = clusterpb.MetaCmdTypeGroupMemberDelete
+	MetaCmdTypePolicyAttachToSAPut          = clusterpb.MetaCmdTypePolicyAttachToSAPut
+	MetaCmdTypePolicyAttachToSADelete       = clusterpb.MetaCmdTypePolicyAttachToSADelete
+	MetaCmdTypePolicyAttachToGroupPut       = clusterpb.MetaCmdTypePolicyAttachToGroupPut
+	MetaCmdTypePolicyAttachToGroupDelete    = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
+	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
+	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -323,6 +331,14 @@ type MetaFSM struct {
 	// Group* commands are safe no-ops when nil.
 	groupStore *group.InMemoryStore
 
+	// policyAttachStore is the SA/group→policy attachment store. nil until
+	// SetPolicyAttachStore is called; PolicyAttach* commands are safe no-ops when nil.
+	policyAttachStore *policyattach.InMemoryStore
+
+	// bucketPolicyStore is the per-bucket policy document store. nil until
+	// SetBucketPolicyStore is called; BucketPolicy* commands are safe no-ops when nil.
+	bucketPolicyStore *bucketpolicy.InMemoryStore
+
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
 	cfgStore *config.Store
@@ -440,6 +456,24 @@ func (f *MetaFSM) SetGroupStore(s *group.InMemoryStore) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.groupStore = s
+}
+
+// SetPolicyAttachStore wires the SA/group→policy attachment store into the
+// MetaFSM. Must be called before the raft log starts replaying. nil means
+// PolicyAttach* commands are safe no-ops.
+func (f *MetaFSM) SetPolicyAttachStore(s *policyattach.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyAttachStore = s
+}
+
+// SetBucketPolicyStore wires the per-bucket policy document store into the
+// MetaFSM. Must be called before the raft log starts replaying. nil means
+// BucketPolicy* commands are safe no-ops.
+func (f *MetaFSM) SetBucketPolicyStore(s *bucketpolicy.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bucketPolicyStore = s
 }
 
 // dekRefCount returns the number of ObjectIndexEntry records that reference
@@ -669,6 +703,18 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyGroupMemberPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeGroupMemberDelete:
 		return f.applyGroupMemberDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToSAPut:
+		return f.applyPolicyAttachToSAPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToSADelete:
+		return f.applyPolicyAttachToSADelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToGroupPut:
+		return f.applyPolicyAttachToGroupPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypePolicyAttachToGroupDelete:
+		return f.applyPolicyAttachToGroupDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeBucketPolicyPut:
+		return f.applyBucketPolicyPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeBucketPolicyDelete:
+		return f.applyBucketPolicyDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		if f.dekKeeper == nil {
 			return nil
@@ -1038,6 +1084,118 @@ func (f *MetaFSM) applyGroupMemberDelete(payload []byte) error {
 	}
 	if f.policyResolver != nil {
 		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToSAPut(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	saID, pol, err := DecodePolicyAttachToSAPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSAPut: %w", err)
+	}
+	if err := f.policyAttachStore.AttachToSA(context.Background(), saID, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSAPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only the affected SA's cached entries need to be dropped.
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToSADelete(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	saID, pol, err := DecodePolicyAttachToSADeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSADelete: %w", err)
+	}
+	if err := f.policyAttachStore.DetachFromSA(context.Background(), saID, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToSADelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only the affected SA's cached entries need to be dropped.
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToGroupPut(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, pol, err := DecodePolicyAttachToGroupPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupPut: %w", err)
+	}
+	if err := f.policyAttachStore.AttachToGroup(context.Background(), grp, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// TODO(opt): nuke only SAs that are members of grp once we can enumerate
+		// them cheaply from this apply path. For now a nuclear invalidate is safe
+		// and cache rebuild is cheap.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyPolicyAttachToGroupDelete(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, pol, err := DecodePolicyAttachToGroupDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupDelete: %w", err)
+	}
+	if err := f.policyAttachStore.DetachFromGroup(context.Background(), grp, pol); err != nil {
+		return fmt.Errorf("meta_fsm: PolicyAttachToGroupDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// TODO(opt): nuke only SAs that are members of grp once we can enumerate
+		// them cheaply from this apply path. For now a nuclear invalidate is safe
+		// and cache rebuild is cheap.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyBucketPolicyPut(payload []byte) error {
+	if f.bucketPolicyStore == nil {
+		return nil // safe no-op until wired
+	}
+	bucket, docJSON, err := DecodeBucketPolicyPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyPut: %w", err)
+	}
+	if err := f.bucketPolicyStore.Put(context.Background(), bucket, docJSON); err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only cache entries for this bucket are stale.
+		f.policyResolver.Invalidate(nil, []string{bucket})
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyBucketPolicyDelete(payload []byte) error {
+	if f.bucketPolicyStore == nil {
+		return nil // safe no-op until wired
+	}
+	bucket, err := DecodeBucketPolicyDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyDelete: %w", err)
+	}
+	if err := f.bucketPolicyStore.Delete(context.Background(), bucket); err != nil {
+		return fmt.Errorf("meta_fsm: BucketPolicyDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only cache entries for this bucket are stale.
+		f.policyResolver.Invalidate(nil, []string{bucket})
 	}
 	return nil
 }
