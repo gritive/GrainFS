@@ -25,129 +25,120 @@ type vfsStatResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// TestCrossProtocolS3PutVFSStat verifies S3 PUT → VFS stat cache invalidation.
-// This is an integration test that uses the admin API to perform VFS stat operations,
-// verifying cross-protocol cache coherency works end-to-end.
-func TestCrossProtocolS3PutVFSStat(t *testing.T) {
-	ctx := context.Background()
-	bucket := "test-cross-protocol-s3-put-vfs"
-
-	// Create bucket via S3
-	createBucket(t, bucket)
-
-	// Upload file via S3
-	key := "test-file.txt"
-	content := "hello, world"
-	_, err := testS3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader([]byte(content)),
-	})
-	require.NoError(t, err)
-
-	// Verify file exists via S3
-	head, err := testS3Client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, err)
-	assert.NotNil(t, head.ContentLength)
-	assert.Equal(t, int64(len(content)), *head.ContentLength)
-
-	// Stat file via VFS using admin API
-	// This verifies that S3 PUT is visible to VFS (cross-protocol coherency)
-	statReq := map[string]string{
-		"volume_name": bucket,
-		"file_path":   key,
-	}
-	var statResp vfsStatResponse
-	vfsStatCall(t, statReq, &statResp)
-
-	// File should exist
-	assert.True(t, statResp.Exists, "VFS should see file after S3 PUT")
-	assert.Equal(t, key, statResp.Name)
-	assert.Equal(t, int64(len(content)), statResp.Size)
-	assert.Equal(t, false, statResp.IsDir)
-}
-
-// TestCrossProtocolS3DeleteVFSESTALE verifies S3 DELETE → VFS ESTALE propagation.
-func TestCrossProtocolS3DeleteVFSESTALE(t *testing.T) {
-	ctx := context.Background()
-	bucket := "test-cross-protocol-s3-delete-estale"
-
-	createBucket(t, bucket)
-
-	// Upload file via S3
-	key := "test-file.txt"
-	content := "hello, world"
-	_, err := testS3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader([]byte(content)),
-	})
-	require.NoError(t, err)
-
-	// Verify file exists via S3
-	head, err := testS3Client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, err)
-	assert.NotNil(t, head)
-
-	// Verify file exists via VFS
-	statReq := map[string]string{
-		"volume_name": bucket,
-		"file_path":   key,
-	}
-	var statResp vfsStatResponse
-	vfsStatCall(t, statReq, &statResp)
-	assert.True(t, statResp.Exists, "VFS should see file before delete")
-
-	// Delete file via S3
-	_, err = testS3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	require.NoError(t, err)
-
-	// Wait for eventual consistency (Raft commit + cache invalidation)
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify file is deleted via S3
-	_, err = testS3Client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	assert.Error(t, err, "S3 HEAD should fail after delete")
-
-	// Verify file is deleted via VFS
-	// Note: In current implementation, MarkDeleted is only called when Raft FSM
-	// applies the delete. In no-peers mode (which tests use), there's no Raft,
-	// so MarkDeleted won't be called. The file should still not exist because
-	// it's deleted from storage.
-	vfsStatCall(t, statReq, &statResp)
-	assert.False(t, statResp.Exists, "VFS should not see deleted file")
-}
-
-// vfsStatCall performs a VFS stat operation via the admin API.
-func vfsStatCall(t *testing.T, req map[string]string, resp *vfsStatResponse) {
+// vfsStatCall performs a VFS stat operation via the admin API on tgt's writable node.
+func vfsStatCall(t *testing.T, endpoint string, req map[string]string, resp *vfsStatResponse) {
 	t.Helper()
 
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 
-	httpResp, err := http.Post(testServerURL+"/admin/debug/vfs/stat", "application/json", bytes.NewReader(body))
+	httpResp, err := http.Post(endpoint+"/admin/debug/vfs/stat", "application/json", bytes.NewReader(body)) //nolint:noctx
 	require.NoError(t, err)
 	defer httpResp.Body.Close()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	require.NoError(t, err)
 
-	if httpResp.StatusCode != http.StatusOK {
-		t.Fatalf("VFS stat failed: %s", string(respBody))
-	}
+	require.Equal(t, http.StatusOK, httpResp.StatusCode, "VFS stat failed: %s", string(respBody))
 
 	err = json.Unmarshal(respBody, resp)
 	require.NoError(t, err)
+}
+
+// TestCrossProtocolE2E exercises S3 ↔ VFS coherency: an S3 PUT must be
+// observable via the admin /admin/debug/vfs/stat probe, and an S3 DELETE
+// must make the VFS view disappear. Shared single + shared cluster fixtures
+// — each sub-test scopes itself with a uniqueBucket.
+func TestCrossProtocolE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runCrossProtocolCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runCrossProtocolCases(t, newSharedClusterS3Target(t))
+	})
+}
+
+func runCrossProtocolCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	ctx := context.Background()
+	cli := tgt.pickNode(0)
+	endpoint := tgt.endpoint(0)
+
+	t.Run("S3PutVFSStat", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "putvfs")
+
+		key := "test-file.txt"
+		content := "hello, world"
+		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader([]byte(content)),
+		})
+		require.NoError(t, err)
+
+		head, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		assert.NotNil(t, head.ContentLength)
+		assert.Equal(t, int64(len(content)), *head.ContentLength)
+
+		var statResp vfsStatResponse
+		vfsStatCall(t, endpoint, map[string]string{
+			"volume_name": bucket,
+			"file_path":   key,
+		}, &statResp)
+
+		assert.True(t, statResp.Exists, "VFS should see file after S3 PUT")
+		assert.Equal(t, key, statResp.Name)
+		assert.Equal(t, int64(len(content)), statResp.Size)
+		assert.Equal(t, false, statResp.IsDir)
+	})
+
+	t.Run("S3DeleteVFSESTALE", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "delvfs")
+
+		key := "test-file.txt"
+		content := "hello, world"
+		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader([]byte(content)),
+		})
+		require.NoError(t, err)
+
+		head, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		assert.NotNil(t, head)
+
+		statReq := map[string]string{
+			"volume_name": bucket,
+			"file_path":   key,
+		}
+		var statResp vfsStatResponse
+		vfsStatCall(t, endpoint, statReq, &statResp)
+		assert.True(t, statResp.Exists, "VFS should see file before delete")
+
+		_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+
+		// Eventual consistency window (Raft commit + cache invalidation).
+		time.Sleep(200 * time.Millisecond)
+
+		_, err = cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		assert.Error(t, err, "S3 HEAD should fail after delete")
+
+		vfsStatCall(t, endpoint, statReq, &statResp)
+		assert.False(t, statResp.Exists, "VFS should not see deleted file")
+	})
 }
