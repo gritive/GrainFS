@@ -166,6 +166,7 @@ func TestMain(m *testing.M) {
 
 	stopSharedCluster()
 	stopSharedMRCluster()
+	shutdownSharedColimaCluster()
 	terminateProcess(cmd)
 	if err := cleanupDataDir(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

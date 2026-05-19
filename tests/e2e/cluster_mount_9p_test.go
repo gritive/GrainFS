@@ -1,20 +1,14 @@
-//go:build colima
-
-// Cluster-mount 9P test (Task 17): drives the shared 3-node colima cluster
-// fixture, mounts 9P from inside the colima VM against each node sequentially,
-// and verifies a file written through node 0's 9P port is visible when
-// re-mounting against node 1 and node 2.
+// Cluster-mount 9P test: mounts 9P from inside the colima VM against each
+// node sequentially and verifies a file written through node 0 is visible
+// when re-mounting against the other cluster nodes.
 //
-// Coexists with the single-node TestMain in 9p_colima_test.go: the cluster
-// fixture is lazily started here under sync.Once so adding the cluster case
-// does not perturb the single-node setup.
+// Migrated from tests/9p_colima/cluster_mount_test.go on the e2e
+// classification pass.
 
-package p9_colima
+package e2e
 
 import (
 	"fmt"
-	"os/exec"
-	"sync"
 	"testing"
 	"time"
 
@@ -23,24 +17,9 @@ import (
 	"github.com/gritive/GrainFS/tests/colimafixture"
 )
 
-var (
-	clusterOnce sync.Once
-	clusterRef  *colimafixture.Cluster
-)
-
-func getClusterFixture(t *testing.T) *colimafixture.Cluster {
-	t.Helper()
-	clusterOnce.Do(func() {
-		clusterRef = colimafixture.StartCluster(t, colimafixture.Options{
-			EnableP9: true,
-		})
-	})
-	return clusterRef
-}
-
-// mount9PNode mounts <bucket> via 9P from node `nodeIdx`'s P9 port, runs fn
-// against the mountpoint, then unmounts.
-func mount9PNode(t *testing.T, c *colimafixture.Cluster, nodeIdx int, bucket string, fn func(mnt string)) {
+// mountColima9PNode mounts <bucket> via 9P from node `nodeIdx`'s P9 port,
+// runs fn against the mountpoint, then unmounts.
+func mountColima9PNode(t *testing.T, c *colimafixture.Cluster, nodeIdx int, bucket string, fn func(mnt string)) {
 	t.Helper()
 	hostIP := envOrDefault("HOST_IP", "192.168.5.2")
 	mnt := fmt.Sprintf("/mnt/grainfs-9p-cluster-n%d-%d", nodeIdx, time.Now().UnixNano())
@@ -55,16 +34,15 @@ func mount9PNode(t *testing.T, c *colimafixture.Cluster, nodeIdx int, bucket str
 	fn(mnt)
 }
 
-func TestP9Cluster_WriteVisibleAcrossNodes(t *testing.T) {
-	c := getClusterFixture(t)
+func TestColimaCluster9PWriteVisibleAcrossNodesE2E(t *testing.T) {
+	c := getOrInitSharedColimaCluster(t)
 	leaderDir := c.DataDirs[c.LeaderIdx]
 
 	bucket := fmt.Sprintf("cluster-9p-write-%d", time.Now().UnixNano())
 
 	// 1. Create bucket on leader (replicated via raft).
-	binary := envOrDefault("GRAINFS_BINARY", "../../bin/grainfs")
-	cmdOut, err := exec.Command(binary, "bucket", "create", bucket, "--endpoint", leaderDir+"/admin.sock").CombinedOutput()
-	require.NoErrorf(t, err, "bucket create on leader: %s", cmdOut)
+	out, code := runColimaAdminCLI(t, leaderDir, "bucket", "create", bucket)
+	require.Equalf(t, 0, code, "bucket create on leader: %s", out)
 
 	// 2. Ensure 9p kernel modules in colima VM (idempotent).
 	colimaSSH("sudo", "modprobe", "9p").Run()           //nolint:errcheck
@@ -74,8 +52,8 @@ func TestP9Cluster_WriteVisibleAcrossNodes(t *testing.T) {
 	// 3. Mount via node 0's 9P port, write a file, unmount.
 	const fileName = "cluster-9p.txt"
 	const body = "cluster-9p-hello"
-	mount9PNode(t, c, 0, bucket, func(mnt string) {
-		writeMountedFile(t, mnt+"/"+fileName, body)
+	mountColima9PNode(t, c, 0, bucket, func(mnt string) {
+		runColimaSSH(t, "sh", "-c", fmt.Sprintf("echo -n %q | sudo tee %s/%s >/dev/null", body, mnt, fileName))
 		got := runColimaSSH(t, "sudo", "cat", mnt+"/"+fileName)
 		require.Equal(t, body, got, "readback on writer node")
 	})
@@ -86,7 +64,7 @@ func TestP9Cluster_WriteVisibleAcrossNodes(t *testing.T) {
 		i := i
 		require.Eventuallyf(t, func() bool {
 			ok := false
-			mount9PNode(t, c, i, bucket, func(mnt string) {
+			mountColima9PNode(t, c, i, bucket, func(mnt string) {
 				out, sshErr := colimaSSH("sudo", "cat", mnt+"/"+fileName).CombinedOutput()
 				if sshErr != nil {
 					return
