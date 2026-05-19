@@ -27,6 +27,7 @@ func TestBucketForwardOpSpecsCoverBucketOps(t *testing.T) {
 		raftpb.ForwardOpDeleteObjectVersion,
 		raftpb.ForwardOpListObjectVersions,
 		raftpb.ForwardOpReadAt,
+		raftpb.ForwardOpHeadObjectVersion,
 	}
 	for _, op := range bucketOps {
 		spec, ok := lookupBucketForwardOpSpec(op)
@@ -66,6 +67,7 @@ func TestBucketForwardOpSpecsClassifyTransportKind(t *testing.T) {
 		raftpb.ForwardOpListMultipartUploads,
 		raftpb.ForwardOpDeleteObjectVersion,
 		raftpb.ForwardOpListObjectVersions,
+		raftpb.ForwardOpHeadObjectVersion,
 	} {
 		spec, ok := lookupBucketForwardOpSpec(op)
 		require.True(t, ok, "missing spec for %s", op)
