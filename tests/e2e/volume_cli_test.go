@@ -128,24 +128,30 @@ func containsFlag(args []string, flag string) bool {
 	return false
 }
 
-// TestVolumeCLIAutoDiscoveryE2E — CLI auto-discovery hint when the binary is
-// invoked without --endpoint in a cwd with no grainfs context. The CLI check
-// runs before any server connection, but the test set is still run against
-// both fixtures for shape parity with the rest of the suite.
-func TestVolumeCLIAutoDiscoveryE2E(t *testing.T) {
+// TestVolumeCLIGuardsE2E groups negative-path checks on the volume CLI /
+// data-plane surface that complement TestVolumeE2E's happy-path coverage:
+//
+//   - CLIHintWhenNoEndpoint: invoking the binary without --endpoint in an
+//     empty cwd prints the actionable hint instead of a stack trace. The
+//     binary computes this before any server connection, so the assertion
+//     is identical on both fixtures — kept under both branches for shape
+//     parity with the rest of the suite.
+//   - DataPlaneVolumesPathHidden (A6 regression): /volumes/* admin endpoints
+//     were removed from the data plane; /volumes/ now falls through to the
+//     S3 bucket handler and must not return admin-shaped JSON.
+func TestVolumeCLIGuardsE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-		_ = newSingleNodeS3Target()
-		runVolumeCLIAutoDiscoveryCases(t)
+		runVolumeCLIGuardsCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-		runVolumeCLIAutoDiscoveryCases(t)
+		runVolumeCLIGuardsCases(t, newSharedClusterS3Target(t))
 	})
 }
 
-func runVolumeCLIAutoDiscoveryCases(t *testing.T) {
+func runVolumeCLIGuardsCases(t *testing.T, tgt s3Target) {
 	t.Helper()
-	t.Run("HintWhenNoEndpoint", func(t *testing.T) {
+
+	t.Run("CLIHintWhenNoEndpoint", func(t *testing.T) {
 		cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
 		require.NoError(t, err)
 		defer os.RemoveAll(cwd)
@@ -159,23 +165,8 @@ func runVolumeCLIAutoDiscoveryCases(t *testing.T) {
 		require.Contains(t, string(out), "admin endpoint not configured")
 		require.Contains(t, string(out), "Hint")
 	})
-}
 
-// TestVolumeDataPlaneGuardE2E — regression: data-plane /volumes/* admin
-// endpoints must be removed (A6). /volumes/ falls through to the S3 bucket
-// handler (it matches /:bucket/), so it must NOT return admin-shaped JSON.
-func TestVolumeDataPlaneGuardE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runVolumeDataPlaneGuardCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVolumeDataPlaneGuardCases(t, newSharedClusterS3Target(t))
-	})
-}
-
-func runVolumeDataPlaneGuardCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	t.Run("VolumesPathDoesNotExposeAdminShape", func(t *testing.T) {
+	t.Run("DataPlaneVolumesPathHidden", func(t *testing.T) {
 		resp, err := http.Get(tgt.endpoint(0) + "/volumes/")
 		require.NoError(t, err)
 		defer resp.Body.Close()

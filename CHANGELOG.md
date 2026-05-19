@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.262.17] - 2026-05-19 - test(e2e): merge volume_cli_test.go entries into single TestVolumeCLIGuardsE2E
+
+Two negative-path entries from v0.0.262.16 (`TestVolumeCLIAutoDiscoveryE2E` + `TestVolumeDataPlaneGuardE2E`) collapsed into one entry. Both cover the same conceptual area — guards on the volume CLI / data plane surface — so a single entry with two sub-tests is the right shape.
+
+### Shape
+
+```
+TestVolumeCLIGuardsE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeCLIGuardsCases(t, tgt s3Target)
+                                ├─ t.Run("CLIHintWhenNoEndpoint")
+                                └─ t.Run("DataPlaneVolumesPathHidden")
+```
+
+`CLIHintWhenNoEndpoint` is fixture-independent by design (asserts binary behavior, not server state); it runs under both branches for grep/inventory consistency. `DataPlaneVolumesPathHidden` reads `tgt.endpoint(0)` directly off the shared fixture.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
 ## [0.0.262.16] - 2026-05-19 - test(e2e): wrap remaining standalone E2Es in SingleNode/Cluster4Node sub-tests
 
 `TestVolumeCLIAutoDiscoveryE2E` and `TestVolumeDataPlaneGuardE2E` landed in v0.0.262.14 as standalone E2Es. Even though one is fixture-independent (CLI hint check before any server connection) and the other only needs an HTTP endpoint, **every e2e entry point in the suite must follow the dual SingleNode/Cluster4Node shape** for grep/inventory consistency. This PR brings the two stragglers into the pattern.
