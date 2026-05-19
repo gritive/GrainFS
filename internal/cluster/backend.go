@@ -127,6 +127,7 @@ type DistributedBackend struct {
 	ecConfigSnapshot atomic.Pointer[ECConfig]
 	runtimeSnapshot  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	multipartLocks   sync.Map                            // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
 	incidentRecorder IncidentRecorder                    // nil disables zero-ops incident recording
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
@@ -3661,6 +3662,10 @@ func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, 
 }
 
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
+	lifeMu := b.multipartLifecycleLock(uploadID)
+	lifeMu.RLock()
+	defer lifeMu.RUnlock()
+
 	// Verify upload exists (read local metadata)
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(b.ks().MultipartKey(uploadID))
@@ -3674,6 +3679,9 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	}
 
 	// Data write is local — no Raft needed for part data
+	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
+		return nil, fmt.Errorf("create part dir: %w", err)
+	}
 	partFile := b.partPath(uploadID, partNumber)
 	f, err := os.Create(partFile)
 	if err != nil {
@@ -3705,6 +3713,13 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 }
 
 func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	lifeMu := b.multipartLifecycleLock(uploadID)
+	lifeMu.Lock()
+	defer func() {
+		lifeMu.Unlock()
+		b.multipartLocks.Delete(uploadID)
+	}()
+
 	// Read upload metadata
 	var meta clusterMultipartMeta
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -3971,6 +3986,13 @@ func clusterMultipartSpoolDomain(uploadID, versionID string) string {
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	lifeMu := b.multipartLifecycleLock(uploadID)
+	lifeMu.Lock()
+	defer func() {
+		lifeMu.Unlock()
+		b.multipartLocks.Delete(uploadID)
+	}()
+
 	err := b.db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(b.ks().MultipartKey(uploadID))
 		if err == badger.ErrKeyNotFound {
@@ -3982,13 +4004,16 @@ func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, k
 		return err
 	}
 
-	os.RemoveAll(b.partDir(uploadID))
-
-	return b.propose(ctx, CmdAbortMultipart, AbortMultipartCmd{
+	if err := b.propose(ctx, CmdAbortMultipart, AbortMultipartCmd{
 		Bucket:   bucket,
 		Key:      key,
 		UploadID: uploadID,
-	})
+	}); err != nil {
+		return err
+	}
+
+	os.RemoveAll(b.partDir(uploadID))
+	return nil
 }
 
 // --- Versioning ---
@@ -4291,6 +4316,11 @@ func (b *DistributedBackend) partDir(uploadID string) string {
 
 func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 	return filepath.Join(b.partDir(uploadID), fmt.Sprintf("%05d", partNumber))
+}
+
+func (b *DistributedBackend) multipartLifecycleLock(uploadID string) *sync.RWMutex {
+	v, _ := b.multipartLocks.LoadOrStore(uploadID, &sync.RWMutex{})
+	return v.(*sync.RWMutex)
 }
 
 // Node returns the RaftNode interface for leadership and raft control.

@@ -24,6 +24,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +45,61 @@ func TestMultipartConcurrentDownloadE2E(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
 		runMultipartConcurrentDownloadCases(t, newSharedClusterS3Target(t))
 	})
+}
+
+func TestMultipartUploadPartRecreatesClusterPartDirE2E(t *testing.T) {
+	tgt := newSharedClusterS3Target(t)
+	client := tgt.pickNode(0)
+
+	probe := tgt.name + "-mp-put-dir-probe"
+	tgt.createBkt(t, probe)
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
+
+	bucket := tgt.uniqueBucket(t, "mp-put-dir")
+	key := "warp-mp-put.bin"
+
+	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String("application/octet-stream"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, initOut.UploadId)
+
+	removed := removeClusterMultipartUploadDirs(t, tgt, *initOut.UploadId)
+	require.NotEmpty(t, removed)
+
+	body := bytes.Repeat([]byte{'A'}, 1024)
+	part, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucket),
+		Key:        aws.String(key),
+		UploadId:   initOut.UploadId,
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader(body),
+	})
+	require.NoError(t, err)
+
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(key),
+		UploadId: initOut.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{{PartNumber: aws.Int32(1), ETag: part.ETag}},
+		},
+	})
+	require.NoError(t, err)
+
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+	got, err := io.ReadAll(out.Body)
+	_ = out.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }
 
 // Isolation: 10 MiB single PUT (no multipart) on cluster, full body GET +
@@ -254,4 +311,30 @@ func runMultipartConcurrentDownloadCases(t *testing.T, tgt s3Target) {
 	}
 	assert.Empty(t, errs, "concurrent multipart part GETs must not error under load")
 	assert.Equal(t, workers*iterationsPerGoro, okCount, "expected every worker iteration to succeed")
+}
+
+func removeClusterMultipartUploadDirs(t *testing.T, tgt s3Target, uploadID string) []string {
+	t.Helper()
+	require.NotNil(t, tgt.cluster)
+
+	matches := findClusterMultipartUploadDirs(t, tgt, uploadID)
+	var removed []string
+	for _, match := range matches {
+		require.NoError(t, os.RemoveAll(match))
+		removed = append(removed, match)
+	}
+	return removed
+}
+
+func findClusterMultipartUploadDirs(t *testing.T, tgt s3Target, uploadID string) []string {
+	t.Helper()
+	require.NotNil(t, tgt.cluster)
+
+	var matches []string
+	for _, dataDir := range tgt.cluster.dataDirs {
+		found, err := filepath.Glob(filepath.Join(dataDir, "groups", "*", "parts", uploadID))
+		require.NoError(t, err)
+		matches = append(matches, found...)
+	}
+	return matches
 }
