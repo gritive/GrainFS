@@ -79,9 +79,6 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 		// server.WithMaxRequestBodySize(512 MiB) — a larger single-shot PUT
 		// must go through Multipart, which is covered separately by
 		// TestMultipartChunkedUploadPartE2E. Skip in -short.
-		if testing.Short() {
-			t.Skip("256 MiB round-trip skipped in -short mode")
-		}
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "large256")
 		data := largeObjectRandomBytes(256 << 20)

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.262.5] - 2026-05-19 - test(e2e): drop residual testing.Short() skip blocks
+
+Follow-up to v0.0.262.3, which stripped 99 `skipIfShort(t, ...)` call sites but left four `if testing.Short() { t.Skip(...) }` blocks intact:
+
+- `tests/colimafixture/cluster_test.go::TestColimaClusterFixtureBoots`
+- `tests/e2e/large_object_test.go` (256 MiB round-trip case)
+- `tests/e2e/multiraft_sharding_test.go::TestE2E_TwoNodeAvailabilityTrap`
+- `tests/e2e/multiraft_sharding_test.go::TestE2E_DynamicGroupSeeding_1to5`
+
+All four removed. `go test -short` no longer skips any e2e or colima fixture test — classification work needs every test running so parity gaps surface.
+
+### Removed
+
+- 4 `if testing.Short() { t.Skip(...) }` blocks across `tests/`.
+
 ## [0.0.262.4] - 2026-05-19 - test(e2e): merge colima cluster_mount {9P,NBD,NFS4} onto shared fixture
 
 `tests/{9p,nbd,nfs4}_colima/cluster_mount_test.go` each booted its own 3-node colima cluster via per-package `sync.Once` + `clusterRef *colimafixture.Cluster` — three separate `go test` invocations, three cluster boots, three teardowns. The cluster_mount tests are bucket-isolated and the fixture supports `EnableP9 + EnableNBD + EnableNFS` simultaneously, so the three protocols can share a single boot.

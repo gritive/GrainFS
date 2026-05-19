@@ -16,10 +16,6 @@ import (
 //
 // Budget: <60s. Boot is ~10–20s; the test stops the cluster immediately.
 func TestColimaClusterFixtureBoots(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cluster boot is too slow for -short")
-	}
-
 	start := time.Now()
 	c := StartCluster(t, Options{
 		NumNodes:  3,
