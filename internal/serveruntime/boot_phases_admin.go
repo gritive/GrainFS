@@ -59,11 +59,12 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			WarnRatio:     cfg.VlogWarnRatio,
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
-		VolumePlacement: NewVolumePlacementAdapter(state.metaRaft),
-		IAM:             state.iamAdminAPI,
-		Buckets:         storage.NewOperations(state.backend),
-		NfsExports:      &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
-		Protocols:       storageProtocolStatusFromConfig(cfg),
+		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
+		IAM:                  state.iamAdminAPI,
+		BucketWithPolicyProp: state.iamProposer,
+		Buckets:              storage.NewOperations(state.backend),
+		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
+		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))

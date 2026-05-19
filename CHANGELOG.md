@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.266.0] - 2026-05-19 - feat(cluster): segment-backed large object chunking phase 2
+
+Cluster large-object chunking phase 2. Chunked PUT/GET now routes object metadata through the cluster raft path while segment payloads are stored and read through the segment store. The branch also hardens the single-node segment-backed storage compatibility paths that were exposed after rebasing onto `origin/master`.
+
+### Added
+
+- Cluster segment metadata FBS wiring for object metadata replication, including segment references and placement entries.
+- Segment store and cluster segment backend coverage for chunked object read/write paths.
+- E2E coverage for cluster chunked PUT roundtrip and fan-out breadth behavior.
+
+### Changed
+
+- Large-object GET in cluster mode now reads through the segment store instead of assuming a flat local object file.
+- Appendable/coalesced object handling avoids publishing metadata before the coalesced temp file is durable and ready.
+- Local singleton cluster reads now resolve to the local backend even when the only voter has a non-leader raft probe.
+- VFS rename uses backend copy support for segment-backed objects, avoiding the high-memory `PutObject` streaming path.
+- LocalBackend partial I/O compatibility now handles segment-backed objects for `WriteAt`, `Truncate`, `Sync`, and `OpenLocalReplica`.
+- Scrubber verification and tests now use segment-aware local replica opening and stored object ETags.
+- Append-object tests create setup buckets through the backend, matching the admin-UDS-only bucket lifecycle guard from `origin/master`.
+
+### Tests
+
+- `make test-unit`
+- `go test ./internal/cluster ./internal/storage ./internal/nfs4server ./internal/p9server ./internal/scrubber ./internal/server ./internal/vfs -count=1`
+- Focused regression coverage for cluster singleton reads, NFS truncate/commit, 9P overwrite/extend, VFS large-file rename memory bounds, scrubber missing/corrupt detection, and append-object streaming trailer handling.
+
 ## [0.0.265.0] - 2026-05-19 - cleanup(auth): §1-§3 잔재 fix — DEK boot wiring, SA→_grainfs deny, IPST snapshot trailer
 
 §1-§3 deferred 잔재 정리 cleanup 슬라이스. v0.0.263.0 (§2 IAM Core + §3 Bucket Lifecycle) 머지 후 review-forever Pass에서 발견된 boot-wiring 갭 2건과 snapshot 누락 1건을 정리. 새 기능 추가 없음 — 기존 §1-§3 구현의 wiring/coverage 완성.

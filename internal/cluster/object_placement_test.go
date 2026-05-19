@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,6 +71,85 @@ func TestSelectObjectPlacementGroup_Deterministic(t *testing.T) {
 	b, err := SelectObjectPlacementGroup("b", "same-key", groups, cfg)
 	require.NoError(t, err)
 	require.Equal(t, a.ID, b.ID)
+}
+
+func TestSelectSegmentPlacementGroup_FanOutAcrossPGs(t *testing.T) {
+	groups := []ShardGroupEntry{
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-4", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	blobID := uuid.Must(uuid.NewV7()).String()
+
+	seen := make(map[string]struct{})
+	for i := 0; i < 100; i++ {
+		got, err := SelectSegmentPlacementGroup("bucket", "key", i, blobID, groups, cfg)
+		require.NoError(t, err)
+		seen[got.ID] = struct{}{}
+	}
+	require.GreaterOrEqual(t, len(seen), 2, "segments should fan out across at least 2 PGs, saw %v", seen)
+}
+
+func TestSelectSegmentPlacementGroup_DifferentBlobIDsDifferentPGs(t *testing.T) {
+	groups := []ShardGroupEntry{
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-4", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+
+	// Probe many blobID pairs until we find one pair that lands on different
+	// PGs — proves blobID participates in the hash. Bounded loop so test
+	// stays deterministic and fast.
+	found := false
+	for i := 0; i < 64 && !found; i++ {
+		blobA := uuid.Must(uuid.NewV7()).String()
+		blobB := uuid.Must(uuid.NewV7()).String()
+		gotA, err := SelectSegmentPlacementGroup("bucket", "key", 0, blobA, groups, cfg)
+		require.NoError(t, err)
+		gotB, err := SelectSegmentPlacementGroup("bucket", "key", 0, blobB, groups, cfg)
+		require.NoError(t, err)
+		if gotA.ID != gotB.ID {
+			found = true
+		}
+	}
+	require.True(t, found, "blobID should influence placement: never observed different PGs across 64 blobID pairs")
+}
+
+func TestSelectSegmentPlacementGroup_FiltersGroup0(t *testing.T) {
+	groups := []ShardGroupEntry{
+		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	blobID := uuid.Must(uuid.NewV7()).String()
+	got, err := SelectSegmentPlacementGroup("b", "k", 0, blobID, groups, cfg)
+	require.NoError(t, err)
+	require.Equal(t, "group-1", got.ID)
+}
+
+func TestSelectSegmentPlacementGroup_FallsBackToGroup0(t *testing.T) {
+	groups := []ShardGroupEntry{
+		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	blobID := uuid.Must(uuid.NewV7()).String()
+	got, err := SelectSegmentPlacementGroup("b", "k", 0, blobID, groups, cfg)
+	require.NoError(t, err)
+	require.Equal(t, "group-0", got.ID)
+}
+
+func TestSelectSegmentPlacementGroup_NoCandidates(t *testing.T) {
+	groups := []ShardGroupEntry{
+		{ID: "group-1"},
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	blobID := uuid.Must(uuid.NewV7()).String()
+	_, err := SelectSegmentPlacementGroup("b", "k", 0, blobID, groups, cfg)
+	require.ErrorContains(t, err, "no EC-capable segment placement group")
 }
 
 func TestValidatePlacementGroupIDRejectsEmpty(t *testing.T) {

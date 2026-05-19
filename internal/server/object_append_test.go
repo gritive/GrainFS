@@ -54,17 +54,12 @@ func TestAppendObjectInvalidWriteOffsetResponse(t *testing.T) {
 }
 
 func TestAppendObjectReturnsFinalObjectSizeHeader(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
 	req.Header.Set(appendOffsetHeader, "0")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -81,18 +76,13 @@ func TestAppendObjectReturnsFinalObjectSizeHeader(t *testing.T) {
 
 func TestAppendObjectDecodesStreamingTrailerBody(t *testing.T) {
 	base, backend := setupTestServerWithBackend(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	mustCreateBucket(t, backend, "b")
 
 	body := "5;chunk-signature=abc\r\nhello\r\n0;chunk-signature=def\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n"
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/k", strings.NewReader(body))
 	req.Header.Set(appendOffsetHeader, "0")
 	req.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)

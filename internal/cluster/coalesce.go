@@ -176,9 +176,15 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 	if mErr != nil {
 		return fmt.Errorf("merge: %w", mErr)
 	}
-	// Cleanup intermediate file on every exit path; success path removes it
-	// once EC shards land + propose returns.
-	cleanupMerged := func() { _ = os.Remove(merged.Path) }
+	mergedPath := merged.Path
+	mergedCleaned := false
+	cleanupMerged := func() {
+		if mergedCleaned {
+			return
+		}
+		mergedCleaned = true
+		_ = os.Remove(mergedPath)
+	}
 
 	shardKey := job.Key + "/coalesced/" + coalescedID
 	liveNodes := b.ecWriteNodes()
@@ -209,6 +215,11 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		cleanupMerged()
 		return fmt.Errorf("ec write: %w", err)
 	}
+	// EC shards now contain the merged body while raw segments remain the
+	// metadata source of truth. Drop the owner-local intermediate before
+	// publishing CoalescedShardRef metadata so observers cannot see completed
+	// EC metadata while this temporary blob still exists.
+	cleanupMerged()
 
 	// Test-only fault hook: simulate a crash after EC shards land but before
 	// the FSM commit. The next worker iteration must re-coalesce and reach a
@@ -244,10 +255,9 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		cleanupMerged()
 		return fmt.Errorf("propose coalesce: %w", err)
 	}
-	// Source of truth is now the EC shards. Remove owner-local intermediate +
-	// raw segments. Best-effort cleanup; unlink failures leave orphans
+	// Source of truth is now the EC shards. Remove raw segments. Best-effort
+	// cleanup; unlink failures leave orphans
 	// (full sweep deferred — see TODOS.md).
-	cleanupMerged()
 	for _, s := range snapshot {
 		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
 	}

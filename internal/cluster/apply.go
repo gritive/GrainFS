@@ -266,6 +266,7 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 		UserMetadata:     c.UserMetadata,
 		SSEAlgorithm:     c.SSEAlgorithm,
 		Parts:            c.Parts,
+		Segments:         segmentMetaEntriesToRefs(c.Segments),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)

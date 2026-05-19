@@ -17,9 +17,13 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
+	"net/http"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -32,6 +36,18 @@ func TestLargeObjectE2E(t *testing.T) {
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
 		runLargeObjectCases(t, newSharedClusterS3Target(t))
+	})
+	t.Run("Cluster_64MiB_RoundTrip", func(t *testing.T) {
+		runLargeObjectRoundTrip(t, newSharedClusterS3Target(t), "large64", 64<<20)
+	})
+	t.Run("Cluster_FanoutBreadth", func(t *testing.T) {
+		runClusterFanoutBreadth(t, newSharedClusterS3Target(t))
+	})
+	t.Run("Cluster_LargeObjectReadAt_CrossSegment", func(t *testing.T) {
+		runLargeObjectRangeAcrossChunkBoundary(t, newSharedClusterS3Target(t))
+	})
+	t.Run("Cluster_AppendableStillWorks", func(t *testing.T) {
+		runLargeObjectClusterAppendable(t, newSharedClusterS3Target(t))
 	})
 }
 
@@ -59,7 +75,7 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 		require.NoError(t, err)
 		out.Body.Close()
 		require.Equal(t, len(data), len(got), "100 MiB length")
-		require.True(t, bytes.Equal(got, data), "100 MiB body must round-trip byte-identical")
+		requireByteEqual(t, data, got, "100 MiB body must round-trip byte-identical")
 
 		sum := md5.Sum(data)
 		wantETag := `"` + hex.EncodeToString(sum[:]) + `"`
@@ -94,40 +110,184 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 		require.NoError(t, err)
 		out.Body.Close()
 		require.Equal(t, len(data), len(got), "256 MiB length")
-		require.True(t, bytes.Equal(got, data), "256 MiB body must round-trip byte-identical")
+		requireByteEqual(t, data, got, "256 MiB body must round-trip byte-identical")
 	})
 
 	t.Run("RangeAcrossChunkBoundary", func(t *testing.T) {
-		// Phase 1.6.7 closed the single-node gap: PackedBackend now
-		// implements storage.PartialIO, so the wal/pullthrough wrappers
-		// can route ReadAt through to the segment-aware LocalBackend.
-		// Cluster path routes through ClusterCoordinator.ReadAt as before.
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "rangecross")
-		// 64 MiB = 4 segments × 16 MiB at DefaultChunkSize.
-		data := largeObjectRandomBytes(64 << 20)
-
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String("blob"),
-			Body:   bytes.NewReader(data),
-		})
-		require.NoError(t, err)
-
-		// Range that crosses the first 16 MiB chunk boundary.
-		from := int64((16 << 20) - 1024)
-		to := int64((16 << 20) + 1024)
-		out, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String("blob"),
-			Range:  aws.String("bytes=" + strconv.FormatInt(from, 10) + "-" + strconv.FormatInt(to, 10)),
-		})
-		require.NoError(t, err)
-		got, err := io.ReadAll(out.Body)
-		require.NoError(t, err)
-		out.Body.Close()
-		require.Equal(t, data[from:to+1], got, "range across boundary must match")
+		runLargeObjectRangeAcrossChunkBoundary(t, tgt)
 	})
+}
+
+func runLargeObjectRoundTrip(t *testing.T, tgt s3Target, bucketCase string, size int) {
+	t.Helper()
+	ctx := context.Background()
+	client := tgt.pickNode(0)
+	bucket := tgt.uniqueBucket(t, bucketCase)
+	data := largeObjectRandomBytes(size)
+
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("blob"),
+		Body:   bytes.NewReader(data),
+	})
+	require.NoError(t, err)
+
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("blob"),
+	})
+	require.NoError(t, err)
+	got, err := io.ReadAll(out.Body)
+	require.NoError(t, err)
+	out.Body.Close()
+	require.Equal(t, len(data), len(got), "%d-byte length", size)
+	requireByteEqual(t, data, got, "%d-byte body must round-trip byte-identical", size)
+
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("blob"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, aws.ToString(out.ETag), aws.ToString(head.ETag), "ETag must remain stable across GET and HEAD")
+
+	sum := md5.Sum(data)
+	wantETag := `"` + hex.EncodeToString(sum[:]) + `"`
+	require.Equal(t, wantETag, aws.ToString(out.ETag), "simple-PUT ETag = MD5(plaintext)")
+}
+
+func requireByteEqual(t *testing.T, want, got []byte, msgAndArgs ...any) {
+	t.Helper()
+	if bytes.Equal(got, want) {
+		return
+	}
+	limit := len(want)
+	if len(got) < limit {
+		limit = len(got)
+	}
+	for i := 0; i < limit; i++ {
+		if got[i] != want[i] {
+			windowEnd := i + 32
+			if windowEnd > limit {
+				windowEnd = limit
+			}
+			gotAt := bytes.Index(want, got[i:windowEnd])
+			wantAt := bytes.Index(got, want[i:windowEnd])
+			t.Fatalf(
+				"first mismatch at byte offset %d: got 0x%02x want 0x%02x; got window found in expected at %d; want window found in got at %d; got=%s want=%s",
+				i,
+				got[i],
+				want[i],
+				gotAt,
+				wantAt,
+				fmt.Sprintf("%x", got[i:windowEnd]),
+				fmt.Sprintf("%x", want[i:windowEnd]),
+			)
+			return
+		}
+	}
+	require.Equal(t, want, got, msgAndArgs...)
+}
+
+func runClusterFanoutBreadth(t *testing.T, tgt s3Target) {
+	t.Helper()
+	require.True(t, tgt.isCluster, "fan-out breadth case requires cluster fixture")
+	ctx := context.Background()
+	client := tgt.pickNode(0)
+	bucket := tgt.uniqueBucket(t, "fanoutbreadth")
+	data := largeObjectRandomBytes(128 << 20)
+
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("blob"),
+		Body:   bytes.NewReader(data),
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		var totalCount, totalSum float64
+		for i := 0; i < tgt.nodes; i++ {
+			count, sum, ok := chunkFanoutHistogram(t, tgt, i)
+			if ok {
+				totalCount += count
+				totalSum += sum
+			}
+		}
+		return totalCount >= 1 && totalSum >= 2
+	}, 10*time.Second, 200*time.Millisecond, "chunk fan-out breadth histogram was not observed")
+}
+
+func runLargeObjectRangeAcrossChunkBoundary(t *testing.T, tgt s3Target) {
+	t.Helper()
+	// Phase 1.6.7 closed the single-node gap: PackedBackend now
+	// implements storage.PartialIO, so the wal/pullthrough wrappers
+	// can route ReadAt through to the segment-aware LocalBackend.
+	// Cluster path routes through ClusterCoordinator.ReadAt as before.
+	ctx := context.Background()
+	client := tgt.pickNode(0)
+	bucket := tgt.uniqueBucket(t, "rangecross")
+	// 64 MiB = 4 segments x 16 MiB at DefaultChunkSize.
+	data := largeObjectRandomBytes(64 << 20)
+
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("blob"),
+		Body:   bytes.NewReader(data),
+	})
+	require.NoError(t, err)
+
+	// Range that crosses the first 16 MiB chunk boundary.
+	from := int64((16 << 20) - 1024)
+	to := int64((16 << 20) + 1024)
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("blob"),
+		Range:  aws.String("bytes=" + strconv.FormatInt(from, 10) + "-" + strconv.FormatInt(to, 10)),
+	})
+	require.NoError(t, err)
+	got, err := io.ReadAll(out.Body)
+	require.NoError(t, err)
+	out.Body.Close()
+	require.Equal(t, data[from:to+1], got, "range across boundary must match")
+}
+
+func runLargeObjectClusterAppendable(t *testing.T, tgt s3Target) {
+	t.Helper()
+	require.True(t, tgt.isCluster, "appendable case requires cluster fixture")
+	bucket := tgt.uniqueBucket(t, "appendable")
+	client := tgt.pickNode(0)
+	key := "appendable"
+	require.NoError(t, putAppend(client, bucket, key, 0, []byte("large-object-")))
+	require.NoError(t, putAppend(client, bucket, key, int64(len("large-object-")), []byte("append")))
+	require.Equal(t, []byte("large-object-append"), getObject(t, client, bucket, key))
+}
+
+func chunkFanoutHistogram(t *testing.T, tgt s3Target, nodeIdx int) (count, sum float64, ok bool) {
+	t.Helper()
+	resp, err := http.Get(tgt.endpoint(nodeIdx) + "/metrics")
+	if err != nil {
+		return 0, 0, false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	countLine := "grainfs_chunk_fanout_breadth_count"
+	sumLine := "grainfs_chunk_fanout_breadth_sum"
+	for _, line := range strings.Split(string(body), "\n") {
+		switch {
+		case strings.HasPrefix(line, countLine+" "):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, countLine)), 64); err == nil {
+				count = v
+			}
+		case strings.HasPrefix(line, sumLine+" "):
+			if v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, sumLine)), 64); err == nil {
+				sum = v
+			}
+		}
+	}
+	return count, sum, count > 0
 }
 
 // largeObjectRandomBytes returns n bytes of cryptographic random — used so the

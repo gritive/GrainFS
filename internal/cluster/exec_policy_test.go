@@ -52,6 +52,15 @@ func TestLocalExecution_ResolveRead_OnlyVoterReturnsLocalBackend(t *testing.T) {
 	require.Same(t, gb, got)
 }
 
+func TestLocalExecution_ResolveRead_RaftBackedOnlyVoterReturnsLocalBackend(t *testing.T) {
+	gb := newGroupBackendWithRaftForTest(&flippableRaftNode{leaderSeq: []bool{false}})
+	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{"g1": gb}}
+	e := NewLocalExecution(groups)
+	got, err := e.ResolveRead(context.Background(), RouteTarget{GroupID: "g1", SelfIsOnlyVoter: true, SelfIsVoter: true})
+	require.NoError(t, err)
+	require.Same(t, gb, got)
+}
+
 func TestLocalExecution_ResolveRead_NonVoterSignalsForward(t *testing.T) {
 	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{}}
 	e := NewLocalExecution(groups)

@@ -42,19 +42,15 @@ func (e *LocalExecution) ResolveRead(ctx context.Context, target RouteTarget) (*
 	if gb == nil {
 		return nil, nil
 	}
+	if target.SelfIsOnlyVoter {
+		return gb, nil
+	}
 	if gb.DistributedBackend == nil {
 		if target.CanReadLocal() {
 			probe := gb.testLeaderProbe
 			if probe == nil || probe.IsLeader() {
 				return gb, nil
 			}
-		}
-		return nil, nil
-	}
-	if target.SelfIsOnlyVoter {
-		probe := gb.leaderProbe()
-		if probe == nil || probe.IsLeader() {
-			return gb, nil
 		}
 		return nil, nil
 	}

@@ -41,6 +41,14 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"path", "stage"})
 
+	// ChunkFanoutBreadth measures how many distinct placement groups a
+	// successful chunked PUT touched.
+	ChunkFanoutBreadth = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "grainfs_chunk_fanout_breadth",
+		Help:    "Number of distinct placement groups touched by a chunked PUT.",
+		Buckets: []float64{1, 2, 3, 4, 6, 8, 12, 16},
+	})
+
 	// StorageBytesTotal tracks total bytes stored.
 	StorageBytesTotal = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_storage_bytes_total",

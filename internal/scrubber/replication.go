@@ -2,6 +2,7 @@ package scrubber
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -117,7 +118,7 @@ func (v *ReplicationVerifier) Verify(ctx context.Context, b Block) (BlockStatus,
 	}
 	rc, err := v.open(b.Bucket, b.Key)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return BlockStatus{Missing: true, Detail: "local file missing"}, nil
 		}
 		return BlockStatus{}, fmt.Errorf("open local: %w", err)

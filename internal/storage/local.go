@@ -99,12 +99,16 @@ func encryptedObjectFileDomain(bucket, key string) string {
 // returns os.ErrNotExist when the file is missing — the contract scrubber
 // verifiers rely on.
 func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj.Segments != nil {
+		rc, _, err := b.GetObject(context.Background(), bucket, key)
+		return rc, err
+	}
 	objPath := b.objectPath(bucket, key)
 	if b.encryptor != nil {
-		obj, err := b.HeadObject(context.Background(), bucket, key)
-		if err != nil {
-			return nil, err
-		}
 		return openEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
 	}
 	return os.Open(objPath)
@@ -458,14 +462,39 @@ func (b *LocalBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, erro
 
 // Truncate implements storage.Truncatable.
 func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
-	_ = ctx
+	obj, err := b.HeadObject(ctx, bucket, key)
+	if err == nil && obj.Segments != nil {
+		_, err = b.rewriteSegmentedObject(ctx, bucket, key, obj, func(w io.Writer) error {
+			rc, _, err := b.GetObject(ctx, bucket, key)
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+			if size <= obj.Size {
+				_, err = io.CopyN(w, rc, size)
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				return err
+			}
+			if _, err := io.Copy(w, rc); err != nil {
+				return err
+			}
+			return writeZeros(w, size-obj.Size)
+		})
+		return err
+	}
+	if err != nil {
+		if !errors.Is(err, ErrObjectNotFound) {
+			return err
+		}
+		if b.encryptor != nil {
+			return err
+		}
+	}
 	objPath := b.objectPath(bucket, key)
 	var currentSize int64
 	if b.encryptor != nil {
-		obj, err := b.HeadObject(context.Background(), bucket, key)
-		if err != nil {
-			return err
-		}
 		currentSize = obj.Size
 		if _, err := truncateEncryptedObjectFile(objPath, b.encryptor, encryptedObjectFileDomain(bucket, key), currentSize, size); err != nil {
 			return fmt.Errorf("truncate encrypted object: %w", err)
@@ -506,11 +535,18 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 // semantics by rewriting the encrypted object, so callers should check PreferWriteAt
 // before using this as a hot-path optimization.
 func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error) {
-	_ = ctx
 	var tStart, tStage time.Time
 	if localTraceEnabled {
 		tStart = time.Now()
 		tStage = tStart
+	}
+
+	existing, existingErr := b.HeadObject(ctx, bucket, key)
+	if existingErr == nil && existing.Segments != nil {
+		return b.writeAtSegmentedObject(ctx, bucket, key, existing, offset, data)
+	}
+	if existingErr != nil && !errors.Is(existingErr, ErrObjectNotFound) {
+		return nil, existingErr
 	}
 
 	objPath := b.objectPath(bucket, key)
@@ -640,6 +676,108 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	return obj, nil
 }
 
+func (b *LocalBackend) writeAtSegmentedObject(ctx context.Context, bucket, key string, obj *Object, offset uint64, data []byte) (*Object, error) {
+	return b.rewriteSegmentedObject(ctx, bucket, key, obj, func(w io.Writer) error {
+		rc, _, err := b.GetObject(ctx, bucket, key)
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+
+		writeOffset := int64(offset)
+		prefix := writeOffset
+		if prefix > obj.Size {
+			prefix = obj.Size
+		}
+		if prefix > 0 {
+			if _, err := io.CopyN(w, rc, prefix); err != nil {
+				return err
+			}
+		}
+		if writeOffset > obj.Size {
+			if err := writeZeros(w, writeOffset-obj.Size); err != nil {
+				return err
+			}
+		}
+		if _, err := w.Write(data); err != nil {
+			return err
+		}
+		if writeOffset < obj.Size {
+			skip := int64(len(data))
+			remaining := obj.Size - writeOffset
+			if skip > remaining {
+				skip = remaining
+			}
+			if skip > 0 {
+				if _, err := io.CopyN(io.Discard, rc, skip); err != nil {
+					return err
+				}
+			}
+			if _, err := io.Copy(w, rc); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (b *LocalBackend) rewriteSegmentedObject(ctx context.Context, bucket, key string, obj *Object, write func(io.Writer) error) (*Object, error) {
+	if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
+		return nil, fmt.Errorf("create bucket dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(b.bucketDir(bucket), ".rewrite-*")
+	if err != nil {
+		return nil, fmt.Errorf("create rewrite temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	defer tmp.Close()
+
+	if err := write(tmp); err != nil {
+		return nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek rewrite temp: %w", err)
+	}
+	acl := obj.ACL
+	next, err := b.PutObjectWithRequest(ctx, PutObjectRequest{
+		Bucket:         bucket,
+		Key:            key,
+		Body:           tmp,
+		ContentType:    obj.ContentType,
+		UserMetadata:   obj.UserMetadata,
+		SystemMetadata: ObjectSystemMetadata{SSEAlgorithm: obj.SSEAlgorithm},
+		ACL:            &acl,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(obj.Tags) > 0 {
+		tags := make([]Tag, len(obj.Tags))
+		copy(tags, obj.Tags)
+		next.Tags = tags
+		if err := b.PutObjectRecord(ctx, bucket, key, next); err != nil {
+			return nil, err
+		}
+	}
+	return next, nil
+}
+
+func writeZeros(w io.Writer, n int64) error {
+	var zeros [32 * 1024]byte
+	for n > 0 {
+		chunk := int64(len(zeros))
+		if n < chunk {
+			chunk = n
+		}
+		if _, err := w.Write(zeros[:chunk]); err != nil {
+			return err
+		}
+		n -= chunk
+	}
+	return nil
+}
+
 // ReadAt reads up to len(buf) bytes from the object at the given offset.
 //
 // Segment-backed objects (every object produced by PutObject since Task 1.6)
@@ -764,8 +902,24 @@ func (b *LocalBackend) PreferWriteAt(bucket string) bool {
 
 // Sync implements storage.Syncable.
 func (b *LocalBackend) Sync(bucket, key string) error {
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj.Segments != nil {
+		for _, seg := range obj.Segments {
+			if err := syncFile(b.segmentPath(bucket, key, seg.BlobID)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	objPath := b.objectPath(bucket, key)
-	f, err := os.OpenFile(objPath, os.O_RDWR, 0o644)
+	return syncFile(objPath)
+}
+
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("sync open: %w", err)
 	}
@@ -943,6 +1097,37 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 	}
 	defer rc.Close()
 
+	if b.encryptor == nil && obj.Segments != nil {
+		if err := b.HeadBucket(ctx, dstBucket); err != nil {
+			return nil, err
+		}
+		segs := make([]SegmentRef, len(obj.Segments))
+		for i, seg := range obj.Segments {
+			segs[i] = cloneSegmentRef(seg)
+			srcPath := b.segmentPath(srcBucket, srcKey, seg.BlobID)
+			dstPath := b.segmentPath(dstBucket, dstKey, seg.BlobID)
+			if err := copyFile(dstPath, srcPath); err != nil {
+				os.RemoveAll(b.objectPath(dstBucket, dstKey) + "_segments")
+				return nil, err
+			}
+		}
+		copied := *obj
+		copied.Key = dstKey
+		copied.LastModified = time.Now().Unix()
+		copied.UserMetadata = cloneStringMap(obj.UserMetadata)
+		copied.Segments = segs
+		copied.Coalesced = nil
+		if len(obj.Tags) > 0 {
+			copied.Tags = make([]Tag, len(obj.Tags))
+			copy(copied.Tags, obj.Tags)
+		}
+		if err := b.PutObjectRecord(ctx, dstBucket, dstKey, &copied); err != nil {
+			os.RemoveAll(b.objectPath(dstBucket, dstKey) + "_segments")
+			return nil, err
+		}
+		return &copied, nil
+	}
+
 	return b.PutObjectWithRequest(ctx, PutObjectRequest{
 		Bucket:         dstBucket,
 		Key:            dstKey,
@@ -951,6 +1136,42 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 		UserMetadata:   obj.UserMetadata,
 		SystemMetadata: ObjectSystemMetadata{SSEAlgorithm: obj.SSEAlgorithm},
 	})
+}
+
+func cloneSegmentRef(seg SegmentRef) SegmentRef {
+	out := seg
+	if len(seg.Checksum) > 0 {
+		out.Checksum = append([]byte(nil), seg.Checksum...)
+	}
+	if len(seg.NodeIDs) > 0 {
+		out.NodeIDs = append([]string(nil), seg.NodeIDs...)
+	}
+	return out
+}
+
+func copyFile(dstPath, srcPath string) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.CopyBuffer(dst, src, make([]byte, 64*1024)); err != nil {
+		dst.Close()
+		os.Remove(dstPath)
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		os.Remove(dstPath)
+		return err
+	}
+	return nil
 }
 
 func (b *LocalBackend) policyKey(bucket string) []byte {
