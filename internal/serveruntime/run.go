@@ -148,6 +148,16 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootSnapshotAndApplyLoop(state); err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
+	// §5 T44: reconcile the trusted-proxy.cidr atomic snapshot once after raft
+	// start. Snapshot Restore (meta_fsm.go:3233) does NOT fire reload hooks,
+	// so if the node booted from a restored snapshot the atomic-snapshot view
+	// used by the iam.anon-enabled reload hook is still "" until this seeds it.
+	// Done here (right after apply-loop start) rather than later so the
+	// hook is correct from the first apply.
+	if state.refreshProxyCIDR != nil && state.cfgStore != nil {
+		v, _ := state.cfgStore.GetString("trusted-proxy.cidr")
+		state.refreshProxyCIDR(v)
+	}
 
 	// PR-final: services + shutdown.
 	if err := bootBalancerAndGossip(ctx, state); err != nil {

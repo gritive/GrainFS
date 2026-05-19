@@ -119,7 +119,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	// The hook fires under the store's write lock, so it MUST NOT re-query
 	// cfgStore — trusted-proxy.cidr is tracked in an atomic snapshot kept
 	// fresh by a sibling OnTrustedProxyCIDR hook.
-	onAnon, onProxy, refreshProxy := wireTLSPostureHooks(state.cfg.DataDir, "")
+	onAnon, onProxy, refreshProxy := wireTLSPostureHooks("")
 	hooks.OnAnonEnabledChange = onAnon
 	hooks.OnTrustedProxyCIDR = onProxy
 	state.refreshProxyCIDR = refreshProxy

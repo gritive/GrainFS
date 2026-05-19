@@ -104,24 +104,25 @@ func TestTLSPosture_AllowsTrustedProxy(t *testing.T) {
 // TestTLSPosture_ReloadHookRollsBackOnUnsafeFlip — the iam.anon-enabled reload
 // hook returns the posture error, and config.Store.Set rolls back the value.
 // This is the runtime-safety leg: an operator cannot `grainfs config set
-// iam.anon-enabled false` into an unsafe posture.
+// iam.anon-enabled false` into an unsafe posture (no trusted proxy).
 //
-// NOTE: the hook fires under the store's write lock, so it MUST NOT re-query
+// The hook is INTENTIONALLY cert-independent — see the "Determinism split"
+// note in tls_posture.go. Per-node cert state cannot drive a cluster-replicated
+// config decision without risking split-brain. Cert presence is checked only
+// at boot (TestTLSPosture_RefusesAuthRequiredWithoutCertOrProxy).
+//
+// The hook also fires under the store's write lock, so it MUST NOT re-query
 // the store (would self-deadlock on RLock). This test exercises that path —
 // it would deadlock if wireTLSPostureHooks regressed to reading from cfgStore.
 func TestTLSPosture_ReloadHookRollsBackOnUnsafeFlip(t *testing.T) {
-	t.Setenv("GRAINFS_TLS_CERT", "")
-	t.Setenv("GRAINFS_TLS_KEY", "")
-	dataDir := t.TempDir()
-
 	cfgStore := config.NewStore()
-	onAnon, onProxy, _ := wireTLSPostureHooks(dataDir, "")
+	onAnon, onProxy, _ := wireTLSPostureHooks("")
 	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
 		OnAnonEnabledChange: onAnon,
 		OnTrustedProxyCIDR:  onProxy,
 	})
 
-	// Flip anon off — no cert, no proxy → hook errors, Set rolls back.
+	// Flip anon off — no proxy → hook errors, Set rolls back.
 	err := cfgStore.Set(context.Background(), "iam.anon-enabled", "false")
 	if err == nil {
 		t.Fatalf("expected Set to fail due to unsafe posture, got nil")
@@ -144,12 +145,8 @@ func TestTLSPosture_ReloadHookRollsBackOnUnsafeFlip(t *testing.T) {
 // then flipping anon off must succeed (the OnTrustedProxyCIDR hook updates the
 // atomic snapshot so the anon-change hook observes the new posture).
 func TestTLSPosture_ReloadHookAcceptsAfterProxySet(t *testing.T) {
-	t.Setenv("GRAINFS_TLS_CERT", "")
-	t.Setenv("GRAINFS_TLS_KEY", "")
-	dataDir := t.TempDir()
-
 	cfgStore := config.NewStore()
-	onAnon, onProxy, _ := wireTLSPostureHooks(dataDir, "")
+	onAnon, onProxy, _ := wireTLSPostureHooks("")
 	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
 		OnAnonEnabledChange: onAnon,
 		OnTrustedProxyCIDR:  onProxy,
