@@ -41,26 +41,6 @@ func (m *MetaProposer) ProposeKeyRevoke(ctx context.Context, accessKey string) e
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMKeyRevoke, buildKeyRevokePayload(accessKey))
 }
 
-func (m *MetaProposer) ProposeGrantPut(ctx context.Context, g Grant) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantPut, buildGrantPutPayload(g))
-}
-
-func (m *MetaProposer) ProposeGrantDelete(ctx context.Context, saID, bucket string) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantDelete, buildGrantDeletePayload(saID, bucket))
-}
-
-func (m *MetaProposer) ProposeGrantWildcardPut(ctx context.Context, g Grant) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantWildcardPut, buildGrantWildcardPutPayload(g))
-}
-
-func (m *MetaProposer) ProposeGrantWildcardDelete(ctx context.Context, saID string) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMGrantWildcardDelete, buildGrantWildcardDeletePayload(saID))
-}
-
-func (m *MetaProposer) ProposeInitFirstSA(ctx context.Context, sa ServiceAccount, k AccessKey, g Grant) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMInitFirstSA, buildInitFirstSAPayload(sa, k, g))
-}
-
 func (m *MetaProposer) ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamPut, buildBucketUpstreamPutPayload(u))
 }
