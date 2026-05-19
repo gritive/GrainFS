@@ -248,6 +248,34 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	assert.Empty(t, deps.deleteCalls)
 }
 
+func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
+	chunk := storage.DefaultChunkSize
+	payload := bytes.Repeat([]byte("P"), chunk+1)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: int64(chunk), ETag: "etag-1"},
+		{PartNumber: 2, Size: 1, ETag: "etag-2"},
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
+		"bucket", "large-mp.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, parts)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	require.Equal(t, parts, obj.Parts)
+
+	require.Len(t, deps.proposeCalls, 1)
+	cmd := deps.proposeCalls[0].cmd
+	require.Len(t, cmd.Segments, 2)
+	require.Equal(t, parts, cmd.Parts)
+}
+
 func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
 	chunk := storage.DefaultChunkSize
 	payload := bytes.Repeat([]byte("M"), 4*chunk) // exactly 4 segments
@@ -417,7 +445,7 @@ func TestPutObjectChunked_RejectsMultipartParts(t *testing.T) {
 		0, false, "", nil,
 		[]storage.MultipartPartEntry{{PartNumber: 1, Size: 1, ETag: "e"}}, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multipart parts: deferred to Phase 3")
+	assert.Contains(t, err.Error(), "multipart parts: deferred to zero-spool Complete path")
 }
 
 func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {

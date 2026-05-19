@@ -188,7 +188,7 @@ func (b *DistributedBackend) putObjectChunked(
 	tags []storage.Tag,
 ) (*storage.Object, error) {
 	if parts != nil {
-		return nil, fmt.Errorf("chunked PUT with multipart parts: deferred to Phase 3")
+		return nil, fmt.Errorf("chunked PUT with multipart parts: deferred to zero-spool Complete path")
 	}
 
 	// Pre-allocate blobIDs + placements sized to exact segment count.
@@ -237,6 +237,23 @@ func runChunkedPut(
 	beforeCommit func() error,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
+	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, nil)
+}
+
+func runChunkedPutWithParts(
+	ctx context.Context,
+	csb *clusterSegmentBackend,
+	body io.Reader,
+	bucket, key, versionID, contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	parts []storage.MultipartPartEntry,
+) (*storage.Object, error) {
 
 	// Best-effort blob cleanup on any error path before raft commit.
 	// SegmentWriter.Write joins all workers before returning, so by the time
@@ -266,6 +283,8 @@ func runChunkedPut(
 	obj.UserMetadata = userMetadata
 	obj.SSEAlgorithm = sseAlgorithm
 	obj.IsAppendable = false
+	partsMeta := cloneMultipartPartEntries(parts)
+	obj.Parts = partsMeta
 
 	// 4. beforeCommit hook before raft commit.
 	if beforeCommit != nil {
@@ -293,6 +312,7 @@ func runChunkedPut(
 		SSEAlgorithm:     sseAlgorithm,
 		ExpectedETag:     expectedETag,
 		IsDeleteMarker:   false,
+		Parts:            partsMeta,
 		NodeIDs:          csb.placements[0].NodeIDs,
 		ECData:           uint8(csb.placements[0].Config.DataShards),
 		ECParity:         uint8(csb.placements[0].Config.ParityShards),
@@ -340,6 +360,15 @@ func countDistinctPlacementGroups(placements []segmentPlacement) int {
 		seen[p.PlacementGroupID] = struct{}{}
 	}
 	return len(seen)
+}
+
+func cloneMultipartPartEntries(parts []storage.MultipartPartEntry) []storage.MultipartPartEntry {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]storage.MultipartPartEntry, len(parts))
+	copy(out, parts)
+	return out
 }
 
 // buildSegmentMetaEntries joins post-write placement metadata with the
