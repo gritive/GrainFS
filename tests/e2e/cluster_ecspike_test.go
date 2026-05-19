@@ -131,73 +131,75 @@ func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.
 // and returns identical bytes after reconstruction, plus measure client-side
 // p95 latency for 16MB PUT to drive the go/no-go decision.
 func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
+	t.Run("Cluster3Node", func(t *testing.T) {
 
-	nodes, cleanup := startEcspikeCluster(t)
-	defer cleanup()
+		nodes, cleanup := startEcspikeCluster(t)
+		defer cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
 
-	// Prepare config using the package's S3 helper for each node.
-	endpoints := make([]string, len(nodes))
-	for i, n := range nodes {
-		endpoints[i] = n.endpoint
-	}
-	clients := make(map[string]*s3.Client, len(endpoints))
-	for _, n := range nodes {
-		clients[n.endpoint] = s3ClientFor(n.endpoint, n.ak, n.sk)
-	}
-	cfg := &ecspike.Config{
-		Nodes:   endpoints,
-		DataK:   4,
-		ParityM: 2,
-		Bucket:  "ecspike",
-		S3Client: func(ep string) *s3.Client {
-			return clients[ep]
-		},
-	}
-
-	requireECSpikeBucketsReady(t, ctx, cfg, clients)
-
-	// Correctness: 10 × 16MB random objects, record SHA256.
-	const objCount = 10
-	const objSize = 16 * 1024 * 1024
-	originals := make(map[string][32]byte, objCount)
-
-	t.Logf("ecspike: writing %d × %d-byte objects", objCount, objSize)
-	for i := 0; i < objCount; i++ {
-		data := make([]byte, objSize)
-		_, err := rand.Read(data)
-		require.NoError(t, err, "rand data")
-		key := fmt.Sprintf("obj-%02d", i)
-		require.NoErrorf(t, ecspike.Put(ctx, cfg, key, data), "Put %s", key)
-		originals[key] = sha256.Sum256(data)
-	}
-
-	// Kill node 0 and give the process a moment to release the port.
-	t.Logf("ecspike: killing node 0 at %s", nodes[0].endpoint)
-	nodes[0].kill()
-	time.Sleep(500 * time.Millisecond)
-
-	// Reconstruct every object and verify SHA256.
-	for key, wantSum := range originals {
-		got, err := ecspike.Get(ctx, cfg, key)
-		if !assert.NoErrorf(t, err, "Get %s after node kill", key) {
-			continue
+		// Prepare config using the package's S3 helper for each node.
+		endpoints := make([]string, len(nodes))
+		for i, n := range nodes {
+			endpoints[i] = n.endpoint
 		}
-		gotSum := sha256.Sum256(got)
-		assert.Equalf(t, wantSum, gotSum, "Get %s: sha256 mismatch (len=%d)", key, len(got))
-	}
+		clients := make(map[string]*s3.Client, len(endpoints))
+		for _, n := range nodes {
+			clients[n.endpoint] = s3ClientFor(n.endpoint, n.ak, n.sk)
+		}
+		cfg := &ecspike.Config{
+			Nodes:   endpoints,
+			DataK:   4,
+			ParityM: 2,
+			Bucket:  "ecspike",
+			S3Client: func(ep string) *s3.Client {
+				return clients[ep]
+			},
+		}
 
-	if t.Failed() {
-		return
-	}
-	t.Logf("ecspike: correctness PASS (%d/%d objects reconstructed)", objCount, objCount)
+		requireECSpikeBucketsReady(t, ctx, cfg, clients)
 
-	// Latency measurement: 100 × 16MB PUT on a fresh cluster so node 0 is alive.
-	// Reuse current cluster sans node 0 → skip this block; instead spawn a fresh
-	// cluster for honest baseline.
-	measureECSpikeP95(t)
+		// Correctness: 10 × 16MB random objects, record SHA256.
+		const objCount = 10
+		const objSize = 16 * 1024 * 1024
+		originals := make(map[string][32]byte, objCount)
+
+		t.Logf("ecspike: writing %d × %d-byte objects", objCount, objSize)
+		for i := 0; i < objCount; i++ {
+			data := make([]byte, objSize)
+			_, err := rand.Read(data)
+			require.NoError(t, err, "rand data")
+			key := fmt.Sprintf("obj-%02d", i)
+			require.NoErrorf(t, ecspike.Put(ctx, cfg, key, data), "Put %s", key)
+			originals[key] = sha256.Sum256(data)
+		}
+
+		// Kill node 0 and give the process a moment to release the port.
+		t.Logf("ecspike: killing node 0 at %s", nodes[0].endpoint)
+		nodes[0].kill()
+		time.Sleep(500 * time.Millisecond)
+
+		// Reconstruct every object and verify SHA256.
+		for key, wantSum := range originals {
+			got, err := ecspike.Get(ctx, cfg, key)
+			if !assert.NoErrorf(t, err, "Get %s after node kill", key) {
+				continue
+			}
+			gotSum := sha256.Sum256(got)
+			assert.Equalf(t, wantSum, gotSum, "Get %s: sha256 mismatch (len=%d)", key, len(got))
+		}
+
+		if t.Failed() {
+			return
+		}
+		t.Logf("ecspike: correctness PASS (%d/%d objects reconstructed)", objCount, objCount)
+
+		// Latency measurement: 100 × 16MB PUT on a fresh cluster so node 0 is alive.
+		// Reuse current cluster sans node 0 → skip this block; instead spawn a fresh
+		// cluster for honest baseline.
+		measureECSpikeP95(t)
+	})
 }
 
 // measureECSpikeP95 spawns a fresh 6-node cluster, does 100 × 16MB PUTs, and

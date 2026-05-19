@@ -21,56 +21,58 @@ import (
 // router-registration bug fixed in v0.0.43.3 (PR #170). This test catches that
 // class of regression by checking holders on disk, not metadata.
 func TestNBDMultiNodeByteLevelReplicationE2E(t *testing.T) {
+	t.Run("Cluster3Node", func(t *testing.T) {
 
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeStaticPeers,
-		DisableNFS: true,
-	})
+		c := startE2ECluster(t, e2eClusterOptions{
+			Nodes:      3,
+			Mode:       ClusterModeStaticPeers,
+			DisableNFS: true,
+		})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	c.GrantAdminOnBuckets("__grainfs_volumes")
-	require.Eventually(t, func() bool {
-		err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
-		return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
-	}, 30*time.Second, 500*time.Millisecond, "__grainfs_volumes bucket grant did not become writable")
-	ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		c.GrantAdminOnBuckets("__grainfs_volumes")
+		require.Eventually(t, func() bool {
+			err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
+			return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
+		}, 30*time.Second, 500*time.Millisecond, "__grainfs_volumes bucket grant did not become writable")
+		ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
 
-	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
-	defer client.Close()
+		client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")
+		defer client.Close()
 
-	body := []byte("nbd-byte-level-replication-payload")
-	client.WriteAt(t, 0, body)
-	client.Flush(t)
-	requireNBDReadEventually(t, client, 0, body)
+		body := []byte("nbd-byte-level-replication-payload")
+		client.WriteAt(t, 0, body)
+		client.Flush(t)
+		requireNBDReadEventually(t, client, 0, body)
 
-	// Poll up to 10s for replication fan-out. FLUSH commits the write-back
-	// mutation, but peer fan-out can still settle asynchronously.
-	var (
-		holders     int
-		perNodeHits []int
-	)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		holders = 0
-		perNodeHits = make([]int, len(c.dataDirs))
-		for i, dd := range c.dataDirs {
-			var hits []string
-			_ = filepathWalkBlock(dd, "default", 0, &hits)
-			perNodeHits[i] = len(hits)
-			if len(hits) > 0 {
-				holders++
+		// Poll up to 10s for replication fan-out. FLUSH commits the write-back
+		// mutation, but peer fan-out can still settle asynchronously.
+		var (
+			holders     int
+			perNodeHits []int
+		)
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			holders = 0
+			perNodeHits = make([]int, len(c.dataDirs))
+			for i, dd := range c.dataDirs {
+				var hits []string
+				_ = filepathWalkBlock(dd, "default", 0, &hits)
+				perNodeHits[i] = len(hits)
+				if len(hits) > 0 {
+					holders++
+				}
 			}
+			if holders >= 2 {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		if holders >= 2 {
-			break
+		for i, n := range perNodeHits {
+			t.Logf("node %d: %d block hit(s)", i, n)
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	for i, n := range perNodeHits {
-		t.Logf("node %d: %d block hit(s)", i, n)
-	}
-	require.GreaterOrEqual(t, holders, 2,
-		"need ≥2 holders on disk for byte-level NBD replication; got %d (replication broken?)", holders)
+		require.GreaterOrEqual(t, holders, 2,
+			"need ≥2 holders on disk for byte-level NBD replication; got %d (replication broken?)", holders)
+	})
 }

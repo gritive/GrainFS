@@ -89,56 +89,58 @@ var (
 // 사이 cleanup이 즉시 풀리지 않아 5 procs × N raft groups 부팅이 누적되며 flake.
 // 한 함수 안에서 명시적 cleanup loop으로 시나리오를 직렬화한다.
 func TestClusterPerfAllE2E(t *testing.T) {
-	if os.Getenv("GRAINFS_PERF") != "1" {
-	}
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-	}
-
-	outRoot := os.Getenv("GRAINFS_PERF_DIR")
-	if outRoot == "" {
-		outRoot = filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-perf-%d", time.Now().Unix()))
-	}
-	require.NoError(t, os.MkdirAll(outRoot, 0o755))
-	t.Logf("perf output dir: %s", outRoot)
-
-	scenarios := []perfScenario{
-		{name: "idle-N8", n: 8, withLoad: false},
-		{name: "idle-N16", n: 16, withLoad: false}, // C2 P0a — scaling curve
-		{name: "idle-N64", n: 64, withLoad: false},
-		{name: "load-N8", n: 8, withLoad: true},
-		{name: "load-N16", n: 16, withLoad: true}, // C2 P0a — scaling curve
-		{name: "load-N32", n: 32, withLoad: true}, // C2 P0a — premise validation gate
-		{name: "load-N64", n: 64, withLoad: true},
-	}
-	// GRAINFS_PERF_SCENARIO=idle-N8,load-N8 형태로 필터.
-	if filter := os.Getenv("GRAINFS_PERF_SCENARIO"); filter != "" {
-		want := map[string]bool{}
-		for _, name := range strings.Split(filter, ",") {
-			want[strings.TrimSpace(name)] = true
+	t.Run("Cluster3Node", func(t *testing.T) {
+		if os.Getenv("GRAINFS_PERF") != "1" {
 		}
-		filtered := scenarios[:0]
-		for _, sc := range scenarios {
-			if want[sc.name] {
-				filtered = append(filtered, sc)
+		binary := getBinary()
+		if _, err := os.Stat(binary); err != nil {
+		}
+
+		outRoot := os.Getenv("GRAINFS_PERF_DIR")
+		if outRoot == "" {
+			outRoot = filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-perf-%d", time.Now().Unix()))
+		}
+		require.NoError(t, os.MkdirAll(outRoot, 0o755))
+		t.Logf("perf output dir: %s", outRoot)
+
+		scenarios := []perfScenario{
+			{name: "idle-N8", n: 8, withLoad: false},
+			{name: "idle-N16", n: 16, withLoad: false}, // C2 P0a — scaling curve
+			{name: "idle-N64", n: 64, withLoad: false},
+			{name: "load-N8", n: 8, withLoad: true},
+			{name: "load-N16", n: 16, withLoad: true}, // C2 P0a — scaling curve
+			{name: "load-N32", n: 32, withLoad: true}, // C2 P0a — premise validation gate
+			{name: "load-N64", n: 64, withLoad: true},
+		}
+		// GRAINFS_PERF_SCENARIO=idle-N8,load-N8 형태로 필터.
+		if filter := os.Getenv("GRAINFS_PERF_SCENARIO"); filter != "" {
+			want := map[string]bool{}
+			for _, name := range strings.Split(filter, ",") {
+				want[strings.TrimSpace(name)] = true
 			}
+			filtered := scenarios[:0]
+			for _, sc := range scenarios {
+				if want[sc.name] {
+					filtered = append(filtered, sc)
+				}
+			}
+			scenarios = filtered
+			require.NotEmpty(t, scenarios, "GRAINFS_PERF_SCENARIO=%q matched no scenarios", filter)
 		}
-		scenarios = filtered
-		require.NotEmpty(t, scenarios, "GRAINFS_PERF_SCENARIO=%q matched no scenarios", filter)
-	}
 
-	results := make([]*perfResult, 0, len(scenarios))
-	for _, sc := range scenarios {
-		t.Logf("===== %s (n=%d, withLoad=%v) =====", sc.name, sc.n, sc.withLoad)
-		r := runPerfScenario(t, sc, outRoot)
-		results = append(results, r)
-		t.Logf("[%s] boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d puts=%d gets=%d",
-			sc.name, r.bootSec, r.cluster.rssMB, r.cluster.heapMB, r.cluster.cpuPct, r.cluster.goroutines,
-			r.workload.puts, r.workload.gets)
-	}
+		results := make([]*perfResult, 0, len(scenarios))
+		for _, sc := range scenarios {
+			t.Logf("===== %s (n=%d, withLoad=%v) =====", sc.name, sc.n, sc.withLoad)
+			r := runPerfScenario(t, sc, outRoot)
+			results = append(results, r)
+			t.Logf("[%s] boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d puts=%d gets=%d",
+				sc.name, r.bootSec, r.cluster.rssMB, r.cluster.heapMB, r.cluster.cpuPct, r.cluster.goroutines,
+				r.workload.puts, r.workload.gets)
+		}
 
-	require.NoError(t, writePerfReport(outRoot, results))
-	t.Logf("final report: %s/cluster-profile.md", outRoot)
+		require.NoError(t, writePerfReport(outRoot, results))
+		t.Logf("final report: %s/cluster-profile.md", outRoot)
+	})
 }
 
 // runPerfScenario 는 한 시나리오를 처음부터 끝까지 실행하고 cleanup까지 수행.

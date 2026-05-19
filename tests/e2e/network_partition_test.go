@@ -151,5 +151,7 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 }
 
 func TestNetworkPartitionSuite(t *testing.T) {
-	suite.Run(t, new(NetworkPartitionSuite))
+	t.Run("Cluster3Node", func(t *testing.T) {
+		suite.Run(t, new(NetworkPartitionSuite))
+	})
 }

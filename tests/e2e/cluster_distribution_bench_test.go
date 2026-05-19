@@ -88,44 +88,46 @@ const (
 )
 
 func TestClusterDistributionBenchE2E(t *testing.T) {
-	if os.Getenv("GRAINFS_DISTRIBUTION_BENCH") != "1" {
-	}
-	if _, err := os.Stat(getBinary()); err != nil {
-	}
+	t.Run("Cluster3Node", func(t *testing.T) {
+		if os.Getenv("GRAINFS_DISTRIBUTION_BENCH") != "1" {
+		}
+		if _, err := os.Stat(getBinary()); err != nil {
+		}
 
-	outRoot := os.Getenv("GRAINFS_DISTRIBUTION_DIR")
-	if outRoot == "" {
-		outRoot = filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-distribution-%d", time.Now().Unix()))
-	}
-	require.NoError(t, os.MkdirAll(outRoot, 0o755))
-	t.Logf("distribution output dir: %s", outRoot)
+		outRoot := os.Getenv("GRAINFS_DISTRIBUTION_DIR")
+		if outRoot == "" {
+			outRoot = filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-distribution-%d", time.Now().Unix()))
+		}
+		require.NoError(t, os.MkdirAll(outRoot, 0o755))
+		t.Logf("distribution output dir: %s", outRoot)
 
-	scenarios := []distributionScenario{
-		{name: "single-write", ingress: distributionIngressSingle, mix: distributionMixWriteHeavy},
-		{name: "single-read", ingress: distributionIngressSingle, mix: distributionMixReadHeavy},
-		{name: "rr-write", ingress: distributionIngressRoundRobin, mix: distributionMixWriteHeavy},
-		{name: "rr-read", ingress: distributionIngressRoundRobin, mix: distributionMixReadHeavy},
-	}
-	scenarios = filterDistributionScenarios(t, scenarios)
+		scenarios := []distributionScenario{
+			{name: "single-write", ingress: distributionIngressSingle, mix: distributionMixWriteHeavy},
+			{name: "single-read", ingress: distributionIngressSingle, mix: distributionMixReadHeavy},
+			{name: "rr-write", ingress: distributionIngressRoundRobin, mix: distributionMixWriteHeavy},
+			{name: "rr-read", ingress: distributionIngressRoundRobin, mix: distributionMixReadHeavy},
+		}
+		scenarios = filterDistributionScenarios(t, scenarios)
 
-	results := make([]*distributionResult, 0, len(scenarios))
-	for _, sc := range scenarios {
-		t.Logf("===== %s (ingress=%s mix=%s) =====", sc.name, sc.ingress, sc.mix)
-		r := runDistributionScenario(t, sc, outRoot)
-		results = append(results, r)
-		t.Logf("[%s] boot=%ds CPU max/median=%.2f puts=%d/%d gets=%d/%d p99_put=%.1fms p99_get=%.1fms",
-			sc.name,
-			r.bootSec,
-			maxMedianRatio(procField(r.perNode, func(m procMetrics) float64 { return m.cpuPct })),
-			r.workload.puts,
-			r.workload.putErrs,
-			r.workload.gets,
-			r.workload.getErrs,
-			r.workload.putLatencyP99MS,
-			r.workload.getLatencyP99MS)
-	}
-	require.NoError(t, writeDistributionReport(outRoot, results))
-	t.Logf("final report: %s", filepath.Join(outRoot, "cluster-distribution.md"))
+		results := make([]*distributionResult, 0, len(scenarios))
+		for _, sc := range scenarios {
+			t.Logf("===== %s (ingress=%s mix=%s) =====", sc.name, sc.ingress, sc.mix)
+			r := runDistributionScenario(t, sc, outRoot)
+			results = append(results, r)
+			t.Logf("[%s] boot=%ds CPU max/median=%.2f puts=%d/%d gets=%d/%d p99_put=%.1fms p99_get=%.1fms",
+				sc.name,
+				r.bootSec,
+				maxMedianRatio(procField(r.perNode, func(m procMetrics) float64 { return m.cpuPct })),
+				r.workload.puts,
+				r.workload.putErrs,
+				r.workload.gets,
+				r.workload.getErrs,
+				r.workload.putLatencyP99MS,
+				r.workload.getLatencyP99MS)
+		}
+		require.NoError(t, writeDistributionReport(outRoot, results))
+		t.Logf("final report: %s", filepath.Join(outRoot, "cluster-distribution.md"))
+	})
 }
 
 func filterDistributionScenarios(t *testing.T, scenarios []distributionScenario) []distributionScenario {

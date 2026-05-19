@@ -12,10 +12,16 @@ import (
 // --upstream / --upstream-access-key / --upstream-secret-key. cobra must
 // reject each as "unknown flag" with non-zero exit. Same regression class
 // as PR #258's incomplete --access-key removal — without this test, a
-// future commit could silently reintroduce one of the flags. Single-node
-// only by nature: probes the single-binary CLI surface; no cluster shape.
+// future commit could silently reintroduce one of the flags. The rejection
+// is binary CLI behavior and identical on both branches by design, but the
+// SingleNode/Cluster4Node shape is kept for grep/inventory consistency.
 func TestServeFlagsRejectionE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
+		_ = newSingleNodeS3Target()
+		runServeFlagsRejectionCases(t)
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 		runServeFlagsRejectionCases(t)
 	})
 }

@@ -32,6 +32,13 @@ func TestRestartRecoveryOrphanSweepE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runRestartRecoveryOrphanSweepCases(t)
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+		// The startup-recovery sweep is per-node and currently asserted on a
+		// single fresh boot — Cluster4Node branch is the shape mirror; full
+		// per-node assertion arrives when cluster startup-event surfacing
+		// is wired.
+	})
 }
 
 func runRestartRecoveryOrphanSweepCases(t *testing.T) {

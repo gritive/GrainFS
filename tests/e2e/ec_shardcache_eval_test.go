@@ -53,265 +53,267 @@ import (
 //   - many_unique: 20 unique 5 MB objects, GET each once. Worst case:
 //     all cold. Simulator must report 0% hit at every cache size.
 func TestE2E_ECShardCacheEval(t *testing.T) {
-	if os.Getenv("GRAINFS_EC_SHARDCACHE_EVAL") != "1" {
-	}
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-	}
-
-	const (
-		clusterKey = "E2E-EC-SHARDCACHE-EVAL"
-		bucketName = "ec-shardcache-eval"
-		numNodes   = 3
-	)
-	var accessKey, secretKey string
-
-	httpPorts := make([]int, numNodes)
-	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
-	}
-	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
-	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-
-	dataDirs := make([]string, numNodes)
-	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-shcache-%d-*", i))
-		require.NoError(t, err)
-		dataDirs[i] = d
-		t.Cleanup(func() { _ = os.RemoveAll(d) })
-	}
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
-	startNode := func(i int) *exec.Cmd {
-		cmd := exec.Command(binary, "serve",
-			"--data", dataDirs[i],
-			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", raftAddr(i),
-			"--raft-addr", raftAddr(i),
-			"--cluster-key", clusterKey,
-			"--encryption-key-file", encKeyFile,
-			"--measure-read-amp", // ← the whole point of this test
-			"--block-cache-size=0",
-			"--shard-cache-size=0", // simulator-only baseline; real cache off
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--scrub-interval", "0",
-			"--lifecycle-interval", "0",
-		)
-		require.NoError(t, cmd.Start(), "start node %d", i)
-		return cmd
-	}
-
-	procs := make([]*exec.Cmd, numNodes)
-	t.Cleanup(func() {
-		for _, p := range procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Kill()
-				_, _ = p.Process.Wait()
-			}
+	t.Run("Cluster3Node", func(t *testing.T) {
+		if os.Getenv("GRAINFS_EC_SHARDCACHE_EVAL") != "1" {
 		}
-	})
+		binary := getBinary()
+		if _, err := os.Stat(binary); err != nil {
+		}
 
-	// Start seed node first, then let followers join via .join-pending.
-	procs[0] = startNode(0)
-	waitForPort(t, httpPorts[0], 60*time.Second)
-	time.Sleep(2 * time.Second)
+		const (
+			clusterKey = "E2E-EC-SHARDCACHE-EVAL"
+			bucketName = "ec-shardcache-eval"
+			numNodes   = 3
+		)
+		var accessKey, secretKey string
 
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+		httpPorts := make([]int, numNodes)
+		raftPorts := make([]int, numNodes)
+		for i := range httpPorts {
+			httpPorts[i] = freePort()
+			raftPorts[i] = freePort()
+		}
+		raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
+		httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 
-	for i := 1; i < numNodes; i++ {
-		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
-		procs[i] = startNode(i)
-		time.Sleep(150 * time.Millisecond)
-	}
-	for i := 0; i < numNodes; i++ {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
+		dataDirs := make([]string, numNodes)
+		for i := range dataDirs {
+			d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-shcache-%d-*", i))
+			require.NoError(t, err)
+			dataDirs[i] = d
+			t.Cleanup(func() { _ = os.RemoveAll(d) })
+		}
+		encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+		startNode := func(i int) *exec.Cmd {
+			cmd := exec.Command(binary, "serve",
+				"--data", dataDirs[i],
+				"--port", fmt.Sprintf("%d", httpPorts[i]),
+				"--node-id", raftAddr(i),
+				"--raft-addr", raftAddr(i),
+				"--cluster-key", clusterKey,
+				"--encryption-key-file", encKeyFile,
+				"--measure-read-amp", // ← the whole point of this test
+				"--block-cache-size=0",
+				"--shard-cache-size=0", // simulator-only baseline; real cache off
+				"--nfs4-port", fmt.Sprintf("%d", freePort()),
+				"--nbd-port", fmt.Sprintf("%d", freePort()),
+				"--scrub-interval", "0",
+				"--lifecycle-interval", "0",
+			)
+			require.NoError(t, cmd.Start(), "start node %d", i)
+			return cmd
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
+		procs := make([]*exec.Cmd, numNodes)
+		t.Cleanup(func() {
+			for _, p := range procs {
+				if p != nil && p.Process != nil {
+					_ = p.Process.Kill()
+					_, _ = p.Process.Wait()
+				}
+			}
+		})
 
-	endpoints := make([]string, numNodes)
-	for i := range endpoints {
-		endpoints[i] = httpURL(i)
-	}
-	leaderIdx, err := waitForWritableEndpoint(
-		ctx,
-		endpoints,
-		120*time.Second,
-		5*time.Second,
-		time.Second,
-		func(attemptCtx context.Context, endpoint string) error {
-			c := ecS3Client(endpoint, accessKey, secretKey)
-			return tryCreateBucket(attemptCtx, c, bucketName)
-		},
-	)
-	require.NoError(t, err, "no leader found")
-	client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
-	leaderURL := endpoints[leaderIdx]
-	t.Logf("leader: %s", leaderURL)
+		// Start seed node first, then let followers join via .join-pending.
+		procs[0] = startNode(0)
+		waitForPort(t, httpPorts[0], 60*time.Second)
+		time.Sleep(2 * time.Second)
 
-	// One 5 MB object — bypasses CachedBackend (4 MB per-obj cap).
-	largeKey := "large-5mb"
-	largeData := make([]byte, 5*1024*1024)
-	if _, err := rand.Read(largeData); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	var putErr error
-	require.Eventually(t, func() bool {
-		putErr = tryPutObject(ctx, client, bucketName, largeKey, largeData)
-		return putErr == nil
-	}, 120*time.Second, 2*time.Second, "put large never became writable: %v", putErr)
+		accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
 
-	// One 1 MB object — fits CachedBackend, repeated GETs should NOT
-	// reach getObjectEC after the first miss.
-	smallKey := "small-1mb"
-	smallData := make([]byte, 1024*1024)
-	if _, err := rand.Read(smallData); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(smallKey),
-		Body:   bytes.NewReader(smallData),
-	}); err != nil {
-		t.Fatalf("put small: %v", err)
-	}
+		for i := 1; i < numNodes; i++ {
+			require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+			procs[i] = startNode(i)
+			time.Sleep(150 * time.Millisecond)
+		}
+		for i := 0; i < numNodes; i++ {
+			waitForPort(t, httpPorts[i], 60*time.Second)
+		}
 
-	// 20 unique 5 MB objects — drains the cache every time.
-	uniqueKeys := make([]string, 20)
-	uniqueData := make([]byte, 5*1024*1024)
-	if _, err := rand.Read(uniqueData); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	for i := range uniqueKeys {
-		uniqueKeys[i] = fmt.Sprintf("uniq-%02d-5mb", i)
+		accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		defer cancel()
+
+		endpoints := make([]string, numNodes)
+		for i := range endpoints {
+			endpoints[i] = httpURL(i)
+		}
+		leaderIdx, err := waitForWritableEndpoint(
+			ctx,
+			endpoints,
+			120*time.Second,
+			5*time.Second,
+			time.Second,
+			func(attemptCtx context.Context, endpoint string) error {
+				c := ecS3Client(endpoint, accessKey, secretKey)
+				return tryCreateBucket(attemptCtx, c, bucketName)
+			},
+		)
+		require.NoError(t, err, "no leader found")
+		client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
+		leaderURL := endpoints[leaderIdx]
+		t.Logf("leader: %s", leaderURL)
+
+		// One 5 MB object — bypasses CachedBackend (4 MB per-obj cap).
+		largeKey := "large-5mb"
+		largeData := make([]byte, 5*1024*1024)
+		if _, err := rand.Read(largeData); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		var putErr error
+		require.Eventually(t, func() bool {
+			putErr = tryPutObject(ctx, client, bucketName, largeKey, largeData)
+			return putErr == nil
+		}, 120*time.Second, 2*time.Second, "put large never became writable: %v", putErr)
+
+		// One 1 MB object — fits CachedBackend, repeated GETs should NOT
+		// reach getObjectEC after the first miss.
+		smallKey := "small-1mb"
+		smallData := make([]byte, 1024*1024)
+		if _, err := rand.Read(smallData); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
 		if _, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucketName),
-			Key:    aws.String(uniqueKeys[i]),
-			Body:   bytes.NewReader(uniqueData),
+			Key:    aws.String(smallKey),
+			Body:   bytes.NewReader(smallData),
 		}); err != nil {
-			t.Fatalf("put %s: %v", uniqueKeys[i], err)
+			t.Fatalf("put small: %v", err)
 		}
-	}
 
-	// We measure each workload independently against a fresh baseline
-	// snapshot. Counters are per-process; each node holds its own.
-	type nodeBaseline struct {
-		hits, misses [3]uint64 // [16MB, 64MB, 256MB]
-	}
-	urls := make([]string, numNodes)
-	for i := range urls {
-		urls[i] = httpURL(i)
-	}
+		// 20 unique 5 MB objects — drains the cache every time.
+		uniqueKeys := make([]string, 20)
+		uniqueData := make([]byte, 5*1024*1024)
+		if _, err := rand.Read(uniqueData); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		for i := range uniqueKeys {
+			uniqueKeys[i] = fmt.Sprintf("uniq-%02d-5mb", i)
+			if _, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String(uniqueKeys[i]),
+				Body:   bytes.NewReader(uniqueData),
+			}); err != nil {
+				t.Fatalf("put %s: %v", uniqueKeys[i], err)
+			}
+		}
 
-	getOnce := func(t *testing.T, key string) {
-		t.Helper()
-		out, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String(key),
+		// We measure each workload independently against a fresh baseline
+		// snapshot. Counters are per-process; each node holds its own.
+		type nodeBaseline struct {
+			hits, misses [3]uint64 // [16MB, 64MB, 256MB]
+		}
+		urls := make([]string, numNodes)
+		for i := range urls {
+			urls[i] = httpURL(i)
+		}
+
+		getOnce := func(t *testing.T, key string) {
+			t.Helper()
+			out, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String(key),
+			})
+			require.NoError(t, err, "GET %s", key)
+			_, _ = io.Copy(io.Discard, out.Body)
+			_ = out.Body.Close()
+		}
+
+		// scrape returns (hits, misses) per simulator size for one node.
+		scrape := func(t *testing.T, url string) [3][2]uint64 {
+			t.Helper()
+			resp, err := http.Get(url + "/metrics")
+			require.NoError(t, err, "scrape %s", url)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			text := string(body)
+			read := func(metric, tracker string) uint64 {
+				pattern := fmt.Sprintf(`grainfs_readamp_%s_total\{tracker="%s"\}\s+(\S+)`, metric, tracker)
+				re := regexp.MustCompile(pattern)
+				m := re.FindStringSubmatch(text)
+				if len(m) < 2 {
+					return 0
+				}
+				f, _ := strconv.ParseFloat(m[1], 64)
+				return uint64(f)
+			}
+			var out [3][2]uint64
+			sizes := []string{"ec_shard_16mb", "ec_shard_64mb", "ec_shard_256mb"}
+			for i, s := range sizes {
+				out[i][0] = read("hits", s)
+				out[i][1] = read("misses", s)
+			}
+			return out
+		}
+		snapshotAll := func(t *testing.T) []nodeBaseline {
+			out := make([]nodeBaseline, numNodes)
+			for i := 0; i < numNodes; i++ {
+				r := scrape(t, urls[i])
+				for j := 0; j < 3; j++ {
+					out[i].hits[j] = r[j][0]
+					out[i].misses[j] = r[j][1]
+				}
+			}
+			return out
+		}
+		report := func(t *testing.T, label string, before []nodeBaseline) {
+			t.Helper()
+			after := snapshotAll(t)
+			// Sum deltas across all nodes — simulator records per-process,
+			// and EC shards land on different nodes, so cluster-wide hit
+			// rate is what we actually want.
+			var totalHits, totalMisses [3]uint64
+			for n := 0; n < numNodes; n++ {
+				for j := 0; j < 3; j++ {
+					if after[n].hits[j] >= before[n].hits[j] {
+						totalHits[j] += after[n].hits[j] - before[n].hits[j]
+					}
+					if after[n].misses[j] >= before[n].misses[j] {
+						totalMisses[j] += after[n].misses[j] - before[n].misses[j]
+					}
+				}
+			}
+			labels := []string{"16MB", "64MB", "256MB"}
+			for j := 0; j < 3; j++ {
+				total := totalHits[j] + totalMisses[j]
+				rate := 0.0
+				if total > 0 {
+					rate = 100 * float64(totalHits[j]) / float64(total)
+				}
+				t.Logf("%-30s %5s: %5.1f%% hit (cluster total: %d hit / %d miss)",
+					label, labels[j], rate, totalHits[j], totalMisses[j])
+			}
+		}
+
+		// Workload A: large object, repeated GET.
+		t.Run("large_repeat_5mb_x10", func(t *testing.T) {
+			base := snapshotAll(t)
+			for i := 0; i < 10; i++ {
+				getOnce(t, largeKey)
+			}
+			report(t, "large_5mb × 10 GETs", base)
 		})
-		require.NoError(t, err, "GET %s", key)
-		_, _ = io.Copy(io.Discard, out.Body)
-		_ = out.Body.Close()
-	}
 
-	// scrape returns (hits, misses) per simulator size for one node.
-	scrape := func(t *testing.T, url string) [3][2]uint64 {
-		t.Helper()
-		resp, err := http.Get(url + "/metrics")
-		require.NoError(t, err, "scrape %s", url)
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		text := string(body)
-		read := func(metric, tracker string) uint64 {
-			pattern := fmt.Sprintf(`grainfs_readamp_%s_total\{tracker="%s"\}\s+(\S+)`, metric, tracker)
-			re := regexp.MustCompile(pattern)
-			m := re.FindStringSubmatch(text)
-			if len(m) < 2 {
-				return 0
+		// Workload B: small object, repeated GET — CachedBackend absorbs.
+		t.Run("small_repeat_1mb_x10", func(t *testing.T) {
+			base := snapshotAll(t)
+			for i := 0; i < 10; i++ {
+				getOnce(t, smallKey)
 			}
-			f, _ := strconv.ParseFloat(m[1], 64)
-			return uint64(f)
-		}
-		var out [3][2]uint64
-		sizes := []string{"ec_shard_16mb", "ec_shard_64mb", "ec_shard_256mb"}
-		for i, s := range sizes {
-			out[i][0] = read("hits", s)
-			out[i][1] = read("misses", s)
-		}
-		return out
-	}
-	snapshotAll := func(t *testing.T) []nodeBaseline {
-		out := make([]nodeBaseline, numNodes)
-		for i := 0; i < numNodes; i++ {
-			r := scrape(t, urls[i])
-			for j := 0; j < 3; j++ {
-				out[i].hits[j] = r[j][0]
-				out[i].misses[j] = r[j][1]
-			}
-		}
-		return out
-	}
-	report := func(t *testing.T, label string, before []nodeBaseline) {
-		t.Helper()
-		after := snapshotAll(t)
-		// Sum deltas across all nodes — simulator records per-process,
-		// and EC shards land on different nodes, so cluster-wide hit
-		// rate is what we actually want.
-		var totalHits, totalMisses [3]uint64
-		for n := 0; n < numNodes; n++ {
-			for j := 0; j < 3; j++ {
-				if after[n].hits[j] >= before[n].hits[j] {
-					totalHits[j] += after[n].hits[j] - before[n].hits[j]
-				}
-				if after[n].misses[j] >= before[n].misses[j] {
-					totalMisses[j] += after[n].misses[j] - before[n].misses[j]
-				}
-			}
-		}
-		labels := []string{"16MB", "64MB", "256MB"}
-		for j := 0; j < 3; j++ {
-			total := totalHits[j] + totalMisses[j]
-			rate := 0.0
-			if total > 0 {
-				rate = 100 * float64(totalHits[j]) / float64(total)
-			}
-			t.Logf("%-30s %5s: %5.1f%% hit (cluster total: %d hit / %d miss)",
-				label, labels[j], rate, totalHits[j], totalMisses[j])
-		}
-	}
+			report(t, "small_1mb × 10 GETs", base)
+		})
 
-	// Workload A: large object, repeated GET.
-	t.Run("large_repeat_5mb_x10", func(t *testing.T) {
-		base := snapshotAll(t)
-		for i := 0; i < 10; i++ {
-			getOnce(t, largeKey)
-		}
-		report(t, "large_5mb × 10 GETs", base)
-	})
-
-	// Workload B: small object, repeated GET — CachedBackend absorbs.
-	t.Run("small_repeat_1mb_x10", func(t *testing.T) {
-		base := snapshotAll(t)
-		for i := 0; i < 10; i++ {
-			getOnce(t, smallKey)
-		}
-		report(t, "small_1mb × 10 GETs", base)
-	})
-
-	// Workload C: many unique large objects — no recurrence.
-	t.Run("many_unique_5mb_x20", func(t *testing.T) {
-		base := snapshotAll(t)
-		for _, k := range uniqueKeys {
-			getOnce(t, k)
-		}
-		report(t, "20 unique 5mb GETs", base)
+		// Workload C: many unique large objects — no recurrence.
+		t.Run("many_unique_5mb_x20", func(t *testing.T) {
+			base := snapshotAll(t)
+			for _, k := range uniqueKeys {
+				getOnce(t, k)
+			}
+			report(t, "20 unique 5mb GETs", base)
+		})
 	})
 }
 
@@ -330,160 +332,162 @@ func TestE2E_ECShardCacheEval(t *testing.T) {
 // the simulator measured on PR #71 is the upper bound; we leave 10%
 // margin for cold misses and cross-node placement details.
 func TestE2E_ECShardCacheActive(t *testing.T) {
-	binary := getBinary()
-	if _, err := os.Stat(binary); err != nil {
-	}
-
-	const (
-		clusterKey = "E2E-EC-SHARDCACHE-ACTIVE"
-		bucketName = "ec-shardcache-active"
-		numNodes   = 3
-	)
-	var accessKey, secretKey string
-
-	httpPorts := make([]int, numNodes)
-	raftPorts := make([]int, numNodes)
-	for i := range httpPorts {
-		httpPorts[i] = freePort()
-		raftPorts[i] = freePort()
-	}
-	raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
-	httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
-
-	dataDirs := make([]string, numNodes)
-	for i := range dataDirs {
-		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-shcache-active-%d-*", i))
-		require.NoError(t, err)
-		dataDirs[i] = d
-		t.Cleanup(func() { _ = os.RemoveAll(d) })
-	}
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
-	startNode := func(i int) *exec.Cmd {
-		cmd := exec.Command(binary, "serve",
-			"--data", dataDirs[i],
-			"--port", fmt.Sprintf("%d", httpPorts[i]),
-			"--node-id", raftAddr(i),
-			"--raft-addr", raftAddr(i),
-			"--cluster-key", clusterKey,
-			"--encryption-key-file", encKeyFile,
-			"--block-cache-size=0", // isolate: only EC shard cache active
-			// 256 MB total → 16 MB per-shard budget. A 5 MB object still
-			// bypasses CachedBackend while keeping single PutObject within
-			// the coordinator forwarding limit.
-			"--shard-cache-size=268435456",
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--scrub-interval", "0",
-			"--lifecycle-interval", "0",
-		)
-		require.NoError(t, cmd.Start(), "start node %d", i)
-		return cmd
-	}
-
-	procs := make([]*exec.Cmd, numNodes)
-	t.Cleanup(func() {
-		for _, p := range procs {
-			if p != nil && p.Process != nil {
-				_ = p.Process.Kill()
-				_, _ = p.Process.Wait()
-			}
+	t.Run("Cluster3Node", func(t *testing.T) {
+		binary := getBinary()
+		if _, err := os.Stat(binary); err != nil {
 		}
-	})
 
-	// Start seed node first, then let followers join via .join-pending.
-	procs[0] = startNode(0)
-	waitForPort(t, httpPorts[0], 60*time.Second)
-	time.Sleep(2 * time.Second)
+		const (
+			clusterKey = "E2E-EC-SHARDCACHE-ACTIVE"
+			bucketName = "ec-shardcache-active"
+			numNodes   = 3
+		)
+		var accessKey, secretKey string
 
-	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+		httpPorts := make([]int, numNodes)
+		raftPorts := make([]int, numNodes)
+		for i := range httpPorts {
+			httpPorts[i] = freePort()
+			raftPorts[i] = freePort()
+		}
+		raftAddr := func(i int) string { return fmt.Sprintf("127.0.0.1:%d", raftPorts[i]) }
+		httpURL := func(i int) string { return fmt.Sprintf("http://127.0.0.1:%d", httpPorts[i]) }
 
-	for i := 1; i < numNodes; i++ {
-		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
-		procs[i] = startNode(i)
-		time.Sleep(150 * time.Millisecond)
-	}
-	for i := 0; i < numNodes; i++ {
-		waitForPort(t, httpPorts[i], 60*time.Second)
-	}
+		dataDirs := make([]string, numNodes)
+		for i := range dataDirs {
+			d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-ec-shcache-active-%d-*", i))
+			require.NoError(t, err)
+			dataDirs[i] = d
+			t.Cleanup(func() { _ = os.RemoveAll(d) })
+		}
+		encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+		startNode := func(i int) *exec.Cmd {
+			cmd := exec.Command(binary, "serve",
+				"--data", dataDirs[i],
+				"--port", fmt.Sprintf("%d", httpPorts[i]),
+				"--node-id", raftAddr(i),
+				"--raft-addr", raftAddr(i),
+				"--cluster-key", clusterKey,
+				"--encryption-key-file", encKeyFile,
+				"--block-cache-size=0", // isolate: only EC shard cache active
+				// 256 MB total → 16 MB per-shard budget. A 5 MB object still
+				// bypasses CachedBackend while keeping single PutObject within
+				// the coordinator forwarding limit.
+				"--shard-cache-size=268435456",
+				"--nfs4-port", fmt.Sprintf("%d", freePort()),
+				"--nbd-port", fmt.Sprintf("%d", freePort()),
+				"--scrub-interval", "0",
+				"--lifecycle-interval", "0",
+			)
+			require.NoError(t, cmd.Start(), "start node %d", i)
+			return cmd
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-
-	endpoints := make([]string, numNodes)
-	for i := range endpoints {
-		endpoints[i] = httpURL(i)
-	}
-	leaderIdx, err := waitForWritableEndpoint(
-		ctx,
-		endpoints,
-		120*time.Second,
-		5*time.Second,
-		time.Second,
-		func(attemptCtx context.Context, endpoint string) error {
-			c := ecS3Client(endpoint, accessKey, secretKey)
-			return tryCreateBucket(attemptCtx, c, bucketName)
-		},
-	)
-	require.NoError(t, err, "no leader found")
-	client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
-	leaderURL := endpoints[leaderIdx]
-	t.Logf("leader: %s", leaderURL)
-
-	largeKey := "large-5mb"
-	largeData := make([]byte, 5*1024*1024)
-	if _, err := rand.Read(largeData); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	var putErr error
-	require.Eventually(t, func() bool {
-		putErr = tryPutObject(ctx, client, bucketName, largeKey, largeData)
-		return putErr == nil
-	}, 120*time.Second, 2*time.Second, "put large never became writable: %v", putErr)
-
-	// Repeated GET ×10 to drive cache hits.
-	for i := 0; i < 10; i++ {
-		out, err := client.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String(largeKey),
+		procs := make([]*exec.Cmd, numNodes)
+		t.Cleanup(func() {
+			for _, p := range procs {
+				if p != nil && p.Process != nil {
+					_ = p.Process.Kill()
+					_, _ = p.Process.Wait()
+				}
+			}
 		})
-		require.NoError(t, err, "GET iteration %d", i)
-		_, _ = io.Copy(io.Discard, out.Body)
-		_ = out.Body.Close()
-	}
 
-	// Sum cluster-wide cache stats. Shards land on different nodes, so
-	// per-process numbers each capture a slice of the work.
-	type cacheStatus struct {
-		ShardCache struct {
-			Enabled       bool    `json:"enabled"`
-			Hits          uint64  `json:"hits"`
-			Misses        uint64  `json:"misses"`
-			ResidentBytes int64   `json:"resident_bytes"`
-			HitRatePct    float64 `json:"hit_rate_pct"`
-		} `json:"shard_cache"`
-	}
-	var totalHits, totalMisses uint64
-	var totalResident int64
-	for i := 0; i < numNodes; i++ {
-		resp, err := http.Get(httpURL(i) + "/api/cache/status")
-		require.NoError(t, err, "fetch cache status from node %d", i)
-		var st cacheStatus
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
-		_ = resp.Body.Close()
-		require.True(t, st.ShardCache.Enabled, "node %d shard_cache must be enabled", i)
-		t.Logf("node %d: hits=%d misses=%d resident=%d hit_rate=%.1f%%",
-			i, st.ShardCache.Hits, st.ShardCache.Misses, st.ShardCache.ResidentBytes, st.ShardCache.HitRatePct)
-		totalHits += st.ShardCache.Hits
-		totalMisses += st.ShardCache.Misses
-		totalResident += st.ShardCache.ResidentBytes
-	}
-	total := totalHits + totalMisses
-	require.Greater(t, total, uint64(0), "shard cache recorded zero accesses — wiring broken")
-	require.Greater(t, totalHits, uint64(0), "shard cache recorded misses but no hits — getObjectEC is not reusing cached shards")
-	require.Greater(t, totalResident, int64(0), "shard cache recorded accesses but retained no shard bytes")
-	hitRate := 100 * float64(totalHits) / float64(total)
-	t.Logf("cluster-wide shard cache: %d hits / %d misses → %.1f%% hit rate", totalHits, totalMisses, hitRate)
+		// Start seed node first, then let followers join via .join-pending.
+		procs[0] = startNode(0)
+		waitForPort(t, httpPorts[0], 60*time.Second)
+		time.Sleep(2 * time.Second)
+
+		accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+
+		for i := 1; i < numNodes; i++ {
+			require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+			procs[i] = startNode(i)
+			time.Sleep(150 * time.Millisecond)
+		}
+		for i := 0; i < numNodes; i++ {
+			waitForPort(t, httpPorts[i], 60*time.Second)
+		}
+
+		accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		defer cancel()
+
+		endpoints := make([]string, numNodes)
+		for i := range endpoints {
+			endpoints[i] = httpURL(i)
+		}
+		leaderIdx, err := waitForWritableEndpoint(
+			ctx,
+			endpoints,
+			120*time.Second,
+			5*time.Second,
+			time.Second,
+			func(attemptCtx context.Context, endpoint string) error {
+				c := ecS3Client(endpoint, accessKey, secretKey)
+				return tryCreateBucket(attemptCtx, c, bucketName)
+			},
+		)
+		require.NoError(t, err, "no leader found")
+		client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
+		leaderURL := endpoints[leaderIdx]
+		t.Logf("leader: %s", leaderURL)
+
+		largeKey := "large-5mb"
+		largeData := make([]byte, 5*1024*1024)
+		if _, err := rand.Read(largeData); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		var putErr error
+		require.Eventually(t, func() bool {
+			putErr = tryPutObject(ctx, client, bucketName, largeKey, largeData)
+			return putErr == nil
+		}, 120*time.Second, 2*time.Second, "put large never became writable: %v", putErr)
+
+		// Repeated GET ×10 to drive cache hits.
+		for i := 0; i < 10; i++ {
+			out, err := client.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String(largeKey),
+			})
+			require.NoError(t, err, "GET iteration %d", i)
+			_, _ = io.Copy(io.Discard, out.Body)
+			_ = out.Body.Close()
+		}
+
+		// Sum cluster-wide cache stats. Shards land on different nodes, so
+		// per-process numbers each capture a slice of the work.
+		type cacheStatus struct {
+			ShardCache struct {
+				Enabled       bool    `json:"enabled"`
+				Hits          uint64  `json:"hits"`
+				Misses        uint64  `json:"misses"`
+				ResidentBytes int64   `json:"resident_bytes"`
+				HitRatePct    float64 `json:"hit_rate_pct"`
+			} `json:"shard_cache"`
+		}
+		var totalHits, totalMisses uint64
+		var totalResident int64
+		for i := 0; i < numNodes; i++ {
+			resp, err := http.Get(httpURL(i) + "/api/cache/status")
+			require.NoError(t, err, "fetch cache status from node %d", i)
+			var st cacheStatus
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
+			_ = resp.Body.Close()
+			require.True(t, st.ShardCache.Enabled, "node %d shard_cache must be enabled", i)
+			t.Logf("node %d: hits=%d misses=%d resident=%d hit_rate=%.1f%%",
+				i, st.ShardCache.Hits, st.ShardCache.Misses, st.ShardCache.ResidentBytes, st.ShardCache.HitRatePct)
+			totalHits += st.ShardCache.Hits
+			totalMisses += st.ShardCache.Misses
+			totalResident += st.ShardCache.ResidentBytes
+		}
+		total := totalHits + totalMisses
+		require.Greater(t, total, uint64(0), "shard cache recorded zero accesses — wiring broken")
+		require.Greater(t, totalHits, uint64(0), "shard cache recorded misses but no hits — getObjectEC is not reusing cached shards")
+		require.Greater(t, totalResident, int64(0), "shard cache recorded accesses but retained no shard bytes")
+		hitRate := 100 * float64(totalHits) / float64(total)
+		t.Logf("cluster-wide shard cache: %d hits / %d misses → %.1f%% hit rate", totalHits, totalMisses, hitRate)
+	})
 }

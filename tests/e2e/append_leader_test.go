@@ -7,6 +7,8 @@ import (
 )
 
 func TestFindOwnerForSingleGroup(t *testing.T) {
-	require.Equal(t, -1, findOwnerForSingleGroup(nil))
-	require.Equal(t, 2, findOwnerForSingleGroup(&e2eCluster{leaderIdx: 2}))
+	t.Run("SingleNode", func(t *testing.T) {
+		require.Equal(t, -1, findOwnerForSingleGroup(nil))
+		require.Equal(t, 2, findOwnerForSingleGroup(&e2eCluster{leaderIdx: 2}))
+	})
 }

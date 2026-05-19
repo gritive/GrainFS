@@ -25,20 +25,22 @@ func nodeSettled(baseURL string) bool {
 }
 
 func TestE2EClusterKillAndRestart(t *testing.T) {
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeDynamicJoin,
-		ClusterKey: "E2E-HARNESS-KILL",
-		LogPrefix:  "harness-kill",
-		DisableNFS: true, DisableNBD: true,
+	t.Run("Cluster3Node", func(t *testing.T) {
+		c := startE2ECluster(t, e2eClusterOptions{
+			Nodes:      3,
+			Mode:       ClusterModeDynamicJoin,
+			ClusterKey: "E2E-HARNESS-KILL",
+			LogPrefix:  "harness-kill",
+			DisableNFS: true, DisableNBD: true,
+		})
+
+		victim := (c.leaderIdx + 1) % 3
+		c.KillNode(victim)
+		waitClusterSettled(t, c.httpURLs[c.leaderIdx])
+
+		c.RestartNode(t, victim)
+		require.Eventually(t, func() bool {
+			return nodeSettled(c.httpURLs[victim])
+		}, 90*time.Second, 500*time.Millisecond, "restarted node never settled")
 	})
-
-	victim := (c.leaderIdx + 1) % 3
-	c.KillNode(victim)
-	waitClusterSettled(t, c.httpURLs[c.leaderIdx])
-
-	c.RestartNode(t, victim)
-	require.Eventually(t, func() bool {
-		return nodeSettled(c.httpURLs[victim])
-	}, 90*time.Second, 500*time.Millisecond, "restarted node never settled")
 }

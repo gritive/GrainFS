@@ -316,13 +316,34 @@ func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
 	}
 }
 
-func TestBucketNameFor(t *testing.T) {
-	got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
-	require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
-	require.LessOrEqual(t, len(got), 63)
+// TestBucketNameForE2E verifies the bucketNameFor helper that derives an
+// S3-spec-compliant bucket name from target + test + case. Pure helper unit
+// check — fixture is not used — but wrapped in the canonical
+// SingleNode/Cluster4Node shape for grep/inventory consistency.
+func TestBucketNameForE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		_ = newSingleNodeS3Target()
+		runBucketNameForCases(t)
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+		runBucketNameForCases(t)
+	})
+}
 
-	long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
-	require.LessOrEqual(t, len(long), 63)
-	require.GreaterOrEqual(t, len(long), 3)
-	require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
+func runBucketNameForCases(t *testing.T) {
+	t.Helper()
+
+	t.Run("ShortNameRoundtrip", func(t *testing.T) {
+		got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
+		require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
+		require.LessOrEqual(t, len(got), 63)
+	})
+
+	t.Run("LongNameTruncatedWithHash", func(t *testing.T) {
+		long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
+		require.LessOrEqual(t, len(long), 63)
+		require.GreaterOrEqual(t, len(long), 3)
+		require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
+	})
 }

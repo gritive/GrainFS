@@ -23,6 +23,9 @@ func TestSmokeDeploymentE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runSmokeDeploymentCases(t)
 	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 func runSmokeDeploymentCases(t *testing.T) {

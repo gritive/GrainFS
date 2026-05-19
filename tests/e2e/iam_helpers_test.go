@@ -195,17 +195,18 @@ func tryIAMGrantPut(sock, saID, bucket, role string) error {
 }
 
 func TestTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
-	sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
-	t.Cleanup(func() { _ = os.Remove(sock) })
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-	defer ln.Close()
+	t.Run("SingleNode", func(t *testing.T) {
+		sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
+		t.Cleanup(func() { _ = os.Remove(sock) })
+		ln, err := net.Listen("unix", sock)
+		require.NoError(t, err)
+		defer ln.Close()
 
-	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.Equal(t, "/v1/iam/sa", r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/v1/iam/sa", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{
 				"sa_id":"019e-test-sa",
 				"name":"admin",
 				"access_key":"ak",
@@ -213,178 +214,185 @@ func TestTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
 				"created_at":"2026-05-13T00:00:00Z",
 				"grants":[{"sa_id":"019e-test-sa","bucket":"ec-test","role":"admin"}]
 			}`)
-		}),
-	}
-	done := make(chan struct{})
-	go func() {
-		_ = srv.Serve(ln)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		<-done
-	})
+			}),
+		}
+		done := make(chan struct{})
+		go func() {
+			_ = srv.Serve(ln)
+			close(done)
+		}()
+		t.Cleanup(func() {
+			_ = srv.Close()
+			<-done
+		})
 
-	got, err := tryBootstrapAdminViaUDSResult(sock)
-	require.NoError(t, err)
-	require.Equal(t, "019e-test-sa", got.SAID)
-	require.Equal(t, "ak", got.AccessKey)
-	require.Equal(t, "sk", got.SecretKey)
-	require.Len(t, got.Grants, 1)
-	require.Equal(t, "ec-test", got.Grants[0].Bucket)
-	require.Equal(t, "admin", got.Grants[0].Role)
+		got, err := tryBootstrapAdminViaUDSResult(sock)
+		require.NoError(t, err)
+		require.Equal(t, "019e-test-sa", got.SAID)
+		require.Equal(t, "ak", got.AccessKey)
+		require.Equal(t, "sk", got.SecretKey)
+		require.Len(t, got.Grants, 1)
+		require.Equal(t, "ec-test", got.Grants[0].Bucket)
+		require.Equal(t, "admin", got.Grants[0].Role)
+	})
 }
 
 func TestBootstrapAdminViaUDSAnyWithBucketGrantsIssuesExplicitGrantForRegularSA(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "admin.sock")
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-	defer ln.Close()
+	t.Run("SingleNode", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		sock := filepath.Join(dir, "admin.sock")
+		ln, err := net.Listen("unix", sock)
+		require.NoError(t, err)
+		defer ln.Close()
 
-	granted := make(chan map[string]string, 1)
-	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case "/v1/iam/sa":
-				require.Equal(t, http.MethodPost, r.Method)
-				_, _ = io.WriteString(w, `{
+		granted := make(chan map[string]string, 1)
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/iam/sa":
+					require.Equal(t, http.MethodPost, r.Method)
+					_, _ = io.WriteString(w, `{
 					"sa_id":"regular-sa",
 					"name":"admin",
 					"access_key":"ak",
 					"secret_key":"sk",
 					"created_at":"2026-05-13T00:00:00Z"
 				}`)
-			case "/v1/iam/grant":
+				case "/v1/iam/grant":
+					require.Equal(t, http.MethodPut, r.Method)
+					var body map[string]string
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+					granted <- body
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}),
+		}
+		done := make(chan struct{})
+		go func() {
+			_ = srv.Serve(ln)
+			close(done)
+		}()
+		t.Cleanup(func() {
+			_ = srv.Close()
+			<-done
+		})
+
+		ak, sk := bootstrapAdminViaUDSAnyWithBucketGrants(t, []string{dir}, time.Second, "__probe")
+		require.Equal(t, "ak", ak)
+		require.Equal(t, "sk", sk)
+
+		select {
+		case body := <-granted:
+			require.Equal(t, "regular-sa", body["sa_id"])
+			require.Equal(t, "__probe", body["bucket"])
+			require.Equal(t, "Admin", body["role"])
+		case <-time.After(time.Second):
+			t.Fatal("expected explicit grant request")
+		}
+	})
+}
+
+func TestE2EClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
+	t.Run("Cluster3Node", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", "grainfs-cluster-grant-*")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		sock := filepath.Join(dir, "admin.sock")
+		ln, err := net.Listen("unix", sock)
+		require.NoError(t, err)
+		defer ln.Close()
+
+		granted := make(chan map[string]string, 1)
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/v1/iam/grant", r.URL.Path)
 				require.Equal(t, http.MethodPut, r.Method)
 				var body map[string]string
 				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 				granted <- body
 				w.WriteHeader(http.StatusNoContent)
-			default:
-				http.NotFound(w, r)
-			}
-		}),
-	}
-	done := make(chan struct{})
-	go func() {
-		_ = srv.Serve(ln)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		<-done
+			}),
+		}
+		done := make(chan struct{})
+		go func() {
+			_ = srv.Serve(ln)
+			close(done)
+		}()
+		t.Cleanup(func() {
+			_ = srv.Close()
+			<-done
+		})
+
+		c := &e2eCluster{
+			t:        t,
+			dataDirs: []string{dir},
+			saID:     "regular-sa",
+		}
+		c.GrantAdminOnBuckets("__probe")
+
+		select {
+		case body := <-granted:
+			require.Equal(t, "regular-sa", body["sa_id"])
+			require.Equal(t, "__probe", body["bucket"])
+			require.Equal(t, "Admin", body["role"])
+		case <-time.After(time.Second):
+			t.Fatal("expected explicit grant request")
+		}
 	})
-
-	ak, sk := bootstrapAdminViaUDSAnyWithBucketGrants(t, []string{dir}, time.Second, "__probe")
-	require.Equal(t, "ak", ak)
-	require.Equal(t, "sk", sk)
-
-	select {
-	case body := <-granted:
-		require.Equal(t, "regular-sa", body["sa_id"])
-		require.Equal(t, "__probe", body["bucket"])
-		require.Equal(t, "Admin", body["role"])
-	case <-time.After(time.Second):
-		t.Fatal("expected explicit grant request")
-	}
-}
-
-func TestE2EClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "grainfs-cluster-grant-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "admin.sock")
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-	defer ln.Close()
-
-	granted := make(chan map[string]string, 1)
-	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.Equal(t, "/v1/iam/grant", r.URL.Path)
-			require.Equal(t, http.MethodPut, r.Method)
-			var body map[string]string
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			granted <- body
-			w.WriteHeader(http.StatusNoContent)
-		}),
-	}
-	done := make(chan struct{})
-	go func() {
-		_ = srv.Serve(ln)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		<-done
-	})
-
-	c := &e2eCluster{
-		t:        t,
-		dataDirs: []string{dir},
-		saID:     "regular-sa",
-	}
-	c.GrantAdminOnBuckets("__probe")
-
-	select {
-	case body := <-granted:
-		require.Equal(t, "regular-sa", body["sa_id"])
-		require.Equal(t, "__probe", body["bucket"])
-		require.Equal(t, "Admin", body["role"])
-	case <-time.After(time.Second):
-		t.Fatal("expected explicit grant request")
-	}
 }
 
 func TestMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "grainfs-mr-cluster-grant-*")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	sock := filepath.Join(dir, "admin.sock")
-	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-	defer ln.Close()
+	t.Run("MRCluster3Node", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", "grainfs-mr-cluster-grant-*")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		sock := filepath.Join(dir, "admin.sock")
+		ln, err := net.Listen("unix", sock)
+		require.NoError(t, err)
+		defer ln.Close()
 
-	granted := make(chan map[string]string, 1)
-	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.Equal(t, "/v1/iam/grant", r.URL.Path)
-			require.Equal(t, http.MethodPut, r.Method)
-			var body map[string]string
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			granted <- body
-			w.WriteHeader(http.StatusNoContent)
-		}),
-	}
-	done := make(chan struct{})
-	go func() {
-		_ = srv.Serve(ln)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		<-done
+		granted := make(chan map[string]string, 1)
+		srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/v1/iam/grant", r.URL.Path)
+				require.Equal(t, http.MethodPut, r.Method)
+				var body map[string]string
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				granted <- body
+				w.WriteHeader(http.StatusNoContent)
+			}),
+		}
+		done := make(chan struct{})
+		go func() {
+			_ = srv.Serve(ln)
+			close(done)
+		}()
+		t.Cleanup(func() {
+			_ = srv.Close()
+			<-done
+		})
+
+		c := &mrCluster{
+			t:        t,
+			dataDirs: []string{dir},
+			saID:     "regular-sa",
+		}
+		c.GrantAdminOnBuckets("__probe")
+
+		select {
+		case body := <-granted:
+			require.Equal(t, "regular-sa", body["sa_id"])
+			require.Equal(t, "__probe", body["bucket"])
+			require.Equal(t, "Admin", body["role"])
+		case <-time.After(time.Second):
+			t.Fatal("expected explicit grant request")
+		}
 	})
-
-	c := &mrCluster{
-		t:        t,
-		dataDirs: []string{dir},
-		saID:     "regular-sa",
-	}
-	c.GrantAdminOnBuckets("__probe")
-
-	select {
-	case body := <-granted:
-		require.Equal(t, "regular-sa", body["sa_id"])
-		require.Equal(t, "__probe", body["bucket"])
-		require.Equal(t, "Admin", body["role"])
-	case <-time.After(time.Second):
-		t.Fatal("expected explicit grant request")
-	}
 }
 
 func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
@@ -807,24 +815,26 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 // correctly: HeadBucket on a missing bucket returns NotFound (not 401),
 // proving the SigV4 verifier accepts the bootstrap key pair.
 func TestIAMHelpers_StartServer_BootstrapAccepted(t *testing.T) {
-	srv := startIAMTestServer(t)
-	defer srv.Stop()
+	t.Run("SingleNode", func(t *testing.T) {
+		srv := startIAMTestServer(t)
+		defer srv.Stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String("__bootstrap_probe__"),
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
+			Bucket: aws.String("__bootstrap_probe__"),
+		})
+		if err == nil {
+			// 200 also means auth succeeded (probe bucket somehow existed).
+			return
+		}
+		// NotFound / NoSuchBucket → auth passed, just no such bucket.
+		// 401/403 → auth failed, fail the test.
+		msg := err.Error()
+		if !(contains(msg, "NotFound") || contains(msg, "NoSuchBucket") || contains(msg, "404")) {
+			t.Fatalf("HeadBucket with bootstrap creds returned non-auth error: %v", err)
+		}
 	})
-	if err == nil {
-		// 200 also means auth succeeded (probe bucket somehow existed).
-		return
-	}
-	// NotFound / NoSuchBucket → auth passed, just no such bucket.
-	// 401/403 → auth failed, fail the test.
-	msg := err.Error()
-	if !(contains(msg, "NotFound") || contains(msg, "NoSuchBucket") || contains(msg, "404")) {
-		t.Fatalf("HeadBucket with bootstrap creds returned non-auth error: %v", err)
-	}
 }
 
 func contains(s, sub string) bool {

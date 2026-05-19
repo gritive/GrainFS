@@ -40,10 +40,9 @@ func TestAppendSizeCapE2E(t *testing.T) {
 
 func runSizeCapCases(t *testing.T, tgt s3Target, smallCap int64) {
 	t.Helper()
-	bucket := "append-size-cap-" + tgt.name
-	tgt.createBkt(t, bucket)
 
 	t.Run("RejectAtCap", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "reject")
 		key := "obj-over"
 		body := bytes.Repeat([]byte("x"), int(smallCap-1))
 		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, body))
@@ -56,6 +55,7 @@ func runSizeCapCases(t *testing.T, tgt s3Target, smallCap int64) {
 	})
 
 	t.Run("ConcurrentRaceAtCap", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "race")
 		key := "obj-race"
 		prefill := bytes.Repeat([]byte("x"), int(smallCap-4))
 		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, prefill))

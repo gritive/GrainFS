@@ -17,185 +17,190 @@ import (
 )
 
 func TestBackup_Restic_BackupAndRestore(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
 
-	// Skip if restic not installed
-	if _, err := exec.LookPath("restic"); err != nil {
-	}
+		// Skip if restic not installed
+		if _, err := exec.LookPath("restic"); err != nil {
+		}
 
-	dir, err := os.MkdirTemp("", "grainfs-backup-test-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+		dir, err := os.MkdirTemp("", "grainfs-backup-test-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
 
-	dataDir := filepath.Join(dir, "data")
-	backupRepo := filepath.Join(dir, "backup")
-	restoreDir := filepath.Join(dir, "restore")
+		dataDir := filepath.Join(dir, "data")
+		backupRepo := filepath.Join(dir, "backup")
+		restoreDir := filepath.Join(dir, "restore")
 
-	binary := getBinary()
-	port := freePort()
+		binary := getBinary()
+		port := freePort()
 
-	// Shared encryption key for source + restore: the IAM store on disk
-	// holds AES-GCM-wrapped secrets, so restoring those bytes into a server
-	// with a different encryption key would decrypt-fail on FSM apply.
-	encKeyFile := makeSharedEncryptionKeyFile(t)
+		// Shared encryption key for source + restore: the IAM store on disk
+		// holds AES-GCM-wrapped secrets, so restoring those bytes into a server
+		// with a different encryption key would decrypt-fail on FSM apply.
+		encKeyFile := makeSharedEncryptionKeyFile(t)
 
-	// Step 1: Start GrainFS and create test data
-	t.Log("Step 1: Starting GrainFS and creating test data...")
-	cmd := exec.Command(binary, "serve",
-		"--data", dataDir,
-		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", "0",
-		"--nbd-port", "0",
-		"--encryption-key-file", encKeyFile,
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-	defer terminateProcess(cmd)
+		// Step 1: Start GrainFS and create test data
+		t.Log("Step 1: Starting GrainFS and creating test data...")
+		cmd := exec.Command(binary, "serve",
+			"--data", dataDir,
+			"--port", fmt.Sprintf("%d", port),
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
+			"--encryption-key-file", encKeyFile,
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
+			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		require.NoError(t, cmd.Start())
+		defer terminateProcess(cmd)
 
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 30*time.Second)
+		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+		waitForPort(t, port, 30*time.Second)
 
-	ctx := context.Background()
-	ak, sk := bootstrapAdminViaUDS(t, dataDir)
-	client := s3ClientFor(endpoint, ak, sk)
+		ctx := context.Background()
+		ak, sk := bootstrapAdminViaUDS(t, dataDir)
+		client := s3ClientFor(endpoint, ak, sk)
 
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("backup-test"),
+		_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String("backup-test"),
+		})
+		require.NoError(t, err)
+		waitForS3Write(t, client, "backup-test", "__grainfs_e2e_ready", 30*time.Second)
+		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String("backup-test"),
+			Key:    aws.String("__grainfs_e2e_ready"),
+		})
+
+		// Create test objects
+		testData := map[string]string{
+			"file1.txt":        "important data 1",
+			"file2.txt":        "important data 2",
+			"nested/file3.txt": "important data 3",
+		}
+
+		for key, content := range testData {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String("backup-test"),
+				Key:    aws.String(key),
+				Body:   strings.NewReader(content),
+			})
+			require.NoError(t, err, "put %s", key)
+		}
+
+		// Stop GrainFS to ensure data is flushed
+		terminateProcess(cmd)
+		time.Sleep(2 * time.Second)
+
+		// Step 2: Initialize restic repository
+		t.Log("Step 2: Initializing restic repository...")
+		os.Setenv("RESTIC_REPOSITORY", backupRepo)
+		os.Setenv("RESTIC_PASSWORD", "test-password")
+
+		initCmd := exec.Command("restic", "init")
+		initCmd.Stdout = os.Stdout
+		initCmd.Stderr = os.Stderr
+		require.NoError(t, initCmd.Run())
+
+		// Step 3: Create backup using grainfs backup command
+		t.Log("Step 3: Creating backup...")
+		backupCmd := exec.Command(binary, "backup",
+			"--repo", backupRepo,
+			"--data", dataDir,
+			"--tag", "e2e-test",
+		)
+		backupCmd.Stdout = os.Stdout
+		backupCmd.Stderr = os.Stderr
+		require.NoError(t, backupCmd.Run())
+
+		// Step 4: Verify backup was created
+		t.Log("Step 4: Verifying backup...")
+		snapshotsCmd := exec.Command("restic", "snapshots", "--json")
+		output, err := snapshotsCmd.CombinedOutput()
+		require.NoError(t, err, "list snapshots: %s", output)
+		require.Contains(t, string(output), "paths", "snapshot should contain paths")
+
+		// Step 5: Corrupt original data (simulate disaster)
+		t.Log("Step 5: Simulating data corruption...")
+		os.RemoveAll(dataDir)
+		os.MkdirAll(dataDir, 0755)
+
+		// Step 6: Restore from backup
+		t.Log("Step 6: Restoring from backup...")
+		restoreCmd := exec.Command(binary, "restore",
+			"--repo", backupRepo,
+			"--target", restoreDir,
+		)
+		restoreCmd.Stdout = os.Stdout
+		restoreCmd.Stderr = os.Stderr
+		require.NoError(t, restoreCmd.Run())
+
+		// Step 7: Verify restored data
+		t.Log("Step 7: Verifying restored data...")
+
+		// grainfs backup stores data under filepath.Base(dataDir), so after
+		// `restic restore --target restoreDir` the data lands at:
+		//   restoreDir/data   (not restoreDir itself)
+		restoredDataDir := filepath.Join(restoreDir, filepath.Base(dataDir))
+
+		// Start GrainFS with restored data. Shared encKeyFile so the IAM store
+		// rehydrates with the same secrets the source server wrote. The
+		// bootstrap creds from before the restore are still valid because the
+		// IAM store is identical (BadgerDB on disk).
+		restorePort := freePort()
+		cmd2 := exec.Command(binary, "serve",
+			"--data", restoredDataDir,
+			"--port", fmt.Sprintf("%d", restorePort),
+			"--nfs4-port", "0",
+			"--nbd-port", "0",
+			"--encryption-key-file", encKeyFile,
+			"--scrub-interval", "0",
+			"--lifecycle-interval", "0",
+			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		)
+		cmd2.Stdout = os.Stdout
+		cmd2.Stderr = os.Stderr
+		require.NoError(t, cmd2.Start())
+		defer terminateProcess(cmd2)
+
+		restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
+		waitForPort(t, restorePort, 60*time.Second)
+
+		client2 := s3ClientFor(restoreEndpoint, ak, sk)
+
+		// Verify all objects are present
+		var listOut *s3.ListObjectsV2Output
+		require.Eventually(t, func() bool {
+			attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			var err error
+			listOut, err = client2.ListObjectsV2(attemptCtx, &s3.ListObjectsV2Input{
+				Bucket: aws.String("backup-test"),
+			}, func(o *s3.Options) {
+				o.RetryMaxAttempts = 1
+			})
+			return err == nil && listOut != nil && len(listOut.Contents) == len(testData)
+		}, 60*time.Second, time.Second, "list objects after restore")
+		require.Len(t, listOut.Contents, len(testData), "all objects should be restored")
+
+		// Verify object contents
+		for key, expectedContent := range testData {
+			resp, err := client2.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String("backup-test"),
+				Key:    aws.String(key),
+			})
+			require.NoError(t, err, "get %s after restore", key)
+			defer resp.Body.Close()
+
+			content, err := io.ReadAll(resp.Body)
+			require.NoError(t, err, "read %s after restore", key)
+			require.Equal(t, expectedContent, string(content), "content of %s should match", key)
+		}
+
+		t.Log("✅ Backup and restore test passed - data integrity verified")
 	})
-	require.NoError(t, err)
-	waitForS3Write(t, client, "backup-test", "__grainfs_e2e_ready", 30*time.Second)
-	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String("backup-test"),
-		Key:    aws.String("__grainfs_e2e_ready"),
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
 	})
-
-	// Create test objects
-	testData := map[string]string{
-		"file1.txt":        "important data 1",
-		"file2.txt":        "important data 2",
-		"nested/file3.txt": "important data 3",
-	}
-
-	for key, content := range testData {
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("backup-test"),
-			Key:    aws.String(key),
-			Body:   strings.NewReader(content),
-		})
-		require.NoError(t, err, "put %s", key)
-	}
-
-	// Stop GrainFS to ensure data is flushed
-	terminateProcess(cmd)
-	time.Sleep(2 * time.Second)
-
-	// Step 2: Initialize restic repository
-	t.Log("Step 2: Initializing restic repository...")
-	os.Setenv("RESTIC_REPOSITORY", backupRepo)
-	os.Setenv("RESTIC_PASSWORD", "test-password")
-
-	initCmd := exec.Command("restic", "init")
-	initCmd.Stdout = os.Stdout
-	initCmd.Stderr = os.Stderr
-	require.NoError(t, initCmd.Run())
-
-	// Step 3: Create backup using grainfs backup command
-	t.Log("Step 3: Creating backup...")
-	backupCmd := exec.Command(binary, "backup",
-		"--repo", backupRepo,
-		"--data", dataDir,
-		"--tag", "e2e-test",
-	)
-	backupCmd.Stdout = os.Stdout
-	backupCmd.Stderr = os.Stderr
-	require.NoError(t, backupCmd.Run())
-
-	// Step 4: Verify backup was created
-	t.Log("Step 4: Verifying backup...")
-	snapshotsCmd := exec.Command("restic", "snapshots", "--json")
-	output, err := snapshotsCmd.CombinedOutput()
-	require.NoError(t, err, "list snapshots: %s", output)
-	require.Contains(t, string(output), "paths", "snapshot should contain paths")
-
-	// Step 5: Corrupt original data (simulate disaster)
-	t.Log("Step 5: Simulating data corruption...")
-	os.RemoveAll(dataDir)
-	os.MkdirAll(dataDir, 0755)
-
-	// Step 6: Restore from backup
-	t.Log("Step 6: Restoring from backup...")
-	restoreCmd := exec.Command(binary, "restore",
-		"--repo", backupRepo,
-		"--target", restoreDir,
-	)
-	restoreCmd.Stdout = os.Stdout
-	restoreCmd.Stderr = os.Stderr
-	require.NoError(t, restoreCmd.Run())
-
-	// Step 7: Verify restored data
-	t.Log("Step 7: Verifying restored data...")
-
-	// grainfs backup stores data under filepath.Base(dataDir), so after
-	// `restic restore --target restoreDir` the data lands at:
-	//   restoreDir/data   (not restoreDir itself)
-	restoredDataDir := filepath.Join(restoreDir, filepath.Base(dataDir))
-
-	// Start GrainFS with restored data. Shared encKeyFile so the IAM store
-	// rehydrates with the same secrets the source server wrote. The
-	// bootstrap creds from before the restore are still valid because the
-	// IAM store is identical (BadgerDB on disk).
-	restorePort := freePort()
-	cmd2 := exec.Command(binary, "serve",
-		"--data", restoredDataDir,
-		"--port", fmt.Sprintf("%d", restorePort),
-		"--nfs4-port", "0",
-		"--nbd-port", "0",
-		"--encryption-key-file", encKeyFile,
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	cmd2.Stdout = os.Stdout
-	cmd2.Stderr = os.Stderr
-	require.NoError(t, cmd2.Start())
-	defer terminateProcess(cmd2)
-
-	restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
-	waitForPort(t, restorePort, 60*time.Second)
-
-	client2 := s3ClientFor(restoreEndpoint, ak, sk)
-
-	// Verify all objects are present
-	var listOut *s3.ListObjectsV2Output
-	require.Eventually(t, func() bool {
-		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		var err error
-		listOut, err = client2.ListObjectsV2(attemptCtx, &s3.ListObjectsV2Input{
-			Bucket: aws.String("backup-test"),
-		}, func(o *s3.Options) {
-			o.RetryMaxAttempts = 1
-		})
-		return err == nil && listOut != nil && len(listOut.Contents) == len(testData)
-	}, 60*time.Second, time.Second, "list objects after restore")
-	require.Len(t, listOut.Contents, len(testData), "all objects should be restored")
-
-	// Verify object contents
-	for key, expectedContent := range testData {
-		resp, err := client2.GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String("backup-test"),
-			Key:    aws.String(key),
-		})
-		require.NoError(t, err, "get %s after restore", key)
-		defer resp.Body.Close()
-
-		content, err := io.ReadAll(resp.Body)
-		require.NoError(t, err, "read %s after restore", key)
-		require.Equal(t, expectedContent, string(content), "content of %s should match", key)
-	}
-
-	t.Log("✅ Backup and restore test passed - data integrity verified")
 }

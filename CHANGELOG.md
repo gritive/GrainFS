@@ -1,5 +1,152 @@
 # Changelog
 
+## [0.0.262.18] - 2026-05-19 - test(e2e): unify all entries under dual sub-test pattern
+
+`tests/e2e/`의 200+ test entry를 canonical `TestXxxE2E + SingleNode/Cluster{N}Node` sub-test 모양으로 통일. 관련 그룹들은 단일 entry로 합치고, single-only / cluster-only entry에는 fixture-가능한 mirror를 추가해 인벤토리 일관성 확보. production code 변경 없음 (test infrastructure only).
+
+## [0.0.262.17] - 2026-05-19 - test(e2e): merge volume_cli_test.go entries into single TestVolumeCLIGuardsE2E
+
+Two negative-path entries from v0.0.262.16 (`TestVolumeCLIAutoDiscoveryE2E` + `TestVolumeDataPlaneGuardE2E`) collapsed into one entry. Both cover the same conceptual area — guards on the volume CLI / data plane surface — so a single entry with two sub-tests is the right shape.
+
+### Shape
+
+```
+TestVolumeCLIGuardsE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeCLIGuardsCases(t, tgt s3Target)
+                                ├─ t.Run("CLIHintWhenNoEndpoint")
+                                └─ t.Run("DataPlaneVolumesPathHidden")
+```
+
+`CLIHintWhenNoEndpoint` is fixture-independent by design (asserts binary behavior, not server state); it runs under both branches for grep/inventory consistency. `DataPlaneVolumesPathHidden` reads `tgt.endpoint(0)` directly off the shared fixture.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
+## [0.0.262.16] - 2026-05-19 - test(e2e): wrap remaining standalone E2Es in SingleNode/Cluster4Node sub-tests
+
+`TestVolumeCLIAutoDiscoveryE2E` and `TestVolumeDataPlaneGuardE2E` landed in v0.0.262.14 as standalone E2Es. Even though one is fixture-independent (CLI hint check before any server connection) and the other only needs an HTTP endpoint, **every e2e entry point in the suite must follow the dual SingleNode/Cluster4Node shape** for grep/inventory consistency. This PR brings the two stragglers into the pattern.
+
+### Shape
+
+```
+TestVolumeCLIAutoDiscoveryE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeCLIAutoDiscoveryCases(t)
+                                └─ t.Run("HintWhenNoEndpoint")
+
+TestVolumeDataPlaneGuardE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeDataPlaneGuardCases(t, tgt s3Target)
+                                └─ t.Run("VolumesPathDoesNotExposeAdminShape")
+```
+
+### Changed
+
+- `TestVolumeCLIAutoDiscoveryE2E`: both branches reference the corresponding shared fixture (`newSingleNodeS3Target()` / `newSharedClusterS3Target(t)`) to keep the boot ordering consistent with the rest of the suite, then run the same CLI hint check in `HintWhenNoEndpoint`. The check is identical on both branches by design — it asserts behavior of the binary itself, not of any fixture.
+- `TestVolumeDataPlaneGuardE2E`: uses `tgt.endpoint(0)` instead of a per-test `startTestServer`; runs against shared single + shared cluster fixtures.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
+## [0.0.262.15] - 2026-05-19 - test(e2e): dual-integrate Dashboard set
+
+Three Dashboard entry points (scattered across three files) collapsed into one entry, `TestDashboardE2E`, with the canonical dual fixture pattern.
+
+### Shape
+
+```
+TestDashboardE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runDashboardCases(t, mk dashboardFactory)
+                                ├─ t.Run("Serves")                (GET /ui/ → HTML)
+                                ├─ t.Run("HealingCardHTMLMarkup") (Phase 16 Self-Healing card markup)
+                                ├─ t.Run("HealingCardSSEStream")  (GET /api/events/heal/stream → text/event-stream)
+                                └─ t.Run("TokenURLAndRotate")     (dashboard CLI token + rotate)
+```
+
+### Changed
+
+- **`TestDashboard_Serves` (`presigned_test.go`) + `TestDashboardHealingCard_HTMLAndStream` (`dashboard_healing_card_test.go`) + `TestE2E_Dashboard_TokenURLAndRotate` (`volume_cli_test.go`) → single `TestDashboardE2E`** (`tests/e2e/dashboard_test.go`, new).
+- `dashboardFactory` mirrors `volumeScrubFactory` — each case gets a dedicated fixture so `TokenURLAndRotate`'s rotate cannot invalidate another case's expectations.
+- `TokenURLAndRotate` simplified: dropped the `--public-url` plumbing. URL assertion is `Contains(t, resp1.URL, "#token="+resp1.Token)` — token suffix only — which holds regardless of the URL prefix.
+- `dashboardDataDir(tgt)` and `dashboardPort(tgt, nodeIdx)` helpers extract the admin dataDir and HTTP port from any target.
+- `callUI(t, port, token)` moved into `dashboard_test.go`.
+- Deleted `tests/e2e/dashboard_healing_card_test.go`.
+
+### Known parity risks (cluster branch)
+
+`Cluster4Node` is the first end-to-end coverage of these endpoints on a 4-node DynamicJoin fixture. The dashboard token is per-node state in some prior implementations; if it isn't replicated/leader-canonical, `TokenURLAndRotate` cluster branch may flap (rotated token on leader vs. callUI hitting the same node). Captured as signal — not fixed here per the e2e-unify session policy.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
+## [0.0.262.14] - 2026-05-19 - test(e2e): absorb TestE2E_VolumeCLI_* into TestVolumeE2E (single admin CLI entry)
+
+`TestE2E_VolumeCLI_*` and `TestVolumeE2E` (landed in v0.0.262.12) covered the same admin-CLI volume surface from two entry points. This PR collapses the admin-CLI case set into one entry — `TestVolumeE2E` — and pulls out the two genuinely-not-admin-CLI tests as standalone E2Es.
+
+### Absorbed into `TestVolumeE2E` (now 9 sub-tests)
+
+| Was | Now (sub-test under `TestVolumeE2E`) |
+|---|---|
+| `TestE2E_VolumeCLI_FullLifecycle` | `FullLifecycle` (list/create/info/resize/snapshot/delete-refused/delete-force) |
+| `TestE2E_VolumeCLI_ListIncludesHealth` | `ListIncludesHealth` |
+| `TestE2E_VolumeCLI_ListJSONIncludesHealthReasons` | `ListJSONIncludesHealthReasons` |
+| `TestE2E_VolumeCLI_ShrinkRejected` | `ShrinkRejected` |
+| `TestE2E_VolumeCLI_NotFound` | `NotFound` |
+
+All five cases now run under `SingleNode` and `Cluster4Node` via the existing `runVolumeCases(t, tgt s3Target)` set helper — six fixture-paths per case from one entry. Per-case unique volume names via `uniqueVolName(tgt, …)` so cluster reruns and parallel cluster tests can't collide on the volume namespace.
+
+### Split out (not admin CLI)
+
+- **`TestE2E_VolumeCLI_AutoDiscoveryFailureMessage` → `TestVolumeCLIAutoDiscoveryE2E`**. Fixture-independent: invokes the binary in a cwd with no grainfs context and asserts the actionable hint is printed before any server connection. No single/cluster split.
+- **`TestE2E_VolumeCLI_NoVolumesViaDataPlane` → `TestVolumeDataPlaneGuardE2E`**. HTTP-level guard against the removed `/volumes/*` admin endpoints on the data plane (A6 regression). Not a CLI invocation.
+
+### Files
+
+- `tests/e2e/volume_test.go` — five sub-tests appended to `runVolumeCases`. Helpers (`createVolumeEventually`, `cleanupVolume`, `uniqueVolName`) reused.
+- `tests/e2e/volume_cli_test.go` — five absorbed functions removed; the two non-admin-CLI tests renamed to the canonical `TestXxxE2E` form. `startTestServer`, `runCLI`, `waitForVolumeReady`, `containsFlag`, `TestE2E_Dashboard_TokenURLAndRotate` (separate group, queued for a later PR) preserved.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
+## [0.0.262.13] - 2026-05-19 - test(e2e): dual-integrate VolumeScrub set + collapse _Cluster4Node suffix entries
+
+Three test groups re-shaped into the canonical single-entry dual pattern.
+
+### Shape
+
+```
+TestVolumeScrubE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeScrubCases(t, mk volumeScrubFactory)
+                                ├─ t.Run("HealthyNoop")                  (dedup=false)
+                                ├─ t.Run("HealthyNoop_Dedup")            (dedup=true)
+                                ├─ t.Run("DryRunDetectsCorruption")      (truncate + --dry-run)
+                                ├─ t.Run("DryRunDetectsCorruption_Dedup")
+                                ├─ t.Run("RepairBehavior")               (single→Unrepairable=1 / cluster→Repaired=1)
+                                ├─ t.Run("RepairBehavior_Dedup")
+                                ├─ t.Run("AdminTriggerWorksAtZeroInterval")  (--scrub-interval=0)
+                                └─ t.Run("StatusListCancel")             (--detach + list + status)
+```
+
+### Changed
+
+- **`TestE2E_VolumeScrub_*` (8 entries) + `TestE2E_VolumeScrub_MultiNodeRepair` → single `TestVolumeScrubE2E`** (`tests/e2e/volume_scrub_test.go`). `MultiNodeRepair` is absorbed by `RepairBehavior`'s cluster branch — same truncate-then-scrub flow, fixture-divergent expectation (single: `Unrepairable=1`, cluster: `Repaired=1`).
+- New `volumeScrubFactory` type — each scrub case needs its own `--dedup`/`--scrub-interval` flags, so the case set is parametrised on a fixture factory rather than a single `s3Target`. Single branch wraps `newDedicatedSingleNodeS3Target`; cluster branch wraps `newClusterS3TargetWithExtraArgs(t, 4, args)`.
+- New `scrubDataDir(tgt, nodeIdx)` and `truncateAVolumeBlock(t, tgt, vol, blockNum)` helpers — encapsulate single-vs-cluster dataDir selection and on-disk shard truncation (picks first holder for cluster).
+- `filepathWalkBlock` helper moved from the deleted `volume_scrub_multinode_test.go` into `volume_scrub_test.go` (still used by `nbd_multinode_replication_test.go`).
+- Deleted `tests/e2e/volume_scrub_multinode_test.go`.
+
+### Also (`_Cluster4Node` suffix cleanup)
+
+- **`TestAppendForwardBufferSaturationE2E_Cluster4Node` → `TestAppendForwardBufferSaturationE2E`** with a single `t.Run("Cluster4Node", …)` branch that calls `runAppendForwardBufferSaturationCases(t, tgt s3Target)`. Cluster-only today (single-node has no forward buffer); shape kept consistent so a future single-node analogue (e.g. per-bucket admission control) can drop in as a sibling `t.Run("SingleNode", …)`.
+- **`TestOrphanSegmentSweepE2E_Cluster4Node` → `TestOrphanSegmentSweepE2E`** with one `t.Run("Cluster4Node", …)` calling `runOrphanSegmentSweepCases(t)`. Cluster-only today (single-node scrubber is covered separately); same forward-compatibility rationale.
+
+Verified: `make build` clean. e2e package compiles (`go test -c`).
+
+### Known parity risks (cluster branch, first run)
+
+- `DryRunDetectsCorruption{,_Dedup}` cluster branch corrupts an EC shard rather than a `current` file — never previously exercised through the dry-run CLI path.
+- `RepairBehavior{,_Dedup}` cluster branch expects `Repaired=1` via EC peer-pull on a 4-node DynamicJoin fixture; `MultiNodeRepair` previously asserted this on 3-node StaticPeers. Fixture difference may flap initial-placement races on the first write.
+- `HealthyNoop_Dedup` cluster branch is the first cluster coverage of dedup-mode volume scrub. If dedup-on-cluster has wiring gaps, the assert fails — captured as signal, not fixed here (classification-only scope per ongoing e2e-unify session policy).
+
 ## [0.0.262.12] - 2026-05-19 - test(e2e): dual-integrate TestVolume admin CLI set
 
 Same one-entry-point shape as v0.0.262.11 (BucketPolicy). Single `TestVolumeE2E` owns the volume admin CLI test set and applies it to both fixtures.

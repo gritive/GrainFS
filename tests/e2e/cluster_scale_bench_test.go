@@ -171,11 +171,13 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 // It boots five processes and samples pprof for 30s, so keep it out of the
 // default e2e suite where correctness tests should remain deterministic.
 func TestClusterScaleBenchN8E2E(t *testing.T) {
-	if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
-	}
-	r := runScaleBench(t, 8)
-	t.Logf("N=8 result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",
-		r.bootSec, r.perProc.rssMB, r.perProc.heapMB, r.perProc.cpuPct, r.perProc.goroutines)
+	t.Run("Cluster8Node", func(t *testing.T) {
+		if os.Getenv("GRAINFS_BENCH_FULL") != "1" {
+		}
+		r := runScaleBench(t, 8)
+		t.Logf("N=8 result: boot=%ds RSS=%.1fMB heap=%.1fMB CPU=%.1f%% gor=%d",
+			r.bootSec, r.perProc.rssMB, r.perProc.heapMB, r.perProc.cpuPct, r.perProc.goroutines)
+	})
 }
 
 // 각 N을 별도 Test 함수로 분리한다 — t.Run으로 묶으면 sub-test 사이의 cleanup이

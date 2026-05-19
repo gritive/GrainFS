@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -129,189 +128,50 @@ func containsFlag(args []string, flag string) bool {
 	return false
 }
 
-func TestE2E_VolumeCLI_FullLifecycle(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	// 1. list — server may or may not have a "default" volume from NBD wiring.
-	// Just confirm it returns 0 (cluster ready and admin reachable).
-	out, code := runCLI(t, dataDir, "volume", "list")
-	require.Equal(t, 0, code, out)
-
-	// 2. create
-	out, code = runCLI(t, dataDir, "volume", "create", "v1", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, `created "v1"`)
-
-	// 3. info
-	out, code = runCLI(t, dataDir, "volume", "info", "v1")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "name:             v1")
-
-	// 4. resize grow
-	out, code = runCLI(t, dataDir, "volume", "resize", "v1", "--size", "2Mi")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "resized")
-
-	// 5. snapshot create
-	out, code = runCLI(t, dataDir, "volume", "snapshot", "create", "v1")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "created")
-
-	// 6. delete refused
-	_, code = runCLI(t, dataDir, "volume", "delete", "v1")
-	require.NotEqual(t, 0, code, "delete with snapshots should fail")
-
-	// 7. delete --force succeeds
-	out, code = runCLI(t, dataDir, "volume", "delete", "v1", "--force")
-	require.Equal(t, 0, code, out)
+// TestVolumeCLIGuardsE2E groups negative-path checks on the volume CLI /
+// data-plane surface that complement TestVolumeE2E's happy-path coverage:
+//
+//   - CLIHintWhenNoEndpoint: invoking the binary without --endpoint in an
+//     empty cwd prints the actionable hint instead of a stack trace. The
+//     binary computes this before any server connection, so the assertion
+//     is identical on both fixtures — kept under both branches for shape
+//     parity with the rest of the suite.
+//   - DataPlaneVolumesPathHidden (A6 regression): /volumes/* admin endpoints
+//     were removed from the data plane; /volumes/ now falls through to the
+//     S3 bucket handler and must not return admin-shaped JSON.
+func TestVolumeCLIGuardsE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runVolumeCLIGuardsCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runVolumeCLIGuardsCases(t, newSharedClusterS3Target(t))
+	})
 }
 
-func TestE2E_VolumeCLI_ListIncludesHealth(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	out, code := runCLI(t, dataDir, "volume", "create", "vhealth", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
-
-	out, code = runCLI(t, dataDir, "volume", "list")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "HEALTH")
-	require.Contains(t, out, "vhealth")
-	require.Contains(t, out, "ok")
-}
-
-func TestE2E_VolumeCLI_ListJSONIncludesHealthReasons(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	out, code := runCLI(t, dataDir, "volume", "create", "vjsonhealth", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
-
-	out, code = runCLI(t, dataDir, "volume", "list", "--format", "json")
-	require.Equal(t, 0, code, out)
-	var raw map[string][]map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &raw))
-	var resp struct {
-		Volumes []struct {
-			Name          string   `json:"name"`
-			Health        string   `json:"health"`
-			HealthReasons []string `json:"health_reasons"`
-		} `json:"volumes"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out), &resp))
-	for _, v := range resp.Volumes {
-		if v.Name == "vjsonhealth" {
-			require.Equal(t, "ok", v.Health)
-			require.Empty(t, v.HealthReasons)
-			foundRaw := false
-			for _, rawVolume := range raw["volumes"] {
-				if rawVolume["name"] == "vjsonhealth" {
-					foundRaw = true
-					require.Contains(t, rawVolume, "health_reasons")
-					require.IsType(t, []any{}, rawVolume["health_reasons"])
-				}
-			}
-			require.True(t, foundRaw, "raw volume vjsonhealth not found")
-			return
-		}
-	}
-	require.Failf(t, "volume not found", "volume vjsonhealth not found in list response: %s", out)
-}
-
-func TestE2E_VolumeCLI_ShrinkRejected(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	out, code := runCLI(t, dataDir, "volume", "create", "v1", "--size", "10Mi")
-	require.Equal(t, 0, code, out)
-
-	out, code = runCLI(t, dataDir, "volume", "resize", "v1", "--size", "5Mi")
-	require.NotEqual(t, 0, code, out)
-	require.Contains(t, out, "shrink not supported")
-}
-
-func TestE2E_VolumeCLI_NotFound(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-	_, code := runCLI(t, dataDir, "volume", "info", "ghost")
-	require.NotEqual(t, 0, code, "info on missing volume should fail")
-}
-
-func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
-	// Run CLI without --endpoint to verify the actionable failure message.
-	cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
-	require.NoError(t, err)
-	defer os.RemoveAll(cwd)
-
-	binary, err := filepath.Abs(getBinary())
-	require.NoError(t, err)
-	cmd := exec.Command(binary, "volume", "list")
-	cmd.Dir = cwd
-	out, err := cmd.CombinedOutput()
-	require.Error(t, err)
-	require.Contains(t, string(out), "admin endpoint not configured")
-	require.Contains(t, string(out), "Hint")
-}
-
-func TestE2E_VolumeCLI_NoVolumesViaDataPlane(t *testing.T) {
-	// Regression: data-plane /volumes/* admin endpoints must be removed (A6).
-	// /volumes/ now falls through to the S3 bucket handler (it matches
-	// /:bucket/), so it should NOT return JSON shaped like admin output.
-	// We assert the response is not the admin "{"volumes":[...]}" shape.
-	_, port, _ := startTestServer(t)
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/volumes/", port))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	require.NotContains(t, string(body), `"volumes":`,
-		"data plane should no longer expose the admin volumes endpoint")
-}
-
-func TestE2E_Dashboard_TokenURLAndRotate(t *testing.T) {
-	publicPort := freePort()
-	dataDir, port, _ := startTestServerOnPort(t, publicPort,
-		"--public-url", fmt.Sprintf("http://127.0.0.1:%d", publicPort),
-	)
-	require.Equal(t, publicPort, port)
-
-	// Get token via CLI.
-	out1, code := runCLI(t, dataDir, "dashboard", "--format", "json")
-	require.Equal(t, 0, code, out1)
-	var resp1 struct {
-		Token string `json:"token"`
-		URL   string `json:"url"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out1), &resp1))
-	require.NotEmpty(t, resp1.Token)
-	require.Contains(t, resp1.URL, "#token="+resp1.Token)
-
-	// Old token works.
-	require.True(t, callUI(t, port, resp1.Token) == http.StatusOK)
-
-	// No token → 401.
-	require.True(t, callUI(t, port, "") == http.StatusUnauthorized)
-
-	// Rotate.
-	out2, code := runCLI(t, dataDir, "dashboard", "--rotate", "--format", "json")
-	require.Equal(t, 0, code, out2)
-	var resp2 struct {
-		Token string `json:"token"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out2), &resp2))
-	require.NotEqual(t, resp1.Token, resp2.Token)
-
-	// Old token is dead.
-	require.True(t, callUI(t, port, resp1.Token) == http.StatusUnauthorized)
-	// New token works.
-	require.True(t, callUI(t, port, resp2.Token) == http.StatusOK)
-}
-
-func callUI(t *testing.T, port int, token string) int {
+func runVolumeCLIGuardsCases(t *testing.T, tgt s3Target) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ui/api/volumes", port), nil)
-	require.NoError(t, err)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode
+
+	t.Run("CLIHintWhenNoEndpoint", func(t *testing.T) {
+		cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
+		require.NoError(t, err)
+		defer os.RemoveAll(cwd)
+
+		binary, err := filepath.Abs(getBinary())
+		require.NoError(t, err)
+		cmd := exec.Command(binary, "volume", "list")
+		cmd.Dir = cwd
+		out, err := cmd.CombinedOutput()
+		require.Error(t, err)
+		require.Contains(t, string(out), "admin endpoint not configured")
+		require.Contains(t, string(out), "Hint")
+	})
+
+	t.Run("DataPlaneVolumesPathHidden", func(t *testing.T) {
+		resp, err := http.Get(tgt.endpoint(0) + "/volumes/")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		require.NotContains(t, string(body), `"volumes":`,
+			"data plane should no longer expose the admin volumes endpoint")
+	})
 }

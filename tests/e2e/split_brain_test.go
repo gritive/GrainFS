@@ -10,35 +10,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSplitBrain_MetricExposed verifies that the Prometheus /metrics endpoint
-// exposes the grainfs_split_brain_suspected metric (always 0 when no peers configured).
-func TestSplitBrain_MetricExposed(t *testing.T) {
-	resp, err := http.Get(testServerURL + "/metrics")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	assert.Contains(t, string(body), "grainfs_split_brain_suspected",
-		"/metrics must expose split brain indicator")
+// TestSplitBrainE2E asserts the grainfs_split_brain_suspected metric is
+// exposed and reads zero on the shared fixtures (no split observed). Shared
+// single + shared cluster — Prometheus scrape is read-only, no state
+// mutation across sub-tests.
+func TestSplitBrainE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runSplitBrainCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runSplitBrainCases(t, newSharedClusterS3Target(t))
+	})
 }
 
-// TestSplitBrain_NoPeersIsZero verifies that when no peers configured split brain is never suspected.
-func TestSplitBrain_NoPeersIsZero(t *testing.T) {
-	resp, err := http.Get(testServerURL + "/metrics")
-	require.NoError(t, err)
-	defer resp.Body.Close()
+func runSplitBrainCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	endpoint := tgt.endpoint(0)
 
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	t.Run("MetricExposed", func(t *testing.T) {
+		resp, err := http.Get(endpoint + "/metrics")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.HasPrefix(line, "grainfs_split_brain_suspected") && !strings.HasPrefix(line, "#") {
-			assert.Contains(t, line, "0", "no-peers mode must report split_brain_suspected=0, got: %q", line)
-			return
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), "grainfs_split_brain_suspected",
+			"/metrics must expose split brain indicator")
+	})
+
+	t.Run("ValueIsZero", func(t *testing.T) {
+		resp, err := http.Get(endpoint + "/metrics")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		for _, line := range strings.Split(string(body), "\n") {
+			if strings.HasPrefix(line, "grainfs_split_brain_suspected") && !strings.HasPrefix(line, "#") {
+				assert.Contains(t, line, "0",
+					"split_brain_suspected must be 0 in steady state, got: %q", line)
+				return
+			}
 		}
-	}
-	t.Fatal("grainfs_split_brain_suspected metric not found in /metrics output")
+		require.Fail(t, "grainfs_split_brain_suspected metric not found in /metrics output")
+	})
 }

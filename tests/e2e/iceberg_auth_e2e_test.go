@@ -11,75 +11,75 @@ import (
 )
 
 // TestIcebergE2E_NoAuth_Rejected: an unsigned http.Post to /iceberg/v1/namespaces
-// must be rejected with 401 by the iceberg auth gate (route policy =
-// routeAuthnSigV4). Validates spec §5.2 row 1 over the wire.
+// must be rejected with 401 by the iceberg auth gate.
 func TestIcebergE2E_NoAuth_Rejected(t *testing.T) {
-	srv := startIAMTestServer(t)
-	defer srv.Stop()
+	t.Run("SingleNode", func(t *testing.T) {
+		srv := startIAMTestServer(t)
+		defer srv.Stop()
 
-	resp, err := http.Post(srv.S3URL+"/iceberg/v1/namespaces", "application/json",
-		bytes.NewReader([]byte(`{"namespace":["x"]}`)))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		resp, err := http.Post(srv.S3URL+"/iceberg/v1/namespaces", "application/json",
+			bytes.NewReader([]byte(`{"namespace":["x"]}`)))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
-// TestIcebergE2E_AfterBootstrap_Accepts: bootstrap an admin SA via UDS, sign a
-// /iceberg/v1/config request with that key; the SigV4 verifier accepts (no
-// 401/403). Validates spec §5.2 row 2.
+// TestIcebergE2E_AfterBootstrap_Accepts: bootstrap an admin SA via UDS,
+// sign a /iceberg/v1/config request with that key; the SigV4 verifier accepts.
 func TestIcebergE2E_AfterBootstrap_Accepts(t *testing.T) {
-	srv := startIAMTestServer(t)
-	defer srv.Stop()
+	t.Run("SingleNode", func(t *testing.T) {
+		srv := startIAMTestServer(t)
+		defer srv.Stop()
 
-	client := newIcebergSigV4Client(t, srv.BootstrapAK, srv.BootstrapSK, "us-east-1")
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		srv.S3URL+"/iceberg/v1/config?warehouse=warehouse", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
-		"signed request should pass authn (got 401)")
-	require.NotEqual(t, http.StatusForbidden, resp.StatusCode,
-		"signed request should not be 403 either")
+		client := newIcebergSigV4Client(t, srv.BootstrapAK, srv.BootstrapSK, "us-east-1")
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			srv.S3URL+"/iceberg/v1/config?warehouse=warehouse", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
+			"signed request should pass authn (got 401)")
+		require.NotEqual(t, http.StatusForbidden, resp.StatusCode,
+			"signed request should not be 403 either")
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }
 
 // TestIcebergE2E_AuthFailures_Audited: 3 unsigned POSTs to /iceberg/v1/...
 // should surface in the audit event log with non-empty Action and Reason.
-//
-// Currently skipped: spec §6.5 explicitly defers wiring iceberg paths into the
-// audit committer to a follow-up PR ("route iceberg ops into the same audit
-// pipeline that S3 ops use, or a separate sink — decide alongside
-// audit-iceberg bucket semantics"). recordAuditAuthFailure early-returns on
-// iceberg paths because s3PathBucketKey("/iceberg/...") returns ("",""), and
-// the function bails when bucket == "". Empirically verified: zero audit
-// events surface for iceberg auth failures in this PR's code state.
-//
-// S3-path auth-failure auditing is already covered by
-// internal/server/handlers_audit_emit_test.go::TestAuditEnvelope_RecordsAuthFailure.
-// The scaffolding below stays so the follow-up PR can flip Skip → assertion.
 func TestIcebergE2E_AuthFailures_Audited(t *testing.T) {
-
-	srv := startIAMTestServer(t)
-	defer srv.Stop()
-	for i := 0; i < 3; i++ {
-		resp, err := http.Post(srv.S3URL+"/iceberg/v1/warehouses", "application/json",
-			bytes.NewReader([]byte(`{}`)))
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-	}
-	time.Sleep(200 * time.Millisecond) // audit pipeline is async
-
-	events := getEventLog(t, srv.S3URL)
-	failures := 0
-	for _, e := range events {
-		action, _ := e["action"].(string)
-		reason, _ := e["err_reason"].(string)
-		authStatus, _ := e["auth_status"].(string)
-		if authStatus == "deny" && action != "" && reason != "" {
-			failures++
+	t.Run("SingleNode", func(t *testing.T) {
+		srv := startIAMTestServer(t)
+		defer srv.Stop()
+		for i := 0; i < 3; i++ {
+			resp, err := http.Post(srv.S3URL+"/iceberg/v1/warehouses", "application/json",
+				bytes.NewReader([]byte(`{}`)))
+			require.NoError(t, err)
+			_ = resp.Body.Close()
 		}
-	}
-	require.GreaterOrEqual(t, failures, 3,
-		"expected ≥3 iceberg auth failures audited with non-empty action+reason")
+		time.Sleep(200 * time.Millisecond) // audit pipeline is async
+
+		events := getEventLog(t, srv.S3URL)
+		failures := 0
+		for _, e := range events {
+			action, _ := e["action"].(string)
+			reason, _ := e["err_reason"].(string)
+			authStatus, _ := e["auth_status"].(string)
+			if authStatus == "deny" && action != "" && reason != "" {
+				failures++
+			}
+		}
+		require.GreaterOrEqual(t, failures, 3,
+			"expected ≥3 iceberg auth failures audited with non-empty action+reason")
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+	})
 }

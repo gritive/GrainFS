@@ -38,12 +38,16 @@ func runNFSExportCases(t *testing.T, tgt *nfsTarget) {
 	})
 }
 
-func TestE2E_NFSExportCasesSingleNode(t *testing.T) {
-	runNFSExportCases(t, newSingleNodeNFSTarget(t))
-}
-
-func TestE2E_NFSExportCasesCluster(t *testing.T) {
-	runNFSExportCases(t, newSharedClusterNFSTarget(t))
+// TestNFSExportCasesE2E merges the previously-split SingleNode/Cluster
+// entries into one entry with sub-test branches, matching the canonical
+// dual fixture shape used by the rest of the suite.
+func TestNFSExportCasesE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runNFSExportCases(t, newSingleNodeNFSTarget(t))
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runNFSExportCases(t, newSharedClusterNFSTarget(t))
+	})
 }
 
 // exportListHasBucketOnDataDir is the dataDir-parameterized form of
