@@ -43,7 +43,7 @@ func taggingDo(t *testing.T, sign func(*http.Request), req *http.Request) *http.
 }
 
 func TestPutObjectTagging_Roundtrip(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
@@ -66,7 +66,7 @@ func TestPutObjectTagging_Roundtrip(t *testing.T) {
 }
 
 func TestPutObjectTagging_RejectInvalid(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
@@ -81,7 +81,7 @@ func TestPutObjectTagging_RejectInvalid(t *testing.T) {
 }
 
 func TestDeleteObjectTagging_Idempotent(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
@@ -95,7 +95,7 @@ func TestDeleteObjectTagging_Idempotent(t *testing.T) {
 }
 
 func TestPutObject_WithTaggingHeader(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 
 	req, err := http.NewRequest(http.MethodPut, url+"/b/k", strings.NewReader("body"))
@@ -117,7 +117,7 @@ func TestPutObject_WithTaggingHeader(t *testing.T) {
 }
 
 func TestPutObject_WithTaggingHeader_InvalidRejected(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 
 	req, err := http.NewRequest(http.MethodPut, url+"/b/k", strings.NewReader("body"))
@@ -129,7 +129,7 @@ func TestPutObject_WithTaggingHeader_InvalidRejected(t *testing.T) {
 }
 
 func TestCreateMultipartUpload_WithTaggingHeader(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 
 	// Create multipart upload with tags
@@ -142,7 +142,7 @@ func TestCreateMultipartUpload_WithTaggingHeader(t *testing.T) {
 }
 
 func TestCreateMultipartUpload_WithTaggingHeader_InvalidRejected(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 
 	req, err := http.NewRequest(http.MethodPost, url+"/b/k?uploads", nil)
@@ -154,7 +154,7 @@ func TestCreateMultipartUpload_WithTaggingHeader_InvalidRejected(t *testing.T) {
 }
 
 func TestCopyObject_WithTaggingDirectiveReplace(t *testing.T) {
-	url, sign := setupECAuthServer(t)
+	url, sign, _ := setupECAuthServer(t)
 	taggingPutBucket(t, url, sign, "b")
 	taggingPutObject(t, url, sign, "b", "src", "body")
 

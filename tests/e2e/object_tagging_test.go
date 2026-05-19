@@ -18,7 +18,6 @@ func TestObjectTaggingE2E(t *testing.T) {
 		runObjectTaggingCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "cluster fixture not booted in -short mode")
 		runObjectTaggingCases(t, newSharedClusterS3Target(t))
 	})
 }
@@ -91,9 +90,6 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("MultipartCreate_TagsMaterialiseOnComplete", func(t *testing.T) {
-		if tgt.isCluster {
-			t.Skip("Phase 1: cluster CreateMultipartUpload with tags is fail-fast Unsupported; covered by single-node here")
-		}
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "mpu")
 
@@ -101,6 +97,11 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Tagging: aws.String("env=prod"),
 		})
+		if tgt.isCluster {
+			// Phase 1: cluster CreateMultipartUpload with tags is fail-fast Unsupported.
+			require.Error(t, err)
+			return
+		}
 		require.NoError(t, err)
 
 		// Use the shortest legal part (>=5 MiB is the S3 minimum except the
@@ -163,15 +164,17 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("Versioning_PerVersion", func(t *testing.T) {
-		if !tgt.isCluster {
-			t.Skip("LocalBackend does not implement BucketVersioner; cluster-only test")
-		}
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "ver")
 		_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 			Bucket:                  aws.String(bucket),
 			VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
 		})
+		if !tgt.isCluster {
+			// LocalBackend does not implement BucketVersioner; cluster-only feature.
+			require.Error(t, err)
+			return
+		}
 		require.NoError(t, err)
 
 		v1, err := client.PutObject(ctx, &s3.PutObjectInput{
