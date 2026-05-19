@@ -1346,9 +1346,6 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 // quorum entirely. This is intentional — 2-node clusters are functionally
 // worse than single-node for availability.
 func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
 
 	c := startMRCluster(t, 2, mrClusterOptions{
 		FastBootstrap: true,
@@ -1403,9 +1400,6 @@ func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
 // After each expansion, a PUT (with internal GET round-trip) is verified to
 // confirm routing works.
 func TestE2E_DynamicGroupSeeding_1to5(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e")
-	}
 
 	// Start with 1 node; pre-allocate ports for 5.
 	c := startMRCluster(t, 1, mrClusterOptions{
