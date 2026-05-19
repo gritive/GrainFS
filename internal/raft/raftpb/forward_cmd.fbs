@@ -26,7 +26,8 @@ enum ForwardOp : byte {
   SetObjectACL = 16,
   ListParts = 17,
   ListMultipartUploads = 18,
-  AppendObject = 19
+  AppendObject = 19,
+  HeadObjectVersion = 20
 }
 
 table ScrubSessionStatArgs {
@@ -83,6 +84,12 @@ table GetObjectVersionArgs {
 table HeadObjectArgs {
   bucket:string;
   key:string;
+}
+
+table HeadObjectVersionArgs {
+  bucket:string;
+  key:string;
+  version_id:string;
 }
 
 table DeleteObjectArgs {
