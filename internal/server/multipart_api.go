@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -107,7 +106,7 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
 		return
 	}
-	body := bytes.NewReader(bodyBytes)
+	body := newPutObjectBodyReader(bodyBytes)
 	part, err := s.uploadMultipartPart(ctx, bucket, key, uploadID, partNumber, body)
 	if err != nil {
 		mapError(c, err)

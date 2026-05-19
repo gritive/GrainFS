@@ -1806,12 +1806,9 @@ func (c *ClusterCoordinator) UploadPart(
 		return partFromReply(reply)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	body, err := forwardBodyBytes(r, c.maxBody)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
@@ -1826,6 +1823,28 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, ErrForwardBodySizeMismatch
 	}
 	return part, nil
+}
+
+type forwardBodyBytesProvider interface {
+	ForwardBodyBytes() []byte
+}
+
+func forwardBodyBytes(r io.Reader, maxBody int64) ([]byte, error) {
+	if provider, ok := r.(forwardBodyBytesProvider); ok {
+		body := provider.ForwardBodyBytes()
+		if int64(len(body)) > maxBody {
+			return nil, storage.ErrEntityTooLarge
+		}
+		return body, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r, maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBody {
+		return nil, storage.ErrEntityTooLarge
+	}
+	return body, nil
 }
 
 // AppendObject implements storage.AppendObjecter at the cluster-coordinator

@@ -2268,6 +2268,96 @@ func TestClusterCoordinator_UploadPart_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
 }
 
+type exposedForwardBodyReader struct {
+	*bytes.Reader
+	body      []byte
+	readCalls int
+}
+
+func newExposedForwardBodyReader(body []byte) *exposedForwardBodyReader {
+	return &exposedForwardBodyReader{Reader: bytes.NewReader(body), body: body}
+}
+
+func (r *exposedForwardBodyReader) Read(p []byte) (int, error) {
+	r.readCalls++
+	return r.Reader.Read(p)
+}
+
+func (r *exposedForwardBodyReader) ForwardBodyBytes() []byte {
+	return r.body
+}
+
+func TestClusterCoordinator_UploadPart_ForwardUsesExposedBodyBytes(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("y"), 1024)
+	reader := newExposedForwardBodyReader(body)
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: int64(len(body))},
+	)
+
+	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, reader)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), p.Size)
+	require.Zero(t, reader.readCalls, "UploadPart should reuse exposed body bytes instead of copying through io.ReadAll")
+
+	args := raftpb.GetRootAsUploadPartArgs(d.calls[0].args, 0)
+	require.Equal(t, body, args.BodyBytes())
+}
+
+func benchmarkClusterCoordinatorUploadPartForward5MiB(b *testing.B, exposed bool) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"a"}},
+	}}
+	reply := buildPartReply(&storage.Part{PartNumber: 1, ETag: "etag-part", Size: 5 * 1024 * 1024})
+	dial := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		_, op, args, err := decodeForwardPayload(payload)
+		if err != nil {
+			return nil, err
+		}
+		if op != raftpb.ForwardOpUploadPart {
+			return nil, errors.New("unexpected forward op")
+		}
+		if got := raftpb.GetRootAsUploadPartArgs(args, 0).BodyLength(); got != 5*1024*1024 {
+			return nil, fmt.Errorf("unexpected upload part body length %d", got)
+		}
+		return reply, nil
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(NewForwardSender(dial))
+	body := bytes.Repeat([]byte("p"), 5*1024*1024)
+
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var reader io.Reader
+		if exposed {
+			reader = newExposedForwardBodyReader(body)
+		} else {
+			reader = bytes.NewReader(body)
+		}
+		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, reader)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if part.Size != int64(len(body)) {
+			b.Fatalf("part size %d != body size %d", part.Size, len(body))
+		}
+	}
+}
+
+func BenchmarkClusterCoordinatorUploadPartForwardReadAll_5MiB(b *testing.B) {
+	benchmarkClusterCoordinatorUploadPartForward5MiB(b, false)
+}
+
+func BenchmarkClusterCoordinatorUploadPartForwardExposed_5MiB(b *testing.B) {
+	benchmarkClusterCoordinatorUploadPartForward5MiB(b, true)
+}
+
 func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := []byte("part-body")
