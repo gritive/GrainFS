@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.262.2] - 2026-05-19 - test(e2e): unify EC suite onto TestBucketsE2E dual pattern
+
+`tests/e2e/erasure_test.go` had five tests (`TestEC_BasicPutGet`, `TestEC_LargeObject`, `TestEC_MultipartUpload`, `TestEC_BucketOperations`, `TestEC_DeleteAndOverwrite`) each booting its own single-node `startECServer` and hard-coding bucket names (`ec-basic`, `ec-large`, ...). Each test was bucket-isolated, so they migrate cleanly onto the standard dual fixture pattern.
+
+Changes:
+
+- Renamed `TestEC_*` → `TestEc{BasicPutGet,LargeObject,MultipartUpload,BucketOperations,DeleteAndOverwrite}E2E`.
+- Every test now runs `t.Run("SingleNode", ...)` + `t.Run("Cluster4Node", ...)` with `runEc{name}Cases(t, tgt s3Target)` helpers. Single uses the package-global fixture (`newSingleNodeS3Target()`); cluster uses the shared 4-node fixture (`newSharedClusterS3Target(t)`, behind `skipIfShort`). EC tests now exercise the cluster S3 surface for the first time.
+- Hard-coded bucket names replaced with `tgt.uniqueBucket(t, "<short>")` so cluster reruns and parallel-running cluster tests do not collide.
+- Removed `startECServer` and `createECBucketReady` helpers — `newSingleNodeS3Target` covers single (the `--scrub-interval 0 --lifecycle-interval 0` flags were already on the TestMain global), and `uniqueBucket` covers create+cleanup. Net helper code reduction.
+
+### Known parity gap surfaced
+
+- `TestEcDeleteAndOverwriteE2E/SingleNode` fails on master: `GetObject` after `DeleteObject` returns success (expected: NoSuchKey). Pre-existing regression from the versioning PR (same class as `TestSmokeDeploymentE2E/SingleNode/ListObjects` from PR #440). Not fixed here per the "classification work, not fix work" scope — captured for a follow-up session.
+
+### Changed
+
+- **`TestEC_BasicPutGet` → `TestEcBasicPutGetE2E`** (`tests/e2e/erasure_test.go`) — dual-pattern + `runEcBasicPutGetCases`. Three inner sub-tests preserved (`small_object`, `medium_object`, `nested_key`).
+- **`TestEC_LargeObject` → `TestEcLargeObjectE2E`** — 5MiB body exercises the EC stripe across both targets.
+- **`TestEC_MultipartUpload` → `TestEcMultipartUploadE2E`** — sub-5MiB parts; note in the test references that cluster may tighten the policy later.
+- **`TestEC_BucketOperations` → `TestEcBucketOperationsE2E`** — Head/List/Delete on the unique bucket; `EventuallyWithT 30s` envelope preserved for routed-ListObjects readiness.
+- **`TestEC_DeleteAndOverwrite` → `TestEcDeleteAndOverwriteE2E`** — fails on master (see Known parity gap above).
+
 ## [0.0.262.1] - 2026-05-19 - test(e2e): unify cluster-only onto shared fixture + admin CLI duals + single-only convention
 
 Three changes bundled:

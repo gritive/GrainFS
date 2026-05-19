@@ -3,10 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -18,68 +15,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// startECServer starts a grainfs server with --ec enabled and returns
-// the S3 client, data directory, and cleanup function.
-func startECServer(t *testing.T) (*s3.Client, string, func()) {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "grainfs-ec-e2e-*")
-	require.NoError(t, err)
+// EC tests exercise the default storage path under the project's standard
+// erasure-coded layout (Reed-Solomon 4+2, set at serve --ec defaults). They
+// are bucket-isolated S3 surface tests, so they ride the shared fixtures on
+// both single-node and cluster targets via the TestBucketsE2E dual pattern.
+//
+// Tests in this file MUST remain bucket-isolated. Any per-test cluster
+// topology mutation belongs in cluster_test.go behind newClusterS3Target.
 
-	binary := getBinary()
-	port := freePort()
-
-	cmd := exec.Command(binary, "serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 30*time.Second)
-
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	client := s3ClientFor(endpoint, ak, sk)
-
-	cleanup := func() {
-		terminateProcess(cmd)
-		os.RemoveAll(dir)
-	}
-
-	return client, dir, cleanup
-}
-
-func createECBucketReady(t *testing.T, client *s3.Client, name string) {
-	t.Helper()
-	ctx := context.Background()
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(name),
+func TestEcBasicPutGetE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runEcBasicPutGetCases(t, newSingleNodeS3Target())
 	})
-	require.NoError(t, err)
-
-	const readinessKey = "__grainfs_e2e_ready"
-	waitForS3Write(t, client, name, readinessKey, 30*time.Second)
-	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(name),
-		Key:    aws.String(readinessKey),
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runEcBasicPutGetCases(t, newSharedClusterS3Target(t))
 	})
 }
 
-func TestEC_BasicPutGet(t *testing.T) {
-	client, _, cleanup := startECServer(t)
-	defer cleanup()
-
+func runEcBasicPutGetCases(t *testing.T, tgt s3Target) {
+	t.Helper()
 	ctx := context.Background()
+	bucket := tgt.uniqueBucket(t, "basic")
+	cli := tgt.pickNode(0)
 
-	createECBucketReady(t, client, "ec-basic")
-
-	tests := []struct {
+	cases := []struct {
 		name    string
 		key     string
 		content string
@@ -88,49 +48,56 @@ func TestEC_BasicPutGet(t *testing.T) {
 		{"medium_object", "medium.txt", strings.Repeat("EC test data ", 1000)},
 		{"nested_key", "path/to/deep/file.txt", "nested EC content"},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := client.PutObject(ctx, &s3.PutObjectInput{
-				Bucket: aws.String("ec-basic"),
-				Key:    aws.String(tt.key),
-				Body:   strings.NewReader(tt.content),
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(tc.key),
+				Body:   strings.NewReader(tc.content),
 			})
 			require.NoError(t, err)
 
-			getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String("ec-basic"),
-				Key:    aws.String(tt.key),
+			getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(tc.key),
 			})
 			require.NoError(t, err)
 			defer getOut.Body.Close()
 
 			body, _ := io.ReadAll(getOut.Body)
-			assert.Equal(t, tt.content, string(body))
-			assert.Equal(t, int64(len(tt.content)), aws.ToInt64(getOut.ContentLength))
+			assert.Equal(t, tc.content, string(body))
+			assert.Equal(t, int64(len(tc.content)), aws.ToInt64(getOut.ContentLength))
 		})
 	}
 }
 
-func TestEC_LargeObject(t *testing.T) {
-	client, _, cleanup := startECServer(t)
-	defer cleanup()
+func TestEcLargeObjectE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runEcLargeObjectCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runEcLargeObjectCases(t, newSharedClusterS3Target(t))
+	})
+}
 
+func runEcLargeObjectCases(t *testing.T, tgt s3Target) {
+	t.Helper()
 	ctx := context.Background()
+	bucket := tgt.uniqueBucket(t, "large")
+	cli := tgt.pickNode(0)
 
-	createECBucketReady(t, client, "ec-large")
-
-	// 5MB object — larger than default shard size
+	// 5MiB body — exceeds the default shard size, forcing a true EC stripe.
 	data := bytes.Repeat([]byte("X"), 5*1024*1024)
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("ec-large"),
+	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("large.bin"),
 		Body:   bytes.NewReader(data),
 	})
 	require.NoError(t, err)
 
-	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("ec-large"),
+	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("large.bin"),
 	})
 	require.NoError(t, err)
@@ -140,26 +107,38 @@ func TestEC_LargeObject(t *testing.T) {
 	assert.Equal(t, data, body)
 }
 
-func TestEC_MultipartUpload(t *testing.T) {
-	client, _, cleanup := startECServer(t)
-	defer cleanup()
+func TestEcMultipartUploadE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runEcMultipartUploadCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runEcMultipartUploadCases(t, newSharedClusterS3Target(t))
+	})
+}
 
+func runEcMultipartUploadCases(t *testing.T, tgt s3Target) {
+	t.Helper()
 	ctx := context.Background()
-
-	createECBucketReady(t, client, "ec-multipart")
+	bucket := tgt.uniqueBucket(t, "multipart")
+	cli := tgt.pickNode(0)
 
 	key := "multipart-ec.bin"
+	// Sub-5MiB parts are non-standard for S3 multipart but the project binary
+	// accepts them today. If cluster surface ever tightens the policy, this
+	// will surface a parity gap and the test should split into single/cluster
+	// branches with different part sizes.
 	part1Data := bytes.Repeat([]byte("A"), 1024)
 	part2Data := bytes.Repeat([]byte("B"), 512)
 
-	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String("ec-multipart"),
+	initOut, err := cli.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	require.NoError(t, err)
 
-	p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String("ec-multipart"),
+	p1, err := cli.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucket),
 		Key:        aws.String(key),
 		UploadId:   initOut.UploadId,
 		PartNumber: aws.Int32(1),
@@ -167,8 +146,8 @@ func TestEC_MultipartUpload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
-		Bucket:     aws.String("ec-multipart"),
+	p2, err := cli.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucket),
 		Key:        aws.String(key),
 		UploadId:   initOut.UploadId,
 		PartNumber: aws.Int32(2),
@@ -176,8 +155,8 @@ func TestEC_MultipartUpload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String("ec-multipart"),
+	_, err = cli.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucket),
 		Key:      aws.String(key),
 		UploadId: initOut.UploadId,
 		MultipartUpload: &types.CompletedMultipartUpload{
@@ -189,8 +168,8 @@ func TestEC_MultipartUpload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("ec-multipart"),
+	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
 	require.NoError(t, err)
@@ -201,83 +180,99 @@ func TestEC_MultipartUpload(t *testing.T) {
 	assert.Equal(t, expected, body)
 }
 
-func TestEC_BucketOperations(t *testing.T) {
-	client, _, cleanup := startECServer(t)
-	defer cleanup()
+func TestEcBucketOperationsE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runEcBucketOperationsCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runEcBucketOperationsCases(t, newSharedClusterS3Target(t))
+	})
+}
 
+func runEcBucketOperationsCases(t *testing.T, tgt s3Target) {
+	t.Helper()
 	ctx := context.Background()
+	bucket := tgt.uniqueBucket(t, "bktops")
+	cli := tgt.pickNode(0)
 
-	// Create, Head, List, Delete
-	createECBucketReady(t, client, "ec-bucket-ops")
-
-	_, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String("ec-bucket-ops"),
+	_, err := cli.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
 	})
 	require.NoError(t, err)
 
-	listOut, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	listOut, err := cli.ListBuckets(ctx, &s3.ListBucketsInput{})
 	require.NoError(t, err)
 	found := false
 	for _, b := range listOut.Buckets {
-		if aws.ToString(b.Name) == "ec-bucket-ops" {
+		if aws.ToString(b.Name) == bucket {
 			found = true
+			break
 		}
 	}
-	assert.True(t, found)
+	assert.True(t, found, "newly created bucket %s missing from ListBuckets", bucket)
 
+	// Empty bucket delete may race with routed ListObjects readiness on
+	// cluster, so retry within the same 30s envelope the standalone test used.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-			Bucket: aws.String("ec-bucket-ops"),
+		_, err = cli.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String(bucket),
 		})
 		assert.NoError(c, err)
 	}, 30*time.Second, 250*time.Millisecond, "empty bucket deletion should wait for routed ListObjects readiness")
 }
 
-func TestEC_DeleteAndOverwrite(t *testing.T) {
-	client, _, cleanup := startECServer(t)
-	defer cleanup()
+func TestEcDeleteAndOverwriteE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runEcDeleteAndOverwriteCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runEcDeleteAndOverwriteCases(t, newSharedClusterS3Target(t))
+	})
+}
 
+func runEcDeleteAndOverwriteCases(t *testing.T, tgt s3Target) {
+	t.Helper()
 	ctx := context.Background()
+	bucket := tgt.uniqueBucket(t, "delover")
+	cli := tgt.pickNode(0)
 
-	createECBucketReady(t, client, "ec-delover")
-
-	// Put, Delete, verify gone
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("ec-delover"),
+	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("file.txt"),
 		Body:   strings.NewReader("v1"),
 	})
 	require.NoError(t, err)
 
-	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String("ec-delover"),
+	_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("file.txt"),
 	})
 	require.NoError(t, err)
 
-	_, err = client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("ec-delover"),
+	_, err = cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("file.txt"),
 	})
 	assert.Error(t, err)
 
-	// Overwrite
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("ec-delover"),
+	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("over.txt"),
 		Body:   strings.NewReader("version1"),
 	})
 	require.NoError(t, err)
 
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("ec-delover"),
+	_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("over.txt"),
 		Body:   strings.NewReader("version2"),
 	})
 	require.NoError(t, err)
 
-	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String("ec-delover"),
+	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("over.txt"),
 	})
 	require.NoError(t, err)
