@@ -242,8 +242,8 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
-	// catalog.Warehouse() is "s3://grainfs-tables/warehouse"; empty arg resolves to that.
-	_, ok := leader.FSM().IcebergNamespace(catalog.Warehouse(), []string{"analytics"})
+	// empty warehouse arg resolves to IcebergDefaultWarehouse ("default").
+	_, ok := leader.FSM().IcebergNamespace(IcebergDefaultWarehouse, []string{"analytics"})
 	require.True(t, ok)
 }
 
@@ -740,37 +740,76 @@ func TestMetaCatalog_TwoWarehousesIsolated(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	// Use explicit warehouse names to verify cross-warehouse isolation.
+	// (Passing "" resolves to IcebergDefaultWarehouse for both catalogs,
+	// so explicit keys are required here.)
+	whA := "warehouse-a"
+	whB := "warehouse-b"
+
 	// Create namespace "analytics" in warehouse-a only.
-	require.NoError(t, catA.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "team-a"}))
+	require.NoError(t, catA.CreateNamespace(ctx, whA, []string{"analytics"}, map[string]string{"owner": "team-a"}))
 
 	// warehouse-a sees it.
-	props, err := catA.LoadNamespace(ctx, "", []string{"analytics"})
+	props, err := catA.LoadNamespace(ctx, whA, []string{"analytics"})
 	require.NoError(t, err)
 	require.Equal(t, "team-a", props["owner"])
 
 	// warehouse-b does NOT see it.
-	_, err = catB.LoadNamespace(ctx, "", []string{"analytics"})
+	_, err = catB.LoadNamespace(ctx, whB, []string{"analytics"})
 	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceNotFound, "warehouse-b should not see warehouse-a namespace")
 
 	// ListNamespaces is also isolated.
-	nsA, err := catA.ListNamespaces(ctx, "")
+	nsA, err := catA.ListNamespaces(ctx, whA)
 	require.NoError(t, err)
 	require.Len(t, nsA, 1)
-	nsB, err := catB.ListNamespaces(ctx, "")
+	nsB, err := catB.ListNamespaces(ctx, whB)
 	require.NoError(t, err)
 	require.Empty(t, nsB)
 
 	// Create same namespace in warehouse-b independently.
-	require.NoError(t, catB.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "team-b"}))
-	propsB, err := catB.LoadNamespace(ctx, "", []string{"analytics"})
+	require.NoError(t, catB.CreateNamespace(ctx, whB, []string{"analytics"}, map[string]string{"owner": "team-b"}))
+	propsB, err := catB.LoadNamespace(ctx, whB, []string{"analytics"})
 	require.NoError(t, err)
 	require.Equal(t, "team-b", propsB["owner"])
 
 	// Delete in warehouse-a does not affect warehouse-b.
-	require.NoError(t, catA.DeleteNamespace(ctx, "", []string{"analytics"}))
-	_, err = catA.LoadNamespace(ctx, "", []string{"analytics"})
+	require.NoError(t, catA.DeleteNamespace(ctx, whA, []string{"analytics"}))
+	_, err = catA.LoadNamespace(ctx, whA, []string{"analytics"})
 	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceNotFound)
-	propsB2, err := catB.LoadNamespace(ctx, "", []string{"analytics"})
+	propsB2, err := catB.LoadNamespace(ctx, whB, []string{"analytics"})
 	require.NoError(t, err)
 	require.Equal(t, "team-b", propsB2["owner"])
+}
+
+// TestMetaCatalog_EmptyWarehouseResolvesToDefault verifies that passing "" as
+// the warehouse argument to MetaCatalog methods resolves to
+// IcebergDefaultWarehouse ("default"), not to the constructor's S3 URI.
+func TestMetaCatalog_EmptyWarehouseResolvesToDefault(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	// Constructor warehouse is an S3 URI — different from IcebergDefaultWarehouse.
+	catalog := NewMetaCatalog(m, backend, "s3://example-warehouse")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// CreateNamespace with "" warehouse — should land under "default", not under the S3 URI.
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"ns"}, nil))
+
+	// Verify via FSM using IcebergDefaultWarehouse key.
+	_, ok := m.FSM().IcebergNamespace(IcebergDefaultWarehouse, []string{"ns"})
+	require.True(t, ok, "namespace should be stored under IcebergDefaultWarehouse")
+
+	// Verify it is NOT stored under the constructor S3 URI key.
+	_, notOK := m.FSM().IcebergNamespace("s3://example-warehouse", []string{"ns"})
+	require.False(t, notOK, "namespace should NOT be stored under the S3-URI warehouse key")
 }

@@ -41,10 +41,10 @@ func newLegacyStoreForMigrationTest(t *testing.T) (*badger.DB, *icebergcatalog.S
 func TestMigrateLegacySingletonIcebergCatalogBackfillsMissingMetadataObject(t *testing.T) {
 	ctx := context.Background()
 	_, legacy := newLegacyStoreForMigrationTest(t)
-	require.NoError(t, legacy.CreateNamespace(ctx, "default", []string{"analytics"}, map[string]string{"owner": "eng"}))
+	require.NoError(t, legacy.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "eng"}))
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
 	metadata := json.RawMessage(`{"format-version":2,"location":"s3://grainfs-tables/warehouse/analytics/events"}`)
-	_, err := legacy.CreateTable(ctx, "default", ident, icebergcatalog.CreateTableInput{
+	_, err := legacy.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Metadata:         metadata,
 		Properties:       map[string]string{"format-version": "2"},
@@ -58,7 +58,7 @@ func TestMigrateLegacySingletonIcebergCatalogBackfillsMissingMetadataObject(t *t
 
 	require.NoError(t, serveruntime.MigrateLegacySingletonIcebergCatalog(ctx, legacy, catalog, backend))
 
-	tbl, err := catalog.LoadTable(ctx, "default", ident)
+	tbl, err := catalog.LoadTable(ctx, "", ident)
 	require.NoError(t, err)
 	require.JSONEq(t, string(metadata), string(tbl.Metadata))
 	rc, _, err := backend.GetObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json")
@@ -72,10 +72,10 @@ func TestMigrateLegacySingletonIcebergCatalogBackfillsMissingMetadataObject(t *t
 func TestMigrateLegacySingletonIcebergCatalogSkipsMatchingExistingPointer(t *testing.T) {
 	ctx := context.Background()
 	_, legacy := newLegacyStoreForMigrationTest(t)
-	require.NoError(t, legacy.CreateNamespace(ctx, "default", []string{"analytics"}, nil))
+	require.NoError(t, legacy.CreateNamespace(ctx, "", []string{"analytics"}, nil))
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
 	metadata := json.RawMessage(`{"format-version":2}`)
-	_, err := legacy.CreateTable(ctx, "default", ident, icebergcatalog.CreateTableInput{
+	_, err := legacy.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Metadata:         metadata,
 		Properties:       map[string]string{"format-version": "2"},
@@ -89,8 +89,8 @@ func TestMigrateLegacySingletonIcebergCatalogSkipsMatchingExistingPointer(t *tes
 	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00000.json", bytes.NewReader(metadata), "application/json")
 	require.NoError(t, err)
 	catalog, _ := newStartedMetaCatalogForMigrationTest(t, backend)
-	require.NoError(t, catalog.CreateNamespace(ctx, "default", []string{"analytics"}, nil))
-	_, err = catalog.CreateTable(ctx, "default", ident, icebergcatalog.CreateTableInput{
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Properties:       map[string]string{"format-version": "2"},
 	})
@@ -103,9 +103,9 @@ func TestMigrateLegacySingletonIcebergCatalogSkipsMatchingExistingPointer(t *tes
 func TestMigrateLegacySingletonIcebergCatalogFailsOnConflictingTablePointer(t *testing.T) {
 	ctx := context.Background()
 	_, legacy := newLegacyStoreForMigrationTest(t)
-	require.NoError(t, legacy.CreateNamespace(ctx, "default", []string{"analytics"}, nil))
+	require.NoError(t, legacy.CreateNamespace(ctx, "", []string{"analytics"}, nil))
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
-	_, err := legacy.CreateTable(ctx, "default", ident, icebergcatalog.CreateTableInput{
+	_, err := legacy.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Metadata:         json.RawMessage(`{"format-version":2}`),
 	})
@@ -118,8 +118,8 @@ func TestMigrateLegacySingletonIcebergCatalogFailsOnConflictingTablePointer(t *t
 	_, err = backend.PutObject(context.Background(), "grainfs-tables", "warehouse/analytics/events/metadata/00001.json", bytes.NewReader([]byte(`{"format-version":2}`)), "application/json")
 	require.NoError(t, err)
 	catalog, _ := newStartedMetaCatalogForMigrationTest(t, backend)
-	require.NoError(t, catalog.CreateNamespace(ctx, "default", []string{"analytics"}, nil))
-	_, err = catalog.CreateTable(ctx, "default", ident, icebergcatalog.CreateTableInput{
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00001.json",
 	})
 	require.NoError(t, err)

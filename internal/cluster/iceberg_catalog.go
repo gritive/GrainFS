@@ -63,18 +63,27 @@ func NewMetaCatalogWithForwarders(
 	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
 }
 
-// Warehouse returns the default warehouse for this catalog instance.
-// It is not part of the Catalog interface; callers that need the default
-// warehouse for the SigV4 path (e.g., server handlers) use it via the
+// IcebergDefaultWarehouse is the warehouse key used for the single-warehouse
+// ("default") mode and for commands that carry an empty warehouse string.
+// It mirrors the FSM-side icebergDefaultWarehouse constant and is exported so
+// callers outside the cluster package can reference it (e.g. migration code,
+// tests).
+const IcebergDefaultWarehouse = "default"
+
+// Warehouse returns the S3-URI warehouse location for this catalog instance.
+// It is not part of the Catalog interface; callers that need the physical
+// warehouse path for the SigV4 path or object-path construction use it via the
 // warehouseProvider interface.
 func (c *MetaCatalog) Warehouse() string { return c.warehouse }
 
-// resolveWarehouse returns w if non-empty, otherwise falls back to c.warehouse.
+// resolveWarehouse returns w if non-empty, otherwise IcebergDefaultWarehouse
+// ("default"). The constructor's c.warehouse is preserved separately via
+// the Warehouse() getter for legacy callers that need it for object paths.
 func (c *MetaCatalog) resolveWarehouse(w string) string {
 	if w != "" {
 		return w
 	}
-	return c.warehouse
+	return IcebergDefaultWarehouse
 }
 
 func (c *MetaCatalog) CreateNamespace(ctx context.Context, warehouse string, namespace []string, properties map[string]string) error {
