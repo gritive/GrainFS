@@ -122,3 +122,11 @@ func TestForwardCodec_ObjectReply_NoParts(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, got.Parts)
 }
+
+func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
+	bytes := buildHeadObjectVersionArgs("bk", "k", "vid-1")
+	args := raftpb.GetRootAsHeadObjectVersionArgs(bytes, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "k", string(args.Key()))
+	require.Equal(t, "vid-1", string(args.VersionId()))
+}

@@ -87,6 +87,19 @@ func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildHeadObjectVersionArgs(bucket, key, versionID string) []byte {
+	b := flatbuffers.NewBuilder(96)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	vid := b.CreateString(versionID)
+	raftpb.HeadObjectVersionArgsStart(b)
+	raftpb.HeadObjectVersionArgsAddBucket(b, bk)
+	raftpb.HeadObjectVersionArgsAddKey(b, k)
+	raftpb.HeadObjectVersionArgsAddVersionId(b, vid)
+	b.Finish(raftpb.HeadObjectVersionArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildHeadObjectArgs(bucket, key string) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
