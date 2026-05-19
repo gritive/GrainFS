@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -275,6 +276,9 @@ func runChunkedPut(
 	if len(csb.placements) == 0 || csb.placements[0].BlobID == "" {
 		return nil, fmt.Errorf("putObjectChunked: placement[0] not recorded")
 	}
+	commitModTime := chunkedChooseModTime(modTime, preserveModTime, time.Now().Unix())
+	obj.LastModified = commitModTime
+	obj.VersionID = versionID
 	cmd := PutObjectMetaCmd{
 		Bucket:           bucket,
 		Key:              key,
@@ -282,7 +286,7 @@ func runChunkedPut(
 		ETag:             obj.ETag,
 		VersionID:        versionID,
 		ContentType:      contentType,
-		ModTime:          chunkedChooseModTime(modTime, preserveModTime, time.Now().UnixNano()),
+		ModTime:          commitModTime,
 		UserMetadata:     userMetadata,
 		SSEAlgorithm:     sseAlgorithm,
 		ExpectedETag:     expectedETag,
@@ -298,6 +302,7 @@ func runChunkedPut(
 	if err := csb.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
 		return nil, fmt.Errorf("commit meta: %w", err)
 	}
+	metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 	committed = true
 	return obj, nil
 }
@@ -317,6 +322,17 @@ func chunkedChooseModTime(modTime int64, preserveModTime bool, now int64) int64 
 		return modTime
 	}
 	return now
+}
+
+func countDistinctPlacementGroups(placements []segmentPlacement) int {
+	seen := make(map[string]struct{}, len(placements))
+	for _, p := range placements {
+		if p.PlacementGroupID == "" {
+			continue
+		}
+		seen[p.PlacementGroupID] = struct{}{}
+	}
+	return len(seen)
 }
 
 // buildSegmentMetaEntries joins post-write placement metadata with the

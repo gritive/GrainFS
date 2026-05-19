@@ -251,6 +251,7 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 		return nil, err
 	}
 	gb.SetCoalesceConfig(state.coalesceCfg)
+	gb.SetShardGroupSource(state.metaRaft.FSM())
 	return gb, nil
 }
 

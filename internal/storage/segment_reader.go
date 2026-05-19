@@ -45,6 +45,10 @@ type pendingSegment struct {
 	ready chan struct{}
 }
 
+type segmentBytesProvider interface {
+	SegmentBytes() []byte
+}
+
 // NewSegmentReader builds a reader that streams len(refs) segments in order.
 // Fetching starts immediately in the background.
 func NewSegmentReader(store segmentStore, refs []SegmentRef) *SegmentReader {
@@ -130,6 +134,10 @@ func (r *SegmentReader) fetchOne(ctx context.Context, idx int) {
 		return
 	}
 	defer rc.Close()
+	if provider, ok := rc.(segmentBytesProvider); ok {
+		p.buf = provider.SegmentBytes()
+		return
+	}
 	buf, err := io.ReadAll(rc)
 	if err != nil {
 		p.err = err

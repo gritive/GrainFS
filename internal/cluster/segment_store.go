@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -30,8 +31,24 @@ func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.Segme
 	}
 
 	shardKey := s.key + "/segments/" + entry.BlobID
-	return s.b.getObjectECReaderAtShardKey(ctx, s.bucket, shardKey, record, entry.Size)
+	data, err := s.b.newECObjectReader().ReadObject(ctx, s.bucket, shardKey, record)
+	if err != nil {
+		return nil, fmt.Errorf("read segment %s: %w", entry.BlobID, err)
+	}
+	if int64(len(data)) != entry.Size {
+		return nil, fmt.Errorf("segment %s reconstructed size %d != metadata size %d", entry.BlobID, len(data), entry.Size)
+	}
+	return &segmentBytesReadCloser{Reader: bytes.NewReader(data), data: data}, nil
 }
+
+type segmentBytesReadCloser struct {
+	*bytes.Reader
+	data []byte
+}
+
+func (r *segmentBytesReadCloser) Close() error { return nil }
+
+func (r *segmentBytesReadCloser) SegmentBytes() []byte { return r.data }
 
 func (s *clusterSegmentStore) segmentRef(blobID string) (storage.SegmentRef, bool) {
 	if s.obj == nil {

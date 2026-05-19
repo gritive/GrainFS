@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -185,6 +186,23 @@ func makeSpool(t *testing.T, payload []byte) *spooledObject {
 	return &spooledObject{Path: path, Size: int64(len(payload))}
 }
 
+func chunkFanoutMetricCount(t *testing.T) uint64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "grainfs_chunk_fanout_breadth" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if h := m.GetHistogram(); h != nil {
+				return h.GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
 func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	chunk := storage.DefaultChunkSize
 	payload := bytes.Repeat([]byte("A"), 4*chunk) // exactly 4 segments
@@ -206,6 +224,7 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 	assert.Equal(t, int64(len(payload)), obj.Size)
+	assert.Equal(t, "v1", obj.VersionID)
 	assert.False(t, obj.IsAppendable)
 	assert.Len(t, obj.Segments, 4)
 
@@ -227,6 +246,31 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 
 	// No cleanup calls on success path.
 	assert.Empty(t, deps.deleteCalls)
+}
+
+func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
+	chunk := storage.DefaultChunkSize
+	payload := bytes.Repeat([]byte("M"), 4*chunk) // exactly 4 segments
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+
+	blobIDs := make([]string, 4)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := newCSBWithDeps(deps, blobIDs)
+
+	before := chunkFanoutMetricCount(t)
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil)
+	require.NoError(t, err)
+
+	after := chunkFanoutMetricCount(t)
+	require.Greater(t, after, before, "chunked PUT must observe fan-out breadth")
 }
 
 func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {

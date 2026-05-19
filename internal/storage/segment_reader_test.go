@@ -165,6 +165,24 @@ func TestSegmentReader_LegacyConstructorStillWorks(t *testing.T) {
 	}
 }
 
+func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T) {
+	t.Parallel()
+	want := []byte("materialized segment")
+	store := &materializedSegmentStore{data: want}
+	r := NewSegmentReader(store, []SegmentRef{{BlobID: "materialized", Size: int64(len(want))}})
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if !store.closed {
+		t.Fatal("materialized reader was not closed")
+	}
+}
+
 // --- helpers ---
 
 type testSegments struct {
@@ -209,6 +227,31 @@ type fakeSegmentStore struct {
 	delayByIdx map[int]time.Duration // delay per ref idx (by BlobID match)
 	errIdx     map[int]error         // injected error per ref idx
 	refIndex   map[string]int        // BlobID → idx for lookup
+}
+
+type materializedSegmentStore struct {
+	data   []byte
+	closed bool
+}
+
+func (s *materializedSegmentStore) OpenSegment(context.Context, SegmentRef) (io.ReadCloser, error) {
+	return &materializedSegmentReadCloser{store: s, data: s.data}, nil
+}
+
+type materializedSegmentReadCloser struct {
+	store *materializedSegmentStore
+	data  []byte
+}
+
+func (r *materializedSegmentReadCloser) SegmentBytes() []byte { return r.data }
+
+func (r *materializedSegmentReadCloser) Read([]byte) (int, error) {
+	return 0, errors.New("Read should not be called for materialized segments")
+}
+
+func (r *materializedSegmentReadCloser) Close() error {
+	r.store.closed = true
+	return nil
 }
 
 func newFakeSegmentStore(segs *testSegments) *fakeSegmentStore {
