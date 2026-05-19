@@ -3085,6 +3085,9 @@ func (b *DistributedBackend) upgradeObjectEC(ctx context.Context, bucket, key st
 		ECParity:         uint8(newCfg.ParityShards),
 		NodeIDs:          newPlacement,
 		UserMetadata:     cloneStringMap(obj.UserMetadata),
+		// applyPutObjectMeta writes Tags unconditionally; forward the existing
+		// tags so an EC config upgrade doesn't clobber them to nil.
+		Tags: obj.Tags,
 	}); perr != nil {
 		cleanup()
 		return fmt.Errorf("upgrade propose object meta: %w", perr)
@@ -3149,6 +3152,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				Parts:        m.Parts,
 				Coalesced:    coalescedRefsToStorage(m.Coalesced),
 				IsAppendable: m.IsAppendable,
+				// Tags copied (not aliased) — m's backing bytes are reused by
+				// badger once the View tx returns.
+				Tags: append([]storage.Tag(nil), m.Tags...),
 			}
 			placement = PlacementMeta{
 				VersionID:        versionID,

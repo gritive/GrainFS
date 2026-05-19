@@ -97,11 +97,6 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Tagging: aws.String("env=prod"),
 		})
-		if tgt.isCluster {
-			// Phase 1: cluster CreateMultipartUpload with tags is fail-fast Unsupported.
-			require.Error(t, err)
-			return
-		}
 		require.NoError(t, err)
 
 		// Use the shortest legal part (>=5 MiB is the S3 minimum except the

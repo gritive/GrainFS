@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -555,4 +556,75 @@ func TestUpgradeObjectEC_RoundTrip(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	assert.Equal(t, data, got, "object content must survive EC upgrade")
+}
+
+// TestUpgradeObjectEC_PreservesTags is the regression guard for the v0.0.265.0
+// Phase 2 fix: extending PutObjectMetaCmd with Tags made upgradeObjectEC's
+// previously-safe propose into a tag-clobber path. applyPutObjectMeta writes
+// c.Tags unconditionally, so upgradeObjectEC must forward existing tags.
+func TestUpgradeObjectEC_PreservesTags(t *testing.T) {
+	backend := NewSingletonBackendForTest(t)
+
+	shardDir := t.TempDir()
+	svc := NewShardService(shardDir, nil)
+	backend.SetShardService(svc, []string{"self"})
+	backend.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+
+	bucket, key := "tagbkt", "tags/obj"
+	data := bytes.Repeat([]byte("grainfs-ec-tags-"), 200)
+
+	require.NoError(t, backend.CreateBucket(context.Background(), bucket))
+
+	// Seed old metadata with tags directly into the FSM.
+	etag := fmt.Sprintf("%x", md5.Sum(data))
+	oldCfg := ECConfig{DataShards: 2, ParityShards: 1}
+	oldNodes := make([]string, oldCfg.NumShards())
+	for i := range oldNodes {
+		oldNodes[i] = "self"
+	}
+	seededTags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "owner", Value: "alice"},
+	}
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bucket, Key: key, Size: int64(len(data)),
+		ContentType: "application/octet-stream", ETag: etag, ModTime: 1,
+		ECData: 2, ECParity: 1, NodeIDs: oldNodes,
+		Tags: seededTags,
+	})
+	require.NoError(t, err)
+	require.NoError(t, backend.fsm.Apply(raw))
+
+	// Sanity-check the seed: tags are readable before the upgrade.
+	preTags, err := backend.GetObjectTags(bucket, key, "")
+	require.NoError(t, err)
+	require.Len(t, preTags, 2, "seed tags must be present before upgrade")
+
+	// Write old shards so upgradeObjectEC can reconstruct the object.
+	oldShards, err := ECSplit(oldCfg, data)
+	require.NoError(t, err)
+	for i, shard := range oldShards {
+		require.NoError(t, svc.WriteLocalShard(bucket, key, i, shard))
+	}
+
+	_, oldMeta, err := backend.headObjectMeta(context.Background(), bucket, key)
+	require.NoError(t, err)
+	oldResolved, err := backend.ResolvePlacement(context.Background(), bucket, key, oldMeta)
+	require.NoError(t, err)
+
+	// Trigger the EC config upgrade.
+	newCfg := ECConfig{DataShards: 3, ParityShards: 2}
+	ctx := context.Background()
+	require.NoError(t, backend.upgradeObjectEC(ctx, bucket, key, oldResolved.Record, newCfg))
+
+	// Regression assertion: tags must survive the upgrade.
+	postTags, err := backend.GetObjectTags(bucket, key, "")
+	require.NoError(t, err)
+	require.Len(t, postTags, 2, "tags must be preserved after EC upgrade")
+	gotKeys := map[string]string{}
+	for _, tag := range postTags {
+		gotKeys[tag.Key] = tag.Value
+	}
+	assert.Equal(t, "prod", gotKeys["env"])
+	assert.Equal(t, "alice", gotKeys["owner"])
 }
