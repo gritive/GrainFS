@@ -1142,6 +1142,57 @@ func (b *LocalBackend) ScanObjectsGrouped(bucket string) (<-chan ObjectKeyGroup,
 	return out, nil
 }
 
+// ScanLocalMultipartUploads enumerates in-progress multipart uploads in the
+// given bucket on THIS node. Per the lifecycle split execution model, each
+// cluster node aborts its own stranded uploads — there is no cross-node MPU
+// view.
+//
+// Cluster deployments call this on each node (via DistributedBackend delegate,
+// Task 6); single-node deployments call it directly. The channel is buffered
+// (16) and closed when iteration completes or an error aborts the scan.
+func (b *LocalBackend) ScanLocalMultipartUploads(bucket string) (<-chan MultipartUploadRecord, error) {
+	if err := b.HeadBucket(context.Background(), bucket); err != nil {
+		return nil, err
+	}
+	out := make(chan MultipartUploadRecord, 16)
+	go func() {
+		defer close(out)
+		_ = b.db.View(func(txn *badger.Txn) error {
+			it := txn.NewIterator(badger.DefaultIteratorOptions)
+			defer it.Close()
+			mpuPrefix := []byte("mpu:")
+			for it.Seek(mpuPrefix); it.ValidForPrefix(mpuPrefix); it.Next() {
+				item := it.Item()
+				itemKey := item.KeyCopy(nil)
+				if err := item.Value(func(val []byte) error {
+					plain, err := openBadgerValue(b.encryptor, badgerDomainMultipart, itemKey, val)
+					if err != nil {
+						return err
+					}
+					meta, err := unmarshalMultipartMeta(plain)
+					if err != nil {
+						return err
+					}
+					if meta.Bucket != bucket {
+						return nil
+					}
+					out <- MultipartUploadRecord{
+						Bucket:      meta.Bucket,
+						Key:         meta.Key,
+						UploadID:    meta.UploadID,
+						InitiatedAt: meta.CreatedAt,
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}()
+	return out, nil
+}
+
 // CopyObject copies an object by reading the source and writing to the destination.
 func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error) {
 	ctx := context.Background()
