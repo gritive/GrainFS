@@ -17,3 +17,4 @@ benchmarks/profiles/
 /raft/
 receipts/
 benchmarks/scratch/
+.auth-redesign-notes.txt
