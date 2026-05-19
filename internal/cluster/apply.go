@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -219,6 +220,9 @@ func (f *FSM) applyCreateBucket(data []byte) error {
 	if err != nil {
 		return err
 	}
+	if reservedname.IsReservedBucketName(c.Bucket) {
+		return fmt.Errorf("bucket name %q is reserved and cannot be created via public API", c.Bucket)
+	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(f.keys.BucketKey(c.Bucket), []byte(`{}`))
 	})
@@ -228,6 +232,9 @@ func (f *FSM) applyDeleteBucket(data []byte) error {
 	c, err := decodeDeleteBucketCmd(data)
 	if err != nil {
 		return err
+	}
+	if reservedname.IsReservedBucketName(c.Bucket) {
+		return fmt.Errorf("bucket name %q is reserved and cannot be deleted via public API", c.Bucket)
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(f.keys.BucketKey(c.Bucket))

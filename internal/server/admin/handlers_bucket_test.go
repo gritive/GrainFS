@@ -190,6 +190,46 @@ func TestAdminGetBucket_NotFound(t *testing.T) {
 	assert.Equal(t, "not_found", ae.Code)
 }
 
+func TestAdminCreateBucket_RefusesReserved(t *testing.T) {
+	// "default" is a syntactically valid name that is refused specifically as reserved.
+	// "_grainfs*" names are syntactically invalid (underscore not allowed), so they
+	// fail at ValidBucketName before reaching the reserved check — still invalid.
+	for _, c := range []struct {
+		name           string
+		expectReserved bool // true: message must contain "reserved"; false: just code=invalid
+	}{
+		{"_grainfs", false},
+		{"_grainfs-audit", false},
+		{"default", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := &admin.Deps{Buckets: newFakeBucketOps()}
+			_, err := admin.AdminCreateBucket(context.Background(), d, admin.CreateBucketAdminReq{Name: c.name})
+			var ae *adminapi.Error
+			require.ErrorAs(t, err, &ae)
+			assert.Equal(t, "invalid", ae.Code)
+			if c.expectReserved {
+				assert.Contains(t, ae.Message, "reserved")
+			}
+		})
+	}
+}
+
+func TestAdminDeleteBucket_RefusesReserved(t *testing.T) {
+	// AdminDeleteBucket does not call ValidBucketName, so all reserved names are
+	// refused explicitly by the IsReservedBucketName guard.
+	for _, name := range []string{"_grainfs", "_grainfs-audit", "default"} {
+		t.Run(name, func(t *testing.T) {
+			d := &admin.Deps{Buckets: newFakeBucketOps()}
+			err := admin.AdminDeleteBucket(context.Background(), d, name, false)
+			var ae *adminapi.Error
+			require.ErrorAs(t, err, &ae)
+			assert.Equal(t, "invalid", ae.Code)
+			assert.Contains(t, ae.Message, "reserved")
+		})
+	}
+}
+
 func TestAdminGetBucket_InternalBucketForbidden(t *testing.T) {
 	fake := newFakeBucketOps()
 	fake.buckets["__grainfs_internal"] = true

@@ -31,3 +31,23 @@ func TestIsReservedDefaultName(t *testing.T) {
 		t.Fatal("mydefault is operator-creatable, not reserved")
 	}
 }
+
+func TestIsReservedBucketName(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		want bool
+	}{
+		{"_grainfs", true},
+		{"_grainfs-audit", true},
+		{"_grainfs-test", true},
+		{"default", true},
+		{"default-2026", false},
+		{"mydefault", false},
+		{"analytics", false},
+		{"foo", false},
+	} {
+		if got := IsReservedBucketName(c.name); got != c.want {
+			t.Errorf("IsReservedBucketName(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -30,6 +30,7 @@ import (
 	"github.com/gritive/GrainFS/internal/migration"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -1168,6 +1169,9 @@ func (f *MetaFSM) applyBucketPolicyPut(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: BucketPolicyPut: %w", err)
 	}
+	if reservedname.IsInternalBucket(bucket) {
+		return fmt.Errorf("meta_fsm: BucketPolicyPut: bucket %q is internal and cannot receive policy mutations via public API", bucket)
+	}
 	if err := f.bucketPolicyStore.Put(context.Background(), bucket, docJSON); err != nil {
 		return fmt.Errorf("meta_fsm: BucketPolicyPut store: %w", err)
 	}
@@ -1185,6 +1189,9 @@ func (f *MetaFSM) applyBucketPolicyDelete(payload []byte) error {
 	bucket, err := DecodeBucketPolicyDeletePayload(payload)
 	if err != nil {
 		return fmt.Errorf("meta_fsm: BucketPolicyDelete: %w", err)
+	}
+	if reservedname.IsInternalBucket(bucket) {
+		return fmt.Errorf("meta_fsm: BucketPolicyDelete: bucket %q is internal and cannot receive policy mutations via public API", bucket)
 	}
 	if err := f.bucketPolicyStore.Delete(context.Background(), bucket); err != nil {
 		return fmt.Errorf("meta_fsm: BucketPolicyDelete store: %w", err)

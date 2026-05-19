@@ -19,3 +19,16 @@ func IsInternalBucket(bucket string) bool {
 func IsReservedDefaultName(bucket string) bool {
 	return bucket == "default"
 }
+
+// IsReservedBucketName reports whether name is reserved from being created or
+// deleted by the public API. Returns true for both:
+//   - prefix "_grainfs" (covers _grainfs, _grainfs-audit, _grainfs-test, ...)
+//   - exact "default"
+//
+// Names like "default-2026", "mydefault", "analytics" are NOT reserved.
+//
+// The internal cluster bootstrap path may create reserved buckets by bypassing
+// this check (T32 will seed _grainfs).
+func IsReservedBucketName(name string) bool {
+	return IsInternalBucket(name) || IsReservedDefaultName(name)
+}
