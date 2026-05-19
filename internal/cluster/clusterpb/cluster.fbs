@@ -489,6 +489,8 @@ enum MetaCmdType : uint8 {
   BucketPolicyPut         = 60, // IAM: set bucket policy document
   BucketPolicyDelete      = 61, // IAM: delete bucket policy document
   CreateBucketWithPolicyAttach = 62, // IAM: atomic create-bucket + attach initial policy to SA (D#13, F#2)
+  JWTSigningKeyRotate          = 63, // IAM JWT: generate new signing key, add to dual-key set
+  JWTSigningKeyPrune           = 64, // IAM JWT: prune old signing keys past grace period
 }
 
 table MetaNodeEntry {
@@ -674,11 +676,13 @@ table MetaIcebergCreateNamespaceCmd {
   request_id:string;
   namespace:[string];
   properties:[KeyValue];
+  warehouse:string;
 }
 
 table MetaIcebergDeleteNamespaceCmd {
   request_id:string;
   namespace:[string];
+  warehouse:string;
 }
 
 table MetaIcebergCreateTableCmd {
@@ -686,6 +690,7 @@ table MetaIcebergCreateTableCmd {
   identifier:IcebergIdentifier;
   metadata_location:string;
   properties:[KeyValue];
+  warehouse:string;
 }
 
 table MetaIcebergCommitTableCmd {
@@ -693,11 +698,13 @@ table MetaIcebergCommitTableCmd {
   identifier:IcebergIdentifier;
   expected_metadata_location:string;
   new_metadata_location:string;
+  warehouse:string;
 }
 
 table MetaIcebergDeleteTableCmd {
   request_id:string;
   identifier:IcebergIdentifier;
+  warehouse:string;
 }
 
 // 클러스터 키 회전 — 4-phase rolling state machine.
@@ -907,6 +914,7 @@ table MetaCatalogReadRequest {
   op         : CatalogReadOp = Unknown;
   namespace  : [string];
   identifier : CatalogIdentifier;
+  warehouse  : string;
 }
 
 table MetaCatalogReadReply {

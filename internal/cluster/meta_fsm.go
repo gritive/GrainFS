@@ -280,17 +280,20 @@ type IcebergTableEntry struct {
 
 type IcebergCreateNamespaceCmd struct {
 	RequestID  string
+	Warehouse  string
 	Namespace  []string
 	Properties map[string]string
 }
 
 type IcebergDeleteNamespaceCmd struct {
 	RequestID string
+	Warehouse string
 	Namespace []string
 }
 
 type IcebergCreateTableCmd struct {
 	RequestID        string
+	Warehouse        string
 	Identifier       icebergcatalog.Identifier
 	MetadataLocation string
 	Properties       map[string]string
@@ -298,6 +301,7 @@ type IcebergCreateTableCmd struct {
 
 type IcebergCommitTableCmd struct {
 	RequestID                string
+	Warehouse                string
 	Identifier               icebergcatalog.Identifier
 	ExpectedMetadataLocation string
 	NewMetadataLocation      string
@@ -305,6 +309,7 @@ type IcebergCommitTableCmd struct {
 
 type IcebergDeleteTableCmd struct {
 	RequestID  string
+	Warehouse  string
 	Identifier icebergcatalog.Identifier
 }
 
@@ -331,8 +336,8 @@ type MetaFSM struct {
 	objectLatest      map[string]string
 	loadSnapshot      map[string]LoadStatEntry // node_id → stats (PR-D)
 	activePlan        *RebalancePlan           // nil = no active plan (PR-D)
-	icebergNamespaces map[string]IcebergNamespaceEntry
-	icebergTables     map[string]IcebergTableEntry
+	icebergNamespaces map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
+	icebergTables     map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
 	onBucketAssigned  func(string, string)             // protected by mu; set before Start() (PR-D)
 	onRebalancePlan   func(*RebalancePlan)             // must not block; set before Start() (PR-D)
 	onShardGroupAdded func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
@@ -439,8 +444,8 @@ func NewMetaFSM() *MetaFSM {
 		objectIndex:       make(map[string]ObjectIndexEntry),
 		objectLatest:      make(map[string]string),
 		loadSnapshot:      make(map[string]LoadStatEntry),
-		icebergNamespaces: make(map[string]IcebergNamespaceEntry),
-		icebergTables:     make(map[string]IcebergTableEntry),
+		icebergNamespaces: make(map[string]map[string]IcebergNamespaceEntry),
+		icebergTables:     make(map[string]map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
 		iamStore:          iam.NewStore(),
 		activeFeatures:    compat.NewActiveFeatures(),
@@ -1767,6 +1772,28 @@ func (f *MetaFSM) applyAbortPlan(data []byte) error {
 	return nil
 }
 
+// icebergNSMap returns the per-warehouse namespace map, creating it if absent.
+// Caller must hold f.mu (write lock).
+func (f *MetaFSM) icebergNSMap(warehouse string) map[string]IcebergNamespaceEntry {
+	m := f.icebergNamespaces[warehouse]
+	if m == nil {
+		m = make(map[string]IcebergNamespaceEntry)
+		f.icebergNamespaces[warehouse] = m
+	}
+	return m
+}
+
+// icebergTblMap returns the per-warehouse table map, creating it if absent.
+// Caller must hold f.mu (write lock).
+func (f *MetaFSM) icebergTblMap(warehouse string) map[string]IcebergTableEntry {
+	m := f.icebergTables[warehouse]
+	if m == nil {
+		m = make(map[string]IcebergTableEntry)
+		f.icebergTables[warehouse] = m
+	}
+	return m
+}
+
 func (f *MetaFSM) applyIcebergCreateNamespace(data []byte) error {
 	c, err := decodeMetaIcebergCreateNamespaceCmd(data)
 	if err != nil {
@@ -1775,10 +1802,11 @@ func (f *MetaFSM) applyIcebergCreateNamespace(data []byte) error {
 	key := icebergNamespaceKey(c.Namespace)
 	var result error
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[key]; ok {
+	nsMap := f.icebergNSMap(icebergWarehouseKey(c.Warehouse))
+	if _, ok := nsMap[key]; ok {
 		result = icebergcatalog.ErrNamespaceExists
 	} else {
-		f.icebergNamespaces[key] = IcebergNamespaceEntry{
+		nsMap[key] = IcebergNamespaceEntry{
 			Namespace:  cloneStringSlice(c.Namespace),
 			Properties: cloneStringMap(c.Properties),
 		}
@@ -1795,19 +1823,22 @@ func (f *MetaFSM) applyIcebergDeleteNamespace(data []byte) error {
 	}
 	key := icebergNamespaceKey(c.Namespace)
 	var result error
+	wh := icebergWarehouseKey(c.Warehouse)
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[key]; !ok {
+	nsMap := f.icebergNSMap(wh)
+	tblMap := f.icebergTblMap(wh)
+	if _, ok := nsMap[key]; !ok {
 		result = icebergcatalog.ErrNamespaceNotFound
 	} else {
 		prefix := key + "\x1f"
-		for tableKey := range f.icebergTables {
+		for tableKey := range tblMap {
 			if strings.HasPrefix(tableKey, prefix) {
 				result = icebergcatalog.ErrNamespaceNotEmpty
 				break
 			}
 		}
 		if result == nil {
-			delete(f.icebergNamespaces, key)
+			delete(nsMap, key)
 		}
 	}
 	f.mu.Unlock()
@@ -1823,13 +1854,16 @@ func (f *MetaFSM) applyIcebergCreateTable(data []byte) error {
 	nsKey := icebergNamespaceKey(c.Identifier.Namespace)
 	tableKey := icebergTableKey(c.Identifier)
 	var result error
+	wh := icebergWarehouseKey(c.Warehouse)
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[nsKey]; !ok {
+	nsMap := f.icebergNSMap(wh)
+	tblMap := f.icebergTblMap(wh)
+	if _, ok := nsMap[nsKey]; !ok {
 		result = icebergcatalog.ErrNamespaceNotFound
-	} else if _, ok := f.icebergTables[tableKey]; ok {
+	} else if _, ok := tblMap[tableKey]; ok {
 		result = icebergcatalog.ErrTableExists
 	} else {
-		f.icebergTables[tableKey] = IcebergTableEntry{
+		tblMap[tableKey] = IcebergTableEntry{
 			Identifier:       cloneIcebergIdent(c.Identifier),
 			MetadataLocation: c.MetadataLocation,
 			Properties:       cloneStringMap(c.Properties),
@@ -1848,14 +1882,15 @@ func (f *MetaFSM) applyIcebergCommitTable(data []byte) error {
 	tableKey := icebergTableKey(c.Identifier)
 	var result error
 	f.mu.Lock()
-	entry, ok := f.icebergTables[tableKey]
+	tblMap := f.icebergTblMap(icebergWarehouseKey(c.Warehouse))
+	entry, ok := tblMap[tableKey]
 	if !ok {
 		result = icebergcatalog.ErrTableNotFound
 	} else if entry.MetadataLocation != c.ExpectedMetadataLocation {
 		result = icebergcatalog.ErrCommitFailed
 	} else {
 		entry.MetadataLocation = c.NewMetadataLocation
-		f.icebergTables[tableKey] = entry
+		tblMap[tableKey] = entry
 	}
 	f.mu.Unlock()
 	f.publishIcebergResult(c.RequestID, result)
@@ -1870,13 +1905,16 @@ func (f *MetaFSM) applyIcebergDeleteTable(data []byte) error {
 	nsKey := icebergNamespaceKey(c.Identifier.Namespace)
 	tableKey := icebergTableKey(c.Identifier)
 	var result error
+	wh2 := icebergWarehouseKey(c.Warehouse)
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[nsKey]; !ok {
+	nsMap := f.icebergNSMap(wh2)
+	tblMap := f.icebergTblMap(wh2)
+	if _, ok := nsMap[nsKey]; !ok {
 		result = icebergcatalog.ErrNamespaceNotFound
-	} else if _, ok := f.icebergTables[tableKey]; !ok {
+	} else if _, ok := tblMap[tableKey]; !ok {
 		result = icebergcatalog.ErrTableNotFound
 	} else {
-		delete(f.icebergTables, tableKey)
+		delete(tblMap, tableKey)
 	}
 	f.mu.Unlock()
 	f.publishIcebergResult(c.RequestID, result)
@@ -2305,10 +2343,14 @@ func (f *MetaFSM) resolveNodeIDByAddressLocked(addr string) (string, bool) {
 	return "", false
 }
 
-func (f *MetaFSM) IcebergNamespace(namespace []string) (IcebergNamespaceEntry, bool) {
+func (f *MetaFSM) IcebergNamespace(warehouse string, namespace []string) (IcebergNamespaceEntry, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	entry, ok := f.icebergNamespaces[icebergNamespaceKey(namespace)]
+	nsMap := f.icebergNamespaces[icebergWarehouseKey(warehouse)]
+	if nsMap == nil {
+		return IcebergNamespaceEntry{}, false
+	}
+	entry, ok := nsMap[icebergNamespaceKey(namespace)]
 	if !ok {
 		return IcebergNamespaceEntry{}, false
 	}
@@ -2318,10 +2360,11 @@ func (f *MetaFSM) IcebergNamespace(namespace []string) (IcebergNamespaceEntry, b
 	}, true
 }
 
-func (f *MetaFSM) IcebergNamespaces() []IcebergNamespaceEntry {
+func (f *MetaFSM) IcebergNamespaces(warehouse string) []IcebergNamespaceEntry {
 	f.mu.RLock()
-	out := make([]IcebergNamespaceEntry, 0, len(f.icebergNamespaces))
-	for _, entry := range f.icebergNamespaces {
+	nsMap := f.icebergNamespaces[icebergWarehouseKey(warehouse)]
+	out := make([]IcebergNamespaceEntry, 0, len(nsMap))
+	for _, entry := range nsMap {
 		out = append(out, IcebergNamespaceEntry{
 			Namespace:  cloneStringSlice(entry.Namespace),
 			Properties: cloneStringMap(entry.Properties),
@@ -2334,21 +2377,26 @@ func (f *MetaFSM) IcebergNamespaces() []IcebergNamespaceEntry {
 	return out
 }
 
-func (f *MetaFSM) IcebergTable(ident icebergcatalog.Identifier) (IcebergTableEntry, bool) {
+func (f *MetaFSM) IcebergTable(warehouse string, ident icebergcatalog.Identifier) (IcebergTableEntry, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	entry, ok := f.icebergTables[icebergTableKey(ident)]
+	tblMap := f.icebergTables[icebergWarehouseKey(warehouse)]
+	if tblMap == nil {
+		return IcebergTableEntry{}, false
+	}
+	entry, ok := tblMap[icebergTableKey(ident)]
 	if !ok {
 		return IcebergTableEntry{}, false
 	}
 	return cloneIcebergTableEntry(entry), true
 }
 
-func (f *MetaFSM) IcebergTables(namespace []string) []IcebergTableEntry {
+func (f *MetaFSM) IcebergTables(warehouse string, namespace []string) []IcebergTableEntry {
 	prefix := icebergNamespaceKey(namespace) + "\x1f"
 	f.mu.RLock()
+	tblMap := f.icebergTables[icebergWarehouseKey(warehouse)]
 	out := make([]IcebergTableEntry, 0)
-	for key, entry := range f.icebergTables {
+	for key, entry := range tblMap {
 		if strings.HasPrefix(key, prefix) {
 			out = append(out, cloneIcebergTableEntry(entry))
 		}
@@ -2393,16 +2441,28 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		cp := *f.activePlan
 		activePlanCopy = &cp
 	}
-	icebergNamespaces := make([]IcebergNamespaceEntry, 0, len(f.icebergNamespaces))
-	for _, entry := range f.icebergNamespaces {
-		icebergNamespaces = append(icebergNamespaces, IcebergNamespaceEntry{
-			Namespace:  cloneStringSlice(entry.Namespace),
-			Properties: cloneStringMap(entry.Properties),
-		})
+	var icebergNamespacesCount int
+	for _, m := range f.icebergNamespaces {
+		icebergNamespacesCount += len(m)
 	}
-	icebergTables := make([]IcebergTableEntry, 0, len(f.icebergTables))
-	for _, entry := range f.icebergTables {
-		icebergTables = append(icebergTables, cloneIcebergTableEntry(entry))
+	icebergNamespaces := make([]IcebergNamespaceEntry, 0, icebergNamespacesCount)
+	for _, nsMap := range f.icebergNamespaces {
+		for _, entry := range nsMap {
+			icebergNamespaces = append(icebergNamespaces, IcebergNamespaceEntry{
+				Namespace:  cloneStringSlice(entry.Namespace),
+				Properties: cloneStringMap(entry.Properties),
+			})
+		}
+	}
+	var icebergTablesCount int
+	for _, m := range f.icebergTables {
+		icebergTablesCount += len(m)
+	}
+	icebergTables := make([]IcebergTableEntry, 0, icebergTablesCount)
+	for _, tblMap := range f.icebergTables {
+		for _, entry := range tblMap {
+			icebergTables = append(icebergTables, cloneIcebergTableEntry(entry))
+		}
 	}
 	exportStore := f.exportStore
 	// Snapshot dekRefCounts while holding the read lock.
@@ -2852,7 +2912,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
-	newIcebergNamespaces := make(map[string]IcebergNamespaceEntry, snap.IcebergNamespacesLength())
+	// Legacy snapshots (pre-warehouse-aware, schema version 0) store entries
+	// without a warehouse key; we assign them to the default warehouse on
+	// restore so they remain accessible after the upgrade.
+	newIcebergNamespaces := make(map[string]map[string]IcebergNamespaceEntry)
 	var nsFB clusterpb.IcebergNamespaceEntry
 	for i := 0; i < snap.IcebergNamespacesLength(); i++ {
 		if !snap.IcebergNamespaces(&nsFB, i) {
@@ -2862,10 +2925,14 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			Namespace:  readStringVector(nsFB.NamespaceLength(), nsFB.Namespace),
 			Properties: readKeyValueProperties(nsFB.PropertiesLength(), nsFB.Properties),
 		}
-		newIcebergNamespaces[icebergNamespaceKey(entry.Namespace)] = entry
+		wh := icebergDefaultWarehouse
+		if m := newIcebergNamespaces[wh]; m == nil {
+			newIcebergNamespaces[wh] = make(map[string]IcebergNamespaceEntry)
+		}
+		newIcebergNamespaces[wh][icebergNamespaceKey(entry.Namespace)] = entry
 	}
 
-	newIcebergTables := make(map[string]IcebergTableEntry, snap.IcebergTablesLength())
+	newIcebergTables := make(map[string]map[string]IcebergTableEntry)
 	var tableFB clusterpb.IcebergTableEntry
 	for i := 0; i < snap.IcebergTablesLength(); i++ {
 		if !snap.IcebergTables(&tableFB, i) {
@@ -2884,7 +2951,11 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			MetadataLocation: string(tableFB.MetadataLocation()),
 			Properties:       readKeyValueProperties(tableFB.PropertiesLength(), tableFB.Properties),
 		}
-		newIcebergTables[icebergTableKey(ident)] = entry
+		wh := icebergDefaultWarehouse
+		if m := newIcebergTables[wh]; m == nil {
+			newIcebergTables[wh] = make(map[string]IcebergTableEntry)
+		}
+		newIcebergTables[wh][icebergTableKey(ident)] = entry
 	}
 
 	newObjectIndex := make(map[string]ObjectIndexEntry, snap.ObjectIndexLength())
@@ -3176,12 +3247,14 @@ func buildMetaCapabilityActivatePayload(capability string) []byte {
 func encodeMetaIcebergCreateNamespaceCmd(c IcebergCreateNamespaceCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	namespaceVec := buildStringVector(b, c.Namespace, clusterpb.MetaIcebergCreateNamespaceCmdStartNamespaceVector)
 	propsVec := buildKeyValuePropertiesVector(b, c.Properties, clusterpb.MetaIcebergCreateNamespaceCmdStartPropertiesVector)
 	clusterpb.MetaIcebergCreateNamespaceCmdStart(b)
 	clusterpb.MetaIcebergCreateNamespaceCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaIcebergCreateNamespaceCmdAddNamespace(b, namespaceVec)
 	clusterpb.MetaIcebergCreateNamespaceCmdAddProperties(b, propsVec)
+	clusterpb.MetaIcebergCreateNamespaceCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergCreateNamespaceCmdEnd(b)), nil
 }
 
@@ -3194,6 +3267,7 @@ func decodeMetaIcebergCreateNamespaceCmd(data []byte) (IcebergCreateNamespaceCmd
 	}
 	return IcebergCreateNamespaceCmd{
 		RequestID:  string(t.RequestId()),
+		Warehouse:  string(t.Warehouse()),
 		Namespace:  readStringVector(t.NamespaceLength(), t.Namespace),
 		Properties: readKeyValueProperties(t.PropertiesLength(), t.Properties),
 	}, nil
@@ -3202,10 +3276,12 @@ func decodeMetaIcebergCreateNamespaceCmd(data []byte) (IcebergCreateNamespaceCmd
 func encodeMetaIcebergDeleteNamespaceCmd(c IcebergDeleteNamespaceCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	namespaceVec := buildStringVector(b, c.Namespace, clusterpb.MetaIcebergDeleteNamespaceCmdStartNamespaceVector)
 	clusterpb.MetaIcebergDeleteNamespaceCmdStart(b)
 	clusterpb.MetaIcebergDeleteNamespaceCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaIcebergDeleteNamespaceCmdAddNamespace(b, namespaceVec)
+	clusterpb.MetaIcebergDeleteNamespaceCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergDeleteNamespaceCmdEnd(b)), nil
 }
 
@@ -3218,6 +3294,7 @@ func decodeMetaIcebergDeleteNamespaceCmd(data []byte) (IcebergDeleteNamespaceCmd
 	}
 	return IcebergDeleteNamespaceCmd{
 		RequestID: string(t.RequestId()),
+		Warehouse: string(t.Warehouse()),
 		Namespace: readStringVector(t.NamespaceLength(), t.Namespace),
 	}, nil
 }
@@ -3225,6 +3302,7 @@ func decodeMetaIcebergDeleteNamespaceCmd(data []byte) (IcebergDeleteNamespaceCmd
 func encodeMetaIcebergCreateTableCmd(c IcebergCreateTableCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	identOff := buildIcebergIdentifier(b, c.Identifier)
 	locationOff := b.CreateString(c.MetadataLocation)
 	propsVec := buildKeyValuePropertiesVector(b, c.Properties, clusterpb.MetaIcebergCreateTableCmdStartPropertiesVector)
@@ -3233,6 +3311,7 @@ func encodeMetaIcebergCreateTableCmd(c IcebergCreateTableCmd) ([]byte, error) {
 	clusterpb.MetaIcebergCreateTableCmdAddIdentifier(b, identOff)
 	clusterpb.MetaIcebergCreateTableCmdAddMetadataLocation(b, locationOff)
 	clusterpb.MetaIcebergCreateTableCmdAddProperties(b, propsVec)
+	clusterpb.MetaIcebergCreateTableCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergCreateTableCmdEnd(b)), nil
 }
 
@@ -3249,6 +3328,7 @@ func decodeMetaIcebergCreateTableCmd(data []byte) (IcebergCreateTableCmd, error)
 	}
 	return IcebergCreateTableCmd{
 		RequestID:        string(t.RequestId()),
+		Warehouse:        string(t.Warehouse()),
 		Identifier:       ident,
 		MetadataLocation: string(t.MetadataLocation()),
 		Properties:       readKeyValueProperties(t.PropertiesLength(), t.Properties),
@@ -3258,6 +3338,7 @@ func decodeMetaIcebergCreateTableCmd(data []byte) (IcebergCreateTableCmd, error)
 func encodeMetaIcebergCommitTableCmd(c IcebergCommitTableCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	identOff := buildIcebergIdentifier(b, c.Identifier)
 	expectedOff := b.CreateString(c.ExpectedMetadataLocation)
 	nextOff := b.CreateString(c.NewMetadataLocation)
@@ -3266,6 +3347,7 @@ func encodeMetaIcebergCommitTableCmd(c IcebergCommitTableCmd) ([]byte, error) {
 	clusterpb.MetaIcebergCommitTableCmdAddIdentifier(b, identOff)
 	clusterpb.MetaIcebergCommitTableCmdAddExpectedMetadataLocation(b, expectedOff)
 	clusterpb.MetaIcebergCommitTableCmdAddNewMetadataLocation(b, nextOff)
+	clusterpb.MetaIcebergCommitTableCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergCommitTableCmdEnd(b)), nil
 }
 
@@ -3282,6 +3364,7 @@ func decodeMetaIcebergCommitTableCmd(data []byte) (IcebergCommitTableCmd, error)
 	}
 	return IcebergCommitTableCmd{
 		RequestID:                string(t.RequestId()),
+		Warehouse:                string(t.Warehouse()),
 		Identifier:               ident,
 		ExpectedMetadataLocation: string(t.ExpectedMetadataLocation()),
 		NewMetadataLocation:      string(t.NewMetadataLocation()),
@@ -3291,10 +3374,12 @@ func decodeMetaIcebergCommitTableCmd(data []byte) (IcebergCommitTableCmd, error)
 func encodeMetaIcebergDeleteTableCmd(c IcebergDeleteTableCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	identOff := buildIcebergIdentifier(b, c.Identifier)
 	clusterpb.MetaIcebergDeleteTableCmdStart(b)
 	clusterpb.MetaIcebergDeleteTableCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaIcebergDeleteTableCmdAddIdentifier(b, identOff)
+	clusterpb.MetaIcebergDeleteTableCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergDeleteTableCmdEnd(b)), nil
 }
 
@@ -3311,6 +3396,7 @@ func decodeMetaIcebergDeleteTableCmd(data []byte) (IcebergDeleteTableCmd, error)
 	}
 	return IcebergDeleteTableCmd{
 		RequestID:  string(t.RequestId()),
+		Warehouse:  string(t.Warehouse()),
 		Identifier: ident,
 	}, nil
 }
@@ -3606,6 +3692,20 @@ func encodeMetaPutShardGroupCmd(sg ShardGroupEntry) ([]byte, error) {
 	clusterpb.MetaPutShardGroupCmdStart(b)
 	clusterpb.MetaPutShardGroupCmdAddGroup(b, sgOff)
 	return fbFinish(b, clusterpb.MetaPutShardGroupCmdEnd(b)), nil
+}
+
+// icebergDefaultWarehouse is the warehouse key used for legacy single-warehouse
+// installations and for commands that carry an empty warehouse string (pre-T38
+// raft log entries replayed after upgrade).
+const icebergDefaultWarehouse = "default"
+
+// icebergWarehouseKey returns warehouse if non-empty, falling back to
+// icebergDefaultWarehouse for legacy / single-warehouse mode.
+func icebergWarehouseKey(warehouse string) string {
+	if warehouse == "" {
+		return icebergDefaultWarehouse
+	}
+	return warehouse
 }
 
 func icebergNamespaceKey(namespace []string) string {

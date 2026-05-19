@@ -781,24 +781,24 @@ func NewMetaCatalogReadSender(d MetaForwardDialer) *MetaCatalogReadSender {
 	return &MetaCatalogReadSender{dialer: d}
 }
 
-func (s *MetaCatalogReadSender) LoadNamespace(ctx context.Context, peers []string, namespace []string) (map[string]string, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "load-namespace", Namespace: namespace})
+func (s *MetaCatalogReadSender) LoadNamespace(ctx context.Context, peers []string, warehouse string, namespace []string) (map[string]string, error) {
+	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "load-namespace", Warehouse: warehouse, Namespace: namespace})
 	if err != nil {
 		return nil, err
 	}
 	return cloneStringMap(reply.Properties), nil
 }
 
-func (s *MetaCatalogReadSender) ListNamespaces(ctx context.Context, peers []string) ([][]string, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "list-namespaces"})
+func (s *MetaCatalogReadSender) ListNamespaces(ctx context.Context, peers []string, warehouse string) ([][]string, error) {
+	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "list-namespaces", Warehouse: warehouse})
 	if err != nil {
 		return nil, err
 	}
 	return reply.Namespaces, nil
 }
 
-func (s *MetaCatalogReadSender) LoadTable(ctx context.Context, peers []string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "load-table", Identifier: ident})
+func (s *MetaCatalogReadSender) LoadTable(ctx context.Context, peers []string, warehouse string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "load-table", Warehouse: warehouse, Identifier: ident})
 	if err != nil {
 		return nil, err
 	}
@@ -808,8 +808,8 @@ func (s *MetaCatalogReadSender) LoadTable(ctx context.Context, peers []string, i
 	return reply.Table, nil
 }
 
-func (s *MetaCatalogReadSender) ListTables(ctx context.Context, peers []string, namespace []string) ([]icebergcatalog.Identifier, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "list-tables", Namespace: namespace})
+func (s *MetaCatalogReadSender) ListTables(ctx context.Context, peers []string, warehouse string, namespace []string) ([]icebergcatalog.Identifier, error) {
+	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "list-tables", Warehouse: warehouse, Namespace: namespace})
 	if err != nil {
 		return nil, err
 	}
@@ -863,15 +863,16 @@ func (r *MetaCatalogReadReceiver) Handle(req *transport.Message) *transport.Mess
 	if !r.catalog.meta.IsLeader() {
 		err = raft.ErrNotLeader
 	} else {
+		wh := r.catalog.resolveWarehouse(request.Warehouse)
 		switch request.Op {
 		case "load-namespace":
-			reply.Properties, err = r.catalog.loadNamespaceLocal(request.Namespace)
+			reply.Properties, err = r.catalog.loadNamespaceLocal(wh, request.Namespace)
 		case "list-namespaces":
-			reply.Namespaces = r.catalog.listNamespacesLocal()
+			reply.Namespaces = r.catalog.listNamespacesLocal(wh)
 		case "load-table":
-			reply.Table, err = r.catalog.loadTableLocal(request.Identifier)
+			reply.Table, err = r.catalog.loadTableLocal(wh, request.Identifier)
 		case "list-tables":
-			reply.Tables, err = r.catalog.listTablesLocal(request.Namespace)
+			reply.Tables, err = r.catalog.listTablesLocal(wh, request.Namespace)
 		default:
 			err = icebergcatalog.ErrServiceUnavailable
 		}
@@ -881,6 +882,7 @@ func (r *MetaCatalogReadReceiver) Handle(req *transport.Message) *transport.Mess
 
 type metaCatalogReadRequest struct {
 	Op         string                    `json:"op"`
+	Warehouse  string                    `json:"warehouse,omitempty"`
 	Namespace  []string                  `json:"namespace,omitempty"`
 	Identifier icebergcatalog.Identifier `json:"identifier,omitempty"`
 }
@@ -906,6 +908,7 @@ func encodeMetaCatalogReadRequest(req metaCatalogReadRequest) ([]byte, error) {
 	if req.Op == "load-table" {
 		idOff = buildCatalogIdentifier(b, req.Identifier)
 	}
+	warehouseOff := b.CreateString(req.Warehouse)
 
 	clusterpb.MetaCatalogReadRequestStart(b)
 	clusterpb.MetaCatalogReadRequestAddOp(b, catalogOpToFB(req.Op))
@@ -915,6 +918,7 @@ func encodeMetaCatalogReadRequest(req metaCatalogReadRequest) ([]byte, error) {
 	if idOff != 0 {
 		clusterpb.MetaCatalogReadRequestAddIdentifier(b, idOff)
 	}
+	clusterpb.MetaCatalogReadRequestAddWarehouse(b, warehouseOff)
 	b.Finish(clusterpb.MetaCatalogReadRequestEnd(b))
 	fb := b.FinishedBytes()
 
@@ -937,6 +941,7 @@ func decodeMetaCatalogReadRequest(payload []byte) (req metaCatalogReadRequest, e
 
 	fb := clusterpb.GetRootAsMetaCatalogReadRequest(payload[len(metaCatalogReadRequestMagic):], 0)
 	req.Op = catalogOpFromFB(fb.Op())
+	req.Warehouse = string(fb.Warehouse())
 	nsLen := fb.NamespaceLength()
 	if nsLen > 0 {
 		req.Namespace = make([]string, nsLen)

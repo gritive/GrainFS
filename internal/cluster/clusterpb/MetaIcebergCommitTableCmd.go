@@ -78,8 +78,16 @@ func (rcv *MetaIcebergCommitTableCmd) NewMetadataLocation() []byte {
 	return nil
 }
 
+func (rcv *MetaIcebergCommitTableCmd) Warehouse() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MetaIcebergCommitTableCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func MetaIcebergCommitTableCmdAddRequestId(builder *flatbuffers.Builder, requestId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(requestId), 0)
@@ -92,6 +100,9 @@ func MetaIcebergCommitTableCmdAddExpectedMetadataLocation(builder *flatbuffers.B
 }
 func MetaIcebergCommitTableCmdAddNewMetadataLocation(builder *flatbuffers.Builder, newMetadataLocation flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(newMetadataLocation), 0)
+}
+func MetaIcebergCommitTableCmdAddWarehouse(builder *flatbuffers.Builder, warehouse flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(warehouse), 0)
 }
 func MetaIcebergCommitTableCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

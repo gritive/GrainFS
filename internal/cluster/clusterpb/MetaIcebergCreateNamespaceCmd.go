@@ -86,8 +86,16 @@ func (rcv *MetaIcebergCreateNamespaceCmd) PropertiesLength() int {
 	return 0
 }
 
+func (rcv *MetaIcebergCreateNamespaceCmd) Warehouse() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MetaIcebergCreateNamespaceCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func MetaIcebergCreateNamespaceCmdAddRequestId(builder *flatbuffers.Builder, requestId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(requestId), 0)
@@ -103,6 +111,9 @@ func MetaIcebergCreateNamespaceCmdAddProperties(builder *flatbuffers.Builder, pr
 }
 func MetaIcebergCreateNamespaceCmdStartPropertiesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func MetaIcebergCreateNamespaceCmdAddWarehouse(builder *flatbuffers.Builder, warehouse flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(warehouse), 0)
 }
 func MetaIcebergCreateNamespaceCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

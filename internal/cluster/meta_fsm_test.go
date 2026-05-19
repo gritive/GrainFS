@@ -490,12 +490,12 @@ func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 		Name:      "events",
 	}, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", map[string]string{"format-version": "2"})))
 
-	ns, ok := f.IcebergNamespace([]string{"analytics"})
+	ns, ok := f.IcebergNamespace("", []string{"analytics"})
 	require.True(t, ok)
 	require.Equal(t, []string{"analytics"}, ns.Namespace)
 	require.Equal(t, "eng", ns.Properties["owner"])
 
-	tbl, ok := f.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	tbl, ok := f.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.True(t, ok)
 	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
 	require.Equal(t, "2", tbl.Properties["format-version"])
@@ -506,7 +506,7 @@ func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 
 	f2 := NewMetaFSM()
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-	restored, ok := f2.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	restored, ok := f2.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.True(t, ok)
 	require.Equal(t, tbl.MetadataLocation, restored.MetadataLocation)
 	require.Equal(t, tbl.Identifier, restored.Identifier)
@@ -541,13 +541,13 @@ func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
 	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "create-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
 	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-ok", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00001.json")))
 	require.NoError(t, results["commit-ok"])
-	table, ok := f.IcebergTable(ident)
+	table, ok := f.IcebergTable("", ident)
 	require.True(t, ok)
 	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
 
 	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-stale", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00002.json")))
 	require.ErrorIs(t, results["commit-stale"], icebergcatalog.ErrCommitFailed)
-	table, ok = f.IcebergTable(ident)
+	table, ok = f.IcebergTable("", ident)
 	require.True(t, ok)
 	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
 
@@ -556,7 +556,7 @@ func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
 
 	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-table", ident)))
 	require.NoError(t, results["delete-table"])
-	_, ok = f.IcebergTable(ident)
+	_, ok = f.IcebergTable("", ident)
 	require.False(t, ok)
 
 	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-missing-table", ident)))

@@ -242,7 +242,8 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
-	_, ok := leader.FSM().IcebergNamespace([]string{"analytics"})
+	// catalog.Warehouse() is "s3://grainfs-tables/warehouse"; empty arg resolves to that.
+	_, ok := leader.FSM().IcebergNamespace(catalog.Warehouse(), []string{"analytics"})
 	require.True(t, ok)
 }
 
@@ -716,4 +717,60 @@ func BenchmarkForwardingObjectIndexProposerApplyWait(b *testing.B) {
 
 	b.Run("poll_fsm", func(b *testing.B) { bench(b, false) })
 	b.Run("forwarded_apply_index", func(b *testing.B) { bench(b, true) })
+}
+
+// TestMetaCatalog_TwoWarehousesIsolated verifies that namespaces and tables
+// created in one warehouse are not visible in another.
+func TestMetaCatalog_TwoWarehousesIsolated(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	catA := NewMetaCatalog(m, backend, "s3://bucket/warehouse-a")
+	catB := NewMetaCatalog(m, backend, "s3://bucket/warehouse-b")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Create namespace "analytics" in warehouse-a only.
+	require.NoError(t, catA.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "team-a"}))
+
+	// warehouse-a sees it.
+	props, err := catA.LoadNamespace(ctx, "", []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "team-a", props["owner"])
+
+	// warehouse-b does NOT see it.
+	_, err = catB.LoadNamespace(ctx, "", []string{"analytics"})
+	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceNotFound, "warehouse-b should not see warehouse-a namespace")
+
+	// ListNamespaces is also isolated.
+	nsA, err := catA.ListNamespaces(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, nsA, 1)
+	nsB, err := catB.ListNamespaces(ctx, "")
+	require.NoError(t, err)
+	require.Empty(t, nsB)
+
+	// Create same namespace in warehouse-b independently.
+	require.NoError(t, catB.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "team-b"}))
+	propsB, err := catB.LoadNamespace(ctx, "", []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "team-b", propsB["owner"])
+
+	// Delete in warehouse-a does not affect warehouse-b.
+	require.NoError(t, catA.DeleteNamespace(ctx, "", []string{"analytics"}))
+	_, err = catA.LoadNamespace(ctx, "", []string{"analytics"})
+	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceNotFound)
+	propsB2, err := catB.LoadNamespace(ctx, "", []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "team-b", propsB2["owner"])
 }
