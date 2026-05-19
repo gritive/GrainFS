@@ -483,6 +483,29 @@ func TestCodec_ObjectMeta_ACL_BackwardCompat(t *testing.T) {
 	assert.Equal(t, uint8(0), got.ACL, "legacy records should have ACL=0 (private)")
 }
 
+func TestCodec_ObjectMeta_SegmentPlacementRoundTrip(t *testing.T) {
+	m := objectMeta{
+		Key: "f", Size: 10, ContentType: "application/octet-stream", ETag: "etag", LastModified: 1,
+		Segments: []storage.SegmentRef{{
+			BlobID:           "seg-1",
+			Size:             10,
+			Checksum:         []byte{1, 2, 3, 4},
+			PlacementGroupID: "pg-2",
+			ShardSize:        4,
+			RingVersion:      9,
+			ECData:           2,
+			ECParity:         1,
+			NodeIDs:          []string{"n1", "n2", "n3"},
+		}},
+	}
+	raw, err := marshalObjectMeta(m)
+	require.NoError(t, err)
+	got, err := unmarshalObjectMeta(raw)
+	require.NoError(t, err)
+	require.Len(t, got.Segments, 1)
+	assert.Equal(t, m.Segments[0], got.Segments[0])
+}
+
 func TestEncodeObjectMeta_AllocsBounded(t *testing.T) {
 	meta := objectMeta{
 		Key: "test-key", Size: 1024, ContentType: "application/octet-stream",

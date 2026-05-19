@@ -269,7 +269,7 @@ table CoalesceSegmentsCmd {
   ring_version:uint64 = 0;
 }
 
-// SegmentRef mirrors storage.SegmentRef — one EC-encoded, encrypted append
+// SegmentRef mirrors storage.SegmentRef — one appendable or chunked-PUT
 // segment. Cluster stores its own copy in ObjectMeta because cluster
 // ObjectMeta is the source of truth on the data path; storage.Object is
 // materialized from it on read.
@@ -277,6 +277,13 @@ table SegmentRef {
   blob_id:string;
   size:int64;
   etag:string;
+  checksum:[ubyte];
+  placement_group_id:string;
+  shard_size:int32 = 0;
+  node_ids:[string];
+  ec_data:uint8 = 0;
+  ec_parity:uint8 = 0;
+  ring_version:uint64 = 0;
 }
 
 table SetBucketVersioningCmd {

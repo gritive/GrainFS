@@ -89,6 +89,82 @@ func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
 	}
 }
 
+func TestSegmentReader_CloseCancelsWorkers(t *testing.T) {
+	t.Parallel()
+	store := &blockingSegmentStore{
+		entered: make(chan struct{}),
+		exited:  make(chan struct{}),
+	}
+	r := NewSegmentReaderCtx(context.Background(), store, []SegmentRef{{BlobID: "blocked", Size: 1}})
+
+	select {
+	case <-store.entered:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not enter OpenSegment")
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	select {
+	case <-store.exited:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not exit after Close")
+	}
+}
+
+func TestSegmentReader_CloseDoesNotScheduleRemainingSegments(t *testing.T) {
+	t.Parallel()
+	const refsN = DefaultGetWorkers + 4
+	refs := make([]SegmentRef, refsN)
+	for i := range refs {
+		refs[i] = SegmentRef{BlobID: fmt.Sprintf("blocked-%d", i), Size: 1}
+	}
+	store := &countingBlockingSegmentStore{
+		entered: make(chan string, refsN),
+		exited:  make(chan string, refsN),
+	}
+	r := NewSegmentReaderCtx(context.Background(), store, refs)
+
+	for i := 0; i < DefaultGetWorkers; i++ {
+		select {
+		case <-store.entered:
+		case <-time.After(time.Second):
+			t.Fatalf("worker %d did not enter OpenSegment", i)
+		}
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for i := 0; i < DefaultGetWorkers; i++ {
+		select {
+		case <-store.exited:
+		case <-time.After(time.Second):
+			t.Fatalf("worker %d did not exit after Close", i)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := len(store.entered); got != 0 {
+		t.Fatalf("Close scheduled %d extra segments after cancellation", got)
+	}
+}
+
+func TestSegmentReader_LegacyConstructorStillWorks(t *testing.T) {
+	t.Parallel()
+	segs := makeTestSegments(t, []int{1024, 2048, 512})
+	store := newFakeSegmentStore(segs)
+	r := NewSegmentReader(store, segs.refs)
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, segs.flat) {
+		t.Fatalf("reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
+	}
+}
+
 // --- helpers ---
 
 type testSegments struct {
@@ -166,4 +242,28 @@ func (s *fakeSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.
 		return nil, injErr
 	}
 	return io.NopCloser(bytes.NewReader(buf)), nil
+}
+
+type blockingSegmentStore struct {
+	entered chan struct{}
+	exited  chan struct{}
+}
+
+func (s *blockingSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	close(s.entered)
+	<-ctx.Done()
+	close(s.exited)
+	return nil, ctx.Err()
+}
+
+type countingBlockingSegmentStore struct {
+	entered chan string
+	exited  chan string
+}
+
+func (s *countingBlockingSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	s.entered <- ref.BlobID
+	<-ctx.Done()
+	s.exited <- ref.BlobID
+	return nil, ctx.Err()
 }

@@ -30,8 +30,8 @@ type objectMeta struct {
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
-	// Segments holds the ordered list of append segments for appendable
-	// objects. Empty/nil for legacy single-blob (non-appendable) objects.
+	// Segments holds appendable owner-local segments or chunked PUT segment
+	// refs. Empty/nil for legacy single-blob objects.
 	Segments []storage.SegmentRef
 	// Coalesced records merged segment blobs. Phase B2 stores each entry
 	// owner-locally; Phase B3 distributes via EC and adds placement params.
@@ -605,14 +605,42 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		segOffs := make([]flatbuffers.UOffsetT, len(m.Segments))
 		for i, s := range m.Segments {
 			blobOff := b.CreateString(s.BlobID)
+			pgOff := b.CreateString(s.PlacementGroupID)
 			// TODO(Phase 2): clusterpb.SegmentRef still uses Etag on the wire;
 			// hex-encode Checksum (MD5 in cluster Phase 1) for backwards compat
 			// until the cluster schema migrates to Checksum bytes.
 			etOff := b.CreateString(hex.EncodeToString(s.Checksum))
+			var checksumOff flatbuffers.UOffsetT
+			if len(s.Checksum) > 0 {
+				checksumOff = b.CreateByteVector(s.Checksum)
+			}
+			var nodeIDsOff flatbuffers.UOffsetT
+			if len(s.NodeIDs) > 0 {
+				nodeIDsOff = buildStringVector(b, s.NodeIDs, clusterpb.SegmentRefStartNodeIdsVector)
+			}
 			clusterpb.SegmentRefStart(b)
 			clusterpb.SegmentRefAddBlobId(b, blobOff)
 			clusterpb.SegmentRefAddSize(b, s.Size)
 			clusterpb.SegmentRefAddEtag(b, etOff)
+			if checksumOff != 0 {
+				clusterpb.SegmentRefAddChecksum(b, checksumOff)
+			}
+			clusterpb.SegmentRefAddPlacementGroupId(b, pgOff)
+			if s.ShardSize != 0 {
+				clusterpb.SegmentRefAddShardSize(b, s.ShardSize)
+			}
+			if nodeIDsOff != 0 {
+				clusterpb.SegmentRefAddNodeIds(b, nodeIDsOff)
+			}
+			if s.ECData != 0 {
+				clusterpb.SegmentRefAddEcData(b, s.ECData)
+			}
+			if s.ECParity != 0 {
+				clusterpb.SegmentRefAddEcParity(b, s.ECParity)
+			}
+			if s.RingVersion != 0 {
+				clusterpb.SegmentRefAddRingVersion(b, s.RingVersion)
+			}
 			segOffs[i] = clusterpb.SegmentRefEnd(b)
 		}
 		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
@@ -754,10 +782,26 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			// TODO(Phase 2): wire Etag is hex-encoded MD5 (cluster Phase 1);
 			// decode into Checksum bytes to match storage.SegmentRef shape.
 			checksum, _ := hex.DecodeString(string(seg.Etag()))
+			if cb := seg.ChecksumBytes(); len(cb) > 0 {
+				checksum = append([]byte(nil), cb...)
+			}
+			var nodeIDs []string
+			if nn := seg.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(seg.NodeIds(j))
+				}
+			}
 			segments[i] = storage.SegmentRef{
-				BlobID:   string(seg.BlobId()),
-				Size:     seg.Size(),
-				Checksum: checksum,
+				BlobID:           string(seg.BlobId()),
+				Size:             seg.Size(),
+				Checksum:         checksum,
+				PlacementGroupID: string(seg.PlacementGroupId()),
+				ShardSize:        seg.ShardSize(),
+				RingVersion:      seg.RingVersion(),
+				ECData:           seg.EcData(),
+				ECParity:         seg.EcParity(),
+				NodeIDs:          nodeIDs,
 			}
 		}
 	}

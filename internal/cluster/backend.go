@@ -1840,8 +1840,30 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	// generic EC ResolvePlacement returns ErrNotEC for appendables (no
 	// placement record); without this fast path ReadAt falls back to a full
 	// GET + discard which negates range-read efficiency.
-	if (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
+	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.readAtAppendable(ctx, bucket, key, obj, offset, buf)
+	}
+	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
+		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+		refs, startOff, err := chunkedSegmentWindow(obj.Segments, offset, len(buf))
+		if err != nil {
+			return 0, err
+		}
+		rc := storage.NewSegmentReaderCtx(ctx, store, refs)
+		defer rc.Close()
+		if startOff > 0 {
+			if _, err := io.CopyN(io.Discard, rc, startOff); err != nil {
+				return 0, fmt.Errorf("chunked ReadAt seek: %w", err)
+			}
+		}
+		n, err := io.ReadFull(rc, buf)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return n, io.EOF
+		}
+		if err != nil {
+			return n, fmt.Errorf("chunked ReadAt read: %w", err)
+		}
+		return n, nil
 	}
 
 	if b.shardSvc != nil {
@@ -2497,8 +2519,12 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	// <objectPath>_segments/<blobID> (see writeSegmentBlobForAppend). Stitch
 	// them with a multi-segment reader instead of trying to open a single
 	// objectPath file (which never exists for appendables).
-	if (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
+	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil
+	}
+	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
+		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
 	}
 
 	// EC path: shardKey = key+"/"+versionID for versioned objects.

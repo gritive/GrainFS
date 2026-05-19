@@ -25,6 +25,8 @@ type SegmentReader struct {
 	store   segmentStore
 	refs    []SegmentRef
 	workers int
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	// pending is pre-populated for every ref at construction so Read() can
 	// always look up the slot it needs without a nil-deref race against
@@ -46,6 +48,13 @@ type pendingSegment struct {
 // NewSegmentReader builds a reader that streams len(refs) segments in order.
 // Fetching starts immediately in the background.
 func NewSegmentReader(store segmentStore, refs []SegmentRef) *SegmentReader {
+	return NewSegmentReaderCtx(context.Background(), store, refs)
+}
+
+// NewSegmentReaderCtx builds a reader that streams len(refs) segments in
+// order, canceling background fetches when ctx is canceled or Close is called.
+func NewSegmentReaderCtx(ctx context.Context, store segmentStore, refs []SegmentRef) *SegmentReader {
+	cctx, cancel := context.WithCancel(ctx)
 	pending := make([]*pendingSegment, len(refs))
 	for i := range refs {
 		pending[i] = &pendingSegment{ready: make(chan struct{})}
@@ -55,12 +64,20 @@ func NewSegmentReader(store segmentStore, refs []SegmentRef) *SegmentReader {
 		refs:    refs,
 		workers: DefaultGetWorkers,
 		pending: pending,
+		ctx:     cctx,
+		cancel:  cancel,
 	}
-	// TODO(phase-2): accept ctx from caller so cluster GET can cancel on
-	// client disconnect or reshard event. v1 uses background context — workers
-	// always run to completion.
-	go r.fetchAll(context.Background())
+	go r.fetchAll(cctx)
 	return r
+}
+
+// Close cancels background fetch workers. It does not discard bytes already
+// fetched into pending buffers.
+func (r *SegmentReader) Close() error {
+	if r.cancel != nil {
+		r.cancel()
+	}
+	return nil
 }
 
 func (r *SegmentReader) fetchAll(ctx context.Context) {
@@ -68,7 +85,20 @@ func (r *SegmentReader) fetchAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for i := range r.refs {
 		i := i
-		sem <- struct{}{}
+		select {
+		case <-ctx.Done():
+			r.cancelUnscheduled(i, ctx.Err())
+			wg.Wait()
+			return
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			r.cancelUnscheduled(i, ctx.Err())
+			wg.Wait()
+			return
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -77,6 +107,17 @@ func (r *SegmentReader) fetchAll(ctx context.Context) {
 		}()
 	}
 	wg.Wait()
+}
+
+func (r *SegmentReader) cancelUnscheduled(start int, err error) {
+	for i := start; i < len(r.pending); i++ {
+		p := r.pending[i]
+		if p == nil {
+			continue
+		}
+		p.err = err
+		close(p.ready)
+	}
 }
 
 func (r *SegmentReader) fetchOne(ctx context.Context, idx int) {

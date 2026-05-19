@@ -55,15 +55,20 @@ type MultipartPartEntry struct {
 	ETag       string
 }
 
-// SegmentRef identifies one EC-encoded encrypted segment of an appendable
-// object. Order in Object.Segments is append order; per-segment offset is
-// derived as the prefix-sum of preceding sizes.
+// SegmentRef identifies one segment of an object. Appendable objects store
+// owner-local append blobs in append order; chunked cluster PUTs store
+// EC-encoded segment placement alongside the same ordered segment list.
+// Per-segment offset is derived as the prefix-sum of preceding sizes.
 type SegmentRef struct {
 	BlobID           string // EC/encrypted blob 식별자 (UUIDv7)
 	Size             int64  // plaintext bytes in this segment
 	Checksum         []byte // xxhash3-128 of plaintext segment bytes (16 B)
 	PlacementGroupID string // placement group (EC stripe) identifier; empty for legacy
 	ShardSize        int32  // EC shard size for this segment; 0 for legacy
+	RingVersion      uint64 // cluster ring version for this segment; 0 for direct node placement
+	ECData           uint8  // EC data shard count; 0 for legacy/local segments
+	ECParity         uint8  // EC parity shard count; 0 for legacy/local segments
+	NodeIDs          []string
 }
 
 // CoalescedRef identifies one coalesced blob produced by merging a prefix of
