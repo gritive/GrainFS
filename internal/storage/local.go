@@ -396,7 +396,9 @@ func (b *LocalBackend) SetObjectACL(bucket, key string, acl uint8) error {
 // clears all tags. Does not modify ETag, LastModified, or blob bytes —
 // matches AWS S3 semantics.
 func (b *LocalBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) error {
-	_ = versionID // versionID=="" targets current version; versioned path deferred to Task 7
+	if versionID != "" {
+		return UnsupportedOperationError{Op: "SetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
 	mk := b.objectMetaKey(bucket, key)
 	return b.db.Update(func(txn *badger.Txn) error {
 		val, err := getBadgerValue(txn, b.encryptor, badgerDomainObject, mk)
@@ -428,7 +430,9 @@ func (b *LocalBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) 
 // GetObjectTags satisfies storage.ObjectTagsGetter. Returns a defensive copy
 // of the tag set on the target version. versionID="" targets the current version.
 func (b *LocalBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, error) {
-	_ = versionID // versionID=="" targets current version; versioned path deferred to Task 7
+	if versionID != "" {
+		return nil, UnsupportedOperationError{Op: "GetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
 	mk := b.objectMetaKey(bucket, key)
 	var result []Tag
 	err := b.db.View(func(txn *badger.Txn) error {

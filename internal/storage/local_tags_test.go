@@ -75,6 +75,28 @@ func TestCachedBackend_SetObjectTags(t *testing.T) {
 	require.Equal(t, tags, got)
 }
 
+func TestLocalBackend_SetObjectTags_VersionedRejected(t *testing.T) {
+	b := newBackend(t)
+	require.NoError(t, b.CreateBucket(ctx(), "b"))
+	_, err := b.PutObject(ctx(), "b", "k", body("hello"), "text/plain")
+	require.NoError(t, err)
+
+	// LocalBackend has no per-version metadata store; non-empty versionID must
+	// return ErrUnsupportedOperation rather than silently targeting current.
+	err = b.SetObjectTags("b", "k", "v1", []storage.Tag{{Key: "env", Value: "prod"}})
+	require.ErrorIs(t, err, storage.ErrUnsupportedOperation)
+	var typed storage.UnsupportedOperationError
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, "SetObjectTags", typed.Op)
+	require.Equal(t, storage.UnsupportedReasonNoAdapter, typed.Reason)
+
+	_, err = b.GetObjectTags("b", "k", "v1")
+	require.ErrorIs(t, err, storage.ErrUnsupportedOperation)
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, "GetObjectTags", typed.Op)
+	require.Equal(t, storage.UnsupportedReasonNoAdapter, typed.Reason)
+}
+
 func TestRecoveryWriteGate_SetObjectTags_Blocks(t *testing.T) {
 	t.Skip("wire to the existing gate-closed harness; mirror SetObjectACL gate test exactly")
 }
