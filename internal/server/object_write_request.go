@@ -19,14 +19,7 @@ func putObjectContentType(c *app.RequestContext) string {
 
 func putObjectBody(c *app.RequestContext) ([]byte, error) {
 	rawBody := c.Request.Body()
-	contentEncoding := string(c.GetHeader("Content-Encoding"))
-	contentSHA := string(c.GetHeader("X-Amz-Content-Sha256"))
-	decodedContentLength := string(c.GetHeader("X-Amz-Decoded-Content-Length"))
-	trailer := string(c.GetHeader("X-Amz-Trailer"))
-	if contentEncoding == "aws-chunked" ||
-		strings.HasPrefix(contentSHA, "STREAMING-") ||
-		decodedContentLength != "" ||
-		trailer != "" {
+	if isAWSChunkedPayload(c) {
 		decoded, err := s3auth.DecodeAWSChunkedBody(rawBody)
 		if err != nil {
 			return nil, fmt.Errorf("invalid aws-chunked encoding: %w", err)
@@ -37,6 +30,32 @@ func putObjectBody(c *app.RequestContext) ([]byte, error) {
 		return nil, fmt.Errorf("request body size mismatch: content-length=%d actual=%d", expected, len(rawBody))
 	}
 	return rawBody, nil
+}
+
+func putObjectPayloadReader(c *app.RequestContext) (io.Reader, error) {
+	if c.Request.IsBodyStream() {
+		body := c.Request.BodyStream()
+		if isAWSChunkedPayload(c) {
+			return s3auth.NewAWSChunkedReader(body), nil
+		}
+		return body, nil
+	}
+	body, err := putObjectBody(c)
+	if err != nil {
+		return nil, err
+	}
+	return newPutObjectBodyReader(body), nil
+}
+
+func isAWSChunkedPayload(c *app.RequestContext) bool {
+	contentEncoding := string(c.GetHeader("Content-Encoding"))
+	contentSHA := string(c.GetHeader("X-Amz-Content-Sha256"))
+	decodedContentLength := string(c.GetHeader("X-Amz-Decoded-Content-Length"))
+	trailer := string(c.GetHeader("X-Amz-Trailer"))
+	return contentEncoding == "aws-chunked" ||
+		strings.HasPrefix(contentSHA, "STREAMING-") ||
+		decodedContentLength != "" ||
+		trailer != ""
 }
 
 type putObjectBodyReader struct {

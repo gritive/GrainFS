@@ -1,8 +1,10 @@
 package s3auth
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"strconv"
 )
 
@@ -48,6 +50,114 @@ func DecodeAWSChunkedBody(data []byte) ([]byte, error) {
 	}
 
 	return data[:writeAt], nil
+}
+
+func NewAWSChunkedReader(r io.Reader) io.Reader {
+	return &awsChunkedReader{br: bufio.NewReader(r)}
+}
+
+type awsChunkedReader struct {
+	br       *bufio.Reader
+	remain   int64
+	done     bool
+	needCRLF bool
+}
+
+func (r *awsChunkedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for r.remain == 0 {
+		if r.done {
+			return 0, io.EOF
+		}
+		if r.needCRLF {
+			if err := r.consumeChunkCRLF(); err != nil {
+				return 0, err
+			}
+			r.needCRLF = false
+		}
+		size, err := r.readChunkSize()
+		if err != nil {
+			return 0, err
+		}
+		if size == 0 {
+			if err := r.consumeTrailers(); err != nil {
+				return 0, err
+			}
+			r.done = true
+			return 0, io.EOF
+		}
+		r.remain = size
+	}
+	if int64(len(p)) > r.remain {
+		p = p[:r.remain]
+	}
+	n, err := io.ReadFull(r.br, p)
+	r.remain -= int64(n)
+	if err != nil {
+		return n, fmt.Errorf("read chunk data: %w", err)
+	}
+	if r.remain == 0 {
+		r.needCRLF = true
+	}
+	return n, nil
+}
+
+func (r *awsChunkedReader) readChunkSize() (int64, error) {
+	line, err := r.br.ReadBytes('\n')
+	if err != nil {
+		return 0, fmt.Errorf("read chunk header: %w", err)
+	}
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	line = bytes.TrimSuffix(line, []byte{'\r'})
+	sizeStr := line
+	if idx := bytes.IndexByte(line, ';'); idx >= 0 {
+		sizeStr = line[:idx]
+	}
+	size, err := strconv.ParseInt(string(bytes.TrimSpace(sizeStr)), 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse chunk size %q: %w", sizeStr, err)
+	}
+	if size < 0 {
+		return 0, fmt.Errorf("read chunk data: negative chunk size")
+	}
+	return size, nil
+}
+
+func (r *awsChunkedReader) consumeChunkCRLF() error {
+	b, err := r.br.ReadByte()
+	if err != nil {
+		return fmt.Errorf("read chunk trailer: %w", err)
+	}
+	if b == '\n' {
+		return nil
+	}
+	if b != '\r' {
+		return fmt.Errorf("read chunk trailer: invalid line ending")
+	}
+	b, err = r.br.ReadByte()
+	if err != nil {
+		return fmt.Errorf("read chunk trailer: %w", err)
+	}
+	if b != '\n' {
+		return fmt.Errorf("read chunk trailer: invalid line ending")
+	}
+	return nil
+}
+
+func (r *awsChunkedReader) consumeTrailers() error {
+	for {
+		line, err := r.br.ReadBytes('\n')
+		if err != nil {
+			return fmt.Errorf("read final chunk trailer: %w", err)
+		}
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if len(line) == 0 {
+			return nil
+		}
+	}
 }
 
 func readLineSlice(data []byte, start int) ([]byte, int, error) {
