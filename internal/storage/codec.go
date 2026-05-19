@@ -40,6 +40,24 @@ func marshalObject(obj *Object) ([]byte, error) {
 		}
 		segmentsOff = b.EndVector(len(segOffs))
 	}
+	var partsOff flatbuffers.UOffsetT
+	if len(obj.Parts) > 0 {
+		partOffs := make([]flatbuffers.UOffsetT, len(obj.Parts))
+		for i := len(obj.Parts) - 1; i >= 0; i-- {
+			p := obj.Parts[i]
+			etOff := b.CreateString(p.ETag)
+			storagepb.MultipartPartEntryStart(b)
+			storagepb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+			storagepb.MultipartPartEntryAddSize(b, p.Size)
+			storagepb.MultipartPartEntryAddEtag(b, etOff)
+			partOffs[i] = storagepb.MultipartPartEntryEnd(b)
+		}
+		storagepb.ObjectStartPartsVector(b, len(partOffs))
+		for i := len(partOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partOffs[i])
+		}
+		partsOff = b.EndVector(len(partOffs))
+	}
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -58,6 +76,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	if obj.IsAppendable {
 		storagepb.ObjectAddIsAppendable(b, true)
+	}
+	if partsOff != 0 {
+		storagepb.ObjectAddParts(b, partsOff)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -107,6 +128,21 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 			}
 		}
 		dst.Segments = segs
+	}
+	if n := t.PartsLength(); n > 0 {
+		parts := make([]MultipartPartEntry, n)
+		var p storagepb.MultipartPartEntry
+		for i := 0; i < n; i++ {
+			if !t.Parts(&p, i) {
+				continue
+			}
+			parts[i] = MultipartPartEntry{
+				PartNumber: int(p.PartNumber()),
+				Size:       p.Size(),
+				ETag:       string(p.Etag()),
+			}
+		}
+		dst.Parts = parts
 	}
 	dst.IsAppendable = t.IsAppendable()
 	return nil
