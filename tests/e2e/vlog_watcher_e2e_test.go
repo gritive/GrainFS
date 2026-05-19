@@ -158,90 +158,107 @@ func runVlogWatcherCases(t *testing.T, tgt s3Target) {
 	})
 }
 
-// TestE2E_GCTicker_RecoversAfterDeletion boots one node with a fast GC ticker
-// and asserts that grainfs_badger_gc_runs_total advances within several ticks.
-// The metric is wired by gcMetricsRecorder; this regression catches the case
-// where the counter declaration drifts away from the increment site.
-func TestE2E_GCTicker_RecoversAfterDeletion(t *testing.T) {
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      1,
-		LogPrefix:  "vlog-gc",
-		DisableNFS: true,
-		DisableNBD: true,
-		ExtraArgs: []string{
-			"--badger-gc-interval=500ms",
-			"--vlog-smoke-defer=2s",
-		},
-	})
-
-	// Touch every category we expect to see GC activity on.
-	cli := c.S3Client(0)
-	ctx := context.Background()
-	require.NoError(t, tryCreateBucket(ctx, cli, "vlog-gc"))
-	for i := 0; i < 4; i++ {
-		require.NoError(t, tryPutObject(ctx, cli, "vlog-gc", fmt.Sprintf("k-%d", i), []byte("payload")))
+// TestGCTickerE2E boots a fixture with a fast GC ticker and asserts that
+// grainfs_badger_gc_runs_total advances within several ticks. The metric
+// is wired by gcMetricsRecorder; this regression catches the case where the
+// counter declaration drifts away from the increment site.
+func TestGCTickerE2E(t *testing.T) {
+	args := []string{
+		"--badger-gc-interval=500ms",
+		"--vlog-smoke-defer=2s",
 	}
-
-	require.Eventually(t, func() bool {
-		v := scrapeMetric(t, c.httpURLs[0], "grainfs_badger_gc_runs_total", `category="meta"`)
-		return v > 0
-	}, 10*time.Second, 200*time.Millisecond, "meta category GC counter must advance")
+	t.Run("SingleNode", func(t *testing.T) {
+		runGCTickerCases(t, newDedicatedSingleNodeS3Target(t, args))
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runGCTickerCases(t, newClusterS3TargetWithExtraArgs(t, 4, args))
+	})
 }
 
-// TestE2E_StrictVlogRegistry_FatalOnMissing plants an unregistered .vlog file
-// before the smoke deferral elapses, then asserts that strict mode either
-// fatally exits the process OR emits a registry_under_populated incident.
-func TestE2E_StrictVlogRegistry_FatalOnMissing(t *testing.T) {
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      1,
-		LogPrefix:  "vlog-strict",
-		DisableNFS: true,
-		DisableNBD: true,
-		ExtraArgs: []string{
-			"--strict-vlog-registry=true",
-			"--vlog-smoke-defer=3s",
-		},
-	})
+func runGCTickerCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	endpoint := tgt.endpoint(0)
+	cli := tgt.pickNode(0)
+	ctx := context.Background()
 
-	// Plant an unregistered vlog directory before the 3s smoke defer expires.
-	plantDir := filepath.Join(c.dataDirs[0], "fake-rogue-db")
-	require.NoError(t, os.MkdirAll(plantDir, 0o755))
-	plantFile := filepath.Join(plantDir, "000001.vlog")
-	require.NoError(t, os.WriteFile(plantFile, []byte("rogue"), 0o644))
-
-	// Either path is acceptable per spec: process exits non-zero, or incident
-	// is recorded. Wait up to 12s (3s defer + buffer + drain).
-	//
-	// log.Fatal() in the child goroutine triggers os.Exit(1) but the harness
-	// has not Wait()'d on the process yet — ProcessState stays nil and the
-	// zombie still answers Signal(0). We probe by hitting the data-plane HTTP
-	// server: when grainfs has exited, the listener is gone and Get returns
-	// "connection refused" within milliseconds.
-	deadline := time.Now().Add(12 * time.Second)
-	exited := false
-	incidentRaised := false
-	probe := &http.Client{Timeout: 500 * time.Millisecond}
-	for time.Now().Before(deadline) {
-		resp, err := probe.Get(c.httpURLs[0] + "/metrics")
-		if err != nil {
-			exited = true
-			break
+	t.Run("RecoversAfterDeletion", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "gctick")
+		for i := 0; i < 4; i++ {
+			_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(fmt.Sprintf("k-%d", i)),
+				Body:   bytes.NewReader([]byte("payload")),
+			})
+			require.NoError(t, err)
 		}
-		_ = resp.Body.Close()
-		incidents := fetchIncidentsSafe(t, c.httpURLs[0])
-		for _, inc := range incidents {
-			if inc.Cause == "registry_under_populated" {
-				incidentRaised = true
+
+		require.Eventually(t, func() bool {
+			v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", `category="meta"`)
+			return v > 0
+		}, 10*time.Second, 200*time.Millisecond, "meta category GC counter must advance")
+	})
+}
+
+// TestVlogStrictRegistryE2E plants an unregistered .vlog file before the
+// smoke deferral elapses, then asserts that strict mode either fatally exits
+// the process OR emits a registry_under_populated incident. Destructive:
+// the fixture may exit non-zero — single sub-test per branch, no other
+// sub-tests can share this fixture.
+func TestVlogStrictRegistryE2E(t *testing.T) {
+	args := []string{
+		"--strict-vlog-registry=true",
+		"--vlog-smoke-defer=3s",
+	}
+	t.Run("SingleNode", func(t *testing.T) {
+		runVlogStrictRegistryCases(t, newDedicatedSingleNodeS3Target(t, args))
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runVlogStrictRegistryCases(t, newClusterS3TargetWithExtraArgs(t, 4, args))
+	})
+}
+
+func runVlogStrictRegistryCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	endpoint := tgt.endpoint(0)
+	dataDir := filepath.Dir(tgt.adminSockPath())
+
+	t.Run("PlantedFileTriggersFatalOrIncident", func(t *testing.T) {
+		// Plant an unregistered vlog directory before the 3s smoke defer expires.
+		plantDir := filepath.Join(dataDir, "fake-rogue-db")
+		require.NoError(t, os.MkdirAll(plantDir, 0o755))
+		plantFile := filepath.Join(plantDir, "000001.vlog")
+		require.NoError(t, os.WriteFile(plantFile, []byte("rogue"), 0o644))
+
+		// Either path is acceptable: process exits non-zero, or incident is
+		// recorded. We probe by hitting the data-plane HTTP server: when
+		// grainfs has exited the listener is gone and Get returns
+		// "connection refused" within milliseconds.
+		deadline := time.Now().Add(12 * time.Second)
+		exited := false
+		incidentRaised := false
+		probe := &http.Client{Timeout: 500 * time.Millisecond}
+		for time.Now().Before(deadline) {
+			resp, err := probe.Get(endpoint + "/metrics")
+			if err != nil {
+				exited = true
 				break
 			}
+			_ = resp.Body.Close()
+			incidents := fetchIncidentsSafe(t, endpoint)
+			for _, inc := range incidents {
+				if inc.Cause == "registry_under_populated" {
+					incidentRaised = true
+					break
+				}
+			}
+			if incidentRaised {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
 		}
-		if incidentRaised {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	require.True(t, exited || incidentRaised,
-		"strict mode must fatally exit or emit registry_under_populated incident")
+		require.True(t, exited || incidentRaised,
+			"strict mode must fatally exit or emit registry_under_populated incident")
+	})
 }
 
 
