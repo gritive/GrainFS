@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.262.12] - 2026-05-19 - test(e2e): dual-integrate TestVolume admin CLI set
+
+Same one-entry-point shape as v0.0.262.11 (BucketPolicy). Single `TestVolumeE2E` owns the volume admin CLI test set and applies it to both fixtures.
+
+### Shape
+
+```
+TestVolumeE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeCases(t, tgt s3Target)
+                                ├─ t.Run("CreateAndGet")
+                                ├─ t.Run("List")
+                                ├─ t.Run("Delete")
+                                └─ t.Run("CreateWithRawByteSize")
+```
+
+### Changed
+
+- **`TestVolume_{CreateAndGet,List,Delete,CreateWithRawByteSize}` → single `TestVolumeE2E`** (`tests/e2e/volume_test.go`).
+- `dataDir := filepath.Dir(tgt.adminSockPath())` derives the admin-UDS directory from the target (single → `testServerDataDir`; cluster → leader dataDir).
+- Helpers (`createVolumeEventually`, `getVolume`, `listVolumes`, `deleteVolume`, `deleteVolumeEventually`, `cleanupVolume`, `requireVolumeMissingEventually`, `requireVolumePresentEventually`) extended with explicit `dataDir` argument so they no longer pin to `testServerDataDir`.
+- New `uniqueVolName(tgt, caseLabel)` helper produces per-target/per-case names with a nanosecond suffix so cluster reruns and parallel cluster tests can't collide.
+
+### Known parity gap (pre-existing)
+
+`Delete` sub-test fails on both `SingleNode` and `Cluster4Node`: `deleteVolume` reports `deleted=true` and exit 0, but `volume info` still returns the volume for 30s afterwards. Same shape as the `TestEcDeleteAndOverwriteE2E` versioning regression captured in v0.0.262.2 and the `TestSmokeDeploymentE2E/SingleNode/ListObjects` regression captured in v0.0.262.1. Not fixed here per the classification-only scope — captured for a follow-up session. The Delete sub-test stays in the suite as a regression signal.
+
 ## [0.0.262.11] - 2026-05-19 - test(e2e): collapse BucketPolicy into single TestBucketPolicyE2E + 3 sub-tests
 
 Follow-up to v0.0.262.10. That PR landed three separate `TestBucketPolicy*E2E` entry functions, each with its own `SingleNode/Cluster4Node` split — three trees, three single boots, three cluster boots. The correct shape is **one entry point that owns the test set and applies it to both fixtures**, the TestBucketsE2E pattern: a single `TestBucketPolicyE2E` with `t.Run("SingleNode") + t.Run("Cluster4Node")` calling one `runBucketPolicyCases(t, tgt s3Target)` set helper, which in turn runs three sub-tests (`SetAndGet`, `InvalidJSON`, `DenyAction`).

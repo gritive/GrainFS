@@ -3,14 +3,17 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// Volume admin CLI tests. The legacy data-plane /volumes/* REST endpoints were
-// intentionally removed; volume administration now goes through admin.sock.
+// Volume admin CLI test set. The legacy data-plane /volumes/* REST endpoints
+// were intentionally removed; volume administration now goes through
+// admin.sock. The same set of cases runs against both single-node and
+// 4-node cluster fixtures to prove the volume admin plane is at parity.
 
 type volumeResp struct {
 	Name            string `json:"name"`
@@ -25,17 +28,17 @@ type volumeListResp struct {
 	Volumes []volumeResp `json:"volumes"`
 }
 
-func createVolumeEventually(t *testing.T, name string, size int64) volumeResp {
+func createVolumeEventually(t *testing.T, dataDir, name string, size int64) volumeResp {
 	t.Helper()
-	return createVolumeWithSizeEventually(t, name, fmt.Sprintf("%d", size))
+	return createVolumeWithSizeEventually(t, dataDir, name, fmt.Sprintf("%d", size))
 }
 
-func createVolumeWithSizeEventually(t *testing.T, name, size string) volumeResp {
+func createVolumeWithSizeEventually(t *testing.T, dataDir, name, size string) volumeResp {
 	t.Helper()
 	var out string
 	var code int
 	require.Eventually(t, func() bool {
-		out, code = runCLI(t, testServerDataDir, "volume", "create", name, "--size", size, "--format", "json")
+		out, code = runCLI(t, dataDir, "volume", "create", name, "--size", size, "--format", "json")
 		return code == 0
 	}, 30*time.Second, 500*time.Millisecond, "create volume %s: code=%d output=%s", name, code, out)
 
@@ -45,9 +48,9 @@ func createVolumeWithSizeEventually(t *testing.T, name, size string) volumeResp 
 	return vol
 }
 
-func getVolume(t *testing.T, name string) (volumeResp, int, string) {
+func getVolume(t *testing.T, dataDir, name string) (volumeResp, int, string) {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "volume", "info", name, "--format", "json")
+	out, code := runCLI(t, dataDir, "volume", "info", name, "--format", "json")
 	if code != 0 {
 		return volumeResp{}, code, out
 	}
@@ -56,18 +59,18 @@ func getVolume(t *testing.T, name string) (volumeResp, int, string) {
 	return vol, code, out
 }
 
-func listVolumes(t *testing.T) []volumeResp {
+func listVolumes(t *testing.T, dataDir string) []volumeResp {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "volume", "list", "--format", "json")
+	out, code := runCLI(t, dataDir, "volume", "list", "--format", "json")
 	require.Equal(t, 0, code, out)
 	var list volumeListResp
 	require.NoError(t, json.Unmarshal([]byte(out), &list))
 	return list.Volumes
 }
 
-func deleteVolume(t *testing.T, name string) {
+func deleteVolume(t *testing.T, dataDir, name string) {
 	t.Helper()
-	out, code := runCLI(t, testServerDataDir, "volume", "delete", name, "--force", "--format", "json")
+	out, code := runCLI(t, dataDir, "volume", "delete", name, "--force", "--format", "json")
 	require.Equal(t, 0, code, out)
 	var resp struct {
 		Deleted bool `json:"deleted"`
@@ -76,84 +79,108 @@ func deleteVolume(t *testing.T, name string) {
 	require.True(t, resp.Deleted)
 }
 
-func deleteVolumeEventually(t *testing.T, name string) {
+func deleteVolumeEventually(t *testing.T, dataDir, name string) {
 	t.Helper()
 	var out string
 	var code int
 	require.Eventually(t, func() bool {
-		out, code = runCLI(t, testServerDataDir, "volume", "delete", name, "--force", "--format", "json")
+		out, code = runCLI(t, dataDir, "volume", "delete", name, "--force", "--format", "json")
 		return code == 0
 	}, 30*time.Second, 500*time.Millisecond, "delete volume %s: code=%d output=%s", name, code, out)
 }
 
-func cleanupVolume(t *testing.T, name string) {
+func cleanupVolume(t *testing.T, dataDir, name string) {
 	t.Helper()
 	t.Cleanup(func() {
-		_, code, _ := getVolume(t, name)
+		_, code, _ := getVolume(t, dataDir, name)
 		if code == 0 {
-			deleteVolumeEventually(t, name)
+			deleteVolumeEventually(t, dataDir, name)
 		}
 	})
 }
 
-func requireVolumeMissingEventually(t *testing.T, name string) {
+func requireVolumeMissingEventually(t *testing.T, dataDir, name string) {
 	t.Helper()
 	var code int
 	var out string
 	require.Eventually(t, func() bool {
-		_, code, out = getVolume(t, name)
+		_, code, out = getVolume(t, dataDir, name)
 		return code != 0
 	}, 30*time.Second, 500*time.Millisecond, "volume %s should be missing; last output=%s", name, out)
 }
 
-func requireVolumePresentEventually(t *testing.T, name string) volumeResp {
+func requireVolumePresentEventually(t *testing.T, dataDir, name string) volumeResp {
 	t.Helper()
 	var vol volumeResp
 	var out string
 	var code int
 	require.Eventually(t, func() bool {
-		vol, code, out = getVolume(t, name)
+		vol, code, out = getVolume(t, dataDir, name)
 		return code == 0
 	}, 30*time.Second, 500*time.Millisecond, "volume %s should be present; last output=%s", name, out)
 	return vol
 }
 
-func TestVolume_CreateAndGet(t *testing.T) {
-	vol := createVolumeEventually(t, "test-vol-1", 1048576)
-	cleanupVolume(t, "test-vol-1")
-	require.Equal(t, "test-vol-1", vol.Name)
-	require.EqualValues(t, 1048576, vol.Size)
-
-	vol2 := requireVolumePresentEventually(t, "test-vol-1")
-	require.Equal(t, "test-vol-1", vol2.Name)
+// uniqueVolName produces a per-test volume name from the target name + case
+// label + nanosecond timestamp so cluster reruns and parallel cluster tests
+// can't collide on the shared "default" volume namespace.
+func uniqueVolName(tgt s3Target, caseLabel string) string {
+	return fmt.Sprintf("vol-%s-%s-%d", tgt.name, caseLabel, time.Now().UnixNano())
 }
 
-func TestVolume_List(t *testing.T) {
-	expected := []string{"list-vol-a", "list-vol-b"}
-	for _, name := range expected {
-		createVolumeEventually(t, name, 4096)
-		cleanupVolume(t, name)
-	}
-
-	vols := listVolumes(t)
-	found := make(map[string]bool, len(vols))
-	for _, vol := range vols {
-		found[vol.Name] = true
-	}
-	for _, name := range expected {
-		require.True(t, found[name], "expected volume %s in list, got %+v", name, vols)
-	}
+func TestVolumeE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runVolumeCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runVolumeCases(t, newSharedClusterS3Target(t))
+	})
 }
 
-func TestVolume_Delete(t *testing.T) {
-	createVolumeEventually(t, "del-vol", 4096)
-	deleteVolume(t, "del-vol")
-	requireVolumeMissingEventually(t, "del-vol")
-}
+func runVolumeCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	dataDir := filepath.Dir(tgt.adminSockPath())
 
-func TestVolume_CreateWithRawByteSize(t *testing.T) {
-	vol := createVolumeWithSizeEventually(t, "raw-size-vol", "8192")
-	cleanupVolume(t, "raw-size-vol")
-	require.Equal(t, "raw-size-vol", vol.Name)
-	require.EqualValues(t, 8192, vol.Size)
+	t.Run("CreateAndGet", func(t *testing.T) {
+		name := uniqueVolName(tgt, "createget")
+		vol := createVolumeEventually(t, dataDir, name, 1048576)
+		cleanupVolume(t, dataDir, name)
+		require.Equal(t, name, vol.Name)
+		require.EqualValues(t, 1048576, vol.Size)
+
+		vol2 := requireVolumePresentEventually(t, dataDir, name)
+		require.Equal(t, name, vol2.Name)
+	})
+
+	t.Run("List", func(t *testing.T) {
+		expected := []string{uniqueVolName(tgt, "lista"), uniqueVolName(tgt, "listb")}
+		for _, name := range expected {
+			createVolumeEventually(t, dataDir, name, 4096)
+			cleanupVolume(t, dataDir, name)
+		}
+
+		vols := listVolumes(t, dataDir)
+		found := make(map[string]bool, len(vols))
+		for _, vol := range vols {
+			found[vol.Name] = true
+		}
+		for _, name := range expected {
+			require.True(t, found[name], "expected volume %s in list, got %+v", name, vols)
+		}
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		name := uniqueVolName(tgt, "delete")
+		createVolumeEventually(t, dataDir, name, 4096)
+		deleteVolume(t, dataDir, name)
+		requireVolumeMissingEventually(t, dataDir, name)
+	})
+
+	t.Run("CreateWithRawByteSize", func(t *testing.T) {
+		name := uniqueVolName(tgt, "rawsize")
+		vol := createVolumeWithSizeEventually(t, dataDir, name, "8192")
+		cleanupVolume(t, dataDir, name)
+		require.Equal(t, name, vol.Name)
+		require.EqualValues(t, 8192, vol.Size)
+	})
 }
