@@ -178,7 +178,7 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, warehouse string, ident i
 	if !c.meta.IsLeader() && len(in.Metadata) > 0 {
 		metadata := make([]byte, len(in.Metadata))
 		copy(metadata, in.Metadata)
-		c.storeCachedMetadata(ident, in.MetadataLocation, metadata)
+		c.storeCachedMetadata(wh, ident, in.MetadataLocation, metadata)
 		return &icebergcatalog.Table{
 			Identifier:       ident,
 			MetadataLocation: in.MetadataLocation,
@@ -193,7 +193,7 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, warehouse string, ident i
 	if err != nil {
 		return nil, err
 	}
-	c.storeCachedMetadata(ident, tbl.MetadataLocation, tbl.Metadata)
+	c.storeCachedMetadata(wh, ident, tbl.MetadataLocation, tbl.Metadata)
 	return tbl, nil
 }
 
@@ -213,7 +213,7 @@ func (c *MetaCatalog) loadTableLocal(warehouse string, ident icebergcatalog.Iden
 		}
 		return nil, icebergcatalog.ErrTableNotFound
 	}
-	if metadata, ok := c.cachedMetadata(ident, entry.MetadataLocation); ok {
+	if metadata, ok := c.cachedMetadata(warehouse, ident, entry.MetadataLocation); ok {
 		return &icebergcatalog.Table{
 			Identifier:       cloneIcebergIdent(entry.Identifier),
 			MetadataLocation: entry.MetadataLocation,
@@ -273,7 +273,7 @@ func (c *MetaCatalog) DeleteTable(ctx context.Context, warehouse string, ident i
 	if err := c.propose(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID); err != nil {
 		return err
 	}
-	c.deleteCachedMetadata(ident)
+	c.deleteCachedMetadata(cmd.Warehouse, ident)
 	return nil
 }
 
@@ -295,7 +295,7 @@ func (c *MetaCatalog) CommitTable(ctx context.Context, warehouse string, ident i
 	metadata := make([]byte, len(in.Metadata))
 	copy(metadata, in.Metadata)
 	if len(metadata) > 0 {
-		c.storeCachedMetadata(ident, in.NewMetadataLocation, metadata)
+		c.storeCachedMetadata(cmd.Warehouse, ident, in.NewMetadataLocation, metadata)
 	}
 	return &icebergcatalog.Table{
 		Identifier:       ident,
@@ -318,9 +318,16 @@ func (c *MetaCatalog) propose(ctx context.Context, typ MetaCmdType, payload []by
 	return c.forward(ctx, data)
 }
 
-func (c *MetaCatalog) cachedMetadata(ident icebergcatalog.Identifier, location string) ([]byte, bool) {
+// icebergCacheKey returns a cache key scoped to both warehouse and table
+// identity. Using only the table identity (F18) caused cross-warehouse cache
+// collisions when two warehouses held the same (namespace, table) pair.
+func icebergCacheKey(warehouse string, ident icebergcatalog.Identifier) string {
+	return warehouse + ":" + icebergTableKey(ident)
+}
+
+func (c *MetaCatalog) cachedMetadata(warehouse string, ident icebergcatalog.Identifier, location string) ([]byte, bool) {
 	c.cacheMu.RLock()
-	entry, ok := c.cache[icebergTableKey(ident)]
+	entry, ok := c.cache[icebergCacheKey(warehouse, ident)]
 	c.cacheMu.RUnlock()
 	if !ok || entry.location != location {
 		return nil, false
@@ -330,21 +337,21 @@ func (c *MetaCatalog) cachedMetadata(ident icebergcatalog.Identifier, location s
 	return metadata, true
 }
 
-func (c *MetaCatalog) storeCachedMetadata(ident icebergcatalog.Identifier, location string, metadata []byte) {
+func (c *MetaCatalog) storeCachedMetadata(warehouse string, ident icebergcatalog.Identifier, location string, metadata []byte) {
 	c.cacheMu.Lock()
 	if c.cache == nil {
 		c.cache = make(map[string]cachedIcebergMetadata)
 	}
-	c.cache[icebergTableKey(ident)] = cachedIcebergMetadata{
+	c.cache[icebergCacheKey(warehouse, ident)] = cachedIcebergMetadata{
 		location: location,
 		metadata: append([]byte(nil), metadata...),
 	}
 	c.cacheMu.Unlock()
 }
 
-func (c *MetaCatalog) deleteCachedMetadata(ident icebergcatalog.Identifier) {
+func (c *MetaCatalog) deleteCachedMetadata(warehouse string, ident icebergcatalog.Identifier) {
 	c.cacheMu.Lock()
-	delete(c.cache, icebergTableKey(ident))
+	delete(c.cache, icebergCacheKey(warehouse, ident))
 	c.cacheMu.Unlock()
 }
 

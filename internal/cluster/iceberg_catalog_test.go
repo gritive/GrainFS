@@ -840,3 +840,59 @@ func TestMetaCatalog_DefaultWarehouseIsConst(t *testing.T) {
 	assert.Equal(t, s3Prefix, catFwds.S3URLPrefix(),
 		"NewMetaCatalogWithForwarders: S3URLPrefix() must return s3URLPrefix (F15)")
 }
+
+// TestMetaCatalog_MetadataCache_WarehouseScoped verifies that the metadata
+// cache uses warehouse-scoped keys (F18). Two warehouses with the same
+// (namespace, table) identifier but different metadata must not cross-contaminate.
+func TestMetaCatalog_MetadataCache_WarehouseScoped(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { local.Close() })
+	require.NoError(t, local.CreateBucket(context.Background(), "bucket"))
+
+	metaA := json.RawMessage(`{"format-version":2,"table-uuid":"aaa"}`)
+	metaB := json.RawMessage(`{"format-version":2,"table-uuid":"bbb"}`)
+	locA := "s3://bucket/warehouse-a/ns/events/metadata/00000.json"
+	locB := "s3://bucket/warehouse-b/ns/events/metadata/00000.json"
+
+	// Write both metadata objects to the backend.
+	_, err = local.PutObject(context.Background(), "bucket", "warehouse-a/ns/events/metadata/00000.json", bytes.NewReader(metaA), "application/json")
+	require.NoError(t, err)
+	_, err = local.PutObject(context.Background(), "bucket", "warehouse-b/ns/events/metadata/00000.json", bytes.NewReader(metaB), "application/json")
+	require.NoError(t, err)
+
+	catA := NewMetaCatalog(m, local, "s3://bucket/warehouse-a")
+	catB := NewMetaCatalog(m, local, "s3://bucket/warehouse-b")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Create namespaces and tables under explicit warehouse keys.
+	whA, whB := "warehouse-a", "warehouse-b"
+	require.NoError(t, catA.CreateNamespace(ctx, whA, []string{"ns"}, nil))
+	require.NoError(t, catB.CreateNamespace(ctx, whB, []string{"ns"}, nil))
+
+	_, err = catA.CreateTable(ctx, whA, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"},
+		icebergcatalog.CreateTableInput{MetadataLocation: locA, Metadata: metaA})
+	require.NoError(t, err)
+	_, err = catB.CreateTable(ctx, whB, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"},
+		icebergcatalog.CreateTableInput{MetadataLocation: locB, Metadata: metaB})
+	require.NoError(t, err)
+
+	// Load from warehouse-a: metadata must be metaA, not metaB.
+	tblA, err := catA.LoadTable(ctx, whA, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(metaA), string(tblA.Metadata), "warehouse-a LoadTable must return warehouse-a metadata")
+
+	// Load from warehouse-b: metadata must be metaB, not metaA.
+	tblB, err := catB.LoadTable(ctx, whB, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(metaB), string(tblB.Metadata), "warehouse-b LoadTable must return warehouse-b metadata")
+}

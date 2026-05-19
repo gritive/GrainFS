@@ -3052,9 +3052,10 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// Decode all trailers into local variables BEFORE touching any f.* field.
 	// If any decode fails, Restore returns an error with f.* completely untouched.
 
-	// IAM: validate by decoding into a temporary store; commit via Reset+ReadSnapshot later.
+	// IAM: validate by decoding into a temporary store; commit via RestoreFrom later.
+	// (F17: iamEnc is no longer needed at commit time — RestoreFrom swaps the state
+	// pointer atomically without re-parsing the snapshot bytes.)
 	var iamTempStore *iam.Store
-	var iamEnc *encrypt.Encryptor
 	if len(iamData) > 0 {
 		if f.iamStore == nil || f.iamApplier == nil {
 			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
@@ -3068,7 +3069,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
 				}
 				iamTempStore = tmp
-				iamEnc = enc
 			}
 		}
 	}
@@ -3215,13 +3215,11 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// Rebalancer handles resume on next tick by checking ActivePlan().
 
 	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
-	// iamData is already validated (decoded into iamTempStore above), so Reset+ReadSnapshot
-	// here is guaranteed to succeed.
+	// RestoreFrom copies the state pointer from iamTempStore into f.iamStore in one
+	// atomic store — no second decode/parse is needed, so no error is possible here
+	// (F17: eliminates the error-returning ReadSnapshot call after core fields commit).
 	if iamTempStore != nil {
-		f.iamStore.Reset()
-		if err := iam.ReadSnapshot(bytes.NewReader(iamData), f.iamStore, iamEnc); err != nil {
-			return fmt.Errorf("meta_fsm: Restore: commit IAM: %w", err)
-		}
+		f.iamStore.RestoreFrom(iamTempStore)
 	}
 
 	// GCFG commit.

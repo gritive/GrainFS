@@ -84,6 +84,14 @@ func (s *Store) Reset() {
 	s.state.Store(newEmptyState())
 }
 
+// RestoreFrom atomically replaces s's state with src's current snapshot.
+// Used by the MetaFSM Restore path to commit a pre-validated temp store
+// without a second ReadSnapshot call (which could fail after the core FSM
+// fields are already committed — F17 atomicity fix).
+func (s *Store) RestoreFrom(src *Store) {
+	s.state.Store(src.snapshot())
+}
+
 // --- apply* methods: called only from FSM apply path ---
 
 func (s *Store) cow() *iamState {

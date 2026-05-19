@@ -258,6 +258,38 @@ func TestIcebergTableScopedCommitAndDelete(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
+// TestMetaCatalog_CreateTable_MetadataPathIsS3URL is an F16 regression test.
+// Before the fix, icebergCreateTable used the FSM warehouse key ("default" or
+// a bearer claims.Warehouse) as the S3 path prefix, producing non-s3:// locations
+// that parseS3Location rejects. After the fix it must use S3URLPrefix().
+func TestMetaCatalog_CreateTable_MetadataPathIsS3URL(t *testing.T) {
+	base, backend := setupTestServerWithBackend(t)
+	createIcebergWarehouseBucket(t, backend)
+
+	postIcebergJSON(t, base+"/iceberg/v1/namespaces",
+		`{"namespace":["regression16"],"properties":{}}`, http.StatusOK)
+
+	resp, err := http.Post(base+"/iceberg/v1/namespaces/regression16/tables",
+		"application/json", strings.NewReader(`{
+			"name": "tbl",
+			"schema": {"type":"struct","fields":[],"schema-id":0},
+			"properties": {}
+		}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	// Must succeed — before the fix this returned 500 (invalid metadata location).
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTable must succeed with valid S3URLPrefix")
+
+	var got struct {
+		MetadataLocation string `json:"metadata-location"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.True(t, strings.HasPrefix(got.MetadataLocation, "s3://"),
+		"MetadataLocation must start with s3://, got: %s", got.MetadataLocation)
+	require.False(t, strings.HasPrefix(got.MetadataLocation, "default/"),
+		"MetadataLocation must NOT start with 'default/', got: %s", got.MetadataLocation)
+}
+
 func TestIcebergTransactionCommitRejectsStaleSnapshotRequirement(t *testing.T) {
 	base, backend := setupTestServerWithBackend(t)
 
