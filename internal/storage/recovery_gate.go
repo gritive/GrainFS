@@ -42,6 +42,9 @@ func (g *RecoveryWriteGate) DeleteObject(context.Context, string, string) error 
 func (g *RecoveryWriteGate) CreateMultipartUpload(context.Context, string, string, string) (*MultipartUpload, error) {
 	return nil, g.err
 }
+func (g *RecoveryWriteGate) CreateMultipartUploadWithTags(context.Context, string, string, string, []Tag) (string, error) {
+	return "", g.err
+}
 func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader) (*Part, error) {
 	return nil, g.err
 }

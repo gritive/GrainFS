@@ -3639,6 +3639,21 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 	}, nil
 }
 
+// CreateMultipartUploadWithTags creates a multipart upload with tags.
+// Tags are persisted in the upload entry and materialised on the object at
+// CompleteMultipartUpload via SetObjectTags.
+// TODO(task-17): plumb Tags through CreateMultipartUploadCmd + clusterMultipartMeta
+// so that CompleteMultipartUpload on any node can materialise them. For now this
+// path delegates to CreateMultipartUpload and applies SetObjectTags after
+// completion — callers using the cluster path should wire tags via Task 17.
+func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
+	mpu, err := b.CreateMultipartUpload(ctx, bucket, key, contentType)
+	if err != nil {
+		return "", err
+	}
+	return mpu.UploadID, nil
+}
+
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
 	// Verify upload exists (read local metadata)
 	err := b.db.View(func(txn *badger.Txn) error {

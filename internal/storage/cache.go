@@ -389,6 +389,16 @@ func (cb *CachedBackend) CompleteMultipartUpload(ctx context.Context, bucket, ke
 	return cb.Backend.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts)
 }
 
+func (cb *CachedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []Tag) (string, error) {
+	inner, ok := cb.Backend.(interface {
+		CreateMultipartUploadWithTags(context.Context, string, string, string, []Tag) (string, error)
+	})
+	if !ok {
+		return "", UnsupportedOperationError{Op: "CreateMultipartUploadWithTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	return inner.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+}
+
 // AppendObject delegates to the inner backend's AppendObjecter implementation
 // and invalidates the cache entry for (bucket, key) on success so a subsequent
 // HEAD/GET sees the new size + segments rather than the stale pre-append entry.

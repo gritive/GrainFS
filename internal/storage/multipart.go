@@ -37,6 +37,7 @@ type multipartMeta struct {
 	Key         string
 	ContentType string
 	CreatedAt   int64
+	Tags        []Tag
 }
 
 func (b *LocalBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error) {
@@ -77,6 +78,49 @@ func (b *LocalBackend) CreateMultipartUpload(ctx context.Context, bucket, key, c
 		ContentType: contentType,
 		CreatedAt:   now,
 	}, nil
+}
+
+// CreateMultipartUploadWithTags creates a multipart upload with the given tags,
+// which are stored in the upload entry and materialised on the object when
+// CompleteMultipartUpload is called.
+func (b *LocalBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []Tag) (string, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return "", err
+	}
+
+	uploadID := uuid.New().String()
+	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
+		return "", fmt.Errorf("create part dir: %w", err)
+	}
+
+	now := time.Now().Unix()
+	var tagsCopy []Tag
+	if len(tags) > 0 {
+		tagsCopy = make([]Tag, len(tags))
+		copy(tagsCopy, tags)
+	}
+	meta := multipartMeta{
+		UploadID:    uploadID,
+		Bucket:      bucket,
+		Key:         key,
+		ContentType: contentType,
+		CreatedAt:   now,
+		Tags:        tagsCopy,
+	}
+
+	data, err := marshalMultipartMeta(&meta)
+	if err != nil {
+		return "", fmt.Errorf("marshal multipart meta: %w", err)
+	}
+
+	err = b.db.Update(func(txn *badger.Txn) error {
+		return setBadgerValue(txn, b.encryptor, badgerDomainMultipart, b.multipartKey(uploadID), data)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return uploadID, nil
 }
 
 func (b *LocalBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
@@ -242,6 +286,12 @@ func (b *LocalBackend) CompleteMultipartUpload(ctx context.Context, bucket, key,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if len(meta.Tags) > 0 {
+		if err := b.SetObjectTags(bucket, key, "", meta.Tags); err != nil {
+			return nil, err
+		}
 	}
 
 	// cleanup parts

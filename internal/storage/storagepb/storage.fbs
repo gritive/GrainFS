@@ -56,6 +56,7 @@ table MultipartMeta {
   key:string;
   content_type:string;
   created_at:int64;
+  tags:[Tag];
 }
 
 root_type Object;

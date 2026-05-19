@@ -85,8 +85,28 @@ func (rcv *MultipartMeta) MutateCreatedAt(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *MultipartMeta) Tags(obj *Tag, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MultipartMeta) TagsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MultipartMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func MultipartMetaAddUploadId(builder *flatbuffers.Builder, uploadId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(uploadId), 0)
@@ -102,6 +122,12 @@ func MultipartMetaAddContentType(builder *flatbuffers.Builder, contentType flatb
 }
 func MultipartMetaAddCreatedAt(builder *flatbuffers.Builder, createdAt int64) {
 	builder.PrependInt64Slot(4, createdAt, 0)
+}
+func MultipartMetaAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(tags), 0)
+}
+func MultipartMetaStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func MultipartMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
