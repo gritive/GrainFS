@@ -129,112 +129,12 @@ func containsFlag(args []string, flag string) bool {
 	return false
 }
 
-func TestE2E_VolumeCLI_FullLifecycle(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	// 1. list — server may or may not have a "default" volume from NBD wiring.
-	// Just confirm it returns 0 (cluster ready and admin reachable).
-	out, code := runCLI(t, dataDir, "volume", "list")
-	require.Equal(t, 0, code, out)
-
-	// 2. create
-	out, code = runCLI(t, dataDir, "volume", "create", "v1", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, `created "v1"`)
-
-	// 3. info
-	out, code = runCLI(t, dataDir, "volume", "info", "v1")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "name:             v1")
-
-	// 4. resize grow
-	out, code = runCLI(t, dataDir, "volume", "resize", "v1", "--size", "2Mi")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "resized")
-
-	// 5. snapshot create
-	out, code = runCLI(t, dataDir, "volume", "snapshot", "create", "v1")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "created")
-
-	// 6. delete refused
-	_, code = runCLI(t, dataDir, "volume", "delete", "v1")
-	require.NotEqual(t, 0, code, "delete with snapshots should fail")
-
-	// 7. delete --force succeeds
-	out, code = runCLI(t, dataDir, "volume", "delete", "v1", "--force")
-	require.Equal(t, 0, code, out)
-}
-
-func TestE2E_VolumeCLI_ListIncludesHealth(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	out, code := runCLI(t, dataDir, "volume", "create", "vhealth", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
-
-	out, code = runCLI(t, dataDir, "volume", "list")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "HEALTH")
-	require.Contains(t, out, "vhealth")
-	require.Contains(t, out, "ok")
-}
-
-func TestE2E_VolumeCLI_ListJSONIncludesHealthReasons(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	out, code := runCLI(t, dataDir, "volume", "create", "vjsonhealth", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
-
-	out, code = runCLI(t, dataDir, "volume", "list", "--format", "json")
-	require.Equal(t, 0, code, out)
-	var raw map[string][]map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &raw))
-	var resp struct {
-		Volumes []struct {
-			Name          string   `json:"name"`
-			Health        string   `json:"health"`
-			HealthReasons []string `json:"health_reasons"`
-		} `json:"volumes"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out), &resp))
-	for _, v := range resp.Volumes {
-		if v.Name == "vjsonhealth" {
-			require.Equal(t, "ok", v.Health)
-			require.Empty(t, v.HealthReasons)
-			foundRaw := false
-			for _, rawVolume := range raw["volumes"] {
-				if rawVolume["name"] == "vjsonhealth" {
-					foundRaw = true
-					require.Contains(t, rawVolume, "health_reasons")
-					require.IsType(t, []any{}, rawVolume["health_reasons"])
-				}
-			}
-			require.True(t, foundRaw, "raw volume vjsonhealth not found")
-			return
-		}
-	}
-	require.Failf(t, "volume not found", "volume vjsonhealth not found in list response: %s", out)
-}
-
-func TestE2E_VolumeCLI_ShrinkRejected(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-
-	out, code := runCLI(t, dataDir, "volume", "create", "v1", "--size", "10Mi")
-	require.Equal(t, 0, code, out)
-
-	out, code = runCLI(t, dataDir, "volume", "resize", "v1", "--size", "5Mi")
-	require.NotEqual(t, 0, code, out)
-	require.Contains(t, out, "shrink not supported")
-}
-
-func TestE2E_VolumeCLI_NotFound(t *testing.T) {
-	dataDir, _, _ := startTestServer(t)
-	_, code := runCLI(t, dataDir, "volume", "info", "ghost")
-	require.NotEqual(t, 0, code, "info on missing volume should fail")
-}
-
-func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
-	// Run CLI without --endpoint to verify the actionable failure message.
+// TestVolumeCLIAutoDiscoveryE2E — fixture-independent CLI behavior: when the
+// binary is invoked without --endpoint in a cwd that has no grainfs context,
+// it must print an actionable failure message rather than a stack trace. No
+// single/cluster split because the failure is computed before any server
+// connection.
+func TestVolumeCLIAutoDiscoveryE2E(t *testing.T) {
 	cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
 	require.NoError(t, err)
 	defer os.RemoveAll(cwd)
@@ -249,11 +149,11 @@ func TestE2E_VolumeCLI_AutoDiscoveryFailureMessage(t *testing.T) {
 	require.Contains(t, string(out), "Hint")
 }
 
-func TestE2E_VolumeCLI_NoVolumesViaDataPlane(t *testing.T) {
-	// Regression: data-plane /volumes/* admin endpoints must be removed (A6).
-	// /volumes/ now falls through to the S3 bucket handler (it matches
-	// /:bucket/), so it should NOT return JSON shaped like admin output.
-	// We assert the response is not the admin "{"volumes":[...]}" shape.
+// TestVolumeDataPlaneGuardE2E — regression: data-plane /volumes/* admin
+// endpoints must be removed (A6). /volumes/ falls through to the S3 bucket
+// handler (it matches /:bucket/), so it must NOT return admin-shaped JSON.
+// HTTP-level data plane check, not an admin CLI invocation.
+func TestVolumeDataPlaneGuardE2E(t *testing.T) {
 	_, port, _ := startTestServer(t)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/volumes/", port))
 	require.NoError(t, err)

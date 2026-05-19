@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +183,111 @@ func runVolumeCases(t *testing.T, tgt s3Target) {
 		cleanupVolume(t, dataDir, name)
 		require.Equal(t, name, vol.Name)
 		require.EqualValues(t, 8192, vol.Size)
+	})
+
+	// Absorbed from TestE2E_VolumeCLI_FullLifecycle — the same admin-CLI
+	// surface (list/create/info/resize/snapshot/delete) on one volume.
+	t.Run("FullLifecycle", func(t *testing.T) {
+		name := uniqueVolName(tgt, "lifecycle")
+
+		out, code := runCLI(t, dataDir, "volume", "list")
+		require.Equal(t, 0, code, out)
+
+		out, code = runCLI(t, dataDir, "volume", "create", name, "--size", "1Mi")
+		require.Equal(t, 0, code, out)
+		require.Contains(t, out, fmt.Sprintf(`created %q`, name))
+
+		out, code = runCLI(t, dataDir, "volume", "info", name)
+		require.Equal(t, 0, code, out)
+		require.Contains(t, out, "name:             "+name)
+
+		out, code = runCLI(t, dataDir, "volume", "resize", name, "--size", "2Mi")
+		require.Equal(t, 0, code, out)
+		require.Contains(t, out, "resized")
+
+		out, code = runCLI(t, dataDir, "volume", "snapshot", "create", name)
+		require.Equal(t, 0, code, out)
+		require.Contains(t, out, "created")
+
+		_, code = runCLI(t, dataDir, "volume", "delete", name)
+		require.NotEqual(t, 0, code, "delete with snapshots should fail")
+
+		out, code = runCLI(t, dataDir, "volume", "delete", name, "--force")
+		require.Equal(t, 0, code, out)
+	})
+
+	// Absorbed from TestE2E_VolumeCLI_ListIncludesHealth.
+	t.Run("ListIncludesHealth", func(t *testing.T) {
+		name := uniqueVolName(tgt, "health")
+		createVolumeEventually(t, dataDir, name, 1048576)
+		cleanupVolume(t, dataDir, name)
+
+		out, code := runCLI(t, dataDir, "volume", "list")
+		require.Equal(t, 0, code, out)
+		require.Contains(t, out, "HEALTH")
+		require.Contains(t, out, name)
+		require.Contains(t, out, "ok")
+	})
+
+	// Absorbed from TestE2E_VolumeCLI_ListJSONIncludesHealthReasons.
+	t.Run("ListJSONIncludesHealthReasons", func(t *testing.T) {
+		name := uniqueVolName(tgt, "jsonhealth")
+		createVolumeEventually(t, dataDir, name, 1048576)
+		cleanupVolume(t, dataDir, name)
+
+		out, code := runCLI(t, dataDir, "volume", "list", "--format", "json")
+		require.Equal(t, 0, code, out)
+
+		var raw map[string][]map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &raw))
+
+		var resp struct {
+			Volumes []struct {
+				Name          string   `json:"name"`
+				Health        string   `json:"health"`
+				HealthReasons []string `json:"health_reasons"`
+			} `json:"volumes"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(out), &resp))
+
+		var found bool
+		for _, v := range resp.Volumes {
+			if v.Name == name {
+				require.Equal(t, "ok", v.Health)
+				require.Empty(t, v.HealthReasons)
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "volume %s not found in list response: %s", name, out)
+
+		var foundRaw bool
+		for _, rawVolume := range raw["volumes"] {
+			if rawVolume["name"] == name {
+				foundRaw = true
+				require.Contains(t, rawVolume, "health_reasons")
+				require.IsType(t, []any{}, rawVolume["health_reasons"])
+				break
+			}
+		}
+		require.True(t, foundRaw, "raw volume %s not found", name)
+	})
+
+	// Absorbed from TestE2E_VolumeCLI_ShrinkRejected.
+	t.Run("ShrinkRejected", func(t *testing.T) {
+		name := uniqueVolName(tgt, "shrink")
+		createVolumeEventually(t, dataDir, name, 10*1024*1024)
+		cleanupVolume(t, dataDir, name)
+
+		out, code := runCLI(t, dataDir, "volume", "resize", name, "--size", "5Mi")
+		require.NotEqual(t, 0, code, out)
+		require.Contains(t, strings.ToLower(out), "shrink not supported")
+	})
+
+	// Absorbed from TestE2E_VolumeCLI_NotFound.
+	t.Run("NotFound", func(t *testing.T) {
+		name := uniqueVolName(tgt, "ghost")
+		_, code := runCLI(t, dataDir, "volume", "info", name)
+		require.NotEqual(t, 0, code, "info on missing volume should fail")
 	})
 }

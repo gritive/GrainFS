@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.262.14] - 2026-05-19 - test(e2e): absorb TestE2E_VolumeCLI_* into TestVolumeE2E (single admin CLI entry)
+
+`TestE2E_VolumeCLI_*` and `TestVolumeE2E` (landed in v0.0.262.12) covered the same admin-CLI volume surface from two entry points. This PR collapses the admin-CLI case set into one entry — `TestVolumeE2E` — and pulls out the two genuinely-not-admin-CLI tests as standalone E2Es.
+
+### Absorbed into `TestVolumeE2E` (now 9 sub-tests)
+
+| Was | Now (sub-test under `TestVolumeE2E`) |
+|---|---|
+| `TestE2E_VolumeCLI_FullLifecycle` | `FullLifecycle` (list/create/info/resize/snapshot/delete-refused/delete-force) |
+| `TestE2E_VolumeCLI_ListIncludesHealth` | `ListIncludesHealth` |
+| `TestE2E_VolumeCLI_ListJSONIncludesHealthReasons` | `ListJSONIncludesHealthReasons` |
+| `TestE2E_VolumeCLI_ShrinkRejected` | `ShrinkRejected` |
+| `TestE2E_VolumeCLI_NotFound` | `NotFound` |
+
+All five cases now run under `SingleNode` and `Cluster4Node` via the existing `runVolumeCases(t, tgt s3Target)` set helper — six fixture-paths per case from one entry. Per-case unique volume names via `uniqueVolName(tgt, …)` so cluster reruns and parallel cluster tests can't collide on the volume namespace.
+
+### Split out (not admin CLI)
+
+- **`TestE2E_VolumeCLI_AutoDiscoveryFailureMessage` → `TestVolumeCLIAutoDiscoveryE2E`**. Fixture-independent: invokes the binary in a cwd with no grainfs context and asserts the actionable hint is printed before any server connection. No single/cluster split.
+- **`TestE2E_VolumeCLI_NoVolumesViaDataPlane` → `TestVolumeDataPlaneGuardE2E`**. HTTP-level guard against the removed `/volumes/*` admin endpoints on the data plane (A6 regression). Not a CLI invocation.
+
+### Files
+
+- `tests/e2e/volume_test.go` — five sub-tests appended to `runVolumeCases`. Helpers (`createVolumeEventually`, `cleanupVolume`, `uniqueVolName`) reused.
+- `tests/e2e/volume_cli_test.go` — five absorbed functions removed; the two non-admin-CLI tests renamed to the canonical `TestXxxE2E` form. `startTestServer`, `runCLI`, `waitForVolumeReady`, `containsFlag`, `TestE2E_Dashboard_TokenURLAndRotate` (separate group, queued for a later PR) preserved.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
 ## [0.0.262.13] - 2026-05-19 - test(e2e): dual-integrate VolumeScrub set + collapse _Cluster4Node suffix entries
 
 Three test groups re-shaped into the canonical single-entry dual pattern.
