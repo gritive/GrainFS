@@ -215,10 +215,10 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 func TestSnapshot_GCFGTrailerByteDeterminism(t *testing.T) {
 	// Encode the same config map 16 times; every output must be identical.
 	entries := map[string]string{
-		"audit.deny-only":   "true",
+		"audit.deny-only":    "true",
 		"trusted-proxy.cidr": "10.0.0.0/8,192.168.0.0/16",
-		"cluster.read-only": "false",
-		"iam.anon-enabled":  "false",
+		"cluster.read-only":  "false",
+		"iam.anon-enabled":   "false",
 	}
 	first, err := encodeMetaConfigSnapshot(entries)
 	if err != nil {
