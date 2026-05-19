@@ -217,6 +217,48 @@ func (b *DistributedBackend) putObjectChunked(
 	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 
+func (b *DistributedBackend) putMultipartObjectChunked(
+	ctx context.Context,
+	bucket, key, versionID, uploadID string,
+	manifest multipartCompleteManifest,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	tags []storage.Tag,
+) (*storage.Object, error) {
+	chunkSize := int64(storage.DefaultChunkSize)
+	numSegments := int((manifest.TotalSize + chunkSize - 1) / chunkSize)
+	if numSegments < 1 {
+		numSegments = 1
+	}
+	blobIDs := make([]string, numSegments)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := &clusterSegmentBackend{
+		b:            b,
+		bucket:       bucket,
+		key:          key,
+		versionID:    versionID,
+		blobIDs:      blobIDs,
+		contentType:  contentType,
+		userMetadata: userMetadata,
+		sseAlgorithm: sseAlgorithm,
+		placements:   make([]segmentPlacement, numSegments),
+	}
+	body, err := manifest.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open multipart manifest: %w", err)
+	}
+	defer body.Close()
+	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags, uploadID)
+}
+
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
 // supplies a fully wired clusterSegmentBackend and the already-opened body
 // reader (production: from putObjectChunked which opens sp.Open(); tests:
@@ -234,6 +276,25 @@ func runChunkedPut(
 	beforeCommit func() error,
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
+) (*storage.Object, error) {
+	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags, "")
+}
+
+func runChunkedPutWithParts(
+	ctx context.Context,
+	csb *clusterSegmentBackend,
+	body io.Reader,
+	bucket, key, versionID, contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
+	completeUploadID string,
 ) (*storage.Object, error) {
 
 	// Best-effort blob cleanup on any error path before raft commit.
@@ -264,6 +325,8 @@ func runChunkedPut(
 	obj.UserMetadata = userMetadata
 	obj.SSEAlgorithm = sseAlgorithm
 	obj.IsAppendable = false
+	partsMeta := cloneMultipartPartEntries(parts)
+	obj.Parts = partsMeta
 
 	// 4. beforeCommit hook before raft commit.
 	if beforeCommit != nil {
@@ -279,30 +342,53 @@ func runChunkedPut(
 	commitModTime := chunkedChooseModTime(modTime, preserveModTime, time.Now().Unix())
 	obj.LastModified = commitModTime
 	obj.VersionID = versionID
-	cmd := PutObjectMetaCmd{
-		Bucket:           bucket,
-		Key:              key,
-		Size:             obj.Size,
-		ETag:             obj.ETag,
-		VersionID:        versionID,
-		ContentType:      contentType,
-		ModTime:          commitModTime,
-		UserMetadata:     userMetadata,
-		SSEAlgorithm:     sseAlgorithm,
-		ExpectedETag:     expectedETag,
-		IsDeleteMarker:   false,
-		NodeIDs:          csb.placements[0].NodeIDs,
-		ECData:           uint8(csb.placements[0].Config.DataShards),
-		ECParity:         uint8(csb.placements[0].Config.ParityShards),
-		PlacementGroupID: csb.placements[0].PlacementGroupID,
-		Segments:         buildSegmentMetaEntries(csb.placements, obj.Segments),
-		Tags:             tags,
-		Parts:            parts,
-	}
+	segments := buildSegmentMetaEntries(csb.placements, obj.Segments)
 
 	// 6. Single atomic raft commit.
-	if err := csb.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
-		return nil, fmt.Errorf("commit meta: %w", err)
+	var commitErr error
+	if completeUploadID != "" {
+		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
+			Bucket:           bucket,
+			Key:              key,
+			UploadID:         completeUploadID,
+			Size:             obj.Size,
+			ETag:             obj.ETag,
+			VersionID:        versionID,
+			ContentType:      contentType,
+			ModTime:          commitModTime,
+			Parts:            partsMeta,
+			NodeIDs:          csb.placements[0].NodeIDs,
+			ECData:           uint8(csb.placements[0].Config.DataShards),
+			ECParity:         uint8(csb.placements[0].Config.ParityShards),
+			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			RingVersion:      csb.placements[0].RingVersion,
+			Segments:         segments,
+			Tags:             tags,
+		})
+	} else {
+		commitErr = csb.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+			Bucket:           bucket,
+			Key:              key,
+			Size:             obj.Size,
+			ETag:             obj.ETag,
+			VersionID:        versionID,
+			ContentType:      contentType,
+			ModTime:          commitModTime,
+			UserMetadata:     userMetadata,
+			SSEAlgorithm:     sseAlgorithm,
+			ExpectedETag:     expectedETag,
+			IsDeleteMarker:   false,
+			Parts:            partsMeta,
+			NodeIDs:          csb.placements[0].NodeIDs,
+			ECData:           uint8(csb.placements[0].Config.DataShards),
+			ECParity:         uint8(csb.placements[0].Config.ParityShards),
+			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			Segments:         segments,
+			Tags:             tags,
+		})
+	}
+	if commitErr != nil {
+		return nil, fmt.Errorf("commit meta: %w", commitErr)
 	}
 	metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 	committed = true
@@ -340,6 +426,15 @@ func countDistinctPlacementGroups(placements []segmentPlacement) int {
 		seen[p.PlacementGroupID] = struct{}{}
 	}
 	return len(seen)
+}
+
+func cloneMultipartPartEntries(parts []storage.MultipartPartEntry) []storage.MultipartPartEntry {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]storage.MultipartPartEntry, len(parts))
+	copy(out, parts)
+	return out
 }
 
 // buildSegmentMetaEntries joins post-write placement metadata with the

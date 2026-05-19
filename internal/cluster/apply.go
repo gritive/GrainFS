@@ -547,15 +547,39 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		ContentType:      c.ContentType,
 		ETag:             c.ETag,
 		LastModified:     c.ModTime,
+		RingVersion:      uint64(c.RingVersion),
 		ECData:           c.ECData,
 		ECParity:         c.ECParity,
 		NodeIDs:          c.NodeIDs,
 		PlacementGroupID: c.PlacementGroupID,
+		Parts:            c.Parts,
+		Segments:         segmentMetaEntriesToRefs(c.Segments),
+		Tags:             c.Tags,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal object meta: %w", err)
 	}
-	return f.db.Update(func(txn *badger.Txn) error {
+	if err := f.db.Update(func(txn *badger.Txn) error {
+		mpuKey := f.keys.MultipartKey(c.UploadID)
+		item, err := txn.Get(mpuKey)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrUploadNotFound
+		}
+		if err != nil {
+			return err
+		}
+		raw, err := f.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		mpu, err := unmarshalClusterMultipartMeta(raw)
+		if err != nil {
+			return err
+		}
+		if mpu.Bucket != c.Bucket || mpu.Key != c.Key {
+			return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
+		}
+
 		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
 		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
@@ -568,8 +592,14 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 				return err
 			}
 		}
-		return txn.Delete(f.keys.MultipartKey(c.UploadID))
-	})
+		return txn.Delete(mpuKey)
+	}); err != nil {
+		return err
+	}
+	if c.RingVersion != 0 {
+		f.rings.incRef(c.RingVersion)
+	}
+	return nil
 }
 
 func (f *FSM) applyAbortMultipart(data []byte) error {

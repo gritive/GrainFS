@@ -162,8 +162,80 @@ func (rcv *CompleteMultipartCmd) NodeIdsLength() int {
 	return 0
 }
 
+func (rcv *CompleteMultipartCmd) Parts(obj *MultipartPartEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *CompleteMultipartCmd) PartsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) Segments(obj *SegmentMetaEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *CompleteMultipartCmd) SegmentsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) Tags(obj *Tag, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *CompleteMultipartCmd) TagsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) RingVersion() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartCmd) MutateRingVersion(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(34, n)
+}
+
 func CompleteMultipartCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(12)
+	builder.StartObject(16)
 }
 func CompleteMultipartCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -203,6 +275,27 @@ func CompleteMultipartCmdAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbu
 }
 func CompleteMultipartCmdStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func CompleteMultipartCmdAddParts(builder *flatbuffers.Builder, parts flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(parts), 0)
+}
+func CompleteMultipartCmdStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func CompleteMultipartCmdAddSegments(builder *flatbuffers.Builder, segments flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(segments), 0)
+}
+func CompleteMultipartCmdStartSegmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func CompleteMultipartCmdAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(tags), 0)
+}
+func CompleteMultipartCmdStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func CompleteMultipartCmdAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
+	builder.PrependUint64Slot(15, ringVersion, 0)
 }
 func CompleteMultipartCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

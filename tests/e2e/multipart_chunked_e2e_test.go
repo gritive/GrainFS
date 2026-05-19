@@ -122,6 +122,117 @@ func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
 			assert.Equal(t, plaintext, partBody, "?partNumber=1 body bytes")
 		}
 	})
+
+	t.Run("LargeCompleteNonAlignedFinalSegment", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "mp-large-complete")
+		key := "large-complete.bin"
+
+		part1 := bytes.Repeat([]byte{'A'}, 5<<20)
+		part2 := bytes.Repeat([]byte{'B'}, 5<<20)
+		part3 := bytes.Repeat([]byte{'C'}, (6<<20)+1)
+		want := append(append(append([]byte{}, part1...), part2...), part3...)
+
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket:      aws.String(bucket),
+			Key:         aws.String(key),
+			ContentType: aws.String("application/octet-stream"),
+		})
+		require.NoError(t, err)
+		uploadID := aws.ToString(initOut.UploadId)
+
+		completed := make([]types.CompletedPart, 0, 3)
+		for i, body := range [][]byte{part1, part2, part3} {
+			out, err := client.UploadPart(ctx, &s3.UploadPartInput{
+				Bucket:     aws.String(bucket),
+				Key:        aws.String(key),
+				UploadId:   aws.String(uploadID),
+				PartNumber: aws.Int32(int32(i + 1)),
+				Body:       bytes.NewReader(body),
+			})
+			require.NoError(t, err)
+			completed = append(completed, types.CompletedPart{
+				PartNumber: aws.Int32(int32(i + 1)),
+				ETag:       out.ETag,
+			})
+		}
+
+		_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+			MultipartUpload: &types.CompletedMultipartUpload{
+				Parts: completed,
+			},
+		})
+		require.NoError(t, err)
+
+		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		defer getOut.Body.Close()
+		got, err := io.ReadAll(getOut.Body)
+		require.NoError(t, err)
+		require.Equal(t, int64(len(want)), aws.ToInt64(getOut.ContentLength))
+		require.True(t, bytes.Equal(want, got), "body mismatch")
+	})
+
+	t.Run("SegmentSpansPartBoundary", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "mp-segment-boundary")
+		key := "segment-spans-part-boundary.bin"
+
+		part1 := bytes.Repeat([]byte{'D'}, 8<<20)
+		part2 := bytes.Repeat([]byte{'E'}, 8<<20)
+		part3 := []byte("tail")
+		want := append(append(append([]byte{}, part1...), part2...), part3...)
+
+		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		uploadID := aws.ToString(initOut.UploadId)
+
+		completed := make([]types.CompletedPart, 0, 3)
+		for i, body := range [][]byte{part1, part2, part3} {
+			out, err := client.UploadPart(ctx, &s3.UploadPartInput{
+				Bucket:     aws.String(bucket),
+				Key:        aws.String(key),
+				UploadId:   aws.String(uploadID),
+				PartNumber: aws.Int32(int32(i + 1)),
+				Body:       bytes.NewReader(body),
+			})
+			require.NoError(t, err)
+			completed = append(completed, types.CompletedPart{
+				PartNumber: aws.Int32(int32(i + 1)),
+				ETag:       out.ETag,
+			})
+		}
+
+		_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+			MultipartUpload: &types.CompletedMultipartUpload{
+				Parts: completed,
+			},
+		})
+		require.NoError(t, err)
+
+		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		require.NoError(t, err)
+		defer getOut.Body.Close()
+		got, err := io.ReadAll(getOut.Body)
+		require.NoError(t, err)
+		require.Equal(t, int64(len(want)), aws.ToInt64(getOut.ContentLength))
+		require.True(t, bytes.Equal(want, got), "body mismatch")
+	})
 }
 
 // uploadPartChunked issues an UploadPart request with aws-chunked framing

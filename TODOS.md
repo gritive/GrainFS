@@ -15,14 +15,7 @@ Planning reference: operator trust roadmap note from 2026-05-15.
 
 Work these in order. Do not run them in parallel.
 
-1. [x] **BadgerDB pre-server recovery journal**
-   - Trust risk: metadata recovery becomes invisible if `GrainFS` fails before the
-     incident store opens.
-   - Signal: durable recovery manifest/journal under `<data>/.recovery/`.
-   - Verification: pre-server crash/restart test, fsync/rename atomicity test,
-     restart-readable journal contract.
-
-2. [ ] **BadgerDB atomic auto-recovery design**
+- [ ] **BadgerDB atomic auto-recovery design**
    - Trust risk: recoverable Badger state still requires manual intervention
      during an outage.
    - Signal: recovery plan, applied action, skipped action, and reason.
@@ -30,7 +23,7 @@ Work these in order. Do not run them in parallel.
    - Boundary: design next; implement after recovery journal decision structs
      stabilize.
 
-3. [ ] **Rolling upgrade remaining safety slices**
+- [ ] **Rolling upgrade remaining safety slices**
    - Trust risk: mixed-version clusters can hide schema, config, or capability
      divergence behind a healthy surface.
    - Signal: compatibility gates, upgrade status, snapshot-config compatibility
@@ -38,20 +31,20 @@ Work these in order. Do not run them in parallel.
    - Verification: `tests/compat/`, mixed-cluster tests, snapshot-config forward
      policy tests.
 
-4. [ ] **Object placement/index orphan and stale reconcile**
+- [ ] **Object placement/index orphan and stale reconcile**
    - Trust risk: object-level placement creates a dual-write failure mode between
      data groups and the global object index.
    - Signal: reconcile report, repair/quarantine counters, non-silent failure.
    - Verification: index commit failure injection, orphan data, stale index,
      missing shard, corrupt shard tests.
 
-5. [ ] **Cluster health data-group Raft progress**
+- [ ] **Cluster health data-group Raft progress**
    - Trust risk: metaRaft can look healthy while a data group is leaderless or
      lagging.
    - Signal: per-group leader, term, lag, drain state, and transfer state.
    - Verification: induced lag, leader transfer, multi-group cluster health e2e.
 
-6. [ ] **NFSv4 and 9P auth/access-control correctness**
+- [ ] **NFSv4 and 9P auth/access-control correctness**
    - Promote only when `GrainFS` must support untrusted networks, multi-tenancy,
      compliance-driven file access audit, or S3 IAM parity for file protocols.
    - Signal: export-level policy, auth mode, denied access events.
@@ -139,8 +132,6 @@ Work these in order. Do not run them in parallel.
   attribute error semantics.
 - [ ] **pynfs/nfstest conformance matrix**: publish nightly/basic suite results
   as an operator-readable pass/fail matrix.
-- [ ] **`cluster remove-peer` negative liveness signal**: design dead-peer
-  detection and display policy.
 - [ ] **Hot reload drift detection**: detect disk/runtime config mismatch after
   config reload.
 - [ ] **Migration mirror/cutover correctness**: settle mirror, cutover, and
@@ -168,13 +159,12 @@ Work these in order. Do not run them in parallel.
   `*ProposeOnly` entrypoint 패턴을 일관 적용. 참조 커밋:
   `fix(s3auth/cluster): warp versioned workload passes on a 4-node
   cluster` (`benchmark` branch).
-- [ ] **Capability evidence propagation ready probe**: 4-node
-  cluster bootstrap 후 multipart capability evidence가 gossip을
-  통해 propagate되는 데 약 30-45s가 걸린다 (`CLUSTER_WARMUP_SLEEP`
-  default 5s는 부족). 운영/벤치마크 자동화를 위해 (a) gate가
-  capability evidence ready인지 polling endpoint 제공, (b) gossip
-  interval 조정, (c) capability evidence를 raft commit으로
-  immediate propagate. 임시 우회: `CLUSTER_WARMUP_SLEEP=45`.
+- [ ] **Capability evidence warmup wiring**: `/v1/cluster/capabilities` now
+  exposes gate evidence on the admin UDS, so the original ready-probe gap is
+  closed. Remaining work is to replace fixed benchmark/operator sleeps
+  (`CLUSTER_WARMUP_SLEEP=45` in `docs/reference/benchmarks.md`) with polling
+  against that endpoint, then re-check whether gossip latency still needs
+  interval tuning or raft-committed evidence.
 
 ## Deferred Until Triggered
 
@@ -260,7 +250,7 @@ Work these in order. Do not run them in parallel.
 - [ ] [nfs-audit] bit 76 charset capability flags [P2] [Skipped]: add after UTF-8
   policy is explicit. Owner: TBD.
 
-## Pull-through Parity Follow-Ups
+## Chunking / Large-Object Follow-Ups
 
 - [ ] **Cluster pull-through large-object parity [P1]**: `TestPullthroughE2E/
   Cluster4Node/LargeObject` (5 MiB random payload) returns bytes that differ
@@ -275,22 +265,21 @@ Work these in order. Do not run them in parallel.
   body is consumed) and ensure the local cache write completes before the
   HTTP response body is closed.
 
-## AppendObject Follow-Ups
+- [ ] **PITR WAL replay carries segment metadata [P1]**: snapshot/restore now
+  knows `Object.Segments`, but `storage/wal.Entry` still only carries scalar
+  object metadata (`Bucket`, `Key`, `ETag`, `ContentType`, `Size`, `VersionID`).
+  WAL-only PITR replay can therefore recreate a segment-backed object record
+  without the segment refs and later report it stale or unreadable. Add a WAL
+  format version that encodes segment refs, preserve old replay compatibility,
+  and add PITR coverage for a chunked object created after the snapshot point.
 
-- [ ] **Single-node LocalBackend missing PartialIO (`ReadAt`) [P1]**: AppendObject
-  body reads after coalesce trigger `wal: inner backend does not support ReadAt`
-  in `internal/storage/wal/backend.go:257` (type-assert `b.Backend.(storage.PartialIO)`
-  fails because `LocalBackend` does not implement it). Cluster works because
-  `DistributedBackend` has its own ReadAt path; single-node hits this gap once
-  the coalesce worker turns N segment files into a single coalesced blob whose
-  read uses ReadAt-based partial fetch. Symptom: `TestAppendCoalesceE2E/SingleNode`
-  passes the immediate-after-append GET (segment-file read) and fails the
-  post-coalesce convergence loop with `EOF` (HERTZ logs the WAL ReadAt error).
-  Fix: implement `(b *LocalBackend) ReadAt(ctx, bucket, key, offset, buf) (int, error)`
-  in `internal/storage/local.go` (open the on-disk object file, pread offset/len),
-  then turn `TestAppendCoalesceE2E` into the `TestBucketsE2E` dual pattern. This
-  is a feature-parity gap per [[feedback-single-cluster-parity]] — the appendable
-  surface should produce the same observable behavior on both deployment shapes.
+- [ ] **AppendObject real per-call MD5 chain [P2]**: `AppendObject` still stores
+  segment xxhash checksums in `AppendCallMD5s` as a stopgap. Capture each append
+  call payload's real MD5 at the API/storage boundary and persist that digest in
+  both single-node and cluster apply paths so composite append ETags are S3-wire
+  correct while segment checksums remain xxhash3 for internal integrity.
+
+## AppendObject Follow-Ups
 
 - [ ] **Forward buffer 512 MiB warp calibration [P1]**: production traffic
   pattern에 default `--cluster-append-forward-buffer-total-bytes` 512 MiB가
@@ -328,25 +317,12 @@ Work these in order. Do not run them in parallel.
   baseline에서도 동일하게 fail (allocations=4 vs ≤1 expected). `-race` 빌드에서
   추가 alloc churn. packblob 패키지 별도 작업.
 
-- [ ] **`make test-e2e` 9 unrelated failures [P1]**: backup_restic, multipart
-  ("capability multipart_listing_v1 rejected"), cluster_incident,
-  quarantine_incident, dynamic_join_services, cluster_scrubber, no_peers,
-  encryption_at_rest, iam_scoped_key. AppendObject 경로 무관. multipart는
-  capability evidence propagation TODO와 동일 root (cluster bootstrap timing).
-  단독 실행 시 PASS인 케이스 vs 환경 의존 케이스 분리 필요.
-
-## Chunking Phase 1 Follow-Ups
-
-- [ ] **Cluster path: 100 MiB simple PUT round-trip corrupts body [P1]**:
-  `TestLargeObjectE2E/Cluster4Node/RoundTrip100MiB` consistently fails
-  byte-equality — length matches, content does not. The 256 MiB sibling
-  (16 even chunks) and the 64 MiB Range sub-case (4 even chunks) PASS on
-  the same cluster fixture, so the corruption is specific to a partial
-  trailing chunk: 100 MiB / 16 MiB = 6 full + 1 × 4 MiB tail. Phase 2 cluster
-  fan-out must handle non-aligned tail chunks. The cluster sub-case is now
-  skipped with a Phase 2 reference (`t.Skip(...)`), so `make test-e2e` is
-  green again; remove the skip once the cluster path handles non-aligned
-  tail chunks.
+- [ ] **Reverify full `make test-e2e` baseline [P1]**: old snapshot listed
+  backup_restic, multipart (`capability multipart_listing_v1 rejected`),
+  cluster_incident, quarantine_incident, dynamic_join_services,
+  cluster_scrubber, no_peers, encryption_at_rest, iam_scoped_key. Since the
+  capability evidence endpoint now exists, rerun the baseline and split true
+  remaining failures from stale bootstrap/warmup artifacts.
 
 ## Conformance Follow-Ups
 
@@ -355,8 +331,10 @@ Work these in order. Do not run them in parallel.
 - [ ] [nfs-conformance] nfstest-runner [P2]: add nfstest after pynfs stabilizes.
 ## Storage And Volume Backlog
 
-- [ ] **Thin pool quota**: cross-volume physical capacity pool after Phase A
-  volume options.
+- [ ] **Volume pool quota operator surface**: `volume.ManagerOptions.PoolQuota`
+  and planner/unit coverage exist; expose/configure the cross-volume physical
+  capacity pool through the server/CLI path before treating it as an operator
+  feature.
 - [ ] **Multi-tenancy**: account/namespace isolation above IAM.
 - [ ] **Quota**: capacity limits per service account or team.
 - [ ] **Volume export/import**: backup/restore for volume data and snapshot

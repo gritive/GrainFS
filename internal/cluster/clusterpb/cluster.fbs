@@ -180,6 +180,10 @@ table CompleteMultipartCmd {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
+  parts:[MultipartPartEntry];
+  segments:[SegmentMetaEntry];
+  tags:[Tag];
+  ring_version:uint64 = 0;
 }
 
 table AbortMultipartCmd {

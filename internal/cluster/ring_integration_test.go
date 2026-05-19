@@ -11,6 +11,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +64,30 @@ func TestRing_PutObjectEC_UsesRingVersion(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	assert.True(t, bytes.Equal(content, got), "content must round-trip via ring EC path")
+}
+
+func TestRing_CompleteMultipartEC_UsesRingVersion(t *testing.T) {
+	backend := NewSingletonBackendForTest(t)
+
+	const selfAddr = "self"
+	shardDir := t.TempDir()
+	svc := NewShardService(shardDir, nil)
+	backend.SetShardService(svc, []string{selfAddr})
+	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
+	proposeRing(t, backend, []string{selfAddr})
+
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bucket"))
+	up, err := backend.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	part, err := backend.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("multipart ring payload")))
+	require.NoError(t, err)
+	_, err = backend.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	_, placement, err := backend.headObjectMeta(ctx, "bucket", "mp.bin")
+	require.NoError(t, err)
+	require.Equal(t, RingVersion(1), placement.RingVersion)
 }
 
 func TestRing_GetObjectFallsBackWhenNoRing(t *testing.T) {
