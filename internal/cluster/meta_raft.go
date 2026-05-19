@@ -515,6 +515,26 @@ func (m *MetaRaft) ProposeIcebergDeleteTable(ctx context.Context, cmd IcebergDel
 	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID)
 }
 
+// ProposeConfigPut encodes a ConfigPut command and proposes it to the cluster,
+// blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeConfigPut(ctx context.Context, key, value string) error {
+	payload, err := encodeMetaConfigPutCmd(key, value)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode ConfigPut: %w", err)
+	}
+	return m.Propose(ctx, MetaCmdTypeConfigPut, payload)
+}
+
+// ProposeConfigDelete encodes a ConfigDelete command and proposes it to the
+// cluster, blocking until the entry is applied to the local FSM.
+func (m *MetaRaft) ProposeConfigDelete(ctx context.Context, key string) error {
+	payload, err := encodeMetaConfigDeleteCmd(key)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode ConfigDelete: %w", err)
+	}
+	return m.Propose(ctx, MetaCmdTypeConfigDelete, payload)
+}
+
 func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) error {
 	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
 	requestID, err := icebergRequestID(cmd.Type(), cmd.DataBytes())

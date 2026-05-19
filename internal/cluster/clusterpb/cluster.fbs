@@ -421,6 +421,8 @@ enum MetaCmdType : uint8 {
   CapabilityActivate      = 43, // Rolling-upgrade capability: active persisted feature marker
   MigrationCutover        = 44, // Migration job: mark bucket upstream cutover semantics active
   NfsExportCreate         = 45, // NFSv4 multi-export: create only, reject existing export
+  ConfigPut               = 46, // cluster-wide config: set key=value
+  ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
 }
 
 table MetaNodeEntry {
@@ -449,6 +451,17 @@ table MetaCapabilityActivateCmd {
 table MetaMigrationCutoverCmd {
   bucket:string;
   updated_at_unix_ns:int64;
+}
+
+// cluster-wide config: set key=value
+table MetaConfigPutCmd {
+  key:string;
+  value:string;
+}
+
+// cluster-wide config: unset key (revert to default)
+table MetaConfigDeleteCmd {
+  key:string;
 }
 
 // PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.

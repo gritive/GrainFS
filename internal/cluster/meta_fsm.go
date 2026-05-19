@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -80,6 +82,8 @@ const (
 	MetaCmdTypeNfsExportCreate              = clusterpb.MetaCmdTypeNfsExportCreate
 	MetaCmdTypeCapabilityActivate           = clusterpb.MetaCmdTypeCapabilityActivate
 	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
+	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
+	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -248,6 +252,10 @@ type MetaFSM struct {
 	// patches are rejected at apply time (see applyClusterConfigPatch). Wired
 	// via SetEncryptor before the raft log starts replaying.
 	encryptor *encrypt.Encryptor
+
+	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
+	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
+	cfgStore *config.Store
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -296,6 +304,15 @@ func (f *MetaFSM) SetEncryptor(e *encrypt.Encryptor) {
 
 // Encryptor returns the registered encryptor, or nil if it has not been wired.
 func (f *MetaFSM) Encryptor() *encrypt.Encryptor { return f.encryptor }
+
+// SetConfigStore wires the cluster-wide config registry into the MetaFSM.
+// Must be called before the raft log starts replaying. nil means
+// ConfigPut/ConfigDelete commands are safe no-ops (not configured yet).
+func (f *MetaFSM) SetConfigStore(s *config.Store) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cfgStore = s
+}
 
 // SetLifecycle wires the lifecycle store into the MetaFSM. Must be called
 // before raft Start so apply does not race with replay.
@@ -462,6 +479,10 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return f.applyCapabilityActivate(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeMigrationCutover:
 		return f.applyMigrationCutover(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeConfigPut:
+		return f.applyConfigPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeConfigDelete:
+		return f.applyConfigDelete(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
@@ -690,6 +711,28 @@ func (f *MetaFSM) applyMigrationCutover(payload []byte) error {
 		Status:    migration.StatusComplete,
 		UpdatedAt: time.Unix(0, cmd.UpdatedAtUnixNs()),
 	})
+}
+
+func (f *MetaFSM) applyConfigPut(payload []byte) error {
+	if f.cfgStore == nil {
+		return nil // safe no-op until wired
+	}
+	key, value, err := decodeMetaConfigPutCmd(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: ConfigPut: %w", err)
+	}
+	return f.cfgStore.Set(context.Background(), key, value)
+}
+
+func (f *MetaFSM) applyConfigDelete(payload []byte) error {
+	if f.cfgStore == nil {
+		return nil // safe no-op until wired
+	}
+	key, err := decodeMetaConfigDeleteCmd(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: ConfigDelete: %w", err)
+	}
+	return f.cfgStore.Unset(context.Background(), key)
 }
 
 func (f *MetaFSM) applyAddNode(data []byte) error {
