@@ -13,10 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_Cluster_RefusesEmptyClusterKey: cluster mode startup must fail-fast
+// TestClusterRefusesEmptyClusterKeyE2E: cluster mode startup must fail-fast
 // when --cluster-key is empty. Join mode (triggered by .join-pending) is the
 // only cluster mode; without --cluster-key the boot must error out.
-func TestE2E_Cluster_RefusesEmptyClusterKey(t *testing.T) {
+func TestClusterRefusesEmptyClusterKeyE2E(t *testing.T) {
 	dir := t.TempDir()
 	encKeyFile := makeSharedEncryptionKeyFile(t)
 	port := freePort()
@@ -43,10 +43,10 @@ func TestE2E_Cluster_RefusesEmptyClusterKey(t *testing.T) {
 	}
 }
 
-// TestE2E_Cluster_DifferentPSK_JoinFails: a node attempting to join an
+// TestClusterDifferentPSKJoinFailsE2E: a node attempting to join an
 // existing cluster with a mismatched --cluster-key must fail. This proves the
 // SPKI pinning (A6) is end-to-end intact, not just unit-test-correct.
-func TestE2E_Cluster_DifferentPSK_JoinFails(t *testing.T) {
+func TestClusterDifferentPSKJoinFailsE2E(t *testing.T) {
 	keyA := strings.Repeat("a", 64)
 	keyB := strings.Repeat("b", 64)
 

@@ -83,12 +83,12 @@ var (
 	perfSecretKey string
 )
 
-// TestE2E_ClusterPerf_All 은 4개 시나리오를 차례로 실행하고 통합 리포트를 생성한다.
+// TestClusterPerfAllE2E 은 4개 시나리오를 차례로 실행하고 통합 리포트를 생성한다.
 //
 // t.Run으로 묶지 않는 이유: cluster_scale_bench_test.go 노트와 동일 — sub-test
 // 사이 cleanup이 즉시 풀리지 않아 5 procs × N raft groups 부팅이 누적되며 flake.
 // 한 함수 안에서 명시적 cleanup loop으로 시나리오를 직렬화한다.
-func TestE2E_ClusterPerf_All(t *testing.T) {
+func TestClusterPerfAllE2E(t *testing.T) {
 	if os.Getenv("GRAINFS_PERF") != "1" {
 	}
 	binary := getBinary()

@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_ClusterDrain_Follower spins up a 3-node cluster and drains a
+// TestClusterDrainFollowerE2E spins up a 3-node cluster and drains a
 // follower (no transfer needed). Verifies the voter set shrinks and the
 // drained node is no longer listed.
-func TestE2E_ClusterDrain_Follower(t *testing.T) {
+func TestClusterDrainFollowerE2E(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

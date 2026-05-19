@@ -87,7 +87,7 @@ const (
 	distributionPrewarmObjects = 32
 )
 
-func TestE2E_ClusterDistributionBench(t *testing.T) {
+func TestClusterDistributionBenchE2E(t *testing.T) {
 	if os.Getenv("GRAINFS_DISTRIBUTION_BENCH") != "1" {
 	}
 	if _, err := os.Stat(getBinary()); err != nil {

@@ -7,13 +7,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_ClusterConfig_HotReload_FollowerObserves validates the
+// TestClusterConfigHotReloadFollowerObservesE2E validates the
 // divergence-impossible guarantee end-to-end: PATCH at the leader's admin UDS,
 // then observe the new value on a *follower* node's admin UDS. Reads come from
 // each node's local MetaFSM (Raft-replicated), so a successful PATCH at the
 // leader must eventually propagate to every follower with no per-node
 // override possible.
-func TestE2E_ClusterConfig_HotReload_FollowerObserves(t *testing.T) {
+func TestClusterConfigHotReloadFollowerObservesE2E(t *testing.T) {
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
 		Mode:       ClusterModeStaticPeers,

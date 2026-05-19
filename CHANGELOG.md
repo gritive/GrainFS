@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.262.8] - 2026-05-19 - test(e2e): rename TestE2E_Cluster*/Bootstrap_* to TestXxxE2E convention (21 funcs)
+
+PR-B follow-up to the multiraft rename (v0.0.262.7). 21 cluster-only functions across the `tests/e2e/cluster_*.go` files carried the legacy `TestE2E_*_*` naming. All are cluster-topology tests (dedicated multi-node clusters, no single-node analogue), so dual-pattern wrapping adds nothing. Pure rename to the `TestXxxE2E` suffix convention; bodies unchanged.
+
+### Changed
+
+- `TestE2E_ClusterDrain_Follower` → `TestClusterDrainFollowerE2E`
+- `TestE2E_ClusterDistributionBench` → `TestClusterDistributionBenchE2E`
+- `TestE2E_ClusterRemovePeer_DeadFollower` → `TestClusterRemovePeerDeadFollowerE2E`
+- `TestE2E_ClusterScrubber_AutoRepair` → `TestClusterScrubberAutoRepairE2E`
+- `TestE2E_ClusterEC_PutGet_5Node` → `TestClusterECPutGet5NodeE2E`
+- `TestE2E_ClusterEC_3Node_ActiveKM21` → `TestClusterEC3NodeActiveKM21E2E`
+- `TestE2E_ClusterEC_TopologyChange` → `TestClusterECTopologyChangeE2E`
+- `TestE2E_Bootstrap_JoinUDS_AlreadyMember` → `TestBootstrapJoinUDSAlreadyMemberE2E`
+- `TestE2E_Bootstrap_JoinCLI_Idempotent` → `TestBootstrapJoinCLIIdempotentE2E`
+- `TestE2E_Bootstrap_DataPresent_BlocksJoin` → `TestBootstrapDataPresentBlocksJoinE2E`
+- `TestE2E_ClusterPerf_All` → `TestClusterPerfAllE2E`
+- `TestE2E_ClusterIncident_MissingShardFixedWithReceipt` → `TestClusterIncidentMissingShardFixedWithReceiptE2E`
+- `TestE2E_ClusterTransferLeader` → `TestClusterTransferLeaderE2E`
+- `TestE2E_ClusterTransferLeader_NoPeers` → `TestClusterTransferLeaderNoPeersE2E`
+- `TestE2E_ClusterConfig_HotReload_FollowerObserves` → `TestClusterConfigHotReloadFollowerObservesE2E`
+- `TestE2E_ClusterScaleBench_N{8,32,64,128}` → `TestClusterScaleBenchN{8,32,64,128}E2E`
+- `TestE2E_Cluster_RefusesEmptyClusterKey` → `TestClusterRefusesEmptyClusterKeyE2E`
+- `TestE2E_Cluster_DifferentPSK_JoinFails` → `TestClusterDifferentPSKJoinFailsE2E`
+
+Inline doc-comment `-run "^TestE2E_ClusterScaleBench_N${N}$"` usage example in `cluster_scale_bench_test.go` updated to the new pattern.
+
 ## [0.0.262.7] - 2026-05-19 - test(e2e): rename TestE2E_MultiRaftSharding_* to TestXxxE2E (cluster-only convention)
 
 13 cluster-only functions in `tests/e2e/multiraft_sharding_test.go` carried the legacy `TestE2E_*_*` naming. They are all multi-raft sharding tests that boot a dedicated `mrCluster` with varying `numNodes` and `mrClusterOptions` — single-node has no analogue for the multi-raft topology, so dual-pattern wrapping (`t.Run("SingleNode")`) adds nothing. Pure rename to the `TestXxxE2E` suffix convention used elsewhere in the package; bodies unchanged.
