@@ -276,6 +276,48 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.Zero(t, backend.getObjCalls.Load())
 }
 
+func TestGetObjectPartNumber_MultipartFloorUsesSingleReadAt(t *testing.T) {
+	tmp := t.TempDir()
+	local, err := storage.NewLocalBackend(tmp)
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+
+	payload := bytes.Repeat([]byte("x"), 5<<20)
+	backend := &partNumberReadAtBackend{
+		Backend: local,
+		data:    payload,
+		obj: storage.Object{
+			Key:         "obj",
+			Size:        int64(len(payload)),
+			ContentType: "application/octet-stream",
+			ETag:        "multipart-etag",
+			ACL:         1,
+			Parts: []storage.MultipartPartEntry{
+				{PartNumber: 1, Size: int64(len(payload)), ETag: "part-1-etag"},
+			},
+		},
+	}
+	port := freePort(t)
+	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
+	go s.Run()
+	t.Cleanup(func() {
+		_ = s.Shutdown(context.Background())
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj?partNumber=1", port))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	n, err := io.Copy(io.Discard, resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	require.Equal(t, int64(len(payload)), n)
+	require.Equal(t, int32(1), backend.preparedReadAtCalls.Load())
+	require.Equal(t, int64(len(payload)), backend.lastReadSize.Load())
+	require.Zero(t, backend.getObjCalls.Load())
+}
+
 func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testing.T) {
 	tmp := t.TempDir()
 	local, err := storage.NewLocalBackend(tmp)

@@ -139,9 +139,8 @@ func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec
 
 // readShards collects the k-of-n data shards needed to reconstruct the object.
 //
-// Strategy: try a local data-shard fast path first; fall back to a full
-// parallel fan-out that includes parity shards when any remote data shard is
-// unavailable.
+// Strategy: satisfy data shards first to avoid healthy-path parity fanout; fall
+// back to parity shards only when data shards are unavailable.
 func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, [][]byte, error) {
 	recCfg := rec.ECConfigOrFallback(r.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
@@ -302,14 +301,17 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		}
 	}
 	if !localDataFastPath {
-		allIdx := make([]int, 0, len(rec.Nodes))
-		for i := range rec.Nodes {
-			allIdx = append(allIdx, i)
-		}
-		fetchShards(allIdx, true)
+		fetchShards(dataIdx, false)
 		if available < recCfg.DataShards {
-			return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
-				available, len(rec.Nodes), recCfg.DataShards)
+			parityIdx := make([]int, 0, recCfg.ParityShards)
+			for i := recCfg.DataShards; i < len(rec.Nodes); i++ {
+				parityIdx = append(parityIdx, i)
+			}
+			fetchShards(parityIdx, true)
+			if available < recCfg.DataShards {
+				return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+					available, len(rec.Nodes), recCfg.DataShards)
+			}
 		}
 		return recCfg, shards, nil
 	}

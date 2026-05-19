@@ -35,6 +35,10 @@ func TestECConfig_IsActive(t *testing.T) {
 	}
 }
 
+func TestECPooledReadThresholdIncludesMultipartPartFloor(t *testing.T) {
+	require.GreaterOrEqual(t, maxECPooledReadObjectSize, 5<<20)
+}
+
 func TestAutoECConfigForClusterSize(t *testing.T) {
 	tests := []struct {
 		nodes int

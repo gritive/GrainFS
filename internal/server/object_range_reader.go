@@ -16,7 +16,7 @@ type objectPreparedReadAtBackend interface {
 	ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error)
 }
 
-const maxRangeReadAtChunk = 1 << 20
+const maxRangeReadAtChunk = 5 << 20
 
 var readAtRangeBufferPool = sync.Pool{
 	New: func() any {

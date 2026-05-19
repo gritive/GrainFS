@@ -258,6 +258,27 @@ func TestECObjectReader_ReadObject_MarksHealthyPeerOnSuccess(t *testing.T) {
 	require.Empty(t, health.unhealthy)
 }
 
+func TestECObjectReader_ReadObject_PrefersDataShardsBeforeParity(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	data := []byte("healthy data shards avoid parity fanout")
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{
+		selfID:   "node-a",
+		shards:   fetcher,
+		ecConfig: cfg,
+	}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-d", "node-e"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	require.Equal(t, cfg.DataShards, fetcher.readShardCalls)
+}
+
 func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	fetcher := &fakeECObjectShardFetcher{} // empty — no shards available
@@ -359,7 +380,7 @@ func TestECObjectReader_OpenObject_AllLocal(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
-func TestECObjectReader_OpenObject_StreamsMultipartSizedObject(t *testing.T) {
+func TestECObjectReader_OpenObject_PoolsMultipartSizedObject(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
 	data := bytes.Repeat([]byte("x"), 5<<20)
 	fetcher := &fakeECObjectShardFetcher{}
@@ -376,8 +397,8 @@ func TestECObjectReader_OpenObject_StreamsMultipartSizedObject(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
-	require.Greater(t, fetcher.readShardStreamCalls, 0)
-	require.Zero(t, fetcher.readShardCalls)
+	require.Greater(t, fetcher.readShardCalls, 0)
+	require.Zero(t, fetcher.readShardStreamCalls)
 }
 
 func TestECObjectReader_OpenObject_NilShardService_ReturnsError(t *testing.T) {

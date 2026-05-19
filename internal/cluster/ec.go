@@ -23,9 +23,10 @@ const (
 	// future expert/archival policy, not the startup CLI.
 	MaxAutoDataShards = 6
 	AutoParityShards  = 2
-	// maxECPooledReadObjectSize caps the all-data-present read prefetch path so
-	// multipart-sized and larger GETs keep the streaming memory profile.
-	maxECPooledReadObjectSize = 4 << 20
+	// maxECPooledReadObjectSize caps the all-data-present read prefetch path.
+	// Keep the S3 multipart minimum part size on the pooled fast path; larger
+	// objects keep the streaming memory profile.
+	maxECPooledReadObjectSize = 8 << 20
 )
 
 // ECConfig controls cluster erasure coding behavior.
