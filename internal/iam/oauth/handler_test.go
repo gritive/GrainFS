@@ -2,9 +2,13 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
@@ -178,6 +182,46 @@ func TestOAuth_TokenMintDeniedWhenSALacksGetCatalogConfig(t *testing.T) {
 	if w.Code != 403 {
 		t.Fatalf("code = %d, want 403 (SA lacks iceberg:GetCatalogConfig)", w.Code)
 	}
+}
+
+// TestOAuth_UnknownAndWrongSecret_SameErrorBody verifies that both unknown
+// access_key and wrong secret return identical 401 + JSON body — so neither
+// path can be used to enumerate valid access_keys via response inspection (F8).
+func TestOAuth_UnknownAndWrongSecret_SameErrorBody(t *testing.T) {
+	ts := newTestHandler(t)
+
+	unknownW := doPost(ts.h,
+		"grant_type=client_credentials&client_id=UNKNOWN-KEY&client_secret=anything&scope=PRINCIPAL_ROLE:analytics")
+	wrongW := doPost(ts.h,
+		"grant_type=client_credentials&client_id=AKIA-test&client_secret=WRONG&scope=PRINCIPAL_ROLE:analytics")
+
+	require.Equal(t, 401, unknownW.Code, "unknown key must return 401")
+	require.Equal(t, 401, wrongW.Code, "wrong secret must return 401")
+
+	var unknownBody, wrongBody map[string]string
+	require.NoError(t, json.Unmarshal(unknownW.Body.Bytes(), &unknownBody))
+	require.NoError(t, json.Unmarshal(wrongW.Body.Bytes(), &wrongBody))
+
+	assert.Equal(t, unknownBody["error"], wrongBody["error"],
+		"error field must be identical for unknown-key and wrong-secret paths")
+	assert.Equal(t, unknownBody["error_description"], wrongBody["error_description"],
+		"error_description must be identical for unknown-key and wrong-secret paths")
+}
+
+// TestOAuth_MultiPrincipalRole_400 verifies that a scope with more than one
+// PRINCIPAL_ROLE: token is rejected with 400 invalid_scope (F11).
+func TestOAuth_MultiPrincipalRole_400(t *testing.T) {
+	ts := newTestHandler(t)
+	// URL-encode the space-separated scope so form parsing produces two tokens.
+	w := doPost(ts.h,
+		"grant_type=client_credentials&client_id=AKIA-test&client_secret=secret&scope=PRINCIPAL_ROLE%3Awh-a+PRINCIPAL_ROLE%3Awh-b")
+
+	require.Equal(t, 400, w.Code, "dual PRINCIPAL_ROLE tokens must return 400")
+
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "invalid_scope", body["error"])
+	assert.Contains(t, body["error_description"], "exactly one PRINCIPAL_ROLE")
 }
 
 // TestOAuth_SubIsaSAID verifies that the minted JWT encodes sa_id as Sub,

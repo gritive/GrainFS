@@ -2931,18 +2931,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	}
 
 	// iceberg_schema_version tracks the Iceberg section format:
-	//   0 = pre-T38 / pre-Commit-3 (no warehouse field in entries)
+	//   0 = pre-T38 / pre-Commit-3 (no warehouse field in entries); only safe when no entries present
 	//   2 = warehouse-aware (D#14 T38 Commit 3)
 	//
-	// Version 0 snapshots with data cannot be safely restored: we don't know
-	// which warehouse each entry belongs to. Fail loud to prevent silent
-	// cross-warehouse data misrouting.
+	// Any other value (e.g. 1, 3, …) is unknown — fail loud so a future format
+	// change is never silently misread as version-2.
 	icebergSchemaVersion := snap.IcebergSchemaVersion()
-	if icebergSchemaVersion == 0 && (snap.IcebergNamespacesLength() > 0 || snap.IcebergTablesLength() > 0) {
+	hasIcebergData := snap.IcebergNamespacesLength() > 0 || snap.IcebergTablesLength() > 0
+	if icebergSchemaVersion == 0 && hasIcebergData {
 		return fmt.Errorf("meta_fsm: Restore: iceberg_schema_version=0 with %d namespaces and %d tables: "+
 			"snapshot was written by a pre-T38 node; cannot safely determine warehouse assignments — "+
 			"re-snapshot from a T38+ node before restore",
 			snap.IcebergNamespacesLength(), snap.IcebergTablesLength())
+	}
+	if icebergSchemaVersion != 0 && icebergSchemaVersion != 2 {
+		return fmt.Errorf("meta_fsm: Restore: unsupported iceberg_schema_version=%d (expected 0 for legacy or 2 for warehouse-aware)", icebergSchemaVersion)
 	}
 
 	newIcebergNamespaces := make(map[string]map[string]IcebergNamespaceEntry)
@@ -3045,6 +3048,106 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newClusterCfgSnap = cs
 	}
 
+	// --- DECODE PHASE ---
+	// Decode all trailers into local variables BEFORE touching any f.* field.
+	// If any decode fails, Restore returns an error with f.* completely untouched.
+
+	// IAM: validate by decoding into a temporary store; commit via Reset+ReadSnapshot later.
+	var iamTempStore *iam.Store
+	var iamEnc *encrypt.Encryptor
+	if len(iamData) > 0 {
+		if f.iamStore == nil || f.iamApplier == nil {
+			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
+		} else {
+			enc := f.iamApplier.Encryptor()
+			if enc == nil {
+				log.Warn().Msg("meta_fsm: Restore: IAM applier has no encryptor; skipping IAM restore")
+			} else {
+				tmp := iam.NewStore()
+				if err := iam.ReadSnapshot(bytes.NewReader(iamData), tmp, enc); err != nil {
+					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
+				}
+				iamTempStore = tmp
+				iamEnc = enc
+			}
+		}
+	}
+
+	// GCFG: decode config values.
+	var newCfgValues map[string]string
+	if len(cfgData) > 0 {
+		if f.cfgStore == nil {
+			log.Warn().Int("cfg_len", len(cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
+		} else {
+			values, err := decodeMetaConfigSnapshot(cfgData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
+			}
+			newCfgValues = values
+		}
+	}
+
+	// DKVS: decode DEK version snapshot.
+	var (
+		newDEKVersions map[uint32][]byte
+		newDEKActive   uint32
+		newDEKRefs     map[uint32]uint64
+		hasDEKData     bool
+	)
+	if len(dekData) > 0 {
+		versions, active, refs, err := decodeMetaDEKVersionSnapshot(dekData)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
+		}
+		newDEKVersions = versions
+		newDEKActive = active
+		newDEKRefs = refs
+		hasDEKData = true
+	}
+
+	// IPST: decode IAM policy stores snapshot.
+	type ipstDecoded struct {
+		polSnap    []policystore.PolicyEntry
+		grpSnap    []group.GroupEntry
+		attachSnap policyattach.AttachSnapshot
+		bpSnap     []bucketpolicy.BucketPolicyEntry
+	}
+	var newIPST *ipstDecoded
+	if len(ipstData) > 0 {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+			log.Warn().Int("ipst_len", len(ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
+		} else {
+			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
+			}
+			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap}
+		}
+	}
+
+	// JKEY: decode JWT signing keys.
+	// F9: if JKEY data is present but DEK keeper is not wired, the keys cannot be
+	// unwrapped after Restore — fail loud rather than silently leaving jwtKeys empty.
+	var (
+		newJkeyCurrent  *iamjwt.KeySeed
+		newJkeyPrevious *iamjwt.KeySeed
+		hasJKEYData     = len(jkeyData) > 0
+	)
+	if hasJKEYData {
+		if f.dekKeeper == nil {
+			return fmt.Errorf("meta_fsm: Restore: JKEY trailer present but DEK keeper not wired — cannot unwrap signing keys")
+		}
+		cur, prev, err := decodeJWTKeyStore(jkeyData)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode JKEY: %w", err)
+		}
+		newJkeyCurrent = cur
+		newJkeyPrevious = prev
+	}
+
+	// --- COMMIT PHASE ---
+	// All decodes succeeded. Commit to f.* fields. No error returns below.
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
@@ -3055,6 +3158,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.activePlan = newActivePlan
 	f.icebergNamespaces = newIcebergNamespaces
 	f.icebergTables = newIcebergTables
+	if hasDEKData {
+		f.pendingDEKVersions = newDEKVersions
+		f.pendingDEKActive = newDEKActive
+		if newDEKRefs != nil {
+			f.dekRefCounts = newDEKRefs
+		} else {
+			// Pre-Task-12 snapshot: no ref_counts trailer field. Rebuild from the
+			// just-restored objectIndex so DEK prune-safety sees accurate counts.
+			// All legacy entries decode dek_gen=0 via FlatBuffer default.
+			f.dekRefCounts = make(map[uint32]uint64, len(f.objectIndex))
+			for _, e := range f.objectIndex {
+				f.dekRefCounts[e.DekGen]++
+			}
+		}
+	}
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
 
@@ -3081,138 +3199,69 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// onRebalancePlan is intentionally NOT called here.
 	// Rebalancer handles resume on next tick by checking ActivePlan().
 
-	// IAM restore — replaces in-memory IAM state on the receiving node so
-	// raft log compaction (LogGCInterval) does not silently drop SAs/keys/
-	// grants/auth_enabled. Skip when there's no trailer (legacy snapshot)
-	// or no IAM data, or when IAM is not wired.
-	if len(iamData) > 0 {
-		if f.iamStore == nil || f.iamApplier == nil {
-			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
-		} else {
-			enc := f.iamApplier.Encryptor()
-			if enc == nil {
-				log.Warn().Msg("meta_fsm: Restore: IAM applier has no encryptor; skipping IAM restore")
-			} else {
-				// Wipe pre-restore state so a snapshot install REPLACES rather
-				// than MERGES — matches raft Restore semantics for the rest of
-				// MetaFSM (which reassigns each map outright above).
-				f.iamStore.Reset()
-				if err := iam.ReadSnapshot(bytes.NewReader(iamData), f.iamStore, enc); err != nil {
-					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
-				}
-			}
+	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
+	// iamData is already validated (decoded into iamTempStore above), so Reset+ReadSnapshot
+	// here is guaranteed to succeed.
+	if iamTempStore != nil {
+		f.iamStore.Reset()
+		if err := iam.ReadSnapshot(bytes.NewReader(iamData), f.iamStore, iamEnc); err != nil {
+			return fmt.Errorf("meta_fsm: Restore: commit IAM: %w", err)
 		}
 	}
 
-	// GCFG restore — populate the config store from the GCFG trailer.
-	// If no trailer was present (legacy snapshot or no overrides), leave the
-	// store empty so registered defaults take effect via GetX fallback.
-	if len(cfgData) > 0 {
-		if f.cfgStore == nil {
-			log.Warn().Int("cfg_len", len(cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
+	// GCFG commit.
+	if newCfgValues != nil {
+		f.cfgStore.Restore(newCfgValues)
+	}
+
+	// IPST commit — apply all 4 policy stores.
+	if newIPST != nil {
+		// Warn per nil store. The 4 stores form a single coherent unit
+		// (group memberships, attached policies, bucket policies all reference
+		// each other); silently dropping one half desyncs the others against
+		// the snapshot. The all-nil path warns once above; here we surface
+		// per-store gaps so the operator sees exactly what was lost.
+		if f.policyStore == nil {
+			log.Warn().Int("entries", len(newIPST.polSnap)).Msg("meta_fsm: Restore: IPST has policy entries but policyStore not wired; entries dropped")
 		} else {
-			values, err := decodeMetaConfigSnapshot(cfgData)
-			if err != nil {
-				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
-			}
-			f.cfgStore.Restore(values)
+			f.policyStore.ReplaceAll(newIPST.polSnap)
+		}
+		if f.groupStore == nil {
+			log.Warn().Int("entries", len(newIPST.grpSnap)).Msg("meta_fsm: Restore: IPST has group entries but groupStore not wired; entries dropped")
+		} else {
+			f.groupStore.ReplaceAll(newIPST.grpSnap)
+		}
+		if f.policyAttachStore == nil {
+			log.Warn().Int("sa_entries", len(newIPST.attachSnap.SAAttachments)).Int("group_entries", len(newIPST.attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
+		} else {
+			f.policyAttachStore.ReplaceAll(newIPST.attachSnap)
+		}
+		if f.bucketPolicyStore == nil {
+			log.Warn().Int("entries", len(newIPST.bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
+		} else {
+			f.bucketPolicyStore.ReplaceAll(newIPST.bpSnap)
+		}
+		// Invalidate the resolver cache so stale pre-restore entries don't
+		// survive the snapshot install. Empty saIDs+buckets nukes the full cache.
+		if f.policyResolver != nil {
+			f.policyResolver.Invalidate(nil, nil)
 		}
 	}
 
-	// DKVS restore — decode the DEK versions into pendingDEKVersions so the
-	// runtime can wire a new DEKKeeper via encrypt.LoadFromFSM(kek, versions)
-	// after Restore returns. Also restore dekRefCounts from the snapshot so
-	// DEK prune-safety checks reflect the stored object count.
-	if len(dekData) > 0 {
-		versions, active, refs, err := decodeMetaDEKVersionSnapshot(dekData)
-		if err != nil {
-			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
-		}
-		f.mu.Lock()
-		f.pendingDEKVersions = versions
-		f.pendingDEKActive = active
-		if refs != nil {
-			f.dekRefCounts = refs
-		} else {
-			// Pre-Task-12 snapshot: no ref_counts trailer field. Rebuild from the
-			// just-restored objectIndex so DEK prune-safety sees accurate counts.
-			// All legacy entries decode dek_gen=0 via FlatBuffer default.
-			f.dekRefCounts = make(map[uint32]uint64, len(f.objectIndex))
-			for _, e := range f.objectIndex {
-				f.dekRefCounts[e.DekGen]++
-			}
-		}
-		f.mu.Unlock()
-	}
-
-	// IPST restore — decode the 4 §2 IAM policy stores from the IPST trailer.
-	// Snapshot was taken with all 4 stores serialized together; restore replaces
-	// each store atomically. Nil stores are skipped with a warning (test fixtures
-	// or nodes that have not yet wired the stores). Legacy snapshots (no IPST
-	// trailer) leave the stores untouched; they will be rebuilt from Raft log replay.
-	if len(ipstData) > 0 {
-		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
-			log.Warn().Int("ipst_len", len(ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
-		} else {
-			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
-			if err != nil {
-				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
-			}
-			// Warn per nil store. The 4 stores form a single coherent unit
-			// (group memberships, attached policies, bucket policies all reference
-			// each other); silently dropping one half desyncs the others against
-			// the snapshot. The all-nil path warns once above; here we surface
-			// per-store gaps so the operator sees exactly what was lost.
-			if f.policyStore == nil {
-				log.Warn().Int("entries", len(polSnap)).Msg("meta_fsm: Restore: IPST has policy entries but policyStore not wired; entries dropped")
-			} else {
-				f.policyStore.ReplaceAll(polSnap)
-			}
-			if f.groupStore == nil {
-				log.Warn().Int("entries", len(grpSnap)).Msg("meta_fsm: Restore: IPST has group entries but groupStore not wired; entries dropped")
-			} else {
-				f.groupStore.ReplaceAll(grpSnap)
-			}
-			if f.policyAttachStore == nil {
-				log.Warn().Int("sa_entries", len(attachSnap.SAAttachments)).Int("group_entries", len(attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
-			} else {
-				f.policyAttachStore.ReplaceAll(attachSnap)
-			}
-			if f.bucketPolicyStore == nil {
-				log.Warn().Int("entries", len(bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
-			} else {
-				f.bucketPolicyStore.ReplaceAll(bpSnap)
-			}
-			// Invalidate the resolver cache so stale pre-restore entries don't
-			// survive the snapshot install. Empty saIDs+buckets nukes the full cache.
-			if f.policyResolver != nil {
-				f.policyResolver.Invalidate(nil, nil)
-			}
-		}
-	}
-
-	// JKEY restore — decode the JWT signing keys from the JKEY trailer.
-	// If no trailer was present (legacy snapshot or no keys generated yet),
-	// clear the store for back-compat.
-	if len(jkeyData) > 0 {
-		jkeyCurrent, jkeyPrevious, err := decodeJWTKeyStore(jkeyData)
-		if err != nil {
-			return fmt.Errorf("meta_fsm: Restore: decode JKEY: %w", err)
-		}
-		f.jwtKeyStore.ReplaceAll(jkeyCurrent, jkeyPrevious)
+	// JKEY commit.
+	if hasJKEYData {
+		f.jwtKeyStore.ReplaceAll(newJkeyCurrent, newJkeyPrevious)
 		// Rebuild the local in-process KeySet so same-process callers can
 		// verify tokens without another Seal/Open round-trip.
-		if f.dekKeeper != nil {
-			var seeds []iamjwt.KeySeed
-			if jkeyCurrent != nil {
-				seeds = append(seeds, *jkeyCurrent)
-			}
-			if jkeyPrevious != nil {
-				seeds = append(seeds, *jkeyPrevious)
-			}
-			if err := f.jwtKeys.LoadFromSeeds(seeds, f.dekKeeper); err != nil {
-				return fmt.Errorf("meta_fsm: Restore: rebuild jwt KeySet: %w", err)
-			}
+		var seeds []iamjwt.KeySeed
+		if newJkeyCurrent != nil {
+			seeds = append(seeds, *newJkeyCurrent)
+		}
+		if newJkeyPrevious != nil {
+			seeds = append(seeds, *newJkeyPrevious)
+		}
+		if err := f.jwtKeys.LoadFromSeeds(seeds, f.dekKeeper); err != nil {
+			return fmt.Errorf("meta_fsm: Restore: rebuild jwt KeySet: %w", err)
 		}
 	} else {
 		f.jwtKeyStore.ReplaceAll(nil, nil)

@@ -125,9 +125,13 @@ func IcebergClaimsFromContext(ctx context.Context) *iamjwt.Claims {
 	return v
 }
 
-// catalogWarehouse returns the warehouse to use for a given catalog request.
-// It prefers the warehouse in the JWT claims (bearer path), falling back to
-// the catalog's configured default warehouse (SigV4 or anon path).
+// catalogWarehouse returns the warehouse to use for catalog operations.
+// Priority:
+//  1. claims.Warehouse from the verified JWT (bearer path)
+//  2. store.Warehouse() as fallback when no claims present (SigV4 anon path)
+//
+// Bearer requests always use the JWT-bound warehouse, even if the catalog
+// has a different default.
 func catalogWarehouse(ctx context.Context, store warehouseProvider) string {
 	if claims := IcebergClaimsFromContext(ctx); claims != nil && claims.Warehouse != "" {
 		return claims.Warehouse

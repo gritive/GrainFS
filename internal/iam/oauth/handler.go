@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -67,20 +68,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope must contain PRINCIPAL_ROLE:<warehouse>.
-	warehouse := extractWarehouse(r.Form.Get("scope"))
-	if warehouse == "" {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "scope must include PRINCIPAL_ROLE:<warehouse>")
+	// scope must contain exactly one PRINCIPAL_ROLE:<warehouse>.
+	warehouse, scopeErr := extractWarehouse(r.Form.Get("scope"))
+	if scopeErr != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", scopeErr.Error())
 		return
 	}
 
 	saID, storedSecret, err := h.sa.LookupByAccessKey(r.Context(), cid)
 	if err != nil {
-		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "unknown or revoked credential")
+		// Run a dummy compare so unknown/revoked access_key and wrong-secret paths
+		// consume the same amount of time — prevents access_key enumeration via
+		// timing side-channel (F8).
+		subtle.ConstantTimeCompare(make([]byte, 32), make([]byte, 32))
+		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
 		return
 	}
 	if subtle.ConstantTimeCompare(storedSecret, []byte(csec)) != 1 {
-		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "wrong secret")
+		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
 		return
 	}
 
@@ -109,14 +114,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// extractWarehouse parses "PRINCIPAL_ROLE:<name>" from a space-delimited scope string.
-func extractWarehouse(scope string) string {
+// extractWarehouse parses exactly one "PRINCIPAL_ROLE:<name>" token from a
+// space-delimited scope string.  Returns an error if zero or more than one
+// PRINCIPAL_ROLE token is present.
+func extractWarehouse(scope string) (string, error) {
+	var found []string
 	for _, part := range strings.Fields(scope) {
 		if strings.HasPrefix(part, "PRINCIPAL_ROLE:") {
-			return strings.TrimPrefix(part, "PRINCIPAL_ROLE:")
+			found = append(found, strings.TrimPrefix(part, "PRINCIPAL_ROLE:"))
 		}
 	}
-	return ""
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("scope must include PRINCIPAL_ROLE:<warehouse>")
+	default:
+		return "", fmt.Errorf("scope must contain exactly one PRINCIPAL_ROLE:<warehouse> token")
+	}
 }
 
 func clientIP(r *http.Request) string {
