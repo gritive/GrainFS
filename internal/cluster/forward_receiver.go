@@ -655,7 +655,17 @@ func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transpo
 	// inherits ListObjectsPage. Honoring marker here keeps forwarded reads
 	// paginating correctly past the first window — pre-fix this dropped
 	// every page beyond marker silently because args carried no marker.
-	objs, _, err := dg.Backend().ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
+	//
+	// The forward reply has no dedicated `truncated` slot, so we encode it
+	// in the length: request maxKeys+1 entries and let the coordinator
+	// detect truncation via `len(objs) > maxKeys`. Without the +1 the
+	// receiver caps at maxKeys, the coordinator sees ≤maxKeys, and
+	// IsTruncated is permanently false on cross-group reads.
+	probeMax := maxKeys
+	if probeMax > 0 {
+		probeMax = maxKeys + 1
+	}
+	objs, _, err := dg.Backend().ListObjectsPage(ctx, bucket, prefix, marker, probeMax)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}

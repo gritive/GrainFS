@@ -88,10 +88,23 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 				"the requested partnumber is not satisfiable for this object")
 			return
 		}
-		rangeHeader = fmt.Sprintf("bytes=%d-%d", start, end)
 		etag = fmt.Sprintf("\"%s\"", partETag)
 		c.Header("ETag", etag)
 		c.Header("x-amz-mp-parts-count", strconv.Itoa(partsCount))
+		// Zero-byte parts (Size==0) have end<start by construction; the
+		// Range body path rejects that and 416s. Short-circuit here with
+		// an explicit empty 206 + Content-Range/Content-Length so the
+		// GET response is a real "no bytes for this part".
+		if end < start {
+			if !checkConditionals(c, etag, obj.LastModified) {
+				return
+			}
+			c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
+			c.Header("Content-Length", "0")
+			c.Status(consts.StatusPartialContent)
+			return
+		}
+		rangeHeader = fmt.Sprintf("bytes=%d-%d", start, end)
 	}
 
 	if !checkConditionals(c, etag, obj.LastModified) {
