@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.262.16] - 2026-05-19 - test(e2e): wrap remaining standalone E2Es in SingleNode/Cluster4Node sub-tests
+
+`TestVolumeCLIAutoDiscoveryE2E` and `TestVolumeDataPlaneGuardE2E` landed in v0.0.262.14 as standalone E2Es. Even though one is fixture-independent (CLI hint check before any server connection) and the other only needs an HTTP endpoint, **every e2e entry point in the suite must follow the dual SingleNode/Cluster4Node shape** for grep/inventory consistency. This PR brings the two stragglers into the pattern.
+
+### Shape
+
+```
+TestVolumeCLIAutoDiscoveryE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeCLIAutoDiscoveryCases(t)
+                                └─ t.Run("HintWhenNoEndpoint")
+
+TestVolumeDataPlaneGuardE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeDataPlaneGuardCases(t, tgt s3Target)
+                                └─ t.Run("VolumesPathDoesNotExposeAdminShape")
+```
+
+### Changed
+
+- `TestVolumeCLIAutoDiscoveryE2E`: both branches reference the corresponding shared fixture (`newSingleNodeS3Target()` / `newSharedClusterS3Target(t)`) to keep the boot ordering consistent with the rest of the suite, then run the same CLI hint check in `HintWhenNoEndpoint`. The check is identical on both branches by design — it asserts behavior of the binary itself, not of any fixture.
+- `TestVolumeDataPlaneGuardE2E`: uses `tgt.endpoint(0)` instead of a per-test `startTestServer`; runs against shared single + shared cluster fixtures.
+
+Verified: `make build` clean; e2e package compiles (`go test -c`).
+
 ## [0.0.262.15] - 2026-05-19 - test(e2e): dual-integrate Dashboard set
 
 Three Dashboard entry points (scattered across three files) collapsed into one entry, `TestDashboardE2E`, with the canonical dual fixture pattern.

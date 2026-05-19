@@ -128,36 +128,59 @@ func containsFlag(args []string, flag string) bool {
 	return false
 }
 
-// TestVolumeCLIAutoDiscoveryE2E — fixture-independent CLI behavior: when the
-// binary is invoked without --endpoint in a cwd that has no grainfs context,
-// it must print an actionable failure message rather than a stack trace. No
-// single/cluster split because the failure is computed before any server
-// connection.
+// TestVolumeCLIAutoDiscoveryE2E — CLI auto-discovery hint when the binary is
+// invoked without --endpoint in a cwd with no grainfs context. The CLI check
+// runs before any server connection, but the test set is still run against
+// both fixtures for shape parity with the rest of the suite.
 func TestVolumeCLIAutoDiscoveryE2E(t *testing.T) {
-	cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
-	require.NoError(t, err)
-	defer os.RemoveAll(cwd)
+	t.Run("SingleNode", func(t *testing.T) {
+		_ = newSingleNodeS3Target()
+		runVolumeCLIAutoDiscoveryCases(t)
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+		runVolumeCLIAutoDiscoveryCases(t)
+	})
+}
 
-	binary, err := filepath.Abs(getBinary())
-	require.NoError(t, err)
-	cmd := exec.Command(binary, "volume", "list")
-	cmd.Dir = cwd
-	out, err := cmd.CombinedOutput()
-	require.Error(t, err)
-	require.Contains(t, string(out), "admin endpoint not configured")
-	require.Contains(t, string(out), "Hint")
+func runVolumeCLIAutoDiscoveryCases(t *testing.T) {
+	t.Helper()
+	t.Run("HintWhenNoEndpoint", func(t *testing.T) {
+		cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
+		require.NoError(t, err)
+		defer os.RemoveAll(cwd)
+
+		binary, err := filepath.Abs(getBinary())
+		require.NoError(t, err)
+		cmd := exec.Command(binary, "volume", "list")
+		cmd.Dir = cwd
+		out, err := cmd.CombinedOutput()
+		require.Error(t, err)
+		require.Contains(t, string(out), "admin endpoint not configured")
+		require.Contains(t, string(out), "Hint")
+	})
 }
 
 // TestVolumeDataPlaneGuardE2E — regression: data-plane /volumes/* admin
 // endpoints must be removed (A6). /volumes/ falls through to the S3 bucket
 // handler (it matches /:bucket/), so it must NOT return admin-shaped JSON.
-// HTTP-level data plane check, not an admin CLI invocation.
 func TestVolumeDataPlaneGuardE2E(t *testing.T) {
-	_, port, _ := startTestServer(t)
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/volumes/", port))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	require.NotContains(t, string(body), `"volumes":`,
-		"data plane should no longer expose the admin volumes endpoint")
+	t.Run("SingleNode", func(t *testing.T) {
+		runVolumeDataPlaneGuardCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runVolumeDataPlaneGuardCases(t, newSharedClusterS3Target(t))
+	})
+}
+
+func runVolumeDataPlaneGuardCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	t.Run("VolumesPathDoesNotExposeAdminShape", func(t *testing.T) {
+		resp, err := http.Get(tgt.endpoint(0) + "/volumes/")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		require.NotContains(t, string(body), `"volumes":`,
+			"data plane should no longer expose the admin volumes endpoint")
+	})
 }
