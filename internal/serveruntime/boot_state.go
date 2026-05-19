@@ -11,6 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/dashboard"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -92,6 +93,7 @@ type bootState struct {
 	iamPolicyStores  *IAMStores
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
+	dekKeeper        *encrypt.DEKKeeper
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
