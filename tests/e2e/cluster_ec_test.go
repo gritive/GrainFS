@@ -373,7 +373,7 @@ func TestClusterEC3NodeActiveKM21E2E(t *testing.T) {
 // This validates the TODOS.md requirement:
 // "N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오."
 func TestClusterECTopologyChangeE2E(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+	t.Run("Cluster6to5Node", func(t *testing.T) {
 		binary := getBinary()
 		if _, err := os.Stat(binary); err != nil {
 		}
