@@ -170,7 +170,7 @@ echo "[bench] writable target node-$TARGET_INDEX on :$TARGET_PORT"
 sleep "${CLUSTER_WARMUP_SLEEP:-5}"
 
 echo "[bench] creating Iceberg warehouse bucket ($ICEBERG_BUCKET)..."
-bench_create_bucket_admin_retry "$BINARY" "$BENCH_DIR/n$TARGET_INDEX" "$ICEBERG_BUCKET"
+bench_create_bucket_with_policy_admin_retry "$BINARY" "$BENCH_DIR/n$TARGET_INDEX" "$ICEBERG_BUCKET" "$SA_ID" bucket-admin
 
 PROFILE_DIR="${PROFILE_ROOT:-benchmarks/profiles/iceberg-table-${NODE_COUNT}-node-cluster-warp-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$PROFILE_DIR"

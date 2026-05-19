@@ -32,3 +32,15 @@ func TestBenchS3CompatPrecreatesLocalGrainFSWarpBuckets(t *testing.T) {
 		t.Fatalf("prepare_grainfs_warp_bucket must run before run_warp_case")
 	}
 }
+
+func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
+	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	if !strings.Contains(script, `bench_create_bucket_with_policy_admin_retry "$BINARY" "$BENCH_DIR/n$TARGET_INDEX" "$ICEBERG_BUCKET" "$SA_ID" bucket-admin`) {
+		t.Fatalf("bench_iceberg_table_cluster.sh must create the warehouse bucket with bucket-admin attached to the benchmark SA")
+	}
+}
