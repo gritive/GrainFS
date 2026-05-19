@@ -60,6 +60,56 @@ Work these in order. Do not run them in parallel.
 
 ## Next
 
+- [ ] **Auth redesign DX follow-ups** (from `docs/superpowers/specs/2026-05-19-auth-redesign.md`
+  Codex review, medium+cosmetic tier). All single-PR-sized, ship after the main
+  redesign lands:
+    - [ ] `grainfs iam explain --sa X --s3 put s3://bucket/key` — request-shaped
+      simulator that maps a natural sentence onto the underlying
+      `(action, resource, condition)` tuple. Wraps `grainfs iam policy simulate`.
+    - [ ] `grainfs iceberg secret duckdb --warehouse X --sa Y` and `grainfs
+      iceberg catalog spark|trino --warehouse X --sa Y` — emit copy-paste config
+      blocks per client. Reduces per-warehouse-token UX tax.
+    - [ ] `grainfs iam jwt-key rotate --auto-prune-after-ttl` — scheduler-friendly
+      one-shot rotation that runs prune after the TTL window elapses. Optional
+      systemd timer / k8s CronJob example in operator docs.
+    - [ ] `grainfs doctor auth --warehouse X --sa Y` — health check that walks
+      the entire auth path (TLS reachability, socket access, SA exists, policies
+      attached, JWT key state, bucket exists, client URL base sane) and prints
+      the first broken link.
+    - [ ] `docs/users/minio-muscle-memory-map.md` — `mc admin policy info` →
+      `grainfs iam policy get`, `mc admin user add` → `grainfs iam sa create`,
+      `aws s3api put-bucket-policy` → `grainfs iam bucket policy put` (admin
+      UDS), `mc console` → (no equivalent yet). Per-row "why different" column.
+    - [ ] Policy template library at `docs/users/iam-policy-templates/`:
+      `readonly-bucket.json`, `readwrite-bucket.json`, `write-prefix.json`,
+      `read-prefix-from-cidr.json`, `iceberg-readwrite-warehouse.json`. Each
+      template is a starting JSON with comments + a sed-friendly bucket name
+      placeholder. Wired into `grainfs iam policy create --from-template <name>
+      --bucket <b>`.
+    - [ ] Adjust spec/docs language: "AWS IAM JSON subset" everywhere instead of
+      "AWS-IAM-compatible." Banner block in `docs/users/iam-policy-from-aws.md`
+      enumerating the unsupported constructs (`NotAction`, policy variables,
+      most condition keys, inline policies, account principals).
+    - [ ] Built-in policy attach warning surface (covered in spec, but TODO is
+      the docs sentence — explain in `docs/users/iam-policy-from-aws.md` why
+      `readwrite` is "global-readwrite" semantically and link to the per-bucket
+      template.
+    - [ ] `grainfs doctor snapshot` — preflight check that operators run on an
+      old binary before installing a new one. Walks the meta-FSM snapshot,
+      reports schema version + compatibility with a target binary version.
+      Mitigates the "fail-loud cluster won't start" surprise for private
+      cluster evaluators.
+    - [ ] `docs/operators/containerization.md` — exact chmod/chown/socket-dir
+      behavior for admin UDS under rootless containers, systemd units, mounted
+      sockets, sidecars, CI users. Failure messages spelled out so operators
+      can grep them.
+    - [ ] Error-message SA-ID exposure decision — keep current "SA <id> lacks
+      ..." or replace external surface with `access_key_suffix` (last 4 chars),
+      moving full SA id to audit log only. Needs explicit ADR.
+    - [ ] External Iceberg client first-tier-only docs — keep warp + DuckDB as
+      tested examples; demote Trino/Spark/PyIceberg/Flink to "configuration
+      pattern, not e2e verified" until each gets its own e2e cell. Avoids stale
+      docs claiming compatibility we haven't measured.
 - [ ] **NFS `rdattr_error` required gap**: implement READDIR per-entry
   attribute error semantics.
 - [ ] **pynfs/nfstest conformance matrix**: publish nightly/basic suite results
@@ -139,6 +189,13 @@ Work these in order. Do not run them in parallel.
   reopen when their telemetry triggers fire.
 - [ ] **Incident store scope index / `ScanObjects(bucket, keyPrefix)`**: reopen
   when measured margins fail or a concrete caller needs prefix scope.
+- [ ] **NFSv4 / NBD auth integration with SA model**: reopen after the
+  S3+Iceberg IAM redesign (admin-UDS-only bucket lifecycle, 2-tier
+  None/Read/Write, OAuth2 bearer for Iceberg) lands. Today NFSv4 relies on
+  AUTH_SYS / RPCSEC_GSS and NBD on TLS X.509 / LAN trust. Decide how (or
+  whether) mount-time credentials map onto SA + per-bucket Grant, and how
+  NFS uid/gid is reconciled with `(SA, Bucket, Role)`. Out of scope for the
+  current IAM grilling.
 
 ## NFSv4 RFC 8881 Follow-Ups
 

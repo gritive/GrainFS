@@ -136,6 +136,16 @@ func NewPackedBackendWithOptions(inner storage.Backend, blobDir string, threshol
 		stopSave:  make(chan struct{}),
 	}
 
+	// Recover the in-memory index from disk (index.bin or, if missing,
+	// rebuild via blob-file scan). Without this, packed objects PUT before
+	// a restart become invisible to LIST/GET — the in-memory index starts
+	// empty and PackedBackend.{ListObjectsPage, HeadObject, GetObject} all
+	// consult it as the authoritative reference to blob_*.bin contents.
+	if err := pb.LoadIndex(); err != nil {
+		_ = bs.Close()
+		return nil, fmt.Errorf("load packed index: %w", err)
+	}
+
 	go pb.periodicSave(30 * time.Second)
 
 	return pb, nil
@@ -869,18 +879,91 @@ func (pb *PackedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	return objects, nil
 }
 
+// RestoreObjects restores the packed in-memory index from surviving on-disk
+// blob files for any snapshot entries whose (bucket,key) tuple is present in
+// the blob store, and delegates remaining entries to the inner backend.
+//
+// Why the split: small objects PUT via the packblob fast path live ONLY in
+// blob_*.bin (the cluster meta/EC path is bypassed at PutObject time). The
+// previous behavior — wipe in-memory index, delegate everything to inner —
+// orphaned packed data: LIST returned 0 because PackedBackend.ListObjectsPage
+// supplements from the cleared index, while CC.ListObjectsPage reads the
+// meta-FSM ObjectIndex which never received those PUTs either. The fix
+// rebuilds the packed index from disk for entries the snapshot kept, so both
+// LIST (via index supplementation) and GET (via blobStore.Read) recover.
+//
+// Stale on-disk entries (PUT after the snapshot point — present in
+// blob_*.bin but not in the snapshot list) are not re-indexed. They become
+// inaccessible to LIST/GET, with on-disk space recovered by background blob
+// orphan sweep on a best-effort cadence (see compaction).
 func (pb *PackedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
 	snap, ok := pb.inner.(storage.Snapshotable)
 	if !ok {
 		return 0, nil, storage.ErrSnapshotNotSupported
 	}
-	// Clear index (best-effort; RestoreObjects is a control-plane operation
-	// not expected to race with hot-path reads/writes).
+
+	diskLocs, err := pb.blobStore.ScanAll()
+	if err != nil {
+		return 0, nil, fmt.Errorf("packblob restore: scan blob store: %w", err)
+	}
+	diskByPK := make(map[packedKey]BlobLocation, len(diskLocs))
+	for k, loc := range diskLocs {
+		if pk, ok := parsePackedKey(k); ok {
+			diskByPK[pk] = loc
+		}
+	}
+
+	// Partition snapshot entries into packed-origin (surviving on disk) vs
+	// cluster-origin (delegate to inner). The packed branch wins on collision
+	// because that's where the data physically resides.
+	type packedRestore struct {
+		key packedKey
+		loc BlobLocation
+		obj storage.SnapshotObject
+	}
+	var clusterObjs []storage.SnapshotObject
+	var packedRestores []packedRestore
+	for _, obj := range objects {
+		pk := packedKey{bucket: obj.Bucket, key: obj.Key}
+		if loc, ok := diskByPK[pk]; ok {
+			packedRestores = append(packedRestores, packedRestore{key: pk, loc: loc, obj: obj})
+			continue
+		}
+		clusterObjs = append(clusterObjs, obj)
+	}
+
+	// Delegate non-packed entries first. Inner restore also reconciles its
+	// own orphans (cluster objects no longer in the snapshot) before we
+	// touch the packed index, so a mid-flight failure leaves the cluster
+	// side consistent.
+	restored, stale, err := snap.RestoreObjects(clusterObjs)
+	if err != nil {
+		return restored, stale, err
+	}
+
+	// Rebuild packed index. Existing in-memory entries are dropped first;
+	// then snapshot-surviving packed entries are restored using metadata
+	// from the snapshot (ETag/ContentType/Modified) rather than recomputing
+	// from disk (cheaper, and preserves the snapshot's view of those fields).
 	pb.index.Range(func(k, _ any) bool {
 		pb.index.Delete(k)
 		return true
 	})
-	return snap.RestoreObjects(objects)
+	for _, pr := range packedRestores {
+		e := &indexEntry{
+			Location:     pr.loc,
+			OriginalSize: pr.obj.Size,
+			ContentType:  pr.obj.ContentType,
+			ETag:         pr.obj.ETag,
+			LastModified: pr.obj.Modified,
+			SSEAlgorithm: pr.obj.SSEAlgorithm,
+		}
+		e.Refcount.Store(1)
+		pb.index.Store(pr.key, e)
+		restored++
+	}
+
+	return restored, stale, nil
 }
 
 func (pb *PackedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
