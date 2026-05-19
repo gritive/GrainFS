@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestE2E_SeedGroups_AutoFromNodeCount(t *testing.T) {
+func TestSeedGroupsAutoFromNodeCountE2E(t *testing.T) {
 
 	const numNodes = 3
 	wantSeedGroups := numNodes * 4

@@ -15,14 +15,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_DegradedMode_WritesBlocked starts a 5-node cluster with EC 3+2,
+// TestDegradedModeWritesBlockedE2E starts a 5-node cluster with EC 3+2,
 // kills 3 nodes (leaving 2 live), and verifies that PUT requests return 503
 // once the degraded monitor detects the shortage (≤ 30 s).
 //
 // The degraded condition: liveCount(2) < MinECNodes(3) → degraded=true.
 // The monitor waits for the first interval tick to avoid startup false
 // positives, then checks at the configured interval.
-func TestE2E_DegradedMode_WritesBlocked(t *testing.T) {
+func TestDegradedModeWritesBlockedE2E(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 	}

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.262.9] - 2026-05-19 - test(e2e): rename remaining 9 cluster-only TestE2E_* stragglers
+
+PR-C follow-up to v0.0.262.7 (multiraft) and v0.0.262.8 (cluster_*). 9 remaining cluster-only functions across single-purpose files renamed to the `TestXxxE2E` suffix convention. Pure rename; bodies unchanged.
+
+### Changed
+
+- `TestE2E_RotateKey_HappyPath` → `TestRotateKeyHappyPathE2E`
+- `TestE2E_RotateKey_StatusOnlyOnSoloMode` → `TestRotateKeyStatusOnlyOnSoloModeE2E`
+- `TestE2E_DegradedMode_WritesBlocked` → `TestDegradedModeWritesBlockedE2E`
+- `TestE2E_HealReceiptAPI_3Node` → `TestHealReceiptAPI3NodeE2E`
+- `TestE2E_SeedGroups_AutoFromNodeCount` → `TestSeedGroupsAutoFromNodeCountE2E`
+- `TestE2E_NFSMultiExportPropagation_MultiNode` → `TestNFSMultiExportPropagationMultiNodeE2E`
+- `TestE2E_NBDMultiNode_ByteLevelReplication` → `TestNBDMultiNodeByteLevelReplicationE2E`
+- `TestE2E_DynamicJoinTwoSurvivorReelect` → `TestDynamicJoinTwoSurvivorReelectE2E`
+- `TestE2E_QuarantineIncident` → `TestQuarantineIncidentE2E`
+
+Cumulative across the three rename PRs (262.7 + 262.8 + 262.9): **43 cluster-only functions** now follow the consistent `TestXxxE2E` naming.
+
 ## [0.0.262.8] - 2026-05-19 - test(e2e): rename TestE2E_Cluster*/Bootstrap_* to TestXxxE2E convention (21 funcs)
 
 PR-B follow-up to the multiraft rename (v0.0.262.7). 21 cluster-only functions across the `tests/e2e/cluster_*.go` files carried the legacy `TestE2E_*_*` naming. All are cluster-topology tests (dedicated multi-node clusters, no single-node analogue), so dual-pattern wrapping adds nothing. Pure rename to the `TestXxxE2E` suffix convention; bodies unchanged.

@@ -22,7 +22,7 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 )
 
-// TestE2E_HealReceiptAPI_3Node verifies the Phase 16 Slice 2 resolution
+// TestHealReceiptAPI3NodeE2E verifies the Phase 16 Slice 2 resolution
 // chain end-to-end against a real 3-node cluster.
 //
 // Covers all four resolution paths the API exposes:
@@ -39,7 +39,7 @@ import (
 // The test sets --heal-receipt-window=1 so only the most recent receipt on
 // node C is gossiped. The older one must resolve via broadcast fallback —
 // that is the path Slice 2 exists to provide.
-func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
+func TestHealReceiptAPI3NodeE2E(t *testing.T) {
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 	}
