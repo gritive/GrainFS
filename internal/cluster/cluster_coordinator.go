@@ -1644,7 +1644,7 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, ErrCoordinatorNoRouter
 	}
 
-	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
+	if c.forward.streamDialer != nil {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
 		streamCtx := ctx
 		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)

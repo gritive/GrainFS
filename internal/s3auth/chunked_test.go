@@ -24,6 +24,16 @@ func TestDecodeAWSChunkedBody_SingleChunk(t *testing.T) {
 	assert.Equal(t, "hello, world!", string(data))
 }
 
+func TestDecodeAWSChunkedBody_ReusesInputStorage(t *testing.T) {
+	input := []byte("5;chunk-signature=sig\r\nhello\r\n0;chunk-signature=sig\r\n\r\n")
+
+	data, err := DecodeAWSChunkedBody(input)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(data))
+	require.NotEmpty(t, data)
+	require.Same(t, &input[0], &data[0])
+}
+
 func TestDecodeAWSChunkedBody_EmptyBody(t *testing.T) {
 	input := "0;chunk-signature=sig0\r\n\r\n"
 
