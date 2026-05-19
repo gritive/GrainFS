@@ -26,14 +26,20 @@ const (
 	routePathClusterRemovePeer = "/api/cluster/remove-peer"
 	routePathClusterBalancer   = "/api/cluster/balancer/status"
 	routePathLifecycleStatus   = "/api/cluster/lifecycle/status"
-	routePathAuditHealth       = "/api/audit/health"
-	routePathAuditS3           = "/api/audit/s3"
-	routePathCacheStatus       = "/api/cache/status"
-	routePathConfig            = "/api/admin/config"
-	routePathAlertsStatus      = "/api/admin/alerts/status"
-	routePathAlertsResend      = "/api/admin/alerts/resend"
-	routePathReceipts          = "/api/receipts"
-	routePathReceiptByID       = "/api/receipts/:id"
+	// Test seams for e2e: drive the in-process lifecycle worker
+	// deterministically across the HTTP boundary (the e2e test process
+	// cannot reach the in-process Service handle of the binary it spawned).
+	// SigV4-authenticated like the rest of /api/. Documented in TODOS.
+	routePathLifecycleTestRunCycle = "/api/cluster/lifecycle/test/run-cycle"
+	routePathLifecycleTestSetNow   = "/api/cluster/lifecycle/test/set-now"
+	routePathAuditHealth           = "/api/audit/health"
+	routePathAuditS3               = "/api/audit/s3"
+	routePathCacheStatus           = "/api/cache/status"
+	routePathConfig                = "/api/admin/config"
+	routePathAlertsStatus          = "/api/admin/alerts/status"
+	routePathAlertsResend          = "/api/admin/alerts/resend"
+	routePathReceipts              = "/api/receipts"
+	routePathReceiptByID           = "/api/receipts/:id"
 
 	routePathAdminHealthBadger = "/admin/health/badger"
 	routePathAdminHealthRaft   = "/admin/health/raft"

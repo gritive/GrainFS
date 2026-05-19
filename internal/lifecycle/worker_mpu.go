@@ -91,6 +91,10 @@ func (w *MPUWorker) Run(ctx context.Context) {
 // RunCycleForTest synchronously executes one scan cycle.
 func (w *MPUWorker) RunCycleForTest(ctx context.Context) { w.runCycle(ctx) }
 
+// SetNowForTest overrides the worker's time source after construction. Test-only
+// seam — production code stays on time.Now (via NewMPUWorker's default).
+func (w *MPUWorker) SetNowForTest(now func() time.Time) { w.now = now }
+
 // AbortedTotal exposes the counter for status/metrics.
 func (w *MPUWorker) AbortedTotal() int64 { return w.aborted.Load() }
 

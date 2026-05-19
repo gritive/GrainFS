@@ -319,3 +319,27 @@ func (s *Service) WorkerRunningForTest() bool {
 func (s *Service) MPUWorkerRunningForTest() bool {
 	return s.mpuWorker.Load() != nil
 }
+
+// RunCycleForTest synchronously runs one object-side cycle on the loaded
+// worker, if any. Followers (worker not loaded) return immediately. The MPU
+// worker is per-node and always loaded once Run has started, so we also
+// drive one MPU cycle in the same call. Test seam.
+func (s *Service) RunCycleForTest(ctx context.Context) {
+	if w := s.worker.Load(); w != nil {
+		w.RunCycleForTest(ctx)
+	}
+	if mpu := s.mpuWorker.Load(); mpu != nil {
+		mpu.RunCycleForTest(ctx)
+	}
+}
+
+// SetNowForTest reconfigures the clock source on any currently-loaded
+// workers. Called after Run has started. Test seam.
+func (s *Service) SetNowForTest(now func() time.Time) {
+	if w := s.worker.Load(); w != nil {
+		w.SetNowForTest(now)
+	}
+	if mpu := s.mpuWorker.Load(); mpu != nil {
+		mpu.SetNowForTest(now)
+	}
+}

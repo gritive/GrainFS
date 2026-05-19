@@ -114,6 +114,10 @@ func (w *Worker) Run(ctx context.Context) {
 // can drive a single cycle deterministically.
 func (w *Worker) RunCycleForTest(ctx context.Context) { w.runCycle(ctx) }
 
+// SetNowForTest overrides the worker's time source after construction. Test-only
+// seam — production code stays on time.Now (via NewWorker's default).
+func (w *Worker) SetNowForTest(now func() time.Time) { w.now = now }
+
 // Stats returns a copy of the current worker statistics.
 func (w *Worker) Stats() Stats {
 	var lastRun time.Time
