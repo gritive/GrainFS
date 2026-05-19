@@ -38,6 +38,27 @@ const iamSnapshotTrailerMagic uint32 = 0x47414D49
 // [u32 iam_len][u32 magic]. Always 8 bytes when present.
 const iamSnapshotTrailerLen = 8
 
+// cfgSnapshotTrailerMagic identifies the GCFG trailer appended after the IAM
+// trailer (or after the FB root when IAM is absent). Hex pairs spell "GCFG"
+// (0x47=G, 0x43=C, 0x46=F, 0x47=G, little-endian uint32 = 0x47464347).
+//
+// Wire layout (appended after existing trailers):
+//
+//	[FB root bytes]
+//	[IAM trailer bytes]       (optional, magic 0x47414D49)
+//	[configPayloadBytes]
+//	[uint32 payloadLen  LE]
+//	[uint32 magic GCFG  LE]
+//
+// Restore reads from the end: check last 4 bytes for GCFG magic, if present
+// read payloadLen, strip GCFG payload+footer, then continue IAM detection on
+// the remaining bytes.
+const cfgSnapshotTrailerMagic uint32 = 0x47464347
+
+// cfgSnapshotTrailerLen is the on-disk size of the GCFG footer:
+// [u32 payload_len][u32 magic]. Always 8 bytes when present.
+const cfgSnapshotTrailerLen = 8
+
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
 
@@ -1903,6 +1924,24 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	binary.LittleEndian.PutUint32(footer[0:4], uint32(len(iamBytes)))
 	binary.LittleEndian.PutUint32(footer[4:8], iamSnapshotTrailerMagic)
 	out = append(out, footer[:]...)
+
+	// Append GCFG trailer after the IAM trailer. Only emit when there are
+	// explicit config values to persist — an empty map produces no trailer so
+	// old snapshots (taken from a fresh cluster with no overrides) remain
+	// indistinguishable from pre-Task-10 snapshots.
+	if f.cfgStore != nil {
+		if cfgValues := f.cfgStore.Snapshot(); len(cfgValues) > 0 {
+			cfgPayload, err := encodeMetaConfigSnapshot(cfgValues)
+			if err != nil {
+				return nil, fmt.Errorf("meta_fsm: Snapshot: encode config: %w", err)
+			}
+			var cfgFooter [cfgSnapshotTrailerLen]byte
+			binary.LittleEndian.PutUint32(cfgFooter[0:4], uint32(len(cfgPayload)))
+			binary.LittleEndian.PutUint32(cfgFooter[4:8], cfgSnapshotTrailerMagic)
+			out = append(out, cfgPayload...)
+			out = append(out, cfgFooter[:]...)
+		}
+	}
 	return out, nil
 }
 
@@ -1915,23 +1954,43 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
 
-	// Detect post-Phase-5d trailer (footer = [u32 iam_len][u32 magic=IAMG]).
+	// Peel GCFG trailer first (it is at the absolute end when present).
+	// Layout: [FB bytes][IAM trailer][cfgPayload][u32 cfgLen][u32 cfgMagic].
+	// After stripping GCFG, the remaining bytes look exactly like a pre-Task-10
+	// snapshot, so the IAM detection below runs unmodified.
+	remaining := data
+	var cfgData []byte
+	if len(remaining) >= cfgSnapshotTrailerLen {
+		cfgFooter := remaining[len(remaining)-cfgSnapshotTrailerLen:]
+		if binary.LittleEndian.Uint32(cfgFooter[4:8]) == cfgSnapshotTrailerMagic {
+			cfgLen := binary.LittleEndian.Uint32(cfgFooter[0:4])
+			if int(cfgLen)+cfgSnapshotTrailerLen > len(remaining) {
+				return fmt.Errorf("meta_fsm: Restore: GCFG trailer length %d exceeds snapshot size %d", cfgLen, len(remaining))
+			}
+			cfgEnd := len(remaining) - cfgSnapshotTrailerLen
+			cfgStart := cfgEnd - int(cfgLen)
+			cfgData = remaining[cfgStart:cfgEnd]
+			remaining = remaining[:cfgStart]
+		}
+	}
+
+	// Detect post-Phase-5d IAM trailer (footer = [u32 iam_len][u32 magic=IAMG]).
 	// Layout when present: [FB bytes][iam bytes][u32 iam_len][u32 magic].
 	// Legacy snapshots end at the FB root and are accepted unchanged.
-	fbData := data
+	fbData := remaining
 	var iamData []byte
-	if len(data) >= iamSnapshotTrailerLen {
-		footer := data[len(data)-iamSnapshotTrailerLen:]
+	if len(remaining) >= iamSnapshotTrailerLen {
+		footer := remaining[len(remaining)-iamSnapshotTrailerLen:]
 		magic := binary.LittleEndian.Uint32(footer[4:8])
 		if magic == iamSnapshotTrailerMagic {
 			iamLen := binary.LittleEndian.Uint32(footer[0:4])
-			if int(iamLen)+iamSnapshotTrailerLen > len(data) {
-				return fmt.Errorf("meta_fsm: Restore: IAM trailer length %d exceeds snapshot size %d", iamLen, len(data))
+			if int(iamLen)+iamSnapshotTrailerLen > len(remaining) {
+				return fmt.Errorf("meta_fsm: Restore: IAM trailer length %d exceeds snapshot size %d", iamLen, len(remaining))
 			}
-			iamEnd := len(data) - iamSnapshotTrailerLen
+			iamEnd := len(remaining) - iamSnapshotTrailerLen
 			iamStart := iamEnd - int(iamLen)
-			iamData = data[iamStart:iamEnd]
-			fbData = data[:iamStart]
+			iamData = remaining[iamStart:iamEnd]
+			fbData = remaining[:iamStart]
 		}
 	}
 
@@ -2168,6 +2227,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
 				}
 			}
+		}
+	}
+
+	// GCFG restore — populate the config store from the GCFG trailer.
+	// If no trailer was present (legacy snapshot or no overrides), leave the
+	// store empty so registered defaults take effect via GetX fallback.
+	if len(cfgData) > 0 {
+		if f.cfgStore == nil {
+			log.Warn().Int("cfg_len", len(cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
+		} else {
+			values, err := decodeMetaConfigSnapshot(cfgData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
+			}
+			f.cfgStore.Restore(values)
 		}
 	}
 	return nil

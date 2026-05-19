@@ -3,8 +3,63 @@ package cluster
 import (
 	"fmt"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
+
+// encodeMetaConfigSnapshot serializes a map[string]string into a
+// MetaConfigSnapshot FlatBuffers buffer used as the GCFG trailer payload.
+func encodeMetaConfigSnapshot(entries map[string]string) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+
+	// Build ConfigEntry offsets in reverse order (FlatBuffers convention).
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
+	}
+
+	entryOffs := make([]flatbuffers.UOffsetT, len(keys))
+	for i := len(keys) - 1; i >= 0; i-- {
+		k := keys[i]
+		kOff := b.CreateString(k)
+		vOff := b.CreateString(entries[k])
+		clusterpb.ConfigEntryStart(b)
+		clusterpb.ConfigEntryAddKey(b, kOff)
+		clusterpb.ConfigEntryAddValue(b, vOff)
+		entryOffs[i] = clusterpb.ConfigEntryEnd(b)
+	}
+
+	clusterpb.MetaConfigSnapshotStartEntriesVector(b, len(entryOffs))
+	for i := len(entryOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(entryOffs[i])
+	}
+	entriesVec := b.EndVector(len(entryOffs))
+
+	clusterpb.MetaConfigSnapshotStart(b)
+	clusterpb.MetaConfigSnapshotAddEntries(b, entriesVec)
+	return fbFinish(b, clusterpb.MetaConfigSnapshotEnd(b)), nil
+}
+
+// decodeMetaConfigSnapshot parses a MetaConfigSnapshot FlatBuffers buffer
+// and returns the key→value map.
+func decodeMetaConfigSnapshot(data []byte) (map[string]string, error) {
+	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaConfigSnapshot {
+		return clusterpb.GetRootAsMetaConfigSnapshot(d, 0)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("config_codec: MetaConfigSnapshot: %w", err)
+	}
+
+	out := make(map[string]string, snap.EntriesLength())
+	var entry clusterpb.ConfigEntry
+	for i := 0; i < snap.EntriesLength(); i++ {
+		if snap.Entries(&entry, i) {
+			out[string(entry.Key())] = string(entry.Value())
+		}
+	}
+	return out, nil
+}
 
 // encodeMetaConfigPutCmd serializes a ConfigPut payload (inner data bytes of
 // a MetaCmd envelope — wrap with encodeMetaCmd to get the full envelope).

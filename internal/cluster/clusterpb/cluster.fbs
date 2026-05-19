@@ -651,6 +651,19 @@ table NfsExportBucketDeleteCascadeCmd {
   force:bool = false;
 }
 
+// MetaConfigSnapshot is the GCFG trailer payload: a snapshot of all
+// explicitly-set cluster-wide config key→value pairs (config.Store).
+// Wire position: appended after the IAM trailer (if any) as described by
+// the GCFG trailer convention in meta_fsm.go.
+table ConfigEntry {
+  key:string;
+  value:string;
+}
+
+table MetaConfigSnapshot {
+  entries:[ConfigEntry];
+}
+
 table MetaStateSnapshot {
   nodes:[MetaNodeEntry];
   shard_groups:[ShardGroupEntry];             // PR-C
