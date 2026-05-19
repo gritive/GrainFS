@@ -69,6 +69,7 @@ const (
 	MetaCmdTypePolicyAttachToGroupDelete    MetaCmdType = 59
 	MetaCmdTypeBucketPolicyPut              MetaCmdType = 60
 	MetaCmdTypeBucketPolicyDelete           MetaCmdType = 61
+	MetaCmdTypeCreateBucketWithPolicyAttach MetaCmdType = 62
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -134,6 +135,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypePolicyAttachToGroupDelete:    "PolicyAttachToGroupDelete",
 	MetaCmdTypeBucketPolicyPut:              "BucketPolicyPut",
 	MetaCmdTypeBucketPolicyDelete:           "BucketPolicyDelete",
+	MetaCmdTypeCreateBucketWithPolicyAttach: "CreateBucketWithPolicyAttach",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -199,6 +201,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"PolicyAttachToGroupDelete":    MetaCmdTypePolicyAttachToGroupDelete,
 	"BucketPolicyPut":              MetaCmdTypeBucketPolicyPut,
 	"BucketPolicyDelete":           MetaCmdTypeBucketPolicyDelete,
+	"CreateBucketWithPolicyAttach": MetaCmdTypeCreateBucketWithPolicyAttach,
 }
 
 func (v MetaCmdType) String() string {

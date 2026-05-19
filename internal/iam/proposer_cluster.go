@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
@@ -54,4 +55,21 @@ func (m *MetaProposer) ProposeBucketUpstreamCutover(ctx context.Context, bucket 
 		return fmt.Errorf("iam: bucket upstream cutover proposer not configured")
 	}
 	return m.Cutover(ctx, bucket)
+}
+
+func (m *MetaProposer) ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach, buildCreateBucketWithPolicyAttachPayload(bucket, sa, policy))
+}
+
+func buildCreateBucketWithPolicyAttachPayload(bucket, sa, policy string) []byte {
+	b := flatbuffers.NewBuilder(64)
+	bucketOff := b.CreateString(bucket)
+	saOff := b.CreateString(sa)
+	polOff := b.CreateString(policy)
+	clusterpb.MetaCreateBucketWithPolicyAttachCmdStart(b)
+	clusterpb.MetaCreateBucketWithPolicyAttachCmdAddBucket(b, bucketOff)
+	clusterpb.MetaCreateBucketWithPolicyAttachCmdAddAttachSa(b, saOff)
+	clusterpb.MetaCreateBucketWithPolicyAttachCmdAddAttachPolicy(b, polOff)
+	b.Finish(clusterpb.MetaCreateBucketWithPolicyAttachCmdEnd(b))
+	return b.FinishedBytes()
 }

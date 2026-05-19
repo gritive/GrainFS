@@ -22,6 +22,20 @@ func AdminCreateBucket(ctx context.Context, d *Deps, req CreateBucketAdminReq) (
 		}
 		return BucketInfo{}, NewInternal("create bucket: " + err.Error())
 	}
+	// Attach path: when both attach_sa and attach_policy are provided, propose
+	// MetaCmd 62 (IAM half). On failure, roll back by deleting the bucket so
+	// the caller sees a clean error (D#13 sequenced approach, F#2 atomicity).
+	if req.AttachSA != "" && req.AttachPolicy != "" {
+		if d.BucketWithPolicyProp == nil {
+			// Best-effort rollback before returning.
+			_ = d.Buckets.DeleteBucket(ctx, req.Name)
+			return BucketInfo{}, NewInternal("bucket-with-policy proposer not configured")
+		}
+		if err := d.BucketWithPolicyProp.ProposeCreateBucketWithPolicyAttach(ctx, req.Name, req.AttachSA, req.AttachPolicy); err != nil {
+			_ = d.Buckets.DeleteBucket(ctx, req.Name)
+			return BucketInfo{}, NewInternal("attach policy: " + err.Error())
+		}
+	}
 	return BucketInfo{Name: req.Name}, nil
 }
 

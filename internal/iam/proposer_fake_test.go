@@ -109,6 +109,12 @@ func (f *fakeProposer) ProposeBucketUpstreamCutover(_ context.Context, bucket st
 	return f.bucketUpstreamCutoverErr
 }
 
+func (f *fakeProposer) ProposeCreateBucketWithPolicyAttach(_ context.Context, bucket, sa, policy string) error {
+	f.calls = append(f.calls, "CreateBucketWithPolicyAttach:"+bucket+":"+sa+":"+policy)
+	f.dispatched = append(f.dispatched, "CreateBucketWithPolicyAttach")
+	return nil
+}
+
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

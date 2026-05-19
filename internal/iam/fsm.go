@@ -30,6 +30,12 @@ func NewApplier(store *Store, enc *encrypt.Encryptor) *Applier {
 // through SetIAM.
 func (a *Applier) Encryptor() *encrypt.Encryptor { return a.enc }
 
+// SAExists reports whether a ServiceAccount with the given ID exists in the store.
+func (a *Applier) SAExists(saID string) bool {
+	_, ok := a.store.LookupSA(saID)
+	return ok
+}
+
 // ApplySACreate decodes a SACreatePayload and inserts the SA. Idempotent
 // on existing sa_id (returns nil) — guards follower replay and the
 // leader-only bootstrap race.

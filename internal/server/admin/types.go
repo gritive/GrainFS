@@ -15,23 +15,24 @@ import (
 // Deps bundles the shared dependencies required by every admin handler.
 // Caller is responsible for constructing this struct at process startup.
 type Deps struct {
-	Manager         *volume.Manager
-	Incident        incident.StateStore   // List(ctx, limit) — optional, nil OK
-	Director        DirectorAPI           // optional; nil disables scrub admin endpoints
-	PeerHealth      PeerHealthAPI         // optional; nil disables cluster peer admin endpoints
-	VlogBreakdown   VlogBreakdownAPI      // optional; nil disables vlog breakdown endpoint
-	ScrubProposer   ScrubProposer         // optional; nil disables POST /v1/scrub
-	Execution       execution.Executor    // optional; nil uses existing ScrubProposer path
-	ScrubAggregator ScrubAggregator       // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
-	VolumePlacement VolumePlacementSource // optional; nil disables replica/EC volume health signal
-	IAM             IAMService            // optional; nil disables IAM admin endpoints
-	Buckets         BucketOps             // optional; nil disables bucket CRUD admin endpoints
-	NfsExports      NfsExportService      // optional; nil disables NFS export admin endpoints
-	Protocols       StorageProtocolStatusResp
-	NFSDiag         NFSDiag // optional; nil disables live NFS lookup/client diagnostics
-	Token           *dashboard.TokenStore
-	PublicURL       string // e.g. "https://node1:9000"; empty means use localhost fallback
-	NodeID          string
+	Manager              *volume.Manager
+	Incident             incident.StateStore      // List(ctx, limit) — optional, nil OK
+	Director             DirectorAPI              // optional; nil disables scrub admin endpoints
+	PeerHealth           PeerHealthAPI            // optional; nil disables cluster peer admin endpoints
+	VlogBreakdown        VlogBreakdownAPI         // optional; nil disables vlog breakdown endpoint
+	ScrubProposer        ScrubProposer            // optional; nil disables POST /v1/scrub
+	Execution            execution.Executor       // optional; nil uses existing ScrubProposer path
+	ScrubAggregator      ScrubAggregator          // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
+	VolumePlacement      VolumePlacementSource    // optional; nil disables replica/EC volume health signal
+	IAM                  IAMService               // optional; nil disables IAM admin endpoints
+	BucketWithPolicyProp BucketWithPolicyProposer // optional; nil → create-only path (no attach)
+	Buckets              BucketOps                // optional; nil disables bucket CRUD admin endpoints
+	NfsExports           NfsExportService         // optional; nil disables NFS export admin endpoints
+	Protocols            StorageProtocolStatusResp
+	NFSDiag              NFSDiag // optional; nil disables live NFS lookup/client diagnostics
+	Token                *dashboard.TokenStore
+	PublicURL            string // e.g. "https://node1:9000"; empty means use localhost fallback
+	NodeID               string
 }
 
 type WriteAtVolumeReq = adminapi.WriteAtVolumeReq

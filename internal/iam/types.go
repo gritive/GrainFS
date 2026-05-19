@@ -18,6 +18,11 @@ type Proposer interface {
 	ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error
 	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
 	ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error
+	// ProposeCreateBucketWithPolicyAttach proposes the IAM half of the
+	// sequenced create-bucket+attach operation (MetaCmd 62, D#13). bucket is
+	// informational for cache invalidation; sa and policy are the attach pair.
+	// Both sa and policy empty = create-only path (no-op IAM half).
+	ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error
 }
 
 // KeyStatus represents whether an AccessKey is usable for SigV4 verification.

@@ -145,6 +145,7 @@ const (
 	MetaCmdTypePolicyAttachToGroupDelete    = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
 	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
 	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
+	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -708,6 +709,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyBucketPolicyPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketPolicyDelete:
 		return f.applyBucketPolicyDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
+		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		if f.dekKeeper == nil {
 			return nil
@@ -1189,6 +1192,53 @@ func (f *MetaFSM) applyBucketPolicyDelete(payload []byte) error {
 	if f.policyResolver != nil {
 		// Only cache entries for this bucket are stale.
 		f.policyResolver.Invalidate(nil, []string{bucket})
+	}
+	return nil
+}
+
+// applyCreateBucketWithPolicyAttach handles MetaCmd 62 — the IAM half of the
+// sequenced bucket-create + policy-attach operation (D#13, F#2).
+//
+// Approach: sequenced (not cross-FSM atomic). The bucket itself is created by
+// the data-plane FSM via the existing CreateBucket path; this MetaCmd only
+// handles the IAM side: validate SA + policy existence, then attach the policy
+// to the SA. The admin handler is responsible for rolling back via DeleteBucket
+// if this propose fails.
+//
+// If both attach_sa and attach_policy are empty, this is a no-op (create-only
+// caller path; the bucket was already created by the prior CreateBucket propose).
+func (f *MetaFSM) applyCreateBucketWithPolicyAttach(payload []byte) error {
+	bucket, sa, pol, err := decodeMetaCreateBucketWithPolicyAttachCmd(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach decode: %w", err)
+	}
+	if sa == "" {
+		// create-only path: no IAM half to apply.
+		return nil
+	}
+	// F#2: validate SA existence before any mutation.
+	if f.iamApplier == nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: iam applier not configured")
+	}
+	if !f.iamApplier.SAExists(sa) {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: SA %q does not exist (F#2)", sa)
+	}
+	// F#2: validate policy existence before any mutation.
+	if f.policyStore == nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: policy store not configured")
+	}
+	if _, perr := f.policyStore.GetRaw(context.Background(), pol); perr != nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: policy %q does not exist: %w", pol, perr)
+	}
+	// Attach policy to SA.
+	if f.policyAttachStore == nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: policy attach store not configured")
+	}
+	if attachErr := f.policyAttachStore.AttachToSA(context.Background(), sa, pol); attachErr != nil {
+		return fmt.Errorf("meta_fsm: CreateBucketWithPolicyAttach: attach: %w", attachErr)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate([]string{sa}, []string{bucket})
 	}
 	return nil
 }

@@ -437,6 +437,7 @@ enum MetaCmdType : uint8 {
   PolicyAttachToGroupDelete = 59, // IAM: detach policy from group
   BucketPolicyPut         = 60, // IAM: set bucket policy document
   BucketPolicyDelete      = 61, // IAM: delete bucket policy document
+  CreateBucketWithPolicyAttach = 62, // IAM: atomic create-bucket + attach initial policy to SA (D#13, F#2)
 }
 
 table MetaNodeEntry {
@@ -934,4 +935,14 @@ table MetaBucketPolicyPutCmd {
 // BucketPolicyDelete payload: remove a bucket policy document.
 table MetaBucketPolicyDeleteCmd {
   bucket:string;
+}
+
+// MetaCreateBucketWithPolicyAttachCmd payload: sequenced bucket-create + IAM-half attach.
+// Bucket creation itself happens in the data-plane FSM (CreateBucket MetaCmd on the data
+// group); this MetaCmd only handles the IAM half: validate SA + policy exist, then attach.
+// attach_sa and attach_policy both empty = policy attach skipped (create-only path, no IAM).
+table MetaCreateBucketWithPolicyAttachCmd {
+  bucket:string;
+  attach_sa:string;
+  attach_policy:string;
 }
