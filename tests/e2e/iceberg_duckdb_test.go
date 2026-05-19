@@ -93,59 +93,61 @@ DROP SCHEMA grainfs_iceberg.ns_cluster_e2e;
 	`)
 }
 
+// runIcebergAuditCases drives the shared audit-iceberg subtests against any
+// icebergTarget that was booted with --audit-iceberg. Each subtest uses a
+// per-case bucket (caseSeq + tgt.name) so cluster targets can be reused
+// across multiple cases without cross-contamination.
+func runIcebergAuditCases(t *testing.T, tgt *icebergTarget, commitInterval time.Duration) {
+	t.Run("AuditPutCommitsToIcebergTable", func(t *testing.T) {
+		id := tgt.caseSeq.Add(1)
+		bucket := fmt.Sprintf("test-audit-%s-%d", tgt.name, id)
+		t.Cleanup(func() {
+			_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
+				Bucket: aws.String(bucket),
+			})
+		})
+
+		if tgt.isCluster && tgt.cluster != nil {
+			tgt.cluster.GrantAdminOnBuckets(bucket)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, err := tgt.s3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		require.NoError(t, err)
+
+		const numPuts = 5
+		writeStart := time.Now()
+		for i := 0; i < numPuts; i++ {
+			key := fmt.Sprintf("audit-test-obj-%d", i)
+			_, err := tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   strings.NewReader("hello audit"),
+			})
+			require.NoError(t, err)
+		}
+		writeElapsed := time.Since(writeStart)
+
+		queryStart := time.Now()
+		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
+			fmt.Sprintf("bucket = '%s' AND method = 'PUT'", bucket),
+			numPuts, 30*time.Second)
+		requireAuditSearchAPIRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
+			bucket, numPuts, 30*time.Second)
+		t.Logf("audit_iceberg_%s puts=%d commit_interval=%s write_elapsed=%s query_elapsed=%s",
+			tgt.name, numPuts, commitInterval, writeElapsed, time.Since(queryStart))
+	})
+}
+
 // TestAuditIcebergSingleDuckDB starts one node with audit enabled, performs S3
 // PUTs, waits for the committer to flush, then verifies the audit.s3 Iceberg
 // table via DuckDB.
 func TestAuditIcebergSingleDuckDB(t *testing.T) {
 	skipIfShort(t, "skipping single-node audit Iceberg DuckDB e2e in short mode")
-
 	const commitInterval = 8 * time.Second
-	start := time.Now()
-	dataDir, err := os.MkdirTemp("", "grainfs-audit-iceberg-duckdb-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(dataDir)
-	raftPort := freePort()
-	encKeyFile := makeSharedEncryptionKeyFile(t)
-
-	server := startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort, encKeyFile,
-		"--audit-iceberg=true",
-		"--audit-commit-interval", commitInterval.String(),
-	)
-	ak, sk := bootstrapAdminViaUDS(t, dataDir)
-	client := s3ClientFor(server.endpoint, ak, sk)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
-	require.NoError(t, err)
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-audit-single")})
-	require.NoError(t, err)
-
-	const numPuts = 5
-	writeStart := time.Now()
-	for i := 0; i < numPuts; i++ {
-		key := fmt.Sprintf("audit-test-single-obj-%d", i)
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("test-audit-single"),
-			Key:    aws.String(key),
-			Body:   strings.NewReader("hello audit"),
-		})
-		require.NoError(t, err)
-	}
-	writeElapsed := time.Since(writeStart)
-
-	queryStart := time.Now()
-	countAuditRows(t, server.endpoint, ak, sk,
-		"bucket = 'test-audit-single' AND method = 'PUT'",
-		numPuts, 30*time.Second,
-	)
-	countAuditRows(t, server.endpoint, ak, sk,
-		"ts >= NOW() - INTERVAL 1 DAY AND operation = 'PutObject' AND bucket = 'test-audit-single'",
-		numPuts, 30*time.Second,
-	)
-	requireAuditSearchAPIRows(t, server.endpoint, ak, sk, "test-audit-single", numPuts, 30*time.Second)
-	t.Logf("audit_iceberg_single_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
-		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
+	tgt := newSingleNodeIcebergTargetWithAudit(t, commitInterval)
+	runIcebergAuditCases(t, tgt, commitInterval)
 }
 
 func requireAuditSearchAPIRows(t *testing.T, endpoint, accessKey, secretKey, bucket string, want int, timeout time.Duration) {
@@ -321,50 +323,9 @@ func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey,
 // then verifies the audit.s3 Iceberg table contains the expected rows via DuckDB.
 func TestAuditIcebergClusterDuckDB(t *testing.T) {
 	skipIfShort(t, "skipping audit Iceberg DuckDB e2e in short mode")
-
 	const commitInterval = 8 * time.Second
-	start := time.Now()
-	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
-		disableNBD:  true,
-		ExtraArgs: []string{
-			"--audit-iceberg=true",
-			"--audit-commit-interval", commitInterval.String(),
-		},
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables", "test-audit")
-	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
-	require.NoError(t, err)
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-audit")})
-	require.NoError(t, err)
-	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
-
-	// Emit a few S3 events via PutObject so the ring buffer has events to commit.
-	const numPuts = 5
-	writeStart := time.Now()
-	for i := 0; i < numPuts; i++ {
-		key := fmt.Sprintf("audit-test-obj-%d", i)
-		_, err := client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("test-audit"),
-			Key:    aws.String(key),
-			Body:   strings.NewReader("hello audit"),
-		})
-		require.NoError(t, err)
-	}
-	writeElapsed := time.Since(writeStart)
-
-	queryStart := time.Now()
-	countAuditRows(t, cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey,
-		"bucket = 'test-audit' AND method = 'PUT'",
-		numPuts, 30*time.Second,
-	)
-	t.Logf("audit_iceberg_cluster_duckdb puts=%d write_elapsed=%s query_elapsed=%s total_elapsed=%s",
-		numPuts, writeElapsed, time.Since(queryStart), time.Since(start))
+	tgt := newSharedClusterIcebergTargetWithAudit(t, commitInterval)
+	runIcebergAuditCases(t, tgt, commitInterval)
 }
 
 // TestAuditIcebergClusterFollowerShipDuckDB verifies that audit events emitted

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.257.2] - 2026-05-19 - fix(storage/packblob): ListObjectsPage to supplement packed in-memory index
+## [0.0.257.3] - 2026-05-19 - fix(storage/packblob): ListObjectsPage to supplement packed in-memory index
 
 v0.0.257.0의 `Operations.ListObjectsPage` walk-and-find-pager 로직이 PackedBackend 계층을 건너뛰고 inner ClusterCoordinator로 바로 가서, single-node packblob fast path에 저장된 작은 객체가 LIST에 안 나오던 회귀 수정. e2e fail 24건 중 동일 root cause(packblob index 우회) 3건 회복: TestObjectsE2E/SingleNode/{List,ListWithPrefix} (Cluster A), TestS3ClientSmoke, TestMigrationInjector. 같은 cluster A의 나머지 5건(TestSnapshot/PITR×2/Backup_Restic/IAM_ScopedKey/QuarantineIncident)은 restore-후-ObjectIndex 재활성화 갭으로 별도 fix 필요.
 
@@ -13,6 +13,37 @@ v0.0.257.0의 `Operations.ListObjectsPage` walk-and-find-pager 로직이 PackedB
 
 - 영향: SingleNode write→list 경로 (8 tests 중 3 회복: TestObjectsE2E, TestS3ClientSmoke, TestMigrationInjector). 나머지 5 tests (TestSnapshot/PITR/Backup/IAM Scoped Key/QuarantineIncident)는 restore-후-ObjectIndex 재활성화 갭 (별도 issue).
 - DuckDB Iceberg `https://http://` 이중 스킴 (v0.0.255.0 SigV4 BREAKING의 부작용, 6 tests), Volume Scrub on-disk block 누락 (5 tests), Encryption/Versioning/NBD multi-node replication 등은 별도 follow-up.
+
+## [0.0.257.2] - 2026-05-19 - test(reorg): binary-vs-in-process classification + per-protocol matrix
+
+테스트 정리 PR (코드 변경 없음, test-only). e2e/integration/unit 경계 명확화 + S3 외 4개 protocol(iceberg/NFS/NBD/9p)에 single/cluster matrix 패턴 확장 + colima cluster mount 신규 커버리지.
+
+### Changed
+
+- **분류 정정 (rename, 5 files)**: in-process 컴포넌트만 결합하는 `internal/**/*_e2e_test.go`는 `bin/grainfs` 자식 프로세스 + 외부 wire client 기준으로 보면 integration. `internal/{nbd,nfs4server}/e2e_test.go`, `internal/nfs4server/nfs4_e2e_coverage_test.go`, `internal/server/sendfile_e2e_require_test.go`, `internal/raft/learner_promote_e2e_race_test.go` → `*_integration_test.go` rename (함수명은 git blame 보존을 위해 유지). `internal/server/sendfile_zerocopy_integration_test.go`는 동명 기존 파일과 충돌 회피용 정밀화.
+- **misclassified file 역이동**: `tests/e2e/nfs4_largefile_test.go`는 `storage.NewLocalBackend` 직접 호출이라 binary 없음 → `internal/nfs4server/largefile_integration_test.go`로 이동. `skipIfShort` → `testing.Short()` 인라인 치환.
+- **`getOrInitSharedCluster`에서 `DisableNBD: true` 제거** (`tests/e2e/target_test.go`). NBD가 S3 generic shared fixture에서도 가동 → `newSharedClusterNBDTarget`이 별도 cluster boot 없이 재사용.
+
+### Added
+
+- **Per-protocol matrix Target 인프라 (s3Target 패턴 확장)**:
+  - `tests/e2e/iceberg_target_test.go` — `icebergTarget` + `newSingleNodeIcebergTarget*`/`newSharedClusterIcebergTarget*` (audit-enabled variants 포함). `runIcebergAuditCases`로 `TestAuditIcebergSingleDuckDB`/`TestAuditIcebergClusterDuckDB` 통합. `uniqueNamespace`로 per-case isolation.
+  - `tests/e2e/nfs_target_test.go` — `nfsTarget` + factories. `uniqueExport`로 per-case bucket+export 격리. `listNfsExportsOnDataDir`로 dataDir-parameterized variant.
+  - `tests/e2e/nbd_target_test.go` — `nbdTarget` + factories. NBD wire export name은 `"default"` 고정 (handshake 제약, `internal/nbd/handshake.go:36`).
+  - `tests/e2e/shared_mrcluster_test.go` — `getOrInitSharedMRCluster` (iceberg + NFS 공용 *mrCluster). static-peer boot 후 `c.nodeCount = 3` + `c.stopped = true` 명시 (TestMain teardown까지 lifecycle 보존; 미설정 시 첫 caller t.Cleanup이 fixture 조기 종료).
+- **NEW cluster coverage**: `tests/e2e/nfs_multi_export_bucket_delete_e2e_test.go` BucketDelete cases (이전 single-only)를 `runNFSExportCases` matrix로 승격. `tests/e2e/nbd_matrix_cases_test.go` ReadWriteRoundTrip 신설 (single + cluster).
+- **Colima cluster mount 테스트** (`tests/colimafixture/` 신규 패키지 + 3 protocol):
+  - `tests/colimafixture/cluster.go` — macOS host에 3-node grainfs cluster 부팅, 모든 protocol port를 `0.0.0.0`에 바인딩해서 colima VM이 `192.168.5.2:<port>`로 접근. `StartCluster(t, Options)` + `Stop()` public API. macOS-side `TestColimaClusterFixtureBoots`로 6초 boot 검증.
+  - `tests/nfs4_colima/cluster_mount_test.go` — NFS4 mount → write → 3-node S3 visibility 검증 (12.4s PASS).
+  - `tests/9p_colima/cluster_mount_test.go` — 9p mount → write → 각 노드 9p 재마운트 read-back 검증 (12.1s PASS).
+  - `tests/nbd_colima/cluster_mount_test.go` — NBD write via node 0 → 각 노드 `__vol/default/` S3 ListObjectsV2 raft 복제 검증 (15.0s PASS). NBD read는 leader-only가 cluster contract — 기존 `TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator` 패턴 미러.
+- **`testServerNFSPort`/`testServerNBDPort` 패키지 var 노출** (`tests/e2e/helpers_test.go`). 이전엔 TestMain inline `freePort()` 호출만 했음 → Target single fixture 재사용에 필요.
+
+### Notes
+
+- **MICRO bump** (test-only follow-up — `0.0.251.1` 패턴 답습).
+- **Pre-existing 미해결**: `TestAuditIcebergSingleDuckDB`/`TestAuditIcebergClusterDuckDB`/`TestNFS4_Allocate`는 master에서도 fail (각각 #427/#428 audit 회귀, fallocate 회귀로 추정). 본 reorg 작업 무관.
+- 운영 모델 명문화 (CONTEXT.md 후속 후보): server = macOS, mount client = colima VM. 모든 `*_colima` 디렉토리가 이 구조.
 
 ## [0.0.257.1] - 2026-05-19 - fix(storage): persist Parts on LocalBackend CompleteMultipartUpload
 
