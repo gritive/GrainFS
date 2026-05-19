@@ -396,8 +396,35 @@ func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64,
 	windowBufs := make([][]byte, len(bodies))
 	for i, r := range bodies {
 		if r != nil {
-			windowBufs[i] = make([]byte, windowSize)
+			windowBufs[i] = getECDataShardBuffer(int(windowSize))
 		}
+	}
+	defer func() {
+		for _, b := range windowBufs {
+			if b != nil {
+				putECDataShardBuffer(b)
+			}
+		}
+	}()
+	// Stream Split stores shards linearly (shard 0 = bytes [0..shardBodySize),
+	// shard 1 = bytes [shardBodySize..2*shardBodySize), …). To produce the
+	// original byte stream we therefore have to emit each reconstructed data
+	// shard's body in full before moving to the next one. Stream shard 0
+	// directly as each window is reconstructed; buffer shards 1..k-1's
+	// reconstructed windows in memory for emission once shard 0 is complete.
+	// Memory cost: (k-1) × shardBodySize + windowBufs. Buffers are pooled
+	// via ecDataShardBufferPool so steady-state runs do not re-allocate.
+	var tailOutputs [][]byte
+	if cfg.DataShards > 1 {
+		tailOutputs = make([][]byte, cfg.DataShards-1)
+		for i := range tailOutputs {
+			tailOutputs[i] = getECDataShardBuffer(int(shardBodySize))[:0]
+		}
+		defer func() {
+			for _, b := range tailOutputs {
+				putECDataShardBuffer(b)
+			}
+		}()
 	}
 	remainingShard := shardBodySize
 	remainingOutput := origSize
@@ -422,20 +449,34 @@ func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64,
 		if err := enc.ReconstructData(windows); err != nil {
 			return fmt.Errorf("ec reconstruct: %w", err)
 		}
-		for i := 0; i < cfg.DataShards && remainingOutput > 0; i++ {
+		if windows[0] == nil {
+			return fmt.Errorf("ec reconstruct: data shard 0 unavailable")
+		}
+		toWrite := int64(len(windows[0]))
+		if remainingOutput < toWrite {
+			toWrite = remainingOutput
+		}
+		if _, err := w.Write(windows[0][:toWrite]); err != nil {
+			return err
+		}
+		remainingOutput -= toWrite
+		for i := 1; i < cfg.DataShards; i++ {
 			if windows[i] == nil {
 				return fmt.Errorf("ec reconstruct: data shard %d unavailable", i)
 			}
-			toWrite := int64(len(windows[i]))
-			if remainingOutput < toWrite {
-				toWrite = remainingOutput
-			}
-			if _, err := w.Write(windows[i][:toWrite]); err != nil {
-				return err
-			}
-			remainingOutput -= toWrite
+			tailOutputs[i-1] = append(tailOutputs[i-1], windows[i]...)
 		}
 		remainingShard -= n
+	}
+	for i := 1; i < cfg.DataShards && remainingOutput > 0; i++ {
+		toWrite := int64(len(tailOutputs[i-1]))
+		if remainingOutput < toWrite {
+			toWrite = remainingOutput
+		}
+		if _, err := w.Write(tailOutputs[i-1][:toWrite]); err != nil {
+			return err
+		}
+		remainingOutput -= toWrite
 	}
 	return nil
 }
