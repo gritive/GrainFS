@@ -43,6 +43,9 @@ type Service struct {
 	backend    Scrubbable    // for executor; may be nil in unit tests
 	deleter    ObjectDeleter // for executor; may be nil in unit tests
 	interval   time.Duration
+	// nodeID labels per-node MPU metrics. Empty string when unset (unit
+	// tests, single-node bootstraps that haven't generated a node ID yet).
+	nodeID string
 
 	// worker is published by Run()'s reconcile loop. Status loads it
 	// lock-free; nil means this node is not the current leader.
@@ -67,8 +70,8 @@ type Service struct {
 
 // NewService wires the service. backend/deleter may be nil for tests that do
 // not exercise Run.
-func NewService(store *Store, prop Proposer, lead LeadershipSignal, backend Scrubbable, deleter ObjectDeleter, interval time.Duration) *Service {
-	return &Service{
+func NewService(store *Store, prop Proposer, lead LeadershipSignal, backend Scrubbable, deleter ObjectDeleter, interval time.Duration, opts ...ServiceOption) *Service {
+	s := &Service{
 		store:      store,
 		proposer:   prop,
 		leadership: lead,
@@ -78,6 +81,19 @@ func NewService(store *Store, prop Proposer, lead LeadershipSignal, backend Scru
 		limiter:    rate.NewLimiter(100, 10), // 100 deletes/sec/node, burst 10 — shared by both workers
 		logger:     log.With().Str("component", "lifecycle-service").Logger(),
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// ServiceOption configures a Service at construction.
+type ServiceOption func(*Service)
+
+// WithNodeID sets the node identifier propagated to the per-node MPU worker
+// for metric labelling.
+func WithNodeID(nodeID string) ServiceOption {
+	return func(s *Service) { s.nodeID = nodeID }
 }
 
 // Enabled reports whether the lifecycle service is active. With the service
@@ -263,7 +279,7 @@ func (s *Service) startMPUWorker(parent context.Context) {
 		return
 	}
 	workerCtx, cancel := context.WithCancel(parent)
-	w := NewMPUWorker(s.store, s.backend, s.deleter, s.interval, s.limiter)
+	w := NewMPUWorker(s.store, s.backend, s.deleter, s.interval, s.limiter, WithMPUNodeID(s.nodeID))
 	s.mpuCancel = cancel
 	s.mpuWorker.Store(w)
 	s.mpuWG.Add(1)

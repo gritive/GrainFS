@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -26,6 +27,10 @@ type MPUWorker struct {
 	logger   zerolog.Logger
 	now      func() time.Time
 
+	// nodeID labels grainfs_lifecycle_aborted_uploads_total so multi-node
+	// clusters can attribute aborts per node. Empty string when unset.
+	nodeID string
+
 	aborted atomic.Int64
 }
 
@@ -41,6 +46,11 @@ func WithMPUNowForTest(now func() time.Time) MPUWorkerOption {
 // WithMPULogger overrides the default zerolog instance.
 func WithMPULogger(l zerolog.Logger) MPUWorkerOption {
 	return func(w *MPUWorker) { w.logger = l }
+}
+
+// WithMPUNodeID labels metrics with the node identifier.
+func WithMPUNodeID(nodeID string) MPUWorkerOption {
+	return func(w *MPUWorker) { w.nodeID = nodeID }
 }
 
 // NewMPUWorker takes a shared limiter (owned by Service per spec §
@@ -152,6 +162,8 @@ func (w *MPUWorker) applyAbortRules(ctx context.Context, u storage.MultipartUplo
 			continue
 		}
 		w.aborted.Add(1)
+		metrics.LifecycleAbortedUploads.WithLabelValues(u.Bucket, w.nodeID).Inc()
+		metrics.LifecycleRuleMatch.WithLabelValues(r.ID, "abort_mpu").Inc()
 		return // rule matched
 	}
 }

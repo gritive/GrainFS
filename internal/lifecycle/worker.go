@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -155,23 +156,38 @@ func (w *Worker) runCycle(ctx context.Context) {
 			continue
 		}
 
-		groups, err := w.backend.ScanObjectsGrouped(bucket)
-		if err != nil {
-			log.Error().Str("bucket", bucket).Err(err).Msg("lifecycle: scan objects grouped")
-			continue
-		}
-
-		for g := range groups {
-			if ctx.Err() != nil {
-				go drainGroups(groups) // drain producer to prevent goroutine leak
-				return
-			}
-			w.objectsChecked.Add(int64(len(g.Versions)))
-			w.applyRulesToGroup(ctx, g, cfg.Rules, now)
-		}
+		w.runBucketCycle(ctx, bucket, cfg.Rules, now)
 	}
 
 	w.lastRunNano.Store(now.UnixNano())
+}
+
+// runBucketCycle wraps a per-bucket scan so we can record
+// grainfs_lifecycle_cycle_seconds with the bucket label via a defer. The
+// per-bucket timing is separate from Worker.lastCycleSecondsBits (which spans
+// the whole runCycle across all buckets and feeds Stats().LastCycleSeconds).
+func (w *Worker) runBucketCycle(ctx context.Context, bucket string, rules []Rule, now time.Time) {
+	bucketStart := w.currentTime()
+	defer func() {
+		metrics.LifecycleCycleSeconds.WithLabelValues(bucket).
+			Observe(w.currentTime().Sub(bucketStart).Seconds())
+	}()
+
+	groups, err := w.backend.ScanObjectsGrouped(bucket)
+	if err != nil {
+		log.Error().Str("bucket", bucket).Err(err).Msg("lifecycle: scan objects grouped")
+		return
+	}
+
+	for g := range groups {
+		if ctx.Err() != nil {
+			go drainGroups(groups) // drain producer to prevent goroutine leak
+			return
+		}
+		metrics.LifecycleGroupVersions.Observe(float64(len(g.Versions)))
+		w.objectsChecked.Add(int64(len(g.Versions)))
+		w.applyRulesToGroup(ctx, g, rules, now)
+	}
 }
 
 func drainGroups(ch <-chan storage.ObjectKeyGroup) {
@@ -205,19 +221,21 @@ func (w *Worker) applyRulesToGroup(ctx context.Context, g storage.ObjectKeyGroup
 			continue
 		}
 		if current != nil && r.Expiration != nil && MatchFilter(current, g.Key, r.Filter) {
-			w.applyExpiration(ctx, g, current, r.Expiration, now)
+			w.applyExpiration(ctx, g, current, r.Expiration, now, r.ID)
 		}
 		if r.NoncurrentVersionExpiration != nil {
-			w.applyNoncurrent(ctx, g, r.NoncurrentVersionExpiration, now)
+			w.applyNoncurrent(ctx, g, r.NoncurrentVersionExpiration, now, r.ID)
 		}
 	}
 }
 
-func (w *Worker) applyExpiration(ctx context.Context, g storage.ObjectKeyGroup, current *storage.ObjectVersionRecord, exp *Expiration, now time.Time) {
+func (w *Worker) applyExpiration(ctx context.Context, g storage.ObjectKeyGroup, current *storage.ObjectVersionRecord, exp *Expiration, now time.Time, ruleID string) {
 	if current.IsDeleteMarker {
 		if exp.ExpiredObjectDeleteMarker != nil && *exp.ExpiredObjectDeleteMarker && len(g.Versions) == 1 {
 			if w.deleteVersion(ctx, g.Bucket, g.Key, current.VersionID) {
 				w.deleteMarkersReclaimed.Add(1)
+				metrics.LifecycleRuleMatch.WithLabelValues(ruleID, "expire_delete_marker").Inc()
+				metrics.LifecycleDeleteMarkersReclaimed.WithLabelValues(g.Bucket).Inc()
 			}
 		}
 		return
@@ -232,11 +250,13 @@ func (w *Worker) applyExpiration(ctx context.Context, g storage.ObjectKeyGroup, 
 		return
 	}
 	if !now.Before(trigger) {
-		w.deleteObject(ctx, g.Bucket, g.Key)
+		if w.deleteObject(ctx, g.Bucket, g.Key) {
+			metrics.LifecycleRuleMatch.WithLabelValues(ruleID, "expire").Inc()
+		}
 	}
 }
 
-func (w *Worker) applyNoncurrent(ctx context.Context, g storage.ObjectKeyGroup, nce *NoncurrentVersionExpiration, now time.Time) {
+func (w *Worker) applyNoncurrent(ctx context.Context, g storage.ObjectKeyGroup, nce *NoncurrentVersionExpiration, now time.Time, ruleID string) {
 	if nce.NewerNoncurrentVersions <= 0 && nce.NoncurrentDays <= 0 {
 		return
 	}
@@ -252,21 +272,26 @@ func (w *Worker) applyNoncurrent(ctx context.Context, g storage.ObjectKeyGroup, 
 		beyondAge := nce.NoncurrentDays <= 0 ||
 			now.Sub(time.Unix(v.LastModified, 0)) >= time.Duration(nce.NoncurrentDays)*24*time.Hour
 		if beyondCount && beyondAge {
-			w.deleteVersion(ctx, g.Bucket, g.Key, v.VersionID)
+			if w.deleteVersion(ctx, g.Bucket, g.Key, v.VersionID) {
+				metrics.LifecycleRuleMatch.WithLabelValues(ruleID, "expire_noncurrent").Inc()
+			}
 		}
 		noncurrentIdx++
 	}
 }
 
-func (w *Worker) deleteObject(ctx context.Context, bucket, key string) {
+// deleteObject returns true when the delete was applied so callers can
+// gate per-action metrics on success.
+func (w *Worker) deleteObject(ctx context.Context, bucket, key string) bool {
 	if err := w.limiter.Wait(ctx); err != nil {
-		return // ctx cancelled
+		return false // ctx cancelled
 	}
 	if err := w.deleter.DeleteObject(ctx, bucket, key); err != nil {
 		log.Error().Str("bucket", bucket).Str("key", key).Err(err).Msg("lifecycle: delete object")
-		return
+		return false
 	}
 	w.expired.Add(1)
+	return true
 }
 
 // deleteVersion deletes a specific object version, observing the limiter.
