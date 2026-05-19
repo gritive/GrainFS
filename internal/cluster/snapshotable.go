@@ -69,6 +69,10 @@ func (b *DistributedBackend) ListAllObjects() ([]storage.SnapshotObject, error) 
 					IsLatest:       latest[key] == versionID,
 					ACL:            meta.ACL,
 					SSEAlgorithm:   meta.SSEAlgorithm,
+					// Tags copied (not aliased) — meta's backing bytes are reused
+					// by badger once the View tx returns. Mirror of LocalBackend
+					// fix in b64521bf so snapshot Tags survive ListAllObjects.
+					Tags: append([]storage.Tag(nil), meta.Tags...),
 				})
 				return nil
 			})

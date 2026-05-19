@@ -166,3 +166,29 @@ func TestVersioning_ListObjectsSkipsTombstones(t *testing.T) {
 	require.Len(t, objs, 1, "tombstoned key should be excluded from ListObjects")
 	assert.Equal(t, "kept", objs[0].Key)
 }
+
+// TestHeadObjectMetaV_ReturnsTags is the parity guard for the versioned
+// HEAD path. headObjectMeta (latest-version) was patched to copy m.Tags
+// into the returned *storage.Object in 5fbcbac0; headObjectMetaV (the
+// versioned counterpart driving HeadObjectVersion) needs the same. Without
+// this, HeadObjectVersion silently returns Object.Tags=nil and any future
+// caller relying on it will hit a sneaky asymmetry bug.
+func TestHeadObjectMetaV_ReturnsTags(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "vtagbkt"))
+
+	obj, err := b.PutObject(context.Background(), "vtagbkt", "k", strings.NewReader("v1"), "text/plain")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+
+	tags := []storage.Tag{
+		{Key: "env", Value: "staging"},
+		{Key: "owner", Value: "bob"},
+	}
+	require.NoError(t, b.SetObjectTags("vtagbkt", "k", obj.VersionID, tags))
+
+	got, err := b.HeadObjectVersion("vtagbkt", "k", obj.VersionID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, tags, got.Tags, "HeadObjectVersion must populate Object.Tags (parity with HeadObject)")
+}

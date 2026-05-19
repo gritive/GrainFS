@@ -2913,7 +2913,9 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		}
 		return nil
 	}
-	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil, nil); err != nil {
+	// applyPutObjectMeta writes Tags unconditionally; forward metaBefore.Tags
+	// so a legacy N×→EC conversion doesn't clobber existing user tags.
+	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil, metaBefore.Tags); err != nil {
 		return fmt.Errorf("convert write ec shards: %w", err)
 	}
 	_, convertedMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -4155,6 +4157,9 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			Parts:        m.Parts,
 			Coalesced:    coalescedRefsToStorage(m.Coalesced),
 			IsAppendable: m.IsAppendable,
+			// Tags copied (not aliased) — m's backing bytes are reused by
+			// badger once the View tx returns. Mirror of headObjectMeta.
+			Tags: append([]storage.Tag(nil), m.Tags...),
 		}
 		placement = PlacementMeta{
 			VersionID:        versionID,
