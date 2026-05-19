@@ -194,6 +194,7 @@ enum ForwardStatus : byte {
   AppendNotSupported = 9,
   AppendCapExceeded = 10,
   AppendObjectTooLarge = 11,
+  MethodNotAllowed = 12,
   Internal = 99
 }
 
