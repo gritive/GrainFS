@@ -519,6 +519,15 @@ func (f *MetaFSM) SetJWTKeySet(ks *iamjwt.KeySet) {
 	}
 }
 
+// JWTKeySet returns the KeySet currently wired into the FSM.
+// It is always non-nil (NewMetaFSM seeds a default KeySet).
+// Callers should not modify the returned value directly; use SetJWTKeySet.
+func (f *MetaFSM) JWTKeySet() *iamjwt.KeySet {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.jwtKeys
+}
+
 // SetPolicyStore wires the IAM policy store into the MetaFSM. Must be called
 // before the raft log starts replaying. nil means PolicyPut/PolicyDelete
 // commands are safe no-ops (not configured yet).

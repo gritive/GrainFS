@@ -144,6 +144,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		metaCatalog = cluster.NewMetaCatalogWithForwarders(metaRaft, state.backend, "s3://grainfs-tables/warehouse", metaForward, state.metaReadSender, metaReadTargets)
 	}
 	srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
+	srvOpts = append(srvOpts, server.WithJWTKeySet(metaRaft.FSM().JWTKeySet()))
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
 	// T33: wire the policy authorizer so Layer 1 (iamCheck) evaluates
 	// policy.Evaluate. Both iamPolicyStores and cfgStore are populated by

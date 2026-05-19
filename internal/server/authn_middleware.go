@@ -79,6 +79,12 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 
 		isIceberg := routeSurfaceForPath(path) == routeSurfaceIceberg
 		if isIceberg {
+			// Bearer requests skip SigV4 entirely — the icebergGuarded middleware
+			// on each route performs JWT verification and policy gating.
+			if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+				c.Next(ctx)
+				return
+			}
 			if reason := icebergSkewReject(r); reason != "" {
 				s.recordAuditAuthFailure(ctx, c, consts.StatusUnauthorized, "authn")
 				writeIcebergError(c, 401, "NotAuthorizedException", reason)

@@ -248,6 +248,32 @@ func TestIcebergAuthn_AnonPhase0_NoBearerNeeded(t *testing.T) {
 	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode, "anon-enabled must skip bearer requirement even for invalid tokens")
 }
 
+// TestIcebergAuthn_SigV4PlusBearer_Passes: F4 regression test.
+// A server with BOTH a SigV4 verifier (WithAuth) and a JWT key set wired must
+// NOT reject a valid "Authorization: Bearer <token>" Iceberg request with 401.
+// Before the F4 fix, the SigV4 authMiddleware would intercept the bearer request
+// and return 401 (no AWS4 signature) before icebergGuarded ever ran.
+func TestIcebergAuthn_SigV4PlusBearer_Passes(t *testing.T) {
+	base, ks := setupJWTAuthnServer(t,
+		// Wire the SigV4 verifier — this is what caused production failures (F4).
+		WithAuth([]s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}),
+	)
+
+	tok := mintBearer(t, ks, "warehouse")
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
+		"SigV4 verifier must not intercept Iceberg bearer requests (F4)")
+	assert.NotEqual(t, http.StatusForbidden, resp.StatusCode,
+		"valid bearer must pass policy gate")
+}
+
 // TestIcebergAuthn_ValidBearer_Passes: happy path; valid JWT for correct
 // warehouse → not 401/403. Claims should be stashed in context (verified
 // indirectly via non-error response).
