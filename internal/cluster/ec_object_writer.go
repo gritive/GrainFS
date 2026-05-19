@@ -52,6 +52,13 @@ type ecObjectWritePlan struct {
 	ContentType      string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
+	// SegmentBlobID is empty for legacy single-blob writes; when non-empty
+	// the plan refers to a chunked-PUT segment and shardKey is scoped by
+	// SegmentBlobID via ecObjectSegmentShardKey.
+	SegmentBlobID string
+	// SegmentIdx is the 0-based chunk index. Meaningful only when
+	// SegmentBlobID != "".
+	SegmentIdx int
 }
 
 type ecObjectWriteResult struct {
@@ -95,6 +102,59 @@ func ecObjectShardKey(key, versionID string) string {
 		return key
 	}
 	return key + "/" + versionID
+}
+
+// ecObjectSegmentShardKey is the post-Phase-2 unified shardKey helper. It
+// preserves legacy behaviour when plan.SegmentBlobID == "" (returns
+// ecObjectShardKey(Key, VersionID) verbatim) and switches to a
+// segment-scoped key when SegmentBlobID != "". Because the existing
+// ShardService inline AAD is bucket+"/"+shardKey+"/"+shardIdx, swapping the
+// shardKey automatically scopes AAD to the segment.
+func ecObjectSegmentShardKey(plan ecObjectWritePlan) string {
+	if plan.SegmentBlobID == "" {
+		return ecObjectShardKey(plan.Key, plan.VersionID)
+	}
+	return plan.Key + "/segments/" + plan.SegmentBlobID
+}
+
+// writeSegmentInput bundles the per-segment write parameters consumed by
+// writeOneSegment. Caller (clusterSegmentBackend.WriteSegment) buffers the
+// SegmentWriter chunk into Data; segments are ≤ DefaultChunkSize.
+type writeSegmentInput struct {
+	Bucket, Key, VersionID string
+	SegmentBlobID          string
+	SegmentIdx             int
+	Group                  ShardGroupEntry
+	Cfg                    ECConfig
+	Data                   []byte
+}
+
+// writeOneSegment is a thin wrapper around writeDataShards that fills in the
+// segment-scoped fields on ecObjectWritePlan. Returns the PlacementRecord
+// (synthesized from the chosen K+M peers), the data-shard etag, and the same
+// blobID echoed back for caller convenience.
+func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInput) (PlacementRecord, string, string, error) {
+	nShards := in.Cfg.DataShards + in.Cfg.ParityShards
+	if len(in.Group.PeerIDs) < nShards {
+		return PlacementRecord{}, "", "", fmt.Errorf("group %s has %d peers, need %d", in.Group.ID, len(in.Group.PeerIDs), nShards)
+	}
+	placement := append([]string(nil), in.Group.PeerIDs[:nShards]...)
+	plan := ecObjectWritePlan{
+		Bucket:           in.Bucket,
+		Key:              in.Key,
+		VersionID:        in.VersionID,
+		PlacementGroupID: in.Group.ID,
+		Config:           in.Cfg,
+		Placement:        placement,
+		SegmentBlobID:    in.SegmentBlobID,
+		SegmentIdx:       in.SegmentIdx,
+	}
+	res, err := w.writeDataShards(ctx, plan, in.Data)
+	if err != nil {
+		return PlacementRecord{}, "", "", err
+	}
+	rec := PlacementRecord{Nodes: placement, K: in.Cfg.DataShards, M: in.Cfg.ParityShards}
+	return rec, res.ETag, in.SegmentBlobID, nil
 }
 
 //nolint:unused // referenced by ec_object_writer_test.go.
@@ -197,7 +257,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	shardSize func(idx int) (int64, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
-	shardKey := ecObjectShardKey(plan.Key, plan.VersionID)
+	shardKey := ecObjectSegmentShardKey(plan)
 	written := make(chan string, len(plan.Placement))
 
 	cleanup := func() {
@@ -309,7 +369,7 @@ func (w ecObjectWriter) writeSingleLocalReader(
 	metricPath string,
 	bodyHash hash.Hash,
 ) (ecObjectWriteResult, error) {
-	shardKey := ecObjectShardKey(plan.Key, plan.VersionID)
+	shardKey := ecObjectSegmentShardKey(plan)
 	stageStart := time.Now()
 
 	header := encodeShardHeader(sp.Size)

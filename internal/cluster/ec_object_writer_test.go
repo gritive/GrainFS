@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -374,4 +377,60 @@ func (f *fakeECObjectWriterShards) DeleteLocalShards(bucket, key string) error {
 func (f *fakeECObjectWriterShards) DeleteShards(ctx context.Context, peer, bucket, key string) error {
 	f.deleteRemoteCalls = append(f.deleteRemoteCalls, peer+"/"+bucket+"/"+key)
 	return nil
+}
+
+func TestEcObjectSegmentShardKey_EmptyBlobIDPreservesLegacy(t *testing.T) {
+	plan := ecObjectWritePlan{Key: "k", VersionID: "v"}
+	require.Equal(t, ecObjectShardKey("k", "v"), ecObjectSegmentShardKey(plan))
+}
+
+func TestEcObjectSegmentShardKey_BlobIDOverridesVersion(t *testing.T) {
+	plan := ecObjectWritePlan{Key: "k", VersionID: "v", SegmentBlobID: "b1"}
+	require.Equal(t, "k/segments/b1", ecObjectSegmentShardKey(plan))
+}
+
+func TestEcObjectSegmentShardKey_DifferentBlobIDsDifferentKeys(t *testing.T) {
+	a := ecObjectSegmentShardKey(ecObjectWritePlan{Key: "k", SegmentBlobID: "blob1"})
+	b := ecObjectSegmentShardKey(ecObjectWritePlan{Key: "k", SegmentBlobID: "blob2"})
+	require.NotEqual(t, a, b)
+}
+
+// TestEcObjectSegmentShardKey_AADPropagation is a regression guard: when the
+// segment-scoped shardKey is plumbed through ShardService.WriteLocalShard, the
+// existing inline AAD (bucket+"/"+key+"/"+shardIdx) automatically becomes
+// segment-scoped — no ShardService changes needed.
+func TestEcObjectSegmentShardKey_AADPropagation(t *testing.T) {
+	rawKey := make([]byte, 32)
+	enc, err := encrypt.NewEncryptor(rawKey)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(dir, transport.MustNewQUICTransport("test-cluster-psk"), WithEncryptor(enc))
+
+	bucket := "bucket"
+	plan := ecObjectWritePlan{Key: "obj", VersionID: "v1", SegmentBlobID: "blob1", SegmentIdx: 0}
+	shardKey := ecObjectSegmentShardKey(plan)
+	require.Equal(t, "obj/segments/blob1", shardKey)
+
+	payload := []byte("segment-encrypted-payload")
+	shardIdx := 2
+	require.NoError(t, svc.WriteLocalShard(bucket, shardKey, shardIdx, payload))
+
+	// Round-trip with the same shardKey must succeed.
+	got, err := svc.ReadLocalShard(bucket, shardKey, shardIdx)
+	require.NoError(t, err)
+	assert.Equal(t, payload, got)
+
+	// Reading the same on-disk bytes with the legacy (non-segment) shardKey
+	// must fail — confirming the AAD is segment-scoped via the shardKey.
+	legacyKey := ecObjectShardKey(plan.Key, plan.VersionID)
+	src := filepath.Join(dir, "shards", bucket, shardKey, "shard_2")
+	raw, err := os.ReadFile(src)
+	require.NoError(t, err)
+	dstDir := filepath.Join(dir, "shards", bucket, legacyKey)
+	require.NoError(t, os.MkdirAll(dstDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dstDir, "shard_2"), raw, 0o600))
+
+	_, err = svc.ReadLocalShard(bucket, legacyKey, shardIdx)
+	require.Error(t, err, "decryption with legacy shardKey must fail — AAD must be segment-scoped")
 }
