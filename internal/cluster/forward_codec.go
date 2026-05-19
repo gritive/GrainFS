@@ -134,6 +134,41 @@ func buildSetObjectACLArgs(bucket, key string, acl uint8) []byte {
 	return b.FinishedBytes()
 }
 
+func buildSetObjectTagsArgs(bucket, key, versionID string, tags []storage.Tag) []byte {
+	b := flatbuffers.NewBuilder(128)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	vid := b.CreateString(versionID)
+
+	var tagsVec flatbuffers.UOffsetT
+	if len(tags) > 0 {
+		offs := make([]flatbuffers.UOffsetT, len(tags))
+		for i, t := range tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			raftpb.TagStart(b)
+			raftpb.TagAddKey(b, kOff)
+			raftpb.TagAddValue(b, vOff)
+			offs[i] = raftpb.TagEnd(b)
+		}
+		raftpb.SetObjectTagsArgsStartTagsVector(b, len(offs))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		tagsVec = b.EndVector(len(offs))
+	}
+
+	raftpb.SetObjectTagsArgsStart(b)
+	raftpb.SetObjectTagsArgsAddBucket(b, bk)
+	raftpb.SetObjectTagsArgsAddKey(b, k)
+	raftpb.SetObjectTagsArgsAddVersionId(b, vid)
+	if tagsVec != 0 {
+		raftpb.SetObjectTagsArgsAddTags(b, tagsVec)
+	}
+	b.Finish(raftpb.SetObjectTagsArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
