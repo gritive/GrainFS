@@ -39,6 +39,41 @@ func (b *countingReadAtBackend) ReadAt(ctx context.Context, bucket, key string, 
 	}).ReadAt(ctx, bucket, key, offset, buf)
 }
 
+type partNumberReadAtBackend struct {
+	storage.Backend
+	data         []byte
+	obj          storage.Object
+	readAtCalls  atomic.Int32
+	getObjCalls  atomic.Int32
+	lastOffset   atomic.Int64
+	lastReadSize atomic.Int64
+}
+
+func (b *partNumberReadAtBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	obj := b.obj
+	return &obj, nil
+}
+
+func (b *partNumberReadAtBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	b.getObjCalls.Add(1)
+	obj := b.obj
+	return io.NopCloser(bytes.NewReader(b.data)), &obj, nil
+}
+
+func (b *partNumberReadAtBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	b.readAtCalls.Add(1)
+	b.lastOffset.Store(offset)
+	b.lastReadSize.Store(int64(len(buf)))
+	if offset >= int64(len(b.data)) {
+		return 0, io.EOF
+	}
+	n := copy(buf, b.data[offset:])
+	if n < len(buf) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
 type transientNotFoundBackend struct {
 	storage.Backend
 	getFailures        atomic.Int32
@@ -173,6 +208,52 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.Equal(t, int32(1), backend.readAtCalls.Load())
 	require.Equal(t, int64(10), backend.lastOffset.Load())
 	require.Equal(t, int64(10), backend.lastReadSize.Load())
+	require.Zero(t, backend.getObjCalls.Load())
+}
+
+func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
+	tmp := t.TempDir()
+	local, err := storage.NewLocalBackend(tmp)
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+
+	payload := []byte("hello grain")
+	backend := &partNumberReadAtBackend{
+		Backend: local,
+		data:    payload,
+		obj: storage.Object{
+			Key:         "obj",
+			Size:        int64(len(payload)),
+			ContentType: "application/octet-stream",
+			ETag:        "multipart-etag",
+			ACL:         1, // public-read
+			Parts: []storage.MultipartPartEntry{
+				{PartNumber: 1, Size: 5, ETag: "part-1-etag"},
+				{PartNumber: 2, Size: 6, ETag: "part-2-etag"},
+			},
+		},
+	}
+	port := freePort(t)
+	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
+	go s.Run()
+	t.Cleanup(func() {
+		_ = s.Shutdown(context.Background())
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	resp, err := http.Get(base + "/b/obj?partNumber=2")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	require.Equal(t, "bytes 5-10/11", resp.Header.Get("Content-Range"))
+	require.Equal(t, []byte(" grain"), body)
+	require.Equal(t, int32(1), backend.readAtCalls.Load())
+	require.Equal(t, int64(5), backend.lastOffset.Load())
+	require.Equal(t, int64(6), backend.lastReadSize.Load())
 	require.Zero(t, backend.getObjCalls.Load())
 }
 

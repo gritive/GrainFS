@@ -52,9 +52,14 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 	if handled && partN < 0 {
 		return
 	}
-	if partN == 0 && versionID == "" && rangeHeader != "" {
-		if s.getObjectRangeReadAt(ctx, c, bucket, key, rangeHeader) {
+	if versionID == "" {
+		if partN > 0 && s.getObjectPartNumberReadAt(ctx, c, bucket, key, partN) {
 			return
+		}
+		if partN == 0 && rangeHeader != "" {
+			if s.getObjectRangeReadAt(ctx, c, bucket, key, rangeHeader) {
+				return
+			}
 		}
 	}
 

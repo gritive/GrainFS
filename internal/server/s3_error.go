@@ -25,6 +25,9 @@ func writeXMLError(c *app.RequestContext, status int, code, message string) {
 }
 
 func mapError(c *app.RequestContext, err error) {
+	if err != nil {
+		c.Set(auditErrReasonKey, err.Error())
+	}
 	switch {
 	case errors.Is(err, storage.ErrPreconditionFailed):
 		writeXMLError(c, consts.StatusPreconditionFailed, "PreconditionFailed", err.Error())

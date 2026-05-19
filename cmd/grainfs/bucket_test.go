@@ -62,6 +62,43 @@ func TestBucketCreateCmd(t *testing.T) {
 	}
 }
 
+func TestBucketCreateCmd_AttachPolicy(t *testing.T) {
+	var gotBody map[string]string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/buckets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"name":"test-bucket"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	root := buildTestBucketRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetContext(context.Background())
+	root.SetArgs([]string{
+		"bucket", "--endpoint", sock,
+		"create", "test-bucket",
+		"--attach-sa", "sa-bench",
+		"--attach-policy", "bucket-admin",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	}
+	if gotBody["name"] != "test-bucket" {
+		t.Errorf("body name = %q, want test-bucket", gotBody["name"])
+	}
+	if gotBody["attach_sa"] != "sa-bench" {
+		t.Errorf("body attach_sa = %q, want sa-bench", gotBody["attach_sa"])
+	}
+	if gotBody["attach_policy"] != "bucket-admin" {
+		t.Errorf("body attach_policy = %q, want bucket-admin", gotBody["attach_policy"])
+	}
+}
+
 func TestBucketListCmd(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets", func(w http.ResponseWriter, r *http.Request) {

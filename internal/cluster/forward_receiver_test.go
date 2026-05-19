@@ -102,10 +102,12 @@ func TestForwardReceiver_HandleGroupPropose_DispatchesToGroupBackend(t *testing.
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 	rcv := NewForwardReceiver(mgr)
+	cmd, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "forward-propose"})
+	require.NoError(t, err)
 
 	reply := rcv.HandleGroupPropose(&transport.Message{
 		Type:    transport.StreamDataGroupProposeForward,
-		Payload: encodeGroupForwardPayload("group-1", []byte("propose-bytes")),
+		Payload: encodeGroupForwardPayload("group-1", cmd),
 	})
 
 	require.NotNil(t, reply)

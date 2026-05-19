@@ -17,14 +17,28 @@ func TestACLGrantConstants(t *testing.T) {
 }
 
 func TestIsReadAction(t *testing.T) {
-	readActions := []S3Action{GetObject, HeadObject, ListBucket}
+	readActions := []S3Action{GetObject, HeadObject, ListBucket, GetBucketVersioning, ListBucketVersions, GetObjectRetention, GetBucketObjectLockConfiguration}
 	for _, a := range readActions {
 		assert.True(t, isReadAction(a), "expected %v to be a read action", a)
 	}
 
-	writeActions := []S3Action{PutObject, DeleteObject, CreateBucket, DeleteBucket}
+	writeActions := []S3Action{PutObject, DeleteObject, CreateBucket, DeleteBucket, PutBucketVersioning, PutObjectRetention}
 	for _, a := range writeActions {
 		assert.False(t, isReadAction(a), "expected %v to NOT be a read action", a)
+	}
+}
+
+func TestPolicyActionString_VersioningAndRetention(t *testing.T) {
+	tests := map[S3Action]string{
+		GetBucketVersioning:              "s3:GetBucketVersioning",
+		PutBucketVersioning:              "s3:PutBucketVersioning",
+		ListBucketVersions:               "s3:ListBucketVersions",
+		GetObjectRetention:               "s3:GetObjectRetention",
+		PutObjectRetention:               "s3:PutObjectRetention",
+		GetBucketObjectLockConfiguration: "s3:GetBucketObjectLockConfiguration",
+	}
+	for action, want := range tests {
+		assert.Equal(t, want, action.PolicyActionString())
 	}
 }
 

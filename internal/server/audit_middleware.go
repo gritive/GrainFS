@@ -53,7 +53,11 @@ func (s *Server) auditEnvelopeMiddleware() app.HandlerFunc {
 
 		ev = finalizeAuditEnvelopeEvent(c, ev, start)
 		if ev.Status >= 400 {
-			ev.AuthStatus = "deny"
+			if ev.Status == http.StatusUnauthorized || ev.Status == http.StatusForbidden {
+				ev.AuthStatus = "deny"
+			} else {
+				ev.AuthStatus = "error"
+			}
 			ev.ErrClass = http.StatusText(int(ev.Status))
 			if ev.ErrClass == "" {
 				ev.ErrClass = "Error"
@@ -63,7 +67,7 @@ func (s *Server) auditEnvelopeMiddleware() app.HandlerFunc {
 					ev.ErrReason = s
 				}
 			}
-			if ev.ErrReason == "" {
+			if ev.ErrReason == "" && ev.AuthStatus == "deny" {
 				ev.AuthStatus = "error"
 			}
 		}

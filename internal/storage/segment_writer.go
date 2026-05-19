@@ -41,6 +41,10 @@ type segmentWriterBackend interface {
 	WriteSegment(ctx context.Context, bucket, key string, idx int, r io.Reader) (SegmentRef, error)
 }
 
+type segmentBytesWriterBackend interface {
+	WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (SegmentRef, error)
+}
+
 // NewSegmentWriter constructs a writer with the standard defaults.
 func NewSegmentWriter(b segmentWriterBackend) *SegmentWriter {
 	return &SegmentWriter{backend: b, chunkSize: DefaultChunkSize, workers: DefaultPutWorkers}
@@ -68,7 +72,15 @@ func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType stri
 		go func() {
 			defer wg.Done()
 			for job := range workCh {
-				ref, err := w.backend.WriteSegment(cctx, bucket, key, job.idx, job.body)
+				var (
+					ref SegmentRef
+					err error
+				)
+				if bw, ok := w.backend.(segmentBytesWriterBackend); ok {
+					ref, err = bw.WriteSegmentBytes(cctx, bucket, key, job.idx, job.body)
+				} else {
+					ref, err = w.backend.WriteSegment(cctx, bucket, key, job.idx, bytes.NewReader(job.body))
+				}
 				resultCh <- segmentWriteResult{idx: job.idx, ref: ref, err: err}
 			}
 		}()
@@ -126,7 +138,7 @@ func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType stri
 
 type chunkJob struct {
 	idx  int
-	body io.Reader
+	body []byte
 }
 
 // chunkLoop reads from r in chunkSize blocks and emits chunkJob values until EOF.
@@ -153,7 +165,7 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 		// Empty-object case: first iteration, no bytes, clean EOF.
 		if n == 0 && errors.Is(readErr, io.EOF) && idx == 0 {
 			select {
-			case workCh <- chunkJob{idx: idx, body: bytes.NewReader(nil)}:
+			case workCh <- chunkJob{idx: idx, body: nil}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -163,7 +175,7 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 			body := make([]byte, n)
 			copy(body, buf[:n])
 			select {
-			case workCh <- chunkJob{idx: idx, body: bytes.NewReader(body)}:
+			case workCh <- chunkJob{idx: idx, body: body}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}

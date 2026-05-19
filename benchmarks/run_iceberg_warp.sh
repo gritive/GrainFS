@@ -20,7 +20,7 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-NODE_COUNT="${NODE_COUNT:-3}"
+NODE_COUNT="${NODE_COUNT:-4}"
 TS="$(date +%Y%m%d-%H%M%S)"
 PROFILE_ROOT_DEFAULT="$REPO_ROOT/benchmarks/profiles/iceberg-warp-${SUB}-${NODE_COUNT}n-${TS}"
 

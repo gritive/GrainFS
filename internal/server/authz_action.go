@@ -4,10 +4,12 @@ import "github.com/gritive/GrainFS/internal/s3auth"
 
 // s3ActionEnum maps an HTTP method + path context to an S3Action enum value.
 // path is required to distinguish sub-resource operations (e.g., ?delete).
-// hasPolicyQuery distinguishes bucket-policy CRUD (?policy) from regular
-// bucket operations so authz can require Admin for Put/Delete and Read
-// for Get on the policy resource.
-func s3ActionEnum(method, path string, hasKey, hasPolicyQuery bool) s3auth.S3Action {
+// hasPolicyQuery and other subresource booleans distinguish bucket/object
+// subresources from regular bucket/object operations.
+func s3ActionEnum(
+	method, path string,
+	hasKey, hasPolicyQuery, hasVersioningQuery, hasVersionsQuery, hasRetentionQuery, hasObjectLockQuery bool,
+) s3auth.S3Action {
 	if hasPolicyQuery && !hasKey {
 		switch method {
 		case "GET":
@@ -17,6 +19,28 @@ func s3ActionEnum(method, path string, hasKey, hasPolicyQuery bool) s3auth.S3Act
 		case "DELETE":
 			return s3auth.DeleteBucketPolicy
 		}
+	}
+	if hasVersioningQuery && !hasKey {
+		switch method {
+		case "GET":
+			return s3auth.GetBucketVersioning
+		case "PUT":
+			return s3auth.PutBucketVersioning
+		}
+	}
+	if hasVersionsQuery && !hasKey && method == "GET" {
+		return s3auth.ListBucketVersions
+	}
+	if hasRetentionQuery && hasKey {
+		switch method {
+		case "GET":
+			return s3auth.GetObjectRetention
+		case "PUT":
+			return s3auth.PutObjectRetention
+		}
+	}
+	if hasObjectLockQuery && !hasKey && method == "GET" {
+		return s3auth.GetBucketObjectLockConfiguration
 	}
 	switch method {
 	case "GET":

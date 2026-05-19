@@ -32,6 +32,10 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		s.putObjectTagging(ctx, c)
 		return
 	}
+	if c.QueryArgs().Has("retention") {
+		s.putObjectRetention(ctx, c)
+		return
+	}
 
 	// Check if this is an UploadPart request
 	uploadID := string(c.QueryArgs().Peek("uploadId"))

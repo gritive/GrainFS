@@ -61,15 +61,18 @@ type segmentPlacement struct {
 // slot. Returns a storage.SegmentRef carrying the xxhash3-128 plaintext
 // checksum.
 func (c *clusterSegmentBackend) WriteSegment(ctx context.Context, bucket, key string, idx int, r io.Reader) (storage.SegmentRef, error) {
-	if idx < 0 || idx >= len(c.blobIDs) {
-		return storage.SegmentRef{}, fmt.Errorf("segment %d: out of range (allocated %d)", idx, len(c.blobIDs))
-	}
-
-	// 1. Buffer chunk to []byte. SegmentWriter caps each chunk at
-	// storage.DefaultChunkSize (16 MiB); 8 workers × 16 MiB ≈ 128 MiB peak.
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: read chunk: %w", idx, err)
+	}
+	return c.WriteSegmentBytes(ctx, bucket, key, idx, data)
+}
+
+// WriteSegmentBytes receives an owned chunk from SegmentWriter's chunker. This
+// avoids re-reading the bytes.Reader with io.ReadAll on the cluster hot path.
+func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (storage.SegmentRef, error) {
+	if idx < 0 || idx >= len(c.blobIDs) {
+		return storage.SegmentRef{}, fmt.Errorf("segment %d: out of range (allocated %d)", idx, len(c.blobIDs))
 	}
 
 	// 2. Pick PG for this segment.
@@ -171,9 +174,6 @@ func chunkedPathThresholdMet(spSize int64) bool {
 // writes across placement groups (best-effort, defer cleanup on any error),
 // then commit a single PutObjectMetaCmd carrying all per-segment placements.
 // The single raft commit is the atomic point.
-//
-// The old spooled chunked entry point rejects multipart parts; multipart
-// callers must use the zero-spool Complete path.
 func (b *DistributedBackend) putObjectChunked(
 	ctx context.Context,
 	bucket, key, versionID string,
@@ -188,10 +188,6 @@ func (b *DistributedBackend) putObjectChunked(
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	if parts != nil {
-		return nil, fmt.Errorf("chunked PUT with multipart parts: deferred to zero-spool Complete path")
-	}
-
 	// Pre-allocate blobIDs + placements sized to exact segment count.
 	chunkSize := int64(storage.DefaultChunkSize)
 	numSegments := int((sp.Size + chunkSize - 1) / chunkSize)
@@ -218,7 +214,7 @@ func (b *DistributedBackend) putObjectChunked(
 		return nil, fmt.Errorf("open spool: %w", err)
 	}
 	defer body.Close()
-	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, tags)
+	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 
 func (b *DistributedBackend) putMultipartObjectChunked(
@@ -278,10 +274,11 @@ func runChunkedPut(
 	preserveModTime bool,
 	expectedETag string,
 	beforeCommit func() error,
+	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
 	return runChunkedPutWithParts(ctx, csb, body, bucket, key, versionID, contentType,
-		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, nil, tags, "")
+		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags, "")
 }
 
 func runChunkedPutWithParts(
@@ -399,6 +396,7 @@ func runChunkedPutWithParts(
 	// must carry Tags even though PutObjectMetaCmd above already persists them.
 	// Defensive copy because callers may outlive the cmd's tags slice.
 	obj.Tags = append([]storage.Tag(nil), tags...)
+	obj.Parts = append([]storage.MultipartPartEntry(nil), parts...)
 	return obj, nil
 }
 

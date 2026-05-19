@@ -33,6 +33,12 @@ const (
 	GetBucketPolicy
 	PutBucketPolicy
 	DeleteBucketPolicy
+	GetBucketVersioning
+	PutBucketVersioning
+	ListBucketVersions
+	GetObjectRetention
+	PutObjectRetention
+	GetBucketObjectLockConfiguration
 )
 
 // Principal identifies the caller of an S3 request.
@@ -95,6 +101,18 @@ func (a S3Action) PolicyActionString() string {
 		return "s3:PutBucketPolicy"
 	case DeleteBucketPolicy:
 		return "s3:DeleteBucketPolicy"
+	case GetBucketVersioning:
+		return "s3:GetBucketVersioning"
+	case PutBucketVersioning:
+		return "s3:PutBucketVersioning"
+	case ListBucketVersions:
+		return "s3:ListBucketVersions"
+	case GetObjectRetention:
+		return "s3:GetObjectRetention"
+	case PutObjectRetention:
+		return "s3:PutObjectRetention"
+	case GetBucketObjectLockConfiguration:
+		return "s3:GetBucketObjectLockConfiguration"
 	default:
 		return "s3:Unknown"
 	}
@@ -102,7 +120,13 @@ func (a S3Action) PolicyActionString() string {
 
 // isReadAction reports whether action is a read-only S3 operation.
 func isReadAction(action S3Action) bool {
-	return action == GetObject || action == HeadObject || action == ListBucket
+	return action == GetObject ||
+		action == HeadObject ||
+		action == ListBucket ||
+		action == GetBucketVersioning ||
+		action == ListBucketVersions ||
+		action == GetObjectRetention ||
+		action == GetBucketObjectLockConfiguration
 }
 
 // IsAuthorizedByACL checks whether accessKey may perform action given the object's ACL.

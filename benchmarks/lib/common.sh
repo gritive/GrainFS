@@ -167,9 +167,10 @@ bench_bootstrap_iam_credentials() {
   bench_wait_admin_socket "$data_dir" 100 0.2
 
   bootstrap_json=$("$binary" iam --json sa create "$name" --endpoint "$admin_sock")
+  SA_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sa_id"])' <<<"$bootstrap_json")
   ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["access_key"])' <<<"$bootstrap_json")
   SECRET_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["secret_key"])' <<<"$bootstrap_json")
-  export ACCESS_KEY SECRET_KEY
+  export SA_ID ACCESS_KEY SECRET_KEY
 }
 
 bench_wait_cluster_leader() {
@@ -228,6 +229,35 @@ bench_create_bucket_admin_retry() {
   done
 
   [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "bucket not ready: $bucket via admin socket $admin_sock" >&2
+  return 1
+}
+
+bench_create_bucket_with_policy_admin_retry() {
+  local binary="$1"
+  local data_dir="$2"
+  local bucket="$3"
+  local sa_id="$4"
+  local policy="$5"
+  local attempts="${6:-60}"
+  local sleep_seconds="${7:-0.5}"
+  local admin_sock="${data_dir}/admin.sock"
+  local last_error=""
+  local output
+
+  for _ in $(seq 1 "$attempts"); do
+    if output=$("$binary" bucket create "$bucket" \
+      --endpoint "$admin_sock" \
+      --attach-sa "$sa_id" \
+      --attach-policy "$policy" \
+      2>&1 >/dev/null); then
+      return 0
+    fi
+    last_error="$output"
+    sleep "$sleep_seconds"
+  done
+
+  [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "bucket not ready with policy: $bucket via admin socket $admin_sock" >&2
+  [[ "${BENCH_QUIET:-0}" == "1" || -z "$last_error" ]] || echo "last error: $last_error" >&2
   return 1
 }
 
