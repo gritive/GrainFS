@@ -2,6 +2,7 @@ package s3auth
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,22 @@ func TestAuthorize_AnonInternalBucketDenied(t *testing.T) {
 	r := a.Authorize(context.Background(), "" /* anon */, "_grainfs", policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::_grainfs/x"})
 	if r.Decision != policy.DecisionDeny {
 		t.Fatalf("anon to _grainfs should be denied even with anon-enabled, got %v", r.Decision)
+	}
+}
+
+func TestAuthorize_SAInternalBucketDenied(t *testing.T) {
+	// An authenticated SA with the readonly policy (Action:s3:GetObject Resource:*)
+	// must NOT be allowed to reach _grainfs/* on the data plane. The guard fires
+	// before policy eval so any attached policy is irrelevant.
+	a, ps, pa, _ := newTestAuthorizer(t, false, false)
+	_ = ps.Put(context.Background(), "readonly", []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`), true)
+	_ = pa.AttachToSA(context.Background(), "sa-1", "readonly")
+	r := a.Authorize(context.Background(), "sa-1", "_grainfs", policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::_grainfs/audit.evaluations"})
+	if r.Decision != policy.DecisionDeny {
+		t.Fatalf("SA with readonly policy should be denied on _grainfs, got %v: %s", r.Decision, r.Reason)
+	}
+	if !strings.Contains(r.Reason, "internal bucket") {
+		t.Fatalf("reason should mention 'internal bucket', got: %s", r.Reason)
 	}
 }
 

@@ -36,8 +36,11 @@ func NewAuthorizer(r *policy.Resolver, c ConfigReader) *Authorizer {
 // saID == "" means anonymous.
 //
 //   - admin-UDS-only actions (D#8) are unconditionally denied on the data plane.
-//   - Anonymous access to internal buckets (_grainfs/*) is denied regardless of
-//     iam.anon-enabled (F-A2: prevents accidental leaks via new handlers).
+//   - Internal buckets (_grainfs/*) are admin-UDS-only on the data plane (spec
+//     line 462 + F-A2). Both anonymous and authenticated SAs are denied. The
+//     audit-internal SA's localhost read path bypasses Authorize entirely via
+//     authenticateAuditInternalRequest (internal/server/authn_middleware.go),
+//     so the audit reader is unaffected.
 //   - When saID == "" and iam.anon-enabled=true, returns Allow without resolver
 //     lookup (Phase 0 → Phase 1 progressive application).
 //   - Otherwise runs full Evaluate with the SA's effective policies and the
@@ -46,8 +49,12 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 	if adminUDSOnlyActions[ctxReq.Action] {
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "admin-UDS-only action (D#8)"}
 	}
-	if saID == "" && reservedname.IsInternalBucket(bucket) {
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (F-A2)"}
+	// F-A2 + spec line 462: internal buckets are admin-UDS-only on the data plane.
+	// Denies BOTH anonymous and authenticated SAs. The audit-internal SA's read path
+	// bypasses Authorize entirely (see internal/server auditInternalObjectReadAllowed),
+	// so this does not break the audit reader.
+	if reservedname.IsInternalBucket(bucket) {
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (data plane is admin-UDS-only)"}
 	}
 	// D#2: "default" bucket carries an implicit anon policy unless the operator
 	// has attached an explicit bucket policy. Implicit policy survives Phase 0→2
