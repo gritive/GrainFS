@@ -194,7 +194,7 @@ func tryIAMGrantPut(sock, saID, bucket, role string) error {
 	return nil
 }
 
-func TestTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
+func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
 		t.Cleanup(func() { _ = os.Remove(sock) })
@@ -237,7 +237,7 @@ func TestTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
 	})
 }
 
-func TestBootstrapAdminViaUDSAnyWithBucketGrantsIssuesExplicitGrantForRegularSA(t *testing.T) {
+func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
 		require.NoError(t, err)
@@ -297,7 +297,7 @@ func TestBootstrapAdminViaUDSAnyWithBucketGrantsIssuesExplicitGrantForRegularSA(
 	})
 }
 
-func TestE2EClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
+func runClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 		dir, err := os.MkdirTemp("/tmp", "grainfs-cluster-grant-*")
 		require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestE2EClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing
 	})
 }
 
-func TestMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
+func runMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
 	t.Run("MRCluster3Node", func(t *testing.T) {
 		dir, err := os.MkdirTemp("/tmp", "grainfs-mr-cluster-grant-*")
 		require.NoError(t, err)
@@ -814,7 +814,7 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 // startIAMTestServer brings up a server with bootstrap creds wired
 // correctly: HeadBucket on a missing bucket returns NotFound (not 401),
 // proving the SigV4 verifier accepts the bootstrap key pair.
-func TestIAMHelpers_StartServer_BootstrapAccepted(t *testing.T) {
+func runIAMHelpersStartServerBootstrapAccepted(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -839,4 +839,17 @@ func TestIAMHelpers_StartServer_BootstrapAccepted(t *testing.T) {
 
 func contains(s, sub string) bool {
 	return bytes.Contains([]byte(s), []byte(sub))
+}
+
+// TestIAMBootstrapHelpersE2E groups single-node IAM bootstrap helper checks.
+func TestIAMBootstrapHelpersE2E(t *testing.T) {
+	t.Run("BootstrapAdminViaUDSAnyWithBucketGrants", runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants)
+	t.Run("TryBootstrapAdminViaUDSResultPreservesSAIDAndGrants", runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants)
+	t.Run("StartServerBootstrapAccepted", runIAMHelpersStartServerBootstrapAccepted)
+}
+
+// TestClusterGrantAdminHelpersE2E groups cluster GrantAdminOnBuckets helper checks.
+func TestClusterGrantAdminHelpersE2E(t *testing.T) {
+	t.Run("E2EClusterGrantAdminOnBuckets", runClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA)
+	t.Run("MRClusterGrantAdminOnBuckets", runMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA)
 }

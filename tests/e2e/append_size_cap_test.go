@@ -23,7 +23,7 @@ import (
 // package-global single fixture cannot accept per-test --append-size-cap-bytes
 // without races across tests; newDedicatedSingleNodeS3Target spawns its own
 // grainfs process with the cap arg threaded through.
-func TestAppendSizeCapE2E(t *testing.T) {
+func runAppendSizeCap(t *testing.T) {
 	smallCap := int64(4 * 1024)
 	capArg := []string{"--append-size-cap-bytes", fmt.Sprintf("%d", smallCap)}
 

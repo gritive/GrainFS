@@ -33,7 +33,7 @@ import (
 
 const streamingPayloadSentinel = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
 
-func TestMultipartChunkedUploadPartE2E(t *testing.T) {
+func runMultipartChunkedUploadPart(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runMultipartChunkedCases(t, newSingleNodeS3Target())
 	})

@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAppendObjectE2E(t *testing.T) {
+func runAppendObject(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		tgt := newSingleNodeS3Target()
 		runCommonAppendCases(t, tgt)
@@ -270,4 +270,13 @@ func getObject(t *testing.T, client *s3.Client, bucket, key string) []byte {
 	data, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return data
+}
+
+// TestAppendObjectsE2E groups all S3 AppendObject scenarios under one entry.
+func TestAppendObjectsE2E(t *testing.T) {
+	t.Run("AppendObject", runAppendObject)
+	t.Run("Coalesce", runAppendCoalesce)
+	t.Run("MidSizeBody", runAppendMidSizeBody)
+	t.Run("ForwardBufferSaturation", runAppendForwardBufferSaturation)
+	t.Run("SizeCap", runAppendSizeCap)
 }

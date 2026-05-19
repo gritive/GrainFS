@@ -12,7 +12,7 @@ import (
 // TestClusterBalancerStatusCLIE2E verifies `cluster balancer status` on
 // both single-node and 4-node fixtures. Balancer may be active or not
 // depending on harness; both should produce structured output.
-func TestClusterBalancerStatusCLIE2E(t *testing.T) {
+func runClusterAdminCLIBalancerStatus(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runClusterBalancerStatusCLICases(t, newSingleNodeS3Target())
 	})

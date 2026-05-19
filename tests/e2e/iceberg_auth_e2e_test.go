@@ -12,7 +12,7 @@ import (
 
 // TestIcebergE2E_NoAuth_Rejected: an unsigned http.Post to /iceberg/v1/namespaces
 // must be rejected with 401 by the iceberg auth gate.
-func TestIcebergE2E_NoAuth_Rejected(t *testing.T) {
+func runIcebergAuthNoAuthRejected(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -30,7 +30,7 @@ func TestIcebergE2E_NoAuth_Rejected(t *testing.T) {
 
 // TestIcebergE2E_AfterBootstrap_Accepts: bootstrap an admin SA via UDS,
 // sign a /iceberg/v1/config request with that key; the SigV4 verifier accepts.
-func TestIcebergE2E_AfterBootstrap_Accepts(t *testing.T) {
+func runIcebergAuthAfterBootstrapAccepts(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -54,7 +54,7 @@ func TestIcebergE2E_AfterBootstrap_Accepts(t *testing.T) {
 
 // TestIcebergE2E_AuthFailures_Audited: 3 unsigned POSTs to /iceberg/v1/...
 // should surface in the audit event log with non-empty Action and Reason.
-func TestIcebergE2E_AuthFailures_Audited(t *testing.T) {
+func runIcebergAuthFailuresAudited(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -82,4 +82,11 @@ func TestIcebergE2E_AuthFailures_Audited(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
 		_ = newSharedClusterS3Target(t)
 	})
+}
+
+// TestIcebergAuthE2E groups iceberg auth-gate scenarios.
+func TestIcebergAuthE2E(t *testing.T) {
+	t.Run("NoAuthRejected", runIcebergAuthNoAuthRejected)
+	t.Run("AfterBootstrapAccepts", runIcebergAuthAfterBootstrapAccepts)
+	t.Run("AuthFailuresAudited", runIcebergAuthFailuresAudited)
 }

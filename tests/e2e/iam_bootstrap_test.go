@@ -22,7 +22,7 @@ import (
 // create returns wildcard grant. Verifies the bootstrap path uses the
 // InitFirstSA dispatch (SA id = sa-default + wildcard admin grant).
 // Single-node only: bootstrap dispatch is single-process state.
-func TestBootstrapFirstSAWildcardGrantE2E(t *testing.T) {
+func runIAMBootstrapFirstSAWildcardGrant(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runBootstrapFirstSAWildcardGrantCases(t)
 	})
@@ -62,7 +62,7 @@ func runBootstrapFirstSAWildcardGrantCases(t *testing.T) {
 
 // TestBootstrapSecondSANoAutoGrantE2E (was F2): non-empty store → SA
 // create does NOT auto-issue a wildcard grant. Single-node only.
-func TestBootstrapSecondSANoAutoGrantE2E(t *testing.T) {
+func runIAMBootstrapSecondSANoAutoGrant(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runBootstrapSecondSANoAutoGrantCases(t)
 	})
@@ -96,7 +96,7 @@ func runBootstrapSecondSANoAutoGrantCases(t *testing.T) {
 // TestBootstrapPreBootstrapDeniedE2E (was F3): pre-bootstrap sigv4 traffic
 // → AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch class error.
 // Single-node only: pre-bootstrap state.
-func TestBootstrapPreBootstrapDeniedE2E(t *testing.T) {
+func runIAMBootstrapPreBootstrapDenied(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runBootstrapPreBootstrapDeniedCases(t)
 	})
@@ -128,7 +128,7 @@ func runBootstrapPreBootstrapDeniedCases(t *testing.T) {
 // TestBootstrapPostBootstrapVerbsE2E (was F4): post-bootstrap, the bootstrap
 // creds drive ListBuckets, CreateBucket, PutObject, and GetObject end-to-end.
 // Single-node only: tests bootstrap completion against a fresh single binary.
-func TestBootstrapPostBootstrapVerbsE2E(t *testing.T) {
+func runIAMBootstrapPostBootstrapVerbs(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runBootstrapPostBootstrapVerbsCases(t)
 	})
@@ -223,4 +223,12 @@ func startUnbootstrappedE2EServer(t testing.TB) (dataDir, s3URL, adminSock strin
 	}
 	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
 	return dir, s3URL, adminSock, port
+}
+
+// TestIAMBootstrapE2E groups IAM bootstrap SA grant scenarios.
+func TestIAMBootstrapE2E(t *testing.T) {
+	t.Run("FirstSAWildcardGrant", runIAMBootstrapFirstSAWildcardGrant)
+	t.Run("SecondSANoAutoGrant", runIAMBootstrapSecondSANoAutoGrant)
+	t.Run("PreBootstrapDenied", runIAMBootstrapPreBootstrapDenied)
+	t.Run("PostBootstrapVerbs", runIAMBootstrapPostBootstrapVerbs)
 }

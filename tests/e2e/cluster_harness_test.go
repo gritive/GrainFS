@@ -128,7 +128,7 @@ func rejectRemovedECExtraArgs(args []string) {
 	}
 }
 
-func TestNormalizeE2EClusterOptionsRejectsRemovedZeroConfigFlags(t *testing.T) {
+func runNormalizeOptionsRejectsRemovedZeroConfigFlags(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity", "--seed-groups=2", "--seed-groups"} {
 			t.Run(arg, func(t *testing.T) {
@@ -142,7 +142,7 @@ func TestNormalizeE2EClusterOptionsRejectsRemovedZeroConfigFlags(t *testing.T) {
 	})
 }
 
-func TestNormalizeE2EClusterOptionsAllowsNonECExtraArgs(t *testing.T) {
+func runNormalizeOptionsAllowsNonECExtraArgs(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		opts := normalizeE2EClusterOptions(e2eClusterOptions{
 			ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
@@ -470,4 +470,10 @@ func (c *e2eCluster) GrantAdminOnBuckets(buckets ...string) {
 		c.t.Fatalf("cannot grant bucket admin without bootstrap sa_id")
 	}
 	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
+}
+
+// TestNormalizeE2EClusterOptionsE2E groups harness option-normalize checks.
+func TestNormalizeE2EClusterOptionsE2E(t *testing.T) {
+	t.Run("AllowsNonECExtraArgs", runNormalizeOptionsAllowsNonECExtraArgs)
+	t.Run("RejectsRemovedZeroConfigFlags", runNormalizeOptionsRejectsRemovedZeroConfigFlags)
 }

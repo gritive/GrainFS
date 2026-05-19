@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMultipartE2E(t *testing.T) {
+func runMultipart(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runMultipartCases(t, newSingleNodeS3Target())
 	})
@@ -353,4 +353,11 @@ func assertMultipartListingParts(t testing.TB, parts *s3.ListPartsOutput, fixtur
 	assert.Equal(t, fixture.ETagOne, aws.ToString(parts.Parts[0].ETag))
 	assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
 	assert.Equal(t, fixture.ETagTwo, aws.ToString(parts.Parts[1].ETag))
+}
+
+// TestMultipartsE2E groups all S3 multipart scenarios under one entry.
+func TestMultipartsE2E(t *testing.T) {
+	t.Run("Multipart", runMultipart)
+	t.Run("ChunkedUploadPart", runMultipartChunkedUploadPart)
+	t.Run("GetPartNumber", runMultipartGetPartNumber)
 }

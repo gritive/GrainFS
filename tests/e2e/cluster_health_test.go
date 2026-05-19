@@ -14,7 +14,7 @@ import (
 // of singleton vs cluster. With no configured peers the local-mode rule
 // does not fire, so issues should be empty (apart from EC degraded if
 // backend is degraded).
-func TestClusterHealthCLIE2E(t *testing.T) {
+func runClusterAdminCLIHealth(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runClusterHealthCLICases(t, newSingleNodeS3Target())
 	})

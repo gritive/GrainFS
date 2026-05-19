@@ -14,7 +14,7 @@ import (
 // TestClusterTransferLeaderE2E spins up a 3-node cluster and exercises
 // `grainfs cluster transfer-leader --wait` against the leader's admin
 // socket. Verifies the leader changes and term advances.
-func TestClusterTransferLeaderE2E(t *testing.T) {
+func runClusterTransferLeader(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 
 		c := startE2ECluster(t, e2eClusterOptions{
@@ -85,7 +85,7 @@ func TestClusterTransferLeaderE2E(t *testing.T) {
 // TestClusterTransferLeaderNoPeersE2E exercises the single-node 503 path.
 // The shared test server in testServerDataDir is single-node, so we can hit
 // it directly without spinning up startE2ECluster.
-func TestClusterTransferLeaderNoPeersE2E(t *testing.T) {
+func runClusterTransferLeaderNoPeers(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 
 		binary := getBinary()
@@ -110,4 +110,11 @@ func TestClusterTransferLeaderNoPeersE2E(t *testing.T) {
 		require.NoError(t, json.Unmarshal(statusOut, &s))
 		require.NotNil(t, s["mode"])
 	})
+}
+
+// TestClusterTransferLeaderE2E groups leader-transfer scenarios (3-node
+// happy path + no-peer single-node behavior) under one entry.
+func TestClusterTransferLeaderE2E(t *testing.T) {
+	t.Run("Cluster3Node", runClusterTransferLeader)
+	t.Run("SingleNodeNoPeers", runClusterTransferLeaderNoPeers)
 }

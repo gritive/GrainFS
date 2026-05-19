@@ -25,7 +25,7 @@ import (
 
 const multipartPartSize = 5 * 1024 * 1024 // 5 MiB — warp's minimum part.size
 
-func TestMultipartGetPartNumberE2E(t *testing.T) {
+func runMultipartGetPartNumber(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runMultipartGetPartNumberCases(t, newSingleNodeS3Target())
 	})

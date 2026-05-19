@@ -10,7 +10,7 @@ import (
 // TestAppendMidSizeBodyE2E proves AppendObject accepts 8 MiB bodies after
 // DefaultMaxForwardBodyBytes was raised from 5 MiB to 64 MiB (matching the
 // HTTP layer appendBodyMaxBytes). See design 2026-05-19 § Follow-up 3.
-func TestAppendMidSizeBodyE2E(t *testing.T) {
+func runAppendMidSizeBody(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		tgt := newSingleNodeS3Target()
 		runMidSizeAppendCase(t, tgt)

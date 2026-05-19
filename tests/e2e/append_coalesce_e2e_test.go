@@ -39,7 +39,7 @@ import (
 // internal/cluster/coalesce_owner_failure_test.go; this e2e focuses on the
 // happy-path observable behavior (round-trip + metrics) on both deployment
 // shapes.
-func TestAppendCoalesceE2E(t *testing.T) {
+func runAppendCoalesce(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runCoalesceCase(t, newSingleNodeS3Target())
 	})

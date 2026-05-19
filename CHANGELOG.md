@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.262.19] - 2026-05-19 - test(e2e): further-group 17 entries into single handles
+
+48개 별 entry를 17개 단일 entry로 추가 통합 (ClusterTransferLeader, ClusterEC, IAMBootstrap, ClusterBootstrapJoin, ClusterJoinServices, NormalizeOptions, WaitForWritableEndpoint, IAMBootstrapHelpers, ClusterGrantAdminHelpers, ClusterPSK, NoPeers, IcebergAuth, IcebergDuckDB, AuditIceberg, AppendObjects, Multiparts, ClusterAdminCLI). 각 함수는 `run*` helper로 rename + 새 entry에서 `t.Run` 디스패치. production code 변경 없음.
+
 ## [0.0.262.18] - 2026-05-19 - test(e2e): unify all entries under dual sub-test pattern
 
 `tests/e2e/`의 200+ test entry를 canonical `TestXxxE2E + SingleNode/Cluster{N}Node` sub-test 모양으로 통일. 관련 그룹들은 단일 entry로 합치고, single-only / cluster-only entry에는 fixture-가능한 mirror를 추가해 인벤토리 일관성 확보. production code 변경 없음 (test infrastructure only).
