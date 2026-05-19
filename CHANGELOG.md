@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.0.262.18] - 2026-05-19 - test(e2e): unify all entries under dual sub-test pattern
+
+`tests/e2e/`의 200+ test entry를 canonical `TestXxxE2E + SingleNode/Cluster{N}Node` sub-test 모양으로 통일. 관련 그룹들은 단일 entry로 합치고, single-only / cluster-only entry에는 fixture-가능한 mirror를 추가해 인벤토리 일관성 확보. production code 변경 없음 (test infrastructure only).
+
 ## [0.0.262.17] - 2026-05-19 - test(e2e): merge volume_cli_test.go entries into single TestVolumeCLIGuardsE2E
 
 Two negative-path entries from v0.0.262.16 (`TestVolumeCLIAutoDiscoveryE2E` + `TestVolumeDataPlaneGuardE2E`) collapsed into one entry. Both cover the same conceptual area — guards on the volume CLI / data plane surface — so a single entry with two sub-tests is the right shape.
