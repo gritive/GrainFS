@@ -14,7 +14,7 @@ import (
 // in a 3-node cluster, reads it back through NBD, then walks every node's
 // dataDir to confirm the bytes physically replicated to ≥2 nodes.
 //
-// Why this exists separately from TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator:
+// Why this exists separately from TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E:
 // that test verifies metadata propagation only — ListObjects from a non-coordinator
 // sees the key because raft replicates metadata. It can pass while bytes live on
 // a single replica, exactly the failure mode caused by the StreamShardWriteBody

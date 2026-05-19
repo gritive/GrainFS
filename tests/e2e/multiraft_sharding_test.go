@@ -475,12 +475,12 @@ func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout
 	}, timeout, time.Second, "expected >= %d shard groups in %s", minGroups, dataDir)
 }
 
-// ----- TestE2E_MultiRaftSharding_Boot --------------------------------------
+// ----- TestMultiRaftShardingBootE2E --------------------------------------
 // Verify 5-process boot with automatic seed groups results in:
 //   - All processes alive
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
 //   - Each group has the expected number of voters for the auto EC profile
-func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
+func TestMultiRaftShardingBootE2E(t *testing.T) {
 	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
@@ -507,11 +507,11 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 	t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
 }
 
-// ----- TestE2E_MultiRaftSharding_AllNodeServices ---------------------------
+// ----- TestMultiRaftShardingAllNodeServicesE2E ---------------------------
 // Every cluster process must expose its node-local services. S3 writes are
 // cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
 // listeners local to each process.
-func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
+func TestMultiRaftShardingAllNodeServicesE2E(t *testing.T) {
 	c := startStaticMRCluster(t, 3)
 
 	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
@@ -537,7 +537,7 @@ func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
 	}
 }
 
-// ----- TestE2E_MultiRaftSharding_BucketAssignment ---------------------------
+// ----- TestMultiRaftShardingBucketAssignmentE2E ---------------------------
 // Verify bucket→group hash assignment is recorded.
 //
 // Scope cut: Without admin endpoints we cannot directly inspect meta-FSM
@@ -546,7 +546,7 @@ func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
 //     ProposeBucketAssignment)
 //   - Subsequent CreateBucket on same name is idempotent (no error / 409)
 //   - Spread: 32 buckets all created without error
-func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
+func TestMultiRaftShardingBucketAssignmentE2E(t *testing.T) {
 	// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
 	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 	// the same forward path with try-each-peer reliability.
@@ -601,10 +601,10 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 	t.Logf("32 buckets created + 5 idempotent re-creates ok")
 }
 
-// ----- TestE2E_MultiRaftSharding_RestartRecovery ----------------------------
+// ----- TestMultiRaftShardingRestartRecoveryE2E ----------------------------
 // Boot, create buckets, SIGTERM all, restart with same dataDirs, verify
 // per-group dirs persist + bucket recreate (idempotent) succeeds.
-func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
+func TestMultiRaftShardingRestartRecoveryE2E(t *testing.T) {
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
@@ -674,10 +674,10 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 	t.Logf("restart ok: %d groups recovered", len(afterDirs))
 }
 
-// ----- TestE2E_MultiRaftSharding_PerGroupPersistence ---------------------
+// ----- TestMultiRaftShardingPerGroupPersistenceE2E ---------------------
 // Verify that an object written through the multi-raft data plane survives a
 // clean cluster restart and remains readable through routed S3 GETs.
-func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
+func TestMultiRaftShardingPerGroupPersistenceE2E(t *testing.T) {
 
 	// This test must route away from legacy group-0 so the object lands under a
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
@@ -903,11 +903,11 @@ func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 		bucket, key, lastNode, lastErr, string(got))
 }
 
-// ----- TestE2E_MultiRaftSharding_CrossNodeDispatch -------------------------
+// ----- TestMultiRaftShardingCrossNodeDispatchE2E -------------------------
 // Verify that a PUT request arriving at a non-voter node is forwarded to
 // the correct group leader and persisted. Tests ClusterCoordinator's
 // forward.Send → peer's ForwardReceiver → GroupBackend.PutObject path.
-func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
+func TestMultiRaftShardingCrossNodeDispatchE2E(t *testing.T) {
 
 	// Cross-node routing does not require multiple seeded groups; one RF=3 group
 	// is enough to exercise follower-to-leader forwarding.
@@ -941,7 +941,7 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 	t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
 }
 
-func TestE2E_TopologyDurability_FullTargetWriteGuard(t *testing.T) {
+func TestTopologyDurabilityFullTargetWriteGuardE2E(t *testing.T) {
 
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -1003,12 +1003,12 @@ func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Cli
 	}, 45*time.Second, time.Second, "expected missing topology placement target to surface as S3 503")
 }
 
-// ----- TestE2E_MultiRaftSharding_GroupLeaderFailover ------------------------
+// ----- TestMultiRaftShardingGroupLeaderFailoverE2E ------------------------
 // Simulate leader crash (SIGTERM) for a group and verify another voter takes
 // over, then PUT/GET continue to work. Validates Raft election + FSM
 // continuity under the new ClusterCoordinator routing (try-each-peer
 // eventually hits the new leader).
-func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
+func TestMultiRaftShardingGroupLeaderFailoverE2E(t *testing.T) {
 
 	// Failover behavior is independent of group count. Use one group to keep
 	// startup focused on the failover path under test.
@@ -1081,11 +1081,11 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 	t.Log("group leader failover ok: new leader elected, committed data readable, new writes blocked while target is missing")
 }
 
-// ----- TestE2E_MultiRaftSharding_NFSv4Smoke ----------------------------
+// ----- TestMultiRaftShardingNFSv4SmokeE2E ----------------------------
 // Cross-protocol parity: verify that NFSv4 routes through ClusterCoordinator,
 // so objects written via S3 are readable over NFSv4 and vice versa. On Linux
 // the test mounts locally; on macOS it mounts from the Colima Linux VM.
-func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
+func TestMultiRaftShardingNFSv4SmokeE2E(t *testing.T) {
 
 	c := startStaticMRCluster(t, 3)
 	waitForPortsParallel(t, []int{c.nfs4Ports[0]}, 45*time.Second)
@@ -1227,7 +1227,7 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
+func TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -1260,7 +1260,7 @@ func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
 	require.NotEmpty(t, out.Contents)
 }
 
-func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *testing.T) {
+func TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E(t *testing.T) {
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -1332,11 +1332,11 @@ func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *te
 	require.Contains(t, string(got), `"format-version"`)
 }
 
-// TestE2E_TwoNodeAvailabilityTrap verifies the well-known 2-node quorum trap:
+// TestTwoNodeAvailabilityTrapE2E verifies the well-known 2-node quorum trap:
 // with 2 voters in metaRaft (and all data groups), losing one node breaks
 // quorum entirely. This is intentional — 2-node clusters are functionally
 // worse than single-node for availability.
-func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
+func TestTwoNodeAvailabilityTrapE2E(t *testing.T) {
 
 	c := startMRCluster(t, 2, mrClusterOptions{
 		FastBootstrap: true,
@@ -1378,7 +1378,7 @@ func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
 	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
 }
 
-// TestE2E_DynamicGroupSeeding_1to5 verifies that each dynamic node join
+// TestDynamicGroupSeeding1to5E2E verifies that each dynamic node join
 // triggers the seed loop to expand shard groups according to
 // seedGroupCountForClusterSize(n) = max(n*4, 8):
 //
@@ -1390,7 +1390,7 @@ func TestE2E_TwoNodeAvailabilityTrap(t *testing.T) {
 //
 // After each expansion, a PUT (with internal GET round-trip) is verified to
 // confirm routing works.
-func TestE2E_DynamicGroupSeeding_1to5(t *testing.T) {
+func TestDynamicGroupSeeding1to5E2E(t *testing.T) {
 
 	// Start with 1 node; pre-allocate ports for 5.
 	c := startMRCluster(t, 1, mrClusterOptions{

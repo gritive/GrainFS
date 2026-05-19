@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.262.7] - 2026-05-19 - test(e2e): rename TestE2E_MultiRaftSharding_* to TestXxxE2E (cluster-only convention)
+
+13 cluster-only functions in `tests/e2e/multiraft_sharding_test.go` carried the legacy `TestE2E_*_*` naming. They are all multi-raft sharding tests that boot a dedicated `mrCluster` with varying `numNodes` and `mrClusterOptions` — single-node has no analogue for the multi-raft topology, so dual-pattern wrapping (`t.Run("SingleNode")`) adds nothing. Pure rename to the `TestXxxE2E` suffix convention used elsewhere in the package; bodies unchanged.
+
+### Changed
+
+- `TestE2E_MultiRaftSharding_Boot` → `TestMultiRaftShardingBootE2E`
+- `TestE2E_MultiRaftSharding_AllNodeServices` → `TestMultiRaftShardingAllNodeServicesE2E`
+- `TestE2E_MultiRaftSharding_BucketAssignment` → `TestMultiRaftShardingBucketAssignmentE2E`
+- `TestE2E_MultiRaftSharding_RestartRecovery` → `TestMultiRaftShardingRestartRecoveryE2E`
+- `TestE2E_MultiRaftSharding_PerGroupPersistence` → `TestMultiRaftShardingPerGroupPersistenceE2E`
+- `TestE2E_MultiRaftSharding_CrossNodeDispatch` → `TestMultiRaftShardingCrossNodeDispatchE2E`
+- `TestE2E_TopologyDurability_FullTargetWriteGuard` → `TestTopologyDurabilityFullTargetWriteGuardE2E`
+- `TestE2E_MultiRaftSharding_GroupLeaderFailover` → `TestMultiRaftShardingGroupLeaderFailoverE2E`
+- `TestE2E_MultiRaftSharding_NFSv4Smoke` → `TestMultiRaftShardingNFSv4SmokeE2E`
+- `TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator` → `TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E`
+- `TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit` → `TestMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplitE2E`
+- `TestE2E_TwoNodeAvailabilityTrap` → `TestTwoNodeAvailabilityTrapE2E`
+- `TestE2E_DynamicGroupSeeding_1to5` → `TestDynamicGroupSeeding1to5E2E`
+
+Cross-file doc-comment references in `tests/e2e/cluster_mount_nbd_test.go` and `tests/e2e/nbd_multinode_replication_test.go` updated to the new names.
+
 ## [0.0.262.6] - 2026-05-19 - test(e2e): drop every t.Skip / t.Skipf / t.SkipNow across tests/
 
 All remaining `t.Skip` / `t.Skipf` / `t.SkipNow` / `c.t.Skipf` / `s.T().Skipf` call sites in `tests/` were removed (26 files, ~58 net lines). Combined with v0.0.262.3 (skipIfShort) and v0.0.262.5 (testing.Short blocks) this means **no test in the tree can skip itself anymore** — every test must run on every invocation. Environment gaps (missing tools, missing binaries, opt-in benchmarks) now surface as failures, not silent skips.

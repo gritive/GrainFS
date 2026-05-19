@@ -5,7 +5,7 @@
 // Verification strategy: NBD reads at non-leader nodes are not part of
 // the cluster contract. We probe the data layer (signed S3 ListObjects
 // of __grainfs_volumes/__vol/default/) on every node instead — same
-// pattern TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator uses.
+// pattern TestMultiRaftShardingNBDRoutesThroughCoordinatorE2E uses.
 // This also avoids kernel-fragile nbd-client reconnect storms.
 //
 // Migrated from tests/nbd_colima/cluster_mount_test.go.
