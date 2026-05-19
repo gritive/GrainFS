@@ -22,8 +22,8 @@ func invokeRequestID(t *testing.T, incoming string) (ridFromCtx, hdrGrain, hdrAm
 	}
 	var seen string
 	mw := WithRequestID()
-	// app.HandlerFunc(c.Next) terminates the chain when there are no handlers;
-	// set a single handler that captures the rid from context.
+	// Downstream capture handler: records the rid that WithRequestID
+	// attached to context so the test can assert ctx/header alignment.
 	c.SetHandlers(app.HandlersChain{
 		func(ctx context.Context, c *app.RequestContext) {
 			seen = RequestIDFromContext(ctx)
