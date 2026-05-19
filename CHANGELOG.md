@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.0.262.13] - 2026-05-19 - test(e2e): dual-integrate VolumeScrub set + collapse _Cluster4Node suffix entries
+
+Three test groups re-shaped into the canonical single-entry dual pattern.
+
+### Shape
+
+```
+TestVolumeScrubE2E
+  ├─ t.Run("SingleNode")  ─┐
+  └─ t.Run("Cluster4Node") ┴─ runVolumeScrubCases(t, mk volumeScrubFactory)
+                                ├─ t.Run("HealthyNoop")                  (dedup=false)
+                                ├─ t.Run("HealthyNoop_Dedup")            (dedup=true)
+                                ├─ t.Run("DryRunDetectsCorruption")      (truncate + --dry-run)
+                                ├─ t.Run("DryRunDetectsCorruption_Dedup")
+                                ├─ t.Run("RepairBehavior")               (single→Unrepairable=1 / cluster→Repaired=1)
+                                ├─ t.Run("RepairBehavior_Dedup")
+                                ├─ t.Run("AdminTriggerWorksAtZeroInterval")  (--scrub-interval=0)
+                                └─ t.Run("StatusListCancel")             (--detach + list + status)
+```
+
+### Changed
+
+- **`TestE2E_VolumeScrub_*` (8 entries) + `TestE2E_VolumeScrub_MultiNodeRepair` → single `TestVolumeScrubE2E`** (`tests/e2e/volume_scrub_test.go`). `MultiNodeRepair` is absorbed by `RepairBehavior`'s cluster branch — same truncate-then-scrub flow, fixture-divergent expectation (single: `Unrepairable=1`, cluster: `Repaired=1`).
+- New `volumeScrubFactory` type — each scrub case needs its own `--dedup`/`--scrub-interval` flags, so the case set is parametrised on a fixture factory rather than a single `s3Target`. Single branch wraps `newDedicatedSingleNodeS3Target`; cluster branch wraps `newClusterS3TargetWithExtraArgs(t, 4, args)`.
+- New `scrubDataDir(tgt, nodeIdx)` and `truncateAVolumeBlock(t, tgt, vol, blockNum)` helpers — encapsulate single-vs-cluster dataDir selection and on-disk shard truncation (picks first holder for cluster).
+- `filepathWalkBlock` helper moved from the deleted `volume_scrub_multinode_test.go` into `volume_scrub_test.go` (still used by `nbd_multinode_replication_test.go`).
+- Deleted `tests/e2e/volume_scrub_multinode_test.go`.
+
+### Also (`_Cluster4Node` suffix cleanup)
+
+- **`TestAppendForwardBufferSaturationE2E_Cluster4Node` → `TestAppendForwardBufferSaturationE2E`** with a single `t.Run("Cluster4Node", …)` branch that calls `runAppendForwardBufferSaturationCases(t, tgt s3Target)`. Cluster-only today (single-node has no forward buffer); shape kept consistent so a future single-node analogue (e.g. per-bucket admission control) can drop in as a sibling `t.Run("SingleNode", …)`.
+- **`TestOrphanSegmentSweepE2E_Cluster4Node` → `TestOrphanSegmentSweepE2E`** with one `t.Run("Cluster4Node", …)` calling `runOrphanSegmentSweepCases(t)`. Cluster-only today (single-node scrubber is covered separately); same forward-compatibility rationale.
+
+Verified: `make build` clean. e2e package compiles (`go test -c`).
+
+### Known parity risks (cluster branch, first run)
+
+- `DryRunDetectsCorruption{,_Dedup}` cluster branch corrupts an EC shard rather than a `current` file — never previously exercised through the dry-run CLI path.
+- `RepairBehavior{,_Dedup}` cluster branch expects `Repaired=1` via EC peer-pull on a 4-node DynamicJoin fixture; `MultiNodeRepair` previously asserted this on 3-node StaticPeers. Fixture difference may flap initial-placement races on the first write.
+- `HealthyNoop_Dedup` cluster branch is the first cluster coverage of dedup-mode volume scrub. If dedup-on-cluster has wiring gaps, the assert fails — captured as signal, not fixed here (classification-only scope per ongoing e2e-unify session policy).
+
 ## [0.0.262.12] - 2026-05-19 - test(e2e): dual-integrate TestVolume admin CLI set
 
 Same one-entry-point shape as v0.0.262.11 (BucketPolicy). Single `TestVolumeE2E` owns the volume admin CLI test set and applies it to both fixtures.

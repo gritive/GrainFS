@@ -21,17 +21,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAppendForwardBufferSaturationE2E_Cluster4Node spins up a cluster with a
-// deliberately tiny forward buffer and drives concurrent appends from
-// non-owner nodes; at least one must surface a 503 SlowDown (mapped from
-// ErrForwardBufferFull). cluster-only.
-func TestAppendForwardBufferSaturationE2E_Cluster4Node(t *testing.T) {
-	tgt := newClusterS3TargetWithExtraArgs(t, 4, []string{
-		"--cluster-append-forward-buffer-total-bytes", fmt.Sprintf("%d", 4*1024*1024),
-		"--cluster-append-forward-buffer-max-per-request", fmt.Sprintf("%d", 64*1024*1024),
+// TestAppendForwardBufferSaturationE2E exercises the cluster forward-buffer
+// saturation path. Single-node has no forward buffer, so the test set has
+// only a Cluster4Node branch today; the shape stays consistent with the
+// other dual-integrated entries so a future single-node analogue (e.g.,
+// per-bucket admission control) can drop in.
+func TestAppendForwardBufferSaturationE2E(t *testing.T) {
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runAppendForwardBufferSaturationCases(t, newClusterS3TargetWithExtraArgs(t, 4, []string{
+			"--cluster-append-forward-buffer-total-bytes", fmt.Sprintf("%d", 4*1024*1024),
+			"--cluster-append-forward-buffer-max-per-request", fmt.Sprintf("%d", 64*1024*1024),
+		}))
 	})
-	bucket := "append-satur-" + tgt.name
-	tgt.createBkt(t, bucket)
+}
+
+func runAppendForwardBufferSaturationCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	bucket := tgt.uniqueBucket(t, "appendsatur")
 
 	var slowDowns int64
 	var wg sync.WaitGroup

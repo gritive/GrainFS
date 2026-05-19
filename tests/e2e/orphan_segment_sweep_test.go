@@ -13,7 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOrphanSegmentSweepE2E_Cluster4Node(t *testing.T) {
+// TestOrphanSegmentSweepE2E exercises the cluster scrubber's orphan-segment
+// sweep path. Single-node scrubber is covered separately; the cluster path
+// has a different walker dispatch, so this test set has a Cluster4Node-only
+// branch today. Future single-node analogue can drop in as a sibling
+// t.Run("SingleNode", ...).
+func TestOrphanSegmentSweepE2E(t *testing.T) {
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runOrphanSegmentSweepCases(t)
+	})
+}
+
+func runOrphanSegmentSweepCases(t *testing.T) {
+	t.Helper()
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:         4,
 		ScrubInterval: "500ms",
