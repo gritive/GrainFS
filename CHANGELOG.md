@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.267.0] - 2026-05-20 - feat(cluster): CreateMultipartUploadWithTags real support
+
+Object Tagging API Phase 2 cluster gap 종결. `CreateMultipartUploadWithTags`가 cluster 모드에서 실제로 동작 (Phase 1의 `len(tags) > 0` fail-fast 제거).
+
+### Changed
+
+- **Cluster `CreateMultipartUploadWithTags` 본격 지원**: `clusterpb.MultipartMeta` + `CreateMultipartUploadCmd` FBS schema에 `tags:[Tag]` 추가. Initiate 시 `clusterMultipartMeta`에 Tags 저장, `CompleteMultipartUpload` 시 production Raft path (`CmdPutObjectMeta`)에 Tags propagation해서 finalised `objectMeta.Tags` 직접 materialise (single Raft entry — 별도 `CmdSetObjectTags` proposal 불필요).
+- **Tag copy discipline 통일**: defensive copy는 cluster API boundary 한 곳 (`createMultipartUploadInternal`)에만 존재. apply / EC commit path는 alias 그대로 전달 (`Parts` 패턴과 일치). hot-path alloc 감소.
+- **`CreateMultipartUpload[WithTags]` dedupe**: 두 public 메서드가 `createMultipartUploadInternal` 헬퍼로 통일되어 placement-group 부트스트랩/rollback 로직 ~30줄 중복 제거.
+
+### Verified (no code change)
+
+- Cluster versioned-record tags (`SetObjectTags`/`GetObjectTags` with `versionID != ""`) — 이미 v0.0.264.0에 구현되어 있음 (`apply.go:691-721` versionID-branch, `backend.go:1377-1379` versioned-key GET). Unit 테스트 통과: `TestFSM_SetObjectTags`, `TestFSM_SetObjectTags_NotFound`, `TestFSM_SetObjectTags_VersionedBucket`, `TestFSM_SetObjectTags_SpecificVersion`.
+
+### Known follow-ups
+
+- `upgradeObjectEC` (`backend.go:3017`)가 `CmdPutObjectMeta` propose 시 Tags 미전달 → EC config upgrade가 tag를 nil로 clobber할 위험. Spec reviewer가 발견, 별도 task로 추적.
+- E2E harness IAM bootstrap probe regression (v0.0.263.0 이후 cluster e2e 전체가 `IAM bootstrap not ready within 30s`로 실패). Phase 2와 무관, 본 릴리스에서 별도 fix 필요.
+
 ## [0.0.266.0] - 2026-05-19 - feat(cluster): segment-backed large object chunking phase 2
 
 Cluster large-object chunking phase 2. Chunked PUT/GET now routes object metadata through the cluster raft path while segment payloads are stored and read through the segment store. The branch also hardens the single-node segment-backed storage compatibility paths that were exposed after rebasing onto `origin/master`.
