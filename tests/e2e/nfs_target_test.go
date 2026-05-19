@@ -51,7 +51,9 @@ func (tgt *nfsTarget) uniqueExport(t *testing.T, caseName string) (string, uint6
 	require.NotZero(t, created.Generation)
 
 	t.Cleanup(func() {
-		_ = runNfsExportJSONOnDataDir(t, tgt.dataDir(tgt.leaderIdx), "remove", bucket)
+		// Best-effort: bucket may already be gone (e.g. delete-cascade case
+		// removed the export). Use --quiet and ignore non-zero exit.
+		_, _ = runCLI(t, tgt.dataDir(tgt.leaderIdx), "nfs", "export", "remove", bucket, "--quiet")
 	})
 	return bucket, created.Generation
 }
