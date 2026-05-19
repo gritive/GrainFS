@@ -61,6 +61,20 @@ func decodeMetaConfigSnapshot(data []byte) (map[string]string, error) {
 	return out, nil
 }
 
+// EncodeConfigPutPayload serializes a ConfigPut inner payload (the DataBytes
+// portion of a MetaCmd envelope). Exposed for use by packages that need to
+// construct a ConfigPut payload outside the cluster package (e.g. tests,
+// dispatchers).
+func EncodeConfigPutPayload(key, value string) ([]byte, error) {
+	return encodeMetaConfigPutCmd(key, value)
+}
+
+// DecodeConfigPutPayload parses a ConfigPut inner payload and returns key and
+// value. Exposed for dispatchers that receive raw hook payloads.
+func DecodeConfigPutPayload(data []byte) (key, value string, err error) {
+	return decodeMetaConfigPutCmd(data)
+}
+
 // encodeMetaConfigPutCmd serializes a ConfigPut payload (inner data bytes of
 // a MetaCmd envelope — wrap with encodeMetaCmd to get the full envelope).
 func encodeMetaConfigPutCmd(key, value string) ([]byte, error) {

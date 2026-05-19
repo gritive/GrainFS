@@ -320,6 +320,10 @@ type MetaFSM struct {
 	// a new DEKKeeper via LoadFromFSM(kek, versions).
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
+
+	// postCommitHooks is a list of hooks fired after each successful applyCmd.
+	// Protected by mu for registration; read under RLock at fire time.
+	postCommitHooks []PostCommitHook
 }
 
 func NewMetaFSM() *MetaFSM {
@@ -476,8 +480,9 @@ func (f *MetaFSM) SetRotationSteady(activeSPKI [32]byte) {
 	f.rotation.SetSteady(activeSPKI)
 }
 
-// applyCmd decodes a MetaCmd FlatBuffers envelope and mutates state.
-// Called by MetaRaft.runApplyLoop on each committed log entry.
+// applyCmd decodes a MetaCmd FlatBuffers envelope, mutates state, and fires
+// post-commit hooks on success. Called by MetaRaft.runApplyLoop on each
+// committed log entry.
 func (f *MetaFSM) applyCmd(data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("meta_fsm: empty command")
@@ -498,6 +503,17 @@ func (f *MetaFSM) applyCmd(data []byte) error {
 		return decErr
 	}
 
+	err := f.applyCmdInner(cmd)
+	if err == nil {
+		f.firePostCommitHooks(cmd.Type(), cmd.DataBytes())
+	}
+	return err
+}
+
+// applyCmdInner dispatches a decoded MetaCmd to the appropriate apply method.
+// Returns an error on failure; the caller (applyCmd) fires post-commit hooks
+// only on nil return.
+func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 	switch cmd.Type() {
 	case clusterpb.MetaCmdTypeNoOp:
 		return nil
