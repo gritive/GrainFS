@@ -8,15 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestServe_RejectsRemovedUpstreamFlags is a regression gate locking the
-// removal of --upstream / --upstream-access-key / --upstream-secret-key.
-// cobra must reject each as "unknown flag" with non-zero exit.
-//
-// Same regression class as PR #258's incomplete --access-key removal —
-// without this test, a future commit could silently reintroduce one of the
-// flags (e.g., from a copy-pasted ops example) and we wouldn't notice until
-// users hit a confusing security exposure.
-func TestServe_RejectsRemovedUpstreamFlags(t *testing.T) {
+// TestServeFlagsRejectionE2E is a regression gate locking the removal of
+// --upstream / --upstream-access-key / --upstream-secret-key. cobra must
+// reject each as "unknown flag" with non-zero exit. Same regression class
+// as PR #258's incomplete --access-key removal — without this test, a
+// future commit could silently reintroduce one of the flags. Single-node
+// only by nature: probes the single-binary CLI surface; no cluster shape.
+func TestServeFlagsRejectionE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runServeFlagsRejectionCases(t)
+	})
+}
+
+func runServeFlagsRejectionCases(t *testing.T) {
+	t.Helper()
 	binary := getBinary()
 
 	cases := []struct {

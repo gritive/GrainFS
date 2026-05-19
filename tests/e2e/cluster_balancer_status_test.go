@@ -3,44 +3,51 @@ package e2e
 import (
 	"encoding/json"
 	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestClusterBalancerStatusCLI verifies `cluster balancer status` returns
-// 200 + a valid response on the test server (balancer may be active or
-// not depending on harness; both should produce structured output).
-func TestClusterBalancerStatusCLI(t *testing.T) {
-	binary := getBinary()
-	sock := filepath.Join(testServerDataDir, "admin.sock")
-
-	out, err := exec.Command(binary, "cluster",
-		"--endpoint", sock,
-		"balancer", "status", "--format", "json",
-	).Output()
-	require.NoError(t, err, "balancer status command must succeed")
-
-	var b map[string]any
-	require.NoError(t, json.Unmarshal(out, &b), "output must be valid JSON")
-	_, ok := b["available"]
-	assert.True(t, ok, "available field expected: %v", b)
+// TestClusterBalancerStatusCLIE2E verifies `cluster balancer status` on
+// both single-node and 4-node fixtures. Balancer may be active or not
+// depending on harness; both should produce structured output.
+func TestClusterBalancerStatusCLIE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runClusterBalancerStatusCLICases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runClusterBalancerStatusCLICases(t, newSharedClusterS3Target(t))
+	})
 }
 
-// TestClusterBalancerStatusCLI_TextRender verifies text output renders
-// one of the expected status lines (active/disabled/not available).
-func TestClusterBalancerStatusCLI_TextRender(t *testing.T) {
+func runClusterBalancerStatusCLICases(t *testing.T, tgt s3Target) {
+	t.Helper()
 	binary := getBinary()
-	sock := filepath.Join(testServerDataDir, "admin.sock")
+	sock := tgt.adminSockPath()
 
-	out, err := exec.Command(binary, "cluster",
-		"--endpoint", sock,
-		"balancer", "status",
-	).Output()
-	require.NoError(t, err)
+	t.Run("JSON", func(t *testing.T) {
+		out, err := exec.Command(binary, "cluster",
+			"--endpoint", sock,
+			"balancer", "status", "--format", "json",
+		).Output()
+		require.NoError(t, err, "balancer status command must succeed")
 
-	output := string(out)
-	assert.Contains(t, output, "balancer:")
+		var b map[string]any
+		require.NoError(t, json.Unmarshal(out, &b), "output must be valid JSON")
+		_, ok := b["available"]
+		assert.True(t, ok, "available field expected: %v", b)
+	})
+
+	t.Run("TextRender", func(t *testing.T) {
+		out, err := exec.Command(binary, "cluster",
+			"--endpoint", sock,
+			"balancer", "status",
+		).Output()
+		require.NoError(t, err)
+
+		output := string(out)
+		assert.Contains(t, output, "balancer:")
+	})
 }

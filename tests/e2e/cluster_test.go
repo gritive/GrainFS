@@ -25,7 +25,17 @@ func getBinary() string {
 	return binary
 }
 
-func TestCluster_NoPeers_BasicOperations(t *testing.T) {
+// TestNoPeersRestartPersistenceE2E exercises stop+restart on the same dataDir
+// — single-binary semantics. Cluster has no analogue (raft handles
+// process-restart differently), so this is single-node-only by nature.
+func TestNoPeersRestartPersistenceE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runNoPeersRestartPersistenceCases(t)
+	})
+}
+
+func runNoPeersRestartPersistenceCases(t *testing.T) {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-e2e-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
@@ -148,7 +158,17 @@ func TestCluster_NoPeers_BasicOperations(t *testing.T) {
 	assert.Equal(t, "new data after restart", string(body))
 }
 
-func TestCluster_NoPeers_Multipart(t *testing.T) {
+// TestNoPeersMultipartE2E exercises multipart against a single-binary
+// no-peers server. The cluster shape's multipart coverage lives in
+// TestMultipartE2E/Cluster4Node; this case stays single-only by design.
+func TestNoPeersMultipartE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runNoPeersMultipartCases(t)
+	})
+}
+
+func runNoPeersMultipartCases(t *testing.T) {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-mp-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
@@ -243,62 +263,39 @@ func TestCluster_NoPeers_Multipart(t *testing.T) {
 	assert.Equal(t, expected, body)
 }
 
-func TestCluster_Multipart_List(t *testing.T) {
-	skipIfShort(t, "skipping multi-node multipart listing e2e in -short mode")
-
-	const (
-		bucketName = "mp-list-cluster"
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-	defer cancel()
-	cluster, leaderIdx := startMultipartListingCluster(t, ctx, bucketName)
-
-	client := cluster.S3Client(leaderIdx)
-	exerciseMultipartListingFeature(t, ctx, client, bucketName, "cluster-part", true)
+// TestClusterMultipartListFanoutE2E verifies that an incomplete multipart
+// upload created on the leader is visible from every cluster node — i.e.
+// metadata fan-out works. Cluster-only by nature: the case probes per-node
+// visibility, which has no single-node analogue. Runs on the shared cluster.
+//
+// The plain multipart-list assertion is already exercised by
+// TestMultipartE2E/Cluster4Node/List; this test adds the per-node fanout
+// assertion on top of the same fixture.
+func TestClusterMultipartListFanoutE2E(t *testing.T) {
+	t.Run("Cluster4Node", func(t *testing.T) {
+		skipIfShort(t, "shared cluster fixture skipped in -short mode")
+		runMultipartListFanoutCases(t, newSharedClusterS3Target(t))
+	})
 }
 
-func TestCluster_Multipart_ListFanoutAcrossNodes(t *testing.T) {
-	skipIfShort(t, "skipping multi-node multipart listing fanout e2e in -short mode")
-
-	const bucketName = "mp-list-fanout"
+func runMultipartListFanoutCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	require.True(t, tgt.isCluster, "multipart list fanout requires cluster fixture")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
-	cluster, leaderIdx := startMultipartListingCluster(t, ctx, bucketName)
 
-	fixture := createIncompleteMultipartListingFixture(t, ctx, cluster.S3Client(leaderIdx), bucketName, "cluster-fanout-part")
+	bucket := tgt.uniqueBucket(t, "mpfanout")
+	// Any node is fine — cluster forwards writes to the owning peer. We use
+	// tgt.pickNode(0) for the create/fixture and assert visibility from
+	// every node below.
+	driver := tgt.pickNode(0)
+	waitForMultipartListingCreate(t, ctx, driver, bucket, multipartListingKey, 120*time.Second)
+	fixture := createIncompleteMultipartListingFixture(t, ctx, driver, bucket, "cluster-fanout-part")
 
-	for i := range cluster.httpURLs {
+	for i := 0; i < tgt.nodes; i++ {
 		t.Run(fmt.Sprintf("node-%d", i+1), func(t *testing.T) {
-			assertMultipartListingFeature(t, ctx, cluster.S3Client(i), fixture, true)
+			assertMultipartListingFeature(t, ctx, tgt.pickNode(i), fixture, true)
 		})
 	}
-}
-
-func startMultipartListingCluster(t *testing.T, ctx context.Context, bucketName string) (*e2eCluster, int) {
-	t.Helper()
-
-	cluster := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeDynamicJoin,
-		LogPrefix:  "grainfs-mp-list",
-		DisableNFS: true,
-		DisableNBD: true,
-	})
-	cluster.GrantAdminOnBuckets(bucketName)
-
-	leaderIdx, err := waitForWritableEndpoint(
-		ctx,
-		cluster.httpURLs,
-		120*time.Second,
-		5*time.Second,
-		time.Second,
-		func(attemptCtx context.Context, endpoint string) error {
-			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, cluster.accessKey, cluster.secretKey), bucketName)
-		},
-	)
-	require.NoError(t, err)
-	waitForMultipartListingCreate(t, ctx, cluster.S3Client(leaderIdx), bucketName, multipartListingKey, 120*time.Second)
-	return cluster, leaderIdx
 }
