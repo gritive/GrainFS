@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- fix(cluster/s3): implement HeadObjectVersion forward path so warp `versioned` benchmark passes on 4-node cluster (HEAD `?versionId=<id>` previously returned 501)
+
 ## [0.0.258.0] - 2026-05-19 - fix(s3+cluster): warp multipart correctness on the 4-node cluster
 
 Warp `multipart` 워크로드가 4-node cluster 에서 두 가지 다른 이유로 깨지던 것을 한 번에 정리한 PR. e2e (`TestMultipartChunkedUploadPartE2E`, `TestMultipartGetPartNumberE2E`) 를 SingleNode + Cluster4Node `TestBucketsE2E` 스타일로 추가하여 회귀 잠금. 부차적으로 `bench_s3_compat_compare.sh` 의 cluster startup 과 warp delete 샘플 부족 워닝을 정리하고, `append_coalesce` / `append_mid_size_body` e2e 를 dedicated cluster → shared cluster fixture 로 옮겨 fixture 부팅 비용을 제거.
