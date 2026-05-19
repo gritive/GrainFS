@@ -1033,6 +1033,7 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 				Modified:     obj.LastModified,
 				SSEAlgorithm: obj.SSEAlgorithm,
 				Segments:     segments,
+				Tags:         obj.Tags,
 			})
 		}
 		return nil
@@ -1112,7 +1113,7 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 		if len(snap.Segments) > 0 {
 			segments = append(segments, snap.Segments...)
 		}
-		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm, Segments: segments}
+		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm, Segments: segments, Tags: snap.Tags}
 		meta, err := marshalObject(obj)
 		if err != nil {
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
