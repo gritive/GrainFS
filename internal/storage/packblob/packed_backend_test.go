@@ -90,6 +90,31 @@ func TestPackedBackend_SmallObjectGoesToBlob(t *testing.T) {
 	assert.Equal(t, obj.ETag, gotObj.ETag)
 }
 
+func TestPackedBackend_AppendConvertsSmallPackedObject(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, pb.CreateBucket(ctx, "test"))
+
+	_, err := pb.PutObject(ctx, "test", "small.txt", strings.NewReader("plain"), "text/plain")
+	require.NoError(t, err)
+	_, packed := pb.index.Load(packedKey{bucket: "test", key: "small.txt"})
+	require.True(t, packed, "plain small PUT should start in packblob")
+
+	obj, err := pb.AppendObject(ctx, "test", "small.txt", 5, strings.NewReader("-append"))
+	require.NoError(t, err)
+	require.Equal(t, int64(len("plain-append")), obj.Size)
+	require.True(t, obj.IsAppendable)
+
+	_, packed = pb.index.Load(packedKey{bucket: "test", key: "small.txt"})
+	require.False(t, packed, "append conversion must retire the packed entry")
+	rc, _, err := pb.GetObject(ctx, "test", "small.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "plain-append", string(body))
+}
+
 func TestPackedBackend_SmallObjectWithUserMetadataGoesToBlob(t *testing.T) {
 	pb := newTestPackedBackend(t)
 	require.NoError(t, pb.CreateBucket(context.Background(), "test"))

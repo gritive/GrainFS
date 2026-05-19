@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -19,7 +20,12 @@ func putObjectBody(c *app.RequestContext) ([]byte, error) {
 	rawBody := c.Request.Body()
 	contentEncoding := string(c.GetHeader("Content-Encoding"))
 	contentSHA := string(c.GetHeader("X-Amz-Content-Sha256"))
-	if contentEncoding == "aws-chunked" || contentSHA == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+	decodedContentLength := string(c.GetHeader("X-Amz-Decoded-Content-Length"))
+	trailer := string(c.GetHeader("X-Amz-Trailer"))
+	if contentEncoding == "aws-chunked" ||
+		strings.HasPrefix(contentSHA, "STREAMING-") ||
+		decodedContentLength != "" ||
+		trailer != "" {
 		decoded, err := s3auth.DecodeAWSChunkedBody(rawBody)
 		if err != nil {
 			return nil, fmt.Errorf("invalid aws-chunked encoding: %w", err)

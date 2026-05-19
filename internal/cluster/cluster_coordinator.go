@@ -295,6 +295,24 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 	return state.opRouter.RouteObjectWrite(bucket, key)
 }
 
+func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOffset int64) (RouteTarget, ShardGroupEntry, error) {
+	state := c.runtimeState()
+	if c.indexWriter != nil && metaObjectIndexAdapter(c.meta) != nil && !storage.IsInternalBucket(bucket) {
+		target, entry, err := state.opRouter.RouteObjectRead(bucket, key, "")
+		if err == nil {
+			group, ok := c.meta.ShardGroup(entry.PlacementGroupID)
+			if !ok {
+				return RouteTarget{}, ShardGroupEntry{}, ErrNoGroup
+			}
+			return target, group, nil
+		}
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return RouteTarget{}, ShardGroupEntry{}, err
+		}
+	}
+	return c.routeWriteOrBucket(bucket, key)
+}
+
 func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
 	if storage.IsInternalBucket(bucket) || c.base == nil {
 		return nil
@@ -1697,7 +1715,7 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
-	target, group, err := c.routeWriteOrBucket(bucket, key)
+	target, group, err := c.routeAppendOrBucket(bucket, key, expectedOffset)
 	if err != nil {
 		return nil, err
 	}

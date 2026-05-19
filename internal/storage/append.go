@@ -38,8 +38,7 @@ type AppendObjecter interface {
 // appendable object when expectedOffset == 0 and the object does not exist.
 //
 // Returns ErrAppendOffsetMismatch if expectedOffset != current object size,
-// ErrAppendCapExceeded if the object already has MaxAppendSegments segments,
-// ErrAppendNotSupported if the existing object is not appendable.
+// ErrAppendCapExceeded if the object already has MaxAppendSegments segments.
 func (b *LocalBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*Object, error) {
 	existing, err := b.HeadObject(ctx, bucket, key)
 	if err != nil && !errors.Is(err, ErrObjectNotFound) {
@@ -50,9 +49,6 @@ func (b *LocalBackend) AppendObject(ctx context.Context, bucket, key string, exp
 			return nil, ErrAppendOffsetMismatch
 		}
 		return b.appendNew(ctx, bucket, key, r)
-	}
-	if !existing.IsAppendable {
-		return nil, ErrAppendNotSupported
 	}
 	if existing.Size != expectedOffset {
 		return nil, ErrAppendOffsetMismatch
@@ -89,6 +85,10 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 }
 
 func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, existing *Object, r io.Reader) (*Object, error) {
+	existing, err := b.ensureAppendableBase(ctx, bucket, key, existing)
+	if err != nil {
+		return nil, err
+	}
 	seg, err := b.WriteSegmentBlob(bucket, key, r)
 	if err != nil {
 		return nil, fmt.Errorf("write segment: %w", err)
@@ -101,12 +101,38 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 	obj := *existing
 	obj.Segments = segs
 	obj.Size = existing.Size + seg.Size
+	obj.IsAppendable = true
 	obj.AppendCallMD5s = callMD5s
 	obj.ETag = CompositeETag(callMD5s)
 	obj.LastModified = time.Now().Unix()
 	if err := b.PutObjectRecord(ctx, bucket, key, &obj); err != nil {
 		return nil, fmt.Errorf("persist: %w", err)
 	}
+	return &obj, nil
+}
+
+func (b *LocalBackend) ensureAppendableBase(ctx context.Context, bucket, key string, existing *Object) (*Object, error) {
+	if existing.IsAppendable {
+		return existing, nil
+	}
+	if len(existing.Segments) > 0 || len(existing.Coalesced) > 0 || existing.Size == 0 {
+		obj := *existing
+		obj.IsAppendable = true
+		return &obj, nil
+	}
+
+	rc, _, err := b.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("read base object: %w", err)
+	}
+	defer rc.Close()
+	seg, err := b.WriteSegmentBlob(bucket, key, rc)
+	if err != nil {
+		return nil, fmt.Errorf("write base segment: %w", err)
+	}
+	obj := *existing
+	obj.Segments = []SegmentRef{seg}
+	obj.IsAppendable = true
 	return &obj, nil
 }
 

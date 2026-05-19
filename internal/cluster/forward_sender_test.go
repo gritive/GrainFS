@@ -446,6 +446,28 @@ func TestForwardSender_SendStreamRetriesPeerSweepWithinCallerDeadline(t *testing
 	require.Equal(t, []string{"a", "b", "a"}, connected)
 }
 
+func TestForwardSender_SendStreamAppendDoesNotRetryAfterDialError(t *testing.T) {
+	var connected []string
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		connected = append(connected, peer)
+		_, _ = io.Copy(io.Discard, body)
+		return nil, errors.New("response lost after append may have applied")
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	reply, err := s.SendStream(ctx, []string{"a", "b"}, "g",
+		raftpb.ForwardOpAppendObject, buildAppendObjectForwardArgs("b", "k", 16), bytes.NewReader([]byte("payload")))
+
+	require.Error(t, err)
+	require.Nil(t, reply)
+	require.Equal(t, []string{"a"}, connected)
+}
+
 func TestForwardSender_SendStreamRetriesNotLeaderWithoutHintWithinCallerDeadline(t *testing.T) {
 	var connected []string
 	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {

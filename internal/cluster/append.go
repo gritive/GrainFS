@@ -43,9 +43,6 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 			return nil, storage.ErrAppendOffsetMismatch
 		}
 	} else {
-		if !existing.IsAppendable {
-			return nil, storage.ErrAppendNotSupported
-		}
 		if existing.Size != expectedOffset {
 			return nil, storage.ErrAppendOffsetMismatch
 		}

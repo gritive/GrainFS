@@ -966,8 +966,19 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 			lastErr = nil
 			allNotLeader := true
 			for _, peer := range peers {
-				_, err := b.forwardPropose(proposeCtx, peer, data)
+				idx, err := b.forwardPropose(proposeCtx, peer, data)
 				if err == nil {
+					for idx > 0 && b.lastApplied.Load() < idx {
+						select {
+						case <-proposeCtx.Done():
+							return proposeCtx.Err()
+						default:
+							time.Sleep(time.Millisecond)
+						}
+					}
+					if applyErr := b.ApplyError(idx); applyErr != nil {
+						return applyErr
+					}
 					return nil
 				}
 				lastErr = err

@@ -330,6 +330,35 @@ func (pb *PackedBackend) AppendObject(ctx context.Context, bucket, key string, e
 	if !ok {
 		return nil, storage.ErrAppendNotSupported
 	}
+	pk := packedKey{bucket: bucket, key: key}
+	if v, packed := pb.index.Load(pk); packed {
+		entry := v.(*indexEntry)
+		if entry.Refcount.Load() > 0 {
+			if entry.OriginalSize != expectedOffset {
+				return nil, storage.ErrAppendOffsetMismatch
+			}
+			data, err := pb.blobStore.Read(entry.Location)
+			if err != nil {
+				return nil, fmt.Errorf("read packed object: %w", err)
+			}
+			_, err = putInnerWithRequest(ctx, pb.inner, storage.PutObjectRequest{
+				Bucket:       bucket,
+				Key:          key,
+				Body:         bytes.NewReader(data),
+				ContentType:  entry.ContentType,
+				UserMetadata: cloneStringMap(entry.UserMetadata),
+				SystemMetadata: storage.ObjectSystemMetadata{
+					SSEAlgorithm: entry.SSEAlgorithm,
+				},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("migrate packed object: %w", err)
+			}
+			if pb.index.CompareAndDelete(pk, entry) {
+				entry.Refcount.Add(-1)
+			}
+		}
+	}
 	return ap.AppendObject(ctx, bucket, key, expectedOffset, r)
 }
 

@@ -382,6 +382,9 @@ func (s *ForwardSender) SendStream(
 			reply, err := s.streamDialer(ctx, peer, payload, body)
 			if err != nil {
 				lastDialErr = err
+				if op == raftpb.ForwardOpAppendObject {
+					return nil, err
+				}
 				if !canRewindForwardBody(body) {
 					return nil, err
 				}
