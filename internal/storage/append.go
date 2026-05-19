@@ -68,16 +68,19 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 	if err != nil {
 		return nil, fmt.Errorf("write segment: %w", err)
 	}
-	// TODO(Task 3.1): capture per-call MD5 during WriteSegmentBlob and pass
-	// it here so Object.ETag is computed from AppendCallMD5s.
+	// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
+	// AppendObject call payload MD5 captured via TeeReader at the API boundary.
+	// Stopgap mirrors the cluster path (internal/cluster/apply.go).
+	callMD5s := [][]byte{append([]byte(nil), seg.Checksum...)}
 	obj := &Object{
-		Key:          key,
-		Size:         seg.Size,
-		ContentType:  "application/octet-stream",
-		ETag:         CompositeETag(nil),
-		LastModified: time.Now().Unix(),
-		Segments:     []SegmentRef{seg},
-		IsAppendable: true,
+		Key:            key,
+		Size:           seg.Size,
+		ContentType:    "application/octet-stream",
+		ETag:           CompositeETag(callMD5s),
+		LastModified:   time.Now().Unix(),
+		Segments:       []SegmentRef{seg},
+		AppendCallMD5s: callMD5s,
+		IsAppendable:   true,
 	}
 	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
 		return nil, fmt.Errorf("persist: %w", err)
@@ -91,11 +94,15 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 		return nil, fmt.Errorf("write segment: %w", err)
 	}
 	segs := append(existing.Segments, seg)
+	// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
+	// AppendObject call payload MD5 captured via TeeReader at the API boundary.
+	// Stopgap mirrors the cluster path (internal/cluster/apply.go).
+	callMD5s := append(append([][]byte(nil), existing.AppendCallMD5s...), append([]byte(nil), seg.Checksum...))
 	obj := *existing
 	obj.Segments = segs
 	obj.Size = existing.Size + seg.Size
-	// TODO(Task 3.1): recompute Object.ETag from AppendCallMD5s.
-	obj.ETag = CompositeETag(obj.AppendCallMD5s)
+	obj.AppendCallMD5s = callMD5s
+	obj.ETag = CompositeETag(callMD5s)
 	obj.LastModified = time.Now().Unix()
 	if err := b.PutObjectRecord(ctx, bucket, key, &obj); err != nil {
 		return nil, fmt.Errorf("persist: %w", err)

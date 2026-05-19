@@ -35,7 +35,6 @@ func TestAppendObjectRejectsMismatchedOffset(t *testing.T) {
 }
 
 func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
-	t.Skip("Task 3.1 will restore append ETag (per-call MD5 wire-up)")
 	b := newTestLocalBackend(t)
 	body := bytes.Repeat([]byte("A"), 10<<20) // 10 MiB
 	obj, err := b.AppendObject(context.Background(), "test", "k", 0, bytes.NewReader(body))
@@ -51,13 +50,16 @@ func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
 	if !obj.IsAppendable {
 		t.Fatal("IsAppendable=false")
 	}
+	// Until Task 3.1 wires real per-call MD5s, the prefix is an MD5 of segment-checksum bytes — assert structure only.
 	if !strings.HasSuffix(obj.ETag, "-1") {
-		t.Fatalf("etag=%q", obj.ETag)
+		t.Fatalf("etag=%q, want suffix -1", obj.ETag)
+	}
+	if idx := strings.IndexByte(obj.ETag, '-'); idx != 32 {
+		t.Fatalf("etag=%q, want 32 hex chars before '-'", obj.ETag)
 	}
 }
 
 func TestAppendObjectSequentialThreeSegments(t *testing.T) {
-	t.Skip("Task 3.1 will restore append ETag (per-call MD5 wire-up)")
 	b := newTestLocalBackend(t)
 	body := bytes.Repeat([]byte("X"), 10<<20) // 10 MiB
 
@@ -77,8 +79,12 @@ func TestAppendObjectSequentialThreeSegments(t *testing.T) {
 	if len(obj.Segments) != 3 {
 		t.Fatalf("segments=%d, want 3", len(obj.Segments))
 	}
+	// Until Task 3.1 wires real per-call MD5s, the prefix is an MD5 of segment-checksum bytes — assert structure only.
 	if !strings.HasSuffix(obj.ETag, "-3") {
 		t.Fatalf("etag=%q, want suffix -3", obj.ETag)
+	}
+	if idx := strings.IndexByte(obj.ETag, '-'); idx != 32 {
+		t.Fatalf("etag=%q, want 32 hex chars before '-'", obj.ETag)
 	}
 }
 
