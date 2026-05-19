@@ -42,6 +42,8 @@ type Object struct {
 	// Entries are sorted ascending by PartNumber. The S3 GetObject/HeadObject
 	// ?partNumber=N handler uses this to compute the byte range for part N.
 	Parts []MultipartPartEntry
+	// Tags holds the user-defined object tags (up to 10 per AWS S3 spec).
+	Tags []Tag
 }
 
 // MultipartPartEntry records one part of a CompleteMultipartUpload object.
