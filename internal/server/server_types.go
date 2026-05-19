@@ -111,6 +111,7 @@ type Server struct {
 	shardCache    *shardcache.Cache
 	jwtKeys       *iamjwt.KeySet
 	oauthHandler  *icebergOAuthHandler
+	bearerCfg     s3auth.ConfigReader // iam.anon-enabled check for bearer JWT path
 
 	// Iceberg §9.1 진단 계측 (default OFF). NewWithServerStorage가 boot 시 ENV에서 읽는다.
 	icebergAccessLogEnabled      atomic.Bool
