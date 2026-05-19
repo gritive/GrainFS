@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.264.0] - 2026-05-19 - feat(s3): Object Tagging API
+
+MinIO-parity S3 Object Tagging API 구현. PUT/GET/DELETE `?tagging` 엔드포인트 + `x-amz-tagging` 헤더 (PutObject / POST / CreateMultipartUpload / CopyObject) + `x-amz-tagging-directive` (COPY/REPLACE). Tags는 FBS `Object` table inline 저장; 클러스터 모드에서 `CmdSetObjectTags` Raft cmd로 versionID-aware 복제.
+
+### Added
+
+- **HTTP endpoints**: `PutObjectTagging` / `GetObjectTagging` / `DeleteObjectTagging` (`?tagging` 쿼리, `?versionId` 선택). DELETE는 idempotent (204).
+- **헤더 통합**: `x-amz-tagging` (URL-encoded k=v&k=v) on PutObject / CreateMultipartUpload / CopyObject; POST Object는 `tagging` form 필드 (XML).
+- **CopyObject directive**: `x-amz-tagging-directive: COPY` (기본, source tags 상속) / `REPLACE` (request tags).
+- **Tag 저장**: FBS `Object.tags:[Tag]` inline; snapshot/restore round-trip 보존; `ListObjectVersions`에 Tags projection.
+- **AWS-strict 검증**: ≤10 tags, key 1..128, value 0..256, Unicode letter/digit/space + `_ . : / = + - @`, `aws:` 접두사 거부; 단일 `internal/storage/tagging.Validate`가 XML body + header 양쪽 권위 소스.
+- **Cluster mode**: `CmdSetObjectTags` Raft cmd (versionID-aware: `versionID=""`는 legacy+latest 듀얼 라이트, 명시 versionID는 해당 record만) + `ForwardOpSetObjectTags=21` dispatch/receiver; `clusterpb.ObjectMeta.tags` 추가로 cluster `objectMeta` 라운드트립.
+- **Multipart Tags**: `CreateMultipartUploadWithTags` — Initiate 시 upload entry에 보존, Complete 시 객체에 materialize.
+- **Metrics**: `grainfs_object_tagging_requests_total{op,result}`, `grainfs_object_tagging_validation_errors_total{reason}`, `grainfs_object_tags_per_object` histogram.
+
+### Notes
+
+- ETag, LastModified, blob bytes는 tag mutation으로 변경되지 않음 (AWS S3 시맨틱). 라이프사이클 tag-기반 필터링이 객체 age clock을 리셋하지 않고, ETag 기반 HTTP 캐시 무효화도 발생하지 않음.
+- Cluster 모드 `CreateMultipartUploadWithTags`는 Phase 1에서 fail-fast (`UnsupportedOperationError`) — `clusterMultipartMeta` widening은 후속 작업으로 미룸. Single-node + cluster-mode `PutObject` x-amz-tagging은 정상 동작.
+- POST form upload의 `tagging` 필드는 AWS 스펙대로 XML payload (URL-encoded 아님).
+- 초기 design doc은 "ACL과 동일 패턴, no FSM cmd"라고 적혔으나 정정: ACL도 `CmdSetObjectACL` Raft cmd 사용. Tags는 ACL과 동일한 cmd-dispatch infrastructure이되 별도 schema/cmd (versionID-aware vs ACL의 versionID-unaware).
+
 ## [0.0.263.0] - 2026-05-19 - feat(auth): §2 IAM Core + §3 Bucket Lifecycle — zero-config progressive application
 
 §1 Foundation (v0.0.260.0)에 이어 §2 IAM Core + §3 Bucket Lifecycle 슬라이스가 결합되어 들어왔습니다. legacy Role/Grant model 완전 제거, 새 AWS-style JSON policy 엔진, 4개 in-memory store + StoreAdapter + Resolver, 4개 built-in managed policy (readonly/readwrite/writeonly/bucket-admin), bucket-lifecycle data-plane 거부, reserved-name 보호, default bucket implicit-anon, Phase 0→2 자동 전환, _grainfs reserved bucket bootstrap seed. `s3auth.Authorizer`가 production 부트 경로에 wire되어 Layer 1 iamCheck가 `policy.Evaluate`를 실제 호출합니다.
