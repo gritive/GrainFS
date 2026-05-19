@@ -49,6 +49,17 @@ func TestBuildMultipartCompleteManifestRejectsInvalidPartNumber(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrInvalidPart)
 }
 
+func TestBuildMultipartCompleteManifestRejectsPartNumberAboveS3Limit(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	p := uploadTestPart(t, b, up.UploadID, s3MultipartMaxPartNumber+1, []byte("tail"))
+
+	_, err = b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p})
+	require.ErrorIs(t, err, storage.ErrInvalidPart)
+}
+
 func TestBuildMultipartCompleteManifestRejectsETagMismatch(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))

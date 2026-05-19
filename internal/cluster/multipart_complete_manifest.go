@@ -11,7 +11,10 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-const s3MultipartMinNonFinalPartSize = int64(5 << 20)
+const (
+	s3MultipartMinNonFinalPartSize = int64(5 << 20)
+	s3MultipartMaxPartNumber       = 10000
+)
 
 type multipartCompleteManifest struct {
 	UploadID   string
@@ -106,7 +109,7 @@ func (b *DistributedBackend) buildMultipartCompleteManifest(uploadID string, req
 	var total int64
 	prev := 0
 	for i, p := range parts {
-		if p.PartNumber <= 0 {
+		if p.PartNumber <= 0 || p.PartNumber > s3MultipartMaxPartNumber {
 			return multipartCompleteManifest{}, fmtInvalidPart(fmt.Sprintf("invalid part number %d", p.PartNumber))
 		}
 		if p.PartNumber == prev {
