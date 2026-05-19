@@ -116,7 +116,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // extractWarehouse parses exactly one "PRINCIPAL_ROLE:<name>" token from a
 // space-delimited scope string.  Returns an error if zero or more than one
-// PRINCIPAL_ROLE token is present.
+// PRINCIPAL_ROLE token is present.  The warehouse name must be a plain
+// identifier: non-empty, no slashes, and no ".." sequences.
 func extractWarehouse(scope string) (string, error) {
 	var found []string
 	for _, part := range strings.Fields(scope) {
@@ -126,7 +127,17 @@ func extractWarehouse(scope string) (string, error) {
 	}
 	switch len(found) {
 	case 1:
-		return found[0], nil
+		name := found[0]
+		if name == "" {
+			return "", fmt.Errorf("scope PRINCIPAL_ROLE: must specify a non-empty warehouse")
+		}
+		if strings.Contains(name, "/") {
+			return "", fmt.Errorf("warehouse name must be a plain identifier, not a URI or path")
+		}
+		if strings.Contains(name, "..") {
+			return "", fmt.Errorf("warehouse name must not contain '..'")
+		}
+		return name, nil
 	case 0:
 		return "", fmt.Errorf("scope must include PRINCIPAL_ROLE:<warehouse>")
 	default:

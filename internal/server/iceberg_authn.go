@@ -71,6 +71,15 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 		return nil, false
 	}
 
+	// Defense in depth (F23): a verified bearer token must carry a non-empty
+	// warehouse claim. An empty claim indicates a malformed or tampered token;
+	// do not fall through to the SigV4 default-warehouse path.
+	if claims.Warehouse == "" {
+		writeIcebergError(c, 401, "unauthorized", "bearer token has empty warehouse claim")
+		c.Abort()
+		return nil, false
+	}
+
 	// Warehouse claim cross-check (F#4).
 	reqWarehouse := string(c.QueryArgs().Peek("warehouse"))
 	if reqWarehouse == "" {

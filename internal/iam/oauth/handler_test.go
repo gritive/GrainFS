@@ -260,3 +260,73 @@ func TestOAuth_SubIsSAID(t *testing.T) {
 		t.Errorf("Warehouse = %q, want %q", claims.Warehouse, "analytics")
 	}
 }
+
+// TestOAuth_EmptyPrincipalRole_400 verifies that scope=PRINCIPAL_ROLE: (empty
+// value after colon) is rejected with 400 invalid_scope (F23).
+func TestOAuth_EmptyPrincipalRole_400(t *testing.T) {
+	ts := newTestHandler(t)
+	w := doPost(ts.h,
+		"grant_type=client_credentials&client_id=AKIA-test&client_secret=secret&scope=PRINCIPAL_ROLE%3A")
+
+	require.Equal(t, 400, w.Code, "empty PRINCIPAL_ROLE must return 400")
+
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "invalid_scope", body["error"])
+	assert.Contains(t, body["error_description"], "non-empty warehouse")
+}
+
+// TestOAuth_URIShapedWarehouse_400 verifies that URI/path-shaped warehouse
+// names in PRINCIPAL_ROLE scope are rejected with 400 invalid_scope (F24).
+// Table-driven: s3://, http://, path-with-slash, and .. traversal.
+func TestOAuth_URIShapedWarehouse_400(t *testing.T) {
+	ts := newTestHandler(t)
+
+	cases := []struct {
+		name  string
+		scope string
+		desc  string
+	}{
+		{
+			name:  "s3_URI",
+			scope: "PRINCIPAL_ROLE:s3://attacker.com/bucket",
+			desc:  "s3:// URI must be rejected",
+		},
+		{
+			name:  "http_URI",
+			scope: "PRINCIPAL_ROLE:http://evil.example.com/x",
+			desc:  "http:// URI must be rejected",
+		},
+		{
+			name:  "https_URI",
+			scope: "PRINCIPAL_ROLE:https://evil.example.com/x",
+			desc:  "https:// URI must be rejected",
+		},
+		{
+			name:  "path_with_slash",
+			scope: "PRINCIPAL_ROLE:warehouse/subdir",
+			desc:  "slash-separated path must be rejected",
+		},
+		{
+			name:  "dotdot_traversal",
+			scope: "PRINCIPAL_ROLE:..evil",
+			desc:  ".. traversal must be rejected",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// URL-encode the colon so form parsing treats it as a single param value.
+			encodedScope := strings.ReplaceAll(tc.scope, ":", "%3A")
+			encodedScope = strings.ReplaceAll(encodedScope, "/", "%2F")
+			w := doPost(ts.h,
+				"grant_type=client_credentials&client_id=AKIA-test&client_secret=secret&scope="+encodedScope)
+
+			require.Equal(t, 400, w.Code, "%s: want 400, got %d (body=%s)", tc.desc, w.Code, w.Body.String())
+
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, "invalid_scope", body["error"], tc.desc)
+		})
+	}
+}

@@ -332,6 +332,31 @@ func TestAuthMiddleware_LowercaseBearer_SkipsSigV4(t *testing.T) {
 		"authMiddleware must skip SigV4 for lowercase-bearer Iceberg requests (F13)")
 }
 
+// TestIcebergAuthn_EmptyClaimWarehouse_Rejects verifies that a bearer token
+// with an empty warehouse claim is rejected 401 and does NOT fall through to
+// the SigV4 default-warehouse path (F23 defense in depth).
+func TestIcebergAuthn_EmptyClaimWarehouse_Rejects(t *testing.T) {
+	base, ks := setupJWTAuthnServer(t)
+
+	// Mint a token with Warehouse="" — Mint doesn't validate the field,
+	// so this simulates a malformed or tampered token.
+	tok, err := ks.Mint(iamjwt.Claims{Sub: "sa-test", Warehouse: "", TTL: time.Hour})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"bearer token with empty warehouse claim must be rejected 401 (F23)")
+	msg, _ := decodeAuthnErrorBody(t, resp)
+	assert.Contains(t, msg, "empty warehouse claim")
+}
+
 // TestIcebergAuthn_LowercaseBearer_Passes: F13 regression test.
 // The OAuth token endpoint emits token_type:"bearer" (lowercase per RFC 6749 §5.1),
 // so clients may send "Authorization: bearer <jwt>". Both icebergGuarded and

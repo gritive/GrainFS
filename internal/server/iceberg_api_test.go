@@ -438,6 +438,31 @@ func TestIcebergCreateTable_TwoWarehousesDistinctPaths(t *testing.T) {
 		"warehouse-a path must differ from warehouse-b path")
 }
 
+// TestIcebergTableBasePath_S3LogicalWarehouseIncludesSegment verifies that a
+// URI-shaped logical warehouse name (e.g. a crafted bearer claim "s3://attacker/x")
+// that differs from s3Prefix is NOT treated as its own prefix and DOES include
+// the warehouse segment in the path (F24 defense in depth).
+func TestIcebergTableBasePath_S3LogicalWarehouseIncludesSegment(t *testing.T) {
+	const s3Prefix = "s3://grainfs-tables/warehouse"
+	const ns = "ns"
+	const table = "tbl"
+
+	// Legacy mode: Warehouse() returns the full S3 URI, equal to s3Prefix.
+	// The segment must be omitted (backward-compatible).
+	pathLegacy := icebergTableBasePath(s3Prefix, s3Prefix, ns, table)
+	require.Equal(t, s3Prefix+"/"+ns+"/"+table, pathLegacy,
+		"when warehouse==s3Prefix (legacy Store mode), warehouse segment must be omitted")
+
+	// MetaCatalog mode: logical warehouse is a URI-shaped name but != s3Prefix.
+	// The warehouse segment MUST be included so paths remain isolated.
+	uriWarehouse := "s3://attacker.com/x"
+	pathAttacker := icebergTableBasePath(s3Prefix, uriWarehouse, ns, table)
+	require.Contains(t, pathAttacker, uriWarehouse,
+		"URI-shaped logical warehouse must include the warehouse segment in the path (F24)")
+	require.NotEqual(t, s3Prefix+"/"+ns+"/"+table, pathAttacker,
+		"URI-shaped logical warehouse path must differ from the default path")
+}
+
 func postIcebergJSON(t *testing.T, url, body string, wantStatus int) {
 	t.Helper()
 	resp, err := http.Post(url, "application/json", strings.NewReader(body))
