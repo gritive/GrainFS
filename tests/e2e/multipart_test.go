@@ -53,7 +53,7 @@ func runMultipartCases(t *testing.T, tgt s3Target) {
 		tgt.createBkt(t, bucket)
 
 		key := "multipart-file.bin"
-		part1Data := bytes.Repeat([]byte("A"), 1024)
+		part1Data := bytes.Repeat([]byte("A"), 5<<20)
 		part2Data := bytes.Repeat([]byte("B"), 512)
 
 		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
@@ -158,8 +158,8 @@ func runMultipartCases(t *testing.T, tgt s3Target) {
 
 		key := "three-parts.bin"
 		partsData := [][]byte{
-			bytes.Repeat([]byte("X"), 256),
-			bytes.Repeat([]byte("Y"), 512),
+			bytes.Repeat([]byte("X"), 5<<20),
+			bytes.Repeat([]byte("Y"), 5<<20),
 			bytes.Repeat([]byte("Z"), 128),
 		}
 
