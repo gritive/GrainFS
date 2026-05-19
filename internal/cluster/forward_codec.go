@@ -169,6 +169,34 @@ func buildSetObjectTagsArgs(bucket, key, versionID string, tags []storage.Tag) [
 	return b.FinishedBytes()
 }
 
+func buildGetObjectTagsArgs(bucket, key, versionID string) []byte {
+	b := flatbuffers.NewBuilder(96)
+	bk := b.CreateString(bucket)
+	k := b.CreateString(key)
+	vid := b.CreateString(versionID)
+	raftpb.GetObjectTagsArgsStart(b)
+	raftpb.GetObjectTagsArgsAddBucket(b, bk)
+	raftpb.GetObjectTagsArgsAddKey(b, k)
+	raftpb.GetObjectTagsArgsAddVersionId(b, vid)
+	b.Finish(raftpb.GetObjectTagsArgsEnd(b))
+	return b.FinishedBytes()
+}
+
+// buildGetObjectTagsReply packs []storage.Tag into ForwardReply.tags. Empty
+// tag set is encoded as a zero-length vector via the absent tags field;
+// tagsFromReply returns nil for both, preserving the GetObjectTags contract.
+func buildGetObjectTagsReply(tags []storage.Tag) []byte {
+	b := flatbuffers.NewBuilder(64 + len(tags)*32)
+	tagsOff := appendForwardTagsVector(b, tags, raftpb.ForwardReplyStartTagsVector)
+	raftpb.ForwardReplyStart(b)
+	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)
+	if tagsOff != 0 {
+		raftpb.ForwardReplyAddTags(b, tagsOff)
+	}
+	b.Finish(raftpb.ForwardReplyEnd(b))
+	return b.FinishedBytes()
+}
+
 func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
@@ -361,6 +389,56 @@ func appendPartsVector(b *flatbuffers.Builder, parts []storage.MultipartPartEntr
 	return b.EndVector(len(offs))
 }
 
+// appendForwardTagsVector encodes []storage.Tag as a Tag FlatBuffers vector
+// using the provided parent-table startVector func (one of
+// ForwardObjectMetaStartTagsVector / ForwardObjectVersionMetaStartTagsVector /
+// ForwardReplyStartTagsVector). Mirrors appendPartsVector and the codec.go
+// buildTagsVector helper — note the FBS Tag tables here come from raftpb
+// (forward path), not clusterpb. MUST be invoked BEFORE the parent table's
+// Start on the same builder.
+func appendForwardTagsVector(b *flatbuffers.Builder, tags []storage.Tag, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(tags) == 0 {
+		return 0
+	}
+	offs := make([]flatbuffers.UOffsetT, len(tags))
+	for i, t := range tags {
+		kOff := b.CreateString(t.Key)
+		vOff := b.CreateString(t.Value)
+		raftpb.TagStart(b)
+		raftpb.TagAddKey(b, kOff)
+		raftpb.TagAddValue(b, vOff)
+		offs[i] = raftpb.TagEnd(b)
+	}
+	startVec(b, len(offs))
+	for i := len(offs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offs[i])
+	}
+	return b.EndVector(len(offs))
+}
+
+// readForwardTagsVector decodes a raftpb.Tag vector via the accessor
+// (length, element-by-mutating-receiver). Returns nil when length==0 so
+// callers preserve a nil-clean storage.Object.Tags for untagged objects.
+// string(t.Key()) copies out of the FBS buffer so the returned slice is
+// safe to keep after the reply bytes go out of scope.
+func readForwardTagsVector(length int, get func(*raftpb.Tag, int) bool) []storage.Tag {
+	if length == 0 {
+		return nil
+	}
+	out := make([]storage.Tag, 0, length)
+	var t raftpb.Tag
+	for i := 0; i < length; i++ {
+		if !get(&t, i) {
+			continue
+		}
+		out = append(out, storage.Tag{
+			Key:   string(t.Key()),
+			Value: string(t.Value()),
+		})
+	}
+	return out
+}
+
 // readPartsVector inverse of appendPartsVector — decodes ForwardObjectMeta.parts
 // into storage.Object.Parts. Returns nil for empty/missing vectors so the
 // caller's Object.Parts stays nil-clean for non-multipart objects.
@@ -394,6 +472,7 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	ct := b.CreateString(obj.ContentType)
 	vid := b.CreateString(obj.VersionID)
 	partsOff := appendPartsVector(b, obj.Parts)
+	tagsOff := appendForwardTagsVector(b, obj.Tags, raftpb.ForwardObjectMetaStartTagsVector)
 	raftpb.ForwardObjectMetaStart(b)
 	raftpb.ForwardObjectMetaAddBucket(b, bk)
 	raftpb.ForwardObjectMetaAddKey(b, k)
@@ -404,6 +483,9 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	raftpb.ForwardObjectMetaAddVersionId(b, vid)
 	if partsOff != 0 {
 		raftpb.ForwardObjectMetaAddParts(b, partsOff)
+	}
+	if tagsOff != 0 {
+		raftpb.ForwardObjectMetaAddTags(b, tagsOff)
 	}
 	metaOff := raftpb.ForwardObjectMetaEnd(b)
 
@@ -424,6 +506,7 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	vid := b.CreateString(obj.VersionID)
 	bodyOff := b.CreateByteVector(body)
 	partsOff := appendPartsVector(b, obj.Parts)
+	tagsOff := appendForwardTagsVector(b, obj.Tags, raftpb.ForwardObjectMetaStartTagsVector)
 
 	raftpb.ForwardObjectMetaStart(b)
 	raftpb.ForwardObjectMetaAddBucket(b, bk)
@@ -435,6 +518,9 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	raftpb.ForwardObjectMetaAddVersionId(b, vid)
 	if partsOff != 0 {
 		raftpb.ForwardObjectMetaAddParts(b, partsOff)
+	}
+	if tagsOff != 0 {
+		raftpb.ForwardObjectMetaAddTags(b, tagsOff)
 	}
 	metaOff := raftpb.ForwardObjectMetaEnd(b)
 
@@ -468,6 +554,9 @@ func buildObjectsReply(bucket string, objs []*storage.Object) []byte {
 		etag := b.CreateString(o.ETag)
 		ct := b.CreateString(o.ContentType)
 		vid := b.CreateString(o.VersionID)
+		// Tags vector MUST be built before the parent ForwardObjectMetaStart
+		// (FBS nested-vector rule). Per-element inside the loop is required.
+		tagsOff := appendForwardTagsVector(b, o.Tags, raftpb.ForwardObjectMetaStartTagsVector)
 		raftpb.ForwardObjectMetaStart(b)
 		raftpb.ForwardObjectMetaAddBucket(b, bk)
 		raftpb.ForwardObjectMetaAddKey(b, k)
@@ -476,6 +565,9 @@ func buildObjectsReply(bucket string, objs []*storage.Object) []byte {
 		raftpb.ForwardObjectMetaAddContentType(b, ct)
 		raftpb.ForwardObjectMetaAddModifiedUnixMs(b, o.LastModified)
 		raftpb.ForwardObjectMetaAddVersionId(b, vid)
+		if tagsOff != 0 {
+			raftpb.ForwardObjectMetaAddTags(b, tagsOff)
+		}
 		metas[i] = raftpb.ForwardObjectMetaEnd(b)
 	}
 	raftpb.ForwardReplyStartObjectsVector(b, len(objs))
@@ -499,6 +591,9 @@ func buildObjectVersionsReply(versions []*storage.ObjectVersion) []byte {
 		k := b.CreateString(v.Key)
 		vid := b.CreateString(v.VersionID)
 		etag := b.CreateString(v.ETag)
+		// Tags vector MUST be built before the parent
+		// ForwardObjectVersionMetaStart (FBS nested-vector rule).
+		tagsOff := appendForwardTagsVector(b, v.Tags, raftpb.ForwardObjectVersionMetaStartTagsVector)
 		raftpb.ForwardObjectVersionMetaStart(b)
 		raftpb.ForwardObjectVersionMetaAddKey(b, k)
 		raftpb.ForwardObjectVersionMetaAddVersionId(b, vid)
@@ -507,6 +602,9 @@ func buildObjectVersionsReply(versions []*storage.ObjectVersion) []byte {
 		raftpb.ForwardObjectVersionMetaAddEtag(b, etag)
 		raftpb.ForwardObjectVersionMetaAddSize(b, v.Size)
 		raftpb.ForwardObjectVersionMetaAddModifiedUnixMs(b, v.LastModified)
+		if tagsOff != 0 {
+			raftpb.ForwardObjectVersionMetaAddTags(b, tagsOff)
+		}
 		metas[i] = raftpb.ForwardObjectVersionMetaEnd(b)
 	}
 	raftpb.ForwardReplyStartVersionsVector(b, len(versions))
@@ -698,6 +796,7 @@ func objectFromReply(reply []byte) (*storage.Object, error) {
 		LastModified: meta.ModifiedUnixMs(),
 		VersionID:    string(meta.VersionId()),
 		Parts:        readPartsVector(meta),
+		Tags:         readForwardTagsVector(meta.TagsLength(), meta.Tags),
 	}, nil
 }
 
@@ -723,6 +822,7 @@ func objectsFromReply(reply []byte) ([]*storage.Object, error) {
 			LastModified: meta.ModifiedUnixMs(),
 			VersionID:    string(meta.VersionId()),
 			Parts:        readPartsVector(&meta),
+			Tags:         readForwardTagsVector(meta.TagsLength(), meta.Tags),
 		})
 	}
 	return out, nil
@@ -748,6 +848,7 @@ func objectVersionsFromReply(reply []byte) ([]*storage.ObjectVersion, error) {
 			ETag:           string(meta.Etag()),
 			Size:           meta.Size(),
 			LastModified:   meta.ModifiedUnixMs(),
+			Tags:           readForwardTagsVector(meta.TagsLength(), meta.Tags),
 		})
 	}
 	return out, nil
@@ -785,6 +886,17 @@ func partFromReply(reply []byte) (*storage.Part, error) {
 		ETag:       string(p.Etag()),
 		Size:       p.Size(),
 	}, nil
+}
+
+// tagsFromReply unpacks ForwardReply.tags for GetObjectTags. Returns nil
+// when the tags vector is absent or zero-length so callers preserve the
+// "no tags" / "empty tag set" convention.
+func tagsFromReply(reply []byte) ([]storage.Tag, error) {
+	if err := parseReplyStatus(reply); err != nil {
+		return nil, err
+	}
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	return readForwardTagsVector(fr.TagsLength(), fr.Tags), nil
 }
 
 func partsFromReply(reply []byte) ([]storage.Part, error) {

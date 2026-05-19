@@ -1477,9 +1477,11 @@ func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags [
 	return parseReplyStatus(reply)
 }
 
-// GetObjectTags satisfies storage.ObjectTagsGetter. Reads from the locally-
-// resolvable group backend; the local FSM-consistent view is sufficient per
-// replication design (writes flow through Raft and replicate to every node).
+// GetObjectTags satisfies storage.ObjectTagsGetter. Routes the tag read to
+// the locally-resolvable group backend when available, otherwise forwards to
+// the owning peer via ForwardOpGetObjectTags. Mirrors SetObjectTags's forward
+// path so multi-group cluster deployments serve S3 GetObjectTagging instead
+// of erroring with "not implemented".
 func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
 	ctx := context.Background()
 	target, err := c.routeReadOrBucket(bucket, key, "")
@@ -1494,7 +1496,12 @@ func (c *ClusterCoordinator) GetObjectTags(bucket, key, versionID string) ([]sto
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	return nil, fmt.Errorf("GetObjectTags: no local replica available; peer forwarding not implemented for read-only tag ops")
+	args := buildGetObjectTagsArgs(bucket, key, versionID)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpGetObjectTags, args)
+	if err != nil {
+		return nil, err
+	}
+	return tagsFromReply(reply)
 }
 
 // WriteAt implements the pwrite fast path for routed internal buckets such as

@@ -3438,6 +3438,9 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
 					Parts:        m.Parts,
+					// Tags copied (not aliased) — m's backing bytes are reused
+					// by badger once the View tx returns.
+					Tags: append([]storage.Tag(nil), m.Tags...),
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]
@@ -3564,6 +3567,9 @@ func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix
 				UserMetadata: cloneStringMap(m.UserMetadata),
 				SSEAlgorithm: m.SSEAlgorithm,
 				Parts:        m.Parts,
+				// Tags copied (not aliased) — m's backing bytes are reused by
+				// badger once the View tx returns.
+				Tags: append([]storage.Tag(nil), m.Tags...),
 			}
 			if isVersioned {
 				obj.VersionID = latMap[baseKey]
@@ -3655,6 +3661,9 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 					UserMetadata: cloneStringMap(m.UserMetadata),
 					SSEAlgorithm: m.SSEAlgorithm,
 					Parts:        m.Parts,
+					// Tags copied (not aliased) — m's backing bytes are reused
+					// by badger once the View tx returns.
+					Tags: append([]storage.Tag(nil), m.Tags...),
 				}
 				if isVersioned {
 					obj.VersionID = latMap[baseKey]

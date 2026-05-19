@@ -42,3 +42,62 @@ func TestDistributedBackend_ListObjectVersions_IncludesTags(t *testing.T) {
 	require.Equal(t, "tagged.txt", v.Key)
 	require.Equal(t, want, v.Tags, "Tags must be projected into ObjectVersion")
 }
+
+// TestDistributedBackend_ListObjects_PreservesTags is the regression guard
+// for adversarial review pass #3 finding #3: ListObjects / ListObjectsPage /
+// WalkObjects previously built storage.Object from objectMeta but omitted
+// Tags, breaking single/cluster parity (HeadObject + ListObjectVersions
+// returned Tags but list paths returned nil).
+func TestDistributedBackend_ListObjects_PreservesTags(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	const bucket = "listtagbucket"
+	require.NoError(t, b.CreateBucket(ctx, bucket))
+
+	_, err := b.PutObject(ctx, bucket, "a.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+	_, err = b.PutObject(ctx, bucket, "b.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	tagsA := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}}
+	require.NoError(t, b.SetObjectTags(bucket, "a.txt", "", tagsA))
+	// b.txt deliberately left untagged — list must return Tags=nil for it.
+
+	t.Run("ListObjects", func(t *testing.T) {
+		objs, err := b.ListObjects(ctx, bucket, "", 100)
+		require.NoError(t, err)
+		got := tagsByKey(objs)
+		require.Equal(t, tagsA, got["a.txt"])
+		require.Nil(t, got["b.txt"])
+	})
+
+	t.Run("ListObjectsPage", func(t *testing.T) {
+		objs, _, err := b.ListObjectsPage(ctx, bucket, "", "", 100)
+		require.NoError(t, err)
+		got := tagsByKey(objs)
+		require.Equal(t, tagsA, got["a.txt"])
+		require.Nil(t, got["b.txt"])
+	})
+
+	t.Run("WalkObjects", func(t *testing.T) {
+		var walked []*storage.Object
+		require.NoError(t, b.WalkObjects(ctx, bucket, "", func(o *storage.Object) error {
+			walked = append(walked, o)
+			return nil
+		}))
+		got := tagsByKey(walked)
+		require.Equal(t, tagsA, got["a.txt"])
+		require.Nil(t, got["b.txt"])
+	})
+}
+
+// tagsByKey collapses []*storage.Object into key→Tags so tests can assert
+// per-key regardless of iterator order.
+func tagsByKey(objs []*storage.Object) map[string][]storage.Tag {
+	out := make(map[string][]storage.Tag, len(objs))
+	for _, o := range objs {
+		out[o.Key] = o.Tags
+	}
+	return out
+}

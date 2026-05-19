@@ -28,6 +28,7 @@ const (
 	ForwardOpAppendObject            ForwardOp = 19
 	ForwardOpHeadObjectVersion       ForwardOp = 20
 	ForwardOpSetObjectTags           ForwardOp = 21
+	ForwardOpGetObjectTags           ForwardOp = 22
 )
 
 var EnumNamesForwardOp = map[ForwardOp]string{
@@ -52,6 +53,7 @@ var EnumNamesForwardOp = map[ForwardOp]string{
 	ForwardOpAppendObject:            "AppendObject",
 	ForwardOpHeadObjectVersion:       "HeadObjectVersion",
 	ForwardOpSetObjectTags:           "SetObjectTags",
+	ForwardOpGetObjectTags:           "GetObjectTags",
 }
 
 var EnumValuesForwardOp = map[string]ForwardOp{
@@ -76,6 +78,7 @@ var EnumValuesForwardOp = map[string]ForwardOp{
 	"AppendObject":            ForwardOpAppendObject,
 	"HeadObjectVersion":       ForwardOpHeadObjectVersion,
 	"SetObjectTags":           ForwardOpSetObjectTags,
+	"GetObjectTags":           ForwardOpGetObjectTags,
 }
 
 func (v ForwardOp) String() string {

@@ -971,6 +971,32 @@ func TestClusterCoordinator_ListAllObjects_PreservesTags(t *testing.T) {
 			"Tags-forward fix isn't dead code on the routed cluster path")
 }
 
+// TestClusterCoordinator_GetObjectTags_Forwarded is the regression guard for
+// adversarial review pass #3: ClusterCoordinator.GetObjectTags previously
+// returned "not implemented" when no local replica resolved, breaking S3
+// GetObjectTagging on real multi-group clusters. Now mirrors SetObjectTags
+// by routing through ForwardOpGetObjectTags.
+func TestClusterCoordinator_GetObjectTags_Forwarded(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+
+	want := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	d.replyByOp[raftpb.ForwardOpGetObjectTags] = buildGetObjectTagsReply(want)
+
+	got, err := c.GetObjectTags("bk", "key.txt", "")
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	require.Len(t, d.calls, 1, "GetObjectTags must route through forward.Send")
+	require.Equal(t, raftpb.ForwardOpGetObjectTags, d.calls[0].op)
+	args := raftpb.GetRootAsGetObjectTagsArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "key.txt", string(args.Key()))
+	require.Equal(t, "", string(args.VersionId()))
+}
+
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")

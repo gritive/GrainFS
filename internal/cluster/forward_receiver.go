@@ -228,6 +228,8 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		return r.handleSetObjectACL(dg, fbsArgs)
 	case raftpb.ForwardOpSetObjectTags:
 		return r.handleSetObjectTags(dg, fbsArgs)
+	case raftpb.ForwardOpGetObjectTags:
+		return r.handleGetObjectTags(dg, fbsArgs)
 	case raftpb.ForwardOpListObjects:
 		return r.handleListObjects(dg, fbsArgs)
 	case raftpb.ForwardOpWalkObjects:
@@ -679,6 +681,15 @@ func (r *ForwardReceiver) handleSetObjectTags(dg *DataGroup, args []byte) *trans
 		return statusReply(mapErrorToStatus(err))
 	}
 	return &transport.Message{Payload: buildOKReply()}
+}
+
+func (r *ForwardReceiver) handleGetObjectTags(dg *DataGroup, args []byte) *transport.Message {
+	ga := raftpb.GetRootAsGetObjectTagsArgs(args, 0)
+	tags, err := dg.Backend().GetObjectTags(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
+	if err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return &transport.Message{Payload: buildGetObjectTagsReply(tags)}
 }
 
 func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) *transport.Message {

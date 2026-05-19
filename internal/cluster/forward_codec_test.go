@@ -123,6 +123,77 @@ func TestForwardCodec_ObjectReply_NoParts(t *testing.T) {
 	require.Nil(t, got.Parts)
 }
 
+// TestForwardObjectMeta_CarriesTags is the regression guard for adversarial
+// review pass #3: ForwardObjectMeta / ForwardObjectVersionMeta / ForwardReply
+// previously carried no tags field, so every cross-node forwarded read
+// returned storage.Object.Tags=nil even when tags were persisted on the
+// source node. Tests round-trip for buildObjectReply, buildGetObjectReply,
+// buildObjectsReply, buildObjectVersionsReply, and buildGetObjectTagsReply.
+func TestForwardObjectMeta_CarriesTags(t *testing.T) {
+	tags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+
+	t.Run("buildObjectReply", func(t *testing.T) {
+		src := &storage.Object{Key: "k", Size: 5, ETag: "e", LastModified: 1, Tags: tags}
+		got, err := objectFromReply(buildObjectReply(src, "bucket"))
+		require.NoError(t, err)
+		require.Equal(t, tags, got.Tags)
+	})
+
+	t.Run("buildGetObjectReply", func(t *testing.T) {
+		src := &storage.Object{Key: "k", Size: 5, ETag: "e", LastModified: 1, Tags: tags}
+		got, err := objectFromReply(buildGetObjectReply(src, "bucket", []byte("hello")))
+		require.NoError(t, err)
+		require.Equal(t, tags, got.Tags)
+	})
+
+	t.Run("buildObjectsReply", func(t *testing.T) {
+		objs := []*storage.Object{
+			{Key: "a", Size: 1, ETag: "ea", Tags: tags},
+			{Key: "b", Size: 2, ETag: "eb"}, // no tags — must stay nil
+		}
+		got, err := objectsFromReply(buildObjectsReply("bucket", objs))
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Equal(t, tags, got[0].Tags, "element 0 must round-trip Tags")
+		require.Nil(t, got[1].Tags, "element 1 must round-trip nil Tags as nil (not empty slice)")
+	})
+
+	t.Run("buildObjectVersionsReply", func(t *testing.T) {
+		versions := []*storage.ObjectVersion{
+			{Key: "a", VersionID: "v1", IsLatest: true, ETag: "ea", Size: 1, Tags: tags},
+			{Key: "a", VersionID: "v0", ETag: "eb", Size: 2}, // no tags
+		}
+		got, err := objectVersionsFromReply(buildObjectVersionsReply(versions))
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Equal(t, tags, got[0].Tags)
+		require.Nil(t, got[1].Tags)
+	})
+
+	t.Run("buildGetObjectTagsReply", func(t *testing.T) {
+		got, err := tagsFromReply(buildGetObjectTagsReply(tags))
+		require.NoError(t, err)
+		require.Equal(t, tags, got)
+	})
+
+	t.Run("buildGetObjectTagsReply_empty", func(t *testing.T) {
+		got, err := tagsFromReply(buildGetObjectTagsReply(nil))
+		require.NoError(t, err)
+		require.Nil(t, got, "empty tags must round-trip as nil")
+	})
+
+	t.Run("buildGetObjectTagsArgs_roundtrip", func(t *testing.T) {
+		bytes := buildGetObjectTagsArgs("bk", "k", "vid-9")
+		args := raftpb.GetRootAsGetObjectTagsArgs(bytes, 0)
+		require.Equal(t, "bk", string(args.Bucket()))
+		require.Equal(t, "k", string(args.Key()))
+		require.Equal(t, "vid-9", string(args.VersionId()))
+	})
+}
+
 func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
 	bytes := buildHeadObjectVersionArgs("bk", "k", "vid-1")
 	args := raftpb.GetRootAsHeadObjectVersionArgs(bytes, 0)
