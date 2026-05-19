@@ -40,6 +40,27 @@ func TestGetObject_ChunkedRoutesToSegmentStore(t *testing.T) {
 	require.Equal(t, body, got)
 }
 
+func TestGetObjectVersion_ChunkedRoutesToSegmentStore(t *testing.T) {
+	b, bucket, key, body := putChunkedTestObject(t)
+	head, err := b.HeadObject(context.Background(), bucket, key)
+	require.NoError(t, err)
+	require.NotEmpty(t, head.VersionID)
+	require.NotEmpty(t, head.Segments)
+
+	versionHead, err := b.HeadObjectVersion(bucket, key, head.VersionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, versionHead.Segments)
+
+	rc, obj, err := b.GetObjectVersion(bucket, key, head.VersionID)
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
+}
+
 func TestGetObject_AppendableNotRoutedToChunked(t *testing.T) {
 	b := setupECBackend(t)
 	ctx := context.Background()

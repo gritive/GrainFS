@@ -4121,7 +4121,10 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			ACL:          m.ACL,
 			UserMetadata: cloneStringMap(m.UserMetadata),
 			SSEAlgorithm: m.SSEAlgorithm,
+			Segments:     m.Segments,
 			Parts:        m.Parts,
+			Coalesced:    coalescedRefsToStorage(m.Coalesced),
+			IsAppendable: m.IsAppendable,
 		}
 		placement = PlacementMeta{
 			VersionID:        versionID,
@@ -4143,6 +4146,7 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 // storage.ErrObjectNotFound if the version doesn't exist. For delete markers,
 // returns ErrMethodNotAllowed to mirror the erasure backend's behavior.
 func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	ctx := context.Background()
 	obj, meta, err := b.headObjectMetaV(bucket, key, versionID)
 	if err != nil {
 		return nil, nil, err
@@ -4155,14 +4159,21 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 	} else if blocked {
 		return nil, nil, objectQuarantinedError(bucket, key, q)
 	}
+	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
+		return b.openAppendableSegments(bucket, key, obj), obj, nil
+	}
+	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
+		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
+	}
 	// EC path: reconstruct from shards when the bucket is erasure-coded.
 	// Mirrors GetObject — versioned objects use shardKey = key+"/"+versionID,
 	// which ResolvePlacement derives from PlacementMeta.VersionID. Non-EC and
 	// legacy objects fall through to the plain-file path (ResolvePlacement → ErrNotEC).
 	if b.shardSvc != nil {
-		resolved, rerr := b.ResolvePlacement(context.Background(), bucket, key, meta)
+		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, meta)
 		if rerr == nil {
-			rc, ecErr := b.getObjectECReaderAtShardKey(context.Background(), bucket, resolved.ShardKey, resolved.Record, obj.Size)
+			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size)
 			if ecErr != nil {
 				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s via %s: %w", bucket, key, versionID, resolved.Source, ecErr)
 			}
