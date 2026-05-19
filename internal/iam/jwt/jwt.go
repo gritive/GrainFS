@@ -62,9 +62,12 @@ func (ks *KeySet) GenerateCurrent() (string, error) {
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
+		return "", fmt.Errorf("generate signing secret: %w", err)
+	}
+	kid, err := newKid()
+	if err != nil {
 		return "", err
 	}
-	kid := newKid()
 	ks.current = &keyEntry{kid: kid, secret: secret}
 	return kid, nil
 }
@@ -80,9 +83,12 @@ func (ks *KeySet) Rotate() (string, error) {
 	ks.previous = demoted
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
+		return "", fmt.Errorf("generate signing secret: %w", err)
+	}
+	kid, err := newKid()
+	if err != nil {
 		return "", err
 	}
-	kid := newKid()
 	ks.current = &keyEntry{kid: kid, secret: secret}
 	return kid, nil
 }
@@ -117,8 +123,14 @@ func (ks *KeySet) MintAt(c Claims, iat time.Time) (string, error) {
 		c.Iss = "grainfs"
 	}
 	hdr := map[string]string{"alg": algHS256, "typ": "JWT", "kid": cur.kid}
-	hdrB, _ := json.Marshal(hdr)
-	bodyB, _ := json.Marshal(c)
+	hdrB, err := json.Marshal(hdr)
+	if err != nil {
+		return "", fmt.Errorf("marshal jwt header: %w", err)
+	}
+	bodyB, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("marshal jwt claims: %w", err)
+	}
 	hdr64 := base64URLEncode(hdrB)
 	body64 := base64URLEncode(bodyB)
 	sig := hmacSign(cur.secret, hdr64+"."+body64)
@@ -191,8 +203,10 @@ func hmacSign(secret []byte, payload string) string {
 	return base64URLEncode(h.Sum(nil))
 }
 
-func newKid() string {
+func newKid() (string, error) {
 	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("k_%x", b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate kid: %w", err)
+	}
+	return fmt.Sprintf("k_%x", b), nil
 }
