@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 )
@@ -70,6 +73,35 @@ func TestBuiltins_BucketAdmin_ExcludesAdminUDSActions(t *testing.T) {
 		}
 		if policy.Evaluate(in).Decision == policy.DecisionAllow {
 			t.Errorf("bucket-admin should NOT Allow %s (Decision #8: admin-UDS-only)", a)
+		}
+	}
+}
+
+// TestBuiltins_NoneAllowsAdminUDSActions enforces D#8 across ALL four built-ins:
+// no built-in policy may grant s3:CreateBucket / DeleteBucket / PutBucketPolicy /
+// DeleteBucketPolicy on the data plane. A regression in any one of them lets a
+// SA with that policy attached create or delete buckets through the public S3
+// route, bypassing admin-UDS-only enforcement.
+func TestBuiltins_NoneAllowsAdminUDSActions(t *testing.T) {
+	ps := policystore.NewInMemoryStore()
+	require.NoError(t, SeedAll(context.Background(), ps))
+	adminActions := []string{
+		"s3:CreateBucket", "s3:DeleteBucket",
+		"s3:PutBucketPolicy", "s3:DeleteBucketPolicy",
+	}
+	for _, name := range []string{"readonly", "readwrite", "writeonly", "bucket-admin"} {
+		raw, err := ps.GetRaw(context.Background(), name)
+		require.NoError(t, err, "GetRaw(%q)", name)
+		doc, err := policy.Parse(raw)
+		require.NoError(t, err, "Parse(%q)", name)
+		for _, a := range adminActions {
+			in := policy.EvalInput{
+				PrincipalPolicies: []*policy.Document{doc},
+				Principal:         "sa-1",
+				Ctx:               policy.RequestContext{Action: a, Resource: "arn:aws:s3:::b"},
+			}
+			assert.NotEqual(t, policy.DecisionAllow, policy.Evaluate(in).Decision,
+				"builtin %q must NOT Allow %s (D#8)", name, a)
 		}
 	}
 }
