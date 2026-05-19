@@ -111,7 +111,7 @@ func getOrInitSharedCluster(t *testing.T) *e2eCluster {
 			ClusterKey: "E2E-S3-OP-SHARED-KEY",
 			LogPrefix:  "grainfs-s3op-shared",
 			DisableNFS: true,
-			DisableNBD: true,
+			// NBD stays enabled so newSharedClusterNBDTarget can reuse this fixture.
 		})
 		for i := range c.procs {
 			iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
