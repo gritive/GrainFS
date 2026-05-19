@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,6 +35,20 @@ func TestBuildMultipartCompleteManifestRejectsDuplicatePartNumber(t *testing.T) 
 	require.ErrorIs(t, err, storage.ErrInvalidPart)
 }
 
+func TestBuildMultipartCompleteManifestRejectsEmptyRequest(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	_, err := b.buildMultipartCompleteManifest("upload-id", nil)
+	require.ErrorIs(t, err, storage.ErrInvalidPart)
+}
+
+func TestBuildMultipartCompleteManifestRejectsInvalidPartNumber(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	_, err := b.buildMultipartCompleteManifest("upload-id", []storage.Part{{PartNumber: 0, ETag: "etag"}})
+	require.ErrorIs(t, err, storage.ErrInvalidPart)
+}
+
 func TestBuildMultipartCompleteManifestRejectsETagMismatch(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
@@ -57,6 +72,28 @@ func TestBuildMultipartCompleteManifestRejectsMissingPartFile(t *testing.T) {
 	require.NoError(t, os.Remove(b.partPath(up.UploadID, 2)))
 
 	_, err = b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p1, p2})
+	require.ErrorIs(t, err, storage.ErrInvalidPart)
+}
+
+func TestBuildMultipartCompleteManifestRejectsUnreadablePartFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based unreadable file test is not deterministic on windows")
+	}
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
+	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	p := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	partPath := b.partPath(up.UploadID, 1)
+	require.NoError(t, os.Chmod(partPath, 0))
+	t.Cleanup(func() {
+		_ = os.Chmod(partPath, 0o600)
+	})
+
+	_, err = b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p})
+	if err == nil {
+		t.Skip("chmod-based unreadable file test is not deterministic for this user/platform")
+	}
 	require.ErrorIs(t, err, storage.ErrInvalidPart)
 }
 
@@ -110,6 +147,32 @@ func TestMultipartCompleteManifestReaderStreamsInOrder(t *testing.T) {
 	require.Equal(t, append(append([]byte{}, p1Body...), p2Body...), got)
 }
 
+func TestMultipartCompleteManifestReaderClosesEachPartOnce(t *testing.T) {
+	var parts []*countingReadCloser
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 3, ETag: "etag-1"},
+			{PartNumber: 2, Size: 3, ETag: "etag-2"},
+		},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			rc := &countingReadCloser{Reader: bytes.NewReader([]byte{byte('a' + partNumber - 1), byte('a' + partNumber - 1), byte('a' + partNumber - 1)})}
+			parts = append(parts, rc)
+			return rc, nil
+		},
+	}
+	rc, err := manifest.Open()
+	require.NoError(t, err)
+
+	got, readErr := io.ReadAll(rc)
+	closeErr := rc.Close()
+	require.NoError(t, readErr)
+	require.NoError(t, closeErr)
+	require.Equal(t, []byte("aaabbb"), got)
+	require.Len(t, parts, 2)
+	require.Equal(t, 1, parts[0].closeCount)
+	require.Equal(t, 1, parts[1].closeCount)
+}
+
 func TestMultipartCompleteManifestReaderPropagatesDeletedPartOnOpen(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
@@ -127,6 +190,25 @@ func TestMultipartCompleteManifestReaderPropagatesDeletedPartOnOpen(t *testing.T
 	closeErr := rc.Close()
 	require.Error(t, readErr)
 	require.NoError(t, closeErr)
+}
+
+func TestMultipartCompleteManifestReaderPropagatesReadError(t *testing.T) {
+	readErr := errors.New("read failed")
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 3, ETag: "etag"}},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			require.Equal(t, 1, partNumber)
+			return &errorReadCloser{err: readErr}, nil
+		},
+	}
+	rc, err := manifest.Open()
+	require.NoError(t, err)
+
+	buf := make([]byte, 8)
+	n, err := rc.Read(buf)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, readErr)
+	require.NoError(t, rc.Close())
 }
 
 func TestMultipartCompleteManifestReaderDefersCloseErrorAfterReturningBytes(t *testing.T) {
@@ -230,4 +312,26 @@ func (r *bytesEOFReadCloser) Read(p []byte) (int, error) {
 
 func (r *bytesEOFReadCloser) Close() error {
 	return r.closeErr
+}
+
+type countingReadCloser struct {
+	*bytes.Reader
+	closeCount int
+}
+
+func (r *countingReadCloser) Close() error {
+	r.closeCount++
+	return nil
+}
+
+type errorReadCloser struct {
+	err error
+}
+
+func (r *errorReadCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r *errorReadCloser) Close() error {
+	return nil
 }
