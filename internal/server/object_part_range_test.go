@@ -35,6 +35,22 @@ func TestPartRange_Multipart(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestPartRange_ZeroSizePartServesEmpty(t *testing.T) {
+	obj := &storage.Object{
+		Size: 5,
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 5, ETag: "p1"},
+			{PartNumber: 2, Size: 0, ETag: "p2"},
+		},
+	}
+	s, e, etag, cnt, ok := partRange(obj, 2)
+	require.True(t, ok, "Size==0 part should resolve, not 416")
+	require.Equal(t, int64(5), s)
+	require.Equal(t, int64(4), e, "end < start signals empty range")
+	require.Equal(t, "p2", etag)
+	require.Equal(t, 2, cnt)
+}
+
 func TestPartRange_SinglePutBackcompat(t *testing.T) {
 	obj := &storage.Object{Size: 10, ETag: "single"}
 	s, e, etag, cnt, ok := partRange(obj, 1)

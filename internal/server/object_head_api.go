@@ -72,5 +72,9 @@ func (s *Server) headObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	if partN > 0 {
+		c.Status(consts.StatusPartialContent)
+		return
+	}
 	c.Status(consts.StatusOK)
 }

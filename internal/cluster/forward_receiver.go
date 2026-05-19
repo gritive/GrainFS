@@ -647,11 +647,19 @@ func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) 
 func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transport.Message {
 	ctx := context.Background()
 	la := raftpb.GetRootAsListObjectsArgs(args, 0)
-	objs, err := dg.Backend().ListObjects(ctx, string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
+	bucket := string(la.Bucket())
+	prefix := string(la.Prefix())
+	marker := string(la.Marker())
+	maxKeys := int(la.MaxKeys())
+	// dg.Backend() is *GroupBackend, which embeds *DistributedBackend and
+	// inherits ListObjectsPage. Honoring marker here keeps forwarded reads
+	// paginating correctly past the first window — pre-fix this dropped
+	// every page beyond marker silently because args carried no marker.
+	objs, _, err := dg.Backend().ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectsReply(string(la.Bucket()), objs)}
+	return &transport.Message{Payload: buildObjectsReply(bucket, objs)}
 }
 
 func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) *transport.Message {

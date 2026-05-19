@@ -35,8 +35,11 @@ func partRange(obj *storage.Object, n int) (start, end int64, etag string, parts
 		offset += obj.Parts[i].Size
 	}
 	p := obj.Parts[n-1]
-	if p.Size <= 0 {
+	if p.Size < 0 {
 		return 0, 0, "", len(obj.Parts), false
+	}
+	if p.Size == 0 {
+		return offset, offset - 1, p.ETag, len(obj.Parts), true
 	}
 	return offset, offset + p.Size - 1, p.ETag, len(obj.Parts), true
 }

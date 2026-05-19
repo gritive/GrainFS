@@ -43,9 +43,15 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 	prefix := string(c.QueryArgs().Peek("prefix"))
 	maxKeys := 1000
 	if mk := string(c.QueryArgs().Peek("max-keys")); mk != "" {
-		if v, err := strconv.Atoi(mk); err == nil && v > 0 {
-			maxKeys = v
+		v, err := strconv.Atoi(mk)
+		if err != nil || v < 0 {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidArgument",
+				"max-keys must be a non-negative integer")
+			return
 		}
+		// max-keys=0 is valid per S3 spec — returns an empty page with the
+		// truncation flag reflecting whether more entries exist.
+		maxKeys = v
 	}
 
 	// ListObjectsV2 is opted in via ?list-type=2. minio-go and the AWS SDKs
@@ -59,9 +65,13 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		// ContinuationToken is opaque to the client; we encode the resume
 		// point as base64(lastKey) on response and decode it here.
 		if continuationToken != "" {
-			if decoded, err := base64.StdEncoding.DecodeString(continuationToken); err == nil {
-				marker = string(decoded)
+			decoded, err := base64.StdEncoding.DecodeString(continuationToken)
+			if err != nil {
+				writeXMLError(c, consts.StatusBadRequest, "InvalidArgument",
+					"The continuation token provided is incorrect")
+				return
 			}
+			marker = string(decoded)
 		}
 		if marker == "" && startAfter != "" {
 			// start-after acts as an exclusive marker for the first page.
@@ -77,38 +87,49 @@ func (s *Server) listObjects(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	result := listObjectsResult{
-		Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
-		Name:        bucket,
-		Prefix:      prefix,
-		MaxKeys:     maxKeys,
-		IsTruncated: truncated,
-	}
-	if isV2 {
-		result.KeyCount = len(objects)
-		result.ContinuationToken = continuationToken
-		result.StartAfter = startAfter
-	} else {
-		result.Marker = marker
-	}
+	contents := make([]objectResult, 0, len(objects))
 	for _, obj := range objects {
-		result.Contents = append(result.Contents, objectResult{
+		contents = append(contents, objectResult{
 			Key:          obj.Key,
 			LastModified: time.Unix(obj.LastModified, 0).UTC().Format(time.RFC3339),
 			ETag:         fmt.Sprintf("\"%s\"", obj.ETag),
 			Size:         obj.Size,
 		})
 	}
-	if truncated && len(result.Contents) > 0 {
-		lastKey := result.Contents[len(result.Contents)-1].Key
-		if isV2 {
-			result.NextContinuationToken = base64.StdEncoding.EncodeToString([]byte(lastKey))
-		} else {
-			result.NextMarker = lastKey
-		}
-	}
 
-	data, _ := xml.Marshal(result)
+	var data []byte
+	if isV2 {
+		v2 := listObjectsResultV2{
+			Xmlns:             "http://s3.amazonaws.com/doc/2006-03-01/",
+			Name:              bucket,
+			Prefix:            prefix,
+			KeyCount:          len(contents),
+			ContinuationToken: continuationToken,
+			StartAfter:        startAfter,
+			MaxKeys:           maxKeys,
+			IsTruncated:       truncated,
+			Contents:          contents,
+		}
+		if truncated && len(contents) > 0 {
+			v2.NextContinuationToken = base64.StdEncoding.EncodeToString(
+				[]byte(contents[len(contents)-1].Key))
+		}
+		data, _ = xml.Marshal(v2)
+	} else {
+		v1 := listObjectsResultV1{
+			Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
+			Name:        bucket,
+			Prefix:      prefix,
+			Marker:      marker,
+			MaxKeys:     maxKeys,
+			IsTruncated: truncated,
+			Contents:    contents,
+		}
+		if truncated && len(contents) > 0 {
+			v1.NextMarker = contents[len(contents)-1].Key
+		}
+		data, _ = xml.Marshal(v1)
+	}
 	c.Data(consts.StatusOK, "application/xml", data)
 }
 

@@ -952,29 +952,12 @@ func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, false, err
 	} else if gb != nil {
-		objs, err := gb.ListObjects(ctx, bucket, prefix, maxKeys)
-		if err != nil {
-			return nil, false, err
-		}
-		if marker != "" {
-			filtered := objs[:0]
-			for _, o := range objs {
-				if o.Key > marker {
-					filtered = append(filtered, o)
-				}
-			}
-			objs = filtered
-		}
-		more := maxKeys > 0 && len(objs) > maxKeys
-		if more {
-			objs = objs[:maxKeys]
-		}
-		return objs, more, nil
+		return gb.ListObjectsPage(ctx, bucket, prefix, marker, maxKeys)
 	}
 	if c.forward == nil {
 		return nil, false, ErrCoordinatorNoRouter
 	}
-	args := buildListObjectsArgs(bucket, prefix, int32(maxKeys))
+	args := buildListObjectsArgs(bucket, prefix, marker, int32(maxKeys))
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjects, args)
 	if err != nil {
 		return nil, false, err
@@ -982,15 +965,6 @@ func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix
 	objs, err := objectsFromReply(reply)
 	if err != nil {
 		return nil, false, err
-	}
-	if marker != "" {
-		filtered := objs[:0]
-		for _, o := range objs {
-			if o.Key > marker {
-				filtered = append(filtered, o)
-			}
-		}
-		objs = filtered
 	}
 	more := maxKeys > 0 && len(objs) > maxKeys
 	if more {

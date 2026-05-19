@@ -135,10 +135,13 @@ func (o *Operations) ListObjects(ctx context.Context, bucket, prefix string, max
 // ListObjectsPage returns one S3 ListObjects page. Entries with key strictly
 // greater than `marker` are returned, capped at `maxKeys`. `truncated` is true
 // when more entries match beyond the returned slice — the S3 handler maps it
-// to <IsTruncated> and <NextMarker>. If any backend in the wrapper chain
-// supports native pagination (e.g. cluster meta-FSM with a sorted index), the
-// call is forwarded there; otherwise the operation falls back to a single
-// ListObjects call with the requested cap and filters in-process.
+// to <IsTruncated> and <NextMarker>. Walks the backend wrapper chain looking
+// for a native pager; LocalBackend and DistributedBackend both implement one,
+// so production deployments never hit the fallback. The fallback path
+// (Unwrap-less, no-pager backend) fetches maxKeys+1 unpaged entries and
+// applies `marker` in-process — this is only correct when `marker` falls
+// within the first maxKeys matches and silently truncates the listing
+// otherwise; we surface the gap with an error rather than mis-paginate.
 func (o *Operations) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error) {
 	type pager interface {
 		ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error)
@@ -154,18 +157,15 @@ func (o *Operations) ListObjectsPage(ctx context.Context, bucket, prefix, marker
 		}
 		b = u.Unwrap()
 	}
+	if marker != "" {
+		return nil, false, UnsupportedOperationError{
+			Op:     "ListObjectsPage",
+			Reason: "backend has no native pager; passing a non-empty marker would silently truncate beyond the first window",
+		}
+	}
 	objects, err := o.backend.ListObjects(ctx, bucket, prefix, maxKeys+1)
 	if err != nil {
 		return nil, false, err
-	}
-	if marker != "" {
-		filtered := objects[:0]
-		for _, obj := range objects {
-			if obj.Key > marker {
-				filtered = append(filtered, obj)
-			}
-		}
-		objects = filtered
 	}
 	truncated := maxKeys > 0 && len(objects) > maxKeys
 	if truncated {

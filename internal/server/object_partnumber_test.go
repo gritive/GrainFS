@@ -316,8 +316,8 @@ func TestHeadObjectPartNumber_Multipart_FirstPart(t *testing.T) {
 	require.NoError(t, err)
 	resp.Body.Close()
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode,
-		"HEAD partNumber currently returns 200 — S3 spec is 206; tracked as a follow-up")
+	assert.Equal(t, http.StatusPartialContent, resp.StatusCode,
+		"HEAD with valid partNumber must return 206 per S3 spec")
 	assert.Equal(t, "5", resp.Header.Get("Content-Length"))
 	assert.Equal(t, "bytes 0-4/11", resp.Header.Get("Content-Range"))
 	assert.Equal(t, "2", resp.Header.Get("x-amz-mp-parts-count"))
