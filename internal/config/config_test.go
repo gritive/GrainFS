@@ -74,3 +74,30 @@ func TestStore_ListAllShowsRegistry(t *testing.T) {
 	assert.True(t, keys["key.a"])
 	assert.True(t, keys["key.b"])
 }
+
+func TestRegisterClusterKeys_AllPresent(t *testing.T) {
+	s := config.NewStore()
+	config.RegisterClusterKeys(s, config.ReloadHooks{})
+
+	entries := s.ListAll()
+	keys := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		keys[e.Key] = true
+	}
+
+	expected := []string{
+		"iam.anon-enabled",
+		"iam.allow-anonymous-bucket-policy",
+		"trusted-proxy.cidr",
+		"jwt.signing-key-rotate",
+		"jwt.signing-key-prune",
+		"encryption.rotate-dek",
+		"encryption.prune-dek-version",
+		"cluster.read-only",
+		"audit.deny-only",
+	}
+	assert.Len(t, entries, len(expected))
+	for _, k := range expected {
+		assert.True(t, keys[k], "expected key %q to be registered", k)
+	}
+}
