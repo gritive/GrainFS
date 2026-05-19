@@ -48,7 +48,7 @@ func httpStatusFrom(err error) int {
 // grant + bucket, PUTs an object, then admin revokes alice's only key. The
 // next S3 operation must be denied (401/403) — proving the verifier no
 // longer accepts the revoked credential.
-func TestIAM_E2E_ET1_RevokedKey_Returns401(t *testing.T) {
+func runIAM_ET1_RevokedKey_Returns401(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -92,7 +92,7 @@ func TestIAM_E2E_ET1_RevokedKey_Returns401(t *testing.T) {
 
 // TestIAM_E2E_ET1_ExpiredKey_Returns401 — rotate a short-TTL key for the
 // SA, wait until expiry is observed, request must fail.
-func TestIAM_E2E_ET1_ExpiredKey_Returns401(t *testing.T) {
+func runIAM_ET1_ExpiredKey_Returns401(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -146,7 +146,7 @@ func TestIAM_E2E_ET1_ExpiredKey_Returns401(t *testing.T) {
 // TestIAM_E2E_ET2_RoleOpMatrix — for each (role, op) combination, build a
 // dedicated SA with that role on a per-case bucket, then verify the op is
 // allowed or denied as expected.
-func TestIAM_E2E_ET2_RoleOpMatrix(t *testing.T) {
+func runIAM_ET2_RoleOpMatrix(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -260,7 +260,7 @@ func TestIAM_E2E_ET2_RoleOpMatrix(t *testing.T) {
 
 // TestIAM_E2E_ET3_PresignedURL_RevokedKey_401 — alice presigns a GET, admin
 // revokes alice's key, the presigned URL must no longer work.
-func TestIAM_E2E_ET3_PresignedURL_RevokedKey_401(t *testing.T) {
+func runIAM_ET3_PresignedURL_RevokedKey_401(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -327,7 +327,7 @@ func TestIAM_E2E_ET3_PresignedURL_RevokedKey_401(t *testing.T) {
 // the IAM control-plane persistence path. IAM secrets are proposed through
 // meta-raft; object data groups and dedup stores never persist IAM key
 // material and are covered by separate data-plane tests.
-func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
+func runIAM_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -358,7 +358,7 @@ func TestIAM_E2E_SC8_NoPlaintextSecretOnDisk(t *testing.T) {
 //     keeps default SA functional on its owned bucket.
 //  4. Default SA is denied on a bucket owned by a different SA, proving
 //     wildcard-bypass authorization no longer applies.
-func TestIAM_E2E_ET6_WildcardRemovalPreservesDefaultSA(t *testing.T) {
+func runIAM_ET6_WildcardRemovalPreservesDefaultSA(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -480,7 +480,7 @@ func iamAdminRaw(t *testing.T, sock, method, path string, body any) (int, []byte
 
 // TestE2E_IAM_ScopedKey_RightBucket_OK — scoped key for "logs" bucket grants
 // access to objects inside "logs".
-func TestE2E_IAM_ScopedKey_RightBucket_OK(t *testing.T) {
+func runIAM_ScopedKey_RightBucket_OK(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -523,7 +523,7 @@ func TestE2E_IAM_ScopedKey_RightBucket_OK(t *testing.T) {
 // TestE2E_IAM_ScopedKey_WrongBucket_403 — scoped key for "logs" is blocked on
 // "reports". Audit reason key_scope_mismatch is enforced server-side (unit
 // coverage); here we verify the 403 surface behaviour.
-func TestE2E_IAM_ScopedKey_WrongBucket_403(t *testing.T) {
+func runIAM_ScopedKey_WrongBucket_403(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -568,7 +568,7 @@ func TestE2E_IAM_ScopedKey_WrongBucket_403(t *testing.T) {
 // TestE2E_IAM_KeyCreate_OverScope_400 — requesting a key scoped to a bucket
 // the SA has no grant on must return 400 with the bucket name in the body.
 // (400 Bad Request matches the project's existing admin-validation pattern.)
-func TestE2E_IAM_KeyCreate_OverScope_400(t *testing.T) {
+func runIAM_KeyCreate_OverScope_400(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -593,7 +593,7 @@ func TestE2E_IAM_KeyCreate_OverScope_400(t *testing.T) {
 // TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants is the R2 REGRESSION CRITICAL
 // test. A key issued without --bucket (BucketScope == nil) must still access
 // all buckets the SA is granted on. Pre-v0.0.99.0 behaviour must be preserved.
-func TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
+func runIAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -641,7 +641,7 @@ func TestE2E_IAM_LegacyKey_NilScope_AccessAllGrants(t *testing.T) {
 // retains its scope after a cluster restart (snapshot + raft replay). The
 // key must still be accepted on the in-scope bucket and rejected on an
 // out-of-scope bucket after restart.
-func TestE2E_IAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
+func runIAM_ScopedKey_SnapshotRoundtrip(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		h := startIAMTestServerWithRestart(t)
 
@@ -749,7 +749,7 @@ func TestGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t *testing.T) {
 // policy CRUD now flows through the IAM authz layer rather than
 // short-circuiting it. Pre-fix, alice (Read on her own bucket) could
 // PUT/GET/DELETE bob's bucket policy — multi-team escape hatch.
-func TestIAM_E2E_PolicyBypassClosed(t *testing.T) {
+func runIAM_PolicyBypassClosed(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		srv := startIAMTestServer(t)
 		defer srv.Stop()
@@ -820,4 +820,24 @@ func TestIAM_E2E_PolicyBypassClosed(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
 		_ = newSharedClusterS3Target(t)
 	})
+}
+
+// TestIAMServiceAccountE2E groups every IAM service-account / scoped-key /
+// security check (TestE2E_IAM_* + TestIAM_E2E_*) under one entry. Each
+// underlying helper still owns its own startIAMTestServer fixture +
+// SingleNode/Cluster4Node mirror — TestIAMServiceAccountE2E is the
+// inventory-level grouping handle.
+func TestIAMServiceAccountE2E(t *testing.T) {
+	t.Run("ScopedKey_RightBucket_OK", runIAM_ScopedKey_RightBucket_OK)
+	t.Run("ScopedKey_WrongBucket_403", runIAM_ScopedKey_WrongBucket_403)
+	t.Run("ScopedKey_SnapshotRoundtrip", runIAM_ScopedKey_SnapshotRoundtrip)
+	t.Run("KeyCreate_OverScope_400", runIAM_KeyCreate_OverScope_400)
+	t.Run("LegacyKey_NilScope_AccessAllGrants", runIAM_LegacyKey_NilScope_AccessAllGrants)
+	t.Run("ET1_RevokedKey_Returns401", runIAM_ET1_RevokedKey_Returns401)
+	t.Run("ET1_ExpiredKey_Returns401", runIAM_ET1_ExpiredKey_Returns401)
+	t.Run("ET2_RoleOpMatrix", runIAM_ET2_RoleOpMatrix)
+	t.Run("ET3_PresignedURL_RevokedKey_401", runIAM_ET3_PresignedURL_RevokedKey_401)
+	t.Run("ET6_WildcardRemovalPreservesDefaultSA", runIAM_ET6_WildcardRemovalPreservesDefaultSA)
+	t.Run("SC8_NoPlaintextSecretOnDisk", runIAM_SC8_NoPlaintextSecretOnDisk)
+	t.Run("PolicyBypassClosed", runIAM_PolicyBypassClosed)
 }
