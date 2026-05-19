@@ -326,3 +326,4 @@ Work these in order. Do not run them in parallel.
 - [ ] SIMD.
 - [ ] SoA layout.
 - [ ] Control-plane/data-plane split.
+- [ ] fix(storage/packblob): extend versioning bypass to Suspended state (currently only Enabled bypasses fast path; Suspended buckets on single-node still pack-write under (bucket,key) without versionId="null"). Add e2e cases for Suspended → PUT/DELETE/HEAD by versionId.
