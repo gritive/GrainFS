@@ -652,3 +652,130 @@ func TestDeleteBucket_ClearsPolicy(t *testing.T) {
 	_, err := b.GetBucketPolicy("reuse-bucket")
 	assert.ErrorIs(t, err, ErrBucketNotFound, "ghost policy must be gone after bucket delete+recreate")
 }
+
+// TestSnapshotRestore_ChunkedObjectRoundTrip exercises the Phase 1.6
+// segment-aware PITR path: ListAllObjects must capture per-object segment
+// refs, and RestoreObjects must (a) verify each segment blob exists on disk
+// at <key>_segments/<blob_id>, and (b) rebuild Object.Segments so a follow-up
+// GetObject yields byte-identical bytes.
+//
+// Two sizes:
+//   - 32 MiB → 2 × 16 MiB segments (multi-chunk case).
+//   - 100 KiB → 1 segment (single-chunk case).
+func TestSnapshotRestore_ChunkedObjectRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{name: "multi_segment_32MiB", size: 32 << 20},
+		{name: "single_segment_100KiB", size: 100 << 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := setupTestBackend(t)
+			ctx := context.Background()
+			const bucket = "bkt"
+			const key = "blob"
+			require.NoError(t, b.CreateBucket(ctx, bucket))
+
+			payload := make([]byte, tc.size)
+			for i := range payload {
+				payload[i] = byte(i * 31)
+			}
+
+			putObj, err := b.PutObject(ctx, bucket, key, bytes.NewReader(payload), "application/octet-stream")
+			require.NoError(t, err)
+			require.NotEmpty(t, putObj.Segments, "PutObject must produce segments")
+			if tc.size >= int(DefaultChunkSize)*2 {
+				require.GreaterOrEqual(t, len(putObj.Segments), 2, "32 MiB must split into ≥ 2 segments")
+			}
+
+			// Snapshot: ListAllObjects must include Segments.
+			snaps, err := b.ListAllObjects()
+			require.NoError(t, err)
+			var snap SnapshotObject
+			for _, s := range snaps {
+				if s.Bucket == bucket && s.Key == key {
+					snap = s
+					break
+				}
+			}
+			require.Equal(t, key, snap.Key)
+			require.Equal(t, len(putObj.Segments), len(snap.Segments), "snapshot must carry segment refs")
+			for i, seg := range snap.Segments {
+				require.Equal(t, putObj.Segments[i].BlobID, seg.BlobID)
+				require.Equal(t, putObj.Segments[i].Size, seg.Size)
+			}
+
+			// Wipe the badger object record but leave the segment blobs on
+			// disk. RestoreObjects must rebuild the metadata.
+			require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+				return txn.Delete(b.objectMetaKey(bucket, key))
+			}))
+			_, _, err = b.GetObject(ctx, bucket, key)
+			require.ErrorIs(t, err, ErrObjectNotFound, "meta wipe must precede restore")
+
+			// Verify each segment blob is still on disk after the wipe.
+			for _, seg := range snap.Segments {
+				_, statErr := os.Stat(b.segmentPath(bucket, key, seg.BlobID))
+				require.NoError(t, statErr, "segment blob %s must survive meta wipe", seg.BlobID)
+			}
+
+			restored, stale, err := b.RestoreObjects([]SnapshotObject{snap})
+			require.NoError(t, err)
+			require.Equal(t, 1, restored)
+			require.Empty(t, stale, "all segment blobs are present — no stale entries")
+
+			// Round-trip: GetObject must reproduce the original bytes.
+			rc, _, err := b.GetObject(ctx, bucket, key)
+			require.NoError(t, err)
+			got, err := io.ReadAll(rc)
+			require.NoError(t, err)
+			rc.Close()
+			require.Equal(t, payload, got, "restored object must round-trip byte-identical")
+		})
+	}
+}
+
+// TestSnapshotRestore_ChunkedObject_StaleWhenSegmentMissing locks in the
+// segment-aware stale-blob detection: if any segment file is gone from disk,
+// RestoreObjects must report the object as stale rather than restoring
+// unreadable metadata.
+func TestSnapshotRestore_ChunkedObject_StaleWhenSegmentMissing(t *testing.T) {
+	b := setupTestBackend(t)
+	ctx := context.Background()
+	const bucket = "bkt"
+	const key = "missing-seg"
+	require.NoError(t, b.CreateBucket(ctx, bucket))
+
+	payload := make([]byte, 32<<20) // 2 segments
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	putObj, err := b.PutObject(ctx, bucket, key, bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(putObj.Segments), 2)
+
+	snaps, err := b.ListAllObjects()
+	require.NoError(t, err)
+	var snap SnapshotObject
+	for _, s := range snaps {
+		if s.Key == key {
+			snap = s
+		}
+	}
+	require.NotEmpty(t, snap.Segments)
+
+	// Wipe meta + remove ONE segment blob.
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(b.objectMetaKey(bucket, key))
+	}))
+	require.NoError(t, os.Remove(b.segmentPath(bucket, key, snap.Segments[1].BlobID)))
+
+	restored, stale, err := b.RestoreObjects([]SnapshotObject{snap})
+	require.NoError(t, err)
+	require.Equal(t, 0, restored)
+	require.Len(t, stale, 1)
+	require.Equal(t, key, stale[0].Key)
+	require.Equal(t, snap.ETag, stale[0].ExpectedETag)
+}

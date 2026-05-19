@@ -157,18 +157,26 @@ type Copier interface {
 }
 
 // SnapshotObject is a point-in-time metadata record for a stored object.
+//
+// Segments carries the per-object chunk refs introduced in Phase 1.6: a
+// chunked object's blobs live under <key>_segments/<blob_id>, not at the
+// legacy objectPath. Snapshots must capture Segments so PITR restore can
+// verify the right blobs and rehydrate Object metadata. Older snapshots
+// without this field are still readable; they fall back to the legacy
+// single-file blob check during restore.
 type SnapshotObject struct {
-	Bucket         string `json:"bucket"`
-	Key            string `json:"key"`
-	ETag           string `json:"etag"`
-	Size           int64  `json:"size"`
-	ContentType    string `json:"content_type"`
-	Modified       int64  `json:"modified"`
-	VersionID      string `json:"version_id,omitempty"`
-	IsDeleteMarker bool   `json:"is_delete_marker,omitempty"`
-	IsLatest       bool   `json:"is_latest,omitempty"`
-	ACL            uint8  `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
-	SSEAlgorithm   string `json:"sse_algorithm,omitempty"`
+	Bucket         string       `json:"bucket"`
+	Key            string       `json:"key"`
+	ETag           string       `json:"etag"`
+	Size           int64        `json:"size"`
+	ContentType    string       `json:"content_type"`
+	Modified       int64        `json:"modified"`
+	VersionID      string       `json:"version_id,omitempty"`
+	IsDeleteMarker bool         `json:"is_delete_marker,omitempty"`
+	IsLatest       bool         `json:"is_latest,omitempty"`
+	ACL            uint8        `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
+	SSEAlgorithm   string       `json:"sse_algorithm,omitempty"`
+	Segments       []SegmentRef `json:"segments,omitempty"`
 }
 
 // StaleBlob reports an object whose blob data was not found during restore.

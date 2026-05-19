@@ -959,6 +959,10 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 			}); err != nil {
 				return err
 			}
+			var segments []SegmentRef
+			if len(obj.Segments) > 0 {
+				segments = append(segments, obj.Segments...)
+			}
 			objs = append(objs, SnapshotObject{
 				Bucket:       bucket,
 				Key:          key,
@@ -967,6 +971,7 @@ func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
 				ContentType:  obj.ContentType,
 				Modified:     obj.LastModified,
 				SSEAlgorithm: obj.SSEAlgorithm,
+				Segments:     segments,
 			})
 		}
 		return nil
@@ -1016,13 +1021,37 @@ func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlo
 		if err := b.CreateBucket(ctx, snap.Bucket); err != nil && !errors.Is(err, ErrBucketAlreadyExists) {
 			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
 		}
-		// Check blob exists on disk
-		if _, err := os.Stat(b.objectPath(snap.Bucket, snap.Key)); os.IsNotExist(err) {
+		// Check blob(s) exist on disk. Phase 1.6 routes every object through
+		// SegmentWriter, so chunked objects live under <key>_segments/<blob_id>
+		// rather than at objectPath. We honor three cases in priority order:
+		//   (a) snap.Segments non-empty → verify every segment blob path.
+		//   (b) Legacy single-file path (pre-Phase-1 snapshot or size==0
+		//       degenerate restore) → verify objectPath.
+		//   (c) snap.Size == 0 and no segments → metadata-only, tolerate.
+		isStale := false
+		switch {
+		case len(snap.Segments) > 0:
+			for _, seg := range snap.Segments {
+				if _, err := os.Stat(b.segmentPath(snap.Bucket, snap.Key, seg.BlobID)); os.IsNotExist(err) {
+					isStale = true
+					break
+				}
+			}
+		case snap.Size > 0:
+			if _, err := os.Stat(b.objectPath(snap.Bucket, snap.Key)); os.IsNotExist(err) {
+				isStale = true
+			}
+		}
+		if isStale {
 			stale = append(stale, StaleBlob{Bucket: snap.Bucket, Key: snap.Key, ExpectedETag: snap.ETag})
 			continue
 		}
-		// Restore metadata
-		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm}
+		// Restore metadata, including segment refs so GetObject can locate the blobs.
+		var segments []SegmentRef
+		if len(snap.Segments) > 0 {
+			segments = append(segments, snap.Segments...)
+		}
+		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm, Segments: segments}
 		meta, err := marshalObject(obj)
 		if err != nil {
 			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
