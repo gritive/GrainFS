@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.257.1] - 2026-05-19 - fix(storage): persist Parts on LocalBackend CompleteMultipartUpload
+
+v0.0.257.0의 single-node (LocalBackend) follow-up. `CompleteMultipartUpload`이 완료 객체를 `Parts` 없이 저장해서, 이후 HeadObject (또는 프로세스 재시작) 시 part 레이아웃이 사라지고 `?partNumber=N`이 legacy single-PUT으로 degrade되던 문제 해소. cluster 경로는 이미 `PutObjectMetaCmd`로 Parts를 영속화했음 — 이제 single-node도 동일 동작.
+
+### Fixed
+
+- **`LocalBackend.CompleteMultipartUpload` Parts 영속화** (`internal/storage/multipart.go`) — 완료 객체에 `obj.Parts = partsCopy` 채워서 HeadObject가 part 레이아웃을 복원하도록. 암호화/평문 분기 공통 literal 경유.
+- **`storage.fbs` Object schema** — `parts:[MultipartPartEntry]` + `MultipartPartEntry` table 추가 (`part_number`/`size`/`etag`). `make fbs` 재생성. 기존 레코드는 `PartsLength()==0`으로 읽혀 legacy single-PUT 동작 유지 (마이그레이션 불필요).
+- **`codec.go` marshalObject/unmarshalObjectInto** — Parts vector encode/decode.
+
+### Notes
+
+- 회귀 테스트 `TestCompleteMultipartUploadPersistsParts` (`internal/storage/multipart_test.go`) — Complete 후 HeadObject로 `len(Parts)==2` + PartNumber/Size/ETag 일치 검증.
+
 ## [0.0.257.0] - 2026-05-19 - feat(s3): multipart ?partNumber=N (GET/HEAD) + cluster capability admin probe + ListObjects pagination hardening
 
 `warp s3 multipart` 4-node cluster 통과율 0% → 99.99% (16/~200K errors는 follow-up). `?partNumber=N`을 GET/HEAD에서 honor하고, `multipart_listing_v1` capability ready를 admin UDS로 노출해서 bench warmup이 45s blind sleep 대신 active probe로 전환. ListObjects pagination은 forward/local-exec fallback의 marker silently truncate 결함을 잡고 V1/V2 응답 struct를 분리.
