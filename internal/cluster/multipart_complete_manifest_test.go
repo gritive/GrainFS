@@ -119,6 +119,7 @@ func TestBuildMultipartCompleteManifestReturnsSortedPartsAndTotalSize(t *testing
 
 	manifest, err := b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p2, p1})
 	require.NoError(t, err)
+	require.Equal(t, up.UploadID, manifest.UploadID)
 	require.Equal(t, int64((5<<20)+4), manifest.TotalSize)
 	require.Equal(t, []storage.MultipartPartEntry{
 		{PartNumber: 1, Size: int64(5 << 20), ETag: p1.ETag},
@@ -147,6 +148,64 @@ func TestMultipartCompleteManifestReaderStreamsInOrder(t *testing.T) {
 	require.Equal(t, append(append([]byte{}, p1Body...), p2Body...), got)
 }
 
+func TestMultipartCompleteManifestOpenReturnsFreshReaders(t *testing.T) {
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 3, ETag: "etag-1"},
+			{PartNumber: 2, Size: 3, ETag: "etag-2"},
+		},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			switch partNumber {
+			case 1:
+				return io.NopCloser(bytes.NewReader([]byte("one"))), nil
+			case 2:
+				return io.NopCloser(bytes.NewReader([]byte("two"))), nil
+			default:
+				t.Fatalf("unexpected part number %d", partNumber)
+				return nil, nil
+			}
+		},
+	}
+
+	first, err := manifest.Open()
+	require.NoError(t, err)
+	second, err := manifest.Open()
+	require.NoError(t, err)
+	firstBody, firstReadErr := io.ReadAll(first)
+	secondBody, secondReadErr := io.ReadAll(second)
+	require.NoError(t, firstReadErr)
+	require.NoError(t, secondReadErr)
+	require.NoError(t, first.Close())
+	require.NoError(t, second.Close())
+	require.Equal(t, []byte("onetwo"), firstBody)
+	require.Equal(t, []byte("onetwo"), secondBody)
+}
+
+func TestMultipartCompleteManifestReaderOpensPartsLazily(t *testing.T) {
+	var opened []int
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{
+			{PartNumber: 1, Size: 2, ETag: "etag-1"},
+			{PartNumber: 2, Size: 2, ETag: "etag-2"},
+		},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			opened = append(opened, partNumber)
+			return io.NopCloser(bytes.NewReader([]byte("ab"))), nil
+		},
+	}
+
+	rc, err := manifest.Open()
+	require.NoError(t, err)
+	require.Empty(t, opened)
+
+	buf := make([]byte, 1)
+	n, err := rc.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, []int{1}, opened)
+	require.NoError(t, rc.Close())
+}
+
 func TestMultipartCompleteManifestReaderClosesEachPartOnce(t *testing.T) {
 	var parts []*countingReadCloser
 	manifest := multipartCompleteManifest{
@@ -171,6 +230,22 @@ func TestMultipartCompleteManifestReaderClosesEachPartOnce(t *testing.T) {
 	require.Len(t, parts, 2)
 	require.Equal(t, 1, parts[0].closeCount)
 	require.Equal(t, 1, parts[1].closeCount)
+}
+
+func TestMultipartCompleteManifestReaderReadAfterCloseReturnsClosedPipe(t *testing.T) {
+	manifest := multipartCompleteManifest{
+		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 3, ETag: "etag"}},
+		openPartFn: func(partNumber int) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("abc"))), nil
+		},
+	}
+	rc, err := manifest.Open()
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+
+	n, err := rc.Read(make([]byte, 1))
+	require.Zero(t, n)
+	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
 
 func TestMultipartCompleteManifestReaderPropagatesDeletedPartOnOpen(t *testing.T) {
