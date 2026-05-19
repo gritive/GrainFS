@@ -260,6 +260,21 @@ Work these in order. Do not run them in parallel.
 - [ ] [nfs-audit] bit 76 charset capability flags [P2] [Skipped]: add after UTF-8
   policy is explicit. Owner: TBD.
 
+## Pull-through Parity Follow-Ups
+
+- [ ] **Cluster pull-through large-object parity [P1]**: `TestPullthroughE2E/
+  Cluster4Node/LargeObject` (5 MiB random payload) returns bytes that differ
+  from the upstream payload after the cache-miss GET; the cache-hit GET
+  exhibits the same divergence. SingleNode passes the identical case. The
+  symptom looks like truncation or a partial 2-pass streaming write to the
+  cluster's local cache before the response is served. Test was originally
+  single-only; promoting the e2e to TestBucketsE2E dual surfaced this gap as
+  a now-failing Cluster4Node subtest — the failing assertion is the
+  regression signal that unblocks closing the gap. Fix candidates: trace the
+  pull-through 2-pass streaming write on cluster (where in EC distribute the
+  body is consumed) and ensure the local cache write completes before the
+  HTTP response body is closed.
+
 ## AppendObject Follow-Ups
 
 - [ ] **Single-node LocalBackend missing PartialIO (`ReadAt`) [P1]**: AppendObject

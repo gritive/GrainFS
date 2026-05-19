@@ -25,10 +25,16 @@ import (
 // local target pulls bytes from the upstream and serves them as if local;
 // the second GET is satisfied from the local cache.
 //
-// Two cases:
+// Two cases — both run on both targets:
 //   - FetchesFromUpstream: small text payload — basic round-trip.
 //   - LargeObject: 5 MiB random payload — exercises the 2-pass streaming
 //     fetch path (regression for the original io.ReadAll OOM bug).
+//
+// Cluster4Node/LargeObject currently fails: cluster pull-through truncates
+// or corrupts large payloads. The failure is intentional and surfaces a
+// real parity gap with single (single passes the identical case). Tracked
+// in TODOS.md → Pull-through Parity Follow-Ups; the failing assertion is
+// the regression signal that unblocks closing the gap.
 func TestPullthroughE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runPullthroughCases(t, newDedicatedSingleNodeS3Target(t, nil))
@@ -154,7 +160,8 @@ func runPullthroughCases(t *testing.T, tgt s3Target) {
 
 		// 5 MiB random payload — exercises the 2-pass streaming fetch
 		// path on the local target. Regression for the original
-		// io.ReadAll OOM bug.
+		// io.ReadAll OOM bug. Cluster4Node currently fails this case
+		// (parity gap with single tracked in TODOS.md).
 		payload := make([]byte, 5*1024*1024)
 		_, err := rand.Read(payload)
 		require.NoError(t, err)
