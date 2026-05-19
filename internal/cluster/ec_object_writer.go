@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -62,6 +63,7 @@ type ecObjectWriteResult struct {
 	RingVersion RingVersion
 	ECData      uint8
 	ECParity    uint8
+	Parts       []storage.MultipartPartEntry // populated by CompleteMultipartUpload
 }
 
 type ecObjectShardWriteError struct {

@@ -1499,6 +1499,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		sseAlgorithm,
 		"ec_single_memory",
 		h,
+		nil,
 	)
 	return obj, true, err
 }
@@ -2025,10 +2026,10 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string) (*storage.Object, error) {
-	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil)
+	return b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, contentType, userMetadata, sseAlgorithm, 0, false, "", nil, nil)
 }
 
-func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error) (*storage.Object, error) {
+func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, modTime int64, preserveModTime bool, expectedETag string, beforeCommit func() error, parts []storage.MultipartPartEntry) (*storage.Object, error) {
 	stageStart := time.Now()
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	if !ok {
@@ -2072,11 +2073,11 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 
 	selfID := b.currentSelfAddr()
 	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm)
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm, parts)
 	}
 
 	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm)
+		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
@@ -2115,6 +2116,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		}
 	}
 
+	result.Parts = parts
 	return b.commitECObjectWriteResult(ctx, plan, result, "ec")
 }
 
@@ -2165,6 +2167,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	parts []storage.MultipartPartEntry,
 ) (*storage.Object, bool, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeMemoryShards(ctx, ecObjectWritePlan{
@@ -2183,6 +2186,7 @@ func (b *DistributedBackend) tryPutObjectECMemoryShards(
 		return nil, true, err
 	}
 
+	result.Parts = parts
 	obj, err := b.commitECObjectWriteResult(
 		ctx,
 		ecObjectWritePlan{
@@ -2230,6 +2234,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		UserMetadata:     cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm:     plan.SSEAlgorithm,
 		ExpectedETag:     plan.ExpectedETag,
+		Parts:            result.Parts,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
@@ -2247,6 +2252,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 		VersionID:    plan.VersionID,
 		UserMetadata: cloneStringMap(plan.UserMetadata),
 		SSEAlgorithm: plan.SSEAlgorithm,
+		Parts:        result.Parts,
 	}, nil
 }
 
@@ -2259,6 +2265,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	parts []storage.MultipartPartEntry,
 ) (*storage.Object, error) {
 	shardKey := ecObjectShardKey(key, versionID)
 	stageStart := time.Now()
@@ -2281,6 +2288,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardSpooled(
 		sseAlgorithm,
 		"ec_single",
 		nil,
+		parts,
 	)
 	closeErr := body.Close()
 	if writeErr != nil {
@@ -2306,6 +2314,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	sseAlgorithm string,
 	metricPath string,
 	bodyHash hash.Hash,
+	parts []storage.MultipartPartEntry,
 ) (*storage.Object, error) {
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
 	result, err := writer.writeSingleLocalReader(ctx, ecObjectWritePlan{
@@ -2340,6 +2349,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		NodeIDs:          result.Placement,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
+		Parts:            parts,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		_ = b.shardSvc.DeleteLocalShards(bucket, result.ShardKey)
@@ -2357,6 +2367,7 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 		VersionID:    versionID,
 		UserMetadata: cloneStringMap(userMetadata),
 		SSEAlgorithm: sseAlgorithm,
+		Parts:        parts,
 	}, nil
 }
 
@@ -2771,7 +2782,7 @@ func (b *DistributedBackend) ConvertObjectToEC(ctx context.Context, bucket, key 
 		}
 		return nil
 	}
-	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit); err != nil {
+	if _, err := b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, metaBefore.VersionID, sp, metaBefore.ContentType, metaBefore.UserMetadata, metaBefore.SSEAlgorithm, metaBefore.LastModified, true, metaBefore.ETag, beforeCommit, nil); err != nil {
 		return fmt.Errorf("convert write ec shards: %w", err)
 	}
 	_, convertedMeta, err := b.headObjectMeta(ctx, bucket, key)
@@ -3555,6 +3566,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	h := md5.New()
 	mw := io.MultiWriter(spoolWriter, h)
 
+	partsMeta := make([]storage.MultipartPartEntry, 0, len(parts))
 	for _, p := range parts {
 		f, err := b.openMultipartPart(uploadID, p.PartNumber)
 		if err != nil {
@@ -3568,6 +3580,11 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 			return nil, fmt.Errorf("copy part %d: %w", p.PartNumber, err)
 		}
 		sp.Size += n
+		partsMeta = append(partsMeta, storage.MultipartPartEntry{
+			PartNumber: p.PartNumber,
+			Size:       n,
+			ETag:       p.ETag,
+		})
 	}
 	if err := out.Close(); err != nil {
 		return nil, err
@@ -3576,7 +3593,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
-		obj, err = b.putObjectECSpooled(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "")
+		obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, partsMeta)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")
 	}
