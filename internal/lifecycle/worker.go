@@ -70,14 +70,16 @@ type Worker struct {
 	versionsPruned atomic.Int64
 }
 
-// NewWorker creates a lifecycle Worker. interval controls how often rules are applied.
-func NewWorker(store *Store, backend Scrubbable, deleter ObjectDeleter, interval time.Duration) *Worker {
+// NewWorker creates a lifecycle Worker. interval controls how often rules are
+// applied. limiter is shared with MPUWorker so the 100 deletes/sec/node cap
+// holds across both clauses (spec § "Memory and Throughput Bounds").
+func NewWorker(store *Store, backend Scrubbable, deleter ObjectDeleter, interval time.Duration, limiter *rate.Limiter) *Worker {
 	return &Worker{
 		store:    store,
 		backend:  backend,
 		deleter:  deleter,
 		interval: interval,
-		limiter:  rate.NewLimiter(100, 10), // 100 deletes/sec, burst 10
+		limiter:  limiter,
 		now:      time.Now,
 	}
 }

@@ -544,8 +544,7 @@ func TestWorker_NoNListVersionsCalls(t *testing.T) {
 	backend := newCountingBackend(t, N)
 	deleter := &mockDeleter{}
 
-	w := NewWorker(store, backend, deleter, time.Minute)
-	w.limiter = rate.NewLimiter(rate.Inf, 0) // disable rate-limit pacing in tests
+	w := NewWorker(store, backend, deleter, time.Minute, rate.NewLimiter(rate.Inf, 0)) // disable rate-limit pacing in tests
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	w.RunCycleForTest(ctx)
