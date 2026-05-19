@@ -48,7 +48,7 @@ func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 			Str("query", query).
 			Str("sa_id", iam.PrincipalFromContext(ctx)).
 			Int("status", status).
-			Int("bytes_in", len(c.Request.Body())).
+			Int64("bytes_in", s3RequestBytesIn(c)).
 			Int64("bytes_out", s3ResponseBytesOut(c)).
 			Dur("latency", latency)
 		if reason, ok := c.Get(auditErrReasonKey); ok {
@@ -58,6 +58,16 @@ func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 		}
 		event.Msg("s3 request")
 	}
+}
+
+func s3RequestBytesIn(c *app.RequestContext) int64 {
+	if n := c.Request.Header.ContentLength(); n >= 0 {
+		return int64(n)
+	}
+	if c.Request.IsBodyStream() {
+		return 0
+	}
+	return int64(len(c.Request.BodyBytes()))
 }
 
 func s3ResponseBytesOut(c *app.RequestContext) int64 {
