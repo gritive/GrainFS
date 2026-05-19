@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"testing"
@@ -130,12 +131,25 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 		t.Fatalf("NewDEKKeeper: %v", err)
 	}
 
-	// Build an FSM with some objects (all dekGen=0 — legacy).
+	// Build an FSM with objects spanning two DEK generations (regression
+	// guard: rebuild loop must walk every entry, not short-circuit on gen=0).
+	// gen 0: k1, k2, k3 (3 objects). gen 1: k4, k5 (2 objects).
+	if err := keeper.Rotate(); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
 	fsm1 := newTestMetaFSMWithDEKKeeper(t, keeper)
-	for i, key := range []string{"k1", "k2", "k3"} {
+	gen0Keys := []string{"k1", "k2", "k3"}
+	gen1Keys := []string{"k4", "k5"}
+	for i, key := range gen0Keys {
 		cmd := buildPutObjectIndexCmdWithDekGen(t, "bkt", key, "v1", "pg1", 0)
 		if err := fsm1.applyCmd(cmd); err != nil {
-			t.Fatalf("applyCmd [%d]: %v", i, err)
+			t.Fatalf("applyCmd gen0 [%d]: %v", i, err)
+		}
+	}
+	for i, key := range gen1Keys {
+		cmd := buildPutObjectIndexCmdWithDekGen(t, "bkt", key, "v1", "pg1", 1)
+		if err := fsm1.applyCmd(cmd); err != nil {
+			t.Fatalf("applyCmd gen1 [%d]: %v", i, err)
 		}
 	}
 
@@ -182,9 +196,42 @@ func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
 		t.Fatalf("Restore: %v", err)
 	}
 
-	// dekRefCount(0) must equal the number of objects (3), not 0.
-	if got := fsm2.dekRefCount(0); got != 3 {
-		t.Fatalf("after legacy restore, dekRefCount(0) = %d, want 3 (rebuilt from objectIndex)", got)
+	// Both generations must be rebuilt — a bug that only counts gen=0 (e.g., early
+	// return, hardcoded gen, type mis-cast) would pass with the previous test
+	// fixture and fail here.
+	if got := fsm2.dekRefCount(0); got != uint64(len(gen0Keys)) {
+		t.Fatalf("after legacy restore, dekRefCount(0) = %d, want %d", got, len(gen0Keys))
+	}
+	if got := fsm2.dekRefCount(1); got != uint64(len(gen1Keys)) {
+		t.Fatalf("after legacy restore, dekRefCount(1) = %d, want %d", got, len(gen1Keys))
+	}
+}
+
+// TestSnapshot_GCFGTrailerByteDeterminism guards against config map iteration
+// order leaking into snapshot bytes (testing specialist CRITICAL F#1). Two
+// snapshots of byte-identical config state must produce byte-identical GCFG
+// trailers; otherwise raft snapshot replication compares hashes across
+// replicas and rejects valid snapshots.
+func TestSnapshot_GCFGTrailerByteDeterminism(t *testing.T) {
+	// Encode the same config map 16 times; every output must be identical.
+	entries := map[string]string{
+		"audit.deny-only":   "true",
+		"trusted-proxy.cidr": "10.0.0.0/8,192.168.0.0/16",
+		"cluster.read-only": "false",
+		"iam.anon-enabled":  "false",
+	}
+	first, err := encodeMetaConfigSnapshot(entries)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	for i := 0; i < 15; i++ {
+		got, err := encodeMetaConfigSnapshot(entries)
+		if err != nil {
+			t.Fatalf("encode #%d: %v", i+1, err)
+		}
+		if !bytes.Equal(first, got) {
+			t.Fatalf("encode iteration %d differs from first — map order leaked into trailer bytes", i+1)
+		}
 	}
 }
 

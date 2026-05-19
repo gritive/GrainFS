@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"sort"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -10,6 +11,10 @@ import (
 
 // encodeMetaConfigSnapshot serializes a map[string]string into a
 // MetaConfigSnapshot FlatBuffers buffer used as the GCFG trailer payload.
+//
+// Keys are sorted ascending so the serialized bytes are deterministic — two
+// nodes with identical config state must produce byte-identical snapshots
+// (raft snapshot replication compares hashes). Mirrors the dek_codec pattern.
 func encodeMetaConfigSnapshot(entries map[string]string) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
@@ -18,6 +23,7 @@ func encodeMetaConfigSnapshot(entries map[string]string) ([]byte, error) {
 	for k := range entries {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 
 	entryOffs := make([]flatbuffers.UOffsetT, len(keys))
 	for i := len(keys) - 1; i >= 0; i-- {

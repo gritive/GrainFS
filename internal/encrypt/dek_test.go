@@ -76,3 +76,68 @@ func TestDEKKeeper_PruneRefusedWhenStillReferenced(t *testing.T) {
 		t.Fatalf("Prune(0, safe=true) failed: %v", err)
 	}
 }
+
+func TestDEKKeeper_PruneRefusesActiveGen(t *testing.T) {
+	kek := make([]byte, 32)
+	rand.Read(kek)
+	k, _ := NewDEKKeeper(kek)
+	_ = k.Rotate() // active = 1
+	if err := k.Prune(1, true); err == nil {
+		t.Fatal("Prune(active_gen, true) must refuse — would lose ability to seal new objects")
+	}
+}
+
+func TestLoadFromFSM_EmptyVersions(t *testing.T) {
+	kek := make([]byte, 32)
+	rand.Read(kek)
+	if _, err := LoadFromFSM(kek, nil); err == nil {
+		t.Fatal("LoadFromFSM(nil) must reject")
+	}
+	if _, err := LoadFromFSM(kek, map[uint32][]byte{}); err == nil {
+		t.Fatal("LoadFromFSM(empty map) must reject")
+	}
+}
+
+func TestLoadFromFSM_RoundTrip(t *testing.T) {
+	kek := make([]byte, 32)
+	rand.Read(kek)
+	original, _ := NewDEKKeeper(kek)
+	_ = original.Rotate()
+	_ = original.Rotate() // gens 0, 1, 2 active=2
+
+	restored, err := LoadFromFSM(kek, original.Versions())
+	if err != nil {
+		t.Fatalf("LoadFromFSM: %v", err)
+	}
+	if gen, _ := restored.Active(); gen != 2 {
+		t.Fatalf("restored active gen = %d, want 2", gen)
+	}
+	// Seal+Open across the keepers must produce identical results (same KEK + same wrapped DEKs).
+	ct, gen, err := original.Seal([]byte("crossed"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	got, err := restored.Open(ct, gen)
+	if err != nil {
+		t.Fatalf("restored.Open: %v", err)
+	}
+	if !bytes.Equal(got, []byte("crossed")) {
+		t.Fatalf("payload mismatch: %q", got)
+	}
+}
+
+func TestDEKKeeper_VersionsIsDeepCopy(t *testing.T) {
+	kek := make([]byte, 32)
+	rand.Read(kek)
+	k, _ := NewDEKKeeper(kek)
+	got := k.Versions()
+	// Zero the returned bytes for active gen; subsequent Seal must still work.
+	for g := range got {
+		for i := range got[g] {
+			got[g][i] = 0
+		}
+	}
+	if _, _, err := k.Seal([]byte("after-mutate")); err != nil {
+		t.Fatalf("Versions() returned a reference, not a copy; Seal failed: %v", err)
+	}
+}

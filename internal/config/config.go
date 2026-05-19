@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -134,7 +135,9 @@ func (s *Store) GetBool(key string) (bool, bool) {
 	return v == "true", true
 }
 
-// ListAll returns a snapshot of all registered keys with their current values.
+// ListAll returns a snapshot of all registered keys with their current values,
+// sorted ascending by Key. Stable order matters for CLI output and admin
+// API responses that downstream tooling parses positionally.
 func (s *Store) ListAll() []Entry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -153,6 +156,7 @@ func (s *Store) ListAll() []Entry {
 			Set:     set,
 		})
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
 	return entries
 }
 

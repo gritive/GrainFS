@@ -43,3 +43,13 @@ func TestLoadOrGenerateKEK_RejectKMS(t *testing.T) {
 	_, err := LoadOrGenerateKEK("kms://arn:aws:kms:us-east-1:123456789012:key/abc")
 	assert.True(t, errors.Is(err, ErrUnsupportedKEKSource))
 }
+
+func TestLoadOrGenerateKEK_RejectsWrongSizeFile(t *testing.T) {
+	for _, sz := range []int{0, 16, 31, 33, 64} {
+		path := t.TempDir() + "/kek.key"
+		require.NoError(t, os.WriteFile(path, make([]byte, sz), 0o600))
+		_, err := LoadOrGenerateKEK("file://" + path)
+		require.Errorf(t, err, "size %d must be rejected", sz)
+		require.Contains(t, err.Error(), "32", "error must name expected size")
+	}
+}
