@@ -154,3 +154,31 @@ func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
 		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
 	}
 }
+
+func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
+	payload := makePattern(5 << 20)
+
+	run := func(t testing.TB) {
+		t.Helper()
+		b := &bytesOnlySegmentBackend{}
+		obj, err := NewSegmentWriter(b).Write(context.Background(), "test", "fast", "application/octet-stream", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if obj.Size != int64(len(payload)) {
+			t.Fatalf("size: want %d, got %d", len(payload), obj.Size)
+		}
+	}
+
+	run(t)
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			run(b)
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("SegmentWriter byte fast path alloc bytes: %d", allocedBytes)
+	if allocedBytes > 18*1024*1024 {
+		t.Fatalf("alloc bytes: got %d, want <= %d", allocedBytes, 18*1024*1024)
+	}
+}

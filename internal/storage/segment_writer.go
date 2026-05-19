@@ -194,9 +194,8 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 			return nil
 		}
 		if n > 0 {
-			body = body[:n]
 			select {
-			case workCh <- chunkJob{idx: idx, body: body}:
+			case workCh <- chunkJob{idx: idx, body: body[:n]}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
