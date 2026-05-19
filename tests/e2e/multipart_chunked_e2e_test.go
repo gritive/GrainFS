@@ -176,7 +176,7 @@ func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
 		got, err := io.ReadAll(getOut.Body)
 		require.NoError(t, err)
 		require.Equal(t, int64(len(want)), aws.ToInt64(getOut.ContentLength))
-		require.Equal(t, want, got)
+		require.True(t, bytes.Equal(want, got), "body mismatch")
 	})
 
 	t.Run("SegmentSpansPartBoundary", func(t *testing.T) {
@@ -230,7 +230,8 @@ func runMultipartChunkedCases(t *testing.T, tgt s3Target) {
 		defer getOut.Body.Close()
 		got, err := io.ReadAll(getOut.Body)
 		require.NoError(t, err)
-		require.Equal(t, want, got)
+		require.Equal(t, int64(len(want)), aws.ToInt64(getOut.ContentLength))
+		require.True(t, bytes.Equal(want, got), "body mismatch")
 	})
 }
 
