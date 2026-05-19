@@ -28,7 +28,7 @@ func getBinary() string {
 // TestNoPeersRestartPersistenceE2E exercises stop+restart on the same dataDir
 // — single-binary semantics. Cluster has no analogue (raft handles
 // process-restart differently), so this is single-node-only by nature.
-func TestNoPeersRestartPersistenceE2E(t *testing.T) {
+func runNoPeersRestartPersistence(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runNoPeersRestartPersistenceCases(t)
 	})
@@ -161,7 +161,7 @@ func runNoPeersRestartPersistenceCases(t *testing.T) {
 // TestNoPeersMultipartE2E exercises multipart against a single-binary
 // no-peers server. The cluster shape's multipart coverage lives in
 // TestMultipartE2E/Cluster4Node; this case stays single-only by design.
-func TestNoPeersMultipartE2E(t *testing.T) {
+func runNoPeersMultipart(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runNoPeersMultipartCases(t)
 	})
@@ -297,4 +297,10 @@ func runMultipartListFanoutCases(t *testing.T, tgt s3Target) {
 			assertMultipartListingFeature(t, ctx, tgt.pickNode(i), fixture, true)
 		})
 	}
+}
+
+// TestNoPeersE2E groups single-node (no-peers) behaviors.
+func TestNoPeersE2E(t *testing.T) {
+	t.Run("Multipart", runNoPeersMultipart)
+	t.Run("RestartPersistence", runNoPeersRestartPersistence)
 }

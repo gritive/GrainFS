@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestE2E_JoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
+func runClusterJoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes:      2,
@@ -53,7 +53,7 @@ func TestE2E_JoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
 	})
 }
 
-func TestE2E_AllServicesAvailableOnJoinedNodes(t *testing.T) {
+func runClusterJoinAllServicesAvailable(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes:      2,
@@ -119,7 +119,7 @@ func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
 	})
 }
 
-func TestE2E_DynamicJoinServices_NodeCounts(t *testing.T) {
+func runClusterJoinDynamicJoinServicesNodeCounts(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 
 		for _, nodes := range []int{2, 3} {
@@ -179,4 +179,11 @@ func TestE2E_DynamicJoinServices_NodeCounts(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestClusterJoinServicesE2E groups dynamic-join services scenarios.
+func TestClusterJoinServicesE2E(t *testing.T) {
+	t.Run("AllServicesAvailable", runClusterJoinAllServicesAvailable)
+	t.Run("DynamicJoinServicesNodeCounts", runClusterJoinDynamicJoinServicesNodeCounts)
+	t.Run("JoinedNodeEdgeForwardsBeforeDataReady", runClusterJoinedNodeEdgeForwardsBeforeDataReady)
 }

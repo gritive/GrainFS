@@ -23,7 +23,7 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-func TestIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
+func runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 
 		dataDir, err := os.MkdirTemp("", "grainfs-iceberg-duckdb-*")
@@ -59,7 +59,7 @@ DROP SCHEMA grainfs_iceberg.ns_e2e;
 	})
 }
 
-func TestIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
+func runIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 
 		cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
@@ -148,7 +148,7 @@ func runIcebergAuditCases(t *testing.T, tgt *icebergTarget, commitInterval time.
 // TestAuditIcebergSingleDuckDB starts one node with audit enabled, performs S3
 // PUTs, waits for the committer to flush, then verifies the audit.s3 Iceberg
 // table via DuckDB.
-func TestAuditIcebergSingleDuckDB(t *testing.T) {
+func runAuditIcebergSingleDuckDB(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		const commitInterval = 8 * time.Second
 		tgt := newSingleNodeIcebergTargetWithAudit(t, commitInterval)
@@ -330,7 +330,7 @@ func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey,
 // TestAuditIcebergClusterDuckDB starts a 3-node cluster with audit enabled and a
 // short commit interval, performs S3 PUTs, waits for the committer to flush,
 // then verifies the audit.s3 Iceberg table contains the expected rows via DuckDB.
-func TestAuditIcebergClusterDuckDB(t *testing.T) {
+func runAuditIcebergClusterDuckDB(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 		const commitInterval = 8 * time.Second
 		tgt := newSharedClusterIcebergTargetWithAudit(t, commitInterval)
@@ -340,7 +340,7 @@ func TestAuditIcebergClusterDuckDB(t *testing.T) {
 
 // TestAuditIcebergClusterFollowerShipDuckDB verifies that audit events emitted
 // on a follower are shipped to the leader and become readable through DuckDB.
-func TestAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
+func runAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 
 		const commitInterval = 8 * time.Second
@@ -392,7 +392,7 @@ func TestAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
 
 // TestAuditIcebergClusterLeaderFlap verifies that audit events captured on followers
 // are forwarded and committed after leader re-election.
-func TestAuditIcebergClusterLeaderFlap(t *testing.T) {
+func runAuditIcebergClusterLeaderFlap(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 
 		const commitInterval = 8 * time.Second
@@ -498,4 +498,18 @@ ATTACH 'grainfs' AS grainfs_iceberg (
 );
 %s
 `, accessKey, secretKey, endpointHost, endpoint, query)
+}
+
+// TestIcebergDuckDBE2E groups iceberg local + cluster DuckDB checks.
+func TestIcebergDuckDBE2E(t *testing.T) {
+	t.Run("LocalCatalogSurvivesRestartAndDrop", runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop)
+	t.Run("ClusterAnyNodeTableAPI", runIcebergDuckDBClusterAnyNodeTableAPI)
+}
+
+// TestAuditIcebergE2E groups audit iceberg scenarios (single + cluster).
+func TestAuditIcebergE2E(t *testing.T) {
+	t.Run("SingleDuckDB", runAuditIcebergSingleDuckDB)
+	t.Run("ClusterDuckDB", runAuditIcebergClusterDuckDB)
+	t.Run("ClusterFollowerShipDuckDB", runAuditIcebergClusterFollowerShipDuckDB)
+	t.Run("ClusterLeaderFlap", runAuditIcebergClusterLeaderFlap)
 }

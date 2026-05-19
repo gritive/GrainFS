@@ -26,7 +26,7 @@ import (
 // We use 5 nodes instead of 6 because 6-node Raft bootstrap on loopback
 // is noisy in CI; 5 nodes converge faster and still exercise the full EC
 // code path (ecK=3, ecM=2, placement across all 5 nodes).
-func TestClusterECPutGet5NodeE2E(t *testing.T) {
+func runClusterECPutGet5Node(t *testing.T) {
 	t.Run("Cluster5Node", func(t *testing.T) {
 		binary := getBinary()
 		if _, err := os.Stat(binary); err != nil {
@@ -231,7 +231,7 @@ func TestClusterECPutGet5NodeE2E(t *testing.T) {
 // - GET reconstructs correctly from 2 available shards (k=2 minimum).
 // - Killing one node (1 out of 3) leaves k=2 shards: GET must still succeed.
 // - Killing a second node leaves only 1 shard (< k=2): GET must fail.
-func TestClusterEC3NodeActiveKM21E2E(t *testing.T) {
+func runClusterEC3NodeActiveKM21(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 		const (
 			clusterKey = "E2E-EC-3NODE-KEY"
@@ -372,7 +372,7 @@ func TestClusterEC3NodeActiveKM21E2E(t *testing.T) {
 //
 // This validates the TODOS.md requirement:
 // "N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오."
-func TestClusterECTopologyChangeE2E(t *testing.T) {
+func runClusterECTopologyChange(t *testing.T) {
 	t.Run("Cluster6to5Node", func(t *testing.T) {
 		binary := getBinary()
 		if _, err := os.Stat(binary); err != nil {
@@ -692,4 +692,11 @@ type staticCreds struct{ ak, sk string }
 
 func (c staticCreds) Retrieve(ctx context.Context) (aws.Credentials, error) {
 	return aws.Credentials{AccessKeyID: c.ak, SecretAccessKey: c.sk, Source: "static"}, nil
+}
+
+// TestClusterECE2E groups EC cluster scenarios.
+func TestClusterECE2E(t *testing.T) {
+	t.Run("EC3NodeActiveKM21", runClusterEC3NodeActiveKM21)
+	t.Run("PutGet5Node", runClusterECPutGet5Node)
+	t.Run("TopologyChange", runClusterECTopologyChange)
 }

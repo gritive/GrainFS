@@ -16,7 +16,7 @@ import (
 // TestClusterRefusesEmptyClusterKeyE2E: cluster mode startup must fail-fast
 // when --cluster-key is empty. Join mode (triggered by .join-pending) is the
 // only cluster mode; without --cluster-key the boot must error out.
-func TestClusterRefusesEmptyClusterKeyE2E(t *testing.T) {
+func runClusterPSKRefusesEmptyClusterKey(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		dir := t.TempDir()
 		encKeyFile := makeSharedEncryptionKeyFile(t)
@@ -48,7 +48,7 @@ func TestClusterRefusesEmptyClusterKeyE2E(t *testing.T) {
 // TestClusterDifferentPSKJoinFailsE2E: a node attempting to join an
 // existing cluster with a mismatched --cluster-key must fail. This proves the
 // SPKI pinning (A6) is end-to-end intact, not just unit-test-correct.
-func TestClusterDifferentPSKJoinFailsE2E(t *testing.T) {
+func runClusterPSKDifferentJoinFails(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {
 		keyA := strings.Repeat("a", 64)
 		keyB := strings.Repeat("b", 64)
@@ -129,4 +129,10 @@ func TestClusterDifferentPSKJoinFailsE2E(t *testing.T) {
 		require.False(t, errors.Is(joinerCtx.Err(), context.DeadlineExceeded), "joiner must fail from PSK rejection, not from test timeout. out: %s", string(out))
 		require.Contains(t, string(out), "peer cert SPKI", "joiner should surface the PSK/SPKI rejection. out: %s", string(out))
 	})
+}
+
+// TestClusterPSKE2E groups cluster PSK validation scenarios.
+func TestClusterPSKE2E(t *testing.T) {
+	t.Run("RefusesEmptyClusterKey", runClusterPSKRefusesEmptyClusterKey)
+	t.Run("DifferentPSKJoinFails", runClusterPSKDifferentJoinFails)
 }

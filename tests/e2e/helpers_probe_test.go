@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWaitForWritableEndpoint_UsesPerAttemptTimeout(t *testing.T) {
+func runWaitForWritableEndpointUsesPerAttemptTimeout(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		endpoints := []string{"node-a", "node-b", "node-c"}
 		var calls int32
@@ -43,7 +43,7 @@ func TestWaitForWritableEndpoint_UsesPerAttemptTimeout(t *testing.T) {
 	})
 }
 
-func TestWaitForWritableEndpoint_ReturnsErrorWhenAllEndpointsFail(t *testing.T) {
+func runWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		endpoints := []string{"node-a", "node-b"}
 
@@ -62,4 +62,10 @@ func TestWaitForWritableEndpoint_ReturnsErrorWhenAllEndpointsFail(t *testing.T) 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no writable endpoint found within")
 	})
+}
+
+// TestWaitForWritableEndpointE2E groups waitForWritableEndpoint probe behaviors.
+func TestWaitForWritableEndpointE2E(t *testing.T) {
+	t.Run("UsesPerAttemptTimeout", runWaitForWritableEndpointUsesPerAttemptTimeout)
+	t.Run("ReturnsErrorWhenAllEndpointsFail", runWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail)
 }

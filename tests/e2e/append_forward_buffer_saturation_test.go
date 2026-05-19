@@ -26,7 +26,7 @@ import (
 // only a Cluster4Node branch today; the shape stays consistent with the
 // other dual-integrated entries so a future single-node analogue (e.g.,
 // per-bucket admission control) can drop in.
-func TestAppendForwardBufferSaturationE2E(t *testing.T) {
+func runAppendForwardBufferSaturation(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
 		runAppendForwardBufferSaturationCases(t, newClusterS3TargetWithExtraArgs(t, 4, []string{
 			"--cluster-append-forward-buffer-total-bytes", fmt.Sprintf("%d", 4*1024*1024),
