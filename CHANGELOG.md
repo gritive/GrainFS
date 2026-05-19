@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.256.1] - 2026-05-19 - fix(cluster): retry follower propose during data-group election convergence
+
+3-노드 cluster에서 비리더 노드로 들어온 첫 S3 PutObject가 500 "not the leader"로 떨어지던 회귀 수정. 갓 instantiate된 data-group raft가 첫 election 완료 전에 propose를 받으면 모든 peer가 ErrNotLeader 반환 → `b.propose` follower 분기가 peer 한 바퀴만 돌고 surface. iceberg metadata-object PUT을 follower로 보내는 e2e 2건 (`TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit`, `TestE2E_DynamicJoinServices_NodeCounts/3_nodes`)이 PR #427 이후 RED 상태였던 원인.
+
+### Fixed
+
+- **Follower propose path retries on `raft.ErrNotLeader` with bounded backoff** (`internal/cluster/backend.go`). `b.propose` follower 분기를 5s deadline / 50ms retry loop로 감싸 election 수렴을 기다림. 매 iteration에서 `b.node.IsLeader()` 재확인 (self가 winner가 될 수 있음) + `LeaderID()`가 알려져 있으면 그쪽으로만 forward (피tile peer round-robin 회피, 모를 땐 기존 fan-out fallback). 비-`ErrNotLeader` 에러는 try-all-peers 후 surface해서 transport 실패가 실제 리더 peer를 가리지 않도록 원본 의미 보존. 두 e2e 테스트 PASS 복구.
+
 ## [0.0.256.0] - 2026-05-19 - feat(iceberg)!: warp catalog-commits/mixed/sustained clean — caller-identity creds + concurrency hardening (BREAKING)
 
 `warp iceberg` 3-subcommand 측정이 4-node cluster에서 strict gate (failed_requests≈0, p99<1s, max<3s) 통과. catalog-commits 11 240 ops × 0 errors, catalog-mixed 123 850 ops × 3 (0.0024%), sustained 3 500 ops × 1 (0.029%) — 잔존 에러는 모두 알려진 QUIC stream transient. `/v1/config` 자격증명 publish는 호출자 본인의 IAM 키만 반환하도록 변경 (privilege amplification 차단).
