@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -112,6 +113,78 @@ func TestDEKRefCount_PersistsInSnapshot(t *testing.T) {
 
 	if got := fsm2.dekRefCount(0); got != 3 {
 		t.Fatalf("after restore, dekRefCount(0) = %d, want 3", got)
+	}
+}
+
+// TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing verifies that when a
+// pre-Task-12 snapshot is restored (DKVS trailer present but no ref_counts field),
+// dekRefCounts is rebuilt from the restored objectIndex rather than left empty.
+// An empty dekRefCounts would allow DEKVersionPrune(0) to silently corrupt objects.
+func TestDEKRefCount_RebuildsFromObjectIndexWhenTrailerMissing(t *testing.T) {
+	kek := make([]byte, 32)
+	if _, err := rand.Read(kek); err != nil {
+		t.Fatal(err)
+	}
+	keeper, err := encrypt.NewDEKKeeper(kek)
+	if err != nil {
+		t.Fatalf("NewDEKKeeper: %v", err)
+	}
+
+	// Build an FSM with some objects (all dekGen=0 — legacy).
+	fsm1 := newTestMetaFSMWithDEKKeeper(t, keeper)
+	for i, key := range []string{"k1", "k2", "k3"} {
+		cmd := buildPutObjectIndexCmdWithDekGen(t, "bkt", key, "v1", "pg1", 0)
+		if err := fsm1.applyCmd(cmd); err != nil {
+			t.Fatalf("applyCmd [%d]: %v", i, err)
+		}
+	}
+
+	// Take a real snapshot (which includes ref_counts).
+	snapBytes, err := fsm1.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Strip the real DKVS trailer and replace it with a legacy one (nil refCounts).
+	// This mimics what a pre-Task-12 node would have written.
+	if len(snapBytes) < dekSnapshotTrailerLen {
+		t.Fatal("snapshot too short to contain DKVS trailer")
+	}
+	dekFooter := snapBytes[len(snapBytes)-dekSnapshotTrailerLen:]
+	if binary.LittleEndian.Uint32(dekFooter[4:8]) != dekSnapshotTrailerMagic {
+		t.Fatal("snapshot does not end with DKVS magic")
+	}
+	dekLen := binary.LittleEndian.Uint32(dekFooter[0:4])
+	dekEnd := len(snapBytes) - dekSnapshotTrailerLen
+	dekStart := dekEnd - int(dekLen)
+	base := snapBytes[:dekStart] // snapshot without any DKVS trailer
+
+	// Re-encode DKVS without ref_counts (nil → pre-Task-12 format).
+	versions := keeper.Versions()
+	active, _ := keeper.Active()
+	legacyDEKPayload, err := encodeMetaDEKVersionSnapshot(versions, active, nil)
+	if err != nil {
+		t.Fatalf("encodeMetaDEKVersionSnapshot (legacy): %v", err)
+	}
+	var legacyFooter [dekSnapshotTrailerLen]byte
+	binary.LittleEndian.PutUint32(legacyFooter[0:4], uint32(len(legacyDEKPayload)))
+	binary.LittleEndian.PutUint32(legacyFooter[4:8], dekSnapshotTrailerMagic)
+	legacySnap := append(base, legacyDEKPayload...)
+	legacySnap = append(legacySnap, legacyFooter[:]...)
+
+	// Restore from the legacy snapshot.
+	keeper2, err := encrypt.LoadFromFSM(kek, versions)
+	if err != nil {
+		t.Fatalf("LoadFromFSM: %v", err)
+	}
+	fsm2 := newTestMetaFSMWithDEKKeeper(t, keeper2)
+	if err := fsm2.Restore(raft.SnapshotMeta{}, legacySnap); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	// dekRefCount(0) must equal the number of objects (3), not 0.
+	if got := fsm2.dekRefCount(0); got != 3 {
+		t.Fatalf("after legacy restore, dekRefCount(0) = %d, want 3 (rebuilt from objectIndex)", got)
 	}
 }
 

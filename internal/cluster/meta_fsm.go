@@ -2415,7 +2415,13 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		if refs != nil {
 			f.dekRefCounts = refs
 		} else {
-			f.dekRefCounts = make(map[uint32]uint64)
+			// Pre-Task-12 snapshot: no ref_counts trailer field. Rebuild from the
+			// just-restored objectIndex so DEK prune-safety sees accurate counts.
+			// All legacy entries decode dek_gen=0 via FlatBuffer default.
+			f.dekRefCounts = make(map[uint32]uint64, len(f.objectIndex))
+			for _, e := range f.objectIndex {
+				f.dekRefCounts[e.DekGen]++
+			}
 		}
 		f.mu.Unlock()
 	}
