@@ -222,6 +222,26 @@ func (cb *CachedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	return setter.SetObjectACL(bucket, key, acl)
 }
 
+func (cb *CachedBackend) SetObjectTags(bucket, key, versionID string, tags []Tag) error {
+	setter, ok := cb.Backend.(ObjectTagsSetter)
+	if !ok {
+		return UnsupportedOperationError{Op: "SetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	if err := setter.SetObjectTags(bucket, key, versionID, tags); err != nil {
+		return err
+	}
+	cb.invalidate(bucket, key)
+	return nil
+}
+
+func (cb *CachedBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, error) {
+	getter, ok := cb.Backend.(ObjectTagsGetter)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "GetObjectTags", Reason: UnsupportedReasonNoAdapter}
+	}
+	return getter.GetObjectTags(bucket, key, versionID)
+}
+
 // PutObject invalidates the cache entry for the key.
 func (cb *CachedBackend) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
 	cb.invalidate(bucket, key)

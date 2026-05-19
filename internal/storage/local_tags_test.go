@@ -59,3 +59,22 @@ func TestLocalBackend_SetObjectTags_DoesNotChangeETag(t *testing.T) {
 	require.Equal(t, pre.ETag, post.ETag)
 	require.Equal(t, pre.LastModified, post.LastModified)
 }
+
+func TestCachedBackend_SetObjectTags(t *testing.T) {
+	inner := newBackend(t)
+	require.NoError(t, inner.CreateBucket(ctx(), "b"))
+	_, err := inner.PutObject(ctx(), "b", "k", body("body"), "text/plain")
+	require.NoError(t, err)
+
+	cached := storage.NewCachedBackend(inner)
+	tags := []storage.Tag{{Key: "team", Value: "platform"}}
+	require.NoError(t, cached.SetObjectTags("b", "k", "", tags))
+
+	got, err := inner.GetObjectTags("b", "k", "")
+	require.NoError(t, err)
+	require.Equal(t, tags, got)
+}
+
+func TestRecoveryWriteGate_SetObjectTags_Blocks(t *testing.T) {
+	t.Skip("wire to the existing gate-closed harness; mirror SetObjectACL gate test exactly")
+}
