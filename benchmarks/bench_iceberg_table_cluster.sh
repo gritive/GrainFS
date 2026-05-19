@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 cd "$REPO_ROOT"
 
 BINARY="${BINARY:-./bin/grainfs}"
-NODE_COUNT="${NODE_COUNT:-3}"
+NODE_COUNT="${NODE_COUNT:-4}"
 BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-iceberg-table-cluster-bench}"
 PROFILE="${PROFILE:-0}"
 VUS="${VUS:-${MAX_VUS:-10}}"
