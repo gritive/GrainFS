@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -196,7 +197,10 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	}
 	csb := newCSBWithDeps(deps, blobIDs)
 
-	obj, err := runChunkedPut(context.Background(), csb, sp,
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	obj, err := runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
 		nil, "", 0, false, "", nil)
 	require.NoError(t, err)
@@ -238,7 +242,10 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {
 	}
 	csb := newCSBWithDeps(deps, blobIDs)
 
-	_, err := runChunkedPut(context.Background(), csb, sp,
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
 		nil, "", 0, false, "", nil)
 	require.Error(t, err)
@@ -278,7 +285,10 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 	csb := newCSBWithDeps(deps, blobIDs)
 
 	hookErr := errors.New("beforeCommit failed (e.g. quota check)")
-	_, err := runChunkedPut(context.Background(), csb, sp,
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
 		nil, "", 0, false, "",
 		func() error { return hookErr })
@@ -308,7 +318,10 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	}
 	csb := newCSBWithDeps(deps, blobIDs)
 
-	_, err := runChunkedPut(context.Background(), csb, sp,
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
 		nil, "", 0, false, "", nil)
 	require.Error(t, err)
@@ -341,7 +354,10 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_DeleteShardsBestEffort(t *te
 	}
 	csb := newCSBWithDeps(deps, blobIDs)
 
-	_, err := runChunkedPut(context.Background(), csb, sp,
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
 		"bucket", "large.bin", "v1", "application/octet-stream",
 		nil, "", 0, false, "", nil)
 	require.Error(t, err)
@@ -374,4 +390,124 @@ func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 func TestChunkedChooseModTime(t *testing.T) {
 	assert.Equal(t, int64(123), chunkedChooseModTime(123, true, 999), "preserve=true returns caller modTime")
 	assert.Equal(t, int64(999), chunkedChooseModTime(123, false, 999), "preserve=false stamps now")
+}
+
+// TestPutObjectChunked_SizeGuard_EndToEnd locks down the outer routing
+// decision in putObjectECSpooledWithOptionalModTime (backend.go): objects at
+// or below DefaultChunkSize must NOT take the chunked path; strictly larger
+// objects must. The routing predicate is extracted as chunkedPathThresholdMet
+// so the threshold can be asserted without a full DistributedBackend fixture
+// while still being the exact predicate consulted at the call site.
+func TestPutObjectChunked_SizeGuard_EndToEnd(t *testing.T) {
+	chunk := int64(storage.DefaultChunkSize)
+	cases := []struct {
+		name      string
+		size      int64
+		wantChunk bool
+	}{
+		{name: "below_threshold_8MiB", size: 8 << 20, wantChunk: false},
+		{name: "at_threshold_16MiB", size: chunk, wantChunk: false},
+		{name: "just_above_threshold", size: chunk + 1, wantChunk: true},
+		{name: "above_threshold_17MiB", size: 17 << 20, wantChunk: true},
+		{name: "well_above_threshold_64MiB", size: 64 << 20, wantChunk: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.wantChunk, chunkedPathThresholdMet(tc.size),
+				"size=%d (chunk=%d) routing decision", tc.size, chunk)
+		})
+	}
+}
+
+// errReaderAfter wraps an underlying io.Reader; once the cumulative bytes
+// returned to callers reaches `at`, the next Read returns
+// io.ErrUnexpectedEOF. Bytes prior to the threshold are passed through
+// verbatim.
+type errReaderAfter struct {
+	r     io.Reader
+	at    int64
+	read  int64
+	errAt error
+}
+
+func (e *errReaderAfter) Read(p []byte) (int, error) {
+	if e.read >= e.at {
+		return 0, e.errAt
+	}
+	remaining := e.at - e.read
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err := e.r.Read(p)
+	e.read += int64(n)
+	if e.read >= e.at && err == nil {
+		err = e.errAt
+	}
+	return n, err
+}
+
+// TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError exercises a
+// chunker-mid-stream failure: the body delivers a full first segment
+// (16 MiB) cleanly, then surfaces io.ErrUnexpectedEOF partway through the
+// second chunk's fillChunk. SegmentWriter propagates the chunker error and
+// runChunkedPut's defer cleanup must tear down every blob whose worker
+// completed before the failure (and any partial blobs recorded in
+// placements), with no PutObjectMetaCmd proposed.
+func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
+	chunk := int64(storage.DefaultChunkSize)
+	// 48 MiB of payload, but the wrapped reader will error at byte 24 MiB —
+	// after segment 0's full 16 MiB has been delivered and 8 MiB into
+	// segment 1's chunk read.
+	totalPayload := 3 * chunk
+	errAt := chunk + (chunk / 2) // 24 MiB
+	payload := bytes.Repeat([]byte("C"), int(totalPayload))
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+
+	// Pre-allocate blobIDs sized for the would-be segment count (3) so any
+	// completed worker has a slot to record into.
+	blobIDs := make([]string, 3)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := newCSBWithDeps(deps, blobIDs)
+
+	spBody, err := sp.Open()
+	require.NoError(t, err)
+	defer spBody.Close()
+	wrapped := &errReaderAfter{r: spBody, at: errAt, errAt: io.ErrUnexpectedEOF}
+
+	_, err = runChunkedPut(context.Background(), csb, wrapped,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil)
+	require.Error(t, err)
+	// Chunker error must surface through the segment write wrap.
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF,
+		"io.ErrUnexpectedEOF from the body must propagate through runChunkedPut")
+
+	// No raft commit on chunker failure.
+	assert.Empty(t, deps.proposeCalls, "chunker error must not propose meta")
+
+	// Every blob that the placement layer recorded MUST appear in the
+	// cleanup recorder. We don't pin the exact count (segment 0 always
+	// completes; segment 1's worker may or may not receive the partial
+	// 8 MiB chunk depending on chunker scheduling), but whatever was
+	// recorded must be torn down.
+	cleanedBlobs := map[string]struct{}{}
+	for _, dc := range deps.deleteCalls {
+		assert.Equal(t, "bucket", dc.bucket)
+		cleanedBlobs[dc.shardKey] = struct{}{}
+	}
+	recordedAny := false
+	for i, p := range csb.placements {
+		if p.BlobID == "" {
+			continue
+		}
+		recordedAny = true
+		want := "large.bin/segments/" + p.BlobID
+		assert.Contains(t, cleanedBlobs, want,
+			"placement[%d] blob %s must be cleaned up on chunker error", i, p.BlobID)
+	}
+	assert.True(t, recordedAny,
+		"chunker error after 24 MiB must have allowed at least segment 0 to record a placement")
 }

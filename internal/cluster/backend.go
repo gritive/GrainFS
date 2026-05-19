@@ -2131,7 +2131,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	// legacy single-group setups (b.shardGroup == nil) fall back to the
 	// existing single-blob EC path even for large objects. Once a cluster
 	// wires SetShardGroupSource, large objects automatically segment.
-	if sp.Size > int64(storage.DefaultChunkSize) && b.shardGroup != nil {
+	if chunkedPathThresholdMet(sp.Size) && b.shardGroup != nil {
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm,

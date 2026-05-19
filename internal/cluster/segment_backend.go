@@ -155,6 +155,16 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 	return c.b.shardSvc.DeleteShards(ctx, peer, bucket, shardKey)
 }
 
+// chunkedPathThresholdMet reports whether a spooled object with the given
+// size is large enough to justify the chunked-PUT pipeline. Objects at or
+// below the threshold stay on the legacy single-segment EC path; strictly
+// larger objects route through putObjectChunked. Extracted from the call
+// site so the outer routing decision in putObjectECSpooledWithOptionalModTime
+// is unit-testable without standing up a full DistributedBackend fixture.
+func chunkedPathThresholdMet(spSize int64) bool {
+	return spSize > int64(storage.DefaultChunkSize)
+}
+
 // putObjectChunked is the chunked-PUT cluster pipeline: split the spooled
 // body into N segments via storage.SegmentWriter, fan out per-segment EC
 // writes across placement groups (best-effort, defer cleanup on any error),
@@ -200,16 +210,22 @@ func (b *DistributedBackend) putObjectChunked(
 		sseAlgorithm: sseAlgorithm,
 		placements:   make([]segmentPlacement, numSegments),
 	}
-	return runChunkedPut(ctx, csb, sp, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit)
+	body, err := sp.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open spool: %w", err)
+	}
+	defer body.Close()
+	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit)
 }
 
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
-// supplies a fully wired clusterSegmentBackend (production: from
-// putObjectChunked; tests: with hook overrides).
+// supplies a fully wired clusterSegmentBackend and the already-opened body
+// reader (production: from putObjectChunked which opens sp.Open(); tests:
+// arbitrary readers — including ones that error mid-stream — wired directly).
 func runChunkedPut(
 	ctx context.Context,
 	csb *clusterSegmentBackend,
-	sp *spooledObject,
+	body io.Reader,
 	bucket, key, versionID, contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
@@ -238,12 +254,7 @@ func runChunkedPut(
 		}
 	}()
 
-	// 3. Stream the spooled body through Phase 1 SegmentWriter.
-	body, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spool: %w", err)
-	}
-	defer body.Close()
+	// 3. Stream the body through Phase 1 SegmentWriter.
 	sw := storage.NewSegmentWriter(csb)
 	obj, err := sw.Write(ctx, bucket, key, contentType, body)
 	if err != nil {
