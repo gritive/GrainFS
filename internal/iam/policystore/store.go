@@ -87,3 +87,37 @@ func (s *InMemoryStore) List() []string {
 	}
 	return out
 }
+
+// PolicyEntry is a snapshot representation of one policy store entry.
+type PolicyEntry struct {
+	Name    string
+	Doc     []byte
+	Builtin bool
+}
+
+// Snapshot returns a copy of all entries for serialization.
+func (s *InMemoryStore) Snapshot() []PolicyEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]PolicyEntry, 0, len(s.m))
+	for k, v := range s.m {
+		out = append(out, PolicyEntry{
+			Name:    k,
+			Doc:     append([]byte(nil), v.doc...),
+			Builtin: v.builtin,
+		})
+	}
+	return out
+}
+
+// ReplaceAll atomically replaces all entries with the provided snapshot.
+// The previous contents are discarded. Callers must not modify entries after
+// this call; ReplaceAll copies bytes internally.
+func (s *InMemoryStore) ReplaceAll(entries []PolicyEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m = make(map[string]entry, len(entries))
+	for _, e := range entries {
+		s.m[e.Name] = entry{doc: append([]byte(nil), e.Doc...), builtin: e.Builtin}
+	}
+}

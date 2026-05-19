@@ -86,6 +86,32 @@ const dekSnapshotTrailerMagic uint32 = 0x53564B44
 // [u32 payload_len][u32 magic]. Always 8 bytes when present.
 const dekSnapshotTrailerLen = 8
 
+// ipstSnapshotTrailerMagic identifies the IPST trailer appended after the DKVS
+// trailer (or after whichever trailers precede it). Hex pairs spell "IPST"
+// (0x49=I, 0x50=P, 0x53=S, 0x54=T → little-endian uint32 = 0x54535049).
+//
+// Carries: PolicyStore + GroupStore + PolicyAttachStore + BucketPolicyStore in
+// a single FlatBuffers payload. One trailer for all 4 §2 stores keeps the chain
+// depth manageable and reflects that the stores always serialize together.
+//
+// Wire layout (appended after every other trailer; IPST is the outermost trailer):
+//
+//	[FB root bytes]
+//	[IAM trailer bytes]       (optional, magic 0x47414D49)
+//	[GCFG trailer bytes]      (optional, magic 0x47464347)
+//	[DKVS trailer bytes]      (optional, magic 0x53564B44)
+//	[ipstPayloadBytes]
+//	[uint32 payloadLen  LE]
+//	[uint32 magic IPST  LE]
+//
+// Restore reads from the end: check last 4 bytes for IPST magic, if present
+// read payloadLen, strip IPST payload+footer, then continue DKVS/GCFG/IAM peel.
+const ipstSnapshotTrailerMagic uint32 = 0x54535049
+
+// ipstSnapshotTrailerLen is the on-disk size of the IPST footer:
+// [u32 payload_len][u32 magic]. Always 8 bytes when present.
+const ipstSnapshotTrailerLen = 8
+
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
 
@@ -2455,10 +2481,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	binary.LittleEndian.PutUint32(footer[4:8], iamSnapshotTrailerMagic)
 	out = append(out, footer[:]...)
 
-	// TODO(T23/T24): include policyStore in snapshot/restore — deferred until
-	// PolicyAttachStore and BucketPolicyStore are wired so a single trailer can
-	// carry all three IAM policy tables atomically.
-
 	// Append GCFG trailer after the IAM trailer. Only emit when there are
 	// explicit config values to persist — an empty map produces no trailer so
 	// old snapshots (taken from a fresh cluster with no overrides) remain
@@ -2497,6 +2519,39 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 			out = append(out, dekFooter[:]...)
 		}
 	}
+
+	// Append IPST trailer after the DKVS trailer. Emit when any of the 4 §2
+	// policy stores is wired. An empty payload (all stores nil or all empty)
+	// is still emitted so the trailer presence signals "new-format snapshot"
+	// to Restore, which can safely skip decode on an empty payload. Only
+	// skip the trailer entirely when all 4 stores are nil (not yet wired).
+	if f.policyStore != nil || f.groupStore != nil || f.policyAttachStore != nil || f.bucketPolicyStore != nil {
+		var polSnap []policystore.PolicyEntry
+		if f.policyStore != nil {
+			polSnap = f.policyStore.Snapshot()
+		}
+		var grpSnap []group.GroupEntry
+		if f.groupStore != nil {
+			grpSnap = f.groupStore.Snapshot()
+		}
+		var attachSnap policyattach.AttachSnapshot
+		if f.policyAttachStore != nil {
+			attachSnap = f.policyAttachStore.Snapshot()
+		}
+		var bpSnap []bucketpolicy.BucketPolicyEntry
+		if f.bucketPolicyStore != nil {
+			bpSnap = f.bucketPolicyStore.Snapshot()
+		}
+		ipstPayload, err := encodeMetaIAMPolicyStoresSnapshot(polSnap, grpSnap, attachSnap, bpSnap)
+		if err != nil {
+			return nil, fmt.Errorf("meta_fsm: Snapshot: encode IAM policy stores: %w", err)
+		}
+		var ipstFooter [ipstSnapshotTrailerLen]byte
+		binary.LittleEndian.PutUint32(ipstFooter[0:4], uint32(len(ipstPayload)))
+		binary.LittleEndian.PutUint32(ipstFooter[4:8], ipstSnapshotTrailerMagic)
+		out = append(out, ipstPayload...)
+		out = append(out, ipstFooter[:]...)
+	}
 	return out, nil
 }
 
@@ -2509,10 +2564,28 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
 
-	// Peel DKVS trailer first (it is the absolute newest trailer when present).
+	// Peel IPST trailer first (it is the absolute newest / outermost trailer when present).
+	// Layout: [FB bytes][IAM trailer][GCFG trailer][DKVS trailer][ipstPayload][u32 ipstLen][u32 ipstMagic].
+	// After stripping IPST, the remaining bytes look like a pre-C1 snapshot.
+	remaining := data
+	var ipstData []byte
+	if len(remaining) >= ipstSnapshotTrailerLen {
+		ipstFooter := remaining[len(remaining)-ipstSnapshotTrailerLen:]
+		if binary.LittleEndian.Uint32(ipstFooter[4:8]) == ipstSnapshotTrailerMagic {
+			ipstLen := binary.LittleEndian.Uint32(ipstFooter[0:4])
+			if int(ipstLen)+ipstSnapshotTrailerLen > len(remaining) {
+				return fmt.Errorf("meta_fsm: Restore: IPST trailer length %d exceeds snapshot size %d", ipstLen, len(remaining))
+			}
+			ipstEnd := len(remaining) - ipstSnapshotTrailerLen
+			ipstStart := ipstEnd - int(ipstLen)
+			ipstData = remaining[ipstStart:ipstEnd]
+			remaining = remaining[:ipstStart]
+		}
+	}
+
+	// Peel DKVS trailer next (second-newest trailer when present).
 	// Layout: [FB bytes][IAM trailer][GCFG trailer][dekPayload][u32 dekLen][u32 dekMagic].
 	// After stripping DKVS, the remaining bytes look like a pre-Task-11 snapshot.
-	remaining := data
 	var dekData []byte
 	if len(remaining) >= dekSnapshotTrailerLen {
 		dekFooter := remaining[len(remaining)-dekSnapshotTrailerLen:]
@@ -2803,8 +2876,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
-	// TODO(T23/T24): restore policyStore from snapshot trailer — deferred, see Snapshot comment.
-
 	// GCFG restore — populate the config store from the GCFG trailer.
 	// If no trailer was present (legacy snapshot or no overrides), leave the
 	// store empty so registered defaults take effect via GetX fallback.
@@ -2844,6 +2915,52 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			}
 		}
 		f.mu.Unlock()
+	}
+
+	// IPST restore — decode the 4 §2 IAM policy stores from the IPST trailer.
+	// Snapshot was taken with all 4 stores serialized together; restore replaces
+	// each store atomically. Nil stores are skipped with a warning (test fixtures
+	// or nodes that have not yet wired the stores). Legacy snapshots (no IPST
+	// trailer) leave the stores untouched; they will be rebuilt from Raft log replay.
+	if len(ipstData) > 0 {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+			log.Warn().Int("ipst_len", len(ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
+		} else {
+			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
+			}
+			// Warn per nil store. The 4 stores form a single coherent unit
+			// (group memberships, attached policies, bucket policies all reference
+			// each other); silently dropping one half desyncs the others against
+			// the snapshot. The all-nil path warns once above; here we surface
+			// per-store gaps so the operator sees exactly what was lost.
+			if f.policyStore == nil {
+				log.Warn().Int("entries", len(polSnap)).Msg("meta_fsm: Restore: IPST has policy entries but policyStore not wired; entries dropped")
+			} else {
+				f.policyStore.ReplaceAll(polSnap)
+			}
+			if f.groupStore == nil {
+				log.Warn().Int("entries", len(grpSnap)).Msg("meta_fsm: Restore: IPST has group entries but groupStore not wired; entries dropped")
+			} else {
+				f.groupStore.ReplaceAll(grpSnap)
+			}
+			if f.policyAttachStore == nil {
+				log.Warn().Int("sa_entries", len(attachSnap.SAAttachments)).Int("group_entries", len(attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
+			} else {
+				f.policyAttachStore.ReplaceAll(attachSnap)
+			}
+			if f.bucketPolicyStore == nil {
+				log.Warn().Int("entries", len(bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
+			} else {
+				f.bucketPolicyStore.ReplaceAll(bpSnap)
+			}
+			// Invalidate the resolver cache so stale pre-restore entries don't
+			// survive the snapshot install. Empty saIDs+buckets nukes the full cache.
+			if f.policyResolver != nil {
+				f.policyResolver.Invalidate(nil, nil)
+			}
+		}
 	}
 	return nil
 }

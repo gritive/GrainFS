@@ -52,3 +52,33 @@ func (s *InMemoryStore) Delete(_ context.Context, bucket string) error {
 	delete(s.m, bucket)
 	return nil
 }
+
+// BucketPolicyEntry is a snapshot of one bucket's policy document.
+type BucketPolicyEntry struct {
+	Bucket string
+	Doc    []byte
+}
+
+// Snapshot returns a copy of all bucket policy entries for serialization.
+func (s *InMemoryStore) Snapshot() []BucketPolicyEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]BucketPolicyEntry, 0, len(s.m))
+	for bucket, doc := range s.m {
+		out = append(out, BucketPolicyEntry{
+			Bucket: bucket,
+			Doc:    append([]byte(nil), doc...),
+		})
+	}
+	return out
+}
+
+// ReplaceAll atomically replaces all bucket policy entries with the provided snapshot.
+func (s *InMemoryStore) ReplaceAll(entries []BucketPolicyEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m = make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		s.m[e.Bucket] = append([]byte(nil), e.Doc...)
+	}
+}

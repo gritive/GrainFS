@@ -87,6 +87,15 @@ func bootMetaRaftWiring(state *bootState) error {
 		metaRaft.FSM().SetEncryptor(state.cfg.Encryptor)
 	}
 
+	// C2 §1 gap fix: construct the cluster DEK Keeper from the node KEK and
+	// inject it into the FSM. Without this wireDEKKeeper call, DEKRotate /
+	// DEKVersionPrune MetaCmds are silent no-ops at apply time. Extracted as a
+	// function so the wiring contract is directly unit-testable (see
+	// dek_keeper_wiring_test.go::TestWireDEKKeeper_InjectsAndRegistersHook).
+	if err := wireDEKKeeper(state, metaRaft.FSM()); err != nil {
+		return err
+	}
+
 	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
 	// Must run before bootMetaRaftStart so apply hooks for MetaCmds 50-61 land
 	// on the same store instances that authz (T26) will read from.

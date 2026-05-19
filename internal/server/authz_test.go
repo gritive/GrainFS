@@ -261,6 +261,31 @@ func TestAuthz_InternalAuditBucket_RejectsUnsignedLocalRead(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+// TestAuthz_InternalAuditBucket_RejectsAuthenticatedSAWithIAM verifies that
+// a regular SA with broad policy attached cannot read _grainfs/* objects
+// through the data plane. Pairs with the legacy auth-disabled and
+// audit-internal tests above. This is the IAM-enabled scope test.
+func TestAuthz_InternalAuditBucket_RejectsAuthenticatedSAWithIAM(t *testing.T) {
+	base, backend := setupTestServerWithBackend(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "AK-sa", SecretKey: "saSecret"}}),
+		WithAuditInternalCredentials("AK-audit-internal", "auditSecret"),
+	)
+	require.NoError(t, backend.CreateBucket(context.Background(), auditpkg.BucketName))
+	_, err := backend.PutObject(context.Background(), auditpkg.BucketName, "metadata/s3/readable.avro",
+		bytes.NewReader([]byte("ok")), "application/octet-stream")
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/"+auditpkg.BucketName+"/metadata/s3/readable.avro", nil)
+	require.NoError(t, err)
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, "AK-sa", "saSecret", "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 func TestAuditInternalObjectReadAllowed_LocalhostOnly(t *testing.T) {
 	assert.True(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "metadata/s3/file.avro", http.MethodGet, "127.0.0.1:9000", "AK-audit-internal", "AK-audit-internal"))
 	assert.True(t, auditInternalObjectReadAllowed(auditpkg.BucketName, "data/2026-05-15/file.parquet", http.MethodHead, "[::1]:9000", "AK-audit-internal", "AK-audit-internal"))
