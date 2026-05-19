@@ -93,6 +93,7 @@ type PackedBackend struct {
 var _ storage.Backend = (*PackedBackend)(nil)
 var _ storage.Snapshotable = (*PackedBackend)(nil)
 var _ storage.BucketSnapshotable = (*PackedBackend)(nil)
+var _ storage.PartialIO = (*PackedBackend)(nil)
 var _ interface {
 	CopyObjectWithRequest(context.Context, storage.CopyObjectAccelerationRequest) (*storage.Object, error)
 } = (*PackedBackend)(nil)
@@ -539,6 +540,71 @@ func (pb *PackedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 
 	// Fall through to inner backend
 	return pb.inner.GetObject(ctx, bucket, key)
+}
+
+// ReadAt implements storage.PartialIO so that range GETs work when this
+// backend sits in a chain wrapped by wal/pullthrough (each of those does a
+// b.Backend.(storage.PartialIO) assertion). Without this method the assertion
+// fails and the chain returns "wal: inner backend does not support ReadAt"
+// for any object served by PackedBackend.
+//
+// Routing mirrors GetObject:
+//   - Packed (small) entries: read the full blob payload and slice. Entries
+//     are bounded by the pack threshold (typically ≤ 1 MiB), so a full read
+//     plus slice is acceptable for v1; revisit if profiles show this is a hot
+//     spot for range-heavy small-object workloads.
+//   - Non-packed (large) objects: delegate to inner — segment-aware
+//     LocalBackend.ReadAt or ClusterCoordinator.ReadAt handles the rest.
+func (pb *PackedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	if v, packed := pb.index.Load(packedKey{bucket: bucket, key: key}); packed {
+		entry := v.(*indexEntry)
+		if entry.Refcount.Load() > 0 {
+			data, err := pb.blobStore.Read(entry.Location)
+			if err != nil {
+				return 0, fmt.Errorf("read packed object: %w", err)
+			}
+			if offset < 0 {
+				return 0, fmt.Errorf("ReadAt: negative offset")
+			}
+			if offset >= int64(len(data)) {
+				return 0, io.EOF
+			}
+			n := copy(buf, data[offset:])
+			if n < len(buf) {
+				return n, io.EOF
+			}
+			return n, nil
+		}
+	}
+	ra, ok := pb.inner.(storage.PartialIO)
+	if !ok {
+		return 0, fmt.Errorf("packblob: inner backend does not support ReadAt")
+	}
+	return ra.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+// WriteAt is a pass-through to inner. Packed (small S3 object) entries are
+// immutable blob slices and never receive pwrite traffic — internal buckets
+// (NFS4 / VFS Volume Device) live entirely on the inner path, so this is a
+// plain delegate.
+func (pb *PackedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	wa, ok := pb.inner.(storage.PartialIO)
+	if !ok {
+		return nil, fmt.Errorf("packblob: inner backend does not support WriteAt")
+	}
+	return wa.WriteAt(ctx, bucket, key, offset, data)
+}
+
+// Truncate is a pass-through to inner (same rationale as WriteAt).
+func (pb *PackedBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
+	tr, ok := pb.inner.(storage.PartialIO)
+	if !ok {
+		return fmt.Errorf("packblob: inner backend does not support Truncate")
+	}
+	return tr.Truncate(ctx, bucket, key, size)
 }
 
 func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {

@@ -102,19 +102,10 @@ func runLargeObjectCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("RangeAcrossChunkBoundary", func(t *testing.T) {
-		// Single-node Range GET above pack-threshold currently fails because
-		// the routed backend is wrapped packblob → wal → pullthrough, and
-		// packblob.PackedBackend does not implement storage.PartialIO. The
-		// wal wrapper's ReadAt then refuses with "wal: inner backend does not
-		// support ReadAt". This is orthogonal to chunking (Task 1.6.5 fixed
-		// LocalBackend.ReadAt; PackedBackend pass-through is its own design
-		// call). Cluster fixture has no packblob layer, so range GET routes
-		// through ClusterCoordinator.ReadAt which is PartialIO-correct.
-		//
-		// Tracked as a Phase 1 follow-up.
-		if !tgt.isCluster {
-			t.Skip("single-node Range GET above pack-threshold blocked on packblob PartialIO; tracked as Phase 1 follow-up")
-		}
+		// Phase 1.6.7 closed the single-node gap: PackedBackend now
+		// implements storage.PartialIO, so the wal/pullthrough wrappers
+		// can route ReadAt through to the segment-aware LocalBackend.
+		// Cluster path routes through ClusterCoordinator.ReadAt as before.
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "rangecross")
 		// 64 MiB = 4 segments × 16 MiB at DefaultChunkSize.

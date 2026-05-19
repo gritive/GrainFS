@@ -347,15 +347,6 @@ Work these in order. Do not run them in parallel.
   red flag in the e2e suite (not skipped) so Phase 2 work has a regression
   target.
 
-- [ ] **PackedBackend PartialIO pass-through [P2]**: single-node Range GET on
-  objects above `--pack-threshold` fails with `wal: inner backend does not
-  support ReadAt` because `packblob.PackedBackend` does not implement
-  `storage.PartialIO`. The wal wrapper type-asserts and refuses. Cluster path
-  routes through `ClusterCoordinator.ReadAt` directly and works.
-  `TestLargeObjectE2E/SingleNode/RangeAcrossChunkBoundary` is currently
-  skipped for this reason; cluster sub-case still exercises the chunk-boundary
-  range. Design call: delegate-when-unpacked vs unpack-and-read.
-
 ## Conformance Follow-Ups
 
 - [ ] [nfs-conformance] pynfs-nightly [P1]: run pynfs basic suite on a scheduled
