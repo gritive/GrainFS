@@ -95,6 +95,45 @@ func TestPutAndGetObject(t *testing.T) {
 	assert.Equal(t, int64(len(data)), meta.Size)
 }
 
+func TestPutObject_AlwaysProducesSegments(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"small", 1024},
+		{"under_chunk", 15 << 20},
+		{"two_chunks", (16 << 20) + 1},
+		{"large", 256 << 20},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestLocalBackend(t)
+			data := makePattern(tc.size)
+			obj, err := b.PutObject(context.Background(), "test", "key-"+tc.name, bytes.NewReader(data), "application/octet-stream")
+			if err != nil {
+				t.Fatalf("put: %v", err)
+			}
+			if len(obj.Segments) < 1 {
+				t.Fatalf("segments must be >=1, got %d", len(obj.Segments))
+			}
+			if obj.Size != int64(tc.size) {
+				t.Fatalf("size: want %d, got %d", tc.size, obj.Size)
+			}
+			rc, _, err := b.GetObject(context.Background(), "test", "key-"+tc.name)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			got, _ := io.ReadAll(rc)
+			rc.Close()
+			if !bytes.Equal(got, data) {
+				t.Fatalf("round-trip differs at offset %d (got %d bytes, want %d)", firstDiff(got, data), len(got), len(data))
+			}
+		})
+	}
+}
+
 func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 	enc := testEncryptor(t)
 	b, err := NewEncryptedLocalBackend(t.TempDir(), enc)
@@ -104,10 +143,13 @@ func TestEncryptedLocalBackendDoesNotStorePlaintextObject(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	plaintext := []byte("sensitive object payload")
 	key := "sensitive-meta-key"
-	_, err = b.PutObject(context.Background(), "bkt", key, bytes.NewReader(plaintext), "text/plain")
+	obj, err := b.PutObject(context.Background(), "bkt", key, bytes.NewReader(plaintext), "text/plain")
 	require.NoError(t, err)
 
-	raw, err := os.ReadFile(b.objectPath("bkt", key))
+	// Plaintext now lives in segment blobs, not at objectPath. Read the
+	// first segment off disk and assert plaintext is absent.
+	require.NotEmpty(t, obj.Segments, "encrypted PUT must produce segments")
+	raw, err := os.ReadFile(b.segmentPath("bkt", key, obj.Segments[0].BlobID))
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), string(plaintext))
 
@@ -322,9 +364,10 @@ func TestLargeObject(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	assert.Equal(t, data, got)
 
-	// verify file on disk
-	_, err = os.Stat(b.objectPath("test-bucket", "large.bin"))
-	require.NoError(t, err, "expected file on disk")
+	// verify segment blobs on disk (objects now flow through SegmentWriter,
+	// so the legacy single-file objectPath no longer exists).
+	_, err = os.Stat(b.objectPath("test-bucket", "large.bin") + "_segments")
+	require.NoError(t, err, "expected segments dir on disk")
 }
 
 func TestLocalBackend_BucketPolicy(t *testing.T) {
@@ -366,8 +409,10 @@ func TestLocalBackend_WriteAt(t *testing.T) {
 
 	full := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 26 bytes
 
-	// Seed the file via PutObject.
-	_, err := b.PutObject(context.Background(), "bkt", "key", bytes.NewReader(full), "application/octet-stream")
+	// Seed the legacy single-file path via WriteAt. PutObject now flows
+	// through SegmentWriter, which the WriteAt/ReadAt fast paths do not
+	// (yet) read; cross-path tests must seed via WriteAt directly.
+	_, err := b.WriteAt(context.Background(), "bkt", "key", 0, full)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -439,7 +484,9 @@ func TestCachedBackend_WriteAt(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 	cached := NewCachedBackend(b)
 
-	_, err := cached.PutObject(context.Background(), "bkt", "key", bytes.NewReader([]byte("hello world")), "text/plain")
+	// Seed via WriteAt to stay on the legacy single-file path that
+	// CachedBackend.WriteAt patches in place.
+	_, err := cached.WriteAt(context.Background(), "bkt", "key", 0, []byte("hello world"))
 	require.NoError(t, err)
 
 	// Warm the cache.
@@ -472,7 +519,9 @@ func TestLocalBackend_ReadAt(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
 	data := []byte("hello world")
-	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	// Seed via WriteAt (legacy single-file path) so ReadAt's pread can find
+	// the bytes at objectPath. Task 1.8 will make ReadAt segment-aware.
+	_, err := b.WriteAt(context.Background(), "bkt", "obj", 0, data)
 	require.NoError(t, err)
 
 	buf := make([]byte, 5)
@@ -486,7 +535,8 @@ func TestLocalBackend_ReadAt_EOF(t *testing.T) {
 	b := setupTestBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
 
-	_, err := b.PutObject(context.Background(), "bkt", "obj", bytes.NewReader([]byte("abc")), "application/octet-stream")
+	// Seed via WriteAt (legacy single-file path). See TestLocalBackend_ReadAt.
+	_, err := b.WriteAt(context.Background(), "bkt", "obj", 0, []byte("abc"))
 	require.NoError(t, err)
 
 	buf := make([]byte, 10)
@@ -530,7 +580,8 @@ func TestCachedBackend_ReadAt_CacheMiss(t *testing.T) {
 	require.NoError(t, cb.CreateBucket(context.Background(), "bkt"))
 
 	data := []byte("uncached data")
-	_, err := cb.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
+	// Seed via WriteAt so ReadAt's pread hits the legacy single-file path.
+	_, err := cb.WriteAt(context.Background(), "bkt", "obj", 0, data)
 	require.NoError(t, err)
 
 	buf := make([]byte, 8)

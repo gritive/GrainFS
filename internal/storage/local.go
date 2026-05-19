@@ -229,110 +229,37 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 		return nil, err
 	}
 
-	objPath := b.objectPath(bucket, key)
-	objDir := filepath.Dir(objPath)
-	if err := os.MkdirAll(objDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create object dir: %w", err)
-	}
-
-	var tStart, tStage time.Time
+	var tStart time.Time
 	if localTraceEnabled {
 		tStart = time.Now()
-		tStage = tStart
 	}
 
-	// Write to a temp file in the same directory, then atomically rename onto
-	// objPath. This prevents readers from observing a truncated file
-	// mid-write (os.Create truncates on open).
-	tmp, err := os.CreateTemp(objDir, ".tmp-*")
+	// Every object — any size, encrypted or plain — flows through
+	// SegmentWriter. The pipeline chunks the input, fans out segment writes
+	// across workers, and computes ETag = md5(plaintext) via TeeReader. On
+	// error the partially-written segment blobs become orphans and are
+	// reclaimed by the scrubber.
+	w := NewSegmentWriter(localBackendAdapter{b})
+	obj, err := w.Write(ctx, bucket, key, req.ContentType, req.Body)
 	if err != nil {
-		return nil, fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	cleanupTmp := func() {
-		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("write segments: %w", err)
 	}
 
-	if localTraceEnabled {
-		log.Debug().Dur("create_temp", time.Since(tStage)).Str("bucket", bucket).Msg("PutObject trace")
-		tStage = time.Now()
-	}
-
-	var (
-		size int64
-		etag string
-		cerr error
-	)
-	if b.encryptor != nil {
-		_ = tmp.Close()
-		h, release := hashForBucket(bucket)
-		size, cerr = writeEncryptedObjectFile(tmpPath, b.encryptor, encryptedObjectFileDomain(bucket, key), req.Body, h)
-		if cerr == nil {
-			etag = etagFromHash(h)
-		}
-		release()
-		if cerr != nil {
-			cleanupTmp()
-			return nil, fmt.Errorf("write encrypted object: %w", cerr)
-		}
-	} else {
-		h, release := hashForBucket(bucket)
-		w := io.MultiWriter(tmp, h)
-		size, cerr = io.Copy(w, req.Body)
-		if cerr == nil {
-			etag = etagFromHash(h)
-		}
-		release()
-		tmp.Close()
-		if cerr != nil {
-			cleanupTmp()
-			return nil, fmt.Errorf("write object: %w", cerr)
-		}
-	}
-
-	if localTraceEnabled {
-		log.Debug().Dur("copy_close", time.Since(tStage)).Int64("bytes", size).Msg("PutObject trace")
-		tStage = time.Now()
-	}
-
-	if err := os.Rename(tmpPath, objPath); err != nil {
-		cleanupTmp()
-		return nil, fmt.Errorf("rename object: %w", err)
-	}
-	now := time.Now().Unix()
-
-	if localTraceEnabled {
-		log.Debug().Dur("rename", time.Since(tStage)).Msg("PutObject trace")
-		tStage = time.Now()
-	}
-
-	obj := &Object{
-		Key:          key,
-		Size:         size,
-		ContentType:  req.ContentType,
-		ETag:         etag,
-		LastModified: now,
-		UserMetadata: cloneStringMap(req.UserMetadata),
-		SSEAlgorithm: req.SystemMetadata.SSEAlgorithm,
-	}
+	// SegmentWriter sets Key/Size/ContentType/ETag/LastModified/Segments.
+	// Layer on per-request metadata before persisting.
+	obj.UserMetadata = cloneStringMap(req.UserMetadata)
+	obj.SSEAlgorithm = req.SystemMetadata.SSEAlgorithm
 	if req.ACL != nil {
 		obj.ACL = *req.ACL
 	}
 
-	meta, err := marshalObject(obj)
-	if err != nil {
-		return nil, fmt.Errorf("marshal metadata: %w", err)
-	}
-
-	err = b.db.Update(func(txn *badger.Txn) error {
-		return setBadgerValue(txn, b.encryptor, badgerDomainObject, b.objectMetaKey(bucket, key), meta)
-	})
-	if err != nil {
-		return nil, err
+	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
+		// Segments are now orphans; scrubber sweep reclaims them.
+		return nil, fmt.Errorf("commit object meta: %w", err)
 	}
 
 	if localTraceEnabled {
-		log.Debug().Dur("badger_update", time.Since(tStage)).Dur("total", time.Since(tStart)).Msg("PutObject trace")
+		log.Debug().Dur("total", time.Since(tStart)).Int64("size", obj.Size).Int("segments", len(obj.Segments)).Str("bucket", bucket).Msg("PutObject trace")
 	}
 
 	return obj, nil
@@ -350,18 +277,17 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 		return nil, nil, err
 	}
 
-	// Appendable objects store bytes across multiple segment blobs under
-	// <bucket>/<key>_segments/<blobID>, not a single object file. Stitch
-	// them with SegmentedReader. obj.Size == 0 still passes the legacy
-	// single-file path harmlessly.
-	if obj.Segments != nil && obj.Size > 0 {
-		r, err := b.OpenSegmentedReader(bucket, key, obj, 0, obj.Size-1)
-		if err != nil {
-			return nil, nil, fmt.Errorf("open segmented reader: %w", err)
-		}
-		return r, obj, nil
+	// Every object — including zero-byte ones (which have one empty
+	// trailing segment) — is now segment-backed. Stream the segments in
+	// order via the parallel SegmentReader.
+	if obj.Segments != nil {
+		store := localSegmentStore{b: b, bucket: bucket, key: key}
+		return io.NopCloser(NewSegmentReader(store, obj.Segments)), obj, nil
 	}
 
+	// Legacy single-file path for objects predating segments (e.g.
+	// __grainfs_volumes Volume Device blocks written via WriteAt). Range
+	// GETs and Volume Device reads keep using ReadAt directly.
 	if b.encryptor != nil {
 		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.encryptor, encryptedObjectFileDomain(bucket, key), obj.Size)
 		if err != nil {
@@ -666,7 +592,10 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 		return err
 	}
 
+	// Legacy single-file blob (Volume Device / pre-segment objects).
 	os.Remove(b.objectPath(bucket, key))
+	// Segment blobs from segmented PUTs live under <key>_segments/.
+	os.RemoveAll(b.objectPath(bucket, key) + "_segments")
 
 	return b.db.Update(func(txn *badger.Txn) error {
 		mk := b.objectMetaKey(bucket, key)

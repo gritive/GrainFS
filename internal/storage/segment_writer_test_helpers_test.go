@@ -52,11 +52,3 @@ func writeViaSegmentWriter(b *LocalBackend, bucket, key string, r io.Reader) (*O
 	}
 	return obj, nil
 }
-
-type localBackendAdapter struct{ b *LocalBackend }
-
-func (a localBackendAdapter) WriteSegment(ctx context.Context, bucket, key string, idx int, r io.Reader) (SegmentRef, error) {
-	_ = ctx
-	_ = idx
-	return a.b.WriteSegmentBlob(bucket, key, r)
-}
