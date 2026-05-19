@@ -833,6 +833,28 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	return objectFromReply(reply)
 }
 
+func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
+	ctx := context.Background()
+	target, err := c.routeReadOrBucket(bucket, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+		return nil, err
+	} else if gb != nil {
+		return gb.HeadObjectVersion(bucket, key, versionID)
+	}
+	if c.forward == nil {
+		return nil, ErrCoordinatorNoRouter
+	}
+	args := buildHeadObjectVersionArgs(bucket, key, versionID)
+	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpHeadObjectVersion, args)
+	if err != nil {
+		return nil, err
+	}
+	return objectFromReply(reply)
+}
+
 func (c *ClusterCoordinator) DeleteObject(ctx context.Context, bucket, key string) error {
 	_, err := c.DeleteObjectReturningMarker(bucket, key)
 	return err
