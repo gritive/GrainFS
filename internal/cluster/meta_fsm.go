@@ -3128,9 +3128,12 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// JKEY: decode JWT signing keys.
 	// F9: if JKEY data is present but DEK keeper is not wired, the keys cannot be
 	// unwrapped after Restore — fail loud rather than silently leaving jwtKeys empty.
+	// F14: stage LoadFromSeeds against a scratch KeySet BEFORE touching f.jwtKeyStore /
+	// f.jwtKeys so that a partial-unwrap failure leaves both fields untouched (atomic).
 	var (
 		newJkeyCurrent  *iamjwt.KeySeed
 		newJkeyPrevious *iamjwt.KeySeed
+		scratchJWTKeys  *iamjwt.KeySet
 		hasJKEYData     = len(jkeyData) > 0
 	)
 	if hasJKEYData {
@@ -3141,8 +3144,20 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		if err != nil {
 			return fmt.Errorf("meta_fsm: Restore: decode JKEY: %w", err)
 		}
+		var seeds []iamjwt.KeySeed
+		if cur != nil {
+			seeds = append(seeds, *cur)
+		}
+		if prev != nil {
+			seeds = append(seeds, *prev)
+		}
+		scratch := iamjwt.NewKeySet()
+		if err := scratch.LoadFromSeeds(seeds, f.dekKeeper); err != nil {
+			return fmt.Errorf("meta_fsm: Restore: JKEY LoadFromSeeds: %w", err)
+		}
 		newJkeyCurrent = cur
 		newJkeyPrevious = prev
+		scratchJWTKeys = scratch
 	}
 
 	// --- COMMIT PHASE ---
@@ -3248,21 +3263,12 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
-	// JKEY commit.
+	// JKEY commit — both f.jwtKeyStore and f.jwtKeys are updated together.
+	// scratchJWTKeys was built (and LoadFromSeeds succeeded) in the decode phase
+	// above, so no error is possible here (F14: atomic commit).
 	if hasJKEYData {
 		f.jwtKeyStore.ReplaceAll(newJkeyCurrent, newJkeyPrevious)
-		// Rebuild the local in-process KeySet so same-process callers can
-		// verify tokens without another Seal/Open round-trip.
-		var seeds []iamjwt.KeySeed
-		if newJkeyCurrent != nil {
-			seeds = append(seeds, *newJkeyCurrent)
-		}
-		if newJkeyPrevious != nil {
-			seeds = append(seeds, *newJkeyPrevious)
-		}
-		if err := f.jwtKeys.LoadFromSeeds(seeds, f.dekKeeper); err != nil {
-			return fmt.Errorf("meta_fsm: Restore: rebuild jwt KeySet: %w", err)
-		}
+		f.jwtKeys = scratchJWTKeys
 	} else {
 		f.jwtKeyStore.ReplaceAll(nil, nil)
 	}

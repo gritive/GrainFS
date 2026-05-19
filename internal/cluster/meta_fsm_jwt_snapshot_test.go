@@ -170,3 +170,41 @@ func TestMetaFSM_JWTPrune_SucceedsAfterTTL(t *testing.T) {
 	_, prev := fsm.jwtKeyStore.Snapshot()
 	assert.Nil(t, prev, "previous key must be nil after successful prune")
 }
+
+// TestMetaFSM_Restore_RollbackOnJKEYLoadSeedFailure is an F14 regression test.
+// When a JKEY trailer is present in a snapshot but the restoring FSM's DEK keeper
+// uses a different KEK (so dekKeeper.Open fails), Restore must:
+//  1. Return a non-nil error.
+//  2. Leave f.jwtKeyStore untouched (both slots nil on a fresh FSM).
+//
+// The bug (pre-F14) was that f.jwtKeyStore.ReplaceAll was called BEFORE
+// LoadFromSeeds, so a failure half-way through the unwrap loop would leave
+// f.jwtKeyStore updated but f.jwtKeys empty → split state.
+func TestMetaFSM_Restore_RollbackOnJKEYLoadSeedFailure(t *testing.T) {
+	// Build a source FSM with KEK-A and rotate a JWT key.
+	src, _ := newTestFSMWithDEK(t)
+	applyDEKRotate(t, src)
+	applyJWTRotate(t, src)
+
+	snap, err := src.Snapshot()
+	require.NoError(t, err)
+
+	// Build a destination FSM with a DIFFERENT KEK — Open will fail.
+	wrongKEK := make([]byte, 32)
+	_, err = rand.Read(wrongKEK)
+	require.NoError(t, err)
+	wrongKeeper, err := encrypt.NewDEKKeeper(wrongKEK)
+	require.NoError(t, err)
+
+	dst := NewMetaFSM()
+	dst.SetDEKKeeper(wrongKeeper)
+
+	// Restore must fail — the wrapped secret was sealed under KEK-A.
+	err = dst.Restore(raft.SnapshotMeta{}, snap)
+	require.Error(t, err, "Restore must fail when DEK keeper cannot unwrap JKEY secrets")
+
+	// jwtKeyStore must remain in its zero state (both slots nil).
+	gotCurrent, gotPrevious := dst.jwtKeyStore.Snapshot()
+	assert.Nil(t, gotCurrent, "jwtKeyStore.current must be nil after failed Restore (F14)")
+	assert.Nil(t, gotPrevious, "jwtKeyStore.previous must be nil after failed Restore (F14)")
+}

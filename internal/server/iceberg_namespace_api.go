@@ -17,13 +17,25 @@ func (s *Server) requireIceberg(c *app.RequestContext) (icebergcatalog.Catalog, 
 	return s.icebergCatalogStore(), true
 }
 
+// s3URLPrefixProvider is satisfied by MetaCatalog (which splits the logical
+// warehouse key from the physical S3 URI used for object-path construction).
+type s3URLPrefixProvider interface {
+	S3URLPrefix() string
+}
+
 func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 	store, ok := s.requireIceberg(c)
 	if !ok {
 		return
 	}
 	wh := catalogWarehouse(ctx, store.(warehouseProvider))
-	overrides := s.icebergS3CredOverrides(ctx, wh)
+	// Use the physical S3 URI for credential overrides (bucket extraction),
+	// falling back to wh for legacy stores that don't implement S3URLPrefix.
+	s3Prefix := wh
+	if p, ok := store.(s3URLPrefixProvider); ok {
+		s3Prefix = p.S3URLPrefix()
+	}
+	overrides := s.icebergS3CredOverrides(ctx, s3Prefix)
 	if len(overrides) > 0 {
 		// Publish the same host:port the client just connected to as
 		// s3.endpoint. iceberg-go's REST catalog reads this to build

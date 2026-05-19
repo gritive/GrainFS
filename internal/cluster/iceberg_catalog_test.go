@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -812,4 +813,30 @@ func TestMetaCatalog_EmptyWarehouseResolvesToDefault(t *testing.T) {
 	// Verify it is NOT stored under the constructor S3 URI key.
 	_, notOK := m.FSM().IcebergNamespace("s3://example-warehouse", []string{"ns"})
 	require.False(t, notOK, "namespace should NOT be stored under the S3-URI warehouse key")
+}
+
+// TestMetaCatalog_DefaultWarehouseIsConst is an F15 regression test.
+// NewMetaCatalog (and its variants) must always return IcebergDefaultWarehouse
+// from Warehouse(), regardless of the s3URLPrefix passed at construction.
+// The S3 URI prefix must be accessible via S3URLPrefix() unchanged.
+func TestMetaCatalog_DefaultWarehouseIsConst(t *testing.T) {
+	const s3Prefix = "s3://grainfs-tables/warehouse"
+
+	cat := NewMetaCatalog(nil, nil, s3Prefix)
+	assert.Equal(t, IcebergDefaultWarehouse, cat.Warehouse(),
+		"Warehouse() must always return IcebergDefaultWarehouse (F15)")
+	assert.Equal(t, s3Prefix, cat.S3URLPrefix(),
+		"S3URLPrefix() must return the constructor s3URLPrefix arg unchanged (F15)")
+
+	catFwd := NewMetaCatalogWithForwarder(nil, nil, s3Prefix, nil)
+	assert.Equal(t, IcebergDefaultWarehouse, catFwd.Warehouse(),
+		"NewMetaCatalogWithForwarder: Warehouse() must return IcebergDefaultWarehouse (F15)")
+	assert.Equal(t, s3Prefix, catFwd.S3URLPrefix(),
+		"NewMetaCatalogWithForwarder: S3URLPrefix() must return s3URLPrefix (F15)")
+
+	catFwds := NewMetaCatalogWithForwarders(nil, nil, s3Prefix, nil, nil, nil)
+	assert.Equal(t, IcebergDefaultWarehouse, catFwds.Warehouse(),
+		"NewMetaCatalogWithForwarders: Warehouse() must return IcebergDefaultWarehouse (F15)")
+	assert.Equal(t, s3Prefix, catFwds.S3URLPrefix(),
+		"NewMetaCatalogWithForwarders: S3URLPrefix() must return s3URLPrefix (F15)")
 }

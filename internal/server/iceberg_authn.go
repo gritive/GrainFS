@@ -36,13 +36,13 @@ func (s *Server) icebergGuarded(action string, h app.HandlerFunc) app.HandlerFun
 		}
 
 		authHeader := string(c.GetHeader("Authorization"))
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		if !hasBearerPrefix(authHeader) {
 			// No bearer token — fall through to the existing SigV4 path.
 			h(ctx, c)
 			return
 		}
 
-		claims, ok := s.icebergAuthnCheck(ctx, c, authHeader[len("Bearer "):], action)
+		claims, ok := s.icebergAuthnCheck(ctx, c, trimBearerPrefix(authHeader), action)
 		if !ok {
 			return // response already written
 		}

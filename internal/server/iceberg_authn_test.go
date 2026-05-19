@@ -307,3 +307,52 @@ func TestIcebergAuthn_ValidBearer_Passes(t *testing.T) {
 	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode, "valid bearer must pass auth")
 	assert.NotEqual(t, http.StatusForbidden, resp.StatusCode, "valid bearer must pass auth")
 }
+
+// TestAuthMiddleware_LowercaseBearer_SkipsSigV4: F13 regression test.
+// authMiddleware must not invoke the SigV4 verifier when the Authorization
+// header starts with lowercase "bearer " (RFC 6749 token_type:"bearer").
+// A SigV4-gated server with a valid lowercase-bearer Iceberg request must
+// reach the handler (not get 401 from the SigV4 verifier).
+func TestAuthMiddleware_LowercaseBearer_SkipsSigV4(t *testing.T) {
+	base, ks := setupJWTAuthnServer(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}),
+	)
+
+	tok := mintBearer(t, ks, "warehouse")
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	// 401 would mean the SigV4 verifier ran (it doesn't recognize bearer as valid SigV4).
+	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
+		"authMiddleware must skip SigV4 for lowercase-bearer Iceberg requests (F13)")
+}
+
+// TestIcebergAuthn_LowercaseBearer_Passes: F13 regression test.
+// The OAuth token endpoint emits token_type:"bearer" (lowercase per RFC 6749 §5.1),
+// so clients may send "Authorization: bearer <jwt>". Both icebergGuarded and
+// authMiddleware must accept either form case-insensitively.
+func TestIcebergAuthn_LowercaseBearer_Passes(t *testing.T) {
+	base, ks := setupJWTAuthnServer(t,
+		WithAuth([]s3auth.Credentials{{AccessKey: "testkey", SecretKey: "testsecret"}}),
+	)
+
+	tok := mintBearer(t, ks, "warehouse")
+	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
+	require.NoError(t, err)
+	// Use lowercase "bearer" — verbatim as OAuth spec says token_type:"bearer".
+	req.Header.Set("Authorization", "bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
+		"lowercase 'bearer' prefix must be accepted in authMiddleware (F13)")
+	assert.NotEqual(t, http.StatusForbidden, resp.StatusCode,
+		"lowercase 'bearer' prefix must pass policy gate (F13)")
+}

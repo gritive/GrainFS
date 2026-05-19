@@ -17,16 +17,17 @@ import (
 )
 
 type MetaCatalog struct {
-	meta      *MetaRaft
-	backend   storage.Backend
-	warehouse string
-	forward   func(context.Context, []byte) error
-	read      *MetaCatalogReadSender
-	readPeers func() []string
-	nextID    atomic.Uint64
-	idPrefix  string // 16 hex chars from crypto/rand, unique per instance
-	cacheMu   sync.RWMutex
-	cache     map[string]cachedIcebergMetadata
+	meta        *MetaRaft
+	backend     storage.Backend
+	warehouse   string
+	s3URLPrefix string // S3 URI prefix for object-path construction (may differ from warehouse key)
+	forward     func(context.Context, []byte) error
+	read        *MetaCatalogReadSender
+	readPeers   func() []string
+	nextID      atomic.Uint64
+	idPrefix    string // 16 hex chars from crypto/rand, unique per instance
+	cacheMu     sync.RWMutex
+	cache       map[string]cachedIcebergMetadata
 }
 
 // newIcebergRequestIDPrefix returns a 16-char hex string from 8 random bytes.
@@ -44,23 +45,30 @@ type cachedIcebergMetadata struct {
 	metadata []byte
 }
 
-func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, warehouse string) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, idPrefix: newIcebergRequestIDPrefix()}
+// NewMetaCatalog constructs a MetaCatalog using IcebergDefaultWarehouse as the
+// logical warehouse key and s3URLPrefix as the physical S3 URI used for
+// object-path construction and credential overrides.
+func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, s3URLPrefix string) *MetaCatalog {
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: IcebergDefaultWarehouse, s3URLPrefix: s3URLPrefix, idPrefix: newIcebergRequestIDPrefix()}
 }
 
-func NewMetaCatalogWithForwarder(meta *MetaRaft, backend storage.Backend, warehouse string, forward func(context.Context, []byte) error) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, idPrefix: newIcebergRequestIDPrefix()}
+// NewMetaCatalogWithForwarder is like NewMetaCatalog but wires a forward func
+// for leader-forwarding writes on follower nodes.
+func NewMetaCatalogWithForwarder(meta *MetaRaft, backend storage.Backend, s3URLPrefix string, forward func(context.Context, []byte) error) *MetaCatalog {
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: IcebergDefaultWarehouse, s3URLPrefix: s3URLPrefix, forward: forward, idPrefix: newIcebergRequestIDPrefix()}
 }
 
+// NewMetaCatalogWithForwarders is like NewMetaCatalogWithForwarder but also
+// wires read-forwarding to follower peers.
 func NewMetaCatalogWithForwarders(
 	meta *MetaRaft,
 	backend storage.Backend,
-	warehouse string,
+	s3URLPrefix string,
 	forward func(context.Context, []byte) error,
 	read *MetaCatalogReadSender,
 	readPeers func() []string,
 ) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: IcebergDefaultWarehouse, s3URLPrefix: s3URLPrefix, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
 }
 
 // IcebergDefaultWarehouse is the warehouse key used for the single-warehouse
@@ -70,11 +78,16 @@ func NewMetaCatalogWithForwarders(
 // tests).
 const IcebergDefaultWarehouse = "default"
 
-// Warehouse returns the S3-URI warehouse location for this catalog instance.
-// It is not part of the Catalog interface; callers that need the physical
-// warehouse path for the SigV4 path or object-path construction use it via the
-// warehouseProvider interface.
+// Warehouse returns the logical warehouse key used as the FSM storage key.
+// Always returns IcebergDefaultWarehouse for MetaCatalog instances.
+// It is not part of the Catalog interface; callers use it via the
+// warehouseProvider interface to determine the storage-layer key.
 func (c *MetaCatalog) Warehouse() string { return c.warehouse }
+
+// S3URLPrefix returns the physical S3 URI used for object-path construction
+// and credential overrides (e.g. "s3://grainfs-tables/warehouse"). May differ
+// from Warehouse() which always returns the logical key ("default").
+func (c *MetaCatalog) S3URLPrefix() string { return c.s3URLPrefix }
 
 // resolveWarehouse returns w if non-empty, otherwise IcebergDefaultWarehouse
 // ("default"). The constructor's c.warehouse is preserved separately via
