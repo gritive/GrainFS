@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.257.0] - 2026-05-19 - feat(s3): multipart ?partNumber=N (GET/HEAD) + cluster capability admin probe + ListObjects pagination hardening
+
+`warp s3 multipart` 4-node cluster 통과율 0% → 99.99% (16/~200K errors는 follow-up). `?partNumber=N`을 GET/HEAD에서 honor하고, `multipart_listing_v1` capability ready를 admin UDS로 노출해서 bench warmup이 45s blind sleep 대신 active probe로 전환. ListObjects pagination은 forward/local-exec fallback의 marker silently truncate 결함을 잡고 V1/V2 응답 struct를 분리.
+
+### Added
+
+- **`storage.MultipartPartEntry` + `Object.Parts`** — multipart 객체의 part metadata (PartNumber/Size/ETag)를 cluster 영속화 전 경로에 추가. FlatBuffers schema (`ObjectMeta`/`PutObjectMetaCmd`/`MetaObjectIndexEntry`) parts vector + codec encode/decode + apply.go + buildObjectIndexEntry + objectIndexEntryToObject + 4× backend.go BadgerDB 읽기 사이트 + CompleteMultipartUpload (`ecObjectWriteResult.Parts`).
+- **`GET/HEAD ?partNumber=N`** (`internal/server/object_part_range.go`, `object_api.go`, `object_head_api.go`) — 206 + `Content-Range` + `x-amz-mp-parts-count` + part ETag. `Range`+`partNumber` 동시 사용 시 400 `InvalidArgument`, N out-of-range 시 416 `InvalidPartNumber`. 비-multipart 객체는 N=1만 허용 (whole object). 0-byte part는 empty 206으로 직접 응답.
+- **Admin UDS `GET /v1/cluster/capabilities`** (`internal/server/cluster_capabilities_api.go`) — peer→capability→ready JSON. `CapabilityGate.EvidenceSnapshot()` + `ClusterInfo.CapabilityEvidence()` + `RaftClusterInfo.WithCapabilityGate`. bench/운영툴/CI 모두 활용.
+- **`bench_wait_capability_ready()`** (`benchmarks/lib/common.sh`) — admin sock unix-socket curl로 모든 노드가 capability ready될 때까지 polling. multipart workload warmup이 45s sleep 대신 평균 ~5–25s active probe.
+- **`ListObjects` marker-aware native pagination** — `LocalBackend.ListObjectsPage` + `DistributedBackend.ListObjectsPage` (badger seek-after-marker, truncated flag). `ListObjectsArgs.marker` FBS field로 forward RPC plumb-through.
+- **`ListObjectsV1` (marker)/`V2` (continuation-token base64) 페이지네이션 응답** (`internal/server/list_objects_api.go`, `bucket_xml.go`) — V1은 `<Marker/>` 항상, V2는 `<KeyCount>` 항상. `?continuation-token` base64 decode 실패 → 400 `InvalidArgument`. `max-keys=0` 허용, 음수/non-int → 400.
+- **bench script optional pprof capture** (`BENCH_PPROF=1`) + `EXTRA_GRAINFS_SERVE_FLAGS` forward.
+
+### Changed
+
+- **`Operations.ListObjectsPage` fallback** non-pager 백엔드 + 비어있지 않은 marker 조합에서 silently truncate 대신 `UnsupportedOperationError` 반환. LocalBackend/DistributedBackend가 모두 pager 구현하므로 production 경로는 영향 없음.
+- **`forward_receiver.handleListObjects`** marker 인자 처리 + receiver가 `maxKeys+1` 프로브로 coordinator의 `len > maxKeys` truncated 검출을 가능하게 함 (이전엔 forward 경로 IsTruncated 항상 false).
+- **`HEAD ?partNumber=N`** 200 → 206 Partial Content (S3 spec 준수).
+- **bench multipart warmup** fixed 45s sleep → active capability probe.
+
+### Fixed
+
+- **multipart capability gate readiness** (`internal/cluster/capability_gate.go` + bench script) — gossip 전파 30~45s 동안 spurious "rolling upgrade" 거부로 multipart workload 100% 실패하던 회귀 해소.
+- **`ListObjects` 30% errors** — minio-go가 pagination 기대했으나 GrainFS가 single-page 응답으로 종료하던 회귀. V1+V2 응답 + meta-FSM 네이티브 pager로 0 errors at 291k obj/s.
+
+### Performance
+
+- 4-node cluster baseline 재측정 (`docs/reference/benchmarks.md`).
+
+### Notes
+
+- single-node (LocalBackend) multipart partNumber 경로는 `internal/storage` codec 미반영으로 동작 안 함 (follow-up). cluster 4-node 경로만 동작.
+- warp multipart 잔여 16/~200K errors는 follow-up.
+
 ## [0.0.256.1] - 2026-05-19 - fix(cluster): retry follower propose during data-group election convergence
 
 3-노드 cluster에서 비리더 노드로 들어온 첫 S3 PutObject가 500 "not the leader"로 떨어지던 회귀 수정. 갓 instantiate된 data-group raft가 첫 election 완료 전에 propose를 받으면 모든 peer가 ErrNotLeader 반환 → `b.propose` follower 분기가 peer 한 바퀴만 돌고 surface. iceberg metadata-object PUT을 follower로 보내는 e2e 2건 (`TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit`, `TestE2E_DynamicJoinServices_NodeCounts/3_nodes`)이 PR #427 이후 RED 상태였던 원인.
