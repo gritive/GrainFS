@@ -18,7 +18,7 @@ import (
 //  1. 16 appends drive the coalesce trigger.
 //  2. The first worker run aborts via coalesceFaultAfterECWrite — EC shards
 //     under shardSvc exist but the metadata never gets the CoalescedShardRef.
-//     Raw segments + owner-local merged file remain on disk.
+//     Raw segments remain on disk for retry.
 //  3. Worker re-runs (simulating backstop scan / restart). With the fault
 //     hook cleared, the job completes normally — different CoalescedID,
 //     consumes the same raw segments, propose succeeds.
