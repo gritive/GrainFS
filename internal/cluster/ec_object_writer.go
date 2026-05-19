@@ -143,7 +143,12 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 	if len(in.Group.PeerIDs) < nShards {
 		return PlacementRecord{}, "", "", fmt.Errorf("group %s has %d peers, need %d", in.Group.ID, len(in.Group.PeerIDs), nShards)
 	}
-	placement := append([]string(nil), in.Group.PeerIDs[:nShards]...)
+	placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+		Key:           in.Key,
+		VersionID:     in.VersionID,
+		SegmentBlobID: in.SegmentBlobID,
+	})
+	placement := PlacementForNodes(in.Cfg, in.Group.PeerIDs, placementKey)
 	plan := ecObjectWritePlan{
 		Bucket:           in.Bucket,
 		Key:              in.Key,

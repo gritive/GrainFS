@@ -1823,6 +1823,10 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	} else if blocked {
 		return 0, objectQuarantinedError(bucket, key, q)
 	}
+	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
+}
+
+func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, key string, obj *storage.Object, placementMeta PlacementMeta, offset int64, buf []byte) (int, error) {
 	if offset >= obj.Size {
 		return 0, io.EOF
 	}

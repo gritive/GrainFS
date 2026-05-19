@@ -252,6 +252,35 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 	require.Equal(t, []string{"node-a"}, result.Placement)
 }
 
+func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "not-a-placement-node",
+		shards: shards,
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"node-a", "node-b", "node-c", "node-d"}
+	blobID := "blob-1"
+	expected := PlacementForNodes(cfg, peers, "object/segments/"+blobID)
+
+	rec, _, _, err := writer.writeOneSegment(context.Background(), writeSegmentInput{
+		Bucket:        "bucket",
+		Key:           "object",
+		SegmentBlobID: blobID,
+		SegmentIdx:    0,
+		Group:         ShardGroupEntry{ID: "group-1", PeerIDs: peers},
+		Cfg:           cfg,
+		Data:          []byte("segment payload"),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, expected, rec.Nodes)
+	require.Len(t, shards.bufferedWrites, cfg.NumShards())
+	for _, write := range shards.bufferedWrites {
+		require.Contains(t, expected, write.peer)
+	}
+}
+
 func readECObjectWriterTraceEvents(t *testing.T, path string) []PutTraceEvent {
 	t.Helper()
 	f, err := os.Open(path)

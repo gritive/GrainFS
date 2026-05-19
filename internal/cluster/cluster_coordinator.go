@@ -1697,14 +1697,19 @@ func (c *ClusterCoordinator) readAtLocalCurrentFollower(ctx context.Context, buc
 		return 0, false, nil
 	}
 	gb := dg.Backend()
-	obj, err := gb.HeadObject(ctx, bucket, key)
+	obj, placementMeta, err := gb.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return 0, false, nil
 	}
 	if !objectMatchesIndexForFollowerRead(obj, entry) {
 		return 0, false, nil
 	}
-	n, err := gb.ReadAt(ctx, bucket, key, offset, buf)
+	if blocked, q, qerr := gb.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+		return 0, true, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return 0, true, objectQuarantinedError(bucket, key, q)
+	}
+	n, err := gb.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
 		return 0, false, nil
 	}
