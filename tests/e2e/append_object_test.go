@@ -33,7 +33,6 @@ func TestAppendObjectE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "4-node cluster boot is too slow for -short")
 		// Dedicated (non-shared) — runClusterOnlyAppendCases contains
 		// OwnerKillSurvives which kills + restarts a node; running that on
 		// the shared fixture would temporarily degrade subsequent tests

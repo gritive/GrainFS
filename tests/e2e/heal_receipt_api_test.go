@@ -40,7 +40,6 @@ import (
 // node C is gossiped. The older one must resolve via broadcast fallback —
 // that is the path Slice 2 exists to provide.
 func TestE2E_HealReceiptAPI_3Node(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)

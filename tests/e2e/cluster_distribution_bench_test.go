@@ -88,7 +88,6 @@ const (
 )
 
 func TestE2E_ClusterDistributionBench(t *testing.T) {
-	skipIfShort(t, "distribution bench skipped in -short mode")
 	if os.Getenv("GRAINFS_DISTRIBUTION_BENCH") != "1" {
 		t.Skip("set GRAINFS_DISTRIBUTION_BENCH=1 to run cluster distribution benchmark")
 	}

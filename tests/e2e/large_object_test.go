@@ -31,7 +31,6 @@ func TestLargeObjectE2E(t *testing.T) {
 		runLargeObjectCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "cluster fixture not booted in -short mode")
 		runLargeObjectCases(t, newSharedClusterS3Target(t))
 	})
 }

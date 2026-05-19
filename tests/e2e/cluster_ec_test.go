@@ -27,7 +27,6 @@ import (
 // is noisy in CI; 5 nodes converge faster and still exercise the full EC
 // code path (ecK=3, ecM=2, placement across all 5 nodes).
 func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)
@@ -232,7 +231,6 @@ func TestE2E_ClusterEC_PutGet_5Node(t *testing.T) {
 // - Killing one node (1 out of 3) leaves k=2 shards: GET must still succeed.
 // - Killing a second node leaves only 1 shard (< k=2): GET must fail.
 func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 	const (
 		clusterKey = "E2E-EC-3NODE-KEY"
 		bucketName = "3n-test"
@@ -372,7 +370,6 @@ func TestE2E_ClusterEC_3Node_ActiveKM21(t *testing.T) {
 // This validates the TODOS.md requirement:
 // "N 변경 전후 placement FSM record가 유효한지 검증하는 E2E 시나리오."
 func TestE2E_ClusterEC_TopologyChange(t *testing.T) {
-	skipIfShort(t, "skipping multi-node e2e in -short mode")
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
 		t.Skipf("grainfs binary not found at %s — run `make build` first", binary)

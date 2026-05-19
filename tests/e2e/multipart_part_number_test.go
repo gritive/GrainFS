@@ -31,7 +31,6 @@ func TestMultipartGetPartNumberE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "cluster fixture not booted in -short mode")
 		runMultipartGetPartNumberCases(t, newSharedClusterS3Target(t))
 	})
 }

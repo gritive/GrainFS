@@ -33,7 +33,6 @@ func TestAppendSizeCapE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "4-node cluster boot is too slow for -short")
 		tgt := newClusterS3TargetWithExtraArgs(t, 4, capArg)
 		runSizeCapCases(t, tgt, smallCap)
 	})

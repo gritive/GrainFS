@@ -482,7 +482,6 @@ func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
 //   - Each group has the expected number of voters for the auto EC profile
 func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
 		disableNFS4: true,
 		disableNBD:  true,
@@ -514,7 +513,6 @@ func TestE2E_MultiRaftSharding_Boot(t *testing.T) {
 // cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
 // listeners local to each process.
 func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startStaticMRCluster(t, 3)
 
 	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
@@ -550,7 +548,6 @@ func TestE2E_MultiRaftSharding_AllNodeServices(t *testing.T) {
 //   - Subsequent CreateBucket on same name is idempotent (no error / 409)
 //   - Spread: 32 buckets all created without error
 func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
 	// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 	// the same forward path with try-each-peer reliability.
@@ -609,7 +606,6 @@ func TestE2E_MultiRaftSharding_BucketAssignment(t *testing.T) {
 // Boot, create buckets, SIGTERM all, restart with same dataDirs, verify
 // per-group dirs persist + bucket recreate (idempotent) succeeds.
 func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
@@ -683,7 +679,6 @@ func TestE2E_MultiRaftSharding_RestartRecovery(t *testing.T) {
 // Verify that an object written through the multi-raft data plane survives a
 // clean cluster restart and remains readable through routed S3 GETs.
 func TestE2E_MultiRaftSharding_PerGroupPersistence(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	// This test must route away from legacy group-0 so the object lands under a
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
@@ -914,7 +909,6 @@ func requireMRGetObjectFromAnyNodeEventually(t *testing.T, ctx context.Context, 
 // the correct group leader and persisted. Tests ClusterCoordinator's
 // forward.Send → peer's ForwardReceiver → GroupBackend.PutObject path.
 func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	// Cross-node routing does not require multiple seeded groups; one RF=3 group
 	// is enough to exercise follower-to-leader forwarding.
@@ -949,7 +943,6 @@ func TestE2E_MultiRaftSharding_CrossNodeDispatch(t *testing.T) {
 }
 
 func TestE2E_TopologyDurability_FullTargetWriteGuard(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -1017,7 +1010,6 @@ func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Cli
 // continuity under the new ClusterCoordinator routing (try-each-peer
 // eventually hits the new leader).
 func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	// Failover behavior is independent of group count. Use one group to keep
 	// startup focused on the failover path under test.
@@ -1095,7 +1087,6 @@ func TestE2E_MultiRaftSharding_GroupLeaderFailover(t *testing.T) {
 // so objects written via S3 are readable over NFSv4 and vice versa. On Linux
 // the test mounts locally; on macOS it mounts from the Colima Linux VM.
 func TestE2E_MultiRaftSharding_NFSv4Smoke(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startStaticMRCluster(t, 3)
 	waitForPortsParallel(t, []int{c.nfs4Ports[0]}, 45*time.Second)
@@ -1246,7 +1237,6 @@ func shellQuote(s string) string {
 }
 
 func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,
@@ -1280,7 +1270,6 @@ func TestE2E_MultiRaftSharding_NBDRoutesThroughCoordinator(t *testing.T) {
 }
 
 func TestE2E_MultiRaftSharding_IcebergCatalogPointerAndMetadataObjectSplit(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      3,

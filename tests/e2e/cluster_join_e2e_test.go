@@ -15,7 +15,6 @@ import (
 )
 
 func TestE2E_JoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -53,7 +52,6 @@ func TestE2E_JoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
 }
 
 func TestE2E_AllServicesAvailableOnJoinedNodes(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -90,7 +88,6 @@ func TestE2E_AllServicesAvailableOnJoinedNodes(t *testing.T) {
 }
 
 func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      2,
 		Mode:       ClusterModeDynamicJoin,
@@ -117,7 +114,6 @@ func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
 }
 
 func TestE2E_DynamicJoinServices_NodeCounts(t *testing.T) {
-	skipIfShort(t, "skipping e2e test in -short mode")
 
 	for _, nodes := range []int{2, 3} {
 		t.Run(fmt.Sprintf("%d_nodes", nodes), func(t *testing.T) {

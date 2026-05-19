@@ -39,13 +39,6 @@ func keepE2EArtifacts() bool {
 	return os.Getenv("GRAINFS_E2E_KEEP_ARTIFACTS") == "1"
 }
 
-func skipIfShort(t *testing.T, reason string) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip(reason)
-	}
-}
-
 func initialFreePortCursor() uint32 {
 	return uint32((time.Now().UnixNano() + int64(os.Getpid()*7919)) % 25000)
 }

@@ -152,6 +152,5 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 }
 
 func TestNetworkPartitionSuite(t *testing.T) {
-	skipIfShort(t, "skipping network partition test in short mode")
 	suite.Run(t, new(NetworkPartitionSuite))
 }

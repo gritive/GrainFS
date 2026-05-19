@@ -15,7 +15,6 @@ import (
 
 func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 	// Skip in short mode
-	skipIfShort(t, "skipping Jepsen test in short mode")
 
 	dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
 	require.NoError(t, err)

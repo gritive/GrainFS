@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.262.3] - 2026-05-19 - test(e2e): unify Cache + CoW suites + drop all skipIfShort
+
+Three bundled changes:
+
+1. **Cache 3 tests → dual pattern**: `TestCacheReadConsistency`, `TestCacheDeleteInvalidation`, `TestCacheHeadAfterPut` migrated to `TestCache{Name}E2E` with `t.Run(SingleNode)` + `t.Run(Cluster4Node)` and `runCache{Name}Cases(t, tgt s3Target)` helpers. Hard-coded buckets (`cache-e2e-test`, `cache-del-test`, `cache-head-test`) replaced with `tgt.uniqueBucket(t, "<short>")`. Cache invariants (overwrite freshness, delete invalidation, HEAD-after-PUT) now verified on the cluster S3 surface as well.
+
+2. **CoW 3 tests → dual pattern**: `TestCoW_SnapshotRollbackRestoresData`, `TestCoW_SnapshotListAndDelete`, `TestCoW_CloneLifecycleIndependence` migrated to `TestCoW{Name}E2E` with the same dual pattern. `cowDataDir(tgt)` derives the admin UDS path from `tgt.adminSockPath()` (single → `testServerDataDir`; cluster → leader dataDir), so the volume CLI helpers stay agnostic. Unused `nfsWriteFile`/`nfsReadFile` helpers removed. CoW exercises the cluster volume/snapshot CLI surface for the first time — expect parity gaps to surface if the volume layer is single-only today.
+
+3. **skipIfShort removed across the e2e package (99 call sites)**: all `skipIfShort(t, "...")` invocations stripped from every test file under `tests/e2e/`. The helper definition was removed from `helpers_test.go`. `go test -short` no longer skips shared cluster fixture branches, dedicated cluster bootstrap, cluster_join, cluster_ec, distribution_bench, perf profile suite, etc. Classification work is more valuable with full visibility — gating tests behind `-short` was hiding the parity surface we are trying to map.
+
+### Changed
+
+- **`TestCacheReadConsistency` → `TestCacheReadConsistencyE2E`** (`tests/e2e/cache_test.go`)
+- **`TestCacheDeleteInvalidation` → `TestCacheDeleteInvalidationE2E`**
+- **`TestCacheHeadAfterPut` → `TestCacheHeadAfterPutE2E`**
+- **`TestCoW_SnapshotRollbackRestoresData` → `TestCoWSnapshotRollbackRestoresDataE2E`** (`tests/e2e/cow_e2e_test.go`)
+- **`TestCoW_SnapshotListAndDelete` → `TestCoWSnapshotListAndDeleteE2E`**
+- **`TestCoW_CloneLifecycleIndependence` → `TestCoWCloneLifecycleIndependenceE2E`**
+
+### Removed
+
+- `tests/e2e/helpers_test.go::skipIfShort` and all 99 call sites across the e2e package.
+- Dead `nfsWriteFile` / `nfsReadFile` helpers from `cow_e2e_test.go`.
+
 ## [0.0.262.2] - 2026-05-19 - test(e2e): unify EC suite onto TestBucketsE2E dual pattern
 
 `tests/e2e/erasure_test.go` had five tests (`TestEC_BasicPutGet`, `TestEC_LargeObject`, `TestEC_MultipartUpload`, `TestEC_BucketOperations`, `TestEC_DeleteAndOverwrite`) each booting its own single-node `startECServer` and hard-coding bucket names (`ec-basic`, `ec-large`, ...). Each test was bucket-isolated, so they migrate cleanly onto the standard dual fixture pattern.

@@ -47,12 +47,10 @@ func runNBDCases(t *testing.T, tgt *nbdTarget) {
 // deployment shapes.
 func TestNBDMatrixE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-		skipIfShort(t, "skipping NBD matrix single-node in short mode")
 		runNBDCases(t, newSingleNodeNBDTarget(t))
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "cluster fixture not booted in -short mode")
 		runNBDCases(t, newSharedClusterNBDTarget(t))
 	})
 }

@@ -273,7 +273,6 @@ func runNoPeersMultipartCases(t *testing.T) {
 // assertion on top of the same fixture.
 func TestClusterMultipartListFanoutE2E(t *testing.T) {
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runMultipartListFanoutCases(t, newSharedClusterS3Target(t))
 	})
 }

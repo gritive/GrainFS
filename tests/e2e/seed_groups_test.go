@@ -8,7 +8,6 @@ import (
 )
 
 func TestE2E_SeedGroups_AutoFromNodeCount(t *testing.T) {
-	skipIfShort(t, "skipping auto seed-groups test in -short mode")
 
 	const numNodes = 3
 	wantSeedGroups := numNodes * 4

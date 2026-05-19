@@ -28,7 +28,6 @@ func TestEcBasicPutGetE2E(t *testing.T) {
 		runEcBasicPutGetCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runEcBasicPutGetCases(t, newSharedClusterS3Target(t))
 	})
 }
@@ -76,7 +75,6 @@ func TestEcLargeObjectE2E(t *testing.T) {
 		runEcLargeObjectCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runEcLargeObjectCases(t, newSharedClusterS3Target(t))
 	})
 }
@@ -112,7 +110,6 @@ func TestEcMultipartUploadE2E(t *testing.T) {
 		runEcMultipartUploadCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runEcMultipartUploadCases(t, newSharedClusterS3Target(t))
 	})
 }
@@ -185,7 +182,6 @@ func TestEcBucketOperationsE2E(t *testing.T) {
 		runEcBucketOperationsCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runEcBucketOperationsCases(t, newSharedClusterS3Target(t))
 	})
 }
@@ -227,7 +223,6 @@ func TestEcDeleteAndOverwriteE2E(t *testing.T) {
 		runEcDeleteAndOverwriteCases(t, newSingleNodeS3Target())
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		skipIfShort(t, "shared cluster fixture skipped in -short mode")
 		runEcDeleteAndOverwriteCases(t, newSharedClusterS3Target(t))
 	})
 }

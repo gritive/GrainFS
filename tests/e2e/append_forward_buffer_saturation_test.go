@@ -26,7 +26,6 @@ import (
 // non-owner nodes; at least one must surface a 503 SlowDown (mapped from
 // ErrForwardBufferFull). cluster-only.
 func TestAppendForwardBufferSaturationE2E_Cluster4Node(t *testing.T) {
-	skipIfShort(t, "4-node cluster boot is too slow for -short")
 	tgt := newClusterS3TargetWithExtraArgs(t, 4, []string{
 		"--cluster-append-forward-buffer-total-bytes", fmt.Sprintf("%d", 4*1024*1024),
 		"--cluster-append-forward-buffer-max-per-request", fmt.Sprintf("%d", 64*1024*1024),

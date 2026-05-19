@@ -26,7 +26,6 @@ import (
 //
 // Total wall time bounded by RotationPhaseGrace (5s × 2 phases) + slack.
 func TestE2E_RotateKey_HappyPath(t *testing.T) {
-	skipIfShort(t, "rotation test waits ~15s for auto-progress; skip in -short")
 	dir := shortTempDir(t)
 	httpPort := freePort()
 	raftPort := freePort()
