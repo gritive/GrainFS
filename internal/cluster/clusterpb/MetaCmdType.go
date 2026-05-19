@@ -59,6 +59,10 @@ const (
 	MetaCmdTypeDEKVersionPrune              MetaCmdType = 49
 	MetaCmdTypePolicyPut                    MetaCmdType = 50
 	MetaCmdTypePolicyDelete                 MetaCmdType = 51
+	MetaCmdTypeGroupPut                     MetaCmdType = 52
+	MetaCmdTypeGroupDelete                  MetaCmdType = 53
+	MetaCmdTypeGroupMemberPut               MetaCmdType = 54
+	MetaCmdTypeGroupMemberDelete            MetaCmdType = 55
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -114,6 +118,10 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeDEKVersionPrune:              "DEKVersionPrune",
 	MetaCmdTypePolicyPut:                    "PolicyPut",
 	MetaCmdTypePolicyDelete:                 "PolicyDelete",
+	MetaCmdTypeGroupPut:                     "GroupPut",
+	MetaCmdTypeGroupDelete:                  "GroupDelete",
+	MetaCmdTypeGroupMemberPut:               "GroupMemberPut",
+	MetaCmdTypeGroupMemberDelete:            "GroupMemberDelete",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -169,6 +177,10 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"DEKVersionPrune":              MetaCmdTypeDEKVersionPrune,
 	"PolicyPut":                    MetaCmdTypePolicyPut,
 	"PolicyDelete":                 MetaCmdTypePolicyDelete,
+	"GroupPut":                     MetaCmdTypeGroupPut,
+	"GroupDelete":                  MetaCmdTypeGroupDelete,
+	"GroupMemberPut":               MetaCmdTypeGroupMemberPut,
+	"GroupMemberDelete":            MetaCmdTypeGroupMemberDelete,
 }
 
 func (v MetaCmdType) String() string {

@@ -19,6 +19,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/group"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -132,6 +133,10 @@ const (
 	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
 	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
 	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
+	MetaCmdTypeGroupPut                     = clusterpb.MetaCmdTypeGroupPut
+	MetaCmdTypeGroupDelete                  = clusterpb.MetaCmdTypeGroupDelete
+	MetaCmdTypeGroupMemberPut               = clusterpb.MetaCmdTypeGroupMemberPut
+	MetaCmdTypeGroupMemberDelete            = clusterpb.MetaCmdTypeGroupMemberDelete
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -314,6 +319,10 @@ type MetaFSM struct {
 	// every PolicyPut/PolicyDelete apply.
 	policyResolver *policy.Resolver
 
+	// groupStore is the IAM group store. nil until SetGroupStore is called;
+	// Group* commands are safe no-ops when nil.
+	groupStore *group.InMemoryStore
+
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
 	cfgStore *config.Store
@@ -422,6 +431,15 @@ func (f *MetaFSM) SetPolicyResolver(r *policy.Resolver) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.policyResolver = r
+}
+
+// SetGroupStore wires the IAM group store into the MetaFSM. Must be called
+// before the raft log starts replaying. nil means Group* commands are safe
+// no-ops (not configured yet).
+func (f *MetaFSM) SetGroupStore(s *group.InMemoryStore) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groupStore = s
 }
 
 // dekRefCount returns the number of ObjectIndexEntry records that reference
@@ -643,6 +661,14 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyPolicyPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePolicyDelete:
 		return f.applyPolicyDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupPut:
+		return f.applyGroupPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupDelete:
+		return f.applyGroupDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupMemberPut:
+		return f.applyGroupMemberPut(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeGroupMemberDelete:
+		return f.applyGroupMemberDelete(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
 		if f.dekKeeper == nil {
 			return nil
@@ -942,6 +968,76 @@ func (f *MetaFSM) applyPolicyDelete(payload []byte) error {
 	}
 	if f.policyResolver != nil {
 		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupPut(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, policies, err := DecodeGroupPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupPut: %w", err)
+	}
+	if err := f.groupStore.Put(context.Background(), name, policies); err != nil {
+		return fmt.Errorf("meta_fsm: GroupPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Group policy attachment changes can affect any cached entry; nuke all.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupDelete(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	name, err := DecodeGroupDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupDelete: %w", err)
+	}
+	if err := f.groupStore.Delete(context.Background(), name); err != nil {
+		return fmt.Errorf("meta_fsm: GroupDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupMemberPut(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, saID, err := DecodeGroupMemberPutPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberPut: %w", err)
+	}
+	if err := f.groupStore.AddMember(context.Background(), grp, saID); err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberPut store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// Only the affected SA's cached entries need to be dropped.
+		f.policyResolver.Invalidate([]string{saID}, nil)
+	}
+	return nil
+}
+
+func (f *MetaFSM) applyGroupMemberDelete(payload []byte) error {
+	if f.groupStore == nil {
+		return nil // safe no-op until wired
+	}
+	grp, saID, err := DecodeGroupMemberDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberDelete: %w", err)
+	}
+	if err := f.groupStore.RemoveMember(context.Background(), grp, saID); err != nil {
+		return fmt.Errorf("meta_fsm: GroupMemberDelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate([]string{saID}, nil)
 	}
 	return nil
 }

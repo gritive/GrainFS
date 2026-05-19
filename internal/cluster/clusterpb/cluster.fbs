@@ -427,6 +427,10 @@ enum MetaCmdType : uint8 {
   DEKVersionPrune         = 49, // DEK version prune: drop old wrapped DEK after rewrap scrub
   PolicyPut               = 50, // IAM: policy document upsert (name + doc JSON + builtin flag)
   PolicyDelete            = 51, // IAM: policy document delete
+  GroupPut                = 52, // IAM: group upsert (name + attached policies)
+  GroupDelete             = 53, // IAM: group delete
+  GroupMemberPut          = 54, // IAM: group member add (sa_id)
+  GroupMemberDelete       = 55, // IAM: group member remove (sa_id)
 }
 
 table MetaNodeEntry {
@@ -866,4 +870,27 @@ table MetaPolicyPutCmd {
 // PolicyDelete payload: remove a named policy document.
 table MetaPolicyDeleteCmd {
   name:string;
+}
+
+// GroupPut payload: upsert a named group with attached policies.
+table MetaGroupPutCmd {
+  name:string;
+  policies:[string];
+}
+
+// GroupDelete payload: remove a named group.
+table MetaGroupDeleteCmd {
+  name:string;
+}
+
+// GroupMemberPut payload: add sa_id to a group.
+table MetaGroupMemberPutCmd {
+  group:string;
+  sa_id:string;
+}
+
+// GroupMemberDelete payload: remove sa_id from a group.
+table MetaGroupMemberDeleteCmd {
+  group:string;
+  sa_id:string;
 }
