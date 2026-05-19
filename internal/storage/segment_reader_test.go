@@ -61,6 +61,34 @@ func TestSegmentReader_OneSegmentFailsAbortsCleanly(t *testing.T) {
 	}
 }
 
+func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
+	t.Parallel()
+	segs := makeTestSegments(t, []int{16 << 20, 16 << 20, 16 << 20, 16 << 20})
+	store := newFakeSegmentStore(segs)
+	r := NewSegmentReader(store, segs.refs)
+
+	// Consume in chunks; after each segment is fully drained, the pending
+	// slot must be nil so its 16 MiB backing array is GC-eligible.
+	buf := make([]byte, 1<<20) // 1 MiB read buffer
+	consumed := 0
+	for consumed < len(segs.flat) {
+		n, err := r.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatalf("read: %v", err)
+		}
+		consumed += n
+		if n == 0 {
+			break
+		}
+	}
+	// After full drain, every pending slot must be nil.
+	for i, p := range r.pending {
+		if p != nil {
+			t.Fatalf("pending[%d] not released after consumption", i)
+		}
+	}
+}
+
 // --- helpers ---
 
 type testSegments struct {

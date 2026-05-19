@@ -56,6 +56,9 @@ func NewSegmentReader(store segmentStore, refs []SegmentRef) *SegmentReader {
 		workers: DefaultGetWorkers,
 		pending: pending,
 	}
+	// TODO(phase-2): accept ctx from caller so cluster GET can cancel on
+	// client disconnect or reshard event. v1 uses background context — workers
+	// always run to completion.
 	go r.fetchAll(context.Background())
 	return r
 }
@@ -114,6 +117,7 @@ func (r *SegmentReader) Read(p []byte) (int, error) {
 	n := copy(p, p0.buf)
 	p0.buf = p0.buf[n:]
 	if len(p0.buf) == 0 {
+		r.pending[r.nextIdx] = nil // release backing array for GC
 		r.nextIdx++
 	}
 	return n, nil
