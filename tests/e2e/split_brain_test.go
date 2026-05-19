@@ -54,6 +54,6 @@ func runSplitBrainCases(t *testing.T, tgt s3Target) {
 				return
 			}
 		}
-		t.Fatal("grainfs_split_brain_suspected metric not found in /metrics output")
+		require.Fail(t, "grainfs_split_brain_suspected metric not found in /metrics output")
 	})
 }

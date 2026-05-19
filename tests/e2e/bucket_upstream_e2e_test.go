@@ -35,9 +35,8 @@ func runBucketUpstreamCases(t *testing.T, tgt s3Target) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		out, _ := exec.CommandContext(ctx, binary, "iam", "--help").CombinedOutput()
-		if strings.Contains(string(out), "bucket-upstream") {
-			t.Fatalf("expected 'bucket-upstream' to be absent from `grainfs iam --help`, got: %s", out)
-		}
+		require.NotContains(t, string(out), "bucket-upstream",
+			"expected 'bucket-upstream' to be absent from `grainfs iam --help`")
 
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel2()
