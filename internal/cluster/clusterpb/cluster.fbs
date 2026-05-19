@@ -83,6 +83,7 @@ table MetaClusterConfigPatchCmd {
 
 table CreateBucketCmd {
   bucket:string;
+  bypass_reserved:bool = false;
 }
 
 table DeleteBucketCmd {

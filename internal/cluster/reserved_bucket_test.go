@@ -43,6 +43,23 @@ func TestApplyCreateBucket_RefusesReserved(t *testing.T) {
 	}
 }
 
+func TestApplyCreateBucket_BypassReserved_AllowsReserved(t *testing.T) {
+	for _, name := range []string{"_grainfs", "default", "_grainfs-audit"} {
+		t.Run(name, func(t *testing.T) {
+			db := newTestDB(t)
+			fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+			data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: name, BypassReserved: true})
+			if err != nil {
+				t.Fatalf("EncodeCommand: %v", err)
+			}
+			if err := fsm.Apply(data); err != nil {
+				t.Fatalf("bypass=true should allow reserved name %q, got %v", name, err)
+			}
+		})
+	}
+}
+
 func TestApplyDeleteBucket_RefusesReserved(t *testing.T) {
 	for _, c := range []struct {
 		name    string

@@ -105,7 +105,17 @@ func encodeCreateBucketCmd(c CreateBucketCmd) ([]byte, error) {
 	bucketOff := b.CreateString(c.Bucket)
 	clusterpb.CreateBucketCmdStart(b)
 	clusterpb.CreateBucketCmdAddBucket(b, bucketOff)
+	clusterpb.CreateBucketCmdAddBypassReserved(b, c.BypassReserved)
 	return fbFinish(b, clusterpb.CreateBucketCmdEnd(b)), nil
+}
+
+// encodeCreateBucketCmdBypass encodes a CreateBucketCmd with bypass_reserved=true.
+// Use only from the bootstrap path to seed reserved buckets (e.g. "default", "_grainfs").
+// Public-API callers must use encodeCreateBucketCmd with BypassReserved=false (the default).
+//
+//nolint:unused // referenced by codec_test.go.
+func encodeCreateBucketCmdBypass(bucket string) ([]byte, error) {
+	return encodeCreateBucketCmd(CreateBucketCmd{Bucket: bucket, BypassReserved: true})
 }
 
 func decodeCreateBucketCmd(data []byte) (CreateBucketCmd, error) {
@@ -115,7 +125,7 @@ func decodeCreateBucketCmd(data []byte) (CreateBucketCmd, error) {
 	if err != nil {
 		return CreateBucketCmd{}, err
 	}
-	return CreateBucketCmd{Bucket: string(t.Bucket())}, nil
+	return CreateBucketCmd{Bucket: string(t.Bucket()), BypassReserved: t.BypassReserved()}, nil
 }
 
 func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {

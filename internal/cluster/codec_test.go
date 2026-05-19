@@ -23,6 +23,34 @@ func TestEncodeDecodeCommand_CreateBucket(t *testing.T) {
 	decoded, err := decodeCreateBucketCmd(cmd.Data)
 	require.NoError(t, err)
 	assert.Equal(t, "my-bucket", decoded.Bucket)
+	assert.False(t, decoded.BypassReserved, "default bypass_reserved must be false")
+}
+
+func TestEncodeDecodeCommand_CreateBucket_BypassReserved(t *testing.T) {
+	// Roundtrip with BypassReserved=true (bootstrap bypass path).
+	orig := CreateBucketCmd{Bucket: "_grainfs", BypassReserved: true}
+
+	encoded, err := EncodeCommand(CmdCreateBucket, orig)
+	require.NoError(t, err)
+
+	cmd, err := DecodeCommand(encoded)
+	require.NoError(t, err)
+
+	decoded, err := decodeCreateBucketCmd(cmd.Data)
+	require.NoError(t, err)
+	assert.Equal(t, "_grainfs", decoded.Bucket)
+	assert.True(t, decoded.BypassReserved, "bypass_reserved must round-trip as true")
+}
+
+func TestEncodeDecodeCommand_CreateBucket_BypassHelper(t *testing.T) {
+	// encodeCreateBucketCmdBypass must produce a decodable bypass=true payload.
+	data, err := encodeCreateBucketCmdBypass("default")
+	require.NoError(t, err)
+
+	decoded, err := decodeCreateBucketCmd(data)
+	require.NoError(t, err)
+	assert.Equal(t, "default", decoded.Bucket)
+	assert.True(t, decoded.BypassReserved)
 }
 
 func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {

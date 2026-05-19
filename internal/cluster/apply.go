@@ -220,7 +220,7 @@ func (f *FSM) applyCreateBucket(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if reservedname.IsReservedBucketName(c.Bucket) {
+	if !c.BypassReserved && reservedname.IsReservedBucketName(c.Bucket) {
 		return fmt.Errorf("bucket name %q is reserved and cannot be created via public API", c.Bucket)
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
