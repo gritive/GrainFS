@@ -133,6 +133,25 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 		}
 		return out, nil
 	}
+	shards, err := ecSplitBodies(cfg, data)
+	if err != nil {
+		return nil, err
+	}
+	header := encodeShardHeader(int64(len(data)))
+	out := make([][]byte, len(shards))
+	for i, s := range shards {
+		payload := make([]byte, shardHeaderSize+len(s))
+		copy(payload, header[:])
+		copy(payload[shardHeaderSize:], s)
+		out[i] = payload
+	}
+	return out, nil
+}
+
+func ecSplitBodies(cfg ECConfig, data []byte) ([][]byte, error) {
+	if len(data) == 0 {
+		return make([][]byte, cfg.NumShards()), nil
+	}
 	enc, err := getEncoder(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("ec encoder: %w", err)
@@ -144,15 +163,7 @@ func ECSplit(cfg ECConfig, data []byte) ([][]byte, error) {
 	if err := enc.Encode(shards); err != nil {
 		return nil, fmt.Errorf("ec encode: %w", err)
 	}
-	header := encodeShardHeader(int64(len(data)))
-	out := make([][]byte, len(shards))
-	for i, s := range shards {
-		payload := make([]byte, shardHeaderSize+len(s))
-		copy(payload, header[:])
-		copy(payload[shardHeaderSize:], s)
-		out[i] = payload
-	}
-	return out, nil
+	return shards, nil
 }
 
 // ECReconstruct assembles the original data from at least k of k+m shards.

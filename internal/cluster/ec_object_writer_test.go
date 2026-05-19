@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/json"
@@ -251,6 +252,39 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", result.ETag)
 	require.Equal(t, "object/v1", result.ShardKey)
 	require.Equal(t, []string{"node-a"}, result.Placement)
+}
+
+func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {
+	data := bytes.Repeat([]byte("0123456789abcdef"), 128*1024)
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	placement := []string{"node-a", "node-b", "node-c", "node-d"}
+
+	run := func(t testing.TB) {
+		t.Helper()
+		shards := &fakeECObjectWriterShards{}
+		writer := ecObjectWriter{
+			selfID: "not-a-placement-node",
+			shards: shards,
+		}
+		_, err := writer.writeDataShards(context.Background(), ecObjectWritePlan{
+			Bucket:    "bucket",
+			Key:       "object",
+			Config:    cfg,
+			Placement: placement,
+		}, data)
+		require.NoError(t, err)
+		require.Len(t, shards.streamWrites, cfg.NumShards())
+	}
+
+	run(t)
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			run(b)
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("writeDataShards alloc bytes: %d", allocedBytes)
+	require.LessOrEqual(t, allocedBytes, int64(3*1024*1024))
 }
 
 func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *testing.T) {
