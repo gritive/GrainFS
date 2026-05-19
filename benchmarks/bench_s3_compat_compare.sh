@@ -260,14 +260,13 @@ start_grainfs_cluster() {
   for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
     urls+=("http://127.0.0.1:${http_ports[$((idx - 1))]}")
   done
-  # Replace the fixed CLUSTER_WARMUP_SLEEP with an explicit leader probe per
-  # node — node-0 bootstraps the meta group, nodes 2..N join via .join-pending,
-  # and we don't proceed until each node reports state="Leader" for its meta
-  # raft group on /api/cluster/status. 120 attempts × 0.25s = 30s budget; the
-  # legacy fixed 45s sleep is gone.
-  for url in "${urls[@]}"; do
-    bench_wait_cluster_leader "$url" 120 0.25 >&2
-  done
+  # Replace the fixed CLUSTER_WARMUP_SLEEP with an explicit leader probe on
+  # node-1 — it bootstraps the meta raft group, so once /api/cluster/status
+  # reports state="Leader" the join handshake is far enough along for warp
+  # to issue S3 calls (data-group leaders elect on first write). 120 attempts
+  # × 0.25s = 30s budget; the legacy fixed 45s sleep is gone. Followers
+  # report state="Follower" on the same endpoint, so we don't poll them.
+  bench_wait_cluster_leader "${urls[0]}" 120 0.25 >&2
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
 
   if [[ "${BENCH_MULTIPART_PROBE:-0}" == "1" ]]; then
