@@ -36,6 +36,18 @@ func localOpener(root string) LocalOpener {
 	}
 }
 
+type localReplicaOpener interface {
+	OpenLocalReplica(bucket, key string) (io.ReadCloser, error)
+}
+
+func backendLocalOpener(b localReplicaOpener) LocalOpener {
+	return b.OpenLocalReplica
+}
+
+func localSegmentPath(root, bucket, key string, obj *storage.Object) string {
+	return filepath.Join(root, "data", bucket, key+"_segments", obj.Segments[0].BlobID)
+}
+
 func TestReplicationObjectSource_WalksBucketPrefix(t *testing.T) {
 	b, _ := setupBackend(t)
 	bucket := "__grainfs_volumes"
@@ -67,7 +79,7 @@ func TestReplicationVerifier_HealthyCorruptMissing(t *testing.T) {
 	b, root := setupBackend(t)
 	bucket := "__grainfs_volumes"
 	key := "__vol/v1/blk_000000000000"
-	putObject(t, b, bucket, key, []byte("DDDD"))
+	obj := putObject(t, b, bucket, key, []byte("DDDD"))
 
 	src := NewReplicationObjectSource("replication", bucket, "__vol/", b)
 	ch, err := src.Iter(context.Background(), ScopeFull, "", "")
@@ -80,13 +92,13 @@ func TestReplicationVerifier_HealthyCorruptMissing(t *testing.T) {
 	target := blocks[0]
 
 	rep := &fakeRepairer{}
-	v := NewReplicationVerifier(localOpener(root), rep)
+	v := NewReplicationVerifier(backendLocalOpener(b.(localReplicaOpener)), rep)
 
 	st, err := v.Verify(context.Background(), target)
 	require.NoError(t, err)
 	require.True(t, st.Healthy, "expected healthy, got %+v", st)
 
-	localPath := filepath.Join(root, "data", bucket, key)
+	localPath := localSegmentPath(root, bucket, key, obj)
 	require.NoError(t, os.Truncate(localPath, 1))
 	st, err = v.Verify(context.Background(), target)
 	require.NoError(t, err)
@@ -102,11 +114,11 @@ func TestReplicationVerifier_HealthyCorruptMissing(t *testing.T) {
 	require.Equal(t, []string{target.Bucket + "/" + target.Key}, rep.calls)
 }
 
-func TestReplicationVerifier_ETagIsObjectXXH3(t *testing.T) {
-	b, root := setupBackend(t)
+func TestReplicationVerifier_SourceUsesStoredObjectETag(t *testing.T) {
+	b, _ := setupBackend(t)
 	bucket := "__grainfs_volumes"
 	key := "__vol/v1/blk_000000000000"
-	putObject(t, b, bucket, key, []byte("hello"))
+	obj := putObject(t, b, bucket, key, []byte("hello"))
 
 	src := NewReplicationObjectSource("replication", bucket, "__vol/", b)
 	ch, _ := src.Iter(context.Background(), ScopeFull, "", "")
@@ -117,10 +129,7 @@ func TestReplicationVerifier_ETagIsObjectXXH3(t *testing.T) {
 	require.Len(t, blocks, 1)
 	got := blocks[0]
 
-	data, err := os.ReadFile(filepath.Join(root, "data", bucket, key))
-	require.NoError(t, err)
-	require.Equal(t, storage.InternalETag(data), got.ExpectedETag,
-		"expected ETag = xxhash3(local file). Internal buckets use xxhash3 oracle.")
+	require.Equal(t, obj.ETag, got.ExpectedETag, "replication source must use the stored object ETag oracle")
 }
 
 type fakeRepairer struct{ calls []string }

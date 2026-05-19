@@ -272,6 +272,23 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 	oldFP := fs.fullPath(oldpath)
 	newFP := fs.fullPath(newpath)
 
+	if copier, ok := fs.backend.(storage.Copier); ok {
+		if _, err := copier.CopyObject(fs.bucket, oldFP, fs.bucket, newFP); err != nil {
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				return os.ErrNotExist
+			}
+			return err
+		}
+		if err := fs.backend.DeleteObject(context.Background(), fs.bucket, oldFP); err != nil {
+			return err
+		}
+		fs.invalidateStatCache(oldFP)
+		fs.invalidateStatCache(newFP)
+		fs.invalidateParentDirCache(oldFP)
+		fs.invalidateParentDirCache(newFP)
+		return nil
+	}
+
 	rc, _, err := fs.backend.GetObject(context.Background(), fs.bucket, oldFP)
 	if err != nil {
 		return os.ErrNotExist
