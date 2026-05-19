@@ -3958,11 +3958,21 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 			beforeCommit := b.testBeforeChunkedMultipartCommit
 			obj, err = b.putMultipartObjectChunked(ctx, bucket, key, versionID, uploadID, manifest, meta.ContentType, nil, "", 0, false, "", beforeCommit, meta.Tags)
 		} else {
-			sp, spoolErr := b.spoolMultipartCompleteManifest(ctx, uploadID, versionID, bucket, manifest)
-			if spoolErr != nil {
-				return nil, spoolErr
+			var sp *spooledObject
+			cleanupSpool := true
+			if len(manifest.Parts) == 1 {
+				sp = b.multipartPartSpooledObject(uploadID, manifest.Parts[0])
+				cleanupSpool = false
+			} else {
+				var spoolErr error
+				sp, spoolErr = b.spoolMultipartCompleteManifest(ctx, uploadID, versionID, bucket, manifest)
+				if spoolErr != nil {
+					return nil, spoolErr
+				}
 			}
-			defer sp.Cleanup()
+			if cleanupSpool {
+				defer sp.Cleanup()
+			}
 			obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, manifest.Parts, meta.Tags, uploadID)
 		}
 	} else {
@@ -3975,6 +3985,20 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		b.logger.Debug().Err(err).Str("upload_id", uploadID).Msg("multipart part cleanup after complete failed")
 	}
 	return obj, nil
+}
+
+func (b *DistributedBackend) multipartPartSpooledObject(uploadID string, part storage.MultipartPartEntry) *spooledObject {
+	sp := &spooledObject{
+		Path: b.partPath(uploadID, part.PartNumber),
+		Size: part.Size,
+		ETag: part.ETag,
+	}
+	if b.encryptedShardStorage() {
+		sp.encrypted = true
+		sp.encryptor = b.shardSvc.encryptor
+		sp.domain = clusterMultipartPartDomain(uploadID, part.PartNumber)
+	}
+	return sp
 }
 
 func (b *DistributedBackend) spoolMultipartCompleteManifest(ctx context.Context, uploadID, versionID, bucket string, manifest multipartCompleteManifest) (*spooledObject, error) {
