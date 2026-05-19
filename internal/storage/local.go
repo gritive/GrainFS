@@ -1089,6 +1089,59 @@ func (b *LocalBackend) WalkObjectKeys(ctx context.Context, bucket, prefix string
 	})
 }
 
+// ScanObjectsGrouped emits one ObjectKeyGroup per object key in the bucket.
+// LocalBackend is unversioned: each group has exactly one version
+// (IsLatest=true, VersionID="", IsDeleteMarker=false). Versioned cluster
+// deployments use DistributedBackend.ScanObjectsGrouped which has its own
+// version-aware implementation.
+//
+// Iteration order matches WalkObjects (badger key order, lexicographic).
+// The channel is buffered (16) and closed when iteration completes or an
+// error aborts the scan.
+func (b *LocalBackend) ScanObjectsGrouped(bucket string) (<-chan ObjectKeyGroup, error) {
+	if err := b.HeadBucket(context.Background(), bucket); err != nil {
+		return nil, err
+	}
+	out := make(chan ObjectKeyGroup, 16)
+	go func() {
+		defer close(out)
+		_ = b.db.View(func(txn *badger.Txn) error {
+			pfx := []byte("obj:" + bucket + "/")
+			it := txn.NewIterator(badger.DefaultIteratorOptions)
+			defer it.Close()
+			for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
+				item := it.Item()
+				itemKey := item.KeyCopy(nil)
+				var obj Object
+				if err := item.Value(func(val []byte) error {
+					plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+					if err != nil {
+						return err
+					}
+					return unmarshalObjectInto(plain, &obj)
+				}); err != nil {
+					return err
+				}
+				out <- ObjectKeyGroup{
+					Bucket: bucket,
+					Key:    obj.Key,
+					Versions: []ObjectVersionRecord{{
+						VersionID:      "",
+						IsLatest:       true,
+						IsDeleteMarker: false,
+						LastModified:   obj.LastModified,
+						Size:           obj.Size,
+						ETag:           obj.ETag,
+						Tags:           obj.Tags,
+					}},
+				}
+			}
+			return nil
+		})
+	}()
+	return out, nil
+}
+
 // CopyObject copies an object by reading the source and writing to the destination.
 func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error) {
 	ctx := context.Background()
