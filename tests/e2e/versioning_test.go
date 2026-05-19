@@ -182,9 +182,6 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("SoftDelete", func(t *testing.T) {
-		if !tgt.isCluster {
-			t.Skip("single-node: DeleteObject on versioned bucket returns an empty VersionId — the single-node delete-marker path does not mint one (distinct from packblob bypass; tracked separately)")
-		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "softdel")
 		enableVersioning(t, bkt)
@@ -206,9 +203,6 @@ func runVersioningCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("HardDeleteByVersionID", func(t *testing.T) {
-		if !tgt.isCluster {
-			t.Skip("single-node: DELETE ?versionId returns 500 'wal: inner backend does not support DeleteObjectVersion' — single-node WAL wrapper has no DeleteObjectVersion adapter (distinct from packblob bypass; tracked separately)")
-		}
 		ctx := context.Background()
 		bkt := tgt.uniqueBucket(t, "harddel")
 		enableVersioning(t, bkt)
