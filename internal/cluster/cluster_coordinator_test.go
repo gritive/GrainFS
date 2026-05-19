@@ -936,6 +936,41 @@ func TestClusterCoordinator_ListAllObjects_PreservesVersionsAndDeleteMarkers(t *
 	require.Equal(t, "text/plain", byVersion[v2.VersionID].ContentType)
 }
 
+// TestClusterCoordinator_ListAllObjects_PreservesTags is the regression guard
+// for adversarial review pass #2: the routed-multi-group snapshot path in
+// ClusterCoordinator.ListAllObjects (cluster_coordinator.go:485) previously
+// omitted Tags from the SnapshotObject literal even though the single-group
+// Snapshotable path had been fixed in e7c7114d. Result before the fix: full
+// snapshot+restore in real cluster deployments silently dropped object tags.
+func TestClusterCoordinator_ListAllObjects_PreservesTags(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"tagged"}}
+	gb := newTestGroupBackend(t, "group-1")
+	obj, err := gb.PutObject(context.Background(), "tagged", "doc.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	tags := []storage.Tag{
+		{Key: "env", Value: "prod"},
+		{Key: "team", Value: "storage"},
+	}
+	require.NoError(t, gb.SetObjectTags("tagged", "doc.txt", obj.VersionID, tags))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("tagged", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, tags, objs[0].Tags,
+		"ClusterCoordinator.ListAllObjects must propagate Tags so the RestoreObjects "+
+			"Tags-forward fix isn't dead code on the routed cluster path")
+}
+
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
 	gb := newTestGroupBackend(t, "group-1")

@@ -491,6 +491,12 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				VersionID:      version.VersionID,
 				IsDeleteMarker: version.IsDeleteMarker,
 				IsLatest:       version.IsLatest,
+				// Tags copied (not aliased) so snapshot survives even if the
+				// enrichment block below is skipped (delete marker or
+				// GetObjectVersion error). Mirror of snapshotable.go fix in
+				// e7c7114d — otherwise the previously-fixed RestoreObjects
+				// Tags-forward path is dead code on the coordinator route.
+				Tags: append([]storage.Tag(nil), version.Tags...),
 			}
 			if !version.IsDeleteMarker {
 				// Enrich metadata from the data file when readable. A metadata
@@ -504,6 +510,9 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 					snap.ContentType = obj.ContentType
 					snap.Modified = obj.LastModified
 					snap.ACL = obj.ACL
+					// Parity with ACL enrichment: prefer the authoritative
+					// obj.Tags over the version-listing fallback when readable.
+					snap.Tags = append([]storage.Tag(nil), obj.Tags...)
 				} else {
 					log.Warn().Str("bucket", bucket).Str("key", version.Key).
 						Str("version", version.VersionID).Err(err).

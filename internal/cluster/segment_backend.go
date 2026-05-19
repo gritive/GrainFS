@@ -307,6 +307,10 @@ func runChunkedPut(
 	}
 	metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 	committed = true
+	// Symmetric with commitECObjectWriteResult: the returned *storage.Object
+	// must carry Tags even though PutObjectMetaCmd above already persists them.
+	// Defensive copy because callers may outlive the cmd's tags slice.
+	obj.Tags = append([]storage.Tag(nil), tags...)
 	return obj, nil
 }
 
