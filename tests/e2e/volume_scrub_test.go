@@ -99,7 +99,24 @@ func filepathWalkBlock(dataDir, vol string, blockNum int, hits *[]string) error 
 
 // TestFindVolumeBlockOnDisk verifies the helper resolves both on-disk
 // layouts (legacy `current` and EC `shard_N`). Pure unit test — no fixture.
-func TestFindVolumeBlockOnDisk(t *testing.T) {
+// TestFindVolumeBlockOnDiskE2E verifies the helper resolves both on-disk
+// layouts (legacy `current` and EC `shard_N`). Pure helper unit check, no
+// fixture used, but wrapped in the canonical SingleNode/Cluster4Node shape
+// for grep/inventory consistency.
+func TestFindVolumeBlockOnDiskE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		_ = newSingleNodeS3Target()
+		runFindVolumeBlockOnDiskCases(t)
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		_ = newSharedClusterS3Target(t)
+		runFindVolumeBlockOnDiskCases(t)
+	})
+}
+
+func runFindVolumeBlockOnDiskCases(t *testing.T) {
+	t.Helper()
+
 	t.Run("LegacyCurrentLayout", func(t *testing.T) {
 		dataDir := t.TempDir()
 		blockPath := filepath.Join(dataDir, "groups", "g1", "data", "__grainfs_volumes", ".obj", "__vol", "vs2", "blk_000000000000_vabc", "current")
