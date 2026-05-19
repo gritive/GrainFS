@@ -17,7 +17,7 @@ import (
 )
 
 // setupECTestServer starts a test server backed by a singleton DistributedBackend.
-func setupECTestServer(t *testing.T) string {
+func setupECTestServer(t *testing.T) (string, *cluster.DistributedBackend) {
 	t.Helper()
 	b := cluster.NewSingletonBackendForTest(t)
 
@@ -33,18 +33,16 @@ func setupECTestServer(t *testing.T) string {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return "http://" + addr
+	return "http://" + addr, b
 }
 
 // TestPutBucketVersioning_NotImplemented verifies that LocalBackend returns 501.
 func TestPutBucketVersioning_NotImplemented(t *testing.T) {
-	base := setupTestServer(t) // uses LocalBackend
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
-	http.DefaultClient.Do(req) //nolint:errcheck
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "mybucket")
 
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -53,10 +51,8 @@ func TestPutBucketVersioning_NotImplemented(t *testing.T) {
 
 // TestGetBucketVersioning_NotImplemented verifies that LocalBackend returns 501.
 func TestGetBucketVersioning_NotImplemented(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
-	http.DefaultClient.Do(req) //nolint:errcheck
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "mybucket")
 
 	resp, err := http.Get(base + "/mybucket?versioning")
 	require.NoError(t, err)
@@ -66,13 +62,11 @@ func TestGetBucketVersioning_NotImplemented(t *testing.T) {
 
 // TestPutBucketVersioning_InvalidStatus verifies bad status values are rejected.
 func TestPutBucketVersioning_InvalidStatus(t *testing.T) {
-	base := setupECTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
-	http.DefaultClient.Do(req) //nolint:errcheck
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "mybucket"))
 
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Invalid</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -81,7 +75,7 @@ func TestPutBucketVersioning_InvalidStatus(t *testing.T) {
 
 // TestPutBucketVersioning_BucketNotFound verifies 404 for non-existent bucket.
 func TestPutBucketVersioning_BucketNotFound(t *testing.T) {
-	base := setupECTestServer(t)
+	base, _ := setupECTestServer(t)
 
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
 	req, _ := http.NewRequest(http.MethodPut, base+"/no-such-bucket?versioning", strings.NewReader(body))
@@ -93,17 +87,13 @@ func TestPutBucketVersioning_BucketNotFound(t *testing.T) {
 
 // TestListObjectVersions_EC verifies GET /<bucket>?versions returns all versions.
 func TestListObjectVersions_EC(t *testing.T) {
-	base := setupECTestServer(t)
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 
-	// Create bucket and enable versioning
-	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
-	resp, _ := http.DefaultClient.Do(req)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
+	// Enable versioning
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
-	resp, _ = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -149,16 +139,12 @@ func TestListObjectVersions_EC(t *testing.T) {
 
 // TestListObjectVersions_WithDeleteMarker_EC verifies DELETE appears as DeleteMarker.
 func TestListObjectVersions_WithDeleteMarker_EC(t *testing.T) {
-	base := setupECTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
-	resp, _ := http.DefaultClient.Do(req)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
-	resp, _ = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(body))
+	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
@@ -185,10 +171,8 @@ func TestListObjectVersions_WithDeleteMarker_EC(t *testing.T) {
 
 // TestListObjectVersions_NotImplemented_Local verifies LocalBackend returns 501.
 func TestListObjectVersions_NotImplemented_Local(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
-	http.DefaultClient.Do(req) //nolint:errcheck
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "mybucket")
 
 	resp, err := http.Get(base + "/mybucket?versions")
 	require.NoError(t, err)
@@ -201,17 +185,13 @@ var _ storage.Backend = (*storage.LocalBackend)(nil)
 
 // TestDeleteObjectVersion_EC verifies DELETE /<bucket>/<key>?versionId= hard-deletes a version.
 func TestDeleteObjectVersion_EC(t *testing.T) {
-	base := setupECTestServer(t)
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 
-	// Create bucket, enable versioning
-	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
-	resp, _ := http.DefaultClient.Do(req)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
+	// Enable versioning
 	putVC := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
-	resp, _ = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
+	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 
 	// PUT an object → get versionId
@@ -248,15 +228,12 @@ func TestDeleteObjectVersion_EC(t *testing.T) {
 // TestGetObjectVersion_DeleteMarker_EC verifies GET ?versionId=<deleteMarkerID>
 // returns 405 MethodNotAllowed with x-amz-delete-marker: true (S3 spec).
 func TestGetObjectVersion_DeleteMarker_EC(t *testing.T) {
-	base := setupECTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
-	resp, _ := http.DefaultClient.Do(req)
-	resp.Body.Close()
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 
 	putVC := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
-	resp, _ = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
+	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
@@ -283,15 +260,12 @@ func TestGetObjectVersion_DeleteMarker_EC(t *testing.T) {
 // TestHeadObjectVersion_EC verifies HEAD /<bucket>/<key>?versionId=<id> routes
 // through HeadObjectVersion and returns 405 for delete markers.
 func TestHeadObjectVersion_EC(t *testing.T) {
-	base := setupECTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
-	resp, _ := http.DefaultClient.Do(req)
-	resp.Body.Close()
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 
 	putVC := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
-	resp, _ = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(putVC))
+	resp, _ := http.DefaultClient.Do(req)
 	resp.Body.Close()
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket/obj.txt", strings.NewReader("v1"))
@@ -329,13 +303,11 @@ func TestHeadObjectVersion_EC(t *testing.T) {
 // TestPutBucketVersioning_RejectsUnversioned verifies that "Unversioned" is
 // rejected as a PUT status value (S3 spec allows only Enabled|Suspended).
 func TestPutBucketVersioning_RejectsUnversioned(t *testing.T) {
-	base := setupECTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket", nil)
-	http.DefaultClient.Do(req) //nolint:errcheck
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "mybucket"))
 
 	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Unversioned</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

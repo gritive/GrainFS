@@ -14,20 +14,14 @@ import (
 // TestGetObject_CacheControlHeader verifies that getObject returns Cache-Control
 // header so CDN edges know how long to cache the object.
 func TestGetObject_CacheControlHeader(t *testing.T) {
-	base := setupTestServer(t)
-
-	// Create bucket and upload object
-	req, _ := http.NewRequest(http.MethodPut, base+"/cdn-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "cdn-bucket")
 
 	body := bytes.NewReader([]byte("cdn content"))
-	req, _ = http.NewRequest(http.MethodPut, base+"/cdn-bucket/asset.js", body)
+	req, _ := http.NewRequest(http.MethodPut, base+"/cdn-bucket/asset.js", body)
 	req.Header.Set("Content-Type", "application/javascript")
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -46,19 +40,14 @@ func TestGetObject_CacheControlHeader(t *testing.T) {
 
 // TestHeadObject_CacheControlHeader verifies that headObject also returns Cache-Control.
 func TestHeadObject_CacheControlHeader(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/cdn-bucket2", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "cdn-bucket2")
 
 	body := bytes.NewReader([]byte("head content"))
-	req, _ = http.NewRequest(http.MethodPut, base+"/cdn-bucket2/file.css", body)
+	req, _ := http.NewRequest(http.MethodPut, base+"/cdn-bucket2/file.css", body)
 	req.Header.Set("Content-Type", "text/css")
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -75,18 +64,13 @@ func TestHeadObject_CacheControlHeader(t *testing.T) {
 
 // TestGetObject_ConditionalGet_ETag verifies 304 Not Modified when ETag matches.
 func TestGetObject_ConditionalGet_ETag(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/etag-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "etag-bucket")
 
 	body := bytes.NewReader([]byte("etag test content"))
-	req, _ = http.NewRequest(http.MethodPut, base+"/etag-bucket/obj.txt", body)
+	req, _ := http.NewRequest(http.MethodPut, base+"/etag-bucket/obj.txt", body)
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)

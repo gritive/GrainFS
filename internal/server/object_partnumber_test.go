@@ -77,10 +77,7 @@ func completeMultipart(t *testing.T, base, bucket, key, uploadID string, parts [
 // anonymous GET/HEAD below can succeed, and returns the parts metadata.
 func setupMultipartTwoParts(t *testing.T, base string, backend *storage.LocalBackend, bucket, key string) []partRef {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPut, base+"/"+bucket, nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	mustCreateBucket(t, backend, bucket)
 
 	uploadID := initMultipartUpload(t, base, bucket, key)
 	parts := []partRef{
@@ -162,17 +159,13 @@ func TestGetObjectPartNumber_Multipart_OutOfRange(t *testing.T) {
 // --- Single-PUT (non-multipart) virtual partNumber=1 ---
 
 func TestGetObjectPartNumber_SinglePut_VirtualPartOne(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
 	payload := []byte("plain-object-body")
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/obj", bytes.NewReader(payload))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/obj", bytes.NewReader(payload))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -188,16 +181,12 @@ func TestGetObjectPartNumber_SinglePut_VirtualPartOne(t *testing.T) {
 }
 
 func TestGetObjectPartNumber_SinglePut_PartTwoIsInvalid(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/obj", strings.NewReader("data"))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/obj", strings.NewReader("data"))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 
@@ -213,16 +202,12 @@ func TestGetObjectPartNumber_SinglePut_PartTwoIsInvalid(t *testing.T) {
 // --- Invalid partNumber values (table-driven) ---
 
 func TestGetObjectPartNumber_InvalidValues(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/obj", strings.NewReader("data"))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/obj", strings.NewReader("data"))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 
@@ -249,17 +234,13 @@ func TestGetObjectPartNumber_InvalidValues(t *testing.T) {
 
 // Empty partNumber=  → treated as not-present, returns the whole object (200).
 func TestGetObjectPartNumber_EmptyValueIgnored(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
 	payload := []byte("whole-object")
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/obj", bytes.NewReader(payload))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/obj", bytes.NewReader(payload))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 
@@ -276,16 +257,12 @@ func TestGetObjectPartNumber_EmptyValueIgnored(t *testing.T) {
 // Range + partNumber together is rejected. The rejection happens in
 // readPartNumber before partRange runs, so a plain single-PUT object suffices.
 func TestGetObjectPartNumber_RejectsCombinedRangeHeader(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/obj", strings.NewReader("data"))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/obj", strings.NewReader("data"))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 

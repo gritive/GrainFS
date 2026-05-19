@@ -13,16 +13,12 @@ import (
 
 // Red 18: invalid x-amz-write-offset-bytes header → 400 InvalidArgument.
 func TestAppendObjectRejectsInvalidOffsetHeader(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
 	req.Header.Set(appendOffsetHeader, "abc")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -34,17 +30,13 @@ func TestAppendObjectRejectsInvalidOffsetHeader(t *testing.T) {
 // Red 19: writing with a wrong offset against an existing appendable object →
 // 400 InvalidWriteOffset XML.
 func TestAppendObjectInvalidWriteOffsetResponse(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/b", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "b")
 
 	// Initial append at offset 0 — creates a 5-byte appendable object.
-	req, _ = http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
+	req, _ := http.NewRequest(http.MethodPut, base+"/b/k", bytes.NewReader([]byte("hello")))
 	req.Header.Set(appendOffsetHeader, "0")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "initial append must succeed")
@@ -63,17 +55,12 @@ func TestAppendObjectInvalidWriteOffsetResponse(t *testing.T) {
 
 // Red 20: AppendObject against a versioning-enabled bucket is rejected with 501.
 func TestAppendObjectVersioningBucketRejected(t *testing.T) {
-	base := setupECTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, b := setupECTestServer(t)
+	require.NoError(t, b.CreateBucket(t.Context(), "ver-bucket"))
 
 	enableXML := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ = http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(enableXML))
-	resp, err = http.DefaultClient.Do(req)
+	req, _ := http.NewRequest(http.MethodPut, base+"/ver-bucket?versioning", strings.NewReader(enableXML))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)

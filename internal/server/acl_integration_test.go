@@ -17,13 +17,15 @@ import (
 )
 
 // setupECAuthServer starts an in-process HTTP server backed by LocalBackend
-// (which now implements storage.ACLSetter) and returns the base URL and a
-// signing helper. LocalBackend is sufficient because ACL serialization
-// correctness is covered by cluster/apply_test.go; here we test the HTTP layer.
-func setupECAuthServer(t *testing.T) (baseURL string, sign func(*http.Request)) {
+// (which now implements storage.ACLSetter) and returns the base URL, a
+// signing helper, and the backend. LocalBackend is sufficient because ACL
+// serialization correctness is covered by cluster/apply_test.go; here we
+// test the HTTP layer.
+func setupECAuthServer(t *testing.T) (baseURL string, sign func(*http.Request), backend *storage.LocalBackend) {
 	t.Helper()
 	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
+	var err error
+	backend, err = storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
@@ -49,27 +51,20 @@ func setupECAuthServer(t *testing.T) (baseURL string, sign func(*http.Request)) 
 		req.Host = req.URL.Host
 		s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
 	}
-	return base, signFn
+	return base, signFn, backend
 }
 
 // TestACL_PublicRead_AnonymousGetAllowed: PUT with x-amz-acl:public-read → anonymous GET → 200
 func TestACL_PublicRead_AnonymousGetAllowed(t *testing.T) {
-	base, sign := setupECAuthServer(t)
-
-	// Create bucket
-	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket", nil)
-	sign(req)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, sign, backend := setupECAuthServer(t)
+	mustCreateBucket(t, backend, "testbucket")
 
 	// PUT object with public-read ACL
 	body := []byte("hello world")
-	req, _ = http.NewRequest(http.MethodPut, base+"/testbucket/public.txt", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket/public.txt", bytes.NewReader(body))
 	req.Header.Set("x-amz-acl", "public-read")
 	sign(req)
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -87,19 +82,13 @@ func TestACL_PublicRead_AnonymousGetAllowed(t *testing.T) {
 
 // TestACL_Private_AnonymousGetDenied: private object → anonymous GET → 403
 func TestACL_Private_AnonymousGetDenied(t *testing.T) {
-	base, sign := setupECAuthServer(t)
+	base, sign, backend := setupECAuthServer(t)
+	mustCreateBucket(t, backend, "testbucket")
 
-	// Create bucket + PUT private object
-	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket", nil)
+	// PUT private object
+	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket/private.txt", bytes.NewReader([]byte("secret")))
 	sign(req)
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/testbucket/private.txt", bytes.NewReader([]byte("secret")))
-	sign(req)
-	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -114,19 +103,14 @@ func TestACL_Private_AnonymousGetDenied(t *testing.T) {
 
 // TestACL_PublicRead_AuthenticatedGetAllowed: public-read object → authenticated GET → 200
 func TestACL_PublicRead_AuthenticatedGetAllowed(t *testing.T) {
-	base, sign := setupECAuthServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket", nil)
-	sign(req)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, sign, backend := setupECAuthServer(t)
+	mustCreateBucket(t, backend, "testbucket")
 
 	body := []byte("public data")
-	req, _ = http.NewRequest(http.MethodPut, base+"/testbucket/pub.txt", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket/pub.txt", bytes.NewReader(body))
 	req.Header.Set("x-amz-acl", "public-read")
 	sign(req)
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)

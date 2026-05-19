@@ -167,9 +167,9 @@ func TestIcebergConfigUsesInjectedCatalogInterface(t *testing.T) {
 }
 
 func TestIcebergCreateNamespaceAndTableTransactionCommit(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
 
-	createIcebergWarehouseBucket(t, base)
+	createIcebergWarehouseBucket(t, backend)
 	postIcebergJSON(t, base+"/iceberg/v1/namespaces", `{"namespace":["ns2"],"properties":{}}`, http.StatusOK)
 	postIcebergJSON(t, base+"/iceberg/v1/namespaces/ns2/tables", `{
 		"stage-create": false,
@@ -218,9 +218,9 @@ func TestIcebergCreateNamespaceAndTableTransactionCommit(t *testing.T) {
 }
 
 func TestIcebergTableScopedCommitAndDelete(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
 
-	createIcebergWarehouseBucket(t, base)
+	createIcebergWarehouseBucket(t, backend)
 	postIcebergJSON(t, base+"/iceberg/v1/namespaces", `{"namespace":["ns2"],"properties":{}}`, http.StatusOK)
 	postIcebergJSON(t, base+"/iceberg/v1/namespaces/ns2/tables", `{
 		"name": "t",
@@ -259,9 +259,9 @@ func TestIcebergTableScopedCommitAndDelete(t *testing.T) {
 }
 
 func TestIcebergTransactionCommitRejectsStaleSnapshotRequirement(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
 
-	createIcebergWarehouseBucket(t, base)
+	createIcebergWarehouseBucket(t, backend)
 	postIcebergJSON(t, base+"/iceberg/v1/namespaces", `{"namespace":["ns2"],"properties":{}}`, http.StatusOK)
 	postIcebergJSON(t, base+"/iceberg/v1/namespaces/ns2/tables", `{
 		"name": "t",
@@ -304,9 +304,9 @@ func TestIcebergTransactionCommitRejectsStaleSnapshotRequirement(t *testing.T) {
 
 func TestIcebergTransactionCommitReusesCommittedTableWithinRequest(t *testing.T) {
 	catalog := &staleLoadCommitCatalog{warehouse: "s3://grainfs-tables/warehouse"}
-	base := setupTestServerWithOptions(t, WithIcebergCatalog(catalog))
+	base, backend := setupTestServerWithBackend(t, WithIcebergCatalog(catalog))
 
-	createIcebergWarehouseBucket(t, base)
+	createIcebergWarehouseBucket(t, backend)
 	postIcebergJSON(t, base+"/iceberg/v1/transactions/commit", `{
 		"table-changes":[{
 			"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],
@@ -381,14 +381,9 @@ func postIcebergJSON(t *testing.T, url, body string, wantStatus int) {
 	require.Equal(t, wantStatus, resp.StatusCode)
 }
 
-func createIcebergWarehouseBucket(t *testing.T, base string) {
+func createIcebergWarehouseBucket(t *testing.T, backend *storage.LocalBackend) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, base+"/grainfs-tables", nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, backend.CreateBucket(t.Context(), "grainfs-tables"))
 }
 
 func decodeIcebergErrorType(t *testing.T, resp *http.Response) string {

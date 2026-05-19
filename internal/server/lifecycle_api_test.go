@@ -40,10 +40,11 @@ func (noopLeadership) Subscribe() (<-chan struct{}, func()) {
 	return ch, func() {}
 }
 
-func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service) {
+func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service, backend *storage.LocalBackend) {
 	t.Helper()
 	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
+	var err error
+	backend, err = storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
@@ -68,7 +69,7 @@ func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return "http://" + addr, svc
+	return "http://" + addr, svc, backend
 }
 
 const testLifecycleXML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -82,34 +83,24 @@ const testLifecycleXML = `<?xml version="1.0" encoding="UTF-8"?>
 </LifecycleConfiguration>`
 
 func TestLifecycleAPI_GetNotSet(t *testing.T) {
-	base, _ := setupLifecycleServer(t)
+	base, _, backend := setupLifecycleServer(t)
+	mustCreateBucket(t, backend, "test-bucket")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/test-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	resp, err = http.Get(base + "/test-bucket?lifecycle")
+	resp, err := http.Get(base + "/test-bucket?lifecycle")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestLifecycleAPI_PutAndGet(t *testing.T) {
-	base, _ := setupLifecycleServer(t)
-
-	// create bucket
-	req, _ := http.NewRequest(http.MethodPut, base+"/my-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, _, backend := setupLifecycleServer(t)
+	mustCreateBucket(t, backend, "my-bucket")
 
 	// PUT lifecycle
-	req, _ = http.NewRequest(http.MethodPut, base+"/my-bucket?lifecycle",
+	req, _ := http.NewRequest(http.MethodPut, base+"/my-bucket?lifecycle",
 		strings.NewReader(testLifecycleXML))
 	req.Header.Set("Content-Type", "application/xml")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -126,17 +117,13 @@ func TestLifecycleAPI_PutAndGet(t *testing.T) {
 }
 
 func TestLifecycleAPI_Delete(t *testing.T) {
-	base, _ := setupLifecycleServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/bkt", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, _, backend := setupLifecycleServer(t)
+	mustCreateBucket(t, backend, "bkt")
 
 	// PUT
-	req, _ = http.NewRequest(http.MethodPut, base+"/bkt?lifecycle",
+	req, _ := http.NewRequest(http.MethodPut, base+"/bkt?lifecycle",
 		strings.NewReader(testLifecycleXML))
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 
@@ -155,16 +142,12 @@ func TestLifecycleAPI_Delete(t *testing.T) {
 }
 
 func TestLifecycleAPI_PutInvalidXML(t *testing.T) {
-	base, _ := setupLifecycleServer(t)
+	base, _, backend := setupLifecycleServer(t)
+	mustCreateBucket(t, backend, "bkt")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/bkt", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/bkt?lifecycle",
+	req, _ := http.NewRequest(http.MethodPut, base+"/bkt?lifecycle",
 		strings.NewReader("<not-valid>"))
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -173,18 +156,13 @@ func TestLifecycleAPI_PutInvalidXML(t *testing.T) {
 // TestLifecycleAPI_GetReturnsRawXML verifies that GET returns the verbatim
 // bytes sent by the caller (ADR 0011 round-trip requirement).
 func TestLifecycleAPI_GetReturnsRawXML(t *testing.T) {
-	base, _ := setupLifecycleServer(t)
-
-	// create bucket
-	req, _ := http.NewRequest(http.MethodPut, base+"/raw-bkt", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, _, backend := setupLifecycleServer(t)
+	mustCreateBucket(t, backend, "raw-bkt")
 
 	// PUT lifecycle — use canonical form
-	req, _ = http.NewRequest(http.MethodPut, base+"/raw-bkt?lifecycle",
+	req, _ := http.NewRequest(http.MethodPut, base+"/raw-bkt?lifecycle",
 		strings.NewReader(testLifecycleXML))
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)

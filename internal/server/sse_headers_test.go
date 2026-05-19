@@ -10,18 +10,13 @@ import (
 )
 
 func TestSSEPutHeadGetCopyRoundTrip(t *testing.T) {
-	base := setupTestServer(t)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "bucket")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/bucket/src.txt", bytes.NewReader([]byte("data")))
+	req, _ := http.NewRequest(http.MethodPut, base+"/bucket/src.txt", bytes.NewReader([]byte("data")))
 	req.Header.Set("x-amz-acl", "public-read")
 	req.Header.Set("x-amz-server-side-encryption", "AES256")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -59,13 +54,8 @@ func TestSSEPutHeadGetCopyRoundTrip(t *testing.T) {
 }
 
 func TestSSEUnsupportedHeadersFailClosed(t *testing.T) {
-	base := setupTestServer(t)
-
-	req, _ := http.NewRequest(http.MethodPut, base+"/bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t)
+	mustCreateBucket(t, backend, "bucket")
 
 	for _, tc := range []struct {
 		name       string

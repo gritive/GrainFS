@@ -21,17 +21,12 @@ func TestAuditEmitHook_Put(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "emit-test-bucket")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/emit-test-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/emit-test-bucket/hello.txt",
+	req, _ := http.NewRequest(http.MethodPut, base+"/emit-test-bucket/hello.txt",
 		bytes.NewReader([]byte("world")))
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -55,16 +50,13 @@ func TestAuditEmitHook_GetAndDelete(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "gd-bucket")
 
-	// create bucket and object
-	req, _ := http.NewRequest(http.MethodPut, base+"/gd-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	req, _ = http.NewRequest(http.MethodPut, base+"/gd-bucket/obj", bytes.NewReader([]byte("data")))
+	// create object
+	req, _ := http.NewRequest(http.MethodPut, base+"/gd-bucket/obj", bytes.NewReader([]byte("data")))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 
@@ -110,16 +102,11 @@ func TestAuditEmitHook_List(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
-
-	// create bucket
-	req, _ := http.NewRequest(http.MethodPut, base+"/list-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "list-bucket")
 
 	// LIST
-	resp, err = http.Get(base + "/list-bucket?list-type=2")
+	resp, err := http.Get(base + "/list-bucket?list-type=2")
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -138,30 +125,24 @@ func TestAuditEmitHook_List(t *testing.T) {
 }
 
 func TestAuditEmitHook_NoEmitterNoPanic(t *testing.T) {
-	// server without audit emitter must not panic
-	base := setupTestServerWithOptions(t)
+	// server without audit emitter must not panic when a PUT (→ 403) is handled.
+	base := setupTestServer(t)
 
 	req, _ := http.NewRequest(http.MethodPut, base+"/nopanic-bucket", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
-	// just verifying no panic occurs
+	// D#8: 403 is fine here — we only care that there's no panic.
 }
 
 func TestAuditEmitterFallback_Put(t *testing.T) {
 	emitter := audit.NewEmitter("node-test")
-	base := setupTestServerWithOptions(t, WithAuditEmitter(emitter))
+	base, backend := setupTestServerWithBackend(t, WithAuditEmitter(emitter))
+	mustCreateBucket(t, backend, "ring-emit-bucket")
 
-	req, err := http.NewRequest(http.MethodPut, base+"/ring-emit-bucket", nil)
+	req, err := http.NewRequest(http.MethodPut, base+"/ring-emit-bucket/hello.txt", bytes.NewReader([]byte("hello")))
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, err = http.NewRequest(http.MethodPut, base+"/ring-emit-bucket/hello.txt", bytes.NewReader([]byte("hello")))
-	require.NoError(t, err)
-	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -181,17 +162,12 @@ func TestAuditEnvelope_RecordsHeadAndRequestID(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "audit-head-bucket")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/audit-head-bucket", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/audit-head-bucket/obj", bytes.NewReader([]byte("body")))
+	req, _ := http.NewRequest(http.MethodPut, base+"/audit-head-bucket/obj", bytes.NewReader([]byte("body")))
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -222,16 +198,11 @@ func TestAuditEnvelope_RecordsNodeID(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox), WithAuditNodeID("node-a"))
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox), WithAuditNodeID("node-a"))
+	mustCreateBucket(t, backend, "audit-node-bucket")
 
-	req, _ := http.NewRequest(http.MethodPut, base+"/audit-node-bucket", nil)
+	req, _ := http.NewRequest(http.MethodPut, base+"/audit-node-bucket/obj", bytes.NewReader([]byte("body")))
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/audit-node-bucket/obj", bytes.NewReader([]byte("body")))
-	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -251,6 +222,7 @@ func TestAuditEnvelope_TruncatesOversizedUserAgentForWire(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
+	// D#8: bucket create returns 403; audit envelope must still record the event.
 	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
 
 	req, err := http.NewRequest(http.MethodPut, base+"/audit-ua-bucket", nil)
@@ -259,7 +231,7 @@ func TestAuditEnvelope_TruncatesOversizedUserAgentForWire(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	// 403 is expected (D#8); the test checks User-Agent truncation in the audit event.
 
 	events, err := outbox.Pending(context.Background(), 100)
 	require.NoError(t, err)
@@ -278,14 +250,8 @@ func TestAuditEnvelope_RecordsFormPostObjectKey(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
-
-	req, err := http.NewRequest(http.MethodPut, base+"/audit-form-bucket", nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "audit-form-bucket")
 
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
@@ -297,10 +263,10 @@ func TestAuditEnvelope_RecordsFormPostObjectKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	req, err = http.NewRequest(http.MethodPost, base+"/audit-form-bucket", &buf)
+	req, err := http.NewRequest(http.MethodPost, base+"/audit-form-bucket", &buf)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", w.FormDataContentType())
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
@@ -320,20 +286,14 @@ func TestAuditEnvelope_RecordsStreamedGetBytesOut(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
-
-	req, err := http.NewRequest(http.MethodPut, base+"/audit-stream-bucket", nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "audit-stream-bucket")
 
 	body := bytes.Repeat([]byte("x"), 20*1024)
-	req, err = http.NewRequest(http.MethodPut, base+"/audit-stream-bucket/large.bin", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPut, base+"/audit-stream-bucket/large.bin", bytes.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("x-amz-acl", "public-read")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -409,16 +369,10 @@ func TestAuditEnvelope_DoesNotMarkNotFoundAsAuthDeny(t *testing.T) {
 	outbox, err := audit.OpenOutbox(t.TempDir())
 	require.NoError(t, err)
 	defer outbox.Close()
-	base := setupTestServerWithOptions(t, WithAuditOutbox(outbox))
+	base, backend := setupTestServerWithBackend(t, WithAuditOutbox(outbox))
+	mustCreateBucket(t, backend, "missing-audit-bucket")
 
-	req, err := http.NewRequest(http.MethodPut, base+"/missing-audit-bucket", nil)
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	resp, err = http.Get(base + "/missing-audit-bucket/no-such-key")
+	resp, err := http.Get(base + "/missing-audit-bucket/no-such-key")
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)

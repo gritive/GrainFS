@@ -32,7 +32,8 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
 
 	if c.QueryArgs().Has("policy") {
-		s.putBucketPolicy(c, bucket)
+		// D#8: bucket-policy mutation is admin-UDS-only on the data plane.
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket policy is admin-UDS-only (D#8)")
 		return
 	}
 	if c.QueryArgs().Has("lifecycle") {
@@ -44,18 +45,9 @@ func (s *Server) createBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	if err := s.createS3Bucket(ctx, bucket); err != nil {
-		mapError(c, err)
-		return
-	}
-	c.Header("Location", "/"+bucket)
-	c.Status(consts.StatusOK)
+	// D#8: bucket creation is admin-UDS-only on the data plane.
+	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket lifecycle is admin-UDS-only (D#8)")
 }
-
-// issueCreatorGrant was the legacy auto-grant path (Role/Grant model removed in §2).
-// Kept as a no-op so call sites in bucket_mutation_runtime.go compile unchanged;
-// bucket ownership is now enforced via policy.Evaluate on subsequent requests.
-func (s *Server) issueCreatorGrant(_ context.Context, _ string) {}
 
 func (s *Server) headBucket(ctx context.Context, c *app.RequestContext) {
 	bucket := c.Param("bucket")
@@ -74,13 +66,11 @@ func (s *Server) deleteBucket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	if c.QueryArgs().Has("policy") {
-		s.deleteBucketPolicy(c, bucket)
+		// D#8: bucket-policy mutation is admin-UDS-only on the data plane.
+		writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket policy is admin-UDS-only (D#8)")
 		return
 	}
 
-	if err := s.deleteS3Bucket(ctx, bucket); err != nil {
-		mapError(c, err)
-		return
-	}
-	c.Status(consts.StatusNoContent)
+	// D#8: bucket deletion is admin-UDS-only on the data plane.
+	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Bucket lifecycle is admin-UDS-only (D#8)")
 }
