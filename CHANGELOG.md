@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.262.10] - 2026-05-19 - test(e2e): dual-integrate BucketPolicy onto TestBucketsE2E pattern
+
+First PR-D batch shifts from rename-only to **dual integration** — the actual goal is to prove single-node and 4-node cluster paths run the same test set and the policy plane is at parity. PR-A/B/C cluster-only renames stay; this PR (and follow-ups) reshape single-or-mixed groups into the proper dual pattern.
+
+### Changed
+
+- **`TestE2E_BucketPolicy_SetAndGet` → `TestBucketPolicySetAndGetE2E`** (`tests/e2e/policy_test.go`) — body extracted into `runBucketPolicySetAndGetCases(t, tgt s3Target)`. `t.Run("SingleNode") + t.Run("Cluster4Node")` runs the same PUT/GET/DELETE BucketPolicy sequence on both fixtures. Hard-coded `policy-test` bucket → `tgt.uniqueBucket(t, "polset")`.
+- **`TestE2E_BucketPolicy_InvalidJSON` → `TestBucketPolicyInvalidJSONE2E`** — dual pattern + `runBucketPolicyInvalidJSONCases`. Verifies 400 BadRequest on both targets.
+- **`TestE2E_BucketPolicy_DenyAction` → `TestBucketPolicyDenyActionE2E`** — dual pattern + `runBucketPolicyDenyActionCases`. Verifies the deny-policy 403 enforcement on both targets; cluster path exercises policy propagation through the meta-raft.
+- `signedPolicyRequest` helper signature extended with `tgt s3Target` so it signs against the right endpoint + AK/SK pair.
+
+All six fixture-paths pass (SingleNode <30ms each; Cluster4Node shared-fixture ~7s incl. boot for first test, <100ms thereafter).
+
 ## [0.0.262.9] - 2026-05-19 - test(e2e): rename remaining 9 cluster-only TestE2E_* stragglers
 
 PR-C follow-up to v0.0.262.7 (multiraft) and v0.0.262.8 (cluster_*). 9 remaining cluster-only functions across single-purpose files renamed to the `TestXxxE2E` suffix convention. Pure rename; bodies unchanged.
