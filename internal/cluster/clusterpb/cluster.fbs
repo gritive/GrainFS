@@ -489,6 +489,8 @@ enum MetaCmdType : uint8 {
   BucketPolicyPut         = 60, // IAM: set bucket policy document
   BucketPolicyDelete      = 61, // IAM: delete bucket policy document
   CreateBucketWithPolicyAttach = 62, // IAM: atomic create-bucket + attach initial policy to SA (D#13, F#2)
+  JWTSigningKeyRotate          = 63, // IAM JWT: generate new signing key, add to dual-key set
+  JWTSigningKeyPrune           = 64, // IAM JWT: prune old signing keys past grace period
 }
 
 table MetaNodeEntry {
@@ -657,6 +659,7 @@ table MetaAbortPlanCmd {
 table IcebergNamespaceEntry {
   namespace:[string];
   properties:[KeyValue];
+  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
 }
 
 table IcebergIdentifier {
@@ -668,17 +671,20 @@ table IcebergTableEntry {
   identifier:IcebergIdentifier;
   metadata_location:string;
   properties:[KeyValue];
+  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
 }
 
 table MetaIcebergCreateNamespaceCmd {
   request_id:string;
   namespace:[string];
   properties:[KeyValue];
+  warehouse:string;
 }
 
 table MetaIcebergDeleteNamespaceCmd {
   request_id:string;
   namespace:[string];
+  warehouse:string;
 }
 
 table MetaIcebergCreateTableCmd {
@@ -686,6 +692,7 @@ table MetaIcebergCreateTableCmd {
   identifier:IcebergIdentifier;
   metadata_location:string;
   properties:[KeyValue];
+  warehouse:string;
 }
 
 table MetaIcebergCommitTableCmd {
@@ -693,11 +700,13 @@ table MetaIcebergCommitTableCmd {
   identifier:IcebergIdentifier;
   expected_metadata_location:string;
   new_metadata_location:string;
+  warehouse:string;
 }
 
 table MetaIcebergDeleteTableCmd {
   request_id:string;
   identifier:IcebergIdentifier;
+  warehouse:string;
 }
 
 // 클러스터 키 회전 — 4-phase rolling state machine.
@@ -773,6 +782,7 @@ table MetaStateSnapshot {
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
   nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
+  iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's
@@ -907,6 +917,7 @@ table MetaCatalogReadRequest {
   op         : CatalogReadOp = Unknown;
   namespace  : [string];
   identifier : CatalogIdentifier;
+  warehouse  : string;
 }
 
 table MetaCatalogReadReply {
@@ -996,6 +1007,25 @@ table MetaCreateBucketWithPolicyAttachCmd {
   bucket:string;
   attach_sa:string;
   attach_policy:string;
+}
+
+// MetaJWTSigningKeyRotateCmd payload: all random material is generated on the
+// proposer side (leader) so that every replica applies the same deterministic
+// bytes.  kid, wrapped_secret, and dek_gen are produced before Propose();
+// demoted_at_unix carries the leader's wall-clock unix-seconds so every node's
+// Demote() call records the same timestamp.
+table MetaJWTSigningKeyRotateCmd {
+  kid:string;
+  wrapped_secret:[ubyte];
+  dek_gen:uint32;
+  demoted_at_unix:int64;
+}
+
+// MetaJWTSigningKeyPruneCmd payload: prune_at_unix carries the leader's
+// wall-clock unix-seconds used to check PrunePrevSafe, so every replica
+// evaluates the same prune-safety window.
+table MetaJWTSigningKeyPruneCmd {
+  prune_at_unix:int64;
 }
 
 // ─── IPST snapshot trailer ────────────────────────────────────────────────────

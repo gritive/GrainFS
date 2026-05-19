@@ -60,19 +60,21 @@ func newFakeCatalog() *fakeCatalog {
 
 func (c *fakeCatalog) Warehouse() string { return "s3://grainfs-audit" }
 
-func (c *fakeCatalog) CreateNamespace(_ context.Context, _ []string, _ map[string]string) error {
+func (c *fakeCatalog) CreateNamespace(_ context.Context, _ string, _ []string, _ map[string]string) error {
 	return nil
 }
 
-func (c *fakeCatalog) LoadNamespace(_ context.Context, _ []string) (map[string]string, error) {
+func (c *fakeCatalog) LoadNamespace(_ context.Context, _ string, _ []string) (map[string]string, error) {
 	return nil, nil
 }
 
-func (c *fakeCatalog) ListNamespaces(_ context.Context) ([][]string, error) { return nil, nil }
+func (c *fakeCatalog) ListNamespaces(_ context.Context, _ string) ([][]string, error) {
+	return nil, nil
+}
 
-func (c *fakeCatalog) DeleteNamespace(_ context.Context, _ []string) error { return nil }
+func (c *fakeCatalog) DeleteNamespace(_ context.Context, _ string, _ []string) error { return nil }
 
-func (c *fakeCatalog) CreateTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+func (c *fakeCatalog) CreateTable(_ context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
 	tbl := &icebergcatalog.Table{
 		Identifier:       ident,
 		MetadataLocation: in.MetadataLocation,
@@ -84,7 +86,7 @@ func (c *fakeCatalog) CreateTable(_ context.Context, ident icebergcatalog.Identi
 	return tbl, nil
 }
 
-func (c *fakeCatalog) LoadTable(_ context.Context, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+func (c *fakeCatalog) LoadTable(_ context.Context, _ string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
 	c.mu.Lock()
 	tbl, ok := c.tables[ident.Name]
 	c.mu.Unlock()
@@ -94,13 +96,15 @@ func (c *fakeCatalog) LoadTable(_ context.Context, ident icebergcatalog.Identifi
 	return tbl, nil
 }
 
-func (c *fakeCatalog) ListTables(_ context.Context, _ []string) ([]icebergcatalog.Identifier, error) {
+func (c *fakeCatalog) ListTables(_ context.Context, _ string, _ []string) ([]icebergcatalog.Identifier, error) {
 	return nil, nil
 }
 
-func (c *fakeCatalog) DeleteTable(_ context.Context, _ icebergcatalog.Identifier) error { return nil }
+func (c *fakeCatalog) DeleteTable(_ context.Context, _ string, _ icebergcatalog.Identifier) error {
+	return nil
+}
 
-func (c *fakeCatalog) CommitTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+func (c *fakeCatalog) CommitTable(_ context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
 	tbl := &icebergcatalog.Table{
 		Identifier:       ident,
 		MetadataLocation: in.NewMetadataLocation,
@@ -119,7 +123,7 @@ func TestCommitter_AppendFromFollower(t *testing.T) {
 	emitter := audit.NewEmitter("leader-1")
 
 	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
-	_, err := catalog.CreateTable(context.Background(), icebergcatalog.Identifier{
+	_, err := catalog.CreateTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace},
 		Name:      audit.TableS3,
 	}, icebergcatalog.CreateTableInput{
@@ -183,7 +187,7 @@ func TestCommitter_CommitsOutboxAndAcks(t *testing.T) {
 	defer outbox.Close()
 
 	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
-	_, err = catalog.CreateTable(context.Background(), icebergcatalog.Identifier{
+	_, err = catalog.CreateTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace},
 		Name:      audit.TableS3,
 	}, icebergcatalog.CreateTableInput{
@@ -363,7 +367,7 @@ func TestCommitter_UsesEventDayForParquetPath(t *testing.T) {
 	defer outbox.Close()
 
 	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
-	_, err = catalog.CreateTable(context.Background(), icebergcatalog.Identifier{
+	_, err = catalog.CreateTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace},
 		Name:      audit.TableS3,
 	}, icebergcatalog.CreateTableInput{
@@ -450,7 +454,7 @@ func TestCommitter_FlushesRingToIceberg(t *testing.T) {
 	emitter := audit.NewEmitter("node-1")
 
 	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
-	_, err := catalog.CreateTable(context.Background(), icebergcatalog.Identifier{
+	_, err := catalog.CreateTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace},
 		Name:      audit.TableS3,
 	}, icebergcatalog.CreateTableInput{

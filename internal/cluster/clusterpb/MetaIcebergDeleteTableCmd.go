@@ -62,14 +62,25 @@ func (rcv *MetaIcebergDeleteTableCmd) Identifier(obj *IcebergIdentifier) *Iceber
 	return nil
 }
 
+func (rcv *MetaIcebergDeleteTableCmd) Warehouse() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MetaIcebergDeleteTableCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func MetaIcebergDeleteTableCmdAddRequestId(builder *flatbuffers.Builder, requestId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(requestId), 0)
 }
 func MetaIcebergDeleteTableCmdAddIdentifier(builder *flatbuffers.Builder, identifier flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(identifier), 0)
+}
+func MetaIcebergDeleteTableCmdAddWarehouse(builder *flatbuffers.Builder, warehouse flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(warehouse), 0)
 }
 func MetaIcebergDeleteTableCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

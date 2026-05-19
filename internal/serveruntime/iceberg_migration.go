@@ -33,7 +33,7 @@ func MigrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergca
 	}
 
 	for _, ns := range exported.Namespaces {
-		existing, err := catalog.LoadNamespace(ctx, ns.Namespace)
+		existing, err := catalog.LoadNamespace(ctx, "", ns.Namespace)
 		switch {
 		case err == nil:
 			if !reflect.DeepEqual(existing, ns.Properties) {
@@ -41,7 +41,7 @@ func MigrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergca
 			}
 			continue
 		case errors.Is(err, icebergcatalog.ErrNamespaceNotFound):
-			if err := catalog.CreateNamespace(ctx, ns.Namespace, ns.Properties); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceExists) {
+			if err := catalog.CreateNamespace(ctx, "", ns.Namespace, ns.Properties); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceExists) {
 				return fmt.Errorf("migrate legacy Iceberg namespace %v: %w", ns.Namespace, err)
 			}
 		default:
@@ -50,7 +50,7 @@ func MigrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergca
 	}
 
 	for _, tbl := range exported.Tables {
-		existing, err := catalog.LoadTable(ctx, tbl.Identifier)
+		existing, err := catalog.LoadTable(ctx, "", tbl.Identifier)
 		switch {
 		case err == nil:
 			if existing.MetadataLocation != tbl.MetadataLocation {
@@ -64,7 +64,7 @@ func MigrateLegacySingletonIcebergCatalog(ctx context.Context, legacy *icebergca
 			if err := EnsureIcebergMetadataObject(ctx, backend, tbl.MetadataLocation, tbl.Metadata); err != nil {
 				return fmt.Errorf("backfill legacy Iceberg metadata for %v: %w", tbl.Identifier, err)
 			}
-			_, err := catalog.CreateTable(ctx, tbl.Identifier, icebergcatalog.CreateTableInput{
+			_, err := catalog.CreateTable(ctx, "", tbl.Identifier, icebergcatalog.CreateTableInput{
 				MetadataLocation: tbl.MetadataLocation,
 				Metadata:         tbl.Metadata,
 				Properties:       tbl.Properties,

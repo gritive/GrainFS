@@ -10,6 +10,7 @@ const (
 	routeSurfaceAdmin
 	routeSurfaceIceberg
 	routeSurfaceUI
+	routeSurfaceOAuth // OAuth2 token endpoint — carries its own credentials
 )
 
 type routeAuthnPolicy uint8
@@ -32,6 +33,9 @@ var routeSurfaceManifest = []routeSurfaceEntry{
 	{pathExact: routePathMetrics, surface: routeSurfaceOps, authn: routeAuthnAnonymous, skipS3Authz: true},
 	{pathPrefix: routePrefixAPI, surface: routeSurfaceOps, authn: routeAuthnSigV4},
 	{pathPrefix: routePrefixUI, surface: routeSurfaceUI, authn: routeAuthnAnonymous, skipS3Authz: true},
+	// OAuth2 token endpoint — carries its own credentials, no SigV4 required.
+	{pathExact: routePrefixIceberg + routePathOAuthTokenSuffix, surface: routeSurfaceOAuth, authn: routeAuthnAnonymous, skipS3Authz: true},
+	{pathExact: routePrefixIcebergAIStor + routePathOAuthTokenSuffix, surface: routeSurfaceOAuth, authn: routeAuthnAnonymous, skipS3Authz: true},
 	{pathPrefix: routePrefixIceberg, surface: routeSurfaceIceberg, authn: routeAuthnSigV4, skipS3Authz: true},
 	{pathPrefix: routePrefixIcebergAIStor, surface: routeSurfaceIceberg, authn: routeAuthnSigV4, skipS3Authz: true},
 	{pathPrefix: routePrefixAdmin, surface: routeSurfaceAdmin, authn: routeAuthnLocalhost, skipS3Authz: true},
@@ -80,13 +84,16 @@ func routeSkipsS3Authz(path string) bool {
 }
 
 func routeSurfaceEntryForPath(path string) (routeSurfaceEntry, bool) {
+	// Exact match has highest priority; return immediately on first hit.
+	for _, entry := range routeSurfaceManifest {
+		if entry.pathExact != "" && path == entry.pathExact {
+			return entry, true
+		}
+	}
+	// Fall back to last prefix match (longer prefixes registered first take precedence).
 	var matched routeSurfaceEntry
 	var ok bool
 	for _, entry := range routeSurfaceManifest {
-		if entry.pathExact != "" && path == entry.pathExact {
-			matched = entry
-			ok = true
-		}
 		if entry.pathPrefix != "" && strings.HasPrefix(path, entry.pathPrefix) {
 			matched = entry
 			ok = true

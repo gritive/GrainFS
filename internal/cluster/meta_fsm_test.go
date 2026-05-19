@@ -490,12 +490,12 @@ func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 		Name:      "events",
 	}, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", map[string]string{"format-version": "2"})))
 
-	ns, ok := f.IcebergNamespace([]string{"analytics"})
+	ns, ok := f.IcebergNamespace("", []string{"analytics"})
 	require.True(t, ok)
 	require.Equal(t, []string{"analytics"}, ns.Namespace)
 	require.Equal(t, "eng", ns.Properties["owner"])
 
-	tbl, ok := f.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	tbl, ok := f.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.True(t, ok)
 	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
 	require.Equal(t, "2", tbl.Properties["format-version"])
@@ -506,7 +506,7 @@ func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
 
 	f2 := NewMetaFSM()
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-	restored, ok := f2.IcebergTable(icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	restored, ok := f2.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.True(t, ok)
 	require.Equal(t, tbl.MetadataLocation, restored.MetadataLocation)
 	require.Equal(t, tbl.Identifier, restored.Identifier)
@@ -541,13 +541,13 @@ func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
 	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "create-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
 	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-ok", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00001.json")))
 	require.NoError(t, results["commit-ok"])
-	table, ok := f.IcebergTable(ident)
+	table, ok := f.IcebergTable("", ident)
 	require.True(t, ok)
 	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
 
 	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-stale", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00002.json")))
 	require.ErrorIs(t, results["commit-stale"], icebergcatalog.ErrCommitFailed)
-	table, ok = f.IcebergTable(ident)
+	table, ok = f.IcebergTable("", ident)
 	require.True(t, ok)
 	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
 
@@ -556,7 +556,7 @@ func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
 
 	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-table", ident)))
 	require.NoError(t, results["delete-table"])
-	_, ok = f.IcebergTable(ident)
+	_, ok = f.IcebergTable("", ident)
 	require.False(t, ok)
 
 	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-missing-table", ident)))
@@ -1062,4 +1062,116 @@ func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {
 	applyErr := f.applyCmd(data)
 	require.Error(t, applyErr)
 	require.Contains(t, applyErr.Error(), "NFS export store not wired")
+}
+
+// TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses verifies that Snapshot writes
+// iceberg_schema_version=2 with warehouse in each entry, and that Restore
+// correctly re-keys into the per-warehouse nested maps.
+func TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses(t *testing.T) {
+	f := NewMetaFSM()
+
+	// Create entries in two warehouses.
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmdWH(t, "ns-a-1", "wh-a", []string{"analytics"}, nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmdWH(t, "tbl-a-1", "wh-a", icebergcatalog.Identifier{
+		Namespace: []string{"analytics"}, Name: "events",
+	}, "s3://bucket/wh-a/analytics/events/metadata/00000.json", nil)))
+	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmdWH(t, "ns-b-1", "wh-b", []string{"metrics"}, nil)))
+
+	snap, err := f.Snapshot()
+	require.NoError(t, err)
+
+	f2 := NewMetaFSM()
+	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
+
+	// wh-a: namespace and table present.
+	_, ok := f2.IcebergNamespace("wh-a", []string{"analytics"})
+	require.True(t, ok, "wh-a namespace should survive roundtrip")
+	tbl, ok := f2.IcebergTable("wh-a", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	require.True(t, ok, "wh-a table should survive roundtrip")
+	require.Equal(t, "s3://bucket/wh-a/analytics/events/metadata/00000.json", tbl.MetadataLocation)
+
+	// wh-b: namespace present, wh-a namespace absent.
+	_, ok = f2.IcebergNamespace("wh-b", []string{"metrics"})
+	require.True(t, ok, "wh-b namespace should survive roundtrip")
+	_, ok = f2.IcebergNamespace("wh-b", []string{"analytics"})
+	require.False(t, ok, "wh-b should not see wh-a namespaces")
+
+	// wh-a table not visible in wh-b.
+	_, ok = f2.IcebergTable("wh-b", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	require.False(t, ok, "wh-b should not see wh-a tables")
+}
+
+// TestMetaCatalog_Restore_FailsLoudly_OnOldFormat verifies that a snapshot
+// written by a pre-T38 node (iceberg_schema_version=0 with iceberg entries)
+// causes a hard error on Restore rather than silently misrouting data.
+func TestMetaCatalog_Restore_FailsLoudly_OnOldFormat(t *testing.T) {
+	snap := buildLegacyIcebergSnapshot(t)
+	f := NewMetaFSM()
+	err := f.Restore(raft.SnapshotMeta{}, snap)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "iceberg_schema_version=0")
+}
+
+// makeIcebergCreateNamespaceCmdWH builds a CreateNamespace command with an
+// explicit warehouse, for testing warehouse-aware FSM paths.
+func makeIcebergCreateNamespaceCmdWH(t *testing.T, requestID string, warehouse string, namespace []string, properties map[string]string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergCreateNamespaceCmd(IcebergCreateNamespaceCmd{
+		RequestID:  requestID,
+		Warehouse:  warehouse,
+		Namespace:  namespace,
+		Properties: properties,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateNamespace, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+// makeIcebergCreateTableCmdWH builds a CreateTable command with an explicit warehouse.
+func makeIcebergCreateTableCmdWH(t *testing.T, requestID string, warehouse string, ident icebergcatalog.Identifier, metadataLocation string, properties map[string]string) []byte {
+	t.Helper()
+	data, err := encodeMetaIcebergCreateTableCmd(IcebergCreateTableCmd{
+		RequestID:        requestID,
+		Warehouse:        warehouse,
+		Identifier:       ident,
+		MetadataLocation: metadataLocation,
+		Properties:       properties,
+	})
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateTable, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+// buildLegacyIcebergSnapshot crafts a raw snapshot byte slice that looks like a
+// pre-T38 (iceberg_schema_version=0) snapshot with non-empty iceberg data.
+// It writes iceberg entries directly without setting the schema version field
+// (defaults to 0).
+func buildLegacyIcebergSnapshot(t *testing.T) []byte {
+	t.Helper()
+	// Build a v0 snapshot: namespace entry present, no warehouse, version=0.
+	b := flatbuffers.NewBuilder(512)
+
+	nsVec := buildStringVector(b, []string{"analytics"}, clusterpb.IcebergNamespaceEntryStartNamespaceVector)
+	clusterpb.IcebergNamespaceEntryStart(b)
+	clusterpb.IcebergNamespaceEntryAddNamespace(b, nsVec)
+	// deliberately omit Warehouse field (leaves empty/legacy)
+	nsOff := clusterpb.IcebergNamespaceEntryEnd(b)
+
+	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, 1)
+	b.PrependUOffsetT(nsOff)
+	nsVecOff := b.EndVector(1)
+
+	clusterpb.MetaStateSnapshotStart(b)
+	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, nsVecOff)
+	// iceberg_schema_version left at 0 (FlatBuffers default)
+	root := clusterpb.MetaStateSnapshotEnd(b)
+	b.Finish(root)
+	fb := b.FinishedBytes()
+
+	// Snapshot format: [FB bytes] — no IAM/JWT trailer needed for this test.
+	out := make([]byte, len(fb))
+	copy(out, fb)
+	return out
 }

@@ -83,8 +83,16 @@ func (rcv *MetaCatalogReadRequest) Identifier(obj *CatalogIdentifier) *CatalogId
 	return nil
 }
 
+func (rcv *MetaCatalogReadRequest) Warehouse() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MetaCatalogReadRequestStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func MetaCatalogReadRequestAddOp(builder *flatbuffers.Builder, op CatalogReadOp) {
 	builder.PrependInt8Slot(0, int8(op), 0)
@@ -97,6 +105,9 @@ func MetaCatalogReadRequestStartNamespaceVector(builder *flatbuffers.Builder, nu
 }
 func MetaCatalogReadRequestAddIdentifier(builder *flatbuffers.Builder, identifier flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(identifier), 0)
+}
+func MetaCatalogReadRequestAddWarehouse(builder *flatbuffers.Builder, warehouse flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(warehouse), 0)
 }
 func MetaCatalogReadRequestEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

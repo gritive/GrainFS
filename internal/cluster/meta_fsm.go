@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
+	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -94,7 +95,7 @@ const dekSnapshotTrailerLen = 8
 // a single FlatBuffers payload. One trailer for all 4 §2 stores keeps the chain
 // depth manageable and reflects that the stores always serialize together.
 //
-// Wire layout (appended after every other trailer; IPST is the outermost trailer):
+// Wire layout (appended before JKEY; JKEY is now the outermost trailer):
 //
 //	[FB root bytes]
 //	[IAM trailer bytes]       (optional, magic 0x47414D49)
@@ -104,13 +105,39 @@ const dekSnapshotTrailerLen = 8
 //	[uint32 payloadLen  LE]
 //	[uint32 magic IPST  LE]
 //
-// Restore reads from the end: check last 4 bytes for IPST magic, if present
-// read payloadLen, strip IPST payload+footer, then continue DKVS/GCFG/IAM peel.
+// Restore reads from the end: peel JKEY first, then check for IPST magic,
+// if present read payloadLen, strip IPST payload+footer, then continue DKVS/GCFG/IAM peel.
 const ipstSnapshotTrailerMagic uint32 = 0x54535049
 
 // ipstSnapshotTrailerLen is the on-disk size of the IPST footer:
 // [u32 payload_len][u32 magic]. Always 8 bytes when present.
 const ipstSnapshotTrailerLen = 8
+
+// jkeySnapshotTrailerMagic identifies the JKEY trailer appended after the IPST
+// trailer (outermost trailer). Hex pairs spell "JKEY"
+// (0x4A=J, 0x4B=K, 0x45=E, 0x59=Y, little-endian uint32 = 0x59454B4A).
+//
+// Carries: JWTKeyStore — current + previous wrapped JWT signing keys.
+// Only appended when at least one key exists (nil/nil is skipped for back-compat).
+//
+// Wire layout (JKEY is the newest/outermost trailer):
+//
+//	[FB root bytes]
+//	[IAM trailer bytes]       (optional, magic 0x47414D49)
+//	[GCFG trailer bytes]      (optional, magic 0x47464347)
+//	[DKVS trailer bytes]      (optional, magic 0x53564B44)
+//	[IPST trailer bytes]      (optional, magic 0x54535049)
+//	[jkeyPayloadBytes]
+//	[uint32 payloadLen  LE]
+//	[uint32 magic JKEY  LE]
+//
+// Restore reads from the end: check last 4 bytes for JKEY magic, if present
+// read payloadLen, strip JKEY payload+footer, then continue IPST/DKVS/GCFG/IAM peel.
+const jkeySnapshotTrailerMagic uint32 = 0x59454B4A
+
+// jkeySnapshotTrailerLen is the on-disk size of the JKEY footer:
+// [u32 payload_len][u32 magic]. Always 8 bytes when present.
+const jkeySnapshotTrailerLen = 8
 
 // MetaCmdType aliases the FlatBuffers-generated type for use within this package.
 type MetaCmdType = clusterpb.MetaCmdType
@@ -173,6 +200,8 @@ const (
 	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
 	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
 	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
+	MetaCmdTypeJWTSigningKeyRotate          = clusterpb.MetaCmdTypeJWTSigningKeyRotate
+	MetaCmdTypeJWTSigningKeyPrune           = clusterpb.MetaCmdTypeJWTSigningKeyPrune
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -238,11 +267,13 @@ type RebalancePlan struct {
 }
 
 type IcebergNamespaceEntry struct {
+	Warehouse  string
 	Namespace  []string
 	Properties map[string]string
 }
 
 type IcebergTableEntry struct {
+	Warehouse        string
 	Identifier       icebergcatalog.Identifier
 	MetadataLocation string
 	Properties       map[string]string
@@ -250,17 +281,20 @@ type IcebergTableEntry struct {
 
 type IcebergCreateNamespaceCmd struct {
 	RequestID  string
+	Warehouse  string
 	Namespace  []string
 	Properties map[string]string
 }
 
 type IcebergDeleteNamespaceCmd struct {
 	RequestID string
+	Warehouse string
 	Namespace []string
 }
 
 type IcebergCreateTableCmd struct {
 	RequestID        string
+	Warehouse        string
 	Identifier       icebergcatalog.Identifier
 	MetadataLocation string
 	Properties       map[string]string
@@ -268,6 +302,7 @@ type IcebergCreateTableCmd struct {
 
 type IcebergCommitTableCmd struct {
 	RequestID                string
+	Warehouse                string
 	Identifier               icebergcatalog.Identifier
 	ExpectedMetadataLocation string
 	NewMetadataLocation      string
@@ -275,6 +310,7 @@ type IcebergCommitTableCmd struct {
 
 type IcebergDeleteTableCmd struct {
 	RequestID  string
+	Warehouse  string
 	Identifier icebergcatalog.Identifier
 }
 
@@ -299,16 +335,16 @@ type MetaFSM struct {
 	bucketAssignments map[string]string          // bucket → group_id (PR-D)
 	objectIndex       map[string]ObjectIndexEntry
 	objectLatest      map[string]string
-	loadSnapshot      map[string]LoadStatEntry // node_id → stats (PR-D)
-	activePlan        *RebalancePlan           // nil = no active plan (PR-D)
-	icebergNamespaces map[string]IcebergNamespaceEntry
-	icebergTables     map[string]IcebergTableEntry
-	onBucketAssigned  func(string, string)             // protected by mu; set before Start() (PR-D)
-	onRebalancePlan   func(*RebalancePlan)             // must not block; set before Start() (PR-D)
-	onShardGroupAdded func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onIcebergResult   func(string, error)              // requestID, typed catalog result; must not block
-	onScrubTrigger    func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
-	onNfsExportChange func()                           // fired after NFS export registry apply; must not block
+	loadSnapshot      map[string]LoadStatEntry                    // node_id → stats (PR-D)
+	activePlan        *RebalancePlan                              // nil = no active plan (PR-D)
+	icebergNamespaces map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
+	icebergTables     map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
+	onBucketAssigned  func(string, string)                        // protected by mu; set before Start() (PR-D)
+	onRebalancePlan   func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
+	onShardGroupAdded func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onIcebergResult   func(string, error)                         // requestID, typed catalog result; must not block
+	onScrubTrigger    func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
+	onNfsExportChange func()                                      // fired after NFS export registry apply; must not block
 
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
@@ -387,6 +423,14 @@ type MetaFSM struct {
 	pendingDEKVersions map[uint32][]byte
 	pendingDEKActive   uint32
 
+	// jwtKeyStore holds the wrapped JWT signing key seeds persisted in the JKEY
+	// snapshot trailer. Always non-nil after NewMetaFSM.
+	jwtKeyStore *JWTKeyStore
+
+	// jwtKeys is the in-process JWT KeySet reconstructed from jwtKeyStore seeds
+	// on Restore. SetJWTKeySet allows serveruntime to swap in its own instance.
+	jwtKeys *iamjwt.KeySet
+
 	// postCommitHooks is an atomic pointer to the slice of post-commit hooks.
 	// Read on every apply via a single atomic load (no mutex). Register path
 	// uses copy-on-write CAS; see post_commit.go for the contract.
@@ -401,13 +445,15 @@ func NewMetaFSM() *MetaFSM {
 		objectIndex:       make(map[string]ObjectIndexEntry),
 		objectLatest:      make(map[string]string),
 		loadSnapshot:      make(map[string]LoadStatEntry),
-		icebergNamespaces: make(map[string]IcebergNamespaceEntry),
-		icebergTables:     make(map[string]IcebergTableEntry),
+		icebergNamespaces: make(map[string]map[string]IcebergNamespaceEntry),
+		icebergTables:     make(map[string]map[string]IcebergTableEntry),
 		rotation:          NewRotationFSM(),
 		iamStore:          iam.NewStore(),
 		activeFeatures:    compat.NewActiveFeatures(),
 		clusterCfg:        NewClusterConfig(),
 		dekRefCounts:      make(map[uint32]uint64),
+		jwtKeyStore:       NewJWTKeyStore(),
+		jwtKeys:           iamjwt.NewKeySet(),
 	}
 }
 
@@ -457,6 +503,28 @@ func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dekKeeper = k
+}
+
+// SetJWTKeySet replaces the in-process JWT KeySet used by the FSM apply path
+// to reflect newly installed/demoted keys into memory. Must be called before
+// the raft log starts replaying. Passing nil resets to the internal default.
+func (f *MetaFSM) SetJWTKeySet(ks *iamjwt.KeySet) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ks == nil {
+		f.jwtKeys = iamjwt.NewKeySet()
+	} else {
+		f.jwtKeys = ks
+	}
+}
+
+// JWTKeySet returns the KeySet currently wired into the FSM.
+// It is always non-nil (NewMetaFSM seeds a default KeySet).
+// Callers should not modify the returned value directly; use SetJWTKeySet.
+func (f *MetaFSM) JWTKeySet() *iamjwt.KeySet {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.jwtKeys
 }
 
 // SetPolicyStore wires the IAM policy store into the MetaFSM. Must be called
@@ -773,6 +841,38 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		}
 		safe := f.dekRefCount(gen) == 0
 		return f.dekKeeper.Prune(gen, safe)
+	case clusterpb.MetaCmdTypeJWTSigningKeyRotate:
+		if f.dekKeeper == nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: DEK keeper not wired")
+		}
+		kid, wrapped, dekGen, demotedAtUnix, err := decodeMetaJWTSigningKeyRotateCmd(cmd.DataBytes())
+		if err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: decode: %w", err)
+		}
+		demotedAt := time.Unix(demotedAtUnix, 0)
+		// Demote old current in the persistent store
+		f.jwtKeyStore.Demote(demotedAt)
+		// Install new current in the persistent store
+		seed := iamjwt.KeySeed{Kid: kid, WrappedSecret: wrapped, DekGen: dekGen, Role: "current"}
+		f.jwtKeyStore.Put(seed)
+		// Reflect into the local in-process KeySet
+		f.jwtKeys.DemoteCurrentToPrevious(demotedAt)
+		if err := f.jwtKeys.InstallCurrent(seed, f.dekKeeper); err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: install jwt key locally: %w", err)
+		}
+		return nil
+	case clusterpb.MetaCmdTypeJWTSigningKeyPrune:
+		pruneAtUnix, err := decodeMetaJWTSigningKeyPruneCmd(cmd.DataBytes())
+		if err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyPrune: decode: %w", err)
+		}
+		pruneAt := time.Unix(pruneAtUnix, 0)
+		if !f.jwtKeyStore.PrunePrevSafe(pruneAt) {
+			return iamjwt.ErrPrunePrev
+		}
+		f.jwtKeyStore.RemovePrev()
+		_ = f.jwtKeys.Prune(true)
+		return nil
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
@@ -1679,6 +1779,28 @@ func (f *MetaFSM) applyAbortPlan(data []byte) error {
 	return nil
 }
 
+// icebergNSMap returns the per-warehouse namespace map, creating it if absent.
+// Caller must hold f.mu (write lock).
+func (f *MetaFSM) icebergNSMap(warehouse string) map[string]IcebergNamespaceEntry {
+	m := f.icebergNamespaces[warehouse]
+	if m == nil {
+		m = make(map[string]IcebergNamespaceEntry)
+		f.icebergNamespaces[warehouse] = m
+	}
+	return m
+}
+
+// icebergTblMap returns the per-warehouse table map, creating it if absent.
+// Caller must hold f.mu (write lock).
+func (f *MetaFSM) icebergTblMap(warehouse string) map[string]IcebergTableEntry {
+	m := f.icebergTables[warehouse]
+	if m == nil {
+		m = make(map[string]IcebergTableEntry)
+		f.icebergTables[warehouse] = m
+	}
+	return m
+}
+
 func (f *MetaFSM) applyIcebergCreateNamespace(data []byte) error {
 	c, err := decodeMetaIcebergCreateNamespaceCmd(data)
 	if err != nil {
@@ -1687,10 +1809,13 @@ func (f *MetaFSM) applyIcebergCreateNamespace(data []byte) error {
 	key := icebergNamespaceKey(c.Namespace)
 	var result error
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[key]; ok {
+	wh := icebergWarehouseKey(c.Warehouse)
+	nsMap := f.icebergNSMap(wh)
+	if _, ok := nsMap[key]; ok {
 		result = icebergcatalog.ErrNamespaceExists
 	} else {
-		f.icebergNamespaces[key] = IcebergNamespaceEntry{
+		nsMap[key] = IcebergNamespaceEntry{
+			Warehouse:  wh,
 			Namespace:  cloneStringSlice(c.Namespace),
 			Properties: cloneStringMap(c.Properties),
 		}
@@ -1707,19 +1832,22 @@ func (f *MetaFSM) applyIcebergDeleteNamespace(data []byte) error {
 	}
 	key := icebergNamespaceKey(c.Namespace)
 	var result error
+	wh := icebergWarehouseKey(c.Warehouse)
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[key]; !ok {
+	nsMap := f.icebergNSMap(wh)
+	tblMap := f.icebergTblMap(wh)
+	if _, ok := nsMap[key]; !ok {
 		result = icebergcatalog.ErrNamespaceNotFound
 	} else {
 		prefix := key + "\x1f"
-		for tableKey := range f.icebergTables {
+		for tableKey := range tblMap {
 			if strings.HasPrefix(tableKey, prefix) {
 				result = icebergcatalog.ErrNamespaceNotEmpty
 				break
 			}
 		}
 		if result == nil {
-			delete(f.icebergNamespaces, key)
+			delete(nsMap, key)
 		}
 	}
 	f.mu.Unlock()
@@ -1735,13 +1863,17 @@ func (f *MetaFSM) applyIcebergCreateTable(data []byte) error {
 	nsKey := icebergNamespaceKey(c.Identifier.Namespace)
 	tableKey := icebergTableKey(c.Identifier)
 	var result error
+	wh := icebergWarehouseKey(c.Warehouse)
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[nsKey]; !ok {
+	nsMap := f.icebergNSMap(wh)
+	tblMap := f.icebergTblMap(wh)
+	if _, ok := nsMap[nsKey]; !ok {
 		result = icebergcatalog.ErrNamespaceNotFound
-	} else if _, ok := f.icebergTables[tableKey]; ok {
+	} else if _, ok := tblMap[tableKey]; ok {
 		result = icebergcatalog.ErrTableExists
 	} else {
-		f.icebergTables[tableKey] = IcebergTableEntry{
+		tblMap[tableKey] = IcebergTableEntry{
+			Warehouse:        wh,
 			Identifier:       cloneIcebergIdent(c.Identifier),
 			MetadataLocation: c.MetadataLocation,
 			Properties:       cloneStringMap(c.Properties),
@@ -1760,14 +1892,15 @@ func (f *MetaFSM) applyIcebergCommitTable(data []byte) error {
 	tableKey := icebergTableKey(c.Identifier)
 	var result error
 	f.mu.Lock()
-	entry, ok := f.icebergTables[tableKey]
+	tblMap := f.icebergTblMap(icebergWarehouseKey(c.Warehouse))
+	entry, ok := tblMap[tableKey]
 	if !ok {
 		result = icebergcatalog.ErrTableNotFound
 	} else if entry.MetadataLocation != c.ExpectedMetadataLocation {
 		result = icebergcatalog.ErrCommitFailed
 	} else {
 		entry.MetadataLocation = c.NewMetadataLocation
-		f.icebergTables[tableKey] = entry
+		tblMap[tableKey] = entry
 	}
 	f.mu.Unlock()
 	f.publishIcebergResult(c.RequestID, result)
@@ -1782,13 +1915,16 @@ func (f *MetaFSM) applyIcebergDeleteTable(data []byte) error {
 	nsKey := icebergNamespaceKey(c.Identifier.Namespace)
 	tableKey := icebergTableKey(c.Identifier)
 	var result error
+	wh2 := icebergWarehouseKey(c.Warehouse)
 	f.mu.Lock()
-	if _, ok := f.icebergNamespaces[nsKey]; !ok {
+	nsMap := f.icebergNSMap(wh2)
+	tblMap := f.icebergTblMap(wh2)
+	if _, ok := nsMap[nsKey]; !ok {
 		result = icebergcatalog.ErrNamespaceNotFound
-	} else if _, ok := f.icebergTables[tableKey]; !ok {
+	} else if _, ok := tblMap[tableKey]; !ok {
 		result = icebergcatalog.ErrTableNotFound
 	} else {
-		delete(f.icebergTables, tableKey)
+		delete(tblMap, tableKey)
 	}
 	f.mu.Unlock()
 	f.publishIcebergResult(c.RequestID, result)
@@ -2217,24 +2353,33 @@ func (f *MetaFSM) resolveNodeIDByAddressLocked(addr string) (string, bool) {
 	return "", false
 }
 
-func (f *MetaFSM) IcebergNamespace(namespace []string) (IcebergNamespaceEntry, bool) {
+func (f *MetaFSM) IcebergNamespace(warehouse string, namespace []string) (IcebergNamespaceEntry, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	entry, ok := f.icebergNamespaces[icebergNamespaceKey(namespace)]
+	wh := icebergWarehouseKey(warehouse)
+	nsMap := f.icebergNamespaces[wh]
+	if nsMap == nil {
+		return IcebergNamespaceEntry{}, false
+	}
+	entry, ok := nsMap[icebergNamespaceKey(namespace)]
 	if !ok {
 		return IcebergNamespaceEntry{}, false
 	}
 	return IcebergNamespaceEntry{
+		Warehouse:  wh,
 		Namespace:  cloneStringSlice(entry.Namespace),
 		Properties: cloneStringMap(entry.Properties),
 	}, true
 }
 
-func (f *MetaFSM) IcebergNamespaces() []IcebergNamespaceEntry {
+func (f *MetaFSM) IcebergNamespaces(warehouse string) []IcebergNamespaceEntry {
+	wh := icebergWarehouseKey(warehouse)
 	f.mu.RLock()
-	out := make([]IcebergNamespaceEntry, 0, len(f.icebergNamespaces))
-	for _, entry := range f.icebergNamespaces {
+	nsMap := f.icebergNamespaces[wh]
+	out := make([]IcebergNamespaceEntry, 0, len(nsMap))
+	for _, entry := range nsMap {
 		out = append(out, IcebergNamespaceEntry{
+			Warehouse:  wh,
 			Namespace:  cloneStringSlice(entry.Namespace),
 			Properties: cloneStringMap(entry.Properties),
 		})
@@ -2246,21 +2391,26 @@ func (f *MetaFSM) IcebergNamespaces() []IcebergNamespaceEntry {
 	return out
 }
 
-func (f *MetaFSM) IcebergTable(ident icebergcatalog.Identifier) (IcebergTableEntry, bool) {
+func (f *MetaFSM) IcebergTable(warehouse string, ident icebergcatalog.Identifier) (IcebergTableEntry, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	entry, ok := f.icebergTables[icebergTableKey(ident)]
+	tblMap := f.icebergTables[icebergWarehouseKey(warehouse)]
+	if tblMap == nil {
+		return IcebergTableEntry{}, false
+	}
+	entry, ok := tblMap[icebergTableKey(ident)]
 	if !ok {
 		return IcebergTableEntry{}, false
 	}
 	return cloneIcebergTableEntry(entry), true
 }
 
-func (f *MetaFSM) IcebergTables(namespace []string) []IcebergTableEntry {
+func (f *MetaFSM) IcebergTables(warehouse string, namespace []string) []IcebergTableEntry {
 	prefix := icebergNamespaceKey(namespace) + "\x1f"
 	f.mu.RLock()
+	tblMap := f.icebergTables[icebergWarehouseKey(warehouse)]
 	out := make([]IcebergTableEntry, 0)
-	for key, entry := range f.icebergTables {
+	for key, entry := range tblMap {
 		if strings.HasPrefix(key, prefix) {
 			out = append(out, cloneIcebergTableEntry(entry))
 		}
@@ -2305,16 +2455,31 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		cp := *f.activePlan
 		activePlanCopy = &cp
 	}
-	icebergNamespaces := make([]IcebergNamespaceEntry, 0, len(f.icebergNamespaces))
-	for _, entry := range f.icebergNamespaces {
-		icebergNamespaces = append(icebergNamespaces, IcebergNamespaceEntry{
-			Namespace:  cloneStringSlice(entry.Namespace),
-			Properties: cloneStringMap(entry.Properties),
-		})
+	var icebergNamespacesCount int
+	for _, m := range f.icebergNamespaces {
+		icebergNamespacesCount += len(m)
 	}
-	icebergTables := make([]IcebergTableEntry, 0, len(f.icebergTables))
-	for _, entry := range f.icebergTables {
-		icebergTables = append(icebergTables, cloneIcebergTableEntry(entry))
+	icebergNamespaces := make([]IcebergNamespaceEntry, 0, icebergNamespacesCount)
+	for wh, nsMap := range f.icebergNamespaces {
+		for _, entry := range nsMap {
+			icebergNamespaces = append(icebergNamespaces, IcebergNamespaceEntry{
+				Warehouse:  wh,
+				Namespace:  cloneStringSlice(entry.Namespace),
+				Properties: cloneStringMap(entry.Properties),
+			})
+		}
+	}
+	var icebergTablesCount int
+	for _, m := range f.icebergTables {
+		icebergTablesCount += len(m)
+	}
+	icebergTables := make([]IcebergTableEntry, 0, icebergTablesCount)
+	for wh, tblMap := range f.icebergTables {
+		for _, entry := range tblMap {
+			e := cloneIcebergTableEntry(entry)
+			e.Warehouse = wh
+			icebergTables = append(icebergTables, e)
+		}
 	}
 	exportStore := f.exportStore
 	// Snapshot dekRefCounts while holding the read lock.
@@ -2455,6 +2620,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
 	clusterpb.MetaStateSnapshotAddNfsExports(b, nfsExportVec)
+	clusterpb.MetaStateSnapshotAddIcebergSchemaVersion(b, 2)
 	root := clusterpb.MetaStateSnapshotEnd(b)
 	bs := fbFinish(b, root)
 
@@ -2552,6 +2718,19 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		out = append(out, ipstPayload...)
 		out = append(out, ipstFooter[:]...)
 	}
+
+	// Append JKEY trailer after the IPST trailer. Only emit when at least one
+	// JWT signing key exists — an empty key store produces no trailer for
+	// back-compat with nodes that have not yet run JWTSigningKeyRotate.
+	jkeyCurrent, jkeyPrevious := f.jwtKeyStore.Snapshot()
+	if jkeyCurrent != nil || jkeyPrevious != nil {
+		jkeyPayload := encodeJWTKeyStore(jkeyCurrent, jkeyPrevious)
+		var jkeyFooter [jkeySnapshotTrailerLen]byte
+		binary.LittleEndian.PutUint32(jkeyFooter[0:4], uint32(len(jkeyPayload)))
+		binary.LittleEndian.PutUint32(jkeyFooter[4:8], jkeySnapshotTrailerMagic)
+		out = append(out, jkeyPayload...)
+		out = append(out, jkeyFooter[:]...)
+	}
 	return out, nil
 }
 
@@ -2564,10 +2743,28 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		return fmt.Errorf("meta_fsm: Restore: empty snapshot")
 	}
 
-	// Peel IPST trailer first (it is the absolute newest / outermost trailer when present).
+	// Peel JKEY trailer first (it is the absolute newest / outermost trailer when present).
+	// Layout: [FB bytes][IAM][GCFG][DKVS][IPST][jkeyPayload][u32 jkeyLen][u32 jkeyMagic].
+	// After stripping JKEY, the remaining bytes look like a pre-T35 snapshot.
+	remaining := data
+	var jkeyData []byte
+	if len(remaining) >= jkeySnapshotTrailerLen {
+		jkeyFooter := remaining[len(remaining)-jkeySnapshotTrailerLen:]
+		if binary.LittleEndian.Uint32(jkeyFooter[4:8]) == jkeySnapshotTrailerMagic {
+			jkeyLen := binary.LittleEndian.Uint32(jkeyFooter[0:4])
+			if int(jkeyLen)+jkeySnapshotTrailerLen > len(remaining) {
+				return fmt.Errorf("meta_fsm: Restore: JKEY trailer length %d exceeds snapshot size %d", jkeyLen, len(remaining))
+			}
+			jkeyEnd := len(remaining) - jkeySnapshotTrailerLen
+			jkeyStart := jkeyEnd - int(jkeyLen)
+			jkeyData = remaining[jkeyStart:jkeyEnd]
+			remaining = remaining[:jkeyStart]
+		}
+	}
+
+	// Peel IPST trailer next (second-newest trailer when present).
 	// Layout: [FB bytes][IAM trailer][GCFG trailer][DKVS trailer][ipstPayload][u32 ipstLen][u32 ipstMagic].
 	// After stripping IPST, the remaining bytes look like a pre-C1 snapshot.
-	remaining := data
 	var ipstData []byte
 	if len(remaining) >= ipstSnapshotTrailerLen {
 		ipstFooter := remaining[len(remaining)-ipstSnapshotTrailerLen:]
@@ -2733,20 +2930,46 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
-	newIcebergNamespaces := make(map[string]IcebergNamespaceEntry, snap.IcebergNamespacesLength())
+	// iceberg_schema_version tracks the Iceberg section format:
+	//   0 = pre-T38 / pre-Commit-3 (no warehouse field in entries); only safe when no entries present
+	//   2 = warehouse-aware (D#14 T38 Commit 3)
+	//
+	// Any other value (e.g. 1, 3, …) is unknown — fail loud so a future format
+	// change is never silently misread as version-2.
+	icebergSchemaVersion := snap.IcebergSchemaVersion()
+	hasIcebergData := snap.IcebergNamespacesLength() > 0 || snap.IcebergTablesLength() > 0
+	if icebergSchemaVersion == 0 && hasIcebergData {
+		return fmt.Errorf("meta_fsm: Restore: iceberg_schema_version=0 with %d namespaces and %d tables: "+
+			"snapshot was written by a pre-T38 node; cannot safely determine warehouse assignments — "+
+			"re-snapshot from a T38+ node before restore",
+			snap.IcebergNamespacesLength(), snap.IcebergTablesLength())
+	}
+	if icebergSchemaVersion != 0 && icebergSchemaVersion != 2 {
+		return fmt.Errorf("meta_fsm: Restore: unsupported iceberg_schema_version=%d (expected 0 for legacy or 2 for warehouse-aware)", icebergSchemaVersion)
+	}
+
+	newIcebergNamespaces := make(map[string]map[string]IcebergNamespaceEntry)
 	var nsFB clusterpb.IcebergNamespaceEntry
 	for i := 0; i < snap.IcebergNamespacesLength(); i++ {
 		if !snap.IcebergNamespaces(&nsFB, i) {
 			return fmt.Errorf("meta_fsm: Restore: iceberg namespace %d decode failed", i)
 		}
+		wh := string(nsFB.Warehouse())
+		if wh == "" {
+			wh = icebergDefaultWarehouse
+		}
 		entry := IcebergNamespaceEntry{
+			Warehouse:  wh,
 			Namespace:  readStringVector(nsFB.NamespaceLength(), nsFB.Namespace),
 			Properties: readKeyValueProperties(nsFB.PropertiesLength(), nsFB.Properties),
 		}
-		newIcebergNamespaces[icebergNamespaceKey(entry.Namespace)] = entry
+		if m := newIcebergNamespaces[wh]; m == nil {
+			newIcebergNamespaces[wh] = make(map[string]IcebergNamespaceEntry)
+		}
+		newIcebergNamespaces[wh][icebergNamespaceKey(entry.Namespace)] = entry
 	}
 
-	newIcebergTables := make(map[string]IcebergTableEntry, snap.IcebergTablesLength())
+	newIcebergTables := make(map[string]map[string]IcebergTableEntry)
 	var tableFB clusterpb.IcebergTableEntry
 	for i := 0; i < snap.IcebergTablesLength(); i++ {
 		if !snap.IcebergTables(&tableFB, i) {
@@ -2760,12 +2983,20 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			Namespace: readStringVector(identFB.NamespaceLength(), identFB.Namespace),
 			Name:      string(identFB.Name()),
 		}
+		wh := string(tableFB.Warehouse())
+		if wh == "" {
+			wh = icebergDefaultWarehouse
+		}
 		entry := IcebergTableEntry{
+			Warehouse:        wh,
 			Identifier:       ident,
 			MetadataLocation: string(tableFB.MetadataLocation()),
 			Properties:       readKeyValueProperties(tableFB.PropertiesLength(), tableFB.Properties),
 		}
-		newIcebergTables[icebergTableKey(ident)] = entry
+		if m := newIcebergTables[wh]; m == nil {
+			newIcebergTables[wh] = make(map[string]IcebergTableEntry)
+		}
+		newIcebergTables[wh][icebergTableKey(ident)] = entry
 	}
 
 	newObjectIndex := make(map[string]ObjectIndexEntry, snap.ObjectIndexLength())
@@ -2817,6 +3048,121 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		newClusterCfgSnap = cs
 	}
 
+	// --- DECODE PHASE ---
+	// Decode all trailers into local variables BEFORE touching any f.* field.
+	// If any decode fails, Restore returns an error with f.* completely untouched.
+
+	// IAM: validate by decoding into a temporary store; commit via RestoreFrom later.
+	// (F17: iamEnc is no longer needed at commit time — RestoreFrom swaps the state
+	// pointer atomically without re-parsing the snapshot bytes.)
+	var iamTempStore *iam.Store
+	if len(iamData) > 0 {
+		if f.iamStore == nil || f.iamApplier == nil {
+			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
+		} else {
+			enc := f.iamApplier.Encryptor()
+			if enc == nil {
+				log.Warn().Msg("meta_fsm: Restore: IAM applier has no encryptor; skipping IAM restore")
+			} else {
+				tmp := iam.NewStore()
+				if err := iam.ReadSnapshot(bytes.NewReader(iamData), tmp, enc); err != nil {
+					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
+				}
+				iamTempStore = tmp
+			}
+		}
+	}
+
+	// GCFG: decode config values.
+	var newCfgValues map[string]string
+	if len(cfgData) > 0 {
+		if f.cfgStore == nil {
+			log.Warn().Int("cfg_len", len(cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
+		} else {
+			values, err := decodeMetaConfigSnapshot(cfgData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
+			}
+			newCfgValues = values
+		}
+	}
+
+	// DKVS: decode DEK version snapshot.
+	var (
+		newDEKVersions map[uint32][]byte
+		newDEKActive   uint32
+		newDEKRefs     map[uint32]uint64
+		hasDEKData     bool
+	)
+	if len(dekData) > 0 {
+		versions, active, refs, err := decodeMetaDEKVersionSnapshot(dekData)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
+		}
+		newDEKVersions = versions
+		newDEKActive = active
+		newDEKRefs = refs
+		hasDEKData = true
+	}
+
+	// IPST: decode IAM policy stores snapshot.
+	type ipstDecoded struct {
+		polSnap    []policystore.PolicyEntry
+		grpSnap    []group.GroupEntry
+		attachSnap policyattach.AttachSnapshot
+		bpSnap     []bucketpolicy.BucketPolicyEntry
+	}
+	var newIPST *ipstDecoded
+	if len(ipstData) > 0 {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+			log.Warn().Int("ipst_len", len(ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
+		} else {
+			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
+			if err != nil {
+				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
+			}
+			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap}
+		}
+	}
+
+	// JKEY: decode JWT signing keys.
+	// F9: if JKEY data is present but DEK keeper is not wired, the keys cannot be
+	// unwrapped after Restore — fail loud rather than silently leaving jwtKeys empty.
+	// F14: stage LoadFromSeeds against a scratch KeySet BEFORE touching f.jwtKeyStore /
+	// f.jwtKeys so that a partial-unwrap failure leaves both fields untouched (atomic).
+	var (
+		newJkeyCurrent  *iamjwt.KeySeed
+		newJkeyPrevious *iamjwt.KeySeed
+		scratchJWTKeys  *iamjwt.KeySet
+		hasJKEYData     = len(jkeyData) > 0
+	)
+	if hasJKEYData {
+		if f.dekKeeper == nil {
+			return fmt.Errorf("meta_fsm: Restore: JKEY trailer present but DEK keeper not wired — cannot unwrap signing keys")
+		}
+		cur, prev, err := decodeJWTKeyStore(jkeyData)
+		if err != nil {
+			return fmt.Errorf("meta_fsm: Restore: decode JKEY: %w", err)
+		}
+		var seeds []iamjwt.KeySeed
+		if cur != nil {
+			seeds = append(seeds, *cur)
+		}
+		if prev != nil {
+			seeds = append(seeds, *prev)
+		}
+		scratch := iamjwt.NewKeySet()
+		if err := scratch.LoadFromSeeds(seeds, f.dekKeeper); err != nil {
+			return fmt.Errorf("meta_fsm: Restore: JKEY LoadFromSeeds: %w", err)
+		}
+		newJkeyCurrent = cur
+		newJkeyPrevious = prev
+		scratchJWTKeys = scratch
+	}
+
+	// --- COMMIT PHASE ---
+	// All decodes succeeded. Commit to f.* fields. No error returns below.
+
 	f.mu.Lock()
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
@@ -2827,6 +3173,21 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.activePlan = newActivePlan
 	f.icebergNamespaces = newIcebergNamespaces
 	f.icebergTables = newIcebergTables
+	if hasDEKData {
+		f.pendingDEKVersions = newDEKVersions
+		f.pendingDEKActive = newDEKActive
+		if newDEKRefs != nil {
+			f.dekRefCounts = newDEKRefs
+		} else {
+			// Pre-Task-12 snapshot: no ref_counts trailer field. Rebuild from the
+			// just-restored objectIndex so DEK prune-safety sees accurate counts.
+			// All legacy entries decode dek_gen=0 via FlatBuffer default.
+			f.dekRefCounts = make(map[uint32]uint64, len(f.objectIndex))
+			for _, e := range f.objectIndex {
+				f.dekRefCounts[e.DekGen]++
+			}
+		}
+	}
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
 
@@ -2834,6 +3195,12 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
 	}
 	restoredNfsExports := false
+	// NOTE: nfsexport.Store.ReplaceAll touches BadgerDB and may return an error
+	// after the core FSM fields are already committed. Making this fully atomic
+	// requires refactoring nfsexport.Store behind an interface for staged-commit.
+	// Deferred to a follow-up — see TODOS for the design discussion. In practice
+	// a BadgerDB error here would indicate disk failure during snapshot restore,
+	// which warrants operator intervention regardless of atomicity.
 	if f.exportStore != nil && hasNfsExports {
 		if err := f.exportStore.ReplaceAll(newNfsExports); err != nil {
 			return fmt.Errorf("meta_fsm: Restore: NFS exports: %w", err)
@@ -2853,114 +3220,61 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	// onRebalancePlan is intentionally NOT called here.
 	// Rebalancer handles resume on next tick by checking ActivePlan().
 
-	// IAM restore — replaces in-memory IAM state on the receiving node so
-	// raft log compaction (LogGCInterval) does not silently drop SAs/keys/
-	// grants/auth_enabled. Skip when there's no trailer (legacy snapshot)
-	// or no IAM data, or when IAM is not wired.
-	if len(iamData) > 0 {
-		if f.iamStore == nil || f.iamApplier == nil {
-			log.Warn().Int("iam_len", len(iamData)).Msg("meta_fsm: Restore: snapshot contains IAM section but IAM not wired; skipping IAM restore")
+	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
+	// RestoreFrom copies the state pointer from iamTempStore into f.iamStore in one
+	// atomic store — no second decode/parse is needed, so no error is possible here
+	// (F17: eliminates the error-returning ReadSnapshot call after core fields commit).
+	if iamTempStore != nil {
+		f.iamStore.RestoreFrom(iamTempStore)
+	}
+
+	// GCFG commit.
+	if newCfgValues != nil {
+		f.cfgStore.Restore(newCfgValues)
+	}
+
+	// IPST commit — apply all 4 policy stores.
+	if newIPST != nil {
+		// Warn per nil store. The 4 stores form a single coherent unit
+		// (group memberships, attached policies, bucket policies all reference
+		// each other); silently dropping one half desyncs the others against
+		// the snapshot. The all-nil path warns once above; here we surface
+		// per-store gaps so the operator sees exactly what was lost.
+		if f.policyStore == nil {
+			log.Warn().Int("entries", len(newIPST.polSnap)).Msg("meta_fsm: Restore: IPST has policy entries but policyStore not wired; entries dropped")
 		} else {
-			enc := f.iamApplier.Encryptor()
-			if enc == nil {
-				log.Warn().Msg("meta_fsm: Restore: IAM applier has no encryptor; skipping IAM restore")
-			} else {
-				// Wipe pre-restore state so a snapshot install REPLACES rather
-				// than MERGES — matches raft Restore semantics for the rest of
-				// MetaFSM (which reassigns each map outright above).
-				f.iamStore.Reset()
-				if err := iam.ReadSnapshot(bytes.NewReader(iamData), f.iamStore, enc); err != nil {
-					return fmt.Errorf("meta_fsm: Restore: decode IAM: %w", err)
-				}
-			}
+			f.policyStore.ReplaceAll(newIPST.polSnap)
+		}
+		if f.groupStore == nil {
+			log.Warn().Int("entries", len(newIPST.grpSnap)).Msg("meta_fsm: Restore: IPST has group entries but groupStore not wired; entries dropped")
+		} else {
+			f.groupStore.ReplaceAll(newIPST.grpSnap)
+		}
+		if f.policyAttachStore == nil {
+			log.Warn().Int("sa_entries", len(newIPST.attachSnap.SAAttachments)).Int("group_entries", len(newIPST.attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
+		} else {
+			f.policyAttachStore.ReplaceAll(newIPST.attachSnap)
+		}
+		if f.bucketPolicyStore == nil {
+			log.Warn().Int("entries", len(newIPST.bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
+		} else {
+			f.bucketPolicyStore.ReplaceAll(newIPST.bpSnap)
+		}
+		// Invalidate the resolver cache so stale pre-restore entries don't
+		// survive the snapshot install. Empty saIDs+buckets nukes the full cache.
+		if f.policyResolver != nil {
+			f.policyResolver.Invalidate(nil, nil)
 		}
 	}
 
-	// GCFG restore — populate the config store from the GCFG trailer.
-	// If no trailer was present (legacy snapshot or no overrides), leave the
-	// store empty so registered defaults take effect via GetX fallback.
-	if len(cfgData) > 0 {
-		if f.cfgStore == nil {
-			log.Warn().Int("cfg_len", len(cfgData)).Msg("meta_fsm: Restore: snapshot contains config section but config store not wired; skipping")
-		} else {
-			values, err := decodeMetaConfigSnapshot(cfgData)
-			if err != nil {
-				return fmt.Errorf("meta_fsm: Restore: decode config: %w", err)
-			}
-			f.cfgStore.Restore(values)
-		}
-	}
-
-	// DKVS restore — decode the DEK versions into pendingDEKVersions so the
-	// runtime can wire a new DEKKeeper via encrypt.LoadFromFSM(kek, versions)
-	// after Restore returns. Also restore dekRefCounts from the snapshot so
-	// DEK prune-safety checks reflect the stored object count.
-	if len(dekData) > 0 {
-		versions, active, refs, err := decodeMetaDEKVersionSnapshot(dekData)
-		if err != nil {
-			return fmt.Errorf("meta_fsm: Restore: decode DEK versions: %w", err)
-		}
-		f.mu.Lock()
-		f.pendingDEKVersions = versions
-		f.pendingDEKActive = active
-		if refs != nil {
-			f.dekRefCounts = refs
-		} else {
-			// Pre-Task-12 snapshot: no ref_counts trailer field. Rebuild from the
-			// just-restored objectIndex so DEK prune-safety sees accurate counts.
-			// All legacy entries decode dek_gen=0 via FlatBuffer default.
-			f.dekRefCounts = make(map[uint32]uint64, len(f.objectIndex))
-			for _, e := range f.objectIndex {
-				f.dekRefCounts[e.DekGen]++
-			}
-		}
-		f.mu.Unlock()
-	}
-
-	// IPST restore — decode the 4 §2 IAM policy stores from the IPST trailer.
-	// Snapshot was taken with all 4 stores serialized together; restore replaces
-	// each store atomically. Nil stores are skipped with a warning (test fixtures
-	// or nodes that have not yet wired the stores). Legacy snapshots (no IPST
-	// trailer) leave the stores untouched; they will be rebuilt from Raft log replay.
-	if len(ipstData) > 0 {
-		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
-			log.Warn().Int("ipst_len", len(ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
-		} else {
-			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
-			if err != nil {
-				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
-			}
-			// Warn per nil store. The 4 stores form a single coherent unit
-			// (group memberships, attached policies, bucket policies all reference
-			// each other); silently dropping one half desyncs the others against
-			// the snapshot. The all-nil path warns once above; here we surface
-			// per-store gaps so the operator sees exactly what was lost.
-			if f.policyStore == nil {
-				log.Warn().Int("entries", len(polSnap)).Msg("meta_fsm: Restore: IPST has policy entries but policyStore not wired; entries dropped")
-			} else {
-				f.policyStore.ReplaceAll(polSnap)
-			}
-			if f.groupStore == nil {
-				log.Warn().Int("entries", len(grpSnap)).Msg("meta_fsm: Restore: IPST has group entries but groupStore not wired; entries dropped")
-			} else {
-				f.groupStore.ReplaceAll(grpSnap)
-			}
-			if f.policyAttachStore == nil {
-				log.Warn().Int("sa_entries", len(attachSnap.SAAttachments)).Int("group_entries", len(attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
-			} else {
-				f.policyAttachStore.ReplaceAll(attachSnap)
-			}
-			if f.bucketPolicyStore == nil {
-				log.Warn().Int("entries", len(bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
-			} else {
-				f.bucketPolicyStore.ReplaceAll(bpSnap)
-			}
-			// Invalidate the resolver cache so stale pre-restore entries don't
-			// survive the snapshot install. Empty saIDs+buckets nukes the full cache.
-			if f.policyResolver != nil {
-				f.policyResolver.Invalidate(nil, nil)
-			}
-		}
+	// JKEY commit — both f.jwtKeyStore and f.jwtKeys are updated together.
+	// scratchJWTKeys was built (and LoadFromSeeds succeeded) in the decode phase
+	// above, so no error is possible here (F14: atomic commit).
+	if hasJKEYData {
+		f.jwtKeyStore.ReplaceAll(newJkeyCurrent, newJkeyPrevious)
+		f.jwtKeys = scratchJWTKeys
+	} else {
+		f.jwtKeyStore.ReplaceAll(nil, nil)
 	}
 	return nil
 }
@@ -3030,12 +3344,14 @@ func buildMetaCapabilityActivatePayload(capability string) []byte {
 func encodeMetaIcebergCreateNamespaceCmd(c IcebergCreateNamespaceCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	namespaceVec := buildStringVector(b, c.Namespace, clusterpb.MetaIcebergCreateNamespaceCmdStartNamespaceVector)
 	propsVec := buildKeyValuePropertiesVector(b, c.Properties, clusterpb.MetaIcebergCreateNamespaceCmdStartPropertiesVector)
 	clusterpb.MetaIcebergCreateNamespaceCmdStart(b)
 	clusterpb.MetaIcebergCreateNamespaceCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaIcebergCreateNamespaceCmdAddNamespace(b, namespaceVec)
 	clusterpb.MetaIcebergCreateNamespaceCmdAddProperties(b, propsVec)
+	clusterpb.MetaIcebergCreateNamespaceCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergCreateNamespaceCmdEnd(b)), nil
 }
 
@@ -3048,6 +3364,7 @@ func decodeMetaIcebergCreateNamespaceCmd(data []byte) (IcebergCreateNamespaceCmd
 	}
 	return IcebergCreateNamespaceCmd{
 		RequestID:  string(t.RequestId()),
+		Warehouse:  string(t.Warehouse()),
 		Namespace:  readStringVector(t.NamespaceLength(), t.Namespace),
 		Properties: readKeyValueProperties(t.PropertiesLength(), t.Properties),
 	}, nil
@@ -3056,10 +3373,12 @@ func decodeMetaIcebergCreateNamespaceCmd(data []byte) (IcebergCreateNamespaceCmd
 func encodeMetaIcebergDeleteNamespaceCmd(c IcebergDeleteNamespaceCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	namespaceVec := buildStringVector(b, c.Namespace, clusterpb.MetaIcebergDeleteNamespaceCmdStartNamespaceVector)
 	clusterpb.MetaIcebergDeleteNamespaceCmdStart(b)
 	clusterpb.MetaIcebergDeleteNamespaceCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaIcebergDeleteNamespaceCmdAddNamespace(b, namespaceVec)
+	clusterpb.MetaIcebergDeleteNamespaceCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergDeleteNamespaceCmdEnd(b)), nil
 }
 
@@ -3072,6 +3391,7 @@ func decodeMetaIcebergDeleteNamespaceCmd(data []byte) (IcebergDeleteNamespaceCmd
 	}
 	return IcebergDeleteNamespaceCmd{
 		RequestID: string(t.RequestId()),
+		Warehouse: string(t.Warehouse()),
 		Namespace: readStringVector(t.NamespaceLength(), t.Namespace),
 	}, nil
 }
@@ -3079,6 +3399,7 @@ func decodeMetaIcebergDeleteNamespaceCmd(data []byte) (IcebergDeleteNamespaceCmd
 func encodeMetaIcebergCreateTableCmd(c IcebergCreateTableCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	identOff := buildIcebergIdentifier(b, c.Identifier)
 	locationOff := b.CreateString(c.MetadataLocation)
 	propsVec := buildKeyValuePropertiesVector(b, c.Properties, clusterpb.MetaIcebergCreateTableCmdStartPropertiesVector)
@@ -3087,6 +3408,7 @@ func encodeMetaIcebergCreateTableCmd(c IcebergCreateTableCmd) ([]byte, error) {
 	clusterpb.MetaIcebergCreateTableCmdAddIdentifier(b, identOff)
 	clusterpb.MetaIcebergCreateTableCmdAddMetadataLocation(b, locationOff)
 	clusterpb.MetaIcebergCreateTableCmdAddProperties(b, propsVec)
+	clusterpb.MetaIcebergCreateTableCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergCreateTableCmdEnd(b)), nil
 }
 
@@ -3103,6 +3425,7 @@ func decodeMetaIcebergCreateTableCmd(data []byte) (IcebergCreateTableCmd, error)
 	}
 	return IcebergCreateTableCmd{
 		RequestID:        string(t.RequestId()),
+		Warehouse:        string(t.Warehouse()),
 		Identifier:       ident,
 		MetadataLocation: string(t.MetadataLocation()),
 		Properties:       readKeyValueProperties(t.PropertiesLength(), t.Properties),
@@ -3112,6 +3435,7 @@ func decodeMetaIcebergCreateTableCmd(data []byte) (IcebergCreateTableCmd, error)
 func encodeMetaIcebergCommitTableCmd(c IcebergCommitTableCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	identOff := buildIcebergIdentifier(b, c.Identifier)
 	expectedOff := b.CreateString(c.ExpectedMetadataLocation)
 	nextOff := b.CreateString(c.NewMetadataLocation)
@@ -3120,6 +3444,7 @@ func encodeMetaIcebergCommitTableCmd(c IcebergCommitTableCmd) ([]byte, error) {
 	clusterpb.MetaIcebergCommitTableCmdAddIdentifier(b, identOff)
 	clusterpb.MetaIcebergCommitTableCmdAddExpectedMetadataLocation(b, expectedOff)
 	clusterpb.MetaIcebergCommitTableCmdAddNewMetadataLocation(b, nextOff)
+	clusterpb.MetaIcebergCommitTableCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergCommitTableCmdEnd(b)), nil
 }
 
@@ -3136,6 +3461,7 @@ func decodeMetaIcebergCommitTableCmd(data []byte) (IcebergCommitTableCmd, error)
 	}
 	return IcebergCommitTableCmd{
 		RequestID:                string(t.RequestId()),
+		Warehouse:                string(t.Warehouse()),
 		Identifier:               ident,
 		ExpectedMetadataLocation: string(t.ExpectedMetadataLocation()),
 		NewMetadataLocation:      string(t.NewMetadataLocation()),
@@ -3145,10 +3471,12 @@ func decodeMetaIcebergCommitTableCmd(data []byte) (IcebergCommitTableCmd, error)
 func encodeMetaIcebergDeleteTableCmd(c IcebergDeleteTableCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	requestIDOff := b.CreateString(c.RequestID)
+	warehouseOff := b.CreateString(c.Warehouse)
 	identOff := buildIcebergIdentifier(b, c.Identifier)
 	clusterpb.MetaIcebergDeleteTableCmdStart(b)
 	clusterpb.MetaIcebergDeleteTableCmdAddRequestId(b, requestIDOff)
 	clusterpb.MetaIcebergDeleteTableCmdAddIdentifier(b, identOff)
+	clusterpb.MetaIcebergDeleteTableCmdAddWarehouse(b, warehouseOff)
 	return fbFinish(b, clusterpb.MetaIcebergDeleteTableCmdEnd(b)), nil
 }
 
@@ -3165,6 +3493,7 @@ func decodeMetaIcebergDeleteTableCmd(data []byte) (IcebergDeleteTableCmd, error)
 	}
 	return IcebergDeleteTableCmd{
 		RequestID:  string(t.RequestId()),
+		Warehouse:  string(t.Warehouse()),
 		Identifier: ident,
 	}, nil
 }
@@ -3462,6 +3791,20 @@ func encodeMetaPutShardGroupCmd(sg ShardGroupEntry) ([]byte, error) {
 	return fbFinish(b, clusterpb.MetaPutShardGroupCmdEnd(b)), nil
 }
 
+// icebergDefaultWarehouse is the warehouse key used for legacy single-warehouse
+// installations and for commands that carry an empty warehouse string (pre-T38
+// raft log entries replayed after upgrade).
+const icebergDefaultWarehouse = "default"
+
+// icebergWarehouseKey returns warehouse if non-empty, falling back to
+// icebergDefaultWarehouse for legacy / single-warehouse mode.
+func icebergWarehouseKey(warehouse string) string {
+	if warehouse == "" {
+		return icebergDefaultWarehouse
+	}
+	return warehouse
+}
+
 func icebergNamespaceKey(namespace []string) string {
 	return strings.Join(namespace, "\x1f")
 }
@@ -3508,6 +3851,7 @@ func cloneIcebergIdent(in icebergcatalog.Identifier) icebergcatalog.Identifier {
 
 func cloneIcebergTableEntry(in IcebergTableEntry) IcebergTableEntry {
 	return IcebergTableEntry{
+		Warehouse:        in.Warehouse,
 		Identifier:       cloneIcebergIdent(in.Identifier),
 		MetadataLocation: in.MetadataLocation,
 		Properties:       cloneStringMap(in.Properties),
@@ -3594,9 +3938,11 @@ func buildIcebergNamespaceEntriesVector(b *flatbuffers.Builder, entries []Iceber
 	for i := len(entries) - 1; i >= 0; i-- {
 		namespaceVec := buildStringVector(b, entries[i].Namespace, clusterpb.IcebergNamespaceEntryStartNamespaceVector)
 		propsVec := buildKeyValuePropertiesVector(b, entries[i].Properties, clusterpb.IcebergNamespaceEntryStartPropertiesVector)
+		warehouseOff := b.CreateString(entries[i].Warehouse)
 		clusterpb.IcebergNamespaceEntryStart(b)
 		clusterpb.IcebergNamespaceEntryAddNamespace(b, namespaceVec)
 		clusterpb.IcebergNamespaceEntryAddProperties(b, propsVec)
+		clusterpb.IcebergNamespaceEntryAddWarehouse(b, warehouseOff)
 		offsets[i] = clusterpb.IcebergNamespaceEntryEnd(b)
 	}
 	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, len(offsets))
@@ -3612,10 +3958,12 @@ func buildIcebergTableEntriesVector(b *flatbuffers.Builder, entries []IcebergTab
 		identOff := buildIcebergIdentifier(b, entries[i].Identifier)
 		locationOff := b.CreateString(entries[i].MetadataLocation)
 		propsVec := buildKeyValuePropertiesVector(b, entries[i].Properties, clusterpb.IcebergTableEntryStartPropertiesVector)
+		warehouseOff := b.CreateString(entries[i].Warehouse)
 		clusterpb.IcebergTableEntryStart(b)
 		clusterpb.IcebergTableEntryAddIdentifier(b, identOff)
 		clusterpb.IcebergTableEntryAddMetadataLocation(b, locationOff)
 		clusterpb.IcebergTableEntryAddProperties(b, propsVec)
+		clusterpb.IcebergTableEntryAddWarehouse(b, warehouseOff)
 		offsets[i] = clusterpb.IcebergTableEntryEnd(b)
 	}
 	clusterpb.MetaStateSnapshotStartIcebergTablesVector(b, len(offsets))

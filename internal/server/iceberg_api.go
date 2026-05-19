@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -16,7 +15,7 @@ func (s *Server) icebergListTables(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	tables, err := store.ListTables(ctx, []string{c.Param("namespace")})
+	tables, err := store.ListTables(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), []string{c.Param("namespace")})
 	if err != nil {
 		writeIcebergMappedError(c, err)
 		return
@@ -32,6 +31,7 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 	if !ok {
 		return
 	}
+	wh := catalogWarehouse(ctx, store.(warehouseProvider))
 	ns := []string{c.Param("namespace")}
 	req, err := parseIcebergCreateTableRequest(c.Request.Body())
 	if err != nil {
@@ -39,10 +39,17 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 		return
 	}
 	ident := icebergcatalog.Identifier{Namespace: ns, Name: req.Name}
-	location := fmt.Sprintf("%s/%s/%s", store.Warehouse(), ns[0], req.Name)
+	// Build the S3 object path from the physical S3 URI prefix, not from the
+	// logical warehouse key (wh). The warehouse key is FSM-only; using it
+	// directly produces a non-s3:// location that parseS3Location rejects.
+	s3Prefix := wh
+	if p, ok := store.(s3URLPrefixProvider); ok {
+		s3Prefix = p.S3URLPrefix()
+	}
+	location := icebergTableBasePath(s3Prefix, wh, ns[0], req.Name)
 	metadataLocation := location + "/metadata/00000.json"
 	metadata := buildInitialIcebergMetadata(location, req.Schema, req.Properties)
-	if _, err := store.LoadTable(ctx, ident); err == nil {
+	if _, err := store.LoadTable(ctx, wh, ident); err == nil {
 		writeIcebergMappedError(c, icebergcatalog.ErrTableExists)
 		return
 	} else if err != nil && !errors.Is(err, icebergcatalog.ErrTableNotFound) {
@@ -53,7 +60,7 @@ func (s *Server) icebergCreateTable(ctx context.Context, c *app.RequestContext) 
 		writeIcebergStorageError(c, err)
 		return
 	}
-	tbl, err := store.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+	tbl, err := store.CreateTable(ctx, wh, ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: metadataLocation,
 		Metadata:         metadata,
 		Properties:       req.Properties,
@@ -70,7 +77,7 @@ func (s *Server) icebergLoadTable(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	tbl, err := store.LoadTable(ctx, icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")})
+	tbl, err := store.LoadTable(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")})
 	if err != nil {
 		writeIcebergMappedError(c, err)
 		return
@@ -83,7 +90,7 @@ func (s *Server) icebergHeadTable(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	if _, err := store.LoadTable(ctx, icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}); err != nil {
+	if _, err := store.LoadTable(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}); err != nil {
 		writeIcebergMappedError(c, err)
 		return
 	}
@@ -99,7 +106,7 @@ func (s *Server) icebergDeleteTable(ctx context.Context, c *app.RequestContext) 
 		return
 	}
 	ident := icebergcatalog.Identifier{Namespace: []string{c.Param("namespace")}, Name: c.Param("table")}
-	if err := store.DeleteTable(ctx, ident); err != nil {
+	if err := store.DeleteTable(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), ident); err != nil {
 		writeIcebergMappedError(c, err)
 		return
 	}

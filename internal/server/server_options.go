@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/iam"
+	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
@@ -44,6 +45,22 @@ func WithIAMAudit(audit *iam.AuditLogger) Option {
 func WithPolicyAuthorizer(a *s3auth.Authorizer) Option {
 	return func(s *Server) {
 		s.policyAuthorizer = a
+	}
+}
+
+// WithJWTKeySet wires the JWT signing key set so the OAuth2 token endpoint
+// can mint bearer tokens.
+func WithJWTKeySet(ks *iamjwt.KeySet) Option {
+	return func(s *Server) {
+		s.jwtKeys = ks
+	}
+}
+
+// WithBearerConfig wires a ConfigReader so the iceberg bearer middleware can
+// check iam.anon-enabled and skip bearer requirement in Phase 0.
+func WithBearerConfig(cfg s3auth.ConfigReader) Option {
+	return func(s *Server) {
+		s.bearerCfg = cfg
 	}
 }
 

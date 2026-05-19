@@ -1,6 +1,82 @@
 # Changelog
 
-## [0.0.269.0] - 2026-05-20 - feat(cluster): zero-spool chunked multipart complete
+## [0.0.270.0] - 2026-05-20 - feat(auth): §4 Iceberg JWT + OAuth + warehouse-aware MetaCatalog
+
+§4 lands the Iceberg Auth layer: clients can now mint short-lived bearer tokens
+via OAuth2 `client_credentials`, hit any `/iceberg/v1/*` route with that token,
+and operate on per-warehouse table state that stays isolated across tenants.
+JWT signing keys rotate atomically across all cluster nodes (no split-brain),
+persist wrapped-at-rest in the meta-raft snapshot, and the catalog FSM is
+re-keyed per `(warehouse, namespace, table)` so two warehouses sharing a name
+no longer collide.
+
+### Added
+
+- **`internal/iam/jwt`** — HS256 mint/verify with `kid` dual-key rotation
+  window, `alg=none`/`RS256` rejection, 30s clock-skew, wrap-at-rest seeds
+  unwrapped via DEK. New errors: `ErrAlgNotHS256`, `ErrKidUnknown`,
+  `ErrClockSkew`, `ErrPrunePrev`.
+- **OAuth2 token endpoint** at `POST /iceberg/v1/oauth/tokens` and
+  `POST /_iceberg/v1/oauth/tokens`. Accepts `client_credentials` via form body
+  or HTTP Basic, validates `client_secret` in constant time, gates token mint
+  on `iceberg:GetCatalogConfig`, returns RFC 6749 `bearer` token type. Rejects
+  empty/URI-shaped/multi `PRINCIPAL_ROLE` scopes.
+- **Iceberg bearer middleware** (`internal/server/iceberg_authn.go`) — anon
+  short-circuit when `iam.anon-enabled=true`, JWT verify with case-insensitive
+  `Bearer ` prefix, warehouse-claim cross-check (`?warehouse=` query or path
+  segment must match `claims.Warehouse`), policy gate per-action.
+- **Warehouse-aware MetaCatalog** (D#14) — every method takes
+  `warehouse string`. FSM `icebergNamespaces`/`icebergTables` maps re-keyed
+  `map[warehouse]map[ns]X`. Metadata cache also warehouse-scoped to prevent
+  cross-warehouse evictions.
+- **JKEY snapshot trailer** (`0x59454B4A`) — wrapped JWT signing seeds
+  persisted as the outermost meta-FSM snapshot trailer (peels before IPST →
+  DKVS → GCFG → IAMG). MetaCmds 63 (`JWTSigningKeyRotate`) and 64
+  (`JWTSigningKeyPrune`) carry deterministic payloads minted on the leader.
+- **Iceberg snapshot schema v2** — entries carry warehouse field; v1
+  snapshots with data fail loud at restore (no silent default-warehouse
+  routing).
+
+### Changed
+
+- **Default warehouse identifier** is the constant `IcebergDefaultWarehouse`
+  (`"default"`) for FSM keys, separated from the S3 URL prefix used for object
+  paths. Boot constructors pass `defaultWarehouse + s3URLPrefix` separately.
+- **Metadata object paths** include the warehouse segment when the warehouse
+  is non-default and not equal to the S3 prefix (defense against bearer-claim
+  URI-shaped warehouse names plus segment collisions across tenants).
+- **Bearer requests bypass SigV4 verifier** at the auth middleware boundary.
+  Before, any `Authorization: Bearer …` Iceberg request was rejected as a
+  malformed SigV4 signature before reaching `icebergGuarded`.
+- **Restore atomicity** — meta-FSM Restore stages every decoded section in
+  locals and commits to `f.*` only after every trailer decode succeeds.
+  JKEY `LoadFromSeeds` runs against a scratch KeySet before commit.
+
+### Fixed
+
+- **Deterministic JWT MetaCmd apply** — `MetaCmdTypeJWTSigningKeyRotate`/
+  `Prune` previously called `rand.Read` + `Seal` + `time.Now` inside FSM
+  apply, so every node minted a different secret and tokens minted on node A
+  failed on node B. Mint moved to proposer; payload carries
+  `(kid, wrapped_secret, dek_gen, demoted_at_unix)`.
+- **JWT KeySet production wiring** — `bootSrvOptsAndReceipt` now threads
+  `metaRaft.FSM().JWTKeySet()` through `server.WithJWTKeySet(...)`. Previously
+  `s.jwtKeys` was nil at runtime, so OAuth returned 503 and bearer middleware
+  said "not configured".
+- **OAuth invalid-client timing** — unknown access_key path now runs a
+  constant-time compare against a sentinel before returning; access-key
+  enumeration via response latency no longer works.
+- **Legacy `icebergcatalog.Store` warehouse guard** — single-warehouse
+  fallback Store rejects non-default warehouse values instead of silently
+  ignoring them.
+
+### Removed
+
+- Silent fallback that mapped empty PRINCIPAL_ROLE scope to the default
+  warehouse. OAuth now returns `400 invalid_scope` when the warehouse is
+  empty, URI-shaped, contains `/`, or contains `..`.
+
+
 
 Large multipart completion in cluster mode now streams completed parts directly
 into the segment writer and commits the final object with one atomic raft

@@ -136,6 +136,59 @@ func TestMetaFSM_Snapshot_NoIAMData_BackwardCompat(t *testing.T) {
 	}
 }
 
+// TestMetaFSM_Restore_IAM_AtomicCommit verifies the F17 fix: the IAM state
+// is committed via RestoreFrom (single atomic state-pointer swap) rather
+// than a second ReadSnapshot call that could fail after core FSM fields are
+// already committed. Confirms that (a) the SA and key survive the roundtrip,
+// and (b) the destination store's LookupKey works immediately after Restore
+// (regression guard: the old Reset+ReadSnapshot path was functionally
+// equivalent but could error post-commit; RestoreFrom is error-free).
+func TestMetaFSM_Restore_IAM_AtomicCommit(t *testing.T) {
+	enc := newIAMTestEncryptor(t)
+	store := iam.NewStore()
+	applier := iam.NewApplier(store, enc)
+	now := time.Unix(1700000001, 0).UTC()
+	if err := applier.ApplySACreate(buildSACreatePayloadForTest("sa-atomic", "atomic-test", now)); err != nil {
+		t.Fatalf("ApplySACreate: %v", err)
+	}
+	wrapped, err := iam.WrapSecret(enc, "sa-atomic", "super-secret")
+	if err != nil {
+		t.Fatalf("WrapSecret: %v", err)
+	}
+	if err := applier.ApplyKeyCreate(buildKeyCreatePayloadForTest("AKATOMIC1", "sa-atomic", wrapped, now)); err != nil {
+		t.Fatalf("ApplyKeyCreate: %v", err)
+	}
+
+	f := NewMetaFSM()
+	f.SetIAM(store, applier)
+	snap, err := f.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Restore into a fresh FSM. RestoreFrom must commit iamTempStore in one
+	// atomic pointer swap — no second parse, no error path.
+	store2 := iam.NewStore()
+	applier2 := iam.NewApplier(store2, enc)
+	f2 := NewMetaFSM()
+	f2.SetIAM(store2, applier2)
+	if err := f2.Restore(raft.SnapshotMeta{}, snap); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	// SA and key must be visible immediately after Restore.
+	if _, ok := store2.LookupSA("sa-atomic"); !ok {
+		t.Fatal("SA missing after atomic IAM Restore")
+	}
+	k, ok := store2.LookupKey("AKATOMIC1")
+	if !ok {
+		t.Fatal("AccessKey missing after atomic IAM Restore")
+	}
+	if k.SecretKey != "super-secret" {
+		t.Fatalf("decrypted secret = %q, want super-secret", k.SecretKey)
+	}
+}
+
 // TestMetaFSM_Snapshot_LegacySnapshot_Restores_NoIAM confirms that snapshots
 // produced by pre-Phase-5d code (no IAM trailer) still restore cleanly. We
 // fabricate a legacy snapshot by stripping the trailer from a fresh one.

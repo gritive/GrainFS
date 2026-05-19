@@ -62,7 +62,7 @@ func newBootstrapCatalog() *bootstrapFakeCatalog {
 
 func (c *bootstrapFakeCatalog) Warehouse() string { return "s3://grainfs-audit/" }
 
-func (c *bootstrapFakeCatalog) CreateNamespace(_ context.Context, _ []string, _ map[string]string) error {
+func (c *bootstrapFakeCatalog) CreateNamespace(_ context.Context, _ string, _ []string, _ map[string]string) error {
 	if c.nsErr != nil {
 		return c.nsErr
 	}
@@ -72,15 +72,19 @@ func (c *bootstrapFakeCatalog) CreateNamespace(_ context.Context, _ []string, _ 
 	return nil
 }
 
-func (c *bootstrapFakeCatalog) LoadNamespace(_ context.Context, _ []string) (map[string]string, error) {
+func (c *bootstrapFakeCatalog) LoadNamespace(_ context.Context, _ string, _ []string) (map[string]string, error) {
 	return nil, nil
 }
 
-func (c *bootstrapFakeCatalog) ListNamespaces(_ context.Context) ([][]string, error) { return nil, nil }
+func (c *bootstrapFakeCatalog) ListNamespaces(_ context.Context, _ string) ([][]string, error) {
+	return nil, nil
+}
 
-func (c *bootstrapFakeCatalog) DeleteNamespace(_ context.Context, _ []string) error { return nil }
+func (c *bootstrapFakeCatalog) DeleteNamespace(_ context.Context, _ string, _ []string) error {
+	return nil
+}
 
-func (c *bootstrapFakeCatalog) CreateTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+func (c *bootstrapFakeCatalog) CreateTable(_ context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
 	tbl := &icebergcatalog.Table{
 		Identifier:       ident,
 		MetadataLocation: in.MetadataLocation,
@@ -92,7 +96,7 @@ func (c *bootstrapFakeCatalog) CreateTable(_ context.Context, ident icebergcatal
 	return tbl, nil
 }
 
-func (c *bootstrapFakeCatalog) LoadTable(_ context.Context, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+func (c *bootstrapFakeCatalog) LoadTable(_ context.Context, _ string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
 	c.mu.Lock()
 	tbl, ok := c.tables[ident.Name]
 	c.mu.Unlock()
@@ -102,15 +106,15 @@ func (c *bootstrapFakeCatalog) LoadTable(_ context.Context, ident icebergcatalog
 	return tbl, nil
 }
 
-func (c *bootstrapFakeCatalog) ListTables(_ context.Context, _ []string) ([]icebergcatalog.Identifier, error) {
+func (c *bootstrapFakeCatalog) ListTables(_ context.Context, _ string, _ []string) ([]icebergcatalog.Identifier, error) {
 	return nil, nil
 }
 
-func (c *bootstrapFakeCatalog) DeleteTable(_ context.Context, _ icebergcatalog.Identifier) error {
+func (c *bootstrapFakeCatalog) DeleteTable(_ context.Context, _ string, _ icebergcatalog.Identifier) error {
 	return nil
 }
 
-func (c *bootstrapFakeCatalog) CommitTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+func (c *bootstrapFakeCatalog) CommitTable(_ context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
 	tbl := &icebergcatalog.Table{
 		Identifier:       ident,
 		MetadataLocation: in.NewMetadataLocation,
@@ -139,7 +143,7 @@ func TestBootstrap_CreatesTableOnFirstCall(t *testing.T) {
 	err := audit.Bootstrap(context.Background(), cat, backend)
 	require.NoError(t, err)
 
-	tbl, err := cat.LoadTable(context.Background(), icebergcatalog.Identifier{
+	tbl, err := cat.LoadTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
 	})
 	require.NoError(t, err)
@@ -159,7 +163,7 @@ func TestBootstrap_MigratesExistingV1Table(t *testing.T) {
 	cat := newBootstrapCatalog()
 	backend := newBootstrapBackend()
 	v1 := fmt.Sprintf(audit.S3InitialMetadataV1ForTest, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
-	_, err := cat.CreateTable(context.Background(), icebergcatalog.Identifier{
+	_, err := cat.CreateTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
 	}, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json",
@@ -169,7 +173,7 @@ func TestBootstrap_MigratesExistingV1Table(t *testing.T) {
 
 	require.NoError(t, audit.Bootstrap(context.Background(), cat, backend))
 
-	tbl, err := cat.LoadTable(context.Background(), icebergcatalog.Identifier{
+	tbl, err := cat.LoadTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
 	})
 	require.NoError(t, err)
@@ -185,7 +189,7 @@ func TestBootstrap_ToleratesConcurrentMetadataMigration(t *testing.T) {
 	cat.raceCommit = true
 	backend := newBootstrapBackend()
 	v1 := fmt.Sprintf(audit.S3InitialMetadataV1ForTest, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
-	_, err := cat.CreateTable(context.Background(), icebergcatalog.Identifier{
+	_, err := cat.CreateTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
 	}, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json",
@@ -195,7 +199,7 @@ func TestBootstrap_ToleratesConcurrentMetadataMigration(t *testing.T) {
 
 	require.NoError(t, audit.Bootstrap(context.Background(), cat, backend))
 
-	tbl, err := cat.LoadTable(context.Background(), icebergcatalog.Identifier{
+	tbl, err := cat.LoadTable(context.Background(), "", icebergcatalog.Identifier{
 		Namespace: []string{audit.Namespace}, Name: audit.TableS3,
 	})
 	require.NoError(t, err)

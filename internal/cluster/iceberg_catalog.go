@@ -17,16 +17,17 @@ import (
 )
 
 type MetaCatalog struct {
-	meta      *MetaRaft
-	backend   storage.Backend
-	warehouse string
-	forward   func(context.Context, []byte) error
-	read      *MetaCatalogReadSender
-	readPeers func() []string
-	nextID    atomic.Uint64
-	idPrefix  string // 16 hex chars from crypto/rand, unique per instance
-	cacheMu   sync.RWMutex
-	cache     map[string]cachedIcebergMetadata
+	meta        *MetaRaft
+	backend     storage.Backend
+	warehouse   string
+	s3URLPrefix string // S3 URI prefix for object-path construction (may differ from warehouse key)
+	forward     func(context.Context, []byte) error
+	read        *MetaCatalogReadSender
+	readPeers   func() []string
+	nextID      atomic.Uint64
+	idPrefix    string // 16 hex chars from crypto/rand, unique per instance
+	cacheMu     sync.RWMutex
+	cache       map[string]cachedIcebergMetadata
 }
 
 // newIcebergRequestIDPrefix returns a 16-char hex string from 8 random bytes.
@@ -44,30 +45,64 @@ type cachedIcebergMetadata struct {
 	metadata []byte
 }
 
-func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, warehouse string) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, idPrefix: newIcebergRequestIDPrefix()}
+// NewMetaCatalog constructs a MetaCatalog using IcebergDefaultWarehouse as the
+// logical warehouse key and s3URLPrefix as the physical S3 URI used for
+// object-path construction and credential overrides.
+func NewMetaCatalog(meta *MetaRaft, backend storage.Backend, s3URLPrefix string) *MetaCatalog {
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: IcebergDefaultWarehouse, s3URLPrefix: s3URLPrefix, idPrefix: newIcebergRequestIDPrefix()}
 }
 
-func NewMetaCatalogWithForwarder(meta *MetaRaft, backend storage.Backend, warehouse string, forward func(context.Context, []byte) error) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, idPrefix: newIcebergRequestIDPrefix()}
+// NewMetaCatalogWithForwarder is like NewMetaCatalog but wires a forward func
+// for leader-forwarding writes on follower nodes.
+func NewMetaCatalogWithForwarder(meta *MetaRaft, backend storage.Backend, s3URLPrefix string, forward func(context.Context, []byte) error) *MetaCatalog {
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: IcebergDefaultWarehouse, s3URLPrefix: s3URLPrefix, forward: forward, idPrefix: newIcebergRequestIDPrefix()}
 }
 
+// NewMetaCatalogWithForwarders is like NewMetaCatalogWithForwarder but also
+// wires read-forwarding to follower peers.
 func NewMetaCatalogWithForwarders(
 	meta *MetaRaft,
 	backend storage.Backend,
-	warehouse string,
+	s3URLPrefix string,
 	forward func(context.Context, []byte) error,
 	read *MetaCatalogReadSender,
 	readPeers func() []string,
 ) *MetaCatalog {
-	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
+	return &MetaCatalog{meta: meta, backend: backend, warehouse: IcebergDefaultWarehouse, s3URLPrefix: s3URLPrefix, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
 }
 
+// IcebergDefaultWarehouse is the warehouse key used for the single-warehouse
+// ("default") mode and for commands that carry an empty warehouse string.
+// It mirrors the FSM-side icebergDefaultWarehouse constant and is exported so
+// callers outside the cluster package can reference it (e.g. migration code,
+// tests).
+const IcebergDefaultWarehouse = "default"
+
+// Warehouse returns the logical warehouse key used as the FSM storage key.
+// Always returns IcebergDefaultWarehouse for MetaCatalog instances.
+// It is not part of the Catalog interface; callers use it via the
+// warehouseProvider interface to determine the storage-layer key.
 func (c *MetaCatalog) Warehouse() string { return c.warehouse }
 
-func (c *MetaCatalog) CreateNamespace(ctx context.Context, namespace []string, properties map[string]string) error {
+// S3URLPrefix returns the physical S3 URI used for object-path construction
+// and credential overrides (e.g. "s3://grainfs-tables/warehouse"). May differ
+// from Warehouse() which always returns the logical key ("default").
+func (c *MetaCatalog) S3URLPrefix() string { return c.s3URLPrefix }
+
+// resolveWarehouse returns w if non-empty, otherwise IcebergDefaultWarehouse
+// ("default"). The constructor's c.warehouse is preserved separately via
+// the Warehouse() getter for legacy callers that need it for object paths.
+func (c *MetaCatalog) resolveWarehouse(w string) string {
+	if w != "" {
+		return w
+	}
+	return IcebergDefaultWarehouse
+}
+
+func (c *MetaCatalog) CreateNamespace(ctx context.Context, warehouse string, namespace []string, properties map[string]string) error {
 	cmd := IcebergCreateNamespaceCmd{
 		RequestID:  c.requestID("create-namespace"),
+		Warehouse:  c.resolveWarehouse(warehouse),
 		Namespace:  namespace,
 		Properties: properties,
 	}
@@ -78,30 +113,32 @@ func (c *MetaCatalog) CreateNamespace(ctx context.Context, namespace []string, p
 	return c.propose(ctx, MetaCmdTypeIcebergCreateNamespace, payload, cmd.RequestID)
 }
 
-func (c *MetaCatalog) LoadNamespace(ctx context.Context, namespace []string) (map[string]string, error) {
+func (c *MetaCatalog) LoadNamespace(ctx context.Context, warehouse string, namespace []string) (map[string]string, error) {
+	wh := c.resolveWarehouse(warehouse)
 	if !c.meta.IsLeader() && c.read != nil {
-		return c.read.LoadNamespace(ctx, c.readTargets(), namespace)
+		return c.read.LoadNamespace(ctx, c.readTargets(), wh, namespace)
 	}
-	return c.loadNamespaceLocal(namespace)
+	return c.loadNamespaceLocal(wh, namespace)
 }
 
-func (c *MetaCatalog) loadNamespaceLocal(namespace []string) (map[string]string, error) {
-	entry, ok := c.meta.FSM().IcebergNamespace(namespace)
+func (c *MetaCatalog) loadNamespaceLocal(warehouse string, namespace []string) (map[string]string, error) {
+	entry, ok := c.meta.FSM().IcebergNamespace(warehouse, namespace)
 	if !ok {
 		return nil, icebergcatalog.ErrNamespaceNotFound
 	}
 	return cloneStringMap(entry.Properties), nil
 }
 
-func (c *MetaCatalog) ListNamespaces(ctx context.Context) ([][]string, error) {
+func (c *MetaCatalog) ListNamespaces(ctx context.Context, warehouse string) ([][]string, error) {
+	wh := c.resolveWarehouse(warehouse)
 	if !c.meta.IsLeader() && c.read != nil {
-		return c.read.ListNamespaces(ctx, c.readTargets())
+		return c.read.ListNamespaces(ctx, c.readTargets(), wh)
 	}
-	return c.listNamespacesLocal(), nil
+	return c.listNamespacesLocal(wh), nil
 }
 
-func (c *MetaCatalog) listNamespacesLocal() [][]string {
-	entries := c.meta.FSM().IcebergNamespaces()
+func (c *MetaCatalog) listNamespacesLocal(warehouse string) [][]string {
+	entries := c.meta.FSM().IcebergNamespaces(warehouse)
 	out := make([][]string, len(entries))
 	for i, entry := range entries {
 		out[i] = cloneStringSlice(entry.Namespace)
@@ -109,9 +146,10 @@ func (c *MetaCatalog) listNamespacesLocal() [][]string {
 	return out
 }
 
-func (c *MetaCatalog) DeleteNamespace(ctx context.Context, namespace []string) error {
+func (c *MetaCatalog) DeleteNamespace(ctx context.Context, warehouse string, namespace []string) error {
 	cmd := IcebergDeleteNamespaceCmd{
 		RequestID: c.requestID("delete-namespace"),
+		Warehouse: c.resolveWarehouse(warehouse),
 		Namespace: namespace,
 	}
 	payload, err := encodeMetaIcebergDeleteNamespaceCmd(cmd)
@@ -121,9 +159,11 @@ func (c *MetaCatalog) DeleteNamespace(ctx context.Context, namespace []string) e
 	return c.propose(ctx, MetaCmdTypeIcebergDeleteNamespace, payload, cmd.RequestID)
 }
 
-func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+func (c *MetaCatalog) CreateTable(ctx context.Context, warehouse string, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+	wh := c.resolveWarehouse(warehouse)
 	cmd := IcebergCreateTableCmd{
 		RequestID:        c.requestID("create-table"),
+		Warehouse:        wh,
 		Identifier:       ident,
 		MetadataLocation: in.MetadataLocation,
 		Properties:       in.Properties,
@@ -138,7 +178,7 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 	if !c.meta.IsLeader() && len(in.Metadata) > 0 {
 		metadata := make([]byte, len(in.Metadata))
 		copy(metadata, in.Metadata)
-		c.storeCachedMetadata(ident, in.MetadataLocation, metadata)
+		c.storeCachedMetadata(wh, ident, in.MetadataLocation, metadata)
 		return &icebergcatalog.Table{
 			Identifier:       ident,
 			MetadataLocation: in.MetadataLocation,
@@ -147,32 +187,33 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 		}, nil
 	}
 	if !c.meta.IsLeader() {
-		return c.LoadTable(ctx, ident)
+		return c.LoadTable(ctx, wh, ident)
 	}
-	tbl, err := c.loadTableLocal(ident)
+	tbl, err := c.loadTableLocal(wh, ident)
 	if err != nil {
 		return nil, err
 	}
-	c.storeCachedMetadata(ident, tbl.MetadataLocation, tbl.Metadata)
+	c.storeCachedMetadata(wh, ident, tbl.MetadataLocation, tbl.Metadata)
 	return tbl, nil
 }
 
-func (c *MetaCatalog) LoadTable(ctx context.Context, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+func (c *MetaCatalog) LoadTable(ctx context.Context, warehouse string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+	wh := c.resolveWarehouse(warehouse)
 	if !c.meta.IsLeader() && c.read != nil {
-		return c.read.LoadTable(ctx, c.readTargets(), ident)
+		return c.read.LoadTable(ctx, c.readTargets(), wh, ident)
 	}
-	return c.loadTableLocal(ident)
+	return c.loadTableLocal(wh, ident)
 }
 
-func (c *MetaCatalog) loadTableLocal(ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
-	entry, ok := c.meta.FSM().IcebergTable(ident)
+func (c *MetaCatalog) loadTableLocal(warehouse string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+	entry, ok := c.meta.FSM().IcebergTable(warehouse, ident)
 	if !ok {
-		if _, nsOK := c.meta.FSM().IcebergNamespace(ident.Namespace); !nsOK {
+		if _, nsOK := c.meta.FSM().IcebergNamespace(warehouse, ident.Namespace); !nsOK {
 			return nil, icebergcatalog.ErrNamespaceNotFound
 		}
 		return nil, icebergcatalog.ErrTableNotFound
 	}
-	if metadata, ok := c.cachedMetadata(ident, entry.MetadataLocation); ok {
+	if metadata, ok := c.cachedMetadata(warehouse, ident, entry.MetadataLocation); ok {
 		return &icebergcatalog.Table{
 			Identifier:       cloneIcebergIdent(entry.Identifier),
 			MetadataLocation: entry.MetadataLocation,
@@ -192,18 +233,19 @@ func (c *MetaCatalog) loadTableLocal(ident icebergcatalog.Identifier) (*icebergc
 	}, nil
 }
 
-func (c *MetaCatalog) ListTables(ctx context.Context, namespace []string) ([]icebergcatalog.Identifier, error) {
+func (c *MetaCatalog) ListTables(ctx context.Context, warehouse string, namespace []string) ([]icebergcatalog.Identifier, error) {
+	wh := c.resolveWarehouse(warehouse)
 	if !c.meta.IsLeader() && c.read != nil {
-		return c.read.ListTables(ctx, c.readTargets(), namespace)
+		return c.read.ListTables(ctx, c.readTargets(), wh, namespace)
 	}
-	return c.listTablesLocal(namespace)
+	return c.listTablesLocal(wh, namespace)
 }
 
-func (c *MetaCatalog) listTablesLocal(namespace []string) ([]icebergcatalog.Identifier, error) {
-	if _, ok := c.meta.FSM().IcebergNamespace(namespace); !ok {
+func (c *MetaCatalog) listTablesLocal(warehouse string, namespace []string) ([]icebergcatalog.Identifier, error) {
+	if _, ok := c.meta.FSM().IcebergNamespace(warehouse, namespace); !ok {
 		return nil, icebergcatalog.ErrNamespaceNotFound
 	}
-	entries := c.meta.FSM().IcebergTables(namespace)
+	entries := c.meta.FSM().IcebergTables(warehouse, namespace)
 	out := make([]icebergcatalog.Identifier, len(entries))
 	for i, entry := range entries {
 		out[i] = cloneIcebergIdent(entry.Identifier)
@@ -218,9 +260,10 @@ func (c *MetaCatalog) readTargets() []string {
 	return nil
 }
 
-func (c *MetaCatalog) DeleteTable(ctx context.Context, ident icebergcatalog.Identifier) error {
+func (c *MetaCatalog) DeleteTable(ctx context.Context, warehouse string, ident icebergcatalog.Identifier) error {
 	cmd := IcebergDeleteTableCmd{
 		RequestID:  c.requestID("delete-table"),
+		Warehouse:  c.resolveWarehouse(warehouse),
 		Identifier: ident,
 	}
 	payload, err := encodeMetaIcebergDeleteTableCmd(cmd)
@@ -230,13 +273,14 @@ func (c *MetaCatalog) DeleteTable(ctx context.Context, ident icebergcatalog.Iden
 	if err := c.propose(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID); err != nil {
 		return err
 	}
-	c.deleteCachedMetadata(ident)
+	c.deleteCachedMetadata(cmd.Warehouse, ident)
 	return nil
 }
 
-func (c *MetaCatalog) CommitTable(ctx context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+func (c *MetaCatalog) CommitTable(ctx context.Context, warehouse string, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
 	cmd := IcebergCommitTableCmd{
 		RequestID:                c.requestID("commit-table"),
+		Warehouse:                c.resolveWarehouse(warehouse),
 		Identifier:               ident,
 		ExpectedMetadataLocation: in.ExpectedMetadataLocation,
 		NewMetadataLocation:      in.NewMetadataLocation,
@@ -251,7 +295,7 @@ func (c *MetaCatalog) CommitTable(ctx context.Context, ident icebergcatalog.Iden
 	metadata := make([]byte, len(in.Metadata))
 	copy(metadata, in.Metadata)
 	if len(metadata) > 0 {
-		c.storeCachedMetadata(ident, in.NewMetadataLocation, metadata)
+		c.storeCachedMetadata(cmd.Warehouse, ident, in.NewMetadataLocation, metadata)
 	}
 	return &icebergcatalog.Table{
 		Identifier:       ident,
@@ -274,9 +318,16 @@ func (c *MetaCatalog) propose(ctx context.Context, typ MetaCmdType, payload []by
 	return c.forward(ctx, data)
 }
 
-func (c *MetaCatalog) cachedMetadata(ident icebergcatalog.Identifier, location string) ([]byte, bool) {
+// icebergCacheKey returns a cache key scoped to both warehouse and table
+// identity. Using only the table identity (F18) caused cross-warehouse cache
+// collisions when two warehouses held the same (namespace, table) pair.
+func icebergCacheKey(warehouse string, ident icebergcatalog.Identifier) string {
+	return warehouse + ":" + icebergTableKey(ident)
+}
+
+func (c *MetaCatalog) cachedMetadata(warehouse string, ident icebergcatalog.Identifier, location string) ([]byte, bool) {
 	c.cacheMu.RLock()
-	entry, ok := c.cache[icebergTableKey(ident)]
+	entry, ok := c.cache[icebergCacheKey(warehouse, ident)]
 	c.cacheMu.RUnlock()
 	if !ok || entry.location != location {
 		return nil, false
@@ -286,21 +337,21 @@ func (c *MetaCatalog) cachedMetadata(ident icebergcatalog.Identifier, location s
 	return metadata, true
 }
 
-func (c *MetaCatalog) storeCachedMetadata(ident icebergcatalog.Identifier, location string, metadata []byte) {
+func (c *MetaCatalog) storeCachedMetadata(warehouse string, ident icebergcatalog.Identifier, location string, metadata []byte) {
 	c.cacheMu.Lock()
 	if c.cache == nil {
 		c.cache = make(map[string]cachedIcebergMetadata)
 	}
-	c.cache[icebergTableKey(ident)] = cachedIcebergMetadata{
+	c.cache[icebergCacheKey(warehouse, ident)] = cachedIcebergMetadata{
 		location: location,
 		metadata: append([]byte(nil), metadata...),
 	}
 	c.cacheMu.Unlock()
 }
 
-func (c *MetaCatalog) deleteCachedMetadata(ident icebergcatalog.Identifier) {
+func (c *MetaCatalog) deleteCachedMetadata(warehouse string, ident icebergcatalog.Identifier) {
 	c.cacheMu.Lock()
-	delete(c.cache, icebergTableKey(ident))
+	delete(c.cache, icebergCacheKey(warehouse, ident))
 	c.cacheMu.Unlock()
 }
 

@@ -107,9 +107,12 @@ func bootMetaRaftWiring(state *bootState) error {
 
 	// T33: construct + wire the cluster config store. This is the §1 gap
 	// (previously deferred) — needed so s3auth.Authorizer can read iam.anon-enabled
-	// at request time. No reload hooks for now (nil hooks are no-ops per keys.go).
+	// at request time.
+	// T39: JWT signing-key rotate/prune triggers are wired here so that a
+	// cluster-config PATCH to jwt.signing-key-rotate / jwt.signing-key-prune
+	// propagates the MetaCmd to the meta-raft FSM on every node.
 	cfgStore := config.NewStore()
-	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{})
+	config.RegisterClusterKeys(cfgStore, wireJWTReloadHooks(metaRaft, state.dekKeeper))
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
 	return nil

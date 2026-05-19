@@ -90,8 +90,16 @@ func (rcv *MetaIcebergCreateTableCmd) PropertiesLength() int {
 	return 0
 }
 
+func (rcv *MetaIcebergCreateTableCmd) Warehouse() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func MetaIcebergCreateTableCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func MetaIcebergCreateTableCmdAddRequestId(builder *flatbuffers.Builder, requestId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(requestId), 0)
@@ -107,6 +115,9 @@ func MetaIcebergCreateTableCmdAddProperties(builder *flatbuffers.Builder, proper
 }
 func MetaIcebergCreateTableCmdStartPropertiesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func MetaIcebergCreateTableCmdAddWarehouse(builder *flatbuffers.Builder, warehouse flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(warehouse), 0)
 }
 func MetaIcebergCreateTableCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

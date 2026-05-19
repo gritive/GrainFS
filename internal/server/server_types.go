@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
+	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -108,6 +109,9 @@ type Server struct {
 	degradedFlag  atomic.Bool
 	blockCache    *blockcache.Cache
 	shardCache    *shardcache.Cache
+	jwtKeys       *iamjwt.KeySet
+	oauthHandler  *icebergOAuthHandler
+	bearerCfg     s3auth.ConfigReader // iam.anon-enabled check for bearer JWT path
 
 	// Iceberg §9.1 진단 계측 (default OFF). NewWithServerStorage가 boot 시 ENV에서 읽는다.
 	icebergAccessLogEnabled      atomic.Bool

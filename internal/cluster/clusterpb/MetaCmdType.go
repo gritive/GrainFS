@@ -70,6 +70,8 @@ const (
 	MetaCmdTypeBucketPolicyPut              MetaCmdType = 60
 	MetaCmdTypeBucketPolicyDelete           MetaCmdType = 61
 	MetaCmdTypeCreateBucketWithPolicyAttach MetaCmdType = 62
+	MetaCmdTypeJWTSigningKeyRotate          MetaCmdType = 63
+	MetaCmdTypeJWTSigningKeyPrune           MetaCmdType = 64
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -136,6 +138,8 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeBucketPolicyPut:              "BucketPolicyPut",
 	MetaCmdTypeBucketPolicyDelete:           "BucketPolicyDelete",
 	MetaCmdTypeCreateBucketWithPolicyAttach: "CreateBucketWithPolicyAttach",
+	MetaCmdTypeJWTSigningKeyRotate:          "JWTSigningKeyRotate",
+	MetaCmdTypeJWTSigningKeyPrune:           "JWTSigningKeyPrune",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -202,6 +206,8 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"BucketPolicyPut":              MetaCmdTypeBucketPolicyPut,
 	"BucketPolicyDelete":           MetaCmdTypeBucketPolicyDelete,
 	"CreateBucketWithPolicyAttach": MetaCmdTypeCreateBucketWithPolicyAttach,
+	"JWTSigningKeyRotate":          MetaCmdTypeJWTSigningKeyRotate,
+	"JWTSigningKeyPrune":           MetaCmdTypeJWTSigningKeyPrune,
 }
 
 func (v MetaCmdType) String() string {

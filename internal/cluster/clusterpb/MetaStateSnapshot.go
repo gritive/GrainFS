@@ -248,8 +248,20 @@ func (rcv *MetaStateSnapshot) NfsExportsLength() int {
 	return 0
 }
 
+func (rcv *MetaStateSnapshot) IcebergSchemaVersion() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *MetaStateSnapshot) MutateIcebergSchemaVersion(n int32) bool {
+	return rcv._tab.MutateInt32Slot(24, n)
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(10)
+	builder.StartObject(11)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -307,6 +319,9 @@ func MetaStateSnapshotAddNfsExports(builder *flatbuffers.Builder, nfsExports fla
 }
 func MetaStateSnapshotStartNfsExportsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func MetaStateSnapshotAddIcebergSchemaVersion(builder *flatbuffers.Builder, icebergSchemaVersion int32) {
+	builder.PrependInt32Slot(10, icebergSchemaVersion, 0)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -79,6 +79,12 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 
 		isIceberg := routeSurfaceForPath(path) == routeSurfaceIceberg
 		if isIceberg {
+			// Bearer requests skip SigV4 entirely — the icebergGuarded middleware
+			// on each route performs JWT verification and policy gating.
+			if hasBearerPrefix(r.Header.Get("Authorization")) {
+				c.Next(ctx)
+				return
+			}
 			if reason := icebergSkewReject(r); reason != "" {
 				s.recordAuditAuthFailure(ctx, c, consts.StatusUnauthorized, "authn")
 				writeIcebergError(c, 401, "NotAuthorizedException", reason)
@@ -129,6 +135,19 @@ func icebergSkewReject(r *http.Request) string {
 		return "request signature outside allowed time window"
 	}
 	return ""
+}
+
+// hasBearerPrefix reports whether s begins with a case-insensitive "bearer "
+// prefix (7 bytes). RFC 6750 requires "Bearer" but the OAuth token endpoint
+// emits token_type:"bearer" (lowercase), so clients may send either form.
+func hasBearerPrefix(s string) bool {
+	return len(s) >= 7 && strings.EqualFold(s[:7], "Bearer ")
+}
+
+// trimBearerPrefix strips the case-insensitive "Bearer " prefix from s and
+// returns the remaining token. Callers must have checked hasBearerPrefix first.
+func trimBearerPrefix(s string) string {
+	return s[7:]
 }
 
 // isLocalhostAddr reports whether addr (typically from c.RemoteAddr().String(),

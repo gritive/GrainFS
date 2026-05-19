@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -43,15 +44,15 @@ func TestMetaCatalogLoadTableReadsMetadataFromWarehouseObject(t *testing.T) {
 	catalog := NewMetaCatalog(m, backend, "s3://grainfs-tables/warehouse")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
-	_, err = catalog.CreateTable(ctx, icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}, icebergcatalog.CreateTableInput{
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, "", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Metadata:         json.RawMessage(`{"wrong":true}`),
 		Properties:       map[string]string{"format-version": "2"},
 	})
 	require.NoError(t, err)
 
-	tbl, err := catalog.LoadTable(ctx, icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
+	tbl, err := catalog.LoadTable(ctx, "", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
 	require.NoError(t, err)
 	require.JSONEq(t, string(metadata), string(tbl.Metadata))
 	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
@@ -79,14 +80,14 @@ func TestMetaCatalogLoadTableReusesMetadataReadAfterCreate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
-	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
-	_, err = catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Metadata:         json.RawMessage(`{"wrong":true}`),
 	})
 	require.NoError(t, err)
 
-	tbl, err := catalog.LoadTable(ctx, ident)
+	tbl, err := catalog.LoadTable(ctx, "", ident)
 	require.NoError(t, err)
 	require.JSONEq(t, string(metadata), string(tbl.Metadata))
 	require.Equal(t, int64(1), backend.gets.Load())
@@ -114,8 +115,8 @@ func BenchmarkMetaCatalogLoadTableRepeated(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
-	require.NoError(b, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
-	_, err = catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+	require.NoError(b, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	_, err = catalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 	})
 	require.NoError(b, err)
@@ -123,7 +124,7 @@ func BenchmarkMetaCatalogLoadTableRepeated(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := catalog.LoadTable(context.Background(), ident); err != nil {
+		if _, err := catalog.LoadTable(context.Background(), "", ident); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -153,46 +154,46 @@ func TestMetaCatalogLeaderListCommitAndDelete(t *testing.T) {
 	catalog := NewMetaCatalog(m, backend, "s3://grainfs-tables/warehouse")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, map[string]string{"owner": "eng"}))
-	require.NoError(t, catalog.CreateNamespace(ctx, []string{"staging"}, nil))
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, map[string]string{"owner": "eng"}))
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"staging"}, nil))
 
-	namespaces, err := catalog.ListNamespaces(ctx)
+	namespaces, err := catalog.ListNamespaces(ctx, "")
 	require.NoError(t, err)
 	require.ElementsMatch(t, [][]string{{"analytics"}, {"staging"}}, namespaces)
-	props, err := catalog.LoadNamespace(ctx, []string{"analytics"})
+	props, err := catalog.LoadNamespace(ctx, "", []string{"analytics"})
 	require.NoError(t, err)
 	require.Equal(t, "eng", props["owner"])
 
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
-	_, err = catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+	_, err = catalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Properties:       map[string]string{"format-version": "2"},
 	})
 	require.NoError(t, err)
-	tables, err := catalog.ListTables(ctx, []string{"analytics"})
+	tables, err := catalog.ListTables(ctx, "", []string{"analytics"})
 	require.NoError(t, err)
 	require.Equal(t, []icebergcatalog.Identifier{ident}, tables)
 
-	_, err = catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+	_, err = catalog.CommitTable(ctx, "", ident, icebergcatalog.CommitTableInput{
 		ExpectedMetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		NewMetadataLocation:      "s3://grainfs-tables/warehouse/analytics/events/metadata/00001.json",
 	})
 	require.NoError(t, err)
-	committed, err := catalog.LoadTable(ctx, ident)
+	committed, err := catalog.LoadTable(ctx, "", ident)
 	require.NoError(t, err)
 	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00001.json", committed.MetadataLocation)
 	require.JSONEq(t, string(nextMetadata), string(committed.Metadata))
 
-	_, err = catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+	_, err = catalog.CommitTable(ctx, "", ident, icebergcatalog.CommitTableInput{
 		ExpectedMetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		NewMetadataLocation:      "s3://grainfs-tables/warehouse/analytics/events/metadata/00002.json",
 	})
 	require.ErrorIs(t, err, icebergcatalog.ErrCommitFailed)
-	require.ErrorIs(t, catalog.DeleteNamespace(ctx, []string{"analytics"}), icebergcatalog.ErrNamespaceNotEmpty)
-	require.NoError(t, catalog.DeleteTable(ctx, ident))
-	_, err = catalog.LoadTable(ctx, ident)
+	require.ErrorIs(t, catalog.DeleteNamespace(ctx, "", []string{"analytics"}), icebergcatalog.ErrNamespaceNotEmpty)
+	require.NoError(t, catalog.DeleteTable(ctx, "", ident))
+	_, err = catalog.LoadTable(ctx, "", ident)
 	require.ErrorIs(t, err, icebergcatalog.ErrTableNotFound)
-	require.NoError(t, catalog.DeleteNamespace(ctx, []string{"analytics"}))
+	require.NoError(t, catalog.DeleteNamespace(ctx, "", []string{"analytics"}))
 }
 
 func TestMetaCatalogFollowerWriteUsesForwarderTypedResult(t *testing.T) {
@@ -205,7 +206,7 @@ func TestMetaCatalogFollowerWriteUsesForwarderTypedResult(t *testing.T) {
 		return icebergcatalog.ErrNamespaceExists
 	})
 
-	err := catalog.CreateNamespace(context.Background(), []string{"analytics"}, nil)
+	err := catalog.CreateNamespace(context.Background(), "", []string{"analytics"}, nil)
 	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceExists)
 	require.Equal(t, 1, calls)
 }
@@ -241,8 +242,9 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, catalog.CreateNamespace(ctx, []string{"analytics"}, nil))
-	_, ok := leader.FSM().IcebergNamespace([]string{"analytics"})
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	// empty warehouse arg resolves to IcebergDefaultWarehouse ("default").
+	_, ok := leader.FSM().IcebergNamespace(IcebergDefaultWarehouse, []string{"analytics"})
 	require.True(t, ok)
 }
 
@@ -289,8 +291,8 @@ func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, leaderCatalog.CreateNamespace(ctx, []string{"analytics"}, nil))
-	tbl, err := followerCatalog.CreateTable(ctx, icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}, icebergcatalog.CreateTableInput{
+	require.NoError(t, leaderCatalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
+	tbl, err := followerCatalog.CreateTable(ctx, "", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}, icebergcatalog.CreateTableInput{
 		MetadataLocation: metadataLocation,
 	})
 	require.NoError(t, err)
@@ -337,10 +339,10 @@ func TestMetaCatalogFollowerCreateTableReturnsProvidedMetadataWithoutLeaderObjec
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	require.NoError(t, leaderCatalog.CreateNamespace(ctx, []string{"analytics"}, nil))
+	require.NoError(t, leaderCatalog.CreateNamespace(ctx, "", []string{"analytics"}, nil))
 	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
 	metadata := json.RawMessage(`{"format-version":2,"current-snapshot-id":7}`)
-	tbl, err := followerCatalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+	tbl, err := followerCatalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json",
 		Metadata:         metadata,
 		Properties:       map[string]string{"format-version": "2"},
@@ -716,4 +718,181 @@ func BenchmarkForwardingObjectIndexProposerApplyWait(b *testing.B) {
 
 	b.Run("poll_fsm", func(b *testing.B) { bench(b, false) })
 	b.Run("forwarded_apply_index", func(b *testing.B) { bench(b, true) })
+}
+
+// TestMetaCatalog_TwoWarehousesIsolated verifies that namespaces and tables
+// created in one warehouse are not visible in another.
+func TestMetaCatalog_TwoWarehousesIsolated(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	catA := NewMetaCatalog(m, backend, "s3://bucket/warehouse-a")
+	catB := NewMetaCatalog(m, backend, "s3://bucket/warehouse-b")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Use explicit warehouse names to verify cross-warehouse isolation.
+	// (Passing "" resolves to IcebergDefaultWarehouse for both catalogs,
+	// so explicit keys are required here.)
+	whA := "warehouse-a"
+	whB := "warehouse-b"
+
+	// Create namespace "analytics" in warehouse-a only.
+	require.NoError(t, catA.CreateNamespace(ctx, whA, []string{"analytics"}, map[string]string{"owner": "team-a"}))
+
+	// warehouse-a sees it.
+	props, err := catA.LoadNamespace(ctx, whA, []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "team-a", props["owner"])
+
+	// warehouse-b does NOT see it.
+	_, err = catB.LoadNamespace(ctx, whB, []string{"analytics"})
+	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceNotFound, "warehouse-b should not see warehouse-a namespace")
+
+	// ListNamespaces is also isolated.
+	nsA, err := catA.ListNamespaces(ctx, whA)
+	require.NoError(t, err)
+	require.Len(t, nsA, 1)
+	nsB, err := catB.ListNamespaces(ctx, whB)
+	require.NoError(t, err)
+	require.Empty(t, nsB)
+
+	// Create same namespace in warehouse-b independently.
+	require.NoError(t, catB.CreateNamespace(ctx, whB, []string{"analytics"}, map[string]string{"owner": "team-b"}))
+	propsB, err := catB.LoadNamespace(ctx, whB, []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "team-b", propsB["owner"])
+
+	// Delete in warehouse-a does not affect warehouse-b.
+	require.NoError(t, catA.DeleteNamespace(ctx, whA, []string{"analytics"}))
+	_, err = catA.LoadNamespace(ctx, whA, []string{"analytics"})
+	require.ErrorIs(t, err, icebergcatalog.ErrNamespaceNotFound)
+	propsB2, err := catB.LoadNamespace(ctx, whB, []string{"analytics"})
+	require.NoError(t, err)
+	require.Equal(t, "team-b", propsB2["owner"])
+}
+
+// TestMetaCatalog_EmptyWarehouseResolvesToDefault verifies that passing "" as
+// the warehouse argument to MetaCatalog methods resolves to
+// IcebergDefaultWarehouse ("default"), not to the constructor's S3 URI.
+func TestMetaCatalog_EmptyWarehouseResolvesToDefault(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { backend.Close() })
+
+	// Constructor warehouse is an S3 URI — different from IcebergDefaultWarehouse.
+	catalog := NewMetaCatalog(m, backend, "s3://example-warehouse")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// CreateNamespace with "" warehouse — should land under "default", not under the S3 URI.
+	require.NoError(t, catalog.CreateNamespace(ctx, "", []string{"ns"}, nil))
+
+	// Verify via FSM using IcebergDefaultWarehouse key.
+	_, ok := m.FSM().IcebergNamespace(IcebergDefaultWarehouse, []string{"ns"})
+	require.True(t, ok, "namespace should be stored under IcebergDefaultWarehouse")
+
+	// Verify it is NOT stored under the constructor S3 URI key.
+	_, notOK := m.FSM().IcebergNamespace("s3://example-warehouse", []string{"ns"})
+	require.False(t, notOK, "namespace should NOT be stored under the S3-URI warehouse key")
+}
+
+// TestMetaCatalog_DefaultWarehouseIsConst is an F15 regression test.
+// NewMetaCatalog (and its variants) must always return IcebergDefaultWarehouse
+// from Warehouse(), regardless of the s3URLPrefix passed at construction.
+// The S3 URI prefix must be accessible via S3URLPrefix() unchanged.
+func TestMetaCatalog_DefaultWarehouseIsConst(t *testing.T) {
+	const s3Prefix = "s3://grainfs-tables/warehouse"
+
+	cat := NewMetaCatalog(nil, nil, s3Prefix)
+	assert.Equal(t, IcebergDefaultWarehouse, cat.Warehouse(),
+		"Warehouse() must always return IcebergDefaultWarehouse (F15)")
+	assert.Equal(t, s3Prefix, cat.S3URLPrefix(),
+		"S3URLPrefix() must return the constructor s3URLPrefix arg unchanged (F15)")
+
+	catFwd := NewMetaCatalogWithForwarder(nil, nil, s3Prefix, nil)
+	assert.Equal(t, IcebergDefaultWarehouse, catFwd.Warehouse(),
+		"NewMetaCatalogWithForwarder: Warehouse() must return IcebergDefaultWarehouse (F15)")
+	assert.Equal(t, s3Prefix, catFwd.S3URLPrefix(),
+		"NewMetaCatalogWithForwarder: S3URLPrefix() must return s3URLPrefix (F15)")
+
+	catFwds := NewMetaCatalogWithForwarders(nil, nil, s3Prefix, nil, nil, nil)
+	assert.Equal(t, IcebergDefaultWarehouse, catFwds.Warehouse(),
+		"NewMetaCatalogWithForwarders: Warehouse() must return IcebergDefaultWarehouse (F15)")
+	assert.Equal(t, s3Prefix, catFwds.S3URLPrefix(),
+		"NewMetaCatalogWithForwarders: S3URLPrefix() must return s3URLPrefix (F15)")
+}
+
+// TestMetaCatalog_MetadataCache_WarehouseScoped verifies that the metadata
+// cache uses warehouse-scoped keys (F18). Two warehouses with the same
+// (namespace, table) identifier but different metadata must not cross-contaminate.
+func TestMetaCatalog_MetadataCache_WarehouseScoped(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background()))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond)
+
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { local.Close() })
+	require.NoError(t, local.CreateBucket(context.Background(), "bucket"))
+
+	metaA := json.RawMessage(`{"format-version":2,"table-uuid":"aaa"}`)
+	metaB := json.RawMessage(`{"format-version":2,"table-uuid":"bbb"}`)
+	locA := "s3://bucket/warehouse-a/ns/events/metadata/00000.json"
+	locB := "s3://bucket/warehouse-b/ns/events/metadata/00000.json"
+
+	// Write both metadata objects to the backend.
+	_, err = local.PutObject(context.Background(), "bucket", "warehouse-a/ns/events/metadata/00000.json", bytes.NewReader(metaA), "application/json")
+	require.NoError(t, err)
+	_, err = local.PutObject(context.Background(), "bucket", "warehouse-b/ns/events/metadata/00000.json", bytes.NewReader(metaB), "application/json")
+	require.NoError(t, err)
+
+	catA := NewMetaCatalog(m, local, "s3://bucket/warehouse-a")
+	catB := NewMetaCatalog(m, local, "s3://bucket/warehouse-b")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Create namespaces and tables under explicit warehouse keys.
+	whA, whB := "warehouse-a", "warehouse-b"
+	require.NoError(t, catA.CreateNamespace(ctx, whA, []string{"ns"}, nil))
+	require.NoError(t, catB.CreateNamespace(ctx, whB, []string{"ns"}, nil))
+
+	_, err = catA.CreateTable(ctx, whA, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"},
+		icebergcatalog.CreateTableInput{MetadataLocation: locA, Metadata: metaA})
+	require.NoError(t, err)
+	_, err = catB.CreateTable(ctx, whB, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"},
+		icebergcatalog.CreateTableInput{MetadataLocation: locB, Metadata: metaB})
+	require.NoError(t, err)
+
+	// Load from warehouse-a: metadata must be metaA, not metaB.
+	tblA, err := catA.LoadTable(ctx, whA, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(metaA), string(tblA.Metadata), "warehouse-a LoadTable must return warehouse-a metadata")
+
+	// Load from warehouse-b: metadata must be metaB, not metaA.
+	tblB, err := catB.LoadTable(ctx, whB, icebergcatalog.Identifier{Namespace: []string{"ns"}, Name: "events"})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(metaB), string(tblB.Metadata), "warehouse-b LoadTable must return warehouse-b metadata")
 }

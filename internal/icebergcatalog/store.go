@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -46,16 +47,15 @@ type CommitTableInput struct {
 }
 
 type Catalog interface {
-	Warehouse() string
-	CreateNamespace(ctx context.Context, namespace []string, properties map[string]string) error
-	LoadNamespace(ctx context.Context, namespace []string) (map[string]string, error)
-	ListNamespaces(ctx context.Context) ([][]string, error)
-	DeleteNamespace(ctx context.Context, namespace []string) error
-	CreateTable(ctx context.Context, ident Identifier, in CreateTableInput) (*Table, error)
-	LoadTable(ctx context.Context, ident Identifier) (*Table, error)
-	ListTables(ctx context.Context, namespace []string) ([]Identifier, error)
-	DeleteTable(ctx context.Context, ident Identifier) error
-	CommitTable(ctx context.Context, ident Identifier, in CommitTableInput) (*Table, error)
+	CreateNamespace(ctx context.Context, warehouse string, namespace []string, properties map[string]string) error
+	LoadNamespace(ctx context.Context, warehouse string, namespace []string) (map[string]string, error)
+	ListNamespaces(ctx context.Context, warehouse string) ([][]string, error)
+	DeleteNamespace(ctx context.Context, warehouse string, namespace []string) error
+	CreateTable(ctx context.Context, warehouse string, ident Identifier, in CreateTableInput) (*Table, error)
+	LoadTable(ctx context.Context, warehouse string, ident Identifier) (*Table, error)
+	ListTables(ctx context.Context, warehouse string, namespace []string) ([]Identifier, error)
+	DeleteTable(ctx context.Context, warehouse string, ident Identifier) error
+	CommitTable(ctx context.Context, warehouse string, ident Identifier, in CommitTableInput) (*Table, error)
 }
 
 type Store struct {
@@ -80,13 +80,37 @@ type LegacyTable struct {
 	Properties       map[string]string
 }
 
+// defaultWarehouse is the canonical single-warehouse key. It mirrors
+// cluster.IcebergDefaultWarehouse; the constant is copied here to avoid an
+// import cycle (icebergcatalog is imported by cluster, so it cannot import
+// cluster in return).
+const defaultWarehouse = "default"
+
 func NewStore(db *badger.DB, warehouse string) *Store {
 	return &Store{db: db, warehouse: warehouse}
 }
 
 func (s *Store) Warehouse() string { return s.warehouse }
 
-func (s *Store) CreateNamespace(_ context.Context, namespace []string, properties map[string]string) error {
+// checkWarehouse returns an error when the caller requests a warehouse that
+// does not match this Store's own warehouse. Store is a single-warehouse
+// implementation whose BadgerDB keys are not partitioned by warehouse name.
+// Silently accepting a foreign warehouse would cause data written for
+// warehouse-A to be readable under warehouse-B keys, violating isolation.
+//
+// Accepted values: "" (unset / SigV4 anonymous), s.warehouse (the store's own
+// configured warehouse), and "default" (the canonical legacy warehouse key).
+func (s *Store) checkWarehouse(warehouse string) error {
+	if warehouse == "" || warehouse == s.warehouse || warehouse == defaultWarehouse {
+		return nil
+	}
+	return fmt.Errorf("legacy single-warehouse icebergcatalog.Store cannot handle warehouse=%q (only %q supported)", warehouse, defaultWarehouse)
+}
+
+func (s *Store) CreateNamespace(_ context.Context, warehouse string, namespace []string, properties map[string]string) error {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return err
+	}
 	key := namespaceKey(namespace)
 	val, err := json.Marshal(namespaceRecord{Namespace: namespace, Properties: cloneMap(properties)})
 	if err != nil {
@@ -102,7 +126,10 @@ func (s *Store) CreateNamespace(_ context.Context, namespace []string, propertie
 	})
 }
 
-func (s *Store) LoadNamespace(_ context.Context, namespace []string) (map[string]string, error) {
+func (s *Store) LoadNamespace(_ context.Context, warehouse string, namespace []string) (map[string]string, error) {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return nil, err
+	}
 	var rec namespaceRecord
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(namespaceKey(namespace))
@@ -120,7 +147,10 @@ func (s *Store) LoadNamespace(_ context.Context, namespace []string) (map[string
 	return cloneMap(rec.Properties), nil
 }
 
-func (s *Store) ListNamespaces(_ context.Context) ([][]string, error) {
+func (s *Store) ListNamespaces(_ context.Context, warehouse string) ([][]string, error) {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return nil, err
+	}
 	var out [][]string
 	err := s.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -181,7 +211,10 @@ func (s *Store) ExportLegacyRows(_ context.Context) (LegacyExport, error) {
 	return out, err
 }
 
-func (s *Store) DeleteNamespace(_ context.Context, namespace []string) error {
+func (s *Store) DeleteNamespace(_ context.Context, warehouse string, namespace []string) error {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return err
+	}
 	return s.db.Update(func(txn *badger.Txn) error {
 		if _, err := txn.Get(namespaceKey(namespace)); err == badger.ErrKeyNotFound {
 			return ErrNamespaceNotFound
@@ -201,7 +234,10 @@ func (s *Store) DeleteNamespace(_ context.Context, namespace []string) error {
 	})
 }
 
-func (s *Store) CreateTable(_ context.Context, ident Identifier, in CreateTableInput) (*Table, error) {
+func (s *Store) CreateTable(_ context.Context, warehouse string, ident Identifier, in CreateTableInput) (*Table, error) {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return nil, err
+	}
 	rec := tableRecord{
 		Identifier:       cloneIdent(ident),
 		MetadataLocation: in.MetadataLocation,
@@ -231,7 +267,10 @@ func (s *Store) CreateTable(_ context.Context, ident Identifier, in CreateTableI
 	return rec.table(), nil
 }
 
-func (s *Store) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+func (s *Store) LoadTable(_ context.Context, warehouse string, ident Identifier) (*Table, error) {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return nil, err
+	}
 	var rec tableRecord
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(tableKey(ident))
@@ -252,7 +291,10 @@ func (s *Store) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
 	return rec.table(), nil
 }
 
-func (s *Store) ListTables(_ context.Context, namespace []string) ([]Identifier, error) {
+func (s *Store) ListTables(_ context.Context, warehouse string, namespace []string) ([]Identifier, error) {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return nil, err
+	}
 	prefix := tableNamespacePrefix(namespace)
 	var out []Identifier
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -276,7 +318,10 @@ func (s *Store) ListTables(_ context.Context, namespace []string) ([]Identifier,
 	return out, err
 }
 
-func (s *Store) DeleteTable(_ context.Context, ident Identifier) error {
+func (s *Store) DeleteTable(_ context.Context, warehouse string, ident Identifier) error {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return err
+	}
 	return s.db.Update(func(txn *badger.Txn) error {
 		if _, err := txn.Get(tableKey(ident)); err == badger.ErrKeyNotFound {
 			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); nsErr == badger.ErrKeyNotFound {
@@ -290,7 +335,10 @@ func (s *Store) DeleteTable(_ context.Context, ident Identifier) error {
 	})
 }
 
-func (s *Store) CommitTable(_ context.Context, ident Identifier, in CommitTableInput) (*Table, error) {
+func (s *Store) CommitTable(_ context.Context, warehouse string, ident Identifier, in CommitTableInput) (*Table, error) {
+	if err := s.checkWarehouse(warehouse); err != nil {
+		return nil, err
+	}
 	var rec tableRecord
 	err := s.db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get(tableKey(ident))
