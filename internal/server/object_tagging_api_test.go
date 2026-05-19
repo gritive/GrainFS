@@ -7,19 +7,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
 // Local helpers — shared across tagging HTTP tests (Task 16, 17, 19)
-func taggingPutBucket(t *testing.T, url string, sign func(*http.Request), bucket string) {
+// taggingPutBucket creates the bucket directly via the backend (bucket creation
+// is admin-UDS-only on the data plane per D#8, so the HTTP PUT /:bucket path
+// always returns 403).
+func taggingPutBucket(t *testing.T, backend *storage.LocalBackend, bucket string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, url+"/"+bucket, nil)
-	require.NoError(t, err)
-	sign(req)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	mustCreateBucket(t, backend, bucket)
 }
 
 func taggingPutObject(t *testing.T, url string, sign func(*http.Request), bucket, key, body string) {
@@ -43,8 +41,8 @@ func taggingDo(t *testing.T, sign func(*http.Request), req *http.Request) *http.
 }
 
 func TestPutObjectTagging_Roundtrip(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
 	body := []byte(`<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
@@ -66,8 +64,8 @@ func TestPutObjectTagging_Roundtrip(t *testing.T) {
 }
 
 func TestPutObjectTagging_RejectInvalid(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
 	body := []byte(`<Tagging><TagSet><Tag><Key>aws:env</Key><Value>x</Value></Tag></TagSet></Tagging>`)
@@ -81,8 +79,8 @@ func TestPutObjectTagging_RejectInvalid(t *testing.T) {
 }
 
 func TestDeleteObjectTagging_Idempotent(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
 	for i := 0; i < 2; i++ {
@@ -95,8 +93,8 @@ func TestDeleteObjectTagging_Idempotent(t *testing.T) {
 }
 
 func TestPutObject_WithTaggingHeader(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 
 	req, err := http.NewRequest(http.MethodPut, url+"/b/k", strings.NewReader("body"))
 	require.NoError(t, err)
@@ -117,8 +115,8 @@ func TestPutObject_WithTaggingHeader(t *testing.T) {
 }
 
 func TestPutObject_WithTaggingHeader_InvalidRejected(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 
 	req, err := http.NewRequest(http.MethodPut, url+"/b/k", strings.NewReader("body"))
 	require.NoError(t, err)
@@ -129,8 +127,8 @@ func TestPutObject_WithTaggingHeader_InvalidRejected(t *testing.T) {
 }
 
 func TestCreateMultipartUpload_WithTaggingHeader(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 
 	// Create multipart upload with tags
 	req, err := http.NewRequest(http.MethodPost, url+"/b/k?uploads", nil)
@@ -142,8 +140,8 @@ func TestCreateMultipartUpload_WithTaggingHeader(t *testing.T) {
 }
 
 func TestCreateMultipartUpload_WithTaggingHeader_InvalidRejected(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 
 	req, err := http.NewRequest(http.MethodPost, url+"/b/k?uploads", nil)
 	require.NoError(t, err)
@@ -154,8 +152,8 @@ func TestCreateMultipartUpload_WithTaggingHeader_InvalidRejected(t *testing.T) {
 }
 
 func TestCopyObject_WithTaggingDirectiveReplace(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 	taggingPutObject(t, url, sign, "b", "src", "body")
 
 	// Tag the source object

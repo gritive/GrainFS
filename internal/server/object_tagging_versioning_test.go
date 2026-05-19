@@ -66,8 +66,8 @@ func getTaggingBody(t *testing.T, url string, sign func(*http.Request), bucket, 
 
 func TestTagging_VersionedBucket_PerVersion(t *testing.T) {
 	t.Skip("LocalBackend does not implement BucketVersioner; per-version tags covered by Task 21 E2E Cluster4Node fixture")
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 	putBucketVersioning(t, url, sign, "b")
 
 	v1 := putObjectAndReturnVersionID(t, url, sign, "b", "k", "v1")
@@ -80,8 +80,8 @@ func TestTagging_VersionedBucket_PerVersion(t *testing.T) {
 }
 
 func TestTagging_ETagUnchanged(t *testing.T) {
-	url, sign, _ := setupECAuthServer(t)
-	taggingPutBucket(t, url, sign, "b")
+	url, sign, backend := setupECAuthServer(t)
+	taggingPutBucket(t, backend, "b")
 	taggingPutObject(t, url, sign, "b", "k", "body")
 
 	// Read ETag before tagging.
