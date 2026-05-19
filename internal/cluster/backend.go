@@ -1348,11 +1348,56 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	})
 }
 
-// SetObjectTags replicates a tag mutation through Raft so every replica sees
-// the update. Implemented fully in Task 12; this stub satisfies the receiver
-// handler compile-time dependency introduced in Task 11.
+// SetObjectTags satisfies storage.ObjectTagsSetter. Replicates the tag
+// mutation through Raft so every replica converges on the same tag set.
+// VersionID="" targets the current version; VersionID!="" targets a
+// specific version. Passing nil tags clears the tag set. Does not modify
+// ETag, LastModified, ACL, or blob bytes.
 func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
-	return fmt.Errorf("SetObjectTags: not yet implemented")
+	ctx := context.Background()
+	// Pre-check: object must exist locally before we propose. Mirrors SetObjectACL.
+	if _, err := b.HeadObject(ctx, bucket, key); err != nil {
+		return err
+	}
+	return b.propose(ctx, CmdSetObjectTags, SetObjectTagsCmd{
+		Bucket:    bucket,
+		Key:       key,
+		VersionID: versionID,
+		Tags:      tags,
+	})
+}
+
+// GetObjectTags satisfies storage.ObjectTagsGetter. Reads from the local
+// FSM-consistent view; writes flow through Raft and replicate to every
+// node, so the local view is always current modulo replication lag.
+func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	var result []storage.Tag
+	err := b.db.View(func(txn *badger.Txn) error {
+		dbKey := b.ks().ObjectMetaKey(bucket, key)
+		if versionID != "" {
+			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)
+		}
+		item, err := txn.Get(dbKey)
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrObjectNotFound
+		}
+		if err != nil {
+			return err
+		}
+		val, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalObjectMeta(val)
+		if err != nil {
+			return err
+		}
+		if len(m.Tags) > 0 {
+			result = append([]storage.Tag(nil), m.Tags...)
+		}
+		return nil
+	})
+	return result, err
 }
 
 // GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"
@@ -4114,6 +4159,7 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 				LastModified:   m.LastModified,
 				ETag:           m.ETag,
 				Size:           m.Size,
+				Tags:           append([]storage.Tag(nil), m.Tags...), // Task 7 carry-over
 			}
 			versions = append(versions, &v)
 		}

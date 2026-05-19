@@ -654,6 +654,8 @@ func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
 	return obj
 }
 
+// TODO(post-launch): widen ObjectIndexEntry with Tags if List-via-coordinator
+// must surface tags. Today clients call GetObjectTagging separately.
 func objectIndexEntryToVersion(entry ObjectIndexEntry, isLatest bool) *storage.ObjectVersion {
 	return &storage.ObjectVersion{
 		Key:            entry.Key,
