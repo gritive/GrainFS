@@ -112,7 +112,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	// cluster-config PATCH to jwt.signing-key-rotate / jwt.signing-key-prune
 	// propagates the MetaCmd to the meta-raft FSM on every node.
 	cfgStore := config.NewStore()
-	config.RegisterClusterKeys(cfgStore, wireJWTReloadHooks(metaRaft))
+	config.RegisterClusterKeys(cfgStore, wireJWTReloadHooks(metaRaft, state.dekKeeper))
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
 	return nil

@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -846,32 +845,29 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		if f.dekKeeper == nil {
 			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: DEK keeper not wired")
 		}
-		secret := make([]byte, 32)
-		if _, err := rand.Read(secret); err != nil {
-			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: rand secret: %w", err)
-		}
-		wrapped, gen, err := f.dekKeeper.Seal(secret)
+		kid, wrapped, dekGen, demotedAtUnix, err := decodeMetaJWTSigningKeyRotateCmd(cmd.DataBytes())
 		if err != nil {
-			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: seal jwt secret: %w", err)
+			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: decode: %w", err)
 		}
-		kid, err := iamjwt.NewKid()
-		if err != nil {
-			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: %w", err)
-		}
-		now := time.Now()
+		demotedAt := time.Unix(demotedAtUnix, 0)
 		// Demote old current in the persistent store
-		f.jwtKeyStore.Demote(now)
+		f.jwtKeyStore.Demote(demotedAt)
 		// Install new current in the persistent store
-		seed := iamjwt.KeySeed{Kid: kid, WrappedSecret: wrapped, DekGen: gen, Role: "current"}
+		seed := iamjwt.KeySeed{Kid: kid, WrappedSecret: wrapped, DekGen: dekGen, Role: "current"}
 		f.jwtKeyStore.Put(seed)
 		// Reflect into the local in-process KeySet
-		f.jwtKeys.DemoteCurrentToPrevious(now)
+		f.jwtKeys.DemoteCurrentToPrevious(demotedAt)
 		if err := f.jwtKeys.InstallCurrent(seed, f.dekKeeper); err != nil {
 			return fmt.Errorf("meta_fsm: JWTSigningKeyRotate: install jwt key locally: %w", err)
 		}
 		return nil
 	case clusterpb.MetaCmdTypeJWTSigningKeyPrune:
-		if !f.jwtKeyStore.PrunePrevSafe(time.Now()) {
+		pruneAtUnix, err := decodeMetaJWTSigningKeyPruneCmd(cmd.DataBytes())
+		if err != nil {
+			return fmt.Errorf("meta_fsm: JWTSigningKeyPrune: decode: %w", err)
+		}
+		pruneAt := time.Unix(pruneAtUnix, 0)
+		if !f.jwtKeyStore.PrunePrevSafe(pruneAt) {
 			return iamjwt.ErrPrunePrev
 		}
 		f.jwtKeyStore.RemovePrev()

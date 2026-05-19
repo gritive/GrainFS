@@ -1009,6 +1009,25 @@ table MetaCreateBucketWithPolicyAttachCmd {
   attach_policy:string;
 }
 
+// MetaJWTSigningKeyRotateCmd payload: all random material is generated on the
+// proposer side (leader) so that every replica applies the same deterministic
+// bytes.  kid, wrapped_secret, and dek_gen are produced before Propose();
+// demoted_at_unix carries the leader's wall-clock unix-seconds so every node's
+// Demote() call records the same timestamp.
+table MetaJWTSigningKeyRotateCmd {
+  kid:string;
+  wrapped_secret:[ubyte];
+  dek_gen:uint32;
+  demoted_at_unix:int64;
+}
+
+// MetaJWTSigningKeyPruneCmd payload: prune_at_unix carries the leader's
+// wall-clock unix-seconds used to check PrunePrevSafe, so every replica
+// evaluates the same prune-safety window.
+table MetaJWTSigningKeyPruneCmd {
+  prune_at_unix:int64;
+}
+
 // ─── IPST snapshot trailer ────────────────────────────────────────────────────
 // MetaIAMPolicyStoresSnapshot is the IPST trailer payload: all 4 §2 in-memory
 // IAM policy stores (policystore, group, policyattach, bucketpolicy) serialized

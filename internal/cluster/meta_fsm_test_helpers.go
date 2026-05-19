@@ -15,3 +15,9 @@ func (f *MetaFSM) ApplyCmdForTest(cmd []byte) error {
 func EncodeMetaCmdForTest(cmdType MetaCmdType, payload []byte) ([]byte, error) {
 	return encodeMetaCmd(cmdType, payload)
 }
+
+// DecodeMetaJWTSigningKeyRotateCmdForTest exposes the private decode function
+// for tests in other packages (e.g. internal/serveruntime). Test-only.
+func DecodeMetaJWTSigningKeyRotateCmdForTest(data []byte) (kid string, wrappedSecret []byte, dekGen uint32, demotedAtUnix int64, err error) {
+	return decodeMetaJWTSigningKeyRotateCmd(data)
+}

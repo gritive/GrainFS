@@ -34,17 +34,34 @@ func applyDEKRotate(t *testing.T, fsm *MetaFSM) {
 	require.NoError(t, fsm.applyCmd(cmd))
 }
 
+// buildJWTRotatePayload builds a deterministic JWTSigningKeyRotate payload using
+// the keeper from fsm. All random material (secret, wrapped, kid) is generated
+// here (proposer side) so the FSM apply path receives only deterministic bytes.
+func buildJWTRotatePayload(t *testing.T, keeper *encrypt.DEKKeeper) []byte {
+	t.Helper()
+	secret := make([]byte, 32)
+	_, err := rand.Read(secret)
+	require.NoError(t, err)
+	wrapped, gen, err := keeper.Seal(secret)
+	require.NoError(t, err)
+	kid, err := iamjwt.NewKid()
+	require.NoError(t, err)
+	return EncodeMetaJWTSigningKeyRotateCmd(kid, wrapped, gen, time.Now().Unix())
+}
+
 // applyJWTRotate applies a JWTSigningKeyRotate command to the FSM.
 func applyJWTRotate(t *testing.T, fsm *MetaFSM) {
 	t.Helper()
-	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeJWTSigningKeyRotate, nil)
+	payload := buildJWTRotatePayload(t, fsm.dekKeeper)
+	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeJWTSigningKeyRotate, payload)
 	require.NoError(t, fsm.applyCmd(cmd))
 }
 
 // applyJWTPrune applies a JWTSigningKeyPrune command to the FSM.
 func applyJWTPrune(t *testing.T, fsm *MetaFSM) error {
 	t.Helper()
-	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeJWTSigningKeyPrune, nil)
+	payload := EncodeMetaJWTSigningKeyPruneCmd(time.Now().Unix())
+	cmd := buildMetaCmd(t, clusterpb.MetaCmdTypeJWTSigningKeyPrune, payload)
 	return fsm.applyCmd(cmd)
 }
 
