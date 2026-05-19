@@ -112,7 +112,18 @@ func bootMetaRaftWiring(state *bootState) error {
 	// cluster-config PATCH to jwt.signing-key-rotate / jwt.signing-key-prune
 	// propagates the MetaCmd to the meta-raft FSM on every node.
 	cfgStore := config.NewStore()
-	config.RegisterClusterKeys(cfgStore, wireJWTReloadHooks(metaRaft, state.dekKeeper))
+	hooks := wireJWTReloadHooks(metaRaft, state.dekKeeper)
+	// §5 T44: refuse runtime flips into an unsafe TLS posture. config.Store.Set
+	// rolls back on hook error, so a `grainfs config set iam.anon-enabled false`
+	// is rejected atomically when no cert + no trusted proxy is configured.
+	// The hook fires under the store's write lock, so it MUST NOT re-query
+	// cfgStore — trusted-proxy.cidr is tracked in an atomic snapshot kept
+	// fresh by a sibling OnTrustedProxyCIDR hook.
+	onAnon, onProxy, refreshProxy := wireTLSPostureHooks(state.cfg.DataDir, "")
+	hooks.OnAnonEnabledChange = onAnon
+	hooks.OnTrustedProxyCIDR = onProxy
+	state.refreshProxyCIDR = refreshProxy
+	config.RegisterClusterKeys(cfgStore, hooks)
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
 	return nil

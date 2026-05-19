@@ -94,6 +94,10 @@ type bootState struct {
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
+	// refreshProxyCIDR re-seeds the trusted-proxy.cidr atomic snapshot used by
+	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
+	// start (so any snapshot Restore has already populated cfgStore).
+	refreshProxyCIDR func(string)
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
