@@ -5,11 +5,13 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
 func TestEncryptedBadgerValueRoundTripAndNoPlaintext(t *testing.T) {
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -44,7 +46,7 @@ func TestEncryptedBadgerValueRoundTripAndNoPlaintext(t *testing.T) {
 
 func TestEncryptedBadgerValueRejectsWrongDomain(t *testing.T) {
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -62,7 +64,7 @@ func TestEncryptedBadgerValueRejectsWrongDomain(t *testing.T) {
 
 func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -97,7 +99,7 @@ func TestEncryptedBadgerValueRejectsWrongKey(t *testing.T) {
 
 func TestEncryptedBadgerValueReadsLegacyPlaintext(t *testing.T) {
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	require.NoError(t, err)
 	defer db.Close()
 
