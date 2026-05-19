@@ -265,17 +265,6 @@ Work these in order. Do not run them in parallel.
   body is consumed) and ensure the local cache write completes before the
   HTTP response body is closed.
 
-- [ ] **Cluster chunked multipart Complete path [P1]**: Phase 2 landed simple
-  chunked PUT/GET, but `DistributedBackend.putObjectChunked` still rejects
-  multipart parts with `chunked PUT with multipart parts: deferred to Phase 3`.
-  Implement zero-spool multipart completion so large multipart objects stream
-  ordered part readers directly into chunked segments, remove the full-object
-  Complete spool, and atomically commit both part metadata and segment metadata
-  in the same raft record. Spec:
-  `docs/superpowers/specs/2026-05-20-zero-spool-chunked-multipart-complete-design.md`.
-  Verify with `go test ./tests/e2e -run 'TestMultipartsE2E/ChunkedUploadPart' -count=1`
-  plus >16 MiB non-aligned final segment and segment-spans-part-boundary cases.
-
 - [ ] **PITR WAL replay carries segment metadata [P1]**: snapshot/restore now
   knows `Object.Segments`, but `storage/wal.Entry` still only carries scalar
   object metadata (`Bucket`, `Key`, `ETag`, `ContentType`, `Size`, `VersionID`).
