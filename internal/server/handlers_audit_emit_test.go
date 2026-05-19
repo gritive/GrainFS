@@ -382,7 +382,7 @@ func TestAuditEnvelope_DoesNotMarkNotFoundAsAuthDeny(t *testing.T) {
 	for _, ev := range events {
 		if ev.Operation == "GetObject" && ev.Bucket == "missing-audit-bucket" && ev.Key == "no-such-key" {
 			require.Equal(t, int32(http.StatusNotFound), ev.Status)
-			require.NotEqual(t, "deny", ev.AuthStatus)
+			require.Equal(t, "error", ev.AuthStatus)
 			return
 		}
 	}
