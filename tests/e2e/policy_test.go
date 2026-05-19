@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -15,89 +16,125 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestE2E_BucketPolicy_SetAndGet(t *testing.T) {
-	createBucket(t, "policy-test")
+// BucketPolicy tests probe the PutBucketPolicy / GetBucketPolicy /
+// DeleteBucketPolicy / policy-enforcement surface on both single-node and
+// 4-node cluster targets. The same test set runs against both fixtures to
+// prove the policy plane is at parity across topologies.
 
-	policy := `{
+func TestBucketPolicySetAndGetE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBucketPolicySetAndGetCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runBucketPolicySetAndGetCases(t, newSharedClusterS3Target(t))
+	})
+}
+
+func runBucketPolicySetAndGetCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	bucket := tgt.uniqueBucket(t, "polset")
+	cli := tgt.pickNode(0)
+	ctx := context.Background()
+
+	policy := fmt.Sprintf(`{
 		"Version": "2012-10-17",
 		"Statement": [{
 			"Effect": "Allow",
 			"Principal": "*",
 			"Action": ["s3:GetObject"],
-			"Resource": ["arn:aws:s3:::policy-test/*"]
+			"Resource": ["arn:aws:s3:::%s/*"]
 		}]
-	}`
+	}`, bucket)
 
-	_, err := testS3Client.PutBucketPolicy(context.Background(), &s3.PutBucketPolicyInput{
-		Bucket: aws.String("policy-test"),
+	_, err := cli.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+		Bucket: aws.String(bucket),
 		Policy: aws.String(policy),
 	})
 	require.NoError(t, err)
 
-	got, err := testS3Client.GetBucketPolicy(context.Background(), &s3.GetBucketPolicyInput{
-		Bucket: aws.String("policy-test"),
+	got, err := cli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
+		Bucket: aws.String(bucket),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, got.Policy)
 	assert.Contains(t, *got.Policy, "s3:GetObject")
 
-	_, err = testS3Client.DeleteBucketPolicy(context.Background(), &s3.DeleteBucketPolicyInput{
-		Bucket: aws.String("policy-test"),
+	_, err = cli.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
+		Bucket: aws.String(bucket),
 	})
 	require.NoError(t, err)
 }
 
-func TestE2E_BucketPolicy_InvalidJSON(t *testing.T) {
-	createBucket(t, "policy-invalid")
+func TestBucketPolicyInvalidJSONE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBucketPolicyInvalidJSONCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runBucketPolicyInvalidJSONCases(t, newSharedClusterS3Target(t))
+	})
+}
 
-	req := signedPolicyRequest(t, http.MethodPut, "policy-invalid", bytes.NewReader([]byte(`{invalid`)))
+func runBucketPolicyInvalidJSONCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	bucket := tgt.uniqueBucket(t, "polinval")
+
+	req := signedPolicyRequest(t, tgt, http.MethodPut, bucket, bytes.NewReader([]byte(`{invalid`)))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-func TestE2E_BucketPolicy_DenyAction(t *testing.T) {
-	createBucket(t, "policy-deny")
+func TestBucketPolicyDenyActionE2E(t *testing.T) {
+	t.Run("SingleNode", func(t *testing.T) {
+		runBucketPolicyDenyActionCases(t, newSingleNodeS3Target())
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runBucketPolicyDenyActionCases(t, newSharedClusterS3Target(t))
+	})
+}
 
-	// Upload an object first
-	_, err := testS3Client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket: aws.String("policy-deny"),
+func runBucketPolicyDenyActionCases(t *testing.T, tgt s3Target) {
+	t.Helper()
+	bucket := tgt.uniqueBucket(t, "poldeny")
+	cli := tgt.pickNode(0)
+	ctx := context.Background()
+
+	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
 		Key:    aws.String("secret.txt"),
 		Body:   strings.NewReader("secret data"),
 	})
 	require.NoError(t, err)
 
-	// Set policy that denies all access for any user
-	policy := `{
+	policy := fmt.Sprintf(`{
 		"Version": "2012-10-17",
 		"Statement": [{
 			"Effect": "Deny",
 			"Principal": "*",
 			"Action": ["s3:*"],
-			"Resource": ["arn:aws:s3:::policy-deny/*"]
+			"Resource": ["arn:aws:s3:::%s/*"]
 		}]
-	}`
+	}`, bucket)
 
-	req := signedPolicyRequest(t, http.MethodPut, "policy-deny", bytes.NewReader([]byte(policy)))
+	req := signedPolicyRequest(t, tgt, http.MethodPut, bucket, bytes.NewReader([]byte(policy)))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 
-	// Try to get the object — should be denied
-	req, _ = http.NewRequest(http.MethodGet, testServerURL+"/policy-deny/secret.txt", nil)
+	req, _ = http.NewRequest(http.MethodGet, tgt.endpoint(0)+"/"+bucket+"/secret.txt", nil)
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-func signedPolicyRequest(t *testing.T, method, bucket string, body io.Reader) *http.Request {
+func signedPolicyRequest(t *testing.T, tgt s3Target, method, bucket string, body io.Reader) *http.Request {
 	t.Helper()
-	req, err := http.NewRequest(method, testServerURL+"/"+bucket+"?policy", body)
+	req, err := http.NewRequest(method, tgt.endpoint(0)+"/"+bucket+"?policy", body)
 	require.NoError(t, err)
 	req.Host = req.URL.Host
-	s3auth.SignRequest(req, testAccessKey, testSecretKey, "us-east-1")
+	s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
 	return req
 }
