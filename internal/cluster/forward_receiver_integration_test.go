@@ -283,6 +283,26 @@ func TestForwardReceiver_HeadObject_DispatchesToBackend(t *testing.T) {
 		"HeadObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 }
 
+// TestForwardReceiver_HeadObjectVersion_DispatchesToBackend verifies the new
+// op decodes and routes through DataGroup.Backend; nil RaftNode yields NotLeader.
+func TestForwardReceiver_HeadObjectVersion_DispatchesToBackend(t *testing.T) {
+	rcv, mgr := setupReceiver(t, "node1")
+
+	mockDist := &DistributedBackend{}
+	gb := WrapDistributedBackend("g1", mockDist)
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
+
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObjectVersion, buildHeadObjectVersionArgs("hv-bucket", "hv-key", "vid-1"))
+	msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
+
+	reply := rcv.Handle(msg)
+	require.NotNil(t, reply)
+
+	fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status(),
+		"HeadObjectVersion should decode and attempt dispatch, returning NotLeader for nil RaftNode")
+}
+
 // TestForwardReceiver_DeleteObject_DispatchesToBackend verifies DeleteObject operation.
 func TestForwardReceiver_DeleteObject_DispatchesToBackend(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
