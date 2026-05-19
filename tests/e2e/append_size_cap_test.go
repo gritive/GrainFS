@@ -24,19 +24,17 @@ import (
 // without races across tests; newDedicatedSingleNodeS3Target spawns its own
 // grainfs process with the cap arg threaded through.
 func TestAppendSizeCapE2E(t *testing.T) {
+	smallCap := int64(4 * 1024)
+	capArg := []string{"--append-size-cap-bytes", fmt.Sprintf("%d", smallCap)}
+
 	t.Run("SingleNode", func(t *testing.T) {
-		smallCap := int64(4 * 1024)
-		capArg := []string{"--append-size-cap-bytes", fmt.Sprintf("%d", smallCap)}
+		tgt := newDedicatedSingleNodeS3Target(t, capArg)
+		runSizeCapCases(t, tgt, smallCap)
+	})
 
-		t.Run("SingleNode", func(t *testing.T) {
-			tgt := newDedicatedSingleNodeS3Target(t, capArg)
-			runSizeCapCases(t, tgt, smallCap)
-		})
-
-		t.Run("Cluster4Node", func(t *testing.T) {
-			tgt := newClusterS3TargetWithExtraArgs(t, 4, capArg)
-			runSizeCapCases(t, tgt, smallCap)
-		})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		tgt := newClusterS3TargetWithExtraArgs(t, 4, capArg)
+		runSizeCapCases(t, tgt, smallCap)
 	})
 }
 
