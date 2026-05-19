@@ -33,6 +33,19 @@ type Object struct {
 	// pre-B2 appendable objects.
 	Coalesced    []CoalescedRef
 	IsAppendable bool
+	// Parts is non-empty only for objects produced by CompleteMultipartUpload.
+	// Entries are sorted ascending by PartNumber. The S3 GetObject/HeadObject
+	// ?partNumber=N handler uses this to compute the byte range for part N.
+	Parts []MultipartPartEntry
+}
+
+// MultipartPartEntry records one part of a CompleteMultipartUpload object.
+// Offset within the assembled object is the prefix-sum of preceding
+// entries' Size; storing offset is redundant and risks divergence.
+type MultipartPartEntry struct {
+	PartNumber int
+	Size       int64
+	ETag       string
 }
 
 // SegmentRef identifies one EC-encoded encrypted segment of an appendable

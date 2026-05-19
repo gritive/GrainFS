@@ -405,13 +405,13 @@ func TestListObjects(t *testing.T) {
 	http.DefaultClient.Do(req)
 
 	resp, _ := http.Get(base + "/mybucket")
-	var result listObjectsResult
+	var result listObjectsResultV1
 	xml.NewDecoder(resp.Body).Decode(&result)
 	resp.Body.Close()
 	assert.Len(t, result.Contents, 3)
 
 	resp, _ = http.Get(base + "/mybucket?prefix=docs/")
-	var prefixResult listObjectsResult
+	var prefixResult listObjectsResultV1
 	xml.NewDecoder(resp.Body).Decode(&prefixResult)
 	resp.Body.Close()
 	assert.Len(t, prefixResult.Contents, 2)
@@ -1128,7 +1128,7 @@ func TestListObjects_WithMaxKeys(t *testing.T) {
 
 	// List with max-keys=2
 	resp, _ := http.Get(base + "/mybucket?max-keys=2")
-	var result listObjectsResult
+	var result listObjectsResultV1
 	xml.NewDecoder(resp.Body).Decode(&result)
 	resp.Body.Close()
 	assert.LessOrEqual(t, len(result.Contents), 2)

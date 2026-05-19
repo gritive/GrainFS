@@ -38,6 +38,9 @@ type objectMeta struct {
 	// IsAppendable indicates the object was created via AppendObject and may
 	// continue to be appended to. False for legacy / multipart / PUT objects.
 	IsAppendable bool
+	// Parts carries the multipart parts list for CompleteMultipartUpload
+	// objects; nil for legacy single-blob and appendable objects.
+	Parts []storage.MultipartPartEntry
 }
 
 // CoalescedShardRef references a single coalesced blob produced by merging a
@@ -153,6 +156,24 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
 	}
 	metadataOff := buildKeyValuePropertiesVector(b, c.UserMetadata, clusterpb.PutObjectMetaCmdStartUserMetadataVector)
+	// parts — build child MultipartPartEntry tables BEFORE PutObjectMetaCmdStart.
+	var partsOff flatbuffers.UOffsetT
+	if len(c.Parts) > 0 {
+		partOffs := make([]flatbuffers.UOffsetT, len(c.Parts))
+		for i, p := range c.Parts {
+			etOff := b.CreateString(p.ETag)
+			clusterpb.MultipartPartEntryStart(b)
+			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+			clusterpb.MultipartPartEntryAddSize(b, p.Size)
+			clusterpb.MultipartPartEntryAddEtag(b, etOff)
+			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+		}
+		clusterpb.PutObjectMetaCmdStartPartsVector(b, len(partOffs))
+		for i := len(partOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partOffs[i])
+		}
+		partsOff = b.EndVector(len(partOffs))
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -183,6 +204,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if expectedETagOff != 0 {
 		clusterpb.PutObjectMetaCmdAddExpectedEtag(b, expectedETagOff)
 	}
+	if partsOff != 0 {
+		clusterpb.PutObjectMetaCmdAddParts(b, partsOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -198,6 +222,21 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		nodeIDs = make([]string, n)
 		for i := range nodeIDs {
 			nodeIDs[i] = string(t.NodeIds(i))
+		}
+	}
+	var parts []storage.MultipartPartEntry
+	if n := t.PartsLength(); n > 0 {
+		parts = make([]storage.MultipartPartEntry, n)
+		var pe clusterpb.MultipartPartEntry
+		for i := 0; i < n; i++ {
+			if !t.Parts(&pe, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode parts[%d]", i)
+			}
+			parts[i] = storage.MultipartPartEntry{
+				PartNumber: int(pe.PartNumber()),
+				Size:       pe.Size(),
+				ETag:       string(pe.Etag()),
+			}
 		}
 	}
 	return PutObjectMetaCmd{
@@ -218,6 +257,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ExpectedETag:     string(t.ExpectedEtag()),
 		PreserveLatest:   t.PreserveLatest(),
 		IsDeleteMarker:   t.IsDeleteMarker(),
+		Parts:            parts,
 	}, nil
 }
 
@@ -522,6 +562,24 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		}
 		coalescedOff = b.EndVector(len(cOffs))
 	}
+	// parts — build child MultipartPartEntry tables BEFORE ObjectMetaStart.
+	var partsOff flatbuffers.UOffsetT
+	if len(m.Parts) > 0 {
+		partOffs := make([]flatbuffers.UOffsetT, len(m.Parts))
+		for i, p := range m.Parts {
+			etOff := b.CreateString(p.ETag)
+			clusterpb.MultipartPartEntryStart(b)
+			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+			clusterpb.MultipartPartEntryAddSize(b, p.Size)
+			clusterpb.MultipartPartEntryAddEtag(b, etOff)
+			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+		}
+		clusterpb.ObjectMetaStartPartsVector(b, len(partOffs))
+		for i := len(partOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partOffs[i])
+		}
+		partsOff = b.EndVector(len(partOffs))
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -550,6 +608,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	}
 	if m.IsAppendable {
 		clusterpb.ObjectMetaAddIsAppendable(b, true)
+	}
+	if partsOff != 0 {
+		clusterpb.ObjectMetaAddParts(b, partsOff)
 	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
@@ -611,6 +672,21 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			}
 		}
 	}
+	var parts []storage.MultipartPartEntry
+	if n := t.PartsLength(); n > 0 {
+		parts = make([]storage.MultipartPartEntry, n)
+		var pe clusterpb.MultipartPartEntry
+		for i := 0; i < n; i++ {
+			if !t.Parts(&pe, i) {
+				return objectMeta{}, fmt.Errorf("decode parts[%d]", i)
+			}
+			parts[i] = storage.MultipartPartEntry{
+				PartNumber: int(pe.PartNumber()),
+				Size:       pe.Size(),
+				ETag:       string(pe.Etag()),
+			}
+		}
+	}
 	return objectMeta{
 		Key:              string(t.Key()),
 		Size:             t.Size(),
@@ -628,6 +704,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		Segments:         segments,
 		Coalesced:        coalesced,
 		IsAppendable:     t.IsAppendable(),
+		Parts:            parts,
 	}, nil
 }
 

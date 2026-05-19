@@ -69,8 +69,16 @@ func (rcv *ListObjectsArgs) MutateMaxKeys(n int32) bool {
 	return rcv._tab.MutateInt32Slot(8, n)
 }
 
+func (rcv *ListObjectsArgs) Marker() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func ListObjectsArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func ListObjectsArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -80,6 +88,9 @@ func ListObjectsArgsAddPrefix(builder *flatbuffers.Builder, prefix flatbuffers.U
 }
 func ListObjectsArgsAddMaxKeys(builder *flatbuffers.Builder, maxKeys int32) {
 	builder.PrependInt32Slot(2, maxKeys, 0)
+}
+func ListObjectsArgsAddMarker(builder *flatbuffers.Builder, marker flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(marker), 0)
 }
 func ListObjectsArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

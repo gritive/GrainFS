@@ -370,6 +370,7 @@ func buildObjectIndexEntry(group ShardGroupEntry, bucket, key string, obj *stora
 		ECParity:         uint8(ecCfg.ParityShards),
 		NodeIDs:          objectIndexNodeIDsForGroup(group, ecCfg),
 		IsDeleteMarker:   isDeleteMarker,
+		Parts:            obj.Parts,
 	}
 }
 
@@ -646,11 +647,29 @@ func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) 
 func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) *transport.Message {
 	ctx := context.Background()
 	la := raftpb.GetRootAsListObjectsArgs(args, 0)
-	objs, err := dg.Backend().ListObjects(ctx, string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
+	bucket := string(la.Bucket())
+	prefix := string(la.Prefix())
+	marker := string(la.Marker())
+	maxKeys := int(la.MaxKeys())
+	// dg.Backend() is *GroupBackend, which embeds *DistributedBackend and
+	// inherits ListObjectsPage. Honoring marker here keeps forwarded reads
+	// paginating correctly past the first window — pre-fix this dropped
+	// every page beyond marker silently because args carried no marker.
+	//
+	// The forward reply has no dedicated `truncated` slot, so we encode it
+	// in the length: request maxKeys+1 entries and let the coordinator
+	// detect truncation via `len(objs) > maxKeys`. Without the +1 the
+	// receiver caps at maxKeys, the coordinator sees ≤maxKeys, and
+	// IsTruncated is permanently false on cross-group reads.
+	probeMax := maxKeys
+	if probeMax > 0 {
+		probeMax = maxKeys + 1
+	}
+	objs, _, err := dg.Backend().ListObjectsPage(ctx, bucket, prefix, marker, probeMax)
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	return &transport.Message{Payload: buildObjectsReply(string(la.Bucket()), objs)}
+	return &transport.Message{Payload: buildObjectsReply(bucket, objs)}
 }
 
 func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) *transport.Message {

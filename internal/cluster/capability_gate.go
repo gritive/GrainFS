@@ -150,6 +150,26 @@ func (g *CapabilityGate) RequirePeerTransportCapability(capability string, op co
 	return plan, nil
 }
 
+// EvidenceSnapshot returns a copy of every node's currently-known capability
+// evidence as `peer → capability → ready`. Read-only — callers may keep the
+// result across gate mutations. Used by admin /v1/cluster/capabilities to let
+// operators (and the bench warmup probe) wait until every node has gossiped
+// its support for a given capability before sending traffic that the gate
+// would otherwise reject as "rolling upgrade".
+func (g *CapabilityGate) EvidenceSnapshot() map[string]map[string]bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make(map[string]map[string]bool, len(g.evidence))
+	for nodeID, ev := range g.evidence {
+		caps := make(map[string]bool, len(ev.Capabilities))
+		for capability, ready := range ev.Capabilities {
+			caps[capability] = ready && ev.Ready
+		}
+		out[string(nodeID)] = caps
+	}
+	return out
+}
+
 func (g *CapabilityGate) ValidatePlanStillCurrent(plan compat.GatePlan) error {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

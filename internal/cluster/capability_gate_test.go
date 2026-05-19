@@ -92,6 +92,31 @@ func TestCapabilityGateAllowsReadyFreshMembers(t *testing.T) {
 	require.Equal(t, raftConfigurationID(cfg), plan.ConfigID)
 }
 
+func TestCapabilityGateEvidenceSnapshot(t *testing.T) {
+	g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
+	now := time.Unix(10, 0)
+	g.ReportEvidence(compat.Evidence{
+		NodeID:       "node-1",
+		Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+		LastSeen:     now,
+		Ready:        true,
+	})
+	g.ReportEvidence(compat.Evidence{
+		NodeID:       "node-2",
+		Capabilities: map[string]bool{compat.CapabilityMultipartListingV1: true},
+		LastSeen:     now,
+		Ready:        false,
+	})
+
+	snap := g.EvidenceSnapshot()
+	require.True(t, snap["node-1"][compat.CapabilityMultipartListingV1])
+	require.False(t, snap["node-2"][compat.CapabilityMultipartListingV1], "Ready=false must mask ready capabilities")
+
+	snap["node-1"][compat.CapabilityMultipartListingV1] = false
+	again := g.EvidenceSnapshot()
+	require.True(t, again["node-1"][compat.CapabilityMultipartListingV1], "snapshot must not alias gate state")
+}
+
 func TestCapabilityGateRequiresPeerTransportCapability(t *testing.T) {
 	g := NewCapabilityGate(compat.DefaultRegistry, 5*time.Second)
 	now := time.Unix(10, 0)

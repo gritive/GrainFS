@@ -718,6 +718,55 @@ func (b *LocalBackend) ListObjects(ctx context.Context, bucket, prefix string, m
 	return objects, err
 }
 
+// ListObjectsPage returns one S3 ListObjects page from the badger-backed
+// object key space. Entries with key strictly greater than `marker` are
+// returned, capped at `maxKeys`. `truncated` is true when more entries
+// match beyond the returned slice. The iterator seeks past `marker` so
+// pagination doesn't have to materialise the skipped prefix in memory.
+func (b *LocalBackend) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*Object, bool, error) {
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return nil, false, err
+	}
+	var (
+		objects   []*Object
+		truncated bool
+	)
+	err := b.db.View(func(txn *badger.Txn) error {
+		pfx := []byte("obj:" + bucket + "/" + prefix)
+		seek := pfx
+		if marker != "" {
+			// Resume strictly after `marker`. Append NUL so the iterator
+			// lands on the first key whose suffix sorts after marker — the
+			// "obj:bucket/" prefix is shared with `pfx`, so the seek key is
+			// "obj:bucket/<marker>\x00".
+			seek = append([]byte("obj:"+bucket+"/"+marker), 0)
+		}
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Seek(seek); it.ValidForPrefix(pfx); it.Next() {
+			if len(objects) >= maxKeys {
+				truncated = true
+				break
+			}
+			item := it.Item()
+			itemKey := item.KeyCopy(nil)
+			var obj Object
+			if err := item.Value(func(val []byte) error {
+				plain, err := openBadgerValue(b.encryptor, badgerDomainObject, itemKey, val)
+				if err != nil {
+					return err
+				}
+				return unmarshalObjectInto(plain, &obj)
+			}); err != nil {
+				return err
+			}
+			objects = append(objects, &obj)
+		}
+		return nil
+	})
+	return objects, truncated, err
+}
+
 func (b *LocalBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err

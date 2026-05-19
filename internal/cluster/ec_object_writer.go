@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -62,6 +63,7 @@ type ecObjectWriteResult struct {
 	RingVersion RingVersion
 	ECData      uint8
 	ECParity    uint8
+	Parts       []storage.MultipartPartEntry // populated by CompleteMultipartUpload
 }
 
 type ecObjectShardWriteError struct {
@@ -112,16 +114,14 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 	if err != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("open spooled object: %w", err)
 	}
-	data, readErr := io.ReadAll(src)
+	data := make([]byte, sp.Size)
+	_, readErr := io.ReadFull(src, data)
 	closeErr := src.Close()
 	if readErr != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("read spooled object: %w", readErr)
 	}
 	if closeErr != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("close spooled object: %w", closeErr)
-	}
-	if int64(len(data)) != sp.Size {
-		return ecObjectWriteResult{}, fmt.Errorf("read spooled object: got %d bytes, expected %d", len(data), sp.Size)
 	}
 	observePutStage("ec_memory", "read_object", stageStart)
 
@@ -225,8 +225,8 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 				}
 				if shardSize != nil {
 					if size, sizeErr := shardSize(i); sizeErr == nil && size <= ecShardBufferedLimit {
-						var data []byte
-						data, werr = io.ReadAll(body)
+						data := make([]byte, size)
+						_, werr = io.ReadFull(body, data)
 						if closer, ok := body.(io.Closer); ok {
 							if closeErr := closer.Close(); werr == nil && closeErr != nil {
 								werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
@@ -377,8 +377,8 @@ func (w ecObjectWriter) writeRemoteShard(
 		if shardSize != nil {
 			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
 				bufferStart := time.Now()
-				var data []byte
-				data, err = io.ReadAll(body)
+				data := make([]byte, size)
+				_, err = io.ReadFull(body, data)
 				if err == nil {
 					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
 						Bytes:            int64(len(data)),
