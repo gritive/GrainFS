@@ -63,9 +63,13 @@ func NewMetaCatalogWithForwarders(
 	return &MetaCatalog{meta: meta, backend: backend, warehouse: warehouse, forward: forward, read: read, readPeers: readPeers, idPrefix: newIcebergRequestIDPrefix()}
 }
 
+// Warehouse returns the default warehouse for this catalog instance.
+// It is not part of the Catalog interface; callers that need the default
+// warehouse for the SigV4 path (e.g., server handlers) use it via the
+// warehouseProvider interface.
 func (c *MetaCatalog) Warehouse() string { return c.warehouse }
 
-func (c *MetaCatalog) CreateNamespace(ctx context.Context, namespace []string, properties map[string]string) error {
+func (c *MetaCatalog) CreateNamespace(ctx context.Context, _ string, namespace []string, properties map[string]string) error {
 	cmd := IcebergCreateNamespaceCmd{
 		RequestID:  c.requestID("create-namespace"),
 		Namespace:  namespace,
@@ -78,7 +82,7 @@ func (c *MetaCatalog) CreateNamespace(ctx context.Context, namespace []string, p
 	return c.propose(ctx, MetaCmdTypeIcebergCreateNamespace, payload, cmd.RequestID)
 }
 
-func (c *MetaCatalog) LoadNamespace(ctx context.Context, namespace []string) (map[string]string, error) {
+func (c *MetaCatalog) LoadNamespace(ctx context.Context, _ string, namespace []string) (map[string]string, error) {
 	if !c.meta.IsLeader() && c.read != nil {
 		return c.read.LoadNamespace(ctx, c.readTargets(), namespace)
 	}
@@ -93,7 +97,7 @@ func (c *MetaCatalog) loadNamespaceLocal(namespace []string) (map[string]string,
 	return cloneStringMap(entry.Properties), nil
 }
 
-func (c *MetaCatalog) ListNamespaces(ctx context.Context) ([][]string, error) {
+func (c *MetaCatalog) ListNamespaces(ctx context.Context, _ string) ([][]string, error) {
 	if !c.meta.IsLeader() && c.read != nil {
 		return c.read.ListNamespaces(ctx, c.readTargets())
 	}
@@ -109,7 +113,7 @@ func (c *MetaCatalog) listNamespacesLocal() [][]string {
 	return out
 }
 
-func (c *MetaCatalog) DeleteNamespace(ctx context.Context, namespace []string) error {
+func (c *MetaCatalog) DeleteNamespace(ctx context.Context, _ string, namespace []string) error {
 	cmd := IcebergDeleteNamespaceCmd{
 		RequestID: c.requestID("delete-namespace"),
 		Namespace: namespace,
@@ -121,7 +125,7 @@ func (c *MetaCatalog) DeleteNamespace(ctx context.Context, namespace []string) e
 	return c.propose(ctx, MetaCmdTypeIcebergDeleteNamespace, payload, cmd.RequestID)
 }
 
-func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+func (c *MetaCatalog) CreateTable(ctx context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
 	cmd := IcebergCreateTableCmd{
 		RequestID:        c.requestID("create-table"),
 		Identifier:       ident,
@@ -147,7 +151,7 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 		}, nil
 	}
 	if !c.meta.IsLeader() {
-		return c.LoadTable(ctx, ident)
+		return c.LoadTable(ctx, "", ident)
 	}
 	tbl, err := c.loadTableLocal(ident)
 	if err != nil {
@@ -157,7 +161,7 @@ func (c *MetaCatalog) CreateTable(ctx context.Context, ident icebergcatalog.Iden
 	return tbl, nil
 }
 
-func (c *MetaCatalog) LoadTable(ctx context.Context, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+func (c *MetaCatalog) LoadTable(ctx context.Context, _ string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
 	if !c.meta.IsLeader() && c.read != nil {
 		return c.read.LoadTable(ctx, c.readTargets(), ident)
 	}
@@ -192,7 +196,7 @@ func (c *MetaCatalog) loadTableLocal(ident icebergcatalog.Identifier) (*icebergc
 	}, nil
 }
 
-func (c *MetaCatalog) ListTables(ctx context.Context, namespace []string) ([]icebergcatalog.Identifier, error) {
+func (c *MetaCatalog) ListTables(ctx context.Context, _ string, namespace []string) ([]icebergcatalog.Identifier, error) {
 	if !c.meta.IsLeader() && c.read != nil {
 		return c.read.ListTables(ctx, c.readTargets(), namespace)
 	}
@@ -218,7 +222,7 @@ func (c *MetaCatalog) readTargets() []string {
 	return nil
 }
 
-func (c *MetaCatalog) DeleteTable(ctx context.Context, ident icebergcatalog.Identifier) error {
+func (c *MetaCatalog) DeleteTable(ctx context.Context, _ string, ident icebergcatalog.Identifier) error {
 	cmd := IcebergDeleteTableCmd{
 		RequestID:  c.requestID("delete-table"),
 		Identifier: ident,
@@ -234,7 +238,7 @@ func (c *MetaCatalog) DeleteTable(ctx context.Context, ident icebergcatalog.Iden
 	return nil
 }
 
-func (c *MetaCatalog) CommitTable(ctx context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+func (c *MetaCatalog) CommitTable(ctx context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
 	cmd := IcebergCommitTableCmd{
 		RequestID:                c.requestID("commit-table"),
 		Identifier:               ident,

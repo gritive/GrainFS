@@ -22,7 +22,8 @@ func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	overrides := s.icebergS3CredOverrides(ctx, store.Warehouse())
+	wh := catalogWarehouse(ctx, store.(warehouseProvider))
+	overrides := s.icebergS3CredOverrides(ctx, wh)
 	if len(overrides) > 0 {
 		// Publish the same host:port the client just connected to as
 		// s3.endpoint. iceberg-go's REST catalog reads this to build
@@ -39,7 +40,7 @@ func (s *Server) icebergConfig(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 	c.JSON(consts.StatusOK, map[string]map[string]string{
-		"defaults":  {"warehouse": store.Warehouse()},
+		"defaults":  {"warehouse": wh},
 		"overrides": overrides,
 	})
 }
@@ -134,7 +135,7 @@ func bucketFromS3Location(loc string) string {
 	return rest
 }
 
-func (s *Server) icebergEnsureWarehouse(_ context.Context, c *app.RequestContext) {
+func (s *Server) icebergEnsureWarehouse(ctx context.Context, c *app.RequestContext) {
 	if s.blockIfMutationDisabled(c, "iceberg_catalog_mutation") {
 		return
 	}
@@ -144,7 +145,7 @@ func (s *Server) icebergEnsureWarehouse(_ context.Context, c *app.RequestContext
 	}
 	c.JSON(consts.StatusOK, map[string]string{
 		"name":      string(c.QueryArgs().Peek("name")),
-		"warehouse": store.Warehouse(),
+		"warehouse": catalogWarehouse(ctx, store.(warehouseProvider)),
 	})
 }
 
@@ -163,7 +164,7 @@ func (s *Server) icebergListNamespaces(ctx context.Context, c *app.RequestContex
 	if !ok {
 		return
 	}
-	namespaces, err := store.ListNamespaces(ctx)
+	namespaces, err := store.ListNamespaces(ctx, catalogWarehouse(ctx, store.(warehouseProvider)))
 	if err != nil {
 		writeIcebergMappedError(c, err)
 		return
@@ -184,7 +185,7 @@ func (s *Server) icebergCreateNamespace(ctx context.Context, c *app.RequestConte
 		writeIcebergError(c, consts.StatusBadRequest, "BadRequestException", "invalid namespace request")
 		return
 	}
-	if err := store.CreateNamespace(ctx, req.Namespace, req.Properties); err != nil {
+	if err := store.CreateNamespace(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), req.Namespace, req.Properties); err != nil {
 		writeIcebergMappedError(c, err)
 		return
 	}
@@ -197,7 +198,7 @@ func (s *Server) icebergLoadNamespace(ctx context.Context, c *app.RequestContext
 		return
 	}
 	ns := []string{c.Param("namespace")}
-	props, err := store.LoadNamespace(ctx, ns)
+	props, err := store.LoadNamespace(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), ns)
 	if err != nil {
 		writeIcebergMappedError(c, err)
 		return
@@ -210,7 +211,7 @@ func (s *Server) icebergHeadNamespace(ctx context.Context, c *app.RequestContext
 	if !ok {
 		return
 	}
-	if _, err := store.LoadNamespace(ctx, []string{c.Param("namespace")}); err != nil {
+	if _, err := store.LoadNamespace(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), []string{c.Param("namespace")}); err != nil {
 		writeIcebergMappedError(c, err)
 		return
 	}
@@ -225,7 +226,7 @@ func (s *Server) icebergDeleteNamespace(ctx context.Context, c *app.RequestConte
 	if !ok {
 		return
 	}
-	if err := store.DeleteNamespace(ctx, []string{c.Param("namespace")}); err != nil {
+	if err := store.DeleteNamespace(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), []string{c.Param("namespace")}); err != nil {
 		writeIcebergMappedError(c, err)
 		return
 	}

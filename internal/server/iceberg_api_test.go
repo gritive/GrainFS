@@ -26,31 +26,31 @@ type fakeIcebergCatalog struct {
 }
 
 func (f fakeIcebergCatalog) Warehouse() string { return f.warehouse }
-func (f fakeIcebergCatalog) CreateNamespace(context.Context, []string, map[string]string) error {
+func (f fakeIcebergCatalog) CreateNamespace(context.Context, string, []string, map[string]string) error {
 	return icebergcatalog.ErrNamespaceExists
 }
-func (f fakeIcebergCatalog) LoadNamespace(context.Context, []string) (map[string]string, error) {
+func (f fakeIcebergCatalog) LoadNamespace(context.Context, string, []string) (map[string]string, error) {
 	return nil, icebergcatalog.ErrNamespaceNotFound
 }
-func (f fakeIcebergCatalog) ListNamespaces(context.Context) ([][]string, error) {
+func (f fakeIcebergCatalog) ListNamespaces(context.Context, string) ([][]string, error) {
 	return nil, nil
 }
-func (f fakeIcebergCatalog) DeleteNamespace(context.Context, []string) error {
+func (f fakeIcebergCatalog) DeleteNamespace(context.Context, string, []string) error {
 	return icebergcatalog.ErrNamespaceNotFound
 }
-func (f fakeIcebergCatalog) CreateTable(context.Context, icebergcatalog.Identifier, icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+func (f fakeIcebergCatalog) CreateTable(context.Context, string, icebergcatalog.Identifier, icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
 	return nil, icebergcatalog.ErrTableExists
 }
-func (f fakeIcebergCatalog) LoadTable(context.Context, icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+func (f fakeIcebergCatalog) LoadTable(context.Context, string, icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
 	return nil, icebergcatalog.ErrTableNotFound
 }
-func (f fakeIcebergCatalog) ListTables(context.Context, []string) ([]icebergcatalog.Identifier, error) {
+func (f fakeIcebergCatalog) ListTables(context.Context, string, []string) ([]icebergcatalog.Identifier, error) {
 	return nil, nil
 }
-func (f fakeIcebergCatalog) DeleteTable(context.Context, icebergcatalog.Identifier) error {
+func (f fakeIcebergCatalog) DeleteTable(context.Context, string, icebergcatalog.Identifier) error {
 	return icebergcatalog.ErrTableNotFound
 }
-func (f fakeIcebergCatalog) CommitTable(context.Context, icebergcatalog.Identifier, icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+func (f fakeIcebergCatalog) CommitTable(context.Context, string, icebergcatalog.Identifier, icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
 	return nil, icebergcatalog.ErrCommitFailed
 }
 
@@ -61,35 +61,35 @@ type staleLoadCommitCatalog struct {
 }
 
 func (s *staleLoadCommitCatalog) Warehouse() string { return s.warehouse }
-func (s *staleLoadCommitCatalog) CreateNamespace(context.Context, []string, map[string]string) error {
+func (s *staleLoadCommitCatalog) CreateNamespace(context.Context, string, []string, map[string]string) error {
 	return nil
 }
-func (s *staleLoadCommitCatalog) LoadNamespace(context.Context, []string) (map[string]string, error) {
+func (s *staleLoadCommitCatalog) LoadNamespace(context.Context, string, []string) (map[string]string, error) {
 	return nil, nil
 }
-func (s *staleLoadCommitCatalog) ListNamespaces(context.Context) ([][]string, error) {
+func (s *staleLoadCommitCatalog) ListNamespaces(context.Context, string) ([][]string, error) {
 	return nil, nil
 }
-func (s *staleLoadCommitCatalog) DeleteNamespace(context.Context, []string) error {
+func (s *staleLoadCommitCatalog) DeleteNamespace(context.Context, string, []string) error {
 	return nil
 }
-func (s *staleLoadCommitCatalog) CreateTable(context.Context, icebergcatalog.Identifier, icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
+func (s *staleLoadCommitCatalog) CreateTable(context.Context, string, icebergcatalog.Identifier, icebergcatalog.CreateTableInput) (*icebergcatalog.Table, error) {
 	return nil, nil
 }
-func (s *staleLoadCommitCatalog) LoadTable(context.Context, icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
+func (s *staleLoadCommitCatalog) LoadTable(context.Context, string, icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
 	return &icebergcatalog.Table{
 		Identifier:       icebergcatalog.Identifier{Namespace: []string{"ns2"}, Name: "t"},
 		MetadataLocation: "s3://grainfs-tables/warehouse/ns2/t/metadata/00000.json",
 		Metadata:         buildInitialIcebergMetadata("s3://grainfs-tables/warehouse/ns2/t", json.RawMessage(`{"type":"struct","fields":[],"schema-id":0}`), nil),
 	}, nil
 }
-func (s *staleLoadCommitCatalog) ListTables(context.Context, []string) ([]icebergcatalog.Identifier, error) {
+func (s *staleLoadCommitCatalog) ListTables(context.Context, string, []string) ([]icebergcatalog.Identifier, error) {
 	return nil, nil
 }
-func (s *staleLoadCommitCatalog) DeleteTable(context.Context, icebergcatalog.Identifier) error {
+func (s *staleLoadCommitCatalog) DeleteTable(context.Context, string, icebergcatalog.Identifier) error {
 	return nil
 }
-func (s *staleLoadCommitCatalog) CommitTable(_ context.Context, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
+func (s *staleLoadCommitCatalog) CommitTable(_ context.Context, _ string, ident icebergcatalog.Identifier, in icebergcatalog.CommitTableInput) (*icebergcatalog.Table, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

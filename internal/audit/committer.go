@@ -247,12 +247,12 @@ func eventPartitionDay(ev S3Event, fallback time.Time) string {
 func (c *Committer) commitDay(ctx context.Context, dt string, events []S3Event) error {
 	ident := icebergcatalog.Identifier{Namespace: []string{Namespace}, Name: TableS3}
 
-	tbl, err := c.cfg.Catalog.LoadTable(ctx, ident)
+	tbl, err := c.cfg.Catalog.LoadTable(ctx, "", ident)
 	if errors.Is(err, icebergcatalog.ErrTableNotFound) {
 		if bootErr := Bootstrap(ctx, c.cfg.Catalog, c.cfg.Backend); bootErr != nil {
 			return fmt.Errorf("lazy bootstrap: %w", bootErr)
 		}
-		tbl, err = c.cfg.Catalog.LoadTable(ctx, ident)
+		tbl, err = c.cfg.Catalog.LoadTable(ctx, "", ident)
 	}
 	if err != nil {
 		return fmt.Errorf("load audit.s3 table: %w", err)
@@ -278,7 +278,7 @@ func (c *Committer) commitDay(ctx context.Context, dt string, events []S3Event) 
 		return fmt.Errorf("build iceberg metadata: %w", err)
 	}
 
-	_, err = c.cfg.Catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+	_, err = c.cfg.Catalog.CommitTable(ctx, "", ident, icebergcatalog.CommitTableInput{
 		ExpectedMetadataLocation: tbl.MetadataLocation,
 		NewMetadataLocation:      newMetaPath,
 		Metadata:                 newMetaJSON,

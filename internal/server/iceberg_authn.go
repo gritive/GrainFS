@@ -125,6 +125,23 @@ func IcebergClaimsFromContext(ctx context.Context) *iamjwt.Claims {
 	return v
 }
 
+// catalogWarehouse returns the warehouse to use for a given catalog request.
+// It prefers the warehouse in the JWT claims (bearer path), falling back to
+// the catalog's configured default warehouse (SigV4 or anon path).
+func catalogWarehouse(ctx context.Context, store warehouseProvider) string {
+	if claims := IcebergClaimsFromContext(ctx); claims != nil && claims.Warehouse != "" {
+		return claims.Warehouse
+	}
+	return store.Warehouse()
+}
+
+// warehouseProvider is satisfied by Store and MetaCatalog which retain a
+// Warehouse() accessor even though it is no longer part of the Catalog
+// interface. Handlers use it for the SigV4 fallback warehouse.
+type warehouseProvider interface {
+	Warehouse() string
+}
+
 // anonConfigReader is a minimal ConfigReader used in tests to simulate iam.anon-enabled.
 type anonConfigReader map[string]bool
 

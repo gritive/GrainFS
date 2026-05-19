@@ -46,16 +46,15 @@ type CommitTableInput struct {
 }
 
 type Catalog interface {
-	Warehouse() string
-	CreateNamespace(ctx context.Context, namespace []string, properties map[string]string) error
-	LoadNamespace(ctx context.Context, namespace []string) (map[string]string, error)
-	ListNamespaces(ctx context.Context) ([][]string, error)
-	DeleteNamespace(ctx context.Context, namespace []string) error
-	CreateTable(ctx context.Context, ident Identifier, in CreateTableInput) (*Table, error)
-	LoadTable(ctx context.Context, ident Identifier) (*Table, error)
-	ListTables(ctx context.Context, namespace []string) ([]Identifier, error)
-	DeleteTable(ctx context.Context, ident Identifier) error
-	CommitTable(ctx context.Context, ident Identifier, in CommitTableInput) (*Table, error)
+	CreateNamespace(ctx context.Context, warehouse string, namespace []string, properties map[string]string) error
+	LoadNamespace(ctx context.Context, warehouse string, namespace []string) (map[string]string, error)
+	ListNamespaces(ctx context.Context, warehouse string) ([][]string, error)
+	DeleteNamespace(ctx context.Context, warehouse string, namespace []string) error
+	CreateTable(ctx context.Context, warehouse string, ident Identifier, in CreateTableInput) (*Table, error)
+	LoadTable(ctx context.Context, warehouse string, ident Identifier) (*Table, error)
+	ListTables(ctx context.Context, warehouse string, namespace []string) ([]Identifier, error)
+	DeleteTable(ctx context.Context, warehouse string, ident Identifier) error
+	CommitTable(ctx context.Context, warehouse string, ident Identifier, in CommitTableInput) (*Table, error)
 }
 
 type Store struct {
@@ -86,7 +85,7 @@ func NewStore(db *badger.DB, warehouse string) *Store {
 
 func (s *Store) Warehouse() string { return s.warehouse }
 
-func (s *Store) CreateNamespace(_ context.Context, namespace []string, properties map[string]string) error {
+func (s *Store) CreateNamespace(_ context.Context, _ string, namespace []string, properties map[string]string) error {
 	key := namespaceKey(namespace)
 	val, err := json.Marshal(namespaceRecord{Namespace: namespace, Properties: cloneMap(properties)})
 	if err != nil {
@@ -102,7 +101,7 @@ func (s *Store) CreateNamespace(_ context.Context, namespace []string, propertie
 	})
 }
 
-func (s *Store) LoadNamespace(_ context.Context, namespace []string) (map[string]string, error) {
+func (s *Store) LoadNamespace(_ context.Context, _ string, namespace []string) (map[string]string, error) {
 	var rec namespaceRecord
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(namespaceKey(namespace))
@@ -120,7 +119,7 @@ func (s *Store) LoadNamespace(_ context.Context, namespace []string) (map[string
 	return cloneMap(rec.Properties), nil
 }
 
-func (s *Store) ListNamespaces(_ context.Context) ([][]string, error) {
+func (s *Store) ListNamespaces(_ context.Context, _ string) ([][]string, error) {
 	var out [][]string
 	err := s.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -181,7 +180,7 @@ func (s *Store) ExportLegacyRows(_ context.Context) (LegacyExport, error) {
 	return out, err
 }
 
-func (s *Store) DeleteNamespace(_ context.Context, namespace []string) error {
+func (s *Store) DeleteNamespace(_ context.Context, _ string, namespace []string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		if _, err := txn.Get(namespaceKey(namespace)); err == badger.ErrKeyNotFound {
 			return ErrNamespaceNotFound
@@ -201,7 +200,7 @@ func (s *Store) DeleteNamespace(_ context.Context, namespace []string) error {
 	})
 }
 
-func (s *Store) CreateTable(_ context.Context, ident Identifier, in CreateTableInput) (*Table, error) {
+func (s *Store) CreateTable(_ context.Context, _ string, ident Identifier, in CreateTableInput) (*Table, error) {
 	rec := tableRecord{
 		Identifier:       cloneIdent(ident),
 		MetadataLocation: in.MetadataLocation,
@@ -231,7 +230,7 @@ func (s *Store) CreateTable(_ context.Context, ident Identifier, in CreateTableI
 	return rec.table(), nil
 }
 
-func (s *Store) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+func (s *Store) LoadTable(_ context.Context, _ string, ident Identifier) (*Table, error) {
 	var rec tableRecord
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(tableKey(ident))
@@ -252,7 +251,7 @@ func (s *Store) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
 	return rec.table(), nil
 }
 
-func (s *Store) ListTables(_ context.Context, namespace []string) ([]Identifier, error) {
+func (s *Store) ListTables(_ context.Context, _ string, namespace []string) ([]Identifier, error) {
 	prefix := tableNamespacePrefix(namespace)
 	var out []Identifier
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -276,7 +275,7 @@ func (s *Store) ListTables(_ context.Context, namespace []string) ([]Identifier,
 	return out, err
 }
 
-func (s *Store) DeleteTable(_ context.Context, ident Identifier) error {
+func (s *Store) DeleteTable(_ context.Context, _ string, ident Identifier) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		if _, err := txn.Get(tableKey(ident)); err == badger.ErrKeyNotFound {
 			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); nsErr == badger.ErrKeyNotFound {
@@ -290,7 +289,7 @@ func (s *Store) DeleteTable(_ context.Context, ident Identifier) error {
 	})
 }
 
-func (s *Store) CommitTable(_ context.Context, ident Identifier, in CommitTableInput) (*Table, error) {
+func (s *Store) CommitTable(_ context.Context, _ string, ident Identifier, in CommitTableInput) (*Table, error) {
 	var rec tableRecord
 	err := s.db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get(tableKey(ident))

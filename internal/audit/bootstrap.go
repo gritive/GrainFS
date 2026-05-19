@@ -26,12 +26,12 @@ func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend audi
 		log.Debug().Str("bucket", BucketName).Msg("audit bootstrap: bucket already exists")
 	}
 
-	if err := catalog.CreateNamespace(ctx, []string{Namespace}, nil); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceExists) {
+	if err := catalog.CreateNamespace(ctx, "", []string{Namespace}, nil); err != nil && !errors.Is(err, icebergcatalog.ErrNamespaceExists) {
 		return fmt.Errorf("audit bootstrap: create namespace %q: %w", Namespace, err)
 	}
 
 	ident := icebergcatalog.Identifier{Namespace: []string{Namespace}, Name: TableS3}
-	if tbl, err := catalog.LoadTable(ctx, ident); err == nil {
+	if tbl, err := catalog.LoadTable(ctx, "", ident); err == nil {
 		migrated, changed, err := MigrateMetadataToCurrent(tbl.Metadata, time.Now().UnixMilli())
 		if err != nil {
 			return fmt.Errorf("audit bootstrap: migrate metadata: %w", err)
@@ -42,13 +42,13 @@ func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend audi
 			if _, err := backend.PutObject(ctx, BucketName, metaKey, bytes.NewReader(migrated), "application/json"); err != nil {
 				return fmt.Errorf("audit bootstrap: write migrated metadata.json: %w", err)
 			}
-			if _, err := catalog.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+			if _, err := catalog.CommitTable(ctx, "", ident, icebergcatalog.CommitTableInput{
 				ExpectedMetadataLocation: tbl.MetadataLocation,
 				NewMetadataLocation:      metaLocation,
 				Metadata:                 migrated,
 			}); err != nil {
 				if errors.Is(err, icebergcatalog.ErrCommitFailed) {
-					latest, loadErr := catalog.LoadTable(ctx, ident)
+					latest, loadErr := catalog.LoadTable(ctx, "", ident)
 					if loadErr == nil {
 						_, stillChanged, migrateErr := MigrateMetadataToCurrent(latest.Metadata, time.Now().UnixMilli())
 						if migrateErr != nil {
@@ -82,7 +82,7 @@ func Bootstrap(ctx context.Context, catalog icebergcatalog.Catalog, backend audi
 		return fmt.Errorf("audit bootstrap: write initial metadata.json: %w", err)
 	}
 
-	if _, err := catalog.CreateTable(ctx, ident, icebergcatalog.CreateTableInput{
+	if _, err := catalog.CreateTable(ctx, "", ident, icebergcatalog.CreateTableInput{
 		MetadataLocation: metaLocation,
 		Metadata:         metaJSON,
 	}); err != nil && !errors.Is(err, icebergcatalog.ErrTableExists) {

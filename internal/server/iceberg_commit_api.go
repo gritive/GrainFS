@@ -43,7 +43,7 @@ func (s *Server) icebergCommitTable(ctx context.Context, c *app.RequestContext) 
 	}
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		tbl, err := store.LoadTable(ctx, ident)
+		tbl, err := store.LoadTable(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), ident)
 		if err != nil {
 			writeIcebergMappedError(c, err)
 			return
@@ -94,7 +94,7 @@ func (s *Server) icebergCommitTransaction(ctx context.Context, c *app.RequestCon
 		tbl := committed[key]
 		if tbl == nil {
 			var err error
-			tbl, err = store.LoadTable(ctx, change.Identifier)
+			tbl, err = store.LoadTable(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), change.Identifier)
 			if err != nil {
 				writeIcebergMappedError(c, err)
 				return

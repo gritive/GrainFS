@@ -51,7 +51,7 @@ func (s *Server) commitIcebergTableFrom(ctx context.Context, c *app.RequestConte
 		writeIcebergStorageError(c, err)
 		return nil, false, fmt.Errorf("write metadata object: %w", err)
 	}
-	committed, err := store.CommitTable(ctx, ident, icebergcatalog.CommitTableInput{
+	committed, err := store.CommitTable(ctx, catalogWarehouse(ctx, store.(warehouseProvider)), ident, icebergcatalog.CommitTableInput{
 		ExpectedMetadataLocation: tbl.MetadataLocation,
 		NewMetadataLocation:      nextMetadataLocation,
 		Metadata:                 metadata,
