@@ -113,8 +113,16 @@ func decodeMetaDEKVersionSnapshot(data []byte) (versions map[uint32][]byte, acti
 		refs = make(map[uint32]uint64, n)
 		var refEntry clusterpb.DEKRefEntry
 		for i := 0; i < n; i++ {
-			if snap.RefCounts(&refEntry, i) {
-				refs[refEntry.Gen()] = uint64(refEntry.Count())
+			if !snap.RefCounts(&refEntry, i) {
+				continue
+			}
+			// Reject negative counts (tampered or bit-flipped snapshot). int64→uint64
+			// cast on a negative value would store 0xFFFFFFFFFFFFFFFF, permanently
+			// pinning the DEK ref count above zero and blocking prune of that
+			// generation forever (DEK leak). Drop the entry; rebuild from
+			// objectIndex will fix it on the next restore path.
+			if c := refEntry.Count(); c >= 0 {
+				refs[refEntry.Gen()] = uint64(c)
 			}
 		}
 	}

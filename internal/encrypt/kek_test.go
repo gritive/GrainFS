@@ -53,3 +53,28 @@ func TestLoadOrGenerateKEK_RejectsWrongSizeFile(t *testing.T) {
 		require.Contains(t, err.Error(), "32", "error must name expected size")
 	}
 }
+
+func TestLoadOrGenerateKEK_RejectsRelativePath(t *testing.T) {
+	_, err := LoadOrGenerateKEK("file://relative/kek.key")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "absolute")
+}
+
+func TestLoadOrGenerateKEK_RejectsLoosePermissions(t *testing.T) {
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o660} {
+		path := t.TempDir() + "/kek.key"
+		require.NoError(t, os.WriteFile(path, make([]byte, KEKSize), mode))
+		_, err := LoadOrGenerateKEK("file://" + path)
+		require.ErrorIsf(t, err, ErrKEKPermissionsTooLoose, "mode %#o must be rejected", mode)
+	}
+}
+
+func TestLoadOrGenerateKEK_RejectsSymlink(t *testing.T) {
+	d := t.TempDir()
+	real := d + "/real.key"
+	require.NoError(t, os.WriteFile(real, make([]byte, KEKSize), 0o600))
+	link := d + "/kek.key"
+	require.NoError(t, os.Symlink(real, link))
+	_, err := LoadOrGenerateKEK("file://" + link)
+	require.ErrorIs(t, err, ErrKEKSymlink)
+}

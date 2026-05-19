@@ -135,7 +135,14 @@ func (k *DEKKeeper) Versions() map[uint32][]byte {
 
 // LoadFromFSM reconstructs a DEKKeeper from persisted wrapped DEKs (used after raft restore).
 // Active gen is set to the maximum key in versions.
+//
+// Validates len(kek) == KEKSize. A caller that passes a malformed KEK here
+// (e.g., a restore pipeline that didn't error-check) would otherwise create a
+// keeper that fails every subsequent Seal/Open with no clear root cause.
 func LoadFromFSM(kek []byte, versions map[uint32][]byte) (*DEKKeeper, error) {
+	if len(kek) != KEKSize {
+		return nil, fmt.Errorf("LoadFromFSM: KEK len = %d, want %d", len(kek), KEKSize)
+	}
 	if len(versions) == 0 {
 		return nil, errors.New("LoadFromFSM: empty versions map")
 	}

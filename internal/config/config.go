@@ -58,7 +58,12 @@ func (s *Store) Register(key string, spec Spec) {
 // If the hook returns an error the value is rolled back and the error is returned.
 //
 // Concurrency note: see Store doc comment — call only from the FSM apply path.
-func (s *Store) Set(ctx context.Context, key, value string) error {
+//
+// Panic safety: if a reload hook panics, the panic is recovered, the value is
+// rolled back to its previous state, and the panic is converted to an error.
+// Without this guard a misbehaving hook would propagate the panic out of the
+// raft apply goroutine and stall the FSM permanently.
+func (s *Store) Set(ctx context.Context, key, value string) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -75,20 +80,33 @@ func (s *Store) Set(ctx context.Context, key, value string) error {
 	prev, hadPrev := s.values[key]
 	s.values[key] = value
 
-	if err := spec.fireReload(ctx, value); err != nil {
+	defer func() {
+		if r := recover(); r != nil {
+			if hadPrev {
+				s.values[key] = prev
+			} else {
+				delete(s.values, key)
+			}
+			err = fmt.Errorf("config: reload hook for %q panicked: %v", key, r)
+		}
+	}()
+
+	if rerr := spec.fireReload(ctx, value); rerr != nil {
 		// Rollback.
 		if hadPrev {
 			s.values[key] = prev
 		} else {
 			delete(s.values, key)
 		}
-		return err
+		return rerr
 	}
 	return nil
 }
 
 // Unset removes an explicit override, reverting the key to its default value.
-func (s *Store) Unset(ctx context.Context, key string) error {
+//
+// Same panic-recovery + rollback contract as Set.
+func (s *Store) Unset(ctx context.Context, key string) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -100,12 +118,21 @@ func (s *Store) Unset(ctx context.Context, key string) error {
 	prev, hadPrev := s.values[key]
 	delete(s.values, key)
 
-	if err := spec.fireReload(ctx, spec.defaultStr()); err != nil {
+	defer func() {
+		if r := recover(); r != nil {
+			if hadPrev {
+				s.values[key] = prev
+			}
+			err = fmt.Errorf("config: unset hook for %q panicked: %v", key, r)
+		}
+	}()
+
+	if rerr := spec.fireReload(ctx, spec.defaultStr()); rerr != nil {
 		// Rollback.
 		if hadPrev {
 			s.values[key] = prev
 		}
-		return err
+		return rerr
 	}
 	return nil
 }
@@ -174,6 +201,11 @@ func (s *Store) Snapshot() map[string]string {
 
 // Restore replaces all explicit values with those from a persisted snapshot.
 // Keys not present in values revert to their default. Unknown keys are silently ignored.
+// Invalid values (rejected by the spec's validate function) are also silently dropped — a
+// bit-flipped or tampered snapshot should not be able to install nonsense state. Reload
+// hooks are NOT fired during Restore: the caller is responsible for reconciling
+// subsystem state with the restored config (typically done by the boot path after the
+// FSM is fully loaded).
 func (s *Store) Restore(values map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -182,10 +214,18 @@ func (s *Store) Restore(values map[string]string) {
 	for k := range s.values {
 		delete(s.values, k)
 	}
-	// Apply snapshot values only for registered keys.
+	// Apply snapshot values only for registered keys, and only when the value
+	// passes the spec's validator. Dropping invalid entries silently is safer
+	// than installing them — invalid state would otherwise be re-emitted on the
+	// next snapshot, propagating corruption.
 	for k, v := range values {
-		if _, ok := s.specs[k]; ok {
-			s.values[k] = v
+		spec, ok := s.specs[k]
+		if !ok {
+			continue
 		}
+		if err := spec.validate(v); err != nil {
+			continue
+		}
+		s.values[k] = v
 	}
 }

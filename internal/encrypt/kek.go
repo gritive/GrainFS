@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // KEKSize is the size of the Key Encryption Key in bytes (AES-256).
@@ -14,9 +16,26 @@ const KEKSize = 32
 // ErrUnsupportedKEKSource is returned when the source scheme is not "file://".
 var ErrUnsupportedKEKSource = errors.New("unsupported KEK source scheme (only file:// is supported in this release)")
 
+// ErrKEKPermissionsTooLoose is returned when the KEK file exists with mode
+// looser than 0o600. Operators must fix permissions, not GrainFS — silently
+// loading a world-readable KEK would let any local user steal the cluster
+// identity.
+var ErrKEKPermissionsTooLoose = errors.New("KEK file permissions must be 0o600")
+
+// ErrKEKSymlink is returned when the KEK path is a symlink. Refusing symlinks
+// blocks an attacker with write access to the data directory from redirecting
+// the KEK load to an attacker-chosen 32-byte file.
+var ErrKEKSymlink = errors.New("KEK path must not be a symlink")
+
 // LoadOrGenerateKEK loads a KEK from source or generates a random one if the
 // file does not exist. Only the "file://" scheme is supported; any other scheme
 // returns ErrUnsupportedKEKSource.
+//
+// Security invariants enforced on every load:
+//   - The path must be absolute. Relative paths or `..` traversal are rejected.
+//   - The file MUST NOT be a symlink (O_NOFOLLOW) — guards against attacker
+//     redirecting the KEK to a chosen file.
+//   - The file mode MUST be exactly 0o600. Looser permissions are refused.
 //
 // If the file is missing it is created with permission 0o600 and filled with
 // 32 cryptographically random bytes. If it exists its size must be exactly 32
@@ -28,25 +47,60 @@ func LoadOrGenerateKEK(source string) ([]byte, error) {
 	}
 
 	path := source[len(scheme):]
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("read KEK file %q: %w", path, err)
-		}
-		// File does not exist — generate a new random KEK.
-		kek := make([]byte, KEKSize)
-		if _, err := rand.Read(kek); err != nil {
-			return nil, fmt.Errorf("generate KEK: %w", err)
-		}
-		if err := os.WriteFile(path, kek, 0o600); err != nil {
-			return nil, fmt.Errorf("write KEK file %q: %w", path, err)
-		}
-		return kek, nil
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("KEK path %q must be absolute", path)
 	}
 
+	// O_NOFOLLOW: if the path is a symlink, open fails with ELOOP.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return generateKEK(path)
+		}
+		// ELOOP shows up as a syscall error wrapping ELOOP — translate it.
+		var pe *os.PathError
+		if errors.As(err, &pe) && errors.Is(pe.Err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%w: %s", ErrKEKSymlink, path)
+		}
+		return nil, fmt.Errorf("open KEK file %q: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat KEK file %q: %w", path, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		return nil, fmt.Errorf("%w: %s has mode %#o", ErrKEKPermissionsTooLoose, path, perm)
+	}
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read KEK file %q: %w", path, err)
+	}
 	if len(data) != KEKSize {
 		return nil, fmt.Errorf("KEK file %q has %d bytes, expected %d", path, len(data), KEKSize)
 	}
 	return data, nil
+}
+
+func generateKEK(path string) ([]byte, error) {
+	kek := make([]byte, KEKSize)
+	if _, err := rand.Read(kek); err != nil {
+		return nil, fmt.Errorf("generate KEK: %w", err)
+	}
+	// O_EXCL: refuse to overwrite a file that appeared between OpenFile and now.
+	// O_NOFOLLOW: refuse to write through a symlink that an attacker just placed.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create KEK file %q: %w", path, err)
+	}
+	if _, err := f.Write(kek); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("write KEK file %q: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close KEK file %q: %w", path, err)
+	}
+	return kek, nil
 }
