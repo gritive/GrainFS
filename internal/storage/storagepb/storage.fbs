@@ -15,12 +15,22 @@ table Object {
   segments:[SegmentRef];
   is_appendable:bool;
   parts:[MultipartPartEntry];
+  append_call_md5s:[BytesValue];   // new: one md5 per AppendObject call;
+                                   // CompositeETag input. Empty for non-appendable.
+                                   // (FlatBuffers has no [bytes]; wrapper table preserves list-of-blobs semantics.)
+}
+
+table BytesValue {
+  v:[ubyte];
 }
 
 table SegmentRef {
   blob_id:string;
   size:int64;
-  etag:string;
+  // etag field is REMOVED; internal segments carry no S3-visible MD5.
+  checksum:[ubyte];               // new: xxhash3-128 of plaintext (16 bytes)
+  placement_group_id:string;      // new: cluster PG ID, empty for single-node
+  shard_size:int32;               // new: EC data-shard size; 0 for single-node
 }
 
 table MultipartPartEntry {

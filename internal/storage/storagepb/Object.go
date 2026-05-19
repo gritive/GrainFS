@@ -181,8 +181,28 @@ func (rcv *Object) PartsLength() int {
 	return 0
 }
 
+func (rcv *Object) AppendCallMd5s(obj *BytesValue, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *Object) AppendCallMd5sLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func ObjectStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(12)
 }
 func ObjectAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -224,6 +244,12 @@ func ObjectAddParts(builder *flatbuffers.Builder, parts flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(parts), 0)
 }
 func ObjectStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func ObjectAddAppendCallMd5s(builder *flatbuffers.Builder, appendCallMd5s flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(appendCallMd5s), 0)
+}
+func ObjectStartAppendCallMd5sVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ObjectEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
