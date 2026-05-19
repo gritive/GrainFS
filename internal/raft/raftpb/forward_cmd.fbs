@@ -27,7 +27,7 @@ enum ForwardOp : byte {
   ListParts = 17,
   ListMultipartUploads = 18,
   AppendObject = 19,
-  HeadObjectVersion = 20,
+  HeadObjectVersion = 20,  // reserved: matches origin/master 4722a758; do not reuse
   SetObjectTags = 21
 }
 
