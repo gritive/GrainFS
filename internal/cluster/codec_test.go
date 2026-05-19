@@ -556,3 +556,22 @@ func TestObjectMeta_PartsLegacyDecode(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, got.Parts)
 }
+
+func TestCodec_ObjectMeta_TagsRoundTrip(t *testing.T) {
+	original := objectMeta{
+		Key:          "k",
+		Size:         5,
+		ContentType:  "text/plain",
+		ETag:         "etag",
+		LastModified: 1700000000,
+		Tags: []storage.Tag{
+			{Key: "env", Value: "prod"},
+			{Key: "owner", Value: "alice"},
+		},
+	}
+	raw, err := marshalObjectMeta(original)
+	require.NoError(t, err)
+	got, err := unmarshalObjectMeta(raw)
+	require.NoError(t, err)
+	require.Equal(t, original.Tags, got.Tags)
+}

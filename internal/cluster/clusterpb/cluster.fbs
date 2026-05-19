@@ -178,6 +178,11 @@ table MultipartPartEntry {
   etag: string;
 }
 
+table Tag {
+  key:string;
+  value:string;
+}
+
 table ObjectMeta {
   key:string;
   size:int64;
@@ -196,6 +201,7 @@ table ObjectMeta {
   coalesced:[CoalescedShardRef];
   is_appendable:bool = false;
   parts:[MultipartPartEntry];
+  tags:[Tag];
 }
 
 // CoalescedShardRef references one coalesced blob produced by merging a

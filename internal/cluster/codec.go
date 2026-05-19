@@ -42,6 +42,7 @@ type objectMeta struct {
 	// Parts carries the multipart parts list for CompleteMultipartUpload
 	// objects; nil for legacy single-blob and appendable objects.
 	Parts []storage.MultipartPartEntry
+	Tags  []storage.Tag // Task 12a
 }
 
 // CoalescedShardRef references a single coalesced blob produced by merging a
@@ -594,6 +595,24 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 		}
 		partsOff = b.EndVector(len(partOffs))
 	}
+	// tags — build child Tag tables BEFORE ObjectMetaStart.
+	var tagsVec flatbuffers.UOffsetT
+	if len(m.Tags) > 0 {
+		tagOffsets := make([]flatbuffers.UOffsetT, len(m.Tags))
+		for i, t := range m.Tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			clusterpb.TagStart(b)
+			clusterpb.TagAddKey(b, kOff)
+			clusterpb.TagAddValue(b, vOff)
+			tagOffsets[i] = clusterpb.TagEnd(b)
+		}
+		clusterpb.ObjectMetaStartTagsVector(b, len(tagOffsets))
+		for i := len(tagOffsets) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(tagOffsets[i])
+		}
+		tagsVec = b.EndVector(len(tagOffsets))
+	}
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -625,6 +644,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	}
 	if partsOff != 0 {
 		clusterpb.ObjectMetaAddParts(b, partsOff)
+	}
+	if tagsVec != 0 {
+		clusterpb.ObjectMetaAddTags(b, tagsVec)
 	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
@@ -704,6 +726,16 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			}
 		}
 	}
+	var tags []storage.Tag
+	if n := t.TagsLength(); n > 0 {
+		tags = make([]storage.Tag, n)
+		for i := 0; i < n; i++ {
+			var tag clusterpb.Tag
+			if t.Tags(&tag, i) {
+				tags[i] = storage.Tag{Key: string(tag.Key()), Value: string(tag.Value())}
+			}
+		}
+	}
 	return objectMeta{
 		Key:              string(t.Key()),
 		Size:             t.Size(),
@@ -722,6 +754,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		Coalesced:        coalesced,
 		IsAppendable:     t.IsAppendable(),
 		Parts:            parts,
+		Tags:             tags,
 	}, nil
 }
 
