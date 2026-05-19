@@ -95,8 +95,15 @@ func (s *Server) icebergS3CredOverrides(ctx context.Context, warehouse string) m
 	if !ok || key == nil || key.SecretKey == "" {
 		return map[string]string{}
 	}
-	// Legacy LookupGrant check removed in §2 (Role/Grant model gone).
-	// Access is controlled by policy.Evaluate; credential forwarding here is best-effort.
+	// T33: gate cred forwarding on iceberg:GetCatalogConfig policy check.
+	// If no authorizer is wired (e.g. test fixtures), skip the gate and
+	// forward creds as before (fail-open for legacy/test paths only).
+	if s.policyAuthorizer != nil {
+		result := s.policyAuthorizer.Authorize(ctx, key.SAID, bucket, policyIcebergConfigContext(bucket))
+		if result.Decision != policyDecisionAllow {
+			return map[string]string{}
+		}
+	}
 	return map[string]string{
 		"s3.access-key-id":     key.AccessKey,
 		"s3.secret-access-key": key.SecretKey,

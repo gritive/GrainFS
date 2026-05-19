@@ -9,6 +9,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/compat"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -89,15 +90,19 @@ func bootMetaRaftWiring(state *bootState) error {
 	// T25.5: wire IAM policy stores + resolver + builtin seed into the meta-FSM.
 	// Must run before bootMetaRaftStart so apply hooks for MetaCmds 50-61 land
 	// on the same store instances that authz (T26) will read from.
-	//
-	// NOTE: SetConfigStore and SetDEKKeeper are defined on MetaFSM but are NOT
-	// called here — the corresponding cfgStore and dekKeeper are never constructed
-	// in the production boot path (§1 gap, out of scope for T25.5).
 	iamStores, err := WireIAMPolicyStores(context.Background(), metaRaft.FSM(), 0)
 	if err != nil {
 		return fmt.Errorf("wire IAM policy stores: %w", err)
 	}
 	state.iamPolicyStores = iamStores
+
+	// T33: construct + wire the cluster config store. This is the §1 gap
+	// (previously deferred) — needed so s3auth.Authorizer can read iam.anon-enabled
+	// at request time. No reload hooks for now (nil hooks are no-ops per keys.go).
+	cfgStore := config.NewStore()
+	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{})
+	metaRaft.FSM().SetConfigStore(cfgStore)
+	state.cfgStore = cfgStore
 	return nil
 }
 

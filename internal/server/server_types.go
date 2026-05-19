@@ -66,20 +66,20 @@ type RaftSnapshotter interface {
 
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
-	backend       storage.Backend
-	ops           *storage.Operations
-	readIndexer   ReadIndexer
-	raftSnapshots RaftSnapshotter
-	dataDir       string
-	snapshotEnc   *encrypt.Encryptor
-	snapMgr       *snapshot.Manager
-	scrubber      *scrubber.BackgroundScrubber
-	verifier      *s3auth.CachingVerifier
-	iamStore      *iam.Store
-	iamAudit      *iam.AuditLogger
-	authz         *s3auth.RequestAuthorizer
-	mutations     *MutationBroker
-	iamProposer   iam.Proposer
+	backend          storage.Backend
+	ops              *storage.Operations
+	readIndexer      ReadIndexer
+	raftSnapshots    RaftSnapshotter
+	dataDir          string
+	snapshotEnc      *encrypt.Encryptor
+	snapMgr          *snapshot.Manager
+	scrubber         *scrubber.BackgroundScrubber
+	verifier         *s3auth.CachingVerifier
+	iamStore         *iam.Store
+	iamAudit         *iam.AuditLogger
+	authz            *s3auth.RequestAuthorizer
+	policyAuthorizer *s3auth.Authorizer
+	mutations        *MutationBroker
 
 	hertz       *server.Hertz
 	hub         *Hub

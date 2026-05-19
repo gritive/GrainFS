@@ -7,6 +7,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -80,19 +81,35 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 }
 
 // buildAuthorizer wires the request authorizer using the server's current
-// dependencies. Call after Options have populated iamStore, iamAudit, and
-// policyStore so the authorizer captures their final values.
+// dependencies. Call after Options have populated iamStore, iamAudit,
+// policyStore, and policyAuthorizer so the authorizer captures their final values.
 func (s *Server) buildAuthorizer() {
 	var iamStore s3auth.IAMStore
 	if s.iamStore != nil {
 		iamStore = s.iamStore
 	}
+
+	// iamCheck: when a policy authorizer is wired, Layer 1 evaluates
+	// policy.Evaluate for the (saID, bucket, action) triple. Without one
+	// (test fixtures, legacy mode), deny-by-default is preserved — the
+	// bucket policy layer (Layer 2) still runs unconditionally.
+	var iamCheck s3auth.IAMChecker
+	if s.policyAuthorizer != nil {
+		pa := s.policyAuthorizer
+		iamCheck = func(saID, bucket string, action s3auth.S3Action) bool {
+			result := pa.Authorize(context.Background(), saID, bucket, policy.RequestContext{
+				Action:   action.PolicyActionString(),
+				Resource: "arn:aws:s3:::" + bucket,
+			})
+			return result.Decision == policy.DecisionAllow
+		}
+	} else {
+		iamCheck = func(_ string, _ string, _ s3auth.S3Action) bool { return false }
+	}
+
 	s.authz = s3auth.NewRequestAuthorizer(
 		iamStore,
-		// iamCheck: legacy Role/Grant path removed in §2. Returning false here
-		// causes Layer 1 to deny when auth is enabled and no bucket policy allows.
-		// This is intentional — new callers use policy.Evaluate via Authorizer.
-		func(_ string, _ string, _ s3auth.S3Action) bool { return false },
+		iamCheck,
 		s.policyStore,
 		s.iamAudit,
 		iam.PrincipalFromContext,
@@ -151,4 +168,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // into scrubber.New via scrubber.WithEmitter.
 func (s *Server) HealEmitter() scrubber.Emitter {
 	return newHealEmitter(s.hub, s.emitEvent)
+}
+
+// policyDecisionAllow is an alias for the policy Allow decision used in
+// buildAuthorizer and iceberg cred-forwarding gate to avoid importing
+// policy.DecisionAllow at multiple call sites.
+const policyDecisionAllow = policy.DecisionAllow
+
+// policyIcebergConfigContext returns the policy.RequestContext for an
+// iceberg:GetCatalogConfig check against a warehouse bucket. Used by
+// icebergS3CredOverrides to gate credential forwarding.
+func policyIcebergConfigContext(bucket string) policy.RequestContext {
+	return policy.RequestContext{
+		Action:   "iceberg:GetCatalogConfig",
+		Resource: "arn:aws:s3:::" + bucket,
+	}
 }
