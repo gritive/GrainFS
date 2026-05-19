@@ -496,4 +496,25 @@ var (
 		Name: "grainfs_fsm_keyspace_leak_total",
 		Help: "FSM-state keys observed without the expected group prefix at a scoped strip-site (indicates a prefix-scoping bug; the op also panics).",
 	})
+
+	// Object tagging metrics.
+
+	// ObjectTaggingRequests counts object tagging API requests by op and result.
+	ObjectTaggingRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_object_tagging_requests_total",
+		Help: "Object tagging API requests by op and result.",
+	}, []string{"op", "result"})
+
+	// ObjectTaggingValidationErrors counts validation rejections in the tagging surface.
+	ObjectTaggingValidationErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "grainfs_object_tagging_validation_errors_total",
+		Help: "Validation rejections in the tagging surface.",
+	}, []string{"reason"})
+
+	// ObjectTagsPerObject observes tag count per PUT (header or body).
+	ObjectTagsPerObject = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "grainfs_object_tags_per_object",
+		Help:    "Tag count per PUT (header or body).",
+		Buckets: []float64{0, 1, 2, 3, 5, 10},
+	})
 )
