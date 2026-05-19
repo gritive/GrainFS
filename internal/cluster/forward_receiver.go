@@ -170,6 +170,13 @@ func (r *ForwardReceiver) HandleGroupPropose(req *transport.Message) *transport.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	idx, err := dg.Backend().Node().ProposeWait(ctx, data)
+	if err == nil {
+		if waitErr := dg.Backend().WaitApplied(ctx, idx); waitErr != nil {
+			err = waitErr
+		} else if applyErr := dg.Backend().ApplyError(idx); applyErr != nil {
+			err = applyErr
+		}
+	}
 	return groupProposeReply(idx, err)
 }
 

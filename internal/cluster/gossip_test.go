@@ -216,6 +216,110 @@ func TestGossipSenderIncludesMultipartListingCapabilityEvidence(t *testing.T) {
 	assert.Contains(t, caps, compat.CapabilityMultipartListingV1)
 }
 
+func TestGossipSenderRefreshesLocalCapabilityEvidence(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
+		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
+			compat.CapabilityMultipartListingV1: true,
+		}}).
+		WithCapabilityGate(gate)
+	sender.broadcastOnce(context.Background())
+
+	_, err := gate.RequirePeerTransportCapability(
+		compat.CapabilityMultipartListingV1,
+		compat.OperationCreateMultipartUpload,
+		[]string{"node-a"},
+		time.Now(),
+	)
+	require.NoError(t, err)
+}
+
+func TestGossipSenderRefreshesLocalCapabilityEvidenceAliases(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
+		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
+			compat.CapabilityMultipartListingV1: true,
+		}}).
+		WithCapabilityGate(gate).
+		WithCapabilityEvidenceAliases("127.0.0.1:9001")
+	sender.broadcastOnce(context.Background())
+
+	_, err := gate.RequirePeerTransportCapability(
+		compat.CapabilityMultipartListingV1,
+		compat.OperationCreateMultipartUpload,
+		[]string{"127.0.0.1:9001"},
+		time.Now(),
+	)
+	require.NoError(t, err)
+}
+
+func TestGossipSenderRefreshesLocalCapabilityEvidenceDynamicAliases(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 70.0})
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	aliases := []string{}
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
+		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
+			compat.CapabilityMultipartListingV1: true,
+		}}).
+		WithCapabilityGate(gate).
+		WithCapabilityEvidenceAliasProvider(func() []string {
+			return append([]string(nil), aliases...)
+		})
+
+	sender.broadcastOnce(context.Background())
+	_, err := gate.RequirePeerTransportCapability(
+		compat.CapabilityMultipartListingV1,
+		compat.OperationCreateMultipartUpload,
+		[]string{"127.0.0.1:9001"},
+		time.Now(),
+	)
+	require.Error(t, err)
+
+	aliases = []string{"127.0.0.1:9001"}
+	sender.broadcastOnce(context.Background())
+	_, err = gate.RequirePeerTransportCapability(
+		compat.CapabilityMultipartListingV1,
+		compat.OperationCreateMultipartUpload,
+		[]string{"127.0.0.1:9001"},
+		time.Now(),
+	)
+	require.NoError(t, err)
+}
+
+func TestGossipSenderBroadcastsCapabilityEvidenceWithoutStats(t *testing.T) {
+	tr := newMockTransport()
+	store := NewNodeStatsStore(1 * time.Minute)
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+
+	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
+		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
+			compat.CapabilityMultipartListingV1: true,
+		}}).
+		WithCapabilityGate(gate).
+		WithCapabilityEvidenceAliases("127.0.0.1:9001")
+	sender.broadcastOnce(context.Background())
+
+	require.Len(t, tr.SentTo("node-b:9000"), 1)
+	_, err := gate.RequirePeerTransportCapability(
+		compat.CapabilityMultipartListingV1,
+		compat.OperationCreateMultipartUpload,
+		[]string{"127.0.0.1:9001"},
+		time.Now(),
+	)
+	require.NoError(t, err)
+}
+
 func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
 	tr := newMockTransport()
 	store := NewNodeStatsStore(1 * time.Minute)
