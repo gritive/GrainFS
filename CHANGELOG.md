@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.0.263.0] - 2026-05-19 - feat(auth): §2 IAM Core + §3 Bucket Lifecycle — zero-config progressive application
+
+§1 Foundation (v0.0.260.0)에 이어 §2 IAM Core + §3 Bucket Lifecycle 슬라이스가 결합되어 들어왔습니다. legacy Role/Grant model 완전 제거, 새 AWS-style JSON policy 엔진, 4개 in-memory store + StoreAdapter + Resolver, 4개 built-in managed policy (readonly/readwrite/writeonly/bucket-admin), bucket-lifecycle data-plane 거부, reserved-name 보호, default bucket implicit-anon, Phase 0→2 자동 전환, _grainfs reserved bucket bootstrap seed. `s3auth.Authorizer`가 production 부트 경로에 wire되어 Layer 1 iamCheck가 `policy.Evaluate`를 실제 호출합니다.
+
+### Added
+
+- `internal/iam/policy`: AWS-style policy document parser + evaluator. `explicit Deny > explicit Allow > implicit Deny`. Action namespaces 제한 (`s3:*`, `iceberg:*`); condition keys 제한 (`aws:SourceIp`, `s3:prefix`); `NotAction`/`NotResource`/`NotPrincipal` parse-time 거부.
+- `internal/iam/policy/Resolver`: SA → effective-policy (SA-attached + group-attached + bucket-policy union) resolver with TTL cache (default 5s) + `Invalidate(saIDs, buckets)` 계약. 모든 MetaCmd apply가 영향 받은 캐시 항목을 동기적으로 무효화.
+- `internal/iam/policystore`, `internal/iam/group`, `internal/iam/policyattach`, `internal/iam/bucketpolicy`: 4개 in-memory store. PolicyStore는 built-in 보호 (`ErrBuiltinPolicy`).
+- `internal/iam/policy.StoreAdapter`: 4개 store를 `policy.Store` 인터페이스로 묶는 단일 어댑터.
+- `internal/iam/builtin`: 4개 built-in managed policy 시드. `bucket-admin`은 admin-UDS-only 액션 4개 (`s3:CreateBucket`, `s3:DeleteBucket`, `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy`) 의도적 제외 (D#8).
+- `internal/reservedname`: leaf 패키지. `IsInternalBucket` (`_grainfs` 접두사), `IsReservedDefaultName` (정확히 `default`), `IsReservedBucketName` (둘의 OR).
+- `internal/s3auth.Authorizer`: 단일 진입점. 우선순위: admin-UDS-only deny → anon + internal bucket deny → default bucket implicit-anon → `iam.anon-enabled` short-circuit → 전체 `policy.Evaluate`.
+- `MetaCmd` enum 50-62: PolicyPut/PolicyDelete, GroupPut/Delete/MemberPut/MemberDelete, PolicyAttachToSAPut/Delete, PolicyAttachToGroupPut/Delete, BucketPolicyPut/Delete, CreateBucketWithPolicyAttach.
+- `internal/serveruntime.WireIAMPolicyStores`: 부트 시 store 인스턴스화 + FSM 주입 + built-in seed. `WithPolicyAuthorizer` option으로 server에 wired.
+- `CreateBucketWithPolicyAttach` (atomic MetaCmd 62): SA 존재 검증 후 정책 attach. admin handler가 data-plane CreateBucket 실패 시 IAM 부분 롤백 (sequenced atomicity, F#2).
+- `internal/cluster/clusterpb/CreateBucketCmd.bypass_reserved`: bootstrap이 reserved name(`default`, `_grainfs`) 시드를 위해 사용. 공개 API에서는 항상 false.
+- `cluster.ApplyCmdForTest` + `EncodeMetaCmdForTest`: 외부 패키지가 FSM apply 경로를 단위 테스트로 검증할 수 있도록 노출. 프로덕션 코드 호출 금지.
+
+### Changed
+
+- `internal/server` S3 데이터 플레인: `CreateBucket`/`DeleteBucket`/`PutBucketPolicy`/`DeleteBucketPolicy` 4개 엔드포인트가 무조건 403 AccessDenied 반환 (D#8). admin UDS 경로는 유지. 약 18개 E2E 테스트가 PUT `/<bucket>` 셋업 대신 `backend.CreateBucket` 직접 호출로 마이그레이션.
+- `internal/server.IAMChecker` 시그니처: `(saID, bucket string, action S3Action) bool` → `(saID, bucket, key string, action S3Action) bool`. object-scope Deny (`Resource: arn:aws:s3:::bucket/path/*`) 가 L1에서 매칭되도록 object key를 전달. 모든 RequestAuthorizer 테스트 픽스처 일괄 업데이트.
+- `internal/cluster/meta_fsm`: `applyIAMSACreate`에서 첫 SA 생성 시 (`wasEmpty && !IsEmpty()`) `iam.anon-enabled=false`로 원자적 flip + resolver invalidate (D#3, F#16).
+- `internal/cluster/apply.go`: `applyCreateBucket`/`applyDeleteBucket`이 `reservedname.IsReservedBucketName` 거부. `applyBucketPolicyPut`/`applyBucketPolicyDelete`는 `IsInternalBucket`만 거부 (`default`는 explicit policy 허용).
+- `internal/server.icebergS3CredOverrides`: cred 포워딩이 `iceberg:GetCatalogConfig` policy gate를 통과해야 SA secret_key 노출. policyAuthorizer wired에서는 fail-closed.
+- `internal/server.WithPolicyAuthorizer`: option으로 `s3auth.Authorizer` 주입. buildAuthorizer 래퍼가 wired면 `policy.Evaluate` 호출, nil이면 deny-by-default (legacy/test 픽스처).
+- `internal/iam`: legacy Role/Grant 완전 제거. SA + AccessKey 코드 유지. `internal/iam/iampb`의 Role enum + GrantPut* table은 backcompat용 reserved (pre-§2 snapshot용).
+- `internal/cluster/clusterpb/cluster.fbs`: enum 25-31 (IAMGrant*/IAMInitFirstSA) reserved 유지, apply switch에서 제거되어 default-case (log warn + metric) fall-through. 새 노드가 pre-§2 snapshot replay 시 silent skip.
+- `internal/iam/policy.principalMatches`: Named-form `Principal:{"AWS":["*"]}` wildcard도 `AllowAnonBucket` gate 적용 (이전: Star branch만 gate; Named branch는 bypass). 보안 회귀 수정.
+
+### Removed
+
+- `internal/iam` legacy: `Role`, `RoleAllows`, `Grant`, `WildcardBucket`, `SystemBucket`, `DefaultSAID`, `ProposeInitFirstSA`, `ProposeGrant*`, `internal/iam/init_first_sa.go`, `internal/iam/role_matrix_test.go`.
+- `internal/server/admin`: `PutGrant`/`DeleteGrant`/`ListGrants` 핸들러 및 어댑터.
+- `internal/server`: `issueCreatorGrant` (T27 `CreateBucketWithPolicyAttach`로 대체), `LookupGrant` 기반 cred 게이트 (T33 policy gate로 대체), `bucket_mutation_runtime.go` 데드 코드.
+
+### Tests
+
+- `internal/iam/policy`: parse/match/evaluate/resolver 매트릭스 18+ 케이스. 신규: Named-form `Principal:{"AWS":["*"]}` AllowAnonBucket gate 회귀 테스트 2건.
+- `internal/iam/builtin`: 4개 built-in × 4개 admin-UDS-only 액션 table-driven (D#8 회귀 보호). testify `require`/`assert` 일관화.
+- `internal/serveruntime`: `WireIAMPolicyStores`가 5개 store 모두 FSM에 주입했는지 PolicyPut/GroupPut/PolicyAttachToSAPut/BucketPolicyPut MetaCmd로 검증.
+- `internal/cluster`: reserved-name guard (4 apply path × 4 케이스), `CreateBucketWithPolicyAttach` atomic apply, anon-flip atomicity (3 케이스), bypass=true 시 reserved 시드 성공.
+- `internal/server`: bucket-lifecycle 데이터-플레인 거부 (4 엔드포인트 × 403). `TestAuthz_InternalAuditBucket_*` 3건 유지.
+
+### Documentation
+
+- `CLAUDE.md`: internal 패키지 리스트에 `iam/policy`, `iam/policystore`, `iam/group`, `iam/policyattach`, `iam/bucketpolicy`, `iam/builtin`, `reservedname` 추가.
+
+### Deferred
+
+- `meta_fsm` snapshot/restore에 policystore/groupstore/policyattach/bucketpolicy 포함 — 현재는 Raft 로그 재플레이 의존. TODOS에 follow-up 등록.
+- `SetDEKKeeper` + `WireDEKPostCommit` 프로덕션 부트 연결 (§1 잔여 갭) — TODOS.
+- `meta_fsm.go` 3509줄 모놀리딕 → 영역별 파일 분리 — TODOS.
+- IAM-enabled 모드에서 SA가 `_grainfs/*`에 접근 시도 시 거부 검증 e2e 테스트 — TODOS.
+
 ## [0.0.262.19] - 2026-05-19 - test(e2e): further-group 17 entries into single handles
 
 48개 별 entry를 17개 단일 entry로 추가 통합 (ClusterTransferLeader, ClusterEC, IAMBootstrap, ClusterBootstrapJoin, ClusterJoinServices, NormalizeOptions, WaitForWritableEndpoint, IAMBootstrapHelpers, ClusterGrantAdminHelpers, ClusterPSK, NoPeers, IcebergAuth, IcebergDuckDB, AuditIceberg, AppendObjects, Multiparts, ClusterAdminCLI). 각 함수는 `run*` helper로 rename + 새 entry에서 `t.Run` 디스패치. production code 변경 없음.
