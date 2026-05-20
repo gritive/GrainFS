@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.0.278.0] - 2026-05-20 - fix: Phase 2 unblock — R1 PutObjectTagging 404 + R2 lifecycle IAM 403
+
+Two long-lived pre-existing regressions resolved that together blocked the
+SingleNode tagging + lifecycle e2e surface. Surgical fixes only; no behavior
+change for the cluster path.
+
+### Fixed
+
+- **R1 — `PutObjectTagging` returned 404 NoSuchKey on SingleNode** for any
+  object below the pack threshold (default 65 KiB). Broken since
+  `3ff8b5b9` (PR #455, v0.0.264.0, "Object Tagging API"). Root cause:
+  `PackedBackend` packs small objects into its own in-memory index, but
+  did not implement `ObjectTagsSetter`/`ObjectTagsGetter`. The
+  `Operations` capability walker unwrapped past `PackedBackend` and bound
+  `tagsSetter` to `DistributedBackend`, whose `HeadObject` pre-check
+  returned `ErrObjectNotFound` for the packed object → 404. Fix:
+  `PackedBackend` now implements `SetObjectTags`/`GetObjectTags`
+  directly, mirroring the existing `CreateMultipartUploadWithTags`
+  explicit-method pattern. Lock-free CAS retry on `pb.index`; `versionID
+  != ""` returns `UnsupportedOperationError` for parity with
+  `LocalBackend`. Tags persist via the index's FlatBuffers payload (`tags
+  [KV]` field appended, backward-compatible).
+
+- **R2 — `PutBucketLifecycleConfiguration` denied with 403 AccessDenied**
+  on the admin SA. Broken since `d2045947` (PR #454, v0.0.263.0, "§2 IAM
+  Core + §3 Bucket Lifecycle"). Root cause: the IAM rewrite around
+  `policy.Evaluate` introduced lifecycle handlers but did not extend the
+  `S3Action` enum or the `bucket-admin` builtin policy to cover
+  lifecycle subresources. `PUT /bucket?lifecycle` fell through to the
+  no-key default branch and was authorized as `s3:CreateBucket`
+  (action=5), which `bucket-admin` deliberately excludes per
+  policies_test Decision #8. Fix: added
+  `Get/Put/DeleteBucketLifecycleConfiguration` to the `S3Action` enum
+  (appended; existing IDs preserved), the `?lifecycle` branch to
+  `s3ActionEnum`, lifecycle plumbing in `authz_request`, and lifecycle
+  actions to `bucket-admin` (R/W/D), `readwrite` (R), `readonly` (R)
+  builtin policies. D#8 admin-UDS-only guard preserved.
+
+### Tests
+
+- New regression guards:
+  - `internal/storage/local_tagging_regression_test.go::TestLocalBackend_PutObjectThenSetTags_Regression`
+    — direct `LocalBackend.SetObjectTags` baseline guard
+  - `internal/storage/packblob/packed_backend_tags_test.go::TestPackedBackend_PutObjectThenSetTags_R1Regression`
+    — packed + above-threshold + SaveIndex/LoadIndex round-trip
+  - `internal/storage/packblob/packed_backend_tags_test.go::TestPackedBackend_SetObjectTags_RejectsVersionID`
+    — versionID parity guard
+  - `internal/storage/packblob/packed_backend_tags_test.go::TestPackedBackend_SetObjectTags_ConcurrentCAS`
+    — 32 concurrent writers under `-race` confirms CAS lock-free retry
+  - `tests/e2e/dedicated_single_node_iam_test.go::TestDedicatedSingleNode_AdminGrant_Regression`
+    — admin SA must succeed on PutObject + HeadObject + PutBucketLifecycleConfiguration
+- `internal/server/authz_test.go::TestS3ActionEnum` extended with
+  `?lifecycle` cases.
+
+### Deferred to follow-up phases
+
+- **R3 — Lifecycle worker is blind to PackedBackend objects.** Structural
+  4-8h fix: implement `PackedBackend.ScanObjectsGrouped` (fusing packed
+  index with inner scan) and switch the lifecycle worker to `state.backend`
+  (full stack) instead of `state.distBackend`. Cluster vs single semantics
+  must be reconciled.
+- **R4 — Lifecycle worker `runCycle` is a no-op on both SingleNode and
+  Cluster4Node fixtures** even after R1+R2 fixes. Suspect: `ListBuckets` or
+  `store.Get(bucket)` returns empty/nil for freshly-created e2e buckets
+  (per-node store vs replicated store mismatch). Discovered while
+  attempting `TestLifecycleExpirationE2E` dual-target enablement.
+- Phase 1 deferred Task 15-16 e2e sub-tests (Size / And / Date / DM /
+  AbortMPU) — blocked on R3 + R4. Land after both fixed.
+- Phase 1 deferred Task 17 (colima leadership-change-mid-scan) and Task 18
+  (N×ListObjectVersions bench).
+- Sibling admin-management subresource gaps possibly analogous to R2:
+  `?tagging`, `?acl`, `?cors`, `?notification`, `?logging`. TODO note left
+  in `internal/server/authz_action.go`.
+
+### Notes for reviewers
+
+- R2 fix touched `bucket-admin`, `readwrite`, `readonly` builtin policies
+  (added lifecycle actions to each at the appropriate R/W/D granularity).
+  Decision #8 admin-UDS-only set (`CreateBucket`/`DeleteBucket`/`PutBucketPolicy`/
+  `DeleteBucketPolicy`) is preserved — admin-UDS-only actions unchanged.
+- `S3Action` enum IDs are append-only — audit log compatibility preserved.
+
 ## [0.0.277.0] - 2026-05-20 - perf(tests): trim remaining storage volume workload cost
 
 Internal storage and volume tests now spend less memory and CPU on synthetic
