@@ -110,10 +110,15 @@ func sortedVoterIDs(c Configuration) []string {
 }
 
 var _ = Describe("membership", func() {
-	It("grows a 3-voter cluster to 4 voters", func() {
-		fix := startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
-		leader := fix.nodes[0]
+	var fix *membershipFixture
+	var leader *Node
 
+	BeforeEach(func() {
+		fix = startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
+		leader = fix.nodes[0]
+	})
+
+	It("grows a 3-voter cluster to 4 voters", func() {
 		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed(),
 			"n1 did not become leader")
 
@@ -146,8 +151,6 @@ var _ = Describe("membership", func() {
 	})
 
 	It("rejects adding a duplicate voter", func() {
-		fix := startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
-		leader := fix.nodes[0]
 		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
 
 		err := leader.AddVoter("n2", "addr")
@@ -155,8 +158,6 @@ var _ = Describe("membership", func() {
 	})
 
 	It("shrinks a 4-voter cluster to 3 voters", func() {
-		fix := startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
-		leader := fix.nodes[0]
 		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
 		fix.addNodeGinkgo("n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 
@@ -190,8 +191,6 @@ var _ = Describe("membership", func() {
 	})
 
 	It("rejects concurrent AddVoter calls", func() {
-		fix := startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
-		leader := fix.nodes[0]
 		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
 		fix.addNodeGinkgo("n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 		fix.addNodeGinkgo("n5", []string{"n1", "n2", "n3"}, slowElectionTimeout)
@@ -318,8 +317,6 @@ var _ = Describe("membership", func() {
 	})
 
 	It("steps down when the leader removes itself", func() {
-		fix := startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
-		leader := fix.nodes[0]
 		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
 
 		Expect(leader.RemoveVoter("n1")).To(Succeed())
