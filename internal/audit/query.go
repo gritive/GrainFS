@@ -173,7 +173,9 @@ func (s *DuckDBSearcher) SearchS3(ctx context.Context, f SearchFilter) ([]Search
 // Query executes a read-only SQL statement against the DuckDB/Iceberg catalog
 // and returns the column names and rows as string slices. Only SELECT and WITH
 // statements are accepted; multi-statement input (containing a semicolon after
-// the first token) is rejected as a safety measure.
+// the first token) is rejected as a safety measure. SQL comment syntax (-- and
+// /* ... */) is also rejected as a defense-in-depth measure against injection
+// probing on the admin UDS path.
 //
 // limit controls the server-side row cap; 0 means MaxSearchLimit.
 // The caller is responsible for imposing a LIMIT clause in the SQL itself for
@@ -193,6 +195,15 @@ func (s *DuckDBSearcher) Query(ctx context.Context, rawSQL string, limit int) (c
 	// guard here rather than relying on the driver.
 	if strings.Contains(stmt, ";") {
 		return nil, nil, fmt.Errorf("compound statements (semicolons) are not allowed")
+	}
+	// Reject SQL comment syntax (-- line comments and /* block comments) as
+	// defense-in-depth. The admin UDS is root-gated, but accepting comment
+	// syntax expands the injection surface unnecessarily.
+	if strings.Contains(stmt, "--") {
+		return nil, nil, fmt.Errorf("SQL comments (--) are not allowed")
+	}
+	if strings.Contains(stmt, "/*") {
+		return nil, nil, fmt.Errorf("SQL comments (/*) are not allowed")
 	}
 
 	db, err := s.open(ctx)
