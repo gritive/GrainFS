@@ -9,6 +9,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -80,7 +81,7 @@ func TestRecoverClusterExecuteRewritesMembershipAndMarker(t *testing.T) {
 	require.Equal(t, "node-recovered", marker.RecoveredNodeID)
 	require.Len(t, marker.OriginalServers, 2)
 
-	db, err := badger.Open(badger.DefaultOptions(filepath.Join(target, "meta")).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(filepath.Join(target, "meta")))
 	require.NoError(t, err)
 	defer db.Close()
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
@@ -186,7 +187,7 @@ func writeRecoverClusterSourceSnapshot(t *testing.T, dataDir string, servers []r
 func writeRecoverClusterSourceSnapshotWithOptions(t *testing.T, dataDir string, servers []raft.Server, extra raft.Snapshot) []byte {
 	t.Helper()
 	metaDir := filepath.Join(dataDir, "meta")
-	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(metaDir))
 	require.NoError(t, err)
 	fsm := NewFSM(db, newStateKeyspaceEmpty())
 	cmd, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "photos"})

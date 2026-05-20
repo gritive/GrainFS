@@ -5,12 +5,13 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
 func openTestDB(t *testing.T) *badger.DB {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -55,19 +56,16 @@ func TestRegistry_Reset_ClearsState(t *testing.T) {
 
 func TestRegistry_ConcurrentRegister_NoDataRace(t *testing.T) {
 	r := NewRegistry()
-	dbs := make([]*badger.DB, 32)
-	for i := range dbs {
-		dbs[i] = openTestDB(t)
-	}
+	db := openTestDB(t)
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {
 		wg.Add(1)
-		go func(db *badger.DB) {
+		go func() {
 			defer wg.Done()
 			e := r.Register(DBCategoryMeta, db)
 			_ = r.Snapshot()
 			r.Deregister(e)
-		}(dbs[i])
+		}()
 	}
 	wg.Wait()
 }

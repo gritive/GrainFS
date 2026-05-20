@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -56,7 +57,7 @@ func newTestNodeForSharedDB(t *testing.T, nodeID string) (node RaftNode, closeFn
 // paths.
 func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	// Shared in-memory BadgerDB.
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -182,7 +183,7 @@ func fsmHasKey(t *testing.T, f *FSM, rawKey string) bool {
 const v2Format = raft.FSMSnapshotFormatVersion
 
 func TestSharedFSM_SnapshotContainsOnlyOwnGroup(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -210,7 +211,7 @@ func TestSharedFSM_SnapshotContainsOnlyOwnGroup(t *testing.T) {
 }
 
 func TestSharedFSM_RestoreReplacesOnlyOwnGroup(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -236,7 +237,7 @@ func TestSharedFSM_RestoreReplacesOnlyOwnGroup(t *testing.T) {
 }
 
 func TestSharedFSM_RestoreRejectsWrongFormatVersion(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -254,7 +255,7 @@ func TestSharedFSM_RestoreRejectsWrongFormatVersion(t *testing.T) {
 }
 
 func TestSharedFSM_RestoreRejectsAlreadyPrefixedKeys(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -273,7 +274,7 @@ func TestSharedFSM_RestoreRejectsAlreadyPrefixedKeys(t *testing.T) {
 }
 
 func TestFSM_Restore_EmptyKeyspace_WholeDBReplace(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 

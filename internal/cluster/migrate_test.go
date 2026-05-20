@@ -9,6 +9,8 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
 // setupLegacyData creates a legacy (pre-cluster) data directory with metadata in BadgerDB,
@@ -22,7 +24,7 @@ func setupLegacyData(t *testing.T, dir string, buckets []string, objects map[str
 	dataDir := filepath.Join(dir, "data")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
 
-	opts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	opts := badgerutil.SmallOptions(metaDir)
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 
@@ -86,7 +88,7 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 
 	// Verify metadata is still intact by re-opening BadgerDB
 	metaDir := filepath.Join(dir, "meta")
-	opts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	opts := badgerutil.SmallOptions(metaDir)
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	defer db.Close()
