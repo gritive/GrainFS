@@ -74,6 +74,15 @@ func (tgt *icebergTarget) runExecBestEffort(stmt string) {
 
 func (tgt *icebergTarget) createBucketWithAdminPolicy(t *testing.T, bucket string) {
 	t.Helper()
+	// Idempotent: shared cluster fixture is reused across multiple iceberg
+	// tests, each of which constructs a fresh icebergTarget. HeadBucket-skip
+	// avoids 409 conflict on the second-and-later targets that share the same
+	// underlying cluster.
+	if _, err := tgt.s3Client(0).HeadBucket(context.Background(), &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
+	}); err == nil {
+		return
+	}
 	createBucketWithAdminPolicyAttachViaUDSAny(t, tgt.dataDirs, tgt.saID, bucket, tgt.s3Client(0))
 }
 
