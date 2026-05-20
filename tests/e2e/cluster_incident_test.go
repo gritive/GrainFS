@@ -66,15 +66,12 @@ func TestClusterIncidentMissingShardFixedWithReceiptE2E(t *testing.T) {
 			DisableNFS:    true,
 			DisableNBD:    true,
 		})
-		c.GrantAdminOnBuckets(bucketName)
-		accessKey, secretKey := c.accessKey, c.secretKey
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
 		endpoints := c.httpURLs
-		leaderIdx, err := waitForWritableEndpoint(ctx, endpoints, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
-			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, accessKey, secretKey), bucketName)
-		})
+		leaderIdx, err := c.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
 		require.NoError(t, err)
+		accessKey, secretKey := c.accessKey, c.secretKey
 		client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
 
 		payload := make([]byte, 256*1024)
@@ -150,17 +147,14 @@ func TestQuarantineIncidentE2E(t *testing.T) {
 			DisableNFS:    true,
 			DisableNBD:    true,
 		})
-		c.GrantAdminOnBuckets(bucketName)
-		accessKey, secretKey := c.accessKey, c.secretKey
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 		defer cancel()
-		leaderIdx, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
-			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, accessKey, secretKey), bucketName)
-		})
+		leaderIdx, err := c.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
 		require.NoError(t, err)
 		client := c.S3Client(leaderIdx)
+		badPayload := []byte(strings.Repeat("bad", 128*1024))
 		require.Eventually(t, func() bool {
-			return tryPutObject(ctx, client, bucketName, "bad", []byte(strings.Repeat("bad", 1024))) == nil
+			return tryPutObject(ctx, client, bucketName, "bad", badPayload) == nil
 		}, 120*time.Second, time.Second)
 		require.Eventually(t, func() bool {
 			return tryPutObject(ctx, client, bucketName, "good", []byte("good")) == nil

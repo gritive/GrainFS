@@ -6,18 +6,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gritive/GrainFS/internal/bucketadmin"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// BucketPolicy test set probes the PutBucketPolicy / GetBucketPolicy /
-// DeleteBucketPolicy / policy-enforcement surface. A single set of cases
+// BucketPolicy test set probes admin-UDS policy CRUD, data-plane policy read,
+// data-plane mutation denial, and policy enforcement. A single set of cases
 // runs against both single-node and 4-node cluster fixtures to prove the
 // policy plane is at parity across topologies.
 
@@ -48,11 +51,10 @@ func runBucketPolicyCases(t *testing.T, tgt s3Target) {
 			}]
 		}`, bucket)
 
-		_, err := cli.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-			Bucket: aws.String(bucket),
-			Policy: aws.String(policy),
-		})
-		require.NoError(t, err)
+		adminPolicySet(t, tgt, bucket, []byte(policy))
+
+		raw := adminPolicyGet(t, tgt, bucket)
+		assert.Contains(t, string(raw), "s3:GetObject")
 
 		got, err := cli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 			Bucket: aws.String(bucket),
@@ -61,20 +63,30 @@ func runBucketPolicyCases(t *testing.T, tgt s3Target) {
 		require.NotNil(t, got.Policy)
 		assert.Contains(t, *got.Policy, "s3:GetObject")
 
-		_, err = cli.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
-			Bucket: aws.String(bucket),
-		})
-		require.NoError(t, err)
+		adminPolicyDelete(t, tgt, bucket)
 	})
 
 	t.Run("InvalidJSON", func(t *testing.T) {
 		bucket := tgt.uniqueBucket(t, "polinval")
+		status, body := adminPolicySetRaw(t, tgt, bucket, []byte(`{invalid`))
+		assert.Equalf(t, http.StatusBadRequest, status, "body=%s", body)
+	})
 
-		req := signedPolicyRequest(t, tgt, http.MethodPut, bucket, bytes.NewReader([]byte(`{invalid`)))
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	t.Run("DataPlaneMutationDenied", func(t *testing.T) {
+		bucket := tgt.uniqueBucket(t, "poldenymutate")
+
+		_, err := tgt.pickNode(0).PutBucketPolicy(context.Background(), &s3.PutBucketPolicyInput{
+			Bucket: aws.String(bucket),
+			Policy: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
+		})
+		require.Error(t, err)
+		require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err), "PutBucketPolicy err=%v", err)
+
+		_, err = tgt.pickNode(0).DeleteBucketPolicy(context.Background(), &s3.DeleteBucketPolicyInput{
+			Bucket: aws.String(bucket),
+		})
+		require.Error(t, err)
+		require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err), "DeleteBucketPolicy err=%v", err)
 	})
 
 	t.Run("DenyAction", func(t *testing.T) {
@@ -99,18 +111,60 @@ func runBucketPolicyCases(t *testing.T, tgt s3Target) {
 			}]
 		}`, bucket)
 
-		req := signedPolicyRequest(t, tgt, http.MethodPut, bucket, bytes.NewReader([]byte(policy)))
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
-		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		adminPolicySet(t, tgt, bucket, []byte(policy))
 
-		req, _ = http.NewRequest(http.MethodGet, tgt.endpoint(0)+"/"+bucket+"/secret.txt", nil)
-		resp, err = http.DefaultClient.Do(req)
+		req, err := http.NewRequest(http.MethodGet, tgt.endpoint(0)+"/"+bucket+"/secret.txt", nil)
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		resp.Body.Close()
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
+}
+
+func adminPolicyClient(t *testing.T, tgt s3Target) *bucketadmin.Client {
+	t.Helper()
+	c, err := bucketadmin.NewClient(tgt.adminSockPath())
+	require.NoError(t, err)
+	return c
+}
+
+func adminPolicySet(t *testing.T, tgt s3Target, bucket string, policy []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, adminPolicyClient(t, tgt).PolicySet(ctx, bucket, policy))
+}
+
+func adminPolicyGet(t *testing.T, tgt s3Target, bucket string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := adminPolicyClient(t, tgt).PolicyGetRaw(ctx, bucket)
+	require.NoError(t, err)
+	return raw
+}
+
+func adminPolicyDelete(t *testing.T, tgt s3Target, bucket string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, adminPolicyClient(t, tgt).PolicyDelete(ctx, bucket))
+}
+
+func adminPolicySetRaw(t *testing.T, tgt s3Target, bucket string, body []byte) (int, []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		"http://unix/v1/buckets/"+url.PathEscape(bucket)+"/policy", bytes.NewReader(body))
+	require.NoError(t, err)
+	resp, err := iamUDSClient(tgt.adminSockPath()).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, respBody
 }
 
 func signedPolicyRequest(t *testing.T, tgt s3Target, method, bucket string, body io.Reader) *http.Request {

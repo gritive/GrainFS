@@ -139,3 +139,17 @@ func (e *LocalExecution) ResolveObjectWrite(ctx context.Context, target RouteTar
 	}
 	return e.ResolveWrite(ctx, target)
 }
+
+// ResolveObjectPlacementRead returns the local voter backend for immutable
+// object-index reads whose metadata already names the object version and EC
+// placement. This lets surviving voters reconstruct k-of-n EC objects even
+// when the data-group leader is down; callers must only use this for
+// version-pinned EC reads and should fall back to ResolveRead/forward when the
+// local backend has not applied the version metadata yet.
+func (e *LocalExecution) ResolveObjectPlacementRead(_ context.Context, target RouteTarget) (*GroupBackend, error) {
+	gb := e.groups.Backend(target.GroupID)
+	if gb == nil || !target.SelfIsVoter {
+		return nil, nil
+	}
+	return gb, nil
+}

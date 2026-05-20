@@ -18,6 +18,8 @@ type Proposer interface {
 	ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error
 	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
 	ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error
+	ProposePolicyAttachToSAPut(ctx context.Context, saID, policy string) error
+	ProposePolicyAttachToSADelete(ctx context.Context, saID, policy string) error
 	// ProposeCreateBucketWithPolicyAttach proposes the IAM half of the
 	// sequenced create-bucket+attach operation (MetaCmd 62, D#13). bucket is
 	// informational for cache invalidation; sa and policy are the attach pair.

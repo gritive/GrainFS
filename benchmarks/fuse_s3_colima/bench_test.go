@@ -43,10 +43,11 @@ func throughput(b *testing.B, label string, payloadBytes int64, fn func()) {
 func withRcloneMountB(b *testing.B, fn func(mnt string)) {
 	b.Helper()
 	if out, err := colimaSSH("which", "rclone").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) == "" {
-		b.Skip("rclone not installed in colima VM")
+		require.NoErrorf(b, err, "rclone not installed in colima VM\n%s", out)
+		require.NotEmptyf(b, strings.TrimSpace(string(out)), "rclone not installed in colima VM\n%s", out)
 	}
 	if err := colimaSSH("test", "-e", "/dev/fuse").Run(); err != nil {
-		b.Skip("/dev/fuse not present in colima VM")
+		require.NoError(b, err, "/dev/fuse not present in colima VM")
 	}
 
 	name := strings.ReplaceAll(b.Name(), "/", "-")

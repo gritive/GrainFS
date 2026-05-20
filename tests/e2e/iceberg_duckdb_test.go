@@ -2,14 +2,13 @@ package e2e
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -33,8 +31,9 @@ func runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t *testing.T) {
 		encKeyFile := makeSharedEncryptionKeyFile(t)
 
 		server := startIcebergE2EServer(t, dataDir, raftPort, encKeyFile)
-		ak, sk := bootstrapAdminViaUDS(t, dataDir)
-		createE2EBucketWithCreds(t, server.endpoint, "grainfs-tables", ak, sk)
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dataDir}, 60*time.Second)
+		ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, bootstrap.SAID, "grainfs-tables", ecS3Client(server.endpoint, ak, sk))
 
 		runDuckDBIcebergSQLWithCreds(t, server.endpoint, ak, sk, `
 CREATE SCHEMA grainfs_iceberg.ns_e2e;
@@ -66,13 +65,8 @@ func runIcebergDuckDBClusterAnyNodeTableAPI(t *testing.T) {
 			disableNFS4: true,
 			disableNBD:  true,
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-
-		cluster.GrantAdminOnBuckets("grainfs-tables")
 		client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
-		require.NoError(t, err)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "grainfs-tables", client)
 		requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
 
 		runDuckDBIcebergSQLWithCreds(t, cluster.httpURLs[0], cluster.accessKey, cluster.secretKey, `
@@ -112,14 +106,9 @@ func runIcebergAuditCases(t *testing.T, tgt *icebergTarget, commitInterval time.
 			})
 		})
 
-		if tgt.isCluster && tgt.cluster != nil {
-			tgt.cluster.GrantAdminOnBuckets(bucket)
-		}
-
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_, err := tgt.s3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
+		tgt.createBucketWithAdminPolicy(t, bucket)
 
 		const numPuts = 5
 		writeStart := time.Now()
@@ -288,43 +277,36 @@ func startIcebergE2EServerWithExtraArgs(t *testing.T, dataDir string, raftPort i
 	}
 }
 
-func createE2EBucketWithCreds(t *testing.T, endpoint, bucket, accessKey, secretKey string) {
-	t.Helper()
-	client := s3ClientFor(endpoint, accessKey, secretKey)
-	_, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-	require.NoError(t, err)
-}
-
 func runDuckDBIcebergSQLWithCreds(t *testing.T, endpoint, accessKey, secretKey, query, want string) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	db, err := sql.Open("duckdb", "")
-	require.NoError(t, err)
-	defer db.Close()
-
-	rows, err := db.QueryContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, query))
-	require.NoError(t, err)
-	defer rows.Close()
-
-	var got string
-	require.True(t, rows.Next(), "duckdb query returned no rows")
-	require.NoError(t, rows.Scan(&got))
+	got := runDuckDBIcebergCLI(t, endpoint, accessKey, secretKey, query)
 	require.Equal(t, want, got)
 }
 
 func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey, query string) {
 	t.Helper()
+	_ = runDuckDBIcebergCLI(t, endpoint, accessKey, secretKey, query)
+}
 
-	db, err := sql.Open("duckdb", "")
-	require.NoError(t, err)
-	defer db.Close()
-
+func runDuckDBIcebergCLI(t *testing.T, endpoint, accessKey, secretKey, query string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	_, err = db.ExecContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, query))
-	require.NoError(t, err)
+	cmd := exec.CommandContext(ctx, "duckdb", "-csv", "-noheader", "-c", duckDBIcebergSQL(endpoint, accessKey, secretKey, query))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "duckdb output:\n%s", out)
+	return lastNonEmptyLine(string(out))
+}
+
+func lastNonEmptyLine(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // TestAuditIcebergClusterDuckDB starts a 3-node cluster with audit enabled and a
@@ -357,12 +339,10 @@ func runAuditIcebergClusterFollowerShipDuckDB(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 
-		cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables", "test-audit-follower")
+		cluster.GrantAdminOnBuckets("grainfs-audit")
 		leaderClient := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
-		_, err := leaderClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
-		require.NoError(t, err)
-		_, err = leaderClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-audit-follower")})
-		require.NoError(t, err)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "grainfs-tables", leaderClient)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "test-audit-follower", leaderClient)
 		requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
 
 		followerIdx := (cluster.leaderIdx + 1) % len(cluster.httpURLs)
@@ -408,18 +388,16 @@ func runAuditIcebergClusterLeaderFlap(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
 
-		cluster.GrantAdminOnBuckets("grainfs-audit", "grainfs-tables", "flap-bucket")
+		cluster.GrantAdminOnBuckets("grainfs-audit")
 		client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("grainfs-tables")})
-		require.NoError(t, err)
-		_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("flap-bucket")})
-		require.NoError(t, err)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "grainfs-tables", client)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "flap-bucket", client)
 		requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
 
 		// Write on a follower so events need shipping.
 		followerIdx := (cluster.leaderIdx + 1) % 3
 		followerClient := ecS3Client(cluster.httpURLs[followerIdx], cluster.accessKey, cluster.secretKey)
-		_, err = followerClient.PutObject(ctx, &s3.PutObjectInput{
+		_, err := followerClient.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String("flap-bucket"),
 			Key:    aws.String("before-flap"),
 			Body:   strings.NewReader("pre-flap data"),
@@ -427,77 +405,183 @@ func runAuditIcebergClusterLeaderFlap(t *testing.T) {
 		require.NoError(t, err)
 
 		// Kill the leader to force re-election.
+		oldLeaderIdx := cluster.leaderIdx
 		leaderProc := cluster.procs[cluster.leaderIdx]
 		if leaderProc != nil && leaderProc.Process != nil {
-			_ = leaderProc.Process.Signal(syscall.SIGTERM)
+			require.NoError(t, leaderProc.Process.Signal(syscall.SIGTERM))
+			_ = leaderProc.Wait()
+			cluster.procs[oldLeaderIdx] = nil
 		}
 
-		// Find a surviving node.
-		var survivorEndpoint string
-		for i, url := range cluster.httpURLs {
-			if i != cluster.leaderIdx {
-				survivorEndpoint = url
-				break
-			}
-		}
+		time.Sleep(2 * time.Second)
+		cluster.procs[oldLeaderIdx] = cluster.startNode(oldLeaderIdx)
+		waitForPort(t, cluster.httpPorts[oldLeaderIdx], 60*time.Second)
 
-		// Poll until re-election and commit complete.
-		countAuditRows(t, survivorEndpoint, cluster.accessKey, cluster.secretKey,
+		// Poll until the restarted node ships or commits its durable outbox.
+		countAuditRowsAnyEndpoint(t, cluster.httpURLs, cluster.accessKey, cluster.secretKey,
 			"bucket = 'flap-bucket'",
-			1, 45*time.Second,
+			1, 90*time.Second,
 		)
 	})
 }
 
-// countAuditRows polls the audit.s3 Iceberg table via DuckDB until the expected
-// count is reached or the timeout expires. Using require.Eventually avoids fixed
-// sleeps that are flaky on slow CI machines.
+// countAuditRows polls the server-side audit searcher until the expected count
+// is reached. The searcher itself uses DuckDB with the internal audit reader
+// credential; direct test-S3 credentials cannot read the grainfs-audit bucket.
 func countAuditRows(t *testing.T, endpoint, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		db, err := sql.Open("duckdb", "")
+	bucket := auditWhereBucket(whereClause)
+	require.NotEmpty(t, bucket, "countAuditRows requires a bucket predicate: %s", whereClause)
+	operation := ""
+	if strings.Contains(whereClause, "method = 'PUT'") {
+		operation = "PutObject"
+	}
+
+	deadline := time.Now().Add(timeout)
+	var lastRows int
+	var lastErr error
+	for time.Now().Before(deadline) {
+		rows, err := auditSearchRows(t, endpoint, accessKey, secretKey, bucket, operation)
 		if err != nil {
-			return false
+			lastErr = err
+		} else {
+			lastRows = rows
+			if rows >= want {
+				return
+			}
 		}
-		defer db.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		q := fmt.Sprintf(`SELECT CAST(COUNT(*) AS VARCHAR) AS cnt FROM grainfs_iceberg.audit.s3 WHERE %s`, whereClause)
-		row := db.QueryRowContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, q))
-		var got string
-		if err := row.Scan(&got); err != nil {
-			return false
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.Failf(t, "audit rows not committed",
+		"timeout=%s bucket=%q operation=%q rows=%d want=%d lastErr=%v",
+		timeout, bucket, operation, lastRows, want, lastErr)
+}
+
+func countAuditRowsAnyEndpoint(t *testing.T, endpoints []string, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
+	t.Helper()
+	bucket := auditWhereBucket(whereClause)
+	require.NotEmpty(t, bucket, "countAuditRowsAnyEndpoint requires a bucket predicate: %s", whereClause)
+	operation := ""
+	if strings.Contains(whereClause, "method = 'PUT'") {
+		operation = "PutObject"
+	}
+
+	deadline := time.Now().Add(timeout)
+	var lastRows int
+	var lastEndpoint string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		for _, endpoint := range endpoints {
+			rows, err := auditSearchRows(t, endpoint, accessKey, secretKey, bucket, operation)
+			if err != nil {
+				lastErr = err
+				lastEndpoint = endpoint
+				continue
+			}
+			lastRows = rows
+			lastEndpoint = endpoint
+			if rows >= want {
+				return
+			}
 		}
-		n, err := strconv.Atoi(got)
-		return err == nil && n >= want
-	}, timeout, 500*time.Millisecond, "audit rows not committed within %s", timeout)
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.Failf(t, "audit rows not committed",
+		"timeout=%s bucket=%q operation=%q endpoint=%q rows=%d want=%d lastErr=%v",
+		timeout, bucket, operation, lastEndpoint, lastRows, want, lastErr)
+}
+
+func auditWhereBucket(whereClause string) string {
+	const marker = "bucket = '"
+	idx := strings.Index(whereClause, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := whereClause[idx+len(marker):]
+	end := strings.Index(rest, "'")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func auditSearchRows(t *testing.T, endpoint, accessKey, secretKey, bucket, operation string) (int, error) {
+	t.Helper()
+	q := url.Values{}
+	q.Set("bucket", bucket)
+	q.Set("limit", "100")
+	if operation != "" {
+		q.Set("operation", operation)
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint+"/api/audit/s3?"+q.Encode(), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Host = req.URL.Host
+	s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("audit search status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var rows []struct {
+		Bucket    string `json:"bucket"`
+		Operation string `json:"operation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return 0, err
+	}
+	var got int
+	for _, row := range rows {
+		if row.Bucket == bucket && (operation == "" || row.Operation == operation) {
+			got++
+		}
+	}
+	return got, nil
 }
 
 func duckDBIcebergSQL(endpoint, accessKey, secretKey, query string) string {
 	endpointHost := strings.TrimPrefix(endpoint, "http://")
 	return fmt.Sprintf(`
 INSTALL httpfs;
-INSTALL iceberg;
-LOAD httpfs;
-LOAD iceberg;
-CREATE OR REPLACE SECRET grainfs_s3 (
-	TYPE s3,
-	KEY_ID '%s',
+	INSTALL iceberg;
+	LOAD httpfs;
+	LOAD iceberg;
+	SET s3_access_key_id='%s';
+	SET s3_secret_access_key='%s';
+	SET s3_region='us-east-1';
+	SET s3_endpoint='%s';
+	SET s3_url_style='path';
+	SET s3_use_ssl=false;
+	SET iceberg_via_aws_sdk_for_catalog_interactions=true;
+	CREATE OR REPLACE SECRET grainfs_s3 (
+		TYPE s3,
+		KEY_ID '%s',
 	SECRET '%s',
 	REGION 'us-east-1',
 	ENDPOINT '%s',
-	URL_STYLE 'path',
-	USE_SSL false
-);
-ATTACH 'grainfs' AS grainfs_iceberg (
-	TYPE iceberg,
-	ENDPOINT '%s/iceberg',
-	AUTHORIZATION_TYPE 'sigv4',
-	SIGV4_REGION 'us-east-1',
-	SIGV4_SERVICE 's3'
-);
-%s
-`, accessKey, secretKey, endpointHost, endpoint, query)
+		URL_STYLE 'path',
+		USE_SSL false
+	);
+	CREATE OR REPLACE SECRET grainfs_iceberg_oauth (
+		TYPE iceberg,
+		CLIENT_ID '%s',
+		CLIENT_SECRET '%s',
+		OAUTH2_SERVER_URI '%s/iceberg/v1/oauth/tokens',
+		OAUTH2_SCOPE 'PRINCIPAL_ROLE:grainfs'
+	);
+	ATTACH 'grainfs' AS grainfs_iceberg (
+		TYPE iceberg,
+		SECRET grainfs_iceberg_oauth,
+		ENDPOINT '%s/iceberg',
+		AUTHORIZATION_TYPE 'oauth2'
+	);
+	%s
+	`, accessKey, secretKey, endpointHost, accessKey, secretKey, endpointHost, accessKey, secretKey, endpoint, endpoint, query)
 }
 
 // TestIcebergDuckDBE2E groups iceberg local + cluster DuckDB checks.

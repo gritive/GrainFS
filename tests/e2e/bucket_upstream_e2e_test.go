@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -42,9 +41,9 @@ func runBucketUpstreamCases(t *testing.T, tgt s3Target) {
 		defer cancel2()
 		legacy := exec.CommandContext(ctx2, binary, "iam", "bucket-upstream", "set", "xb",
 			"--endpoint", "/tmp/nonexistent.sock",
-			"--upstream-url", "http://x:1",
+			"--endpoint-url", "http://x:1",
 			"--access-key", "x",
-			"--secret-key-file", "/dev/null",
+			"--secret-key", "x",
 		)
 		out, err := legacy.CombinedOutput()
 		require.Error(t, err, "legacy `iam bucket-upstream set …` must exit non-zero; got output: %s", out)
@@ -59,11 +58,10 @@ func runBucketUpstreamCases(t *testing.T, tgt s3Target) {
 			defer cancel()
 			putCmd := exec.CommandContext(ctx, binary, "bucket", "upstream", "put", name,
 				"--endpoint", sock,
-				"--upstream-url", "http://upstream.example:9000",
+				"--endpoint-url", "http://upstream.example:9000",
 				"--access-key", "AKUP",
-				"--secret-key-stdin",
+				"--secret-key", "upstream-secret-plain",
 			)
-			putCmd.Stdin = strings.NewReader("upstream-secret-plain\n")
 			out, err := putCmd.CombinedOutput()
 			require.NoError(t, err, "put: %s", string(out))
 		}
@@ -114,7 +112,7 @@ func runBucketUpstreamCases(t *testing.T, tgt s3Target) {
 				"--endpoint", sock,
 			).CombinedOutput()
 			require.Error(t, err, "GET after delete must fail; output: %s", string(out))
-			assert.Contains(t, string(out), "404", "post-delete GET must surface 404 in output")
+			assert.Contains(t, string(out), "not found", "post-delete GET must surface not found in output")
 		}
 	})
 }

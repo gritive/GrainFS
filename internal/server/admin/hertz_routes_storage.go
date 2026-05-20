@@ -20,7 +20,7 @@ func registerBucket(g router, d *Deps) {
 	g.GET(routePathBuckets, wrapZero(d, AdminListBuckets))
 	g.GET(routePathBucket, wrapName(d, AdminGetBucket))
 	g.DELETE(routePathBucket, bucketDeleteHandler(d))
-	g.GET(routePathBucketPolicy, wrapName(d, AdminGetBucketPolicy))
+	g.GET(routePathBucketPolicy, bucketGetPolicyHandler(d))
 	g.PUT(routePathBucketPolicy, bucketSetPolicyHandler(d))
 	g.DELETE(routePathBucketPolicy, bucketDeletePolicyHandler(d))
 	g.GET(routePathBucketVersioning, wrapName(d, AdminGetBucketVersioning))

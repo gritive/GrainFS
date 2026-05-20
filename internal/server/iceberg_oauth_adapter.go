@@ -7,8 +7,10 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/oauth"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 )
 
 // icebergOAuthHandler wraps the stdlib oauth.Handler for use with Hertz.
@@ -20,6 +22,45 @@ type icebergOAuthHandler struct {
 
 func newIcebergOAuthHandler(sa oauth.SAResolver, keys *iamjwt.KeySet, authz oauth.Authorizer) *icebergOAuthHandler {
 	return &icebergOAuthHandler{inner: oauth.NewHandler(sa, keys, authz)}
+}
+
+type auditInternalOAuthResolver struct {
+	base      oauth.SAResolver
+	accessKey string
+	secretKey string
+}
+
+func (r auditInternalOAuthResolver) LookupByAccessKey(ctx context.Context, accessKey string) (string, []byte, error) {
+	if r.accessKey != "" && accessKey == r.accessKey {
+		return audit.SystemSA, []byte(r.secretKey), nil
+	}
+	return r.base.LookupByAccessKey(ctx, accessKey)
+}
+
+type auditInternalOAuthAuthorizer struct {
+	base oauth.Authorizer
+}
+
+func (a auditInternalOAuthAuthorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult {
+	if saID == audit.SystemSA && bucket == audit.Warehouse && auditInternalIcebergReadAction(ctxReq.Action) {
+		return policy.EvalResult{Decision: policy.DecisionAllow, Reason: "audit internal iceberg reader"}
+	}
+	return a.base.Authorize(ctx, saID, bucket, ctxReq)
+}
+
+func auditInternalIcebergReadAction(action string) bool {
+	switch action {
+	case "iceberg:GetCatalogConfig",
+		"iceberg:ListNamespaces",
+		"iceberg:LoadNamespace",
+		"iceberg:HeadNamespace",
+		"iceberg:ListTables",
+		"iceberg:LoadTable",
+		"iceberg:HeadTable":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *icebergOAuthHandler) handle(ctx context.Context, c *app.RequestContext) {

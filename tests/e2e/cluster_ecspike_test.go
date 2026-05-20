@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ type ecspikeNode struct {
 	endpoint string
 	dataDir  string
 	cmd      *exec.Cmd
+	saID     string
 	ak, sk   string
 	logFile  *os.File
 }
@@ -100,23 +102,29 @@ func startEcspikeClusterOpts(t *testing.T) ([]*ecspikeNode, func()) {
 		require.NoErrorf(t,
 			waitForPortsParallelErrWithProcesses([]int{port}, []*exec.Cmd{cmd}, 30*time.Second),
 			"server did not start on port %d; stderr saved to %s", port, logFile.Name())
-		ak, sk := bootstrapAdminViaUDS(t, dir)
-		nodes[i].ak = ak
-		nodes[i].sk = sk
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 10*time.Second)
+		nodes[i].saID = bootstrap.SAID
+		nodes[i].ak = bootstrap.AccessKey
+		nodes[i].sk = bootstrap.SecretKey
 	}
 	return nodes, cleanup
 }
 
-func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.Config, clients map[string]*s3.Client) {
+func requireECSpikeBucketsReady(t *testing.T, ctx context.Context, cfg *ecspike.Config, nodes []*ecspikeNode, clients map[string]*s3.Client) {
 	t.Helper()
 
 	const readinessKey = "__grainfs_e2e_ready"
+	byEndpoint := make(map[string]*ecspikeNode, len(nodes))
+	for _, n := range nodes {
+		byEndpoint[n.endpoint] = n
+	}
 	for _, ep := range cfg.Nodes {
+		node := byEndpoint[ep]
+		require.NotNil(t, node, "node for endpoint %s", ep)
+		require.NotEmpty(t, node.saID, "bootstrap SA ID for %s", ep)
+		sock := filepath.Join(node.dataDir, "admin.sock")
+		require.NoErrorf(t, tryAdminCreateBucketWithPolicyAttach(sock, cfg.Bucket, node.saID, "bucket-admin"), "admin create bucket on %s", ep)
 		client := clients[ep]
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(cfg.Bucket),
-		})
-		require.NoErrorf(t, err, "create bucket on %s", ep)
 		waitForS3Write(t, client, cfg.Bucket, readinessKey, 30*time.Second)
 		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(cfg.Bucket),
@@ -158,7 +166,7 @@ func TestECSpike_KillOneNodeStillReadable(t *testing.T) {
 			},
 		}
 
-		requireECSpikeBucketsReady(t, ctx, cfg, clients)
+		requireECSpikeBucketsReady(t, ctx, cfg, nodes, clients)
 
 		// Correctness: 10 × 16MB random objects, record SHA256.
 		const objCount = 10
@@ -229,7 +237,7 @@ func measureECSpikeP95(t *testing.T) {
 			return clients[ep]
 		},
 	}
-	requireECSpikeBucketsReady(t, ctx, cfg, clients)
+	requireECSpikeBucketsReady(t, ctx, cfg, nodes, clients)
 
 	const iter = 100
 	const objSize = 16 * 1024 * 1024

@@ -47,23 +47,10 @@ func TestClusterScrubberAutoRepairE2E(t *testing.T) {
 			LogPrefix:     "grainfs-scrubber",
 			ScrubInterval: "2s",
 		})
-		cluster.GrantAdminOnBuckets(bucketName)
-
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
-		endpoints := append([]string(nil), cluster.httpURLs...)
 
-		leaderIdx, err := waitForWritableEndpoint(
-			ctx,
-			endpoints,
-			120*time.Second,
-			5*time.Second,
-			1*time.Second,
-			func(attemptCtx context.Context, endpoint string) error {
-				c := ecS3Client(endpoint, cluster.accessKey, cluster.secretKey)
-				return tryCreateBucket(attemptCtx, c, bucketName)
-			},
-		)
+		leaderIdx, err := cluster.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
 		require.NoError(t, err, "no leader ready")
 		client := cluster.S3Client(leaderIdx)
 

@@ -179,15 +179,26 @@ func (w *Worker) runBucketCycle(ctx context.Context, bucket string, rules []Rule
 		return
 	}
 
+	groupCount := 0
+	versionCount := 0
 	for g := range groups {
 		if ctx.Err() != nil {
 			go drainGroups(groups) // drain producer to prevent goroutine leak
 			return
 		}
+		groupCount++
+		versionCount += len(g.Versions)
 		metrics.LifecycleGroupVersions.Observe(float64(len(g.Versions)))
 		w.objectsChecked.Add(int64(len(g.Versions)))
 		w.applyRulesToGroup(ctx, g, rules, now)
 	}
+	log.Info().
+		Str("bucket", bucket).
+		Int("rules", len(rules)).
+		Int("groups", groupCount).
+		Int("versions", versionCount).
+		Time("now", now).
+		Msg("lifecycle: bucket cycle complete")
 }
 
 func drainGroups(ch <-chan storage.ObjectKeyGroup) {
@@ -290,6 +301,7 @@ func (w *Worker) deleteObject(ctx context.Context, bucket, key string) bool {
 		log.Error().Str("bucket", bucket).Str("key", key).Err(err).Msg("lifecycle: delete object")
 		return false
 	}
+	log.Info().Str("bucket", bucket).Str("key", key).Msg("lifecycle: deleted object")
 	w.expired.Add(1)
 	return true
 }

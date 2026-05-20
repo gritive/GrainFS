@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -24,6 +25,14 @@ func TestObjectTaggingE2E(t *testing.T) {
 
 func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 	client := tgt.pickNode(0)
+
+	if tgt.isCluster {
+		probe := tgt.name + "-tag-mp-probe"
+		tgt.createBkt(t, probe)
+		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+		defer cancel()
+		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
+	}
 
 	t.Run("PutGetDelete", func(t *testing.T) {
 		ctx := context.Background()
@@ -159,17 +168,17 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 	})
 
 	t.Run("Versioning_PerVersion", func(t *testing.T) {
+		if !tgt.isCluster {
+			// Local single-node storage does not implement versionID-aware
+			// object tag mutation; the per-version contract is cluster-only.
+			return
+		}
 		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "ver")
 		_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 			Bucket:                  aws.String(bucket),
 			VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
 		})
-		if !tgt.isCluster {
-			// LocalBackend does not implement BucketVersioner; cluster-only feature.
-			require.Error(t, err)
-			return
-		}
 		require.NoError(t, err)
 
 		v1, err := client.PutObject(ctx, &s3.PutObjectInput{

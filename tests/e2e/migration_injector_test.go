@@ -45,16 +45,11 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		waitForPort(t, srcPort, 30*time.Second)
 
 		srcEndpoint := fmt.Sprintf("http://127.0.0.1:%d", srcPort)
-		srcAK, srcSK := bootstrapAdminViaUDS(t, srcDir)
+		srcBootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{srcDir}, 30*time.Second)
+		srcAK, srcSK := srcBootstrap.AccessKey, srcBootstrap.SecretKey
 		srcClient := s3ClientFor(srcEndpoint, srcAK, srcSK)
 
-		_, err = srcClient.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("data")})
-		require.NoError(t, err)
-		waitForS3Write(t, srcClient, "data", "__grainfs_e2e_ready", 30*time.Second)
-		_, _ = srcClient.DeleteObject(ctx, &s3.DeleteObjectInput{
-			Bucket: aws.String("data"),
-			Key:    aws.String("__grainfs_e2e_ready"),
-		})
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{srcDir}, srcBootstrap.SAID, "data", srcClient)
 		_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String("data"),
 			Key:    aws.String("hello.txt"),
@@ -90,8 +85,10 @@ func TestMigrationInjector_CopiesFromSourceToDest(t *testing.T) {
 		waitForPort(t, dstPort, 30*time.Second)
 
 		dstEndpoint := fmt.Sprintf("http://127.0.0.1:%d", dstPort)
-		dstAK, dstSK := bootstrapAdminViaUDS(t, dstDir)
+		dstBootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dstDir}, 30*time.Second)
+		dstAK, dstSK := dstBootstrap.AccessKey, dstBootstrap.SecretKey
 		dstClient := s3ClientFor(dstEndpoint, dstAK, dstSK)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dstDir}, dstBootstrap.SAID, "data", dstClient)
 
 		// --- Run migration injector ---
 		injectCmd := exec.Command(binary, "migrate", "inject",

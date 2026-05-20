@@ -11,6 +11,8 @@ func registerIAM(g router, d *Deps) {
 	g.GET(routePathIAMSA, wrapZero(d, ListSA))
 	g.GET(routePathIAMSAByID, iamGetSAHandler(d))
 	g.DELETE(routePathIAMSAByID, iamDeleteSAHandler(d))
+	g.PUT(routePathIAMGrant, wrapBodyNoOut204[iam.GrantPutRequest](d, PutGrant))
+	g.DELETE(routePathIAMGrant, wrapBodyNoOut204[iam.GrantDeleteRequest](d, DeleteGrant))
 	// Key
 	g.POST(routePathIAMSAKey, iamCreateKeyHandler(d))
 	g.DELETE(routePathIAMSAKeyByAK, iamRevokeKeyHandler(d))

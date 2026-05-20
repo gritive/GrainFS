@@ -293,27 +293,40 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, clusterKey string) (
 	return cmd, logFile
 }
 
-// uniqueFreePorts picks n free TCP ports by binding :0 then closing. Same
-// TOCTOU caveat as the e2e helper — the kernel can hand the port to another
-// process between Close and grainfs's Listen. The boot test tolerates this
-// because failures here are fail-fast and rerunning is cheap.
+// uniqueFreePorts picks n ports where both TCP and UDP are free. The fixture
+// uses TCP for HTTP/NFS/NBD/9P and UDP for QUIC raft, so checking TCP alone can
+// choose a port that later fails the raft listener with EADDRINUSE.
 func uniqueFreePorts(t testing.TB, n int) []int {
 	t.Helper()
-	listeners := make([]net.Listener, 0, n)
+	tcpListeners := make([]net.Listener, 0, n)
+	udpListeners := make([]net.PacketConn, 0, n)
 	ports := make([]int, 0, n)
-	for i := 0; i < n; i++ {
+	for len(ports) < n {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			for _, prev := range listeners {
+			for _, prev := range tcpListeners {
+				_ = prev.Close()
+			}
+			for _, prev := range udpListeners {
 				_ = prev.Close()
 			}
 			t.Fatalf("listen :0: %v", err)
 		}
-		listeners = append(listeners, ln)
-		ports = append(ports, ln.Addr().(*net.TCPAddr).Port)
+		port := ln.Addr().(*net.TCPAddr).Port
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			_ = ln.Close()
+			continue
+		}
+		tcpListeners = append(tcpListeners, ln)
+		udpListeners = append(udpListeners, pc)
+		ports = append(ports, port)
 	}
-	for _, ln := range listeners {
+	for _, ln := range tcpListeners {
 		_ = ln.Close()
+	}
+	for _, pc := range udpListeners {
+		_ = pc.Close()
 	}
 	return ports
 }

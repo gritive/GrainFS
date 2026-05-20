@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,10 @@ var (
 	testS3Client      *s3.Client
 	freePortCursor    uint32 = initialFreePortCursor()
 )
+
+type e2ePortLease struct {
+	PID int `json:"pid"`
+}
 
 func keepE2EArtifacts() bool {
 	return os.Getenv("GRAINFS_E2E_KEEP_ARTIFACTS") == "1"
@@ -121,6 +126,16 @@ func TestMain(m *testing.M) {
 	testSecretKey = admin.SecretKey
 	testSAID = admin.SAID
 	testWildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
+	if !testWildcardAdmin && testSAID != "" {
+		if err := grantAdminOnBucketViaUDSForTestMain(dir, testSAID, "default", 30*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "grant default bucket to bootstrap SA: %v\n", err)
+			terminateProcess(cmd)
+			if cleanupErr := cleanupDataDir(); cleanupErr != nil {
+				fmt.Fprintln(os.Stderr, cleanupErr)
+			}
+			os.Exit(1)
+		}
+	}
 
 	// Disable auto-snapshot for deterministic e2e behavior. Tests that need
 	// the auto-snapshot loop (e.g. auto_snapshot_test.go) PATCH it back to a
@@ -171,7 +186,6 @@ func TestMain(m *testing.M) {
 
 	stopSharedCluster()
 	stopSharedMRCluster()
-	shutdownSharedColimaCluster()
 	terminateProcess(cmd)
 	if err := cleanupDataDir(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -326,43 +340,145 @@ func bootstrapAdminResultViaUDSForTestMain(dataDir string, timeout time.Duration
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return tryBootstrapAdminViaUDSResult(sock)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		out, err := tryBootstrapAdminViaUDSResult(sock)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		time.Sleep(50 * time.Millisecond)
+	}
+	return iamSAResult{}, fmt.Errorf("admin socket %s not ready within %v: %w", sock, timeout, lastErr)
+}
+
+func grantAdminOnBucketViaUDSForTestMain(dataDir, saID, bucket string, timeout time.Duration) error {
+	sock := dataDir + "/admin.sock"
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sock); err != nil {
+			lastErr = err
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if err := tryIAMGrantPut(sock, saID, bucket, "Admin"); err != nil {
+			lastErr = err
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("grant Admin for %s on %s via %s did not succeed within %v: %w", saID, bucket, sock, timeout, lastErr)
 }
 
 func freePort() int {
+	locked, unlock := lockE2EPortRegistry()
+	if locked {
+		defer unlock()
+	}
+	leases := readE2EPortLeases()
 	// Avoid the OS ephemeral range for listeners. The cluster e2e tests open
 	// many outbound UDP/QUIC sockets; using :0 for a future UDP listener can
 	// race with an ephemeral source port after the probe socket is closed.
 	for i := 0; i < 25000; i++ {
 		port := 20000 + int(atomic.AddUint32(&freePortCursor, 7919)%25000)
-		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
+		if _, reserved := leases[strconv.Itoa(port)]; reserved {
 			continue
 		}
-		udp, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err == nil {
-			_ = udp.Close()
-			_ = l.Close()
+		if portAvailableForTCPAndUDP(port) {
+			leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
+			writeE2EPortLeases(leases)
 			return port
 		}
-		_ = l.Close()
 	}
 
 	for i := 0; i < 100; i++ {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
+		l, err := net.Listen("tcp", ":0")
 		if err != nil {
 			panic(fmt.Sprintf("cannot allocate free port: %v", err))
 		}
 		port := l.Addr().(*net.TCPAddr).Port
-		udp, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if _, reserved := leases[strconv.Itoa(port)]; reserved {
+			_ = l.Close()
+			continue
+		}
+		udp, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
 		if err == nil {
 			_ = udp.Close()
 			_ = l.Close()
+			leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
+			writeE2EPortLeases(leases)
 			return port
 		}
 		_ = l.Close()
 	}
 	panic("cannot allocate port available for both tcp and udp")
+}
+
+func lockE2EPortRegistry() (bool, func()) {
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "grainfs-e2e-port-registry.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, func() {}
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return false, func() {}
+	}
+	return true, func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}
+}
+
+func readE2EPortLeases() map[string]e2ePortLease {
+	path := filepath.Join(os.TempDir(), "grainfs-e2e-port-registry.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]e2ePortLease{}
+	}
+	var leases map[string]e2ePortLease
+	if err := json.Unmarshal(data, &leases); err != nil {
+		return map[string]e2ePortLease{}
+	}
+	pruneE2EPortLeases(leases)
+	return leases
+}
+
+func writeE2EPortLeases(leases map[string]e2ePortLease) {
+	data, err := json.Marshal(leases)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(os.TempDir(), "grainfs-e2e-port-registry.json"), data, 0o600)
+}
+
+func pruneE2EPortLeases(leases map[string]e2ePortLease) {
+	for port, lease := range leases {
+		if lease.PID > 0 && processExists(lease.PID) {
+			continue
+		}
+		delete(leases, port)
+	}
+}
+
+func processExists(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func portAvailableForTCPAndUDP(port int) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	defer l.Close()
+	udp, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	_ = udp.Close()
+	return true
 }
 
 func uniqueFreePorts(n int) []int {
@@ -623,38 +739,6 @@ func waitForIAMReady(cli *s3.Client, timeout time.Duration) error {
 	}
 }
 
-func createBucketWithClient(t testing.TB, client *s3.Client, name string) {
-	t.Helper()
-	ctx := context.Background()
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(name),
-	})
-	require.NoError(t, err, "create bucket %s", name)
-	const readinessKey = "__grainfs_e2e_ready"
-	waitForS3Write(t, client, name, readinessKey, 30*time.Second)
-	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(name),
-		Key:    aws.String(readinessKey),
-	})
-
-	t.Cleanup(func() {
-		out, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket: aws.String(name),
-		})
-		if out != nil {
-			for _, obj := range out.Contents {
-				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket: aws.String(name),
-					Key:    obj.Key,
-				})
-			}
-		}
-		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-			Bucket: aws.String(name),
-		})
-	})
-}
-
 func createBucketWithAdminPolicyAttachViaUDSAny(t testing.TB, dataDirs []string, saID, name string, client *s3.Client) {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
@@ -722,14 +806,7 @@ func terminateProcess(cmd *exec.Cmd) {
 func createBucket(t *testing.T, name string) {
 	t.Helper()
 	ctx := context.Background()
-	if !testWildcardAdmin {
-		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{testServerDataDir}, testSAID, name, testS3Client)
-	} else {
-		_, err := testS3Client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(name),
-		})
-		require.NoError(t, err, "create bucket %s", name)
-	}
+	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{testServerDataDir}, testSAID, name, testS3Client)
 
 	t.Cleanup(func() {
 		// delete all objects first

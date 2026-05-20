@@ -6,6 +6,7 @@ const (
 	TableS3    = "s3"
 	BucketName = "grainfs-audit"
 	SystemSA   = "system:audit"
+	Warehouse  = "default"
 )
 
 // S3Event is one row of the audit.s3 Iceberg table.

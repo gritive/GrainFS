@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -117,12 +115,7 @@ func runClusterBootstrapDataPresentBlocksJoin(t *testing.T) {
 		})
 
 		// Create a bucket so HasUserData() → true.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, err := c.S3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String("guard-test-bucket"),
-		})
-		require.NoError(t, err)
+		require.NoError(t, adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, "guard-test-bucket", 30*time.Second))
 
 		// Any non-self, non-empty host:port works — the data guard fires before
 		// the handler tries to reach the peer.

@@ -231,6 +231,34 @@ func TestBucketFile_Create_CreatesEmptyObjectAndReturnsWritableFile(t *testing.T
 	require.Equal(t, uint32(0640), loadP9FileMeta(ctx, backend, "bkt", "new.txt").Mode)
 }
 
+func TestBucketFile_Create_FirstWriteAtZeroDoesNotReadEmptyObject(t *testing.T) {
+	base := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, base.CreateBucket(ctx, "bkt"))
+	backend := &getFailBackend{Backend: base, err: errors.New("unexpected get")}
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	file, _, _, err := bf.Create("new.txt", p9.WriteOnly, 0640, 0, 0)
+	require.NoError(t, err)
+	_, err = file.(*objectFile).WriteAt([]byte("hello"), 0)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	require.Equal(t, []byte("hello"), readObjectBytes(t, base, "bkt", "new.txt"))
+}
+
+func TestBucketFile_Create_RetriesTransientHeadError(t *testing.T) {
+	base := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, base.CreateBucket(ctx, "bkt"))
+	backend := &transientHeadBackend{Backend: base, err: errors.New("forward: internal reply error")}
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	file, _, _, err := bf.Create("new.txt", p9.WriteOnly, 0640, 0, 0)
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	require.Equal(t, 2, backend.headCalls)
+}
+
 func TestBucketFile_Create_ExistingFailsAndPreservesBytes(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
@@ -1107,6 +1135,20 @@ type preferPutObjectBackend struct {
 	writeAtCalled   bool
 	truncateCalled  bool
 	preferWriteAtFn func(string) bool
+}
+
+type transientHeadBackend struct {
+	storage.Backend
+	err       error
+	headCalls int
+}
+
+func (b *transientHeadBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	b.headCalls++
+	if b.headCalls == 1 {
+		return nil, b.err
+	}
+	return b.Backend.HeadObject(ctx, bucket, key)
 }
 
 func (b *preferPutObjectBackend) PreferWriteAt(bucket string) bool {

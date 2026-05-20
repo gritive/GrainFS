@@ -179,6 +179,7 @@ type bootState struct {
 
 	// bootBackendWrap
 	backend          storage.Backend
+	lifecycleBackend storage.Backend
 	recoveryReadOnly bool
 	diskCollector    *cluster.DiskCollector
 

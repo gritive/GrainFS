@@ -56,6 +56,7 @@ func runCoalesceCase(t *testing.T, tgt s3Target) {
 	bucket := tgt.uniqueBucket(t, "coalesce")
 	client := tgt.pickNode(0)
 	key := "obj-coalesce"
+	coalesceMetricBaseline := metricCounterTotal(t, tgt, `grainfs_append_coalesce_total{result="success"}`)
 
 	const chunkSize = 8 * 1024
 	const numChunks = 20
@@ -108,12 +109,7 @@ func runCoalesceCase(t *testing.T, tgt s3Target) {
 	// Metrics endpoint: at least one coalesce success across all nodes. We
 	// inspect each node's /metrics; the OWNER node observed the success.
 	require.Eventually(t, func() bool {
-		for i := 0; i < tgt.nodes; i++ {
-			if metricCounterAtLeast(t, tgt, i, `grainfs_append_coalesce_total{result="success"}`, 1) {
-				return true
-			}
-		}
-		return false
+		return metricCounterTotal(t, tgt, `grainfs_append_coalesce_total{result="success"}`) > coalesceMetricBaseline
 	}, 10*time.Second, 200*time.Millisecond, "no node reported a coalesce success")
 }
 
@@ -138,16 +134,32 @@ func getObjectRange(client *s3.Client, bucket, key string, startInclusive, endIn
 // tgt.endpoint(i).
 // Lightweight parser — accepts the prometheus text format line "name{labels} value".
 func metricCounterAtLeast(t *testing.T, tgt s3Target, nodeIdx int, metricLine string, threshold float64) bool {
+	value, ok := metricCounterValue(t, tgt, nodeIdx, metricLine)
+	return ok && value >= threshold
+}
+
+func metricCounterTotal(t *testing.T, tgt s3Target, metricLine string) float64 {
+	t.Helper()
+	var total float64
+	for i := 0; i < tgt.nodes; i++ {
+		if value, ok := metricCounterValue(t, tgt, i, metricLine); ok {
+			total += value
+		}
+	}
+	return total
+}
+
+func metricCounterValue(t *testing.T, tgt s3Target, nodeIdx int, metricLine string) (float64, bool) {
 	t.Helper()
 	url := tgt.endpoint(nodeIdx) + "/metrics"
 	resp, err := http.Get(url)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	for _, line := range strings.Split(string(body), "\n") {
 		if strings.HasPrefix(line, "#") || !strings.HasPrefix(line, metricLine) {
@@ -156,10 +168,8 @@ func metricCounterAtLeast(t *testing.T, tgt s3Target, nodeIdx int, metricLine st
 		// Expected format: "<metricLine> <value>"
 		var f float64
 		if _, err := fmt.Sscanf(line, metricLine+" %f", &f); err == nil {
-			if f >= threshold {
-				return true
-			}
+			return f, true
 		}
 	}
-	return false
+	return 0, false
 }

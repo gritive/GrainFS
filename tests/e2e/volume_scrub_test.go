@@ -228,7 +228,7 @@ func runVolumeScrubCases(t *testing.T, mk volumeScrubFactory) {
 	})
 
 	t.Run("DryRunDetectsCorruption", func(t *testing.T) {
-		tgt := mk("--dedup=false")
+		tgt := mk("--dedup=false", "--pack-threshold=0", "--shard-pack-threshold=0")
 		dd := scrubDataDir(tgt, 0)
 		out, code := runCLI(t, dd, "volume", "create", "vs2", "--size", "1Mi")
 		require.Equal(t, 0, code, out)
@@ -249,7 +249,7 @@ func runVolumeScrubCases(t *testing.T, mk volumeScrubFactory) {
 	})
 
 	t.Run("DryRunDetectsCorruption_Dedup", func(t *testing.T) {
-		tgt := mk("--dedup=true")
+		tgt := mk("--dedup=true", "--pack-threshold=0", "--shard-pack-threshold=0")
 		dd := scrubDataDir(tgt, 0)
 		out, code := runCLI(t, dd, "volume", "create", "vsd2", "--size", "1Mi")
 		require.Equal(t, 0, code, out)
@@ -272,7 +272,7 @@ func runVolumeScrubCases(t *testing.T, mk volumeScrubFactory) {
 	t.Run("RepairBehavior", func(t *testing.T) {
 		// Single-node: no peer to pull from → Unrepairable=1.
 		// Cluster:      EC peer-pull repair  → Repaired=1.
-		tgt := mk("--dedup=false")
+		tgt := mk("--dedup=false", "--pack-threshold=0", "--shard-pack-threshold=0")
 		dd := scrubDataDir(tgt, 0)
 		out, code := runCLI(t, dd, "volume", "create", "vs3", "--size", "1Mi")
 		require.Equal(t, 0, code, out)
@@ -293,7 +293,7 @@ func runVolumeScrubCases(t *testing.T, mk volumeScrubFactory) {
 	})
 
 	t.Run("RepairBehavior_Dedup", func(t *testing.T) {
-		tgt := mk("--dedup=true")
+		tgt := mk("--dedup=true", "--pack-threshold=0", "--shard-pack-threshold=0")
 		dd := scrubDataDir(tgt, 0)
 		out, code := runCLI(t, dd, "volume", "create", "vsd3", "--size", "1Mi")
 		require.Equal(t, 0, code, out)

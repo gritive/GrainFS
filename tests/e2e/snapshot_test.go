@@ -146,10 +146,12 @@ func runSnapshotCases(t *testing.T, tgt s3Target) {
 		restoreResp, err := postJSON(restoreURL, nil)
 		require.NoError(t, err)
 		defer restoreResp.Body.Close()
-		require.Equal(t, http.StatusOK, restoreResp.StatusCode, "restore status")
+		restoreBody, err := io.ReadAll(restoreResp.Body)
+		require.NoError(t, err)
+		require.Equalf(t, http.StatusOK, restoreResp.StatusCode, "restore status: %s", restoreBody)
 
 		var rr restoreResponse
-		require.NoError(t, json.NewDecoder(restoreResp.Body).Decode(&rr))
+		require.NoError(t, json.Unmarshal(restoreBody, &rr))
 		require.GreaterOrEqual(t, rr.RestoredObjects, 5, "at least 5 objects restored")
 		require.Empty(t, rr.StaleBlobs, "no stale blobs: blobs still exist")
 

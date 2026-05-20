@@ -44,6 +44,29 @@ func (b *countingBackend) DeleteObject(ctx context.Context, bucket, key string) 
 	return b.mockBackend.DeleteObject(ctx, bucket, key)
 }
 
+type mutableVersioningSoftDeleteBackend struct {
+	storage.Backend
+	state       string
+	softDeletes atomic.Int64
+}
+
+func (b *mutableVersioningSoftDeleteBackend) SetBucketVersioning(bucket, state string) error {
+	b.state = state
+	return nil
+}
+
+func (b *mutableVersioningSoftDeleteBackend) GetBucketVersioning(bucket string) (string, error) {
+	return b.state, nil
+}
+
+func (b *mutableVersioningSoftDeleteBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	b.softDeletes.Add(1)
+	if err := b.Backend.DeleteObject(context.Background(), bucket, key); err != nil {
+		return "", err
+	}
+	return "unexpected-marker", nil
+}
+
 func TestPackedBackend_SmallObjectSkipsInnerMarkerWrite(t *testing.T) {
 	inner := &countingBackend{}
 	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
@@ -58,36 +81,11 @@ func TestPackedBackend_SmallObjectSkipsInnerMarkerWrite(t *testing.T) {
 	require.Equal(t, int64(0), inner.deletes.Load(), "small packed deletes should not call inner object delete without a marker")
 }
 
-type versionedDeleteBackend struct {
-	mockBackend
-	deleted atomic.Bool
-}
-
-func (b *versionedDeleteBackend) GetBucketVersioning(bucket string) (string, error) {
-	return "Enabled", nil
-}
-
-func (b *versionedDeleteBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
-	b.deleted.Store(true)
-	return "delete-marker-version", nil
-}
-
-func (b *versionedDeleteBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	if b.deleted.Load() {
-		return nil, nil, storage.ErrObjectNotFound
-	}
-	return b.mockBackend.GetObject(ctx, bucket, key)
-}
-
-func (b *versionedDeleteBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	if b.deleted.Load() {
-		return nil, storage.ErrObjectNotFound
-	}
-	return b.mockBackend.HeadObject(ctx, bucket, key)
-}
-
-func TestPackedBackend_VersionedDeleteInvalidatesPackedObject(t *testing.T) {
-	inner := &versionedDeleteBackend{}
+func TestPackedBackend_DeleteObjectReturningMarkerDeletesPackedObjectWhenVersioningDisabled(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "test"))
+	inner := &mutableVersioningSoftDeleteBackend{Backend: local, state: "Disabled"}
 	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pb.Close()) })
@@ -97,9 +95,32 @@ func TestPackedBackend_VersionedDeleteInvalidatesPackedObject(t *testing.T) {
 
 	markerID, err := pb.DeleteObjectReturningMarker("test", "small.txt")
 	require.NoError(t, err)
-	require.Equal(t, "delete-marker-version", markerID)
+	require.Empty(t, markerID, "non-versioned delete must not surface a delete marker")
+	require.Equal(t, int64(0), inner.softDeletes.Load(), "non-versioned packed delete must not bypass packed index cleanup")
 
-	_, _, err = pb.GetObject(context.Background(), "test", "small.txt")
+	_, err = pb.HeadObject(context.Background(), "test", "small.txt")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
+func TestPackedBackend_DeleteObjectReturningMarkerClearsPackedObjectBeforeVersionedMarker(t *testing.T) {
+	local, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "test"))
+	inner := &mutableVersioningSoftDeleteBackend{Backend: local, state: "Disabled"}
+	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	_, err = pb.PutObject(context.Background(), "test", "small.txt", strings.NewReader("tiny data"), "text/plain")
+	require.NoError(t, err)
+	inner.state = "Enabled"
+
+	markerID, err := pb.DeleteObjectReturningMarker("test", "small.txt")
+	require.NoError(t, err)
+	require.Equal(t, "unexpected-marker", markerID)
+	require.Equal(t, int64(1), inner.softDeletes.Load())
+
+	_, err = pb.HeadObject(context.Background(), "test", "small.txt")
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 
 	objs, truncated, err := pb.ListObjectsPage(context.Background(), "test", "", "", 10)

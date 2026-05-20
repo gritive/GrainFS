@@ -128,6 +128,22 @@ func TestOAuth_FormBodyMint(t *testing.T) {
 	}
 }
 
+func TestOAuth_FormBodyMintInitializesMissingSigningKey(t *testing.T) {
+	ts := newTestHandler(t)
+	ks := iamjwt.NewKeySet()
+	h := NewHandler(ts.sa, ks, ts.authz)
+
+	w := doPost(h,
+		"grant_type=client_credentials&client_id=AKIA-test&client_secret=secret&scope=PRINCIPAL_ROLE:analytics")
+
+	if w.Code != 200 {
+		t.Fatalf("code = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"access_token"`) {
+		t.Fatal("response missing access_token")
+	}
+}
+
 func TestOAuth_HTTPBasicMint(t *testing.T) {
 	ts := newTestHandler(t)
 	req := httptest.NewRequest("POST", "/iceberg/v1/oauth/tokens",

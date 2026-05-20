@@ -26,6 +26,7 @@ import (
 )
 
 const maxBatchSize = 65536
+const shutdownDrainTimeout = 10 * time.Second
 
 var ErrLeaderAuditBackpressure = errors.New("audit leader backpressure")
 
@@ -82,10 +83,12 @@ func (c *Committer) AppendFromFollower(ctx context.Context, events []S3Event) er
 				return err
 			}
 		}
+		log.Info().Str("node_id", c.cfg.NodeID).Int("events", len(events)).Msg("audit committer: appended shipped events to leader outbox")
 		return nil
 	}
 	select {
 	case c.followerIn <- events:
+		log.Info().Str("node_id", c.cfg.NodeID).Int("events", len(events)).Msg("audit committer: accepted shipped events in memory")
 		return nil
 	default: // channel full; events dropped — count them so audit_drops_total stays accurate
 		auditDropsTotal.WithLabelValues(c.cfg.NodeID).Add(float64(len(events)))
@@ -101,6 +104,7 @@ func (c *Committer) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			c.drainLeaderOutboxOnShutdown()
 			return
 		case <-ticker.C:
 			if ctx.Err() != nil {
@@ -171,11 +175,40 @@ func (c *Committer) Run(ctx context.Context) {
 						auditDropsTotal.WithLabelValues(nodeID).Add(float64(len(c.batch)))
 					}
 				} else if c.cfg.Outbox != nil {
+					log.Info().Str("node_id", nodeID).Int("events", len(c.batch)).Msg("audit committer: shipped outbox events to leader")
 					c.ackOutbox(c.batch)
+				} else {
+					log.Info().Str("node_id", nodeID).Int("events", len(c.batch)).Msg("audit committer: shipped in-memory events to leader")
 				}
 				c.batch = c.batch[:0]
 			}
 		}
+	}
+}
+
+func (c *Committer) drainLeaderOutboxOnShutdown() {
+	if c.cfg.Outbox == nil || c.cfg.IsLeader == nil || !c.cfg.IsLeader() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+	defer cancel()
+	events, err := c.cfg.Outbox.Pending(ctx, maxBatchSize)
+	if err != nil {
+		log.Error().Err(err).Msg("audit committer: shutdown read outbox failed")
+		return
+	}
+	if len(events) == 0 {
+		return
+	}
+	log.Info().Str("node_id", c.cfg.NodeID).Int("events", len(events)).Msg("audit committer: draining leader outbox on shutdown")
+	committed, err := c.commit(ctx, events)
+	if err != nil {
+		log.Error().Err(err).Str("node_id", c.cfg.NodeID).Int("events", len(events)).Msg("audit committer: shutdown commit failed; durable outbox events remain pending")
+		return
+	}
+	if len(committed) > 0 {
+		c.ackOutbox(committed)
+		log.Info().Str("node_id", c.cfg.NodeID).Int("events", len(committed)).Msg("audit committer: shutdown drain committed events")
 	}
 }
 

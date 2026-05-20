@@ -16,3 +16,14 @@ func TestConfigureDuckDBConnectionPoolPinsSingleConnection(t *testing.T) {
 
 	require.Equal(t, 1, db.Stats().MaxOpenConnections)
 }
+
+func TestDuckDBSearcherSetupSQLUsesAuditWarehouse(t *testing.T) {
+	searcher := NewDuckDBSearcher(DuckDBSearchConfig{
+		Endpoint:  "http://127.0.0.1:9000",
+		AccessKey: "AK-test",
+		SecretKey: "secret",
+	})
+
+	require.Contains(t, searcher.setupSQL(), "OAUTH2_SCOPE 'PRINCIPAL_ROLE:"+Warehouse+"'")
+	require.Contains(t, searcher.setupSQL(), "ATTACH '"+Warehouse+"' AS grainfs_iceberg")
+}

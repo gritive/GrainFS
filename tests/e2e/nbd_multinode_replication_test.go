@@ -3,7 +3,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,10 +31,6 @@ func TestNBDMultiNodeByteLevelReplicationE2E(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		c.GrantAdminOnBuckets("__grainfs_volumes")
-		require.Eventually(t, func() bool {
-			err := tryCreateBucket(ctx, c.S3Client(0), "__grainfs_volumes")
-			return err == nil || strings.Contains(fmt.Sprint(err), "BucketAlreadyOwnedByYou")
-		}, 30*time.Second, 500*time.Millisecond, "__grainfs_volumes bucket grant did not become writable")
 		ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
 
 		client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), "default")

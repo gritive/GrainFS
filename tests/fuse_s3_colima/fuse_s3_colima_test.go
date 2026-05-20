@@ -88,8 +88,10 @@ func withRcloneMount(t *testing.T, fn func(mnt string)) {
 	// Make sure rclone + fuse are available in the VM.
 	out, err := colimaSSH("which", "rclone").CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
+		t.Fatalf("rclone is required in the Colima VM; install with: colima ssh -- sudo apt install -y rclone fuse3")
 	}
 	if _, err := colimaSSH("test", "-e", "/dev/fuse").CombinedOutput(); err != nil {
+		t.Fatalf("/dev/fuse is not present in the Colima VM; enable FUSE support and install fuse3")
 	}
 
 	name := strings.ReplaceAll(t.Name(), "/", "-")
@@ -221,8 +223,10 @@ func withGoofysMount(t *testing.T, fn func(mnt string)) {
 func requireColimaFUSEClient(t *testing.T, binary, installHint string) {
 	t.Helper()
 	if out, err := colimaSSH("which", binary).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) == "" {
+		t.Fatalf("%s is required in the Colima VM; %s", binary, installHint)
 	}
 	if _, err := colimaSSH("test", "-e", "/dev/fuse").CombinedOutput(); err != nil {
+		t.Fatalf("/dev/fuse is not present in the Colima VM; enable FUSE support and install fuse3")
 	}
 }
 
@@ -247,8 +251,12 @@ func unmountColima(t *testing.T, mnt string) {
 
 func TestMain(m *testing.M) {
 	if err := exec.Command("colima", "status").Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "colima not running — skipping all colima tests")
-		os.Exit(0)
+		fmt.Fprintln(os.Stderr, "[colima] not running; starting colima...")
+		out, startErr := exec.Command("colima", "start").CombinedOutput()
+		if startErr != nil {
+			fmt.Fprintf(os.Stderr, "colima start failed: %v\n%s\n", startErr, out)
+			os.Exit(1)
+		}
 	}
 
 	if os.Getenv("SKIP_BUILD") != "1" {

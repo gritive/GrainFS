@@ -42,6 +42,17 @@ type SAListItem struct {
 	NumKeys     int       `json:"num_keys"`
 }
 
+type GrantPutRequest struct {
+	SAID   string `json:"sa_id"`
+	Bucket string `json:"bucket"`
+	Role   string `json:"role"`
+}
+
+type GrantDeleteRequest struct {
+	SAID   string `json:"sa_id"`
+	Bucket string `json:"bucket"`
+}
+
 // AdminAPI hosts HTTP handlers for /admin/iam/* endpoints. Stdlib handlers
 // are wrapped onto Hertz at the admin UDS in Task 21.
 type AdminAPI struct {
@@ -117,6 +128,54 @@ func (a *AdminAPI) HandleSAList(w http.ResponseWriter, r *http.Request) {
 	out, _ := a.ListSA(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (a *AdminAPI) PutGrant(ctx context.Context, req GrantPutRequest) error {
+	if req.SAID == "" {
+		return &adminapi.Error{Code: "invalid", Message: "sa_id required"}
+	}
+	if req.Bucket == "" {
+		return &adminapi.Error{Code: "invalid", Message: "bucket required"}
+	}
+	policy, err := grantRolePolicy(req.Role)
+	if err != nil {
+		return err
+	}
+	if _, ok := a.store.LookupSA(req.SAID); !ok {
+		return &adminapi.Error{Code: "not_found", Message: "SA not found"}
+	}
+	if err := a.proposer.ProposePolicyAttachToSAPut(ctx, req.SAID, policy); err != nil {
+		return &adminapi.Error{Code: "internal", Message: "attach policy: " + err.Error()}
+	}
+	return nil
+}
+
+func (a *AdminAPI) DeleteGrant(ctx context.Context, req GrantDeleteRequest) error {
+	if req.SAID == "" {
+		return &adminapi.Error{Code: "invalid", Message: "sa_id required"}
+	}
+	if req.Bucket == "" {
+		return &adminapi.Error{Code: "invalid", Message: "bucket required"}
+	}
+	for _, policy := range []string{"readonly", "writeonly", "bucket-admin"} {
+		if err := a.proposer.ProposePolicyAttachToSADelete(ctx, req.SAID, policy); err != nil {
+			return &adminapi.Error{Code: "internal", Message: "detach policy: " + err.Error()}
+		}
+	}
+	return nil
+}
+
+func grantRolePolicy(role string) (string, error) {
+	switch strings.ToLower(role) {
+	case "read":
+		return "readonly", nil
+	case "write":
+		return "writeonly", nil
+	case "admin":
+		return "bucket-admin", nil
+	default:
+		return "", &adminapi.Error{Code: "invalid", Message: "role must be Read, Write, or Admin"}
+	}
 }
 
 // SAGetResponse is the wire shape for GET /admin/iam/sa/{id}. Mirrors

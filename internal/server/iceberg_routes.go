@@ -12,10 +12,20 @@ func (s *Server) registerIcebergAPI(h *server.Hertz) {
 	// Build the OAuth handler once all options have been applied.
 	// iamStore and policyAuthorizer may be nil in tests that don't wire them.
 	if s.oauthHandler == nil && s.jwtKeys != nil && s.iamStore != nil && s.policyAuthorizer != nil {
+		var resolver oauth.SAResolver = oauth.NewStoreResolver(s.iamStore)
+		authorizer := oauth.Authorizer(s.policyAuthorizer)
+		if s.auditInternalAccessKey != "" && s.auditInternalSecretKey != "" {
+			resolver = auditInternalOAuthResolver{
+				base:      resolver,
+				accessKey: s.auditInternalAccessKey,
+				secretKey: s.auditInternalSecretKey,
+			}
+			authorizer = auditInternalOAuthAuthorizer{base: authorizer}
+		}
 		s.oauthHandler = newIcebergOAuthHandler(
-			oauth.NewStoreResolver(s.iamStore),
+			resolver,
 			s.jwtKeys,
-			s.policyAuthorizer,
+			authorizer,
 		)
 	}
 

@@ -115,8 +115,12 @@ func runClusterECPutGet5Node(t *testing.T) {
 		}
 		waitForPortsParallel(t, httpPorts, 90*time.Second)
 
-		// Bootstrap admin SA via UDS once quorum exists.
-		accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+		// Bootstrap admin SA via UDS once quorum exists. S3 CreateBucket is
+		// admin-UDS-only, so seed the test bucket through the admin endpoint.
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, dataDirs, 60*time.Second)
+		accessKey, secretKey = bootstrap.AccessKey, bootstrap.SecretKey
+		require.NotEmpty(t, bootstrap.SAID, "bootstrap SA ID")
+		require.NoError(t, adminCreateBucketWithPolicyAttachAny(dataDirs, bootstrap.SAID, bucketName, 60*time.Second))
 
 		var client *s3.Client
 		var leaderIdx int
@@ -124,16 +128,15 @@ func runClusterECPutGet5Node(t *testing.T) {
 		defer cancel()
 		require.Eventually(t, func() bool {
 			for i := 0; i < numNodes; i++ {
-				c := ecS3Client(httpURL(i), accessKey, secretKey)
-				err := tryCreateBucket(ctx, c, bucketName)
-				if err == nil {
-					client = c
+				candidate := ecS3Client(httpURL(i), accessKey, secretKey)
+				if tryPutObject(ctx, candidate, bucketName, "__leader_probe", []byte("probe")) == nil {
+					client = candidate
 					leaderIdx = i
 					return true
 				}
 			}
 			return false
-		}, 240*time.Second, 500*time.Millisecond, "no leader found or CreateBucket never succeeded")
+		}, 240*time.Second, 500*time.Millisecond, "no leader found or PutObject never succeeded")
 		t.Logf("leader: node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 		// Write 5 random objects of varied sizes. Verify each round-trips.
@@ -247,7 +250,7 @@ func runClusterEC3NodeActiveKM21(t *testing.T) {
 			DisableNFS: true,
 			DisableNBD: true,
 		})
-		c.GrantAdminOnBuckets(bucketName)
+		require.NoError(t, adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucketName, 60*time.Second))
 		accessKey, secretKey := c.accessKey, c.secretKey
 
 		var client *s3.Client
@@ -256,8 +259,7 @@ func runClusterEC3NodeActiveKM21(t *testing.T) {
 		require.Eventually(t, func() bool {
 			for i := 0; i < numNodes; i++ {
 				candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
-				err := tryCreateBucket(ctx, candidate, bucketName)
-				if err == nil {
+				if tryPutObject(ctx, candidate, bucketName, "__leader_probe", []byte("probe")) == nil {
 					client = candidate
 					return true
 				}
@@ -470,8 +472,12 @@ func runClusterECTopologyChange(t *testing.T) {
 			t.Logf("node %d up (http :%d)", i, port)
 		}
 
-		// Bootstrap admin SA via the leader's UDS.
-		accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
+		// Bootstrap admin SA via the leader's UDS and create the bucket through
+		// the admin endpoint; data-plane CreateBucket is denied by design.
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, dataDirs, 60*time.Second)
+		accessKey, secretKey = bootstrap.AccessKey, bootstrap.SecretKey
+		require.NotEmpty(t, bootstrap.SAID, "bootstrap SA ID")
+		require.NoError(t, adminCreateBucketWithPolicyAttachAny(dataDirs, bootstrap.SAID, bucketName, 60*time.Second))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
@@ -488,10 +494,10 @@ func runClusterECTopologyChange(t *testing.T) {
 			1*time.Second,
 			func(attemptCtx context.Context, endpoint string) error {
 				c := ecS3Client(endpoint, accessKey, secretKey)
-				return tryCreateBucket(attemptCtx, c, bucketName)
+				return tryPutObject(attemptCtx, c, bucketName, "__leader_probe", []byte("probe"))
 			},
 		)
-		require.NoError(t, err, "no leader found or CreateBucket never succeeded")
+		require.NoError(t, err, "no leader found or PutObject never succeeded")
 		client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
 		t.Logf("topology test: leader node %d at %s (N=%d, auto EC width=%d)", leaderIdx, httpURL(leaderIdx), numNodes, cluster.AutoECConfigForClusterSize(numNodes).NumShards())
 
@@ -640,15 +646,6 @@ func ecS3Client(endpoint, ak, sk string) *s3.Client {
 		RetryMaxAttempts: 1,
 		HTTPClient:       e2eNoKeepAliveHTTPClient(0),
 	})
-}
-
-func tryCreateBucket(parent context.Context, client *s3.Client, bucket string) error {
-	ctx, cancel := clusterECS3OpContext(parent, 5*time.Second)
-	defer cancel()
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}, func(o *s3.Options) {
-		o.RetryMaxAttempts = 1
-	})
-	return err
 }
 
 func tryPutObject(parent context.Context, client *s3.Client, bucket, key string, data []byte) error {

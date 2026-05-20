@@ -57,8 +57,38 @@ func (m *MetaProposer) ProposeBucketUpstreamCutover(ctx context.Context, bucket 
 	return m.Cutover(ctx, bucket)
 }
 
+func (m *MetaProposer) ProposePolicyAttachToSAPut(ctx context.Context, saID, policy string) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypePolicyAttachToSAPut, buildPolicyAttachToSAPutPayload(saID, policy))
+}
+
+func (m *MetaProposer) ProposePolicyAttachToSADelete(ctx context.Context, saID, policy string) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypePolicyAttachToSADelete, buildPolicyAttachToSADeletePayload(saID, policy))
+}
+
 func (m *MetaProposer) ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error {
 	return m.Propose(ctx, clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach, buildCreateBucketWithPolicyAttachPayload(bucket, sa, policy))
+}
+
+func buildPolicyAttachToSAPutPayload(saID, policy string) []byte {
+	b := flatbuffers.NewBuilder(64)
+	saOff := b.CreateString(saID)
+	polOff := b.CreateString(policy)
+	clusterpb.MetaPolicyAttachToSAPutCmdStart(b)
+	clusterpb.MetaPolicyAttachToSAPutCmdAddSaId(b, saOff)
+	clusterpb.MetaPolicyAttachToSAPutCmdAddPolicy(b, polOff)
+	b.Finish(clusterpb.MetaPolicyAttachToSAPutCmdEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildPolicyAttachToSADeletePayload(saID, policy string) []byte {
+	b := flatbuffers.NewBuilder(64)
+	saOff := b.CreateString(saID)
+	polOff := b.CreateString(policy)
+	clusterpb.MetaPolicyAttachToSADeleteCmdStart(b)
+	clusterpb.MetaPolicyAttachToSADeleteCmdAddSaId(b, saOff)
+	clusterpb.MetaPolicyAttachToSADeleteCmdAddPolicy(b, polOff)
+	b.Finish(clusterpb.MetaPolicyAttachToSADeleteCmdEnd(b))
+	return b.FinishedBytes()
 }
 
 func buildCreateBucketWithPolicyAttachPayload(bucket, sa, policy string) []byte {

@@ -133,8 +133,7 @@ func runLifecycleCases(t *testing.T, c *e2eCluster) {
 		require.GreaterOrEqual(t, followerIdx, 0, "must find a follower node")
 
 		const bucket = "lc-follower-put"
-		c.GrantAdminOnBuckets(bucket)
-		createBucketWithClient(t, c.S3Client(leaderIdx), bucket)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(leaderIdx))
 
 		status := ls.signedLifecyclePut(t, c.httpURLs[followerIdx], bucket)
 		require.Equal(t, http.StatusOK, status,
@@ -181,8 +180,7 @@ func runLifecycleLeaderChangeSubtest(t *testing.T, c *e2eCluster, ls lifecycleSi
 
 	// 버킷 생성 후 현재 리더에 lifecycle 설정 PUT
 	const bucket = "lc-leader-change"
-	c.GrantAdminOnBuckets(bucket)
-	createBucketWithClient(t, c.S3Client(currentLeaderIdx), bucket)
+	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(currentLeaderIdx))
 
 	status := ls.signedLifecyclePut(t, c.httpURLs[currentLeaderIdx], bucket)
 	require.Equal(t, http.StatusOK, status,

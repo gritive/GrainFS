@@ -621,8 +621,9 @@ func (f *FSM) applySetBucketPolicy(data []byte) error {
 	if err != nil {
 		return err
 	}
+	policyJSON := append([]byte(nil), c.PolicyJSON...)
 	return f.db.Update(func(txn *badger.Txn) error {
-		return f.setValue(txn, f.keys.BucketPolicyKey(c.Bucket), c.PolicyJSON)
+		return f.setValue(txn, f.keys.BucketPolicyKey(c.Bucket), policyJSON)
 	})
 }
 
@@ -728,9 +729,25 @@ func (f *FSM) applySetObjectTags(data []byte) error {
 	}
 	return f.db.Update(func(txn *badger.Txn) error {
 		if c.VersionID != "" {
-			// Target ONLY the specific versioned record.
 			vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
-			return mutateVersionTags(f, txn, vKey, c.Tags)
+			if err := mutateVersionTags(f, txn, vKey, c.Tags); err != nil {
+				return err
+			}
+			latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
+			if lerr != nil {
+				return nil //nolint:nilerr // no latest marker, so no legacy-current mirror to update
+			}
+			var latest string
+			if err := latItem.Value(func(v []byte) error {
+				latest = string(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if latest != c.VersionID {
+				return nil
+			}
+			return mutateVersionTags(f, txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), c.Tags)
 		}
 		// VersionID == "" → mutate legacy (current) record, and if LatestKey
 		// exists also dual-write the latest versioned record.

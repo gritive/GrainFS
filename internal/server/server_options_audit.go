@@ -37,6 +37,7 @@ func WithAuditInternalCredentials(accessKey, secretKey string) Option {
 			return
 		}
 		s.auditInternalAccessKey = accessKey
+		s.auditInternalSecretKey = secretKey
 		s.auditInternalVerifier = s3auth.NewCachingVerifier(s3auth.NewVerifier([]s3auth.Credentials{{
 			AccessKey: accessKey,
 			SecretKey: secretKey,

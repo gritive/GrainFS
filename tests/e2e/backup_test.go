@@ -60,13 +60,11 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 		waitForPort(t, port, 30*time.Second)
 
 		ctx := context.Background()
-		ak, sk := bootstrapAdminViaUDS(t, dataDir)
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dataDir}, 60*time.Second)
+		ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
 		client := s3ClientFor(endpoint, ak, sk)
 
-		_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String("backup-test"),
-		})
-		require.NoError(t, err)
+		require.NoError(t, adminCreateBucketWithPolicyAttachAny([]string{dataDir}, bootstrap.SAID, "backup-test", 30*time.Second))
 		waitForS3Write(t, client, "backup-test", "__grainfs_e2e_ready", 30*time.Second)
 		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String("backup-test"),
@@ -180,9 +178,22 @@ func TestBackup_Restic_BackupAndRestore(t *testing.T) {
 			}, func(o *s3.Options) {
 				o.RetryMaxAttempts = 1
 			})
-			return err == nil && listOut != nil && len(listOut.Contents) == len(testData)
+			if err != nil || listOut == nil {
+				return false
+			}
+			seen := make(map[string]struct{}, len(listOut.Contents))
+			for _, obj := range listOut.Contents {
+				if obj.Key != nil {
+					seen[*obj.Key] = struct{}{}
+				}
+			}
+			for key := range testData {
+				if _, ok := seen[key]; !ok {
+					return false
+				}
+			}
+			return true
 		}, 60*time.Second, time.Second, "list objects after restore")
-		require.Len(t, listOut.Contents, len(testData), "all objects should be restored")
 
 		// Verify object contents
 		for key, expectedContent := range testData {

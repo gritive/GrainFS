@@ -911,6 +911,11 @@ func (b *DistributedBackend) WaitApplied(ctx context.Context, index uint64) erro
 }
 
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
+	if b.groupID != "" {
+		if _, ok := PlacementGroupFromContext(ctx); !ok {
+			ctx = ContextWithPlacementGroup(ctx, b.groupID)
+		}
+	}
 	data, err := EncodeCommand(cmdType, payload)
 	if err != nil {
 		return fmt.Errorf("encode command: %w", err)
@@ -1347,6 +1352,60 @@ func (b *DistributedBackend) SetBucketVersioningPropose(bucket, state string) er
 		Bucket: bucket,
 		State:  state,
 	})
+}
+
+// SetBucketPolicy satisfies storage.PolicyBackend. The policy document is
+// replicated through Raft so every node observes the same bucket policy.
+func (b *DistributedBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	return b.SetBucketPolicyPropose(bucket, policyJSON)
+}
+
+// SetBucketPolicyPropose is the coordinator-facing entrypoint: it skips the
+// local bucket-existence pre-check after the coordinator has run a
+// cluster-aware HeadBucket.
+func (b *DistributedBackend) SetBucketPolicyPropose(bucket string, policyJSON []byte) error {
+	ctx := context.Background()
+	return b.propose(ctx, CmdSetBucketPolicy, SetBucketPolicyCmd{
+		Bucket:     bucket,
+		PolicyJSON: append([]byte(nil), policyJSON...),
+	})
+}
+
+// GetBucketPolicy satisfies storage.PolicyBackend. Reads use the local
+// FSM-consistent view; writes flow through Raft.
+func (b *DistributedBackend) GetBucketPolicy(bucket string) ([]byte, error) {
+	var data []byte
+	err := b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.ks().BucketPolicyKey(bucket))
+		if err == badger.ErrKeyNotFound {
+			return storage.ErrBucketNotFound
+		}
+		if err != nil {
+			return err
+		}
+		data, err = b.itemValueCopy(item)
+		return err
+	})
+	return data, err
+}
+
+// DeleteBucketPolicy satisfies storage.PolicyBackend.
+func (b *DistributedBackend) DeleteBucketPolicy(bucket string) error {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	return b.DeleteBucketPolicyPropose(bucket)
+}
+
+// DeleteBucketPolicyPropose is the coordinator-facing entrypoint.
+func (b *DistributedBackend) DeleteBucketPolicyPropose(bucket string) error {
+	ctx := context.Background()
+	return b.propose(ctx, CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: bucket})
 }
 
 // SetObjectACL satisfies storage.ACLSetter. Replicates the ACL change through
@@ -4424,14 +4483,61 @@ func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys i
 			// Versioned format: {key}/{versionID}. Unversioned legacy: {key}.
 			slash := strings.LastIndex(rest, "/")
 			if slash < 0 {
-				continue // legacy unversioned entry, no per-version record
+				if _, hasVersionedRecord := latestMap[rest]; hasVersionedRecord {
+					continue
+				}
+				val, err := b.itemValueCopy(it.Item())
+				if err != nil {
+					return err
+				}
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				v := storage.ObjectVersion{
+					Key:            rest,
+					VersionID:      "",
+					IsLatest:       true,
+					IsDeleteMarker: m.ETag == deleteMarkerETag,
+					LastModified:   m.LastModified,
+					ETag:           m.ETag,
+					Size:           m.Size,
+					Tags:           append([]storage.Tag(nil), m.Tags...),
+				}
+				versions = append(versions, &v)
+				continue
 			}
 			key := rest[:slash]
 			vid := rest[slash+1:]
+			latestVID, hasVersionedRecord := latestMap[key]
+			if !hasVersionedRecord {
+				if !strings.HasPrefix(rest, prefix) {
+					continue
+				}
+				val, err := b.itemValueCopy(it.Item())
+				if err != nil {
+					return err
+				}
+				m, err := unmarshalObjectMeta(val)
+				if err != nil {
+					return err
+				}
+				v := storage.ObjectVersion{
+					Key:            rest,
+					VersionID:      "",
+					IsLatest:       true,
+					IsDeleteMarker: m.ETag == deleteMarkerETag,
+					LastModified:   m.LastModified,
+					ETag:           m.ETag,
+					Size:           m.Size,
+					Tags:           append([]storage.Tag(nil), m.Tags...),
+				}
+				versions = append(versions, &v)
+				continue
+			}
 			if vid == "" || !strings.HasPrefix(key, prefix) {
 				continue
 			}
-			latestVID := latestMap[key]
 			val, err := b.itemValueCopy(it.Item())
 			if err != nil {
 				return err

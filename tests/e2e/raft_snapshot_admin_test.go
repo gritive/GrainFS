@@ -1,16 +1,12 @@
 package e2e
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,19 +23,9 @@ func TestRaftSnapshotAdminE2E(t *testing.T) {
 func runRaftSnapshotAdminCases(t *testing.T, tgt s3Target) {
 	t.Helper()
 	endpoint := tgt.endpoint(0)
-	cli := tgt.pickNode(0)
 
 	t.Run("TriggerStatusAndMetrics", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		bucket := tgt.uniqueBucket(t, "raftsnap")
-		_, err := cli.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String(bucket),
-		})
-		// uniqueBucket already created the bucket; CreateBucket may surface
-		// BucketAlreadyOwnedByYou — accept either path.
-		_ = err
+		_ = tgt.uniqueBucket(t, "raftsnap")
 
 		resp, err := http.Post(endpoint+"/admin/raft/snapshot", "application/json", nil) //nolint:noctx
 		require.NoError(t, err)

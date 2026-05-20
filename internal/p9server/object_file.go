@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hugelgupf/p9/p9"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -220,11 +221,16 @@ func (f *objectFile) WriteAt(buf []byte, offset int64) (int, error) {
 	if end > maxFallbackObjectSize {
 		return 0, syscall.EFBIG
 	}
-	if err := f.loadDirty(ctx, offset == 0); err != nil {
-		if errors.Is(err, syscall.EFBIG) {
-			return 0, syscall.EFBIG
+	if offset == 0 && !f.dirtyLoaded && f.meta != nil && f.meta.Size == 0 {
+		f.dirtyLoaded = true
+		f.dirtyData = nil
+	} else {
+		if err := f.loadDirty(ctx, offset == 0); err != nil {
+			if errors.Is(err, syscall.EFBIG) {
+				return 0, syscall.EFBIG
+			}
+			return 0, syscall.EIO
 		}
-		return 0, syscall.EIO
 	}
 	if int64(len(f.dirtyData)) < end {
 		f.dirtyData = append(f.dirtyData, make([]byte, end-int64(len(f.dirtyData)))...)
@@ -296,6 +302,7 @@ func (f *objectFile) flush(ctx context.Context) error {
 	}
 	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(f.dirtyData), "application/octet-stream")
 	if err != nil {
+		log.Warn().Err(err).Str("bucket", f.bucket).Str("key", f.key).Int("bytes", len(f.dirtyData)).Msg("9p flush: put object failed")
 		return err
 	}
 	f.meta = obj

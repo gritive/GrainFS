@@ -5,6 +5,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -95,6 +96,9 @@ func (s *Server) icebergAuthnCheck(ctx context.Context, c *app.RequestContext, t
 	// client IP rather than naive X-Forwarded-For first-hop — that prevents
 	// spoofing by direct clients and rejects untrusted-proxy forwarding chains.
 	if s.policyAuthorizer != nil {
+		if claims.Sub == audit.SystemSA && claims.Warehouse == audit.Warehouse && auditInternalIcebergReadAction(action) {
+			return claims, true
+		}
 		result := s.policyAuthorizer.Authorize(ctx, claims.Sub, claims.Warehouse, policy.RequestContext{
 			Action:   action,
 			Resource: "arn:aws:s3:::" + claims.Warehouse,

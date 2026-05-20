@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -50,9 +48,6 @@ func TestIcebergConcurrentCommitsE2E(t *testing.T) {
 func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-
 	// Build the URL fan-out from the target. Single-node has 1 endpoint,
 	// cluster has N. The leader for namespace/table creation is node-0 on
 	// single (only choice); cluster fixtures expose the elected leader via
@@ -66,19 +61,9 @@ func runIcebergConcurrentCommitCase(t *testing.T, tgt s3Target) {
 		leaderIdx = tgt.cluster.leaderIdx
 	}
 
-	// Bootstrap: warehouse bucket. On cluster the bucket may be pre-granted
-	// admin by the fixture; on single we just create it idempotently via the
-	// SDK. Both paths tolerate already-exists for shared-fixture re-runs.
-	if tgt.isCluster && tgt.cluster != nil {
-		tgt.cluster.GrantAdminOnBuckets("grainfs-tables")
-	}
-	_, err := tgt.pickNode(leaderIdx).CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("grainfs-tables"),
-	})
-	if err != nil && !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") &&
-		!strings.Contains(err.Error(), "BucketAlreadyExists") {
-		require.NoError(t, err)
-	}
+	// Bootstrap: warehouse bucket. CreateBucket is admin-UDS-only on the S3
+	// data plane, so use the fixture helper that creates and attaches policy.
+	tgt.createBkt(t, "grainfs-tables")
 	// Probe the iceberg /v1/config endpoint on every endpoint so we know
 	// the catalog router is wired and the bucket is reachable from each —
 	// on cluster this catches the rare "follower joined but iceberg routes

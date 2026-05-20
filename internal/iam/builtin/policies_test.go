@@ -77,6 +77,25 @@ func TestBuiltins_BucketAdmin_ExcludesAdminUDSActions(t *testing.T) {
 	}
 }
 
+func TestBuiltins_BucketAdmin_AllowsIcebergDropActions(t *testing.T) {
+	ps := policystore.NewInMemoryStore()
+	require.NoError(t, SeedAll(context.Background(), ps))
+	raw, err := ps.GetRaw(context.Background(), "bucket-admin")
+	require.NoError(t, err)
+	doc, err := policy.Parse(raw)
+	require.NoError(t, err)
+
+	for _, a := range []string{"iceberg:DropTable", "iceberg:DropNamespace"} {
+		in := policy.EvalInput{
+			PrincipalPolicies: []*policy.Document{doc},
+			Principal:         "sa-1",
+			Ctx:               policy.RequestContext{Action: a, Resource: "*"},
+		}
+		assert.Equal(t, policy.DecisionAllow, policy.Evaluate(in).Decision,
+			"bucket-admin should Allow %s for Iceberg REST route parity", a)
+	}
+}
+
 // TestBuiltins_NoneAllowsAdminUDSActions enforces D#8 across ALL four built-ins:
 // no built-in policy may grant s3:CreateBucket / DeleteBucket / PutBucketPolicy /
 // DeleteBucketPolicy on the data plane. A regression in any one of them lets a

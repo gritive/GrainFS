@@ -75,8 +75,12 @@ func withNBDDevice(t *testing.T, fn func(dev string)) {
 
 func TestMain(m *testing.M) {
 	if err := exec.Command("colima", "status").Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "colima not running — skipping all nbd colima tests")
-		os.Exit(0)
+		fmt.Fprintln(os.Stderr, "[colima-nbd] not running; starting colima...")
+		out, startErr := exec.Command("colima", "start").CombinedOutput()
+		if startErr != nil {
+			fmt.Fprintf(os.Stderr, "colima start failed: %v\n%s\n", startErr, out)
+			os.Exit(1)
+		}
 	}
 
 	if os.Getenv("SKIP_BUILD") != "1" {

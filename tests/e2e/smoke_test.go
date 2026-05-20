@@ -49,7 +49,7 @@ func runSmokeDeploymentCases(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	defer cmd.Process.Kill()
+	defer terminateProcess(cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
@@ -57,8 +57,8 @@ func runSmokeDeploymentCases(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	client := s3ClientFor(endpoint, ak, sk)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
 
 	// Test 1: Health check
 	t.Run("HealthCheck", func(t *testing.T) {
@@ -68,12 +68,9 @@ func runSmokeDeploymentCases(t *testing.T) {
 		require.NotNil(t, resp, "health check response should not be nil")
 	})
 
-	// Test 2: Create bucket
+	// Test 2: Create bucket through the admin control plane.
 	t.Run("CreateBucket", func(t *testing.T) {
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String("smoke-test"),
-		})
-		require.NoError(t, err, "create bucket should succeed")
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, bootstrap.SAID, "smoke-test", client)
 	})
 
 	// Test 3: Put object

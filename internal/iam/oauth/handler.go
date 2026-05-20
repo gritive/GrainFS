@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -101,6 +102,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tok, err := h.keys.Mint(iamjwt.Claims{Sub: saID, Warehouse: warehouse, TTL: 3600 * time.Second})
+	if errors.Is(err, iamjwt.ErrNoCurrentKey) {
+		if _, genErr := h.keys.GenerateCurrent(); genErr != nil {
+			writeOAuthError(w, http.StatusInternalServerError, "server_error", genErr.Error())
+			return
+		}
+		tok, err = h.keys.Mint(iamjwt.Claims{Sub: saID, Warehouse: warehouse, TTL: 3600 * time.Second})
+	}
 	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return

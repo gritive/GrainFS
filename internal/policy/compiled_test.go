@@ -129,6 +129,31 @@ func TestCompiledPolicyStore_DeleteRestoresNoPolicy(t *testing.T) {
 	assert.True(t, cs.Allow(ctx, inp("user1", s3auth.GetObject, "mybucket", "k")))
 }
 
+func TestCompiledPolicyStore_SetCopiesRawPolicy(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	raw := makePolicy(t, allowStmt("*", "s3:GetObject", "arn:aws:s3:::mybucket/*"))
+	want := append([]byte(nil), raw...)
+
+	require.NoError(t, cs.Set("mybucket", raw))
+	for i := range raw {
+		raw[i] = 0
+	}
+
+	require.Equal(t, want, cs.GetRaw("mybucket"))
+}
+
+func TestCompiledPolicyStore_GetRawReturnsCopy(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	raw := makePolicy(t, allowStmt("*", "s3:GetObject", "arn:aws:s3:::mybucket/*"))
+	require.NoError(t, cs.Set("mybucket", raw))
+
+	got := cs.GetRaw("mybucket")
+	require.NotEmpty(t, got)
+	got[0] = 0
+
+	require.Equal(t, raw, cs.GetRaw("mybucket"))
+}
+
 func TestCompiledPolicyStore_WildcardAction(t *testing.T) {
 	cs := NewCompiledPolicyStore()
 	ctx := context.Background()

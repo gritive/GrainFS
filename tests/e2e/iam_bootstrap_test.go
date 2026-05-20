@@ -19,8 +19,7 @@ import (
 )
 
 // TestBootstrapFirstSAWildcardGrantE2E (was F1): empty IAM → first sa
-// create returns wildcard grant. Verifies the bootstrap path uses the
-// InitFirstSA dispatch (SA id = sa-default + wildcard admin grant).
+// create bootstraps an admin credential and persists the SA.
 // Single-node only: bootstrap dispatch is single-process state.
 func runIAMBootstrapFirstSAWildcardGrant(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
@@ -30,14 +29,14 @@ func runIAMBootstrapFirstSAWildcardGrant(t *testing.T) {
 
 func runBootstrapFirstSAWildcardGrantCases(t *testing.T) {
 	t.Helper()
-	dir, _, _, _ := startUnbootstrappedE2EServer(t)
+	dir, s3URL, _, _ := startUnbootstrappedE2EServer(t)
 	sock := filepath.Join(dir, "admin.sock")
 
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	require.NotEmpty(t, ak)
-	require.NotEmpty(t, sk)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+	require.NotEmpty(t, bootstrap.AccessKey)
+	require.NotEmpty(t, bootstrap.SecretKey)
+	require.NotEmpty(t, bootstrap.SAID)
 
-	// SA must use the fixed DefaultSAID ("sa-default").
 	var saList []map[string]any
 	iamDo(t, sock, "GET", "/v1/iam/sa", nil, &saList)
 	var saIDs []string
@@ -46,18 +45,10 @@ func runBootstrapFirstSAWildcardGrantCases(t *testing.T) {
 			saIDs = append(saIDs, id)
 		}
 	}
-	require.Contains(t, saIDs, "sa-default", "first SA must use DefaultSAID; got %v", saIDs)
+	require.Contains(t, saIDs, bootstrap.SAID, "first SA must be persisted; got %v", saIDs)
 
-	// Wildcard grant must be present for sa-default.
-	grants := iamListGrants(t, sock, "sa-default", "")
-	found := false
-	for _, g := range grants {
-		if g.Bucket == "*" && strings.EqualFold(g.Role, "admin") {
-			found = true
-			break
-		}
-	}
-	require.True(t, found, "first SA must have wildcard admin grant; got %+v", grants)
+	cli := s3ClientFor(s3URL, bootstrap.AccessKey, bootstrap.SecretKey)
+	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
 }
 
 // TestBootstrapSecondSANoAutoGrantE2E (was F2): non-empty store → SA
@@ -70,11 +61,11 @@ func runIAMBootstrapSecondSANoAutoGrant(t *testing.T) {
 
 func runBootstrapSecondSANoAutoGrantCases(t *testing.T) {
 	t.Helper()
-	dir, _, _, _ := startUnbootstrappedE2EServer(t)
+	dir, s3URL, _, _ := startUnbootstrappedE2EServer(t)
 	sock := filepath.Join(dir, "admin.sock")
 
 	// First SA → bootstrap.
-	bootstrapAdminViaUDS(t, dir)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
 
 	// Second SA → must NOT receive auto wildcard grant.
 	var out struct {
@@ -85,12 +76,19 @@ func runBootstrapSecondSANoAutoGrantCases(t *testing.T) {
 		Grants    []map[string]any `json:"grants"`
 	}
 	iamDo(t, sock, "POST", "/v1/iam/sa", map[string]string{"name": "user1"}, &out)
-	require.NotEqual(t, "sa-default", out.SAID, "second SA must NOT reuse DefaultSAID")
+	require.NotEqual(t, bootstrap.SAID, out.SAID, "second SA must NOT reuse bootstrap SAID")
 	require.Empty(t, out.Grants, "second SA must have no auto-issued grants; got %+v", out.Grants)
 
-	// Defence in depth: confirm no grants persisted for the second SA.
-	grants := iamListGrants(t, sock, out.SAID, "")
-	require.Empty(t, grants, "second SA must have no persisted grants; got %+v", grants)
+	bootstrapClient := s3ClientFor(s3URL, bootstrap.AccessKey, bootstrap.SecretKey)
+	const bucket = "bootstrap-owned"
+	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, bootstrap.SAID, bucket, bootstrapClient)
+
+	userClient := s3ClientFor(s3URL, out.AccessKey, out.SecretKey)
+	iamWaitKeyReady(t, s3URL, out.AccessKey, out.SecretKey, 10*time.Second)
+	_, err := userClient.HeadBucket(context.Background(), &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	require.Error(t, err, "second SA without explicit grant must not access bootstrap-owned bucket")
 }
 
 // TestBootstrapPreBootstrapDeniedE2E (was F3): pre-bootstrap sigv4 traffic
@@ -138,8 +136,8 @@ func runBootstrapPostBootstrapVerbsCases(t *testing.T) {
 	t.Helper()
 	dir, s3URL, _, _ := startUnbootstrappedE2EServer(t)
 
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	cli := s3ClientFor(s3URL, ak, sk)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+	cli := s3ClientFor(s3URL, bootstrap.AccessKey, bootstrap.SecretKey)
 	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -151,10 +149,9 @@ func runBootstrapPostBootstrapVerbsCases(t *testing.T) {
 	_, err := cli.ListBuckets(ctx, &s3.ListBucketsInput{})
 	require.NoError(t, err, "ListBuckets")
 
-	// CreateBucket.
+	// Create bucket through the admin control plane.
 	bucket := "f4-bootstrap-bucket"
-	_, err = cli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-	require.NoError(t, err, "CreateBucket")
+	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, bootstrap.SAID, bucket, cli)
 
 	// PutObject.
 	const payload = "hello-bootstrap-f4"
@@ -221,8 +218,24 @@ func startUnbootstrappedE2EServer(t testing.TB) (dataDir, s3URL, adminSock strin
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
+	require.NoError(t, retryPatchSnapshotIntervalM(dir, "0s", 10*time.Second), "disable auto-snapshot")
 	return dir, s3URL, adminSock, port
+}
+
+func retryPatchSnapshotIntervalM(dataDir, dur string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := patchSnapshotIntervalM(dataDir, dur); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // TestIAMBootstrapE2E groups IAM bootstrap SA grant scenarios.

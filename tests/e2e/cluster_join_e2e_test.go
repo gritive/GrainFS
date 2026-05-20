@@ -33,9 +33,8 @@ func runClusterJoinedNodeEdgeForwardsBeforeDataReady(t *testing.T) {
 		key := "hello.txt"
 		body := []byte("hello dynamic join")
 
-		require.Eventually(t, func() bool {
-			return tryCreateBucket(ctx, joinClient, bucket) == nil
-		}, 30*time.Second, 500*time.Millisecond)
+		_, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
+		require.NoError(t, err)
 		require.NoError(t, tryPutObject(ctx, joinClient, bucket, key, body))
 
 		gotSeed, err := getObjectBytes(ctx, seedClient, bucket, key)
@@ -141,9 +140,8 @@ func runClusterJoinDynamicJoinServicesNodeCounts(t *testing.T) {
 				defer cancel()
 
 				bucket := fmt.Sprintf("dynamic-join-services-%d", nodes)
-				require.Eventually(t, func() bool {
-					return tryCreateBucket(ctx, c.S3Client(0), bucket) == nil
-				}, 30*time.Second, 500*time.Millisecond)
+				_, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
+				require.NoError(t, err)
 
 				for i := range c.httpURLs {
 					key := fmt.Sprintf("node-%d.txt", i)

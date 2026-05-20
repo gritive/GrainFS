@@ -129,7 +129,20 @@ func (s *DuckDBSearcher) SearchS3(ctx context.Context, f SearchFilter) ([]Search
 	q, args := BuildSearchSQL(f)
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		if !isDuckDBCatalogMiss(err) {
+			return nil, err
+		}
+		if closeErr := s.Close(); closeErr != nil {
+			return nil, closeErr
+		}
+		db, err = s.open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer rows.Close()
 
@@ -208,6 +221,13 @@ INSTALL httpfs;
 INSTALL iceberg;
 LOAD httpfs;
 LOAD iceberg;
+SET s3_access_key_id='%s';
+SET s3_secret_access_key='%s';
+SET s3_region='us-east-1';
+SET s3_endpoint='%s';
+SET s3_url_style='path';
+SET s3_use_ssl=%t;
+SET iceberg_via_aws_sdk_for_catalog_interactions=true;
 CREATE OR REPLACE SECRET grainfs_s3 (
 	TYPE s3,
 	KEY_ID '%s',
@@ -217,16 +237,36 @@ CREATE OR REPLACE SECRET grainfs_s3 (
 	URL_STYLE 'path',
 	USE_SSL %t
 );
-ATTACH 'grainfs' AS grainfs_iceberg (
+CREATE OR REPLACE SECRET grainfs_iceberg_oauth (
 	TYPE iceberg,
-	ENDPOINT '%s/iceberg',
-	AUTHORIZATION_TYPE 'sigv4',
-	SIGV4_REGION 'us-east-1',
-	SIGV4_SERVICE 's3'
+	CLIENT_ID '%s',
+	CLIENT_SECRET '%s',
+	OAUTH2_SERVER_URI '%s/iceberg/v1/oauth/tokens',
+	OAUTH2_SCOPE 'PRINCIPAL_ROLE:%s'
 );
-`, sqlString(s.cfg.AccessKey), sqlString(s.cfg.SecretKey), sqlString(endpointHost), useSSL, sqlString(s.cfg.Endpoint))
+ATTACH '%s' AS grainfs_iceberg (
+	TYPE iceberg,
+	SECRET grainfs_iceberg_oauth,
+	ENDPOINT '%s/iceberg',
+	AUTHORIZATION_TYPE 'oauth2'
+);
+`,
+		sqlString(s.cfg.AccessKey), sqlString(s.cfg.SecretKey), sqlString(endpointHost), useSSL,
+		sqlString(s.cfg.AccessKey), sqlString(s.cfg.SecretKey), sqlString(endpointHost), useSSL,
+		sqlString(s.cfg.AccessKey), sqlString(s.cfg.SecretKey), sqlString(s.cfg.Endpoint), sqlString(Warehouse),
+		sqlString(Warehouse), sqlString(s.cfg.Endpoint),
+	)
 }
 
 func sqlString(v string) string {
 	return strings.ReplaceAll(v, "'", "''")
+}
+
+func isDuckDBCatalogMiss(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "does not exist because schema") ||
+		strings.Contains(msg, "Table with name") && strings.Contains(msg, "does not exist")
 }
