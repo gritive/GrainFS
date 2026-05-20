@@ -1325,7 +1325,7 @@ func TestClusterCoordinator_GetObject_ForwardRejectsSizeMismatch(t *testing.T) {
 
 func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("g"), DefaultMaxForwardBodyBytes+1024)
+	body := bytes.Repeat([]byte("g"), minMultipartForwardStreamBytes+1024)
 	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
 		&storage.Object{Key: "large", Size: int64(len(body)), ETag: "etag-large", ContentType: "application/octet-stream"},
 		"bk", body,
@@ -1342,7 +1342,7 @@ func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 
 func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("g"), int(DefaultMaxForwardReplyBytes)+1024)
+	body := bytes.Repeat([]byte("g"), 128*1024)
 	d.readReplyBy[raftpb.ForwardOpGetObject] = buildGetObjectReply(
 		&storage.Object{Key: "large", Size: int64(len(body)), ETag: "etag-large", ContentType: "application/octet-stream"},
 		"bk", nil,
@@ -1988,7 +1988,7 @@ func TestClusterCoordinator_HeadObjectVersion_Forward(t *testing.T) {
 
 func TestClusterCoordinator_GetObjectVersion_ForwardUsesReadStream(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("v"), int(DefaultMaxForwardReplyBytes)+1024)
+	body := bytes.Repeat([]byte("v"), 128*1024)
 	d.readReplyBy[raftpb.ForwardOpGetObjectVersion] = buildGetObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-v1", ContentType: "application/octet-stream", VersionID: "vid-1"},
 		"bk", nil,

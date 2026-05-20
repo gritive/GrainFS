@@ -526,7 +526,7 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 
 // buildGetObjectReply embeds the read body inside ForwardReply.read_body.
 func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte {
-	b := flatbuffers.NewBuilder(128 + len(body))
+	b := flatbuffers.NewBuilder(getObjectReplyBuilderSize(obj, bucket, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(obj.Key)
 	etag := b.CreateString(obj.ETag)
@@ -560,8 +560,16 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	return b.FinishedBytes()
 }
 
+func getObjectReplyBuilderSize(obj *storage.Object, bucket string, bodyLen int) int {
+	const tableOverhead = 1024
+	return bodyLen +
+		len(bucket) + len(obj.Key) + len(obj.ETag) + len(obj.ContentType) + len(obj.VersionID) +
+		len(obj.Parts)*96 + len(obj.Tags)*96 +
+		tableOverhead
+}
+
 func buildReadAtReply(body []byte) []byte {
-	b := flatbuffers.NewBuilder(64 + len(body))
+	b := flatbuffers.NewBuilder(256 + len(body))
 	bodyOff := b.CreateByteVector(body)
 	raftpb.ForwardReplyStart(b)
 	raftpb.ForwardReplyAddStatus(b, raftpb.ForwardStatusOK)

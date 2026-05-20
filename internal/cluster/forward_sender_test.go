@@ -129,6 +129,31 @@ func TestBuildUploadPartArgs_5MiBAllocationBound(t *testing.T) {
 	require.Lessf(t, avgAlloc, float64(len(body))*1.5, "avg allocation per buildUploadPartArgs call = %.0f bytes", avgAlloc)
 }
 
+func TestBuildGetObjectReply_5MiBAllocationBound(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 5*1024*1024)
+	obj := &storage.Object{
+		Key:         "large",
+		Size:        int64(len(body)),
+		ETag:        "etag-large",
+		ContentType: "application/octet-stream",
+	}
+	const runs = 20
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		reply := buildGetObjectReply(obj, "bucket", body)
+		require.Greater(t, len(reply), len(body))
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	avgAlloc := float64(after.TotalAlloc-before.TotalAlloc) / runs
+	require.Lessf(t, avgAlloc, float64(len(body))*1.5, "avg allocation per buildGetObjectReply call = %.0f bytes", avgAlloc)
+}
+
 func BenchmarkBuildUploadPartArgs_5MiB(b *testing.B) {
 	body := bytes.Repeat([]byte("x"), 5*1024*1024)
 	b.SetBytes(int64(len(body)))
