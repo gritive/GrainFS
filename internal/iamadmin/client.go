@@ -2,6 +2,7 @@ package iamadmin
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
@@ -13,7 +14,9 @@ type Client struct {
 	*adminapi.Transport
 }
 
-// NewClient resolves the endpoint and returns a ready-to-use client.
+// NewClient resolves the endpoint (flag value → GRAINFS_ADMIN_SOCKET env →
+// fail-fast) and returns a ready-to-use client. Matches the legacy IAM CLI
+// resolution order so existing operator muscle memory still works.
 func NewClient(endpoint string) (*Client, error) {
 	ep, err := ResolveEndpoint(endpoint)
 	if err != nil {
@@ -35,6 +38,7 @@ func NewClientForURL(rawurl string) *Client {
 
 // --- ServiceAccount ---
 
+// SACreate creates a ServiceAccount and returns its first AccessKey + one-time secret.
 func (c *Client) SACreate(ctx context.Context, name, description string) (SACreateResponse, error) {
 	body := map[string]string{"name": name, "description": description}
 	var resp SACreateResponse
@@ -42,18 +46,21 @@ func (c *Client) SACreate(ctx context.Context, name, description string) (SACrea
 	return resp, err
 }
 
+// SAList returns every ServiceAccount known to the admin server.
 func (c *Client) SAList(ctx context.Context) ([]SAListItem, error) {
 	var resp []SAListItem
 	err := c.Get(ctx, "/v1/iam/sa", &resp)
 	return resp, err
 }
 
+// SAGet returns metadata for the named ServiceAccount.
 func (c *Client) SAGet(ctx context.Context, saID string) (SAGetResponse, error) {
 	var resp SAGetResponse
 	err := c.Get(ctx, "/v1/iam/sa/"+url.PathEscape(saID), &resp)
 	return resp, err
 }
 
+// SADelete removes a ServiceAccount; the server cascades to its keys + grants via FSM.
 func (c *Client) SADelete(ctx context.Context, saID string) error {
 	return c.Delete(ctx, "/v1/iam/sa/"+url.PathEscape(saID), nil)
 }
@@ -71,6 +78,7 @@ func (c *Client) KeyCreateRaw(ctx context.Context, saID string, buckets []string
 	return c.PostRaw(ctx, "/v1/iam/sa/"+url.PathEscape(saID)+"/key", body)
 }
 
+// KeyRevoke revokes a single AccessKey on the named ServiceAccount.
 func (c *Client) KeyRevoke(ctx context.Context, saID, accessKey string) error {
 	return c.Delete(ctx,
 		"/v1/iam/sa/"+url.PathEscape(saID)+"/key/"+url.PathEscape(accessKey), nil)
@@ -78,14 +86,16 @@ func (c *Client) KeyRevoke(ctx context.Context, saID, accessKey string) error {
 
 // --- Grant ---
 
+// GrantPut grants the given role on a bucket to the SA. role is one of Read|Write|Admin.
 func (c *Client) GrantPut(ctx context.Context, saID, bucket, role string) error {
 	body := map[string]string{"sa_id": saID, "bucket": bucket, "role": role}
 	return c.Put(ctx, "/v1/iam/grant", body, nil)
 }
 
+// GrantDelete removes the SA's grant on the named bucket.
 func (c *Client) GrantDelete(ctx context.Context, saID, bucket string) error {
 	body := map[string]string{"sa_id": saID, "bucket": bucket}
-	return c.Do(ctx, "DELETE", "/v1/iam/grant", body, nil)
+	return c.Do(ctx, http.MethodDelete, "/v1/iam/grant", body, nil)
 }
 
 // GrantListRaw mirrors existing behavior: server body verbatim.
