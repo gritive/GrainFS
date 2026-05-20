@@ -50,7 +50,12 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 	registerStorageUI(g, d)
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api;
 	// they live only on the local admin Unix socket.
-	registerIAM(g, d)
+	// Policy and group admin endpoints are intentionally NOT mounted on /ui/api:
+	// they grant powers (attach Resource:* policies, create groups, modify SA
+	// membership) that are root-equivalent. The CLI Resource:* warning lives in
+	// the binary; the wire shape carries no such guard. Dashboard-token holders
+	// get the SA / Key / BucketUpstream surface only.
+	registerIAMUI(g, d)
 	// registerBucket is intentionally NOT mounted on /ui/api: AdminGetBucket
 	// performs an unbounded CountObjects walk (full Badger scan) that any
 	// dashboard-token holder could trigger remotely, causing write starvation.

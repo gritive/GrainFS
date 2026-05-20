@@ -40,3 +40,32 @@ func registerIAM(g router, d *Deps) {
 	g.DELETE(routePathBucketUpstream, iamDeleteBucketUpstreamHandler(d))
 	g.POST(routePathMigrationCutover, iamBucketUpstreamCutoverHandler(d))
 }
+
+// registerIAMUI mounts the dashboard-safe subset of IAM routes: SA CRUD, key
+// management, and bucket-upstream management (including migration cutover).
+// Policy and group admin routes are intentionally omitted — they grant powers
+// (attach Resource:* policies, create groups, modify SA membership) that are
+// root-equivalent. The CLI Resource:* warning lives in the binary; the wire
+// shape carries no such guard. Dashboard-token holders get the SA / Key /
+// BucketUpstream surface only.
+func registerIAMUI(g router, d *Deps) {
+	if !routeFeatureRoutesVisible(d, routeFeatureIAM) {
+		return
+	}
+	// SA
+	g.POST(routePathIAMSA, wrapBody[iam.SACreateRequest, iam.SACreateResponse](d, CreateSA))
+	g.GET(routePathIAMSA, wrapZero(d, ListSA))
+	g.GET(routePathIAMSAByID, iamGetSAHandler(d))
+	g.DELETE(routePathIAMSAByID, iamDeleteSAHandler(d))
+	// Key
+	g.POST(routePathIAMSAKey, iamCreateKeyHandler(d))
+	g.DELETE(routePathIAMSAKeyByAK, iamRevokeKeyHandler(d))
+	// Bucket upstream (PUT upsert -> 204). Routes under /upstreams (not
+	// /buckets/upstream) to avoid Hertz static-beats-param collision with
+	// GET /buckets/:name used by AdminGetBucket.
+	g.PUT(routePathUpstreams, wrapBodyNoOut204[iam.BucketUpstreamPutRequest](d, PutBucketUpstream))
+	g.GET(routePathUpstreams, wrapZero(d, ListBucketUpstreams))
+	g.GET(routePathBucketUpstream, iamGetBucketUpstreamHandler(d))
+	g.DELETE(routePathBucketUpstream, iamDeleteBucketUpstreamHandler(d))
+	g.POST(routePathMigrationCutover, iamBucketUpstreamCutoverHandler(d))
+}
