@@ -116,11 +116,8 @@ func init() {
 
 	bucketCmd.AddCommand(
 		bucketCreateCmd, bucketListCmd, bucketInfoCmd, bucketDeleteCmd,
-		// TODO(T10): the versioning subtree is still added below via the legacy
-		// builder-function pattern. Task 10 converts the file to var pattern
-		// (which AddCommands itself into bucketCmd via its own init()) and
-		// removes the builder call from here.
-		bucketVersioningCmd(),
 	)
+	// The upstream/policy/versioning subtrees register themselves onto
+	// bucketCmd from their own init() blocks (matching the iam.go template).
 	rootCmd.AddCommand(bucketCmd)
 }
