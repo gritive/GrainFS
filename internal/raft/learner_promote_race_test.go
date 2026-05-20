@@ -25,7 +25,7 @@ var _ = ginkgo.Describe("Learner promote leader stability", func() {
 	ginkgo.It("keeps a solo-voter leader stable while promoting a learner", func(ginkgo.SpecContext) {
 		fix, cleanup, err := startPromoteRaceCluster([]string{"n1"})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := fix.nodes[0]
 		gomega.Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).
@@ -56,7 +56,7 @@ var _ = ginkgo.Describe("Learner promote leader stability", func() {
 	ginkgo.It("keeps a three-voter leader stable while promoting a learner", func(ginkgo.SpecContext) {
 		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := fix.nodes[0]
 		gomega.Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).

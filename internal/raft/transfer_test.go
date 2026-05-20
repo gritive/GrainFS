@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("returns ErrNoPeers for a solo leader without stepping down", func(ginkgo.SpecContext) {
 		node, cleanup, err := startRaftIntegrationSingleVoter("solo")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		got := node.TransferLeadership()
 		gomega.Expect(got).To(gomega.MatchError(gomega.MatchRegexp(ErrNoPeers.Error())))
@@ -46,7 +46,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("returns ErrNotLeader when called on a follower", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
@@ -60,7 +60,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("steps down the leader and allows a new leader to emerge", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		n1, n2, n3 := nodes[0], nodes[1], nodes[2]
 		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
@@ -75,7 +75,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("lets a follower accept TimeoutNow", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		n1, n2 := nodes[0], nodes[1]
 		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
@@ -90,7 +90,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("rejects stale-term TimeoutNow without making the node leader", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		n1, n2 := nodes[0], nodes[1]
 		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
@@ -125,7 +125,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("has leaders ignore TimeoutNow", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
@@ -140,7 +140,7 @@ var _ = ginkgo.Describe("Transfer leadership", func() {
 	ginkgo.It("targets the peer with the highest match index", func(ginkgo.SpecContext) {
 		nodes, net, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		n1, n3 := nodes[0], nodes[2]
 		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")

@@ -15,7 +15,7 @@ var _ = ginkgo.Describe("ReadIndex", func() {
 	ginkgo.It("rejects follower reads without queueing actor work", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		n1, n2 := nodes[0], nodes[1]
 		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed())
@@ -32,7 +32,7 @@ var _ = ginkgo.Describe("ReadIndex", func() {
 	ginkgo.It("returns the commit index inline for a single-voter leader", func(ginkgo.SpecContext) {
 		node, cleanup, err := startRaftIntegrationSingleVoter("solo")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer pcancel()
@@ -50,7 +50,7 @@ var _ = ginkgo.Describe("ReadIndex", func() {
 	ginkgo.It("confirms a multi-voter leader through a heartbeat round", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
@@ -195,7 +195,7 @@ var _ = ginkgo.Describe("ReadIndex", func() {
 	ginkgo.It("resets peerLastRound when leadership is regained", func(ginkgo.SpecContext) {
 		nodes, _, cleanup, err := startRaftIntegrationCluster("x1", "x2", "x3")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())

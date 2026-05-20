@@ -112,20 +112,15 @@ func sortedVoterIDs(c Configuration) []string {
 var _ = ginkgo.Describe("Membership changes", func() {
 	var fix *membershipFixture
 	var leader *Node
-	var cleanup func()
 
 	ginkgo.BeforeEach(func() {
 		var err error
+		var cleanup func()
 		fix, cleanup, err = startPromoteRaceCluster([]string{"n1", "n2", "n3"})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 		leader = fix.nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 did not become leader")
-	})
-
-	ginkgo.AfterEach(func() {
-		if cleanup != nil {
-			cleanup()
-		}
 	})
 
 	ginkgo.It("adds a voter and converges configuration on all members", func(ginkgo.SpecContext) {

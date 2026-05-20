@@ -76,20 +76,15 @@ func startCluster(t *testing.T, ids ...string) (nodes []*Node, net *memNetwork) 
 var _ = ginkgo.Describe("Election", func() {
 	ginkgo.Context("three-voter cluster", func() {
 		var nodes []*Node
-		var cleanup func()
 		var n1, n2, n3 *Node
 
 		ginkgo.BeforeEach(func() {
 			var err error
+			var cleanup func()
 			nodes, _, cleanup, err = startRaftIntegrationCluster("n1", "n2", "n3")
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.DeferCleanup(cleanup)
 			n1, n2, n3 = nodes[0], nodes[1], nodes[2]
-		})
-
-		ginkgo.AfterEach(func() {
-			if cleanup != nil {
-				cleanup()
-			}
 		})
 
 		ginkgo.It("elects the short-timeout node as leader", func(ginkgo.SpecContext) {

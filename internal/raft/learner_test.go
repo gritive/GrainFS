@@ -13,7 +13,7 @@ var _ = ginkgo.Describe("Learner membership", func() {
 	ginkgo.It("commits AddLearner inline on a solo leader", func(ginkgo.SpecContext) {
 		node, cleanup, err := startRaftIntegrationSingleVoter("leader")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		gomega.Expect(node.AddLearner("learner-1", "addr-1")).To(gomega.Succeed())
 
@@ -38,7 +38,7 @@ var _ = ginkgo.Describe("Learner membership", func() {
 	ginkgo.It("rejects duplicate learners and voter self-add", func(ginkgo.SpecContext) {
 		node, cleanup, err := startRaftIntegrationSingleVoter("leader")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		gomega.Expect(node.AddLearner("x", "addr")).To(gomega.Succeed())
 		gomega.Expect(errors.Is(node.AddLearner("x", "addr"), ErrAlreadyLearner)).To(gomega.BeTrue())
@@ -77,7 +77,7 @@ var _ = ginkgo.Describe("Learner membership", func() {
 	ginkgo.It("promotes a caught-up learner to voter on leader and follower views", func(ginkgo.SpecContext) {
 		fix, cleanup, err := startPromoteRaceCluster([]string{"n1"})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := fix.nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
@@ -114,7 +114,7 @@ var _ = ginkgo.Describe("Learner membership", func() {
 	ginkgo.It("rejects PromoteToVoter for non-learners", func(ginkgo.SpecContext) {
 		node, cleanup, err := startRaftIntegrationSingleVoter("leader")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		gomega.Expect(errors.Is(node.PromoteToVoter("never-added"), ErrNotALearner)).To(gomega.BeTrue())
 	}, ginkgo.NodeTimeout(5*time.Second))

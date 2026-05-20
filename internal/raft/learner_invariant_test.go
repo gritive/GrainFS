@@ -85,7 +85,7 @@ var _ = ginkgo.Describe("Learner quorum invariants", func() {
 	ginkgo.It("does not count learners in a multi-voter quorum", func(ginkgo.SpecContext) {
 		fix, cleanup, err := startPromoteRaceCluster([]string{"v1", "v2", "v3"})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+		ginkgo.DeferCleanup(cleanup)
 
 		leader := fix.nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
