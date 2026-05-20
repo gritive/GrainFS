@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 17:05 KST
+Updated: 2026-05-20 17:07 KST
 
 ## Goal
 
@@ -64,6 +64,12 @@ Updated: 2026-05-20 17:05 KST
 | multipart-put |  804.95 |    160.99 |      0 |               879.59 | faster than MinIO/RustFS; RSS below MinIO | after bounded chunked multipart complete; artifact `benchmarks/profiles/grainfs-single-multipart-put-after-complete-8m-limit24-20260520-170108` |
 | append        |   78.39 |   1254.28 |      0 |               326.50 | correct; MinIO/RustFS append baselines invalid | initial measurement; artifact `benchmarks/profiles/grainfs-single-append-initial-20260520-170436` |
 
+## GrainFS Single-Node Iceberg Benchmark
+
+| op           | total ops/s | p99 latency | max latency | errors | notes |
+| ------------ | ----------: | ----------: | ----------: | -----: | ----- |
+| catalog-read |    53526.85 |        1.3ms |       82.2ms |      0 | after removing unsupported single-node `--catalog-prop` flags; artifact `benchmarks/profiles/iceberg-single-catalog-read-after-catalog-prop-fix-20260520-170702` |
+
 ## GrainFS Optimization Notes
 
 - `put` memory candidate 1: `PackedBackend.readPackedCandidate` allocated the full pack threshold for known-size small bodies. TDD: `TestReadPackedCandidateSizedReaderAllocatesExactSmallBody`. Fix: exact-size read for readers exposing `Len/Size`; threshold-or-larger readers route directly to inner backend without prefix allocation. Micro benchmark after exact-size fix: 1 alloc/op, ~64 KiB/op. e2e RSS improved from 1391.78 MiB to 1078.44 MiB.
@@ -91,11 +97,12 @@ Updated: 2026-05-20 17:05 KST
 - `multipart` candidate 5: pprof still showed repeated metadata fetch/copy pressure around the multipart `HeadObject` warmup path. Architecture review: object data cache entries were already immutable, lock-free snapshots, but `HeadObject` misses were not published into that cache; publishing metadata-only entries keeps HEAD hot without pretending body bytes are cached. Fix: cache metadata-only entries from `CachedBackend.HeadObject`, gate body-serving paths on `hasData`, and let `GetObject` reuse cached metadata before reading body. Metadata-only entries are charged a small fixed size so HEAD-only workloads still evict through the existing bounded cache. TDD: `TestCachedBackend_HeadObjectMissCachesMetadata`, `TestCachedBackend_GetObjectAfterHeadObjectReadsBody`, and `TestCachedBackend_HeadObjectMetadataCacheEvictsOnSizeLimit`. Clean e2e measured 4736.85/4809.70 MiB/s before metadata charge; final bounded run measured 3986.73 MiB/s with RSS 675.98 MiB, above MinIO/RustFS and below MinIO RSS.
 - `multipart-put` initial measurement: 311.07 MiB/s and 376.03 MiB RSS failed the MinIO/RustFS throughput gate. A pprof run showed throughput can exceed the gate, but heap/inuse was dominated by `SegmentWriter.chunkLoop` during multipart complete: concurrent completes each held 16 MiB chunk buffers, producing multi-GiB RSS. Architecture fix: keep normal chunked PUT unchanged, but for chunked multipart complete cap chunks at 8 MiB, run one segment worker per complete, and bound concurrent chunked multipart completes with a lightweight buffered-channel semaphore. Limit 16 was memory-safe but too slow (480.08 MiB/s); limit 32 was fast but too high RSS; final limit 24 with 8 MiB chunks measured 804.95 MiB/s and 879.59 MiB RSS. TDD: `TestChunkedMultipartCompleteChunkSizeCapsDefault`, `TestAcquireChunkedMultipartCompleteSlotHonorsContext`, and `TestSegmentWriter_CustomWorkersBoundsConcurrentWrites`.
 - `append` initial measurement: GrainFS completed with 0 errors at 78.39 MiB/s and 1254.28 obj/s, RSS 326.50 MiB. MinIO and RustFS append baselines both returned high error counts, so they are invalid correctness baselines for throughput comparison.
+- `iceberg catalog-read` initial run failed before reaching GrainFS because the single-node benchmark script still passed `--catalog-prop`, which warp 1.5.0 no longer supports. The cluster Iceberg script had already removed those flags, so the single-node script was aligned with it. After the script fix, catalog-read completed with 0 errors at 53526.85 total ops/s.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
-- Continue with Iceberg warp targets: `catalog-read`, `catalog-commits`, `catalog-mixed`, `sustained`.
+- Continue with Iceberg warp targets: `catalog-commits`, `catalog-mixed`, `sustained`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
