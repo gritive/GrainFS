@@ -31,6 +31,21 @@ passing through the server response body, so JSON keys are
 alphabetically ordered. Field names and values are unchanged. Raw
 passthrough preserved for `iam key create` and `iam grant list`.
 
+**Behavior changes (also low risk):**
+
+- `iam` commands no longer apply a client-side 30s timeout. The legacy
+  `iamHTTPClient` capped requests at 30s via `http.Client.Timeout`;
+  `adminapi.Transport` has no client-side timeout. Admin UDS is local
+  so the practical effect is nil, but long-running follow loops will
+  no longer be terminated client-side. This matches `volumeadmin` /
+  `clusteradmin` behavior already in production.
+- Error messages from `iam` commands now use the `adminapi.Error`
+  envelope (e.g., bare `<server-message>` or
+  `admin server unreachable: …`). The legacy prefix
+  `admin <METHOD> <path> -> <status>: <body>` is gone. Scripts that
+  grep for the old prefix will no longer match; behavior on success
+  is unchanged.
+
 Part of: cmd thin-runner refactor (step 1/7).
 Spec: docs/superpowers/specs/2026-05-20-cmd-thin-runner-design.md
 
