@@ -1456,6 +1456,53 @@ func TestClusterCoordinator_ReadAt_FollowerVoterUsesLocalCurrentObjectBeforeForw
 	require.Empty(t, d.calls)
 }
 
+func TestClusterCoordinator_HeadObject_FollowerVoterUsesLocalCurrentObjectBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	modTime := time.Now().Unix()
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-current",
+		LastModified: modTime,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 11, ContentType: "text/plain", ETag: "etag-current", ModTime: modTime},
+		},
+	}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	obj, err := c.HeadObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(11), obj.Size)
+	require.Equal(t, "text/plain", obj.ContentType)
+	require.Equal(t, "etag-current", obj.ETag)
+	require.Empty(t, d.calls)
+}
+
 func TestClusterCoordinator_ReadAt_FollowerVoterForwardsWhenLocalObjectIndexStale(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"self", "peer-a"})
 	meta := &objectIndexMeta{
