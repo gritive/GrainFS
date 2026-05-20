@@ -23,20 +23,20 @@ func TestObjectTaggingE2E(t *testing.T) {
 }
 
 var _ = ginkgo.Describe("Object tagging", func() {
-	describeObjectTaggingContext("SingleNode", func(t testing.TB) s3Target {
+	describeObjectTaggingContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
 	})
-	describeObjectTaggingContext("Cluster4Node", func(t testing.TB) s3Target {
-		return newSharedClusterS3Target(t)
+	describeObjectTaggingContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
 	})
 })
 
-func describeObjectTaggingContext(name string, factory func(testing.TB) s3Target) {
+func describeObjectTaggingContext(name string, factory func() s3Target) {
 	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 		ginkgo.BeforeAll(func() {
+			tgt = factory()
 			tb := ginkgo.GinkgoTB()
-			tgt = factory(tb)
 			client := tgt.pickNode(0)
 			if tgt.isCluster {
 				probe := tgt.name + "-tag-mp-probe"

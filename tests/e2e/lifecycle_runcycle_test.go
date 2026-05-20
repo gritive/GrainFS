@@ -27,22 +27,24 @@ func TestLifecycleWorkerE2E(t *testing.T) {
 }
 
 var _ = ginkgo.Describe("Lifecycle worker", func() {
-	describeLifecycleWorkerContext("SingleNode", func(t testing.TB) (s3Target, *lifecycleFixture) {
-		tgt := newDedicatedSingleNodeS3Target(t, []string{"--lifecycle-interval=24h"})
-		return tgt, newLifecycleFixture(t, tgt)
+	describeLifecycleWorkerContext("SingleNode", func() (s3Target, *lifecycleFixture) {
+		tb := ginkgo.GinkgoTB()
+		tgt := newDedicatedSingleNodeS3Target(tb, []string{"--lifecycle-interval=24h"})
+		return tgt, newLifecycleFixture(tb, tgt)
 	})
-	describeLifecycleWorkerContext("Cluster4Node", func(t testing.TB) (s3Target, *lifecycleFixture) {
-		tgt := newDedicatedCluster4NodeS3Target(t, []string{"--lifecycle-interval=24h"})
-		return tgt, newLifecycleFixture(t, tgt)
+	describeLifecycleWorkerContext("Cluster4Node", func() (s3Target, *lifecycleFixture) {
+		tb := ginkgo.GinkgoTB()
+		tgt := newDedicatedCluster4NodeS3Target(tb, []string{"--lifecycle-interval=24h"})
+		return tgt, newLifecycleFixture(tb, tgt)
 	})
 })
 
-func describeLifecycleWorkerContext(name string, factory func(testing.TB) (s3Target, *lifecycleFixture)) {
+func describeLifecycleWorkerContext(name string, factory func() (s3Target, *lifecycleFixture)) {
 	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 		var lc *lifecycleFixture
 		ginkgo.BeforeAll(func() {
-			tgt, lc = factory(ginkgo.GinkgoTB())
+			tgt, lc = factory()
 		})
 		ginkgo.BeforeEach(func() {
 			lc.ResetClock()

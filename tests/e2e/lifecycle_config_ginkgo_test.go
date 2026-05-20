@@ -20,13 +20,15 @@ func TestLifecycleConfigGinkgo(t *testing.T) {
 }
 
 var _ = ginkgo.Describe("Lifecycle config", func() {
-	describeLifecycleConfigContext("SingleNode", func(t testing.TB) (s3Target, *lifecycleFixture) {
-		tgt := newDedicatedSingleNodeS3Target(t, []string{"--lifecycle-interval=24h"})
-		return tgt, newLifecycleFixture(t, tgt)
+	describeLifecycleConfigContext("SingleNode", func() (s3Target, *lifecycleFixture) {
+		tb := ginkgo.GinkgoTB()
+		tgt := newDedicatedSingleNodeS3Target(tb, []string{"--lifecycle-interval=24h"})
+		return tgt, newLifecycleFixture(tb, tgt)
 	})
-	describeLifecycleConfigContext("Cluster4Node", func(t testing.TB) (s3Target, *lifecycleFixture) {
-		tgt := newDedicatedCluster4NodeS3Target(t, []string{"--lifecycle-interval=24h"})
-		return tgt, newLifecycleFixture(t, tgt)
+	describeLifecycleConfigContext("Cluster4Node", func() (s3Target, *lifecycleFixture) {
+		tb := ginkgo.GinkgoTB()
+		tgt := newDedicatedCluster4NodeS3Target(tb, []string{"--lifecycle-interval=24h"})
+		return tgt, newLifecycleFixture(tb, tgt)
 	})
 })
 
@@ -36,12 +38,16 @@ var _ = ginkgo.Describe("Lifecycle config", func() {
 // lifecycle worker clock starts at real-now for each spec, preventing
 // cumulative drift across specs (every prior AdvanceLifecycleClock call
 // would otherwise leak into the next spec's PutObject/expiration window).
-func describeLifecycleConfigContext(name string, factory func(testing.TB) (s3Target, *lifecycleFixture)) {
+//
+// factory는 인자 없는 ginkgo-native closure — BeforeAll 안에서만 호출되며
+// 내부에서 ginkgo.GinkgoTB()를 직접 받는다. helper들(newDedicated*S3Target,
+// newLifecycleFixture)이 testing.TB를 요구하므로 GinkgoTB 호출은 factory가 담당.
+func describeLifecycleConfigContext(name string, factory func() (s3Target, *lifecycleFixture)) {
 	ginkgo.Context(name, ginkgo.Ordered, func() {
 		var tgt s3Target
 		var lc *lifecycleFixture
 		ginkgo.BeforeAll(func() {
-			tgt, lc = factory(ginkgo.GinkgoTB())
+			tgt, lc = factory()
 		})
 		ginkgo.BeforeEach(func() {
 			lc.ResetClock()
