@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,7 +15,7 @@ import (
 
 // TestIcebergOAuthE2E exercises the §4 OAuth2 client_credentials token endpoint
 // (POST /iceberg/v1/oauth/tokens) and adjacent SigV4 access on the warehouse
-// bucket. Dual-target: SingleNode + Cluster4Node, per R10 convention.
+// bucket. Dual-target: SingleNode + Cluster3Node, per R10 convention.
 //
 // Cases:
 //   - S3SigV4_NoBearerNeeded_PutGetRoundtrip — SigV4-authenticated PUT/GET on
@@ -30,7 +32,7 @@ func TestIcebergOAuthE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runIcebergOAuthCases(t, newSingleNodeIcebergTarget(t))
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
+	t.Run("Cluster3Node", func(t *testing.T) {
 		runIcebergOAuthCases(t, newSharedClusterIcebergTarget(t))
 	})
 }
@@ -68,7 +70,7 @@ func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t *testing.T, tgt *iceb
 	_, err := tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
-		Body:   strings.NewReader(string(body)),
+		Body:   bytes.NewReader(body),
 	})
 	require.NoError(t, err, "SigV4 PutObject must succeed without minting a bearer")
 
@@ -78,9 +80,9 @@ func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t *testing.T, tgt *iceb
 	})
 	require.NoError(t, err, "SigV4 GetObject must succeed without minting a bearer")
 	defer out.Body.Close()
-	buf := make([]byte, len(body))
-	n, _ := out.Body.Read(buf)
-	require.Equal(t, body, buf[:n])
+	got, err := io.ReadAll(out.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }
 
 // runIcebergOAuthMintTokenHappyPath mints a bearer for a fresh SA with
@@ -133,7 +135,7 @@ func runIcebergOAuthBearerGatedS3GetObjectAuthedOK(t *testing.T, tgt *icebergTar
 	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(warehouse),
 		Key:    aws.String(key),
-		Body:   strings.NewReader(string(body)),
+		Body:   bytes.NewReader(body),
 	})
 	require.NoError(t, err, "post-mint SigV4 PutObject must succeed")
 
@@ -143,7 +145,7 @@ func runIcebergOAuthBearerGatedS3GetObjectAuthedOK(t *testing.T, tgt *icebergTar
 	})
 	require.NoError(t, err, "post-mint SigV4 GetObject must succeed")
 	defer out.Body.Close()
-	buf := make([]byte, len(body))
-	n, _ := out.Body.Read(buf)
-	require.Equal(t, body, buf[:n])
+	got, err := io.ReadAll(out.Body)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
 }

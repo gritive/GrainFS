@@ -134,12 +134,9 @@ func (tgt *icebergTarget) uniqueWarehouse(t *testing.T, suffix string) string {
 	return name
 }
 
-// mintToken POSTs grant_type=client_credentials to the iceberg OAuth2 token
-// endpoint and returns (jwt, httpStatus). On success (200) jwt is the
-// access_token from the response body; on any non-200 jwt is "" and the
-// caller decides via httpStatus how to assert. The function does NOT t.Fatal
-// on transport errors — those still fatal, but on HTTP-level errors the test
-// case is the one to decide.
+// mintToken POSTs grant_type=client_credentials to the iceberg OAuth token
+// endpoint. Returns (jwt, 200) on success; ("", non-200) on auth failure.
+// Transport/IO/decode errors fail the test via require.NoError.
 func (tgt *icebergTarget) mintToken(t *testing.T, clientID, clientSecret, warehouse string) (string, int) {
 	t.Helper()
 	form := url.Values{}
