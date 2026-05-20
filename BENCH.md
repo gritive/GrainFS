@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 14:48 KST
+Updated: 2026-05-20 14:56 KST
 
 ## Goal
 
@@ -52,9 +52,9 @@ Updated: 2026-05-20 14:48 KST
 
 | op     |   MiB/s |    obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                                                                                |
 | ------ | ------: | -------: | -----: | -------------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| put    |  337.39 |  5398.29 |      0 |               621.27 | faster than MinIO/RustFS; RSS below MinIO | S3-only services-off run with `--audit-iceberg=false --dedup=false --block-cache-size=0 --shard-cache-size=0`; artifact `benchmarks/profiles/grainfs-single-put-s3only-services-off-20260520-143500` |
-| get    | 1051.93 | 16830.92 |      0 |               801.30 | faster than MinIO/RustFS; RSS below MinIO | after raw-body response and encrypted blob read buffer reuse; artifact `benchmarks/profiles/grainfs-single-get-after-read-rawbody-pools-20260520-145200`                                             |
-| delete |    0.00 | 17734.67 |      0 |               701.98 | faster than MinIO/RustFS; RSS above MinIO | after MetaFSM snapshot sort-key and snapshot threshold optimizations; artifact `benchmarks/profiles/grainfs-single-delete-after-meta-snapshot-threshold-20260520-144550`                             |
+| put    |  548.30 |  8772.82 |      0 |               601.22 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`                                                                       |
+| get    | 1849.34 | 29589.49 |      0 |               767.03 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`                                                                       |
+| delete |    0.00 | 17964.91 |      0 |               460.70 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`                                                                         |
 
 ## GrainFS Optimization Notes
 
@@ -68,6 +68,7 @@ Updated: 2026-05-20 14:48 KST
 - `delete` first S3-only measurement: throughput satisfies the baseline gate, but RSS is 789.33 MiB versus MinIO DELETE 533.9 MiB. Next step: review DELETE architecture, then collect pprof heap/allocs before choosing a fix.
 - `delete` memory candidate 1: pprof showed seed/snapshot churn rather than the DELETE fast path itself. `MetaFSM.Snapshot` sorted object index entries by rebuilding `objectIndexVersionKey` inside the comparator, causing O(n log n) string allocation. Fix: carry the existing object-index map key as a snapshot sort key. Micro benchmark `BenchmarkMetaFSMSnapshotObjectIndex4096`: ~2.1-2.3 ms/op, ~3.4 MiB/op, ~80-96 allocs/op after the change. pprof alloc_space fell from 8.88 GiB to 4.24 GiB and `objectIndexVersionKey` disappeared from the alloc_space top list; e2e DELETE RSS remains above MinIO, so continue investigation.
 - `delete` memory candidate 2: Meta Raft snapshots were still created every 1024 applied log entries during object-heavy seed/delete workloads. Architecture review: this is durability-safe but too aggressive for single-node S3 warp because each snapshot serializes the full object index. Fix: raise the snapshot interval to 8192 applied log entries and make the threshold predicate unit-testable. e2e DELETE improved to 17734.67 obj/s with RSS 701.98 MiB. Throughput is well above both baselines, but RSS is still above MinIO DELETE 533.9 MiB and RustFS DELETE 232.11 MiB, so memory work continues.
+- `delete` memory candidate 3: pprof after snapshot threshold showed resident memory dominated by Badger memtable arenas, Badger block-cache allocator, and mmap-backed value logs across many small role DBs rather than the delete handler. Architecture fix: tune `SmallOptions` for GrainFS metadata roles: no block compression, no block cache, 2 MiB memtables, 256 KiB ValueThreshold, and 16 MiB value-log files. A 1 MiB memtable attempt regressed RSS to 547.31 MiB, so it was rejected. Final e2e checks after the accepted option set: PUT 548.30 MiB/s RSS 601.22 MiB, GET 1849.34 MiB/s RSS 767.03 MiB, DELETE 17964.91 obj/s RSS 460.70 MiB.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items

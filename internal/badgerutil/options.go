@@ -4,12 +4,15 @@ import (
 	"sync/atomic"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
 )
 
 const (
-	SmallMemTableSize     int64 = 8 << 20
-	SmallBlockCacheSize   int64 = 8 << 20
-	SmallValueLogFileSize int64 = 64 << 20
+	SmallMemTableSize     int64 = 2 << 20
+	SmallMaxBatchSize     int64 = (15 * SmallMemTableSize) / 100
+	SmallBlockCacheSize   int64 = 0
+	SmallValueThreshold   int64 = 256 << 10
+	SmallValueLogFileSize int64 = 16 << 20
 	SmallNumMemtables           = 2
 )
 
@@ -25,6 +28,9 @@ func SetValueThresholdOverride(v int64) {
 	if v < 0 {
 		v = 0
 	}
+	if v > SmallMaxBatchSize {
+		v = SmallMaxBatchSize
+	}
 	valueThresholdOverride.Store(v)
 }
 
@@ -34,8 +40,10 @@ func SetValueThresholdOverride(v int64) {
 func SmallOptions(path string) badger.Options {
 	opts := badger.DefaultOptions(path).
 		WithLogger(nil).
+		WithCompression(options.None).
 		WithMemTableSize(SmallMemTableSize).
 		WithNumMemtables(SmallNumMemtables).
+		WithValueThreshold(SmallValueThreshold).
 		WithValueLogFileSize(SmallValueLogFileSize).
 		WithBlockCacheSize(SmallBlockCacheSize).
 		WithNumCompactors(2)
