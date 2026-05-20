@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,8 +91,9 @@ func runClusterJoinAllServicesAvailable(t *testing.T) {
 	})
 }
 
-func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("Cluster join default bucket", func() {
+	ginkgo.It("creates the default bucket only on the seed", func() {
+		t := ginkgo.GinkgoTB()
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes:      2,
 			Mode:       ClusterModeDynamicJoin,
@@ -116,7 +118,7 @@ func TestE2E_DefaultBucketOnlySeedCreates(t *testing.T) {
 			require.Equal(t, 1, defaults, "default bucket should exist once as shared cluster metadata at %s", endpoint)
 		}
 	})
-}
+})
 
 func runClusterJoinDynamicJoinServicesNodeCounts(t *testing.T) {
 	t.Run("Cluster3Node", func(t *testing.T) {

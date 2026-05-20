@@ -2,21 +2,20 @@ package e2e
 
 import (
 	"context"
-	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-func TestDefaultBucket_ExistsOnStartup(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+var _ = ginkgo.Describe("Default bucket", func() {
+	ginkgo.It("exists on single-node startup", func() {
 		ctx := context.Background()
 
 		// The "default" bucket should exist immediately after server startup
 		out, err := testS3Client.ListBuckets(ctx, &s3.ListBucketsInput{})
-		if err != nil {
-			t.Fatalf("list buckets: %v", err)
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		found := false
 		for _, b := range out.Buckets {
@@ -25,19 +24,16 @@ func TestDefaultBucket_ExistsOnStartup(t *testing.T) {
 				break
 			}
 		}
-		if !found {
-			t.Fatal("expected 'default' bucket to exist on startup, but it was not found")
-		}
+		gomega.Expect(found).To(gomega.BeTrue())
 
 		// Verify we can use the default bucket immediately.
 		_, err = testS3Client.HeadBucket(ctx, &s3.HeadBucketInput{
 			Bucket: aws.String("default"),
 		})
-		if err != nil {
-			t.Fatalf("head default bucket: %v", err)
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
+
+	ginkgo.It("exists on cluster startup", func() {
+		_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
 	})
-}
+})
