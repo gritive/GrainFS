@@ -23,10 +23,10 @@ import (
 // boundary UBC would sit at, so the hit rates here are the marginal
 // value-add UBC offers over what we already do.
 //
-// CachedBackend default size is 64 MB / 4 MB-per-object. Workloads
-// below stay under those thresholds so CachedBackend itself acts as
-// the first layer (its native counters tell us its own hit rate; we
-// look for residual locality the simulator catches afterwards).
+// The test scales CachedBackend down to 8 MB / 1 MB-per-object so CI does not
+// spend seconds writing hundreds of MiB just to cross the same cache-ratio
+// boundaries. Workloads below preserve the relationships that matter:
+// smaller-than-cache, larger-than-cache, and hot/cold skew.
 func TestReadAmpStorage_Workload(t *testing.T) {
 	type baseline struct{ h16, m16, h64, m64, h256, m256 uint64 }
 	snap := func() baseline {
@@ -74,10 +74,13 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 	readamp.Enable()
 	defer readamp.Disable()
 
-	// Helper to set up a CachedBackend(LocalBackend) stack — what serve.go
-	// configures by default for non-cluster runs. The cache size is the
-	// production default so the simulator records only what slips through
-	// the existing object cache.
+	const testCacheBytes = 8 * 1024 * 1024
+	const testMaxObjectBytes = 1 * 1024 * 1024
+
+	// Helper to set up a CachedBackend(LocalBackend) stack. The cache is scaled
+	// down for test speed, but the object-cache hit/miss boundaries are the same
+	// as production: objects at or below max-object size can cache, and
+	// sequential working sets larger than total capacity churn.
 	setupBackend := func(t *testing.T) Backend {
 		t.Helper()
 		dir := t.TempDir()
@@ -85,7 +88,11 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("local backend: %v", err)
 		}
-		return NewCachedBackend(local)
+		return NewCachedBackend(
+			local,
+			WithMaxCacheBytes(testCacheBytes),
+			WithMaxObjectCacheBytes(testMaxObjectBytes),
+		)
 	}
 
 	bucket := "ubc-bench"
@@ -105,7 +112,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		rc.Close()
 	}
 
-	// --- A: cold sequential — 200 unique objects, each read once ---
+	// --- A: cold sequential — unique objects, each read once ---
 	// Worst case: nothing recurs, simulator must report 0% (CachedBackend
 	// doesn't help, and neither would UBC).
 	t.Run("cold_sequential", func(t *testing.T) {
@@ -116,13 +123,13 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 			t.Fatalf("create bucket: %v", err)
 		}
 		payload := bytes.Repeat([]byte("x"), 4096)
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 64; i++ {
 			put(b, fmt.Sprintf("seq-%04d", i), payload)
 		}
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 64; i++ {
 			mustGet(b, fmt.Sprintf("seq-%04d", i))
 		}
-		report(t, "cold_sequential (200 unique GETs)", base)
+		report(t, "cold_sequential (64 unique GETs)", base)
 	})
 
 	// --- B: hot key burst — 1 object, 100 GETs ---
@@ -144,11 +151,9 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		report(t, "hot_key_burst (1 obj × 100 GETs)", base)
 	})
 
-	// --- C: working set under 64 MB, two passes ---
-	// 800 small objects (~3 MB total), GET each twice. CachedBackend
-	// at 64 MB easily fits everything — simulator should see the second
-	// pass as 100% hit on the LARGE simulated cache, but 0% on small
-	// caches sized below the working set.
+	// --- C: working set under object cache, two passes ---
+	// 256 small objects (~2 MB total), GET each twice. The scaled 8 MB
+	// CachedBackend fits everything, so the second pass stays in object cache.
 	t.Run("working_set_under_objcache", func(t *testing.T) {
 		resetTrackers()
 		base := snap()
@@ -156,8 +161,8 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
-		const n = 800
-		payload := bytes.Repeat([]byte("ws"), 4096) // 8 KB per object → 6.4 MB total
+		const n = 256
+		payload := bytes.Repeat([]byte("ws"), 4096) // 8 KB per object → 2 MB total
 		for i := 0; i < n; i++ {
 			put(b, fmt.Sprintf("ws-%05d", i), payload)
 		}
@@ -166,15 +171,14 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 				mustGet(b, fmt.Sprintf("ws-%05d", i))
 			}
 		}
-		report(t, "working_set_6MB (800 objs × 2 GETs)", base)
+		report(t, "working_set_2MB (256 objs × 2 GETs)", base)
 	})
 
-	// --- D: working set OVER object cache (64 MB), two passes ---
-	// 200 large objects of 1 MB each = 200 MB total. CachedBackend at
-	// 64 MB cannot retain them all → second-pass GETs miss the object
-	// cache, fall through to LocalBackend → readamp records them. This
-	// is the simulator's golden case: when object cache is too small,
-	// would a UBC at this layer help?
+	// --- D: working set OVER object cache, two passes ---
+	// 12 objects of 1 MB each = 12 MB total. The scaled 8 MB CachedBackend cannot
+	// retain the sequential working set, so second-pass GETs miss the object
+	// cache and fall through to LocalBackend. This is the simulator's golden case:
+	// when object cache is too small, would a UBC at this layer help?
 	t.Run("working_set_over_objcache", func(t *testing.T) {
 		resetTrackers()
 		base := snap()
@@ -182,7 +186,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
-		const n = 200
+		const n = 12
 		payload := bytes.Repeat([]byte{0xAB}, 1024*1024) // 1 MB per object
 		for i := 0; i < n; i++ {
 			put(b, fmt.Sprintf("big-%03d", i), payload)
@@ -192,10 +196,10 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 				mustGet(b, fmt.Sprintf("big-%03d", i))
 			}
 		}
-		report(t, "working_set_200MB (200 obj×1MB ×2 GETs)", base)
+		report(t, "working_set_12MB (12 obj×1MB ×2 GETs)", base)
 	})
 
-	// --- E: pareto access on 500 small objects ---
+	// --- E: pareto access on small objects ---
 	// 80% of GETs hit 20% of objects. Most-asked layer in any web
 	// application. CachedBackend should already absorb the hot
 	// portion. Simulator counters here = the "post-CachedBackend
@@ -207,13 +211,13 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
-		const n = 500
+		const n = 256
 		payload := bytes.Repeat([]byte("p"), 8192) // 8 KB per object
 		for i := 0; i < n; i++ {
 			put(b, fmt.Sprintf("p-%04d", i), payload)
 		}
 		rng := rand.New(rand.NewSource(7))
-		const accesses = 5000
+		const accesses = 1000
 		hot := n / 5
 		for i := 0; i < accesses; i++ {
 			var k int
@@ -224,6 +228,6 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 			}
 			mustGet(b, fmt.Sprintf("p-%04d", k))
 		}
-		report(t, "pareto_80_20 (5k GETs on 500 obj)", base)
+		report(t, "pareto_80_20 (1k GETs on 256 obj)", base)
 	})
 }

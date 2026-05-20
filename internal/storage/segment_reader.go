@@ -138,7 +138,7 @@ func (r *SegmentReader) fetchOne(ctx context.Context, idx int) {
 		p.buf = provider.SegmentBytes()
 		return
 	}
-	buf, err := io.ReadAll(rc)
+	buf, err := readExactlySizedObject(rc, r.refs[idx].Size)
 	if err != nil {
 		p.err = err
 		return
