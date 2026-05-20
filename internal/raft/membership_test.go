@@ -4,14 +4,23 @@ import (
 	"context"
 	"sort"
 	"sync"
-	"testing"
 	"time"
 
-	"github.com/onsi/ginkgo/v2"
-	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
+// startMembershipCluster builds a cluster with the given IDs all wired through
+// a shared memNetwork. The first ID gets the fast election timeout so it
+// wins term 1 deterministically. Unlike startCapturingCluster this helper
+// supports any number of nodes, allows pre-Start configuration overrides
+// (peers list per node), and drains ApplyCh in the background like
+// startCluster.
+//
+// The function returns the nodes (in the same order as ids) and the shared
+// memNetwork so tests can register additional nodes (the AddVoter happy
+// path needs a node to exist on the network at the time the leader's
+// joint AE arrives).
 type membershipFixture struct {
 	nodes []*Node
 	net   *memNetwork
@@ -27,31 +36,34 @@ func sortedVoterIDs(c Configuration) []string {
 	return out
 }
 
-var _ = ginkgo.Describe("Membership changes", func() {
+var _ = Describe("membership", func() {
 	var fix *membershipFixture
 	var leader *Node
 
-	ginkgo.BeforeEach(func() {
-		var err error
-		var cleanup func()
-		fix, cleanup, err = startPromoteRaceCluster([]string{"n1", "n2", "n3"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ginkgo.DeferCleanup(cleanup)
+	BeforeEach(func() {
+		fix = startMembershipClusterGinkgo([]string{"n1", "n2", "n3"})
 		leader = fix.nodes[0]
-		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 did not become leader")
 	})
 
-	ginkgo.It("adds a voter and converges configuration on all members", func(ginkgo.SpecContext) {
-		_, err := addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		gomega.Expect(leader.AddVoterCtx(ctx, "n4", "n4-addr")).To(gomega.Succeed())
+	It("grows a 3-voter cluster to 4 voters", func() {
+		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed(),
+			"n1 did not become leader")
 
+		// Bring n4 up before AddVoter so it can receive the joint entry.
+		// Its seed Peers must reference the current cluster (so the followers
+		// lookup table sees the same network handle), but currentConfig will
+		// be overwritten by the joint entry the leader sends.
+		fix.addNodeGinkgo("n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		DeferCleanup(cancel)
+		Expect(leader.AddVoterCtx(ctx, "n4", "n4-addr")).To(Succeed())
+
+		// Configuration on every member must include n4 — and only n4 — added.
 		want := []string{"n1", "n2", "n3", "n4"}
-		gomega.Expect(waitFor(3*time.Second, func() bool {
-			for _, node := range fix.nodes {
-				got := sortedVoterIDs(node.Configuration())
+		Expect(waitFor(3*time.Second, func() bool {
+			for _, n := range fix.nodes {
+				got := sortedVoterIDs(n.Configuration())
 				if len(got) != len(want) {
 					return false
 				}
@@ -62,29 +74,36 @@ var _ = ginkgo.Describe("Membership changes", func() {
 				}
 			}
 			return true
-		})).To(gomega.Succeed(), "configuration did not converge to {n1..n4}")
-	}, ginkgo.NodeTimeout(10*time.Second))
+		})).To(Succeed(), "configuration did not converge to {n1..n4}")
+	})
 
-	ginkgo.It("rejects adding an existing voter", func(ginkgo.SpecContext) {
-		gomega.Expect(leader.AddVoter("n2", "addr")).To(gomega.HaveOccurred())
-	}, ginkgo.NodeTimeout(5*time.Second))
+	It("rejects adding a duplicate voter", func() {
+		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
 
-	ginkgo.It("removes a voter and converges remaining members", func(ginkgo.SpecContext) {
-		_, err := addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err := leader.AddVoter("n2", "addr")
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("shrinks a 4-voter cluster to 3 voters", func() {
+		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
+		fix.addNodeGinkgo("n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		gomega.Expect(leader.AddVoterCtx(ctx, "n4", "n4-addr")).To(gomega.Succeed())
-		gomega.Expect(leader.RemoveVoter("n3")).To(gomega.Succeed())
+		DeferCleanup(cancel)
+		Expect(leader.AddVoterCtx(ctx, "n4", "n4-addr")).To(Succeed())
+
+		// Now remove n3.
+		Expect(leader.RemoveVoter("n3")).To(Succeed())
 
 		want := []string{"n1", "n2", "n4"}
-		gomega.Expect(waitFor(3*time.Second, func() bool {
-			for _, node := range fix.nodes {
-				if node.cfg.ID == "n3" {
+		Expect(waitFor(3*time.Second, func() bool {
+			// Skip n3 — it's been ejected and may eventually time out / step
+			// back to follower; the remaining live members must converge.
+			for _, n := range fix.nodes {
+				if n.cfg.ID == "n3" {
 					continue
 				}
-				got := sortedVoterIDs(node.Configuration())
+				got := sortedVoterIDs(n.Configuration())
 				if len(got) != len(want) {
 					return false
 				}
@@ -95,16 +114,21 @@ var _ = ginkgo.Describe("Membership changes", func() {
 				}
 			}
 			return true
-		})).To(gomega.Succeed(), "configuration did not converge to {n1, n2, n4}")
-	}, ginkgo.NodeTimeout(10*time.Second))
+		})).To(Succeed(), "configuration did not converge to {n1, n2, n4}")
+	})
 
-	ginkgo.It("rejects concurrent AddVoter while one conf change is in flight", func(ginkgo.SpecContext) {
-		_, err := addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		_, err = addPromoteRaceNode(fix, "n5", []string{"n1", "n2", "n3"}, slowElectionTimeout)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	It("rejects concurrent AddVoter calls", func() {
+		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
+		fix.addNodeGinkgo("n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+		fix.addNodeGinkgo("n5", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 
-		gomega.Eventually(func() bool {
+		// Spin up a goroutine for the first change; the second should see
+		// ErrConfChangeInFlight if it lands while the first is still mid-flight.
+		// Because the joint commit is fast (memNetwork), we issue them as fast
+		// as possible and accept that occasionally the second succeeds — but
+		// at least ONE of the next-voter slots must produce ErrConfChangeInFlight
+		// for this assertion to be meaningful. We retry until we observe it.
+		Eventually(func() bool {
 			errCh := make(chan error, 2)
 			go func() { errCh <- leader.AddVoter("n4", "addr") }()
 			go func() { errCh <- leader.AddVoter("n5", "addr") }()
@@ -115,159 +139,150 @@ var _ = ginkgo.Describe("Membership changes", func() {
 					sawInFlight = true
 				}
 			}
+			// If the AddVoters are now both committed, reset for the next try.
+			// (Idempotent — RemoveVoter for n4/n5 if they made it in, ignore
+			// errors.)
 			_ = leader.RemoveVoter("n4")
 			_ = leader.RemoveVoter("n5")
 			return sawInFlight
-		}, 5*time.Second, 50*time.Millisecond).Should(gomega.BeTrue(),
+		}).WithTimeout(5*time.Second).WithPolling(50*time.Millisecond).Should(BeTrue(),
 			"expected at least one concurrent AddVoter to see ErrConfChangeInFlight")
-	}, ginkgo.NodeTimeout(10*time.Second))
-
-	ginkgo.It("steps down a leader after removing itself", func(ginkgo.SpecContext) {
-		gomega.Expect(leader.RemoveVoter("n1")).To(gomega.Succeed())
-
-		gomega.Expect(waitFor(3*time.Second, func() bool {
-			return !leader.IsLeader() && leader.State() == Follower
-		})).To(gomega.Succeed(), "self-removed leader did not step down")
-
-		gomega.Expect(waitFor(5*time.Second, func() bool {
-			return fix.nodes[1].IsLeader() || fix.nodes[2].IsLeader()
-		})).To(gomega.Succeed(), "no successor leader after self-removal")
-	}, ginkgo.NodeTimeout(10*time.Second))
-})
-
-// TestMembership_TruncateAfterRevertsConfig: a follower with a config entry
-// in its log gets that suffix truncated by a conflicting AE; effective
-// config must revert to whatever was active just before the dropped
-// config entry. Direct unit test on truncateAndRevertConfig.
-func TestMembership_TruncateAfterRevertsConfig(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
-	require.NoError(t, err)
-	// Seed the log with a normal entry, then a joint entry, then a final
-	// entry. currentConfig should track to the final state.
-	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
-	n.appendAndTrackConfig([]LogEntry{{
-		Term: 1, Index: 2, Type: LogEntryJointConfChange,
-		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
-	}})
-	require.True(t, n.st.currentConfig.joint)
-	n.appendAndTrackConfig([]LogEntry{{
-		Term: 1, Index: 3, Type: LogEntryConfChange,
-		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
-	}})
-	require.False(t, n.st.currentConfig.joint)
-	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
-	require.Equal(t, uint64(3), n.st.appendedConfigIndex)
-	require.Len(t, n.st.configHistory, 2)
-
-	// Truncate past index 1 — drops both config entries; revert to the
-	// pre-history config (the original {n1,n2,n3}).
-	n.truncateAndRevertConfig(1)
-	require.False(t, n.st.currentConfig.joint)
-	require.Equal(t, []string{"n1", "n2", "n3"}, n.st.currentConfig.voters)
-	require.Equal(t, uint64(0), n.st.appendedConfigIndex)
-	require.Empty(t, n.st.configHistory)
-	require.Equal(t, uint64(1), n.st.log.LastIndex())
-}
-
-// TestMembership_TruncateRevertsToJoint: truncate past only the FINAL entry
-// (idx 2) so the joint entry survives. Effective config must end up in
-// joint state.
-func TestMembership_TruncateRevertsToJoint(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
-	require.NoError(t, err)
-	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
-	n.appendAndTrackConfig([]LogEntry{{
-		Term: 1, Index: 2, Type: LogEntryJointConfChange,
-		Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
-	}})
-	n.appendAndTrackConfig([]LogEntry{{
-		Term: 1, Index: 3, Type: LogEntryConfChange,
-		Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
-	}})
-
-	n.truncateAndRevertConfig(2) // drops idx 3 only
-	require.True(t, n.st.currentConfig.joint, "after truncating final, must be back in joint state")
-	require.Equal(t, []string{"n1", "n2", "n3", "n4"}, n.st.currentConfig.voters)
-	require.Equal(t, []string{"n1", "n2", "n3"}, n.st.currentConfig.oldVoters)
-	require.Equal(t, uint64(2), n.st.appendedConfigIndex)
-	require.Len(t, n.st.configHistory, 1)
-}
-
-// TestMembership_InstallSnapshotResetsConfig: a follower whose live config
-// is in the joint state receives an InstallSnapshot RPC carrying a
-// post-joint Cnew. Its effective config must reset to the snapshot's
-// voter set (non-joint).
-func TestMembership_InstallSnapshotResetsConfig(t *testing.T) {
-	n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}})
-	require.NoError(t, err)
-
-	// Force the follower into a joint state via direct state manipulation
-	// (pre-Start so the actor goroutine is not running). Append a joint
-	// entry to the log and update tracking.
-	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
-	n.appendAndTrackConfig([]LogEntry{{
-		Term: 1, Index: 2, Type: LogEntryJointConfChange,
-		Command: encodeJointConfChange([]string{"leader", "follower"}, []string{"leader", "follower", "newcomer"}),
-	}})
-	require.True(t, n.st.currentConfig.joint)
-	require.Equal(t, uint64(2), n.st.appendedConfigIndex)
-
-	n.Start()
-	t.Cleanup(n.Stop)
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
-
-	// Inject a snapshot whose Configuration is post-joint Cnew.
-	reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
-		Term:              1,
-		LeaderID:          "leader",
-		LastIncludedIndex: 5,
-		LastIncludedTerm:  1,
-		Configuration:     []string{"leader", "follower", "newcomer"},
-		Data:              []byte("snap"),
 	})
-	require.NotNil(t, reply)
 
-	// Configuration must reset to the snapshot's voter set.
-	require.NoError(t, waitFor(time.Second, func() bool {
-		got := sortedVoterIDs(n.Configuration())
-		return len(got) == 3 && got[0] == "follower" && got[1] == "leader" && got[2] == "newcomer"
-	}), "Configuration did not reset to snapshot voters")
+	It("reverts config when truncating after config entries", func() {
+		n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+		Expect(err).NotTo(HaveOccurred())
+		// Seed the log with a normal entry, then a joint entry, then a final
+		// entry. currentConfig should track to the final state.
+		Expect(n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}})).To(Succeed())
+		n.appendAndTrackConfig([]LogEntry{{
+			Term: 1, Index: 2, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+		}})
+		Expect(n.st.currentConfig.joint).To(BeTrue())
+		n.appendAndTrackConfig([]LogEntry{{
+			Term: 1, Index: 3, Type: LogEntryConfChange,
+			Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
+		}})
+		Expect(n.st.currentConfig.joint).To(BeFalse())
+		Expect(n.st.currentConfig.voters).To(Equal([]string{"n1", "n2", "n3", "n4"}))
+		Expect(n.st.appendedConfigIndex).To(Equal(uint64(3)))
+		Expect(n.st.configHistory).To(HaveLen(2))
 
-	rs := n.rs.Load()
-	require.False(t, rs.config.joint, "must exit joint state after snapshot install")
-}
+		// Truncate past index 1 — drops both config entries; revert to the
+		// pre-history config (the original {n1,n2,n3}).
+		n.truncateAndRevertConfig(1)
+		Expect(n.st.currentConfig.joint).To(BeFalse())
+		Expect(n.st.currentConfig.voters).To(Equal([]string{"n1", "n2", "n3"}))
+		Expect(n.st.appendedConfigIndex).To(Equal(uint64(0)))
+		Expect(n.st.configHistory).To(BeEmpty())
+		Expect(n.st.log.LastIndex()).To(Equal(uint64(1)))
+	})
 
-// TestMembership_ColdOnlyVoterCanElect: per Raft §4.3, a server in Cold but
-// not in Cnew is still a legitimate voter during the joint period — "any
-// server from either configuration may serve as leader." Concrete scenario:
-// 2→1 shrink (Cold={a,b}, Cnew={b}). If b is partitioned mid-joint, a must
-// be allowed to call an election to drive the joint forward; the
-// onElectionTimeout guard must consult Cold ∪ Cnew, not Cnew alone.
-func TestMembership_ColdOnlyVoterCanElect(t *testing.T) {
-	n, err := NewNode(Config{ID: "a", Peers: []string{"b"}})
-	require.NoError(t, err)
-	// Drive the node into a joint state with Cold={a,b} and Cnew={b}.
-	// Pre-Start state manipulation, mirroring TestMembership_TruncateAfterRevertsConfig.
-	require.NoError(t, n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}}))
-	n.appendAndTrackConfig([]LogEntry{{
-		Term: 1, Index: 2, Type: LogEntryJointConfChange,
-		Command: encodeJointConfChange([]string{"a", "b"}, []string{"b"}),
-	}})
-	require.True(t, n.st.currentConfig.joint)
-	require.False(t, n.st.currentConfig.containsVoter("a"), "a is in Cold but not Cnew")
+	It("reverts to joint config when truncating only the final entry", func() {
+		n, err := NewNode(Config{ID: "n1", Peers: []string{"n2", "n3"}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}})).To(Succeed())
+		n.appendAndTrackConfig([]LogEntry{{
+			Term: 1, Index: 2, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange([]string{"n1", "n2", "n3"}, []string{"n1", "n2", "n3", "n4"}),
+		}})
+		n.appendAndTrackConfig([]LogEntry{{
+			Term: 1, Index: 3, Type: LogEntryConfChange,
+			Command: encodeJointExitConfChange([]string{"n1", "n2", "n3", "n4"}, nil),
+		}})
 
-	startTerm := n.st.currentTerm
-	require.Equal(t, Follower, n.st.state)
+		n.truncateAndRevertConfig(2) // drops idx 3 only
+		Expect(n.st.currentConfig.joint).To(BeTrue(), "after truncating final, must be back in joint state")
+		Expect(n.st.currentConfig.voters).To(Equal([]string{"n1", "n2", "n3", "n4"}))
+		Expect(n.st.currentConfig.oldVoters).To(Equal([]string{"n1", "n2", "n3"}))
+		Expect(n.st.appendedConfigIndex).To(Equal(uint64(2)))
+		Expect(n.st.configHistory).To(HaveLen(1))
+	})
 
-	// onElectionTimeout must NOT short-circuit a Cold-only voter — it must
-	// transition to Candidate and bump the term so the joint can make
-	// progress. Pre-Start: transport is nil so RV broadcasts no-op safely;
-	// stable store is in-memory so persistHardState is non-blocking.
-	n.onElectionTimeout()
+	It("resets config from an installed snapshot", func() {
+		n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}})
+		Expect(err).NotTo(HaveOccurred())
 
-	require.Equal(t, Candidate, n.st.state, "Cold-only voter must be allowed to become Candidate during joint state")
-	require.Equal(t, startTerm+1, n.st.currentTerm, "becomeCandidate must bump term")
-}
+		// Force the follower into a joint state via direct state manipulation
+		// (pre-Start so the actor goroutine is not running). Append a joint
+		// entry to the log and update tracking.
+		Expect(n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}})).To(Succeed())
+		n.appendAndTrackConfig([]LogEntry{{
+			Term: 1, Index: 2, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange([]string{"leader", "follower"}, []string{"leader", "follower", "newcomer"}),
+		}})
+		Expect(n.st.currentConfig.joint).To(BeTrue())
+		Expect(n.st.appendedConfigIndex).To(Equal(uint64(2)))
+
+		n.Start()
+		DeferCleanup(n.Stop)
+		go func() {
+			for range n.ApplyCh() {
+			}
+		}()
+
+		// Inject a snapshot whose Configuration is post-joint Cnew.
+		reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
+			Term:              1,
+			LeaderID:          "leader",
+			LastIncludedIndex: 5,
+			LastIncludedTerm:  1,
+			Configuration:     []string{"leader", "follower", "newcomer"},
+			Data:              []byte("snap"),
+		})
+		Expect(reply).NotTo(BeNil())
+
+		// Configuration must reset to the snapshot's voter set.
+		Expect(waitFor(time.Second, func() bool {
+			got := sortedVoterIDs(n.Configuration())
+			return len(got) == 3 && got[0] == "follower" && got[1] == "leader" && got[2] == "newcomer"
+		})).To(Succeed(), "Configuration did not reset to snapshot voters")
+
+		rs := n.rs.Load()
+		Expect(rs.config.joint).To(BeFalse(), "must exit joint state after snapshot install")
+	})
+
+	It("steps down when the leader removes itself", func() {
+		Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed())
+
+		Expect(leader.RemoveVoter("n1")).To(Succeed())
+
+		// Leader steps down once Cnew (excluding n1) commits.
+		Expect(waitFor(3*time.Second, func() bool {
+			return !leader.IsLeader() && leader.State() == Follower
+		})).To(Succeed(), "self-removed leader did not step down")
+
+		// One of the remaining voters must take over (election may take a
+		// few hundred milliseconds because n2 and n3 use slowElectionTimeout).
+		Expect(waitFor(5*time.Second, func() bool {
+			return fix.nodes[1].IsLeader() || fix.nodes[2].IsLeader()
+		})).To(Succeed(), "no successor leader after self-removal")
+	})
+
+	It("allows a cold-only voter to call an election during joint config", func() {
+		n, err := NewNode(Config{ID: "a", Peers: []string{"b"}})
+		Expect(err).NotTo(HaveOccurred())
+		// Drive the node into a joint state with Cold={a,b} and Cnew={b}.
+		// Pre-Start state manipulation, mirroring TestMembership_TruncateAfterRevertsConfig.
+		Expect(n.st.log.Append([]LogEntry{{Term: 1, Index: 1, Type: LogEntryNoOp}})).To(Succeed())
+		n.appendAndTrackConfig([]LogEntry{{
+			Term: 1, Index: 2, Type: LogEntryJointConfChange,
+			Command: encodeJointConfChange([]string{"a", "b"}, []string{"b"}),
+		}})
+		Expect(n.st.currentConfig.joint).To(BeTrue())
+		Expect(n.st.currentConfig.containsVoter("a")).To(BeFalse(), "a is in Cold but not Cnew")
+
+		startTerm := n.st.currentTerm
+		Expect(n.st.state).To(Equal(Follower))
+
+		// onElectionTimeout must NOT short-circuit a Cold-only voter — it must
+		// transition to Candidate and bump the term so the joint can make
+		// progress. Pre-Start: transport is nil so RV broadcasts no-op safely;
+		// stable store is in-memory so persistHardState is non-blocking.
+		n.onElectionTimeout()
+
+		Expect(n.st.state).To(Equal(Candidate), "Cold-only voter must be allowed to become Candidate during joint state")
+		Expect(n.st.currentTerm).To(Equal(startTerm+1), "becomeCandidate must bump term")
+	})
+})

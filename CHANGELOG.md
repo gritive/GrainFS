@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.304.0] - 2026-05-21
+
+### Tests
+
+- internal/raft integration-style election, membership, learner promotion,
+  and learner quorum coverage now runs through the shared Ginkgo v2 suite
+  with Gomega assertions and Ginkgo-native cleanup.
+- The migrated raft specs keep one top-level `Describe` per file, share
+  setup through `BeforeEach`/helpers, and remove orphan `testing.T` fixtures
+  from the converted files.
+
 ## [0.0.303.0] - 2026-05-21
 
 ### Tests
