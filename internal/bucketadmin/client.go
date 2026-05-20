@@ -4,7 +4,6 @@ package bucketadmin
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/url"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
@@ -32,6 +31,7 @@ func NewClient(endpoint string) (*Client, error) {
 }
 
 // NewClientForURL builds a Client against an explicit http(s) URL — test seam.
+// Errors are deferred to the first request (test convenience).
 func NewClientForURL(rawurl string) *Client {
 	tp, _ := adminapi.NewTransport(rawurl)
 	return &Client{Transport: tp}
@@ -81,6 +81,7 @@ func (c *Client) Delete(ctx context.Context, name string, force, recursive bool)
 
 // --- Upstream credentials ---
 
+// UpstreamPut writes (or upserts) the upstream credentials for a bucket.
 func (c *Client) UpstreamPut(ctx context.Context, opts UpstreamPutOptions) error {
 	body := map[string]string{
 		"bucket":        opts.Bucket,
@@ -94,20 +95,24 @@ func (c *Client) UpstreamPut(ctx context.Context, opts UpstreamPutOptions) error
 	return c.Put(ctx, "/v1/upstreams", body, nil)
 }
 
+// UpstreamGetRaw returns the bucket's upstream credentials document verbatim.
 func (c *Client) UpstreamGetRaw(ctx context.Context, bucket string) ([]byte, error) {
 	return c.GetRaw(ctx, "/v1/upstreams/"+url.PathEscape(bucket))
 }
 
+// UpstreamListRaw returns the server's list of upstream-configured buckets verbatim.
 func (c *Client) UpstreamListRaw(ctx context.Context) ([]byte, error) {
 	return c.GetRaw(ctx, "/v1/upstreams")
 }
 
+// UpstreamDelete removes the upstream credentials for a bucket.
 func (c *Client) UpstreamDelete(ctx context.Context, bucket string) error {
 	return c.Transport.Delete(ctx, "/v1/upstreams/"+url.PathEscape(bucket), nil)
 }
 
 // --- Policy ---
 
+// PolicyGetRaw returns the bucket's IAM policy document verbatim.
 func (c *Client) PolicyGetRaw(ctx context.Context, bucket string) ([]byte, error) {
 	return c.GetRaw(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy")
 }
@@ -119,27 +124,28 @@ func (c *Client) PolicySet(ctx context.Context, bucket string, policy []byte) er
 		json.RawMessage(policy), nil)
 }
 
+// PolicyDelete removes the IAM policy attached to a bucket.
 func (c *Client) PolicyDelete(ctx context.Context, bucket string) error {
 	return c.Transport.Delete(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", nil)
 }
 
 // --- Versioning ---
 
+// VersioningGet returns the bucket's versioning status.
 func (c *Client) VersioningGet(ctx context.Context, bucket string) (VersioningStatus, error) {
 	var resp VersioningStatus
 	err := c.Get(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/versioning", &resp)
 	return resp, err
 }
 
+// VersioningEnable marks the bucket as versioning-enabled.
 func (c *Client) VersioningEnable(ctx context.Context, bucket string) error {
 	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/versioning",
 		map[string]string{"status": "Enabled"}, nil)
 }
 
+// VersioningSuspend marks the bucket as versioning-suspended.
 func (c *Client) VersioningSuspend(ctx context.Context, bucket string) error {
 	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/versioning",
 		map[string]string{"status": "Suspended"}, nil)
 }
-
-// avoid unused imports under partial compilation
-var _ = http.MethodDelete
