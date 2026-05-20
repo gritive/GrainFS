@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 14:41 KST
+Updated: 2026-05-20 14:48 KST
 
 ## Goal
 
@@ -54,7 +54,7 @@ Updated: 2026-05-20 14:41 KST
 | ------ | ------: | -------: | -----: | -------------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | put    |  337.39 |  5398.29 |      0 |               621.27 | faster than MinIO/RustFS; RSS below MinIO | S3-only services-off run with `--audit-iceberg=false --dedup=false --block-cache-size=0 --shard-cache-size=0`; artifact `benchmarks/profiles/grainfs-single-put-s3only-services-off-20260520-143500` |
 | get    | 1051.93 | 16830.92 |      0 |               801.30 | faster than MinIO/RustFS; RSS below MinIO | after raw-body response and encrypted blob read buffer reuse; artifact `benchmarks/profiles/grainfs-single-get-after-read-rawbody-pools-20260520-145200`                                             |
-| delete |    0.00 |  6511.14 |      0 |               811.88 | faster than MinIO/RustFS; RSS above MinIO | after MetaFSM snapshot sort-key optimization; artifact `benchmarks/profiles/grainfs-single-delete-after-snapshot-sortkey-20260520-151000`                                                            |
+| delete |    0.00 | 17734.67 |      0 |               701.98 | faster than MinIO/RustFS; RSS above MinIO | after MetaFSM snapshot sort-key and snapshot threshold optimizations; artifact `benchmarks/profiles/grainfs-single-delete-after-meta-snapshot-threshold-20260520-144550`                             |
 
 ## GrainFS Optimization Notes
 
@@ -67,6 +67,7 @@ Updated: 2026-05-20 14:41 KST
 - `get` memory candidates: architecture review found three buffers for 64 KiB packed objects: encrypted blob read, CachedBackend reader, and server small-body response copy. pprof alloc_space confirmed `BlobStore.Read` and `writeObjectBody` as the dominant churn. Fixes: raw body fast path for packed/cache readers and pooled encrypted blob read key/payload/AAD buffers. Micro benchmarks: raw response path ~0.9-2.1 us/op, 1992 B/op versus normal reader ~6.8-9.1 us/op, 67568 B/op; `BenchmarkEncryptedBlobStoreRead64KBNoCompress` is 2 alloc/op. e2e GET RSS improved to 801.30 MiB, below MinIO GET RSS 919.2 MiB.
 - `delete` first S3-only measurement: throughput satisfies the baseline gate, but RSS is 789.33 MiB versus MinIO DELETE 533.9 MiB. Next step: review DELETE architecture, then collect pprof heap/allocs before choosing a fix.
 - `delete` memory candidate 1: pprof showed seed/snapshot churn rather than the DELETE fast path itself. `MetaFSM.Snapshot` sorted object index entries by rebuilding `objectIndexVersionKey` inside the comparator, causing O(n log n) string allocation. Fix: carry the existing object-index map key as a snapshot sort key. Micro benchmark `BenchmarkMetaFSMSnapshotObjectIndex4096`: ~2.1-2.3 ms/op, ~3.4 MiB/op, ~80-96 allocs/op after the change. pprof alloc_space fell from 8.88 GiB to 4.24 GiB and `objectIndexVersionKey` disappeared from the alloc_space top list; e2e DELETE RSS remains above MinIO, so continue investigation.
+- `delete` memory candidate 2: Meta Raft snapshots were still created every 1024 applied log entries during object-heavy seed/delete workloads. Architecture review: this is durability-safe but too aggressive for single-node S3 warp because each snapshot serializes the full object index. Fix: raise the snapshot interval to 8192 applied log entries and make the threshold predicate unit-testable. e2e DELETE improved to 17734.67 obj/s with RSS 701.98 MiB. Throughput is well above both baselines, but RSS is still above MinIO DELETE 533.9 MiB and RustFS DELETE 232.11 MiB, so memory work continues.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items

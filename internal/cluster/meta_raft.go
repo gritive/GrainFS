@@ -27,6 +27,7 @@ const (
 	MetaRaftElectionTimeout         = 750 * time.Millisecond
 	MetaRaftLivenessFreshnessWindow = 3 * MetaRaftElectionTimeout
 	metaForwardLocalApplyTimeout    = 5 * time.Second
+	metaSnapshotLogThreshold        = uint64(8192)
 )
 
 // MetaTransport abstracts RPC delivery for the meta-Raft group.
@@ -933,8 +934,7 @@ func (m *MetaRaft) runApplyLoop(ctx context.Context) {
 }
 
 func (m *MetaRaft) maybeCreateSnapshot(index uint64) {
-	const threshold uint64 = 1024
-	if !m.node.IsLeader() || index == 0 || index-m.lastSnapshotIndex < threshold {
+	if !shouldCreateMetaSnapshot(m.node.IsLeader(), index, m.lastSnapshotIndex) {
 		return
 	}
 	data, err := m.fsm.Snapshot()
@@ -947,4 +947,8 @@ func (m *MetaRaft) maybeCreateSnapshot(index uint64) {
 		return
 	}
 	m.lastSnapshotIndex = index
+}
+
+func shouldCreateMetaSnapshot(isLeader bool, index, lastSnapshotIndex uint64) bool {
+	return isLeader && index > lastSnapshotIndex && index-lastSnapshotIndex >= metaSnapshotLogThreshold
 }
