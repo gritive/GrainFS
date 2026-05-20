@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 15:10 KST
+Updated: 2026-05-20 15:14 KST
 
 ## Goal
 
@@ -59,6 +59,7 @@ Updated: 2026-05-20 15:10 KST
 | list      |    0.00 | 434233.02 |      0 |               150.38 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950`       |
 | stat      |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
 | versioned |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
+| retention |    0.00 |  19336.57 |      0 |               280.86 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
 
 ## GrainFS Optimization Notes
 
@@ -78,7 +79,7 @@ Updated: 2026-05-20 15:10 KST
 
 ## Open Items
 
-- Continue GrainFS single-node benchmark with S3-only service flags: `retention`, `multipart`, `multipart-put`, `append`.
+- Continue GrainFS single-node benchmark with S3-only service flags: `multipart`, `multipart-put`, `append`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
