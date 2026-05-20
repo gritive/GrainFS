@@ -98,6 +98,13 @@ const auditIcebergSchemaJSON = `{"type":"struct","schema-id":0,"fields":[` +
 
 const auditPartitionSpecJSON = `[{"name":"ts_day","transform":"day","source-id":1,"field-id":1000}]`
 
+// currentSchemaLastColumnID is the highest column id in auditIcebergSchemaJSON.
+// Keep this in sync with the `"last-column-id":N` literal in S3InitialMetadata
+// below; TestS3InitialMetadata_LastColumnID_Updated catches drift. The
+// migration trigger reads this to decide whether an existing table needs its
+// schema rewritten.
+const currentSchemaLastColumnID = 27
+
 const S3InitialMetadata = `{"format-version":2,"table-uuid":%q,"location":%q,` +
 	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":27,` +
 	`"current-schema-id":0,"schemas":[` + auditIcebergSchemaJSON + `],` +
