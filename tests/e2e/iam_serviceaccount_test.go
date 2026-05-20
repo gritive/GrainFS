@@ -21,6 +21,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/iamadmin"
+
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
@@ -447,14 +449,23 @@ func runIAMSAScopedSnapshot(t *testing.T, tgt iamAdminTarget) {
 
 	h := startIAMTestServerWithRestart(t)
 	ctx := context.Background()
-	bootCli := s3ClientFor(h.S3URL, h.BootstrapAK, h.BootstrapSK)
 
-	// Provision buckets and seed an object before shutdown.
-	for _, bkt := range []string{"st5-logs", "st5-reports"} {
-		_, err := bootCli.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bkt)})
-		require.NoErrorf(t, err, "CreateBucket %s", bkt)
+	// Provision buckets via admin UDS — s3:CreateBucket is adminUDSOnlyActions
+	// per §3 Decision #8 and is unconditionally refused on the data plane.
+	// Create a dedicated seed SA + admin-on-bucket policy so PutObject can seed.
+	bootIAMCli := iamadmin.NewClientForURL(h.AdminSock)
+	seed := iamCreateSA(t, h.AdminSock, "seed-st5")
+	seedTgt := iamAdminTarget{
+		adminSockPath: func() string { return h.AdminSock },
+		endpoint:      func(i int) string { return h.S3URL },
 	}
-	_, err := bootCli.PutObject(ctx, &s3.PutObjectInput{
+	for _, bkt := range []string{"st5-logs", "st5-reports"} {
+		require.NoErrorf(t, bootIAMCli.BucketCreate(ctx, bkt, "", ""), "BucketCreate %s via admin UDS", bkt)
+		attachAdminPolicyOnBucket(t, seedTgt, seed.SAID, bkt, "Admin")
+	}
+	iamWaitKeyReady(t, h.S3URL, seed.AccessKey, seed.SecretKey, 10*time.Second)
+	seedCli := s3ClientFor(h.S3URL, seed.AccessKey, seed.SecretKey)
+	_, err := seedCli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
 		Body: strings.NewReader("persistent"),
 	})
