@@ -81,11 +81,10 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		requireAdminStatus(t, err, http.StatusForbidden)
 	})
 
-	t.Run("PutEmptyName_400", func(t *testing.T) {
-		c := tgt.iamClient()
-		err := c.PolicyPut(ctx, "", []byte(validPolicyDoc))
-		requireAdminStatus(t, err, http.StatusBadRequest)
-	})
+	// PutEmptyName_400, AttachEmptyName_400, DetachEmptyName_400 are intentionally
+	// absent: routes use path-param :name, so an empty segment produces a 404 from
+	// the router before the handler guard (F32) runs. The guard IS exercised via
+	// body-param routes (SimulateEmptySAID_400 below) and unit tests.
 
 	t.Run("GetMissing_404", func(t *testing.T) {
 		c := tgt.iamClient()
@@ -93,9 +92,12 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 		requireAdminStatus(t, err, http.StatusNotFound)
 	})
 
-	t.Run("PutInvalidJSON_400", func(t *testing.T) {
+	t.Run("PutInvalidPolicy_400", func(t *testing.T) {
 		c := tgt.iamClient()
-		err := c.PolicyPut(ctx, "e2e-invalid-json-"+tgt.name, []byte(`{not valid json`))
+		// NotAction is explicitly banned by policy.Parse — the server must
+		// reject this with 400 before the Raft round-trip.
+		bad := []byte(`{"Version":"2012-10-17","Statement":[{"NotAction":"s3:GetObject","Resource":"*"}]}`)
+		err := c.PolicyPut(ctx, "e2e-invalid-policy-"+tgt.name, bad)
 		requireAdminStatus(t, err, http.StatusBadRequest)
 	})
 
@@ -117,20 +119,6 @@ func runIAMPolicyCases(t *testing.T, tgt iamAdminTarget) {
 
 		require.NoError(t, c.PolicyAttachToSA(ctx, policyName, saID))
 		require.NoError(t, c.PolicyDetachFromSA(ctx, policyName, saID))
-	})
-
-	t.Run("AttachEmptyName_400", func(t *testing.T) {
-		c := tgt.iamClient()
-		saID, _, _ := tgt.uniqueSA(t, "attach-empty")
-		err := c.PolicyAttachToSA(ctx, "", saID)
-		requireAdminStatus(t, err, http.StatusBadRequest)
-	})
-
-	t.Run("DetachEmptyName_400", func(t *testing.T) {
-		c := tgt.iamClient()
-		saID, _, _ := tgt.uniqueSA(t, "detach-empty")
-		err := c.PolicyDetachFromSA(ctx, "", saID)
-		requireAdminStatus(t, err, http.StatusBadRequest)
 	})
 
 	// --- Simulate ---
