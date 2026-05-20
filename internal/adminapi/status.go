@@ -4,18 +4,20 @@ package adminapi
 // cluster topology, phase, IAM, encryption, TLS, proxy, audit, and JWT state
 // into a single operator-friendly snapshot.
 type StatusReport struct {
-	Cluster    ClusterStatus    `json:"cluster"`
-	IAM        IAMStatus        `json:"iam"`
-	Encryption EncryptionStatus `json:"encryption"`
-	TLS        TLSStatus        `json:"tls"`
-	Proxy      ProxyStatus      `json:"proxy,omitempty"`
-	Audit      AuditStatus      `json:"audit"`
-	JWT        JWTStatus        `json:"jwt"`
+	Cluster      ClusterStatus    `json:"cluster"`
+	Phase        int              `json:"phase"`
+	IAM          IAMStatus        `json:"iam"`
+	Encryption   EncryptionStatus `json:"encryption"`
+	TLS          TLSStatus        `json:"tls"`
+	TrustedProxy []string         `json:"trusted_proxy"`
+	Audit        AuditStatus      `json:"audit"`
+	JWTKeys      JWTStatus        `json:"jwt_keys"`
+	Banner       bool             `json:"banner"`
 }
 
-// ClusterStatus holds cluster topology and the derived readiness phase.
+// ClusterStatus holds cluster topology (node identity and size).
 //
-// Phase derivation (server-side):
+// Phase derivation (server-side, now a top-level StatusReport field):
 //
 //	0 = sa_count==0 && cluster_size==1  (single-node, no IAM bootstrap)
 //	1 = sa_count==0 && cluster_size>1   (cluster, no IAM bootstrap)
@@ -24,13 +26,11 @@ type StatusReport struct {
 type ClusterStatus struct {
 	NodeID      string `json:"node_id"`
 	ClusterSize int    `json:"cluster_size"`
-	Phase       int    `json:"phase"`
 }
 
 // IAMStatus summarises identity and access management state.
 type IAMStatus struct {
-	SACount int  `json:"sa_count"`
-	Banner  bool `json:"banner"` // true when iam.anon-enabled = true (Phase 0 banner)
+	SACount int `json:"sa_count"`
 }
 
 // EncryptionStatus describes at-rest encryption posture.
@@ -42,12 +42,6 @@ type EncryptionStatus struct {
 // TLSStatus describes TLS certificate presence.
 type TLSStatus struct {
 	CertPresent bool `json:"cert_present"`
-}
-
-// ProxyStatus describes the trusted-proxy CIDR configuration.
-// Omitted from JSON when TrustedCIDR is empty (omitempty on the parent).
-type ProxyStatus struct {
-	TrustedCIDR string `json:"trusted_cidr,omitempty"`
 }
 
 // AuditStatus describes audit configuration.

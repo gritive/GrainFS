@@ -31,18 +31,18 @@ func runStatusCmd(t *testing.T, sock string, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// fakeStatusReport returns a minimal StatusReport for testing.
+// fakePhase0Report returns a minimal StatusReport for phase-0 testing.
 func fakePhase0Report() adminapi.StatusReport {
 	return adminapi.StatusReport{
 		Cluster: adminapi.ClusterStatus{
 			NodeID:      "node-001",
 			ClusterSize: 1,
-			Phase:       0,
 		},
+		Phase: 0,
 		IAM: adminapi.IAMStatus{
 			SACount: 0,
-			Banner:  true,
 		},
+		Banner: true,
 		Encryption: adminapi.EncryptionStatus{
 			Enabled: true,
 			DEKGen:  1,
@@ -53,7 +53,7 @@ func fakePhase0Report() adminapi.StatusReport {
 		Audit: adminapi.AuditStatus{
 			DenyOnly: false,
 		},
-		JWT: adminapi.JWTStatus{
+		JWTKeys: adminapi.JWTStatus{
 			CurrentKID: "",
 		},
 	}
@@ -64,12 +64,12 @@ func fakePhase2Report() adminapi.StatusReport {
 		Cluster: adminapi.ClusterStatus{
 			NodeID:      "node-001",
 			ClusterSize: 1,
-			Phase:       2,
 		},
+		Phase: 2,
 		IAM: adminapi.IAMStatus{
 			SACount: 1,
-			Banner:  false,
 		},
+		Banner: false,
 		Encryption: adminapi.EncryptionStatus{
 			Enabled: true,
 			DEKGen:  1,
@@ -80,7 +80,7 @@ func fakePhase2Report() adminapi.StatusReport {
 		Audit: adminapi.AuditStatus{
 			DenyOnly: false,
 		},
-		JWT: adminapi.JWTStatus{
+		JWTKeys: adminapi.JWTStatus{
 			CurrentKID: "k_abc123",
 		},
 	}
@@ -111,8 +111,8 @@ func TestCLI_Status_Phase0(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("parse output as JSON: %v\noutput: %s", err, out)
 	}
-	if got.Cluster.Phase != 0 {
-		t.Errorf("expected phase=0, got phase=%d", got.Cluster.Phase)
+	if got.Phase != 0 {
+		t.Errorf("expected phase=0, got phase=%d", got.Phase)
 	}
 }
 
@@ -141,19 +141,19 @@ func TestCLI_Status_Phase2(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("parse output as JSON: %v\noutput: %s", err, out)
 	}
-	if got.Cluster.Phase != 2 {
-		t.Errorf("expected phase=2, got phase=%d", got.Cluster.Phase)
+	if got.Phase != 2 {
+		t.Errorf("expected phase=2, got phase=%d", got.Phase)
 	}
 	if got.IAM.SACount < 1 {
 		t.Errorf("expected sa_count >= 1, got %d", got.IAM.SACount)
 	}
 }
 
-// TestCLI_Status_AllFieldsPresent verifies that all 6 top-level JSON keys are
+// TestCLI_Status_AllFieldsPresent verifies that all 9 top-level JSON keys are
 // present in the output.
 func TestCLI_Status_AllFieldsPresent(t *testing.T) {
 	report := fakePhase2Report()
-	report.Proxy = adminapi.ProxyStatus{TrustedCIDR: "10.0.0.0/8"}
+	report.TrustedProxy = []string{"10.0.0.0/8", "192.168.0.0/16"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
@@ -171,7 +171,7 @@ func TestCLI_Status_AllFieldsPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status all-fields: %v\noutput: %s", err, out)
 	}
-	requiredKeys := []string{"cluster", "iam", "encryption", "tls", "audit", "jwt"}
+	requiredKeys := []string{"cluster", "phase", "iam", "encryption", "tls", "trusted_proxy", "audit", "jwt_keys", "banner"}
 	for _, key := range requiredKeys {
 		if !containsKey(out, key) {
 			t.Errorf("expected output to contain key %q, got: %s", key, out)

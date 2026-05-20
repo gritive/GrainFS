@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -47,26 +48,26 @@ func renderStatus(w io.Writer, report adminapi.StatusReport, asJSON bool) error 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "node_id:\t%s\n", report.Cluster.NodeID)
 	fmt.Fprintf(tw, "cluster_size:\t%d\n", report.Cluster.ClusterSize)
-	fmt.Fprintf(tw, "phase:\t%d\n", report.Cluster.Phase)
+	fmt.Fprintf(tw, "phase:\t%d\n", report.Phase)
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "sa_count:\t%d\n", report.IAM.SACount)
-	fmt.Fprintf(tw, "banner:\t%v\n", report.IAM.Banner)
+	fmt.Fprintf(tw, "banner:\t%v\n", report.Banner)
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "encryption_enabled:\t%v\n", report.Encryption.Enabled)
 	fmt.Fprintf(tw, "dek_gen:\t%s\n", strconv.FormatUint(uint64(report.Encryption.DEKGen), 10))
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "tls_cert_present:\t%v\n", report.TLS.CertPresent)
-	if report.Proxy.TrustedCIDR != "" {
-		fmt.Fprintf(tw, "trusted_cidr:\t%s\n", report.Proxy.TrustedCIDR)
+	if len(report.TrustedProxy) > 0 {
+		fmt.Fprintf(tw, "trusted_proxy:\t%s\n", strings.Join(report.TrustedProxy, ","))
 	}
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "audit_deny_only:\t%v\n", report.Audit.DenyOnly)
 	fmt.Fprintf(tw, "\n")
-	if report.JWT.CurrentKID != "" {
-		fmt.Fprintf(tw, "jwt_current_kid:\t%s\n", report.JWT.CurrentKID)
+	if report.JWTKeys.CurrentKID != "" {
+		fmt.Fprintf(tw, "jwt_current_kid:\t%s\n", report.JWTKeys.CurrentKID)
 	}
-	if report.JWT.PreviousKID != "" {
-		fmt.Fprintf(tw, "jwt_previous_kid:\t%s\n", report.JWT.PreviousKID)
+	if report.JWTKeys.PreviousKID != "" {
+		fmt.Fprintf(tw, "jwt_previous_kid:\t%s\n", report.JWTKeys.PreviousKID)
 	}
 	return tw.Flush()
 }

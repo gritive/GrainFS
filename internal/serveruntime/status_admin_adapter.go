@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -90,11 +91,15 @@ func (a *StatusAdapter) Report() adminapi.StatusReport {
 		auditDenyOnly, _ = a.cfgStore.GetBool("audit.deny-only")
 	}
 
-	// Trusted-proxy CIDR.
-	proxyCIDR := ""
+	// Trusted-proxy CIDRs (comma-separated string → []string).
+	var trustedProxy []string
 	if a.cfgStore != nil {
-		if v, ok := a.cfgStore.GetString("trusted-proxy.cidr"); ok {
-			proxyCIDR = v
+		if v, ok := a.cfgStore.GetString("trusted-proxy.cidr"); ok && v != "" {
+			for _, cidr := range strings.Split(v, ",") {
+				if s := strings.TrimSpace(cidr); s != "" {
+					trustedProxy = append(trustedProxy, s)
+				}
+			}
 		}
 	}
 
@@ -115,11 +120,10 @@ func (a *StatusAdapter) Report() adminapi.StatusReport {
 		Cluster: adminapi.ClusterStatus{
 			NodeID:      a.nodeID,
 			ClusterSize: clusterSize,
-			Phase:       phase,
 		},
+		Phase: phase,
 		IAM: adminapi.IAMStatus{
 			SACount: saCount,
-			Banner:  banner,
 		},
 		Encryption: adminapi.EncryptionStatus{
 			Enabled: encEnabled,
@@ -128,16 +132,15 @@ func (a *StatusAdapter) Report() adminapi.StatusReport {
 		TLS: adminapi.TLSStatus{
 			CertPresent: tlsCertPresent,
 		},
-		Proxy: adminapi.ProxyStatus{
-			TrustedCIDR: proxyCIDR,
-		},
+		TrustedProxy: trustedProxy,
 		Audit: adminapi.AuditStatus{
 			DenyOnly: auditDenyOnly,
 		},
-		JWT: adminapi.JWTStatus{
+		JWTKeys: adminapi.JWTStatus{
 			CurrentKID:  currentKID,
 			PreviousKID: previousKID,
 		},
+		Banner: banner,
 	}
 }
 
