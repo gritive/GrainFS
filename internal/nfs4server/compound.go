@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/fsmeta"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -141,6 +141,7 @@ const (
 	OpPutRootFH          = 24
 	OpRead               = 25
 	OpReadDir            = 26
+	OpReadLink           = 27
 	OpRemove             = 28
 	OpRename             = 29
 	OpSetAttr            = 34
@@ -195,6 +196,7 @@ func attrBitmapLen(bm attrBitmap) uint32 {
 const (
 	NF4REG = 1
 	NF4DIR = 2
+	NF4LNK = 5
 )
 
 type Op struct {
@@ -323,6 +325,8 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opReadDir(op.Data)
 	case OpRead:
 		return d.opRead(op.Data)
+	case OpReadLink:
+		return d.opReadLink()
 	case OpWrite:
 		return d.opWrite(op.Data)
 	case OpOpen:
@@ -476,15 +480,26 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opCreate(data []byte) OpResult {
-	// data pre-processed by readOpArgs: objType(uint32) + objname(string)
+	// data pre-processed by readOpArgs: objType(uint32) + optional linktext + objname(string)
 	if len(data) < 8 {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
 	}
 	r := NewXDRReader(data)
 	objType, _ := r.ReadUint32()
+	var linkText string
+	if objType == NF4LNK {
+		var err error
+		linkText, err = r.ReadString()
+		if err != nil {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
+		}
+	}
 	objName, _ := r.ReadString()
 	if err := validateComponentName(objName); err != nil {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
+	}
+	if fsmeta.IsReservedName(objName) {
+		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ACCESS}
 	}
 	if d.isPathReadOnly(d.currentPath) {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ROFS}
@@ -495,6 +510,27 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	if objType == NF4DIR {
 		d.state.MarkDir(newPath)
 		d.invalidatePath(newPath)
+	} else if objType == NF4LNK {
+		if d.state.IsDir(newPath) {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
+		}
+		bucket, key := extractBucketAndKey(newPath)
+		if fsmeta.IsReservedKey(key) {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_ACCESS}
+		}
+		if _, err := d.backend.HeadObject(context.Background(), bucket, key); err == nil {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
+		} else if !errors.Is(err, storage.ErrObjectNotFound) {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_IO}
+		}
+		if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(nil), "application/octet-stream"); err != nil {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_IO}
+		}
+		if err := fsmeta.SaveSymlink(context.Background(), d.backend, bucket, key, linkText, 0777, time.Now().UnixNano()); err != nil {
+			_ = d.backend.DeleteObject(context.Background(), bucket, key)
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_IO}
+		}
+		d.state.InvalidateObject(bucket, key)
 	}
 	fh := d.state.GetOrCreateFH(newPath)
 	if d.server != nil {
@@ -549,6 +585,7 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 	var fileSize uint64
 	var lastModUnix int64
 	var sidecarMode uint32
+	var fileMeta fsmeta.FileMeta
 	fileid := pathToFileID(p)
 	bucket, key := extractBucketAndKey(p)
 	isPseudoRoot := p == "/"
@@ -567,7 +604,11 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 		lastModUnix = listedObj.LastModified
 
 		meta := d.loadFileMeta(bucket, key)
+		fileMeta = meta
 		sidecarMode = meta.Mode
+		if meta.IsSymlink() {
+			fileSize = uint64(len(meta.Target))
+		}
 		if meta.Mtime > 0 {
 			lastModUnix = meta.Mtime / 1e9
 		}
@@ -586,7 +627,11 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
 		if !isDir {
 			meta := d.loadFileMeta(bucket, key)
+			fileMeta = meta
 			sidecarMode = meta.Mode
+			if meta.IsSymlink() {
+				fileSize = uint64(len(meta.Target))
+			}
 			if meta.Mtime > 0 {
 				lastModUnix = meta.Mtime / 1e9
 			}
@@ -609,6 +654,8 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 		fileType = NF4DIR
 		mode = 0755
 		numlinks = 2
+	} else if fileMeta.IsSymlink() {
+		fileType = NF4LNK
 	}
 
 	// Build attrvals in RFC 7530 §5 ascending bit order, track which bits we set.
@@ -662,7 +709,7 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 	// Bit 6: SYMLINK_SUPPORT — bool
 	if hasBit(6) {
 		setBit(6)
-		attrW.WriteUint32(0)
+		attrW.WriteUint32(1)
 	}
 	// Bit 7: NAMED_ATTR — bool
 	if hasBit(7) {
@@ -873,6 +920,9 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 		objects, _ := d.backend.ListObjects(context.Background(), bucket, prefix, 1000)
 		cookie := uint64(0)
 		for _, obj := range objects {
+			if fsmeta.IsReservedKey(obj.Key) {
+				continue
+			}
 			name := obj.Key
 			if prefix != "" {
 				name = name[len(prefix):]
@@ -1002,6 +1052,23 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	w.WriteOpaque(readData)
 
 	return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+}
+
+func (d *Dispatcher) opReadLink() OpResult {
+	if d.backend == nil || d.currentPath == "" {
+		return OpResult{OpCode: OpReadLink, Status: NFS4ERR_NOFILEHANDLE}
+	}
+	bucket, key := extractBucketAndKey(d.currentPath)
+	meta, err := fsmeta.LoadStrict(context.Background(), d.backend, bucket, key)
+	if err != nil {
+		return OpResult{OpCode: OpReadLink, Status: NFS4ERR_IO}
+	}
+	if !meta.IsSymlink() {
+		return OpResult{OpCode: OpReadLink, Status: NFS4ERR_INVAL}
+	}
+	w := getXDRWriter()
+	w.WriteString(meta.Target)
+	return OpResult{OpCode: OpReadLink, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opWrite(data []byte) OpResult {
@@ -1461,6 +1528,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 	if err := d.backend.DeleteObject(context.Background(), bucket, key); err != nil {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_IO}
 	}
+	_ = d.backend.DeleteObject(context.Background(), bucket, fsmeta.SidecarKey(key))
 	d.state.InvalidateFH(targetPath)
 	d.state.InvalidateObject(bucket, key)
 
@@ -1526,6 +1594,14 @@ func (d *Dispatcher) opRename(data []byte) OpResult {
 			return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
 		}
 		rc.Close()
+	}
+	if meta, err := fsmeta.LoadStrict(context.Background(), d.backend, srcBucket, oldKey); err == nil {
+		if _, err := d.backend.HeadObject(context.Background(), srcBucket, fsmeta.SidecarKey(oldKey)); err == nil {
+			if err := fsmeta.Save(context.Background(), d.backend, dstBucket, newKey, meta); err != nil {
+				return OpResult{OpCode: OpRename, Status: NFS4ERR_IO}
+			}
+			_ = d.backend.DeleteObject(context.Background(), srcBucket, fsmeta.SidecarKey(oldKey))
+		}
 	}
 	d.backend.DeleteObject(context.Background(), srcBucket, oldKey) //nolint:errcheck
 
@@ -1718,17 +1794,10 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 	return OpResult{OpCode: OpSequence, Status: NFS4_OK, Data: seqResp}
 }
 
-// nfsFileMeta stores per-file NFS metadata that must survive server restarts.
-// Persisted as JSON under metaSidecarKey(key) in the export's backend bucket.
-// Phase 0a: routes through extractBucketAndKey wrapper (single bucket).
-// Phase 3: per-export routing.
-type nfsFileMeta struct {
-	Mode  uint32 `json:"mode"`
-	Mtime int64  `json:"mtime_ns"` // UnixNano; 0 means "use object LastModified"
-}
+type nfsFileMeta = fsmeta.FileMeta
 
 func metaSidecarKey(key string) string {
-	return "__meta/" + key
+	return fsmeta.SidecarKey(key)
 }
 
 func fileMetaCacheKey(bucket, key string) string {
@@ -1742,20 +1811,7 @@ func (d *Dispatcher) loadFileMeta(bucket, key string) nfsFileMeta {
 			return m
 		}
 	}
-	rc, _, err := d.backend.GetObject(context.Background(), bucket, metaSidecarKey(key))
-	if err != nil {
-		m := nfsFileMeta{Mode: 0644}
-		if d.state != nil {
-			d.state.fileMeta.Store(cacheKey, m)
-		}
-		return m
-	}
-	defer rc.Close()
-	data, _ := io.ReadAll(rc)
-	var m nfsFileMeta
-	if err := json.Unmarshal(data, &m); err != nil || m.Mode == 0 {
-		m.Mode = 0644
-	}
+	m := fsmeta.Load(context.Background(), d.backend, bucket, key)
 	if d.state != nil {
 		d.state.fileMeta.Store(cacheKey, m)
 	}
@@ -1763,11 +1819,7 @@ func (d *Dispatcher) loadFileMeta(bucket, key string) nfsFileMeta {
 }
 
 func (d *Dispatcher) saveFileMeta(bucket, key string, m nfsFileMeta) error {
-	data, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	_, err = d.backend.PutObject(context.Background(), bucket, metaSidecarKey(key), bytes.NewReader(data), "application/json")
+	err := fsmeta.Save(context.Background(), d.backend, bucket, key, m)
 	if err == nil && d.state != nil {
 		d.state.fileMeta.Store(fileMetaCacheKey(bucket, key), m)
 	}

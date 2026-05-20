@@ -17,6 +17,7 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/fsmeta"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -195,6 +196,40 @@ func TestP9SidecarKey_ProtectedNamespace(t *testing.T) {
 	require.True(t, isP9ReservedName("__meta"))
 	require.False(t, isP9ReservedKey("user/__meta/file.txt"))
 	require.False(t, isP9ReservedName("meta"))
+}
+
+func TestP9MetadataReadsSharedSymlinkSchema(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	require.NoError(t, fsmeta.SaveSymlink(ctx, backend, "bkt", "link.txt", "../target.txt", 0777, 123))
+
+	meta := loadP9FileMeta(ctx, backend, "bkt", "link.txt")
+	require.True(t, meta.IsSymlink())
+	require.Equal(t, fsmeta.KindSymlink, meta.Kind)
+	require.Equal(t, "../target.txt", meta.Target)
+	require.Equal(t, uint32(0777), meta.Mode)
+	require.Equal(t, int64(123), meta.Mtime)
+}
+
+func TestP9MetadataWritesSharedSchema(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+
+	require.NoError(t, saveP9FileMeta(ctx, backend, "bkt", "link.txt", p9FileMeta{
+		Mode:   0777,
+		Mtime:  456,
+		Kind:   fsmeta.KindSymlink,
+		Target: "target.txt",
+	}))
+
+	meta, err := fsmeta.LoadStrict(ctx, backend, "bkt", "link.txt")
+	require.NoError(t, err)
+	require.True(t, meta.IsSymlink())
+	require.Equal(t, "target.txt", meta.Target)
+	require.Equal(t, uint32(0777), meta.Mode)
+	require.Equal(t, int64(456), meta.Mtime)
 }
 
 func TestBucketFile_Readdir_HidesSidecarObjects(t *testing.T) {
@@ -594,6 +629,82 @@ func TestObjectFile_GetAttr_UsesSidecarModeAndMtimeWithFreshHead(t *testing.T) {
 	require.Equal(t, uint64(11), attr.Size)
 	require.Equal(t, uint64(1704067200), attr.MTimeSeconds)
 	require.Equal(t, uint64(123), attr.MTimeNanoSeconds)
+}
+
+func TestBucketFile_SymlinkCreatesLinkAndReadlinkReturnsTarget(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	qid, err := bf.Symlink("target.txt", "link.txt", 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, p9.TypeSymlink, qid.Type)
+	obj, err := backend.HeadObject(ctx, "bkt", "link.txt")
+	require.NoError(t, err)
+	require.Equal(t, int64(0), obj.Size)
+
+	qids, file, err := bf.Walk([]string{"link.txt"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	require.Equal(t, p9.TypeSymlink, qids[0].Type)
+	target, err := file.(*objectFile).Readlink()
+	require.NoError(t, err)
+	require.Equal(t, "target.txt", target)
+}
+
+func TestBucketFile_ReaddirReportsSymlinkType(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "link.txt", strings.NewReader(""), "application/octet-stream")
+	require.NoError(t, err)
+	require.NoError(t, fsmeta.SaveSymlink(ctx, backend, "bkt", "link.txt", "target.txt", 0777, 123))
+
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+	dirents, err := bf.Readdir(0, 100)
+	require.NoError(t, err)
+	require.Len(t, dirents, 1)
+	require.Equal(t, "link.txt", dirents[0].Name)
+	require.Equal(t, p9.TypeSymlink, dirents[0].Type)
+	require.Equal(t, p9.TypeSymlink, dirents[0].QID.Type)
+}
+
+func TestBucketFile_WalkSymlinkReturnsSymlinkQIDAndGetAttr(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "link.txt", strings.NewReader(""), "application/octet-stream")
+	require.NoError(t, err)
+	require.NoError(t, fsmeta.SaveSymlink(ctx, backend, "bkt", "link.txt", "../target.txt", 0777, 123))
+
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+	qids, file, err := bf.Walk([]string{"link.txt"})
+	require.NoError(t, err)
+	require.Len(t, qids, 1)
+	require.Equal(t, p9.TypeSymlink, qids[0].Type)
+
+	of := file.(*objectFile)
+	of.meta = obj
+	qid, valid, attr, err := of.GetAttr(p9.AttrMask{Mode: true, Size: true})
+	require.NoError(t, err)
+	require.True(t, valid.Mode)
+	require.True(t, valid.Size)
+	require.Equal(t, p9.TypeSymlink, qid.Type)
+	require.Equal(t, p9.ModeSymlink|0777, attr.Mode)
+	require.Equal(t, uint64(len("../target.txt")), attr.Size)
+}
+
+func TestObjectFile_ReadlinkRegularFileEINVAL(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "regular.txt", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+
+	of := &objectFile{backend: backend, bucket: "bkt", key: "regular.txt", meta: obj}
+	_, err = of.Readlink()
+	require.ErrorIs(t, err, syscall.EINVAL)
 }
 
 func TestObjectFile_SetAttr_ModeMtimeAndServerTime(t *testing.T) {

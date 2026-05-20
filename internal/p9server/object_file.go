@@ -12,6 +12,7 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/fsmeta"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -46,17 +47,31 @@ func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 	if isP9ReservedKey(f.key) {
 		return p9.QID{}, 0, syscall.EPERM
 	}
-	return p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}, 0, nil
+	typ := p9.TypeRegular
+	if loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key).IsSymlink() {
+		typ = p9.TypeSymlink
+	}
+	return p9.QID{Type: typ, Path: qidPath(f.bucket, f.key)}, 0, nil
 }
 
 func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
-	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}
+	fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
+	qidType := p9.TypeRegular
+	modeType := p9.ModeRegular
+	if fileMeta.IsSymlink() {
+		qidType = p9.TypeSymlink
+		modeType = p9.ModeSymlink
+	}
+	qid := p9.QID{Type: qidType, Path: qidPath(f.bucket, f.key)}
 	if f.dirtyLoaded {
-		fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
 		valid := p9.AttrMask{Mode: true, Size: true, MTime: true}
+		size := uint64(len(f.dirtyData))
+		if fileMeta.IsSymlink() {
+			size = uint64(len(fileMeta.Target))
+		}
 		attr := p9.Attr{
-			Mode: p9.ModeRegular | p9.FileMode(fileMeta.Mode),
-			Size: uint64(len(f.dirtyData)),
+			Mode: modeType | p9.FileMode(fileMeta.Mode&0777),
+			Size: size,
 		}
 		return qid, valid, attr, nil
 	}
@@ -65,7 +80,6 @@ func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 		return qid, p9.AttrMask{}, p9.Attr{}, syscall.ENOENT
 	}
 	f.meta = obj
-	fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
 	mtimeSec := uint64(obj.LastModified)
 	mtimeNsec := uint64(0)
 	if fileMeta.Mtime != 0 {
@@ -74,9 +88,13 @@ func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 		mtimeNsec = uint64(mtime.Nanosecond())
 	}
 	valid := p9.AttrMask{Mode: true, Size: true, MTime: true}
+	size := uint64(obj.Size)
+	if fileMeta.IsSymlink() {
+		size = uint64(len(fileMeta.Target))
+	}
 	attr := p9.Attr{
-		Mode:             p9.ModeRegular | p9.FileMode(fileMeta.Mode),
-		Size:             uint64(obj.Size),
+		Mode:             modeType | p9.FileMode(fileMeta.Mode&0777),
+		Size:             size,
 		MTimeSeconds:     mtimeSec,
 		MTimeNanoSeconds: mtimeNsec,
 	}
@@ -192,6 +210,17 @@ func (f *objectFile) ReadAt(buf []byte, offset int64) (int, error) {
 		return n, nil
 	}
 	return n, err
+}
+
+func (f *objectFile) Readlink() (string, error) {
+	meta, err := fsmeta.LoadStrict(context.Background(), f.backend, f.bucket, f.key)
+	if err != nil {
+		return "", syscall.EIO
+	}
+	if !meta.IsSymlink() {
+		return "", syscall.EINVAL
+	}
+	return meta.Target, nil
 }
 
 func (f *objectFile) WriteAt(buf []byte, offset int64) (int, error) {

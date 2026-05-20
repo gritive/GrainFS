@@ -83,3 +83,36 @@ func TestXDRReader_ReadUint64_ShortRead(t *testing.T) {
 	_, err := r.ReadUint64()
 	assert.Equal(t, io.ErrUnexpectedEOF, err)
 }
+
+func TestReadOpArgsCreateNF4LNKPreservesLinkText(t *testing.T) {
+	raw := &XDRWriter{}
+	raw.WriteUint32(uint32(NF4LNK))
+	raw.WriteString("../target.txt")
+	raw.WriteString("link.txt")
+	raw.WriteUint32(0)   // createattrs bitmap len
+	raw.WriteOpaque(nil) // createattrs attrlist
+
+	data, poolKey, err := readOpArgs(NewXDRReader(raw.Bytes()), OpCreate)
+	require.NoError(t, err)
+	require.Zero(t, poolKey)
+
+	r := NewXDRReader(data)
+	objType, err := r.ReadUint32()
+	require.NoError(t, err)
+	linkText, err := r.ReadString()
+	require.NoError(t, err)
+	objName, err := r.ReadString()
+	require.NoError(t, err)
+
+	require.Equal(t, uint32(NF4LNK), objType)
+	require.Equal(t, "../target.txt", linkText)
+	require.Equal(t, "link.txt", objName)
+}
+
+func TestReadOpArgsReadlinkHasNoArgs(t *testing.T) {
+	data, poolKey, err := readOpArgs(NewXDRReader(nil), OpReadLink)
+
+	require.NoError(t, err)
+	require.Zero(t, poolKey)
+	require.Empty(t, data)
+}

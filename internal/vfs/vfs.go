@@ -17,6 +17,7 @@ import (
 	"time"
 
 	billy "github.com/go-git/go-billy/v5"
+	"github.com/gritive/GrainFS/internal/fsmeta"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -256,12 +257,24 @@ func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, os.ErrNotExist
 	}
+	meta, err := fsmeta.LoadStrict(context.Background(), fs.backend, fs.bucket, fp)
+	if err != nil {
+		return nil, err
+	}
 
 	info := &fileInfo{
 		name:    path.Base(filename),
 		size:    obj.Size,
 		isDir:   false,
+		mode:    os.FileMode(meta.Mode & 0777),
 		modTime: time.Unix(obj.LastModified, 0),
+	}
+	if meta.IsSymlink() {
+		info.size = int64(len(meta.Target))
+		info.mode = os.ModeSymlink | os.FileMode(meta.Mode&0777)
+		if meta.Mtime != 0 {
+			info.modTime = time.Unix(0, meta.Mtime)
+		}
 	}
 	fs.putStatCache(fp, info)
 	return info, nil
@@ -271,6 +284,18 @@ func (fs *GrainVFS) Stat(filename string) (os.FileInfo, error) {
 func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 	oldFP := fs.fullPath(oldpath)
 	newFP := fs.fullPath(newpath)
+	ctx := context.Background()
+	meta, metaErr := fsmeta.LoadStrict(ctx, fs.backend, fs.bucket, oldFP)
+	if metaErr != nil {
+		return metaErr
+	}
+	hasMeta := true
+	if _, err := fs.backend.HeadObject(ctx, fs.bucket, fsmeta.SidecarKey(oldFP)); err != nil {
+		if !errors.Is(err, storage.ErrObjectNotFound) {
+			return err
+		}
+		hasMeta = false
+	}
 
 	if copier, ok := fs.backend.(storage.Copier); ok {
 		if _, err := copier.CopyObject(fs.bucket, oldFP, fs.bucket, newFP); err != nil {
@@ -281,6 +306,14 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 		}
 		if err := fs.backend.DeleteObject(context.Background(), fs.bucket, oldFP); err != nil {
 			return err
+		}
+		if hasMeta {
+			if err := fsmeta.Save(ctx, fs.backend, fs.bucket, newFP, meta); err != nil {
+				return err
+			}
+			if err := fs.backend.DeleteObject(ctx, fs.bucket, fsmeta.SidecarKey(oldFP)); err != nil {
+				return err
+			}
 		}
 		fs.invalidateStatCache(oldFP)
 		fs.invalidateStatCache(newFP)
@@ -316,6 +349,14 @@ func (fs *GrainVFS) Rename(oldpath, newpath string) error {
 	if err := fs.backend.DeleteObject(context.Background(), fs.bucket, oldFP); err != nil {
 		return err
 	}
+	if hasMeta {
+		if err := fsmeta.Save(ctx, fs.backend, fs.bucket, newFP, meta); err != nil {
+			return err
+		}
+		if err := fs.backend.DeleteObject(ctx, fs.bucket, fsmeta.SidecarKey(oldFP)); err != nil {
+			return err
+		}
+	}
 
 	fs.invalidateStatCache(oldFP)
 	fs.invalidateStatCache(newFP)
@@ -340,6 +381,9 @@ func (fs *GrainVFS) Remove(filename string) error {
 		if err := fs.backend.DeleteObject(context.Background(), fs.bucket, fp+dirMarkerSuffix); err != nil {
 			return err
 		}
+	}
+	if err := fs.backend.DeleteObject(context.Background(), fs.bucket, fsmeta.SidecarKey(fp)); err != nil {
+		return err
 	}
 	fs.invalidateStatCache(fp)
 	fs.invalidateParentDirCache(fp)
@@ -383,6 +427,9 @@ func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
 
 		parts := strings.SplitN(rel, "/", 2)
 		entryName := parts[0]
+		if fsmeta.IsReservedName(entryName) {
+			continue
+		}
 
 		if len(parts) > 1 {
 			// It's a subdirectory
@@ -399,11 +446,26 @@ func (fs *GrainVFS) ReadDir(dirPath string) ([]os.FileInfo, error) {
 				seen[dirName] = &fileInfo{name: dirName, isDir: true, modTime: time.Now()}
 				continue
 			}
+			meta, err := fsmeta.LoadStrict(context.Background(), fs.backend, fs.bucket, obj.Key)
+			if err != nil {
+				return nil, err
+			}
+			mode := os.FileMode(meta.Mode & 0777)
+			size := obj.Size
+			modTime := time.Unix(obj.LastModified, 0)
+			if meta.IsSymlink() {
+				mode = os.ModeSymlink | os.FileMode(meta.Mode&0777)
+				size = int64(len(meta.Target))
+				if meta.Mtime != 0 {
+					modTime = time.Unix(0, meta.Mtime)
+				}
+			}
 			seen[entryName] = &fileInfo{
 				name:    entryName,
-				size:    obj.Size,
+				size:    size,
 				isDir:   false,
-				modTime: time.Unix(obj.LastModified, 0),
+				mode:    mode,
+				modTime: modTime,
 			}
 		}
 	}
@@ -440,14 +502,50 @@ func (fs *GrainVFS) Lstat(filename string) (os.FileInfo, error) {
 	return fs.Stat(filename)
 }
 
-// Symlink is not supported.
 func (fs *GrainVFS) Symlink(target, link string) error {
-	return fmt.Errorf("symlinks not supported")
+	fp := fs.fullPath(link)
+	if fsmeta.IsReservedKey(fp) {
+		return os.ErrPermission
+	}
+	if fs.isDir(fp) {
+		return os.ErrExist
+	}
+	if _, err := fs.backend.HeadObject(context.Background(), fs.bucket, fp); err == nil {
+		return os.ErrExist
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return err
+	}
+	if _, err := fs.backend.PutObject(context.Background(), fs.bucket, fp, strings.NewReader(""), "application/octet-stream"); err != nil {
+		return err
+	}
+	if err := fsmeta.SaveSymlink(context.Background(), fs.backend, fs.bucket, fp, target, 0777, time.Now().UnixNano()); err != nil {
+		_ = fs.backend.DeleteObject(context.Background(), fs.bucket, fp)
+		return err
+	}
+	fs.invalidateStatCache(fp)
+	fs.invalidateParentDirCache(fp)
+	return nil
 }
 
-// Readlink is not supported.
 func (fs *GrainVFS) Readlink(link string) (string, error) {
-	return "", fmt.Errorf("symlinks not supported")
+	fp := fs.fullPath(link)
+	if _, err := fs.backend.HeadObject(context.Background(), fs.bucket, fp); err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			if fs.isDir(fp) {
+				return "", fmt.Errorf("readlink %s: invalid operation", link)
+			}
+			return "", os.ErrNotExist
+		}
+		return "", err
+	}
+	meta, err := fsmeta.LoadStrict(context.Background(), fs.backend, fs.bucket, fp)
+	if err != nil {
+		return "", err
+	}
+	if !meta.IsSymlink() {
+		return "", fmt.Errorf("readlink %s: invalid operation", link)
+	}
+	return meta.Target, nil
 }
 
 // Chroot returns a new filesystem rooted at the given path.
@@ -496,12 +594,24 @@ type fileInfo struct {
 	name    string
 	size    int64
 	isDir   bool
+	mode    os.FileMode
 	modTime time.Time
 }
 
-func (fi *fileInfo) Name() string      { return fi.name }
-func (fi *fileInfo) Size() int64       { return fi.size }
-func (fi *fileInfo) Mode() os.FileMode { return 0644 }
+func (fi *fileInfo) Name() string { return fi.name }
+func (fi *fileInfo) Size() int64  { return fi.size }
+func (fi *fileInfo) Mode() os.FileMode {
+	if fi.isDir {
+		if fi.mode != 0 {
+			return fi.mode | os.ModeDir
+		}
+		return 0755 | os.ModeDir
+	}
+	if fi.mode != 0 {
+		return fi.mode
+	}
+	return 0644
+}
 func (fi *fileInfo) ModTime() time.Time {
 	if fi.modTime.IsZero() {
 		return time.Now()

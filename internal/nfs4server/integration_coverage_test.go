@@ -1,13 +1,224 @@
 package nfs4server
 
 import (
+	"bytes"
+	"context"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func buildCreateSymlinkOp(name, target string) []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(uint32(OpCreate))
+	w.WriteUint32(uint32(NF4LNK))
+	w.WriteString(target)
+	w.WriteString(name)
+	w.WriteUint32(0)   // createattrs bitmap len
+	w.WriteOpaque(nil) // createattrs attrlist
+	return w.Bytes()
+}
+
+func buildCreateSymlinkArgs(name, target string) []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(uint32(NF4LNK))
+	w.WriteString(target)
+	w.WriteString(name)
+	return w.Bytes()
+}
+
+func buildReadlinkOp() []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(uint32(OpReadLink))
+	return w.Bytes()
+}
+
+func buildGetAttrTypeOp() []byte {
+	w := &XDRWriter{}
+	w.WriteUint32(uint32(OpGetAttr))
+	w.WriteUint32(1)
+	w.WriteUint32(1 << 1)
+	return w.Bytes()
+}
+
+func decodeReadlinkResult(t *testing.T, r *XDRReader) string {
+	t.Helper()
+	op, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(OpReadLink), op)
+	status, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(NFS4_OK), status)
+	target, err := r.ReadString()
+	require.NoError(t, err)
+	return target
+}
+
+func decodeGetAttrType(t *testing.T, r *XDRReader) uint32 {
+	t.Helper()
+	op, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(OpGetAttr), op)
+	status, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(NFS4_OK), status)
+	bitmapLen, err := r.ReadUint32()
+	require.NoError(t, err)
+	for i := uint32(0); i < bitmapLen; i++ {
+		_, err := r.ReadUint32()
+		require.NoError(t, err)
+	}
+	attrVals, err := r.ReadOpaque()
+	require.NoError(t, err)
+	ar := NewXDRReader(attrVals)
+	fileType, err := ar.ReadUint32()
+	require.NoError(t, err)
+	return fileType
+}
+
+func skipOKResult(t *testing.T, r *XDRReader, expectedOp uint32) {
+	t.Helper()
+	op, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, expectedOp, op)
+	status, err := r.ReadUint32()
+	require.NoError(t, err)
+	require.Equal(t, uint32(NFS4_OK), status)
+}
+
+func skipCreateOKResult(t *testing.T, r *XDRReader) {
+	t.Helper()
+	skipOKResult(t, r, uint32(OpCreate))
+	_, err := r.ReadUint32() // change_info4.atomic
+	require.NoError(t, err)
+	_, err = r.ReadUint64() // before
+	require.NoError(t, err)
+	_, err = r.ReadUint64() // after
+	require.NoError(t, err)
+	bitmapLen, err := r.ReadUint32()
+	require.NoError(t, err)
+	for i := uint32(0); i < bitmapLen; i++ {
+		_, err := r.ReadUint32()
+		require.NoError(t, err)
+	}
+}
+
+func newSymlinkDispatcherForTest(t *testing.T) (*Dispatcher, storage.Backend) {
+	t.Helper()
+	backend, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	d := &Dispatcher{
+		backend:     backend,
+		state:       NewStateManager(),
+		currentPath: "/" + legacyNFS4Bucket,
+	}
+	d.state.MarkDir(d.currentPath)
+	return d, backend
+}
+
+func TestNFSCreateSymlinkReadlinkRoundTrip(t *testing.T) {
+	d, _ := newSymlinkDispatcherForTest(t)
+
+	create := d.opCreate(buildCreateSymlinkArgs("link.txt", "../target.txt"))
+	require.Equal(t, NFS4_OK, create.Status)
+	require.Equal(t, "/"+legacyNFS4Bucket+"/link.txt", d.currentPath)
+
+	readlink := d.opReadLink()
+	require.Equal(t, NFS4_OK, readlink.Status)
+	target, err := NewXDRReader(readlink.Data).ReadString()
+	require.NoError(t, err)
+	require.Equal(t, "../target.txt", target)
+}
+
+func TestNFSReadlinkRegularFileReturnsINVAL(t *testing.T) {
+	d, backend := newSymlinkDispatcherForTest(t)
+	_, err := backend.PutObject(context.Background(), legacyNFS4Bucket, "regular.txt", bytes.NewReader([]byte("data")), "application/octet-stream")
+	require.NoError(t, err)
+	d.currentPath = "/" + legacyNFS4Bucket + "/regular.txt"
+
+	readlink := d.opReadLink()
+	require.Equal(t, NFS4ERR_INVAL, readlink.Status)
+}
+
+func TestNFSCreateSymlinkOverDirectoryReturnsINVAL(t *testing.T) {
+	d, _ := newSymlinkDispatcherForTest(t)
+	d.state.MarkDir("/" + legacyNFS4Bucket + "/dir")
+
+	create := d.opCreate(buildCreateSymlinkArgs("dir", "target.txt"))
+	require.Equal(t, NFS4ERR_INVAL, create.Status)
+}
+
+func TestNFSGetAttrTypeReportsNF4LNK(t *testing.T) {
+	d, _ := newSymlinkDispatcherForTest(t)
+
+	create := d.opCreate(buildCreateSymlinkArgs("link.txt", "target.txt"))
+	require.Equal(t, NFS4_OK, create.Status)
+
+	getattr := d.opGetAttr(buildGetAttrTypeOp()[4:])
+	require.Equal(t, NFS4_OK, getattr.Status)
+	attrType := decodeGetAttrType(t, NewXDRReader(append([]byte{
+		0, 0, 0, byte(OpGetAttr),
+		0, 0, 0, byte(NFS4_OK),
+	}, getattr.Data...)))
+	require.Equal(t, uint32(NF4LNK), attrType)
+}
+
+func TestNFSReadDirReportsNF4LNKAndHidesSidecars(t *testing.T) {
+	d, _ := newSymlinkDispatcherForTest(t)
+	create := d.opCreate(buildCreateSymlinkArgs("link.txt", "target.txt"))
+	require.Equal(t, NFS4_OK, create.Status)
+	d.currentPath = "/" + legacyNFS4Bucket
+
+	ops := &XDRWriter{}
+	ops.WriteUint64(0)    // cookie = 0
+	ops.WriteUint64(0)    // cookieverf
+	ops.WriteUint32(4096) // dircount
+	ops.WriteUint32(4096) // maxcount
+	ops.WriteUint32(1)    // attr bitmap len
+	ops.WriteUint32(1 << 1)
+
+	result := d.opReadDir(ops.Bytes())
+	require.Equal(t, NFS4_OK, result.Status)
+	r := NewXDRReader(result.Data)
+
+	_, err := r.ReadUint64() // cookieverf
+	require.NoError(t, err)
+
+	seenLink := false
+	for {
+		follows, err := r.ReadUint32()
+		require.NoError(t, err)
+		if follows == 0 {
+			break
+		}
+		_, err = r.ReadUint64()
+		require.NoError(t, err)
+		name, err := r.ReadString()
+		require.NoError(t, err)
+		require.NotEqual(t, "__meta", name)
+		bitmapLen, err := r.ReadUint32()
+		require.NoError(t, err)
+		for i := uint32(0); i < bitmapLen; i++ {
+			_, err := r.ReadUint32()
+			require.NoError(t, err)
+		}
+		attrVals, err := r.ReadOpaque()
+		require.NoError(t, err)
+		if name == "link.txt" {
+			ar := NewXDRReader(attrVals)
+			fileType, err := ar.ReadUint32()
+			require.NoError(t, err)
+			require.Equal(t, uint32(NF4LNK), fileType)
+			seenLink = true
+		}
+	}
+	require.True(t, seenLink, "READDIR should include link.txt")
+}
 
 // nfs4Client wraps a TCP connection with helpers for building NFS4 compounds.
 type nfs4Client struct {

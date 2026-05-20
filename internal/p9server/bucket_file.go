@@ -44,7 +44,11 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	}
 	if len(names) == 1 {
 		if obj, err := f.backend.HeadObject(context.Background(), f.bucket, key); err == nil {
-			oqid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
+			typ := p9.TypeRegular
+			if loadP9FileMeta(context.Background(), f.backend, f.bucket, key).IsSymlink() {
+				typ = p9.TypeSymlink
+			}
+			oqid := p9.QID{Type: typ, Path: qidPath(f.bucket, key)}
 			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}
 			return []p9.QID{oqid}, of, nil
 		}
@@ -189,6 +193,51 @@ func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid
 		return p9.QID{}, syscall.EIO
 	}
 	return p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, key)}, nil
+}
+
+func (f *bucketFile) Symlink(oldName string, newName string, uid p9.UID, gid p9.GID) (p9.QID, error) {
+	if !validObjectName(newName) {
+		return p9.QID{}, syscall.EINVAL
+	}
+	if isP9ReservedName(newName) {
+		return p9.QID{}, syscall.EPERM
+	}
+	key := f.childKey(newName)
+	if isP9ReservedKey(key) {
+		return p9.QID{}, syscall.EPERM
+	}
+	lockKeys := []objectLockKey{
+		{bucket: f.bucket, key: key},
+		{bucket: f.bucket, key: p9MetaSidecarKey(key)},
+	}
+	if parentKey, ok := f.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	unlock := f.locks.lockMany(lockKeys...)
+	defer unlock()
+
+	ctx := context.Background()
+	if _, err := f.backend.HeadObject(ctx, f.bucket, key); err == nil {
+		return p9.QID{}, syscall.EEXIST
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return p9.QID{}, syscall.EIO
+	}
+	if f.hasPrefix(dirMarkerKey(key)) {
+		return p9.QID{}, syscall.EEXIST
+	}
+	if _, err := f.backend.PutObject(ctx, f.bucket, key, bytes.NewReader(nil), "application/octet-stream"); err != nil {
+		return p9.QID{}, syscall.EIO
+	}
+	if err := saveP9FileMeta(ctx, f.backend, f.bucket, key, p9FileMeta{
+		Mode:   0777,
+		Mtime:  time.Now().UnixNano(),
+		Kind:   "symlink",
+		Target: oldName,
+	}); err != nil {
+		_ = f.backend.DeleteObject(ctx, f.bucket, key)
+		return p9.QID{}, syscall.EIO
+	}
+	return p9.QID{Type: p9.TypeSymlink, Path: qidPath(f.bucket, key)}, nil
 }
 
 func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
@@ -386,6 +435,9 @@ func (f *bucketFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
 		}
 		if uint32(len(out)) >= count {
 			return errStopReaddir
+		}
+		if typ == p9.TypeRegular && loadP9FileMeta(context.Background(), f.backend, f.bucket, qidKey).IsSymlink() {
+			typ = p9.TypeSymlink
 		}
 		out = append(out, p9.Dirent{
 			QID:    p9.QID{Type: typ, Path: qidPath(f.bucket, qidKey)},

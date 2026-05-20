@@ -1,14 +1,18 @@
 package vfs
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"math/rand"
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/fsmeta"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -277,18 +281,96 @@ func TestJoin(t *testing.T) {
 	assert.Equal(t, "file.txt", fs.Join("file.txt"))
 }
 
-func TestSymlinkNotSupported(t *testing.T) {
+func TestSymlinkWritesSharedMetadataAndMarker(t *testing.T) {
 	fs := setupFS(t)
-	err := fs.Symlink("target", "link")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "symlinks not supported")
+
+	require.NoError(t, fs.MkdirAll("dir", 0755))
+	require.NoError(t, fs.Symlink("../target.txt", "dir/link.txt"))
+
+	obj, err := fs.backend.HeadObject(context.Background(), fs.bucket, "dir/link.txt")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), obj.Size)
+
+	rc, _, err := fs.backend.GetObject(context.Background(), fs.bucket, fsmeta.SidecarKey("dir/link.txt"))
+	require.NoError(t, err)
+	defer rc.Close()
+
+	var meta fsmeta.FileMeta
+	require.NoError(t, json.NewDecoder(rc).Decode(&meta))
+	assert.Equal(t, fsmeta.KindSymlink, meta.Kind)
+	assert.Equal(t, "../target.txt", meta.Target)
+	assert.Equal(t, uint32(0777), meta.Mode)
+	assert.NotZero(t, meta.Mtime)
 }
 
-func TestReadlinkNotSupported(t *testing.T) {
+func TestReadlinkReturnsExactTarget(t *testing.T) {
 	fs := setupFS(t)
-	_, err := fs.Readlink("link")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "symlinks not supported")
+
+	require.NoError(t, fs.Symlink("../target.txt", "link.txt"))
+
+	target, err := fs.Readlink("link.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "../target.txt", target)
+}
+
+func TestReadlinkRegularFileAndDirectoryReturnInvalid(t *testing.T) {
+	fs := setupFS(t)
+
+	f, err := fs.Create("regular.txt")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	require.NoError(t, fs.MkdirAll("dir", 0755))
+
+	_, err = fs.Readlink("regular.txt")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid operation")
+
+	_, err = fs.Readlink("dir")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid operation")
+}
+
+func TestReadlinkMissingReturnsNotExist(t *testing.T) {
+	fs := setupFS(t)
+
+	_, err := fs.Readlink("missing.txt")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestSymlinkOverExistingDirectoryReturnsExist(t *testing.T) {
+	fs := setupFS(t)
+	require.NoError(t, fs.MkdirAll("dir", 0755))
+
+	err := fs.Symlink("target.txt", "dir")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrExist)
+}
+
+func TestReadDirHidesMetaAndMarksSymlinkMode(t *testing.T) {
+	fs := setupFS(t)
+
+	require.NoError(t, fs.MkdirAll("dir", 0755))
+	require.NoError(t, fs.Symlink("../target.txt", "dir/link.txt"))
+
+	_, err := fs.backend.PutObject(context.Background(), fs.bucket, fsmeta.SidecarKey("dir/extra.txt"), strings.NewReader(`{"mode":384}`), "application/json")
+	require.NoError(t, err)
+
+	entries, err := fs.ReadDir("dir")
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(entries))
+	var link os.FileInfo
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+		if entry.Name() == "link.txt" {
+			link = entry
+		}
+	}
+	assert.NotContains(t, names, "__meta")
+	require.NotNil(t, link)
+	assert.NotZero(t, link.Mode()&os.ModeSymlink)
+	assert.Equal(t, int64(len("../target.txt")), link.Size())
 }
 
 func TestLstat(t *testing.T) {

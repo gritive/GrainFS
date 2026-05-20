@@ -394,8 +394,9 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	case OpCreate:
 		// CREATE4args: createtype4 objtype + component4 objname + fattr4 createattrs
 		objType, _ := r.ReadUint32() // nfs_ftype4
-		if objType == 5 {            // NF4LNK: skip linktext4 (string)
-			r.ReadOpaque()
+		var linkText string
+		if objType == NF4LNK {
+			linkText, _ = r.ReadString()
 		}
 		// For NF4BLK/NF4CHR skip specdata4 (2 uint32s); others have no extra data.
 		if objType == 3 || objType == 4 {
@@ -411,8 +412,14 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		r.ReadOpaque()
 		w := getXDRWriter()
 		w.WriteUint32(objType)
+		if objType == NF4LNK {
+			w.WriteString(linkText)
+		}
 		w.WriteString(name)
 		return xdrWriterBytes(w), 0, nil
+
+	case OpReadLink:
+		return nil, 0, nil
 
 	case OpAccess:
 		b := getOpArg8()
