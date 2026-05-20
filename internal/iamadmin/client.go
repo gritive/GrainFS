@@ -128,3 +128,43 @@ func (c *Client) PolicySimulate(ctx context.Context, req PolicySimulateRequest) 
 	err := c.Post(ctx, "/v1/iam/policy/simulate", req, &resp)
 	return resp, err
 }
+
+// --- Group ---
+
+// GroupCreate creates a named group (empty policies; attach via GroupPolicyAttach).
+func (c *Client) GroupCreate(ctx context.Context, name string) error {
+	return c.Put(ctx, "/v1/iam/group/"+url.PathEscape(name), nil, nil)
+}
+
+// GroupDelete removes the named group via Raft.
+func (c *Client) GroupDelete(ctx context.Context, name string) error {
+	return c.Delete(ctx, "/v1/iam/group/"+url.PathEscape(name), nil)
+}
+
+// GroupMemberAdd adds saID as a member of group via Raft.
+func (c *Client) GroupMemberAdd(ctx context.Context, group, saID string) error {
+	return c.Put(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/member/"+url.PathEscape(saID),
+		nil, nil)
+}
+
+// GroupMemberRemove removes saID from group via Raft.
+func (c *Client) GroupMemberRemove(ctx context.Context, group, saID string) error {
+	return c.Delete(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/member/"+url.PathEscape(saID),
+		nil)
+}
+
+// GroupPolicyAttach attaches a policy to a group via Raft.
+func (c *Client) GroupPolicyAttach(ctx context.Context, group, policy string) error {
+	return c.Put(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/policy/"+url.PathEscape(policy),
+		nil, nil)
+}
+
+// GroupPolicyDetach detaches a policy from a group via Raft.
+func (c *Client) GroupPolicyDetach(ctx context.Context, group, policy string) error {
+	return c.Delete(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/policy/"+url.PathEscape(policy),
+		nil)
+}

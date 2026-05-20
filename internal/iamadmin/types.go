@@ -147,3 +147,39 @@ type PolicySimulateResponse struct {
 	MatchedSID    string `json:"matched_sid"`
 	Reason        string `json:"reason"`
 }
+
+// --- Group ---
+
+type GroupCreateOptions struct {
+	BaseOptions
+	Name string
+}
+
+type GroupDeleteOptions struct {
+	BaseOptions
+	Name string
+}
+
+type GroupMemberAddOptions struct {
+	BaseOptions
+	GroupName string
+	SAID      string
+}
+
+type GroupMemberRemoveOptions struct {
+	BaseOptions
+	GroupName string
+	SAID      string
+}
+
+type GroupPolicyAttachOptions struct {
+	BaseOptions
+	GroupName  string
+	PolicyName string
+}
+
+type GroupPolicyDetachOptions struct {
+	BaseOptions
+	GroupName  string
+	PolicyName string
+}

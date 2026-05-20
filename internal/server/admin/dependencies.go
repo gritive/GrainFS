@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfs4server"
@@ -110,6 +111,14 @@ type NFSDiag interface {
 // falls back to the existing create-only flow.
 type BucketWithPolicyProposer interface {
 	ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error
+}
+
+// IAMGroupService is the slim interface group admin handlers need.
+// Kept separate from IAMPolicyService because group operations use distinct
+// Raft MetaCmdTypes (52-55, 58-59) and distinct FSM stores. nil disables
+// group admin endpoints.
+type IAMGroupService interface {
+	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
 }
 
 // ConfigProposer is the slim interface config admin handlers need to write

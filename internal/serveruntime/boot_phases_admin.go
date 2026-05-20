@@ -62,6 +62,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
 		IAM:                  state.iamAdminAPI,
 		IAMPolicy:            iamPolicyAdminService(state),
+		IAMGroup:             iamGroupAdminService(state),
 		BucketWithPolicyProp: state.iamProposer,
 		ConfigProposer:       state.metaRaft,
 		ConfigStore:          state.cfgStore,
@@ -132,6 +133,15 @@ func iamPolicyAdminService(state *bootState) admin.IAMPolicyService {
 		return nil
 	}
 	return NewIAMPolicyAdminAdapter(state.iamPolicyStores, state.metaRaft.Propose)
+}
+
+// iamGroupAdminService returns a wired admin.IAMGroupService if MetaRaft is
+// available; otherwise returns nil (disables group admin endpoints).
+func iamGroupAdminService(state *bootState) admin.IAMGroupService {
+	if state.metaRaft == nil {
+		return nil
+	}
+	return &iamGroupAdminAdapter{propose: state.metaRaft.Propose}
 }
 
 func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {

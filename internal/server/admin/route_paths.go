@@ -55,6 +55,12 @@ const (
 	routePathIAMPolicyByName   = "/iam/policy/:name"
 	routePathIAMPolicyAttachSA = "/iam/policy/:name/attach/sa/:said"
 
+	// Group routes: member and policy sub-paths listed before bare :name to
+	// ensure more-specific routes are registered first.
+	routePathIAMGroupByName       = "/iam/group/:name"
+	routePathIAMGroupMember       = "/iam/group/:name/member/:said"
+	routePathIAMGroupPolicyAttach = "/iam/group/:name/policy/:policy"
+
 	routePathUpstreams        = "/upstreams"
 	routePathBucketUpstream   = "/buckets/:bucket/upstream"
 	routePathMigrationCutover = "/migration/cutover"
