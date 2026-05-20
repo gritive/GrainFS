@@ -91,7 +91,7 @@ func runClusterJoinAllServicesAvailable(t *testing.T) {
 	})
 }
 
-var _ = ginkgo.Describe("Cluster join default bucket", func() {
+var _ = ginkgo.Describe("Cluster join default bucket", ginkgo.Label("bucket"), func() {
 	ginkgo.It("creates the default bucket only on the seed", func() {
 		t := ginkgo.GinkgoTB()
 		c := startE2ECluster(t, e2eClusterOptions{

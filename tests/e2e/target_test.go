@@ -354,7 +354,7 @@ func newDedicatedCluster4NodeS3Target(t testing.TB, extraArgs []string) s3Target
 // S3-spec-compliant bucket name from target + test + case. Pure helper unit
 // check — fixture is not used — but wrapped in the canonical
 // SingleNode/Cluster4Node shape for grep/inventory consistency.
-var _ = ginkgo.Describe("Bucket name helper", func() {
+var _ = ginkgo.Describe("Bucket name helper", ginkgo.Label("bucket"), func() {
 	ginkgo.It("derives valid names for a single-node target", func() {
 		t := ginkgo.GinkgoTB()
 		_ = newSingleNodeS3Target()

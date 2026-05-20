@@ -18,7 +18,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = ginkgo.Describe("Buckets", func() {
+var _ = ginkgo.Describe("Buckets", ginkgo.Label("bucket"), func() {
 	describeBucketContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
 	})

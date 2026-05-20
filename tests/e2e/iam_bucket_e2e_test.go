@@ -13,7 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
-var _ = ginkgo.Describe("IAM bucket", func() {
+var _ = ginkgo.Describe("IAM bucket", ginkgo.Label("bucket"), func() {
 	describeIAMBucketContext("SingleNode", func() iamAdminTarget {
 		return newSingleNodeIAMAdminTarget()
 	})

@@ -7,7 +7,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-func TestBucketGinkgoE2E(t *testing.T) {
+func TestE2EGinkgo(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Bucket e2e")
+	ginkgo.RunSpecs(t, "E2E Ginkgo")
 }

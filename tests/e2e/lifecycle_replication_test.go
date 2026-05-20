@@ -96,16 +96,6 @@ func waitClusterSettled(t testing.TB, leaderURL string) {
 		"3-node cluster must settle (peers==2)")
 }
 
-// TestLifecycleE2E collapses lifecycle replication checks (follower→leader
-// PUT forward, leader-change preserves replicated config) into one entry.
-// Both sub-specs need a 3-voter DynamicJoin cluster — the second one kills
-// the leader, so it runs last in Ordered Context order; the first sub-spec
-// runs against the pristine cluster.
-func TestLifecycleE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Lifecycle replication e2e")
-}
-
 var _ = ginkgo.Describe("Lifecycle replication", func() {
 	ginkgo.Context("Cluster3Node", ginkgo.Ordered, func() {
 		var c *e2eCluster

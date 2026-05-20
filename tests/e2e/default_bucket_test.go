@@ -9,7 +9,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = ginkgo.Describe("Default bucket", func() {
+var _ = ginkgo.Describe("Default bucket", ginkgo.Label("bucket"), func() {
 	ginkgo.It("exists on single-node startup", func() {
 		ctx := context.Background()
 

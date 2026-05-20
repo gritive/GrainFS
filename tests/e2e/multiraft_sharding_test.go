@@ -547,7 +547,7 @@ func TestMultiRaftShardingAllNodeServicesE2E(t *testing.T) {
 //     ProposeBucketAssignment)
 //   - Subsequent CreateBucket on same name is idempotent (no error / 409)
 //   - Spread: 32 buckets all created without error
-var _ = ginkgo.Describe("Multi-Raft bucket assignment", func() {
+var _ = ginkgo.Describe("Multi-Raft bucket assignment", ginkgo.Label("bucket"), func() {
 	ginkgo.It("records bucket-to-group hash assignment", func() {
 		t := ginkgo.GinkgoTB()
 		// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.

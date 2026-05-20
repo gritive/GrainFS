@@ -10,7 +10,7 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = ginkgo.Describe("Bucket upstream", func() {
+var _ = ginkgo.Describe("Bucket upstream", ginkgo.Label("bucket"), func() {
 	describeBucketUpstreamContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
 	})

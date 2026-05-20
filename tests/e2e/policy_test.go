@@ -25,7 +25,7 @@ import (
 // runs against both single-node and 4-node cluster fixtures to prove the
 // policy plane is at parity across topologies.
 
-var _ = ginkgo.Describe("Bucket policy", func() {
+var _ = ginkgo.Describe("Bucket policy", ginkgo.Label("bucket"), func() {
 	describeBucketPolicyContext("SingleNode", func() s3Target {
 		return newSingleNodeS3Target()
 	})
