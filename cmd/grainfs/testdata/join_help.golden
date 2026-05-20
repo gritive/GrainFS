@@ -1,0 +1,20 @@
+Send a join request to the running grainfs serve process via its admin UDS.
+
+If the node is already a cluster member the call is a no-op.
+If the node is a solo bootstrap and the peer is reachable, the server will
+restart and join the cluster on next boot.
+
+Example:
+  grainfs join 192.168.1.10:8301 --endpoint /data/admin.sock
+
+Usage:
+  grainfs join <peer-raft-addr> [flags]
+
+Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --force              force join even if solo node has user data (data will be discarded)
+  -h, --help               help for join
+      --timeout duration   admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)
+
+Global Flags:
+      --log-level string   log level: debug, info, warn, error (default "info")

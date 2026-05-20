@@ -78,6 +78,22 @@ func (t *Transport) Patch(ctx context.Context, path string, in any, out any) err
 	return t.Do(ctx, http.MethodPatch, path, in, out)
 }
 
+// PatchWithHeaders is Patch with extra request headers. Used by callers that
+// need optimistic-concurrency or similar metadata (e.g. cluster config's
+// If-Match-Rev). Headers are set after Content-Type so they cannot overwrite
+// it accidentally.
+func (t *Transport) PatchWithHeaders(ctx context.Context, path string, headers map[string]string, in any, out any) error {
+	return t.DoWithHeaders(ctx, http.MethodPatch, path, headers, in, out)
+}
+
+// PatchRawWithHeaders is PatchWithHeaders but returns the raw 2xx body bytes
+// instead of JSON-decoding into a typed out. Use this when the caller needs
+// to pass the server response through verbatim (e.g. CLI rendering that
+// should round-trip future server fields).
+func (t *Transport) PatchRawWithHeaders(ctx context.Context, path string, headers map[string]string, in any) ([]byte, error) {
+	return t.doRawWithHeaders(ctx, http.MethodPatch, path, headers, in)
+}
+
 // Delete issues DELETE path with optional JSON-decoded response.
 func (t *Transport) Delete(ctx context.Context, path string, out any) error {
 	return t.Do(ctx, http.MethodDelete, path, nil, out)
@@ -135,6 +151,11 @@ func (t *Transport) PostRaw(ctx context.Context, path string, in any) ([]byte, e
 
 // Do is the shared request executor.
 func (t *Transport) Do(ctx context.Context, method, path string, in any, out any) error {
+	return t.DoWithHeaders(ctx, method, path, nil, in, out)
+}
+
+// DoWithHeaders is Do with extra request headers (set after Content-Type).
+func (t *Transport) DoWithHeaders(ctx context.Context, method, path string, headers map[string]string, in any, out any) error {
 	var body io.Reader
 	if in != nil {
 		buf, err := json.Marshal(in)
@@ -149,6 +170,9 @@ func (t *Transport) Do(ctx context.Context, method, path string, in any, out any
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
@@ -165,6 +189,39 @@ func (t *Transport) Do(ctx context.Context, method, path string, in any, out any
 		return nil
 	}
 	return t.parseErrorBody(resp.StatusCode, respBody)
+}
+
+// doRawWithHeaders is the raw-body variant of DoWithHeaders. Used by
+// PatchRawWithHeaders (and any future *Raw variant that needs custom headers).
+func (t *Transport) doRawWithHeaders(ctx context.Context, method, path string, headers map[string]string, in any) ([]byte, error) {
+	var body io.Reader
+	if in != nil {
+		buf, err := json.Marshal(in)
+		if err != nil {
+			return nil, fmt.Errorf("marshal request: %w", err)
+		}
+		body = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, t.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return nil, t.wrapTransportError(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return respBody, nil
+	}
+	return nil, t.parseErrorBody(resp.StatusCode, respBody)
 }
 
 func (t *Transport) parseErrorBody(status int, body []byte) error {

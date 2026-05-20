@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.300.2] - 2026-05-21
+
+### Changed
+
+- **Refactor**: cluster family CLI commands now use `internal/clusteradmin` and
+  `internal/cluster` directly. `cmd/grainfs/cluster_config.go` (268 → 98 LOC),
+  `cmd/grainfs/cluster_join.go` (175 → 81 LOC), `cmd/grainfs/join.go` (76 →
+  62 LOC) shrunk to thin runners. Offline cluster join via `grainfs cluster join`
+  now lives in `internal/cluster.PerformOfflineJoin`. `Client.JoinViaUDS` wraps
+  the admin-UDS join path with typed `JoinResult` + `JoinConflictError` 409
+  handling. New `clusteradmin.HeaderIfMatchRev` const centralizes the OCC
+  header on `cluster config` PATCH. No flag, output, or protocol change.
+  (cmd thin-runner step 5/7)
+
 ## [0.0.300.1] - 2026-05-21
 
 ### Tests

@@ -1,0 +1,32 @@
+Performs the §7 cluster-join handshake against <peer-addr> directly over
+QUIC. Intended for first-time bootstrap of a not-yet-running node: loads the
+local KEK from <data>/kek.key (or $GRAINFS_KEK_SOURCE), runs Challenge to
+get a fresh nonce from the peer, computes HMAC-SHA256(KEK, nonce), and sends
+Join with the response. The peer's MetaJoinReceiver verifies the response
+under its own KEK and admits the node via AddVoter only on match.
+
+For runtime restart-into-join on an already-running node, use `grainfs join` (which
+talks to that node's admin UDS).
+
+Example:
+  grainfs cluster join 192.168.1.10:7001 \
+    --data /var/grainfs/data \
+    --node-id node-2 \
+    --bind-addr 192.168.1.11:7001 \
+    --cluster-key $GRAINFS_CLUSTER_KEY
+
+Usage:
+  grainfs cluster join <peer-addr> [flags]
+
+Flags:
+      --bind-addr string     raft listen address the joining node will advertise (required)
+      --cluster-key string   pre-shared cluster key (required; same as serve --cluster-key)
+  -d, --data string          data directory (used to locate kek.key) (default "./data")
+  -h, --help                 help for join
+      --node-id string       unique node ID for the joining node (required)
+      --timeout duration     join request timeout (default 30s)
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --format string      Output format: text or json (status/peers/events; ignored elsewhere) (default "text")
+      --log-level string   log level: debug, info, warn, error (default "info")

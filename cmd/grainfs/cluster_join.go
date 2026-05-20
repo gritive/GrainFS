@@ -9,24 +9,18 @@
 // admin UDS of an already-running node (runtime restart-into-join). Both
 // exist intentionally — different operational scenarios.
 //
-// References:
-//   - T54 (encrypt.ComputeHandshakeResponse / HandshakeVerifier)
-//   - T55 (Challenge/Admit RPC plumbing in MetaChallengeSender + JoinRequest fields)
+// Thin-runner shape: KEK load + QUIC transport + handshake state machine
+// live in internal/cluster.PerformOfflineJoin. This file only owns Cobra
+// wiring + flag validation.
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/nodeconfig"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 func clusterJoinCmd() *cobra.Command {
@@ -61,13 +55,11 @@ Example:
 }
 
 func runClusterJoin(cmd *cobra.Command, args []string) error {
-	peer := args[0]
-	dataDir, _ := cmd.Flags().GetString("data")
+	timeout, _ := cmd.Flags().GetDuration("timeout")
 	nodeID, _ := cmd.Flags().GetString("node-id")
 	bindAddr, _ := cmd.Flags().GetString("bind-addr")
 	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	timeout, _ := cmd.Flags().GetDuration("timeout")
-
+	dataDir, _ := cmd.Flags().GetString("data")
 	if nodeID == "" {
 		return fmt.Errorf("--node-id is required")
 	}
@@ -77,99 +69,13 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 	if clusterKey == "" {
 		return fmt.Errorf("--cluster-key is required (same value as serve --cluster-key on peer)")
 	}
-
-	nc := nodeconfig.New(dataDir)
-	// §7 T57 (F#21): a joining node MUST already have the cluster's KEK
-	// in place — auto-generating a fresh random KEK here would produce a
-	// node whose KEK can never decrypt the cluster's FSM-wrapped DEKs and
-	// whose Challenge handshake would fail anyway. LoadKEK (strict) makes
-	// that failure mode loud and explicit.
-	kek, err := encrypt.LoadKEK(nc.KEKSource())
-	if err != nil {
-		if errors.Is(err, encrypt.ErrKEKNotFound) {
-			return fmt.Errorf("KEK not found at %s. "+
-				"A joining node must already hold the cluster's KEK before "+
-				"`cluster join` can complete the challenge-response handshake. "+
-				"Copy kek.key from any healthy peer (e.g. `scp peer:/var/lib/grainfs/kek.key %s`) "+
-				"and re-run cluster join. Underlying error: %w",
-				nc.KEKSource(), nc.KEKSource()[len("file://"):], err)
-		}
-		return fmt.Errorf("load KEK: %w", err)
-	}
-
-	qt, err := transport.NewQUICTransport(clusterKey)
-	if err != nil {
-		return fmt.Errorf("init transport: %w", err)
-	}
-	defer qt.Close()
-
-	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
-	defer cancel()
-
-	chalSender := cluster.NewMetaChallengeSender(func(p string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamMetaJoinChallenge, Payload: payload}
-		reply, err := qt.Call(ctx, p, msg)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
+	return cluster.PerformOfflineJoin(cmd.Context(), cluster.OfflineJoinOptions{
+		Peer:       args[0],
+		NodeID:     nodeID,
+		BindAddr:   bindAddr,
+		ClusterKey: clusterKey,
+		DataDir:    dataDir,
+		Timeout:    timeout,
+		Stdout:     cmd.OutOrStdout(),
 	})
-	joinSender := cluster.NewMetaJoinSender(func(p string, payload []byte) ([]byte, error) {
-		msg := &transport.Message{Type: transport.StreamMetaJoin, Payload: payload}
-		reply, err := qt.Call(ctx, p, msg)
-		if err != nil {
-			return nil, err
-		}
-		return reply.Payload, nil
-	})
-
-	return performClusterJoin(ctx, chalSender, joinSender, peer, nodeID, bindAddr, kek, cmd.OutOrStdout())
-}
-
-// performClusterJoin runs the Challenge → Join handshake. Factored out for
-// test injection: tests pass senders whose dialers route bytes directly into
-// in-process MetaChallengeReceiver / MetaJoinReceiver handlers (no QUIC).
-func performClusterJoin(
-	ctx context.Context,
-	chalSender *cluster.MetaChallengeSender,
-	joinSender *cluster.MetaJoinSender,
-	peer, nodeID, bindAddr string,
-	kek []byte,
-	out io.Writer,
-) error {
-	chalReply, err := chalSender.SendChallenge(ctx, peer, cluster.ChallengeRequest{NodeID: nodeID})
-	if err != nil {
-		return fmt.Errorf("challenge: %w", err)
-	}
-	if chalReply.Status != cluster.JoinStatusOK {
-		return fmt.Errorf("challenge refused: %s: %s", chalReply.Status, chalReply.Message)
-	}
-
-	resp := encrypt.ComputeHandshakeResponse(kek, chalReply.Nonce)
-
-	joinReply, err := joinSender.SendJoin(ctx, []string{peer}, cluster.JoinRequest{
-		NodeID:            nodeID,
-		Address:           bindAddr,
-		HandshakeNonce:    chalReply.Nonce,
-		HandshakeResponse: resp,
-	})
-	if err != nil {
-		return fmt.Errorf("join: %w", err)
-	}
-
-	switch joinReply.Status {
-	case cluster.JoinStatusOK:
-		fmt.Fprintln(out, "joined cluster successfully")
-		return nil
-	case cluster.JoinStatusAlreadyMember:
-		fmt.Fprintln(out, "already a cluster member (no-op)")
-		return nil
-	case cluster.JoinStatusKEKMismatch:
-		return fmt.Errorf("join refused: KEK mismatch with peer — restore kek.key by `scp <data>/kek.key` from any healthy node, then retry (%s)", joinReply.Message)
-	default:
-		if joinReply.Message != "" {
-			return fmt.Errorf("join refused: %s: %s", joinReply.Status, joinReply.Message)
-		}
-		return fmt.Errorf("join refused: %s", joinReply.Status)
-	}
 }

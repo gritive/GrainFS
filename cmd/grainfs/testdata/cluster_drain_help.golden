@@ -1,0 +1,33 @@
+Composite orchestration:
+  1. Status fetch — identify current leader
+  2. If <id> is the leader: transfer-leader + wait for new leader
+  3. Remove-peer <id> via joint consensus
+
+Partial failure semantics (A2-a):
+  - Transfer fail            → STOP. Voter set unchanged.
+  - Transfer ok + remove fail → progressive feedback. Cluster left with new
+    leader but <id> still in voter set. Operator can retry remove-peer
+    against the new leader.
+
+Self-drain is allowed (T1-a) — admin socket may close as the node leaves
+the cluster after removal. Run with --yes to skip the leader confirmation.
+
+Usage:
+  grainfs cluster drain <id> [flags]
+
+Examples:
+  # Drain a follower (no transfer needed)
+  grainfs cluster --endpoint <data>/admin.sock drain node-2 --yes
+
+  # Drain the current leader (transfer first, then remove)
+  grainfs cluster --endpoint <data>/admin.sock drain node-1 --yes
+
+Flags:
+  -h, --help               help for drain
+      --timeout duration   Transfer-leader wait timeout after transfer (default 30s)
+  -y, --yes                Confirm leader-drain without prompt
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --format string      Output format: text or json (status/peers/events; ignored elsewhere) (default "text")
+      --log-level string   log level: debug, info, warn, error (default "info")
