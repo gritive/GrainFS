@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
@@ -76,53 +78,45 @@ func TestLearner_LearnersDoNotCount(t *testing.T) {
 	})
 }
 
-// TestLearner_LearnersDoNotCount_MultiVoter exercises the more rigorous
-// k-th matchIndex invariant on a 3-voter cluster augmented with learners.
-// The invariant: sort(voter matchIndices) descending; commitIndex of
-// the leader must NOT exceed matchIndices[floor(n/2)].
-func TestLearner_LearnersDoNotCount_MultiVoter(t *testing.T) {
-	fix := startMembershipCluster(t, []string{"v1", "v2", "v3"})
-	leader := fix.nodes[0]
-	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }))
+var _ = ginkgo.Describe("Learner quorum invariants", func() {
+	// Exercises the more rigorous k-th matchIndex invariant on a 3-voter
+	// cluster augmented with learners. The invariant: sort voter matchIndices
+	// descending; leader commitIndex must not exceed matchIndices[floor(n/2)].
+	ginkgo.It("does not count learners in a multi-voter quorum", func(ginkgo.SpecContext) {
+		fix, cleanup, err := startPromoteRaceCluster([]string{"v1", "v2", "v3"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		defer cleanup()
 
-	// Stand up two learners and let them join.
-	fix.addNode(t, "L1", []string{"v1", "v2", "v3"}, slowElectionTimeout)
-	fix.addNode(t, "L2", []string{"v1", "v2", "v3"}, slowElectionTimeout)
-	require.NoError(t, leader.AddLearner("L1", "L1-addr"))
-	require.NoError(t, leader.AddLearner("L2", "L2-addr"))
+		leader := fix.nodes[0]
+		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
 
-	// Drive some commits.
-	for i := 0; i < 5; i++ {
-		_, err := leader.ProposeWait(context.Background(), []byte(fmt.Sprintf("c-%d", i)))
-		require.NoError(t, err)
-	}
+		_, err = addPromoteRaceNode(fix, "L1", []string{"v1", "v2", "v3"}, slowElectionTimeout)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		_, err = addPromoteRaceNode(fix, "L2", []string{"v1", "v2", "v3"}, slowElectionTimeout)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(leader.AddLearner("L1", "L1-addr")).To(gomega.Succeed())
+		gomega.Expect(leader.AddLearner("L2", "L2-addr")).To(gomega.Succeed())
 
-	// Wait for learners to catch up so their matchIndex >= commitIndex.
-	require.NoError(t, waitFor(3*time.Second, func() bool {
-		return leader.peerMatchIndexForTest("L1") >= leader.CommittedIndex() &&
-			leader.peerMatchIndexForTest("L2") >= leader.CommittedIndex()
-	}))
+		for i := 0; i < 5; i++ {
+			_, err := leader.ProposeWait(context.Background(), []byte(fmt.Sprintf("c-%d", i)))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
 
-	// Now: artificially push voter matchIndices below commitIndex via
-	// the test hook, simulating a lagging voter cohort. If learners
-	// were counted, commitIndex would already have advanced PAST what
-	// voter-only quorum permits. Path B keeps commitIndex bounded by
-	// the voter quorum.
-	commitNow := leader.CommittedIndex()
-	require.GreaterOrEqual(t, commitNow, uint64(5))
+		gomega.Expect(waitFor(3*time.Second, func() bool {
+			return leader.peerMatchIndexForTest("L1") >= leader.CommittedIndex() &&
+				leader.peerMatchIndexForTest("L2") >= leader.CommittedIndex()
+		})).To(gomega.Succeed())
 
-	// Snapshot matchIndices.
-	v1m := leader.peerMatchIndexForTest("v1") // self → 0 via the test hook (not stored)
-	v2m := leader.peerMatchIndexForTest("v2")
-	v3m := leader.peerMatchIndexForTest("v3")
-	_ = v1m
-	// Sort voter matchIndices including self (self's matchIndex == lastLogIndex).
-	// We read via Configuration which gives us last term/index snapshots.
-	last := leader.CommittedIndex() // lower bound on lastLogIndex
-	voterMatch := []uint64{last, v2m, v3m}
-	sort.Slice(voterMatch, func(i, j int) bool { return voterMatch[i] > voterMatch[j] })
-	// quorum = 2 of 3; commit ceiling = voterMatch[quorum-1] = voterMatch[1]
-	commitCeiling := voterMatch[1]
-	require.LessOrEqual(t, commitNow, commitCeiling,
-		"Path B invariant: leader commitIndex must not exceed voter-quorum match ceiling")
-}
+		commitNow := leader.CommittedIndex()
+		gomega.Expect(commitNow).To(gomega.BeNumerically(">=", 5))
+
+		v2m := leader.peerMatchIndexForTest("v2")
+		v3m := leader.peerMatchIndexForTest("v3")
+		last := leader.CommittedIndex()
+		voterMatch := []uint64{last, v2m, v3m}
+		sort.Slice(voterMatch, func(i, j int) bool { return voterMatch[i] > voterMatch[j] })
+		commitCeiling := voterMatch[1]
+		gomega.Expect(commitNow).To(gomega.BeNumerically("<=", commitCeiling),
+			"Path B invariant: leader commitIndex must not exceed voter-quorum match ceiling")
+	}, ginkgo.NodeTimeout(10*time.Second))
+})
