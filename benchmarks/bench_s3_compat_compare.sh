@@ -74,6 +74,34 @@ START_ACCESS_KEY=""
 START_SECRET_KEY=""
 START_MODE=""
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
+HOST_GRAINFS_SERVE_COUNT=0
+HOST_DISK_USED_PCT=""
+
+collect_host_preflight() {
+  local out="$PROFILE_ROOT/host-preflight.txt"
+  local disk_line
+  HOST_GRAINFS_SERVE_COUNT="$(
+    ps -axo command 2>/dev/null \
+      | grep -F 'grainfs serve' \
+      | grep -v grep \
+      | wc -l \
+      | tr -d ' '
+  )"
+  disk_line="$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR == 2 { print $5 }' || true)"
+  HOST_DISK_USED_PCT="${disk_line%%%}"
+  {
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "repo: $REPO_ROOT"
+    echo "disk:"
+    df -h "$REPO_ROOT" 2>/dev/null || true
+    echo
+    echo "load:"
+    uptime 2>/dev/null || true
+    echo
+    echo "preexisting_grainfs_serve_count: ${HOST_GRAINFS_SERVE_COUNT:-0}"
+    ps -axo pid,ppid,pcpu,rss,etime,command 2>/dev/null | grep -F 'grainfs serve' | grep -v grep || true
+  } >"$out"
+}
 
 set_start_info() {
   START_BASE_URL="$1"
@@ -558,10 +586,19 @@ write_summary_header() {
     echo "- noclear: ${WARP_NOCLEAR}"
     echo "- host select: ${WARP_HOST_SELECT}"
     echo "- raw artifacts: ${PROFILE_ROOT}"
+    echo "- host preflight: ${PROFILE_ROOT}/host-preflight.txt"
     echo
     echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. With WARP_NOCLEAR=1, GET measures a warm-read pass over the objects written by the preceding PUT pass; DELETE uses warp's batch delete workload."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. Local MinIO/RustFS single-node targets use their default single-node durability; local \`*-cluster\` targets boot 4-node distributed clusters unless overridden."
+    if (( ${HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
+      echo
+      echo "> Warning: host preflight found ${HOST_GRAINFS_SERVE_COUNT} pre-existing \`grainfs serve\` processes. Treat throughput/RSS results as contaminated unless those processes are expected."
+    fi
+    if [[ -n "${HOST_DISK_USED_PCT:-}" ]] && (( HOST_DISK_USED_PCT >= 90 )); then
+      echo
+      echo "> Warning: host preflight found filesystem usage at ${HOST_DISK_USED_PCT}%. Low free disk can skew write-heavy benchmark results."
+    fi
     echo
     echo "| target | mode | op | MiB/s | obj/s | errors | ratio vs MinIO | ratio vs RustFS | artifacts |"
     echo "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
@@ -826,10 +863,11 @@ target_enabled() {
   esac
 }
 
-write_summary_header
 : >"$PROFILE_ROOT/warp-results.tsv"
 : >"$PROFILE_ROOT/resource-results.tsv"
 : >"$PROFILE_ROOT/skipped.txt"
+collect_host_preflight
+write_summary_header
 RUN_FAILURES=0
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
