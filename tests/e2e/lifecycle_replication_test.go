@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"syscall"
@@ -14,7 +15,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 const lifecycleXML = `<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>`
@@ -36,7 +38,7 @@ func newLifecycleSigner(accessKey, secretKey string) lifecycleSigner {
 }
 
 // signedLifecyclePut는 SigV4로 서명된 PUT /<bucket>?lifecycle 요청을 발송하고 상태 코드를 반환한다.
-func (ls lifecycleSigner) signedLifecyclePut(t *testing.T, baseURL, bucket string) int {
+func (ls lifecycleSigner) signedLifecyclePut(t testing.TB, baseURL, bucket string) int {
 	t.Helper()
 	ctx := context.Background()
 	body := []byte(lifecycleXML)
@@ -45,14 +47,14 @@ func (ls lifecycleSigner) signedLifecyclePut(t *testing.T, baseURL, bucket strin
 
 	url := baseURL + "/" + bucket + "?lifecycle"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/xml")
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 	err = ls.signer.SignHTTP(ctx, ls.creds, req, payloadHash, "s3", "us-east-1", time.Now())
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -62,7 +64,7 @@ func (ls lifecycleSigner) signedLifecyclePut(t *testing.T, baseURL, bucket strin
 }
 
 // signedLifecycleGet는 SigV4로 서명된 GET /<bucket>?lifecycle 요청을 발송하고 상태 코드를 반환한다.
-func (ls lifecycleSigner) signedLifecycleGet(t *testing.T, baseURL, bucket string) int {
+func (ls lifecycleSigner) signedLifecycleGet(t testing.TB, baseURL, bucket string) int {
 	t.Helper()
 	ctx := context.Background()
 	sum := sha256.Sum256(nil)
@@ -70,13 +72,13 @@ func (ls lifecycleSigner) signedLifecycleGet(t *testing.T, baseURL, bucket strin
 
 	url := baseURL + "/" + bucket + "?lifecycle"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 	err = ls.signer.SignHTTP(ctx, ls.creds, req, payloadHash, "s3", "us-east-1", time.Now())
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	_, _ = io.ReadAll(resp.Body)
 	return resp.StatusCode
@@ -84,180 +86,190 @@ func (ls lifecycleSigner) signedLifecycleGet(t *testing.T, baseURL, bucket strin
 
 // waitClusterSettled는 3-voter 클러스터가 안정될 때까지 기다린다.
 // getStatusJSON이 "peers" 2개를 보고할 때 완전히 합류한 것으로 간주.
-func waitClusterSettled(t *testing.T, leaderURL string) {
+func waitClusterSettled(t testing.TB, leaderURL string) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		s := getStatusJSON(t, leaderURL)
 		return len(stringList(s["peers"])) == 2
-	}, 90*time.Second, 500*time.Millisecond, "3-node cluster must settle (peers==2)")
+	}).WithTimeout(90*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(),
+		"3-node cluster must settle (peers==2)")
 }
 
 // TestLifecycleE2E collapses lifecycle replication checks (follower→leader
 // PUT forward, leader-change preserves replicated config) into one entry.
-// Both sub-tests need a 3-voter DynamicJoin cluster — the second one kills
-// the leader, so it runs last in code order; the first sub-test runs
-// against the pristine cluster.
+// Both sub-specs need a 3-voter DynamicJoin cluster — the second one kills
+// the leader, so it runs last in Ordered Context order; the first sub-spec
+// runs against the pristine cluster.
 func TestLifecycleE2E(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
-		c := startE2ECluster(t, e2eClusterOptions{
-			Nodes:      3,
-			Mode:       ClusterModeDynamicJoin,
-			ClusterKey: "E2E-LIFECYCLE-REPL-KEY",
-			LogPrefix:  "grainfs-lifecycle",
-			ExtraArgs:  []string{"--lifecycle-interval=24h"},
+	gomega.RegisterFailHandler(ginkgo.Fail)
+	ginkgo.RunSpecs(t, "Lifecycle replication e2e")
+}
+
+var _ = ginkgo.Describe("Lifecycle replication", func() {
+	ginkgo.Context("Cluster3Node", ginkgo.Ordered, func() {
+		var c *e2eCluster
+		var ls lifecycleSigner
+
+		ginkgo.BeforeAll(func() {
+			tb := ginkgo.GinkgoTB()
+			c = startE2ECluster(tb, e2eClusterOptions{
+				Nodes:      3,
+				Mode:       ClusterModeDynamicJoin,
+				ClusterKey: "E2E-LIFECYCLE-REPL-KEY",
+				LogPrefix:  "grainfs-lifecycle",
+				ExtraArgs:  []string{"--lifecycle-interval=24h"},
+			})
+			gomega.Expect(c.leaderIdx).To(gomega.BeNumerically(">=", 0),
+				"harness must have identified leader")
+			waitClusterSettled(tb, c.httpURLs[c.leaderIdx])
+
+			for i := range c.procs {
+				iamWaitKeyReady(tb, c.httpURLs[i], c.accessKey, c.secretKey, 15*time.Second)
+			}
+			ls = newLifecycleSigner(c.accessKey, c.secretKey)
 		})
-		runLifecycleCases(t, c)
-	})
-}
 
-func runLifecycleCases(t *testing.T, c *e2eCluster) {
-	t.Helper()
-	leaderIdx := c.leaderIdx
-	require.GreaterOrEqual(t, leaderIdx, 0, "harness must have identified leader")
-	waitClusterSettled(t, c.httpURLs[leaderIdx])
-
-	for i := range c.procs {
-		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 15*time.Second)
-	}
-
-	ls := newLifecycleSigner(c.accessKey, c.secretKey)
-
-	t.Run("FollowerPutLeaderGet", func(t *testing.T) {
-		followerIdx := -1
-		for i := range c.procs {
-			if i != leaderIdx {
-				followerIdx = i
-				break
+		ginkgo.It("follower PUT forwards to leader (FollowerPutLeaderGet)", func(ctx context.Context) {
+			tb := ginkgo.GinkgoTB()
+			leaderIdx := c.leaderIdx
+			followerIdx := -1
+			for i := range c.procs {
+				if i != leaderIdx {
+					followerIdx = i
+					break
+				}
 			}
-		}
-		require.GreaterOrEqual(t, followerIdx, 0, "must find a follower node")
+			gomega.Expect(followerIdx).To(gomega.BeNumerically(">=", 0), "must find a follower node")
 
-		const bucket = "lc-follower-put"
-		createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(leaderIdx))
+			const bucket = "lc-follower-put"
+			createBucketWithAdminPolicyAttachViaUDSAny(tb, c.dataDirs, c.saID, bucket, c.S3Client(leaderIdx))
 
-		status := ls.signedLifecyclePut(t, c.httpURLs[followerIdx], bucket)
-		require.Equal(t, http.StatusOK, status,
-			"follower PUT /%s?lifecycle must return 200 (ADR 0011: follower must forward to leader)", bucket)
+			status := ls.signedLifecyclePut(tb, c.httpURLs[followerIdx], bucket)
+			gomega.Expect(status).To(gomega.Equal(http.StatusOK),
+				"follower PUT /%s?lifecycle must return 200 (ADR 0011: follower must forward to leader)", bucket)
 
-		require.Eventually(t, func() bool {
-			return ls.signedLifecycleGet(t, c.httpURLs[leaderIdx], bucket) == http.StatusOK
-		}, 5*time.Second, 100*time.Millisecond,
-			"leader must observe replicated lifecycle config within 5s")
-	})
+			gomega.Eventually(func() bool {
+				return ls.signedLifecycleGet(tb, c.httpURLs[leaderIdx], bucket) == http.StatusOK
+			}).WithTimeout(5*time.Second).WithPolling(100*time.Millisecond).Should(gomega.BeTrue(),
+				"leader must observe replicated lifecycle config within 5s")
+		}, ginkgo.NodeTimeout(180*time.Second))
 
-	t.Run("LeaderChangePreservesConfig", func(t *testing.T) {
-		// destructive: kills the current leader to force re-election.
-		// must run last in code order — subsequent sub-tests would see a
+		// destructive: kills the current leader to force re-election. Must run
+		// last in Ordered Context order — subsequent It blocks would see a
 		// post-leader-kill cluster.
-		runLifecycleLeaderChangeSubtest(t, c, ls)
-	})
-}
+		ginkgo.It("preserves config across leader change (LeaderChangePreservesConfig)", func(ctx context.Context) {
+			tb := ginkgo.GinkgoTB()
+			leaderIdx := c.leaderIdx
+			s := getStatusJSON(tb, c.httpURLs[leaderIdx])
+			initialLeader, _ := s["leader_id"].(string)
+			gomega.Expect(initialLeader).NotTo(gomega.BeEmpty(),
+				"must resolve current leader id from status")
 
-func runLifecycleLeaderChangeSubtest(t *testing.T, c *e2eCluster, ls lifecycleSigner) {
-	t.Helper()
-	leaderIdx := c.leaderIdx
-	s := getStatusJSON(t, c.httpURLs[leaderIdx])
-	initialLeader, _ := s["leader_id"].(string)
-	require.NotEmpty(t, initialLeader, "must resolve current leader id from status")
-
-	// leader_id → 노드 인덱스 매핑
-	currentLeaderIdx := -1
-	for i := range c.procs {
-		if c.nodeID(i) == initialLeader {
-			currentLeaderIdx = i
-			break
-		}
-	}
-	require.GreaterOrEqual(t, currentLeaderIdx, 0, "must locate current leader by node id")
-
-	// 새 리더 후보가 IAM 키를 이미 받았는지 재확인 (외부 함수에서 이미 한 번 대기했지만,
-	// leader change 시점에는 follower들이 leader 역할로 전환되어야 하므로 한 번 더 대기)
-	for i := range c.procs {
-		if c.procs[i] != nil {
-			iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 15*time.Second)
-		}
-	}
-
-	// 버킷 생성 후 현재 리더에 lifecycle 설정 PUT
-	const bucket = "lc-leader-change"
-	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(currentLeaderIdx))
-
-	status := ls.signedLifecyclePut(t, c.httpURLs[currentLeaderIdx], bucket)
-	require.Equal(t, http.StatusOK, status,
-		"leader PUT /%s?lifecycle must return 200", bucket)
-
-	// 생존 노드 인덱스 목록 (리더 제외)
-	var survivorIdxs []int
-	for i := range c.procs {
-		if i != currentLeaderIdx {
-			survivorIdxs = append(survivorIdxs, i)
-		}
-	}
-	require.NotEmpty(t, survivorIdxs, "must have at least 2 surviving nodes after leader kill")
-
-	// 리더 프로세스를 SIGKILL로 강제 종료하여 즉각 재선거 유도.
-	// SIGKILL은 transfer-leader보다 더 극단적인 시나리오(즉각 crash)를 검증한다.
-	t.Logf("killing leader node %d (%s) to trigger re-election", currentLeaderIdx, initialLeader)
-	require.NoError(t, c.procs[currentLeaderIdx].Process.Signal(syscall.SIGKILL))
-	_ = c.procs[currentLeaderIdx].Wait()
-	c.procs[currentLeaderIdx] = nil // Stop() 중복 처리 방지
-
-	// 생존 노드 양쪽에서 새 리더가 선출될 때까지 폴링.
-	// getStatusJSON은 내부에서 require.NoError를 호출하므로 require.Eventually에서
-	// HTTP 에러 발생 시 goroutine이 조용히 종료된다. 대신 직접 polling loop를 사용해
-	// HTTP 에러를 무시하고 안전하게 재시도한다.
-	tryStatusLeaderID := func(url string) string {
-		resp, err := http.Get(url + "/api/cluster/status") //nolint:noctx
-		if err != nil {
-			return ""
-		}
-		defer resp.Body.Close()
-		var s map[string]any
-		if decErr := json.NewDecoder(resp.Body).Decode(&s); decErr != nil {
-			return ""
-		}
-		id, _ := s["leader_id"].(string)
-		state, _ := s["state"].(string)
-		term, _ := s["term"].(float64)
-		t.Logf("status check: leader_id=%q state=%s term=%.0f", id, state, term)
-		return id
-	}
-
-	var newLeaderID string
-	var newLeaderIdx int
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, idx := range survivorIdxs {
-			id := tryStatusLeaderID(c.httpURLs[idx])
-			if id != "" && id != initialLeader {
-				newLeaderID = id
-				goto foundNewLeader
+			// leader_id → 노드 인덱스 매핑
+			currentLeaderIdx := -1
+			for i := range c.procs {
+				if c.nodeID(i) == initialLeader {
+					currentLeaderIdx = i
+					break
+				}
 			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.Failf(t, "no new leader elected",
-		"a new leader must be elected within 30s after killing the old leader (initial=%s)", initialLeader)
-foundNewLeader:
+			gomega.Expect(currentLeaderIdx).To(gomega.BeNumerically(">=", 0),
+				"must locate current leader by node id")
 
-	// 새 리더 인덱스 탐색
-	newLeaderIdx = -1
-	for _, i := range survivorIdxs {
-		if c.nodeID(i) == newLeaderID {
-			newLeaderIdx = i
-			break
-		}
-	}
-	require.GreaterOrEqual(t, newLeaderIdx, 0,
-		"must locate new leader node by id; got %q", newLeaderID)
-	t.Logf("new leader: node %d (%s)", newLeaderIdx, newLeaderID)
+			// 새 리더 후보가 IAM 키를 이미 받았는지 재확인 (BeforeAll에서 이미 한 번 대기했지만,
+			// leader change 시점에는 follower들이 leader 역할로 전환되어야 하므로 한 번 더 대기)
+			for i := range c.procs {
+				if c.procs[i] != nil {
+					iamWaitKeyReady(tb, c.httpURLs[i], c.accessKey, c.secretKey, 15*time.Second)
+				}
+			}
 
-	// 새 리더에서 IAM 키 준비 대기
-	iamWaitKeyReady(t, c.httpURLs[newLeaderIdx], c.accessKey, c.secretKey, 15*time.Second)
+			// 버킷 생성 후 현재 리더에 lifecycle 설정 PUT
+			const bucket = "lc-leader-change"
+			createBucketWithAdminPolicyAttachViaUDSAny(tb, c.dataDirs, c.saID, bucket, c.S3Client(currentLeaderIdx))
 
-	// 새 리더에서 lifecycle 설정이 복제됐는지 확인 (ADR 0011 철칙)
-	require.Eventually(t, func() bool {
-		return ls.signedLifecycleGet(t, c.httpURLs[newLeaderIdx], bucket) == http.StatusOK
-	}, 30*time.Second, 200*time.Millisecond,
-		"new leader must see replicated lifecycle config after re-election (ADR 0011)")
-}
+			status := ls.signedLifecyclePut(tb, c.httpURLs[currentLeaderIdx], bucket)
+			gomega.Expect(status).To(gomega.Equal(http.StatusOK),
+				"leader PUT /%s?lifecycle must return 200", bucket)
+
+			// 생존 노드 인덱스 목록 (리더 제외)
+			var survivorIdxs []int
+			for i := range c.procs {
+				if i != currentLeaderIdx {
+					survivorIdxs = append(survivorIdxs, i)
+				}
+			}
+			gomega.Expect(survivorIdxs).NotTo(gomega.BeEmpty(),
+				"must have at least 2 surviving nodes after leader kill")
+
+			// 리더 프로세스를 SIGKILL로 강제 종료하여 즉각 재선거 유도.
+			// SIGKILL은 transfer-leader보다 더 극단적인 시나리오(즉각 crash)를 검증한다.
+			tb.Logf("killing leader node %d (%s) to trigger re-election", currentLeaderIdx, initialLeader)
+			gomega.Expect(c.procs[currentLeaderIdx].Process.Signal(syscall.SIGKILL)).NotTo(gomega.HaveOccurred())
+			_ = c.procs[currentLeaderIdx].Wait()
+			// 죽은 leader proc 슬롯의 nil 마킹은 spec 종료 후로 미룬다 —
+			// 본문은 currentLeaderIdx 슬롯을 더 이상 참조하지 않으니 안전하고,
+			// BeforeAll의 cluster cleanup(t.Cleanup)이 호출될 때 helper의 Stop()이
+			// 이미 죽은 proc을 두 번 정리하지 않도록 ginkgo.DeferCleanup으로 명시.
+			killedIdx := currentLeaderIdx
+			ginkgo.DeferCleanup(func() {
+				c.procs[killedIdx] = nil
+			})
+
+			// 생존 노드 양쪽에서 새 리더가 선출될 때까지 폴링.
+			tryStatusLeaderID := func(url string) string {
+				resp, err := http.Get(url + "/api/cluster/status") //nolint:noctx
+				if err != nil {
+					return ""
+				}
+				defer resp.Body.Close()
+				var ss map[string]any
+				if decErr := json.NewDecoder(resp.Body).Decode(&ss); decErr != nil {
+					return ""
+				}
+				id, _ := ss["leader_id"].(string)
+				state, _ := ss["state"].(string)
+				term, _ := ss["term"].(float64)
+				tb.Logf("status check: leader_id=%q state=%s term=%.0f", id, state, term)
+				return id
+			}
+
+			var newLeaderID string
+			var newLeaderIdx int
+			deadline := time.Now().Add(30 * time.Second)
+			for time.Now().Before(deadline) {
+				for _, idx := range survivorIdxs {
+					id := tryStatusLeaderID(c.httpURLs[idx])
+					if id != "" && id != initialLeader {
+						newLeaderID = id
+						goto foundNewLeader
+					}
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			ginkgo.Fail(fmt.Sprintf("a new leader must be elected within 30s after killing the old leader (initial=%s)", initialLeader))
+		foundNewLeader:
+
+			// 새 리더 인덱스 탐색
+			newLeaderIdx = -1
+			for _, i := range survivorIdxs {
+				if c.nodeID(i) == newLeaderID {
+					newLeaderIdx = i
+					break
+				}
+			}
+			gomega.Expect(newLeaderIdx).To(gomega.BeNumerically(">=", 0),
+				"must locate new leader node by id; got %q", newLeaderID)
+			tb.Logf("new leader: node %d (%s)", newLeaderIdx, newLeaderID)
+
+			// 새 리더에서 IAM 키 준비 대기
+			iamWaitKeyReady(tb, c.httpURLs[newLeaderIdx], c.accessKey, c.secretKey, 15*time.Second)
+
+			// 새 리더에서 lifecycle 설정이 복제됐는지 확인 (ADR 0011 철칙)
+			gomega.Eventually(func() bool {
+				return ls.signedLifecycleGet(tb, c.httpURLs[newLeaderIdx], bucket) == http.StatusOK
+			}).WithTimeout(30*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(),
+				"new leader must see replicated lifecycle config after re-election (ADR 0011)")
+		}, ginkgo.NodeTimeout(240*time.Second))
+	})
+})
