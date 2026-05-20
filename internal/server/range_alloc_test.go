@@ -400,24 +400,3 @@ func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
 	require.Equal(t, int64(16<<20), n)
 	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(8<<20))
 }
-
-func TestReadAtRangeReader_WriteToStreamsRange(t *testing.T) {
-	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
-	backend := &partNumberReadAtBackend{data: payload}
-	reader := &readAtRangeReader{
-		ctx:     context.Background(),
-		backend: backend,
-		bucket:  "b",
-		key:     "obj",
-		offset:  10,
-		length:  12,
-	}
-
-	var dst bytes.Buffer
-	n, err := reader.WriteTo(&dst)
-	require.NoError(t, err)
-	require.Equal(t, int64(12), n)
-	require.Equal(t, []byte("abcdefghijkl"), dst.Bytes())
-	require.Equal(t, int64(10), backend.lastOffset.Load())
-	require.Equal(t, int64(12), backend.lastReadSize.Load())
-}

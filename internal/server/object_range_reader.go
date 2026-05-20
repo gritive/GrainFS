@@ -83,57 +83,6 @@ func (r *readAtRangeReader) readAt(offset int64, buf []byte) (int, error) {
 	return r.backend.ReadAt(r.ctx, r.bucket, r.key, offset, buf)
 }
 
-func (r *readAtRangeReader) WriteTo(w io.Writer) (int64, error) {
-	var written int64
-	for r.pos < r.length {
-		if r.buf == nil {
-			size := r.length
-			if size > maxRangeReadAtChunk {
-				size = maxRangeReadAtChunk
-			}
-			if size == maxRangeReadAtChunk {
-				bufp := readAtRangeBufferPool.Get().(*[]byte)
-				r.buf = (*bufp)[:maxRangeReadAtChunk]
-				r.pooled = true
-			} else {
-				r.buf = make([]byte, int(size))
-			}
-		}
-		want := len(r.buf)
-		if remaining := r.length - r.pos; int64(want) > remaining {
-			want = int(remaining)
-		}
-		n, readErr := r.readAt(r.offset+r.pos, r.buf[:want])
-		if n > 0 {
-			off := 0
-			for off < n {
-				nw, writeErr := w.Write(r.buf[off:n])
-				if nw > 0 {
-					off += nw
-					written += int64(nw)
-					r.pos += int64(nw)
-				}
-				if writeErr != nil {
-					return written, writeErr
-				}
-				if nw == 0 {
-					return written, io.ErrShortWrite
-				}
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF && n > 0 {
-				continue
-			}
-			return written, readErr
-		}
-		if n == 0 {
-			return written, io.EOF
-		}
-	}
-	return written, nil
-}
-
 func (r *readAtRangeReader) Close() error {
 	if r.pooled && r.buf != nil {
 		buf := r.buf[:maxRangeReadAtChunk]
