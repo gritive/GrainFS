@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### refactor(cmd): move iam.go business logic to internal/iamadmin
+
+`cmd/grainfs/iam.go` shrunk from 350 LOC to a thin runner (~205 LOC),
+becoming a delegate over the new `internal/iamadmin/` package built
+on `adminapi.Transport`.
+
+- New package: `internal/iamadmin/` mirrors the
+  `volumeadmin`/`clusteradmin`/`nfsadmin` template — `client.go`,
+  `types.go`, `endpoint.go`, `errors.go`, `format.go`,
+  `helpers.go`, `sa_ops.go`, `key_ops.go`, `grant_ops.go`.
+  32 unit tests against an `httptest.Server`.
+- New `internal/adminapi.Transport.Put` and `internal/adminapi.Transport.PostRaw`
+  added for the JSON-body PUT and verbatim-pass-through POST callers.
+- Inline HTTP/UDS client (`iamHTTPClient`, `iamRequest`) deleted from
+  `cmd/grainfs/iam.go`. Relocated verbatim to
+  `cmd/grainfs/admin_uds_client.go` as a temporary shim — bucket
+  commands still depend on them until step 2 of the refactor
+  (`bucketadmin`) lands.
+- CLI surface preserved verbatim: flag names, defaults, env-var
+  binding (`GRAINFS_ADMIN_SOCKET`), `--help` text. A new
+  `cmd/grainfs/iam_help_test.go` golden snapshot test guards against
+  accidental drift.
+
+**Behavior change (low risk):** `iam --json` mode for `sa create`,
+`sa list`, `sa get` now re-marshals from typed structs rather than
+passing through the server response body, so JSON keys are
+alphabetically ordered. Field names and values are unchanged. Raw
+passthrough preserved for `iam key create` and `iam grant list`.
+
+Part of: cmd thin-runner refactor (step 1/7).
+Spec: docs/superpowers/specs/2026-05-20-cmd-thin-runner-design.md
+
 ## [0.0.278.0] - 2026-05-20 - fix: Phase 2 unblock — R1 PutObjectTagging 404 + R2 lifecycle IAM 403
 
 Two long-lived pre-existing regressions resolved that together blocked the
