@@ -1,143 +1,73 @@
 package main
 
-// NOTE: Tests below temporarily disabled — Step 2 changed bucketPolicyCmd
-// from a builder function returning *cobra.Command to a package-level var
-// (registered in bucketCmd via init()). Body shape for `policy set` also
-// changed: legacy wrapped in {"policy": <raw>}; bucketadmin sends raw
-// document bytes verbatim. Task 11 will rewrite the cobra smoke tests
-// against the new shape.
-
-/*
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
-func buildTestBucketPolicyRoot() *cobra.Command {
-	root := &cobra.Command{Use: "grainfs"}
-	bkt := &cobra.Command{Use: "bucket"}
-	bkt.PersistentFlags().String("endpoint", "", "")
-	bkt.PersistentFlags().Bool("json", false, "")
-	bkt.AddCommand(bucketPolicyCmd())
-	root.AddCommand(bkt)
-	return root
-}
-
-func TestBucketPolicyGetCmd(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/my-bucket/policy", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"policy":{"Version":"2012-10-17","Statement":[]}}`)
-	})
-	sock := startFakeAdminUDS(t, mux)
-
-	root := buildTestBucketPolicyRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "policy", "get", "my-bucket"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
-	}
-	var m map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
-		t.Errorf("output should be valid JSON: %v\n%s", err, buf.String())
-	}
-}
-
-func TestBucketPolicySetCmd_File(t *testing.T) {
+// TestCLI_PolicySet_FromStdin verifies the bytes piped to stdin reach the wire
+// verbatim (the new bucketadmin shape — no wrapping in {"policy": ...}).
+func TestCLI_PolicySet_FromStdin(t *testing.T) {
+	const doc = `{"Version":"2012-10-17","Statement":[]}`
 	var gotMethod string
-	var gotBody map[string]any
-
+	var gotBody []byte
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/my-bucket/policy", func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	sock := startFakeAdminUDS(t, mux)
 
-	policyFile := t.TempDir() + "/policy.json"
-	if err := writeTempFile(policyFile, `{"Version":"2012-10-17","Statement":[]}`); err != nil {
-		t.Fatal(err)
-	}
-
-	root := buildTestBucketPolicyRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "policy", "set", "my-bucket", policyFile})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"bucket", "--endpoint", sock, "policy", "set", "my-bucket", "-"})
+	rootCmd.SetIn(strings.NewReader(doc))
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
 	}
 	if gotMethod != "PUT" {
 		t.Errorf("method = %q, want PUT", gotMethod)
 	}
-	if gotBody["policy"] == nil {
-		t.Errorf("body[\"policy\"] should not be nil, got %v", gotBody)
+	if string(gotBody) != doc {
+		t.Errorf("body = %q, want %q (verbatim, no wrapping)", string(gotBody), doc)
 	}
 }
 
-func TestBucketPolicyDeleteCmd(t *testing.T) {
-	var gotMethod string
-
+// TestCLI_PolicySet_FromFile verifies reading the policy from a file path
+// argument also lands on the wire verbatim.
+func TestCLI_PolicySet_FromFile(t *testing.T) {
+	const doc = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]}`
+	var gotBody []byte
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/my-bucket/policy", func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
+		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	sock := startFakeAdminUDS(t, mux)
 
-	root := buildTestBucketPolicyRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "policy", "delete", "my-bucket"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if gotMethod != "DELETE" {
-		t.Errorf("method = %q, want DELETE", gotMethod)
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"bucket", "--endpoint", sock, "policy", "set", "my-bucket", path})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
 	}
-}
-
-func TestBucketPolicySetCmd_Stdin(t *testing.T) {
-	var gotBody map[string]any
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/my-bucket/policy", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	sock := startFakeAdminUDS(t, mux)
-
-	root := buildTestBucketPolicyRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetIn(strings.NewReader(`{"Version":"2012-10-17","Statement":[]}`))
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "policy", "set", "my-bucket", "-"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
-	}
-	if gotBody["policy"] == nil {
-		t.Errorf("body[\"policy\"] should not be nil")
+	if string(gotBody) != doc {
+		t.Errorf("body = %q, want %q (verbatim, no wrapping)", string(gotBody), doc)
 	}
 }
-
-func writeTempFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o600)
-}
-*/

@@ -1,105 +1,40 @@
 package main
 
-// NOTE: Tests below temporarily disabled — Step 2 changed bucketVersioningCmd
-// from a builder function returning *cobra.Command to a package-level var
-// (registered in bucketCmd via init()). Task 11 will rewrite the cobra
-// smoke tests against the new shape.
-
-/*
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
-func buildTestBucketVersioningRoot() *cobra.Command {
-	root := &cobra.Command{Use: "grainfs"}
-	bkt := &cobra.Command{Use: "bucket"}
-	bkt.PersistentFlags().String("endpoint", "", "")
-	bkt.PersistentFlags().Bool("json", false, "")
-	bkt.AddCommand(bucketVersioningCmd())
-	root.AddCommand(bkt)
-	return root
-}
-
-func TestBucketVersioningGetCmd(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/my-bucket/versioning", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"Enabled"}`)
-	})
-	sock := startFakeAdminUDS(t, mux)
-
-	root := buildTestBucketVersioningRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "versioning", "get", "my-bucket"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
-	}
-	if !strings.Contains(buf.String(), "Enabled") {
-		t.Errorf("output %q should contain 'Enabled'", buf.String())
-	}
-}
-
-func TestBucketVersioningEnableCmd(t *testing.T) {
+// TestCLI_VersioningEnable_EndToEnd is a cobra smoke test: drives the live
+// rootCmd through `bucket versioning enable` and asserts the server sees
+// {"status":"Enabled"}. Wire shape and Suspend variant are covered by
+// internal/bucketadmin/versioning_ops_test.go.
+func TestCLI_VersioningEnable_EndToEnd(t *testing.T) {
+	var gotMethod string
 	var gotBody map[string]string
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/my-bucket/versioning", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "PUT" {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
+		gotMethod = r.Method
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	sock := startFakeAdminUDS(t, mux)
 
-	root := buildTestBucketVersioningRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "versioning", "enable", "my-bucket"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"bucket", "--endpoint", sock, "versioning", "enable", "my-bucket"})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	if gotMethod != "PUT" {
+		t.Errorf("method = %q, want PUT", gotMethod)
 	}
 	if gotBody["status"] != "Enabled" {
 		t.Errorf("body status = %q, want Enabled", gotBody["status"])
 	}
 }
-
-func TestBucketVersioningSuspendCmd(t *testing.T) {
-	var gotBody map[string]string
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/buckets/my-bucket/versioning", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	sock := startFakeAdminUDS(t, mux)
-
-	root := buildTestBucketVersioningRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bucket", "--endpoint", sock, "versioning", "suspend", "my-bucket"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v\noutput: %s", err, buf.String())
-	}
-	if gotBody["status"] != "Suspended" {
-		t.Errorf("body status = %q, want Suspended", gotBody["status"])
-	}
-}
-*/
