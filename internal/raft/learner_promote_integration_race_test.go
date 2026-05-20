@@ -3,10 +3,10 @@ package raft
 import (
 	"fmt"
 	"sync/atomic"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit pins the M6.0
@@ -31,37 +31,34 @@ import (
 // The chosen matrix exercises the envelope this fix targets. Production
 // e2e (election 750–1500ms, RTT 50–200ms) sits comfortably in this
 // regime.
-func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
+var _ = Describe("learner promotion integration race", func() {
 	const iterations = 50
-	delays := []time.Duration{
+
+	for _, delay := range []time.Duration{
 		10 * time.Millisecond,
 		20 * time.Millisecond,
 		30 * time.Millisecond,
-	}
-	for _, d := range delays {
-		d := d
-		t.Run(fmt.Sprintf("delay=%s", d), func(t *testing.T) {
+	} {
+		delay := delay
+		Context(fmt.Sprintf("with %s append entries delay", delay), func() {
 			for i := 0; i < iterations; i++ {
 				i := i
-				t.Run(fmt.Sprintf("iter%d", i), func(t *testing.T) {
-					t.Parallel()
-					runPromoteRaceWithDelay(t, d)
+				It(fmt.Sprintf("keeps the leader stable during promote iteration %d", i), func() {
+					runPromoteRaceWithDelay(delay)
 				})
 			}
 		})
 	}
-}
+})
 
-func runPromoteRaceWithDelay(t *testing.T, aeDelay time.Duration) {
-	t.Helper()
-
-	fix := startMembershipCluster(t, []string{"n1"})
+func runPromoteRaceWithDelay(aeDelay time.Duration) {
+	fix := startMembershipClusterGinkgo([]string{"n1"})
 	leader := fix.nodes[0]
-	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }),
+	Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(Succeed(),
 		"n1 must bootstrap as leader")
 	leaderTermBefore := leader.Term()
 
-	n2 := fix.addNode(t, "n2", []string{"n1"}, fastElectionTimeout)
+	n2 := fix.addNodeGinkgo("n2", []string{"n1"}, fastElectionTimeout)
 
 	// Wrap transports so we can flip latency on AFTER the AddLearner
 	// catchup phase, isolating the delay to the PromoteToVoter dance.
@@ -70,30 +67,30 @@ func runPromoteRaceWithDelay(t *testing.T, aeDelay time.Duration) {
 	leader.SetTransport(leaderDelay)
 	n2.SetTransport(n2Delay)
 
-	require.NoError(t, leader.AddLearner("n2", "n2-addr"))
-	require.NoError(t, waitFor(3*time.Second, func() bool {
+	Expect(leader.AddLearner("n2", "n2-addr")).To(Succeed())
+	Expect(waitFor(3*time.Second, func() bool {
 		return leader.peerMatchIndexForTest("n2") >= leader.CommittedIndex()
-	}), "n2 must catch up to leader commit before promote")
+	})).To(Succeed(), "n2 must catch up to leader commit before promote")
 
 	leaderDelay.enable()
 	n2Delay.enable()
-	defer func() {
+	DeferCleanup(func() {
 		leaderDelay.disable()
 		n2Delay.disable()
-	}()
+	})
 
 	err := leader.PromoteToVoter("n2")
-	require.NoError(t, err,
+	Expect(err).NotTo(HaveOccurred(),
 		"PromoteToVoter must not fail (Cnew commit election race)")
-	require.True(t, leader.IsLeader(),
+	Expect(leader.IsLeader()).To(BeTrue(),
 		"n1 must remain leader after promote — stepdown indicates the race fired")
-	require.Equal(t, leaderTermBefore, leader.Term(),
+	Expect(leader.Term()).To(Equal(leaderTermBefore),
 		"leader term must not advance — stepdown+re-election would bump it")
 
 	cfg := leader.Configuration()
-	require.Len(t, cfg.Servers, 2)
+	Expect(cfg.Servers).To(HaveLen(2))
 	for _, s := range cfg.Servers {
-		require.Equal(t, Voter, s.Suffrage, "all servers must be Voter post-promote")
+		Expect(s.Suffrage).To(Equal(Voter), "all servers must be Voter post-promote")
 	}
 }
 
