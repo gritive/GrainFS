@@ -28,16 +28,16 @@ func newIcebergConfigAdapter(store *iam.Store) admin.IcebergConfigService {
 // oldest active AccessKey belonging to saID.
 func (a *icebergConfigAdapter) RevealSAKeyPair(_ context.Context, saID string) (string, string, error) {
 	keys := a.store.ListKeysForSA(saID)
+	if len(keys) == 0 {
+		return "", "", admin.NewNotFound(fmt.Sprintf("service account %q not found", saID))
+	}
 	for _, k := range keys {
 		if k.Status == iam.KeyStatusActive {
 			if k.SecretKey == "" {
-				return "", "", fmt.Errorf("sa %q has no in-memory plaintext key (DEK not loaded?)", saID)
+				return "", "", admin.NewUnavailable(fmt.Sprintf("DEK not loaded; secret key unavailable for SA %q", saID))
 			}
 			return k.AccessKey, k.SecretKey, nil
 		}
 	}
-	if len(keys) == 0 {
-		return "", "", fmt.Errorf("service account %q not found or has no keys", saID)
-	}
-	return "", "", fmt.Errorf("service account %q has no active keys", saID)
+	return "", "", admin.NewNotFound(fmt.Sprintf("service account %q has no active access keys", saID))
 }
