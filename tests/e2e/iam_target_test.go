@@ -121,11 +121,7 @@ func newSharedClusterIAMAdminTarget(t *testing.T) iamAdminTarget {
 		uniqueBucket: func(t *testing.T, caseName string) string {
 			t.Helper()
 			name := bucketNameFor("cluster4", t.Name(), caseName)
-			if c.wildcardAdmin {
-				createBucketWithClient(t, c.S3Client(c.leaderIdx), name)
-			} else {
-				createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
-			}
+			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
 			t.Cleanup(func() {
 				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})

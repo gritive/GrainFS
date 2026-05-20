@@ -362,7 +362,7 @@ func grantAdminOnBucketViaUDSForTestMain(dataDir, saID, bucket string, timeout t
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		if err := tryIAMGrantPut(sock, saID, bucket, "Admin"); err != nil {
+		if err := tryPolicyAttachAdminOnBucket(sock, saID, bucket); err != nil {
 			lastErr = err
 			time.Sleep(50 * time.Millisecond)
 			continue
