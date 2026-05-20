@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 )
 
@@ -71,118 +73,101 @@ func startCluster(t *testing.T, ids ...string) (nodes []*Node, net *memNetwork) 
 	return nodes, net
 }
 
-// TestElection_SingleCandidateWins: 3-node cluster, n1's short timeout makes
-// it Candidate first. n2 and n3 grant their votes; n1 reaches majority (2/3)
-// and becomes Leader.
-func TestElection_SingleCandidateWins(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+var _ = Describe("election", func() {
+	var n1, n2, n3 *Node
 
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n1.IsLeader()
-	}), "n1 did not become leader")
-
-	require.Equal(t, Leader, n1.State())
-	require.Equal(t, "n1", n1.LeaderID())
-
-	// Followers should converge on the new leader (via heartbeat).
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
-	}), "followers did not learn the leader")
-
-	require.Equal(t, Follower, n2.State())
-	require.Equal(t, Follower, n3.State())
-}
-
-// TestElection_HeartbeatPreventsReElection: once n1 is leader, periodic
-// heartbeats keep n2/n3 election timers reset. The followers' term must not
-// advance during a sustained leadership period.
-func TestElection_HeartbeatPreventsReElection(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
-
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
-	}), "cluster did not stabilise on n1")
-
-	leaderTerm := n1.Term()
-
-	// Watch for 500ms — well beyond a follower's election timeout window.
-	// Heartbeats every 30ms must keep the followers parked.
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		require.Equal(t, leaderTerm, n2.Term(), "n2 term must not advance under heartbeat")
-		require.Equal(t, leaderTerm, n3.Term(), "n3 term must not advance under heartbeat")
-		require.Equal(t, Follower, n2.State(), "n2 must remain Follower")
-		require.Equal(t, Follower, n3.State(), "n3 must remain Follower")
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// TestElection_LeaderStepsDownOnHigherTerm: a Leader observing a higher-term
-// RequestVote steps down to Follower at the new term. Inject the RequestVote
-// directly via Handle so the test does not depend on a second cluster's
-// election timing.
-func TestElection_LeaderStepsDownOnHigherTerm(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
-
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
-	leaderTerm := n1.Term()
-
-	// The leader has a no-op entry at index 1 (becomeLeader §5.4.2). The
-	// intruder's log must be at least as up-to-date (same term, same index).
-	reply := n1.HandleRequestVote(&RequestVoteArgs{
-		Term:         leaderTerm + 5,
-		CandidateID:  "n2",
-		LastLogIndex: 1,
-		LastLogTerm:  leaderTerm,
+	BeforeEach(func() {
+		nodes, _ := startClusterGinkgo("n1", "n2", "n3")
+		n1, n2, n3 = nodes[0], nodes[1], nodes[2]
 	})
 
-	require.True(t, reply.VoteGranted, "leader must grant a higher-term vote from an up-to-date candidate")
-	require.Equal(t, leaderTerm+5, reply.Term)
-	require.Equal(t, Follower, n1.State(), "leader must step down")
-	require.False(t, n1.IsLeader())
-	require.Equal(t, leaderTerm+5, n1.Term())
-	require.Equal(t, "n2", n1.rs.Load().votedFor)
-}
+	It("elects the single early candidate", func() {
+		Expect(waitFor(2*time.Second, func() bool {
+			return n1.IsLeader()
+		})).To(Succeed(), "n1 did not become leader")
 
-func TestElection_RejectsHigherTermVoteFromNonVoter(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1", ElectionTimeout: time.Hour, HeartbeatTimeout: 10 * time.Millisecond})
-	require.NoError(t, err)
-	n.Start()
-	defer n.Stop()
+		Expect(n1.State()).To(Equal(Leader))
+		Expect(n1.LeaderID()).To(Equal("n1"))
 
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n.IsLeader() }))
-	leaderTerm := n.Term()
+		// Followers should converge on the new leader (via heartbeat).
+		Expect(waitFor(2*time.Second, func() bool {
+			return n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
+		})).To(Succeed(), "followers did not learn the leader")
 
-	reply := n.HandleRequestVote(&RequestVoteArgs{
-		Term:         leaderTerm + 5,
-		CandidateID:  "n2",
-		LastLogIndex: 1,
-		LastLogTerm:  leaderTerm,
+		Expect(n2.State()).To(Equal(Follower))
+		Expect(n3.State()).To(Equal(Follower))
 	})
 
-	require.False(t, reply.VoteGranted)
-	require.Equal(t, leaderTerm, reply.Term)
-	require.True(t, n.IsLeader(), "non-voter RequestVote must not step down the leader")
-	require.Equal(t, leaderTerm, n.Term())
-	require.Empty(t, n.rs.Load().votedFor)
-}
+	It("keeps followers from starting a new election while heartbeats arrive", func() {
+		Expect(waitFor(2*time.Second, func() bool {
+			return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
+		})).To(Succeed(), "cluster did not stabilise on n1")
 
-// TestElection_TermAgreementAcrossCluster: after election stabilises, all
-// three nodes report the same term. Sanity check that the heartbeat path
-// propagates the leader's term to followers.
-func TestElection_TermAgreementAcrossCluster(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+		leaderTerm := n1.Term()
 
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
-	}))
+		// Watch for 500ms — well beyond a follower's election timeout window.
+		// Heartbeats every 30ms must keep the followers parked.
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			Expect(n2.Term()).To(Equal(leaderTerm), "n2 term must not advance under heartbeat")
+			Expect(n3.Term()).To(Equal(leaderTerm), "n3 term must not advance under heartbeat")
+			Expect(n2.State()).To(Equal(Follower), "n2 must remain Follower")
+			Expect(n3.State()).To(Equal(Follower), "n3 must remain Follower")
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
 
-	term := n1.Term()
-	require.Equal(t, term, n2.Term(), "n2 term must match leader")
-	require.Equal(t, term, n3.Term(), "n3 term must match leader")
-	require.GreaterOrEqual(t, term, uint64(1), "election advances term at least once")
-}
+	It("steps down when observing a higher-term RequestVote", func() {
+		Expect(waitFor(2*time.Second, func() bool { return n1.IsLeader() })).To(Succeed())
+		leaderTerm := n1.Term()
+
+		// The leader has a no-op entry at index 1 (becomeLeader §5.4.2). The
+		// intruder's log must be at least as up-to-date (same term, same index).
+		reply := n1.HandleRequestVote(&RequestVoteArgs{
+			Term:         leaderTerm + 5,
+			CandidateID:  "n2",
+			LastLogIndex: 1,
+			LastLogTerm:  leaderTerm,
+		})
+
+		Expect(reply.VoteGranted).To(BeTrue(), "leader must grant a higher-term vote from an up-to-date candidate")
+		Expect(reply.Term).To(Equal(leaderTerm + 5))
+		Expect(n1.State()).To(Equal(Follower), "leader must step down")
+		Expect(n1.IsLeader()).To(BeFalse())
+		Expect(n1.Term()).To(Equal(leaderTerm + 5))
+		Expect(n1.rs.Load().votedFor).To(Equal("n2"))
+	})
+
+	It("rejects a higher-term vote from a non-voter", func() {
+		n, err := NewNode(Config{ID: "n1", ElectionTimeout: time.Hour, HeartbeatTimeout: 10 * time.Millisecond})
+		Expect(err).NotTo(HaveOccurred())
+		startGinkgoNode(n)
+
+		Expect(waitFor(2*time.Second, func() bool { return n.IsLeader() })).To(Succeed())
+		leaderTerm := n.Term()
+
+		reply := n.HandleRequestVote(&RequestVoteArgs{
+			Term:         leaderTerm + 5,
+			CandidateID:  "n2",
+			LastLogIndex: 1,
+			LastLogTerm:  leaderTerm,
+		})
+
+		Expect(reply.VoteGranted).To(BeFalse())
+		Expect(reply.Term).To(Equal(leaderTerm))
+		Expect(n.IsLeader()).To(BeTrue(), "non-voter RequestVote must not step down the leader")
+		Expect(n.Term()).To(Equal(leaderTerm))
+		Expect(n.rs.Load().votedFor).To(BeEmpty())
+	})
+
+	It("agrees on the elected term across the cluster", func() {
+		Expect(waitFor(2*time.Second, func() bool {
+			return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
+		})).To(Succeed())
+
+		term := n1.Term()
+		Expect(n2.Term()).To(Equal(term), "n2 term must match leader")
+		Expect(n3.Term()).To(Equal(term), "n3 term must match leader")
+		Expect(term).To(BeNumerically(">=", uint64(1)), "election advances term at least once")
+	})
+})
