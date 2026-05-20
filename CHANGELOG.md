@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.304.1] - 2026-05-21
+
+### Fixed
+
+- Doc-rot in `cluster_help_test.go` and `nfs_help_test.go` docstrings —
+  "near the bottom of this file" replaced with an explicit anchor to
+  the "Regenerate goldens:" section. (Sibling `TestCLI_UpstreamPut_AllFlags`
+  fix landed in v0.0.303.0 #500.)
+
 ## [0.0.304.0] - 2026-05-21
 
 ### Tests
