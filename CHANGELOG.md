@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.274.0] - 2026-05-20 - perf(tests): trim remaining internal test latency
+
+Internal Go test runs now spend less time in synthetic setup and teardown while
+keeping the behavior under test intact. This makes the remaining internal suite
+faster to run during PR review without lowering the nightly hardening knobs.
+
+### Changed
+
+- Reduced the default Raft chaos smoke duration from 30s to 10s, while keeping
+  `RAFT_CHAOS_DURATION` available for longer manual or nightly runs.
+- Reduced the default Raft property smoke run to 30 rapid sequences, while
+  preserving explicit `RAPID_CHECKS` and `-rapid.checks` overrides.
+- Replaced expensive read-amplification prepopulation writes with direct read
+  access patterns, since the test measures readamp tracking before storage fetch.
+- Warmed the block-cache workload with one contiguous write instead of thousands
+  of metadata-heavy per-block writes.
+- Shortened admin and serveruntime test server shutdown waits so Hertz cleanup no
+  longer dominates targeted test runtime.
+
+### Fixed
+
+- Made the migration executor Phase 3 TTL test deterministic by invoking the TTL
+  sweep directly, removing a background ticker timing race while still checking
+  the one-extension-then-cancel behavior.
+
 ## [0.0.273.0] - 2026-05-20 - feat(lifecycle): MinIO-Parity Phase 1 — Filter/Expiration/AbortMPU + worker rework
 
 AWS/MinIO-parity lifecycle 규칙 평가 + worker 재설계. 새 Filter (Tag/Size/And), Expiration.Date + ExpiredObjectDeleteMarker, AbortIncompleteMultipartUpload, hardened Validate, N×ListObjectVersions bottleneck 제거. Split execution: object-side는 leader-only, MPU-side는 모든 node.
