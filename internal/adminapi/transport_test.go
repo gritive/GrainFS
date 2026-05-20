@@ -91,6 +91,34 @@ func TestTransport_PutBody(t *testing.T) {
 	}
 }
 
+func TestTransport_PostRaw(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"raw":"body"}`))
+	}))
+	defer srv.Close()
+
+	tp, err := adminapi.NewTransport(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := tp.PostRaw(context.Background(), "/x", map[string]string{"a": "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["a"] != "b" {
+		t.Errorf("body = %v, want a=b", got)
+	}
+	if string(raw) != `{"raw":"body"}` {
+		t.Errorf("raw = %q", raw)
+	}
+}
+
 func TestTransport_NonJSONErrorResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
