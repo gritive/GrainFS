@@ -49,6 +49,8 @@ type badgerSnapshotStore struct {
 const (
 	snapshotEncodingVersion       byte = 0x03
 	snapshotEncodingVersionLegacy byte = 0x02
+	snapshotChunkedVersion        byte = 0x83
+	snapshotChunkSize                  = 8 << 20
 )
 
 // newBadgerSnapshotStore opens a SnapshotStore view into db under prefix.
@@ -68,6 +70,23 @@ func (s *badgerSnapshotStore) latestKey() []byte {
 	return key
 }
 
+func (s *badgerSnapshotStore) chunkKey(id []byte, ordinal uint32) []byte {
+	const sep = "/"
+	const suffix = "chunk/"
+	key := make([]byte, len(s.keyPrefix)+len(suffix)+len(id)+len(sep)+4)
+	off := 0
+	copy(key[off:], s.keyPrefix)
+	off += len(s.keyPrefix)
+	copy(key[off:], suffix)
+	off += len(suffix)
+	copy(key[off:], id)
+	off += len(id)
+	copy(key[off:], sep)
+	off += len(sep)
+	binary.BigEndian.PutUint32(key[off:], ordinal)
+	return key
+}
+
 // Latest returns the most recent saved snapshot, or (nil, nil) when no
 // snapshot has been persisted yet. A decode failure (bad version, truncated
 // blob) is surfaced so the caller can refuse to start with a corrupt
@@ -83,6 +102,17 @@ func (s *badgerSnapshotStore) Latest() (*Snapshot, error) {
 			return fmt.Errorf("badgerSnapshotStore: Latest: %w", err)
 		}
 		return item.Value(func(val []byte) error {
+			if len(val) > 0 && val[0] == snapshotChunkedVersion {
+				manifest, decErr := decodeSnapshotChunkManifest(val)
+				if decErr != nil {
+					return decErr
+				}
+				chunked, readErr := s.readChunkedSnapshot(txn, manifest)
+				if readErr != nil {
+					return readErr
+				}
+				val = chunked
+			}
 			decoded, decErr := decodeSnapshot(val)
 			if decErr != nil {
 				return decErr
@@ -104,7 +134,14 @@ func (s *badgerSnapshotStore) Save(snap *Snapshot) error {
 	}
 	normalized := normalizedSnapshot(*snap)
 	val := encodeSnapshot(&normalized)
-	err := s.db.Update(func(txn *badger.Txn) error {
+	if len(val) > snapshotChunkSize {
+		return s.saveChunkedSnapshot(&normalized, val)
+	}
+	oldManifest, hasOldManifest, err := s.latestChunkManifest()
+	if err != nil {
+		return err
+	}
+	err = s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(s.latestKey(), val)
 	})
 	if err != nil {
@@ -113,7 +150,201 @@ func (s *badgerSnapshotStore) Save(snap *Snapshot) error {
 	if err := s.db.Sync(); err != nil {
 		return fmt.Errorf("badgerSnapshotStore: Save sync: %w", err)
 	}
+	if hasOldManifest {
+		if err := s.deleteSnapshotChunks(oldManifest); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+type snapshotChunkManifest struct {
+	totalLen  uint64
+	chunkSize uint32
+	numChunks uint32
+	id        []byte
+}
+
+func (s *badgerSnapshotStore) saveChunkedSnapshot(snap *Snapshot, val []byte) error {
+	oldManifest, hasOldManifest, err := s.latestChunkManifest()
+	if err != nil {
+		return err
+	}
+	id := snapshotChunkID(snap)
+	numChunks := uint32((len(val) + snapshotChunkSize - 1) / snapshotChunkSize)
+	manifest := snapshotChunkManifest{
+		totalLen:  uint64(len(val)),
+		chunkSize: snapshotChunkSize,
+		numChunks: numChunks,
+		id:        id,
+	}
+	for i := uint32(0); i < numChunks; i++ {
+		start := int(i) * snapshotChunkSize
+		end := start + snapshotChunkSize
+		if end > len(val) {
+			end = len(val)
+		}
+		chunk := val[start:end]
+		err := s.db.Update(func(txn *badger.Txn) error {
+			return txn.Set(s.chunkKey(id, i), chunk)
+		})
+		if err != nil {
+			return fmt.Errorf("badgerSnapshotStore: Save chunk %d/%d: %w", i+1, numChunks, err)
+		}
+	}
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerSnapshotStore: Save chunk sync: %w", err)
+	}
+	manifestVal := encodeSnapshotChunkManifest(manifest)
+	err = s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(s.latestKey(), manifestVal)
+	})
+	if err != nil {
+		return fmt.Errorf("badgerSnapshotStore: Save manifest: %w", err)
+	}
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerSnapshotStore: Save sync: %w", err)
+	}
+	if hasOldManifest && string(oldManifest.id) != string(id) {
+		if err := s.deleteSnapshotChunks(oldManifest); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *badgerSnapshotStore) latestChunkManifest() (snapshotChunkManifest, bool, error) {
+	var manifest snapshotChunkManifest
+	var found bool
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(s.latestKey())
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("badgerSnapshotStore: latest manifest: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			if len(val) == 0 || val[0] != snapshotChunkedVersion {
+				return nil
+			}
+			decoded, err := decodeSnapshotChunkManifest(val)
+			if err != nil {
+				return err
+			}
+			manifest = decoded
+			found = true
+			return nil
+		})
+	})
+	if err != nil {
+		return snapshotChunkManifest{}, false, err
+	}
+	return manifest, found, nil
+}
+
+func (s *badgerSnapshotStore) deleteSnapshotChunks(manifest snapshotChunkManifest) error {
+	err := s.db.Update(func(txn *badger.Txn) error {
+		for i := uint32(0); i < manifest.numChunks; i++ {
+			if err := txn.Delete(s.chunkKey(manifest.id, i)); err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("badgerSnapshotStore: delete old chunks: %w", err)
+	}
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("badgerSnapshotStore: delete old chunks sync: %w", err)
+	}
+	return nil
+}
+
+func snapshotChunkID(snap *Snapshot) []byte {
+	id := make([]byte, 16)
+	binary.BigEndian.PutUint64(id[:8], snap.LastIncludedIndex)
+	binary.BigEndian.PutUint64(id[8:], snap.LastIncludedTerm)
+	return id
+}
+
+func encodeSnapshotChunkManifest(manifest snapshotChunkManifest) []byte {
+	size := 1 + 8 + 4 + 4 + 2 + len(manifest.id)
+	buf := make([]byte, size)
+	off := 0
+	buf[off] = snapshotChunkedVersion
+	off++
+	binary.BigEndian.PutUint64(buf[off:], manifest.totalLen)
+	off += 8
+	binary.BigEndian.PutUint32(buf[off:], manifest.chunkSize)
+	off += 4
+	binary.BigEndian.PutUint32(buf[off:], manifest.numChunks)
+	off += 4
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(manifest.id)))
+	off += 2
+	copy(buf[off:], manifest.id)
+	return buf
+}
+
+func decodeSnapshotChunkManifest(val []byte) (snapshotChunkManifest, error) {
+	if len(val) < 1+8+4+4+2 {
+		return snapshotChunkManifest{}, fmt.Errorf("badgerSnapshotStore: short chunk manifest")
+	}
+	if val[0] != snapshotChunkedVersion {
+		return snapshotChunkManifest{}, fmt.Errorf("badgerSnapshotStore: unknown chunk manifest version 0x%02x", val[0])
+	}
+	off := 1
+	totalLen := binary.BigEndian.Uint64(val[off:])
+	off += 8
+	chunkSize := binary.BigEndian.Uint32(val[off:])
+	off += 4
+	numChunks := binary.BigEndian.Uint32(val[off:])
+	off += 4
+	idLen := int(binary.BigEndian.Uint16(val[off:]))
+	off += 2
+	if len(val) != off+idLen {
+		return snapshotChunkManifest{}, fmt.Errorf("badgerSnapshotStore: invalid chunk manifest id length")
+	}
+	if chunkSize == 0 || numChunks == 0 {
+		return snapshotChunkManifest{}, fmt.Errorf("badgerSnapshotStore: invalid chunk manifest geometry")
+	}
+	id := make([]byte, idLen)
+	copy(id, val[off:])
+	return snapshotChunkManifest{
+		totalLen:  totalLen,
+		chunkSize: chunkSize,
+		numChunks: numChunks,
+		id:        id,
+	}, nil
+}
+
+func (s *badgerSnapshotStore) readChunkedSnapshot(txn *badger.Txn, manifest snapshotChunkManifest) ([]byte, error) {
+	if manifest.totalLen > uint64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("badgerSnapshotStore: chunked snapshot too large")
+	}
+	buf := make([]byte, int(manifest.totalLen))
+	off := 0
+	for i := uint32(0); i < manifest.numChunks; i++ {
+		item, err := txn.Get(s.chunkKey(manifest.id, i))
+		if err != nil {
+			return nil, fmt.Errorf("badgerSnapshotStore: Latest chunk %d/%d: %w", i+1, manifest.numChunks, err)
+		}
+		err = item.Value(func(chunk []byte) error {
+			if off+len(chunk) > len(buf) {
+				return fmt.Errorf("badgerSnapshotStore: chunked snapshot length overflow")
+			}
+			copy(buf[off:], chunk)
+			off += len(chunk)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if off != len(buf) {
+		return nil, fmt.Errorf("badgerSnapshotStore: chunked snapshot length mismatch (%d != %d)", off, len(buf))
+	}
+	return buf, nil
 }
 
 // encodeSnapshot serialises a Snapshot into the binary format documented

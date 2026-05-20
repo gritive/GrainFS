@@ -8,6 +8,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +119,73 @@ func TestBadgerSnapshotStore_RoundTripsCanonicalMetadata(t *testing.T) {
 	require.Equal(t, uint64(11), out.JointEnterIndex)
 	require.Equal(t, []string{"learner-a"}, out.JointManagedLearners)
 	require.Equal(t, []byte("fsm"), out.Data)
+}
+
+func TestBadgerSnapshotStore_RoundTripsLargeSnapshotData(t *testing.T) {
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, err := NewBadgerSnapshotStore(db, []byte("raft/v2/snap/"))
+	require.NoError(t, err)
+
+	data := make([]byte, 17<<20)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	in := &Snapshot{
+		LastIncludedIndex: 12,
+		LastIncludedTerm:  3,
+		Configuration:     []string{"n1"},
+		Data:              data,
+	}
+
+	require.NoError(t, store.Save(in))
+	out, err := store.Latest()
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.Equal(t, in.LastIncludedIndex, out.LastIncludedIndex)
+	require.Equal(t, in.LastIncludedTerm, out.LastIncludedTerm)
+	require.Equal(t, in.Configuration, out.Configuration)
+	require.Equal(t, data, out.Data)
+}
+
+func TestBadgerSnapshotStore_ReplacingLargeSnapshotRemovesOldChunks(t *testing.T) {
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, err := newBadgerSnapshotStore(db, []byte("raft/v2/snap/"))
+	require.NoError(t, err)
+
+	large := &Snapshot{
+		LastIncludedIndex: 12,
+		LastIncludedTerm:  3,
+		Configuration:     []string{"n1"},
+		Data:              make([]byte, 17<<20),
+	}
+	require.NoError(t, store.Save(large))
+	oldChunkKey := store.chunkKey(snapshotChunkID(large), 0)
+
+	err = db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(oldChunkKey)
+		return err
+	})
+	require.NoError(t, err)
+
+	small := &Snapshot{
+		LastIncludedIndex: 13,
+		LastIncludedTerm:  3,
+		Configuration:     []string{"n1"},
+		Data:              []byte("small"),
+	}
+	require.NoError(t, store.Save(small))
+
+	err = db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(oldChunkKey)
+		return err
+	})
+	require.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
 
 func TestInstallSnapshot_PreservesLearners(t *testing.T) {
