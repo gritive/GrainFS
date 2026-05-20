@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.287.0] - 2026-05-20
+
+### Changed
+
+- Reduced NFS buffer-pool test I/O while covering the small, medium, and large
+  buffer tiers explicitly.
+- Reused the read-only export dispatcher fixture across read-only mutation
+  guard subtests instead of opening a fresh backend per case.
+- Reduced the storage snapshot restore multi-segment fixture to the minimum
+  object size that crosses the segment boundary.
+
 ## [0.0.286.0] - 2026-05-20
 
 ### Changed

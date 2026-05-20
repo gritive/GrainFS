@@ -722,14 +722,14 @@ func TestDeleteBucket_ClearsPolicy(t *testing.T) {
 // GetObject yields byte-identical bytes.
 //
 // Two sizes:
-//   - 32 MiB → 2 × 16 MiB segments (multi-chunk case).
+//   - DefaultChunkSize+1 → 2 segments (multi-chunk case).
 //   - 100 KiB → 1 segment (single-chunk case).
 func TestSnapshotRestore_ChunkedObjectRoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
 		size int
 	}{
-		{name: "multi_segment_32MiB", size: 32 << 20},
+		{name: "multi_segment_chunk_plus_one", size: int(DefaultChunkSize) + 1},
 		{name: "single_segment_100KiB", size: 100 << 10},
 	}
 	for _, tc := range cases {
@@ -748,8 +748,8 @@ func TestSnapshotRestore_ChunkedObjectRoundTrip(t *testing.T) {
 			putObj, err := b.PutObject(ctx, bucket, key, bytes.NewReader(payload), "application/octet-stream")
 			require.NoError(t, err)
 			require.NotEmpty(t, putObj.Segments, "PutObject must produce segments")
-			if tc.size >= int(DefaultChunkSize)*2 {
-				require.GreaterOrEqual(t, len(putObj.Segments), 2, "32 MiB must split into ≥ 2 segments")
+			if tc.size > int(DefaultChunkSize) {
+				require.GreaterOrEqual(t, len(putObj.Segments), 2, "chunk+1 object must split into ≥ 2 segments")
 			}
 
 			// Snapshot: ListAllObjects must include Segments.

@@ -26,6 +26,10 @@ func newDispatcherWithExports(t *testing.T, rows map[string]exportConfig) *Dispa
 }
 
 func TestReadOnlyExportMutationGuards(t *testing.T) {
+	d := newDispatcherWithExports(t, map[string]exportConfig{
+		"ro": {readOnly: true, generation: 1},
+	})
+
 	cases := []struct {
 		name   string
 		setup  func(*Dispatcher)
@@ -124,9 +128,8 @@ func TestReadOnlyExportMutationGuards(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := newDispatcherWithExports(t, map[string]exportConfig{
-				"ro": {readOnly: true, generation: 1},
-			})
+			d.savedPath = ""
+			d.currentPath = ""
 			tc.setup(d)
 			require.Equal(t, NFS4ERR_ROFS, tc.invoke(d).Status)
 		})
