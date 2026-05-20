@@ -111,6 +111,102 @@ func TestEvaluate_Matrix(t *testing.T) {
 	}
 }
 
+// TestEvaluate_ConditionContextPopulated verifies that EvalResult carries the
+// IAM condition keys observed at evaluation time on every outcome path —
+// allow, explicit deny, and implicit deny. T51' B2 review.
+func TestEvaluate_ConditionContextPopulated(t *testing.T) {
+	readonly, err := Parse([]byte(`{"Statement":[{"Sid":"AllowGet","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::a/*"}]}`))
+	if err != nil {
+		t.Fatalf("parse readonly: %v", err)
+	}
+	allowList, err := Parse([]byte(`{"Statement":[{"Sid":"AllowList","Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::a"}]}`))
+	if err != nil {
+		t.Fatalf("parse allowList: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		doc  *Document
+		ctx  RequestContext
+		want map[string]string
+	}{
+		{
+			name: "action+resource always present",
+			doc:  readonly,
+			ctx:  RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::a/x"},
+			want: map[string]string{
+				"aws:Action":   "s3:GetObject",
+				"aws:Resource": "arn:aws:s3:::a/x",
+			},
+		},
+		{
+			name: "source ip included when set",
+			doc:  readonly,
+			ctx:  RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::a/x", SourceIP: "10.0.0.1"},
+			want: map[string]string{
+				"aws:Action":   "s3:GetObject",
+				"aws:Resource": "arn:aws:s3:::a/x",
+				"aws:SourceIp": "10.0.0.1",
+			},
+		},
+		{
+			name: "prefix included on list requests",
+			doc:  allowList,
+			ctx:  RequestContext{Action: "s3:ListBucket", Resource: "arn:aws:s3:::a", Prefix: "data/"},
+			want: map[string]string{
+				"aws:Action":   "s3:ListBucket",
+				"aws:Resource": "arn:aws:s3:::a",
+				"s3:prefix":    "data/",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("allow_"+tc.name, func(t *testing.T) {
+			got := Evaluate(EvalInput{
+				PrincipalPolicies:    []*Document{tc.doc},
+				PrincipalPolicyNames: []string{"p"},
+				Principal:            "sa-1",
+				Ctx:                  tc.ctx,
+			})
+			if got.Decision != DecisionAllow {
+				t.Fatalf("decision = %v want Allow (reason: %s)", got.Decision, got.Reason)
+			}
+			assertConditionContextEqual(t, got.ConditionContext, tc.want)
+		})
+	}
+
+	// Implicit deny must still carry the request facts so audit consumers
+	// can see "what was the request" even when no statement matched.
+	t.Run("implicit_deny_carries_context", func(t *testing.T) {
+		got := Evaluate(EvalInput{
+			PrincipalPolicies:    []*Document{readonly},
+			PrincipalPolicyNames: []string{"readonly"},
+			Principal:            "sa-1",
+			Ctx:                  RequestContext{Action: "s3:DeleteObject", Resource: "arn:aws:s3:::a/x"},
+		})
+		if got.Decision != DecisionDeny {
+			t.Fatalf("decision = %v want Deny", got.Decision)
+		}
+		assertConditionContextEqual(t, got.ConditionContext, map[string]string{
+			"aws:Action":   "s3:DeleteObject",
+			"aws:Resource": "arn:aws:s3:::a/x",
+		})
+	})
+}
+
+func assertConditionContextEqual(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d len(want)=%d got=%v want=%v", len(got), len(want), got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("got[%q]=%q want %q", k, got[k], v)
+		}
+	}
+}
+
 // TestEvaluate_MatchedPolicy verifies that EvalResult.MatchedPolicy is
 // populated from PrincipalPolicyNames / ResourcePolicyBucket. T51' §6.
 func TestEvaluate_MatchedPolicy(t *testing.T) {

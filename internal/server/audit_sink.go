@@ -6,7 +6,16 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
+
+// Compile-time guard: *iam.AuditLogger MUST satisfy
+// s3auth.AuditEmitterDetailed so RequestAuthorizer.Decide's runtime type
+// assertion succeeds and the detailed audit emit path actually fires in
+// production. Both methods take s3auth.AuditAllowDetails (with
+// iam.AuditDetails as a Go type alias for the same type). T51' B1 review.
+var _ s3auth.AuditEmitterDetailed = (*iam.AuditLogger)(nil)
 
 type auditSink struct {
 	outbox  *audit.Outbox

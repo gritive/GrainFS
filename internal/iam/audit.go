@@ -75,13 +75,12 @@ type AuditLogger struct {
 func NewAuditLogger(em AuditEmitter) *AuditLogger { return &AuditLogger{em: em} }
 
 // AuditDetails carries the optional policy-decision metadata threaded from
-// the authorizer's EvalResult. Zero-valued fields are skipped on output.
-type AuditDetails struct {
-	MatchedPolicyID  string
-	MatchedSID       string
-	AuthzLatencyUS   int32
-	ConditionContext map[string]string
-}
+// the authorizer's EvalResult. Type-aliased to s3auth.AuditAllowDetails so
+// *AuditLogger satisfies s3auth.AuditEmitterDetailed at runtime — the two
+// types are LITERALLY the same after Go's type-alias rule, not just
+// structurally identical. A compile-time guard lives in
+// internal/server/audit_sink.go (T51' B1 review fix).
+type AuditDetails = s3auth.AuditAllowDetails
 
 // RecordAllow emits an allow decision. Thin wrapper around
 // RecordAllowDetailed for callers that don't have policy decision details.

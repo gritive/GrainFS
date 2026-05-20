@@ -19,6 +19,36 @@ type EvalResult struct {
 	MatchedPolicy string
 	MatchedSid    string
 	Reason        string
+	// ConditionContext echoes the IAM condition keys observed at evaluation
+	// time (e.g. aws:SourceIp, s3:prefix, the action/resource ARN). Populated
+	// from EvalInput.Ctx; empty when no fields were set. Surfaced into
+	// audit.s3.condition_context_json so operators can correlate a decision
+	// with the exact request facts that drove it. T51' B2 review.
+	ConditionContext map[string]string
+}
+
+// ConditionContextFromRequest snapshots the request-context fields available
+// at evaluation time into a stable map. Empty values are skipped so the
+// resulting JSON has no zero-valued keys. Keys use the standard AWS/S3
+// condition-key vocabulary so consumers can filter without translation.
+// Exported so short-circuit paths in s3auth.Authorizer (which don't run
+// Evaluate) can attach the same context shape to their EvalResults.
+func ConditionContextFromRequest(c RequestContext) map[string]string {
+	var out map[string]string
+	put := func(k, v string) {
+		if v == "" {
+			return
+		}
+		if out == nil {
+			out = make(map[string]string, 4)
+		}
+		out[k] = v
+	}
+	put("aws:Action", c.Action)
+	put("aws:Resource", c.Resource)
+	put("aws:SourceIp", c.SourceIP)
+	put("s3:prefix", c.Prefix)
+	return out
 }
 
 type EvalInput struct {
@@ -56,8 +86,12 @@ func bucketPolicyMatchID(bucket string) string {
 }
 
 // Evaluate implements: explicit Deny > explicit Allow > implicit Deny.
-// Union of principal-attached and resource-attached policies.
+// Union of principal-attached and resource-attached policies. Every return
+// path attaches a ConditionContext snapshot of the request facts that drove
+// the decision; the snapshot is the same for allow / deny / implicit-deny so
+// audit consumers see "what was the request" regardless of outcome.
 func Evaluate(in EvalInput) EvalResult {
+	cc := ConditionContextFromRequest(in.Ctx)
 	allowMatch := ""
 	allowSid := ""
 	allowPolicy := ""
@@ -71,10 +105,11 @@ func Evaluate(in EvalInput) EvalResult {
 			}
 			if st.matches(in.Ctx) {
 				return EvalResult{
-					Decision:      DecisionDeny,
-					MatchedPolicy: principalPolicyName(in.PrincipalPolicyNames, i),
-					MatchedSid:    st.Sid,
-					Reason:        "explicit Deny on principal policy",
+					Decision:         DecisionDeny,
+					MatchedPolicy:    principalPolicyName(in.PrincipalPolicyNames, i),
+					MatchedSid:       st.Sid,
+					Reason:           "explicit Deny on principal policy",
+					ConditionContext: cc,
 				}
 			}
 		}
@@ -89,10 +124,11 @@ func Evaluate(in EvalInput) EvalResult {
 			}
 			if st.matches(in.Ctx) {
 				return EvalResult{
-					Decision:      DecisionDeny,
-					MatchedPolicy: bucketPolicyMatchID(in.ResourcePolicyBucket),
-					MatchedSid:    st.Sid,
-					Reason:        "explicit Deny on bucket policy",
+					Decision:         DecisionDeny,
+					MatchedPolicy:    bucketPolicyMatchID(in.ResourcePolicyBucket),
+					MatchedSid:       st.Sid,
+					Reason:           "explicit Deny on bucket policy",
+					ConditionContext: cc,
 				}
 			}
 		}
@@ -129,13 +165,18 @@ func Evaluate(in EvalInput) EvalResult {
 	}
 	if allowMatch != "" {
 		return EvalResult{
-			Decision:      DecisionAllow,
-			MatchedPolicy: allowPolicy,
-			MatchedSid:    allowSid,
-			Reason:        "explicit Allow on " + allowMatch,
+			Decision:         DecisionAllow,
+			MatchedPolicy:    allowPolicy,
+			MatchedSid:       allowSid,
+			Reason:           "explicit Allow on " + allowMatch,
+			ConditionContext: cc,
 		}
 	}
-	return EvalResult{Decision: DecisionDeny, Reason: "implicit Deny (no statement matched)"}
+	return EvalResult{
+		Decision:         DecisionDeny,
+		Reason:           "implicit Deny (no statement matched)",
+		ConditionContext: cc,
+	}
 }
 
 func principalMatches(p *StringOrMap, principal string, allowAnon bool) bool {

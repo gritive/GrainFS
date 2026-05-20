@@ -107,22 +107,29 @@ func (s *Server) buildAuthorizer() {
 			if key != "" {
 				resource += "/" + key
 			}
+			// Note: SourceIP/Prefix are not threaded through IAMChecker today
+			// — extending the closure signature is a wider refactor than this
+			// fix warrants. ConditionContext picks up aws:Action +
+			// aws:Resource (always present), giving operators correlate-by-
+			// request facts on every audit row. SourceIP enrichment is a
+			// follow-up. T51' B2 review.
 			result := pa.Authorize(context.Background(), saID, bucket, policy.RequestContext{
 				Action:   action.PolicyActionString(),
 				Resource: resource,
 			})
 			detail := s3auth.AuthzDetail{
-				MatchedPolicyID: result.MatchedPolicy,
-				MatchedSID:      result.MatchedSid,
-				Reason:          result.Reason,
+				MatchedPolicyID:  result.MatchedPolicy,
+				MatchedSID:       result.MatchedSid,
+				Reason:           result.Reason,
+				ConditionContext: result.ConditionContext,
 				// AnonAllow is set when an anonymous request is permitted by
 				// either iam.anon-enabled or the default bucket's implicit
 				// anon policy (D#2). The authorizer surfaces both via
 				// result.Reason; pattern-match here to keep the policy layer
 				// agnostic of audit vocabulary.
 				AnonAllow: saID == "" && result.Decision == policy.DecisionAllow &&
-					(result.Reason == "iam.anon-enabled=true" ||
-						result.Reason == "default bucket implicit anon (D#2)"),
+					(result.Reason == s3auth.ReasonAnonEnabled ||
+						result.Reason == s3auth.ReasonDefaultBucketImplicitAnon),
 			}
 			return result.Decision == policy.DecisionAllow, detail
 		}
