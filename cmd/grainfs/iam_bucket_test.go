@@ -197,8 +197,10 @@ func TestCLI_IAMBucketPolicyPutDelete(t *testing.T) {
 	if gotMethod != http.MethodPut {
 		t.Errorf("policy put: expected PUT, got %s", gotMethod)
 	}
-	if string(gotBody) != policyDoc {
-		t.Errorf("policy put: body mismatch\nwant: %s\ngot:  %s", policyDoc, gotBody)
+	// Body must be the server-side envelope {"policy": <doc>}, not the raw doc.
+	wantBody := `{"policy":` + policyDoc + `}`
+	if string(gotBody) != wantBody {
+		t.Errorf("policy put: body mismatch\nwant: %s\ngot:  %s", wantBody, gotBody)
 	}
 
 	// policy delete

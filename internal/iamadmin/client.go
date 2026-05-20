@@ -202,9 +202,13 @@ func (c *Client) BucketList(ctx context.Context) ([]BucketListItem, error) {
 	return resp.Buckets, err
 }
 
-// BucketPolicyPut sends a raw JSON policy document to the server verbatim.
+// BucketPolicyPut sends a raw JSON policy document wrapped in the server's
+// BucketPolicySetReq envelope ({"policy": <doc>}).
 func (c *Client) BucketPolicyPut(ctx context.Context, bucket string, policy []byte) error {
-	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", json.RawMessage(policy), nil)
+	body := struct {
+		Policy json.RawMessage `json:"policy"`
+	}{Policy: json.RawMessage(policy)}
+	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", body, nil)
 }
 
 // BucketPolicyDelete removes the bucket policy.
