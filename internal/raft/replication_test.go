@@ -281,10 +281,7 @@ var _ = ginkgo.Describe("Replication scenarios", func() {
 		}, ginkgo.NodeTimeout(7*time.Second))
 
 		ginkgo.It("retries replication using conflict hints until followers converge", func(ginkgo.SpecContext) {
-			var counter struct {
-				ae map[string]int
-			}
-			counter.ae = make(map[string]int)
+			countingTransport := &countingAETransport{count: make(map[string]int)}
 
 			nodes, cleanup, err := startReplicationNodes(ids, defaultConfig, func(net *memNetwork, nodes []*Node) {
 				seedLogEntries(nodes[0], []LogEntry{{Term: 5, Index: 1, Command: []byte("leader-old")}})
@@ -298,7 +295,8 @@ var _ = ginkgo.Describe("Replication scenarios", func() {
 				for _, node := range nodes {
 					transport := net.Register(node.cfg.ID, node)
 					if node.cfg.ID == "n1" {
-						node.SetTransport(&countingAETransport{inner: transport, count: counter.ae})
+						countingTransport.inner = transport
+						node.SetTransport(countingTransport)
 					} else {
 						node.SetTransport(transport)
 					}
@@ -328,7 +326,10 @@ var _ = ginkgo.Describe("Replication scenarios", func() {
 			gomega.Expect(nodes[1].st.log.LastIndex()).To(gomega.BeNumerically(">=", uint64(3)), "n2 should have at least 3 entries")
 			gomega.Expect(entry.Term).To(gomega.Equal(uint64(5)), "n2's stale index-1 term should be replaced")
 			gomega.Expect(entry.Command).To(gomega.Equal([]byte("leader-old")), "n2's index-1 command should match n1's seed")
-			gomega.Expect(counter.ae["n2"]).To(gomega.BeNumerically(">", 0), "AE wrapper should have observed traffic to n2")
+			countingTransport.mu.Lock()
+			n2Traffic := countingTransport.count["n2"]
+			countingTransport.mu.Unlock()
+			gomega.Expect(n2Traffic).To(gomega.BeNumerically(">", 0), "AE wrapper should have observed traffic to n2")
 		}, ginkgo.NodeTimeout(8*time.Second))
 
 		ginkgo.It("caps AppendEntries batches at MaxEntriesPerAE", func(ginkgo.SpecContext) {
