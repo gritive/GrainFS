@@ -20,15 +20,20 @@ type iamAdminTarget struct {
 	nodes         int
 	adminSockPath func() string
 	pickNode      func(i int) *s3.Client
-	accessKey     string
-	secretKey     string
+	// endpoint returns the base S3 HTTP URL for node i (e.g. "http://127.0.0.1:9000").
+	endpoint  func(i int) string
+	accessKey string
+	secretKey string
 	// uniqueSA creates a fresh ServiceAccount scoped to the calling sub-test.
 	// Returns (saID, accessKey, secretKey). Registers t.Cleanup to delete the SA.
 	uniqueSA func(t *testing.T, caseName string) (saID, ak, sk string)
 	// uniqueBucket creates a bucket and registers t.Cleanup(DeleteBucket).
 	// Returns the actual bucket name used.
 	uniqueBucket func(t *testing.T, caseName string) string
-	isCluster    bool
+	// dataDirs returns all per-node data directories. Used for at-rest
+	// persistence assertions (e.g. secret-not-on-disk scans).
+	dataDirs  func() []string
+	isCluster bool
 }
 
 // iamClient returns an *iamadmin.Client wired to the admin UDS for this target.
@@ -49,6 +54,12 @@ func newSingleNodeIAMAdminTarget() iamAdminTarget {
 		},
 		pickNode: func(i int) *s3.Client {
 			return testS3Client
+		},
+		endpoint: func(i int) string {
+			return testServerURL
+		},
+		dataDirs: func() []string {
+			return []string{testServerDataDir}
 		},
 		accessKey: testAccessKey,
 		secretKey: testSecretKey,
@@ -88,6 +99,12 @@ func newSharedClusterIAMAdminTarget(t *testing.T) iamAdminTarget {
 		},
 		pickNode: func(i int) *s3.Client {
 			return c.S3Client(i % 4)
+		},
+		endpoint: func(i int) string {
+			return c.httpURLs[i%4]
+		},
+		dataDirs: func() []string {
+			return c.dataDirs
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
