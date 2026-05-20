@@ -61,3 +61,41 @@ func TestWALBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, tags, got, "tags from CreateMultipartUploadWithTags must materialise on the completed object")
 }
+
+type recordingPreparedReadAtBackend struct {
+	storage.Backend
+	calls int
+	obj   *storage.Object
+}
+
+func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	b.calls++
+	b.obj = obj
+	return copy(buf, "prepared"), nil
+}
+
+func TestWALBackend_ReadAtObject_DelegatesToInner(t *testing.T) {
+	inner, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+
+	w, err := wal.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, w.Close()) })
+
+	rec := &recordingPreparedReadAtBackend{Backend: inner}
+	wrapped := wal.NewBackend(rec, w)
+
+	reader, ok := any(wrapped).(interface {
+		ReadAtObject(context.Context, string, string, *storage.Object, int64, []byte) (int, error)
+	})
+	require.True(t, ok, "wal.Backend must expose prepared ReadAtObject so wrappers do not force a second metadata lookup")
+
+	obj := &storage.Object{Key: "k", Size: 8, ETag: "etag"}
+	buf := make([]byte, 8)
+	n, err := reader.ReadAtObject(context.Background(), "b", "k", obj, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, []byte("prepared"), buf)
+	require.Equal(t, 1, rec.calls)
+	require.Same(t, obj, rec.obj)
+}

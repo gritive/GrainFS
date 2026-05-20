@@ -68,11 +68,13 @@ rm -rf "$BENCH_DIR"
 mkdir -p "$BENCH_DIR"
 
 PIDS=()
+TARGET_DATA_DIRS=()
 START_BASE_URL=""
 START_ACCESS_KEY=""
 START_SECRET_KEY=""
 START_MODE=""
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
+BACKENDS_STARTED=0
 
 set_start_info() {
   START_BASE_URL="$1"
@@ -82,7 +84,9 @@ set_start_info() {
 }
 
 cleanup() {
-  echo "[bench] stopping comparison backends..."
+  if [[ "$BACKENDS_STARTED" == "1" ]]; then
+    echo "[bench] stopping comparison backends..."
+  fi
   stop_pids "${PIDS[@]:-}"
   stop_child_backends
   if [[ "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
@@ -142,6 +146,44 @@ stop_target_backends() {
   PIDS=("${PIDS[@]:-}")
 }
 
+reset_target_resources() {
+  TARGET_DATA_DIRS=()
+}
+
+register_target_data_dir() {
+  TARGET_DATA_DIRS+=("$1")
+}
+
+collect_resource_snapshot() {
+  local target="$1"
+  local op="$2"
+  local start_idx="$3"
+  local out="$PROFILE_ROOT/resource-results.tsv"
+  local target_pids=("${PIDS[@]:$start_idx}")
+  local idx pid ps_out rss_kb cpu_pct rss_mib data_dir disk_mib
+
+  ((${#target_pids[@]} > 0)) || return 0
+
+  for idx in "${!target_pids[@]}"; do
+    pid="${target_pids[$idx]}"
+    [[ -n "$pid" ]] || continue
+    ps_out="$(ps -o rss=,pcpu= -p "$pid" 2>/dev/null || true)"
+    [[ -n "$ps_out" ]] || continue
+    if ! read -r rss_kb cpu_pct <<<"$ps_out"; then
+      continue
+    fi
+    [[ -n "${rss_kb:-}" && -n "${cpu_pct:-}" ]] || continue
+    rss_mib="$(awk -v kb="$rss_kb" 'BEGIN { printf "%.2f", kb / 1024 }' || true)"
+    data_dir="${TARGET_DATA_DIRS[$idx]:-}"
+    disk_mib=""
+    if [[ -n "$data_dir" && -d "$data_dir" ]]; then
+      disk_mib="$(du -sk "$data_dir" 2>/dev/null | awk '{ printf "%.2f", $1 / 1024 }' || true)"
+    fi
+    printf '%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n' \
+      "$target" "$op" "$((idx + 1))" "$pid" "$rss_mib" "$cpu_pct" "${disk_mib:-0}" "$data_dir" >>"$out"
+  done
+}
+
 start_grainfs_single() {
   if [[ "${GRAINFS_SINGLE_URL:-}" != "" ]]; then
     set_start_info "$GRAINFS_SINGLE_URL" "${GRAINFS_ACCESS_KEY:-}" "${GRAINFS_SECRET_KEY:-}" "external"
@@ -156,11 +198,21 @@ start_grainfs_single() {
 
   local data_dir="$BENCH_DIR/grainfs-single"
   local port
+  local extra=()
+  local extra_flags=()
   port="$(bench_free_port)"
   mkdir -p "$data_dir"
+  register_target_data_dir "$data_dir"
   BENCH_ENCRYPTION_KEY_FILE="$data_dir/encryption.key"
   export BENCH_ENCRYPTION_KEY_FILE
   bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
+  if [[ "$BENCH_PPROF" == "1" ]]; then
+    GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
+    extra+=(--pprof-port "$PPROF_BASE_PORT")
+  fi
+  if [[ -n "${EXTRA_GRAINFS_SERVE_FLAGS:-}" ]]; then
+    read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"
+  fi
 
   "$BINARY" serve \
     --data "$data_dir" \
@@ -172,9 +224,14 @@ start_grainfs_single() {
     --scrub-interval 0 \
     --lifecycle-interval 0 \
     --log-level warn \
+    "${extra[@]}" \
+    "${extra_flags[@]}" \
     >"$PROFILE_ROOT/grainfs-single.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "grainfs-single S3" 180 0.2 >&2
+  if [[ "$BENCH_PPROF" == "1" ]]; then
+    bench_wait_tcp_port "127.0.0.1" "$PPROF_BASE_PORT" "grainfs-single pprof" 60 0.2 >&2
+  fi
   bench_bootstrap_iam_credentials "$BINARY" "$data_dir" "bench-s3-compat" >&2
   GRAINFS_ADMIN_DATA_DIR="$data_dir"
   GRAINFS_SA_ID="$SA_ID"
@@ -207,6 +264,7 @@ start_grainfs_cluster() {
   mkdir -p "$cluster_dir"
   for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
     mkdir -p "$cluster_dir/n${idx}"
+    register_target_data_dir "$cluster_dir/n${idx}"
     http_ports+=("$(bench_free_port)")
     raft_ports+=("$(bench_free_port)")
     if [[ "$BENCH_PPROF" == "1" ]]; then
@@ -304,6 +362,7 @@ start_minio() {
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
   mkdir -p "$data_dir"
+  register_target_data_dir "$data_dir"
 
   MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
   MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
@@ -343,6 +402,7 @@ start_minio_cluster() {
   local idx
   for idx in $(seq 1 "$nodes"); do
     mkdir -p "$base_dir/n${idx}"
+    register_target_data_dir "$base_dir/n${idx}"
     ports+=("$(bench_free_port)")
     console_ports+=("$(bench_free_port)")
   done
@@ -412,6 +472,7 @@ start_rustfs() {
   port="$(bench_free_port)"
   console_port="$(bench_free_port)"
   mkdir -p "$data_dir"
+  register_target_data_dir "$data_dir"
 
   RUSTFS_ACCESS_KEY="$RUSTFS_ACCESS_KEY" \
   RUSTFS_SECRET_KEY="$RUSTFS_SECRET_KEY" \
@@ -450,6 +511,7 @@ start_rustfs_cluster() {
   local idx
   for idx in $(seq 1 "$nodes"); do
     mkdir -p "$base_dir/n${idx}"
+    register_target_data_dir "$base_dir/n${idx}"
     ports+=("$(bench_free_port)")
     console_ports+=("$(bench_free_port)")
   done
@@ -499,10 +561,12 @@ write_summary_header() {
     echo "- noclear: ${WARP_NOCLEAR}"
     echo "- host select: ${WARP_HOST_SELECT}"
     echo "- raw artifacts: ${PROFILE_ROOT}"
+    echo "- host preflight: ${PROFILE_ROOT}/host-preflight.txt"
     echo
     echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. With WARP_NOCLEAR=1, GET measures a warm-read pass over the objects written by the preceding PUT pass; DELETE uses warp's batch delete workload."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. Local MinIO/RustFS single-node targets use their default single-node durability; local \`*-cluster\` targets boot 4-node distributed clusters unless overridden."
+    bench_print_host_preflight_warnings
     echo
     echo "| target | mode | op | MiB/s | obj/s | errors | ratio vs MinIO | ratio vs RustFS | artifacts |"
     echo "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
@@ -585,15 +649,18 @@ run_warp_case() {
     args+=(--noclear)
   fi
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then
+    RUN_FAILURES=1
     echo "warp-$op: non-zero exit for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
 
   if [[ ! -f "$data_file" ]]; then
+    RUN_FAILURES=1
     echo "warp-$op: missing benchdata for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
     return 0
   fi
 
   if ! "$WARP_BIN" analyze "$data_file" >"$out_dir/analyze.out" 2>&1; then
+    RUN_FAILURES=1
     echo "warp-$op: analyze failed for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
     return 0
   fi
@@ -631,12 +698,15 @@ elif op == "delete":
     obj_s = objects / (millis / 1000.0)
 else:
     sys.exit("missing Average line")
+if errors > 0:
+    sys.exit(f"non-zero warp errors: {errors}")
 row = [target, mode, op, f"{mib:.2f}", f"{obj_s:.2f}", str(errors), artifact_dir]
 with open(out_path, "a", encoding="utf-8") as f:
     f.write("\t".join(row) + "\n")
 PY
   then
-    echo "warp-$op: missing average throughput for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
+    RUN_FAILURES=1
+    echo "warp-$op: analyze result not publishable for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
 }
 
@@ -700,6 +770,59 @@ with open(summary_path, "a") as out:
 PY
 }
 
+append_resource_summary() {
+  local summary="$PROFILE_ROOT/summary.md"
+  python3 - "$PROFILE_ROOT/resource-results.tsv" "$summary" <<'PY'
+import statistics
+import sys
+from collections import defaultdict
+
+results_path, summary_path = sys.argv[1:]
+groups = defaultdict(lambda: {"rss": [], "cpu": [], "disk": []})
+
+try:
+    with open(results_path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 8:
+                continue
+            target, op, _, _, rss, cpu, disk, _ = parts
+            key = (target, op)
+            groups[key]["rss"].append(float(rss))
+            groups[key]["cpu"].append(float(cpu))
+            groups[key]["disk"].append(float(disk))
+except FileNotFoundError:
+    groups = {}
+
+def avg(values):
+    return sum(values) / len(values) if values else 0.0
+
+def skew(values):
+    if not values:
+        return ""
+    med = statistics.median(values)
+    if med <= 0:
+        return ""
+    return f"{max(values) / med:.2f}x"
+
+with open(summary_path, "a", encoding="utf-8") as out:
+    out.write("\n## Resource Snapshot\n\n")
+    out.write("| target | op | nodes | avg RSS MiB | max RSS MiB | RSS skew | avg CPU % | max CPU % | CPU skew | avg disk MiB | max disk MiB | disk skew |\n")
+    out.write("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+    for target, op in sorted(groups):
+        data = groups[(target, op)]
+        rss = data["rss"]
+        cpu = data["cpu"]
+        disk = data["disk"]
+        out.write(
+            f"| {target} | {op.upper()} | {len(rss)} | "
+            f"{avg(rss):.2f} | {max(rss) if rss else 0.0:.2f} | {skew(rss)} | "
+            f"{avg(cpu):.2f} | {max(cpu) if cpu else 0.0:.2f} | {skew(cpu)} | "
+            f"{avg(disk):.2f} | {max(disk) if disk else 0.0:.2f} | {skew(disk)} |\n"
+        )
+PY
+}
+
 target_enabled() {
   local needle="$1"
   case ",$TARGETS," in
@@ -708,14 +831,19 @@ target_enabled() {
   esac
 }
 
-write_summary_header
 : >"$PROFILE_ROOT/warp-results.tsv"
+: >"$PROFILE_ROOT/resource-results.tsv"
 : >"$PROFILE_ROOT/skipped.txt"
+bench_collect_host_preflight "$PROFILE_ROOT"
+bench_enforce_strict_host "$PROFILE_ROOT"
+write_summary_header
+RUN_FAILURES=0
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
 for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-cluster; do
   target_enabled "$target" || continue
   target_pid_start="${#PIDS[@]}"
+  reset_target_resources
 
   case "$target" in
     grainfs-single)
@@ -756,12 +884,13 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
   access_key="$START_ACCESS_KEY"
   secret_key="$START_SECRET_KEY"
   mode="$START_MODE"
+  BACKENDS_STARTED=1
   for op in "${WARP_OP_LIST[@]}"; do
     case "$op" in
       get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)
         prepare_grainfs_warp_bucket "$target" "$op"
-        if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
-          cpu_dir="$PROFILE_ROOT/grainfs-cluster/pprof-cpu-$op"
+        if [[ "$BENCH_PPROF" == "1" && "$target" == grainfs-* && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
+          cpu_dir="$PROFILE_ROOT/$target/pprof-cpu-$op"
           mkdir -p "$cpu_dir"
           cpu_pids=()
           for i in "${!GRAINFS_PPROF_PORTS[@]}"; do
@@ -776,6 +905,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
         else
           run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"
         fi
+        collect_resource_snapshot "$target" "$op" "$target_pid_start"
         ;;
       *)
         echo "[error] unknown WARP_OPS entry: $op" >&2
@@ -784,9 +914,9 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     esac
   done
 
-  if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
+  if [[ "$BENCH_PPROF" == "1" && "$target" == grainfs-* && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
     for i in "${!GRAINFS_PPROF_PORTS[@]}"; do
-      snap_dir="$PROFILE_ROOT/grainfs-cluster/pprof-snap/node$((i+1))"
+      snap_dir="$PROFILE_ROOT/$target/pprof-snap/node$((i+1))"
       mkdir -p "$snap_dir"
       echo "[pprof] collecting node$((i+1)) heap/allocs/goroutine/mutex/block snapshots..."
       bench_collect_pprof "${GRAINFS_PPROF_PORTS[$i]}" "$snap_dir" heap allocs goroutine mutex block
@@ -797,6 +927,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
 done
 
 append_summary_rows
+append_resource_summary
 
 echo
 echo "=================================================================="
@@ -810,3 +941,6 @@ if [[ -s "$PROFILE_ROOT/skipped.txt" ]]; then
 fi
 echo
 echo "[bench] profiles saved to $PROFILE_ROOT"
+if (( RUN_FAILURES != 0 )); then
+  exit 1
+fi

@@ -618,6 +618,41 @@ func TestCachedBackend_ReadAt_CacheMiss(t *testing.T) {
 	assert.Equal(t, []byte("uncached"), buf[:n])
 }
 
+type recordingPreparedReadAtBackend struct {
+	Backend
+	calls int
+	obj   *Object
+}
+
+func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error) {
+	b.calls++
+	b.obj = obj
+	return copy(buf, "prepared"), nil
+}
+
+func TestCachedBackend_ReadAtObject_DelegatesPreparedObject(t *testing.T) {
+	inner, err := NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { inner.Close() })
+
+	rec := &recordingPreparedReadAtBackend{Backend: inner}
+	cb := NewCachedBackend(rec)
+
+	reader, ok := any(cb).(interface {
+		ReadAtObject(context.Context, string, string, *Object, int64, []byte) (int, error)
+	})
+	require.True(t, ok, "CachedBackend must expose prepared ReadAtObject through the wrapper")
+
+	obj := &Object{Key: "k", Size: 8, ETag: "etag"}
+	buf := make([]byte, 8)
+	n, err := reader.ReadAtObject(context.Background(), "b", "k", obj, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, []byte("prepared"), buf)
+	require.Equal(t, 1, rec.calls)
+	require.Same(t, obj, rec.obj)
+}
+
 func TestForceDeleteBucket(t *testing.T) {
 	ctx := context.Background()
 	b := setupTestBackend(t)

@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 func TestSegmentWriter_Boundaries(t *testing.T) {
@@ -108,6 +110,23 @@ func TestSegmentWriter_UsesByteWriterFastPath(t *testing.T) {
 	}
 }
 
+func TestSegmentWriter_CustomWorkersBoundsConcurrentWrites(t *testing.T) {
+	b := &countingConcurrentBytesBackend{}
+	data := makePattern(4 << 10)
+
+	w := NewSegmentWriterWithChunkSizeAndWorkers(b, 1024, 1)
+	obj, err := w.Write(context.Background(), "test", "serial", "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if obj.Size != int64(len(data)) {
+		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
+	}
+	if got := b.maxActive.Load(); got != 1 {
+		t.Fatalf("max concurrent writes: want 1, got %d", got)
+	}
+}
+
 func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 	t.Parallel()
 	b := newTestLocalBackend(t)
@@ -138,6 +157,32 @@ func (b *bytesOnlySegmentBackend) WriteSegmentBytes(_ context.Context, _ string,
 	}, nil
 }
 
+type countingConcurrentBytesBackend struct {
+	active    atomic.Int32
+	maxActive atomic.Int32
+}
+
+func (b *countingConcurrentBytesBackend) WriteSegment(context.Context, string, string, int, io.Reader) (SegmentRef, error) {
+	return SegmentRef{}, errors.New("reader path should not be used")
+}
+
+func (b *countingConcurrentBytesBackend) WriteSegmentBytes(_ context.Context, _ string, _ string, idx int, data []byte) (SegmentRef, error) {
+	active := b.active.Add(1)
+	for {
+		max := b.maxActive.Load()
+		if active <= max || b.maxActive.CompareAndSwap(max, active) {
+			break
+		}
+	}
+	time.Sleep(time.Millisecond)
+	b.active.Add(-1)
+	return SegmentRef{
+		BlobID:   string(rune('a' + idx)),
+		Size:     int64(len(data)),
+		Checksum: ChecksumOf(data),
+	}, nil
+}
+
 func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
 	t.Parallel()
 	b := &bytesOnlySegmentBackend{}
@@ -152,5 +197,33 @@ func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
 	}
 	if obj.Size != int64(len(data)) {
 		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
+	}
+}
+
+func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
+	payload := makePattern(5 << 20)
+
+	run := func(t testing.TB) {
+		t.Helper()
+		b := &bytesOnlySegmentBackend{}
+		obj, err := NewSegmentWriter(b).Write(context.Background(), "test", "fast", "application/octet-stream", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if obj.Size != int64(len(payload)) {
+			t.Fatalf("size: want %d, got %d", len(payload), obj.Size)
+		}
+	}
+
+	run(t)
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			run(b)
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("SegmentWriter byte fast path alloc bytes: %d", allocedBytes)
+	if allocedBytes > 18*1024*1024 {
+		t.Fatalf("alloc bytes: got %d, want <= %d", allocedBytes, 18*1024*1024)
 	}
 }

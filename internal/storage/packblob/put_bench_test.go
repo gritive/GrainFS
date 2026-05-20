@@ -103,6 +103,53 @@ func BenchmarkBlobStoreAppend64KBNoCompress(b *testing.B) {
 	}
 }
 
+func BenchmarkEncryptedBlobStoreAppend64KBNoCompress(b *testing.B) {
+	bs, err := NewEncryptedBlobStore(b.TempDir(), math.MaxInt64, newPackblobBenchmarkEncryptor(b))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = bs.Close() })
+
+	key := "bucket/key"
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := bs.Append(key, payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncryptedBlobStoreRead64KBNoCompress(b *testing.B) {
+	bs, err := NewEncryptedBlobStore(b.TempDir(), math.MaxInt64, newPackblobBenchmarkEncryptor(b))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = bs.Close() })
+
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+	loc, err := bs.Append("bucket/key", payload)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got, err := bs.Read(loc)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(got) != len(payload) {
+			b.Fatalf("len=%d want %d", len(got), len(payload))
+		}
+	}
+}
+
 func newPackblobBenchmarkEncryptor(b *testing.B) *encrypt.Encryptor {
 	b.Helper()
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x42}, 32))

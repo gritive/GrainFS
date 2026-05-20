@@ -17,17 +17,22 @@ var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend
 
 // Object represents a stored object with metadata.
 type Object struct {
-	Key            string
-	Size           int64
-	ContentType    string
-	ETag           string
-	LastModified   int64  // Unix timestamp
-	VersionID      string // non-empty when bucket versioning is Enabled
-	IsDeleteMarker bool   // true when this object is a delete marker
-	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
-	UserMetadata   map[string]string
-	SSEAlgorithm   string
-	Segments       []SegmentRef
+	Key              string
+	Size             int64
+	ContentType      string
+	ETag             string
+	LastModified     int64  // Unix timestamp
+	VersionID        string // non-empty when bucket versioning is Enabled
+	IsDeleteMarker   bool   // true when this object is a delete marker
+	ACL              uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+	UserMetadata     map[string]string
+	SSEAlgorithm     string
+	PlacementGroupID string
+	RingVersion      uint64
+	ECData           uint8
+	ECParity         uint8
+	NodeIDs          []string
+	Segments         []SegmentRef
 	// Coalesced lists merged segment refs produced by background coalesce.
 	// Read path stitches Coalesced first, then Segments. Empty for legacy /
 	// pre-B2 appendable objects.
@@ -266,6 +271,12 @@ type PartialIO interface {
 	WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*Object, error)
 	ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error)
 	Truncate(ctx context.Context, bucket, key string, size int64) error
+}
+
+// PreparedReadAt is an optional fast path for callers that already loaded the
+// current object metadata and want to avoid a second lookup before ReadAt.
+type PreparedReadAt interface {
+	ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error)
 }
 
 // Syncable is an optional interface for backends that can fsync a specific object.

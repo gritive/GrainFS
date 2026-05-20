@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -49,6 +50,77 @@ type segmentBytesReadCloser struct {
 func (r *segmentBytesReadCloser) Close() error { return nil }
 
 func (r *segmentBytesReadCloser) SegmentBytes() []byte { return r.data }
+
+func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.SegmentRef, offset int64, buf []byte) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("segment %s: negative offset %d", ref.BlobID, offset)
+	}
+	entry, ok := s.segmentRef(ref.BlobID)
+	if !ok {
+		return 0, fmt.Errorf("segment %s not found in metadata for %s/%s", ref.BlobID, s.bucket, s.key)
+	}
+	if entry.Size <= 0 {
+		return 0, fmt.Errorf("segment %s has invalid size %d", entry.BlobID, entry.Size)
+	}
+	if offset >= entry.Size {
+		return 0, io.EOF
+	}
+	if max := entry.Size - offset; int64(len(buf)) > max {
+		buf = buf[:max]
+	}
+	record, err := s.placementRecord(entry)
+	if err != nil {
+		return 0, err
+	}
+	shardKey := s.key + "/segments/" + entry.BlobID
+	return s.b.newECObjectReader().ReadAt(ctx, s.bucket, shardKey, record, entry.Size, offset, buf)
+}
+
+type chunkedSegmentRangeStore interface {
+	ReadAtSegment(ctx context.Context, ref storage.SegmentRef, offset int64, buf []byte) (int, error)
+}
+
+func readAtChunkedSegments(ctx context.Context, store chunkedSegmentRangeStore, refs []storage.SegmentRef, offset int64, buf []byte) (int, error) {
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	window, startOff, err := chunkedSegmentWindow(refs, offset, len(buf))
+	if err != nil {
+		return 0, err
+	}
+	done := 0
+	segOff := startOff
+	for _, ref := range window {
+		if done == len(buf) {
+			break
+		}
+		available := ref.Size - segOff
+		if available <= 0 {
+			segOff = 0
+			continue
+		}
+		want := len(buf) - done
+		if int64(want) > available {
+			want = int(available)
+		}
+		n, readErr := store.ReadAtSegment(ctx, ref, segOff, buf[done:done+want])
+		done += n
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) && done > 0 {
+				return done, nil
+			}
+			return done, readErr
+		}
+		if n != want {
+			return done, io.ErrUnexpectedEOF
+		}
+		segOff = 0
+	}
+	if done != len(buf) {
+		return done, io.EOF
+	}
+	return done, nil
+}
 
 func (s *clusterSegmentStore) segmentRef(blobID string) (storage.SegmentRef, bool) {
 	if s.obj == nil {

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -180,6 +181,27 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkDistributedBackend_CompleteSinglePartMultipart64KiB(b *testing.B) {
+	bk := newTestDistributedBackend(b)
+	require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+	data := bytes.Repeat([]byte("x"), 64<<10)
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		key := fmt.Sprintf("single-part-%d", i)
+		up, err := bk.CreateMultipartUpload(context.Background(), "bench", key, "application/octet-stream")
+		require.NoError(b, err)
+		part, err := bk.UploadPart(context.Background(), "bench", key, up.UploadID, 1, bytes.NewReader(data))
+		require.NoError(b, err)
+		b.StartTimer()
+
+		_, err = bk.CompleteMultipartUpload(context.Background(), "bench", key, up.UploadID, []storage.Part{*part})
+		require.NoError(b, err)
 	}
 }
 

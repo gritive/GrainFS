@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -134,6 +136,132 @@ func TestAppendObjectRaceTwoConcurrent(t *testing.T) {
 	}
 	if len(final.Segments) != 2 {
 		t.Fatalf("final segments=%d, want 2 (seed + one winning append)", len(final.Segments))
+	}
+}
+
+func TestAppendObjectSerializesSameObjectBeforeSegmentWrite(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if _, err := b.AppendObject(ctx, "test", "k", 0, bytes.NewReader([]byte("aaaa"))); err != nil {
+		t.Fatalf("initial AppendObject: %v", err)
+	}
+
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var entered atomic.Int32
+	b.testBeforeAppendSegmentWrite = func() {
+		switch entered.Add(1) {
+		case 1:
+			close(firstEntered)
+			<-releaseFirst
+		case 2:
+			close(secondEntered)
+		}
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := b.AppendObject(ctx, "test", "k", 4, bytes.NewReader([]byte("bbbb")))
+		errCh <- err
+	}()
+	<-firstEntered
+
+	go func() {
+		_, err := b.AppendObject(ctx, "test", "k", 4, bytes.NewReader([]byte("cccc")))
+		errCh <- err
+	}()
+
+	select {
+	case <-secondEntered:
+		close(releaseFirst)
+		<-errCh
+		<-errCh
+		t.Fatal("second same-object append reached segment write before the first append committed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+
+	successes, mismatches := 0, 0
+	for i := 0; i < 2; i++ {
+		err := <-errCh
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, storage.ErrAppendOffsetMismatch):
+			mismatches++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || mismatches != 1 {
+		t.Fatalf("got %d success + %d mismatch; want 1+1", successes, mismatches)
+	}
+	if got := entered.Load(); got != 1 {
+		t.Fatalf("segment write entries=%d, want 1", got)
+	}
+}
+
+func TestAppendObjectReusesVersionIDAcrossSegments(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	first, err := b.AppendObject(ctx, "test", "k", 0, bytes.NewReader([]byte("aaaa")))
+	if err != nil {
+		t.Fatalf("first AppendObject: %v", err)
+	}
+	second, err := b.AppendObject(ctx, "test", "k", 4, bytes.NewReader([]byte("bbbb")))
+	if err != nil {
+		t.Fatalf("second AppendObject: %v", err)
+	}
+	if first.VersionID == "" {
+		t.Fatal("first append returned empty VersionID")
+	}
+	if second.VersionID != first.VersionID {
+		t.Fatalf("second append VersionID=%q, want existing %q", second.VersionID, first.VersionID)
+	}
+}
+
+func TestAppendObjectFSMApplyUsesCommandModifiedTime(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	cmd := AppendObjectCmd{
+		Bucket:          "test",
+		Key:             "k",
+		ExpectedOffset:  0,
+		BlobID:          "blob-1",
+		SegmentSize:     4,
+		SegmentETag:     "deadbeefcafebabedeadbeefcafebabe",
+		ModifiedUnixSec: 1234,
+	}
+	data, err := encodeAppendObjectCmd(cmd)
+	if err != nil {
+		t.Fatalf("encode AppendObjectCmd: %v", err)
+	}
+
+	if err := b.fsm.applyAppendObjectFromCmd(data); err != nil {
+		t.Fatalf("applyAppendObjectFromCmd: %v", err)
+	}
+
+	obj, err := b.HeadObject(ctx, "test", "k")
+	if err != nil {
+		t.Fatalf("HeadObject: %v", err)
+	}
+	if obj.LastModified != 1234 {
+		t.Fatalf("LastModified=%d, want 1234", obj.LastModified)
 	}
 }
 

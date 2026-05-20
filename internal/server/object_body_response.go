@@ -13,6 +13,11 @@ import (
 
 const bufferedObjectBodyLimit = 128 * 1024
 
+type rawBodyReadCloser interface {
+	io.ReadCloser
+	RawBody() []byte
+}
+
 func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Object, rangeHeader string) (bool, error) {
 	if rangeHeader != "" {
 		start, end, ok := parseByteRange(rangeHeader, obj.Size)
@@ -49,6 +54,15 @@ func writeObjectBody(c *app.RequestContext, rc io.ReadCloser, obj *storage.Objec
 	}
 
 	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
+	if rawReader, ok := rc.(rawBodyReadCloser); ok {
+		data := rawReader.RawBody()
+		if int64(len(data)) == obj.Size {
+			c.Header("Content-Type", obj.ContentType)
+			c.Response.SetBodyRaw(data)
+			c.Status(consts.StatusOK)
+			return false, nil
+		}
+	}
 	// Pre-allocate the exact-size body buffer in one shot. The old io.ReadAll
 	// over an exactLengthReadCloser grew its buffer geometrically (~16 doublings
 	// to reach a 64 KiB warp object) and wrapped rc in a length-limiting reader,

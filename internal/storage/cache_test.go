@@ -23,6 +23,33 @@ func newTestCachedBackend(t *testing.T, opts ...CacheOption) (*CachedBackend, *L
 	return cached, backend
 }
 
+type countingHeadBackend struct {
+	*LocalBackend
+	headCalls int
+	getCalls  int
+}
+
+func newCountingCachedBackend(t *testing.T) (*CachedBackend, *countingHeadBackend) {
+	t.Helper()
+	dir := t.TempDir()
+	local, err := NewLocalBackend(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { local.Close() })
+
+	backend := &countingHeadBackend{LocalBackend: local}
+	return NewCachedBackend(backend), backend
+}
+
+func (b *countingHeadBackend) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
+	b.headCalls++
+	return b.LocalBackend.HeadObject(ctx, bucket, key)
+}
+
+func (b *countingHeadBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
+	b.getCalls++
+	return b.LocalBackend.GetObject(ctx, bucket, key)
+}
+
 func TestCachedBackend_DoesNotUseMutexForCacheState(t *testing.T) {
 	typ := reflect.TypeOf(CachedBackend{})
 	for i := 0; i < typ.NumField(); i++ {
@@ -113,6 +140,60 @@ func TestCachedBackend_HeadObjectCacheHit(t *testing.T) {
 	obj2, err := cb.HeadObject(context.Background(), "test", "key1")
 	require.NoError(t, err)
 	assert.Equal(t, obj1.ETag, obj2.ETag)
+}
+
+func TestCachedBackend_HeadObjectMissCachesMetadata(t *testing.T) {
+	cb, backend := newCountingCachedBackend(t)
+	require.NoError(t, cb.CreateBucket(context.Background(), "test"))
+	_, err := cb.PutObject(context.Background(), "test", "key1", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+
+	obj1, err := cb.HeadObject(context.Background(), "test", "key1")
+	require.NoError(t, err)
+	obj2, err := cb.HeadObject(context.Background(), "test", "key1")
+	require.NoError(t, err)
+
+	require.Equal(t, obj1.ETag, obj2.ETag)
+	require.Equal(t, 1, backend.headCalls)
+}
+
+func TestCachedBackend_GetObjectAfterHeadObjectReadsBody(t *testing.T) {
+	cb, backend := newCountingCachedBackend(t)
+	require.NoError(t, cb.CreateBucket(context.Background(), "test"))
+	_, err := cb.PutObject(context.Background(), "test", "key1", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+	_, err = cb.HeadObject(context.Background(), "test", "key1")
+	require.NoError(t, err)
+
+	rc, obj, err := cb.GetObject(context.Background(), "test", "key1")
+	require.NoError(t, err)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+
+	require.Equal(t, int64(4), obj.Size)
+	require.Equal(t, []byte("data"), body)
+	require.Equal(t, 1, backend.getCalls)
+}
+
+func TestCachedBackend_HeadObjectMetadataCacheEvictsOnSizeLimit(t *testing.T) {
+	cb, backend := newCountingCachedBackend(t)
+	cb.maxBytes = metadataCacheEntryBytes
+	require.NoError(t, cb.CreateBucket(context.Background(), "test"))
+	_, err := cb.PutObject(context.Background(), "test", "key1", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+	_, err = cb.PutObject(context.Background(), "test", "key2", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+
+	_, err = cb.HeadObject(context.Background(), "test", "key1")
+	require.NoError(t, err)
+	_, err = cb.HeadObject(context.Background(), "test", "key2")
+	require.NoError(t, err)
+	_, err = cb.HeadObject(context.Background(), "test", "key1")
+	require.NoError(t, err)
+
+	require.Equal(t, 3, backend.headCalls)
+	require.Equal(t, int64(2), cb.Stats().Evictions)
 }
 
 func TestCachedBackend_InvalidateOnPut(t *testing.T) {
@@ -258,6 +339,26 @@ func TestCachedBackend_LargeObjectNotCached(t *testing.T) {
 	assert.Equal(t, large, string(body2))
 
 	assert.Equal(t, int64(0), cb.Stats().Hits)
+}
+
+func TestCachedBackend_DefaultCacheStoresMultipartSizedObject(t *testing.T) {
+	cb, _ := newTestCachedBackend(t)
+	require.NoError(t, cb.CreateBucket(context.Background(), "test"))
+
+	data := strings.Repeat("x", 5<<20)
+	_, err := cb.PutObject(context.Background(), "test", "multipart-sized", strings.NewReader(data), "text/plain")
+	require.NoError(t, err)
+
+	rc1, _, err := cb.GetObject(context.Background(), "test", "multipart-sized")
+	require.NoError(t, err)
+	require.NoError(t, rc1.Close())
+
+	rc2, _, err := cb.GetObject(context.Background(), "test", "multipart-sized")
+	require.NoError(t, err)
+	require.NoError(t, rc2.Close())
+
+	require.Equal(t, int64(1), cb.Stats().Misses)
+	require.Equal(t, int64(1), cb.Stats().Hits)
 }
 
 func TestCachedBackend_PassthroughBucketOps(t *testing.T) {

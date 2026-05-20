@@ -139,9 +139,8 @@ func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec
 
 // readShards collects the k-of-n data shards needed to reconstruct the object.
 //
-// Strategy: try a local data-shard fast path first; fall back to a full
-// parallel fan-out that includes parity shards when any remote data shard is
-// unavailable.
+// Strategy: satisfy data shards first to avoid healthy-path parity fanout; fall
+// back to parity shards only when data shards are unavailable.
 func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, [][]byte, error) {
 	recCfg := rec.ECConfigOrFallback(r.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
@@ -302,14 +301,17 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		}
 	}
 	if !localDataFastPath {
-		allIdx := make([]int, 0, len(rec.Nodes))
-		for i := range rec.Nodes {
-			allIdx = append(allIdx, i)
-		}
-		fetchShards(allIdx, true)
+		fetchShards(dataIdx, false)
 		if available < recCfg.DataShards {
-			return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
-				available, len(rec.Nodes), recCfg.DataShards)
+			parityIdx := make([]int, 0, recCfg.ParityShards)
+			for i := recCfg.DataShards; i < len(rec.Nodes); i++ {
+				parityIdx = append(parityIdx, i)
+			}
+			fetchShards(parityIdx, true)
+			if available < recCfg.DataShards {
+				return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
+					available, len(rec.Nodes), recCfg.DataShards)
+			}
 		}
 		return recCfg, shards, nil
 	}
@@ -423,6 +425,13 @@ func (r ecObjectReader) bufferedShardReaders(ctx context.Context, bucket, shardK
 // shard. Remote reads prefer buffered RPC when len(buf) <= maxShardRangeReplyBytes.
 func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, node string, shardIdx int, shardOffset int64, buf []byte) (int, error) {
 	readamp.RecordECShard(shardCacheKey(bucket, shardKey, shardIdx))
+	rangeCacheKey := ""
+	if r.cache != nil && len(buf) > 0 {
+		rangeCacheKey = shardRangeCacheKey(bucket, shardKey, shardIdx, shardOffset, int64(len(buf)))
+		if data, ok := r.cache.Get(rangeCacheKey); ok {
+			return copy(buf, data), nil
+		}
+	}
 	if node == r.selfID {
 		return r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
 	}
@@ -444,6 +453,7 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 		if n != len(buf) || n != len(data) {
 			return n, io.ErrUnexpectedEOF
 		}
+		r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), nil)
 		return n, nil
 	}
 	rc, err := r.shards.ReadShardRangeStream(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
@@ -457,7 +467,18 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 	if r.peerHealth != nil {
 		r.peerHealth.MarkHealthy(node)
 	}
-	return io.ReadFull(rc, buf)
+	n, err := io.ReadFull(rc, buf)
+	r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), err)
+	return n, err
+}
+
+func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, err error) {
+	if key == "" || r.cache == nil || err != nil || n != want {
+		return
+	}
+	if r.cache.CanStore(key, int64(n)) {
+		r.cache.Put(key, data)
+	}
 }
 
 // cacheCanStore reports whether every shard slot for this object fits in the

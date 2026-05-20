@@ -26,6 +26,41 @@ func TestPackedBackend_ImplementsPartialIO(t *testing.T) {
 	require.True(t, ok, "PackedBackend must satisfy storage.PartialIO so wal/pullthrough ReadAt can delegate through it")
 }
 
+type recordingPreparedReadAtBackend struct {
+	storage.Backend
+	calls int
+	obj   *storage.Object
+}
+
+func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	b.calls++
+	b.obj = obj
+	return copy(buf, "prepared"), nil
+}
+
+func TestPackedBackend_ReadAtObjectDelegatesPreparedInner(t *testing.T) {
+	inner, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { inner.Close() })
+
+	rec := &recordingPreparedReadAtBackend{Backend: inner}
+	pb, err := NewPackedBackend(rec, t.TempDir(), 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	reader, ok := any(pb).(storage.PreparedReadAt)
+	require.True(t, ok, "PackedBackend must preserve prepared ReadAtObject through wrapper chains")
+
+	obj := &storage.Object{Key: "large", Size: 8, ETag: "etag"}
+	buf := make([]byte, 8)
+	n, err := reader.ReadAtObject(context.Background(), "test", "large", obj, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, []byte("prepared"), buf)
+	require.Equal(t, 1, rec.calls)
+	require.Same(t, obj, rec.obj)
+}
+
 // TestPackedBackend_RangeAcrossSegments exercises the pass-through ReadAt path
 // for objects above the pack threshold — the production-breaking case from
 // Task 1.9 single-node e2e.

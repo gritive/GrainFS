@@ -36,7 +36,7 @@ func (s *Server) newAuditEnvelopeEvent(ctx context.Context, c *app.RequestContex
 		Key:         in.key,
 		Subresource: op.Subresource,
 		AuthStatus:  "allow",
-		BytesIn:     int64(len(c.Request.Body())),
+		BytesIn:     s3RequestBytesIn(c),
 		VersionID:   string(c.QueryArgs().Peek("versionId")),
 		UploadID:    string(c.QueryArgs().Peek("uploadId")),
 	}
@@ -120,6 +120,6 @@ func (s *Server) newAuditAuthFailureEvent(
 		AuthStatus:  "deny",
 		ErrClass:    "AccessDenied",
 		ErrReason:   reason,
-		BytesIn:     int64(len(c.Request.Body())),
+		BytesIn:     s3RequestBytesIn(c),
 	})
 }

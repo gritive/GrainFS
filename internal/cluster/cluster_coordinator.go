@@ -32,6 +32,8 @@ const DefaultMaxForwardBodyBytes = 64 * 1024 * 1024
 // without reintroducing the request-body buffering fixed for writes.
 const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
+const minMultipartForwardStreamBytes = 5 * 1024 * 1024
+
 // ErrCoordinatorNoRouter is returned when OpRouter is called on a
 // coordinator that was constructed without a router (test/solo-node configs
 // that should not be reaching the routing path).
@@ -266,18 +268,28 @@ func (c *ClusterCoordinator) runtimeState() clusterCoordinatorRuntime {
 // without an objectIndexProposer / objectIndexSource). Preserves the legacy
 // routeObjectLatest/Version dispatch behavior that callers depended on.
 func (c *ClusterCoordinator) routeReadOrBucket(bucket, key, versionID string) (RouteTarget, error) {
+	target, _, _, err := c.routeReadOrBucketWithEntry(bucket, key, versionID)
+	return target, err
+}
+
+func (c *ClusterCoordinator) routeReadOrBucketWithEntry(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, bool, error) {
 	state := c.runtimeState()
 	if c.indexWriter == nil {
-		return state.opRouter.RouteBucket(bucket)
+		target, err := state.opRouter.RouteBucket(bucket)
+		return target, ObjectIndexEntry{}, false, err
 	}
-	target, _, err := state.opRouter.RouteObjectRead(bucket, key, versionID)
+	target, entry, err := state.opRouter.RouteObjectRead(bucket, key, versionID)
+	hasEntry := err == nil
+	if err == nil {
+		return target, entry, true, nil
+	}
 	if errors.Is(err, storage.ErrObjectNotFound) {
 		fallback, _, fallbackErr := c.routeWriteOrBucket(bucket, key)
 		if fallbackErr == nil {
-			return fallback, nil
+			return fallback, ObjectIndexEntry{}, false, nil
 		}
 	}
-	return target, err
+	return target, entry, hasEntry, err
 }
 
 // routeWriteOrBucket picks RouteObjectWrite (EC-aware placement) when an
@@ -300,6 +312,15 @@ func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOff
 	if c.indexWriter != nil && metaObjectIndexAdapter(c.meta) != nil && !storage.IsInternalBucket(bucket) {
 		target, entry, err := state.opRouter.RouteObjectRead(bucket, key, "")
 		if err == nil {
+			if entry.Size > expectedOffset {
+				log.Debug().
+					Str("bucket", bucket).
+					Str("key", key).
+					Int64("indexed_size", entry.Size).
+					Int64("offset", expectedOffset).
+					Msg("append stale offset rejected from object index before body read")
+				return RouteTarget{}, ShardGroupEntry{}, storage.ErrAppendOffsetMismatch
+			}
 			group, ok := c.meta.ShardGroup(entry.PlacementGroupID)
 			if !ok {
 				return RouteTarget{}, ShardGroupEntry{}, ErrNoGroup
@@ -731,7 +752,7 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // response body bytes after the metadata reply; legacy tests can still use the
 // single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, entry, hasEntry, err := c.routeReadOrBucketWithEntry(bucket, key, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -739,6 +760,11 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 		return nil, nil, err
 	} else if gb != nil {
 		return gb.GetObject(ctx, bucket, key)
+	}
+	if hasEntry {
+		if rc, obj, ok, err := c.getObjectLocalCurrentFollower(ctx, bucket, key, target, entry); ok {
+			return rc, obj, err
+		}
 	}
 	if c.forward == nil {
 		return nil, nil, ErrCoordinatorNoRouter
@@ -826,6 +852,42 @@ func (c *ClusterCoordinator) forwardReadObject(
 	return &forwardReadValidator{rc: body, want: obj.Size}, obj, nil
 }
 
+func (c *ClusterCoordinator) getObjectLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry) (io.ReadCloser, *storage.Object, bool, error) {
+	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
+		return nil, nil, false, nil
+	}
+	dg := c.groups.Get(target.GroupID)
+	if dg == nil || dg.Backend() == nil {
+		return nil, nil, false, nil
+	}
+	gb := dg.Backend()
+	obj, _, err := gb.headObjectMeta(ctx, bucket, key)
+	if err != nil {
+		return nil, nil, false, nil
+	}
+	if !objectMatchesIndexForFollowerRead(obj, entry) {
+		return nil, nil, false, nil
+	}
+
+	var rc io.ReadCloser
+	if entry.VersionID != "" {
+		rc, obj, err = gb.GetObjectVersion(bucket, key, entry.VersionID)
+	} else {
+		rc, obj, err = gb.GetObject(ctx, bucket, key)
+	}
+	if err != nil {
+		if errors.Is(err, ErrObjectQuarantined) || ctx.Err() != nil {
+			return nil, nil, true, err
+		}
+		return nil, nil, false, nil
+	}
+	if !objectMatchesIndexForFollowerRead(obj, entry) {
+		_ = rc.Close()
+		return nil, nil, false, nil
+	}
+	return rc, obj, true, nil
+}
+
 type forwardReadValidator struct {
 	rc   io.ReadCloser
 	want int64
@@ -855,7 +917,7 @@ func (r *forwardReadValidator) Close() error {
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, _, _, err := c.routeReadOrBucketWithEntry(bucket, key, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1315,12 +1377,9 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 		return obj, nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	body, err := readBoundedBody(r, c.maxBody)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildPutObjectArgs(bucket, key, contentType, body)
 	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
@@ -1621,13 +1680,14 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 }
 
 // ReadAt implements the pread fast path for routed internal buckets. Local
-// leaders use the group backend's zero-copy path; non-leaders fall back through
-// regular routed GetObject for correctness.
+// leaders use the group backend's zero-copy path. Follower voters may serve
+// immutable object-index reads locally only after their local metadata matches
+// the cluster object-index entry; stale followers still forward to the leader.
 func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")
 	}
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, entry, hasEntry, err := c.routeReadOrBucketWithEntry(bucket, key, "")
 	if err != nil {
 		return 0, err
 	}
@@ -1635,6 +1695,11 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return 0, err
 	} else if gb != nil {
 		return gb.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if hasEntry {
+		if n, ok, err := c.readAtLocalCurrentFollower(ctx, bucket, key, target, entry, offset, buf); ok {
+			return n, err
+		}
 	}
 
 	if c.forward == nil {
@@ -1670,6 +1735,75 @@ func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, off
 		return 0, err
 	}
 	return io.ReadFull(body, buf)
+}
+
+func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if obj == nil {
+		return c.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if obj.Key != "" && obj.Key != key {
+		return 0, fmt.Errorf("coordinator: ReadAt object key mismatch: got %q, want %q", obj.Key, key)
+	}
+	if offset < 0 {
+		return 0, errors.New("coordinator: negative ReadAt offset")
+	}
+	target, _, _, err := c.routeReadOrBucketWithEntry(bucket, key, "")
+	if err != nil {
+		return 0, err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
+		return 0, err
+	} else if gb != nil {
+		return gb.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return c.ReadAt(ctx, bucket, key, offset, buf)
+}
+
+func (c *ClusterCoordinator) readAtLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry, offset int64, buf []byte) (int, bool, error) {
+	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
+		return 0, false, nil
+	}
+	dg := c.groups.Get(target.GroupID)
+	if dg == nil || dg.Backend() == nil {
+		return 0, false, nil
+	}
+	gb := dg.Backend()
+	obj, placementMeta, err := gb.headObjectMeta(ctx, bucket, key)
+	if err != nil {
+		return 0, false, nil
+	}
+	if !objectMatchesIndexForFollowerRead(obj, entry) {
+		return 0, false, nil
+	}
+	if blocked, q, qerr := gb.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+		return 0, true, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return 0, true, objectQuarantinedError(bucket, key, q)
+	}
+	n, err := gb.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
+	if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
+		return 0, false, nil
+	}
+	return n, true, err
+}
+
+func objectMatchesIndexForFollowerRead(obj *storage.Object, entry ObjectIndexEntry) bool {
+	if obj == nil {
+		return false
+	}
+	if obj.Size != entry.Size || obj.ETag != entry.ETag {
+		return false
+	}
+	if entry.ContentType != "" && obj.ContentType != entry.ContentType {
+		return false
+	}
+	if entry.ModTime != 0 && obj.LastModified != entry.ModTime {
+		return false
+	}
+	if entry.VersionID != "" && obj.VersionID != entry.VersionID {
+		return false
+	}
+	return true
 }
 
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
@@ -1716,7 +1850,7 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, ErrCoordinatorNoRouter
 	}
 
-	if c.forward.streamDialer != nil {
+	if c.forward.streamDialer != nil && shouldStreamUploadPartForward(r, c.maxBody) {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil)
 		streamCtx := ctx
 		peers := c.forward.ResolveLeaderPeers(streamCtx, target.Peers, target.GroupID, bucket, key)
@@ -1727,12 +1861,9 @@ func (c *ClusterCoordinator) UploadPart(
 		return partFromReply(reply)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	body, err := forwardBodyBytes(r, c.maxBody)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body)
 	reply, err := c.forward.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
@@ -1747,6 +1878,35 @@ func (c *ClusterCoordinator) UploadPart(
 		return nil, ErrForwardBodySizeMismatch
 	}
 	return part, nil
+}
+
+type forwardBodyBytesProvider interface {
+	ForwardBodyBytes() []byte
+}
+
+func forwardBodyBytes(r io.Reader, maxBody int64) ([]byte, error) {
+	if provider, ok := r.(forwardBodyBytesProvider); ok {
+		body := provider.ForwardBodyBytes()
+		if int64(len(body)) > maxBody {
+			return nil, storage.ErrEntityTooLarge
+		}
+		return body, nil
+	}
+	return readBoundedBody(r, maxBody)
+}
+
+func readBoundedBody(r io.Reader, maxBody int64) ([]byte, error) {
+	// Forward-frame and retry boundaries need a replayable body. Keep this
+	// allocation explicit, capped, and shared so ReadAll cannot creep into
+	// unbounded hot paths.
+	body, err := io.ReadAll(io.LimitReader(r, maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBody {
+		return nil, storage.ErrEntityTooLarge
+	}
+	return body, nil
 }
 
 // AppendObject implements storage.AppendObjecter at the cluster-coordinator
@@ -1803,12 +1963,9 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	if c.forward.streamDialer == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	forwardBody, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	forwardBody, err := readBoundedBody(r, c.maxBody)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(forwardBody)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
 	}
 	bodyLen := int64(len(forwardBody))
 	if c.appendForwardBuffer != nil {
@@ -1842,12 +1999,9 @@ func (c *ClusterCoordinator) appendObjectLocalWithRetry(
 	seeker, ok := r.(io.Seeker)
 	var buffered []byte
 	if !ok {
-		body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+		body, err := readBoundedBody(r, c.maxBody)
 		if err != nil {
 			return nil, err
-		}
-		if int64(len(body)) > c.maxBody {
-			return nil, storage.ErrEntityTooLarge
 		}
 		buffered = body
 	}
@@ -1894,6 +2048,28 @@ func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 		return true
 	}
 	return end-cur > maxBody
+}
+
+func shouldStreamUploadPartForward(r io.Reader, maxBody int64) bool {
+	if forwardBodyExceedsSingleFrameCap(r, maxBody) {
+		return true
+	}
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return true
+	}
+	cur, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return true
+	}
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if _, seekErr := seeker.Seek(cur, io.SeekStart); err == nil && seekErr != nil {
+		err = seekErr
+	}
+	if err != nil {
+		return true
+	}
+	return end-cur >= minMultipartForwardStreamBytes
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

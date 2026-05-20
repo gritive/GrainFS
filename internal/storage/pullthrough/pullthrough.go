@@ -96,6 +96,14 @@ func (b *Backend) ReadAt(ctx context.Context, bucket, key string, offset int64, 
 	return partial.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+// ReadAtObject preserves prepared-object fast paths through pullthrough.
+func (b *Backend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if prepared, ok := b.Backend.(storage.PreparedReadAt); ok {
+		return prepared.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return b.ReadAt(ctx, bucket, key, offset, buf)
+}
+
 func (b *Backend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	partial, ok := b.Backend.(storage.PartialIO)
 	if !ok {

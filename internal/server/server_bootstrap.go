@@ -76,6 +76,7 @@ func (s *Server) newHertzEngine(addr string) *server.Hertz {
 		server.WithHostPorts(""),
 		server.WithMaxRequestBodySize(512*1024*1024), // 512MB max body
 		server.WithMaxKeepBodySize(0),
+		server.WithStreamBody(true),
 	)
 	s.installMiddlewares(h)
 	return h

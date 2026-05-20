@@ -60,7 +60,7 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, "NotFound", apiErr.ErrorCode())
 	})
 
-	t.Run("CreateConflict", func(t *testing.T) {
+	t.Run("CreateDeniedOnDataPlane", func(t *testing.T) {
 		ctx := context.Background()
 		name := tgt.uniqueBucket(t, "conflict")
 
@@ -71,7 +71,7 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 		var apiErr smithy.APIError
 		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "BucketAlreadyOwnedByYou", apiErr.ErrorCode())
+		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 	})
 
 	t.Run("List", func(t *testing.T) {
@@ -93,14 +93,16 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 	t.Run("Delete", func(t *testing.T) {
 		ctx := context.Background()
-		// uniqueBucket auto-registers t.Cleanup(DeleteBucket) which ignores
-		// "NoSuchBucket" — safe to call DeleteBucket explicitly here.
 		name := tgt.uniqueBucket(t, "delete")
 
 		_, err := client.DeleteBucket(ctx, &s3.DeleteBucketInput{
 			Bucket: aws.String(name),
 		})
-		require.NoError(t, err)
+		require.Error(t, err)
+
+		var apiErr smithy.APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 	})
 
 	t.Run("DeleteNotEmpty", func(t *testing.T) {
@@ -121,22 +123,17 @@ func runBucketCases(t *testing.T, tgt s3Target) {
 
 		var apiErr smithy.APIError
 		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "BucketNotEmpty", apiErr.ErrorCode())
+		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 	})
 
-	t.Run("ListExcludesInternal", func(t *testing.T) {
+	t.Run("InternalBucketDeniedAndNotListed", func(t *testing.T) {
 		ctx := context.Background()
 
-		// Explicitly create an internal-prefixed bucket so the filter is
-		// exercised even when no NFS/VFS internal bucket exists. Cannot use
-		// uniqueBucket because the sanitizer strips the leading underscores
-		// that drive the "internal prefix" filter under test.
+		// Data-plane bucket lifecycle is admin-UDS-only; internal buckets are
+		// also rejected before storage creation.
 		internalName := "__grainfs_review_test_internal_" + tgt.name
 		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(internalName)})
-		require.NoError(t, err)
-		t.Cleanup(func() {
-			client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(internalName)})
-		})
+		require.Error(t, err)
 
 		out, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 		require.NoError(t, err)

@@ -35,6 +35,7 @@ package shardcache
 import (
 	"container/list"
 	"hash/fnv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -250,6 +251,27 @@ func (c *Cache) Invalidate(key string) {
 		c.residency.Add(-int64(len(e.data)))
 		mResident.Set(float64(c.residency.Load()))
 	}
+}
+
+func (c *Cache) InvalidatePrefix(prefix string) {
+	if c.capacityBytes <= 0 || prefix == "" {
+		return
+	}
+	for _, s := range c.shards {
+		s.mu.Lock()
+		for key, elem := range s.entries {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			e := elem.Value.(*entry)
+			s.lru.Remove(elem)
+			delete(s.entries, key)
+			s.bytes -= int64(len(e.data))
+			c.residency.Add(-int64(len(e.data)))
+		}
+		s.mu.Unlock()
+	}
+	mResident.Set(float64(c.residency.Load()))
 }
 
 // Stats is a snapshot of cache state.

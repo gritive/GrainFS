@@ -1362,6 +1362,167 @@ func TestClusterCoordinator_GetObject_ForwardUsesReadStream(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
 }
 
+func TestClusterCoordinator_GetObject_FollowerVoterUsesLocalCurrentObjectBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-current",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 11, ContentType: "text/plain", ETag: "etag-current"},
+		},
+	}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	rc, obj, err := c.GetObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	defer rc.Close()
+	require.Equal(t, int64(11), obj.Size)
+	require.Equal(t, "etag-current", obj.ETag)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, []byte("hello world"), body)
+	require.Empty(t, d.calls)
+	require.Empty(t, d.readCalls)
+}
+
+func TestClusterCoordinator_GetObject_FollowerVoterUsesLocalCurrentVersionBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-v1",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPathV("bk", "k", "v1")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPathV("bk", "k", "v1"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		if err := txn.Set(latestKey("bk", "k"), []byte("v1")); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKeyV("bk", "k", "v1"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", VersionID: "v1", PlacementGroupID: "g1", Size: 11, ContentType: "text/plain", ETag: "etag-v1"},
+		},
+	}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	rc, obj, err := c.GetObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	defer rc.Close()
+	require.Equal(t, "v1", obj.VersionID)
+	require.Equal(t, "etag-v1", obj.ETag)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, []byte("hello world"), body)
+	require.Empty(t, d.calls)
+	require.Empty(t, d.readCalls)
+}
+
+func TestClusterCoordinator_GetObject_FollowerVoterForwardsWhenLocalObjectIndexStale(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         5,
+		ContentType:  "text/stale",
+		ETag:         "etag-current",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("stale"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 5, ContentType: "text/plain", ETag: "etag-current"},
+		},
+	}
+	d := &recordingDialer{
+		readReplyBy: map[raftpb.ForwardOp][]byte{
+			raftpb.ForwardOpGetObject: buildGetObjectReply(
+				&storage.Object{Key: "k", Size: 5, ETag: "etag-current", ContentType: "text/plain"},
+				"bk", nil,
+			),
+		},
+		readBodyBy: map[raftpb.ForwardOp][]byte{raftpb.ForwardOpGetObject: []byte("fresh")},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial).WithReadStreamDialer(d.readStream))
+
+	rc, obj, err := c.GetObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	defer rc.Close()
+	require.Equal(t, "etag-current", obj.ETag)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, []byte("fresh"), body)
+	require.Empty(t, d.calls)
+	require.Len(t, d.readCalls, 1)
+	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
+}
+
 func TestForwardReadValidator_IgnoresTerminalErrorAfterExpectedBytes(t *testing.T) {
 	body := []byte("complete-body")
 	rc := &forwardReadValidator{
@@ -1408,6 +1569,284 @@ func TestClusterCoordinator_ReadAt_ForwardSmallRangeUsesSingleFrame(t *testing.T
 	args := raftpb.GetRootAsReadAtArgs(d.calls[0].args, 0)
 	require.Equal(t, int64(10), args.Offset())
 	require.Equal(t, int64(len(body)), args.Length())
+}
+
+func TestClusterCoordinator_ReadAt_FollowerVoterUsesLocalCurrentObjectBeforeForward(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-current",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 11, ETag: "etag-current"},
+		},
+	}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	buf := make([]byte, 5)
+	n, err := c.ReadAt(context.Background(), "bk", "k", 6, buf)
+
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, []byte("world"), buf)
+	require.Empty(t, d.calls)
+}
+
+func TestClusterCoordinator_HeadObject_FollowerVoterForwardsToLeader(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	modTime := time.Now().Unix()
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-current",
+		LastModified: modTime,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 11, ContentType: "text/plain", ETag: "etag-current", ModTime: modTime},
+		},
+	}
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{
+		raftpb.ForwardOpHeadObject: buildObjectReply(&storage.Object{
+			Key:          "k",
+			Size:         11,
+			ContentType:  "text/plain",
+			ETag:         "etag-current",
+			LastModified: modTime,
+		}, "bk"),
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	obj, err := c.HeadObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(11), obj.Size)
+	require.Equal(t, "text/plain", obj.ContentType)
+	require.Equal(t, "etag-current", obj.ETag)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+}
+
+func TestClusterCoordinator_HeadObject_FollowerVoterForwardsInsteadOfServingStaleIndexMatch(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	staleModTime := time.Now().Unix()
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-stale",
+		LastModified: staleModTime,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 11, ContentType: "text/plain", ETag: "etag-stale", ModTime: staleModTime},
+		},
+	}
+	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{
+		raftpb.ForwardOpHeadObject: buildObjectReply(&storage.Object{
+			Key:          "k",
+			Size:         22,
+			ContentType:  "text/plain",
+			ETag:         "etag-fresh",
+			LastModified: staleModTime + 1,
+		}, "bk"),
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	obj, err := c.HeadObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	require.Equal(t, int64(22), obj.Size)
+	require.Equal(t, "etag-fresh", obj.ETag)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+}
+
+func TestClusterCoordinator_ReadAt_FollowerVoterForwardsWhenLocalObjectIndexStale(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"self", "peer-a"})
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 5, ETag: "etag-current"},
+		},
+	}
+	c.meta = meta
+	c.WithObjectIndexProposer(noopObjectIndexProposer{})
+	d.replyByOp[raftpb.ForwardOpReadAt] = buildReadAtReply([]byte("fresh"))
+	c.forward.WithReadStreamDialer(d.readStream)
+
+	buf := make([]byte, 5)
+	n, err := c.ReadAt(context.Background(), "bk", "k", 0, buf)
+
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, []byte("fresh"), buf)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, "peer-a", d.calls[0].peer)
+}
+
+func TestClusterCoordinator_ReadAt_FollowerVoterForwardsWhenLocalCurrentReadFails(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         5,
+		ContentType:  "text/plain",
+		ETag:         "etag-current",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 5, ETag: "etag-current"},
+		},
+	}
+	d := &recordingDialer{
+		replyByOp:     map[raftpb.ForwardOp][]byte{raftpb.ForwardOpReadAt: buildReadAtReply([]byte("fresh"))},
+		streamReplyBy: map[raftpb.ForwardOp][]byte{},
+		readReplyBy:   map[raftpb.ForwardOp][]byte{},
+		readBodyBy:    map[raftpb.ForwardOp][]byte{},
+	}
+	sender := NewForwardSender(d.dial).WithReadStreamDialer(d.readStream)
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(sender)
+
+	buf := make([]byte, 5)
+	n, err := c.ReadAt(context.Background(), "bk", "k", 0, buf)
+
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, []byte("fresh"), buf)
+	require.Len(t, d.calls, 1)
+}
+
+func TestClusterCoordinator_ReadAt_FollowerVoterCurrentObjectAvoidsSecondMetadataDecode(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestFollowerGroupBackend(t, "g1", "self")
+	metaBytes, err := marshalObjectMeta(objectMeta{
+		Key:          "k",
+		Size:         11,
+		ContentType:  "text/plain",
+		ETag:         "etag-current",
+		LastModified: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(gb.objectPath("bk", "k")), 0o755))
+	require.NoError(t, os.WriteFile(gb.objectPath("bk", "k"), []byte("hello world"), 0o644))
+	require.NoError(t, gb.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(bucketKey("bk"), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set(objectMetaKey("bk", "k"), metaBytes)
+	}))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {Bucket: "bk", Key: "k", PlacementGroupID: "g1", Size: 11, ETag: "etag-current"},
+		},
+	}
+	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	allocs := testing.AllocsPerRun(100, func() {
+		buf := make([]byte, 5)
+		n, err := c.ReadAt(context.Background(), "bk", "k", 6, buf)
+		require.NoError(t, err)
+		require.Equal(t, 5, n)
+	})
+	require.Less(t, allocs, 60.0)
 }
 
 func TestClusterCoordinator_ReadAt_ForwardMalformedReplyReturnsError(t *testing.T) {
@@ -2101,6 +2540,147 @@ func TestClusterCoordinator_UploadPart_Forward(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
 }
 
+type exposedForwardBodyReader struct {
+	*bytes.Reader
+	body      []byte
+	readCalls int
+}
+
+func newExposedForwardBodyReader(body []byte) *exposedForwardBodyReader {
+	return &exposedForwardBodyReader{Reader: bytes.NewReader(body), body: body}
+}
+
+func (r *exposedForwardBodyReader) Read(p []byte) (int, error) {
+	r.readCalls++
+	return r.Reader.Read(p)
+}
+
+func (r *exposedForwardBodyReader) ForwardBodyBytes() []byte {
+	return r.body
+}
+
+func TestClusterCoordinator_UploadPart_ForwardUsesExposedBodyBytes(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	body := bytes.Repeat([]byte("y"), 1024)
+	reader := newExposedForwardBodyReader(body)
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 7, ETag: "etag-part", Size: int64(len(body))},
+	)
+
+	p, err := c.UploadPart(context.Background(), "bk", "k", "uid", 7, reader)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), p.Size)
+	require.Zero(t, reader.readCalls, "UploadPart should reuse exposed body bytes instead of copying through io.ReadAll")
+
+	args := raftpb.GetRootAsUploadPartArgs(d.calls[0].args, 0)
+	require.Equal(t, body, args.BodyBytes())
+}
+
+func benchmarkClusterCoordinatorUploadPartForward5MiB(b *testing.B, exposed bool) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"a"}},
+	}}
+	reply := buildPartReply(&storage.Part{PartNumber: 1, ETag: "etag-part", Size: 5 * 1024 * 1024})
+	dial := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		_, op, args, err := decodeForwardPayload(payload)
+		if err != nil {
+			return nil, err
+		}
+		if op != raftpb.ForwardOpUploadPart {
+			return nil, errors.New("unexpected forward op")
+		}
+		if got := raftpb.GetRootAsUploadPartArgs(args, 0).BodyLength(); got != 5*1024*1024 {
+			return nil, fmt.Errorf("unexpected upload part body length %d", got)
+		}
+		return reply, nil
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").WithForwardSender(NewForwardSender(dial))
+	body := bytes.Repeat([]byte("p"), 5*1024*1024)
+
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var reader io.Reader
+		if exposed {
+			reader = newExposedForwardBodyReader(body)
+		} else {
+			reader = bytes.NewReader(body)
+		}
+		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, reader)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if part.Size != int64(len(body)) {
+			b.Fatalf("part size %d != body size %d", part.Size, len(body))
+		}
+	}
+}
+
+func BenchmarkClusterCoordinatorUploadPartForwardReadAll_5MiB(b *testing.B) {
+	benchmarkClusterCoordinatorUploadPartForward5MiB(b, false)
+}
+
+func BenchmarkClusterCoordinatorUploadPartForwardExposed_5MiB(b *testing.B) {
+	benchmarkClusterCoordinatorUploadPartForward5MiB(b, true)
+}
+
+func BenchmarkClusterCoordinatorUploadPartForwardStream_5MiB(b *testing.B) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"a"}},
+	}}
+	reply := buildPartReply(&storage.Part{PartNumber: 1, ETag: "etag-part", Size: 5 * 1024 * 1024})
+	dial := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		return buildSimpleReply(raftpb.ForwardStatusNotLeader, "a"), nil
+	}
+	stream := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		_, op, args, err := decodeForwardPayload(payload)
+		if err != nil {
+			return nil, err
+		}
+		if op != raftpb.ForwardOpUploadPart {
+			return nil, errors.New("unexpected forward op")
+		}
+		if got := raftpb.GetRootAsUploadPartArgs(args, 0).BodyLength(); got != 0 {
+			return nil, fmt.Errorf("unexpected upload part body length %d", got)
+		}
+		n, err := io.Copy(io.Discard, body)
+		if err != nil {
+			return nil, err
+		}
+		if n != 5*1024*1024 {
+			return nil, fmt.Errorf("streamed body length %d", n)
+		}
+		return reply, nil
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(dial).WithStreamDialer(stream))
+	body := bytes.Repeat([]byte("p"), 5*1024*1024)
+
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if part.Size != int64(len(body)) {
+			b.Fatalf("part size %d != body size %d", part.Size, len(body))
+		}
+	}
+}
+
 func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	body := []byte("part-body")
@@ -2185,10 +2765,10 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) 
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
 }
 
-func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesStream(t *testing.T) {
+func TestClusterCoordinator_UploadPart_StreamForward_AtMultipartPartFloor(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
-	body := []byte("small-part-body")
+	body := bytes.Repeat([]byte("p"), minMultipartForwardStreamBytes)
 	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
@@ -2202,7 +2782,26 @@ func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesStream(t *testin
 	require.Equal(t, body, d.streamCalls[0].rawly)
 
 	args := raftpb.GetRootAsUploadPartArgs(d.streamCalls[0].args, 0)
-	require.Zero(t, args.BodyLength(), "streamed UploadPart metadata must not embed the part body")
+	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
+}
+
+func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	body := []byte("small-part-body")
+	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
+		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
+	)
+
+	part, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), part.Size)
+	require.Empty(t, d.streamCalls)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpUploadPart, d.calls[0].op)
+
+	args := raftpb.GetRootAsUploadPartArgs(d.calls[0].args, 0)
+	require.Equal(t, body, args.BodyBytes())
 }
 
 func TestClusterCoordinator_CompleteMultipartUpload_ForwardCommitsObjectIndex(t *testing.T) {
@@ -2281,6 +2880,40 @@ func TestClusterCoordinator_AppendObject_ExistingObjectRoutesByObjectIndex(t *te
 	require.Len(t, d.streamCalls, 1)
 	require.Equal(t, "object-group", d.streamCalls[0].gid)
 	require.Equal(t, "object-peer", d.streamCalls[0].peer)
+}
+
+func TestClusterCoordinator_AppendObject_RejectsStaleOffsetFromObjectIndexBeforeReadingBody(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("object-group", []string{"object-peer"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("b", "object-group")
+	metaGroups := map[string]ShardGroupEntry{
+		"object-group": {ID: "object-group", PeerIDs: []string{"object-peer"}},
+	}
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: metaGroups},
+		latest: map[string]ObjectIndexEntry{
+			"b/k": {Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "object-group", Size: 10},
+		},
+	}
+	d := &recordingDialer{
+		replyByOp:     map[raftpb.ForwardOp][]byte{},
+		streamReplyBy: map[raftpb.ForwardOp][]byte{},
+		readReplyBy:   map[raftpb.ForwardOp][]byte{},
+		readBodyBy:    map[raftpb.ForwardOp][]byte{},
+	}
+	reader := newExposedForwardBodyReader([]byte("chunk"))
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial).WithStreamDialer(d.stream)).
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+
+	_, err := c.AppendObject(context.Background(), "b", "k", 5, reader)
+
+	require.ErrorIs(t, err, storage.ErrAppendOffsetMismatch)
+	require.Zero(t, reader.readCalls)
+	require.Empty(t, d.streamCalls)
 }
 
 func TestClusterCoordinator_AppendObject_IndexMissFallsBackToWriteRoute(t *testing.T) {

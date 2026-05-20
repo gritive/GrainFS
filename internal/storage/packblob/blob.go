@@ -29,6 +29,13 @@ const (
 	flagEncrypted  = byte(0x02)
 )
 
+var (
+	blobAppendAADPool    = make(chan []byte, 256)
+	blobAppendSealedPool = make(chan []byte, 256)
+	blobReadKeyPool      = make(chan []byte, 256)
+	blobReadPayloadPool  = make(chan []byte, 256)
+)
+
 // BlobStore manages append-only blob files for packing small objects.
 type BlobStore struct {
 	dir       string
@@ -148,12 +155,19 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	defer bs.mu.Unlock()
 
 	offset := bs.activeOff
+	var aadBuf []byte
+	var sealedBuf []byte
 	if bs.encryptor != nil {
 		flags |= flagEncrypted
-		sealed, err := bs.encryptor.SealValueAADTo(nil, bs.entryAAD(bs.activeID, uint64(offset), key, flags), storedPayload)
+		aadBuf = takeBlobAppendAADBuffer(len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key))
+		sealedBuf = takeBlobAppendSealedBuffer(len(storedPayload) + 64)
+		sealed, err := bs.encryptor.SealValueAADTo(sealedBuf[:0], bs.entryAADTo(aadBuf, bs.activeID, uint64(offset), key, flags), storedPayload)
 		if err != nil {
+			releaseBlobAppendAADBuffer(aadBuf)
+			releaseBlobAppendSealedBuffer(sealedBuf)
 			return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 		}
+		sealedBuf = sealed
 		payload = sealed
 	}
 
@@ -162,14 +176,19 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	// Rotate if this entry would exceed max blob size
 	if bs.activeOff+entrySize > bs.maxSize && bs.activeOff > 0 {
 		if err := bs.rotate(); err != nil {
+			releaseBlobAppendAADBuffer(aadBuf)
+			releaseBlobAppendSealedBuffer(sealedBuf)
 			return BlobLocation{}, err
 		}
 		offset = bs.activeOff
 		if bs.encryptor != nil {
-			sealed, err := bs.encryptor.SealValueAADTo(nil, bs.entryAAD(bs.activeID, uint64(offset), key, flags), storedPayload)
+			sealed, err := bs.encryptor.SealValueAADTo(sealedBuf[:0], bs.entryAADTo(aadBuf, bs.activeID, uint64(offset), key, flags), storedPayload)
 			if err != nil {
+				releaseBlobAppendAADBuffer(aadBuf)
+				releaseBlobAppendSealedBuffer(sealedBuf)
 				return BlobLocation{}, fmt.Errorf("encrypt blob entry: %w", err)
 			}
+			sealedBuf = sealed
 			payload = sealed
 			entrySize = int64(entryOverhead + len(key) + len(payload))
 		}
@@ -179,26 +198,38 @@ func (bs *BlobStore) Append(key string, data []byte) (BlobLocation, error) {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(key)))
 	if _, err := bs.active.Write(header[:]); err != nil {
+		releaseBlobAppendAADBuffer(aadBuf)
+		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.WriteString(key); err != nil {
+		releaseBlobAppendAADBuffer(aadBuf)
+		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	var entryHeader [5]byte
 	entryHeader[0] = flags
 	binary.BigEndian.PutUint32(entryHeader[1:], uint32(len(payload)))
 	if _, err := bs.active.Write(entryHeader[:]); err != nil {
+		releaseBlobAppendAADBuffer(aadBuf)
+		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 	if _, err := bs.active.Write(payload); err != nil {
+		releaseBlobAppendAADBuffer(aadBuf)
+		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
 
 	var crc [4]byte
 	binary.BigEndian.PutUint32(crc[:], blobEntryCRC([]byte(key), flags, payload))
 	if _, err := bs.active.Write(crc[:]); err != nil {
+		releaseBlobAppendAADBuffer(aadBuf)
+		releaseBlobAppendSealedBuffer(sealedBuf)
 		return BlobLocation{}, err
 	}
+	releaseBlobAppendAADBuffer(aadBuf)
+	releaseBlobAppendSealedBuffer(sealedBuf)
 
 	bs.activeOff += entrySize
 
@@ -229,44 +260,75 @@ func (bs *BlobStore) Read(loc BlobLocation) ([]byte, error) {
 		return nil, fmt.Errorf("corrupt blob: keyLen %d exceeds max", keyLen)
 	}
 
-	restLen := int(keyLen) + 1 + 4 + int(loc.Length) + 4
-	rest := make([]byte, restLen)
-	if err := readFullAt(f, rest, &off); err != nil {
+	key := takeBlobReadKeyBuffer(int(keyLen))
+	if err := readFullAt(f, key, &off); err != nil {
+		releaseBlobReadBuffers(key, nil, false)
 		return nil, err
 	}
 
-	key := rest[:keyLen]
-	cursor := int(keyLen)
+	var flagBuf [1]byte
+	if err := readFullAt(f, flagBuf[:], &off); err != nil {
+		releaseBlobReadBuffers(key, nil, false)
+		return nil, err
+	}
+	flags := flagBuf[0]
 
-	flags := rest[cursor]
-	cursor++
-
-	dataLen := binary.BigEndian.Uint32(rest[cursor : cursor+4])
-	cursor += 4
+	if err := readFullAt(f, header[:], &off); err != nil {
+		releaseBlobReadBuffers(key, nil, false)
+		return nil, err
+	}
+	dataLen := binary.BigEndian.Uint32(header[:])
 	if dataLen > maxEntrySize {
+		releaseBlobReadBuffers(key, nil, false)
 		return nil, fmt.Errorf("corrupt blob: dataLen %d exceeds max", dataLen)
 	}
 	if dataLen != loc.Length {
+		releaseBlobReadBuffers(key, nil, false)
 		return nil, fmt.Errorf("corrupt blob: dataLen %d does not match location length %d", dataLen, loc.Length)
 	}
 
-	payload := rest[cursor : cursor+int(dataLen)]
-	cursor += int(dataLen)
+	payloadLen := int(dataLen)
+	payload := make([]byte, payloadLen)
+	pooledPayload := false
+	if bs.encryptor != nil && flags&flagEncrypted != 0 {
+		payload = takeBlobReadPayloadBuffer(payloadLen)
+		pooledPayload = cap(payload) > 0
+	}
+	if err := readFullAt(f, payload, &off); err != nil {
+		releaseBlobReadBuffers(key, payload, pooledPayload)
+		return nil, err
+	}
 
-	expectedCRC := binary.BigEndian.Uint32(rest[cursor : cursor+4])
+	if err := readFullAt(f, header[:], &off); err != nil {
+		releaseBlobReadBuffers(key, payload, pooledPayload)
+		return nil, err
+	}
+	expectedCRC := binary.BigEndian.Uint32(header[:])
 
 	if !bs.skipReadCRC(flags) {
 		if blobEntryCRC(key, flags, payload) != expectedCRC {
 			if legacyBlobEntryCRC(key, payload) != expectedCRC {
+				releaseBlobReadBuffers(key, payload, pooledPayload)
 				return nil, fmt.Errorf("CRC mismatch at blob %d offset %d", loc.BlobID, loc.Offset)
 			}
 			if err := bs.rejectEncryptedFlagDowngrade(loc.BlobID, loc.Offset, string(key), flags, payload); err != nil {
+				releaseBlobReadBuffers(key, payload, pooledPayload)
 				return nil, err
 			}
 		}
 	}
 
-	payload, err = bs.decodePayload(loc.BlobID, loc.Offset, string(key), flags, payload)
+	if bs.encryptor != nil && flags&flagEncrypted != 0 {
+		aadBuf := takeBlobAppendAADBuffer(len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key))
+		encryptedPayload := payload
+		payload, err = bs.encryptor.OpenValueAADTo(nil, entryAADBytesTo(aadBuf, loc.BlobID, loc.Offset, key, flags), encryptedPayload)
+		releaseBlobAppendAADBuffer(aadBuf)
+		releaseBlobReadBuffers(key, encryptedPayload, pooledPayload)
+	} else {
+		keyString := string(key)
+		payload, err = bs.decodePayload(loc.BlobID, loc.Offset, keyString, flags, payload)
+		releaseBlobReadBuffers(key, nil, false)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +549,15 @@ func (bs *BlobStore) blobPath(id uint64) string {
 }
 
 func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags byte) []byte {
-	aad := make([]byte, len("packblob:v2:")+8+8+1+4+len(key))
+	return bs.entryAADTo(nil, blobID, offset, key, flags)
+}
+
+func (bs *BlobStore) entryAADTo(dst []byte, blobID uint64, offset uint64, key string, flags byte) []byte {
+	aadLen := len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key)
+	if cap(dst) < aadLen {
+		dst = make([]byte, aadLen)
+	}
+	aad := dst[:aadLen]
 	copy(aad, "packblob:v2:")
 	off := len("packblob:v2:")
 	binary.BigEndian.PutUint64(aad[off:], blobID)
@@ -500,6 +570,133 @@ func (bs *BlobStore) entryAAD(blobID uint64, offset uint64, key string, flags by
 	off += 4
 	copy(aad[off:], key)
 	return aad
+}
+
+func entryAADBytesTo(dst []byte, blobID uint64, offset uint64, key []byte, flags byte) []byte {
+	aadLen := len("packblob:v2:") + 8 + 8 + 1 + 4 + len(key)
+	if cap(dst) < aadLen {
+		dst = make([]byte, aadLen)
+	}
+	aad := dst[:aadLen]
+	copy(aad, "packblob:v2:")
+	off := len("packblob:v2:")
+	binary.BigEndian.PutUint64(aad[off:], blobID)
+	off += 8
+	binary.BigEndian.PutUint64(aad[off:], offset)
+	off += 8
+	aad[off] = flags
+	off++
+	binary.BigEndian.PutUint32(aad[off:], uint32(len(key)))
+	off += 4
+	copy(aad[off:], key)
+	return aad
+}
+
+func takeBlobAppendAADBuffer(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	select {
+	case buf := <-blobAppendAADPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]byte, n)
+}
+
+func releaseBlobAppendAADBuffer(buf []byte) {
+	if cap(buf) == 0 || cap(buf) > 4<<10 {
+		return
+	}
+	clear(buf[:cap(buf)])
+	select {
+	case blobAppendAADPool <- buf[:0]:
+	default:
+	}
+}
+
+func takeBlobAppendSealedBuffer(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	select {
+	case buf := <-blobAppendSealedPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]byte, n)
+}
+
+func releaseBlobAppendSealedBuffer(buf []byte) {
+	if cap(buf) == 0 || cap(buf) > 1<<20 {
+		return
+	}
+	clear(buf[:cap(buf)])
+	select {
+	case blobAppendSealedPool <- buf[:0]:
+	default:
+	}
+}
+
+func takeBlobReadKeyBuffer(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	select {
+	case buf := <-blobReadKeyPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]byte, n)
+}
+
+func releaseBlobReadKeyBuffer(buf []byte) {
+	if cap(buf) == 0 || cap(buf) > 4<<10 {
+		return
+	}
+	clear(buf[:cap(buf)])
+	select {
+	case blobReadKeyPool <- buf[:0]:
+	default:
+	}
+}
+
+func releaseBlobReadBuffers(key []byte, payload []byte, releasePayload bool) {
+	releaseBlobReadKeyBuffer(key)
+	if releasePayload {
+		releaseBlobReadPayloadBuffer(payload)
+	}
+}
+
+func takeBlobReadPayloadBuffer(n int) []byte {
+	if n == 0 {
+		return nil
+	}
+	select {
+	case buf := <-blobReadPayloadPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]byte, n)
+}
+
+func releaseBlobReadPayloadBuffer(buf []byte) {
+	if cap(buf) == 0 || cap(buf) > 1<<20 {
+		return
+	}
+	clear(buf[:cap(buf)])
+	select {
+	case blobReadPayloadPool <- buf[:0]:
+	default:
+	}
 }
 
 func blobEntryCRC(key []byte, flags byte, payload []byte) uint32 {

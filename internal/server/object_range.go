@@ -49,6 +49,7 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 	c.Response.SetBodyStream(&readAtRangeReader{
 		ctx:     ctx,
 		backend: reader,
+		obj:     obj,
 		bucket:  bucket,
 		key:     key,
 		offset:  start,
@@ -83,6 +84,10 @@ func (s *Server) getObjectPartNumberReadAt(ctx context.Context, c *app.RequestCo
 		return true
 	}
 
+	if start == 0 && end+1 == obj.Size {
+		return false
+	}
+
 	s.writeObjectReadHeaders(c, obj, false)
 	etag := fmt.Sprintf("\"%s\"", partETag)
 	c.Header("ETag", etag)
@@ -107,6 +112,7 @@ func (s *Server) getObjectPartNumberReadAt(ctx context.Context, c *app.RequestCo
 	c.Response.SetBodyStream(&readAtRangeReader{
 		ctx:     ctx,
 		backend: reader,
+		obj:     obj,
 		bucket:  bucket,
 		key:     key,
 		offset:  start,

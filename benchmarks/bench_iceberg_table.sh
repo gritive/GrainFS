@@ -11,16 +11,26 @@ BINARY="${BINARY:-./bin/grainfs}"
 BASE_PORT="${BASE_PORT:-$(bench_free_port)}"
 PPROF_PORT="${PPROF_PORT:-$(bench_free_port)}"
 PROFILE="${PROFILE:-0}"
-VUS="${VUS:-${MAX_VUS:-10}}"
 DURATION="${DURATION:-30s}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
 ICEBERG_WARP_COMMAND="${ICEBERG_WARP_COMMAND:-catalog-mixed}"
+if [[ "$ICEBERG_WARP_COMMAND" == "sustained" && -z "${VUS+x}" && -z "${MAX_VUS+x}" ]]; then
+  VUS="1"
+else
+  VUS="${VUS:-${MAX_VUS:-10}}"
+fi
 ICEBERG_CATALOG="${ICEBERG_CATALOG:-warehouse}"
 ICEBERG_BUCKET="${ICEBERG_BUCKET:-grainfs-tables}"
 ICEBERG_BASE_LOCATION="${ICEBERG_BASE_LOCATION:-s3://${ICEBERG_BUCKET}}"
 ICEBERG_NAMESPACE_WIDTH="${ICEBERG_NAMESPACE_WIDTH:-1}"
 ICEBERG_NAMESPACE_DEPTH="${ICEBERG_NAMESPACE_DEPTH:-1}"
-ICEBERG_TABLES_PER_NS="${ICEBERG_TABLES_PER_NS:-4}"
+if [[ -z "${ICEBERG_TABLES_PER_NS+x}" ]]; then
+  if [[ "$ICEBERG_WARP_COMMAND" == "catalog-commits" ]]; then
+    ICEBERG_TABLES_PER_NS="200"
+  else
+    ICEBERG_TABLES_PER_NS="4"
+  fi
+fi
 ICEBERG_VIEWS_PER_NS="${ICEBERG_VIEWS_PER_NS:-0}"
 ICEBERG_COLUMNS="${ICEBERG_COLUMNS:-10}"
 ICEBERG_PROPERTIES="${ICEBERG_PROPERTIES:-5}"
@@ -29,6 +39,10 @@ ICEBERG_TABLE_UPDATE_DISTRIB="${ICEBERG_TABLE_UPDATE_DISTRIB:-0}"
 ICEBERG_VIEW_UPDATE_DISTRIB="${ICEBERG_VIEW_UPDATE_DISTRIB:-0}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
+PROFILE_DIR="${PROFILE_ROOT:-benchmarks/profiles/iceberg-table-warp-$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$PROFILE_DIR"
+bench_collect_host_preflight "$PROFILE_DIR"
+bench_enforce_strict_host "$PROFILE_DIR"
 
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
   echo "[bench] building grainfs..."
@@ -38,7 +52,6 @@ bench_require_binary "$BINARY"
 bench_require_command "$WARP_BIN" "brew install minio/stable/warp"
 
 DATA_DIR=$(mktemp -d "grainfs-iceberg-table-bench-XXXX" -p /tmp)
-PROFILE_DIR="${PROFILE_ROOT:-benchmarks/profiles/iceberg-table-warp-$(date +%Y%m%d-%H%M%S)}"
 PIDS=()
 
 cleanup() {
@@ -80,7 +93,7 @@ fi
 bench_wait_cluster_leader "http://127.0.0.1:$BASE_PORT" 120 0.5
 bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR" "bench-iceberg-table"
 echo "[bench] creating Iceberg warehouse bucket ($ICEBERG_BUCKET)..."
-bench_create_bucket_admin_retry "$BINARY" "$DATA_DIR" "$ICEBERG_BUCKET"
+bench_create_bucket_with_policy_admin_retry "$BINARY" "$DATA_DIR" "$ICEBERG_BUCKET" "$SA_ID" bucket-admin
 
 PPROF_BG_PID=""
 if [[ "$PROFILE" == "1" ]]; then
@@ -103,9 +116,9 @@ args=(
   --host "$host"
   --access-key "$ACCESS_KEY"
   --secret-key "$SECRET_KEY"
-  --catalog-prop "rest.sigv4-enabled=true"
-  --catalog-prop "rest.signing-name=s3"
-  --catalog-prop "rest.signing-region=us-east-1"
+  # warp 1.5.0 has no --catalog-prop flag. The AIStor catalog driver signs
+  # REST calls with SigV4, and GrainFS accepts the service name chosen by the
+  # client.
   --bucket "$ICEBERG_BUCKET"
   --catalog-name "$ICEBERG_CATALOG"
   --base-location "$ICEBERG_BASE_LOCATION"
@@ -137,7 +150,11 @@ case "$ICEBERG_WARP_COMMAND" in
     args+=(--views-per-ns "$ICEBERG_VIEWS_PER_NS")
     ;;
   sustained)
-    args+=(--columns "$ICEBERG_COLUMNS" --properties "$ICEBERG_PROPERTIES")
+    args+=(
+      --columns "$ICEBERG_COLUMNS"
+      --properties "$ICEBERG_PROPERTIES"
+      --rps-limit "${ICEBERG_SUSTAINED_RPS_LIMIT:-1}"
+    )
     ;;
   *)
     echo "[error] unsupported ICEBERG_WARP_COMMAND: $ICEBERG_WARP_COMMAND" >&2
@@ -168,6 +185,8 @@ fi
   echo "- duration: ${DURATION}"
   echo "- update distribution: ns=${ICEBERG_NS_UPDATE_DISTRIB}, table=${ICEBERG_TABLE_UPDATE_DISTRIB}, view=${ICEBERG_VIEW_UPDATE_DISTRIB}"
   echo "- raw artifacts: ${PROFILE_DIR}"
+  echo "- host preflight: ${PROFILE_DIR}/host-preflight.txt"
+  bench_print_host_preflight_warnings
 } >"$PROFILE_DIR/summary.md"
 
 [[ -n "$PPROF_BG_PID" ]] && wait "$PPROF_BG_PID" 2>/dev/null || true

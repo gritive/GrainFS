@@ -503,6 +503,75 @@ func TestDistributedBackend_CompleteMultipartDoesNotProposeSeparateAbort(t *test
 	require.Equal(t, []CommandType{CmdCompleteMultipart}, rec.commandTypes())
 }
 
+func TestDistributedBackend_CompleteSinglePartMultipartBypassesCompleteSpool(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	payload := []byte("small-final-part")
+	part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(b.spoolDir()), 0o700))
+	require.NoError(t, os.Mkdir(b.spoolDir(), 0o500))
+	require.NoError(t, os.Chmod(b.spoolDir(), 0o500))
+	t.Cleanup(func() { _ = os.Chmod(b.spoolDir(), 0o700) })
+
+	obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+	require.Equal(t, int64(len(payload)), obj.Size)
+
+	rc, _, err := b.GetObject(ctx, "bucket", "mp.bin")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+func TestDistributedBackend_ReadAtObjectUsesPreparedECPlacement(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+	part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
+	require.NoError(t, err)
+	_, err = b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject(ctx, "bucket", "mp.bin")
+	require.NoError(t, err)
+	require.Equal(t, uint8(1), obj.ECData)
+	require.Equal(t, uint8(0), obj.ECParity)
+	require.Equal(t, []string{b.selfAddr}, obj.NodeIDs)
+
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Delete(b.ks().ObjectMetaKey("bucket", "mp.bin")); err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err := txn.Delete(b.ks().ObjectMetaKeyV("bucket", "mp.bin", obj.VersionID)); err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		if err := txn.Delete(b.ks().LatestKey("bucket", "mp.bin")); err != nil && err != badger.ErrKeyNotFound {
+			return err
+		}
+		return nil
+	}))
+	_, err = b.HeadObject(ctx, "bucket", "mp.bin")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+
+	buf := make([]byte, len(payload))
+	n, err := b.ReadAtObject(ctx, "bucket", "mp.bin", obj, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, len(payload), n)
+	require.Equal(t, payload, buf)
+}
+
 func TestDistributedBackend_PutObjectToBadBucket(t *testing.T) {
 	b := newTestDistributedBackend(t)
 

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -252,6 +254,68 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 	require.Equal(t, []string{"node-a"}, result.Placement)
 }
 
+func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {
+	data := bytes.Repeat([]byte("0123456789abcdef"), 128*1024)
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	placement := []string{"node-a", "node-b", "node-c", "node-d"}
+
+	run := func(t testing.TB) {
+		t.Helper()
+		shards := &fakeECObjectWriterShards{}
+		writer := ecObjectWriter{
+			selfID: "not-a-placement-node",
+			shards: shards,
+		}
+		_, err := writer.writeDataShards(context.Background(), ecObjectWritePlan{
+			Bucket:    "bucket",
+			Key:       "object",
+			Config:    cfg,
+			Placement: placement,
+		}, data)
+		require.NoError(t, err)
+		require.Len(t, shards.streamWrites, cfg.NumShards())
+	}
+
+	run(t)
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			run(b)
+		}
+	})
+	allocedBytes := res.AllocedBytesPerOp()
+	t.Logf("writeDataShards alloc bytes: %d", allocedBytes)
+	require.LessOrEqual(t, allocedBytes, int64(3*1024*1024))
+}
+
+func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "not-a-placement-node",
+		shards: shards,
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"node-a", "node-b", "node-c", "node-d"}
+	blobID := "blob-1"
+	expected := PlacementForNodes(cfg, peers, "object/segments/"+blobID)
+
+	rec, _, _, err := writer.writeOneSegment(context.Background(), writeSegmentInput{
+		Bucket:        "bucket",
+		Key:           "object",
+		SegmentBlobID: blobID,
+		SegmentIdx:    0,
+		Group:         ShardGroupEntry{ID: "group-1", PeerIDs: peers},
+		Cfg:           cfg,
+		Data:          []byte("segment payload"),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, expected, rec.Nodes)
+	require.Len(t, shards.bufferedWrites, cfg.NumShards())
+	for _, write := range shards.bufferedWrites {
+		require.Contains(t, expected, write.peer)
+	}
+}
+
 func readECObjectWriterTraceEvents(t *testing.T, path string) []PutTraceEvent {
 	t.Helper()
 	f, err := os.Open(path)
@@ -281,6 +345,7 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 }
 
 type fakeECObjectWriterShards struct {
+	mu                  sync.Mutex
 	writeShardErr       map[string]error
 	localWrites         []fakeECObjectWriterLocalWrite
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
@@ -314,6 +379,8 @@ type fakeECObjectWriterStreamWrite struct {
 
 func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
 	data, _ := io.ReadAll(body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.localWrites = append(f.localWrites, fakeECObjectWriterLocalWrite{
 		bucket:   bucket,
 		key:      key,
@@ -328,6 +395,8 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStreamContext(ctx context.Cont
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bufferedLocalWrites = append(f.bufferedLocalWrites, fakeECObjectWriterLocalWrite{
 		bucket:   bucket,
 		key:      key,
@@ -342,6 +411,8 @@ func (f *fakeECObjectWriterShards) WriteLocalShardContext(ctx context.Context, b
 }
 
 func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bufferedWrites = append(f.bufferedWrites, fakeECObjectWriterBufferedWrite{
 		peer:     peer,
 		bucket:   bucket,
@@ -357,6 +428,8 @@ func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket,
 
 func (f *fakeECObjectWriterShards) WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error {
 	_, _ = io.Copy(io.Discard, body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.streamWrites = append(f.streamWrites, fakeECObjectWriterStreamWrite{
 		peer:     peer,
 		bucket:   bucket,
@@ -370,11 +443,15 @@ func (f *fakeECObjectWriterShards) WriteShardStream(ctx context.Context, peer, b
 }
 
 func (f *fakeECObjectWriterShards) DeleteLocalShards(bucket, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.deleteLocalCalls = append(f.deleteLocalCalls, bucket+"/"+key)
 	return nil
 }
 
 func (f *fakeECObjectWriterShards) DeleteShards(ctx context.Context, peer, bucket, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.deleteRemoteCalls = append(f.deleteRemoteCalls, peer+"/"+bucket+"/"+key)
 	return nil
 }

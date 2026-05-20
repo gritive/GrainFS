@@ -259,6 +259,14 @@ func (b *Backend) ReadAt(ctx context.Context, bucket, key string, offset int64, 
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+// ReadAtObject preserves prepared-object fast paths through the WAL wrapper.
+func (b *Backend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if prepared, ok := b.Backend.(storage.PreparedReadAt); ok {
+		return prepared.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return b.ReadAt(ctx, bucket, key, offset, buf)
+}
+
 func (b *Backend) PreferReadAt(bucket string) bool {
 	type readAtPreference interface {
 		PreferReadAt(bucket string) bool

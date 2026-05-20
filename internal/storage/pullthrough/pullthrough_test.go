@@ -109,6 +109,38 @@ func TestPullThrough_ForwardsPartialIOCapabilities(t *testing.T) {
 	require.Equal(t, []byte("bc"), buf)
 }
 
+type recordingPreparedReadAtBackend struct {
+	storage.Backend
+	calls int
+	obj   *storage.Object
+}
+
+func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	b.calls++
+	b.obj = obj
+	return copy(buf, "prepared"), nil
+}
+
+func TestPullThrough_ReadAtObject_DelegatesToInner(t *testing.T) {
+	local := newLocalBackend(t)
+	rec := &recordingPreparedReadAtBackend{Backend: local}
+	pt := pullthrough.NewBackend(rec, &staticResolver{})
+
+	reader, ok := any(pt).(interface {
+		ReadAtObject(context.Context, string, string, *storage.Object, int64, []byte) (int, error)
+	})
+	require.True(t, ok, "pullthrough.Backend must expose prepared ReadAtObject so wrappers do not force a second metadata lookup")
+
+	obj := &storage.Object{Key: "k", Size: 8, ETag: "etag"}
+	buf := make([]byte, 8)
+	n, err := reader.ReadAtObject(context.Background(), "b", "k", obj, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	require.Equal(t, []byte("prepared"), buf)
+	require.Equal(t, 1, rec.calls)
+	require.Same(t, obj, rec.obj)
+}
+
 // streamingUpstream returns a ReadCloser that streams arbitrary bytes without
 // buffering the full body up-front. Used to verify pullthrough does not
 // buffer the entire upstream body in memory.

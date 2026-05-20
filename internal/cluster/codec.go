@@ -950,18 +950,19 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 			if !t.Segments(&seg, i) {
 				continue
 			}
-			// TODO(Phase 2): wire Etag is hex-encoded MD5 (cluster Phase 1);
-			// decode into Checksum bytes to match storage.SegmentRef shape.
-			checksum, _ := hex.DecodeString(string(seg.Etag()))
-			if cb := seg.ChecksumBytes(); len(cb) > 0 {
-				checksum = append([]byte(nil), cb...)
-			}
 			var nodeIDs []string
 			if nn := seg.NodeIdsLength(); nn > 0 {
 				nodeIDs = make([]string, nn)
 				for j := 0; j < nn; j++ {
 					nodeIDs[j] = string(seg.NodeIds(j))
 				}
+			}
+			checksum := append([]byte(nil), seg.ChecksumBytes()...)
+			if len(checksum) == 0 {
+				// TODO(Phase 2): wire Etag is hex-encoded MD5 (cluster Phase 1);
+				// decode into Checksum bytes for legacy records that do not carry
+				// ChecksumBytes.
+				checksum, _ = hex.DecodeString(string(seg.Etag()))
 			}
 			segments[i] = storage.SegmentRef{
 				BlobID:           string(seg.BlobId()),
@@ -1342,6 +1343,7 @@ func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
 	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
 	clusterpb.AppendObjectCmdAddVersionId(b, vidOff)
+	clusterpb.AppendObjectCmdAddModifiedUnixSec(b, c.ModifiedUnixSec)
 	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
 }
 
@@ -1361,6 +1363,7 @@ func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
 		SegmentETag:      string(t.SegmentEtag()),
 		PlacementGroupID: string(t.PlacementGroupId()),
 		VersionID:        string(t.VersionId()),
+		ModifiedUnixSec:  t.ModifiedUnixSec(),
 	}, nil
 }
 

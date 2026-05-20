@@ -128,8 +128,10 @@ type DistributedBackend struct {
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks                       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 	multipartLocks                   sync.Map                            // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
+	appendLocks                      [appendLockStripeCount]sync.Mutex   // striped owner-side admission locks for same-object AppendObject
 	incidentRecorder                 IncidentRecorder                    // nil disables zero-ops incident recording
 	testBeforeChunkedMultipartCommit func() error                        // test-only hook for chunked multipart commit preflight
+	testBeforeAppendSegmentWrite     func()                              // test-only hook after append pre-check before segment write
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard
@@ -310,6 +312,14 @@ func shardCacheKey(bucket, shardKey string, idx int) string {
 	return fmt.Sprintf("%s/%s/%d", bucket, shardKey, idx)
 }
 
+func shardRangeCacheKey(bucket, shardKey string, idx int, offset, length int64) string {
+	return fmt.Sprintf("%s/%s/%d:%d:%d", bucket, shardKey, idx, offset, length)
+}
+
+func shardRangeCachePrefix(bucket, shardKey string, idx int) string {
+	return fmt.Sprintf("%s/%s/%d:", bucket, shardKey, idx)
+}
+
 // invalidateShardCache drops every shard slot for one shardKey. Used by
 // PutObject overwrite, DeleteObject, and repairShardEC so a subsequent
 // read sees post-write state. nShards covers the full k+m fan-out.
@@ -317,6 +327,7 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 	if b.shardCache == nil {
 		return
 	}
+	b.shardCache.InvalidatePrefix(fmt.Sprintf("%s/%s/", bucket, shardKey))
 	for i := 0; i < nShards; i++ {
 		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, i))
 	}
@@ -1823,6 +1834,45 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	} else if blocked {
 		return 0, objectQuarantinedError(bucket, key, q)
 	}
+	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
+}
+
+func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if obj == nil {
+		return b.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if obj.Key != "" && obj.Key != key {
+		return 0, fmt.Errorf("ReadAt object key mismatch: got %q, want %q", obj.Key, key)
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("ReadAt negative offset %d", offset)
+	}
+	if len(buf) == 0 {
+		return 0, nil
+	}
+	if storage.IsInternalBucket(bucket) {
+		return b.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	placementMeta := PlacementMeta{
+		VersionID:        obj.VersionID,
+		RingVersion:      RingVersion(obj.RingVersion),
+		ECData:           obj.ECData,
+		ECParity:         obj.ECParity,
+		NodeIDs:          obj.NodeIDs,
+		PlacementGroupID: obj.PlacementGroupID,
+	}
+	if !obj.IsAppendable && len(obj.Segments) == 0 && placementMeta.ECData == 0 && placementMeta.RingVersion == 0 && len(placementMeta.NodeIDs) == 0 {
+		return b.ReadAt(ctx, bucket, key, offset, buf)
+	}
+	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+		return 0, fmt.Errorf("check quarantine: %w", qerr)
+	} else if blocked {
+		return 0, objectQuarantinedError(bucket, key, q)
+	}
+	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
+}
+
+func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, key string, obj *storage.Object, placementMeta PlacementMeta, offset int64, buf []byte) (int, error) {
 	if offset >= obj.Size {
 		return 0, io.EOF
 	}
@@ -1840,25 +1890,7 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	}
 	if !obj.IsAppendable && len(obj.Segments) > 0 && obj.Size > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
-		refs, startOff, err := chunkedSegmentWindow(obj.Segments, offset, len(buf))
-		if err != nil {
-			return 0, err
-		}
-		rc := storage.NewSegmentReaderCtx(ctx, store, refs)
-		defer rc.Close()
-		if startOff > 0 {
-			if _, err := io.CopyN(io.Discard, rc, startOff); err != nil {
-				return 0, fmt.Errorf("chunked ReadAt seek: %w", err)
-			}
-		}
-		n, err := io.ReadFull(rc, buf)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return n, io.EOF
-		}
-		if err != nil {
-			return n, fmt.Errorf("chunked ReadAt read: %w", err)
-		}
-		return n, nil
+		return readAtChunkedSegments(ctx, store, obj.Segments, offset, buf)
 	}
 
 	if b.shardSvc != nil {
@@ -2384,16 +2416,21 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	// result.Tags aliases the caller's slice; do not introduce concurrent
 	// readers/writers on result after this point.
 	return &storage.Object{
-		Key:          plan.Key,
-		Size:         result.Size,
-		ContentType:  plan.ContentType,
-		ETag:         result.ETag,
-		LastModified: modTime,
-		VersionID:    plan.VersionID,
-		UserMetadata: cloneStringMap(plan.UserMetadata),
-		SSEAlgorithm: plan.SSEAlgorithm,
-		Parts:        result.Parts,
-		Tags:         result.Tags,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		LastModified:     modTime,
+		VersionID:        plan.VersionID,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
+		SSEAlgorithm:     plan.SSEAlgorithm,
+		PlacementGroupID: plan.PlacementGroupID,
+		RingVersion:      uint64(result.RingVersion),
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          cloneStringSlice(result.Placement),
+		Parts:            result.Parts,
+		Tags:             result.Tags,
 	}, nil
 }
 
@@ -2434,16 +2471,21 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	observePutStage(metricPath, "propose_meta", stageStart)
 
 	return &storage.Object{
-		Key:          plan.Key,
-		Size:         result.Size,
-		ContentType:  plan.ContentType,
-		ETag:         result.ETag,
-		LastModified: modTime,
-		VersionID:    plan.VersionID,
-		UserMetadata: cloneStringMap(plan.UserMetadata),
-		SSEAlgorithm: plan.SSEAlgorithm,
-		Parts:        result.Parts,
-		Tags:         result.Tags,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		LastModified:     modTime,
+		VersionID:        plan.VersionID,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
+		SSEAlgorithm:     plan.SSEAlgorithm,
+		PlacementGroupID: plan.PlacementGroupID,
+		RingVersion:      uint64(result.RingVersion),
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          cloneStringSlice(result.Placement),
+		Parts:            result.Parts,
+		Tags:             result.Tags,
 	}, nil
 }
 
@@ -2564,16 +2606,21 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	observePutStage("ec_single", "propose_meta", stageStart)
 
 	return &storage.Object{
-		Key:          key,
-		Size:         result.Size,
-		ContentType:  contentType,
-		ETag:         result.ETag,
-		LastModified: result.ModTime,
-		VersionID:    versionID,
-		UserMetadata: cloneStringMap(userMetadata),
-		SSEAlgorithm: sseAlgorithm,
-		Parts:        parts,
-		Tags:         tags,
+		Key:              key,
+		Size:             result.Size,
+		ContentType:      contentType,
+		ETag:             result.ETag,
+		LastModified:     result.ModTime,
+		VersionID:        versionID,
+		UserMetadata:     cloneStringMap(userMetadata),
+		SSEAlgorithm:     sseAlgorithm,
+		PlacementGroupID: placementGroupID,
+		RingVersion:      uint64(result.RingVersion),
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          cloneStringSlice(result.Placement),
+		Parts:            parts,
+		Tags:             tags,
 	}, nil
 }
 
@@ -2822,6 +2869,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		// corrupted slot. Drop the cache entry so subsequent reads pull
 		// fresh data — repaint > stale.
 		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, shardIdx))
+		b.shardCache.InvalidatePrefix(shardRangeCachePrefix(bucket, shardKey, shardIdx))
 	}
 	return werr
 }
@@ -3220,19 +3268,24 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				return storage.ErrObjectNotFound
 			}
 			obj = storage.Object{
-				Key:          m.Key,
-				Size:         m.Size,
-				ContentType:  m.ContentType,
-				ETag:         m.ETag,
-				LastModified: m.LastModified,
-				VersionID:    versionID,
-				ACL:          m.ACL,
-				UserMetadata: cloneStringMap(m.UserMetadata),
-				SSEAlgorithm: m.SSEAlgorithm,
-				Segments:     m.Segments,
-				Parts:        m.Parts,
-				Coalesced:    coalescedRefsToStorage(m.Coalesced),
-				IsAppendable: m.IsAppendable,
+				Key:              m.Key,
+				Size:             m.Size,
+				ContentType:      m.ContentType,
+				ETag:             m.ETag,
+				LastModified:     m.LastModified,
+				VersionID:        versionID,
+				ACL:              m.ACL,
+				UserMetadata:     cloneStringMap(m.UserMetadata),
+				SSEAlgorithm:     m.SSEAlgorithm,
+				PlacementGroupID: m.PlacementGroupID,
+				RingVersion:      m.RingVersion,
+				ECData:           m.ECData,
+				ECParity:         m.ECParity,
+				NodeIDs:          cloneStringSlice(m.NodeIDs),
+				Segments:         m.Segments,
+				Parts:            m.Parts,
+				Coalesced:        coalescedRefsToStorage(m.Coalesced),
+				IsAppendable:     m.IsAppendable,
 				// Tags copied (not aliased) — m's backing bytes are reused by
 				// badger once the View tx returns.
 				Tags: append([]storage.Tag(nil), m.Tags...),
@@ -3945,11 +3998,21 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 			beforeCommit := b.testBeforeChunkedMultipartCommit
 			obj, err = b.putMultipartObjectChunked(ctx, bucket, key, versionID, uploadID, manifest, meta.ContentType, nil, "", 0, false, "", beforeCommit, meta.Tags)
 		} else {
-			sp, spoolErr := b.spoolMultipartCompleteManifest(ctx, uploadID, versionID, bucket, manifest)
-			if spoolErr != nil {
-				return nil, spoolErr
+			var sp *spooledObject
+			cleanupSpool := true
+			if len(manifest.Parts) == 1 {
+				sp = b.multipartPartSpooledObject(uploadID, manifest.Parts[0])
+				cleanupSpool = false
+			} else {
+				var spoolErr error
+				sp, spoolErr = b.spoolMultipartCompleteManifest(ctx, uploadID, versionID, bucket, manifest)
+				if spoolErr != nil {
+					return nil, spoolErr
+				}
 			}
-			defer sp.Cleanup()
+			if cleanupSpool {
+				defer sp.Cleanup()
+			}
 			obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, false, "", nil, manifest.Parts, meta.Tags, uploadID)
 		}
 	} else {
@@ -3962,6 +4025,20 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		b.logger.Debug().Err(err).Str("upload_id", uploadID).Msg("multipart part cleanup after complete failed")
 	}
 	return obj, nil
+}
+
+func (b *DistributedBackend) multipartPartSpooledObject(uploadID string, part storage.MultipartPartEntry) *spooledObject {
+	sp := &spooledObject{
+		Path: b.partPath(uploadID, part.PartNumber),
+		Size: part.Size,
+		ETag: part.ETag,
+	}
+	if b.encryptedShardStorage() {
+		sp.encrypted = true
+		sp.encryptor = b.shardSvc.encryptor
+		sp.domain = clusterMultipartPartDomain(uploadID, part.PartNumber)
+	}
+	return sp
 }
 
 func (b *DistributedBackend) spoolMultipartCompleteManifest(ctx context.Context, uploadID, versionID, bucket string, manifest multipartCompleteManifest) (*spooledObject, error) {
@@ -4204,19 +4281,24 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			return storage.ErrMethodNotAllowed
 		}
 		obj = storage.Object{
-			Key:          m.Key,
-			Size:         m.Size,
-			ContentType:  m.ContentType,
-			ETag:         m.ETag,
-			LastModified: m.LastModified,
-			VersionID:    versionID,
-			ACL:          m.ACL,
-			UserMetadata: cloneStringMap(m.UserMetadata),
-			SSEAlgorithm: m.SSEAlgorithm,
-			Segments:     m.Segments,
-			Parts:        m.Parts,
-			Coalesced:    coalescedRefsToStorage(m.Coalesced),
-			IsAppendable: m.IsAppendable,
+			Key:              m.Key,
+			Size:             m.Size,
+			ContentType:      m.ContentType,
+			ETag:             m.ETag,
+			LastModified:     m.LastModified,
+			VersionID:        versionID,
+			ACL:              m.ACL,
+			UserMetadata:     cloneStringMap(m.UserMetadata),
+			SSEAlgorithm:     m.SSEAlgorithm,
+			PlacementGroupID: m.PlacementGroupID,
+			RingVersion:      m.RingVersion,
+			ECData:           m.ECData,
+			ECParity:         m.ECParity,
+			NodeIDs:          cloneStringSlice(m.NodeIDs),
+			Segments:         m.Segments,
+			Parts:            m.Parts,
+			Coalesced:        coalescedRefsToStorage(m.Coalesced),
+			IsAppendable:     m.IsAppendable,
 			// Tags copied (not aliased) — m's backing bytes are reused by
 			// badger once the View tx returns. Mirror of headObjectMeta.
 			Tags: append([]storage.Tag(nil), m.Tags...),

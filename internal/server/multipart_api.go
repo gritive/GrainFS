@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -102,12 +101,11 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 	// caller's plaintext bytes — leaving the framing in place inflates Part.Size
 	// and corrupts ?partNumber=N GET responses (warp's multipart workload sends
 	// every part with `X-Amz-Content-Sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD`).
-	bodyBytes, err := putObjectBody(c)
+	body, err := putObjectPayloadReader(c)
 	if err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
 		return
 	}
-	body := bytes.NewReader(bodyBytes)
 	part, err := s.uploadMultipartPart(ctx, bucket, key, uploadID, partNumber, body)
 	if err != nil {
 		mapError(c, err)

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -575,6 +576,62 @@ func TestEncodeObjectMeta_AllocsBounded(t *testing.T) {
 		_, _ = marshalObjectMeta(meta)
 	})
 	assert.LessOrEqual(t, allocs, 2.0, "marshalObjectMeta should allocate ≤2 (output slice + copy)")
+}
+
+func TestDecodeObjectMetaPrefersChecksumBytesAllocationBound(t *testing.T) {
+	segments := make([]storage.SegmentRef, 16)
+	for i := range segments {
+		segments[i] = storage.SegmentRef{
+			BlobID:   "segment-id",
+			Size:     64 << 10,
+			Checksum: bytes.Repeat([]byte{byte(i)}, 16),
+		}
+	}
+	raw, err := marshalObjectMeta(objectMeta{
+		Key:          "append-key",
+		Size:         int64(len(segments)) * (64 << 10),
+		ContentType:  "application/octet-stream",
+		ETag:         "append-etag",
+		LastModified: 1714000000,
+		Segments:     segments,
+		IsAppendable: true,
+	})
+	require.NoError(t, err)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		got, err := unmarshalObjectMeta(raw)
+		require.NoError(t, err)
+		require.Len(t, got.Segments, len(segments))
+	})
+	assert.LessOrEqual(t, allocs, 42.0, "checksum-bytes decode should avoid also decoding legacy hex etag per segment")
+}
+
+func BenchmarkUnmarshalObjectMetaAppendSegments16(b *testing.B) {
+	segments := make([]storage.SegmentRef, 16)
+	for i := range segments {
+		segments[i] = storage.SegmentRef{
+			BlobID:   "segment-id",
+			Size:     64 << 10,
+			Checksum: bytes.Repeat([]byte{byte(i)}, 16),
+		}
+	}
+	raw, err := marshalObjectMeta(objectMeta{
+		Key:          "append-key",
+		Size:         int64(len(segments)) * (64 << 10),
+		ContentType:  "application/octet-stream",
+		ETag:         "append-etag",
+		LastModified: 1714000000,
+		Segments:     segments,
+		IsAppendable: true,
+	})
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := unmarshalObjectMeta(raw); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func TestCoalescedShardRefRoundTrip(t *testing.T) {

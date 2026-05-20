@@ -4,13 +4,15 @@ import (
 	"context"
 	"io"
 	"sync"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 type objectReadAtBackend interface {
 	ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error)
 }
 
-const maxRangeReadAtChunk = 1 << 20
+const maxRangeReadAtChunk = 5 << 20
 
 var readAtRangeBufferPool = sync.Pool{
 	New: func() any {
@@ -22,6 +24,7 @@ var readAtRangeBufferPool = sync.Pool{
 type readAtRangeReader struct {
 	ctx            context.Context
 	backend        objectReadAtBackend
+	obj            *storage.Object
 	bucket, key    string
 	offset, length int64
 	pos            int64
@@ -53,7 +56,7 @@ func (r *readAtRangeReader) Read(p []byte) (int, error) {
 		if remaining := r.length - r.pos; int64(want) > remaining {
 			want = int(remaining)
 		}
-		n, err := r.backend.ReadAt(r.ctx, r.bucket, r.key, r.offset+r.pos, r.buf[:want])
+		n, err := r.readAt(r.offset+r.pos, r.buf[:want])
 		if n > 0 {
 			r.bufPos = 0
 			r.bufEnd = n
@@ -69,6 +72,15 @@ func (r *readAtRangeReader) Read(p []byte) (int, error) {
 	r.bufPos += n
 	r.pos += int64(n)
 	return n, nil
+}
+
+func (r *readAtRangeReader) readAt(offset int64, buf []byte) (int, error) {
+	if r.obj != nil {
+		if prepared, ok := r.backend.(storage.PreparedReadAt); ok {
+			return prepared.ReadAtObject(r.ctx, r.bucket, r.key, r.obj, offset, buf)
+		}
+	}
+	return r.backend.ReadAt(r.ctx, r.bucket, r.key, offset, buf)
 }
 
 func (r *readAtRangeReader) Close() error {

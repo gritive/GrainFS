@@ -346,6 +346,16 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	}
 	nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
 	aad := encryptedChunkAAD(aadBase, chunkIdx)
+	if inChunk == 0 && len(dst) >= int(plainLen) {
+		plaintext, err := enc.OpenWithNonceAAD(dst[:0], nonce[:], ciphertext, aad)
+		if err != nil {
+			return 0, fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+		}
+		if uint32(len(plaintext)) != plainLen {
+			return 0, fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+		}
+		return len(plaintext), nil
+	}
 	if cap(*plainBuf) < int(plainLen) {
 		*plainBuf = make([]byte, plainLen)
 	}
@@ -447,11 +457,17 @@ type encryptedShardRangeReader struct {
 	pos         int64
 	remaining   int64
 	plain       []byte
+	plainPtr    *[]byte
+	cipherPtr   *[]byte
 	plainBuf    []byte
 	cipherBuf   []byte
+	closed      bool
 }
 
 func (r *encryptedShardRangeReader) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, fmt.Errorf("encrypted shard range reader is closed")
+	}
 	if r.remaining <= 0 {
 		return 0, io.EOF
 	}
@@ -468,6 +484,30 @@ func (r *encryptedShardRangeReader) Read(p []byte) (int, error) {
 	r.pos += int64(n)
 	r.remaining -= int64(n)
 	return n, nil
+}
+
+func (r *encryptedShardRangeReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	r.plain = nil
+	if r.plainPtr != nil {
+		if cap(r.plainBuf) > 0 {
+			clear(r.plainBuf[:cap(r.plainBuf)])
+		}
+		*r.plainPtr = r.plainBuf[:0]
+		encryptedPlainChunkPool.Put(r.plainPtr)
+		r.plainPtr = nil
+		r.plainBuf = nil
+	}
+	if r.cipherPtr != nil {
+		*r.cipherPtr = r.cipherBuf[:0]
+		encryptedCipherChunkPool.Put(r.cipherPtr)
+		r.cipherPtr = nil
+		r.cipherBuf = nil
+	}
+	return nil
 }
 
 func (r *encryptedShardRangeReader) loadChunk() error {
@@ -497,6 +537,10 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 		return io.EOF
 	}
 
+	if r.cipherPtr == nil {
+		r.cipherPtr = encryptedCipherChunkPool.Get().(*[]byte)
+		r.cipherBuf = *r.cipherPtr
+	}
 	if cap(r.cipherBuf) < int(cipherLen) {
 		r.cipherBuf = make([]byte, cipherLen)
 	}
@@ -506,6 +550,10 @@ func (r *encryptedShardRangeReader) loadChunk() error {
 	}
 	nonce := encryptedChunkNonce(r.noncePrefix, chunkIdx)
 	aad := encryptedChunkAAD(r.aadBase, chunkIdx)
+	if r.plainPtr == nil {
+		r.plainPtr = encryptedPlainChunkPool.Get().(*[]byte)
+		r.plainBuf = *r.plainPtr
+	}
 	if cap(r.plainBuf) < int(plainLen) {
 		r.plainBuf = make([]byte, plainLen)
 	}

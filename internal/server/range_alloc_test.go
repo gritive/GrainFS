@@ -41,12 +41,13 @@ func (b *countingReadAtBackend) ReadAt(ctx context.Context, bucket, key string, 
 
 type partNumberReadAtBackend struct {
 	storage.Backend
-	data         []byte
-	obj          storage.Object
-	readAtCalls  atomic.Int32
-	getObjCalls  atomic.Int32
-	lastOffset   atomic.Int64
-	lastReadSize atomic.Int64
+	data                []byte
+	obj                 storage.Object
+	readAtCalls         atomic.Int32
+	preparedReadAtCalls atomic.Int32
+	getObjCalls         atomic.Int32
+	lastOffset          atomic.Int64
+	lastReadSize        atomic.Int64
 }
 
 func (b *partNumberReadAtBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
@@ -62,6 +63,23 @@ func (b *partNumberReadAtBackend) GetObject(ctx context.Context, bucket, key str
 
 func (b *partNumberReadAtBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	b.readAtCalls.Add(1)
+	b.lastOffset.Store(offset)
+	b.lastReadSize.Store(int64(len(buf)))
+	if offset >= int64(len(b.data)) {
+		return 0, io.EOF
+	}
+	n := copy(buf, b.data[offset:])
+	if n < len(buf) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (b *partNumberReadAtBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	b.preparedReadAtCalls.Add(1)
+	if obj == nil {
+		return 0, fmt.Errorf("missing prepared object")
+	}
 	b.lastOffset.Store(offset)
 	b.lastReadSize.Store(int64(len(buf)))
 	if offset >= int64(len(b.data)) {
@@ -251,10 +269,53 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
 	require.Equal(t, "bytes 5-10/11", resp.Header.Get("Content-Range"))
 	require.Equal(t, []byte(" grain"), body)
-	require.Equal(t, int32(1), backend.readAtCalls.Load())
+	require.Zero(t, backend.readAtCalls.Load())
+	require.Equal(t, int32(1), backend.preparedReadAtCalls.Load())
 	require.Equal(t, int64(5), backend.lastOffset.Load())
 	require.Equal(t, int64(6), backend.lastReadSize.Load())
 	require.Zero(t, backend.getObjCalls.Load())
+}
+
+func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
+	tmp := t.TempDir()
+	local, err := storage.NewLocalBackend(tmp)
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+
+	payload := bytes.Repeat([]byte("x"), 5<<20)
+	backend := &partNumberReadAtBackend{
+		Backend: local,
+		data:    payload,
+		obj: storage.Object{
+			Key:         "obj",
+			Size:        int64(len(payload)),
+			ContentType: "application/octet-stream",
+			ETag:        "multipart-etag",
+			ACL:         1,
+			Parts: []storage.MultipartPartEntry{
+				{PartNumber: 1, Size: int64(len(payload)), ETag: "part-1-etag"},
+			},
+		},
+	}
+	port := freePort(t)
+	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
+	go s.Run()
+	t.Cleanup(func() {
+		_ = s.Shutdown(context.Background())
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj?partNumber=1", port))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	n, err := io.Copy(io.Discard, resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	require.Equal(t, int64(len(payload)), n)
+	require.Zero(t, backend.readAtCalls.Load())
+	require.Zero(t, backend.preparedReadAtCalls.Load())
+	require.Equal(t, int32(1), backend.getObjCalls.Load())
 }
 
 func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testing.T) {

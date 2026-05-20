@@ -1,6 +1,8 @@
 package s3auth
 
 import (
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,6 +51,15 @@ func TestDecodeAWSChunkedBody_NoSignature(t *testing.T) {
 	data, err := DecodeAWSChunkedBody([]byte(input))
 	require.NoError(t, err)
 	assert.Equal(t, "hello", string(data))
+}
+
+func TestNewAWSChunkedReader_DecodesWithoutBuffering(t *testing.T) {
+	input := "5;chunk-signature=abc123\r\nhello\r\n6;chunk-signature=def456\r\n world\r\n0;chunk-signature=final\r\n\r\n"
+
+	data, err := io.ReadAll(NewAWSChunkedReader(strings.NewReader(input)))
+
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(data))
 }
 
 func TestDecodeAWSChunkedBody_LargeChunks(t *testing.T) {

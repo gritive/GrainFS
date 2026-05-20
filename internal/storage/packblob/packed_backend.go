@@ -99,6 +99,8 @@ var _ interface {
 	CopyObjectWithRequest(context.Context, storage.CopyObjectAccelerationRequest) (*storage.Object, error)
 } = (*PackedBackend)(nil)
 
+var packedCandidatePool = make(chan []byte, 256)
+
 // PackedBackendOptions configures optional behavior for PackedBackend.
 type PackedBackendOptions struct {
 	Compress  bool // enable zstd compression for packed (small) objects
@@ -380,7 +382,10 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return nil, err
 	}
 
-	data, large, err := readPackedCandidate(req.Body, pb.threshold)
+	data, large, pooledCandidate, err := readPackedCandidateReusable(req.Body, pb.threshold)
+	if pooledCandidate {
+		defer releasePackedCandidateBuffer(data)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read object data: %w", err)
 	}
@@ -445,23 +450,71 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 	}, nil
 }
 
-func readPackedCandidate(r io.Reader, threshold int64) ([]byte, bool, error) {
+func readPackedCandidateReusable(r io.Reader, threshold int64) ([]byte, bool, bool, error) {
 	if threshold <= 0 {
-		return nil, true, nil
+		return nil, true, false, nil
 	}
 	maxInt := int64(int(^uint(0) >> 1))
 	if threshold > maxInt {
-		return nil, false, fmt.Errorf("packed threshold %d exceeds max int", threshold)
+		return nil, false, false, fmt.Errorf("packed threshold %d exceeds max int", threshold)
 	}
-	buf := make([]byte, int(threshold))
+	if sr, ok := r.(interface {
+		Len() int
+		Size() int64
+	}); ok {
+		remaining := sr.Len()
+		if remaining < 0 {
+			return nil, false, false, fmt.Errorf("sized reader remaining length %d is negative", remaining)
+		}
+		if int64(remaining) >= threshold {
+			return nil, true, false, nil
+		}
+		buf := takePackedCandidateBuffer(remaining)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			releasePackedCandidateBuffer(buf)
+			if errors.Is(err, io.EOF) && remaining == 0 {
+				return buf, false, false, nil
+			}
+			return nil, false, false, err
+		}
+		return buf, false, cap(buf) > 0, nil
+	}
+	buf := takePackedCandidateBuffer(int(threshold))
 	n, err := io.ReadFull(r, buf)
 	switch {
 	case err == nil:
-		return buf, true, nil
+		return buf, true, cap(buf) > 0, nil
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return buf[:n], false, nil
+		candidate := buf[:n]
+		return candidate, false, cap(candidate) > 0, nil
 	default:
-		return nil, false, err
+		releasePackedCandidateBuffer(buf)
+		return nil, false, false, err
+	}
+}
+
+func takePackedCandidateBuffer(n int) []byte {
+	if n == 0 {
+		return []byte{}
+	}
+	select {
+	case buf := <-packedCandidatePool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]byte, n)
+}
+
+func releasePackedCandidateBuffer(buf []byte) {
+	if cap(buf) == 0 || cap(buf) > 1<<20 {
+		return
+	}
+	clear(buf)
+	select {
+	case packedCandidatePool <- buf[:0]:
+	default:
 	}
 }
 
@@ -515,12 +568,18 @@ func cloneTags(in []storage.Tag) []storage.Tag {
 // pair on every packed GetObject.
 type packedReader struct {
 	bytes.Reader
+	data []byte
 }
 
 func (r *packedReader) Close() error {
 	r.Reader.Reset(nil)
+	r.data = nil
 	packedReaderPool.Put(r)
 	return nil
+}
+
+func (r *packedReader) RawBody() []byte {
+	return r.data
 }
 
 var packedReaderPool = sync.Pool{
@@ -533,6 +592,7 @@ var packedReaderPool = sync.Pool{
 func newPackedReader(data []byte) *packedReader {
 	r := packedReaderPool.Get().(*packedReader)
 	r.Reader.Reset(data)
+	r.data = data
 	return r
 }
 
@@ -626,6 +686,19 @@ func (pb *PackedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+func (pb *PackedBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if v, packed := pb.index.Load(packedKey{bucket: bucket, key: key}); packed {
+		entry := v.(*indexEntry)
+		if entry.Refcount.Load() > 0 {
+			return pb.ReadAt(ctx, bucket, key, offset, buf)
+		}
+	}
+	if prepared, ok := pb.inner.(storage.PreparedReadAt); ok {
+		return prepared.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return pb.ReadAt(ctx, bucket, key, offset, buf)
+}
+
 // WriteAt is a pass-through to inner. Packed (small S3 object) entries are
 // immutable blob slices and never receive pwrite traffic — internal buckets
 // (NFS4 / VFS Volume Device) live entirely on the inner path, so this is a
@@ -667,7 +740,11 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 	// Mirrors the same bypass in PutObjectWithRequest.
 	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
 		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
-			return pb.inner.DeleteObject(ctx, bucket, key)
+			if err := pb.inner.DeleteObject(ctx, bucket, key); err != nil {
+				return err
+			}
+			pb.evictPackedKey(bucket, key)
+			return nil
 		}
 	}
 
@@ -696,7 +773,22 @@ func (pb *PackedBackend) DeleteObjectReturningMarker(bucket, key string) (string
 	if !ok {
 		return "", storage.UnsupportedOperationError{Op: "DeleteObjectReturningMarker", Reason: storage.UnsupportedReasonNoAdapter}
 	}
-	return sd.DeleteObjectReturningMarker(bucket, key)
+	markerID, err := sd.DeleteObjectReturningMarker(bucket, key)
+	if err != nil {
+		return "", err
+	}
+	pb.evictPackedKey(bucket, key)
+	return markerID, nil
+}
+
+func (pb *PackedBackend) evictPackedKey(bucket, key string) {
+	pk := packedKey{bucket: bucket, key: key}
+	if v, loaded := pb.index.Load(pk); loaded {
+		entry := v.(*indexEntry)
+		if pb.index.CompareAndDelete(pk, entry) {
+			entry.Refcount.Add(-1)
+		}
+	}
 }
 
 // DeleteObjectVersion forwards version-specific hard deletes to the inner

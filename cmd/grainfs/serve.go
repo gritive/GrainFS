@@ -45,7 +45,7 @@ func init() {
 	serveCmd.Flags().String("9p-bind", "127.0.0.1", "9P2000.L bind address; set 0.0.0.0 only on trusted networks")
 	serveCmd.Flags().Int("9p-port", 0, "9P2000.L server port (0 = disabled); unauthenticated, use firewall")
 	serveCmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
-	serveCmd.Flags().Int("shard-pack-threshold", 65537, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65537)")
+	serveCmd.Flags().Int("shard-pack-threshold", 65545, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65545)")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
 	serveCmd.Flags().Duration("scrub-orphan-age", 5*time.Minute,
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
@@ -82,7 +82,7 @@ func init() {
 	serveCmd.Flags().Int32("badger-gc-fail-threshold", 3, "consecutive RunValueLogGC failures before incident")
 	serveCmd.Flags().Bool("strict-vlog-registry", false, "fatal on vlog registry smoke mismatch (e2e: true)")
 	serveCmd.Flags().Duration("vlog-smoke-defer", 60*time.Second, "delay before vlog registry startup smoke runs")
-	serveCmd.Flags().Int64("badger-value-threshold", 0, "force BadgerDB ValueThreshold (bytes) so values above this size spill to vlog; 0 keeps Badger default (1 MiB). Test-only.")
+	serveCmd.Flags().Int64("badger-value-threshold", 0, "force BadgerDB ValueThreshold (bytes) so values above this size spill to vlog; 0 keeps GrainFS small-store default. Test-only.")
 	_ = serveCmd.Flags().MarkHidden("badger-value-threshold")
 	// Phase 2 — direct I/O on local shard writes. Bypasses the kernel page
 	// cache (Linux O_DIRECT, macOS F_NOCACHE). On by default — the bench
@@ -103,11 +103,10 @@ func init() {
 	// temporal locality saturate around that budget. Set 0 to disable.
 	serveCmd.Flags().Int64("block-cache-size", 64*1024*1024, "volume block cache capacity in bytes (0 disables)")
 	// EC shard cache (Phase 2 #3 follow-up). Sits in front of getObjectEC's
-	// per-shard fan-out. Default 256 MB — multi-node measurement on PR #71
-	// showed large_repeat (16 MB×10) hits 90% at every reachable cache size,
-	// so the working set is small relative to memory budget. Set 0 to
-	// disable when running --measure-read-amp baselines.
-	serveCmd.Flags().Int64("shard-cache-size", 256*1024*1024, "EC shard cache capacity in bytes (0 disables)")
+	// per-shard fan-out. Default 1 GiB keeps repeated multipart range reads
+	// resident in 4-node cluster runs without the RSS jump seen at 2 GiB.
+	// Set 0 to disable when running --measure-read-amp baselines.
+	serveCmd.Flags().Int64("shard-cache-size", 1024*1024*1024, "EC shard cache capacity in bytes (0 disables)")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")

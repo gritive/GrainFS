@@ -12,6 +12,13 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+const (
+	defaultMaxChunkedMultipartCompletes = 24
+	defaultChunkedMultipartCompleteSize = 8 << 20
+)
+
+var chunkedMultipartCompleteSlots = make(chan struct{}, defaultMaxChunkedMultipartCompletes)
+
 // clusterSegmentBackend implements storage.segmentWriterBackend for the
 // chunked-PUT cluster pipeline. One instance is constructed per PUT; the
 // SegmentWriter's 8 workers call WriteSegment concurrently with unique
@@ -176,6 +183,22 @@ func (b *DistributedBackend) chunkedPathThresholdMet(size int64) bool {
 	return size > int64(b.effectiveChunkedPutChunkSize())
 }
 
+func chunkedMultipartCompleteChunkSize(defaultSize int) int {
+	if defaultSize <= 0 || defaultSize > defaultChunkedMultipartCompleteSize {
+		return defaultChunkedMultipartCompleteSize
+	}
+	return defaultSize
+}
+
+func acquireChunkedMultipartCompleteSlot(ctx context.Context) (func(), error) {
+	select {
+	case chunkedMultipartCompleteSlots <- struct{}{}:
+		return func() { <-chunkedMultipartCompleteSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // putObjectChunked is the chunked-PUT cluster pipeline: split the spooled
 // body into N segments via storage.SegmentWriter, fan out per-segment EC
 // writes across placement groups (best-effort, defer cleanup on any error),
@@ -238,7 +261,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	beforeCommit func() error,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	chunkSize := int64(b.effectiveChunkedPutChunkSize())
+	chunkSize := int64(chunkedMultipartCompleteChunkSize(b.effectiveChunkedPutChunkSize()))
 	numSegments := int((manifest.TotalSize + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1
@@ -336,6 +359,14 @@ func runChunkedPutWithParts(
 	sw := storage.NewSegmentWriter(csb)
 	if csb.chunkSize > 0 {
 		sw = storage.NewSegmentWriterWithChunkSize(csb, csb.chunkSize)
+	}
+	if completeUploadID != "" {
+		release, err := acquireChunkedMultipartCompleteSlot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		sw = storage.NewSegmentWriterWithChunkSizeAndWorkers(csb, csb.chunkSize, 1)
 	}
 	obj, err := sw.Write(ctx, bucket, key, contentType, body)
 	if err != nil {

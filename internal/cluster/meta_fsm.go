@@ -1576,6 +1576,7 @@ type metaPutObjectIndexCmd struct {
 type objectIndexSnapshotEntry struct {
 	ObjectIndexEntry
 	IsLatest bool
+	sortKey  string
 }
 
 func objectIndexLatestKey(bucket, key string) string {
@@ -2444,11 +2445,12 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		buckets = append(buckets, bucketKV{bucket, groupID})
 	}
 	objectEntries := make([]objectIndexSnapshotEntry, 0, len(f.objectIndex))
-	for _, entry := range f.objectIndex {
+	for versionKey, entry := range f.objectIndex {
 		latestVersionID := f.objectLatest[objectIndexLatestKey(entry.Bucket, entry.Key)]
 		objectEntries = append(objectEntries, objectIndexSnapshotEntry{
 			ObjectIndexEntry: cloneObjectIndexEntry(entry),
 			IsLatest:         latestVersionID == entry.VersionID,
+			sortKey:          versionKey,
 		})
 	}
 	lsEntries := make([]LoadStatEntry, 0, len(f.loadSnapshot))
@@ -3627,8 +3629,7 @@ func buildMetaObjectIndexEntry(b *flatbuffers.Builder, entry objectIndexSnapshot
 
 func buildMetaObjectIndexEntriesVector(b *flatbuffers.Builder, entries []objectIndexSnapshotEntry) flatbuffers.UOffsetT {
 	sort.Slice(entries, func(i, j int) bool {
-		a, b := entries[i].ObjectIndexEntry, entries[j].ObjectIndexEntry
-		return objectIndexVersionKey(a.Bucket, a.Key, a.VersionID) < objectIndexVersionKey(b.Bucket, b.Key, b.VersionID)
+		return entries[i].sortKey < entries[j].sortKey
 	})
 	offsets := make([]flatbuffers.UOffsetT, len(entries))
 	for i := len(entries) - 1; i >= 0; i-- {

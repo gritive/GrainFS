@@ -143,7 +143,12 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 	if len(in.Group.PeerIDs) < nShards {
 		return PlacementRecord{}, "", "", fmt.Errorf("group %s has %d peers, need %d", in.Group.ID, len(in.Group.PeerIDs), nShards)
 	}
-	placement := append([]string(nil), in.Group.PeerIDs[:nShards]...)
+	placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+		Key:           in.Key,
+		VersionID:     in.VersionID,
+		SegmentBlobID: in.SegmentBlobID,
+	})
+	placement := PlacementForNodes(in.Cfg, in.Group.PeerIDs, placementKey)
 	plan := ecObjectWritePlan{
 		Bucket:           in.Bucket,
 		Key:              in.Key,
@@ -217,10 +222,11 @@ func (w ecObjectWriter) writeMemoryShards(ctx context.Context, plan ecObjectWrit
 }
 
 func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
-	shards, err := ECSplit(plan.Config, data)
+	shards, err := ecSplitBodies(plan.Config, data)
 	if err != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("ec split: %w", err)
 	}
+	header := encodeShardHeader(int64(len(data)))
 	h := md5.Sum(data)
 	sp := &spooledObject{
 		Size: int64(len(data)),
@@ -231,12 +237,12 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		if idx < 0 || idx >= len(shards) {
 			return nil, fmt.Errorf("ec data shard %d out of range", idx)
 		}
-		return bytes.NewReader(shards[idx]), nil
+		return io.MultiReader(bytes.NewReader(header[:]), bytes.NewReader(shards[idx])), nil
 	}, func(idx int) (int64, error) {
 		if idx < 0 || idx >= len(shards) {
 			return 0, fmt.Errorf("ec data shard %d out of range", idx)
 		}
-		return int64(len(shards[idx])), nil
+		return int64(shardHeaderSize + len(shards[idx])), nil
 	}, "ec")
 }
 

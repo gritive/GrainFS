@@ -58,6 +58,51 @@ func TestPackedBackend_SmallObjectSkipsInnerMarkerWrite(t *testing.T) {
 	require.Equal(t, int64(0), inner.deletes.Load(), "small packed deletes should not call inner object delete without a marker")
 }
 
+type versionedDeleteBackend struct {
+	mockBackend
+	deleted atomic.Bool
+}
+
+func (b *versionedDeleteBackend) GetBucketVersioning(bucket string) (string, error) {
+	return "Enabled", nil
+}
+
+func (b *versionedDeleteBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
+	b.deleted.Store(true)
+	return "delete-marker-version", nil
+}
+
+func (b *versionedDeleteBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	if b.deleted.Load() {
+		return nil, nil, storage.ErrObjectNotFound
+	}
+	return b.mockBackend.GetObject(ctx, bucket, key)
+}
+
+func (b *versionedDeleteBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	if b.deleted.Load() {
+		return nil, storage.ErrObjectNotFound
+	}
+	return b.mockBackend.HeadObject(ctx, bucket, key)
+}
+
+func TestPackedBackend_VersionedDeleteInvalidatesPackedObject(t *testing.T) {
+	inner := &versionedDeleteBackend{}
+	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pb.Close()) })
+
+	_, err = pb.PutObject(context.Background(), "test", "small.txt", strings.NewReader("tiny data"), "text/plain")
+	require.NoError(t, err)
+
+	markerID, err := pb.DeleteObjectReturningMarker("test", "small.txt")
+	require.NoError(t, err)
+	require.Equal(t, "delete-marker-version", markerID)
+
+	_, _, err = pb.GetObject(context.Background(), "test", "small.txt")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
 func TestPackedBackend_DeleteBucketSeesPackedObjects(t *testing.T) {
 	pb := newTestPackedBackend(t)
 	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
@@ -289,6 +334,20 @@ func TestPackedBackend_ThresholdRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadPackedCandidateSizedReaderAllocatesExactSmallBody(t *testing.T) {
+	const threshold = 1024 * 1024
+	body := bytes.Repeat([]byte("x"), 64*1024)
+
+	got, large, pooled, err := readPackedCandidateReusable(bytes.NewReader(body), threshold)
+	if pooled {
+		defer releasePackedCandidateBuffer(got)
+	}
+	require.NoError(t, err)
+	require.False(t, large)
+	require.Equal(t, body, got)
+	require.LessOrEqual(t, cap(got), len(body), "known-size small bodies must not allocate the full pack threshold")
 }
 
 func TestPackedBackend_LargeObjectIntakeAllocationBound(t *testing.T) {

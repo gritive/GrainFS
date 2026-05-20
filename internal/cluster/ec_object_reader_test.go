@@ -15,8 +15,12 @@ import (
 
 // fakeECObjectShardFetcher records calls and returns configurable data/errors.
 type fakeECObjectShardFetcher struct {
-	localShards map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
-	remoteErr   map[string]error  // node → error to return
+	localShards               map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
+	remoteErr                 map[string]error  // node → error to return
+	mu                        sync.Mutex
+	readShardCalls            int
+	readShardStreamCalls      int
+	readShardRangeStreamCalls int
 }
 
 func (f *fakeECObjectShardFetcher) key(bucket, key string, idx int) string {
@@ -32,6 +36,13 @@ func (f *fakeECObjectShardFetcher) ReadLocalShard(bucket, key string, shardIdx i
 }
 
 func (f *fakeECObjectShardFetcher) ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error) {
+	f.mu.Lock()
+	f.readShardCalls++
+	f.mu.Unlock()
+	return f.readShardData(peer, bucket, key, shardIdx)
+}
+
+func (f *fakeECObjectShardFetcher) readShardData(peer, bucket, key string, shardIdx int) ([]byte, error) {
 	if err := f.remoteErr[peer]; err != nil {
 		return nil, err
 	}
@@ -51,7 +62,10 @@ func (f *fakeECObjectShardFetcher) OpenLocalShard(bucket, key string, shardIdx i
 }
 
 func (f *fakeECObjectShardFetcher) ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error) {
-	data, err := f.ReadShard(ctx, peer, bucket, key, shardIdx)
+	f.mu.Lock()
+	f.readShardStreamCalls++
+	f.mu.Unlock()
+	data, err := f.readShardData(peer, bucket, key, shardIdx)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +100,9 @@ func (f *fakeECObjectShardFetcher) ReadShardRange(ctx context.Context, peer, buc
 }
 
 func (f *fakeECObjectShardFetcher) ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) (io.ReadCloser, error) {
+	f.mu.Lock()
+	f.readShardRangeStreamCalls++
+	f.mu.Unlock()
 	data, err := f.ReadShardRange(ctx, peer, bucket, key, shardIdx, offset, length)
 	if err != nil {
 		return nil, err
@@ -245,6 +262,27 @@ func TestECObjectReader_ReadObject_MarksHealthyPeerOnSuccess(t *testing.T) {
 	require.Empty(t, health.unhealthy)
 }
 
+func TestECObjectReader_ReadObject_PrefersDataShardsBeforeParity(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	data := []byte("healthy data shards avoid parity fanout")
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{
+		selfID:   "node-a",
+		shards:   fetcher,
+		ecConfig: cfg,
+	}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-d", "node-e"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	require.Equal(t, cfg.DataShards, fetcher.readShardCalls)
+}
+
 func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	fetcher := &fakeECObjectShardFetcher{} // empty — no shards available
@@ -346,6 +384,27 @@ func TestECObjectReader_OpenObject_AllLocal(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
+func TestECObjectReader_OpenObject_PoolsMultipartSizedObject(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	data := bytes.Repeat([]byte("x"), 5<<20)
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(data)))
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	require.Greater(t, fetcher.readShardCalls, 0)
+	require.Zero(t, fetcher.readShardStreamCalls)
+}
+
 func TestECObjectReader_OpenObject_NilShardService_ReturnsError(t *testing.T) {
 	r := ecObjectReader{selfID: "node-a", shards: nil, ecConfig: ECConfig{DataShards: 2, ParityShards: 0}}
 	rec := PlacementRecord{Nodes: []string{"node-a", "node-a"}}
@@ -393,6 +452,32 @@ func TestECObjectReader_ReadAt_MultiShardSpan(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 8, n)
 	require.Equal(t, []byte("23456789"), buf)
+}
+
+func TestECObjectReader_ReadAt_CachesRemoteRange(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 0}
+	data := bytes.Repeat([]byte("x"), 256<<10)
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+	cache := shardcache.New(16 << 20)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, cache: cache, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c"}}
+	rec.K = cfg.DataShards
+
+	first := make([]byte, 128<<10)
+	n, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 0, first)
+	require.NoError(t, err)
+	require.Equal(t, len(first), n)
+	require.Equal(t, data[:len(first)], first)
+	require.Equal(t, 1, fetcher.readShardRangeStreamCalls)
+
+	second := make([]byte, len(first))
+	n, err = r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 0, second)
+	require.NoError(t, err)
+	require.Equal(t, len(second), n)
+	require.Equal(t, first, second)
+	require.Equal(t, 1, fetcher.readShardRangeStreamCalls)
 }
 
 func TestECObjectReader_ReadAt_PartialFillAtEnd(t *testing.T) {

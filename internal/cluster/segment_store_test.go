@@ -151,6 +151,56 @@ func TestChunkedSegmentWindow_SelectsOnlyOverlappingSegments(t *testing.T) {
 	require.Equal(t, []storage.SegmentRef{refs[1], refs[2]}, got)
 }
 
+func TestReadAtChunkedSegmentsReadsOnlyOverlappingRanges(t *testing.T) {
+	refs := []storage.SegmentRef{
+		{BlobID: "seg-0", Size: 10},
+		{BlobID: "seg-1", Size: 10},
+		{BlobID: "seg-2", Size: 10},
+	}
+	store := &recordingSegmentRangeStore{
+		data: map[string][]byte{
+			"seg-0": []byte("0123456789"),
+			"seg-1": []byte("abcdefghij"),
+			"seg-2": []byte("ABCDEFGHIJ"),
+		},
+	}
+	buf := make([]byte, 7)
+
+	n, err := readAtChunkedSegments(context.Background(), store, refs, 8, buf)
+	require.NoError(t, err)
+	require.Equal(t, 7, n)
+	require.Equal(t, []byte("89abcde"), buf)
+	require.Equal(t, []segmentRangeRead{
+		{blobID: "seg-0", offset: 8, length: 2},
+		{blobID: "seg-1", offset: 0, length: 5},
+	}, store.reads)
+}
+
+type segmentRangeRead struct {
+	blobID string
+	offset int64
+	length int
+}
+
+type recordingSegmentRangeStore struct {
+	data  map[string][]byte
+	reads []segmentRangeRead
+}
+
+func (s *recordingSegmentRangeStore) ReadAtSegment(ctx context.Context, ref storage.SegmentRef, offset int64, buf []byte) (int, error) {
+	_ = ctx
+	s.reads = append(s.reads, segmentRangeRead{blobID: ref.BlobID, offset: offset, length: len(buf)})
+	data := s.data[ref.BlobID]
+	if offset >= int64(len(data)) {
+		return 0, io.EOF
+	}
+	n := copy(buf, data[offset:])
+	if n < len(buf) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
 func TestClusterSegmentStore_PlacementRecordUsesSegmentMetadata(t *testing.T) {
 	store := &clusterSegmentStore{}
 	ref := storage.SegmentRef{

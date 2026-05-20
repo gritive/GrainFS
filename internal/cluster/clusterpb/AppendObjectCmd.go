@@ -113,8 +113,20 @@ func (rcv *AppendObjectCmd) VersionId() []byte {
 	return nil
 }
 
+func (rcv *AppendObjectCmd) ModifiedUnixSec() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *AppendObjectCmd) MutateModifiedUnixSec(n int64) bool {
+	return rcv._tab.MutateInt64Slot(20, n)
+}
+
 func AppendObjectCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func AppendObjectCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -139,6 +151,9 @@ func AppendObjectCmdAddPlacementGroupId(builder *flatbuffers.Builder, placementG
 }
 func AppendObjectCmdAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(versionId), 0)
+}
+func AppendObjectCmdAddModifiedUnixSec(builder *flatbuffers.Builder, modifiedUnixSec int64) {
+	builder.PrependInt64Slot(8, modifiedUnixSec, 0)
 }
 func AppendObjectCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

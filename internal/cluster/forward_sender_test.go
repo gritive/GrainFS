@@ -110,6 +110,38 @@ func BenchmarkBuildPutObjectArgs_64KiB(b *testing.B) {
 	}
 }
 
+func TestBuildUploadPartArgs_5MiBAllocationBound(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 5*1024*1024)
+	const runs = 20
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		require.Greater(t, len(args), len(body))
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	avgAlloc := float64(after.TotalAlloc-before.TotalAlloc) / runs
+	require.Lessf(t, avgAlloc, float64(len(body))*2.5, "avg allocation per buildUploadPartArgs call = %.0f bytes", avgAlloc)
+}
+
+func BenchmarkBuildUploadPartArgs_5MiB(b *testing.B) {
+	body := bytes.Repeat([]byte("x"), 5*1024*1024)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		if len(args) <= len(body) {
+			b.Fatalf("args length %d <= body length %d", len(args), len(body))
+		}
+	}
+}
+
 // TestForwardSender_TryEachPeer_FirstDownNextSucceeds verifies the recovery
 // path when the first peer in the candidate list is unreachable. Without
 // this, a single down node renders the entire group unreachable to non-voters
@@ -514,6 +546,43 @@ func TestForwardSender_SendStreamReadinessRetryAddsDeadlineForBackgroundCaller(t
 	require.NoError(t, err)
 	require.NotEmpty(t, reply)
 	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
+func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *testing.T) {
+	const concurrency = 32
+	started := make(chan struct{}, concurrency)
+	release := make(chan struct{})
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		started <- struct{}{}
+		<-release
+		_, _ = io.Copy(io.Discard, body)
+		return okReplyBytes(t), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+	defer close(release)
+
+	done := make(chan error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		i := i
+		go func() {
+			_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
+				raftpb.ForwardOpUploadPart, buildUploadPartArgs("b", "k", "upload-id", int32(i+1), nil), bytes.NewReader([]byte("part")))
+			done <- err
+		}()
+	}
+
+	for i := 0; i < concurrency; i++ {
+		select {
+		case <-started:
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent streams to start")
+		}
+	}
 }
 
 func TestForwardSender_SendStream_BackpressureLimit(t *testing.T) {
