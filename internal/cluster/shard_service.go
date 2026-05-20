@@ -946,6 +946,16 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 }
 
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
+	if s.shardPack != nil && s.packThreshold > 0 {
+		packed, handled, err := s.tryWriteLocalShardStreamPack(ctx, bucket, key, shardIdx, body)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
+		body = packed
+	}
 	dir := filepath.Join(s.dataDir, bucket, key)
 	mkdirStart := time.Now()
 	if err := s.ensureShardDir(dir); err != nil {
@@ -989,6 +999,47 @@ func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket,
 	// The streaming atomic writers already fsync the parent directory after
 	// rename, so there is no second ShardService-level directory sync here.
 	return nil
+}
+
+func (s *ShardService) tryWriteLocalShardStreamPack(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) (io.Reader, bool, error) {
+	var plain bytes.Buffer
+	limited := &io.LimitedReader{R: body, N: int64(s.packThreshold)}
+	_, err := plain.ReadFrom(limited)
+	if err != nil {
+		return nil, false, err
+	}
+	if limited.N == 0 {
+		return io.MultiReader(bytes.NewReader(plain.Bytes()), body), false, nil
+	}
+	if plain.Len() >= s.packThreshold {
+		return bytes.NewReader(plain.Bytes()), false, nil
+	}
+
+	aad := []byte(bucket + "/" + key + "/" + strconv.Itoa(shardIdx))
+	var payload []byte
+	if s.encryptor != nil {
+		var encoded bytes.Buffer
+		if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(plain.Bytes()), s.encryptor, aad, eccodec.DefaultEncryptedChunkSize); err != nil {
+			return nil, false, err
+		}
+		payload = encoded.Bytes()
+	} else {
+		payload = eccodec.EncodeShard(plain.Bytes())
+	}
+	fileStart := time.Now()
+	if err := s.shardPack.put(bucket, key, shardIdx, payload); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		return nil, false, err
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+	return nil, true, nil
 }
 
 func (s *ShardService) ensureShardDir(dir string) error {

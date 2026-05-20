@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 15:04 KST
+Updated: 2026-05-20 15:10 KST
 
 ## Goal
 
@@ -50,15 +50,15 @@ Updated: 2026-05-20 15:04 KST
 
 ## GrainFS Single-Node Benchmark
 
-| op     |   MiB/s |    obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                                                                                |
-| ------ | ------: | -------: | -----: | -------------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| put    |  548.30 |  8772.82 |      0 |               601.22 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`                                                                       |
-| get    | 1849.34 | 29589.49 |      0 |               767.03 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`                                                                       |
-| delete |    0.00 | 17964.91 |      0 |               460.70 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`                                                                         |
-| mixed  |  176.17 |  2818.79 |      0 |               251.75 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750`                                                                     |
-| list   |    0.00 | 434233.02 |      0 |               150.38 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950`                                                                      |
-| stat   |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`                                                                      |
-| versioned | 40.37 | 645.87 | 0 | 311.06 | slower than MinIO/RustFS; RSS below MinIO | needs profiling; artifact `benchmarks/profiles/grainfs-single-versioned-after-small-badger-options-20260520-150219` |
+| op        |   MiB/s |     obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                 |
+| --------- | ------: | --------: | -----: | -------------------: | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| put       |  548.30 |   8772.82 |      0 |               601.22 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`        |
+| get       | 1849.34 |  29589.49 |      0 |               767.03 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`        |
+| delete    |    0.00 |  17964.91 |      0 |               460.70 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`          |
+| mixed     |  176.17 |   2818.79 |      0 |               251.75 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750`      |
+| list      |    0.00 | 434233.02 |      0 |               150.38 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950`       |
+| stat      |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
+| versioned |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
 
 ## GrainFS Optimization Notes
 
@@ -73,12 +73,12 @@ Updated: 2026-05-20 15:04 KST
 - `delete` memory candidate 1: pprof showed seed/snapshot churn rather than the DELETE fast path itself. `MetaFSM.Snapshot` sorted object index entries by rebuilding `objectIndexVersionKey` inside the comparator, causing O(n log n) string allocation. Fix: carry the existing object-index map key as a snapshot sort key. Micro benchmark `BenchmarkMetaFSMSnapshotObjectIndex4096`: ~2.1-2.3 ms/op, ~3.4 MiB/op, ~80-96 allocs/op after the change. pprof alloc_space fell from 8.88 GiB to 4.24 GiB and `objectIndexVersionKey` disappeared from the alloc_space top list; e2e DELETE RSS remains above MinIO, so continue investigation.
 - `delete` memory candidate 2: Meta Raft snapshots were still created every 1024 applied log entries during object-heavy seed/delete workloads. Architecture review: this is durability-safe but too aggressive for single-node S3 warp because each snapshot serializes the full object index. Fix: raise the snapshot interval to 8192 applied log entries and make the threshold predicate unit-testable. e2e DELETE improved to 17734.67 obj/s with RSS 701.98 MiB. Throughput is well above both baselines, but RSS is still above MinIO DELETE 533.9 MiB and RustFS DELETE 232.11 MiB, so memory work continues.
 - `delete` memory candidate 3: pprof after snapshot threshold showed resident memory dominated by Badger memtable arenas, Badger block-cache allocator, and mmap-backed value logs across many small role DBs rather than the delete handler. Architecture fix: tune `SmallOptions` for GrainFS metadata roles: no block compression, no block cache, 2 MiB memtables, 256 KiB ValueThreshold, and 16 MiB value-log files. A 1 MiB memtable attempt regressed RSS to 547.31 MiB, so it was rejected. Final e2e checks after the accepted option set: PUT 548.30 MiB/s RSS 601.22 MiB, GET 1849.34 MiB/s RSS 767.03 MiB, DELETE 17964.91 obj/s RSS 460.70 MiB.
+- `versioned` candidate 1: architecture review found the existing shard pack was only wired to buffered local shard writes; versioned single-shard PUT uses `WriteLocalShardStreamContext`, so every 64 KiB version created a shard directory, temp file, fsync, and rename. Fix: route bounded streaming shard writes through the existing shard pack when the stream is below the pack threshold, and raise the default shard-pack threshold enough to include the 8-byte EC shard header for 64 KiB objects. e2e VERSIONED improved from 40.37 MiB/s, 645.87 obj/s to 182.82 MiB/s, 2925.17 obj/s; RSS stayed below MinIO at 486.23 MiB.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
 - Continue GrainFS single-node benchmark with S3-only service flags: `retention`, `multipart`, `multipart-put`, `append`.
-- Optimize `versioned`: current gate fails on throughput, not RSS.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.

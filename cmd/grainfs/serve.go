@@ -45,7 +45,7 @@ func init() {
 	serveCmd.Flags().String("9p-bind", "127.0.0.1", "9P2000.L bind address; set 0.0.0.0 only on trusted networks")
 	serveCmd.Flags().Int("9p-port", 0, "9P2000.L server port (0 = disabled); unauthenticated, use firewall")
 	serveCmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
-	serveCmd.Flags().Int("shard-pack-threshold", 65537, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65537)")
+	serveCmd.Flags().Int("shard-pack-threshold", 65545, "pack cluster shards below this size into node-local append-only shard packs (0 = disabled, e.g. 65545)")
 	serveCmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
 	serveCmd.Flags().Duration("scrub-orphan-age", 5*time.Minute,
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
