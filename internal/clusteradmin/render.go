@@ -162,6 +162,7 @@ func RenderClusterConfigDiff(w io.Writer, resp *ClusterConfigResponse) error {
 // ParseClusterConfigKVs turns ["k=v",...] into a map. Values parse as JSON
 // literals first (so 30, true, "x" work); non-JSON values like https://…
 // URLs fall back to a plain string.
+// Duplicate keys: last occurrence wins.
 func ParseClusterConfigKVs(kvs []string) (map[string]any, error) {
 	out := map[string]any{}
 	for _, kv := range kvs {

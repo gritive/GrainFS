@@ -157,7 +157,7 @@ func (h *ClusterConfigHandler) servePatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if rev := r.Header.Get("If-Match-Rev"); rev != "" {
+	if rev := r.Header.Get(HeaderIfMatchRev); rev != "" {
 		n, perr := strconv.ParseUint(rev, 10, 64)
 		if perr != nil {
 			http.Error(w, "invalid If-Match-Rev: "+perr.Error(), http.StatusBadRequest)

@@ -138,13 +138,14 @@ func TestClient_ClusterConfigPatchRaw_FreeForm(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	rev, err := c.ClusterConfigPatchRaw(context.Background(), map[string]any{
+	resp, err := c.ClusterConfigPatchRaw(context.Background(), map[string]any{
 		"balancer-imbalance-trigger-pct": 30,
 		"alert-webhook":                  "https://x.example",
 		"balancer-enabled":               true,
 	}, 7)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(11), rev)
+	assert.Equal(t, uint64(11), resp.Rev)
+	assert.JSONEq(t, `{"rev":11}`, string(resp.Raw))
 	assert.Equal(t, "7", rec.LastIfMatchRev())
 	assert.JSONEq(t, `{
 		"balancer-imbalance-trigger-pct":30,

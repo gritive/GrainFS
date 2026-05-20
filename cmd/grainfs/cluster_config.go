@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/gritive/GrainFS/internal/clusteradmin"
 	"github.com/spf13/cobra"
 )
@@ -22,19 +20,20 @@ func clusterConfigFetch(cmd *cobra.Command) (*clusteradmin.ClusterConfigResponse
 	return clusteradmin.NewClient(ep).ClusterConfigGet(cmd.Context())
 }
 
-// clusterConfigPatchRaw is the shared PATCH path for set/reset.
+// clusterConfigPatchRaw is the shared PATCH path for set/reset. Writes the
+// server response body verbatim so future server-side fields round-trip.
 func clusterConfigPatchRaw(cmd *cobra.Command, body map[string]any) error {
 	ep, err := clusterEndpointFromCmd(cmd)
 	if err != nil {
 		return err
 	}
 	rev, _ := cmd.Flags().GetUint64("if-match-rev")
-	newRev, err := clusteradmin.NewClient(ep).ClusterConfigPatchRaw(cmd.Context(), body, rev)
+	resp, err := clusteradmin.NewClient(ep).ClusterConfigPatchRaw(cmd.Context(), body, rev)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), `{"rev":%d}`+"\n", newRev)
-	return nil
+	_, err = cmd.OutOrStdout().Write(resp.Raw)
+	return err
 }
 
 var clusterConfigShowCmd = &cobra.Command{
