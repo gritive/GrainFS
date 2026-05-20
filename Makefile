@@ -59,6 +59,7 @@ test-race:
 
 test-e2e: bin/$(BINARY)
 	@set -e; \
+	trap 'trap - INT TERM EXIT; kill 0 2>/dev/null; wait 2>/dev/null; exit' INT TERM EXIT; \
 	list_out=$$(mktemp); \
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -p $(E2E_TEST_P) ./tests/e2e/ -parallel $(E2E_TEST_PARALLEL) -list '$(E2E_TEST_PATTERN)' > $$list_out; \
 	tests=$$(awk '/^Test/ { print $$1 }' $$list_out); \
