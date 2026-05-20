@@ -64,14 +64,14 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 
 ## Performance
 
-Latest same-host 4-node cluster `warp` runs, 64 KiB objects, concurrency 32,
+Latest same-host single-node `warp` runs, 64 KiB objects, concurrency 32,
 signed S3 requests, 0 errors:
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |     65.32 |    244.26 |        1.58x |        2.56x |
-| MinIO     |     41.37 |     95.52 |        1.00x |        1.00x |
-| RustFS    |     18.50 |     48.20 |        0.45x |        0.50x |
+| `GrainFS` |    548.30 |   1849.34 |        3.13x |        4.04x |
+| MinIO     |    175.14 |    457.81 |        1.00x |        1.00x |
+| RustFS    |     26.62 |    437.77 |        0.15x |        0.96x |
 
 Methodology and raw artifacts:
 [benchmark reference](docs/reference/benchmarks.md#latest-local-result).

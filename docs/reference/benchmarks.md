@@ -110,25 +110,46 @@ reference page.
 
 These snapshots were captured on the local Apple M3 loopback setup with signed
 S3 requests, 64 KiB objects, concurrency 32, `warp`, `--host-select
-roundrobin`, and `--noclear`. Each target ran as a local 4-node cluster. GET is
-a warm-read pass over objects kept from the preceding PUT pass. MinIO and RustFS
-were measured once in the final comparison. `GrainFS` ran with at-rest
-encryption and default Iceberg audit enabled.
+roundrobin`, and `--noclear`. Each target ran in local single-node mode. GET is
+a warm-read pass over objects kept from the preceding PUT pass. `GrainFS` ran
+with at-rest encryption and S3-only benchmark flags:
+`--audit-iceberg=false --dedup=false --block-cache-size=0 --shard-cache-size=0`.
 
-| Target    | Commit / build | PUT MiB/s | PUT obj/s | PUT errors | GET MiB/s | GET obj/s | GET errors | Raw artifacts |
-| --------- | -------------- | --------: | --------: | ---------: | --------: | --------: | ---------: | ------------- |
-| `GrainFS` | `b8d635e7`     |     65.32 |   1045.10 |          0 |    244.26 |   3908.11 |          0 | `benchmarks/profiles/fair4-c32-20260519-055104/grainfs-cluster` |
-| MinIO     | local run      |     41.37 |    661.85 |          0 |     95.52 |   1528.30 |          0 | `benchmarks/profiles/fair4-c32-20260519-055104/minio-cluster` |
-| RustFS    | local run      |     18.50 |    296.08 |          0 |     48.20 |    771.14 |          0 | `benchmarks/profiles/fair4-c32-20260519-055104/rustfs-cluster` |
+| S3 op | MinIO MiB/s | MinIO obj/s | MinIO errors | MinIO RSS MiB | RustFS MiB/s | RustFS obj/s | RustFS errors | RustFS RSS MiB | GrainFS MiB/s | GrainFS obj/s | GrainFS errors | GrainFS RSS MiB | GrainFS artifact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| put | 175.14 | 2802.27 | 0 | 796.30 | 26.62 | 425.95 | 0 | 106.58 | 548.30 | 8772.82 | 0 | 601.22 | `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417` |
+| get | 457.81 | 7325.01 | 0 | 919.20 | 437.77 | 7004.32 | 0 | 213.28 | 1849.34 | 29589.49 | 0 | 767.03 | `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504` |
+| delete | 0.00 | 1968.80 | 0 | 533.90 | 0.00 | 2835.91 | 0 | 232.11 | 0.00 | 17964.91 | 0 | 460.70 | `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342` |
+| mixed | 126.89 | 2030.20 | 0 | 687.70 | 163.62 | 2617.84 | 0 | 258.25 | 176.17 | 2818.79 | 0 | 251.75 | `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750` |
+| list | 0.00 | 31285.46 | 0 | 1158.50 | 0.00 | 11869.98 | 0 | 605.75 | 0.00 | 434233.02 | 0 | 150.38 | `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950` |
+| stat | 0.00 | 14601.34 | 0 | 727.20 | 0.00 | 9428.66 | 0 | 187.55 | 0.00 | 58557.94 | 0 | 126.72 | `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109` |
+| versioned | 129.32 | 2069.14 | 0 | 602.00 | 75.57 | 1209.13 | 0 | 407.53 | 182.82 | 2925.17 | 0 | 486.23 | `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
+| retention | 0.00 | 3897.55 | 0 | pending | 0.00 | 3208.87 | 0 | 367.53 | 0.00 | 19336.57 | 0 | 280.86 | `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
+| multipart | 3245.85 | 649.17 | 0 | 1101.73 | 3622.07 | 724.41 | 0 | 475.05 | 3986.73 | 797.35 | 0 | 675.98 | `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
+| multipart-put | 321.18 | 64.24 | 0 | 1579.06 | 614.95 | 122.99 | 0 | 539.89 | 804.95 | 160.99 | 0 | 879.59 | `benchmarks/profiles/grainfs-single-multipart-put-after-complete-8m-limit24-20260520-170108` |
+| append | 302.05 | 4832.80 | 146687 | 663.12 | 163.40 | 2614.33 | 78801 | 119.12 | 78.39 | 1254.28 | 0 | 326.50 | `benchmarks/profiles/grainfs-single-append-initial-20260520-170436` |
 
-Observed deltas:
+MinIO and RustFS append runs returned errors, so they are not valid correctness
+baselines for append throughput. GrainFS completed append with 0 errors.
 
-- `GrainFS` PUT throughput was 1.58x the MinIO PUT baseline and 3.53x the
-  RustFS PUT baseline.
-- `GrainFS` GET throughput was 2.56x the MinIO GET baseline and 5.07x the
-  RustFS GET baseline.
-- Raw summary:
-  `benchmarks/profiles/fair4-c32-20260519-055104/summary.md`.
+Single-node Iceberg REST Catalog results used `make bench-iceberg-table` /
+`benchmarks/bench_iceberg_table.sh` and `warp iceberg`:
+
+| Iceberg op | Throughput | p99 latency | max latency | errors | Raw artifacts |
+| --- | ---: | ---: | ---: | ---: | --- |
+| catalog-read | 53526.85 total ops/s | 1.3 ms | 82.2 ms | 0 | `benchmarks/profiles/iceberg-single-catalog-read-after-catalog-prop-fix-20260520-170702` |
+| catalog-commits | 9563.81 ops/s | 1.8 ms | 42.1 ms | 0 | `benchmarks/profiles/iceberg-single-catalog-commits-200tables-20260520-170932` |
+| catalog-mixed | 60767.74 total ops/s | 0.9 ms | 97.0 ms | 0 | `benchmarks/profiles/iceberg-single-catalog-mixed-initial-20260520-171102` |
+| sustained | 1.00 ops/s | 11.6 ms | 17.6 ms | 0 | `benchmarks/profiles/iceberg-single-sustained-rps1-20260520-171508` |
+
+Observed S3 deltas:
+
+- `GrainFS` PUT throughput was 3.13x the MinIO PUT baseline and 20.60x the
+  RustFS PUT baseline, with lower RSS than MinIO.
+- `GrainFS` GET throughput was 4.04x the MinIO GET baseline and 4.22x the
+  RustFS GET baseline, with lower RSS than MinIO.
+- `GrainFS` passed the measured non-append S3 throughput gates with 0 errors
+  and lower RSS than MinIO where a MinIO RSS sample was available.
 
 The official comparison uses `warp`; the old k6 mixed workload has been removed.
 
