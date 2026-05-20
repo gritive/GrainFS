@@ -65,7 +65,7 @@ func (s *Server) emitIcebergAuditAnonAllow(ctx context.Context, c *app.RequestCo
 		EventID:    uuid.NewString(),
 		NodeID:     s.auditNodeID,
 		RequestID:  RequestIDFromContext(ctx),
-		SAID:       "",
+		SAID:       audit.AnonSAID,
 		SourceIP:   s.authoritativeClientIP(c),
 		Method:     auditString8(string(c.Method())),
 		Operation:  action,

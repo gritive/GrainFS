@@ -220,8 +220,8 @@ func TestIcebergGuarded_EmitsAnonAllowAuditRow(t *testing.T) {
 	require.True(t, found, "expected anon_allow audit event; got events: %+v", events)
 	assert.Equal(t, "anon_allow", ev.AuthStatus, "AuthStatus should be anon_allow when iam.anon-enabled=true")
 
-	// SAID should be anonymous (no JWT claims on anon path).
-	assert.Empty(t, ev.SAID, "SAID should be empty for anon requests (before normalization assigns '(anonymous)')")
+	// SAID must carry the canonical sentinel for anonymous requests.
+	assert.Equal(t, audit.AnonSAID, ev.SAID, "SAID should be AnonSAID sentinel for anon requests")
 }
 
 // TestIcebergGuarded_SigV4Passthrough_NoAuditFromBearerPath checks that
