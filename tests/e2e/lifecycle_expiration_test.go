@@ -201,4 +201,95 @@ func runLifecycleExpirationCases(t *testing.T, tgt s3Target) {
 		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("k")})
 		require.Error(t, err, "object must be expired by past Date")
 	})
+
+	t.Run("ExpiredObjectDeleteMarker_ChainedReclaim", func(t *testing.T) {
+		if tgt.name == "single-dedicated" {
+			t.Skip("DM reclaim requires versioning; SingleNode 미지원")
+		}
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "dm")
+		_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+			Bucket:                  aws.String(bucket),
+			VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+		})
+		require.NoError(t, err)
+
+		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"), Body: stringReader("v1"),
+		})
+		require.NoError(t, err)
+		_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"),
+		})
+		require.NoError(t, err)
+
+		tru := true
+		_, err = client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:                          aws.String("dm-and-noncurrent"),
+				Status:                      types.ExpirationStatusEnabled,
+				Filter:                      &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				Expiration:                  &types.LifecycleExpiration{ExpiredObjectDeleteMarker: &tru},
+				NoncurrentVersionExpiration: &types.NoncurrentVersionExpiration{NoncurrentDays: aws.Int32(1)},
+			}}},
+		})
+		require.NoError(t, err)
+
+		// Cycle 1: noncurrent v1 expires; DM still present (not yet lone).
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+		out, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket: aws.String(bucket), Prefix: aws.String("k"),
+		})
+		require.NoError(t, err)
+		require.Empty(t, out.Versions, "noncurrent v1 must be reclaimed")
+		require.Len(t, out.DeleteMarkers, 1, "DM still present (not yet lone-reclaimed)")
+
+		// Cycle 2: lone DM reclaimed.
+		lc.RunLifecycleCycle(ctx)
+		out, err = client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket: aws.String(bucket), Prefix: aws.String("k"),
+		})
+		require.NoError(t, err)
+		require.Empty(t, out.Versions)
+		require.Empty(t, out.DeleteMarkers, "lone DM must be reclaimed on next cycle")
+	})
+
+	t.Run("AbortIncompleteMultipartUpload", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "mpu")
+
+		// Cluster4Node requires the multipart_listing_v1 capability to be
+		// acknowledged before CreateMultipartUpload succeeds on a fresh bucket.
+		if tgt.isCluster {
+			waitForMultipartListingCreate(t, ctx, client, bucket, "k", 120*time.Second)
+		}
+
+		created, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"),
+		})
+		require.NoError(t, err)
+		// Do NOT complete — leave the MPU abandoned.
+
+		_, err = client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:                             aws.String("abort-mpu"),
+				Status:                         types.ExpirationStatusEnabled,
+				Filter:                         &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				AbortIncompleteMultipartUpload: &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(1)},
+			}}},
+		})
+		require.NoError(t, err)
+
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+
+		out, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(bucket)})
+		require.NoError(t, err)
+		for _, u := range out.Uploads {
+			require.NotEqual(t, *created.UploadId, *u.UploadId, "abandoned MPU must be aborted")
+		}
+	})
 }
