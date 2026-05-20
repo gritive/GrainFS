@@ -130,9 +130,12 @@ with at-rest encryption and S3-only benchmark flags:
 | append | n/a | n/a | 146687 | 663.12 | n/a | n/a | 78801 | 119.12 | 78.39 | 1254.28 | 0 | 326.50 | `benchmarks/profiles/grainfs-single-append-initial-20260520-170436` |
 
 MinIO and RustFS append runs returned errors, so they are not valid correctness
-baselines for append throughput. Their raw artifact directories still contain
-the failed run output, but the throughput cells are intentionally not published
-as comparable baseline numbers. GrainFS completed append with 0 errors.
+baselines for append throughput. `warp append` exercises S3 Express append
+semantics; the local OSS MinIO binary rejects `x-amz-write-offset-bytes` outside
+S3 Express mode and cannot provide a valid append baseline without an AIStor/S3
+Express endpoint. Their raw artifact directories still contain the failed run
+output, but the throughput cells are intentionally not published as comparable
+baseline numbers. GrainFS append is reported as a best-effort 0-error result.
 
 Single-node Iceberg REST Catalog results used `make bench-iceberg-table` /
 `benchmarks/bench_iceberg_table.sh` and `warp iceberg`:
