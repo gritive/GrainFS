@@ -30,7 +30,7 @@ Updated: 2026-05-20 17:33 KST
 | retention     |    0.00 |  3897.55 |      0 |              pending | command ended before after-sample                                                                                              |
 | multipart     | 3245.85 |   649.17 |      0 |              1101.73 | artifact `benchmarks/profiles/baseline-minio-single-multipart-20260520-133526`                                                 |
 | multipart-put |  321.18 |    64.24 |      0 |              1579.06 | artifact `benchmarks/profiles/baseline-minio-single-multipart-put-20260520-133631`                                             |
-| append        |  302.05 |  4832.80 | 146687 |               663.12 | invalid baseline: append workload returned errors; artifact `benchmarks/profiles/baseline-minio-single-append-20260520-133747` |
+| append        |     n/a |      n/a | 146687 |               663.12 | invalid baseline: unsupported append PUT API errors; raw artifact `benchmarks/profiles/baseline-minio-single-append-20260520-133747` |
 
 ## RustFS Single-Node Baseline
 
@@ -46,7 +46,7 @@ Updated: 2026-05-20 17:33 KST
 | retention     |    0.00 |  3208.87 |      0 |               367.53 | object/s workload; artifact `benchmarks/profiles/baseline-rustfs-single-retention-20260520-134643`                              |
 | multipart     | 3622.07 |   724.41 |      0 |               475.05 | artifact `benchmarks/profiles/baseline-rustfs-single-multipart-20260520-134800`                                                 |
 | multipart-put |  614.95 |   122.99 |      0 |               539.89 | artifact `benchmarks/profiles/baseline-rustfs-single-multipart-put-20260520-134854`                                             |
-| append        |  163.40 |  2614.33 |  78801 |               119.12 | invalid baseline: append workload returned errors; artifact `benchmarks/profiles/baseline-rustfs-single-append-20260520-134950` |
+| append        |     n/a |      n/a |  78801 |               119.12 | invalid baseline: not-implemented upload errors; raw artifact `benchmarks/profiles/baseline-rustfs-single-append-20260520-134950` |
 
 ## GrainFS Single-Node Benchmark
 
