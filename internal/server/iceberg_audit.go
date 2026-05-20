@@ -17,7 +17,9 @@ import (
 // Iceberg request. Called after the downstream handler returns so the HTTP
 // status code is captured from the response. evalResult may be nil when no
 // policy authorizer is configured (JWT verify is the only gate).
-func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContext, action string, claims *iamjwt.Claims, evalResult *policy.EvalResult, start time.Time) {
+// authzLatencyUS is the policy Authorize() window only (S3-parity); it is 0
+// when no policy gate ran.
+func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContext, action string, claims *iamjwt.Claims, evalResult *policy.EvalResult, authzLatencyUS int32, start time.Time) {
 	if !s.auditSinkConfigured() {
 		return
 	}
@@ -25,7 +27,6 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 	if status == 0 {
 		status = int32(http.StatusOK)
 	}
-	latencyUS := int32(time.Since(start).Microseconds())
 	ev := audit.S3Event{
 		Ts:             start.UnixMicro(),
 		EventID:        uuid.NewString(),
@@ -39,7 +40,7 @@ func (s *Server) emitIcebergAuditAllow(ctx context.Context, c *app.RequestContex
 		Status:         status,
 		AuthStatus:     "allow",
 		LatencyMs:      int32(time.Since(start).Milliseconds()),
-		AuthzLatencyUS: latencyUS,
+		AuthzLatencyUS: authzLatencyUS,
 	}
 	if evalResult != nil {
 		ev.MatchedPolicyID = evalResult.MatchedPolicy
@@ -80,12 +81,13 @@ func (s *Server) emitIcebergAuditAnonAllow(ctx context.Context, c *app.RequestCo
 // request that was rejected. Called synchronously before the response is
 // finalized (the status code passed in is the one written to the response).
 // evalResult may be nil for pre-policy denials (token invalid, warehouse mismatch).
+// authzLatencyUS is the policy Authorize() window only; callers pass 0 for
+// pre-policy denials where the authorization layer was never reached.
 // start is threaded from icebergGuarded so Ts and LatencyMs share the same baseline.
-func (s *Server) emitIcebergAuditDeny(ctx context.Context, c *app.RequestContext, action string, saID string, warehouse string, status int, reason string, evalResult *policy.EvalResult, start time.Time) {
+func (s *Server) emitIcebergAuditDeny(ctx context.Context, c *app.RequestContext, action string, saID string, warehouse string, status int, reason string, evalResult *policy.EvalResult, authzLatencyUS int32, start time.Time) {
 	if !s.auditSinkConfigured() {
 		return
 	}
-	latencyUS := int32(time.Since(start).Microseconds())
 	ev := audit.S3Event{
 		Ts:             start.UnixMicro(),
 		EventID:        uuid.NewString(),
@@ -101,7 +103,7 @@ func (s *Server) emitIcebergAuditDeny(ctx context.Context, c *app.RequestContext
 		ErrClass:       http.StatusText(status),
 		ErrReason:      reason,
 		LatencyMs:      int32(time.Since(start).Milliseconds()),
-		AuthzLatencyUS: latencyUS,
+		AuthzLatencyUS: authzLatencyUS,
 	}
 	if evalResult != nil {
 		ev.MatchedPolicyID = evalResult.MatchedPolicy

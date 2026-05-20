@@ -174,6 +174,8 @@ func TestIcebergGuarded_EmitsDenyAuditRow_BadToken(t *testing.T) {
 	require.True(t, found, "expected deny audit event for bad token; got events: %+v", events)
 	assert.Equal(t, "deny", ev.AuthStatus)
 	assert.Equal(t, "invalid_token", ev.ErrReason)
+	// Policy layer was never reached on bad-token path; authz latency must be 0.
+	assert.Zero(t, ev.AuthzLatencyUS, "AuthzLatencyUS must be 0 when policy layer was not reached")
 }
 
 // TestIcebergGuarded_EmitsAnonAllowAuditRow checks that anon-enabled requests
