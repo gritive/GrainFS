@@ -110,17 +110,27 @@ func sortedVoterIDs(c Configuration) []string {
 }
 
 var _ = ginkgo.Describe("Membership changes", func() {
-	ginkgo.It("adds a voter and converges configuration on all members", func(ginkgo.SpecContext) {
-		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
+	var fix *membershipFixture
+	var leader *Node
+	var cleanup func()
 
-		leader := fix.nodes[0]
+	ginkgo.BeforeEach(func() {
+		var err error
+		fix, cleanup, err = startPromoteRaceCluster([]string{"n1", "n2", "n3"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		leader = fix.nodes[0]
 		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 did not become leader")
+	})
 
-		_, err = addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+	ginkgo.AfterEach(func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	})
+
+	ginkgo.It("adds a voter and converges configuration on all members", func(ginkgo.SpecContext) {
+		_, err := addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		gomega.Expect(leader.AddVoterCtx(ctx, "n4", "n4-addr")).To(gomega.Succeed())
@@ -143,23 +153,11 @@ var _ = ginkgo.Describe("Membership changes", func() {
 	}, ginkgo.NodeTimeout(10*time.Second))
 
 	ginkgo.It("rejects adding an existing voter", func(ginkgo.SpecContext) {
-		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
-
-		leader := fix.nodes[0]
-		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
 		gomega.Expect(leader.AddVoter("n2", "addr")).To(gomega.HaveOccurred())
 	}, ginkgo.NodeTimeout(5*time.Second))
 
 	ginkgo.It("removes a voter and converges remaining members", func(ginkgo.SpecContext) {
-		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
-
-		leader := fix.nodes[0]
-		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
-		_, err = addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+		_, err := addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -188,13 +186,7 @@ var _ = ginkgo.Describe("Membership changes", func() {
 	}, ginkgo.NodeTimeout(10*time.Second))
 
 	ginkgo.It("rejects concurrent AddVoter while one conf change is in flight", func(ginkgo.SpecContext) {
-		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
-
-		leader := fix.nodes[0]
-		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
-		_, err = addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
+		_, err := addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_, err = addPromoteRaceNode(fix, "n5", []string{"n1", "n2", "n3"}, slowElectionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -218,12 +210,6 @@ var _ = ginkgo.Describe("Membership changes", func() {
 	}, ginkgo.NodeTimeout(10*time.Second))
 
 	ginkgo.It("steps down a leader after removing itself", func(ginkgo.SpecContext) {
-		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer cleanup()
-
-		leader := fix.nodes[0]
-		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
 		gomega.Expect(leader.RemoveVoter("n1")).To(gomega.Succeed())
 
 		gomega.Expect(waitFor(3*time.Second, func() bool {
