@@ -1377,12 +1377,9 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 		return obj, nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	body, err := readBoundedBody(r, c.maxBody)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(body)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
 	}
 	args := buildPutObjectArgs(bucket, key, contentType, body)
 	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
@@ -1895,6 +1892,13 @@ func forwardBodyBytes(r io.Reader, maxBody int64) ([]byte, error) {
 		}
 		return body, nil
 	}
+	return readBoundedBody(r, maxBody)
+}
+
+func readBoundedBody(r io.Reader, maxBody int64) ([]byte, error) {
+	// Forward-frame and retry boundaries need a replayable body. Keep this
+	// allocation explicit, capped, and shared so ReadAll cannot creep into
+	// unbounded hot paths.
 	body, err := io.ReadAll(io.LimitReader(r, maxBody+1))
 	if err != nil {
 		return nil, err
@@ -1959,12 +1963,9 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	if c.forward.streamDialer == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	forwardBody, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+	forwardBody, err := readBoundedBody(r, c.maxBody)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(forwardBody)) > c.maxBody {
-		return nil, storage.ErrEntityTooLarge
 	}
 	bodyLen := int64(len(forwardBody))
 	if c.appendForwardBuffer != nil {
@@ -1998,12 +1999,9 @@ func (c *ClusterCoordinator) appendObjectLocalWithRetry(
 	seeker, ok := r.(io.Seeker)
 	var buffered []byte
 	if !ok {
-		body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
+		body, err := readBoundedBody(r, c.maxBody)
 		if err != nil {
 			return nil, err
-		}
-		if int64(len(body)) > c.maxBody {
-			return nil, storage.ErrEntityTooLarge
 		}
 		buffered = body
 	}
