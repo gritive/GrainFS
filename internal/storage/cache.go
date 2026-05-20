@@ -340,6 +340,22 @@ func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+// ReadAtObject preserves prepared-object fast paths through the cache wrapper.
+func (cb *CachedBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error) {
+	ck := cacheKey(bucket, key)
+	entry, ok := cb.getCached(ck)
+	if ok {
+		var r bytes.Reader
+		r.Reset(entry.data)
+		return r.ReadAt(buf, offset)
+	}
+
+	if prepared, ok := cb.Backend.(PreparedReadAt); ok {
+		return prepared.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return cb.ReadAt(ctx, bucket, key, offset, buf)
+}
+
 func (cb *CachedBackend) PreferReadAt(bucket string) bool {
 	type readAtPreference interface {
 		PreferReadAt(bucket string) bool

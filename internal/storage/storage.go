@@ -268,6 +268,12 @@ type PartialIO interface {
 	Truncate(ctx context.Context, bucket, key string, size int64) error
 }
 
+// PreparedReadAt is an optional fast path for callers that already loaded the
+// current object metadata and want to avoid a second lookup before ReadAt.
+type PreparedReadAt interface {
+	ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error)
+}
+
 // Syncable is an optional interface for backends that can fsync a specific object.
 // Backends that do not implement this interface skip the fsync in COMMIT.
 type Syncable interface {

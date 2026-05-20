@@ -12,10 +12,6 @@ type objectReadAtBackend interface {
 	ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error)
 }
 
-type objectPreparedReadAtBackend interface {
-	ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error)
-}
-
 const maxRangeReadAtChunk = 5 << 20
 
 var readAtRangeBufferPool = sync.Pool{
@@ -80,7 +76,7 @@ func (r *readAtRangeReader) Read(p []byte) (int, error) {
 
 func (r *readAtRangeReader) readAt(offset int64, buf []byte) (int, error) {
 	if r.obj != nil {
-		if prepared, ok := r.backend.(objectPreparedReadAtBackend); ok {
+		if prepared, ok := r.backend.(storage.PreparedReadAt); ok {
 			return prepared.ReadAtObject(r.ctx, r.bucket, r.key, r.obj, offset, buf)
 		}
 	}
