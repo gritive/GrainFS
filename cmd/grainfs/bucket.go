@@ -116,11 +116,10 @@ func init() {
 
 	bucketCmd.AddCommand(
 		bucketCreateCmd, bucketListCmd, bucketInfoCmd, bucketDeleteCmd,
-		// TODO(T9-T10): the policy/versioning subtrees are still added below
-		// via the legacy builder-function pattern. Each subsequent task converts
-		// one file to var pattern (which AddCommands itself into bucketCmd via
-		// its own init()) and removes its builder call from here.
-		bucketPolicyCmd(),
+		// TODO(T10): the versioning subtree is still added below via the legacy
+		// builder-function pattern. Task 10 converts the file to var pattern
+		// (which AddCommands itself into bucketCmd via its own init()) and
+		// removes the builder call from here.
 		bucketVersioningCmd(),
 	)
 	rootCmd.AddCommand(bucketCmd)
