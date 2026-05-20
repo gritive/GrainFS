@@ -266,6 +266,32 @@ func Test9P_ListObjects(t *testing.T) {
 	})
 }
 
+func Test9P_Symlink_CreateReadlinkAndFollow(t *testing.T) {
+	unique := fmt.Sprintf("symlink-e2e-%d", time.Now().UnixNano())
+	targetName := unique + "-target.txt"
+	linkName := unique + "-link.txt"
+
+	httpPutObject(t, targetName, "symlink body")
+
+	with9PBucketMount(t, func(mnt string) {
+		cmdCreate := fmt.Sprintf("cd %s && ln -s %s %s", shellQuote(mnt), shellQuote(targetName), shellQuote(linkName))
+		runColimaSSH(t, "sudo", "sh", "-c", cmdCreate)
+
+		readlink := runColimaSSH(t, "sudo", "sh", "-c", fmt.Sprintf("cd %s && readlink %s", shellQuote(mnt), shellQuote(linkName)))
+		require.Equal(t, targetName, readlink)
+
+		fileBody := runColimaSSH(t, "sudo", "sh", "-c", fmt.Sprintf("cd %s && cat %s", shellQuote(mnt), shellQuote(linkName)))
+		require.Equal(t, "symlink body", fileBody)
+
+		ls := runColimaSSH(t, "sudo", "sh", "-c", fmt.Sprintf("cd %s && ls -l %s", shellQuote(mnt), shellQuote(linkName)))
+		require.Contains(t, ls, linkName+" -> "+targetName)
+
+		runColimaSSH(t, "sudo", "sh", "-c", fmt.Sprintf("cd %s && rm %s", shellQuote(mnt), shellQuote(linkName)))
+		_, status := httpGetObject(t, linkName)
+		require.NotEqual(t, http.StatusOK, status)
+	})
+}
+
 func Test9P_WriteReadAndHTTPVisibility(t *testing.T) {
 	with9PBucketMount(t, func(mnt string) {
 		writeMountedFile(t, p9Path(mnt, "write-read.txt"), "hello from 9p")

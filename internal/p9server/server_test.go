@@ -928,6 +928,71 @@ func TestServer_CloseStopsListenAndServe(t *testing.T) {
 	}
 }
 
+func TestP9Client_IntegrationSymlink_ReadlinkFlow(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "target.txt", strings.NewReader("linked content"), "text/plain")
+	require.NoError(t, err)
+
+	srv := NewServer(backend)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Serve(context.Background(), ln)
+	}()
+
+	require.Eventually(t, func() bool {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}, time.Second, 10*time.Millisecond)
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	client, err := p9.NewClient(conn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	root, err := client.Attach("")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	_, bucketDir, err := root.Walk([]string{"bkt"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bucketDir.Close() })
+
+	_, err = bucketDir.Symlink("target.txt", "link.txt", 0, 0)
+	require.NoError(t, err)
+
+	_, symlinkNode, err := bucketDir.Walk([]string{"link.txt"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = symlinkNode.Close() })
+
+	_, _, attr, err := symlinkNode.GetAttr(p9.AttrMask{Mode: true})
+	require.NoError(t, err)
+	require.Equal(t, p9.ModeSymlink|0777, attr.Mode)
+
+	target, err := symlinkNode.Readlink()
+	require.NoError(t, err)
+	require.Equal(t, "target.txt", target)
+
+	_ = srv.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("9p server did not stop during cleanup")
+	}
+}
+
 func TestP9Locks_PropagateThroughWalk(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
