@@ -10,7 +10,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -31,14 +30,12 @@ type ObjectDeleter interface {
 	MultipartUploadPartCount(bucket, key, uploadID string) (int, error)
 }
 
-// Scrubbable is the subset of scrubber.Scrubbable used by the lifecycle worker.
-//
-// ScanObjects stays on the interface for backward compatibility with the
-// scrubber package; the lifecycle worker itself no longer uses it as of
-// Task 9 (it now drives ScanObjectsGrouped instead).
+// Scrubbable is the subset of backend methods used by the lifecycle worker.
+// It covers bucket enumeration, per-key version grouping, and local MPU
+// enumeration. ScanObjects (EC scrubber) is intentionally excluded — the
+// lifecycle worker drives ScanObjectsGrouped exclusively.
 type Scrubbable interface {
 	ListBuckets(ctx context.Context) ([]string, error)
-	ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error)
 	ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
 	ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
 }
@@ -159,7 +156,6 @@ func (w *Worker) runCycle(ctx context.Context) {
 		if cfg == nil {
 			continue
 		}
-
 		w.runBucketCycle(ctx, bucket, cfg.Rules, now)
 	}
 

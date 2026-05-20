@@ -2235,6 +2235,125 @@ var (
 	_ storage.Truncatable = (*ClusterCoordinator)(nil)
 )
 
+// ScanObjectsGrouped fans out to all locally-owned shard groups so that
+// objects written to any shard group (not just group-0 / base) are visible
+// to the lifecycle expiration scan. In single-node mode every seeded group is
+// locally owned; in cluster mode the leader scans its own shard groups.
+// Falls back to c.base when no data groups are registered (tests / legacy).
+func (c *ClusterCoordinator) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	type scanner interface {
+		ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+	}
+
+	// No DataGroupManager — fall back to base (covers tests and legacy single-group mode).
+	if c.groups == nil {
+		sc, ok := c.base.(scanner)
+		if !ok {
+			return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
+		}
+		return sc.ScanObjectsGrouped(bucket)
+	}
+
+	groups := c.groups.All()
+	if len(groups) == 0 {
+		sc, ok := c.base.(scanner)
+		if !ok {
+			return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
+		}
+		return sc.ScanObjectsGrouped(bucket)
+	}
+
+	// Collect per-group channels; only locally-owned groups (Backend() != nil) participate.
+	var srcs []<-chan storage.ObjectKeyGroup
+	for _, dg := range groups {
+		gb := dg.Backend()
+		if gb == nil {
+			continue // not locally owned — skip (no RPC fan-out for lifecycle)
+		}
+		ch, err := gb.ScanObjectsGrouped(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("ScanObjectsGrouped group %s: %w", dg.ID(), err)
+		}
+		srcs = append(srcs, ch)
+	}
+	if len(srcs) == 0 {
+		// No local backends (all placeholder groups) — nothing to scan.
+		out := make(chan storage.ObjectKeyGroup)
+		close(out)
+		return out, nil
+	}
+
+	out := make(chan storage.ObjectKeyGroup, 16)
+	go func() {
+		defer close(out)
+		for _, src := range srcs {
+			for g := range src {
+				out <- g
+			}
+		}
+	}()
+	return out, nil
+}
+
+// ScanLocalMultipartUploads fans out to all locally-owned shard groups so that
+// MPU metadata stored in any shard group's keyspace is visible to the lifecycle
+// worker. MPU metadata is stored in the shard group that owns the write path for
+// the bucket (not necessarily group-0 / base). Falls back to c.base when no data
+// groups are registered (tests / legacy single-group mode).
+func (c *ClusterCoordinator) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	type scanner interface {
+		ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
+	}
+
+	// No DataGroupManager — fall back to base (covers tests and legacy single-group mode).
+	if c.groups == nil {
+		sc, ok := c.base.(scanner)
+		if !ok {
+			return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+		}
+		return sc.ScanLocalMultipartUploads(bucket)
+	}
+
+	groups := c.groups.All()
+	if len(groups) == 0 {
+		sc, ok := c.base.(scanner)
+		if !ok {
+			return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+		}
+		return sc.ScanLocalMultipartUploads(bucket)
+	}
+
+	// Collect per-group channels; only locally-owned groups (Backend() != nil) participate.
+	var srcs []<-chan storage.MultipartUploadRecord
+	for _, dg := range groups {
+		gb := dg.Backend()
+		if gb == nil {
+			continue // not locally owned — skip (no RPC fan-out for lifecycle)
+		}
+		ch, err := gb.ScanLocalMultipartUploads(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("ScanLocalMultipartUploads group %s: %w", dg.ID(), err)
+		}
+		srcs = append(srcs, ch)
+	}
+	if len(srcs) == 0 {
+		out := make(chan storage.MultipartUploadRecord)
+		close(out)
+		return out, nil
+	}
+
+	out := make(chan storage.MultipartUploadRecord, 16)
+	go func() {
+		defer close(out)
+		for _, src := range srcs {
+			for rec := range src {
+				out <- rec
+			}
+		}
+	}()
+	return out, nil
+}
+
 // ScrubPeerStat is the cluster-package-local snapshot of one peer's scrub
 // session state. Returned by ScrubSessionStat fan-out; serve.go's adapter
 // converts to admin.ScrubJobInfo so cluster does not import admin.

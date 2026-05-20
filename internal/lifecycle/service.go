@@ -325,7 +325,8 @@ func (s *Service) MPUWorkerRunningForTest() bool {
 // worker is per-node and always loaded once Run has started, so we also
 // drive one MPU cycle in the same call. Test seam.
 func (s *Service) RunCycleForTest(ctx context.Context) {
-	if w := s.worker.Load(); w != nil {
+	w := s.worker.Load()
+	if w != nil {
 		w.RunCycleForTest(ctx)
 	}
 	if mpu := s.mpuWorker.Load(); mpu != nil {

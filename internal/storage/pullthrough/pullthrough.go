@@ -271,3 +271,29 @@ func (b *Backend) GetObject(ctx context.Context, bucket, key string) (io.ReadClo
 func isNotFound(err error) bool {
 	return errors.Is(err, storage.ErrObjectNotFound)
 }
+
+// ScanObjectsGrouped delegates to inner via type assertion so the lifecycle
+// Scrubbable interface is satisfied through the pull-through wrapper chain.
+func (b *Backend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	type scanner interface {
+		ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+	}
+	sc, ok := b.Backend.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanObjectsGrouped(bucket)
+}
+
+// ScanLocalMultipartUploads delegates to inner via type assertion so the
+// lifecycle Scrubbable interface is satisfied through the pull-through chain.
+func (b *Backend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	type scanner interface {
+		ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
+	}
+	sc, ok := b.Backend.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanLocalMultipartUploads(bucket)
+}

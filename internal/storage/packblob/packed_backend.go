@@ -316,8 +316,33 @@ func (pb *PackedBackend) ForceDeleteBucket(ctx context.Context, bucket string) e
 	return nil
 }
 
+// ListBuckets fuses inner backend's bucket list with any buckets that only
+// appear in the packed index (e.g. after index drift: LoadIndex loaded entries
+// for a bucket that was cleaned up in the inner backend out-of-band). Only
+// active (Refcount > 0) index entries are considered.
 func (pb *PackedBackend) ListBuckets(ctx context.Context) ([]string, error) {
-	return pb.inner.ListBuckets(ctx)
+	innerBuckets, err := pb.inner.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(innerBuckets))
+	for _, b := range innerBuckets {
+		seen[b] = struct{}{}
+	}
+
+	pb.index.Range(func(k, v any) bool {
+		if v.(*indexEntry).Refcount.Load() <= 0 {
+			return true
+		}
+		bucket := k.(packedKey).bucket
+		if _, ok := seen[bucket]; !ok {
+			seen[bucket] = struct{}{}
+			innerBuckets = append(innerBuckets, bucket)
+		}
+		return true
+	})
+	return innerBuckets, nil
 }
 
 // --- Object operations ---
@@ -959,6 +984,88 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 		}
 	}
 	return nil
+}
+
+// ScanObjectsGrouped fuses packed index entries with inner scan results.
+//
+// Memory bound: O(packed-index-size-for-bucket), NOT O(inner-bucket-size).
+// We emit packed-only entries FIRST (bounded snapshot from pb.index.Range),
+// capture their keys in seenKeys, then stream inner while skipping dupes.
+//
+// INVARIANT: PackedBackend hosts only objects in non-versioned buckets.
+// PutObjectWithRequest enforces this: versioning-enabled buckets forward to
+// inner unconditionally (lines 394–405). The dedup branch below protects
+// against silently shadowing inner multi-version history with a packed
+// single-version record if the invariant is ever violated.
+//
+// inner.ScanObjectsGrouped is accessed via type assertion because
+// ScanObjectsGrouped is not part of the storage.Backend interface.
+func (pb *PackedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	type scanner interface {
+		ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+	}
+	sc, ok := pb.inner.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	inner, err := sc.ScanObjectsGrouped(bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan storage.ObjectKeyGroup, 64)
+	go func() {
+		defer close(out)
+		seenKeys := make(map[string]struct{})
+		pb.index.Range(func(k, v any) bool {
+			pk := k.(packedKey)
+			if pk.bucket != bucket {
+				return true
+			}
+			ie := v.(*indexEntry)
+			if ie.Refcount.Load() <= 0 {
+				return true
+			}
+			seenKeys[pk.key] = struct{}{}
+			out <- storage.ObjectKeyGroup{
+				Bucket: bucket,
+				Key:    pk.key,
+				Versions: []storage.ObjectVersionRecord{{
+					VersionID:      "",
+					IsLatest:       true,
+					IsDeleteMarker: false,
+					LastModified:   ie.LastModified, // int64 unix seconds — same unit as ObjectVersionRecord.LastModified
+					Size:           ie.OriginalSize,
+					ETag:           ie.ETag,
+					Tags:           cloneTags(ie.Tags),
+				}},
+			}
+			return true
+		})
+		for g := range inner {
+			if _, ok := seenKeys[g.Key]; ok {
+				log.Warn().Str("bucket", bucket).Str("key", g.Key).
+					Msg("packblob: scan dedup — same key in packed and inner (invariant violation)")
+				continue
+			}
+			out <- g
+		}
+	}()
+	return out, nil
+}
+
+// ScanLocalMultipartUploads delegates to inner via type assertion. MPU
+// metadata is stored by the inner backend (LocalBackend/DistributedBackend),
+// not in the packed blob index.
+func (pb *PackedBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	type scanner interface {
+		ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
+	}
+	sc, ok := pb.inner.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanLocalMultipartUploads(bucket)
 }
 
 // --- Copy operations (Copier interface) ---

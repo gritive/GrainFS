@@ -240,10 +240,14 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		// which works for both v1 and v2.
 		lead := &cluster.RaftLeadership{Node: state.distBackend.Node()}
 		state.metaRaft.FSM().SetLifecycle(lstore) // pattern from boot_phases_scrubber.go:127
+		scrubbable, ok := state.backend.(lifecycle.Scrubbable)
+		if !ok {
+			return fmt.Errorf("lifecycle: state.backend does not implement Scrubbable (type %T)", state.backend)
+		}
 		state.lifecycleSvc = lifecycle.NewService(
 			lstore, prop, lead,
-			state.distBackend,                        // Scrubbable
-			storage.NewOperations(state.distBackend), // ObjectDeleter
+			scrubbable,                           // Scrubbable — full wrapper stack (PackedBackend visible)
+			storage.NewOperations(state.backend), // ObjectDeleter
 			cfg.LifecycleInterval,
 			lifecycle.WithNodeID(nodeID),
 		)

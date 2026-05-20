@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.0.285.0] - 2026-05-20 - fix: Lifecycle Phase 1 followup — R3 PackedBackend scan + R4 ClusterCoordinator multi-group scan
+
+Phase 1 (v0.0.273.0)에서 deferred됐던 e2e sub-tests를 land하기 위해, Phase 2
+unblock fixes (v0.0.278.0)에서 발견된 두 구조적 회귀(R3, R4)를 통합 surgical fix로
+해결. Lifecycle worker가 이제 SingleNode + Cluster4Node 양쪽에서 packed 객체를
+enumerate하고, freshly-created bucket의 fan-out scan을 정상 처리한다.
+
+R5 (PackedBackend.DeleteObjectReturningMarker packed index stale)는 본 phase의
+Task 6 verify gate에서 신규 발견됐으나 v0.0.283.0 (#475)에서 master에 동일한
+의도의 fix가 먼저 머지됐다. 본 phase는 R5 guard test 만 추가.
+
+### Fixed
+
+- **R3**: PackedBackend가 `ScanObjectsGrouped`/`ListBuckets`를 미구현하여
+  lifecycle worker가 packed (default <65 KiB) 객체를 enumerate 못 함. Fix:
+  `PackedBackend.ScanObjectsGrouped` (packed-first 순서로 fuse, memory bound =
+  packed-index-size, dedup branch는 invariant 위반 시 warn-log), `PackedBackend.ListBuckets`
+  (inner + packed-only 합집합). Pullthrough / WAL / RecoveryWriteGate wrapper도
+  Scrubbable delegate-to-inner pass-through 추가. Invariant: PackedBackend hosts
+  only non-versioned objects (PutObjectWithRequest line ~394에서 enforced).
+
+- **R4 (actual root cause, plan과 다름)**: `ClusterCoordinator.ScanObjectsGrouped`가
+  `c.base` (group-0 keyspace)에만 위임하여 다른 shard group에 라우팅된 객체를
+  누락. SingleNode도 `SeedInitialShardGroups`가 8개 shard group을 생성하므로
+  영향 받음. Plan은 R4를 backend.ListBuckets/Scan cache 문제로 가정했으나
+  Task 2 instrumentation이 worker가 정상 진입 + ListBuckets/store.Get 정상,
+  ScanObjectsGrouped만 empty임을 확인. Fix: `ListMultipartUploads`와 동일한
+  `c.groups.All()` fan-out 패턴으로 모든 로컬 소유 GroupBackend에 fan-out,
+  결과를 순차 병합. `ScanLocalMultipartUploads`도 같은 패턴의 버그라 동일 수정.
+
+- Lifecycle service wiring: `state.distBackend` → `state.backend` (full wrapper
+  stack)로 변경하여 PackedBackend가 lifecycle scan path에 포함되게 함.
+  Cluster leader-only semantics는 service-level `RaftLeadership`로 보존.
+
+### Tests
+
+- New regression guards (unit):
+  - `internal/storage/packblob/scan_test.go::TestPackedBackend_ScanObjectsGroupedFusesPackedAndInner`
+  - `internal/storage/packblob/scan_test.go::TestPackedBackend_ScanObjectsGroupedDedupBranchLogsAndPrefersPacked`
+  - `internal/storage/packblob/scan_test.go::TestPackedBackend_ListBucketsFusesPackedAndInner`
+- New regression guard (e2e dual-target): `tests/e2e/lifecycle_runcycle_test.go::TestLifecycleWorkerE2E/{SingleNode,Cluster4Node}/RunsAfterBucketCreate`
+- `TestLifecycleExpirationE2E` Cluster4Node 분기 신설 (`newDedicatedCluster4NodeS3Target`, `--lifecycle-interval=24h`)
+- Phase 1 deferred Task 15-16 sub-tests landed:
+  - SingleNode + Cluster4Node: TagFilter, SizeFilter, AndFilter, ExpirationDate, AbortIncompleteMultipartUpload
+  - Cluster4Node only: ExpiredObjectDeleteMarker_ChainedReclaim (versioning required, SingleNode SKIPS)
+
+### Plan-vs-reality (lessons recorded)
+
+- Plan은 master에 R3 workaround (`lifecycleTestBodyKiB`=70)가 있다고 가정 → 실제로는 master에 없었음. Task 7 (workaround 제거)은 사실상 no-op verifier로 수행.
+- Plan은 R4 hypothesis 1-4 (ListBuckets/store.Get/packed/endpoint)를 제시 → Task 2 instrumentation이 모두 negative, 실제 root cause는 `ClusterCoordinator.ScanObjectsGrouped` group-0 only fan-out 누락.
+- Task 6 verify gate에서 R5 신규 발견 → Task 5.6 surgical fix 진행했으나 rebase 시 master의 v0.0.283.0 (#475)에서 동일 의도의 fix가 먼저 머지됨을 확인. 본 phase는 R5 guard test 만 유지.
+- Task 9 진행 중 ScanLocalMultipartUploads도 R4와 동일한 패턴 발견 → 같은 fan-out fix 적용.
+
+### Deferred to future phases
+
+- PackedBackend non-versioned invariant 코드 강제는 PutObjectWithRequest에서 이미 enforced, 다른 surface (Copy, Restore 등) 검사는 future audit.
+- Phase 1 deferred Task 17 (colima leadership-change-mid-scan)
+- Phase 1 deferred Task 18 (N×ListObjectVersions bench)
+- Per-bucket `pb.index.Range` O(B×N) optimization (24h cycle cadence라 acceptable, future bench phase)
+
 ## [0.0.284.0] - 2026-05-20
 
 ### Changed

@@ -442,3 +442,29 @@ func (b *Backend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
 	}
 	return bs.RestoreBuckets(buckets)
 }
+
+// ScanObjectsGrouped delegates to inner via type assertion so the lifecycle
+// Scrubbable interface is satisfied through the WAL wrapper chain.
+func (b *Backend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	type scanner interface {
+		ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+	}
+	sc, ok := b.Backend.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanObjectsGrouped(bucket)
+}
+
+// ScanLocalMultipartUploads delegates to inner via type assertion so the
+// lifecycle Scrubbable interface is satisfied through the WAL wrapper chain.
+func (b *Backend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	type scanner interface {
+		ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
+	}
+	sc, ok := b.Backend.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanLocalMultipartUploads(bucket)
+}
