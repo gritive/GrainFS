@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -21,6 +22,9 @@ const ackEventsChunkSize = 1000
 // Outbox stores audit events durably until the Iceberg committer acks them.
 type Outbox struct {
 	db *badger.DB
+	// denyOnly, when true, drops finalized allow/anon_allow events at the
+	// durable-write boundary (Finalize, AppendFinalized). See SetDenyOnly.
+	denyOnly atomic.Bool
 }
 
 type OutboxStats struct {
@@ -71,23 +75,94 @@ func (o *Outbox) AppendAttempt(ctx context.Context, ev S3Event) error {
 	})
 }
 
+// SetDenyOnly toggles deny-only filtering. When true, Finalize and
+// AppendFinalized drop allow/anon_allow events at the durable-write
+// boundary. The toggle is wired to the audit.deny-only config reload
+// hook (see internal/serveruntime/boot_phases_raft.go).
+//
+// Filtering is applied only at write time, not at read time: rows that
+// were already persisted before a true→false flip remain committable,
+// and rows already persisted before a false→true flip continue to flow.
+// This is the "AtomicFlip doesn't lose in-flight events" guarantee
+// exercised by TestOutbox_DenyOnly_AtomicFlip.
+func (o *Outbox) SetDenyOnly(v bool) {
+	if o == nil {
+		return
+	}
+	o.denyOnly.Store(v)
+}
+
+// DenyOnly reports the current deny-only filter state. Exported for tests
+// and for diagnostics; production callers should not branch on it.
+func (o *Outbox) DenyOnly() bool {
+	if o == nil {
+		return false
+	}
+	return o.denyOnly.Load()
+}
+
+// denyOnlyDropsFinalized reports whether the deny-only filter would drop ev
+// at the durable-write boundary. Only finalized rows with AuthStatus in
+// {"allow","anon_allow"} are dropped; "deny", "incomplete", and any unknown
+// status are kept (deny is the row we want to keep; incomplete is the
+// reaper's own tombstone; unknown statuses are conservatively retained).
+func (o *Outbox) denyOnlyDropsFinalized(ev S3Event) bool {
+	if !o.denyOnly.Load() {
+		return false
+	}
+	return ev.AuthStatus == "allow" || ev.AuthStatus == "anon_allow"
+}
+
 // Finalize overwrites an attempt with the final request outcome.
+//
+// When deny-only filtering is enabled, finalized allow/anon_allow rows are
+// dropped here — we also delete any pre-finalize AppendAttempt row for the
+// same EventID so the stale-attempt reaper does not later resurrect them as
+// "incomplete". AppendAttempt itself is intentionally NOT filtered: at that
+// point the auth outcome is not yet known.
 func (o *Outbox) Finalize(ctx context.Context, ev S3Event) error {
 	if ev.EventID == "" {
 		return ErrOutboxInvalidEvent
 	}
 	ev.Finalized = true
+	if o.denyOnlyDropsFinalized(ev) {
+		return o.dropAttempt(ctx, ev.EventID)
+	}
 	return o.put(ctx, ev)
 }
 
 // AppendFinalized writes an already-final audit event. It is used when a
 // follower ships rows that were finalized in its local outbox.
+//
+// Deny-only filtering applies here too — without this, allow rows shipped
+// from followers would bypass the leader's filter (committer.AppendFromFollower
+// routes through this method).
 func (o *Outbox) AppendFinalized(ctx context.Context, ev S3Event) error {
 	if ev.EventID == "" {
 		return ErrOutboxInvalidEvent
 	}
 	ev.Finalized = true
+	if o.denyOnlyDropsFinalized(ev) {
+		return nil
+	}
 	return o.put(ctx, ev)
+}
+
+// dropAttempt removes any pre-finalize AppendAttempt row for the given
+// EventID. Used when Finalize decides to drop the finalized row but a
+// provisional attempt row may already exist on disk.
+func (o *Outbox) dropAttempt(ctx context.Context, eventID string) error {
+	return o.db.Update(func(txn *badger.Txn) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := txn.Delete(outboxKey(eventID)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		return nil
+	})
 }
 
 func (o *Outbox) put(ctx context.Context, ev S3Event) error {
