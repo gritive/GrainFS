@@ -18,6 +18,16 @@ func TestLatestS3BenchmarkTableSatisfiesDocumentedGates(t *testing.T) {
 	}
 }
 
+func TestReadmePerformancePublishesOnlyPutGet(t *testing.T) {
+	body, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReadmePerformanceScope(string(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func validateLatestS3BenchmarkGates(markdown string) error {
 	required := map[string]bool{
 		"put":           false,
@@ -97,6 +107,51 @@ func validateLatestS3BenchmarkGates(markdown string) error {
 		}
 	}
 	return nil
+}
+
+func validateReadmePerformanceScope(markdown string) error {
+	section, err := markdownSection(markdown, "## Performance")
+	if err != nil {
+		return err
+	}
+	for _, required := range []string{"PUT MiB/s", "GET MiB/s", "vs MinIO PUT", "vs MinIO GET"} {
+		if !strings.Contains(section, required) {
+			return fmt.Errorf("README Performance section must include %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"DELETE",
+		"MIXED",
+		"LIST",
+		"STAT",
+		"VERSIONED",
+		"RETENTION",
+		"MULTIPART",
+		"APPEND",
+		"Iceberg",
+		"catalog-read",
+		"catalog-commits",
+		"catalog-mixed",
+		"sustained",
+	} {
+		if strings.Contains(section, forbidden) {
+			return fmt.Errorf("README Performance section must not publish %s results; use docs/reference/benchmarks.md", forbidden)
+		}
+	}
+	return nil
+}
+
+func markdownSection(markdown, heading string) (string, error) {
+	start := strings.Index(markdown, heading)
+	if start < 0 {
+		return "", fmt.Errorf("missing section %q", heading)
+	}
+	rest := markdown[start+len(heading):]
+	end := strings.Index(rest, "\n## ")
+	if end < 0 {
+		return rest, nil
+	}
+	return rest[:end], nil
 }
 
 func benchmarkThroughput(mib, objs string) (float64, error) {
