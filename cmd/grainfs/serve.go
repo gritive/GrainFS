@@ -170,7 +170,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	raftAddr, _ := cmd.Flags().GetString("raft-addr")
 	encKeyFile, _ := cmd.Flags().GetString("encryption-key-file")
-	shardEncryptor, err := loadOrCreateEncryptionKey(encKeyFile, dataDir, allowAutoGenerateEncryptionKey(dataDir, raftAddr))
+	shardEncryptor, err := serveruntime.LoadOrCreateEncryptionKey(encKeyFile, dataDir, serveruntime.AllowAutoGenerateEncryptionKey(dataDir, raftAddr))
 	if err != nil {
 		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
 	}
