@@ -1,8 +1,11 @@
+//go:build integration
+
 package e2e
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,38 +13,53 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 func TestObjectTaggingE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runObjectTaggingCases(t, newSingleNodeS3Target())
+	gomega.RegisterFailHandler(ginkgo.Fail)
+	ginkgo.RunSpecs(t, "Object tagging e2e")
+}
+
+var _ = ginkgo.Describe("Object tagging", func() {
+	describeObjectTaggingContext("SingleNode", func(t testing.TB) s3Target {
+		return newSingleNodeS3Target()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runObjectTaggingCases(t, newSharedClusterS3Target(t))
+	describeObjectTaggingContext("Cluster4Node", func(t testing.TB) s3Target {
+		return newSharedClusterS3Target(t)
+	})
+})
+
+func describeObjectTaggingContext(name string, factory func(testing.TB) s3Target) {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
+		var tgt s3Target
+		ginkgo.BeforeAll(func() {
+			tb := ginkgo.GinkgoTB()
+			tgt = factory(tb)
+			client := tgt.pickNode(0)
+			if tgt.isCluster {
+				probe := tgt.name + "-tag-mp-probe"
+				tgt.createBkt(tb, probe)
+				ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+				defer cancel()
+				waitForMultipartListingCreate(tb, ctx, client, probe, multipartListingKey, 120*time.Second)
+			}
+		})
+		runObjectTaggingCases(func() s3Target { return tgt })
 	})
 }
 
-func runObjectTaggingCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-
-	if tgt.isCluster {
-		probe := tgt.name + "-tag-mp-probe"
-		tgt.createBkt(t, probe)
-		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
-		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
-	}
-
-	t.Run("PutGetDelete", func(t *testing.T) {
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "putget")
+func runObjectTaggingCases(getTgt func() s3Target) {
+	ginkgo.It("Put/Get/Delete round-trip (PutGetDelete)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "putget")
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Body: stringReader("hello"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
@@ -50,106 +68,110 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 				{Key: aws.String("owner"), Value: aws.String("alice")},
 			}},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		got, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
-		require.Len(t, got.TagSet, 2)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got.TagSet).To(gomega.HaveLen(2))
 
 		_, err = client.DeleteObjectTagging(ctx, &s3.DeleteObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		got, err = client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
-		assert.Empty(t, got.TagSet)
-	})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got.TagSet).To(gomega.BeEmpty())
+	}, ginkgo.NodeTimeout(120*time.Second))
 
-	t.Run("HeaderOnPut", func(t *testing.T) {
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "hdr")
+	ginkgo.It("materialises ?tagging header on PUT (HeaderOnPut)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "hdr")
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Body: stringReader("body"), Tagging: aws.String("env=prod&owner=alice"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		got, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
-		require.Len(t, got.TagSet, 2)
-	})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got.TagSet).To(gomega.HaveLen(2))
+	}, ginkgo.NodeTimeout(120*time.Second))
 
-	t.Run("HeaderOnPut_InvalidRejected", func(t *testing.T) {
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "hdrbad")
+	ginkgo.It("rejects reserved aws:* prefix in PUT ?tagging (HeaderOnPut_InvalidRejected)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "hdrbad")
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Body: stringReader("body"), Tagging: aws.String("aws:env=prod"),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "InvalidTag", apiErr.ErrorCode())
-	})
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("InvalidTag"))
+	}, ginkgo.NodeTimeout(120*time.Second))
 
-	t.Run("MultipartCreate_TagsMaterialiseOnComplete", func(t *testing.T) {
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "mpu")
+	ginkgo.It("materialises tags on CompleteMultipartUpload (MultipartCreate_TagsMaterialiseOnComplete)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "mpu")
 
 		created, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Tagging: aws.String("env=prod"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Use the shortest legal part (>=5 MiB is the S3 minimum except the
-		// last part). The existing e2e harness has a multipart helper —
-		// reuse it if available; otherwise UploadPart inline with 5 MiB.
-		uploadOnePartAndComplete(t, ctx, client, bucket, "k", *created.UploadId)
+		// last part).
+		uploadOnePartAndComplete(ginkgo.GinkgoTB(), ctx, client, bucket, "k", *created.UploadId)
 
 		got, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
-		require.Len(t, got.TagSet, 1)
-		assert.Equal(t, "env", aws.ToString(got.TagSet[0].Key))
-	})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got.TagSet).To(gomega.HaveLen(1))
+		gomega.Expect(aws.ToString(got.TagSet[0].Key)).To(gomega.Equal("env"))
+	}, ginkgo.NodeTimeout(180*time.Second))
 
-	t.Run("PutObjectTagging_OnIncompleteMPU_404", func(t *testing.T) {
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "incomplete")
+	ginkgo.It("returns NoSuchKey on PutObjectTagging against incomplete MPU (PutObjectTagging_OnIncompleteMPU_404)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "incomplete")
 
 		_, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Tagging: &types.Tagging{TagSet: []types.Tag{{Key: aws.String("k"), Value: aws.String("v")}}},
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
-	})
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("NoSuchKey"))
+	}, ginkgo.NodeTimeout(120*time.Second))
 
-	t.Run("CopyObject_ReplaceDirective", func(t *testing.T) {
-		ctx := context.Background()
-		src := tgt.uniqueBucket(t, "src")
-		dst := tgt.uniqueBucket(t, "dst")
+	ginkgo.It("respects REPLACE TaggingDirective on CopyObject (CopyObject_ReplaceDirective)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		src := tgt.uniqueBucket(ginkgo.GinkgoTB(), "src")
+		dst := tgt.uniqueBucket(ginkgo.GinkgoTB(), "dst")
 
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(src), Key: aws.String("k"),
 			Body: stringReader("body"), Tagging: aws.String("old=1"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
 			Bucket: aws.String(dst), Key: aws.String("k"),
@@ -157,61 +179,60 @@ func runObjectTaggingCases(t *testing.T, tgt s3Target) {
 			TaggingDirective: types.TaggingDirectiveReplace,
 			Tagging:          aws.String("new=2"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		got, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(dst), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
-		require.Len(t, got.TagSet, 1)
-		assert.Equal(t, "new", aws.ToString(got.TagSet[0].Key))
-	})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got.TagSet).To(gomega.HaveLen(1))
+		gomega.Expect(aws.ToString(got.TagSet[0].Key)).To(gomega.Equal("new"))
+	}, ginkgo.NodeTimeout(120*time.Second))
 
-	t.Run("Versioning_PerVersion", func(t *testing.T) {
+	ginkgo.It("scopes tags per version (Versioning_PerVersion)", func(ctx context.Context) {
+		tgt := getTgt()
 		if !tgt.isCluster {
-			// Local single-node storage does not implement versionID-aware
-			// object tag mutation; the per-version contract is cluster-only.
-			return
+			ginkgo.Skip("Local single-node storage does not implement versionID-aware object tag mutation; cluster-only.")
 		}
-		ctx := context.Background()
-		bucket := tgt.uniqueBucket(t, "ver")
+		client := tgt.pickNode(0)
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "ver")
 		_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 			Bucket:                  aws.String(bucket),
 			VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		v1, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Body: stringReader("v1"), Tagging: aws.String("v=1"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 			Body: stringReader("v2"), Tagging: aws.String("v=2"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		t1, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"), VersionId: v1.VersionId,
 		})
-		require.NoError(t, err)
-		require.Len(t, t1.TagSet, 1)
-		assert.Equal(t, "1", aws.ToString(t1.TagSet[0].Value))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(t1.TagSet).To(gomega.HaveLen(1))
+		gomega.Expect(aws.ToString(t1.TagSet[0].Value)).To(gomega.Equal("1"))
 
 		t2, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 			Bucket: aws.String(bucket), Key: aws.String("k"),
 		})
-		require.NoError(t, err)
-		require.Len(t, t2.TagSet, 1)
-		assert.Equal(t, "2", aws.ToString(t2.TagSet[0].Value))
-	})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(t2.TagSet).To(gomega.HaveLen(1))
+		gomega.Expect(aws.ToString(t2.TagSet[0].Value)).To(gomega.Equal("2"))
+	}, ginkgo.NodeTimeout(120*time.Second))
 }
 
 // uploadOnePartAndComplete uploads a single 5 MiB part (the S3 multipart
 // minimum for non-last parts) and completes the multipart upload.
-func uploadOnePartAndComplete(t *testing.T, ctx context.Context, client *s3.Client, bucket, key, uploadID string) {
+func uploadOnePartAndComplete(t testing.TB, ctx context.Context, client *s3.Client, bucket, key, uploadID string) {
 	t.Helper()
 	body := bytes.Repeat([]byte{'x'}, 5*1024*1024) // 5 MiB
 	partResp, err := client.UploadPart(ctx, &s3.UploadPartInput{
@@ -221,7 +242,7 @@ func uploadOnePartAndComplete(t *testing.T, ctx context.Context, client *s3.Clie
 		PartNumber: aws.Int32(1),
 		Body:       bytes.NewReader(body),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(bucket),
 		Key:      aws.String(key),
@@ -230,5 +251,5 @@ func uploadOnePartAndComplete(t *testing.T, ctx context.Context, client *s3.Clie
 			Parts: []types.CompletedPart{{ETag: partResp.ETag, PartNumber: aws.Int32(1)}},
 		},
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 }
