@@ -150,7 +150,7 @@ var _ = ginkgo.Describe("Election", func() {
 		node, err := NewNode(Config{ID: "n1", ElectionTimeout: time.Hour, HeartbeatTimeout: 10 * time.Millisecond})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		node.Start()
-		defer node.Stop()
+		ginkgo.DeferCleanup(node.Stop)
 
 		gomega.Expect(waitFor(2*time.Second, node.IsLeader)).To(gomega.Succeed())
 		leaderTerm := node.Term()

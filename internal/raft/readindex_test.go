@@ -305,7 +305,7 @@ var _ = ginkgo.Describe("ReadIndex", func() {
 			node, err := NewNode(Config{ID: "n1"})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			node.Start()
-			defer node.Stop()
+			ginkgo.DeferCleanup(node.Stop)
 
 			gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
 

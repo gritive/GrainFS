@@ -53,7 +53,7 @@ var _ = ginkgo.Describe("Learner membership", func() {
 			HeartbeatTimeout: testHeartbeat,
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		defer node.Stop()
+		ginkgo.DeferCleanup(node.Stop)
 
 		node.st.currentConfig = effectiveConfig{
 			joint:    false,
@@ -129,7 +129,7 @@ var _ = ginkgo.Describe("Learner membership", func() {
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		node.Start()
-		defer node.Stop()
+		ginkgo.DeferCleanup(node.Stop)
 		go func() {
 			for range node.ApplyCh() {
 			}
