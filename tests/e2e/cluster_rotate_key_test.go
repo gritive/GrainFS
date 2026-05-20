@@ -55,6 +55,7 @@ func TestRotateKeyHappyPathE2E(t *testing.T) {
 		defer os.Remove(logFile.Name())
 
 		srv := exec.CommandContext(ctx, getBinary(), args...)
+		srv.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		srv.Stdout = logFile
 		srv.Stderr = logFile
 		require.NoError(t, srv.Start())
@@ -136,6 +137,7 @@ func TestRotateKeyStatusOnlyOnSoloModeE2E(t *testing.T) {
 		defer os.Remove(logFile.Name())
 
 		srv := exec.CommandContext(ctx, getBinary(), args...)
+		srv.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		srv.Stdout = logFile
 		srv.Stderr = logFile
 		require.NoError(t, srv.Start())
