@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.288.0] - 2026-05-20
+
+### Changed
+
+- Reduced NFS large-file read/write test fixtures to the minimum size that
+  crosses the storage segment boundary.
+
 ## [0.0.287.0] - 2026-05-20
 
 ### Changed
