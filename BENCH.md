@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 17:16 KST
+Updated: 2026-05-20 17:33 KST
 
 ## Goal
 
@@ -104,11 +104,22 @@ Updated: 2026-05-20 17:16 KST
 - `iceberg catalog-commits` initial run with 4 tables reached 8792.81 ops/s but produced 13 spec-compliant 409 optimistic-concurrency conflicts. Matching the cluster script's collision-avoidance setup with 200 tables removed the conflicts and measured 9563.81 ops/s. The single-node script now defaults catalog-commits to 200 tables unless explicitly overridden.
 - `iceberg catalog-mixed` initial measurement completed with 0 errors at 60767.74 total ops/s.
 - `iceberg sustained` first run failed to prepare because the benchmark SA lacked S3 write permission on the warehouse bucket; the single-node script now attaches `bucket-admin` like the cluster script. Uncontrolled sustained RPS then produced expected optimistic-concurrency conflicts and local FD pressure. Since warp documents sustained as a controlled-RPS workload, the single-node script now defaults sustained to `VUS=1` and `--rps-limit=1`; that run completed with 0 errors at 1.00 ops/s and p99 11.6ms.
-- ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
+- ReadAll audit status: production `ReadAll` candidates were reviewed after the S3/Iceberg pass. Remaining hot-path uses are either bounded by `LimitReader(maxBody+1)`/reply caps, replaced by exact-size reads on the GET cache/response path, or bypassed by byte/stream fast paths (`WriteSegmentBytes`, upload-part stream forwarding, raw cached body response). No unbounded S3 warp hot-path `ReadAll` remains as the next optimization target.
+
+## ReadAll Audit
+
+| area | status | justification |
+| ---- | ------ | ------------- |
+| `internal/cluster/segment_backend.go` | acceptable fallback | `WriteSegment` still buffers a caller-provided segment reader, but the cluster write hot path now uses `WriteSegmentBytes` with owned chunk bytes and avoids re-reading a `bytes.Reader`. |
+| `internal/cluster/cluster_coordinator.go` PUT/upload forwarding | bounded or bypassed | Frame forwarding uses `io.LimitReader(maxBody+1)` to enforce the configured body cap; large upload-part forwarding streams when `shouldStreamUploadPartForward` is true, and byte providers avoid a duplicate copy. |
+| `internal/cluster/cluster_coordinator.go` append retry/forwarding | bounded by architecture | Append must retry on stale placement and needs rewindable bytes for non-seekable readers; reads are capped at `maxBody+1` and additionally constrained by the append forward-buffer reservation. |
+| `internal/cluster/forward_receiver.go` legacy read replies | bounded compatibility path | Non-stream legacy GET replies are capped by `forwardReplyBytesLimit`; stream read handlers return the body reader separately. |
+| `internal/storage/cache.go` and `internal/server/object_body_response.go` | optimized | Former `io.ReadAll` paths were replaced by exact-size `io.ReadFull` allocation or raw-body zero-copy response paths. |
+| CLI/admin/snapshot/migration/NFS/9P helpers | not an S3 warp bottleneck | Uses are command/control-plane or protocol fallback paths, commonly reading config, metadata, bounded fallback objects, or compressed snapshots outside the measured warp hot path. |
 
 ## Open Items
 
-- Current pass has measured all requested S3 and Iceberg single-node targets; next step is final review before promoting results into `docs/reference/benchmarks.md` and README once baselines/results are accepted.
+- Append comparison is correctness-limited: GrainFS completed with 0 errors, while MinIO/RustFS append baselines returned errors and are invalid throughput baselines. Do not claim raw append throughput superiority unless comparable 0-error baselines are produced.
+- Iceberg comparison currently records GrainFS-only single-node warp results; MinIO/RustFS do not provide the same GrainFS Iceberg REST catalog surface in this harness.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
-- Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
-- For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
+- For every future GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
