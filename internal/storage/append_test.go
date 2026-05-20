@@ -37,8 +37,7 @@ func TestAppendObjectRejectsMismatchedOffset(t *testing.T) {
 
 func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
 	b := newTestLocalBackend(t)
-	body := bytes.Repeat([]byte("A"), 10<<20) // 10 MiB
-	obj, err := b.AppendObject(context.Background(), "test", "k", 0, bytes.NewReader(body))
+	obj, err := b.AppendObject(context.Background(), "test", "k", 0, newRepeatByteReader('A', 10<<20)) // 10 MiB
 	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
@@ -62,13 +61,12 @@ func TestAppendObjectInitialCreates10MiBSegment(t *testing.T) {
 
 func TestAppendObjectSequentialThreeSegments(t *testing.T) {
 	b := newTestLocalBackend(t)
-	body := bytes.Repeat([]byte("X"), 10<<20) // 10 MiB
 
 	off := int64(0)
 	var obj *Object
 	for i := 0; i < 3; i++ {
 		var err error
-		obj, err = b.AppendObject(context.Background(), "test", "k", off, bytes.NewReader(body))
+		obj, err = b.AppendObject(context.Background(), "test", "k", off, newRepeatByteReader('X', 10<<20)) // 10 MiB
 		if err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
@@ -87,6 +85,29 @@ func TestAppendObjectSequentialThreeSegments(t *testing.T) {
 	if idx := strings.IndexByte(obj.ETag, '-'); idx != 32 {
 		t.Fatalf("etag=%q, want 32 hex chars before '-'", obj.ETag)
 	}
+}
+
+type repeatByteReader struct {
+	b byte
+	n int64
+}
+
+func newRepeatByteReader(b byte, n int64) *repeatByteReader {
+	return &repeatByteReader{b: b, n: n}
+}
+
+func (r *repeatByteReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.n {
+		p = p[:r.n]
+	}
+	for i := range p {
+		p[i] = r.b
+	}
+	r.n -= int64(len(p))
+	return len(p), nil
 }
 
 func TestAppendObjectRejectsAtCap(t *testing.T) {

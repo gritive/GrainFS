@@ -277,12 +277,10 @@ func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {
 	}
 
 	run(t)
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			run(b)
-		}
-	})
-	allocedBytes := res.AllocedBytesPerOp()
+	allocedBytes := int64(allocBytesPerRunForTest(t, 3, func() error {
+		run(t)
+		return nil
+	}))
 	t.Logf("writeDataShards alloc bytes: %d", allocedBytes)
 	require.LessOrEqual(t, allocedBytes, int64(3*1024*1024))
 }

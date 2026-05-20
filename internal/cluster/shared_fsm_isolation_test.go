@@ -41,11 +41,10 @@ func mustNewKS(t *testing.T, id string) *stateKeyspace {
 // Returned FSMs and backends are isolated by distinct stateKeyspaces.
 // Each backend is started with its own raft node; the apply loop is running.
 // The caller should NOT close the DB — t.Cleanup handles it.
-func setupTwoGroups(t *testing.T) (
+func setupTwoFSMs(t *testing.T) (
 	db *badger.DB,
 	ksA, ksB *stateKeyspace,
 	fA, fB *FSM,
-	backendA, backendB *DistributedBackend,
 ) {
 	t.Helper()
 
@@ -58,8 +57,21 @@ func setupTwoGroups(t *testing.T) (
 
 	fA = NewFSM(db, ksA)
 	fB = NewFSM(db, ksB)
+	return db, ksA, ksB, fA, fB
+}
+
+func setupTwoGroups(t *testing.T) (
+	db *badger.DB,
+	ksA, ksB *stateKeyspace,
+	fA, fB *FSM,
+	backendA, backendB *DistributedBackend,
+) {
+	t.Helper()
+
+	db, ksA, ksB, fA, fB = setupTwoFSMs(t)
 
 	nodeA, _ := newTestNodeForSharedDB(t, "isoA-node")
+	var err error
 	backendA, err = NewDistributedBackend(t.TempDir(), db, nodeA, ksA, true)
 	require.NoError(t, err)
 	stopA := make(chan struct{})
@@ -119,7 +131,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			// produce two distinct keys; deleting one does not affect the other.
 			name: "CreateBucket_DeleteBucket",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB, _, _ := setupTwoGroups(t)
+				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
@@ -208,7 +220,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			// Aborting one leaves the other intact.
 			name: "Multipart_SameUploadID_TwoKeys",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB, _, _ := setupTwoGroups(t)
+				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				const uploadID = "upload-42"
 
@@ -239,7 +251,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			// SetBucketPolicy / DeleteBucketPolicy: distinct policy keys per group.
 			name: "BucketPolicy_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB, _, _ := setupTwoGroups(t)
+				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
@@ -268,7 +280,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			// SetBucketVersioning: A enables versioning, B does not. Keys distinct.
 			name: "BucketVersioning_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB, _, _ := setupTwoGroups(t)
+				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
@@ -290,7 +302,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			// (or none). Quarantine: A quarantines obj1; B's obj1 unaffected.
 			name: "ObjectACL_Quarantine_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB, _, _ := setupTwoGroups(t)
+				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")

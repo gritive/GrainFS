@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.284.0] - 2026-05-20
+
+### Changed
+
+- Reduced internal test runtime and allocation pressure by scaling large test
+  fixtures to the behavioral boundaries they cover, replacing adaptive
+  allocation benchmarks with fixed-run measurements, and using streaming
+  readers in large NFS and append-path tests.
+- Preserved internal coverage for segment boundaries, range streaming,
+  cache-read-amplification workloads, compression concurrency, EC shard writes,
+  shared FSM isolation, and NFS large-file integrity while lowering CI memory
+  and CPU cost.
+
 ## [0.0.283.0] - 2026-05-20
 
 ### Added

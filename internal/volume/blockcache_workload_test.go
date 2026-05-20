@@ -14,15 +14,15 @@ import (
 // This is the integration check that the simulator's predicted curve
 // shows up in production code, not just in the simulator.
 //
-// Sized to keep the working set comfortably under the 64 MB cache while still
-// exercising thousands of real ReadAt calls across the two passes. Timing the
+// Sized to keep the working set comfortably under the cache while still
+// exercising hundreds of real ReadAt calls across the two passes. Timing the
 // second pass against the first shows the user-visible win without making CI pay
 // for extra metadata I/O.
 func TestBlockCache_RealVsSimulator(t *testing.T) {
-	const blocks = 1024
-	const cap64MB = 64 * 1024 * 1024
+	const blocks = 256
+	const cacheCapacity = 32 * 1024 * 1024
 
-	cache := blockcache.New(cap64MB)
+	cache := blockcache.New(cacheCapacity)
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	if err != nil {
@@ -60,7 +60,7 @@ func TestBlockCache_RealVsSimulator(t *testing.T) {
 	statsAfterWarm := cache.Stats()
 
 	t.Logf("blocks=%d, working_set=%d MB, cache_capacity=%d MB",
-		blocks, blocks*DefaultBlockSize/1024/1024, cap64MB/1024/1024)
+		blocks, blocks*DefaultBlockSize/1024/1024, cacheCapacity/1024/1024)
 	t.Logf("cold pass: %v  (hits=%d misses=%d evictions=%d resident=%d)",
 		cold, statsAfterCold.Hits, statsAfterCold.Misses, statsAfterCold.Evictions, statsAfterCold.ResidentByte)
 	t.Logf("warm pass: %v  (hits=%d misses=%d evictions=%d resident=%d)",

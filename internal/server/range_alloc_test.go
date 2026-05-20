@@ -282,7 +282,7 @@ func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
-	payload := bytes.Repeat([]byte("x"), 5<<20)
+	payload := bytes.Repeat([]byte("x"), 64<<10)
 	backend := &partNumberReadAtBackend{
 		Backend: local,
 		data:    payload,
@@ -301,9 +301,9 @@ func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		_ = s.Shutdown(context.Background())
+		shutdownTestServer(t, s)
 	})
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj?partNumber=1", port))
 	require.NoError(t, err)
@@ -367,7 +367,7 @@ func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 
-	payload := bytes.Repeat([]byte("x"), 32<<20)
+	payload := bytes.Repeat([]byte("x"), 17<<20)
 	_, err = backend.PutObject(context.Background(), "b", "large.bin", bytes.NewReader(payload), "application/octet-stream")
 	require.NoError(t, err)
 	require.NoError(t, backend.SetObjectACL("b", "large.bin", 1)) // ACLPublicRead
