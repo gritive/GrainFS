@@ -2,7 +2,9 @@ package main
 
 import (
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,4 +21,27 @@ func TestServeCmd_RemovesManualECFlags(t *testing.T) {
 	require.Nil(t, serveCmd.Flags().Lookup("ec-data"))
 	require.Nil(t, serveCmd.Flags().Lookup("ec-parity"))
 	require.Nil(t, serveCmd.Flags().Lookup("seed-groups"))
+}
+
+// The flag-default tests below were split out of reshard_manager_registry_test.go
+// in Task 9e (step 4) — that file's registry test relocated to
+// internal/serveruntime, but these reference cmd-private serveCmd /
+// defaultReshardInterval and must stay in cmd per the Task 9 audit-gate rule.
+
+func TestServeReshardIntervalDefault(t *testing.T) {
+	flag := serveCmd.Flags().Lookup("reshard-interval")
+	require.NotNil(t, flag)
+	assert.Equal(t, defaultReshardInterval.String(), flag.DefValue)
+}
+
+func TestServeRingReshardIntervalDefault(t *testing.T) {
+	flag := serveCmd.Flags().Lookup("ring-reshard-interval")
+	require.NotNil(t, flag)
+	assert.Equal(t, time.Hour.String(), flag.DefValue)
+}
+
+func TestServeDatagroupRefreshIntervalDefault(t *testing.T) {
+	flag := serveCmd.Flags().Lookup("datagroup-refresh-interval")
+	require.NotNil(t, flag)
+	assert.Equal(t, time.Minute.String(), flag.DefValue)
 }
