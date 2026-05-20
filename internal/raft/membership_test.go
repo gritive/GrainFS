@@ -12,92 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// startMembershipCluster builds a cluster with the given IDs all wired through
-// a shared memNetwork. The first ID gets the fast election timeout so it
-// wins term 1 deterministically. Unlike startCapturingCluster this helper
-// supports any number of nodes, allows pre-Start configuration overrides
-// (peers list per node), and drains ApplyCh in the background like
-// startCluster.
-//
-// The function returns the nodes (in the same order as ids) and the shared
-// memNetwork so tests can register additional nodes (the AddVoter happy
-// path needs a node to exist on the network at the time the leader's
-// joint AE arrives).
 type membershipFixture struct {
 	nodes []*Node
 	net   *memNetwork
 	wg    sync.WaitGroup
-}
-
-func startMembershipCluster(t *testing.T, ids []string) *membershipFixture {
-	t.Helper()
-	require.NotEmpty(t, ids)
-	fix := &membershipFixture{net: newMemNetwork()}
-
-	for i, id := range ids {
-		peers := make([]string, 0, len(ids)-1)
-		for _, p := range ids {
-			if p != id {
-				peers = append(peers, p)
-			}
-		}
-		electionTimeout := slowElectionTimeout
-		if i == 0 {
-			electionTimeout = fastElectionTimeout
-		}
-		n, err := NewNode(Config{
-			ID:               id,
-			Peers:            peers,
-			ElectionTimeout:  electionTimeout,
-			HeartbeatTimeout: testHeartbeat,
-		})
-		require.NoError(t, err)
-		fix.nodes = append(fix.nodes, n)
-	}
-
-	for _, n := range fix.nodes {
-		n.SetTransport(fix.net.Register(n.cfg.ID, n))
-	}
-	for _, n := range fix.nodes {
-		n.Start()
-		t.Cleanup(n.Stop)
-		fix.wg.Add(1)
-		go func(n *Node) {
-			defer fix.wg.Done()
-			for range n.ApplyCh() {
-			}
-		}(n)
-	}
-	return fix
-}
-
-// addNode brings a fresh Node up on the network with the given ID. The
-// Node's seed peers are the current member set (so if the leader installs
-// a snapshot to it later, the seed is harmless). The Node is started and
-// registered with the shared memNetwork.
-func (f *membershipFixture) addNode(t *testing.T, id string, seedPeers []string, electionTimeout time.Duration) *Node {
-	t.Helper()
-	if electionTimeout == 0 {
-		electionTimeout = slowElectionTimeout
-	}
-	n, err := NewNode(Config{
-		ID:               id,
-		Peers:            seedPeers,
-		ElectionTimeout:  electionTimeout,
-		HeartbeatTimeout: testHeartbeat,
-	})
-	require.NoError(t, err)
-	n.SetTransport(f.net.Register(id, n))
-	n.Start()
-	t.Cleanup(n.Stop)
-	f.wg.Add(1)
-	go func() {
-		defer f.wg.Done()
-		for range n.ApplyCh() {
-		}
-	}()
-	f.nodes = append(f.nodes, n)
-	return n
 }
 
 func sortedVoterIDs(c Configuration) []string {

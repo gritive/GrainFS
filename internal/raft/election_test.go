@@ -1,12 +1,10 @@
 package raft
 
 import (
-	"testing"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 // Election test timing knobs. Node 1 (the prospective leader) gets a much
@@ -19,59 +17,6 @@ const (
 	slowElectionTimeout = 300 * time.Millisecond
 	testHeartbeat       = 30 * time.Millisecond
 )
-
-// startCluster wires three Nodes through a memNetwork. n1 has a short election
-// timeout; n2 and n3 have long ones. All three start as Follower; n1 wins the
-// first election deterministically.
-//
-// The caller receives the three Nodes and a teardown closure registered via
-// t.Cleanup. ApplyCh of each Node is drained in the background.
-func startCluster(t *testing.T, ids ...string) (nodes []*Node, net *memNetwork) {
-	t.Helper()
-	require.Len(t, ids, 3, "startCluster expects exactly 3 ids")
-
-	net = newMemNetwork()
-	nodes = make([]*Node, 0, len(ids))
-
-	for i, id := range ids {
-		// Build peers list = ids except self.
-		peers := make([]string, 0, len(ids)-1)
-		for _, p := range ids {
-			if p != id {
-				peers = append(peers, p)
-			}
-		}
-
-		electionTimeout := slowElectionTimeout
-		if i == 0 {
-			electionTimeout = fastElectionTimeout
-		}
-		n, err := NewNode(Config{
-			ID:               id,
-			Peers:            peers,
-			ElectionTimeout:  electionTimeout,
-			HeartbeatTimeout: testHeartbeat,
-		})
-		require.NoError(t, err)
-		nodes = append(nodes, n)
-	}
-
-	// Register transports BEFORE starting actors so the first Candidate's
-	// outbound RequestVote can route immediately.
-	for _, n := range nodes {
-		tr := net.Register(n.cfg.ID, n)
-		n.SetTransport(tr)
-	}
-	for _, n := range nodes {
-		n.Start()
-		t.Cleanup(n.Stop)
-		go func(n *Node) {
-			for range n.ApplyCh() {
-			}
-		}(n)
-	}
-	return nodes, net
-}
 
 var _ = ginkgo.Describe("Election", func() {
 	ginkgo.Context("three-voter cluster", func() {
