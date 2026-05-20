@@ -459,6 +459,12 @@ start_minio_cluster() {
     return 1
   fi
   echo "  minio-cluster S3 cluster-ready"
+  echo "  waiting for minio-cluster signed write readiness..."
+  bench_wait_s3_signed_write_ready "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "warp-minio-cluster-ready" "${MINIO_CLUSTER_WRITE_READY_ATTEMPTS:-120}" "${MINIO_CLUSTER_WRITE_READY_SLEEP:-0.5}" >&2 || {
+    echo "  minio-cluster signed write readiness failed; aborting" >&2
+    return 1
+  }
+  echo "  minio-cluster signed write-ready"
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"
 }
 

@@ -416,6 +416,65 @@ bench_wait_s3_bucket_auth_ready() {
   return 1
 }
 
+bench_wait_s3_signed_write_ready() {
+  local base_urls="$1"
+  local access_key="$2"
+  local secret_key="$3"
+  local bucket="$4"
+  local attempts="${5:-120}"
+  local sleep_seconds="${6:-0.5}"
+  local urls=()
+  local first_url
+  local body_file
+  local key="ready.txt"
+  local attempt
+
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "bench_wait_s3_signed_write_ready: aws CLI is required to probe signed write readiness" >&2
+    return 1
+  fi
+
+  IFS=',' read -r -a urls <<<"$base_urls"
+  first_url="${urls[0]:-}"
+  if [[ -z "$first_url" ]]; then
+    echo "bench_wait_s3_signed_write_ready: no endpoints supplied" >&2
+    return 1
+  fi
+
+  body_file="$(mktemp "${TMPDIR:-/tmp}/bench-s3-ready.XXXXXX")"
+  printf 'ready' >"$body_file"
+
+  for attempt in $(seq 1 "$attempts"); do
+    AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
+      AWS_MAX_ATTEMPTS=1 AWS_EC2_METADATA_DISABLED=true \
+      AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+      aws --cli-connect-timeout 1 --cli-read-timeout 2 \
+        --endpoint-url "$first_url" s3api create-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+
+    local all_ready=1
+    local url
+    for url in "${urls[@]}"; do
+      if ! AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
+        AWS_MAX_ATTEMPTS=1 AWS_EC2_METADATA_DISABLED=true \
+        AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+        aws --cli-connect-timeout 1 --cli-read-timeout 2 \
+          --endpoint-url "$url" s3api put-object --bucket "$bucket" --key "$key" --body "$body_file" >/dev/null 2>&1; then
+        all_ready=0
+        break
+      fi
+    done
+    if [[ "$all_ready" == "1" ]]; then
+      rm -f "$body_file"
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  rm -f "$body_file"
+  echo "signed object write not ready for $bucket across $base_urls" >&2
+  return 1
+}
+
 bench_put_object_retry() {
   local base_url="$1"
   local bucket="$2"

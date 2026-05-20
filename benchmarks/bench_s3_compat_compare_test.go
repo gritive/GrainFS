@@ -293,6 +293,49 @@ func TestBenchS3CompatWaitsForGrainFSBucketAuthOnEveryClusterNode(t *testing.T) 
 	}
 }
 
+func TestBenchS3CompatWaitsForMinIOClusterSignedWriteReadiness(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	common, err := os.ReadFile("lib/common.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonScript := string(common)
+
+	if !strings.Contains(commonScript, "bench_wait_s3_signed_write_ready()") {
+		t.Fatalf("common.sh must define bench_wait_s3_signed_write_ready")
+	}
+	if !strings.Contains(commonScript, `s3api create-bucket --bucket "$bucket"`) {
+		t.Fatalf("signed write readiness must create a probe bucket")
+	}
+	if !strings.Contains(commonScript, `s3api put-object --bucket "$bucket" --key "$key" --body "$body_file"`) {
+		t.Fatalf("signed write readiness must PUT through each endpoint")
+	}
+
+	start := strings.Index(script, "start_minio_cluster()")
+	if start < 0 {
+		t.Fatal("start_minio_cluster not found")
+	}
+	end := strings.Index(script[start:], "start_rustfs()")
+	if end < 0 {
+		t.Fatal("start_rustfs not found")
+	}
+	minioCluster := script[start : start+end]
+
+	healthReady := strings.Index(minioCluster, `echo "  minio-cluster S3 cluster-ready"`)
+	writeReady := strings.Index(minioCluster, `bench_wait_s3_signed_write_ready "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "warp-minio-cluster-ready"`)
+	setStart := strings.Index(minioCluster, `set_start_info "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"`)
+	if writeReady < 0 {
+		t.Fatalf("start_minio_cluster must wait for signed write readiness before publishing endpoints")
+	}
+	if !(healthReady < writeReady && writeReady < setStart) {
+		t.Fatalf("minio signed write readiness must run after health readiness and before set_start_info")
+	}
+}
+
 func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
 	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
 	if err != nil {
