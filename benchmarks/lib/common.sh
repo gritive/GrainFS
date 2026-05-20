@@ -183,6 +183,25 @@ bench_wait_tcp_port() {
   return 1
 }
 
+bench_wait_file() {
+  local path="$1"
+  local label="${2:-file}"
+  local attempts="${3:-100}"
+  local sleep_seconds="${4:-0.2}"
+
+  echo "  waiting for $label..."
+  for _ in $(seq 1 "$attempts"); do
+    if [[ -f "$path" ]]; then
+      echo "  $label ready"
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  echo "$label did not become ready: $path" >&2
+  return 1
+}
+
 bench_encryption_args() {
   if [[ "${NO_ENCRYPTION:-0}" == "1" ]]; then
     echo "[error] encryption is mandatory; do not set NO_ENCRYPTION=1" >&2
@@ -355,6 +374,45 @@ bench_create_bucket_with_policy_admin_retry() {
 
   [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "bucket not ready with policy: $bucket via admin socket $admin_sock" >&2
   [[ "${BENCH_QUIET:-0}" == "1" || -z "$last_error" ]] || echo "last error: $last_error" >&2
+  return 1
+}
+
+bench_wait_s3_bucket_auth_ready() {
+  local base_urls="$1"
+  local access_key="$2"
+  local secret_key="$3"
+  local bucket="$4"
+  local attempts="${5:-120}"
+  local sleep_seconds="${6:-0.25}"
+  local urls=()
+  local url
+  local attempt
+
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "bench_wait_s3_bucket_auth_ready: aws CLI is required to probe signed bucket readiness" >&2
+    return 1
+  fi
+
+  IFS=',' read -r -a urls <<<"$base_urls"
+  for attempt in $(seq 1 "$attempts"); do
+    local all_ready=1
+    for url in "${urls[@]}"; do
+      if ! AWS_ACCESS_KEY_ID="$access_key" AWS_SECRET_ACCESS_KEY="$secret_key" \
+        AWS_MAX_ATTEMPTS=1 AWS_EC2_METADATA_DISABLED=true \
+        AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+        aws --cli-connect-timeout 1 --cli-read-timeout 1 \
+          --endpoint-url "$url" s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+        all_ready=0
+        break
+      fi
+    done
+    if [[ "$all_ready" == "1" ]]; then
+      return 0
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  echo "signed bucket auth not ready for $bucket across $base_urls" >&2
   return 1
 }
 

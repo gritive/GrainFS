@@ -19,6 +19,19 @@ type fakeBucketOps struct {
 	counts  map[string]int64
 }
 
+type fakeBucketWithPolicyProposer struct {
+	bucket string
+	sa     string
+	policy string
+}
+
+func (f *fakeBucketWithPolicyProposer) ProposeCreateBucketWithPolicyAttach(_ context.Context, bucket, sa, policy string) error {
+	f.bucket = bucket
+	f.sa = sa
+	f.policy = policy
+	return nil
+}
+
 func newFakeBucketOps() *fakeBucketOps {
 	return &fakeBucketOps{
 		buckets: map[string]bool{},
@@ -98,6 +111,22 @@ func TestAdminCreateBucket(t *testing.T) {
 	var ae *adminapi.Error
 	require.ErrorAs(t, err, &ae)
 	assert.Equal(t, "conflict", ae.Code)
+}
+
+func TestAdminCreateBucket_NestedAttachFromClientProposesPolicyAttach(t *testing.T) {
+	var req admin.CreateBucketAdminReq
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"bench-bucket","attach":{"sa":"sa-bench","policy":"bucket-admin"}}`), &req))
+
+	fake := newFakeBucketOps()
+	prop := &fakeBucketWithPolicyProposer{}
+	d := &admin.Deps{Buckets: fake, BucketWithPolicyProp: prop}
+
+	_, err := admin.AdminCreateBucket(context.Background(), d, req)
+	require.NoError(t, err)
+	assert.True(t, fake.buckets["bench-bucket"])
+	assert.Equal(t, "bench-bucket", prop.bucket)
+	assert.Equal(t, "sa-bench", prop.sa)
+	assert.Equal(t, "bucket-admin", prop.policy)
 }
 
 func TestAdminListBuckets(t *testing.T) {
