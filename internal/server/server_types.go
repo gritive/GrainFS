@@ -119,6 +119,8 @@ type Server struct {
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration
 
+	eventQueueSize int
+
 	// Iceberg §9.1 진단 계측 (default OFF). NewWithServerStorage가 boot 시 ENV에서 읽는다.
 	icebergAccessLogEnabled      atomic.Bool
 	icebergCommitSlowThresholdNs atomic.Int64

@@ -20,6 +20,14 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+const testEventQueueSize = 64
+
+func withEventQueueSize(size int) Option {
+	return func(s *Server) {
+		s.eventQueueSize = size
+	}
+}
+
 func setupTestServerWithEvents(t *testing.T) (string, *eventstore.Store) {
 	t.Helper()
 	base, _, evStore := setupTestServerWithEventsAndBackend(t)
@@ -41,7 +49,7 @@ func setupTestServerWithEventsAndBackend(t *testing.T) (string, *storage.LocalBa
 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, backend, WithEventStore(evStore))
+	srv := New(addr, backend, WithEventStore(evStore), withEventQueueSize(testEventQueueSize))
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)
@@ -111,7 +119,7 @@ func TestEmitEvent_BoundedQueueNoGoroutineLeak(t *testing.T) {
 
 	// Construct Server without starting the HTTP listener — this isolates the
 	// event worker path from Hertz shutdown complexity.
-	srv := &Server{backend: backend, evStore: evStore, hub: NewHub()}
+	srv := &Server{backend: backend, evStore: evStore, hub: NewHub(), eventQueueSize: testEventQueueSize}
 	srv.startEventWorker()
 	t.Cleanup(func() { srv.stopEventWorker() })
 
@@ -120,7 +128,7 @@ func TestEmitEvent_BoundedQueueNoGoroutineLeak(t *testing.T) {
 
 	// Emit many more events than the queue can hold. Excess events must be
 	// dropped (counted) rather than producing goroutines.
-	const burst = eventQueueSize * 3
+	const burst = testEventQueueSize * 3
 	for i := 0; i < burst; i++ {
 		srv.emitEvent(eventstore.Event{Type: eventstore.EventTypeS3, Action: eventstore.EventActionPut, Bucket: "b", Key: "k"})
 	}
@@ -128,7 +136,7 @@ func TestEmitEvent_BoundedQueueNoGoroutineLeak(t *testing.T) {
 	peak := runtime.NumGoroutine()
 	assert.Less(t, peak-before, 10, "goroutine count must not scale with event burst (before=%d, peak=%d)", before, peak)
 
-	// Some portion of burst must have been dropped (queue is capacity eventQueueSize).
+	// Some portion of burst must have been dropped (queue is capacity testEventQueueSize).
 	drops := eventDropsTotal.Load() - dropsBefore
 	assert.Greater(t, drops, uint64(0), "bounded queue must drop excess events")
 

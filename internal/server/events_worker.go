@@ -24,10 +24,13 @@ type eventWorker struct {
 	stopOnce sync.Once
 }
 
-func newEventWorker(store *eventstore.Store) *eventWorker {
+func newEventWorker(store *eventstore.Store, queueSize int) *eventWorker {
+	if queueSize <= 0 {
+		queueSize = eventQueueSize
+	}
 	return &eventWorker{
 		store: store,
-		ch:    make(chan eventstore.Event, eventQueueSize),
+		ch:    make(chan eventstore.Event, queueSize),
 		done:  make(chan struct{}),
 	}
 }
@@ -66,7 +69,7 @@ func (s *Server) startEventWorker() {
 	if s.evStore == nil {
 		return
 	}
-	s.eventWorker = newEventWorker(s.evStore)
+	s.eventWorker = newEventWorker(s.evStore, s.eventQueueSize)
 	s.eventWorker.start()
 }
 
