@@ -13,13 +13,15 @@ import (
 const (
 	defaultMaxCacheBytes       = 64 * 1024 * 1024 // 64MB total cache
 	defaultMaxObjectCacheBytes = 8 * 1024 * 1024  // 8MB per object
+	metadataCacheEntryBytes    = 1024             // approximate map/key/Object overhead
 )
 
 // cacheEntry stores cached object content and metadata.
 type cacheEntry struct {
-	data []byte
-	obj  Object // copy, not pointer
-	size int64
+	data    []byte
+	obj     Object // copy, not pointer
+	size    int64
+	hasData bool
 }
 
 type objectCacheKey struct {
@@ -174,16 +176,23 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 
 	// Fast path: cache hit from immutable atomic snapshot.
 	entry, ok := cb.getCached(ck)
-	if ok {
+	if ok && entry.hasData {
 		cb.hits.Add(1)
 		obj := entry.obj // copy
 		return newCachedObjectReader(entry.data), &obj, nil
 	}
 
 	// Cache miss: check size before buffering
-	meta, err := cb.Backend.HeadObject(ctx, bucket, key)
-	if err != nil {
-		return nil, nil, err
+	var meta *Object
+	if ok {
+		obj := entry.obj
+		meta = &obj
+	} else {
+		var err error
+		meta, err = cb.Backend.HeadObject(ctx, bucket, key)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	rc, obj, err := cb.Backend.GetObject(ctx, bucket, key)
@@ -206,7 +215,7 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 		return nil, nil, err
 	}
 
-	cb.put(ck, cacheEntry{data: data, obj: *obj, size: int64(len(data))})
+	cb.put(ck, cacheEntry{data: data, obj: *obj, size: int64(len(data)), hasData: true})
 
 	return newCachedObjectReader(data), obj, nil
 }
@@ -235,7 +244,12 @@ func (cb *CachedBackend) HeadObject(ctx context.Context, bucket, key string) (*O
 		return &obj, nil
 	}
 
-	return cb.Backend.HeadObject(ctx, bucket, key)
+	obj, err := cb.Backend.HeadObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	cb.put(ck, cacheEntry{obj: *obj, size: metadataCacheEntryBytes})
+	return obj, nil
 }
 
 func (cb *CachedBackend) SetObjectACL(bucket, key string, acl uint8) error {
@@ -337,7 +351,7 @@ func (cb *CachedBackend) WriteAt(ctx context.Context, bucket, key string, offset
 func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	ck := cacheKey(bucket, key)
 	entry, ok := cb.getCached(ck)
-	if ok {
+	if ok && entry.hasData {
 		var r bytes.Reader
 		r.Reset(entry.data)
 		return r.ReadAt(buf, offset)
@@ -354,7 +368,7 @@ func (cb *CachedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 func (cb *CachedBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error) {
 	ck := cacheKey(bucket, key)
 	entry, ok := cb.getCached(ck)
-	if ok {
+	if ok && entry.hasData {
 		var r bytes.Reader
 		r.Reset(entry.data)
 		return r.ReadAt(buf, offset)

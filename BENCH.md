@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 16:24 KST
+Updated: 2026-05-20 16:35 KST
 
 ## Goal
 
@@ -60,7 +60,7 @@ Updated: 2026-05-20 16:24 KST
 | stat      |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
 | versioned |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
 | retention |    0.00 |  19336.57 |      0 |               280.86 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
-| multipart | 3468.12 |    693.62 |      0 |               634.14 | faster than MinIO; slower than RustFS; RSS below MinIO | after 8 MiB object cache limit rerun; artifact `benchmarks/profiles/grainfs-single-multipart-after-8m-object-cache-rerun-20260520-160421` |
+| multipart | 3986.73 |    797.35 |      0 |               675.98 | faster than MinIO/RustFS; RSS below MinIO | after bounded metadata-only HeadObject cache; artifact `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
 
 ## GrainFS Optimization Notes
 
@@ -86,11 +86,11 @@ Updated: 2026-05-20 16:24 KST
 - `multipart` rejected candidate: enabling 64 MiB shard cache without code changes measured 2920.93 MiB/s, worse than the 8 MiB object-cache result. Adding local `ReadLocalShardAt` range cache support made the unit test pass but e2e fell to 2823.96 MiB/s and RSS rose to 1294.84 MiB, above MinIO's multipart RSS. The change was reverted; range cache admission needs a tighter policy before it is usable for this workload.
 - `multipart` rejected candidate: combining the 8 MiB object-cache change with the 128 KiB Hertz copy buffer measured 2739.80 MiB/s and 666.08 MiB RSS, so the copy-buffer change remains rejected.
 - `multipart` rejected candidate: implementing `io.WriterTo` on `readAtRangeReader` measured 3717.24 MiB/s once but reran at 3521.63 MiB/s. Follow-up pprof still showed Hertz `CopyBuffer/CopyZeroAlloc` as the dominant path because Hertz's `network.Writer` does not satisfy `io.Writer` in this path, so the `WriterTo` hook is not used. The commit was reverted.
+- `multipart` candidate 5: pprof still showed repeated metadata fetch/copy pressure around the multipart `HeadObject` warmup path. Architecture review: object data cache entries were already immutable, lock-free snapshots, but `HeadObject` misses were not published into that cache; publishing metadata-only entries keeps HEAD hot without pretending body bytes are cached. Fix: cache metadata-only entries from `CachedBackend.HeadObject`, gate body-serving paths on `hasData`, and let `GetObject` reuse cached metadata before reading body. Metadata-only entries are charged a small fixed size so HEAD-only workloads still evict through the existing bounded cache. TDD: `TestCachedBackend_HeadObjectMissCachesMetadata`, `TestCachedBackend_GetObjectAfterHeadObjectReadsBody`, and `TestCachedBackend_HeadObjectMetadataCacheEvictsOnSizeLimit`. Clean e2e measured 4736.85/4809.70 MiB/s before metadata charge; final bounded run measured 3986.73 MiB/s with RSS 675.98 MiB, above MinIO/RustFS and below MinIO RSS.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
-- Continue optimizing `multipart`: current clean e2e is 3468.12 MiB/s vs MinIO 3245.85/RustFS 3622.07; RSS is below MinIO.
 - Continue GrainFS single-node benchmark with S3-only service flags after multipart passes: `multipart-put`, `append`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
