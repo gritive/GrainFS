@@ -102,10 +102,12 @@ func runLifecycleExpirationCases(getTgt func() s3Target, getLC func() *lifecycle
 		lc.RunLifecycleCycle(ctx)
 
 		var headErr error
+		// Timeout 30s — 다중 ginkgo fixture가 글로벌 spec tree에서 동시에 lifecycle
+		// worker를 공유할 수 있어 단일 spec 실행 대비 expire 처리 지연 가능.
 		gomega.Eventually(func() bool {
 			_, headErr = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("drop")})
 			return headErr != nil
-		}).WithTimeout(5*time.Second).WithPolling(100*time.Millisecond).Should(gomega.BeTrue(),
+		}).WithTimeout(30*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(),
 			"tag-matched object was not expired")
 		var apiErr smithy.APIError
 		if errors.As(headErr, &apiErr) {
