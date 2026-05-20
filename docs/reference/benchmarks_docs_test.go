@@ -58,7 +58,7 @@ func TestBenchmarkReferenceDocumentsStrictHostPreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, want := range []string{"BENCH_STRICT_HOST=1", "host-preflight.txt", "contaminated"} {
+	for _, want := range []string{"BENCH_STRICT_HOST=1", "host-preflight.txt", "BENCH_MAX_LOAD_PER_CPU", "load_per_cpu", "contaminated"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("benchmark reference must document strict host preflight with %q", want)
 		}

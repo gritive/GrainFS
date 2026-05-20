@@ -75,9 +75,11 @@ performance claims should use `warp`.
 
 Every comparison run writes `host-preflight.txt` in the profile directory and
 adds summary warnings when the host already has `grainfs serve` processes or
-the benchmark filesystem is at least 90 percent full. Use strict mode for
-publishable runs so contaminated host state fails before any benchmark server
-starts:
+the benchmark filesystem is at least 90 percent full. The same file records
+`load1`, `cpu_count`, `load_per_cpu`, and `max_load_per_cpu`; strict mode fails
+when `load_per_cpu` exceeds `BENCH_MAX_LOAD_PER_CPU` (default `1.0`). Use
+strict mode for publishable runs so contaminated host state fails before any
+benchmark server starts:
 
 ```bash
 BENCH_STRICT_HOST=1 WARP_OPS=put,get make bench-s3-compat-compare
