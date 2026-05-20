@@ -136,7 +136,7 @@ func TestAuditEmitHook_NoEmitterNoPanic(t *testing.T) {
 }
 
 func TestAuditEmitterFallback_Put(t *testing.T) {
-	emitter := audit.NewEmitter("node-test")
+	emitter := audit.NewEmitterWithRingCapacity("node-test", 1)
 	base, backend := setupTestServerWithBackend(t, WithAuditEmitter(emitter))
 	mustCreateBucket(t, backend, "ring-emit-bucket")
 

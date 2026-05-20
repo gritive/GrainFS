@@ -15,6 +15,12 @@ func NewEmitter(nodeID string) *Emitter {
 	return &Emitter{nodeID: nodeID, ring: NewRing()}
 }
 
+// NewEmitterWithRingCapacity creates an Emitter backed by a bounded audit ring.
+// Non-positive capacity preserves the production default.
+func NewEmitterWithRingCapacity(nodeID string, capacity int) *Emitter {
+	return &Emitter{nodeID: nodeID, ring: NewRingWithCapacity(capacity)}
+}
+
 // EmitS3 logs an S3 event to stdout and enqueues it in the ring.
 // Events for the audit bucket or the system:audit SA are silently dropped to prevent recursion.
 func (e *Emitter) EmitS3(ev S3Event) {

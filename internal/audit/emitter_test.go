@@ -9,7 +9,7 @@ import (
 )
 
 func TestEmitterRecursionGuard_AuditBucket(t *testing.T) {
-	e := audit.NewEmitter("node-1")
+	e := audit.NewEmitterWithRingCapacity("node-1", 1)
 	e.EmitS3(audit.S3Event{Bucket: audit.BucketName, Method: "PUT", Status: 200})
 	buf := make([]audit.S3Event, 10)
 	got := e.Ring().DrainInto(buf)
@@ -17,7 +17,7 @@ func TestEmitterRecursionGuard_AuditBucket(t *testing.T) {
 }
 
 func TestEmitterRecursionGuard_SystemSA(t *testing.T) {
-	e := audit.NewEmitter("node-1")
+	e := audit.NewEmitterWithRingCapacity("node-1", 1)
 	e.EmitS3(audit.S3Event{SAID: audit.SystemSA, Bucket: "data", Method: "PUT", Status: 200})
 	buf := make([]audit.S3Event, 10)
 	got := e.Ring().DrainInto(buf)
@@ -25,11 +25,20 @@ func TestEmitterRecursionGuard_SystemSA(t *testing.T) {
 }
 
 func TestEmitterNormalEvent(t *testing.T) {
-	e := audit.NewEmitter("node-1")
+	e := audit.NewEmitterWithRingCapacity("node-1", 1)
 	e.EmitS3(audit.S3Event{Bucket: "mybucket", Method: "PUT", Key: "obj", Status: 200})
 	buf := make([]audit.S3Event, 10)
 	got := e.Ring().DrainInto(buf)
 	require.Len(t, got, 1)
 	require.Equal(t, "PUT", got[0].Method)
 	require.Equal(t, "node-1", got[0].NodeID)
+}
+
+func TestEmitterWithRingCapacityUsesRequestedBound(t *testing.T) {
+	e := audit.NewEmitterWithRingCapacity("node-1", 1)
+	e.EmitS3(audit.S3Event{Bucket: "mybucket", Method: "PUT", Key: "obj", Status: 200})
+	e.EmitS3(audit.S3Event{Bucket: "mybucket", Method: "GET", Key: "obj", Status: 200})
+
+	require.Equal(t, 1, e.Ring().Len())
+	require.Equal(t, uint64(1), e.Ring().Drops())
 }

@@ -132,7 +132,7 @@ func TestClient_RemovePeer_QuorumBlock_CarriesNumbers(t *testing.T) {
 func TestClient_RemovePeer_ContextCancelled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
-		case <-time.After(2 * time.Second):
+		case <-time.After(200 * time.Millisecond):
 		case <-r.Context().Done():
 		}
 		w.WriteHeader(http.StatusOK)

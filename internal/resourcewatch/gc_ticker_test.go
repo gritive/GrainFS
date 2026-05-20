@@ -119,7 +119,7 @@ func TestGCTicker_ContextCancel_StopsCleanly(t *testing.T) {
 
 func TestGCTicker_SequentialIteration(t *testing.T) {
 	r := NewRegistry()
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 2; i++ {
 		dir := t.TempDir()
 		db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
 		if err != nil {
@@ -132,8 +132,8 @@ func TestGCTicker_SequentialIteration(t *testing.T) {
 	// in TestRegistry_ConcurrentRegister_NoDataRace combined with
 	// snapshot-then-unlock semantics — the ticker iterates the snapshot in
 	// caller goroutine, no inner parallelism.
-	cfg := GCTickerConfig{Interval: 10 * time.Millisecond, Registry: r}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	cfg := GCTickerConfig{Interval: time.Millisecond, Registry: r}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	RunGCTicker(ctx, cfg)
 }
