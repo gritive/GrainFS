@@ -16,7 +16,7 @@ import (
 // AuditQueryService is the slim interface audit admin handlers need.
 // Satisfied by *audit.DuckDBSearcher; nil disables audit admin endpoints.
 type AuditQueryService interface {
-	Query(ctx context.Context, sql string) (columns []string, rows [][]string, err error)
+	Query(ctx context.Context, sql string, limit int) (columns []string, rows [][]string, err error)
 	SearchS3(ctx context.Context, f audit.SearchFilter) ([]audit.SearchRow, error)
 }
 
@@ -36,7 +36,7 @@ func auditQueryHandler(d *Deps) app.HandlerFunc {
 			writeError(c, NewInvalid("sql is required"))
 			return
 		}
-		cols, rows, err := d.AuditQuery.Query(ctx, sql)
+		cols, rows, err := d.AuditQuery.Query(ctx, sql, audit.ClampSearchLimit(req.Limit))
 		if err != nil {
 			writeError(c, NewInvalid(fmt.Sprintf("query error: %v", err)))
 			return
@@ -64,7 +64,7 @@ func auditRecentDeniesHandler(d *Deps) app.HandlerFunc {
 				`ORDER BY ts DESC LIMIT %d`,
 			limit,
 		)
-		cols, rows, err := d.AuditQuery.Query(ctx, sql)
+		cols, rows, err := d.AuditQuery.Query(ctx, sql, 0)
 		if err != nil {
 			writeError(c, fmt.Errorf("query error: %w", err))
 			return

@@ -175,12 +175,14 @@ func (s *DuckDBSearcher) SearchS3(ctx context.Context, f SearchFilter) ([]Search
 // statements are accepted; multi-statement input (containing a semicolon after
 // the first token) is rejected as a safety measure.
 //
-// The caller is responsible for imposing a LIMIT in the SQL itself; this method
-// stops reading after MaxSearchLimit rows as a server-side safety net.
-func (s *DuckDBSearcher) Query(ctx context.Context, rawSQL string) (columns []string, rows [][]string, err error) {
+// limit controls the server-side row cap; 0 means MaxSearchLimit.
+// The caller is responsible for imposing a LIMIT clause in the SQL itself for
+// database-level efficiency; this method enforces an additional cap as a safety net.
+func (s *DuckDBSearcher) Query(ctx context.Context, rawSQL string, limit int) (columns []string, rows [][]string, err error) {
 	if s == nil || s.cfg.Endpoint == "" {
 		return nil, nil, fmt.Errorf("audit searcher is not configured")
 	}
+	effective := ClampSearchLimit(limit)
 	stmt := strings.TrimSpace(rawSQL)
 	lower := strings.ToLower(stmt)
 	if !strings.HasPrefix(lower, "select") && !strings.HasPrefix(lower, "with") {
@@ -211,7 +213,7 @@ func (s *DuckDBSearcher) Query(ctx context.Context, rawSQL string) (columns []st
 
 	rows = [][]string{}
 	for dbRows.Next() {
-		if len(rows) >= MaxSearchLimit {
+		if len(rows) >= effective {
 			break
 		}
 		vals := make([]any, len(columns))
