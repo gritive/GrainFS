@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,5 +76,129 @@ func runLifecycleExpirationCases(t *testing.T, tgt s3Target) {
 
 		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("keep")})
 		require.NoError(t, err)
+	})
+
+	t.Run("SizeFilter", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "size")
+
+		sizes := map[string]int{"tiny": 1024, "small": 1 << 20, "big": 100 << 20}
+		for key, n := range sizes {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket), Key: aws.String(key),
+				Body: stringReader(strings.Repeat("a", n)),
+			})
+			require.NoError(t, err)
+		}
+
+		_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:     aws.String("big-only"),
+				Status: types.ExpirationStatusEnabled,
+				Filter: &types.LifecycleRuleFilter{
+					ObjectSizeGreaterThan: aws.Int64(10 << 20),
+				},
+				Expiration: &types.LifecycleExpiration{Days: aws.Int32(1)},
+			}}},
+		})
+		require.NoError(t, err)
+
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("big")})
+		require.Error(t, err, "big (100 MiB) must be expired")
+
+		for _, k := range []string{"tiny", "small"} {
+			_, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(k)})
+			require.NoError(t, err, "%s must remain (below 10 MiB threshold)", k)
+		}
+	})
+
+	t.Run("AndFilter", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "and")
+
+		type entry struct {
+			key  string
+			body string
+			tag  bool
+		}
+		entries := []entry{
+			{"logs/match", strings.Repeat("x", 200), true},
+			{"logs/small", strings.Repeat("x", 50), true},
+			{"logs/notag", strings.Repeat("x", 200), false},
+			{"data/big", strings.Repeat("x", 200), true},
+			{"data/none", strings.Repeat("x", 50), false},
+		}
+		for _, e := range entries {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket), Key: aws.String(e.key), Body: stringReader(e.body),
+			})
+			require.NoError(t, err)
+			if e.tag {
+				_, err := client.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
+					Bucket: aws.String(bucket), Key: aws.String(e.key),
+					Tagging: &types.Tagging{TagSet: []types.Tag{{Key: aws.String("env"), Value: aws.String("prod")}}},
+				})
+				require.NoError(t, err)
+			}
+		}
+
+		_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:     aws.String("and-filter"),
+				Status: types.ExpirationStatusEnabled,
+				Filter: &types.LifecycleRuleFilter{
+					And: &types.LifecycleRuleAndOperator{
+						Prefix:                aws.String("logs/"),
+						Tags:                  []types.Tag{{Key: aws.String("env"), Value: aws.String("prod")}},
+						ObjectSizeGreaterThan: aws.Int64(100),
+					},
+				},
+				Expiration: &types.LifecycleExpiration{Days: aws.Int32(1)},
+			}}},
+		})
+		require.NoError(t, err)
+
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("logs/match")})
+		require.Error(t, err, "logs/match must be expired (all three criteria match)")
+
+		for _, k := range []string{"logs/small", "logs/notag", "data/big", "data/none"} {
+			_, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(k)})
+			require.NoError(t, err, "%s must remain", k)
+		}
+	})
+
+	t.Run("ExpirationDate", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "date")
+
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"), Body: stringReader("body"),
+		})
+		require.NoError(t, err)
+
+		yesterday := time.Now().UTC().Add(-24 * time.Hour).Truncate(24 * time.Hour)
+		_, err = client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:         aws.String("date-rule"),
+				Status:     types.ExpirationStatusEnabled,
+				Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				Expiration: &types.LifecycleExpiration{Date: aws.Time(yesterday)},
+			}}},
+		})
+		require.NoError(t, err)
+
+		lc.RunLifecycleCycle(ctx) // 시계 advance 불필요 — Date가 이미 과거
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("k")})
+		require.Error(t, err, "object must be expired by past Date")
 	})
 }
