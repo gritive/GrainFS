@@ -296,15 +296,14 @@ func TestNFSv4BufferPoolNoLeaks(t *testing.T) {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
 
-	// Perform several transfers of various sizes.
+	// Cover all buffer tiers without repeating large object I/O.
 	sizes := []int64{
-		100 * 1024,      // 100KB (small)
-		2 * 1024 * 1024, // 2MB (medium)
-		8 * 1024 * 1024, // 8MB (large enough for buffer reuse)
+		100 * 1024,       // 100KB (small)
+		2 * 1024 * 1024,  // 2MB (medium)
+		10*1024*1024 + 1, // just over the large-buffer threshold
 	}
 
-	for i := 0; i < 6; i++ {
-		size := sizes[i%len(sizes)]
+	for i, size := range sizes {
 		key := fmt.Sprintf("test-leak-%d.bin", i)
 
 		_, err := backend.PutObject(context.Background(), testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
