@@ -394,15 +394,20 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 	case OpCreate:
 		// CREATE4args: createtype4 objtype + component4 objname + fattr4 createattrs
 		objType, _ := r.ReadUint32() // nfs_ftype4
-		if objType == 5 {            // NF4LNK: skip linktext4 (string)
-			r.ReadOpaque()
+		name, _ := r.ReadString()
+		var linkText string
+		if objType == NF4LNK {
+			lt, err := r.ReadString()
+			if err != nil {
+				return nil, 0, err
+			}
+			linkText = lt
 		}
 		// For NF4BLK/NF4CHR skip specdata4 (2 uint32s); others have no extra data.
 		if objType == 3 || objType == 4 {
 			r.ReadUint32()
 			r.ReadUint32()
 		}
-		name, _ := r.ReadString()
 		// fattr4 createattrs: bitmap4 + opaque attrlist
 		bitmapLen, _ := r.ReadUint32()
 		for i := uint32(0); i < bitmapLen; i++ {
@@ -412,6 +417,9 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		w := getXDRWriter()
 		w.WriteUint32(objType)
 		w.WriteString(name)
+		if objType == NF4LNK {
+			w.WriteString(linkText)
+		}
 		return xdrWriterBytes(w), 0, nil
 
 	case OpAccess:
@@ -482,6 +490,14 @@ func readOpArgs(r *XDRReader, opCode int) ([]byte, int, error) {
 		binary.BigEndian.PutUint64(b[16:24], offset)
 		binary.BigEndian.PutUint32(b[24:28], count)
 		return b[:28], 32, nil
+
+	case OpReadlink:
+		b := getOpArg16()
+		if _, err := io.ReadFull(&r.r, b); err != nil {
+			putOpArg16(b)
+			return nil, 0, err
+		}
+		return b, 16, nil
 
 	case OpWrite:
 		argStart := r.Offset()

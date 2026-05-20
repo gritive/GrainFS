@@ -141,6 +141,7 @@ const (
 	OpPutRootFH          = 24
 	OpRead               = 25
 	OpReadDir            = 26
+	OpReadlink           = 27
 	OpRemove             = 28
 	OpRename             = 29
 	OpSetAttr            = 34
@@ -195,6 +196,7 @@ func attrBitmapLen(bm attrBitmap) uint32 {
 const (
 	NF4REG = 1
 	NF4DIR = 2
+	NF4LNK = 5
 )
 
 type Op struct {
@@ -323,6 +325,8 @@ func (d *Dispatcher) dispatchOp(op Op) OpResult {
 		return d.opReadDir(op.Data)
 	case OpRead:
 		return d.opRead(op.Data)
+	case OpReadlink:
+		return d.opReadlink(op.Data)
 	case OpWrite:
 		return d.opWrite(op.Data)
 	case OpOpen:
@@ -458,8 +462,12 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 		}
 	}
 	if !exists && d.backend != nil {
-		_, err := d.backend.HeadObject(context.Background(), childBucket, childKey)
-		exists = err == nil
+		if _, err := d.backend.HeadObject(context.Background(), childBucket, childKey); err == nil {
+			exists = true
+		} else {
+			meta := d.loadFileMeta(childBucket, childKey)
+			exists = meta.LinkTarget != ""
+		}
 	}
 	log.Debug().Str("name", name).Str("child", childPath).Bool("exists", exists).Msg("nfs4: LOOKUP")
 	if !exists {
@@ -486,6 +494,14 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	if err := validateComponentName(objName); err != nil {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
 	}
+	var linkTarget string
+	if objType == NF4LNK {
+		var err error
+		linkTarget, err = r.ReadString()
+		if err != nil {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
+		}
+	}
 	if d.isPathReadOnly(d.currentPath) {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ROFS}
 	}
@@ -494,6 +510,25 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 
 	if objType == NF4DIR {
 		d.state.MarkDir(newPath)
+		d.invalidatePath(newPath)
+	} else if objType == NF4LNK {
+		if d.backend == nil {
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_SERVERFAULT}
+		}
+		bucket, key := extractBucketAndKey(newPath)
+		if _, err := d.backend.HeadObject(context.Background(), bucket, key); err != nil {
+			if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(nil), "application/octet-stream"); err != nil {
+				return OpResult{OpCode: OpCreate, Status: NFS4ERR_IO}
+			}
+		}
+		meta := d.loadFileMeta(bucket, key)
+		meta.LinkTarget = linkTarget
+		meta.Mtime = time.Now().UnixNano()
+		meta.Mode = 0644
+		if err := d.saveFileMeta(bucket, key, meta); err != nil {
+			_ = d.backend.DeleteObject(context.Background(), bucket, key)
+			return OpResult{OpCode: OpCreate, Status: NFS4ERR_SERVERFAULT}
+		}
 		d.invalidatePath(newPath)
 	}
 	fh := d.state.GetOrCreateFH(newPath)
@@ -549,6 +584,7 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 	var fileSize uint64
 	var lastModUnix int64
 	var sidecarMode uint32
+	var linkTarget string
 	fileid := pathToFileID(p)
 	bucket, key := extractBucketAndKey(p)
 	isPseudoRoot := p == "/"
@@ -568,28 +604,33 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 
 		meta := d.loadFileMeta(bucket, key)
 		sidecarMode = meta.Mode
-		if meta.Mtime > 0 {
-			lastModUnix = meta.Mtime / 1e9
+		linkTarget = meta.LinkTarget
+		effectiveMtime := meta.effectiveMtime()
+		if effectiveMtime > 0 {
+			lastModUnix = effectiveMtime / 1e9
 		}
 	} else if !isDir && d.backend != nil {
+		meta := d.loadFileMeta(bucket, key)
+		linkTarget = meta.LinkTarget
+		effectiveMtime := meta.effectiveMtime()
+		if effectiveMtime > 0 {
+			lastModUnix = effectiveMtime / 1e9
+		}
+		sidecarMode = meta.Mode
 		obj, err := d.backend.HeadObject(context.Background(), bucket, key)
 		if err == nil {
 			isDir = false
 			fileSize = uint64(obj.Size)
-			lastModUnix = obj.LastModified
+			if listedObj == nil && lastModUnix == 0 {
+				lastModUnix = obj.LastModified
+			}
+		} else if linkTarget != "" {
+			isDir = false
+			fileSize = 0
 		} else {
 			// Unknown path: treat as directory (fallback for uncreated subdirs)
 			isDir = true
 			fileSize = 4096
-		}
-
-		// Read sidecar for NFS-specific mode/mtime (key is in scope here)
-		if !isDir {
-			meta := d.loadFileMeta(bucket, key)
-			sidecarMode = meta.Mode
-			if meta.Mtime > 0 {
-				lastModUnix = meta.Mtime / 1e9
-			}
 		}
 	} else {
 		fileSize = 4096
@@ -605,6 +646,10 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 		mode = sidecarMode
 	}
 	numlinks := uint32(1)
+	if linkTarget != "" {
+		fileType = NF4LNK
+		mode = 0644
+	}
 	if isDir {
 		fileType = NF4DIR
 		mode = 0755
@@ -662,7 +707,7 @@ func (d *Dispatcher) encodeAttrsWithObject(p string, reqBit attrBitmap, listedOb
 	// Bit 6: SYMLINK_SUPPORT — bool
 	if hasBit(6) {
 		setBit(6)
-		attrW.WriteUint32(0)
+		attrW.WriteUint32(1)
 	}
 	// Bit 7: NAMED_ATTR — bool
 	if hasBit(7) {
@@ -1002,6 +1047,26 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 	w.WriteOpaque(readData)
 
 	return OpResult{OpCode: OpRead, Status: NFS4_OK, Data: xdrWriterBytes(w)}
+}
+
+func (d *Dispatcher) opReadlink(data []byte) OpResult {
+	if len(data) < 16 {
+		return OpResult{OpCode: OpReadlink, Status: NFS4ERR_INVAL}
+	}
+
+	bucket, key := extractBucketAndKey(d.currentPath)
+	if bucket == "" {
+		return OpResult{OpCode: OpReadlink, Status: NFS4ERR_NOENT}
+	}
+
+	meta := d.loadFileMeta(bucket, key)
+	if meta.LinkTarget == "" {
+		return OpResult{OpCode: OpReadlink, Status: NFS4ERR_INVAL}
+	}
+
+	w := getXDRWriter()
+	w.WriteOpaque([]byte(meta.LinkTarget))
+	return OpResult{OpCode: OpReadlink, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
 func (d *Dispatcher) opWrite(data []byte) OpResult {
@@ -1403,6 +1468,7 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 	if err := d.backend.DeleteObject(context.Background(), bucket, key); err != nil {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_IO}
 	}
+	_ = d.backend.DeleteObject(context.Background(), bucket, metaSidecarKey(key))
 	d.state.InvalidateFH(targetPath)
 	d.state.InvalidateObject(bucket, key)
 
@@ -1665,8 +1731,17 @@ func (d *Dispatcher) opSequence(data []byte) OpResult {
 // Phase 0a: routes through extractBucketAndKey wrapper (single bucket).
 // Phase 3: per-export routing.
 type nfsFileMeta struct {
-	Mode  uint32 `json:"mode"`
-	Mtime int64  `json:"mtime_ns"` // UnixNano; 0 means "use object LastModified"
+	Mode     uint32 `json:"mode"`
+	Mtime    int64  `json:"mtime"`
+	MtimeNs  int64  `json:"mtime_ns,omitempty"`
+	LinkTarget string `json:"link_target,omitempty"`
+}
+
+func (m nfsFileMeta) effectiveMtime() int64 {
+	if m.Mtime != 0 {
+		return m.Mtime
+	}
+	return m.MtimeNs
 }
 
 func metaSidecarKey(key string) string {

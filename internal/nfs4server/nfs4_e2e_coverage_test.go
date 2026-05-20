@@ -106,6 +106,39 @@ func (c *nfs4Client) writeTestFile(name string, data []byte) {
 	assert.Equal(c.t, uint32(NFS4_OK), status, "writeTestFile %q should succeed", name)
 }
 
+func (c *nfs4Client) writeTestSymlink(name, target string) {
+	c.t.Helper()
+	ops := &XDRWriter{}
+	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
+	ops.WriteUint32(uint32(OpCreate))
+	ops.WriteUint32(uint32(NF4LNK))
+	ops.WriteString(name)
+	ops.WriteString(target)
+	ops.WriteUint32(0)
+	ops.WriteOpaque(nil)
+	ops.WriteUint32(0)
+
+	reply := c.sendCompound(ops.Bytes(), 3)
+	status, r := c.parseCompoundReply(reply)
+	require.Equal(c.t, uint32(NFS4_OK), status, "writeTestSymlink %q should succeed", name)
+
+	// Skip PUTROOTFH + LOOKUP(export)
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+
+	createOp, _ := r.ReadUint32()
+	createStatus, _ := r.ReadUint32()
+	assert.Equal(c.t, uint32(OpCreate), createOp)
+	assert.Equal(c.t, uint32(NFS4_OK), createStatus)
+	r.ReadUint32() // atomic
+	r.ReadUint64() // before
+	r.ReadUint64() // after
+	r.ReadUint32() // attrset len
+}
+
 // TestE2E_ReadDir verifies that files written to the legacy export appear in READDIR output.
 func TestE2E_ReadDir(t *testing.T) {
 	addr, _ := startTestNFS4Server(t)
@@ -366,6 +399,75 @@ func TestE2E_ReadBeyondEOF(t *testing.T) {
 
 	assert.Equal(t, uint32(1), eof, "should be EOF")
 	assert.Equal(t, []byte("hi"), data)
+}
+
+// TestE2E_SymLink_CreateReadlink verifies NF4LNK create returns and READLINK
+// returns the requested target path.
+func TestE2E_SymLink_CreateReadlink(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	c := newNFS4Client(t, addr)
+
+	c.writeTestSymlink("link.lnk", "real.txt")
+
+	ops := &XDRWriter{}
+	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
+	writeLookupFile(ops, "link.lnk")
+	ops.WriteUint32(uint32(OpReadlink))
+	ops.WriteUint64(0) // stateid seqid
+	ops.WriteUint64(0) // stateid other
+
+	reply := c.sendCompound(ops.Bytes(), 4)
+	status, r := c.parseCompoundReply(reply)
+	require.Equal(t, uint32(NFS4_OK), status)
+
+	for i := 0; i < 3; i++ {
+		r.ReadUint32()
+		r.ReadUint32()
+	}
+
+	// Parse CREATE-like LOOKUP? We already did LOOKUP(export)+LOOKUP(file) + READLINK
+	readlinkOp, _ := r.ReadUint32()
+	readlinkStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpReadlink), readlinkOp)
+	require.Equal(t, uint32(NFS4_OK), readlinkStatus)
+	target, err := r.ReadOpaque()
+	require.NoError(t, err)
+	assert.Equal(t, "real.txt", string(target))
+}
+
+// TestE2E_Symlink_ReadlinkOnRegularFile returns NFS4ERR_INVAL.
+func TestE2E_Symlink_ReadlinkOnRegularFile(t *testing.T) {
+	addr, _ := startTestNFS4Server(t)
+	c := newNFS4Client(t, addr)
+
+	c.writeTestFile("plain.txt", []byte("hello"))
+
+	ops := &XDRWriter{}
+	ops.WriteUint32(uint32(OpPutRootFH))
+	writeLookupLegacyExport(ops)
+	writeLookupFile(ops, "plain.txt")
+	ops.WriteUint32(uint32(OpReadlink))
+	ops.WriteUint64(0)
+	ops.WriteUint64(0)
+
+	reply := c.sendCompound(ops.Bytes(), 4)
+	status, r := c.parseCompoundReply(reply)
+
+	require.Equal(t, uint32(NFS4ERR_INVAL), status)
+
+	// Skip PUTROOTFH + LOOKUP(export) + LOOKUP(plain.txt)
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+	r.ReadUint32()
+
+	readlinkOp, _ := r.ReadUint32()
+	readlinkStatus, _ := r.ReadUint32()
+	assert.Equal(t, uint32(OpReadlink), readlinkOp)
+	assert.Equal(t, uint32(NFS4ERR_INVAL), readlinkStatus)
 }
 
 // TestE2E_Access verifies that ACCESS echoes back the requested permission bits.

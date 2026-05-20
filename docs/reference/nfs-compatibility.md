@@ -48,7 +48,7 @@ coverage. Unit-test-only coverage is not enough.
 | POSIX-like behavior | Atomic rename               | Supported     |                                                                                                                                   |
 | POSIX-like behavior | File locking                | Partial       | Validate full lock-manager behavior per client workload.                                                                          |
 | POSIX-like behavior | Hard links                  | Not supported |                                                                                                                                   |
-| POSIX-like behavior | Symlinks                    | Not supported |                                                                                                                                   |
+| POSIX-like behavior | Symlinks                    | Supported     | CREATE(NF4LNK)+READLINK implemented with sidecar-persisted symlink target metadata. |
 | POSIX-like behavior | ACLs                        | Not supported |                                                                                                                                   |
 | POSIX-like behavior | chown/chgrp                 | Not supported |                                                                                                                                   |
 | Capacity/quota      | Quota attributes            | Not supported |                                                                                                                                   |

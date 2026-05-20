@@ -111,7 +111,7 @@ func TestLinkAndSymlinkSupportReflectUnsupportedOps(t *testing.T) {
 	symlinkSupport, err := ar.ReadUint32()
 	require.NoError(t, err)
 	require.Equal(t, uint32(0), linkSupport)
-	require.Equal(t, uint32(0), symlinkSupport)
+	require.Equal(t, uint32(1), symlinkSupport)
 }
 
 func TestGetAttrCanReturnThirdBitmapWord(t *testing.T) {
