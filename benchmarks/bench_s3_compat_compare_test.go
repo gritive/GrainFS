@@ -145,6 +145,21 @@ func TestBenchS3CompatCanFailFastOnDirtyHost(t *testing.T) {
 	}
 }
 
+func TestHostPreflightDoesNotCountItsOwnProcessScan(t *testing.T) {
+	common, err := os.ReadFile("lib/common.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonScript := string(common)
+
+	if strings.Contains(commonScript, `awk '/grainfs serve/`) {
+		t.Fatalf("host preflight process scan can match its own awk command")
+	}
+	if !strings.Contains(commonScript, `awk '/[g]rainfs serve/`) {
+		t.Fatalf("host preflight process scan must avoid matching its own awk command")
+	}
+}
+
 func TestBenchS3CompatCleanupOnlyAnnouncesWhenBackendsStarted(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {

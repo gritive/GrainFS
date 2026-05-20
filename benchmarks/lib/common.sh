@@ -19,7 +19,7 @@ bench_collect_host_preflight() {
   mkdir -p "$profile_dir"
   BENCH_HOST_GRAINFS_SERVE_COUNT="$(
     ps -axo command 2>/dev/null \
-      | awk '/grainfs serve/ { count++ } END { print count + 0 }'
+      | awk '/[g]rainfs serve/ { count++ } END { print count + 0 }'
   )"
   disk_line="$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR == 2 { print $5 }' || true)"
   BENCH_HOST_DISK_USED_PCT="${disk_line%%%}"
@@ -68,7 +68,7 @@ PY
     echo "max_load_per_cpu: ${BENCH_MAX_LOAD_PER_CPU}"
     echo "strict_host: ${BENCH_STRICT_HOST}"
     echo "preflight_failures: ${BENCH_HOST_PREFLIGHT_FAILURES}"
-    ps -axo pid,ppid,pcpu,rss,etime,command 2>/dev/null | awk '/grainfs serve/ { print }' || true
+    ps -axo pid,ppid,pcpu,rss,etime,command 2>/dev/null | awk '/[g]rainfs serve/ { print }' || true
   } >"$out"
 }
 
