@@ -103,11 +103,10 @@ func init() {
 	// temporal locality saturate around that budget. Set 0 to disable.
 	serveCmd.Flags().Int64("block-cache-size", 64*1024*1024, "volume block cache capacity in bytes (0 disables)")
 	// EC shard cache (Phase 2 #3 follow-up). Sits in front of getObjectEC's
-	// per-shard fan-out. Default 256 MB — multi-node measurement on PR #71
-	// showed large_repeat (16 MB×10) hits 90% at every reachable cache size,
-	// so the working set is small relative to memory budget. Set 0 to
-	// disable when running --measure-read-amp baselines.
-	serveCmd.Flags().Int64("shard-cache-size", 256*1024*1024, "EC shard cache capacity in bytes (0 disables)")
+	// per-shard fan-out. Default 1 GiB keeps repeated multipart range reads
+	// resident in 4-node cluster runs without the RSS jump seen at 2 GiB.
+	// Set 0 to disable when running --measure-read-amp baselines.
+	serveCmd.Flags().Int64("shard-cache-size", 1024*1024*1024, "EC shard cache capacity in bytes (0 disables)")
 	// Phase 16 Week 5 Slice 2 — HealReceipt API + gossip.
 	serveCmd.Flags().Bool("heal-receipt-enabled", true, "enable HealReceipt audit API (Phase 16 Slice 2)")
 	serveCmd.Flags().String("heal-receipt-psk", "", "PSK for HealReceipt HMAC-SHA256 signing (defaults to --cluster-key in cluster mode)")
