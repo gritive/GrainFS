@@ -36,6 +36,11 @@ type e2eClusterOptions struct {
 	DisableNFS    bool
 	DisableNBD    bool
 	EnablePprof   bool
+	// NoBootstrap when true skips the bootstrapAdminViaUDSAnyResult call so
+	// the cluster starts with an empty IAM store. Only supported in
+	// ClusterModeDynamicJoin. bootstrap-test runners use this to drive the
+	// first-SA creation themselves.
+	NoBootstrap bool
 	// ExtraArgs is appended verbatim to every node's `grainfs serve` cmdline.
 	// Use for per-test flag tweaks (e.g. `--vlog-warn-ratio=0.001`,
 	// `--badger-gc-disable=true`) so the harness stays generic.
@@ -59,6 +64,7 @@ type e2eCluster struct {
 	secretKey     string
 	saID          string
 	wildcardAdmin bool
+	noBootstrap   bool
 	logPrefix     string
 	scrubInterval string
 	extraArgs     []string
@@ -166,6 +172,7 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 		encKeyFile:    makeSharedEncryptionKeyFile(t),
 		accessKey:     opts.AccessKey,
 		secretKey:     opts.SecretKey,
+		noBootstrap:   opts.NoBootstrap,
 		logPrefix:     opts.LogPrefix,
 		scrubInterval: opts.ScrubInterval,
 		extraArgs:     append([]string(nil), opts.ExtraArgs...),
@@ -237,10 +244,14 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 	// Bootstrap admin SA on the seed node before any followers join.
 	// Node 0 is the leader at this point in dynamic-join mode, so the
 	// /v1/iam/sa propose succeeds against its admin UDS.
-	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs[:1], 30*time.Second)
-	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
-	c.saID = admin.SAID
-	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
+	// When NoBootstrap is set the IAM store is left empty; the caller is
+	// responsible for driving the first SA creation via the admin UDS.
+	if !c.noBootstrap {
+		admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs[:1], 30*time.Second)
+		c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
+		c.saID = admin.SAID
+		c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
+	}
 
 	// Followers: write .join-pending before starting so they boot directly in
 	// join mode without a separate restart step.
@@ -261,6 +272,10 @@ func (c *e2eCluster) startDynamicJoin() (*e2eCluster, error) {
 }
 
 func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
+	if c.noBootstrap {
+		c.Stop()
+		return nil, fmt.Errorf("NoBootstrap is not supported with ClusterModeStaticPeers: leader detection requires admin creds")
+	}
 	// Bootstrap node 0 as the seed leader.
 	c.procs[0] = c.startNode(c.t, 0)
 	if err := waitForPortsParallelErrWithProcesses(c.httpPorts[:1], c.procs[:1], 60*time.Second); err != nil {
