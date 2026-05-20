@@ -43,6 +43,9 @@ func PutPolicy(ctx context.Context, d *Deps, name string, docJSON []byte) error 
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
 	}
+	if name == "" {
+		return NewInvalid("name is required")
+	}
 	if builtin.IsBuiltinName(name) {
 		return NewForbidden(fmt.Sprintf("cannot overwrite built-in policy: %q", name))
 	}
@@ -61,6 +64,9 @@ func PutPolicy(ctx context.Context, d *Deps, name string, docJSON []byte) error 
 func GetPolicy(ctx context.Context, d *Deps, name string) ([]byte, error) {
 	if d.IAMPolicy == nil {
 		return nil, NewInternal("iam policy admin disabled")
+	}
+	if name == "" {
+		return nil, NewInvalid("name is required")
 	}
 	raw, err := d.IAMPolicy.PolicyDoc(ctx, name)
 	if err != nil {
@@ -84,6 +90,9 @@ func ListPolicies(ctx context.Context, d *Deps) ([]string, error) {
 func DeletePolicy(ctx context.Context, d *Deps, name string) error {
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
+	}
+	if name == "" {
+		return NewInvalid("name is required")
 	}
 	if builtin.IsBuiltinName(name) {
 		return NewForbidden(fmt.Sprintf("cannot delete built-in policy: %q", name))

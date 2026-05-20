@@ -14,6 +14,9 @@ func CreateGroup(ctx context.Context, d *Deps, name string) error {
 	if d.IAMGroup == nil {
 		return NewInternal("iam group admin disabled")
 	}
+	if name == "" {
+		return NewInvalid("name is required")
+	}
 	payload, err := cluster.EncodeGroupPutPayload(name, []string{})
 	if err != nil {
 		return err
@@ -25,6 +28,9 @@ func CreateGroup(ctx context.Context, d *Deps, name string) error {
 func DeleteGroup(ctx context.Context, d *Deps, name string) error {
 	if d.IAMGroup == nil {
 		return NewInternal("iam group admin disabled")
+	}
+	if name == "" {
+		return NewInvalid("name is required")
 	}
 	payload, err := cluster.EncodeGroupDeletePayload(name)
 	if err != nil {
