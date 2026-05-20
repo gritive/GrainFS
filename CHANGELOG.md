@@ -1,8 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### refactor(cmd): move bucket commands to internal/bucketadmin
+## [0.0.282.0] - 2026-05-20 - refactor(cmd): move bucket commands to internal/bucketadmin
 
 Continuation of the cmd thin-runner refactor (step 2/7). All four
 `cmd/grainfs/bucket*.go` files shrunk to thin runners over the new
