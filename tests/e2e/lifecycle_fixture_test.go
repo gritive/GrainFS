@@ -67,6 +67,21 @@ func (f *lifecycleFixture) AdvanceLifecycleClock(d time.Duration) {
 	}
 }
 
+// ResetClock returns the fixture's clock to real-time now and pushes that value
+// to the server-side lifecycle worker on every captured node. Use in per-spec
+// setup when a shared fixture is reused across specs (Ordered Container +
+// BeforeAll pattern) to avoid cumulative clock drift polluting later specs.
+func (f *lifecycleFixture) ResetClock() {
+	f.t.Helper()
+	f.now = time.Now()
+	f.startSet = true
+	payload, err := json.Marshal(map[string]int64{"unix_nano": f.now.UnixNano()})
+	require.NoError(f.t, err)
+	for _, url := range f.urls {
+		f.postSigned(url+routePathLifecycleTestSetNow, payload)
+	}
+}
+
 // RunLifecycleCycle synchronously runs one object-side + MPU cycle on every
 // captured node. Followers without a leader-side worker no-op naturally
 // (Service.RunCycleForTest is nil-safe on the worker handle).

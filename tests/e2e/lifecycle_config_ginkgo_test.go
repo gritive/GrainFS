@@ -20,32 +20,38 @@ func TestLifecycleConfigGinkgo(t *testing.T) {
 }
 
 var _ = ginkgo.Describe("Lifecycle config", func() {
-	ginkgo.Context("SingleNode", func() {
-		var tgt s3Target
-		var lc *lifecycleFixture
-		ginkgo.BeforeEach(func() {
-			tgt = newDedicatedSingleNodeS3Target(ginkgo.GinkgoTB(), []string{"--lifecycle-interval=24h"})
-			lc = newLifecycleFixture(ginkgo.GinkgoTB(), tgt)
-		})
-		runLifecycleConfigCases(
-			func() s3Target { return tgt },
-			func() *lifecycleFixture { return lc },
-		)
+	describeLifecycleConfigContext("SingleNode", func(t testing.TB) (s3Target, *lifecycleFixture) {
+		tgt := newDedicatedSingleNodeS3Target(t, []string{"--lifecycle-interval=24h"})
+		return tgt, newLifecycleFixture(t, tgt)
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		var tgt s3Target
-		var lc *lifecycleFixture
-		ginkgo.BeforeEach(func() {
-			tgt = newDedicatedCluster4NodeS3Target(ginkgo.GinkgoTB(), nil)
-			lc = newLifecycleFixture(ginkgo.GinkgoTB(), tgt)
-		})
-		runLifecycleConfigCases(
-			func() s3Target { return tgt },
-			func() *lifecycleFixture { return lc },
-		)
+	describeLifecycleConfigContext("Cluster4Node", func(t testing.TB) (s3Target, *lifecycleFixture) {
+		tgt := newDedicatedCluster4NodeS3Target(t, nil)
+		return tgt, newLifecycleFixture(t, tgt)
 	})
 })
+
+// describeLifecycleConfigContext registers an Ordered Ginkgo Context whose
+// fixture (target + lifecycleFixture) is built once in BeforeAll and shared
+// across all specs. BeforeEach calls lc.ResetClock() so the server-side
+// lifecycle worker clock starts at real-now for each spec, preventing
+// cumulative drift across specs (every prior AdvanceLifecycleClock call
+// would otherwise leak into the next spec's PutObject/expiration window).
+func describeLifecycleConfigContext(name string, factory func(testing.TB) (s3Target, *lifecycleFixture)) {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
+		var tgt s3Target
+		var lc *lifecycleFixture
+		ginkgo.BeforeAll(func() {
+			tgt, lc = factory(ginkgo.GinkgoTB())
+		})
+		ginkgo.BeforeEach(func() {
+			lc.ResetClock()
+		})
+		runLifecycleConfigCases(
+			func() s3Target { return tgt },
+			func() *lifecycleFixture { return lc },
+		)
+	})
+}
 
 // runLifecycleConfigCases registers all It-specs against whichever fixture is
 // set up by the surrounding Context's BeforeEach. Mirrors the t.Run pattern's
