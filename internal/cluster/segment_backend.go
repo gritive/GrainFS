@@ -166,6 +166,8 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 // larger objects route through putObjectChunked. Extracted from the call
 // site so the outer routing decision in putObjectECSpooledWithOptionalModTime
 // is unit-testable without standing up a full DistributedBackend fixture.
+//
+//nolint:unused // exercised by segment_backend_test.go; lint config sets tests:false so test usage is invisible to the linter
 func chunkedPathThresholdMet(spSize int64) bool {
 	return spSize > int64(storage.DefaultChunkSize)
 }
