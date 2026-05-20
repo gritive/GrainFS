@@ -15,9 +15,37 @@ import (
 func makePattern(n int) []byte {
 	out := make([]byte, n)
 	for i := range out {
-		out[i] = byte((i * 31) ^ (i >> 8))
+		out[i] = patternByte(i)
 	}
 	return out
+}
+
+func patternByte(i int) byte {
+	return byte((i * 31) ^ (i >> 8))
+}
+
+type patternReader struct {
+	pos int
+	n   int
+}
+
+func newPatternReader(n int) *patternReader {
+	return &patternReader{n: n}
+}
+
+func (r *patternReader) Read(p []byte) (int, error) {
+	if r.pos >= r.n {
+		return 0, io.EOF
+	}
+	remaining := r.n - r.pos
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	for i := range p {
+		p[i] = patternByte(r.pos + i)
+	}
+	r.pos += len(p)
+	return len(p), nil
 }
 
 func allocBytesPerRunForStorageTest(t testing.TB, runs int, run func() error) uint64 {

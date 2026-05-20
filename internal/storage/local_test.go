@@ -111,8 +111,7 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			b := newTestLocalBackend(t)
-			data := makePattern(tc.size)
-			obj, err := b.PutObject(context.Background(), "test", "key-"+tc.name, bytes.NewReader(data), "application/octet-stream")
+			obj, err := b.PutObject(context.Background(), "test", "key-"+tc.name, newPatternReader(tc.size), "application/octet-stream")
 			if err != nil {
 				t.Fatalf("put: %v", err)
 			}
@@ -126,7 +125,7 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 			if err != nil {
 				t.Fatalf("get: %v", err)
 			}
-			if err := requireReaderEqualBytes(rc, data); err != nil {
+			if err := requireReaderEqualPattern(rc, tc.size); err != nil {
 				rc.Close()
 				t.Fatal(err)
 			}
@@ -152,6 +151,34 @@ func requireReaderEqualBytes(r io.Reader, want []byte) error {
 		if err == io.EOF {
 			if off != len(want) {
 				return fmt.Errorf("round-trip ended early: got %d bytes, want %d", off, len(want))
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func requireReaderEqualPattern(r io.Reader, size int) error {
+	buf := make([]byte, 32*1024)
+	off := 0
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if off+n > size {
+				return fmt.Errorf("round-trip produced too many bytes: got at least %d, want %d", off+n, size)
+			}
+			for i, got := range buf[:n] {
+				if want := patternByte(off + i); got != want {
+					return fmt.Errorf("round-trip differs at offset %d", off+i)
+				}
+			}
+			off += n
+		}
+		if err == io.EOF {
+			if off != size {
+				return fmt.Errorf("round-trip ended early: got %d bytes, want %d", off, size)
 			}
 			return nil
 		}
