@@ -88,7 +88,7 @@ func TestAuditSchemaV2HasSearchFieldsAndDayPartition(t *testing.T) {
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal([]byte(metaJSON), &meta))
 
-	require.Equal(t, float64(23), meta["last-column-id"])
+	require.Equal(t, float64(27), meta["last-column-id"])
 	specs := meta["partition-specs"].([]any)
 	require.Len(t, specs, 1)
 	fields := specs[0].(map[string]any)["fields"].([]any)

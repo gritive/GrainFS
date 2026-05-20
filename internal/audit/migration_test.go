@@ -19,7 +19,7 @@ func TestMigrateMetadataV1ToCurrent(t *testing.T) {
 
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(got, &meta))
-	require.Equal(t, float64(23), meta["last-column-id"])
+	require.Equal(t, float64(27), meta["last-column-id"])
 	require.Equal(t, float64(1000), meta["last-partition-id"])
 	specs := meta["partition-specs"].([]any)
 	require.Len(t, specs, 2)
