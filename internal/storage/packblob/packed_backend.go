@@ -1054,6 +1054,20 @@ func (pb *PackedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.Objec
 	return out, nil
 }
 
+// ScanLocalMultipartUploads delegates to inner via type assertion. MPU
+// metadata is stored by the inner backend (LocalBackend/DistributedBackend),
+// not in the packed blob index.
+func (pb *PackedBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	type scanner interface {
+		ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
+	}
+	sc, ok := pb.inner.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanLocalMultipartUploads(bucket)
+}
+
 // --- Copy operations (Copier interface) ---
 
 // CopyObject performs a metadata-only copy for packed objects.

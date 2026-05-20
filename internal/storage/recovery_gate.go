@@ -135,3 +135,29 @@ func (g *RecoveryWriteGate) ListAllBuckets() ([]SnapshotBucket, error) {
 }
 
 func (g *RecoveryWriteGate) RestoreBuckets([]SnapshotBucket) error { return g.err }
+
+// ScanObjectsGrouped delegates to inner via type assertion so the lifecycle
+// Scrubbable interface is satisfied through the RecoveryWriteGate chain.
+func (g *RecoveryWriteGate) ScanObjectsGrouped(bucket string) (<-chan ObjectKeyGroup, error) {
+	type scanner interface {
+		ScanObjectsGrouped(bucket string) (<-chan ObjectKeyGroup, error)
+	}
+	sc, ok := g.Backend.(scanner)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanObjectsGrouped(bucket)
+}
+
+// ScanLocalMultipartUploads delegates to inner via type assertion so the
+// lifecycle Scrubbable interface is satisfied through the RecoveryWriteGate chain.
+func (g *RecoveryWriteGate) ScanLocalMultipartUploads(bucket string) (<-chan MultipartUploadRecord, error) {
+	type scanner interface {
+		ScanLocalMultipartUploads(bucket string) (<-chan MultipartUploadRecord, error)
+	}
+	sc, ok := g.Backend.(scanner)
+	if !ok {
+		return nil, UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: UnsupportedReasonNoAdapter}
+	}
+	return sc.ScanLocalMultipartUploads(bucket)
+}
