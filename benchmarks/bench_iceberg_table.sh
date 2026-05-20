@@ -11,10 +11,14 @@ BINARY="${BINARY:-./bin/grainfs}"
 BASE_PORT="${BASE_PORT:-$(bench_free_port)}"
 PPROF_PORT="${PPROF_PORT:-$(bench_free_port)}"
 PROFILE="${PROFILE:-0}"
-VUS="${VUS:-${MAX_VUS:-10}}"
 DURATION="${DURATION:-30s}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
 ICEBERG_WARP_COMMAND="${ICEBERG_WARP_COMMAND:-catalog-mixed}"
+if [[ "$ICEBERG_WARP_COMMAND" == "sustained" && -z "${VUS+x}" && -z "${MAX_VUS+x}" ]]; then
+  VUS="1"
+else
+  VUS="${VUS:-${MAX_VUS:-10}}"
+fi
 ICEBERG_CATALOG="${ICEBERG_CATALOG:-warehouse}"
 ICEBERG_BUCKET="${ICEBERG_BUCKET:-grainfs-tables}"
 ICEBERG_BASE_LOCATION="${ICEBERG_BASE_LOCATION:-s3://${ICEBERG_BUCKET}}"
@@ -86,7 +90,7 @@ fi
 bench_wait_cluster_leader "http://127.0.0.1:$BASE_PORT" 120 0.5
 bench_bootstrap_iam_credentials "$BINARY" "$DATA_DIR" "bench-iceberg-table"
 echo "[bench] creating Iceberg warehouse bucket ($ICEBERG_BUCKET)..."
-bench_create_bucket_admin_retry "$BINARY" "$DATA_DIR" "$ICEBERG_BUCKET"
+bench_create_bucket_with_policy_admin_retry "$BINARY" "$DATA_DIR" "$ICEBERG_BUCKET" "$SA_ID" bucket-admin
 
 PPROF_BG_PID=""
 if [[ "$PROFILE" == "1" ]]; then
@@ -143,7 +147,11 @@ case "$ICEBERG_WARP_COMMAND" in
     args+=(--views-per-ns "$ICEBERG_VIEWS_PER_NS")
     ;;
   sustained)
-    args+=(--columns "$ICEBERG_COLUMNS" --properties "$ICEBERG_PROPERTIES")
+    args+=(
+      --columns "$ICEBERG_COLUMNS"
+      --properties "$ICEBERG_PROPERTIES"
+      --rps-limit "${ICEBERG_SUSTAINED_RPS_LIMIT:-1}"
+    )
     ;;
   *)
     echo "[error] unsupported ICEBERG_WARP_COMMAND: $ICEBERG_WARP_COMMAND" >&2

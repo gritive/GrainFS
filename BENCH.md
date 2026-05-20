@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 17:11 KST
+Updated: 2026-05-20 17:16 KST
 
 ## Goal
 
@@ -71,6 +71,7 @@ Updated: 2026-05-20 17:11 KST
 | catalog-read |    53526.85 |        1.3ms |       82.2ms |      0 | after removing unsupported single-node `--catalog-prop` flags; artifact `benchmarks/profiles/iceberg-single-catalog-read-after-catalog-prop-fix-20260520-170702` |
 | catalog-commits |  9563.81 |        1.8ms |       42.1ms |      0 | with 200 tables to avoid expected optimistic-concurrency collisions; artifact `benchmarks/profiles/iceberg-single-catalog-commits-200tables-20260520-170932` |
 | catalog-mixed |   60767.74 |        0.9ms |       97.0ms |      0 | initial measurement; artifact `benchmarks/profiles/iceberg-single-catalog-mixed-initial-20260520-171102` |
+| sustained    |        1.00 |       11.6ms |       17.6ms |      0 | controlled 1 rps commit workload; artifact `benchmarks/profiles/iceberg-single-sustained-rps1-20260520-171508` |
 
 ## GrainFS Optimization Notes
 
@@ -102,11 +103,12 @@ Updated: 2026-05-20 17:11 KST
 - `iceberg catalog-read` initial run failed before reaching GrainFS because the single-node benchmark script still passed `--catalog-prop`, which warp 1.5.0 no longer supports. The cluster Iceberg script had already removed those flags, so the single-node script was aligned with it. After the script fix, catalog-read completed with 0 errors at 53526.85 total ops/s.
 - `iceberg catalog-commits` initial run with 4 tables reached 8792.81 ops/s but produced 13 spec-compliant 409 optimistic-concurrency conflicts. Matching the cluster script's collision-avoidance setup with 200 tables removed the conflicts and measured 9563.81 ops/s. The single-node script now defaults catalog-commits to 200 tables unless explicitly overridden.
 - `iceberg catalog-mixed` initial measurement completed with 0 errors at 60767.74 total ops/s.
+- `iceberg sustained` first run failed to prepare because the benchmark SA lacked S3 write permission on the warehouse bucket; the single-node script now attaches `bucket-admin` like the cluster script. Uncontrolled sustained RPS then produced expected optimistic-concurrency conflicts and local FD pressure. Since warp documents sustained as a controlled-RPS workload, the single-node script now defaults sustained to `VUS=1` and `--rps-limit=1`; that run completed with 0 errors at 1.00 ops/s and p99 11.6ms.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
-- Continue with Iceberg warp target: `sustained`.
+- Current pass has measured all requested S3 and Iceberg single-node targets; next step is final review before promoting results into `docs/reference/benchmarks.md` and README once baselines/results are accepted.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
