@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 17:07 KST
+Updated: 2026-05-20 17:10 KST
 
 ## Goal
 
@@ -69,6 +69,7 @@ Updated: 2026-05-20 17:07 KST
 | op           | total ops/s | p99 latency | max latency | errors | notes |
 | ------------ | ----------: | ----------: | ----------: | -----: | ----- |
 | catalog-read |    53526.85 |        1.3ms |       82.2ms |      0 | after removing unsupported single-node `--catalog-prop` flags; artifact `benchmarks/profiles/iceberg-single-catalog-read-after-catalog-prop-fix-20260520-170702` |
+| catalog-commits |  9563.81 |        1.8ms |       42.1ms |      0 | with 200 tables to avoid expected optimistic-concurrency collisions; artifact `benchmarks/profiles/iceberg-single-catalog-commits-200tables-20260520-170932` |
 
 ## GrainFS Optimization Notes
 
@@ -98,11 +99,12 @@ Updated: 2026-05-20 17:07 KST
 - `multipart-put` initial measurement: 311.07 MiB/s and 376.03 MiB RSS failed the MinIO/RustFS throughput gate. A pprof run showed throughput can exceed the gate, but heap/inuse was dominated by `SegmentWriter.chunkLoop` during multipart complete: concurrent completes each held 16 MiB chunk buffers, producing multi-GiB RSS. Architecture fix: keep normal chunked PUT unchanged, but for chunked multipart complete cap chunks at 8 MiB, run one segment worker per complete, and bound concurrent chunked multipart completes with a lightweight buffered-channel semaphore. Limit 16 was memory-safe but too slow (480.08 MiB/s); limit 32 was fast but too high RSS; final limit 24 with 8 MiB chunks measured 804.95 MiB/s and 879.59 MiB RSS. TDD: `TestChunkedMultipartCompleteChunkSizeCapsDefault`, `TestAcquireChunkedMultipartCompleteSlotHonorsContext`, and `TestSegmentWriter_CustomWorkersBoundsConcurrentWrites`.
 - `append` initial measurement: GrainFS completed with 0 errors at 78.39 MiB/s and 1254.28 obj/s, RSS 326.50 MiB. MinIO and RustFS append baselines both returned high error counts, so they are invalid correctness baselines for throughput comparison.
 - `iceberg catalog-read` initial run failed before reaching GrainFS because the single-node benchmark script still passed `--catalog-prop`, which warp 1.5.0 no longer supports. The cluster Iceberg script had already removed those flags, so the single-node script was aligned with it. After the script fix, catalog-read completed with 0 errors at 53526.85 total ops/s.
+- `iceberg catalog-commits` initial run with 4 tables reached 8792.81 ops/s but produced 13 spec-compliant 409 optimistic-concurrency conflicts. Matching the cluster script's collision-avoidance setup with 200 tables removed the conflicts and measured 9563.81 ops/s. The single-node script now defaults catalog-commits to 200 tables unless explicitly overridden.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
-- Continue with Iceberg warp targets: `catalog-commits`, `catalog-mixed`, `sustained`.
+- Continue with Iceberg warp targets: `catalog-mixed`, `sustained`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
