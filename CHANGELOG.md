@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.299.0] - 2026-05-21
+
+### Changed
+
+- **Refactor**: `cmd/grainfs/serve.go` shrunk to a thin runner (146 LOC, was 213).
+  Runtime assembly (IAM store, s3auth verifier, encryption key, OTel, pprof, preflight,
+  cluster config) now lives in `internal/serveruntime.RunFromOptions(ctx, ServeOptions)`.
+  `cmd/grainfs/serve_config.go` (121 LOC) + `cmd/grainfs/serve_storage.go` (64 LOC) deleted.
+  10 wiring tests relocated to `internal/serveruntime/`. No flag, output, or
+  runtime-behavior change. (cmd thin-runner step 4/7;
+  see docs/superpowers/specs/2026-05-20-cmd-thin-runner-design.md)
+
 ## [0.0.298.0] - 2026-05-21
 
 ### Fixed
