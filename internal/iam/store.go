@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,13 +177,7 @@ func (s *Store) ListKeysForSA(saID string) []*AccessKey {
 		}
 	}
 	// Sort oldest-first so callers that pick [0] get the oldest key deterministically.
-	for i := 0; i < len(out)-1; i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[i].CreatedAt.After(out[j].CreatedAt) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	if out == nil {
 		out = []*AccessKey{}
 	}
