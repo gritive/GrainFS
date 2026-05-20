@@ -1,0 +1,20 @@
+Manage NFSv4 export registrations
+
+Usage:
+  grainfs nfs export [command]
+
+Available Commands:
+  add         Register a bucket as an NFSv4 export
+  list        List NFSv4 exports
+  remove      Unregister an NFSv4 export
+  update      Update an NFSv4 export
+
+Flags:
+  -h, --help   help for export
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --log-level string   log level: debug, info, warn, error (default "info")
+      --timeout duration   admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)
+
+Use "grainfs nfs export [command] --help" for more information about a command.

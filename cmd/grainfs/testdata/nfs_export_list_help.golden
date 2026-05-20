@@ -1,0 +1,13 @@
+List NFSv4 exports
+
+Usage:
+  grainfs nfs export list [flags]
+
+Flags:
+  -h, --help   help for list
+      --json   emit machine-readable JSON output
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --log-level string   log level: debug, info, warn, error (default "info")
+      --timeout duration   admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)

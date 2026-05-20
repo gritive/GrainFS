@@ -44,3 +44,8 @@ type RemoveExportOptions struct {
 type ListExportOptions struct {
 	BaseOptions
 }
+
+type DebugExportOptions struct {
+	BaseOptions
+	Bucket string
+}
