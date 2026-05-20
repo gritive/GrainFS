@@ -6,7 +6,7 @@ import (
 	"github.com/gritive/GrainFS/internal/bucketadmin"
 )
 
-var bucketVersioningParentCmd = &cobra.Command{
+var bucketVersioningCmd = &cobra.Command{
 	Use:   "versioning",
 	Short: "Manage bucket versioning state",
 }
@@ -61,10 +61,10 @@ var bucketVersioningSuspendCmd = &cobra.Command{
 }
 
 func init() {
-	bucketVersioningParentCmd.AddCommand(
+	bucketVersioningCmd.AddCommand(
 		bucketVersioningGetCmd,
 		bucketVersioningEnableCmd,
 		bucketVersioningSuspendCmd,
 	)
-	bucketCmd.AddCommand(bucketVersioningParentCmd)
+	bucketCmd.AddCommand(bucketVersioningCmd)
 }

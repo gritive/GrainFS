@@ -6,7 +6,7 @@ import (
 	"github.com/gritive/GrainFS/internal/bucketadmin"
 )
 
-var bucketUpstreamCmdVar = &cobra.Command{
+var bucketUpstreamCmd = &cobra.Command{
 	Use:   "upstream",
 	Short: "Manage per-bucket pull-through upstream credentials",
 }
@@ -106,11 +106,11 @@ func init() {
 	bucketUpstreamPutCmd.Flags().String("remote-bucket", "",
 		"upstream bucket name on the remote (defaults to the local bucket name)")
 
-	bucketUpstreamCmdVar.AddCommand(
+	bucketUpstreamCmd.AddCommand(
 		bucketUpstreamPutCmd,
 		bucketUpstreamGetCmd,
 		bucketUpstreamListCmd,
 		bucketUpstreamDeleteCmd,
 	)
-	bucketCmd.AddCommand(bucketUpstreamCmdVar)
+	bucketCmd.AddCommand(bucketUpstreamCmd)
 }

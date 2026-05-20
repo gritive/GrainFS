@@ -10,7 +10,7 @@ import (
 	"github.com/gritive/GrainFS/internal/bucketadmin"
 )
 
-var bucketPolicyParentCmd = &cobra.Command{
+var bucketPolicyCmd = &cobra.Command{
 	Use:   "policy",
 	Short: "Manage bucket policies",
 }
@@ -89,10 +89,10 @@ func readPolicyArg(arg string, stdin io.Reader) ([]byte, error) {
 }
 
 func init() {
-	bucketPolicyParentCmd.AddCommand(
+	bucketPolicyCmd.AddCommand(
 		bucketPolicyGetCmd,
 		bucketPolicySetCmd,
 		bucketPolicyDeleteCmd,
 	)
-	bucketCmd.AddCommand(bucketPolicyParentCmd)
+	bucketCmd.AddCommand(bucketPolicyCmd)
 }
