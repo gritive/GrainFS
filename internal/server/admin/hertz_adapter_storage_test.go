@@ -125,13 +125,13 @@ func newUIRouteTestServer(t *testing.T) (*server.Hertz, string, func()) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	h := server.New(server.WithListener(ln), server.WithHostPorts(""))
+	h := server.New(server.WithListener(ln), server.WithHostPorts(""), server.WithExitWaitTime(10*time.Millisecond))
 	start := func() {
 		t.Helper()
 		go h.Spin() //nolint:errcheck
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		_ = h.Shutdown(ctx)
 	})

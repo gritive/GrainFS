@@ -43,20 +43,16 @@ func TestMigrationExecutor_PendingTTL(t *testing.T) {
 	assert.False(t, e.hasPending(id), "sweep must remove expired entry")
 }
 
-// TestMigrationExecutor_TTLDuringPhase3: sweep fires after Phase 2 (proposedAt set)
-// but before Raft commit → must NOT cancel on first sweep, must cancel after extension.
-// Option A: 1 extension of TTL duration, then cancel.
-// Timeline (TTL=10ms, sweep=5ms):
-//
-//	t=0:    register + markProposed (deadline = t+10ms)
-//	t=5:    sweep1 — not expired → skip
-//	t=10:   sweep2 — expired, proposedAt!=0 → extend to ~20ms
-//	t=15:   sweep3 — not expired (deadline=20ms) → skip  ← check1 here
-//	t=20:   sweep4 — extended deadline expired, extended=true → CANCEL ← check2 after this
+// TestMigrationExecutor_TTLDuringPhase3: sweep after Phase 2 (proposedAt set)
+// must extend the deadline once, then cancel after the extended deadline expires.
 func TestMigrationExecutor_TTLDuringPhase3(t *testing.T) {
-	ttl := 10 * time.Millisecond
-	e, cancel := makeTTLExecutor(ttl)
-	defer cancel()
+	ttl := 5 * time.Millisecond
+	e := NewMigrationExecutorWithTTL(
+		&noopMover{},
+		&noopRaft{nodeID: "self"},
+		2,
+		ttl,
+	)
 	defer e.Stop()
 
 	id := "bucket/key/"
@@ -66,13 +62,16 @@ func TestMigrationExecutor_TTLDuringPhase3(t *testing.T) {
 	// Simulate Phase 2: mark proposedAt immediately
 	e.markProposed(id)
 
-	time.Sleep(ttl + ttl/2)
+	time.Sleep(ttl + time.Millisecond)
+	e.sweepExpired()
 	require.NoError(t, entryCtx.Err(), "sweep must NOT cancel entry immediately after proposedAt extension")
 	assert.True(t, e.hasPending(id), "entry must still exist after first sweep with proposedAt")
 
+	time.Sleep(ttl + time.Millisecond)
+	e.sweepExpired()
 	require.Eventually(t, func() bool {
-		return entryCtx.Err() == context.Canceled
-	}, 100*time.Millisecond, time.Millisecond, "sweep must eventually cancel after extension")
+		return entryCtx.Err() == context.Canceled && !e.hasPending(id)
+	}, 50*time.Millisecond, time.Millisecond, "sweep must eventually cancel after extension")
 	assert.ErrorIs(t, entryCtx.Err(), context.Canceled, "sweep must eventually cancel after extension")
 }
 

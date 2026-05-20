@@ -49,11 +49,12 @@ func startCutoverRouteTestServer(t *testing.T, iamSvc admin.IAMService) *http.Cl
 		server.WithListener(ln),
 		server.WithTransport(standard.NewTransporter),
 		server.WithHostPorts(""),
+		server.WithExitWaitTime(10*time.Millisecond),
 	)
 	admin.RegisterIAMOnly(h, &admin.Deps{IAM: iamSvc})
 	go h.Spin() //nolint:errcheck
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		_ = h.Shutdown(ctx)
 	})

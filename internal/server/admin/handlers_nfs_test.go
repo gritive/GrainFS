@@ -104,7 +104,11 @@ func startAdminNfsHTTP(t *testing.T) (*http.Client, string) {
 	deps, _ := newAdminTestDepsWithNfs(t)
 	srv, err := admin.Start(admin.Config{SocketPath: sock, Deps: deps})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_ = srv.Stop(ctx)
+	})
 	return unixHTTPClient(sock), "http://unix"
 }
 

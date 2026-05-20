@@ -1,7 +1,6 @@
 package volume
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -33,11 +32,10 @@ func TestBlockCache_RealVsSimulator(t *testing.T) {
 	if _, err := mgr.Create("bc", int64(blocks)*int64(DefaultBlockSize)); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	for i := 0; i < blocks; i++ {
-		payload := []byte(fmt.Sprintf("bc-%05d", i))
-		if _, err := mgr.WriteAt("bc", payload, int64(i)*int64(DefaultBlockSize)); err != nil {
-			t.Fatalf("write %d: %v", i, err)
-		}
+	payload := make([]byte, blocks*DefaultBlockSize)
+	copy(payload, []byte("bc-block"))
+	if _, err := mgr.WriteAt("bc", payload, 0); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 
 	buf := make([]byte, DefaultBlockSize)

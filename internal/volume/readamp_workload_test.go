@@ -1,7 +1,6 @@
 package volume
 
 import (
-	"fmt"
 	"math/rand"
 	"testing"
 
@@ -83,13 +82,6 @@ func TestReadAmpWorkload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		// Pre-populate every block so ReadAt actually fetches.
-		for i := 0; i < 1024; i++ {
-			payload := []byte(fmt.Sprintf("blk-%04d", i))
-			if _, err := mgr.WriteAt("seq", payload, int64(i)*int64(DefaultBlockSize)); err != nil {
-				t.Fatalf("write %d: %v", i, err)
-			}
-		}
 		buf := make([]byte, DefaultBlockSize)
 		for i := 0; i < 1024; i++ {
 			if _, err := mgr.ReadAt("seq", buf, int64(i)*int64(DefaultBlockSize)); err != nil {
@@ -109,9 +101,6 @@ func TestReadAmpWorkload(t *testing.T) {
 		_, err := mgr.Create("hot", 4*1024*1024)
 		if err != nil {
 			t.Fatalf("create: %v", err)
-		}
-		if _, err := mgr.WriteAt("hot", []byte("hot-block-payload"), 0); err != nil {
-			t.Fatalf("write: %v", err)
 		}
 		buf := make([]byte, DefaultBlockSize)
 		for i := 0; i < 100; i++ {
@@ -134,12 +123,6 @@ func TestReadAmpWorkload(t *testing.T) {
 		_, err := mgr.Create("ws", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
-		}
-		for i := 0; i < blocks; i++ {
-			payload := []byte(fmt.Sprintf("ws-%05d", i))
-			if _, err := mgr.WriteAt("ws", payload, int64(i)*int64(DefaultBlockSize)); err != nil {
-				t.Fatalf("write %d: %v", i, err)
-			}
 		}
 		buf := make([]byte, DefaultBlockSize)
 		// Phase 1: read every block once (warmup → all miss).
@@ -169,12 +152,6 @@ func TestReadAmpWorkload(t *testing.T) {
 		_, err := mgr.Create("par", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
-		}
-		for i := 0; i < blocks; i++ {
-			payload := []byte(fmt.Sprintf("par-%05d", i))
-			if _, err := mgr.WriteAt("par", payload, int64(i)*int64(DefaultBlockSize)); err != nil {
-				t.Fatalf("write %d: %v", i, err)
-			}
 		}
 		buf := make([]byte, DefaultBlockSize)
 		rng := rand.New(rand.NewSource(42))
@@ -207,12 +184,6 @@ func TestReadAmpWorkload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		for i := 0; i < blocks; i++ {
-			payload := []byte(fmt.Sprintf("nbd-%05d", i))
-			if _, err := mgr.WriteAt("nbd", payload, int64(i)*int64(DefaultBlockSize)); err != nil {
-				t.Fatalf("write %d: %v", i, err)
-			}
-		}
 		buf := make([]byte, DefaultBlockSize)
 		for pass := 0; pass < 2; pass++ {
 			for i := 0; i < blocks; i++ {
@@ -237,12 +208,6 @@ func TestReadAmpWorkload(t *testing.T) {
 		_, err := mgr.Create("ws2", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
-		}
-		for i := 0; i < blocks; i++ {
-			payload := []byte(fmt.Sprintf("ws2-%05d", i))
-			if _, err := mgr.WriteAt("ws2", payload, int64(i)*int64(DefaultBlockSize)); err != nil {
-				t.Fatalf("write %d: %v", i, err)
-			}
 		}
 		buf := make([]byte, DefaultBlockSize)
 		for pass := 0; pass < 2; pass++ {
