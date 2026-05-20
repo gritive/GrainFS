@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.286.0] - 2026-05-20
+
+### Changed
+
+- Reduced `internal/server` and `internal/nfs4server` test logging overhead by
+  discarding routine test logs while preserving tests that capture their own
+  log output.
+- Lowered event-store test heap pressure by keeping the production event queue
+  default unchanged and using a small test-only event queue for event-enabled
+  server fixtures.
+
 ## [0.0.285.0] - 2026-05-20 - fix: Lifecycle Phase 1 followup — R3 PackedBackend scan + R4 ClusterCoordinator multi-group scan
 
 Phase 1 (v0.0.273.0)에서 deferred됐던 e2e sub-tests를 land하기 위해, Phase 2
