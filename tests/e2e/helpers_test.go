@@ -798,7 +798,23 @@ func terminateProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil {
 		return
 	}
-	_ = cmd.Process.Kill()
+	pid := cmd.Process.Pid
+	// If Setpgid was set, pid == pgid; killing the negative pid kills the
+	// entire process group (the grainfs leader and any children it spawned).
+	// Falls back to a plain Kill if syscall.Kill returns ESRCH.
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Kill()
+	} else {
+		// Give it ~500ms to exit cleanly, then escalate.
+		done := make(chan struct{})
+		go func() { _, _ = cmd.Process.Wait(); close(done) }()
+		select {
+		case <-done:
+			return
+		case <-time.After(500 * time.Millisecond):
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
 	_, _ = cmd.Process.Wait()
 }
 
