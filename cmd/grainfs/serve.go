@@ -2,23 +2,12 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	_ "net/http/pprof"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/rs/zerolog/log"
-
-	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/iam"
-	grainotel "github.com/gritive/GrainFS/internal/otel"
-	"github.com/gritive/GrainFS/internal/s3auth"
-	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
@@ -146,74 +135,12 @@ var serveCmd = &cobra.Command{
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	dataDir, _ := cmd.Flags().GetString("data")
-	port, _ := cmd.Flags().GetInt("port")
-
-	if vt, _ := cmd.Flags().GetInt64("badger-value-threshold"); vt > 0 {
-		badgerutil.SetValueThresholdOverride(vt)
-	}
-
-	addr := fmt.Sprintf(":%d", port)
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// IAM Store always exists. Static creds are no longer accepted via flag —
-	// bootstrap goes through admin UDS POST /v1/iam/sa (see docs/operators/runbook.md).
-	iamStore := iam.NewStore()
-	inner := s3auth.NewVerifier(nil)
-	inner.SecretLookup = iam.NewSecretLookup(iamStore)
-	verifier := s3auth.NewCachingVerifier(inner, 4096, 5*time.Minute)
-
-	authOpts := []server.Option{
-		server.WithVerifier(verifier),
-		server.WithIAMStore(iamStore),
-	}
-	// IAM audit logger emits authz allow/deny events via zerolog. Always
-	// wired in production; tests can override or omit by using a different
-	// option set.
-	auditLogger := iam.NewAuditLogger(iam.NewLogAuditEmitter())
-	authOpts = append(authOpts, server.WithIAMAudit(auditLogger))
-
-	raftAddr, _ := cmd.Flags().GetString("raft-addr")
-	encKeyFile, _ := cmd.Flags().GetString("encryption-key-file")
-	shardEncryptor, err := serveruntime.LoadOrCreateEncryptionKey(encKeyFile, dataDir, serveruntime.AllowAutoGenerateEncryptionKey(dataDir, raftAddr))
+	opts, err := serveOptionsFromCmd(cmd)
 	if err != nil {
-		return fmt.Errorf("encryption setup: %w\n  recovery: pass --encryption-key-file=<path> to load an existing key", err)
-	}
-	iamApplier := iam.NewApplier(iamStore, shardEncryptor)
-
-	if pprofPort, _ := cmd.Flags().GetInt("pprof-port"); pprofPort > 0 {
-		runtime.SetMutexProfileFraction(1)
-		runtime.SetBlockProfileRate(1)
-		pprofAddr := fmt.Sprintf("127.0.0.1:%d", pprofPort)
-		go func() {
-			log.Info().Str("addr", pprofAddr).Msg("pprof listening")
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-				log.Warn().Err(err).Msg("pprof server error")
-			}
-		}()
-	}
-
-	otelEndpoint, _ := cmd.Flags().GetString("otel-endpoint")
-	otelSampleRate, _ := cmd.Flags().GetFloat64("otel-sample-rate")
-	otelShutdown, err := grainotel.Init(ctx, otelEndpoint, otelSampleRate)
-	if err != nil {
-		log.Warn().Err(err).Msg("otel: init failed, tracing disabled")
-	} else if otelEndpoint != "" {
-		log.Info().Str("endpoint", otelEndpoint).Float64("sample_rate", otelSampleRate).Msg("otel: tracing enabled")
-		defer func() { _ = otelShutdown(context.Background()) }()
-	}
-
-	if err := server.RunSystemPreflight(server.PreflightConfig{
-		DataDir:  dataDir,
-		HTTPAddr: addr,
-	}); err != nil {
 		return err
 	}
-
-	nodeID, _ := cmd.Flags().GetString("node-id")
-	clusterKey, _ := cmd.Flags().GetString("cluster-key")
-	cfg := buildClusterConfig(cmd, addr, dataDir, nodeID, raftAddr, clusterKey, authOpts, shardEncryptor, iamStore, iamApplier)
-	return serveruntime.Run(ctx, cfg)
+	opts.Version = version
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return serveruntime.RunFromOptions(ctx, opts)
 }

@@ -15,6 +15,11 @@ import (
 // Pre-resolved arguments (addr, dataDir, nodeID, raftAddr, clusterKey,
 // authOpts, encryptor) are still produced by runServe — they sit upstream
 // of cobra (Q9 of the cmd-thin grill).
+//
+// buildClusterConfig is deleted in Task 7 (next commit) when serve_config.go is removed.
+// This commit's cut-over leaves it temporarily unused; Task 7 deletes the file entirely.
+//
+//nolint:unused
 func buildClusterConfig(
 	cmd *cobra.Command,
 	addr, dataDir, nodeID, raftAddr, clusterKey string,

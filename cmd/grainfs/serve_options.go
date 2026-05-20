@@ -12,12 +12,6 @@ import (
 // Version, Stdout, and Stderr are intentionally not populated here —
 // the caller (runServe) sets Version from the cmd-level `version` global,
 // and RunFromOptions fills Stdout/Stderr defaults.
-//
-// Wired into runServe in step 4 / Task 6; covered today by
-// TestServeOptionsFromCmdReadsAllFlags (golangci-lint runs with tests: false,
-// so the unused linter does not see the test call site).
-//
-//nolint:unused
 func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) {
 	opts := serveruntime.ServeOptions{}
 
