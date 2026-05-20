@@ -3,6 +3,63 @@
 BENCH_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCHMARKS_DIR="$(cd "$BENCH_LIB_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$BENCHMARKS_DIR/.." && pwd)"
+BENCH_STRICT_HOST="${BENCH_STRICT_HOST:-0}"
+BENCH_HOST_GRAINFS_SERVE_COUNT=0
+BENCH_HOST_DISK_USED_PCT=""
+BENCH_HOST_PREFLIGHT_FAILURES=0
+
+bench_collect_host_preflight() {
+  local profile_dir="$1"
+  local out="$profile_dir/host-preflight.txt"
+  local disk_line
+  mkdir -p "$profile_dir"
+  BENCH_HOST_GRAINFS_SERVE_COUNT="$(
+    ps -axo command 2>/dev/null \
+      | awk '/grainfs serve/ { count++ } END { print count + 0 }'
+  )"
+  disk_line="$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR == 2 { print $5 }' || true)"
+  BENCH_HOST_DISK_USED_PCT="${disk_line%%%}"
+  BENCH_HOST_PREFLIGHT_FAILURES=0
+  if (( ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
+    BENCH_HOST_PREFLIGHT_FAILURES=1
+  fi
+  if [[ -n "${BENCH_HOST_DISK_USED_PCT:-}" ]] && (( BENCH_HOST_DISK_USED_PCT >= 90 )); then
+    BENCH_HOST_PREFLIGHT_FAILURES=1
+  fi
+  {
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "repo: $REPO_ROOT"
+    echo "disk:"
+    df -h "$REPO_ROOT" 2>/dev/null || true
+    echo
+    echo "load:"
+    uptime 2>/dev/null || true
+    echo
+    echo "preexisting_grainfs_serve_count: ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0}"
+    echo "strict_host: ${BENCH_STRICT_HOST}"
+    echo "preflight_failures: ${BENCH_HOST_PREFLIGHT_FAILURES}"
+    ps -axo pid,ppid,pcpu,rss,etime,command 2>/dev/null | awk '/grainfs serve/ { print }' || true
+  } >"$out"
+}
+
+bench_enforce_strict_host() {
+  local profile_dir="$1"
+  if [[ "$BENCH_STRICT_HOST" == "1" && "${BENCH_HOST_PREFLIGHT_FAILURES:-0}" == "1" ]]; then
+    echo "[error] host preflight failed; see $profile_dir/host-preflight.txt" >&2
+    exit 1
+  fi
+}
+
+bench_print_host_preflight_warnings() {
+  if (( ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
+    echo
+    echo "> Warning: host preflight found ${BENCH_HOST_GRAINFS_SERVE_COUNT} pre-existing \`grainfs serve\` processes. Treat throughput/RSS results as contaminated unless those processes are expected."
+  fi
+  if [[ -n "${BENCH_HOST_DISK_USED_PCT:-}" ]] && (( BENCH_HOST_DISK_USED_PCT >= 90 )); then
+    echo
+    echo "> Warning: host preflight found filesystem usage at ${BENCH_HOST_DISK_USED_PCT}%. Low free disk can skew write-heavy benchmark results."
+  fi
+}
 
 bench_free_port() {
   python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'

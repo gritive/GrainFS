@@ -116,15 +116,47 @@ func TestBenchS3CompatCanFailFastOnDirtyHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(body)
+	common, err := os.ReadFile("lib/common.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonScript := string(common)
 
 	for _, want := range []string{
-		`BENCH_STRICT_HOST`,
-		`HOST_PREFLIGHT_FAILURES=1`,
-		`if [[ "$BENCH_STRICT_HOST" == "1" && "$HOST_PREFLIGHT_FAILURES" == "1" ]]; then`,
-		`exit 1`,
+		`bench_collect_host_preflight "$PROFILE_ROOT"`,
+		`bench_enforce_strict_host "$PROFILE_ROOT"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("bench_s3_compat_compare.sh must support strict dirty-host preflight with %q", want)
+		}
+	}
+	for _, want := range []string{
+		`BENCH_STRICT_HOST`,
+		`BENCH_HOST_PREFLIGHT_FAILURES=1`,
+		`if [[ "$BENCH_STRICT_HOST" == "1" && "${BENCH_HOST_PREFLIGHT_FAILURES:-0}" == "1" ]]; then`,
+		`exit 1`,
+	} {
+		if !strings.Contains(commonScript, want) {
+			t.Fatalf("common.sh must support strict dirty-host preflight with %q", want)
+		}
+	}
+}
+
+func TestIcebergBenchesUseHostPreflight(t *testing.T) {
+	for _, path := range []string{"bench_iceberg_table.sh", "bench_iceberg_table_cluster.sh"} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		script := string(body)
+		for _, want := range []string{
+			`bench_collect_host_preflight "$PROFILE_DIR"`,
+			`bench_enforce_strict_host "$PROFILE_DIR"`,
+			`host-preflight.txt`,
+		} {
+			if !strings.Contains(script, want) {
+				t.Fatalf("%s must use host preflight with %q", path, want)
+			}
 		}
 	}
 }

@@ -39,6 +39,10 @@ ICEBERG_TABLE_UPDATE_DISTRIB="${ICEBERG_TABLE_UPDATE_DISTRIB:-0}"
 ICEBERG_VIEW_UPDATE_DISTRIB="${ICEBERG_VIEW_UPDATE_DISTRIB:-0}"
 WARP_HOST_SELECT="${WARP_HOST_SELECT:-roundrobin}"
 WARP_NOCLEAR="${WARP_NOCLEAR:-1}"
+PROFILE_DIR="${PROFILE_ROOT:-benchmarks/profiles/iceberg-table-warp-$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$PROFILE_DIR"
+bench_collect_host_preflight "$PROFILE_DIR"
+bench_enforce_strict_host "$PROFILE_DIR"
 
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
   echo "[bench] building grainfs..."
@@ -48,7 +52,6 @@ bench_require_binary "$BINARY"
 bench_require_command "$WARP_BIN" "brew install minio/stable/warp"
 
 DATA_DIR=$(mktemp -d "grainfs-iceberg-table-bench-XXXX" -p /tmp)
-PROFILE_DIR="${PROFILE_ROOT:-benchmarks/profiles/iceberg-table-warp-$(date +%Y%m%d-%H%M%S)}"
 PIDS=()
 
 cleanup() {
@@ -182,6 +185,8 @@ fi
   echo "- duration: ${DURATION}"
   echo "- update distribution: ns=${ICEBERG_NS_UPDATE_DISTRIB}, table=${ICEBERG_TABLE_UPDATE_DISTRIB}, view=${ICEBERG_VIEW_UPDATE_DISTRIB}"
   echo "- raw artifacts: ${PROFILE_DIR}"
+  echo "- host preflight: ${PROFILE_DIR}/host-preflight.txt"
+  bench_print_host_preflight_warnings
 } >"$PROFILE_DIR/summary.md"
 
 [[ -n "$PPROF_BG_PID" ]] && wait "$PPROF_BG_PID" 2>/dev/null || true
