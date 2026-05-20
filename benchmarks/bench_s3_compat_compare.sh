@@ -90,6 +90,57 @@ set_start_info() {
   START_MODE="$4"
 }
 
+capture_cluster_status_snapshot() {
+  local target="$1"
+  local label="$2"
+  local base_urls="$3"
+  [[ "$target" == "grainfs-cluster" ]] || return 0
+  [[ -n "$base_urls" ]] || return 0
+
+  local out_dir="$PROFILE_ROOT/$target/cluster-status-$label"
+  local urls=()
+  local idx=1
+  local url
+  mkdir -p "$out_dir"
+  IFS=',' read -r -a urls <<<"$base_urls"
+  for url in "${urls[@]}"; do
+    curl -sf "$url/api/cluster/status" >"$out_dir/node${idx}.json" 2>/dev/null || true
+    idx=$((idx + 1))
+  done
+  python3 - "$out_dir" <<'PY' || true
+import collections
+import glob
+import json
+import os
+import sys
+
+out_dir = sys.argv[1]
+leaders = collections.Counter()
+groups = set()
+for path in sorted(glob.glob(os.path.join(out_dir, "node*.json"))):
+    try:
+        with open(path, encoding="utf-8") as f:
+            status = json.load(f)
+    except Exception:
+        continue
+    for group in status.get("shard_groups") or []:
+        group_id = group.get("id") or ""
+        leader = group.get("leader_id") or ""
+        if group_id:
+            groups.add(group_id)
+        if leader:
+            leaders[leader] += 1
+with open(os.path.join(out_dir, "leaders.tsv"), "w", encoding="utf-8") as f:
+    f.write("leader_id\tgroups\n")
+    for leader, count in sorted(leaders.items()):
+        f.write(f"{leader}\t{count}\n")
+with open(os.path.join(out_dir, "summary.txt"), "w", encoding="utf-8") as f:
+    f.write(f"groups_seen\t{len(groups)}\n")
+    for leader, count in sorted(leaders.items()):
+        f.write(f"leader\t{leader}\t{count}\n")
+PY
+}
+
 cleanup() {
   if [[ "$BACKENDS_STARTED" == "1" ]]; then
     echo "[bench] stopping comparison backends..."
@@ -670,10 +721,12 @@ run_warp_case() {
   if [[ "$WARP_NOCLEAR" == "1" ]]; then
     args+=(--noclear)
   fi
+  capture_cluster_status_snapshot "$target" "$op-before" "$base_url"
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then
     RUN_FAILURES=1
     echo "warp-$op: non-zero exit for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
+  capture_cluster_status_snapshot "$target" "$op-after" "$base_url"
 
   if [[ ! -f "$data_file" ]]; then
     RUN_FAILURES=1
