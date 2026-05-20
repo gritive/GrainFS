@@ -168,3 +168,46 @@ func (c *Client) GroupPolicyDetach(ctx context.Context, group, policy string) er
 		"/v1/iam/group/"+url.PathEscape(group)+"/policy/"+url.PathEscape(policy),
 		nil)
 }
+
+// --- Bucket (iam bucket subtree) ---
+
+// BucketCreate creates a bucket. When both attachSA and attachPolicy are
+// non-empty the server routes through MetaCmd 62 (CreateBucketWithPolicyAttach).
+func (c *Client) BucketCreate(ctx context.Context, name, attachSA, attachPolicy string) error {
+	body := map[string]any{"name": name}
+	if attachSA != "" {
+		body["attach_sa"] = attachSA
+	}
+	if attachPolicy != "" {
+		body["attach_policy"] = attachPolicy
+	}
+	return c.Post(ctx, "/v1/buckets", body, nil)
+}
+
+// BucketDelete removes the named bucket. force=true forces deletion of all objects first.
+func (c *Client) BucketDelete(ctx context.Context, name string, force bool) error {
+	path := "/v1/buckets/" + url.PathEscape(name)
+	if force {
+		path += "?force=true"
+	}
+	return c.Delete(ctx, path, nil)
+}
+
+// BucketList returns all user-facing buckets (__grainfs_* excluded by server).
+func (c *Client) BucketList(ctx context.Context) ([]BucketListItem, error) {
+	var resp struct {
+		Buckets []BucketListItem `json:"buckets"`
+	}
+	err := c.Get(ctx, "/v1/buckets", &resp)
+	return resp.Buckets, err
+}
+
+// BucketPolicyPut sends a raw JSON policy document to the server verbatim.
+func (c *Client) BucketPolicyPut(ctx context.Context, bucket string, policy []byte) error {
+	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", json.RawMessage(policy), nil)
+}
+
+// BucketPolicyDelete removes the bucket policy.
+func (c *Client) BucketPolicyDelete(ctx context.Context, bucket string) error {
+	return c.Delete(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", nil)
+}

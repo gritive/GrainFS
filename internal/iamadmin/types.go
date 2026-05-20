@@ -183,3 +183,39 @@ type GroupPolicyDetachOptions struct {
 	GroupName  string
 	PolicyName string
 }
+
+// --- Bucket (iam bucket subtree) ---
+
+type BucketCreateOptions struct {
+	BaseOptions
+	Name         string
+	AttachSA     string // optional; must be paired with AttachPolicy
+	AttachPolicy string // optional; must be paired with AttachSA
+}
+
+type BucketDeleteOptions struct {
+	BaseOptions
+	Name  string
+	Force bool
+}
+
+type BucketListOptions struct {
+	BaseOptions
+}
+
+type BucketPolicyPutOptions struct {
+	BaseOptions
+	Bucket string
+	Policy []byte // raw JSON; sent verbatim
+}
+
+type BucketPolicyDeleteOptions struct {
+	BaseOptions
+	Bucket string
+}
+
+// BucketListItem is one entry in the bucket list response.
+type BucketListItem struct {
+	Name        string `json:"name"`
+	HasUpstream bool   `json:"has_upstream"`
+}
