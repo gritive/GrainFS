@@ -752,7 +752,7 @@ func (c *ClusterCoordinator) localBackend(groupID string) *GroupBackend {
 // response body bytes after the metadata reply; legacy tests can still use the
 // single-frame read_body fallback.
 func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	target, err := c.routeReadOrBucket(bucket, key, "")
+	target, entry, hasEntry, err := c.routeReadOrBucketWithEntry(bucket, key, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -760,6 +760,11 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 		return nil, nil, err
 	} else if gb != nil {
 		return gb.GetObject(ctx, bucket, key)
+	}
+	if hasEntry {
+		if rc, obj, ok, err := c.getObjectLocalCurrentFollower(ctx, bucket, key, target, entry); ok {
+			return rc, obj, err
+		}
 	}
 	if c.forward == nil {
 		return nil, nil, ErrCoordinatorNoRouter
@@ -845,6 +850,42 @@ func (c *ClusterCoordinator) forwardReadObject(
 		return nil, nil, err
 	}
 	return &forwardReadValidator{rc: body, want: obj.Size}, obj, nil
+}
+
+func (c *ClusterCoordinator) getObjectLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry) (io.ReadCloser, *storage.Object, bool, error) {
+	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
+		return nil, nil, false, nil
+	}
+	dg := c.groups.Get(target.GroupID)
+	if dg == nil || dg.Backend() == nil {
+		return nil, nil, false, nil
+	}
+	gb := dg.Backend()
+	obj, _, err := gb.headObjectMeta(ctx, bucket, key)
+	if err != nil {
+		return nil, nil, false, nil
+	}
+	if !objectMatchesIndexForFollowerRead(obj, entry) {
+		return nil, nil, false, nil
+	}
+
+	var rc io.ReadCloser
+	if entry.VersionID != "" {
+		rc, obj, err = gb.GetObjectVersion(bucket, key, entry.VersionID)
+	} else {
+		rc, obj, err = gb.GetObject(ctx, bucket, key)
+	}
+	if err != nil {
+		if errors.Is(err, ErrObjectQuarantined) || ctx.Err() != nil {
+			return nil, nil, true, err
+		}
+		return nil, nil, false, nil
+	}
+	if !objectMatchesIndexForFollowerRead(obj, entry) {
+		_ = rc.Close()
+		return nil, nil, false, nil
+	}
+	return rc, obj, true, nil
 }
 
 type forwardReadValidator struct {
@@ -1754,6 +1795,12 @@ func objectMatchesIndexForFollowerRead(obj *storage.Object, entry ObjectIndexEnt
 		return false
 	}
 	if obj.Size != entry.Size || obj.ETag != entry.ETag {
+		return false
+	}
+	if entry.ContentType != "" && obj.ContentType != entry.ContentType {
+		return false
+	}
+	if entry.ModTime != 0 && obj.LastModified != entry.ModTime {
 		return false
 	}
 	if entry.VersionID != "" && obj.VersionID != entry.VersionID {
