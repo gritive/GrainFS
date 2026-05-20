@@ -105,7 +105,7 @@ func TestClusterConfigPatch_AuditLog_CarriesPeerUID(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		_ = srv.Stop(ctx)
 	})

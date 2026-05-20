@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.297.0] - 2026-05-21
+
+### Changed
+
+- Trimmed internal test overhead by letting audit tests use small bounded audit
+  rings while preserving the production ring capacity for default emitters.
+- Shortened fixed waits in transport, clusteradmin, and resourcewatch tests after
+  the asserted behavior has already completed, reducing suite wall time without
+  weakening stability coverage.
+
 ## [0.0.296.0] - 2026-05-20 - test(e2e): lifecycle config + Ginkgo v2 PoC
 
 Bucket Lifecycle Config API (`PutBucketLifecycleConfiguration` /

@@ -16,6 +16,15 @@ type Ring struct {
 
 func NewRing() *Ring { return &Ring{ch: make(chan S3Event, ringCap)} }
 
+// NewRingWithCapacity creates a ring with a caller-specified buffer size.
+// Non-positive capacity preserves the production default.
+func NewRingWithCapacity(capacity int) *Ring {
+	if capacity <= 0 {
+		capacity = ringCap
+	}
+	return &Ring{ch: make(chan S3Event, capacity)}
+}
+
 // Put enqueues an event. Drops and increments the counter if the ring is full. Never blocks.
 func (r *Ring) Put(e S3Event) {
 	select {

@@ -12,9 +12,9 @@ import (
 )
 
 func TestRingDropOnOverflow(t *testing.T) {
-	r := audit.NewRing()
+	r := audit.NewRingWithCapacity(2)
 	dropped := 0
-	for i := 0; i < 70000; i++ {
+	for i := 0; i < 3; i++ {
 		before := r.Drops()
 		r.Put(audit.S3Event{Method: "PUT"})
 		if r.Drops() > before {
@@ -26,7 +26,7 @@ func TestRingDropOnOverflow(t *testing.T) {
 }
 
 func TestRingDrainInto(t *testing.T) {
-	r := audit.NewRing()
+	r := audit.NewRingWithCapacity(3)
 	for i := 0; i < 3; i++ {
 		r.Put(audit.S3Event{Status: int32(i)})
 	}
@@ -38,6 +38,16 @@ func TestRingDrainInto(t *testing.T) {
 	}
 	empty := r.DrainInto(buf)
 	require.Empty(t, empty)
+}
+
+func TestRingWithCapacityUsesRequestedBound(t *testing.T) {
+	r := audit.NewRingWithCapacity(2)
+	r.Put(audit.S3Event{Method: "PUT"})
+	r.Put(audit.S3Event{Method: "GET"})
+	r.Put(audit.S3Event{Method: "HEAD"})
+
+	require.Equal(t, 2, r.Len())
+	require.Equal(t, uint64(1), r.Drops())
 }
 
 func BenchmarkAuditEmit(b *testing.B) {

@@ -814,7 +814,7 @@ func TestMixedVersionRejection(t *testing.T) {
 	select {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after CE version mismatch")
-	case <-time.After(time.Second):
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -855,7 +855,7 @@ func TestCapabilityExchangeTimeout(t *testing.T) {
 	defer client.Close()
 	require.NoError(t, client.Listen(ctx, "127.0.0.1:0"))
 
-	callCtx, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
+	callCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	defer cancel()
 
 	_, err = client.GetOrConnectMux(callCtx, serverAddr)
@@ -909,7 +909,7 @@ func TestCapabilityWrongFirstStream(t *testing.T) {
 	select {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after CE stream type rejection")
-	case <-time.After(time.Second):
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -956,7 +956,7 @@ func TestCE_ShortPayload_Rejected(t *testing.T) {
 	select {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after CE payload rejection")
-	case <-time.After(time.Second):
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -1111,7 +1111,7 @@ func TestCE_FeatureBit_Unsupported_Rejected(t *testing.T) {
 	select {
 	case <-handlerCalled:
 		t.Fatal("mux handler should not be called after feature rejection")
-	case <-time.After(time.Second):
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
