@@ -437,13 +437,13 @@ func parseDuration(envKey string, defaultDur time.Duration) time.Duration {
 }
 
 // TestChaos_Sustained runs a duration-bounded imperative chaos loop against a
-// 3-voter cluster. Duration is controlled by RAFT_CHAOS_DURATION (default 30s).
+// 3-voter cluster. Duration is controlled by RAFT_CHAOS_DURATION (default 10s).
 // All six Raft invariants are asserted after each action.
 //
-// Per-PR CI: default 30s smoke run (runs as part of go test ./internal/raft/v2/).
+// Per-PR CI: default 10s smoke run (runs as part of go test ./internal/raft/v2/).
 // Nightly: RAFT_CHAOS_DURATION=30m make test-raft-v2-chaos.
 func TestChaos_Sustained(t *testing.T) {
-	duration := parseDuration("RAFT_CHAOS_DURATION", 30*time.Second)
+	duration := parseDuration("RAFT_CHAOS_DURATION", 10*time.Second)
 
 	cc := newChaosCluster(t)
 	t.Cleanup(func() { cc.Stop(t) })

@@ -71,12 +71,13 @@ func startIAMAdminTestServer(t *testing.T, api *iam.AdminAPI) *http.Client {
 		server.WithListener(ln),
 		server.WithTransport(standard.NewTransporter),
 		server.WithHostPorts(""),
+		server.WithExitWaitTime(10*time.Millisecond),
 	)
 	admin.RegisterIAMOnly(h, &admin.Deps{IAM: api})
 
 	go h.Spin() //nolint:errcheck
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		_ = h.Shutdown(ctx)
 	})

@@ -36,7 +36,7 @@ func TestServer_StartCleansStaleSocketAndChmods0660(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Stop(context.Background())
+	deferStopAdminServer(t, s)
 
 	info, err := os.Stat(sock)
 	if err != nil {
@@ -45,6 +45,15 @@ func TestServer_StartCleansStaleSocketAndChmods0660(t *testing.T) {
 	if mode := info.Mode().Perm(); mode != 0o660 {
 		t.Fatalf("mode = %o, want 0660", mode)
 	}
+}
+
+func deferStopAdminServer(t *testing.T, s *admin.Server) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_ = s.Stop(ctx)
+	})
 }
 
 func TestServer_StartFailsWhenAnotherListenerActive(t *testing.T) {
@@ -117,7 +126,7 @@ func TestServer_ServesListVolumesOverUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Stop(context.Background())
+	deferStopAdminServer(t, s)
 
 	// Wait for listener to be ready.
 	deadline := time.Now().Add(2 * time.Second)
@@ -164,7 +173,7 @@ func TestServer_SnapshotAndCloneRoutesDoNotHitVolumeNameRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Stop(context.Background())
+	deferStopAdminServer(t, s)
 
 	cli, err := volumeadmin.NewClient(sock)
 	if err != nil {
@@ -210,7 +219,7 @@ func TestServer_ExtraRoutesNilSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Stop(context.Background())
+	deferStopAdminServer(t, s)
 
 	// Default route still works.
 	cli := unixHTTPClient(sock)
@@ -245,7 +254,7 @@ func TestServer_ExtraRoutesCalledAfterRegisterAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Stop(context.Background())
+	deferStopAdminServer(t, s)
 
 	if !called {
 		t.Fatal("ExtraRoutes was not invoked")

@@ -51,11 +51,12 @@ func startJoinHandlerTestServer(t *testing.T, h *JoinHandler) *http.Client {
 		hzserver.WithListener(ln),
 		hzserver.WithTransport(standard.NewTransporter),
 		hzserver.WithHostPorts(""),
+		hzserver.WithExitWaitTime(10*time.Millisecond),
 	)
 	srv.POST("/v1/cluster/join", h.Handle)
 	go srv.Spin() //nolint:errcheck
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	})

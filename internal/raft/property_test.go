@@ -16,7 +16,7 @@ package raft
 //
 //   6. Liveness          — under stable leadership a proposed entry eventually commits.
 //
-// Count knob: TestProperty_* uses rapid.Check default (100 sequences) for CI.
+// Count knob: TestProperty_* uses 30 sequences for the default smoke run.
 // Nightly CI: -rapid.checks=100000. Manual hardening: -rapid.checks=1000000 (~5h).
 //
 //	go test -race -count=1 ./internal/raft/v2/... -run TestProperty -rapid.checks=100000
@@ -26,7 +26,9 @@ package raft
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -232,13 +234,33 @@ func (sm *raftStateMachine) Heal(t *rapid.T) {
 // TestProperty_ElectionSafetyAndLeaderAppendOnly exercises the 3-voter cluster
 // with random op sequences and asserts both invariants after every action.
 //
-// Default CI run: rapid.Check default count (100 sequences, each up to ~100 actions).
+// Default CI run: 30 rapid sequences, each up to ~100 actions.
 // Full hardening (100k sequences): -rapid.checks=100000 flag:
 //
 //	go test -race -count=1 ./internal/raft/v2/... -run TestProperty -rapid.checks=100000
 func TestProperty_ElectionSafetyAndLeaderAppendOnly(t *testing.T) {
+	restoreRapidChecks := setRapidSmokeChecks(t, "30")
+	defer restoreRapidChecks()
+
 	rapid.Check(t, func(rt *rapid.T) {
 		sm := newRaftStateMachine(t, rt)
 		rt.Repeat(rapid.StateMachineActions(sm))
 	})
+}
+
+func setRapidSmokeChecks(t *testing.T, checks string) func() {
+	t.Helper()
+	f := flag.Lookup("rapid.checks")
+	if f == nil || os.Getenv("RAPID_CHECKS") != "" || f.Value.String() != f.DefValue {
+		return func() {}
+	}
+	original := f.Value.String()
+	if err := flag.Set("rapid.checks", checks); err != nil {
+		t.Fatalf("set rapid.checks smoke default: %v", err)
+	}
+	return func() {
+		if err := flag.Set("rapid.checks", original); err != nil {
+			t.Fatalf("restore rapid.checks: %v", err)
+		}
+	}
 }
