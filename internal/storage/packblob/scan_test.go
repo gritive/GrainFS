@@ -75,6 +75,41 @@ func TestPackedBackend_ScanObjectsGroupedFusesPackedAndInner(t *testing.T) {
 	require.True(t, keys["big-key"], "above-threshold key must be enumerated via inner delegate")
 }
 
+// TestPackedBackend_ListBucketsFusesPackedAndInner guards against R3:
+// ListBuckets must include both buckets visible in inner and buckets
+// that only appear in the in-memory packed index (e.g. after an index
+// load where the inner bucket was cleaned up out-of-band).
+//
+// Because the public API enforces that every bucket exists in inner
+// (PutObjectWithRequest calls HeadBucket before packing), the "index-only"
+// scenario is simulated by directly injecting an entry into pb.index.
+func TestPackedBackend_ListBucketsFusesPackedAndInner(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	ctx := context.Background()
+
+	// bucket-a: created and written normally → visible in inner
+	require.NoError(t, pb.CreateBucket(ctx, "bucket-a"))
+	bigBody := bytes.Repeat([]byte("x"), 70*1024)
+	_, err := pb.PutObject(ctx, "bucket-a", "k", bytes.NewReader(bigBody), "text/plain")
+	require.NoError(t, err)
+
+	// bucket-c: injected directly into the packed index only (no inner bucket).
+	// This simulates index drift (e.g. LoadIndex after inner cleanup).
+	e := &indexEntry{OriginalSize: 5, ETag: "abc"}
+	e.Refcount.Add(1)
+	pb.index.Store(packedKey{bucket: "bucket-c", key: "k"}, e)
+
+	buckets, err := pb.ListBuckets(ctx)
+	require.NoError(t, err)
+
+	set := make(map[string]bool)
+	for _, b := range buckets {
+		set[b] = true
+	}
+	require.True(t, set["bucket-a"], "inner bucket must appear")
+	require.True(t, set["bucket-c"], "index-only bucket must appear after fuse")
+}
+
 // TestPackedBackend_ScanObjectsGroupedDedupBranchPrefersPacked guards against
 // the case where the same key exists in both the packed index and inner. The
 // packed entry must win and only one group must be emitted (no duplicate).

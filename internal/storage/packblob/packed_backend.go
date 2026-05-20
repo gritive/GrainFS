@@ -316,8 +316,33 @@ func (pb *PackedBackend) ForceDeleteBucket(ctx context.Context, bucket string) e
 	return nil
 }
 
+// ListBuckets fuses inner backend's bucket list with any buckets that only
+// appear in the packed index (e.g. after index drift: LoadIndex loaded entries
+// for a bucket that was cleaned up in the inner backend out-of-band). Only
+// active (Refcount > 0) index entries are considered.
 func (pb *PackedBackend) ListBuckets(ctx context.Context) ([]string, error) {
-	return pb.inner.ListBuckets(ctx)
+	innerBuckets, err := pb.inner.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(innerBuckets))
+	for _, b := range innerBuckets {
+		seen[b] = struct{}{}
+	}
+
+	pb.index.Range(func(k, v any) bool {
+		if v.(*indexEntry).Refcount.Load() <= 0 {
+			return true
+		}
+		bucket := k.(packedKey).bucket
+		if _, ok := seen[bucket]; !ok {
+			seen[bucket] = struct{}{}
+			innerBuckets = append(innerBuckets, bucket)
+		}
+		return true
+	})
+	return innerBuckets, nil
 }
 
 // --- Object operations ---
