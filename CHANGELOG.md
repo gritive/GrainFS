@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.298.0] - 2026-05-21
+
+### Fixed
+
+- Test harness now puts each spawned `grainfs` subprocess in its own process
+  group (`Setpgid`) and `terminateProcess` signals the whole group with a
+  500 ms SIGTERM→SIGKILL escalation, so e2e cleanup reaches any children the
+  server spawned.
+- `make test-e2e` recipe traps INT/TERM/EXIT and `kill 0`s the recipe's
+  process group, preventing orphaned `xargs`/`go test`/`grainfs` subtrees
+  (and their `/tmp/ge-*` data dirs) when the make process is killed.
+
 ## [0.0.297.0] - 2026-05-21
 
 ### Changed
