@@ -88,7 +88,8 @@ func (ls lifecycleSigner) signedLifecycleGet(t testing.TB, baseURL, bucket strin
 // getStatusJSON이 "peers" 2개를 보고할 때 완전히 합류한 것으로 간주.
 func waitClusterSettled(t testing.TB, leaderURL string) {
 	t.Helper()
-	gomega.Eventually(func() bool {
+	g := gomega.NewWithT(t)
+	g.Eventually(func() bool {
 		s := getStatusJSON(t, leaderURL)
 		return len(stringList(s["peers"])) == 2
 	}).WithTimeout(90*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(),
