@@ -15,10 +15,11 @@ import (
 // shows up in production code, not just in the simulator.
 //
 // Sized to keep the working set comfortably under the 64 MB cache while still
-// exercising thousands of real ReadAt calls. Timing the second pass against the
-// first shows the user-visible win without making CI pay for extra metadata I/O.
+// exercising thousands of real ReadAt calls across the two passes. Timing the
+// second pass against the first shows the user-visible win without making CI pay
+// for extra metadata I/O.
 func TestBlockCache_RealVsSimulator(t *testing.T) {
-	const blocks = 2048
+	const blocks = 1024
 	const cap64MB = 64 * 1024 * 1024
 
 	cache := blockcache.New(cap64MB)

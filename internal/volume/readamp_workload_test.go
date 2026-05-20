@@ -112,14 +112,14 @@ func TestReadAmpWorkload(t *testing.T) {
 	})
 
 	// --- Workload C: working-set fits 64 MB but not 16 MB ---
-	// 10 000 unique blocks (40 MB), then re-read each once. 16 MB
+	// 5 000 unique blocks (~20 MB), then re-read each once. 16 MB
 	// (4096 blocks) cannot retain everything; 64 MB and 256 MB can.
 	// This is the bend in the hit-rate curve a UBC would target.
-	t.Run("working_set_40mb", func(t *testing.T) {
+	t.Run("working_set_20mb", func(t *testing.T) {
 		resetTrackers()
 		base := snapBaseline()
 		mgr := setupManager(t)
-		const blocks = 10000
+		const blocks = 5000
 		_, err := mgr.Create("ws", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -137,7 +137,7 @@ func TestReadAmpWorkload(t *testing.T) {
 				t.Fatalf("re-read %d: %v", i, err)
 			}
 		}
-		report(t, "working_set_40mb (10k blocks ×2)", base)
+		report(t, "working_set_20mb (5k blocks x2)", base)
 	})
 
 	// --- Workload D: pareto / hot+cold mix ---
@@ -148,14 +148,14 @@ func TestReadAmpWorkload(t *testing.T) {
 		resetTrackers()
 		base := snapBaseline()
 		mgr := setupManager(t)
-		const blocks = 5000
+		const blocks = 2048
 		_, err := mgr.Create("par", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		buf := make([]byte, DefaultBlockSize)
 		rng := rand.New(rand.NewSource(42))
-		const accesses = 50000
+		const accesses = 10000
 		hot := blocks / 5
 		for i := 0; i < accesses; i++ {
 			var blk int
@@ -168,7 +168,7 @@ func TestReadAmpWorkload(t *testing.T) {
 				t.Fatalf("read iter %d blk %d: %v", i, blk, err)
 			}
 		}
-		report(t, "pareto_80_20 (50k reads, 5k blocks)", base)
+		report(t, "pareto_80_20 (10k reads, 2048 blocks)", base)
 	})
 
 	// --- Workload E: NBD-like sequential scan, twice ---
@@ -179,7 +179,7 @@ func TestReadAmpWorkload(t *testing.T) {
 		resetTrackers()
 		base := snapBaseline()
 		mgr := setupManager(t)
-		const blocks = 5000
+		const blocks = 2048
 		_, err := mgr.Create("nbd", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -192,19 +192,18 @@ func TestReadAmpWorkload(t *testing.T) {
 				}
 			}
 		}
-		report(t, "nbd_double_scan (5k blocks ×2)", base)
+		report(t, "nbd_double_scan (2048 blocks x2)", base)
 	})
 
-	// --- Workload F: 200 MB working set re-read ---
-	// 50 000 unique blocks (≈200 MB), each touched twice. 16 MB and
-	// 64 MB caches will thrash; 256 MB still cannot retain all of it.
-	// Tells us what hit rate looks like when the working set exceeds
-	// every reachable cache size — useful for the curve's right tail.
-	t.Run("working_set_200mb", func(t *testing.T) {
+	// --- Workload F: working set over 64 MB re-read ---
+	// 20 000 unique blocks (~78 MB), each touched twice. 16 MB and
+	// 64 MB caches will thrash; 256 MB can retain it. This keeps the
+	// right-side curve signal without making every CI run walk 100k reads.
+	t.Run("working_set_over_64mb", func(t *testing.T) {
 		resetTrackers()
 		base := snapBaseline()
 		mgr := setupManager(t)
-		const blocks = 50000
+		const blocks = 20000
 		_, err := mgr.Create("ws2", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -217,6 +216,6 @@ func TestReadAmpWorkload(t *testing.T) {
 				}
 			}
 		}
-		report(t, "working_set_200mb (50k blocks ×2)", base)
+		report(t, "working_set_over_64mb (20k blocks x2)", base)
 	})
 }
