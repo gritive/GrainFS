@@ -41,7 +41,7 @@ coverage. Unit-test-only coverage is not enough.
 | POSIX-like behavior | Directories | Partial | Directory markers and nested object prefixes are modeled; full filesystem semantics are not claimed. |
 | POSIX-like behavior | Advisory lock enforcement | Not supported | Lock requests are not a compatibility guarantee for multi-client coordination. |
 | POSIX-like behavior | Hard links | Not supported |  |
-| POSIX-like behavior | Symlinks | Not supported |  |
+| POSIX-like behavior | Symlinks | Partial       | `symlink`, `readlink` 테스트 커버는 지원하나, 일부 동작(예: 링크 탐색 경로 처리/완전한 정책)은 추가 검증 필요 |
 | POSIX-like behavior | Special files and xattrs | Not supported |  |
 
 ## Related

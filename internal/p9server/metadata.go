@@ -13,8 +13,9 @@ import (
 const p9MetaPrefix = "__meta/"
 
 type p9FileMeta struct {
-	Mode  uint32 `json:"mode"`
-	Mtime int64  `json:"mtime_ns"`
+	Mode   uint32 `json:"mode"`
+	Mtime  int64  `json:"mtime_ns"`
+	Target string `json:"target,omitempty"`
 }
 
 func p9MetaSidecarKey(key string) string {
@@ -32,6 +33,9 @@ func isP9ReservedKey(key string) bool {
 func loadP9FileMeta(ctx context.Context, backend storage.Backend, bucket, key string) p9FileMeta {
 	rc, _, err := backend.GetObject(ctx, bucket, p9MetaSidecarKey(key))
 	if err != nil {
+		return p9FileMeta{Mode: 0644}
+	}
+	if rc == nil {
 		return p9FileMeta{Mode: 0644}
 	}
 	defer rc.Close()

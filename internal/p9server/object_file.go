@@ -45,17 +45,31 @@ func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 	if isP9ReservedKey(f.key) {
 		return p9.QID{}, 0, syscall.EPERM
 	}
-	return p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}, 0, nil
+	fileMode := fileModeFromMeta(context.Background(), f.backend, f.bucket, f.key)
+	if fileMode&p9.FileModeMask == p9.ModeSymlink {
+		return p9.QID{}, 0, syscall.EPERM
+	}
+	return p9.QID{Type: qidTypeFromMode(fileMode), Path: qidPath(f.bucket, f.key)}, 0, nil
 }
 
 func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
-	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}
+	fileMode := fileModeFromMeta(context.Background(), f.backend, f.bucket, f.key)
+	qid := p9.QID{Type: qidTypeFromMode(fileMode), Path: qidPath(f.bucket, f.key)}
 	if f.dirtyLoaded {
 		fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
 		valid := p9.AttrMask{Mode: true, Size: true, MTime: true}
+		mtimeSec := uint64(0)
+		mtimeNsec := uint64(0)
+		if fileMeta.Mtime != 0 {
+			mtime := time.Unix(0, fileMeta.Mtime)
+			mtimeSec = uint64(mtime.Unix())
+			mtimeNsec = uint64(mtime.Nanosecond())
+		}
 		attr := p9.Attr{
-			Mode: p9.ModeRegular | p9.FileMode(fileMeta.Mode),
-			Size: uint64(len(f.dirtyData)),
+			Mode:             p9.FileMode(fileMode&0o777) | (fileMode & p9.FileModeMask),
+			Size:             uint64(len(f.dirtyData)),
+			MTimeSeconds:     mtimeSec,
+			MTimeNanoSeconds: mtimeNsec,
 		}
 		return qid, valid, attr, nil
 	}
@@ -74,7 +88,7 @@ func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 	}
 	valid := p9.AttrMask{Mode: true, Size: true, MTime: true}
 	attr := p9.Attr{
-		Mode:             p9.ModeRegular | p9.FileMode(fileMeta.Mode),
+		Mode:             p9.FileMode(fileMode&0o777) | (fileMode & p9.FileModeMask),
 		Size:             uint64(obj.Size),
 		MTimeSeconds:     mtimeSec,
 		MTimeNanoSeconds: mtimeNsec,
@@ -106,9 +120,10 @@ func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
 	}
 
 	meta := loadP9FileMeta(ctx, f.backend, f.bucket, f.key)
+	modeType := meta.Mode & uint32(p9.FileModeMask)
 	changed := false
 	if valid.Permissions {
-		meta.Mode = uint32(attr.Permissions) & 0777
+		meta.Mode = modeType | (uint32(attr.Permissions) & 0o777)
 		changed = true
 	}
 	if valid.MTime {
@@ -128,6 +143,34 @@ func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
 		f.meta = obj
 	}
 	return nil
+}
+
+func (f *objectFile) Readlink() (string, error) {
+	if isP9ReservedKey(f.key) {
+		return "", syscall.EPERM
+	}
+	mode := fileModeFromMeta(context.Background(), f.backend, f.bucket, f.key)
+	if mode&p9.FileModeMask != p9.ModeSymlink {
+		return "", syscall.EINVAL
+	}
+	fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
+	if fileMeta.Target != "" {
+		return fileMeta.Target, nil
+	}
+	if f.dirtyLoaded {
+		return string(f.dirtyData), nil
+	}
+	ctx := context.Background()
+	rc, _, err := f.backend.GetObject(ctx, f.bucket, f.key)
+	if err != nil {
+		return "", syscall.EIO
+	}
+	defer rc.Close()
+	bs, err := io.ReadAll(io.LimitReader(rc, maxFallbackObjectSize+1))
+	if err != nil {
+		return "", syscall.EIO
+	}
+	return string(bs), nil
 }
 
 func (f *objectFile) resize(ctx context.Context, size int64) error {

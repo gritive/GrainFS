@@ -206,7 +206,7 @@ func TestBucketFile_Readdir_HidesSidecarObjects(t *testing.T) {
 	_, err = backend.PutObject(ctx, "bkt", "__meta/visible.txt", strings.NewReader(`{"mode":384}`), "application/json")
 	require.NoError(t, err)
 
-	bf := &bucketFile{backend: backend, bucket: "bkt"}
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
 	dirents, err := bf.Readdir(0, 100)
 	require.NoError(t, err)
 	require.Len(t, dirents, 1)
@@ -216,19 +216,70 @@ func TestBucketFile_Readdir_HidesSidecarObjects(t *testing.T) {
 	require.ErrorIs(t, err, syscall.ENOENT)
 }
 
-func TestBucketFile_Create_CreatesEmptyObjectAndReturnsWritableFile(t *testing.T) {
+func TestBucketFile_Symlink_CreatesSymlinkAndReturnsWalkableLink(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "target.txt", strings.NewReader("target"), "text/plain")
+	require.NoError(t, err)
+
 	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
-	file, qid, _, err := bf.Create("new.txt", p9.WriteOnly, 0640, 0, 0)
+	qid, err := bf.Symlink("target.txt", "link", 0, 0)
 	require.NoError(t, err)
-	require.Equal(t, p9.TypeRegular, qid.Type)
-	_, err = file.(*objectFile).WriteAt([]byte("hello"), 0)
+	require.Equal(t, p9.TypeSymlink, qid.Type)
+	require.Equal(t, []byte("target.txt"), readObjectBytes(t, backend, "bkt", "link"))
+
+	saved := loadP9FileMeta(ctx, backend, "bkt", "link")
+	require.Equal(t, uint32(p9.ModeSymlink|0777), saved.Mode)
+	require.Equal(t, "target.txt", saved.Target)
+
+	_, file, err := bf.Walk([]string{"link"})
 	require.NoError(t, err)
-	require.NoError(t, file.Close())
-	require.Equal(t, []byte("hello"), readObjectBytes(t, backend, "bkt", "new.txt"))
-	require.Equal(t, uint32(0640), loadP9FileMeta(ctx, backend, "bkt", "new.txt").Mode)
+	of := file.(*objectFile)
+	_, _, attr, err := of.GetAttr(p9.AttrMask{Mode: true, Size: true})
+	require.NoError(t, err)
+	require.Equal(t, p9.ModeSymlink|0777, attr.Mode)
+	target, err := of.Readlink()
+	require.NoError(t, err)
+	require.Equal(t, "target.txt", target)
+}
+
+func TestBucketFile_Readdir_ListedAsSymlink(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "target.txt", strings.NewReader("target"), "text/plain")
+	require.NoError(t, err)
+
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+	_, err = bf.Symlink("target.txt", "link", 0, 0)
+	require.NoError(t, err)
+
+	dirents, err := bf.Readdir(0, 100)
+	require.NoError(t, err)
+	seenSymlink := false
+	for _, d := range dirents {
+		if d.Name == "link" {
+			seenSymlink = true
+			require.Equal(t, p9.TypeSymlink, d.Type)
+		}
+	}
+	require.True(t, seenSymlink)
+}
+
+func TestBucketFile_SymlinkedEntry_RemovedFromDirectory(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "gone.txt", strings.NewReader("bye"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, saveP9FileMeta(ctx, backend, "bkt", "gone.txt", p9FileMeta{Mode: 0600}))
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+	require.NoError(t, bf.UnlinkAt("gone.txt", 0))
+	_, err = backend.HeadObject(ctx, "bkt", "gone.txt")
+	require.Error(t, err)
+	_, err = backend.HeadObject(ctx, "bkt", p9MetaSidecarKey("gone.txt"))
+	require.Error(t, err)
 }
 
 func TestBucketFile_Create_ExistingFailsAndPreservesBytes(t *testing.T) {
@@ -343,7 +394,7 @@ func TestBucketFile_ChildCreateSharesParentDirectoryLock(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-func TestBucketFile_UnlinkAt_DeletesFileAndMetadata(t *testing.T) {
+func TestBucketFile_UnlinkAt_DeletesFileAndMetadata_WithMetadata(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
@@ -624,6 +675,43 @@ func TestObjectFile_SetAttr_TruncateAndExtend(t *testing.T) {
 	require.Equal(t, []byte("abc"), readObjectBytes(t, backend, "bkt", "data.bin"))
 	require.NoError(t, of.SetAttr(p9.SetAttrMask{Size: true}, p9.SetAttr{Size: 5}))
 	require.Equal(t, []byte{'a', 'b', 'c', 0, 0}, readObjectBytes(t, backend, "bkt", "data.bin"))
+}
+
+func TestObjectFile_Open_SymlinkReturnsEPERM(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "link", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, saveP9FileMeta(ctx, backend, "bkt", "link", p9FileMeta{Mode: uint32(p9.ModeSymlink | 0777)}))
+	of := &objectFile{backend: backend, locks: newObjectLocks(), bucket: "bkt", key: "link", meta: obj}
+	_, _, err = of.Open(p9.ReadOnly)
+	require.ErrorIs(t, err, syscall.EPERM)
+}
+
+func TestObjectFile_Readlink_ReturnsSymlinkTargetFromMeta(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "link", strings.NewReader("../../target.txt"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, saveP9FileMeta(ctx, backend, "bkt", "link", p9FileMeta{Mode: uint32(p9.ModeSymlink | 0777), Target: "../../target.txt"}))
+	of := &objectFile{backend: backend, locks: newObjectLocks(), bucket: "bkt", key: "link", meta: obj}
+	target, err := of.Readlink()
+	require.NoError(t, err)
+	require.Equal(t, "../../target.txt", target)
+}
+
+func TestObjectFile_Readlink_OnRegularFileReturnsEINVAL(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	obj, err := backend.PutObject(ctx, "bkt", "hello.txt", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+	of := &objectFile{backend: backend, locks: newObjectLocks(), bucket: "bkt", key: "hello.txt", meta: obj}
+	target, err := of.Readlink()
+	require.ErrorIs(t, err, syscall.EINVAL)
+	require.Equal(t, "", target)
 }
 
 func TestObjectFile_ReadAt_FullContent(t *testing.T) {

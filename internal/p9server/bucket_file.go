@@ -41,9 +41,10 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	}
 	if len(names) == 1 {
 		if obj, err := f.backend.HeadObject(context.Background(), f.bucket, key); err == nil {
-			oqid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
+			mode := fileModeFromMeta(context.Background(), f.backend, f.bucket, key)
+			qid := p9.QID{Type: qidTypeFromMode(mode), Path: qidPath(f.bucket, key)}
 			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}
-			return []p9.QID{oqid}, of, nil
+			return []p9.QID{qid}, of, nil
 		}
 	}
 	if !f.hasPrefix(key + "/") {
@@ -164,6 +165,49 @@ func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid
 		return p9.QID{}, syscall.EIO
 	}
 	return p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, key)}, nil
+}
+
+func (f *bucketFile) Symlink(oldName string, newName string, uid p9.UID, gid p9.GID) (p9.QID, error) {
+	_ = uid
+	_ = gid
+	if isP9ReservedName(newName) {
+		return p9.QID{}, syscall.EPERM
+	}
+	key := f.childKey(newName)
+	if isP9ReservedKey(key) {
+		return p9.QID{}, syscall.EPERM
+	}
+	lockKeys := []objectLockKey{{bucket: f.bucket, key: key}}
+	if parentKey, ok := f.parentDirLockKey(); ok {
+		lockKeys = append(lockKeys, parentKey)
+	}
+	unlock := f.locks.lockMany(lockKeys...)
+	defer unlock()
+
+	ctx := context.Background()
+	if _, err := f.backend.HeadObject(ctx, f.bucket, key); err == nil {
+		return p9.QID{}, syscall.EEXIST
+	} else if !errors.Is(err, storage.ErrObjectNotFound) {
+		return p9.QID{}, syscall.EIO
+	}
+	if f.hasPrefix(dirMarkerKey(key)) {
+		return p9.QID{}, syscall.EISDIR
+	}
+	_, err := f.backend.PutObject(ctx, f.bucket, key, strings.NewReader(oldName), "text/plain")
+	if err != nil {
+		return p9.QID{}, syscall.EIO
+	}
+	meta := p9FileMeta{
+		Mode:   uint32(p9.ModeSymlink | 0777),
+		Mtime:  time.Now().UnixNano(),
+		Target: oldName,
+	}
+	if err := saveP9FileMeta(ctx, f.backend, f.bucket, key, meta); err != nil {
+		_ = f.backend.DeleteObject(ctx, f.bucket, key)
+		return p9.QID{}, syscall.EIO
+	}
+	qid := p9.QID{Type: p9.TypeSymlink, Path: qidPath(f.bucket, key)}
+	return qid, nil
 }
 
 func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
@@ -350,7 +394,7 @@ func (f *bucketFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
 		if rest == "" {
 			return nil
 		}
-		name, typ, qidKey := direntForRest(f.prefix, rest)
+		name, typ, qidKey := f.direntForRest(rest)
 		if _, ok := seen[name]; ok {
 			return nil
 		}
@@ -435,12 +479,32 @@ func (f *bucketFile) hasPrefix(prefix string) bool {
 	return found && (err == nil || errors.Is(err, errStopReaddir))
 }
 
-func direntForRest(prefix, rest string) (name string, typ p9.QIDType, qidKey string) {
+func (f *bucketFile) direntForRest(rest string) (name string, typ p9.QIDType, qidKey string) {
 	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
 		name = rest[:slash]
-		return name, p9.TypeDir, prefix + name
+		return name, p9.TypeDir, f.prefix + name
 	}
-	return rest, p9.TypeRegular, prefix + rest
+	mode := fileModeFromMeta(context.Background(), f.backend, f.bucket, f.prefix+rest)
+	return rest, qidTypeFromMode(mode), f.prefix + rest
+}
+
+func fileModeFromMeta(ctx context.Context, backend storage.Backend, bucket, key string) p9.FileMode {
+	mode := p9.FileMode(loadP9FileMeta(ctx, backend, bucket, key).Mode)
+	if mode&^0o777 == 0 {
+		return p9.ModeRegular | (mode & 0o777)
+	}
+	return mode
+}
+
+func qidTypeFromMode(mode p9.FileMode) p9.QIDType {
+	switch mode & p9.FileModeMask {
+	case p9.ModeDirectory:
+		return p9.TypeDir
+	case p9.ModeSymlink:
+		return p9.TypeSymlink
+	default:
+		return p9.TypeRegular
+	}
 }
 
 func direntCap(count uint32) int {
