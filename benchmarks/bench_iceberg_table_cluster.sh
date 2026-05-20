@@ -135,6 +135,8 @@ fi
 bench_bootstrap_iam_credentials "$BINARY" "$BENCH_DIR/n0" "bench-iceberg-cluster"
 
 for i in $(seq 1 $((NODE_COUNT - 1))); do
+  cp "$BENCH_DIR/n0/kek.key" "$BENCH_DIR/n$i/kek.key"
+  chmod 600 "$BENCH_DIR/n$i/kek.key"
   printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"
   chmod 600 "$BENCH_DIR/n$i/.join-pending"
   start_node "$i"

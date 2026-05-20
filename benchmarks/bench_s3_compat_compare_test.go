@@ -371,3 +371,21 @@ func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
 		t.Fatalf("bench_iceberg_table_cluster.sh must create the warehouse bucket with bucket-admin attached to the benchmark SA")
 	}
 }
+
+func TestIcebergClusterBenchCopiesKEKBeforeJoinersStart(t *testing.T) {
+	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	copyKEK := strings.Index(script, `cp "$BENCH_DIR/n0/kek.key" "$BENCH_DIR/n$i/kek.key"`)
+	joinPending := strings.Index(script, `printf '%s' "$(raft_addr 0)" >"$BENCH_DIR/n$i/.join-pending"`)
+	startJoiner := strings.Index(script, `start_node "$i"`)
+	if copyKEK < 0 {
+		t.Fatalf("bench_iceberg_table_cluster.sh must copy n0 kek.key before starting joiners")
+	}
+	if !(copyKEK < joinPending && joinPending < startJoiner) {
+		t.Fatalf("Iceberg cluster joiner KEK copy must happen before join-pending and start_node")
+	}
+}
