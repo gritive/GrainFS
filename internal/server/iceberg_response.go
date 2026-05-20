@@ -77,11 +77,15 @@ func writeIcebergStorageError(c *app.RequestContext, err error) {
 }
 
 func writeIcebergError(c *app.RequestContext, status int, typ, message string) {
-	c.JSON(status, map[string]any{
+	body := map[string]any{
 		"error": map[string]any{
 			"message": message,
 			"type":    typ,
 			"code":    status,
 		},
-	})
+	}
+	if rid := requestIDFromHertz(c); rid != "" {
+		body["request_id"] = rid
+	}
+	c.JSON(status, body)
 }

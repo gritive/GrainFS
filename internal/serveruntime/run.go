@@ -27,6 +27,9 @@ func Run(ctx context.Context, cfg Config) error {
 	defer cancel()
 	state := newBootState(cfg)
 	state.cancel = cancel
+	// §5 T46: default banner sink. Tests using bootstrap.Run override
+	// state.bannerWriter to a buffer before phase dispatch.
+	state.bannerWriter = os.Stdout
 	defer state.Cleanup()
 
 	// PR 2: config + storage open.
@@ -148,6 +151,22 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootSnapshotAndApplyLoop(state); err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
+	// §5 T44: reconcile the trusted-proxy.cidr atomic snapshot once after raft
+	// start. Snapshot Restore (meta_fsm.go:3233) does NOT fire reload hooks,
+	// so if the node booted from a restored snapshot the atomic-snapshot view
+	// used by the iam.anon-enabled reload hook is still "" until this seeds it.
+	// Done here (right after apply-loop start) rather than later so the
+	// hook is correct from the first apply.
+	if state.refreshProxyCIDR != nil && state.cfgStore != nil {
+		v, _ := state.cfgStore.GetString("trusted-proxy.cidr")
+		state.refreshProxyCIDR(v)
+		// §5 T45: same snapshot-Restore-doesn't-fire-hooks problem — seed the
+		// ProxyTrust CIDR set from the restored cfgStore so authoritativeClientIP
+		// is correct from the first request post-Restore.
+		if state.proxyTrust != nil {
+			state.proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
+		}
+	}
 
 	// PR-final: services + shutdown.
 	if err := bootBalancerAndGossip(ctx, state); err != nil {
@@ -163,6 +182,19 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	if err := bootHTTPServerAndAdmin(state); err != nil {
+		return err
+	}
+	// §5 T44: refuse to start with anon-disabled + no TLS cert + no trusted
+	// proxy. Must run AFTER bootHTTPServerAndAdmin (state.cfgStore + state.srv
+	// populated) and BEFORE bootResharderAndDegraded (which goroutines
+	// srv.Run() — the listener actually starts there).
+	if err := bootTLSPostureGate(state); err != nil {
+		return err
+	}
+	// §5 T46: print Phase 0 anonymous-access banner once at startup. Placed
+	// AFTER bootTLSPostureGate so a refused boot does not contradict itself
+	// by also printing the warning.
+	if err := bootPhase0Banner(state); err != nil {
 		return err
 	}
 	if err := bootRecoveryAndScrubber(ctx, state); err != nil {

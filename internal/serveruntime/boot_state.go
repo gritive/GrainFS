@@ -2,6 +2,7 @@ package serveruntime
 
 import (
 	"context"
+	"io"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
@@ -94,6 +95,22 @@ type bootState struct {
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
+	// refreshProxyCIDR re-seeds the trusted-proxy.cidr atomic snapshot used by
+	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
+	// start (so any snapshot Restore has already populated cfgStore).
+	refreshProxyCIDR func(string)
+	// proxyTrust validates Forwarded / X-Forwarded-* headers when the request
+	// arrives from a trusted upstream (trusted-proxy.cidr). Built at raft-phase
+	// wire time so its SetCIDRs is also driven by OnTrustedProxyCIDR. Passed
+	// into server.New via WithProxyTrust. §5 T45.
+	proxyTrust *server.ProxyTrust
+
+	// bannerWriter is the destination for the §5 T46 Phase 0 anonymous-access
+	// banner (startup) and the "s3://default remains public" INFO banner
+	// (anon true→false flip). Set to os.Stdout in production via
+	// newBootState; tests that exercise bootPhase0Banner / the composed
+	// OnAnonEnabledChange hook substitute a *bytes.Buffer.
+	bannerWriter io.Writer
 
 	// Storage runtime (populated by storage phases — bootShardService,
 	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
@@ -179,6 +196,10 @@ type bootState struct {
 
 // newBootState returns an empty state bound to cfg. Caller is responsible for
 // calling Cleanup (typically via defer) once.
+//
+// bannerWriter defaults to os.Stdout — set by Run() before phase dispatch
+// rather than here so the field stays zero-valued in tests that do not opt in
+// to banner emission. See bootPhase0Banner for the consumer.
 func newBootState(cfg Config) *bootState {
 	return &bootState{cfg: cfg}
 }

@@ -64,6 +64,14 @@ func WithBearerConfig(cfg s3auth.ConfigReader) Option {
 	}
 }
 
+// WithProxyTrust wires the trusted-proxy validator used by
+// (*Server).authoritativeClientIP. §5 T45.
+func WithProxyTrust(pt *ProxyTrust) Option {
+	return func(s *Server) {
+		s.proxyTrust = pt
+	}
+}
+
 func WithMutationGate(gate *MutationGate) Option {
 	return func(s *Server) {
 		s.mutationGate = gate

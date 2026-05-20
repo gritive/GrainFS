@@ -3,6 +3,9 @@ package serveruntime
 import (
 	"context"
 	"errors"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -99,6 +102,29 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 		if err := srv.Run(); err != nil {
 			log.Error().Err(err).Str("addr", addr).
 				Msg("http server error — confirm TCP port is free (lsof -i TCP:" + addr + "), or pass --port=0 to pick a free port")
+		}
+	}()
+
+	// §5 T43: SIGHUP → ReloadTLS. Operators rotate certs by writing fresh
+	// PEM files to TLSCertPath/TLSKeyPath and `kill -HUP <grainfs-pid>`.
+	// Lives in its own goroutine on a dedicated channel so it does NOT
+	// race with the SIGINT/SIGTERM signal.NotifyContext path in serve.go.
+	// The channel exits when ctx is done; signal.Stop releases the OS hook.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	go func() {
+		defer signal.Stop(hupCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hupCh:
+				if err := srv.ReloadTLS(); err != nil {
+					log.Warn().Err(err).Msg("SIGHUP: TLS reload failed; previous posture retained")
+				} else {
+					log.Info().Bool("tls_active", srv.TLSActive()).Msg("SIGHUP: TLS reloaded")
+				}
+			}
 		}
 	}()
 	if state.auditSearchWarmup != nil {

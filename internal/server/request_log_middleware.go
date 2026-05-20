@@ -24,7 +24,9 @@ func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 		key := getKey(c)
 		query := string(c.URI().QueryString())
 		op := audit.ClassifyS3Operation(string(c.Method()), key != "", query, toHTTPRequest(c).Header)
-		requestID := string(c.Response.Header.Peek("x-amz-request-id"))
+		// Single source of truth: WithRequestID runs first in installMiddlewares
+		// and always populates the rid in ctx.
+		requestID := RequestIDFromContext(ctx)
 		start := time.Now()
 
 		c.Next(ctx)
@@ -32,9 +34,6 @@ func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 		status := c.Response.StatusCode()
 		if status == 0 {
 			status = http.StatusOK
-		}
-		if requestID == "" {
-			requestID = string(c.Response.Header.Peek("x-amz-request-id"))
 		}
 		latency := time.Since(start)
 		event := log.WithLevel(s3RequestLogLevel(status, latency)).

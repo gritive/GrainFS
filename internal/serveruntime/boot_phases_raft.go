@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -12,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -112,10 +114,50 @@ func bootMetaRaftWiring(state *bootState) error {
 	// cluster-config PATCH to jwt.signing-key-rotate / jwt.signing-key-prune
 	// propagates the MetaCmd to the meta-raft FSM on every node.
 	cfgStore := config.NewStore()
-	config.RegisterClusterKeys(cfgStore, wireJWTReloadHooks(metaRaft, state.dekKeeper))
+	hooks := wireJWTReloadHooks(metaRaft, state.dekKeeper)
+	// §5 T44: refuse runtime flips into an unsafe TLS posture. config.Store.Set
+	// rolls back on hook error, so a `grainfs config set iam.anon-enabled false`
+	// is rejected atomically when no cert + no trusted proxy is configured.
+	// The hook fires under the store's write lock, so it MUST NOT re-query
+	// cfgStore — trusted-proxy.cidr is tracked in an atomic snapshot kept
+	// fresh by a sibling OnTrustedProxyCIDR hook.
+	onAnon, onProxy, refreshProxy := wireTLSPostureHooks("")
+
+	// §5 T45: construct the ProxyTrust validator and wrap onProxy so a single
+	// OnTrustedProxyCIDR firing updates BOTH (a) the TLS-posture atomic
+	// snapshot used by the anon-change hook and (b) the live CIDR set used by
+	// (*Server).authoritativeClientIP. ReloadHooks.OnTrustedProxyCIDR is
+	// single-slot (one func), so we compose at the wire site rather than
+	// touching the hook plumbing.
+	proxyTrust := server.NewProxyTrust(nil)
+	state.proxyTrust = proxyTrust
+	// §5 T46: wrap the posture-check hook so the operator gets a one-shot
+	// "s3://default remains public" INFO banner on a successful true→false
+	// flip. Initial value is the registered default (true) — anon-enabled
+	// has not yet been Set at wire time, so the BoolSpec default is the
+	// correct seed. state.bannerWriter is os.Stdout in production (set in
+	// Run); tests that route through bootstrap.Run can substitute a buffer
+	// before phase dispatch.
+	hooks.OnAnonEnabledChange = composeAnonHookWithBanner(onAnon, true, state.bannerWriter)
+	hooks.OnTrustedProxyCIDR = func(ctx context.Context, v string) error {
+		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
+		return onProxy(ctx, v)
+	}
+	state.refreshProxyCIDR = refreshProxy
+	config.RegisterClusterKeys(cfgStore, hooks)
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
 	return nil
+}
+
+// splitTrustedProxyCIDRSpec splits the comma-separated trusted-proxy.cidr value
+// into entries suitable for ProxyTrust.SetCIDRs. Empty entries are tolerated;
+// ProxyTrust.SetCIDRs additionally trims and silently drops invalid CIDRs.
+func splitTrustedProxyCIDRSpec(v string) []string {
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
 }
 
 func refreshCapabilityGate(state *bootState) {

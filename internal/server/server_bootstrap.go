@@ -8,8 +8,10 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/cloudwego/hertz/pkg/network/standard"
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
+	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -52,8 +54,26 @@ func normalizeServerStorage(ss ServerStorage, policyStore *CompiledPolicyStore) 
 }
 
 func (s *Server) newHertzEngine(addr string) *server.Hertz {
+	// §5 T43: bind via HotTLSListener so SIGHUP can hot-swap TLS certs.
+	// nodeconfig.New is cheap; it just memoizes dataDir. With an empty
+	// dataDir (some construction tests) TLS paths become relative and
+	// don't exist → Reload falls through to plaintext, preserving the
+	// pre-T43 default posture.
+	nc := nodeconfig.New(s.dataDir)
+	tlsLn := NewHotTLSListener(nc, addr)
+	if err := tlsLn.Start(); err != nil {
+		// Partial cert/key or bind failure — fail loud at construction.
+		log.Fatal().Err(err).Str("addr", addr).Msg("HotTLSListener.Start failed")
+	}
+	s.tlsListener = tlsLn
+
 	h := server.Default(
-		server.WithHostPorts(addr),
+		server.WithListener(tlsLn),
+		server.WithTransport(standard.NewTransporter),
+		// Match the admin-server pattern (internal/server/admin/server.go):
+		// when WithListener is set, WithHostPorts must be empty so Hertz
+		// doesn't try to bind a second time.
+		server.WithHostPorts(""),
 		server.WithMaxRequestBodySize(512*1024*1024), // 512MB max body
 		server.WithMaxKeepBodySize(0),
 	)
@@ -62,6 +82,9 @@ func (s *Server) newHertzEngine(addr string) *server.Hertz {
 }
 
 func (s *Server) installMiddlewares(h *server.Hertz) {
+	// WithRequestID must run first so every downstream middleware
+	// (metrics, auth, audit, request_log) sees the same rid in context.
+	h.Use(WithRequestID())
 	h.Use(s.metricsMiddleware())
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())

@@ -1,5 +1,126 @@
 # Changelog
 
+## [0.0.272.0] - 2026-05-20 - feat(server): §5 Server Posture — request-id, TLS hot-swap, posture gate, ProxyTrust, Phase 0 banner
+
+§5 hardens the data-plane HTTP server. Every response now carries a stable
+`X-GrainFS-Request-Id` (UUIDv7, client-supplied id preserved) embedded in S3
+XML and Iceberg JSON error envelopes so operators can correlate failures
+across logs, audit events, and client tracebacks. TLS certs can be installed
+or rotated with a `SIGHUP` against the live process — no restart, no dropped
+connections in flight. Booting with `iam.anon-enabled=false` and no TLS cert
+and no trusted-proxy CIDR is now refused with a three-option remediation
+message instead of silently exposing plaintext credentials. When the server
+sits behind a trusted L7 proxy, `Forwarded` (RFC 7239) and `X-Forwarded-*`
+headers determine the authoritative client IP via configurable CIDR; spoofed
+headers from untrusted sources are ignored, all-trusted-chain rejected. The
+Phase 0 anonymous-access startup banner now prints (and re-prints when an
+operator flips `iam.anon-enabled` off, advising that `s3://default` remains
+open until they install a bucket policy).
+
+### Added
+
+- **`X-GrainFS-Request-Id` middleware** (`internal/server/request_id.go`) —
+  UUIDv7 generate-if-absent, incoming header preserved verbatim, dual-written
+  to `x-amz-request-id` for S3 SDK compatibility. Stored in both
+  `context.Context` (via `RequestIDFromContext`) and Hertz K/V (via
+  `requestIDFromHertz`) so any downstream middleware or error writer can
+  read the rid without ctx plumbing.
+- **Error envelope `request_id` propagation** — S3 XML `<Error>` gains a
+  `<RequestId>` element (S3 wire-format compatible); Iceberg JSON gains a
+  top-level `request_id` field alongside `error`. Both omit when empty.
+- **`HotTLSListener`** (`internal/server/tls_listener.go`) — wraps a TCP
+  listener, accepts plaintext until cert+key exist on disk
+  (`<data>/tls/cert.pem` + `key.pem`, or `GRAINFS_TLS_CERT`/`KEY` env
+  override), then transparently swaps to `tls.Server` wrapping per Accept.
+  `MinVersion: tls.VersionTLS12`. `SIGHUP` triggers `Reload()` to re-read
+  cert/key atomically via `atomic.Pointer[tlsState]`. Partial cert (cert
+  without key, or vice versa) refuses at boot.
+- **TLS posture gate** (`internal/serveruntime/tls_posture.go`) —
+  `enforceTLSPosture(cfg, nc) error` runs as a boot phase
+  (`bootTLSPostureGate`) AFTER cfgStore is populated and BEFORE the listener
+  accepts connections. Refuses startup when `iam.anon-enabled=false` AND no
+  cert on disk AND `trusted-proxy.cidr` is empty, with the three-option
+  remediation message. Also wired into the `iam.anon-enabled` reload hook
+  (anon+proxy only; cert check is cluster-non-deterministic so it stays
+  boot-only).
+- **`ProxyTrust`** (`internal/server/proxy_trust.go`) — RFC 7239 `Forwarded`
+  preferred, `X-Forwarded-Proto`/`X-Forwarded-For` fallback. Trusted CIDRs
+  configured via `trusted-proxy.cidr` config key (hot-reloadable). Algorithm:
+  untrusted remote → return remote (headers ignored); trusted remote +
+  Forwarded `proto=https` → use `for=` IP if not also trusted; trusted
+  remote + XFF → leftmost untrusted IP wins; all-trusted chain rejected.
+  `(*Server).authoritativeClientIP(c)` is the helper consumed by audit
+  events (`audit_envelope_event.go`) and Iceberg bearer auth
+  (`iceberg_authn.go`) — `policy.RequestContext.SourceIP` now reflects the
+  validated client IP.
+- **Phase 0 anonymous banner** (`internal/server/phase0_banner.go`) —
+  emits a `WARN` to stdout at boot when `iam.anon-enabled=true` reminding
+  operators that `s3://default` is reachable by any client and pointing to
+  `grainfs iam sa create` for other buckets. The `iam.anon-enabled`
+  true→false reload hook also emits a one-shot `INFO` reminding that
+  `s3://default` remains public until overridden via
+  `grainfs iam bucket policy put default ...`.
+- **`Server.ReloadTLS()`** / **`Server.TLSActive()`** — programmatic
+  reload + introspection of the data-plane TLS posture (callable from
+  serveruntime).
+
+### Changed
+
+- `audit_middleware.go` reads request id from `RequestIDFromContext(ctx)`
+  instead of generating its own UUIDv4 per request. Single-source-of-truth
+  rid across audit events, response headers, error envelopes, and request
+  logs.
+- `request_log_middleware.go` reads rid solely from context (eliminates the
+  dead response-header peek path).
+- `OnAnonEnabledChange` reload hook is now composed:
+  `wireTLSPostureHooks` → `composeAnonHookWithBanner` so a single Set fires
+  posture re-check, banner-on-flip, atomic snapshot update — atomically and
+  rolled back together on validation failure.
+- `OnTrustedProxyCIDR` reload hook is composed to update both the TLS
+  posture gate's atomic snapshot AND `ProxyTrust.SetCIDRs(...)` in one
+  hook chain.
+- `internal/server/server_bootstrap.go` `newHertzEngine` swapped from
+  `server.WithHostPorts(addr)` to `server.WithListener(HotTLSListener)` +
+  `server.WithTransport(standard.NewTransporter)`. Admin server (UDS,
+  `internal/server/admin/server.go`) is untouched — TLS irrelevant on a
+  Unix socket.
+
+### Fixed
+
+- Iceberg bearer middleware previously used `Forwarded`/`X-Forwarded-For`
+  blindly when computing `policy.RequestContext.SourceIP`, which let any
+  client spoof the source IP for `SourceIPMatchAny` policy conditions.
+  Now goes through `authoritativeClientIP` so headers are only honored from
+  trusted CIDRs.
+
+### Known limitations
+
+- `internal/server/server_bootstrap.go:newHertzEngine` still calls
+  `log.Fatal` on partial-cert errors at boot rather than propagating up
+  through `server.NewWithServerStorage`. Cascading the error signature
+  through many call sites is deferred — the posture gate covers the more
+  common "no cert" case structurally.
+- `MetaFSM.Restore` (runtime `InstallSnapshot` path) bypasses `config.Store`
+  reload hooks, so a lagging follower receiving a snapshot containing
+  `trusted-proxy.cidr=X` will have a stale T44 posture-snapshot atomic
+  until the next `ConfigPut` apply lands. Boot-time Restore is reconciled
+  (`state.refreshProxyCIDR` after `bootSnapshotAndApplyLoop`); runtime
+  Restore is not. Tracked as F25.
+- `composeAnonHookWithBanner` hardcodes `initialAnon=true` at wire time
+  matching today's `iam.anon-enabled` BoolSpec default. If the default
+  flips to `false` in a future hardening, the very first true→false set
+  could fire a spurious "remains public" banner. One-line fix to read the
+  default from the registry. Tracked as F26.
+- T43 TLS hot-swap e2e is SingleNode only; Cluster4Node cert rotation is a
+  separate operational concern.
+- ProxyTrust, on `Authoritative()` returning `(_, false)` (e.g. trusted
+  source + missing `proto=https`), falls back to the raw peer IP rather
+  than rejecting the HTTP request. This keeps audit/policy `SourceIP`
+  non-empty; header-driven 400 rejection is future work.
+- `parseForwarded` handles a single `for=`/`proto=` pair only. Deployments
+  with multi-element `Forwarded` lists should rely on `X-Forwarded-*`
+  fallback.
+
 ## [0.0.271.0] - 2026-05-20 - perf(tests): speed up cluster and server suites
 
 ### Changed

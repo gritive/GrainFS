@@ -145,6 +145,12 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
 	srvOpts = append(srvOpts, server.WithJWTKeySet(metaRaft.FSM().JWTKeySet()))
+	// §5 T45: ProxyTrust is constructed in bootMetaRaftWiring and its CIDRs are
+	// driven by the OnTrustedProxyCIDR reload hook. Pass it to the Server so
+	// authoritativeClientIP can validate Forwarded / X-Forwarded-*.
+	if state.proxyTrust != nil {
+		srvOpts = append(srvOpts, server.WithProxyTrust(state.proxyTrust))
+	}
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
 	// T33: wire the policy authorizer so Layer 1 (iamCheck) evaluates
 	// policy.Evaluate. Both iamPolicyStores and cfgStore are populated by

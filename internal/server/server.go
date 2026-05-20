@@ -147,6 +147,26 @@ func (s *Server) Run() error {
 // dashboard token auth) before Run is called. Must be invoked before Run.
 func (s *Server) HertzEngine() *server.Hertz { return s.hertz }
 
+// ReloadTLS re-reads the TLS cert/key from disk and atomically swaps the
+// active TLS posture on the HotTLSListener. Wired to SIGHUP in cmd/grainfs/
+// serve.go so operators can rotate certs without restart. No-op when the
+// listener is absent (e.g. construction-only test fixtures). §5 T43.
+func (s *Server) ReloadTLS() error {
+	if s.tlsListener == nil {
+		return nil
+	}
+	return s.tlsListener.Reload()
+}
+
+// TLSActive reports the current TLS posture of the data-plane listener.
+// Used by §5 T44 (TLS posture gate) and operational tooling. §5 T43.
+func (s *Server) TLSActive() bool {
+	if s.tlsListener == nil {
+		return false
+	}
+	return s.tlsListener.IsTLS()
+}
+
 // VolumeManager exposes the volume manager so callers can construct admin.Deps
 // without round-tripping through New options.
 func (s *Server) VolumeManager() *volume.Manager { return s.volMgr }
