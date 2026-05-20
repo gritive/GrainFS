@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.290.0] - 2026-05-20
+
+### Changed
+
+- Consolidated duplicated `internal/serveruntime` boot phase population tests
+  into their ordering witnesses, preserving phase assertions while avoiding
+  repeated full boot prerequisite setup.
+
 ## [0.0.289.0] - 2026-05-20
 
 ### Changed
