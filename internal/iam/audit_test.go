@@ -112,6 +112,80 @@ func TestLogAuditEmitter_DoesNotError(t *testing.T) {
 	}
 }
 
+func TestAuditLogger_RecordAllowDetailed_CarriesPolicyMetadata(t *testing.T) {
+	em := &fakeEmitter{}
+	a := NewAuditLogger(em)
+	a.RecordAllowDetailed(context.Background(), "sa-1", "b", "k", s3auth.GetObject, AuditDetails{
+		MatchedPolicyID:  "readonly",
+		MatchedSID:       "AllowGet",
+		AuthzLatencyUS:   42,
+		ConditionContext: map[string]string{"aws:SourceIp": "10.0.0.1"},
+	})
+	got := em.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d events", len(got))
+	}
+	if got[0].Status != AuditStatusAllow {
+		t.Fatalf("status = %v want Allow", got[0].Status)
+	}
+	if got[0].MatchedPolicyID != "readonly" || got[0].MatchedSID != "AllowGet" {
+		t.Fatalf("policy/sid mismatch: %+v", got[0])
+	}
+	if got[0].AuthzLatencyUS != 42 {
+		t.Fatalf("latency = %d want 42", got[0].AuthzLatencyUS)
+	}
+	if got[0].ConditionContext["aws:SourceIp"] != "10.0.0.1" {
+		t.Fatalf("condition context = %v", got[0].ConditionContext)
+	}
+}
+
+func TestAuditLogger_RecordDenyDetailed_CarriesPolicyMetadata(t *testing.T) {
+	em := &fakeEmitter{}
+	a := NewAuditLogger(em)
+	a.RecordDenyDetailed(context.Background(), "sa-2", "b", "k", s3auth.PutObject, "policy_deny", AuditDetails{
+		MatchedPolicyID: "deny-puts",
+		MatchedSID:      "DenyPut",
+		AuthzLatencyUS:  77,
+	})
+	got := em.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d events", len(got))
+	}
+	if got[0].Status != AuditStatusDeny || got[0].Reason != "policy_deny" {
+		t.Fatalf("status/reason mismatch: %+v", got[0])
+	}
+	if got[0].MatchedPolicyID != "deny-puts" || got[0].MatchedSID != "DenyPut" || got[0].AuthzLatencyUS != 77 {
+		t.Fatalf("policy/sid/latency mismatch: %+v", got[0])
+	}
+}
+
+func TestAuditLogger_RecordAnonAllow_StatusAndAnonymousSA(t *testing.T) {
+	em := &fakeEmitter{}
+	a := NewAuditLogger(em)
+	a.RecordAnonAllow(context.Background(), "default", "k", s3auth.GetObject, AuditDetails{
+		AuthzLatencyUS: 9,
+	})
+	got := em.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d events", len(got))
+	}
+	if got[0].Status != AuditStatusAnonAllow {
+		t.Fatalf("status = %v want AnonAllow", got[0].Status)
+	}
+	if got[0].SAID != "(anonymous)" {
+		t.Fatalf("SAID = %q want (anonymous)", got[0].SAID)
+	}
+	if got[0].AuthzLatencyUS != 9 {
+		t.Fatalf("latency = %d", got[0].AuthzLatencyUS)
+	}
+}
+
+func TestAuditStatus_String_AnonAllow(t *testing.T) {
+	if AuditStatusAnonAllow.String() != "anon_allow" {
+		t.Fatalf("AuditStatusAnonAllow.String() = %q", AuditStatusAnonAllow.String())
+	}
+}
+
 func TestLogAuditEmitter_DefaultInfoLevelSuppressesAllowButKeepsDeny(t *testing.T) {
 	var buf bytes.Buffer
 	prev := log.Logger

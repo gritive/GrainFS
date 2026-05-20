@@ -15,6 +15,17 @@ const auditErrReasonKey = "audit.err_reason"
 const auditObjectKeyKey = "audit.object_key"
 const auditBytesOutKey = "audit.bytes_out"
 
+// auditAuthzDecisionKey carries the s3auth.Decision (specifically its Detail
+// and AuthzLatencyUS) emitted by RequestAuthorizer.Decide so the audit
+// envelope finalizer can populate matched_policy_id / matched_sid /
+// authz_latency_us / condition_context_json on the audit.s3 row. T51' §6.
+const auditAuthzDecisionKey = "audit.authz_decision"
+
+// auditAuthzAnonAllowKey is a small specialization that lets the envelope
+// finalizer distinguish anon-allow from authenticated allow without
+// reparsing the policy reason. T51' §6.
+const auditAuthzAnonAllowKey = "audit.authz_anon_allow"
+
 func (s *Server) auditEnvelopeMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		if !s.auditSinkConfigured() {

@@ -41,6 +41,9 @@ func normalizeAuditEvent(ev audit.S3Event) audit.S3Event {
 	ev.UploadID = auditString16(ev.UploadID)
 	ev.CopySourceBucket = auditString16(ev.CopySourceBucket)
 	ev.CopySourceKey = auditString16(ev.CopySourceKey)
+	// T51' §6 policy decision metadata.
+	ev.MatchedPolicyID = auditString16(ev.MatchedPolicyID)
+	ev.MatchedSID = auditString16(ev.MatchedSID)
 	return ev
 }
 

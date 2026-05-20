@@ -24,9 +24,35 @@ type EvalResult struct {
 type EvalInput struct {
 	PrincipalPolicies []*Document
 	ResourcePolicy    *Document
-	Principal         string
-	Ctx               RequestContext
-	AllowAnonBucket   bool
+	// PrincipalPolicyNames runs parallel to PrincipalPolicies and carries the
+	// catalog name of each document so Evaluate can surface MatchedPolicy. May
+	// be nil or shorter than PrincipalPolicies; missing entries yield "".
+	PrincipalPolicyNames []string
+	// ResourcePolicyBucket names the bucket the ResourcePolicy is attached to;
+	// used to label MatchedPolicy ("bucket:<name>") for bucket-policy matches.
+	// May be empty.
+	ResourcePolicyBucket string
+	Principal            string
+	Ctx                  RequestContext
+	AllowAnonBucket      bool
+}
+
+// principalPolicyName returns the catalog name for the i-th principal policy
+// in the slice, or "" when names are unavailable.
+func principalPolicyName(names []string, i int) string {
+	if i < 0 || i >= len(names) {
+		return ""
+	}
+	return names[i]
+}
+
+// bucketPolicyMatchID renders the MatchedPolicy label for a resource-policy
+// match: "bucket:<name>" when bucket is known, "bucket" otherwise.
+func bucketPolicyMatchID(bucket string) string {
+	if bucket == "" {
+		return "bucket"
+	}
+	return "bucket:" + bucket
 }
 
 // Evaluate implements: explicit Deny > explicit Allow > implicit Deny.
@@ -34,7 +60,8 @@ type EvalInput struct {
 func Evaluate(in EvalInput) EvalResult {
 	allowMatch := ""
 	allowSid := ""
-	for _, doc := range in.PrincipalPolicies {
+	allowPolicy := ""
+	for i, doc := range in.PrincipalPolicies {
 		if doc == nil {
 			continue
 		}
@@ -43,7 +70,12 @@ func Evaluate(in EvalInput) EvalResult {
 				continue
 			}
 			if st.matches(in.Ctx) {
-				return EvalResult{Decision: DecisionDeny, MatchedSid: st.Sid, Reason: "explicit Deny on principal policy"}
+				return EvalResult{
+					Decision:      DecisionDeny,
+					MatchedPolicy: principalPolicyName(in.PrincipalPolicyNames, i),
+					MatchedSid:    st.Sid,
+					Reason:        "explicit Deny on principal policy",
+				}
 			}
 		}
 	}
@@ -56,11 +88,16 @@ func Evaluate(in EvalInput) EvalResult {
 				continue
 			}
 			if st.matches(in.Ctx) {
-				return EvalResult{Decision: DecisionDeny, MatchedSid: st.Sid, Reason: "explicit Deny on bucket policy"}
+				return EvalResult{
+					Decision:      DecisionDeny,
+					MatchedPolicy: bucketPolicyMatchID(in.ResourcePolicyBucket),
+					MatchedSid:    st.Sid,
+					Reason:        "explicit Deny on bucket policy",
+				}
 			}
 		}
 	}
-	for _, doc := range in.PrincipalPolicies {
+	for i, doc := range in.PrincipalPolicies {
 		if doc == nil {
 			continue
 		}
@@ -71,6 +108,7 @@ func Evaluate(in EvalInput) EvalResult {
 			if st.matches(in.Ctx) {
 				allowSid = st.Sid
 				allowMatch = "principal policy"
+				allowPolicy = principalPolicyName(in.PrincipalPolicyNames, i)
 			}
 		}
 	}
@@ -85,11 +123,17 @@ func Evaluate(in EvalInput) EvalResult {
 			if st.matches(in.Ctx) {
 				allowSid = st.Sid
 				allowMatch = "bucket policy"
+				allowPolicy = bucketPolicyMatchID(in.ResourcePolicyBucket)
 			}
 		}
 	}
 	if allowMatch != "" {
-		return EvalResult{Decision: DecisionAllow, MatchedSid: allowSid, Reason: "explicit Allow on " + allowMatch}
+		return EvalResult{
+			Decision:      DecisionAllow,
+			MatchedPolicy: allowPolicy,
+			MatchedSid:    allowSid,
+			Reason:        "explicit Allow on " + allowMatch,
+		}
 	}
 	return EvalResult{Decision: DecisionDeny, Reason: "implicit Deny (no statement matched)"}
 }
