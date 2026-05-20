@@ -17,8 +17,8 @@ import (
 )
 
 // Config is the flat snapshot of every flag and pre-resolved input that Run
-// needs. The cmd/grainfs/buildClusterConfig captures this from cobra so Run
-// itself reads no cobra state.
+// needs. Run itself reads no cobra state; callers materialize Config via
+// optionsToConfig (or RunFromOptions, which wraps it).
 type Config struct {
 	// Build/runtime identity
 	Version string

@@ -1,19 +1,17 @@
-package main
+package serveruntime
 
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestReshardManagerRegistry_ReplacesBackendForSameGroupID(t *testing.T) {
 	parent := t.Context()
-	registry := serveruntime.NewReshardManagerRegistry()
+	registry := NewReshardManagerRegistry()
 	gb1 := &cluster.GroupBackend{}
 	gb2 := &cluster.GroupBackend{}
 
@@ -42,22 +40,4 @@ func TestReshardManagerRegistry_ReplacesBackendForSameGroupID(t *testing.T) {
 
 	registry.Refresh(parent, nil, start)
 	assert.ErrorIs(t, started[1].Err(), context.Canceled)
-}
-
-func TestServeReshardIntervalDefault(t *testing.T) {
-	flag := serveCmd.Flags().Lookup("reshard-interval")
-	require.NotNil(t, flag)
-	assert.Equal(t, defaultReshardInterval.String(), flag.DefValue)
-}
-
-func TestServeRingReshardIntervalDefault(t *testing.T) {
-	flag := serveCmd.Flags().Lookup("ring-reshard-interval")
-	require.NotNil(t, flag)
-	assert.Equal(t, time.Hour.String(), flag.DefValue)
-}
-
-func TestServeDatagroupRefreshIntervalDefault(t *testing.T) {
-	flag := serveCmd.Flags().Lookup("datagroup-refresh-interval")
-	require.NotNil(t, flag)
-	assert.Equal(t, time.Minute.String(), flag.DefValue)
 }

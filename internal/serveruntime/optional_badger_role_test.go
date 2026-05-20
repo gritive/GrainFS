@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"context"
@@ -10,12 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerrole"
-	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestOptionalRoleDisabledRecognizesIncidentAPI(t *testing.T) {
-	feature, ok := serveruntime.OptionalRoleDisabled(badgerrole.DefaultRegistry(), badgerrole.Decision{
+	feature, ok := OptionalRoleDisabled(badgerrole.DefaultRegistry(), badgerrole.Decision{
 		Role:   badgerrole.RoleIncidentState,
 		Status: badgerrole.DecisionOpenFailed,
 		Action: badgerrole.RecoveryActionDisableFeature,
@@ -33,7 +32,7 @@ func TestBuildVolumeManagerDisablesDedupWhenOptionalRoleCannotOpen(t *testing.T)
 	require.NoError(t, err)
 	defer backend.Close()
 
-	mgr, cache, dedupDB, err := serveruntime.BuildVolumeManager(serveruntime.VolumeManagerOptions{DedupEnabled: true}, dataFile, backend)
+	mgr, cache, dedupDB, err := BuildVolumeManager(VolumeManagerOptions{DedupEnabled: true}, dataFile, backend)
 
 	require.NoError(t, err)
 	require.NotNil(t, mgr)
@@ -45,9 +44,9 @@ func TestSetupClusterReceiptDisablesOptionalRoleWhenDBCannotOpen(t *testing.T) {
 	dataFile := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(dataFile, []byte("x"), 0o644))
 
-	opts, wiring, err := serveruntime.SetupClusterReceipt(
+	opts, wiring, err := SetupClusterReceipt(
 		context.Background(),
-		serveruntime.ReceiptOptions{
+		ReceiptOptions{
 			Enabled:        true,
 			PSK:            "test-psk",
 			Retention:      time.Hour,

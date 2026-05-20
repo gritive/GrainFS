@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"context"
@@ -8,12 +8,11 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
 func TestRaftClusterInfo_NormalizesPeerAddressesToNodeIDs(t *testing.T) {
 	node := &clusterInfoRaftNode{id: "node-0", peers: []string{"10.0.0.1:7001"}}
-	info := serveruntime.NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{nodes: []cluster.MetaNodeEntry{
+	info := NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{nodes: []cluster.MetaNodeEntry{
 		{ID: "node-1", Address: "10.0.0.1:7001"},
 	}})
 
@@ -23,7 +22,7 @@ func TestRaftClusterInfo_NormalizesPeerAddressesToNodeIDs(t *testing.T) {
 
 func TestRaftClusterInfo_SurfacesUnresolvedLegacyPeerState(t *testing.T) {
 	node := &clusterInfoRaftNode{id: "node-0", peers: []string{"10.0.0.9:7001"}}
-	info := serveruntime.NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{})
+	info := NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{})
 
 	require.Equal(t, []string{"10.0.0.9:7001"}, info.Peers())
 	require.Equal(t, map[string]string{"10.0.0.9:7001": "unresolved_legacy"}, info.PeerStates())
@@ -31,7 +30,7 @@ func TestRaftClusterInfo_SurfacesUnresolvedLegacyPeerState(t *testing.T) {
 
 func TestRaftClusterInfo_BuildsPeerSnapshot(t *testing.T) {
 	node := &clusterInfoRaftNode{id: "node-0", peers: []string{"10.0.0.1:7001", "10.0.0.9:7001"}}
-	info := serveruntime.NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{nodes: []cluster.MetaNodeEntry{
+	info := NewRaftClusterInfo(node, nil, nil, fakeClusterInfoAddressBook{nodes: []cluster.MetaNodeEntry{
 		{ID: "node-1", Address: "10.0.0.1:7001"},
 	}})
 

@@ -1,18 +1,17 @@
-package main
+package serveruntime
 
 import (
 	"context"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/serveruntime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPlacementMonitorRegistry_ReplacesBackendForSameGroupID(t *testing.T) {
 	parent := t.Context()
-	registry := serveruntime.NewPlacementMonitorRegistry()
+	registry := NewPlacementMonitorRegistry()
 	gb1 := &cluster.GroupBackend{}
 	gb2 := &cluster.GroupBackend{}
 

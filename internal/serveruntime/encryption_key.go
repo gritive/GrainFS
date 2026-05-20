@@ -1,4 +1,4 @@
-package main
+package serveruntime
 
 import (
 	"crypto/rand"
@@ -9,14 +9,13 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
-// loadOrCreateEncryptionKey loads a key from file or auto-generates one in the
+// LoadOrCreateEncryptionKey loads a key from file or auto-generates one in the
 // data directory when allowed. An explicitly provided missing key path is
 // treated as an error, because generating a new key would make existing shards
 // unreadable.
-func loadOrCreateEncryptionKey(keyFile, dataDir string, allowAutoGenerate bool) (*encrypt.Encryptor, error) {
+func LoadOrCreateEncryptionKey(keyFile, dataDir string, allowAutoGenerate bool) (*encrypt.Encryptor, error) {
 	explicitPath := keyFile != ""
 	if !explicitPath {
 		keyFile = filepath.Join(dataDir, "encryption.key")
@@ -53,11 +52,14 @@ func loadOrCreateEncryptionKey(keyFile, dataDir string, allowAutoGenerate bool) 
 	return encrypt.NewEncryptor(keyData)
 }
 
-func allowAutoGenerateEncryptionKey(dataDir, raftAddr string) bool {
+// AllowAutoGenerateEncryptionKey reports whether a node-local key may be
+// auto-generated. Cluster mode (raftAddr set) and pending-join state disable
+// auto-generation to avoid creating an unrecoverable mismatch with peers.
+func AllowAutoGenerateEncryptionKey(dataDir, raftAddr string) bool {
 	if raftAddr != "" {
 		return false
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, serveruntime.JoinPendingFile)); err == nil {
+	if _, err := os.Stat(filepath.Join(dataDir, JoinPendingFile)); err == nil {
 		return false
 	}
 	return true
