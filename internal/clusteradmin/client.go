@@ -133,3 +133,43 @@ func (c *Client) BalancerStatus(ctx context.Context) (*BalancerStatus, error) {
 	}
 	return &b, nil
 }
+
+// ClusterConfigGet fetches GET /v1/cluster/config. The returned response
+// carries the effective-key map + per-key source ("default" | "explicit")
+// used by the `grainfs cluster config show/get/diff` subcommands.
+func (c *Client) ClusterConfigGet(ctx context.Context) (*ClusterConfigResponse, error) {
+	var out ClusterConfigResponse
+	if err := c.Get(ctx, "/v1/cluster/config", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClusterConfigPatch issues PATCH /v1/cluster/config with req as the JSON
+// body and an optional If-Match-Rev header (expectedRev != 0). Returns the
+// new rev as reported by the server response body.
+func (c *Client) ClusterConfigPatch(ctx context.Context, req ClusterConfigPatchRequest, expectedRev uint64) (uint64, error) {
+	return c.clusterConfigPatch(ctx, req, expectedRev)
+}
+
+// ClusterConfigPatchRaw is the free-form variant for callers that build the
+// body as a map (the CLI parses `<kebab-key>=<json-value>` pairs into a map
+// to avoid kebab→field-name reflection). The map keys must match the kebab
+// JSON tags of ClusterConfigPatchRequest; the server unmarshal accepts both.
+func (c *Client) ClusterConfigPatchRaw(ctx context.Context, body map[string]any, expectedRev uint64) (uint64, error) {
+	return c.clusterConfigPatch(ctx, body, expectedRev)
+}
+
+func (c *Client) clusterConfigPatch(ctx context.Context, body any, expectedRev uint64) (uint64, error) {
+	var headers map[string]string
+	if expectedRev != 0 {
+		headers = map[string]string{"If-Match-Rev": strconv.FormatUint(expectedRev, 10)}
+	}
+	var resp struct {
+		Rev uint64 `json:"rev"`
+	}
+	if err := c.PatchWithHeaders(ctx, "/v1/cluster/config", headers, body, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Rev, nil
+}
