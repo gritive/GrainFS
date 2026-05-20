@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -95,6 +96,7 @@ func runClusterBootstrapJoinCLIIdempotent(t *testing.T) {
 // combined stdout+stderr output.
 func runGrainFSJoin(ctx context.Context, sock, peerAddr string) (string, error) {
 	cmd := exec.CommandContext(ctx, getBinary(), "join", peerAddr, "--endpoint", sock)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := cmd.CombinedOutput()
 	return fmt.Sprintf("%s", out), err
 }
