@@ -230,6 +230,41 @@ func TestAppendObjectReusesVersionIDAcrossSegments(t *testing.T) {
 	}
 }
 
+func TestAppendObjectFSMApplyUsesCommandModifiedTime(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	cmd := AppendObjectCmd{
+		Bucket:          "test",
+		Key:             "k",
+		ExpectedOffset:  0,
+		BlobID:          "blob-1",
+		SegmentSize:     4,
+		SegmentETag:     "deadbeefcafebabedeadbeefcafebabe",
+		ModifiedUnixSec: 1234,
+	}
+	data, err := encodeAppendObjectCmd(cmd)
+	if err != nil {
+		t.Fatalf("encode AppendObjectCmd: %v", err)
+	}
+
+	if err := b.fsm.applyAppendObjectFromCmd(data); err != nil {
+		t.Fatalf("applyAppendObjectFromCmd: %v", err)
+	}
+
+	obj, err := b.HeadObject(ctx, "test", "k")
+	if err != nil {
+		t.Fatalf("HeadObject: %v", err)
+	}
+	if obj.LastModified != 1234 {
+		t.Fatalf("LastModified=%d, want 1234", obj.LastModified)
+	}
+}
+
 func TestAppendObjectConvertsPlainPutAtCurrentOffset(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()

@@ -276,7 +276,8 @@ type AppendObjectCmd struct {
 	// first segment because versioning-enabled buckets reject AppendObject.
 	// When empty (legacy replay / direct apply-test fixtures), apply falls back
 	// to the legacy ObjectMetaKey-only single-write path.
-	VersionID string
+	VersionID       string
+	ModifiedUnixSec int64
 }
 
 // EncodeNoOpCommand returns a serialized CmdNoOp suitable for SetNoOpCommand.

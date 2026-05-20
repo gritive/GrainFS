@@ -322,6 +322,7 @@ table AppendObjectCmd {
   segment_etag:string;
   placement_group_id:string;
   version_id:string;
+  modified_unix_sec:int64;
 }
 
 table KeyValue {

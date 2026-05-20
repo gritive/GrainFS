@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -124,6 +125,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	if versionID == "" {
 		versionID = uuid.Must(uuid.NewV7()).String()
 	}
+	modifiedUnixSec := time.Now().Unix()
 	cmd := AppendObjectCmd{
 		Bucket:         bucket,
 		Key:            key,
@@ -135,6 +137,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		SegmentETag:      hex.EncodeToString(seg.Checksum),
 		PlacementGroupID: pgID,
 		VersionID:        versionID,
+		ModifiedUnixSec:  modifiedUnixSec,
 	}
 	if err := b.propose(ctx, CmdAppendObject, cmd); err != nil {
 		// Best-effort cleanup of orphan segment blob on apply rejection
@@ -143,16 +146,101 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		return nil, err
 	}
 
-	// Step 5: re-HeadObject for fresh result.
-	obj, herr := b.HeadObject(ctx, bucket, key)
-	if herr == nil && obj != nil && obj.IsAppendable {
+	obj := appendObjectResult(existing, key, versionID, seg, modifiedUnixSec)
+	if obj != nil && obj.IsAppendable {
 		b.maybeTriggerCoalesce(bucket, key, obj.Segments)
 	}
-	if herr == nil && obj != nil {
+	if obj != nil {
 		metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
 		metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
 	}
-	return obj, herr
+	return obj, nil
+}
+
+func appendObjectResult(existing *storage.Object, key, versionID string, seg storage.SegmentRef, modifiedUnixSec int64) *storage.Object {
+	if existing == nil {
+		return &storage.Object{
+			Key:          key,
+			Size:         seg.Size,
+			ContentType:  "application/octet-stream",
+			ETag:         storage.CompositeETag([][]byte{seg.Checksum}),
+			LastModified: modifiedUnixSec,
+			VersionID:    versionID,
+			Segments:     []storage.SegmentRef{cloneSegmentRef(seg)},
+			IsAppendable: true,
+		}
+	}
+
+	obj := &storage.Object{
+		Key:            existing.Key,
+		Size:           existing.Size + seg.Size,
+		ContentType:    existing.ContentType,
+		LastModified:   modifiedUnixSec,
+		VersionID:      versionID,
+		ACL:            existing.ACL,
+		UserMetadata:   cloneStringMap(existing.UserMetadata),
+		SSEAlgorithm:   existing.SSEAlgorithm,
+		Coalesced:      cloneStorageCoalescedRefs(existing.Coalesced),
+		IsAppendable:   true,
+		Parts:          cloneMultipartPartEntries(existing.Parts),
+		Tags:           append([]storage.Tag(nil), existing.Tags...),
+		AppendCallMD5s: nil,
+	}
+	if obj.Key == "" {
+		obj.Key = key
+	}
+	if obj.ContentType == "" {
+		obj.ContentType = "application/octet-stream"
+	}
+	if !existing.IsAppendable && len(existing.Segments) == 0 && len(existing.Coalesced) == 0 && existing.Size > 0 {
+		coalescedID := "base"
+		if versionID != "" {
+			coalescedID = "base-" + versionID
+		}
+		obj.Coalesced = []storage.CoalescedRef{{
+			CoalescedID: coalescedID,
+			Size:        existing.Size,
+			ETag:        existing.ETag,
+		}}
+	}
+	obj.Segments = append(cloneSegmentRefs(existing.Segments), cloneSegmentRef(seg))
+	callDigests := make([][]byte, 0, len(obj.Segments))
+	for _, s := range obj.Segments {
+		if len(s.Checksum) > 0 {
+			callDigests = append(callDigests, s.Checksum)
+		}
+	}
+	obj.ETag = storage.CompositeETag(callDigests)
+	return obj
+}
+
+func cloneSegmentRefs(in []storage.SegmentRef) []storage.SegmentRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]storage.SegmentRef, len(in))
+	for i := range in {
+		out[i] = cloneSegmentRef(in[i])
+	}
+	return out
+}
+
+func cloneSegmentRef(in storage.SegmentRef) storage.SegmentRef {
+	in.Checksum = append([]byte(nil), in.Checksum...)
+	in.NodeIDs = append([]string(nil), in.NodeIDs...)
+	return in
+}
+
+func cloneStorageCoalescedRefs(in []storage.CoalescedRef) []storage.CoalescedRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]storage.CoalescedRef, len(in))
+	for i := range in {
+		out[i] = in[i]
+		out[i].NodeIDs = append([]string(nil), in[i].NodeIDs...)
+	}
+	return out
 }
 
 // writeSegmentBlobForAppend writes one segment blob to owner-node disk under

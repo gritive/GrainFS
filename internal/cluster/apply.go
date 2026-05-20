@@ -805,6 +805,10 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 
 	// Snapshot config once; avoids holding mu across the BadgerDB transaction.
 	coalesceCfg := f.snapshotCoalesceCfg()
+	modifiedUnixSec := cmd.ModifiedUnixSec
+	if modifiedUnixSec == 0 {
+		modifiedUnixSec = time.Now().Unix()
+	}
 
 	return f.db.Update(func(txn *badger.Txn) error {
 		metaKey := f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)
@@ -888,7 +892,7 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 				Size:             seg.Size,
 				ContentType:      "application/octet-stream",
 				ETag:             storage.CompositeETag([][]byte{segDigest}),
-				LastModified:     time.Now().Unix(),
+				LastModified:     modifiedUnixSec,
 				PlacementGroupID: cmd.PlacementGroupID,
 				Segments:         []storage.SegmentRef{seg},
 				IsAppendable:     true,
@@ -937,7 +941,7 @@ func (f *FSM) applyAppendObjectFromCmd(data []byte) error {
 				}
 			}
 			updated.ETag = storage.CompositeETag(callDigests)
-			updated.LastModified = time.Now().Unix()
+			updated.LastModified = modifiedUnixSec
 		}
 
 		out, err := marshalObjectMeta(updated)

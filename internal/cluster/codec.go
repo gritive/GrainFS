@@ -1342,6 +1342,7 @@ func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
 	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
 	clusterpb.AppendObjectCmdAddVersionId(b, vidOff)
+	clusterpb.AppendObjectCmdAddModifiedUnixSec(b, c.ModifiedUnixSec)
 	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
 }
 
@@ -1361,6 +1362,7 @@ func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
 		SegmentETag:      string(t.SegmentEtag()),
 		PlacementGroupID: string(t.PlacementGroupId()),
 		VersionID:        string(t.VersionId()),
+		ModifiedUnixSec:  t.ModifiedUnixSec(),
 	}, nil
 }
 
