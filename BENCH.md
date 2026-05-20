@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 15:46 KST
+Updated: 2026-05-20 15:59 KST
 
 ## Goal
 
@@ -80,6 +80,8 @@ Updated: 2026-05-20 15:46 KST
 - `multipart` candidate 2: zero-copy review of `ReadEncryptedShardRangeAt` found full aligned chunk reads decrypted into a temporary plaintext chunk and copied into the caller range buffer. Fix: decrypt directly into the caller buffer for aligned full-chunk reads, preserving the old buffered path for partial chunks. Clean e2e improved from 2010.59 MiB/s to 2451.06 MiB/s, still below MinIO/RustFS.
 - `multipart` candidate 3: warp `multipart` reads `partNumber=1` for objects whose only part spans the full object. Architecture review showed forcing that full-part request through `ReadAtObject` converts a normal whole-object stream into pread/range-reader work with no correctness benefit. Fix: when the requested multipart part exactly covers the object, fall back to the existing GetObject streaming path; partial parts still use ReadAt. Best clean e2e reached 3568.66 MiB/s and 630.25 MiB RSS, but rerun measured 3014.54 MiB/s and 625.83 MiB RSS, so the current recorded result remains below MinIO/RustFS.
 - `multipart` rejected candidate: skipping `getObjectPartNumberReadAt` entirely for `partNumber=1` removed a duplicate HeadObject in unit tests, but two e2e runs regressed to 2448.38/2442.32 MiB/s and RSS jumped to 3842.14/2958.08 MiB. The change was reverted; in this path the pre-read HeadObject appears to provide read-after-write/metadata warmup that is more valuable than the removed lookup.
+- `multipart` rejected candidate: raising Hertz's response copy buffer from 64 KiB to 128 KiB targeted the `resp.Write -> CopyZeroAlloc -> rawsyscalln` hotspot. One clean run reached 4979.12 MiB/s, but the immediate rerun fell to 2473.13 MiB/s; pprof run reached 3542.68 MiB/s with similar RSS. Because the clean e2e result was not reproducible, the change was reverted.
+- `multipart` rejected candidate: `CachedBackend.GetObject` can avoid a cache-miss `HeadObject` because `GetObject` already returns metadata. The unit test reproduced the duplicate lookup, but clean e2e regressed to 2646.15 MiB/s. The change was reverted; like the server-level duplicate lookup, the pre-read metadata call appears to warm the read path enough to matter for this workload.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
