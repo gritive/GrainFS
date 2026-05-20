@@ -166,7 +166,7 @@ fan-out scan을 정상 처리하며, packed object의 hard delete도 packed inde
   - `internal/storage/packblob/scan_test.go::TestPackedBackend_ScanObjectsGroupedDedupBranchLogsAndPrefersPacked`
   - `internal/storage/packblob/scan_test.go::TestPackedBackend_ListBucketsFusesPackedAndInner`
   - `internal/storage/packblob/scan_test.go::TestPackedBackend_DeleteObjectReturningMarker_CleanupPackedIndex_NonVersioning`
-- New regression guard (e2e): `tests/e2e/lifecycle_runcycle_test.go::TestLifecycleWorker_RunsAfterBucketCreate`
+- New regression guard (e2e): `tests/e2e/lifecycle_runcycle_test.go::TestLifecycleWorkerE2E/{SingleNode,Cluster4Node}/RunsAfterBucketCreate`
 - `TestLifecycleExpirationE2E` Cluster4Node 분기 신설 (`newDedicatedCluster4NodeS3Target`, `--lifecycle-interval=24h`)
 - Phase 1 deferred Task 15-16 sub-tests landed:
   - SingleNode + Cluster4Node: TagFilter, SizeFilter, AndFilter, ExpirationDate, AbortIncompleteMultipartUpload

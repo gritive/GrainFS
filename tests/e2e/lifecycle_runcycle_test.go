@@ -1,5 +1,3 @@
-//go:build integration
-
 // Lifecycle worker e2e (target table-driven).
 //
 // SingleNode + Cluster4Node 듀얼 분기. Cases는 worker.runCycle 자체의 행동을
