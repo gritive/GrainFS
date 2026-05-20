@@ -171,6 +171,38 @@ func TestEncryptedBlobStoreCompressionRoundTrip(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
+func TestEncryptedBlobStoreAppendKeepsAllocationBound(t *testing.T) {
+	bs, err := NewEncryptedBlobStore(t.TempDir(), 256*1024*1024, newPackblobTestEncryptor(t))
+	require.NoError(t, err)
+	defer bs.Close()
+
+	key := "bucket/key"
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, err := bs.Append(key, payload)
+		require.NoError(t, err)
+	})
+	require.LessOrEqual(t, allocs, 2.0)
+}
+
+func TestEncryptedBlobStoreReadKeepsAllocationBound(t *testing.T) {
+	bs, err := NewEncryptedBlobStore(t.TempDir(), 256*1024*1024, newPackblobTestEncryptor(t))
+	require.NoError(t, err)
+	defer bs.Close()
+
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+	loc, err := bs.Append("bucket/key", payload)
+	require.NoError(t, err)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		got, err := bs.Read(loc)
+		require.NoError(t, err)
+		require.Equal(t, payload, got)
+	})
+	require.LessOrEqual(t, allocs, 4.0)
+}
+
 func TestEncryptedBlobStoreRejectsKeyRemap(t *testing.T) {
 	enc := newPackblobTestEncryptor(t)
 

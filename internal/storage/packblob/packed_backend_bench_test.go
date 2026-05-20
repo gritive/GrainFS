@@ -1,6 +1,7 @@
 package packblob
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
@@ -42,6 +43,31 @@ func BenchmarkPackblob_SaveIndex(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkReadPackedCandidateReusable_SizedSmall(b *testing.B) {
+	const threshold = 1024 * 1024
+	body := bytes.Repeat([]byte("x"), 64*1024)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	var r bytes.Reader
+	for i := 0; i < b.N; i++ {
+		r.Reset(body)
+		got, large, pooled, err := readPackedCandidateReusable(&r, threshold)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if large {
+			b.Fatal("candidate unexpectedly routed as large")
+		}
+		if len(got) != len(body) {
+			b.Fatalf("len=%d want %d", len(got), len(body))
+		}
+		if pooled {
+			releasePackedCandidateBuffer(got)
+		}
 	}
 }
 

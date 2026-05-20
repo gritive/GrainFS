@@ -291,6 +291,20 @@ func TestPackedBackend_ThresholdRouting(t *testing.T) {
 	}
 }
 
+func TestReadPackedCandidateSizedReaderAllocatesExactSmallBody(t *testing.T) {
+	const threshold = 1024 * 1024
+	body := bytes.Repeat([]byte("x"), 64*1024)
+
+	got, large, pooled, err := readPackedCandidateReusable(bytes.NewReader(body), threshold)
+	if pooled {
+		defer releasePackedCandidateBuffer(got)
+	}
+	require.NoError(t, err)
+	require.False(t, large)
+	require.Equal(t, body, got)
+	require.LessOrEqual(t, cap(got), len(body), "known-size small bodies must not allocate the full pack threshold")
+}
+
 func TestPackedBackend_LargeObjectIntakeAllocationBound(t *testing.T) {
 	const threshold = 1024
 	body := bytes.Repeat([]byte("x"), 256*1024)
