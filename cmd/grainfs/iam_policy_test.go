@@ -124,6 +124,14 @@ func TestCLI_PolicyAttach_IKnow_Suppresses(t *testing.T) {
 	})
 	sock := startFakeAdminUDS(t, mux)
 
+	t.Cleanup(func() {
+		// Bool flag persists on the singleton command; reset so subsequent
+		// tests that don't pass --i-know don't inherit the set value.
+		f := iamPolicyAttachCmd.Flags().Lookup("i-know")
+		_ = f.Value.Set("false")
+		f.Changed = false
+	})
+
 	var stdout, stderr bytes.Buffer
 	rootCmd.SetArgs([]string{"iam", "--endpoint", sock, "policy", "attach", "readonly", "--sa", "alice", "--i-know"})
 	rootCmd.SetOut(&stdout)
