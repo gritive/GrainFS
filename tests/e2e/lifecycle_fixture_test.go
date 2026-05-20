@@ -25,7 +25,7 @@ import (
 // only the leader's object-side worker is loaded (followers no-op naturally),
 // while every node's MPU worker is per-node and always loaded.
 type lifecycleFixture struct {
-	t        *testing.T
+	t        testing.TB
 	urls     []string
 	signer   *v4.Signer
 	creds    aws.Credentials
@@ -36,7 +36,7 @@ type lifecycleFixture struct {
 // newLifecycleFixture seeds the fixture at the current real-time clock and
 // captures the list of node URLs from tgt. The caller is responsible for
 // boot-time admin grants — the fixture only signs and POSTs.
-func newLifecycleFixture(t *testing.T, tgt s3Target) *lifecycleFixture {
+func newLifecycleFixture(t testing.TB, tgt s3Target) *lifecycleFixture {
 	t.Helper()
 	urls := make([]string, 0, tgt.nodes)
 	for i := 0; i < tgt.nodes; i++ {

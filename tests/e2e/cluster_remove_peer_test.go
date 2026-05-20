@@ -106,7 +106,7 @@ func TestClusterRemovePeerDeadFollowerE2E(t *testing.T) {
 	})
 }
 
-func getStatusJSON(t *testing.T, base string) map[string]any {
+func getStatusJSON(t testing.TB, base string) map[string]any {
 	t.Helper()
 	resp, err := http.Get(base + "/api/cluster/status")
 	require.NoError(t, err)

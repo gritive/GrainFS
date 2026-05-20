@@ -36,11 +36,11 @@ type s3Target struct {
 	endpoint  func(i int) string
 	accessKey string
 	secretKey string
-	createBkt func(t *testing.T, bucket string)
+	createBkt func(t testing.TB, bucket string)
 	// uniqueBucket creates a bucket with a name derived from t.Name() + case,
 	// sanitized to S3 spec (lowercase/hyphen, 3-63 chars). Auto-registers
 	// t.Cleanup(DeleteBucket). Returns the actual bucket name used.
-	uniqueBucket func(t *testing.T, caseName string) string
+	uniqueBucket func(t testing.TB, caseName string) string
 	// adminSockPath returns the path to the admin UDS for the "writable"
 	// node — node-0 on single, the elected leader on cluster. Tests that
 	// drive per-bucket admin config (e.g., pull-through upstream
@@ -62,10 +62,10 @@ func newSingleNodeS3Target() s3Target {
 		},
 		accessKey: testAccessKey,
 		secretKey: testSecretKey,
-		createBkt: func(t *testing.T, bucket string) {
+		createBkt: func(t testing.TB, bucket string) {
 			createBucket(t, bucket)
 		},
-		uniqueBucket: func(t *testing.T, caseName string) string {
+		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("single", t.Name(), caseName)
 			createBucket(t, name)
 			t.Cleanup(func() {
@@ -82,7 +82,7 @@ func newSingleNodeS3Target() s3Target {
 
 var bucketSanitizeRE = regexp.MustCompile(`[^a-z0-9-]`)
 
-func currentE2EClusterLeaderIdx(t *testing.T, c *e2eCluster) int {
+func currentE2EClusterLeaderIdx(t testing.TB, c *e2eCluster) int {
 	t.Helper()
 	start := c.leaderIdx
 	if start < 0 || start >= len(c.httpURLs) {
@@ -129,7 +129,7 @@ var (
 	sharedCluster     *e2eCluster
 )
 
-func getOrInitSharedCluster(t *testing.T) *e2eCluster {
+func getOrInitSharedCluster(t testing.TB) *e2eCluster {
 	t.Helper()
 	sharedClusterOnce.Do(func() {
 		c := startE2EClusterNoCleanup(t, e2eClusterOptions{
@@ -159,7 +159,7 @@ func stopSharedCluster() {
 	}
 }
 
-func newSharedClusterS3Target(t *testing.T) s3Target {
+func newSharedClusterS3Target(t testing.TB) s3Target {
 	t.Helper()
 	c := getOrInitSharedCluster(t)
 	return s3Target{
@@ -173,10 +173,10 @@ func newSharedClusterS3Target(t *testing.T) s3Target {
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
-		createBkt: func(t *testing.T, bucket string) {
+		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
 		},
-		uniqueBucket: func(t *testing.T, caseName string) string {
+		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
 			t.Cleanup(func() {
@@ -196,13 +196,13 @@ func newSharedClusterS3Target(t *testing.T) s3Target {
 // newSharedClusterS3Target for tests that don't mutate cluster topology;
 // reserve this for tests that kill nodes, change CLI flags, or otherwise
 // need an isolated cluster.
-func newClusterS3Target(t *testing.T, nodes int) s3Target {
+func newClusterS3Target(t testing.TB, nodes int) s3Target {
 	return newClusterS3TargetWithExtraArgs(t, nodes, nil)
 }
 
 // newClusterS3TargetWithExtraArgs mirrors newClusterS3Target but passes
 // extraArgs verbatim to every node's grainfs serve command-line.
-func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string) s3Target {
+func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string) s3Target {
 	t.Helper()
 	c := startE2ECluster(t, e2eClusterOptions{
 		Nodes:      nodes,
@@ -229,10 +229,10 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
-		createBkt: func(t *testing.T, bucket string) {
+		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, bucket, c.S3Client(c.leaderIdx))
 		},
-		uniqueBucket: func(t *testing.T, caseName string) string {
+		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
 			t.Cleanup(func() {
@@ -258,7 +258,7 @@ func newClusterS3TargetWithExtraArgs(t *testing.T, nodes int, extraArgs []string
 //
 // Lifetime: process is launched on call, terminated + tmpdir removed via
 // t.Cleanup. Each call gets its own port + data dir.
-func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
+func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-e2e-single-dedicated-")
@@ -312,10 +312,10 @@ func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
 		},
 		accessKey: ak,
 		secretKey: sk,
-		createBkt: func(t *testing.T, bucket string) {
+		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, bucket, client)
 		},
-		uniqueBucket: func(t *testing.T, caseName string) string {
+		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("single-dedicated", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, name, client)
 			t.Cleanup(func() {
@@ -339,7 +339,7 @@ func newDedicatedSingleNodeS3Target(t *testing.T, extraArgs []string) s3Target {
 //
 // The fixture's tgt.name is "cluster-4-dedicated" — sub-tests use this
 // to discriminate cluster-only flows (e.g., DM sub-test).
-func newDedicatedCluster4NodeS3Target(t *testing.T, extraArgs []string) s3Target {
+func newDedicatedCluster4NodeS3Target(t testing.TB, extraArgs []string) s3Target {
 	t.Helper()
 	args := append([]string{"--lifecycle-interval=24h"}, extraArgs...)
 	tgt := newClusterS3TargetWithExtraArgs(t, 4, args)

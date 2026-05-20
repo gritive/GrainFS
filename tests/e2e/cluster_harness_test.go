@@ -42,7 +42,7 @@ type e2eClusterOptions struct {
 }
 
 type e2eCluster struct {
-	t             *testing.T
+	t             testing.TB
 	mode          ClusterMode
 	procs         []*exec.Cmd
 	dataDirs      []string
@@ -65,7 +65,7 @@ type e2eCluster struct {
 	leaderIdx     int
 }
 
-func startE2ECluster(t *testing.T, opts e2eClusterOptions) *e2eCluster {
+func startE2ECluster(t testing.TB, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
 	c := startE2EClusterNoCleanup(t, opts)
 	t.Cleanup(c.Stop)
@@ -76,7 +76,7 @@ func startE2ECluster(t *testing.T, opts e2eClusterOptions) *e2eCluster {
 // register t.Cleanup(c.Stop). Intended for process-global shared fixtures
 // whose lifetime is managed by TestMain teardown. The caller is responsible
 // for calling c.Stop() exactly once.
-func startE2EClusterNoCleanup(t *testing.T, opts e2eClusterOptions) *e2eCluster {
+func startE2EClusterNoCleanup(t testing.TB, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
 	opts = normalizeE2EClusterOptions(opts)
 	var lastErr error
@@ -152,7 +152,7 @@ func runNormalizeOptionsAllowsNonECExtraArgs(t *testing.T) {
 	})
 }
 
-func tryStartE2ECluster(t *testing.T, opts e2eClusterOptions) (*e2eCluster, error) {
+func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, error) {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
@@ -369,7 +369,7 @@ func (c *e2eCluster) EnsureBucketWritable(ctx context.Context, bucket string, ti
 	return waitForAdminBucketWritable(ctx, c.dataDirs, c.httpURLs, c.accessKey, c.secretKey, c.saID, bucket, timeout)
 }
 
-func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
+func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 	t.Helper()
 	logFile, err := os.CreateTemp("", fmt.Sprintf("%s-node-%d-*.log", c.logPrefix, i))
 	require.NoError(t, err)
@@ -471,7 +471,7 @@ func (c *e2eCluster) KillNode(i int) {
 // RestartNode re-launches node i with the preserved data dir / ports.
 // Mirrors the initial startNode call. Caller should poll waitClusterSettled
 // or getStatusJSON after this to confirm the node has rejoined.
-func (c *e2eCluster) RestartNode(t *testing.T, i int) {
+func (c *e2eCluster) RestartNode(t testing.TB, i int) {
 	t.Helper()
 	if c == nil || i < 0 || i >= len(c.procs) {
 		return
