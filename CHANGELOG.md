@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.279.0] - 2026-05-20 - perf: reduce internal test resource cost
+
+Internal test runs now use substantially less memory and avoid several
+large, unnecessary allocations while preserving the same behavior coverage.
+
+### Changed
+
+- Reduced Badger arena overhead in cluster, raft, and resourcewatch tests by
+  using small test-sized Badger options where the tests do not need production
+  defaults.
+- Reworked large NFS test verification to stream checksums instead of reading
+  full objects into memory.
+- Kept storage range-boundary coverage across multiple segments while scaling
+  the test object down to smaller explicit chunks.
+- Parallelized independent raft promotion race iterations without reducing the
+  coverage matrix.
+- Lowered cluster coordinator forwarding test payload sizes by using local
+  per-test body caps while still exercising over-cap and stream-forward paths.
+
 ## [0.0.278.0] - 2026-05-20 - fix: Phase 2 unblock — R1 PutObjectTagging 404 + R2 lifecycle IAM 403
 
 Two long-lived pre-existing regressions resolved that together blocked the
