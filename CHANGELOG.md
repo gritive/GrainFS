@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.289.0] - 2026-05-20
+
+### Changed
+
+- Reduced storage segment round-trip test allocation by streaming deterministic
+  test data and verifying readback against the generated pattern instead of
+  materializing large payloads up front.
+
 ## [0.0.288.0] - 2026-05-20
 
 ### Changed
