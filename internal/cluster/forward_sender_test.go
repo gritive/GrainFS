@@ -94,7 +94,7 @@ func TestBuildPutObjectArgs_SmallBodyAllocationBound(t *testing.T) {
 	runtime.ReadMemStats(&after)
 
 	avgAlloc := float64(after.TotalAlloc-before.TotalAlloc) / runs
-	require.Lessf(t, avgAlloc, float64(len(body))*2.5, "avg allocation per buildPutObjectArgs call = %.0f bytes", avgAlloc)
+	require.Lessf(t, avgAlloc, float64(len(body))*1.5, "avg allocation per buildPutObjectArgs call = %.0f bytes", avgAlloc)
 }
 
 func BenchmarkBuildPutObjectArgs_64KiB(b *testing.B) {
@@ -126,7 +126,7 @@ func TestBuildUploadPartArgs_5MiBAllocationBound(t *testing.T) {
 	runtime.ReadMemStats(&after)
 
 	avgAlloc := float64(after.TotalAlloc-before.TotalAlloc) / runs
-	require.Lessf(t, avgAlloc, float64(len(body))*2.5, "avg allocation per buildUploadPartArgs call = %.0f bytes", avgAlloc)
+	require.Lessf(t, avgAlloc, float64(len(body))*1.5, "avg allocation per buildUploadPartArgs call = %.0f bytes", avgAlloc)
 }
 
 func BenchmarkBuildUploadPartArgs_5MiB(b *testing.B) {

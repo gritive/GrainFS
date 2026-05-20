@@ -130,6 +130,9 @@ func TestHandleTimeoutNow_StaleTermRejected(t *testing.T) {
 	n2 := nodes[1]
 
 	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
+	require.Eventually(t, func() bool {
+		return n2.Term() > 0
+	}, 2*time.Second, 10*time.Millisecond, "n2 must observe an election term")
 
 	// Advance n2's term via a higher-term RequestVote (so currentTerm > 1).
 	currentTerm := n2.Term()

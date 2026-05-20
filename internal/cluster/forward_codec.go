@@ -43,11 +43,7 @@ func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
 
 func putObjectArgsBuilderSize(bucket, key, contentType string, bodyLen int) int {
 	const tableOverhead = 128
-	n := bodyLen + len(bucket) + len(key) + len(contentType) + tableOverhead
-	if bodyLen > 0 {
-		n += bodyLen
-	}
-	return n
+	return bodyLen + len(bucket) + len(key) + len(contentType) + tableOverhead
 }
 
 func buildGetObjectArgs(bucket, key string) []byte {
@@ -310,11 +306,7 @@ func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []
 
 func uploadPartArgsBuilderSize(bucket, key, uploadID string, bodyLen int) int {
 	const tableOverhead = 128
-	n := bodyLen + len(bucket) + len(key) + len(uploadID) + tableOverhead
-	if bodyLen > 0 {
-		n += bodyLen
-	}
-	return n
+	return bodyLen + len(bucket) + len(key) + len(uploadID) + tableOverhead
 }
 
 func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []storage.Part) []byte {
