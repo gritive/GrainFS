@@ -55,8 +55,6 @@ func runLifecycleConfigCases(
 	getTgt func() s3Target,
 	getLC func() *lifecycleFixture,
 ) {
-	_ = getLC // wired in Task 3+ when time-driven cases land
-
 	ginkgo.It("round-trips Put → Get (PutGetRoundTrip)", func() {
 		tgt := getTgt()
 		client := tgt.pickNode(0)
@@ -114,8 +112,104 @@ func runLifecycleConfigCases(
 		gomega.Expect(aws.ToInt32(r2.NoncurrentVersionExpiration.NoncurrentDays)).To(gomega.Equal(int32(7)))
 	})
 
-	// 5 remaining sub-tests added in Task 3+4
-}
+	ginkgo.It("returns NoSuchLifecycleConfiguration after Delete (DeleteThenGet404)", func() {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "lcdel")
 
-// Avoid "declared but not used" until Task 3+ adds time-using cases.
-var _ = time.Hour
+		// Put a minimal config first
+		_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:         aws.String("any"),
+				Status:     types.ExpirationStatusEnabled,
+				Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				Expiration: &types.LifecycleExpiration{Days: aws.Int32(1)},
+			}}},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Delete it
+		_, err = client.DeleteBucketLifecycle(ctx, &s3.DeleteBucketLifecycleInput{Bucket: aws.String(bucket)})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "DeleteBucketLifecycle must succeed")
+
+		// Get must now return NoSuchLifecycleConfiguration
+		_, err = client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+		})
+		gomega.Expect(err).To(gomega.HaveOccurred(), "Get must error after Delete")
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("NoSuchLifecycleConfiguration"),
+			"error must be NoSuchLifecycleConfiguration code: %v", err)
+	})
+
+	ginkgo.It("ignores Disabled rule during scan (DisabledRuleIgnored)", func() {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		lc := getLC()
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "lcdis")
+
+		// Put an object that would be expired IF the rule were Enabled
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("survive"),
+			Body: stringReader("body"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Rule with Status: Disabled — should be ignored entirely
+		_, err = client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:         aws.String("disabled-rule"),
+				Status:     types.ExpirationStatusDisabled,
+				Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				Expiration: &types.LifecycleExpiration{Days: aws.Int32(1)},
+			}}},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Advance clock + run cycle
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+
+		// Object must still be alive
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("survive"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(),
+			"object must remain — Disabled rule must not trigger expiration")
+	})
+
+	ginkgo.It("scans empty bucket without panic (EmptyBucketScanNoPanic)", func() {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		lc := getLC()
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "lcempty")
+
+		// No objects — apply lifecycle config to empty bucket
+		_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:         aws.String("any"),
+				Status:     types.ExpirationStatusEnabled,
+				Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				Expiration: &types.LifecycleExpiration{Days: aws.Int32(1)},
+			}}},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+
+		// Cycle must complete without panic / error
+		gomega.Expect(func() {
+			lc.RunLifecycleCycle(ctx)
+		}).NotTo(gomega.Panic(), "RunLifecycleCycle must not panic on empty bucket")
+
+		// Bucket should still be there + listable
+		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bucket must still exist after empty-scan cycle")
+		gomega.Expect(out.Contents).To(gomega.BeEmpty(), "bucket must still be empty")
+	})
+}
