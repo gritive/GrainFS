@@ -2,13 +2,22 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
 // icebergTarget abstracts an iceberg-capable grainfs fixture. Per-case
@@ -65,7 +74,114 @@ func (tgt *icebergTarget) runExecBestEffort(stmt string) {
 
 func (tgt *icebergTarget) createBucketWithAdminPolicy(t *testing.T, bucket string) {
 	t.Helper()
+	// Idempotent: shared cluster fixture is reused across multiple iceberg
+	// tests, each of which constructs a fresh icebergTarget. HeadBucket-skip
+	// avoids 409 conflict on the second-and-later targets that share the same
+	// underlying cluster.
+	if _, err := tgt.s3Client(0).HeadBucket(context.Background(), &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
+	}); err == nil {
+		return
+	}
 	createBucketWithAdminPolicyAttachViaUDSAny(t, tgt.dataDirs, tgt.saID, bucket, tgt.s3Client(0))
+}
+
+// adminSockPath returns the admin UDS path for the leader node. Cluster
+// targets route through the elected leader; single-node uses dataDirs[0].
+func (tgt *icebergTarget) adminSockPath() string {
+	if tgt.isCluster && tgt.cluster != nil && tgt.cluster.leaderIdx >= 0 &&
+		tgt.cluster.leaderIdx < len(tgt.cluster.dataDirs) {
+		return tgt.cluster.dataDirs[tgt.cluster.leaderIdx] + "/admin.sock"
+	}
+	return tgt.dataDirs[0] + "/admin.sock"
+}
+
+// adminCreateSA creates a fresh ServiceAccount via the admin UDS and registers
+// a t.Cleanup to delete it. Returns (saID, accessKey, secretKey). Mirrors the
+// shape of iamAdminTarget.uniqueSA but lives on icebergTarget so OAuth e2e
+// cases can mint bearers without composing the iamAdminTarget abstraction.
+func (tgt *icebergTarget) adminCreateSA(t *testing.T, namePrefix string) (saID, ak, sk string) {
+	t.Helper()
+	sock := tgt.adminSockPath()
+	name := "sa-" + sanitizeForBucket(t.Name()) + "-" + sanitizeForBucket(namePrefix)
+	out := iamCreateSA(t, sock, name)
+	t.Cleanup(func() {
+		iamSADelete(t, sock, out.SAID)
+	})
+	// Wait for Raft propagation on cluster targets — without this, MintToken
+	// happy-path can race the key apply and return 401 (indistinguishable
+	// from a real wrong-secret 401, masking both flakes and false passes).
+	iamWaitKeyReady(t, tgt.endpoint(0), out.AccessKey, out.SecretKey, 30*time.Second)
+	return out.SAID, out.AccessKey, out.SecretKey
+}
+
+// adminAttachPolicy attaches the named policy to saID via the admin UDS and
+// registers a t.Cleanup that detaches on test exit. policyName must be a
+// known builtin (e.g. "readwrite", "readonly", "bucket-admin") or a policy
+// previously installed via PolicyPut.
+func (tgt *icebergTarget) adminAttachPolicy(t *testing.T, saID, policyName string) {
+	t.Helper()
+	cli := iamadmin.NewClientForURL(tgt.adminSockPath())
+	ctx := context.Background()
+	require.NoErrorf(t, cli.PolicyAttachToSA(ctx, policyName, saID),
+		"PolicyAttachToSA %s -> %s", policyName, saID)
+	t.Cleanup(func() {
+		_ = cli.PolicyDetachFromSA(ctx, policyName, saID)
+	})
+}
+
+// uniqueWarehouse creates a warehouse-backed bucket via the admin UDS (with
+// admin policy attached to tgt.saID so the bootstrap SA can manage it) and
+// registers a t.Cleanup that best-effort deletes the bucket. The bucket name
+// is derived from t.Name() + suffix to stay stable per sub-test while keeping
+// re-runs collision-free across t.Name() variants.
+func (tgt *icebergTarget) uniqueWarehouse(t *testing.T, suffix string) string {
+	t.Helper()
+	name := bucketNameFor(tgt.name, t.Name(), suffix)
+	createBucketWithAdminPolicyAttachViaUDSAny(t, tgt.dataDirs, tgt.saID, name, tgt.s3Client(0))
+	t.Cleanup(func() {
+		_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
+			Bucket: aws.String(name),
+		})
+	})
+	return name
+}
+
+// mintToken POSTs grant_type=client_credentials to the iceberg OAuth token
+// endpoint. Returns (jwt, 200) on success; ("", non-200) on auth failure.
+// Transport/IO/decode errors fail the test via require.NoError.
+func (tgt *icebergTarget) mintToken(t *testing.T, clientID, clientSecret, warehouse string) (string, int) {
+	t.Helper()
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("scope", "PRINCIPAL_ROLE:"+warehouse)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		tgt.endpoint(0)+"/iceberg/v1/oauth/tokens", strings.NewReader(form.Encode()))
+	require.NoError(t, err, "mintToken: build request")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "mintToken: HTTP do")
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "mintToken: read body")
+
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.StatusCode
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("mintToken: decode 200 body: %v (body=%s)", err, string(body))
+	}
+	return out.AccessToken, resp.StatusCode
 }
 
 // newSingleNodeIcebergTarget boots a single grainfs node with the iceberg
