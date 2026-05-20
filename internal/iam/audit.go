@@ -13,8 +13,9 @@ import (
 type AuditStatus uint8
 
 const (
-	AuditStatusAllow AuditStatus = 1
-	AuditStatusDeny  AuditStatus = 2
+	AuditStatusAllow     AuditStatus = 1
+	AuditStatusDeny      AuditStatus = 2
+	AuditStatusAnonAllow AuditStatus = 3
 )
 
 // String renders the status as a stable lowercase token suitable for
@@ -25,6 +26,8 @@ func (s AuditStatus) String() string {
 		return "allow"
 	case AuditStatusDeny:
 		return "deny"
+	case AuditStatusAnonAllow:
+		return "anon_allow"
 	default:
 		return "unknown"
 	}
@@ -42,6 +45,13 @@ type AuditEvent struct {
 	Action    s3auth.S3Action
 	Status    AuditStatus
 	Reason    string // populated for deny events; empty for allow
+
+	// Policy decision metadata (T51' §6). Optional; zero values mean
+	// "not measured" / "no policy matched" / "no condition context".
+	MatchedPolicyID  string
+	MatchedSID       string
+	AuthzLatencyUS   int32
+	ConditionContext map[string]string
 }
 
 // AuditEmitter is the sink interface for AuditLogger. Implementations are
@@ -64,19 +74,48 @@ type AuditLogger struct {
 // emitter for tests / future incident-store integration.
 func NewAuditLogger(em AuditEmitter) *AuditLogger { return &AuditLogger{em: em} }
 
-// RecordAllow emits an allow decision.
+// AuditDetails carries the optional policy-decision metadata threaded from
+// the authorizer's EvalResult. Type-aliased to s3auth.AuditAllowDetails so
+// *AuditLogger satisfies s3auth.AuditEmitterDetailed at runtime — the two
+// types are LITERALLY the same after Go's type-alias rule, not just
+// structurally identical. A compile-time guard lives in
+// internal/server/audit_sink.go (T51' B1 review fix).
+type AuditDetails = s3auth.AuditAllowDetails
+
+// RecordAllow emits an allow decision. Thin wrapper around
+// RecordAllowDetailed for callers that don't have policy decision details.
 func (a *AuditLogger) RecordAllow(ctx context.Context, saID, bucket, key string, action s3auth.S3Action) {
-	a.emit(ctx, saID, bucket, key, action, AuditStatusAllow, "")
+	a.emit(ctx, saID, bucket, key, action, AuditStatusAllow, "", AuditDetails{})
+}
+
+// RecordAllowDetailed emits an allow decision with policy decision metadata.
+// Used by RequestAuthorizer.Decide for T51' §6.
+func (a *AuditLogger) RecordAllowDetailed(ctx context.Context, saID, bucket, key string, action s3auth.S3Action, d AuditDetails) {
+	a.emit(ctx, saID, bucket, key, action, AuditStatusAllow, "", d)
 }
 
 // RecordDeny emits a deny decision with the given reason (e.g., "no_grant",
 // "policy_deny"). Reason is a short stable token for filtering, not free
 // text.
 func (a *AuditLogger) RecordDeny(ctx context.Context, saID, bucket, key string, action s3auth.S3Action, reason string) {
-	a.emit(ctx, saID, bucket, key, action, AuditStatusDeny, reason)
+	a.emit(ctx, saID, bucket, key, action, AuditStatusDeny, reason, AuditDetails{})
 }
 
-func (a *AuditLogger) emit(ctx context.Context, saID, bucket, key string, action s3auth.S3Action, status AuditStatus, reason string) {
+// RecordDenyDetailed emits a deny decision with policy decision metadata.
+// Used by RequestAuthorizer.Decide for T51' §6.
+func (a *AuditLogger) RecordDenyDetailed(ctx context.Context, saID, bucket, key string, action s3auth.S3Action, reason string, d AuditDetails) {
+	a.emit(ctx, saID, bucket, key, action, AuditStatusDeny, reason, d)
+}
+
+// RecordAnonAllow emits an allow decision for an anonymous request that was
+// permitted by an iam.anon-enabled config or the default bucket's implicit
+// anon policy. The status separates it from authenticated allows so audit
+// consumers can filter on Phase 0 traffic.
+func (a *AuditLogger) RecordAnonAllow(ctx context.Context, bucket, key string, action s3auth.S3Action, d AuditDetails) {
+	a.emit(ctx, "", bucket, key, action, AuditStatusAnonAllow, "", d)
+}
+
+func (a *AuditLogger) emit(ctx context.Context, saID, bucket, key string, action s3auth.S3Action, status AuditStatus, reason string, d AuditDetails) {
 	if a == nil || a.em == nil {
 		return
 	}
@@ -84,13 +123,17 @@ func (a *AuditLogger) emit(ctx context.Context, saID, bucket, key string, action
 		saID = "(anonymous)"
 	}
 	ev := AuditEvent{
-		Timestamp: time.Now().UTC(),
-		SAID:      saID,
-		Bucket:    bucket,
-		Key:       key,
-		Action:    action,
-		Status:    status,
-		Reason:    reason,
+		Timestamp:        time.Now().UTC(),
+		SAID:             saID,
+		Bucket:           bucket,
+		Key:              key,
+		Action:           action,
+		Status:           status,
+		Reason:           reason,
+		MatchedPolicyID:  d.MatchedPolicyID,
+		MatchedSID:       d.MatchedSID,
+		AuthzLatencyUS:   d.AuthzLatencyUS,
+		ConditionContext: d.ConditionContext,
 	}
 	if err := a.em.Emit(ctx, ev); err != nil {
 		log.Warn().Err(err).Str("sa_id", saID).Msg("iam audit emit failed")
@@ -119,6 +162,9 @@ func (logAuditEmitter) Emit(_ context.Context, ev AuditEvent) error {
 		Uint16("action", uint16(ev.Action)).
 		Str("status", ev.Status.String()).
 		Str("reason", ev.Reason).
+		Str("matched_policy_id", ev.MatchedPolicyID).
+		Str("matched_sid", ev.MatchedSID).
+		Int32("authz_latency_us", ev.AuthzLatencyUS).
 		Time("ts", ev.Timestamp).
 		Msg("iam.authz")
 	return nil

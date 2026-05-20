@@ -7,6 +7,16 @@ import (
 	"github.com/gritive/GrainFS/internal/reservedname"
 )
 
+// Anon-allow reason tokens. Promoted to consts so the authorizer producer
+// (this file) and the audit consumer (internal/server/server.go iamCheck
+// closure) reference the SAME string — silently drifting the literal in
+// one place would make every anonymous Allow re-classify as a regular
+// authenticated allow on the audit.s3 row. T51' N1 review.
+const (
+	ReasonAnonEnabled               = "iam.anon-enabled=true"
+	ReasonDefaultBucketImplicitAnon = "default bucket implicit anon (D#2)"
+)
+
 // adminUDSOnlyActions are unconditionally denied on the data plane (Decision #8).
 var adminUDSOnlyActions = map[string]bool{
 	"s3:CreateBucket":       true,
@@ -46,15 +56,19 @@ func NewAuthorizer(r *policy.Resolver, c ConfigReader) *Authorizer {
 //   - Otherwise runs full Evaluate with the SA's effective policies and the
 //     bucket policy. AllowAnonBucket comes from iam.allow-anonymous-bucket-policy.
 func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult {
+	// Short-circuit paths below don't invoke policy.Evaluate, so they have
+	// to attach the ConditionContext themselves; consumers (audit) rely on
+	// the field being populated on every Allow/Deny outcome. T51' B2 review.
+	cc := policy.ConditionContextFromRequest(ctxReq)
 	if adminUDSOnlyActions[ctxReq.Action] {
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "admin-UDS-only action (D#8)"}
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "admin-UDS-only action (D#8)", ConditionContext: cc}
 	}
 	// F-A2 + spec line 462: internal buckets are admin-UDS-only on the data plane.
 	// Denies BOTH anonymous and authenticated SAs. The audit-internal SA's read path
 	// bypasses Authorize entirely (see internal/server auditInternalObjectReadAllowed),
 	// so this does not break the audit reader.
 	if reservedname.IsInternalBucket(bucket) {
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (data plane is admin-UDS-only)"}
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "internal bucket deny (data plane is admin-UDS-only)", ConditionContext: cc}
 	}
 	// D#2: "default" bucket carries an implicit anon policy unless the operator
 	// has attached an explicit bucket policy. Implicit policy survives Phase 0→2
@@ -62,18 +76,18 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 	if saID == "" && bucket == "default" {
 		hasExplicit, err := a.resolver.HasBucketPolicy(ctx, "default")
 		if err == nil && !hasExplicit {
-			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: "default bucket implicit anon (D#2)"}
+			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonDefaultBucketImplicitAnon, ConditionContext: cc}
 		}
 	}
 	if saID == "" {
 		if anon, ok := a.cfg.GetBool("iam.anon-enabled"); ok && anon {
-			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: "iam.anon-enabled=true"}
+			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonAnonEnabled, ConditionContext: cc}
 		}
 		// Fall through: Principal:* on a bucket policy may still allow if iam.allow-anonymous-bucket-policy=true.
 	}
 	in, err := a.resolver.Effective(ctx, saID, bucket)
 	if err != nil {
-		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: " + err.Error()}
+		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: " + err.Error(), ConditionContext: cc}
 	}
 	in.Ctx = ctxReq
 	allowAnon, _ := a.cfg.GetBool("iam.allow-anonymous-bucket-policy")

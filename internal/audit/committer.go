@@ -459,6 +459,15 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"22"})},
 		{Name: "copy_source_key", Type: arrow.BinaryTypes.LargeString,
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"23"})},
+		// T51' §6: policy decision metadata (Iceberg schema field ids 24-27).
+		{Name: "matched_policy_id", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"24"})},
+		{Name: "matched_sid", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"25"})},
+		{Name: "authz_latency_us", Type: arrow.PrimitiveTypes.Int32,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"26"})},
+		{Name: "condition_context_json", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"27"})},
 	}, nil)
 
 	builder := array.NewRecordBuilder(pool, arrowSchema)
@@ -487,6 +496,10 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 	uploadIDB := builder.Field(20).(*array.LargeStringBuilder)
 	copySourceBucketB := builder.Field(21).(*array.LargeStringBuilder)
 	copySourceKeyB := builder.Field(22).(*array.LargeStringBuilder)
+	matchedPolicyIDB := builder.Field(23).(*array.LargeStringBuilder)
+	matchedSIDB := builder.Field(24).(*array.LargeStringBuilder)
+	authzLatencyUSB := builder.Field(25).(*array.Int32Builder)
+	conditionContextB := builder.Field(26).(*array.LargeStringBuilder)
 
 	for _, e := range events {
 		tsB.Append(arrow.Timestamp(e.Ts))
@@ -512,6 +525,14 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 		uploadIDB.Append(e.UploadID)
 		copySourceBucketB.Append(e.CopySourceBucket)
 		copySourceKeyB.Append(e.CopySourceKey)
+		matchedPolicyIDB.Append(e.MatchedPolicyID)
+		matchedSIDB.Append(e.MatchedSID)
+		authzLatencyUSB.Append(e.AuthzLatencyUS)
+		ccJSON, err := encodeConditionContext(e.ConditionContext)
+		if err != nil {
+			return nil, fmt.Errorf("condition_context: %w", err)
+		}
+		conditionContextB.Append(ccJSON)
 	}
 
 	rec := builder.NewRecordBatch()

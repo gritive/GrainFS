@@ -10,6 +10,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 type auditEnvelopeInput struct {
@@ -63,9 +64,34 @@ func finalizeAuditEnvelopeEvent(c *app.RequestContext, ev audit.S3Event, start t
 		ev.BytesOut = int64(len(c.Response.Body()))
 	}
 	ev.LatencyMs = int32(time.Since(start).Milliseconds())
+
+	// T51' §6: lift the Layer 1 policy decision (stashed by
+	// rememberAuthzDecision) into the audit row. The middleware already sets
+	// AuthStatus="deny" for 4xx responses; we only OVERWRITE that decision
+	// here when the request was an anonymous Allow (anon_allow).
+	if v, ok := c.Get(auditAuthzDecisionKey); ok {
+		if dec, ok := v.(s3auth.Decision); ok {
+			ev.MatchedPolicyID = dec.Detail.MatchedPolicyID
+			ev.MatchedSID = dec.Detail.MatchedSID
+			ev.AuthzLatencyUS = dec.AuthzLatencyUS
+			ev.ConditionContext = dec.Detail.ConditionContext
+			if anon, ok2 := c.Get(auditAuthzAnonAllowKey); ok2 {
+				if b, ok3 := anon.(bool); ok3 && b && ev.Status < 400 {
+					ev.AuthStatus = "anon_allow"
+				}
+			}
+		}
+	}
 	return normalizeAuditEvent(ev)
 }
 
+// newAuditAuthFailureEvent constructs an audit row for SigV4 / authn rejection
+// that aborts INSIDE authMiddleware — before auditEnvelopeMiddleware can call
+// c.Next. The envelope finalizer therefore never runs on this path; the row
+// is written directly via appendFinalizedAuditEvent with ErrReason="authn".
+// matched_policy_id / matched_sid / authz_latency_us / condition_context_json
+// stay empty for the same reason as the scope-mismatch / internal-bucket
+// aux-deny paths: no Layer 1 policy was evaluated for this rejection.
 func (s *Server) newAuditAuthFailureEvent(
 	ctx context.Context,
 	c *app.RequestContext,

@@ -179,7 +179,7 @@ func TestBootstrap_MigratesExistingV1Table(t *testing.T) {
 	require.NoError(t, err)
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(tbl.Metadata, &meta))
-	require.Equal(t, float64(23), meta["last-column-id"])
+	require.Equal(t, float64(27), meta["last-column-id"])
 	require.Equal(t, float64(1000), meta["last-partition-id"])
 	require.NotEqual(t, "s3://grainfs-audit/metadata/s3/00000-v1.metadata.json", tbl.MetadataLocation)
 }

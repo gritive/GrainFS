@@ -62,6 +62,38 @@ func TestWireRoundtrip(t *testing.T) {
 		{name: "method at 255-byte boundary", events: []audit.S3Event{
 			{Method: strings.Repeat("X", 255), Bucket: "b", Key: "k", Status: 200},
 		}},
+		{name: "policy decision fields (T51')", events: []audit.S3Event{{
+			Ts:              1716000000000003,
+			EventID:         "evt-policy",
+			NodeID:          "node-1",
+			RequestID:       "req-policy-1",
+			SAID:            "sa-admin",
+			Method:          "GET",
+			Bucket:          "b",
+			Key:             "k",
+			Status:          200,
+			AuthStatus:      "allow",
+			MatchedPolicyID: "policy:readonly",
+			MatchedSID:      "AllowGet",
+			AuthzLatencyUS:  127,
+			ConditionContext: map[string]string{
+				"aws:SourceIp": "10.0.0.1",
+				"s3:prefix":    "data/",
+			},
+		}}},
+		{name: "policy decision empty condition", events: []audit.S3Event{{
+			Ts:              1716000000000004,
+			EventID:         "evt-deny",
+			NodeID:          "node-1",
+			Method:          "PUT",
+			Bucket:          "b",
+			Status:          403,
+			AuthStatus:      "deny",
+			MatchedPolicyID: "policy:readonly",
+			MatchedSID:      "DenyPut",
+			AuthzLatencyUS:  42,
+			// ConditionContext nil → round-trips as nil
+		}}},
 		{name: "extended audit fields", events: []audit.S3Event{{
 			Ts:               1716000000000000,
 			EventID:          "evt-1",

@@ -144,6 +144,18 @@ func bootMetaRaftWiring(state *bootState) error {
 		return onProxy(ctx, v)
 	}
 	state.refreshProxyCIDR = refreshProxy
+
+	// §6 T52': route audit.deny-only reloads to the audit outbox.
+	// The outbox is constructed later in boot_phases_srvopts, so the closure
+	// reads through state.auditOutbox at fire time (nil-safe). When audit
+	// iceberg is disabled, state.auditOutbox stays nil and the hook is a
+	// silent no-op — consistent with the config key's BoolSpec default of
+	// false (no operator-visible flip happens at boot).
+	hooks.OnAuditDenyOnly = func(_ context.Context, v bool) error {
+		state.auditOutbox.SetDenyOnly(v) // Outbox.SetDenyOnly is nil-safe
+		return nil
+	}
+
 	config.RegisterClusterKeys(cfgStore, hooks)
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore

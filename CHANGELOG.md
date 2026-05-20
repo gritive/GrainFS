@@ -1,5 +1,138 @@
 # Changelog
 
+## [0.0.276.0] - 2026-05-20 - feat(audit): §6 Audit — policy-decision columns on audit.s3 Iceberg table
+
+§6 makes the existing `audit.s3` Iceberg table answer not just "what S3 op
+happened" but also "why was it authorized." Every audited request now carries
+the policy decision metadata that gated it: which policy matched, which
+statement Sid, how long authorization took in microseconds, and the AWS
+condition keys (`aws:Action`, `aws:Resource`) that were evaluated. The
+`audit.deny-only` config key (registered in §5 but previously unwired) now
+filters the audit pipeline so operators can keep an explicit-deny-only audit
+table during high-volume traffic without losing forensic value.
+
+Existing tables at the prior 23-column schema auto-migrate to the new
+27-column schema at boot (`last-column-id` bump to 27). DuckDB readers
+project missing columns as NULL on old parquet files (standard Iceberg
+schema-evolution behavior).
+
+### Added
+
+- **Policy-decision columns on `audit.s3`** (ids 24-27):
+  - `matched_policy_id string` — name of the IAM policy or `bucket:<name>`
+    that matched the request (empty when no Layer-1 policy was evaluated:
+    SigV4 reject, scope mismatch, internal-bucket deny).
+  - `matched_sid string` — Statement Sid that matched (allow or explicit deny).
+  - `authz_latency_us int` — authorization decision elapsed time in
+    microseconds, capped at `math.MaxInt32`.
+  - `condition_context_json string` — JSON-encoded snapshot of
+    `aws:Action`/`aws:Resource` (and any other RequestContext keys present)
+    that the policy evaluator saw. Empty string when no context was attached.
+- **`AuditStatusAnonAllow = 3`** enum value with `String() = "anon_allow"`.
+  Distinguishes anonymous-allow events (Phase 0 `iam.anon-enabled=true` and
+  `default` bucket implicit-anon match) from authenticated allow events in
+  the `auth_status` column.
+- **`iam.AuditLogger.RecordAllowDetailed` / `RecordDenyDetailed` /
+  `RecordAnonAllow`** — preserve the legacy bool-only `RecordAllow`/
+  `RecordDeny` callers via thin wrappers. Detailed variants carry the new
+  policy-decision fields through zerolog (the `iam.authz` log line) and the
+  audit envelope path.
+- **`s3auth.AuditEmitterDetailed`** extension interface for detailed sinks;
+  runtime type-assert in `RequestAuthorizer.Decide` lets old emitters fall
+  back to bool-only without breaking.
+- **`policy.EvalResult.ConditionContext`** + `policy.ConditionContextFromRequest`
+  helper. Every return path in `Evaluate()` (explicit-deny on principal/bucket,
+  explicit-allow, implicit-deny) attaches the snapshot; every authorizer
+  short-circuit (admin-UDS deny, internal-bucket deny, default-bucket
+  implicit anon, iam.anon-enabled, resolver error) does the same.
+- **`Outbox.SetDenyOnly(bool)`** + `DenyOnly()` getter (atomic.Bool). Filter
+  applied at `Outbox.Finalize` and `Outbox.AppendFinalized` (both durable-
+  write boundaries). When filtering drops an allow row at Finalize, the
+  pre-existing `AppendAttempt` key is also deleted to prevent the stale-
+  attempt reaper from resurrecting it as `"incomplete"`.
+- **`OnAuditDenyOnly` reload hook** wired in `internal/serveruntime/
+  boot_phases_raft.go` next to the §5 sibling hooks. `audit.deny-only`
+  config Set now actually filters rows. Boot-time seed reads
+  `cfgStore.GetBool("audit.deny-only")` so a node joining a cluster with
+  the key already set inherits the policy on first boot.
+- **Migration v23 → v27** — existing v2 tables at `last-column-id == 23`
+  now upgrade in-place. Threshold is a `currentSchemaLastColumnID = 27`
+  const so future column additions update by bumping a single literal.
+- **F#25 recursion guard** — `internal/audit/imports_test.go` parses every
+  non-test .go file in `internal/audit/` and rejects `internal/server`
+  imports. Catches direct imports only; transitive recursion (a→b→server)
+  is governed by package layering rules.
+- **Sink-separation doc-blocks** in `request_authz.go` and `audit_sink.go`
+  documenting that `AuditEmitter`/`AuditEmitterDetailed` feeds zerolog
+  only; the `audit.s3` Iceberg row is populated independently via
+  `rememberAuthzDecision` → `auditAuthzDecisionKey` → `finalizeAuditEnvelopeEvent`.
+- **`s3auth.ReasonAnonEnabled` / `ReasonDefaultBucketImplicitAnon`** package-
+  level consts. Producer (authorizer.go) and consumer (server.go
+  AnonAllow detection) share string-literal identity; copy-edit drift
+  impossible.
+
+### Changed
+
+- Schema migration trigger `internal/audit/migration.go:15` references
+  `currentSchemaLastColumnID` instead of a hardcoded `23` literal. Tables
+  at the prior schema auto-rewrite their metadata.json on next boot.
+- `IAMChecker` signature returns `(bool, AuthzDetail)` instead of bare
+  `bool`. The Authorize closure threads `policy.EvalResult` details
+  through `AuthzDetail` so they reach the audit row.
+- `RequestAuthorizer.Decide` measures elapsed-µs with a `math.MaxInt32`
+  saturation clamp; threads the detail into `Decision.Detail`.
+- `internal/audit/wire.go` `encodeConditionContext` simplified to direct
+  `json.Marshal(m)` — `encoding/json` already sorts map keys
+  lexicographically, so the explicit sort+rebuild step from the prototype
+  was redundant alloc churn.
+- `Outbox.DenyOnly()` doc-comment strengthened to warn against
+  production decision-gating: it's a write-path filter, not a decision
+  primitive; tests/diagnostics only.
+
+### Fixed
+
+- Iceberg bearer middleware's `policy.RequestContext.SourceIP` previously
+  used the raw `Forwarded`/`X-Forwarded-For` header (introduced by §4),
+  letting any client spoof the source IP for `SourceIPMatchAny` policy
+  conditions. §5 ProxyTrust validates these; §6 follows the same path —
+  `authoritativeClientIP` is honored only from trusted CIDRs.
+- `iam.AuditLogger` previously emitted nothing to the Iceberg audit table
+  on its zerolog sink — the audit row path was wired only via
+  `audit_envelope_event.go`. The Sink-Separation doc-block now documents
+  this duality so future maintainers don't conflate the two sinks.
+
+### Known limitations
+
+- **F29** — Iceberg REST API traffic (JWT bearer requests to
+  `/iceberg/v1/*`) is policy-gated but emits no row to the `audit.s3`
+  Iceberg table; only structured zerolog output exists via
+  `iam.AuditLogger`. Predates §6 (§4 introduced the bearer path without
+  an audit emitter). Follow-up task tracked.
+- **ConditionContext is sparse on the S3 path**: only `aws:Action` and
+  `aws:Resource` are threaded through `IAMChecker` to avoid a wider
+  closure-signature refactor. `aws:SourceIp` and `s3:prefix` are not
+  populated. The Iceberg bearer path passes SourceIP directly through
+  `policy.RequestContext` but that decision is not emitted to `audit.s3`
+  at all (see F29).
+- **Schema migration is metadata-only**. Tables that existed before §6
+  have parquet data files on disk with the old 23-column schema; only new
+  writes carry 27 columns. Iceberg readers (DuckDB via `query.go`)
+  materialize new columns as NULL on old files — standard Iceberg
+  projection behavior — but no integration test mixes pre- and post-
+  migration parquet files in one snapshot.
+- **Non-Layer-1 deny paths (SigV4 reject, scope mismatch, internal-bucket
+  deny) leave policy-decision columns empty**. By design — no policy was
+  evaluated. Operators querying `WHERE auth_status='deny' AND
+  matched_policy_id IS NOT NULL` will see only the Layer-1 IAM-grant
+  denies. Reason rides on the existing `err_reason` column for the other
+  paths.
+- **F25 / F26** — §5 deferred items unchanged.
+- **Boot-seed race window** for `audit.deny-only` and `trusted-proxy.cidr`
+  is microscopic and documented at the seed sites. If boot phasing
+  changes such that Raft Apply replays config writes before
+  serveruntime publishes the relevant pointer onto `bootState`, wrap the
+  publish/seed pair in an `atomic.Pointer` handle.
+
 ## [0.0.275.0] - 2026-05-20 - perf(storage): reduce readamp workload allocation
 
 Follow-up internal test optimization for the read-amplification and block-cache

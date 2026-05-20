@@ -11,20 +11,26 @@ const (
 // S3Event is one row of the audit.s3 Iceberg table.
 // Ts is Unix microseconds (Iceberg TIMESTAMPTZ → int64 μs since epoch).
 type S3Event struct {
-	Ts               int64
-	EventID          string
-	Finalized        bool
-	NodeID           string
-	RequestID        string
-	SAID             string
-	SourceIP         string
-	UserAgent        string
-	Method           string
-	Operation        string
-	Bucket           string
-	Key              string
-	Subresource      string
-	Status           int32
+	Ts        int64
+	EventID   string
+	Finalized bool
+	NodeID    string
+	RequestID string
+	SAID      string
+	SourceIP  string
+	UserAgent string
+	Method    string
+	Operation string
+	Bucket    string
+	Key       string
+	// Subresource captures the S3 sub-resource query (e.g. "acl", "tagging").
+	Subresource string
+	Status      int32
+	// AuthStatus is the outcome of authz. Valid values:
+	//   "allow"      — explicit allow by a policy statement
+	//   "deny"       — explicit deny (or default deny)
+	//   "anon_allow" — anonymous request allowed by a bucket policy (no SA)
+	//   "incomplete" — request did not finalize (server-side reaper)
 	AuthStatus       string
 	BytesIn          int64
 	BytesOut         int64
@@ -35,6 +41,27 @@ type S3Event struct {
 	UploadID         string
 	CopySourceBucket string
 	CopySourceKey    string
+
+	// Policy decision metadata (T48' §6). All fields optional; zero values mean
+	// "no policy matched" / "not measured" / "no condition context".
+
+	// MatchedPolicyID is the ID of the policy whose statement authorized (or
+	// denied) the request. Empty if the decision was a default deny or no
+	// policy was evaluated.
+	MatchedPolicyID string
+	// MatchedSID is the statement ID (Sid) within MatchedPolicyID. Empty if
+	// the matched statement has no Sid or none was matched.
+	MatchedSID string
+	// AuthzLatencyUS is the policy-evaluation latency in microseconds. Zero
+	// if not measured.
+	AuthzLatencyUS int32
+	// ConditionContext is the IAM condition context observed at evaluation
+	// time (e.g. aws:SourceIp, s3:prefix). On the wire this is serialized as
+	// a JSON-encoded string into the Iceberg `condition_context_json`
+	// column; an empty/nil map writes an empty string. (We use a JSON string
+	// rather than Iceberg `map<string,string>` to keep the row-serializer
+	// path simple; a future migration can promote it to a real map type.)
+	ConditionContext map[string]string
 }
 
 // S3InitialMetadata is the Iceberg v2 metadata.json for an empty audit.s3 table.
@@ -62,13 +89,24 @@ const auditIcebergSchemaJSON = `{"type":"struct","schema-id":0,"fields":[` +
 	`{"id":20,"name":"version_id","required":false,"type":"string"},` +
 	`{"id":21,"name":"upload_id","required":false,"type":"string"},` +
 	`{"id":22,"name":"copy_source_bucket","required":false,"type":"string"},` +
-	`{"id":23,"name":"copy_source_key","required":false,"type":"string"}` +
+	`{"id":23,"name":"copy_source_key","required":false,"type":"string"},` +
+	`{"id":24,"name":"matched_policy_id","required":false,"type":"string"},` +
+	`{"id":25,"name":"matched_sid","required":false,"type":"string"},` +
+	`{"id":26,"name":"authz_latency_us","required":false,"type":"int"},` +
+	`{"id":27,"name":"condition_context_json","required":false,"type":"string"}` +
 	`]}`
 
 const auditPartitionSpecJSON = `[{"name":"ts_day","transform":"day","source-id":1,"field-id":1000}]`
 
+// currentSchemaLastColumnID is the highest column id in auditIcebergSchemaJSON.
+// Keep this in sync with the `"last-column-id":N` literal in S3InitialMetadata
+// below; TestS3InitialMetadata_LastColumnID_Updated catches drift. The
+// migration trigger reads this to decide whether an existing table needs its
+// schema rewritten.
+const currentSchemaLastColumnID = 27
+
 const S3InitialMetadata = `{"format-version":2,"table-uuid":%q,"location":%q,` +
-	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":23,` +
+	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":27,` +
 	`"current-schema-id":0,"schemas":[` + auditIcebergSchemaJSON + `],` +
 	`"partition-specs":[{"spec-id":0,"fields":` + auditPartitionSpecJSON + `}],` +
 	`"default-spec-id":0,"last-partition-id":1000,` +

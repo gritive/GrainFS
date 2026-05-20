@@ -7,6 +7,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -182,6 +183,14 @@ type bootState struct {
 	mutationGate      *server.MutationGate
 	volMgr            *volume.Manager
 	auditSearchWarmup func(context.Context) error
+	// auditOutbox is the per-node durable audit outbox. Created in
+	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
+	// Kept on bootState so the OnAuditDenyOnly reload-hook closure registered
+	// earlier (in bootMetaRaftWiring) can dereference it nil-safely at fire
+	// time — RegisterClusterKeys runs before the outbox exists, so the
+	// closure must read through state rather than capturing the pointer
+	// directly.
+	auditOutbox *audit.Outbox
 
 	// bootHTTPServerAndAdmin
 	srv        *server.Server

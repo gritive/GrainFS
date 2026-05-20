@@ -211,3 +211,125 @@ func BenchmarkOutboxAppendAttemptFinalize(b *testing.B) {
 		}
 	})
 }
+
+// TestOutbox_DenyOnly_DropsAllowEvents verifies that with the deny-only filter
+// engaged, Finalize drops allow + anon_allow rows at the durable-write boundary.
+// The pre-finalize AppendAttempt row is also cleaned up so the stale-attempt
+// reaper does not later resurrect it as "incomplete".
+func TestOutbox_DenyOnly_DropsAllowEvents(t *testing.T) {
+	ctx := context.Background()
+	box, err := audit.OpenOutbox(filepath.Join(t.TempDir(), "audit-outbox"))
+	require.NoError(t, err)
+	defer box.Close()
+
+	box.SetDenyOnly(true)
+	require.True(t, box.DenyOnly())
+
+	cases := []struct {
+		name       string
+		authStatus string
+	}{
+		{name: "allow", authStatus: "allow"},
+		{name: "anon_allow", authStatus: "anon_allow"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "evt-allow-" + strconv.Itoa(i)
+			attempt := audit.S3Event{EventID: id, RequestID: id, Ts: time.Now().UnixMicro(), Method: "GET", Bucket: "b", Key: "k"}
+			require.NoError(t, box.AppendAttempt(ctx, attempt))
+
+			ev := attempt
+			ev.Status = 200
+			ev.AuthStatus = tc.authStatus
+			require.NoError(t, box.Finalize(ctx, ev))
+
+			pending, err := box.Pending(ctx, 10)
+			require.NoError(t, err)
+			require.Empty(t, pending, "deny-only must drop %s row, and the prior AppendAttempt row must be cleaned so the reaper does not surface it later", tc.authStatus)
+
+			// AppendFinalized (follower-ship path) is also filtered.
+			followerID := id + "-follower"
+			follower := audit.S3Event{EventID: followerID, RequestID: followerID, Ts: time.Now().UnixMicro(), Method: "GET", Bucket: "b", Key: "k", AuthStatus: tc.authStatus, Status: 200}
+			require.NoError(t, box.AppendFinalized(ctx, follower))
+			pending, err = box.Pending(ctx, 10)
+			require.NoError(t, err)
+			require.Empty(t, pending)
+		})
+	}
+}
+
+// TestOutbox_DenyOnly_KeepsDenyEvents verifies that deny rows (and incomplete
+// reaper tombstones) remain committable when the filter is engaged.
+func TestOutbox_DenyOnly_KeepsDenyEvents(t *testing.T) {
+	ctx := context.Background()
+	box, err := audit.OpenOutbox(filepath.Join(t.TempDir(), "audit-outbox"))
+	require.NoError(t, err)
+	defer box.Close()
+
+	box.SetDenyOnly(true)
+
+	denyEv := audit.S3Event{EventID: "evt-deny", RequestID: "r-deny", Ts: time.Now().UnixMicro(), Method: "GET", Bucket: "b", Key: "k", AuthStatus: "deny", Status: 403}
+	require.NoError(t, box.AppendAttempt(ctx, denyEv))
+	require.NoError(t, box.Finalize(ctx, denyEv))
+
+	// Follower-ship path: deny row from a follower must also flow.
+	followerDeny := audit.S3Event{EventID: "evt-deny-follower", RequestID: "r-deny-follower", Ts: time.Now().UnixMicro(), Method: "PUT", Bucket: "b", Key: "k2", AuthStatus: "deny", Status: 403}
+	require.NoError(t, box.AppendFinalized(ctx, followerDeny))
+
+	pending, err := box.Pending(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 2)
+	statuses := map[string]bool{}
+	for _, ev := range pending {
+		statuses[ev.AuthStatus] = true
+	}
+	require.True(t, statuses["deny"])
+}
+
+// TestOutbox_DenyOnly_AtomicFlip verifies that the filter is a write-time
+// gate: rows persisted before the flip remain committable, and rows persisted
+// after the flip respect the new policy. Toggling on/off must not lose
+// in-flight events that were already durably written.
+func TestOutbox_DenyOnly_AtomicFlip(t *testing.T) {
+	ctx := context.Background()
+	box, err := audit.OpenOutbox(filepath.Join(t.TempDir(), "audit-outbox"))
+	require.NoError(t, err)
+	defer box.Close()
+
+	// Filter OFF: allow row is persisted.
+	ev1 := audit.S3Event{EventID: "evt-1", RequestID: "r1", Ts: time.Now().UnixMicro(), Method: "GET", Bucket: "b", Key: "k1", AuthStatus: "allow", Status: 200}
+	require.NoError(t, box.AppendFinalized(ctx, ev1))
+
+	// Flip ON: previously-persisted row remains readable; new allow row is dropped.
+	box.SetDenyOnly(true)
+	ev2 := audit.S3Event{EventID: "evt-2", RequestID: "r2", Ts: time.Now().UnixMicro(), Method: "GET", Bucket: "b", Key: "k2", AuthStatus: "allow", Status: 200}
+	require.NoError(t, box.AppendFinalized(ctx, ev2))
+
+	pending, err := box.Pending(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "evt-1", pending[0].EventID, "in-flight rows persisted before the flip must not be lost")
+
+	// Flip OFF again: new allow row now flows through.
+	box.SetDenyOnly(false)
+	ev3 := audit.S3Event{EventID: "evt-3", RequestID: "r3", Ts: time.Now().UnixMicro(), Method: "GET", Bucket: "b", Key: "k3", AuthStatus: "allow", Status: 200}
+	require.NoError(t, box.AppendFinalized(ctx, ev3))
+
+	pending, err = box.Pending(ctx, 10)
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, ev := range pending {
+		ids[ev.EventID] = true
+	}
+	require.True(t, ids["evt-1"], "evt-1 must still be present")
+	require.False(t, ids["evt-2"], "evt-2 was dropped while filter was on")
+	require.True(t, ids["evt-3"], "evt-3 must flow after filter is turned off")
+}
+
+// TestOutbox_DenyOnly_NilSafe verifies that the toggle is nil-safe — production
+// wiring may be called against a nil outbox when audit.iceberg is disabled.
+func TestOutbox_DenyOnly_NilSafe(t *testing.T) {
+	var box *audit.Outbox
+	require.NotPanics(t, func() { box.SetDenyOnly(true) })
+	require.False(t, box.DenyOnly())
+}

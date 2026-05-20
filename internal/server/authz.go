@@ -90,7 +90,7 @@ func (s *Server) mustAuthorizePostLoad(ctx context.Context, c *app.RequestContex
 	if auditInternalObjectReadAllowed(bucket, key, string(c.Method()), c.RemoteAddr().String(), AccessKeyFromContext(ctx), s.auditInternalAccessKey) {
 		return false
 	}
-	if s.authorizePostLoad(ctx, bucket, key, action, aclByte) {
+	if s.authorizePostLoad(ctx, c, bucket, key, action, aclByte) {
 		return false
 	}
 	c.Set(auditErrReasonKey, "object_acl_deny")

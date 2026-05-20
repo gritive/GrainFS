@@ -307,6 +307,23 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			return fmt.Errorf("audit outbox: %w", err)
 		}
 		state.AddCleanup(func() { _ = auditOutbox.Close() })
+		// Seed and publish: SetDenyOnly runs against the local var BEFORE the
+		// outbox pointer becomes visible on state.auditOutbox, so a concurrent
+		// reload hook from Raft Apply either (a) fires before publication and
+		// silently no-ops on the still-nil pointer, leaving state.auditOutbox
+		// at the boot-time snapshot value when publication completes, or (b)
+		// fires after publication and wins. Case (a) is a narrow lost-update
+		// window during boot (a fresh true that arrived via Raft replay between
+		// GetBool and the publish would be clobbered by the boot snapshot),
+		// but at boot phase Raft Apply has not yet replayed config writes —
+		// the hook subscription was just registered in bootMetaRaftWiring.
+		// If this assumption breaks (e.g. boot ordering changes), wrap the
+		// publish + seed in an atomic.Pointer-based handle that the hook can
+		// CAS against.
+		if v, ok := state.cfgStore.GetBool("audit.deny-only"); ok {
+			auditOutbox.SetDenyOnly(v)
+		}
+		state.auditOutbox = auditOutbox
 		auditAccessKey := "AKGFAUDIT" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		auditSecretKey := uuid.NewString() + uuid.NewString()
 		srvOpts = append(srvOpts,

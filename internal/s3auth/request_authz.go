@@ -1,6 +1,10 @@
 package s3auth
 
-import "context"
+import (
+	"context"
+	"math"
+	"time"
+)
 
 // Phase distinguishes pre-load and post-load authorization evaluation.
 // PhasePreLoad evaluates Layer 1 (IAM grant) + Layer 2 (bucket policy); ObjectACL is ignored.
@@ -19,6 +23,26 @@ type Decision struct {
 	Allow  bool
 	Layer  string
 	Reason string
+	// Detail surfaces the Layer 1 policy-decision metadata (matched policy
+	// id, matched sid, anon-allow flag, condition context) so callers can
+	// thread it into the audit envelope without a second policy evaluation.
+	// T51' §6.
+	Detail AuthzDetail
+	// AuthzLatencyUS reports the wall-clock microseconds the authorizer
+	// spent producing this decision. T51' §6.
+	AuthzLatencyUS int32
+}
+
+// AuthzDetail carries policy decision metadata threaded out of the Layer 1
+// check so the audit emitter can record matched_policy_id, matched_sid, and
+// the evaluator's reason without depending on the iam/policy package
+// directly. Zero values are valid and mean "no detail available". T51' §6.
+type AuthzDetail struct {
+	MatchedPolicyID  string
+	MatchedSID       string
+	Reason           string
+	AnonAllow        bool
+	ConditionContext map[string]string
 }
 
 // IAMStore is the subset of *iam.Store the authorizer depends on.
@@ -32,17 +56,54 @@ type IAMStore interface {
 // object-scope Deny statements (Resource: arn:aws:s3:::bucket/path/*) to
 // match at L1 — without it a paired "Allow Resource:*" silently bypasses
 // the Deny.
-type IAMChecker func(saID, bucket, key string, action S3Action) bool
+//
+// The second return value carries optional policy-decision metadata for
+// audit (T51' §6). Callers may return a zero AuthzDetail; the authorizer
+// treats it as "no detail available".
+type IAMChecker func(saID, bucket, key string, action S3Action) (bool, AuthzDetail)
 
 // PolicyChecker evaluates bucket policy. *policy.CompiledPolicyStore satisfies this.
 type PolicyChecker interface {
 	Allow(ctx context.Context, in PermCheckInput) bool
 }
 
+// Audit emission has two INDEPENDENT sinks:
+//
+//  1. AuditEmitter (this interface): structured zerolog line "iam.authz";
+//     immediate, per-call. AuditEmitterDetailed extension carries
+//     matched_policy_id / matched_sid / authz_latency_us / condition_context.
+//  2. audit.s3 Iceberg table (internal/audit + internal/server/audit_envelope_event.go):
+//     built from the request context via rememberAuthzDecision; flushed via
+//     outbox at request end.
+//
+// Both are fed from the same Decision; if you change the Decision shape,
+// update BOTH paths.
+//
 // AuditEmitter records authorization decisions. *iam.AuditLogger satisfies this.
 type AuditEmitter interface {
 	RecordAllow(ctx context.Context, saID, bucket, key string, action S3Action)
 	RecordDeny(ctx context.Context, saID, bucket, key string, action S3Action, reason string)
+}
+
+// AuditEmitterDetailed is an optional extension of AuditEmitter that accepts
+// policy decision metadata (matched policy/sid, evaluator latency, condition
+// context, anon-allow flag). *iam.AuditLogger satisfies this. When an
+// AuditEmitter does not also implement AuditEmitterDetailed, RequestAuthorizer
+// falls back to the bool-only RecordAllow/RecordDeny path.
+type AuditEmitterDetailed interface {
+	RecordAllowDetailed(ctx context.Context, saID, bucket, key string, action S3Action, d AuditAllowDetails)
+	RecordDenyDetailed(ctx context.Context, saID, bucket, key string, action S3Action, reason string, d AuditAllowDetails)
+	RecordAnonAllow(ctx context.Context, bucket, key string, action S3Action, d AuditAllowDetails)
+}
+
+// AuditAllowDetails carries the policy decision metadata into the audit
+// emitter. Mirrors iam.AuditDetails — defined here to keep s3auth free of
+// an iam import. T51' §6.
+type AuditAllowDetails struct {
+	MatchedPolicyID  string
+	MatchedSID       string
+	AuthzLatencyUS   int32
+	ConditionContext map[string]string
 }
 
 // PrincipalResolver returns the SA id stored in ctx. iam.PrincipalFromContext satisfies this.
@@ -93,12 +154,22 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 	}
 	authEnabled := r.iam != nil && r.iam.AuthEnabled()
 
+	// Latency clock starts here so the audit row's authz_latency_us reflects
+	// the full Layer 1 + Layer 2 + Layer 3 evaluation as observed by the
+	// authorizer (the part operators can influence via policy edits). T51' §6.
+	t0 := time.Now()
+	var detail AuthzDetail
+
 	// Layer 1: IAM grant.
 	if authEnabled {
-		ok := r.iamCheck != nil && r.iamCheck(saID, in.Resource.Bucket, in.Resource.Key, in.Action)
+		ok := false
+		if r.iamCheck != nil {
+			ok, detail = r.iamCheck(saID, in.Resource.Bucket, in.Resource.Key, in.Action)
+		}
 		if !ok {
-			r.recordDeny(ctx, saID, in, "no_grant")
-			return Decision{Allow: false, Layer: "iam_grant", Reason: "no_grant"}
+			lat := elapsedUS(t0)
+			r.recordDeny(ctx, saID, in, "no_grant", detail, lat)
+			return Decision{Allow: false, Layer: "iam_grant", Reason: "no_grant", Detail: detail, AuthzLatencyUS: lat}
 		}
 	}
 
@@ -106,8 +177,9 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 	// chicken-and-egg lockout; IAM (Layer 1) already gates these actions.
 	if !isBucketPolicyAction(in.Action) && r.policy != nil {
 		if !r.policy.Allow(ctx, in) {
-			r.recordDeny(ctx, saID, in, "policy_deny")
-			return Decision{Allow: false, Layer: "bucket_policy", Reason: "policy_deny"}
+			lat := elapsedUS(t0)
+			r.recordDeny(ctx, saID, in, "policy_deny", detail, lat)
+			return Decision{Allow: false, Layer: "bucket_policy", Reason: "policy_deny", Detail: detail, AuthzLatencyUS: lat}
 		}
 	}
 
@@ -115,32 +187,69 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 	if phase == PhasePostLoad {
 		if !IsAuthorizedByACL(in.ObjectACL, in.Principal.AccessKey, in.Action) {
 			reason := aclDenyReason(in.Principal.AccessKey)
-			r.recordDeny(ctx, saID, in, reason)
-			return Decision{Allow: false, Layer: "object_acl", Reason: reason}
+			lat := elapsedUS(t0)
+			r.recordDeny(ctx, saID, in, reason, detail, lat)
+			return Decision{Allow: false, Layer: "object_acl", Reason: reason, Detail: detail, AuthzLatencyUS: lat}
 		}
 		layer := postLoadAllowLayer(in)
+		lat := elapsedUS(t0)
 		if authEnabled {
-			r.recordAllow(ctx, saID, in)
+			r.recordAllow(ctx, saID, in, detail, lat)
 		}
-		return Decision{Allow: true, Layer: layer}
+		return Decision{Allow: true, Layer: layer, Detail: detail, AuthzLatencyUS: lat}
 	}
 
+	lat := elapsedUS(t0)
 	if authEnabled {
-		r.recordAllow(ctx, saID, in)
-		return Decision{Allow: true, Layer: "iam_grant"}
+		r.recordAllow(ctx, saID, in, detail, lat)
+		return Decision{Allow: true, Layer: "iam_grant", Detail: detail, AuthzLatencyUS: lat}
 	}
-	return Decision{Allow: true, Layer: "anonymous_pass"}
+	return Decision{Allow: true, Layer: "anonymous_pass", Detail: detail, AuthzLatencyUS: lat}
 }
 
-func (r *RequestAuthorizer) recordAllow(ctx context.Context, saID string, in PermCheckInput) {
+func elapsedUS(t0 time.Time) int32 {
+	us := time.Since(t0).Microseconds()
+	if us < 0 {
+		return 0
+	}
+	if us > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int32(us)
+}
+
+func (r *RequestAuthorizer) recordAllow(ctx context.Context, saID string, in PermCheckInput, detail AuthzDetail, latencyUS int32) {
 	if r.audit == nil {
+		return
+	}
+	if detailed, ok := r.audit.(AuditEmitterDetailed); ok {
+		d := AuditAllowDetails{
+			MatchedPolicyID:  detail.MatchedPolicyID,
+			MatchedSID:       detail.MatchedSID,
+			AuthzLatencyUS:   latencyUS,
+			ConditionContext: detail.ConditionContext,
+		}
+		if detail.AnonAllow {
+			detailed.RecordAnonAllow(ctx, in.Resource.Bucket, in.Resource.Key, in.Action, d)
+			return
+		}
+		detailed.RecordAllowDetailed(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action, d)
 		return
 	}
 	r.audit.RecordAllow(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action)
 }
 
-func (r *RequestAuthorizer) recordDeny(ctx context.Context, saID string, in PermCheckInput, reason string) {
+func (r *RequestAuthorizer) recordDeny(ctx context.Context, saID string, in PermCheckInput, reason string, detail AuthzDetail, latencyUS int32) {
 	if r.audit == nil {
+		return
+	}
+	if detailed, ok := r.audit.(AuditEmitterDetailed); ok {
+		detailed.RecordDenyDetailed(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action, reason, AuditAllowDetails{
+			MatchedPolicyID:  detail.MatchedPolicyID,
+			MatchedSID:       detail.MatchedSID,
+			AuthzLatencyUS:   latencyUS,
+			ConditionContext: detail.ConditionContext,
+		})
 		return
 	}
 	r.audit.RecordDeny(ctx, saID, in.Resource.Bucket, in.Resource.Key, in.Action, reason)

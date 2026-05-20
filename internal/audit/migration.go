@@ -12,7 +12,7 @@ func MigrateMetadataToCurrent(raw json.RawMessage, nowMs int64) (json.RawMessage
 	}
 	changed := false
 
-	if getInt64(meta, "last-column-id") < 23 {
+	if getInt64(meta, "last-column-id") < currentSchemaLastColumnID {
 		var current map[string]any
 		currentJSON := []byte(fmt.Sprintf(S3InitialMetadata, "migration-probe", "s3://grainfs-audit", nowMs))
 		if err := json.Unmarshal(currentJSON, &current); err != nil {

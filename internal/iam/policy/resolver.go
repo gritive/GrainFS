@@ -20,6 +20,7 @@ type Store interface {
 type cacheEntry struct {
 	expires time.Time
 	pp      []*Document
+	ppNames []string
 	bp      *Document
 }
 
@@ -46,7 +47,13 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInpu
 	r.mu.Lock()
 	if e, ok := r.cache[k]; ok && time.Now().Before(e.expires) {
 		r.mu.Unlock()
-		return EvalInput{PrincipalPolicies: e.pp, ResourcePolicy: e.bp, Principal: saID}, nil
+		return EvalInput{
+			PrincipalPolicies:    e.pp,
+			PrincipalPolicyNames: e.ppNames,
+			ResourcePolicy:       e.bp,
+			ResourcePolicyBucket: bucket,
+			Principal:            saID,
+		}, nil
 	}
 	r.mu.Unlock()
 
@@ -66,6 +73,7 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInpu
 		names = append(names, gp...)
 	}
 	var pp []*Document
+	var ppNames []string
 	for _, n := range names {
 		d, err := r.store.PolicyDoc(ctx, n)
 		if err != nil {
@@ -73,6 +81,7 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInpu
 		}
 		if d != nil {
 			pp = append(pp, d)
+			ppNames = append(ppNames, n)
 		}
 	}
 	bp, err := r.store.BucketPolicy(ctx, bucket)
@@ -81,9 +90,15 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInpu
 	}
 
 	r.mu.Lock()
-	r.cache[k] = cacheEntry{expires: time.Now().Add(r.ttl), pp: pp, bp: bp}
+	r.cache[k] = cacheEntry{expires: time.Now().Add(r.ttl), pp: pp, ppNames: ppNames, bp: bp}
 	r.mu.Unlock()
-	return EvalInput{PrincipalPolicies: pp, ResourcePolicy: bp, Principal: saID}, nil
+	return EvalInput{
+		PrincipalPolicies:    pp,
+		PrincipalPolicyNames: ppNames,
+		ResourcePolicy:       bp,
+		ResourcePolicyBucket: bucket,
+		Principal:            saID,
+	}, nil
 }
 
 // HasBucketPolicy reports whether an explicit bucket policy exists for bucket.

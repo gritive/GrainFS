@@ -88,7 +88,7 @@ func TestAuditSchemaV2HasSearchFieldsAndDayPartition(t *testing.T) {
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal([]byte(metaJSON), &meta))
 
-	require.Equal(t, float64(23), meta["last-column-id"])
+	require.Equal(t, float64(27), meta["last-column-id"])
 	specs := meta["partition-specs"].([]any)
 	require.Len(t, specs, 1)
 	fields := specs[0].(map[string]any)["fields"].([]any)
@@ -150,7 +150,7 @@ func TestEncodeParquetReadback(t *testing.T) {
 	defer tbl.Release()
 
 	require.Equal(t, int64(len(events)), tbl.NumRows(), "row count must match")
-	require.Equal(t, 23, int(tbl.NumCols()), "must have 23 columns")
+	require.Equal(t, 27, int(tbl.NumCols()), "must have 27 columns")
 
 	// Verify column names match schema
 	schema := tbl.Schema()
@@ -160,6 +160,7 @@ func TestEncodeParquetReadback(t *testing.T) {
 		"bytes_in", "bytes_out", "latency_ms", "err_class",
 		"event_id", "user_agent", "operation", "subresource", "auth_status",
 		"err_reason", "version_id", "upload_id", "copy_source_bucket", "copy_source_key",
+		"matched_policy_id", "matched_sid", "authz_latency_us", "condition_context_json",
 	}
 	for i, name := range wantCols {
 		require.Equal(t, name, schema.Field(i).Name, "column %d name", i)

@@ -95,22 +95,48 @@ func (s *Server) buildAuthorizer() {
 	// policy.Evaluate for the (saID, bucket, action) triple. Without one
 	// (test fixtures, legacy mode), deny-by-default is preserved — the
 	// bucket policy layer (Layer 2) still runs unconditionally.
+	//
+	// T51' §6: the closure threads policy decision metadata (matched policy
+	// id, matched sid, reason, condition context, anon-allow flag) into the
+	// authorizer's audit emitter via the second return value (AuthzDetail).
 	var iamCheck s3auth.IAMChecker
 	if s.policyAuthorizer != nil {
 		pa := s.policyAuthorizer
-		iamCheck = func(saID, bucket, key string, action s3auth.S3Action) bool {
+		iamCheck = func(saID, bucket, key string, action s3auth.S3Action) (bool, s3auth.AuthzDetail) {
 			resource := "arn:aws:s3:::" + bucket
 			if key != "" {
 				resource += "/" + key
 			}
+			// Note: SourceIP/Prefix are not threaded through IAMChecker today
+			// — extending the closure signature is a wider refactor than this
+			// fix warrants. ConditionContext picks up aws:Action +
+			// aws:Resource (always present), giving operators correlate-by-
+			// request facts on every audit row. SourceIP enrichment is a
+			// follow-up. T51' B2 review.
 			result := pa.Authorize(context.Background(), saID, bucket, policy.RequestContext{
 				Action:   action.PolicyActionString(),
 				Resource: resource,
 			})
-			return result.Decision == policy.DecisionAllow
+			detail := s3auth.AuthzDetail{
+				MatchedPolicyID:  result.MatchedPolicy,
+				MatchedSID:       result.MatchedSid,
+				Reason:           result.Reason,
+				ConditionContext: result.ConditionContext,
+				// AnonAllow is set when an anonymous request is permitted by
+				// either iam.anon-enabled or the default bucket's implicit
+				// anon policy (D#2). The authorizer surfaces both via
+				// result.Reason; pattern-match here to keep the policy layer
+				// agnostic of audit vocabulary.
+				AnonAllow: saID == "" && result.Decision == policy.DecisionAllow &&
+					(result.Reason == s3auth.ReasonAnonEnabled ||
+						result.Reason == s3auth.ReasonDefaultBucketImplicitAnon),
+			}
+			return result.Decision == policy.DecisionAllow, detail
 		}
 	} else {
-		iamCheck = func(_ string, _ string, _ string, _ s3auth.S3Action) bool { return false }
+		iamCheck = func(_, _, _ string, _ s3auth.S3Action) (bool, s3auth.AuthzDetail) {
+			return false, s3auth.AuthzDetail{}
+		}
 	}
 
 	s.authz = s3auth.NewRequestAuthorizer(
