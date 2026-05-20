@@ -214,4 +214,117 @@ func runLifecycleConfigCases(
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bucket must still exist after empty-scan cycle")
 		gomega.Expect(out.Contents).To(gomega.BeEmpty(), "bucket must still be empty")
 	}, ginkgo.NodeTimeout(120*time.Second))
+
+	ginkgo.It("reclaims noncurrent versions standalone without DM (NoncurrentVersionExpirationStandalone)", func(ctx context.Context) {
+		tgt := getTgt()
+		if tgt.name == "single-dedicated" {
+			ginkgo.Skip("noncurrent version reclaim requires versioning; LocalBackend SingleNode 미지원")
+		}
+		client := tgt.pickNode(0)
+		lc := getLC()
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "lcncv")
+
+		// Enable versioning
+		_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+			Bucket:                  aws.String(bucket),
+			VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Put v1, then v2 (v1 becomes noncurrent)
+		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"), Body: stringReader("v1"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"), Body: stringReader("v2"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// NoncurrentVersionExpiration only — NO Expiration, NO ExpiredObjectDeleteMarker
+		_, err = client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+				ID:     aws.String("ncv-only"),
+				Status: types.ExpirationStatusEnabled,
+				Filter: &types.LifecycleRuleFilter{Prefix: aws.String("")},
+				NoncurrentVersionExpiration: &types.NoncurrentVersionExpiration{
+					NoncurrentDays: aws.Int32(1),
+				},
+			}}},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+
+		// v1 (noncurrent) must be reclaimed; v2 (current) must remain; no DM
+		out, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket: aws.String(bucket), Prefix: aws.String("k"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Versions).To(gomega.HaveLen(1), "only current v2 must remain")
+		gomega.Expect(aws.ToBool(out.Versions[0].IsLatest)).To(gomega.BeTrue())
+		gomega.Expect(out.DeleteMarkers).To(gomega.BeEmpty(), "no DM expected (standalone NoncurrentVersionExpiration)")
+
+		// HEAD must still return v2
+		head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("k"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "current v2 must still be reachable via HeadObject")
+		gomega.Expect(head.ContentLength).NotTo(gomega.BeNil())
+	}, ginkgo.NodeTimeout(180*time.Second))
+
+	// Step 1 finding: applyRulesToGroup iterates rules slice in declaration order and applies
+	// all matching rules sequentially (no specificity ranking). Multiple matching rules all
+	// evaluate; effects accumulate. The narrower prefix rule with shorter Days wins because
+	// its expiration trigger fires sooner.
+	ginkgo.It("applies all matching rules sequentially — narrower wins via shorter Days (MultipleRulesPriority)", func(ctx context.Context) {
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		lc := getLC()
+		bucket := tgt.uniqueBucket(ginkgo.GinkgoTB(), "lcmr")
+
+		// Two objects: logs/critical matches both "logs/" (broad) and "logs/critical" (narrow),
+		// logs/normal matches only "logs/" (broad).
+		for _, key := range []string{"logs/critical", "logs/normal"} {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket), Key: aws.String(key), Body: stringReader("body"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+			Bucket: aws.String(bucket),
+			LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{
+				{
+					ID:         aws.String("broad-logs"),
+					Status:     types.ExpirationStatusEnabled,
+					Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("logs/")},
+					Expiration: &types.LifecycleExpiration{Days: aws.Int32(30)},
+				},
+				{
+					ID:         aws.String("narrow-critical"),
+					Status:     types.ExpirationStatusEnabled,
+					Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("logs/critical")},
+					Expiration: &types.LifecycleExpiration{Days: aws.Int32(1)},
+				},
+			}},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Advance 2 days — narrow rule triggers logs/critical; broad rule (30d) doesn't yet
+		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
+		lc.RunLifecycleCycle(ctx)
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("logs/critical"),
+		})
+		gomega.Expect(err).To(gomega.HaveOccurred(), "logs/critical must be expired by narrow rule (1d)")
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String("logs/normal"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "logs/normal must remain — broad rule (30d) not yet triggered")
+	}, ginkgo.NodeTimeout(120*time.Second))
 }
