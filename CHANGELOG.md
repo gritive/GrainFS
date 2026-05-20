@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.277.0] - 2026-05-20 - perf(tests): trim remaining storage volume workload cost
+
+Internal storage and volume tests now spend less memory and CPU on synthetic
+workload scale while preserving the segment, cache-hit, and read-amplification
+signals they were written to exercise.
+
+### Changed
+
+- Reduced the largest `PutObject` segment round-trip case from 256 MiB to just
+  over 64 MiB, still covering multi-segment object reconstruction without the
+  extra synthetic payload cost.
+- Compared large object round-trips as a stream instead of `io.ReadAll`, removing
+  a full duplicate result buffer from the test memory profile.
+- Scaled volume read-amplification workloads down while preserving the 16 MiB,
+  64 MiB, and 256 MiB cache-boundary relationships.
+- Reduced the block-cache real-vs-simulator workload to 1024 blocks, still
+  exercising thousands of real `ReadAt` calls across cold and warm passes.
+
 ## [0.0.276.0] - 2026-05-20 - feat(audit): §6 Audit — policy-decision columns on audit.s3 Iceberg table
 
 §6 makes the existing `audit.s3` Iceberg table answer not just "what S3 op
