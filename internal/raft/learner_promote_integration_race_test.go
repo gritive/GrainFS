@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit pins the M6.0
@@ -36,6 +36,7 @@ import (
 // e2e (election 750–1500ms, RTT 50–200ms) sits comfortably in this
 // regime.
 func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
+	gomega.RegisterFailHandler(ginkgo.Fail)
 	ginkgo.RunSpecs(t, "Raft learner promotion integration race")
 }
 
@@ -55,7 +56,7 @@ var _ = ginkgo.Describe("TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit", fu
 		delay := delay
 		ginkgo.It(fmt.Sprintf("keeps leader stable with delay=%s", delay), func(ginkgo.SpecContext) {
 			err := runPromoteRaceIterations(delay)
-			require.NoError(ginkgo.GinkgoTB(), err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}, ginkgo.NodeTimeout(90*time.Second))
 	}
 })
