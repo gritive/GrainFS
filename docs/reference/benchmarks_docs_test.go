@@ -28,6 +28,16 @@ func TestReadmePerformancePublishesOnlyPutGet(t *testing.T) {
 	}
 }
 
+func TestLatestIcebergBenchmarkTableSatisfiesDocumentedGates(t *testing.T) {
+	body, err := os.ReadFile("benchmarks.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLatestIcebergBenchmarkGates(string(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func validateLatestS3BenchmarkGates(markdown string) error {
 	required := map[string]bool{
 		"put":           false,
@@ -109,6 +119,45 @@ func validateLatestS3BenchmarkGates(markdown string) error {
 	for _, required := range []string{"S3 Express", "best-effort"} {
 		if !strings.Contains(markdown, required) {
 			return fmt.Errorf("append caveat must mention %q", required)
+		}
+	}
+	return nil
+}
+
+func validateLatestIcebergBenchmarkGates(markdown string) error {
+	required := map[string]bool{
+		"catalog-read":    false,
+		"catalog-commits": false,
+		"catalog-mixed":   false,
+		"sustained":       false,
+	}
+	for _, line := range strings.Split(markdown, "\n") {
+		cells := markdownTableCells(line)
+		if len(cells) != 6 {
+			continue
+		}
+		op := cells[0]
+		if _, ok := required[op]; !ok {
+			continue
+		}
+		required[op] = true
+		if cells[1] == "" {
+			return fmt.Errorf("%s Iceberg throughput must be present", op)
+		}
+		errorsValue, err := strconv.Atoi(cells[4])
+		if err != nil {
+			return fmt.Errorf("%s Iceberg errors must be numeric: %w", op, err)
+		}
+		if errorsValue != 0 {
+			return fmt.Errorf("%s Iceberg errors=%d, want 0", op, errorsValue)
+		}
+		if !strings.Contains(cells[5], "benchmarks/profiles/iceberg-single-") {
+			return fmt.Errorf("%s Iceberg artifact must point at benchmarks/profiles/iceberg-single-*", op)
+		}
+	}
+	for op, seen := range required {
+		if !seen {
+			return fmt.Errorf("latest Iceberg benchmark table missing %s", op)
 		}
 	}
 	return nil
