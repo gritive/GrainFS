@@ -16,6 +16,14 @@ func registerIAM(g router, d *Deps) {
 	// Key
 	g.POST(routePathIAMSAKey, iamCreateKeyHandler(d))
 	g.DELETE(routePathIAMSAKeyByAK, iamRevokeKeyHandler(d))
+	// Policy — simulate must be registered before :name to avoid param capture
+	g.POST(routePathIAMPolicySimulate, iamPolicySimulateHandler(d))
+	g.PUT(routePathIAMPolicyByName, iamPolicyPutHandler(d))
+	g.GET(routePathIAMPolicyByName, iamPolicyGetHandler(d))
+	g.DELETE(routePathIAMPolicyByName, iamPolicyDeleteHandler(d))
+	g.GET(routePathIAMPolicy, iamPolicyListHandler(d))
+	g.PUT(routePathIAMPolicyAttachSA, iamPolicyAttachSAHandler(d))
+	g.DELETE(routePathIAMPolicyAttachSA, iamPolicyDetachSAHandler(d))
 	// Bucket upstream (PUT upsert -> 204). Routes under /upstreams (not
 	// /buckets/upstream) to avoid Hertz static-beats-param collision with
 	// GET /buckets/:name used by AdminGetBucket.

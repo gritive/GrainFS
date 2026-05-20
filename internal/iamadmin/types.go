@@ -80,3 +80,70 @@ type KeyRevokeOptions struct {
 	SAID      string
 	AccessKey string
 }
+
+// --- Policy ---
+
+type PolicyPutOptions struct {
+	BaseOptions
+	Name     string
+	FilePath string
+}
+
+type PolicyGetOptions struct {
+	BaseOptions
+	Name string
+}
+
+type PolicyListOptions struct {
+	BaseOptions
+}
+
+type PolicyDeleteOptions struct {
+	BaseOptions
+	Name string
+}
+
+// PolicyAttachOptions holds options for attaching a policy to an SA or group.
+// Exactly one of SAID or GroupID should be set.
+type PolicyAttachOptions struct {
+	BaseOptions
+	PolicyName string
+	SAID       string
+	GroupID    string
+	IKnow      bool // suppress Resource:* warning
+}
+
+type PolicyDetachOptions struct {
+	BaseOptions
+	PolicyName string
+	SAID       string
+	GroupID    string
+}
+
+// PolicyValidateOptions performs local validation only — no UDS dial.
+type PolicyValidateOptions struct {
+	BaseOptions
+	FilePath string
+}
+
+type PolicySimulateOptions struct {
+	BaseOptions
+	SAID     string
+	Action   string
+	Resource string
+}
+
+// PolicySimulateRequest is the wire type sent to POST /v1/iam/policy/simulate.
+type PolicySimulateRequest struct {
+	SAID     string `json:"sa_id"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+}
+
+// PolicySimulateResponse is the wire type received from POST /v1/iam/policy/simulate.
+type PolicySimulateResponse struct {
+	Effect        string `json:"effect"`
+	MatchedPolicy string `json:"matched_policy"`
+	MatchedSID    string `json:"matched_sid"`
+	Reason        string `json:"reason"`
+}

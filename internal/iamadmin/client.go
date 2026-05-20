@@ -2,6 +2,7 @@ package iamadmin
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
@@ -81,4 +82,49 @@ func (c *Client) KeyCreateRaw(ctx context.Context, saID string, buckets []string
 func (c *Client) KeyRevoke(ctx context.Context, saID, accessKey string) error {
 	return c.Delete(ctx,
 		"/v1/iam/sa/"+url.PathEscape(saID)+"/key/"+url.PathEscape(accessKey), nil)
+}
+
+// --- Policy ---
+
+// PolicyPut uploads a custom policy document to the admin server.
+func (c *Client) PolicyPut(ctx context.Context, name string, doc []byte) error {
+	return c.Do(ctx, "PUT", "/v1/iam/policy/"+url.PathEscape(name), json.RawMessage(doc), nil)
+}
+
+// PolicyGet returns the raw policy document bytes for the named policy.
+func (c *Client) PolicyGet(ctx context.Context, name string) ([]byte, error) {
+	return c.GetRaw(ctx, "/v1/iam/policy/"+url.PathEscape(name))
+}
+
+// PolicyList returns the names of all policies known to the admin server.
+func (c *Client) PolicyList(ctx context.Context) ([]string, error) {
+	var resp []string
+	err := c.Get(ctx, "/v1/iam/policy", &resp)
+	return resp, err
+}
+
+// PolicyDelete deletes the named policy; the server refuses built-in names.
+func (c *Client) PolicyDelete(ctx context.Context, name string) error {
+	return c.Delete(ctx, "/v1/iam/policy/"+url.PathEscape(name), nil)
+}
+
+// PolicyAttachToSA attaches a policy to the named ServiceAccount via Raft.
+func (c *Client) PolicyAttachToSA(ctx context.Context, policyName, saID string) error {
+	return c.Put(ctx,
+		"/v1/iam/policy/"+url.PathEscape(policyName)+"/attach/sa/"+url.PathEscape(saID),
+		nil, nil)
+}
+
+// PolicyDetachFromSA detaches a policy from the named ServiceAccount via Raft.
+func (c *Client) PolicyDetachFromSA(ctx context.Context, policyName, saID string) error {
+	return c.Delete(ctx,
+		"/v1/iam/policy/"+url.PathEscape(policyName)+"/attach/sa/"+url.PathEscape(saID),
+		nil)
+}
+
+// PolicySimulate evaluates a hypothetical request against current cluster IAM state.
+func (c *Client) PolicySimulate(ctx context.Context, req PolicySimulateRequest) (PolicySimulateResponse, error) {
+	var resp PolicySimulateResponse
+	err := c.Post(ctx, "/v1/iam/policy/simulate", req, &resp)
+	return resp, err
 }

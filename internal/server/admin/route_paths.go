@@ -50,6 +50,11 @@ const (
 	routePathIAMSAKey     = "/iam/sa/:id/key"
 	routePathIAMSAKeyByAK = "/iam/sa/:id/key/:ak"
 
+	routePathIAMPolicy         = "/iam/policy"
+	routePathIAMPolicySimulate = "/iam/policy/simulate"
+	routePathIAMPolicyByName   = "/iam/policy/:name"
+	routePathIAMPolicyAttachSA = "/iam/policy/:name/attach/sa/:said"
+
 	routePathUpstreams        = "/upstreams"
 	routePathBucketUpstream   = "/buckets/:bucket/upstream"
 	routePathMigrationCutover = "/migration/cutover"

@@ -61,6 +61,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}),
 		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
 		IAM:                  state.iamAdminAPI,
+		IAMPolicy:            iamPolicyAdminService(state),
 		BucketWithPolicyProp: state.iamProposer,
 		ConfigProposer:       state.metaRaft,
 		ConfigStore:          state.cfgStore,
@@ -121,6 +122,16 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		_ = adminSrv.Stop(stopCtx)
 	})
 	return nil
+}
+
+// iamPolicyAdminService returns a wired admin.IAMPolicyService if MetaRaft and
+// IAM policy stores are available; otherwise returns nil (disables the policy
+// admin endpoints).
+func iamPolicyAdminService(state *bootState) admin.IAMPolicyService {
+	if state.metaRaft == nil || state.iamPolicyStores == nil {
+		return nil
+	}
+	return NewIAMPolicyAdminAdapter(state.iamPolicyStores, state.metaRaft.Propose)
 }
 
 func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {
