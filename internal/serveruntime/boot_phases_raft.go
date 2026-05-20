@@ -169,11 +169,13 @@ func bootMetaRaftWiring(state *bootState) error {
 		refreshProxy(cidr)
 		// F26: re-seed banner-prev so the next OnAnonEnabledChange hook firing
 		// compares against the restored value, not the stale wire-time seed.
-		anonEnabled := true // matches BoolSpec default for iam.anon-enabled
-		if v, ok := values["iam.anon-enabled"]; ok {
-			anonEnabled = v == "true"
+		if state.anonBannerSeedPrev != nil {
+			anonEnabled := true // matches BoolSpec default for iam.anon-enabled
+			if v, ok := values["iam.anon-enabled"]; ok {
+				anonEnabled = v == "true"
+			}
+			state.anonBannerSeedPrev(anonEnabled)
 		}
-		state.anonBannerSeedPrev(anonEnabled)
 	})
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
