@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.296.0] - 2026-05-20 - test(e2e): lifecycle config + Ginkgo v2 PoC
+
+Bucket Lifecycle Config API (`PutBucketLifecycleConfiguration` /
+`GetBucketLifecycleConfiguration` / `DeleteBucketLifecycle`) + lifecycle rule
+edge cases (Disabled rule, NoncurrentVersionExpiration standalone, multiple-rule
+priority, empty bucket scan) e2e coverage. 동시에 **Ginkgo v2 + Gomega**를 PoC로
+도입해 기존 `t.Run` 패턴과 사이드-바이-사이드 비교.
+
+### Tests added
+
+- `tests/e2e/lifecycle_config_ginkgo_test.go` — 6 sub-tests × dual-target
+  (SingleNode + Cluster4Node) = 12 specs, 11 PASS + 1 SKIP (NCV SingleNode SKIP —
+  LocalBackend versioning 미지원). `go test` native 호환, ginkgo CLI 의존 없음.
+- 신규 sub-tests:
+  - **PutGetRoundTrip** — XML 직렬화/역직렬화 검증
+  - **DeleteThenGet404** — Delete 후 NoSuchLifecycleConfiguration 반환
+  - **DisabledRuleIgnored** — `Status: Disabled` rule 무시
+  - **NoncurrentVersionExpirationStandalone** — DM 없이 noncurrent 단독 reclaim
+  - **MultipleRulesPriority** — `applyRulesToGroup` sequential evaluation 검증 (좁은 prefix + 짧은 Days가 먼저 expire)
+  - **EmptyBucketScanNoPanic** — 객체 없는 bucket의 cycle 안전성
+
+### Helper improvements (backward-compat)
+
+- `tests/e2e/` helpers (`newDedicatedSingleNodeS3Target`, `newDedicatedCluster4NodeS3Target`, `newLifecycleFixture`, etc.) 7개 함수 + 3개 struct field를 `*testing.T` → `testing.TB`로 widening — Ginkgo `GinkgoTB()` adapter 호환. 기존 caller 영향 0.
+- `lifecycleFixture.ResetClock()` 신규 — server-side `SetNowForTest` 글로벌 시계 reset. Ordered Container + BeforeAll 패턴에서 per-spec cumulative drift 격리.
+- `newDedicatedCluster4NodeS3Target`의 lifecycle flag auto-prepend 제거 — `newDedicatedSingleNodeS3Target`과 caller-explicit 패턴 통일 (single/cluster parity).
+
+### Deferred to future phases
+
+- Bucket Tagging API server-side 구현 + e2e
+- MaxNoncurrentVersions 지원 (server-side audit)
+- Same-ID rule rejection / replacement semantics edge cases
+- Leader change persistence on lifecycle config
+
 ## [0.0.295.0] - 2026-05-20
 
 ### Changed

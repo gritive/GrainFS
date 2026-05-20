@@ -803,7 +803,7 @@ func terminateProcess(cmd *exec.Cmd) {
 }
 
 // createBucket creates a bucket for testing and returns a cleanup function.
-func createBucket(t *testing.T, name string) {
+func createBucket(t testing.TB, name string) {
 	t.Helper()
 	ctx := context.Background()
 	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{testServerDataDir}, testSAID, name, testS3Client)

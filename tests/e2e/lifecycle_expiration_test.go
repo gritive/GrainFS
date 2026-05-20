@@ -27,7 +27,7 @@ func TestLifecycleExpirationE2E(t *testing.T) {
 		runLifecycleExpirationCases(t, newDedicatedSingleNodeS3Target(t, []string{"--lifecycle-interval=24h"}))
 	})
 	t.Run("Cluster4Node", func(t *testing.T) {
-		runLifecycleExpirationCases(t, newDedicatedCluster4NodeS3Target(t, nil))
+		runLifecycleExpirationCases(t, newDedicatedCluster4NodeS3Target(t, []string{"--lifecycle-interval=24h"}))
 	})
 }
 

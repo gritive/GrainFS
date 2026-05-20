@@ -523,7 +523,7 @@ func iamCreateSA(t *testing.T, sock, name string) iamSAResult {
 //
 // Unready signal: error body mentions "unknown access key" (key not yet
 // applied to the IAM store) — keep polling.
-func iamWaitKeyReady(t *testing.T, s3URL, ak, sk string, timeout time.Duration) {
+func iamWaitKeyReady(t testing.TB, s3URL, ak, sk string, timeout time.Duration) {
 	t.Helper()
 	cli := s3ClientFor(s3URL, ak, sk)
 	deadline := time.Now().Add(timeout)
