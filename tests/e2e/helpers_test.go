@@ -805,18 +805,20 @@ func terminateProcess(cmd *exec.Cmd) {
 	// Falls back to a plain Kill if syscall.Kill returns ESRCH.
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		_ = cmd.Process.Kill()
-	} else {
-		// Give it ~500ms to exit cleanly, then escalate.
-		done := make(chan struct{})
-		go func() { _, _ = cmd.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-			return
-		case <-time.After(500 * time.Millisecond):
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
+		_, _ = cmd.Process.Wait()
+		return
 	}
-	_, _ = cmd.Process.Wait()
+	// Give it ~500ms to exit cleanly, then escalate. The goroutine is the sole
+	// owner of Process.Wait on this path — waitpid is not safe for concurrent
+	// reapers, so we never call Wait from the caller goroutine here.
+	done := make(chan struct{})
+	go func() { _, _ = cmd.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		<-done // wait for the reaper goroutine to finish after SIGKILL takes effect
+	}
 }
 
 // createBucket creates a bucket for testing and returns a cleanup function.
