@@ -961,6 +961,74 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 	return nil
 }
 
+// ScanObjectsGrouped fuses packed index entries with inner scan results.
+//
+// Memory bound: O(packed-index-size-for-bucket), NOT O(inner-bucket-size).
+// We emit packed-only entries FIRST (bounded snapshot from pb.index.Range),
+// capture their keys in seenKeys, then stream inner while skipping dupes.
+//
+// INVARIANT: PackedBackend hosts only objects in non-versioned buckets.
+// PutObjectWithRequest enforces this: versioning-enabled buckets forward to
+// inner unconditionally (lines 394–405). The dedup branch below protects
+// against silently shadowing inner multi-version history with a packed
+// single-version record if the invariant is ever violated.
+//
+// inner.ScanObjectsGrouped is accessed via type assertion because
+// ScanObjectsGrouped is not part of the storage.Backend interface.
+func (pb *PackedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	type scanner interface {
+		ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+	}
+	sc, ok := pb.inner.(scanner)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	inner, err := sc.ScanObjectsGrouped(bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan storage.ObjectKeyGroup, 64)
+	go func() {
+		defer close(out)
+		seenKeys := make(map[string]struct{})
+		pb.index.Range(func(k, v any) bool {
+			pk := k.(packedKey)
+			if pk.bucket != bucket {
+				return true
+			}
+			ie := v.(*indexEntry)
+			if ie.Refcount.Load() <= 0 {
+				return true
+			}
+			seenKeys[pk.key] = struct{}{}
+			out <- storage.ObjectKeyGroup{
+				Bucket: bucket,
+				Key:    pk.key,
+				Versions: []storage.ObjectVersionRecord{{
+					VersionID:      "",
+					IsLatest:       true,
+					IsDeleteMarker: false,
+					LastModified:   ie.LastModified, // int64 unix seconds — same unit as ObjectVersionRecord.LastModified
+					Size:           ie.OriginalSize,
+					ETag:           ie.ETag,
+					Tags:           cloneTags(ie.Tags),
+				}},
+			}
+			return true
+		})
+		for g := range inner {
+			if _, ok := seenKeys[g.Key]; ok {
+				log.Warn().Str("bucket", bucket).Str("key", g.Key).
+					Msg("packblob: scan dedup — same key in packed and inner (invariant violation)")
+				continue
+			}
+			out <- g
+		}
+	}()
+	return out, nil
+}
+
 // --- Copy operations (Copier interface) ---
 
 // CopyObject performs a metadata-only copy for packed objects.
