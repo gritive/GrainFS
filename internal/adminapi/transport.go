@@ -68,6 +68,11 @@ func (t *Transport) Post(ctx context.Context, path string, in any, out any) erro
 	return t.Do(ctx, http.MethodPost, path, in, out)
 }
 
+// Put issues PUT path with optional JSON body and JSON-decoded response.
+func (t *Transport) Put(ctx context.Context, path string, in any, out any) error {
+	return t.Do(ctx, http.MethodPut, path, in, out)
+}
+
 // Patch issues PATCH path with optional JSON body and JSON-decoded response.
 func (t *Transport) Patch(ctx context.Context, path string, in any, out any) error {
 	return t.Do(ctx, http.MethodPatch, path, in, out)
@@ -95,6 +100,37 @@ func (t *Transport) GetRaw(ctx context.Context, path string) ([]byte, error) {
 		return body, nil
 	}
 	return nil, t.parseErrorBody(resp.StatusCode, body)
+}
+
+// PostRaw issues POST path with optional JSON body and returns the raw 2xx
+// body bytes. Use this when the caller needs to pass through the server
+// response verbatim (e.g. iam key create preserving the existing CLI contract).
+func (t *Transport) PostRaw(ctx context.Context, path string, in any) ([]byte, error) {
+	var body io.Reader
+	if in != nil {
+		buf, err := json.Marshal(in)
+		if err != nil {
+			return nil, fmt.Errorf("marshal request: %w", err)
+		}
+		body = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return nil, t.wrapTransportError(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return respBody, nil
+	}
+	return nil, t.parseErrorBody(resp.StatusCode, respBody)
 }
 
 // Do is the shared request executor.
