@@ -106,6 +106,11 @@ func validateLatestS3BenchmarkGates(markdown string) error {
 			return fmt.Errorf("latest S3 benchmark table missing %s", op)
 		}
 	}
+	for _, required := range []string{"S3 Express", "best-effort"} {
+		if !strings.Contains(markdown, required) {
+			return fmt.Errorf("append caveat must mention %q", required)
+		}
+	}
 	return nil
 }
 
