@@ -740,7 +740,11 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 	// Mirrors the same bypass in PutObjectWithRequest.
 	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
 		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
-			return pb.inner.DeleteObject(ctx, bucket, key)
+			if err := pb.inner.DeleteObject(ctx, bucket, key); err != nil {
+				return err
+			}
+			pb.evictPackedKey(bucket, key)
+			return nil
 		}
 	}
 
@@ -769,7 +773,22 @@ func (pb *PackedBackend) DeleteObjectReturningMarker(bucket, key string) (string
 	if !ok {
 		return "", storage.UnsupportedOperationError{Op: "DeleteObjectReturningMarker", Reason: storage.UnsupportedReasonNoAdapter}
 	}
-	return sd.DeleteObjectReturningMarker(bucket, key)
+	markerID, err := sd.DeleteObjectReturningMarker(bucket, key)
+	if err != nil {
+		return "", err
+	}
+	pb.evictPackedKey(bucket, key)
+	return markerID, nil
+}
+
+func (pb *PackedBackend) evictPackedKey(bucket, key string) {
+	pk := packedKey{bucket: bucket, key: key}
+	if v, loaded := pb.index.Load(pk); loaded {
+		entry := v.(*indexEntry)
+		if pb.index.CompareAndDelete(pk, entry) {
+			entry.Refcount.Add(-1)
+		}
+	}
 }
 
 // DeleteObjectVersion forwards version-specific hard deletes to the inner
