@@ -82,7 +82,7 @@ func TestComposeAnonHook_EmitsDisabledBannerOnTrueToFalse(t *testing.T) {
 	var buf bytes.Buffer
 	cfgStore := config.NewStore()
 	onAnon, onProxy, _ := wireTLSPostureHooks("")
-	composed := composeAnonHookWithBanner(onAnon, true, &buf)
+	composed, _ := composeAnonHookWithBanner(onAnon, true, &buf)
 	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
 		OnAnonEnabledChange: composed,
 		OnTrustedProxyCIDR:  onProxy,
@@ -111,7 +111,7 @@ func TestComposeAnonHook_NoOpFlipIgnored(t *testing.T) {
 	var buf bytes.Buffer
 	cfgStore := config.NewStore()
 	onAnon, onProxy, _ := wireTLSPostureHooks("")
-	composed := composeAnonHookWithBanner(onAnon, true, &buf)
+	composed, _ := composeAnonHookWithBanner(onAnon, true, &buf)
 	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
 		OnAnonEnabledChange: composed,
 		OnTrustedProxyCIDR:  onProxy,
@@ -135,7 +135,7 @@ func TestComposeAnonHook_RejectedFlipDoesNotEmit(t *testing.T) {
 	var buf bytes.Buffer
 	cfgStore := config.NewStore()
 	onAnon, onProxy, _ := wireTLSPostureHooks("")
-	composed := composeAnonHookWithBanner(onAnon, true, &buf)
+	composed, _ := composeAnonHookWithBanner(onAnon, true, &buf)
 	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
 		OnAnonEnabledChange: composed,
 		OnTrustedProxyCIDR:  onProxy,
@@ -168,7 +168,7 @@ func TestComposeAnonHook_RejectedFlipDoesNotEmit(t *testing.T) {
 func TestComposeAnonHook_NilWriter(t *testing.T) {
 	cfgStore := config.NewStore()
 	onAnon, onProxy, _ := wireTLSPostureHooks("")
-	composed := composeAnonHookWithBanner(onAnon, true, nil)
+	composed, _ := composeAnonHookWithBanner(onAnon, true, nil)
 	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
 		OnAnonEnabledChange: composed,
 		OnTrustedProxyCIDR:  onProxy,
@@ -180,5 +180,72 @@ func TestComposeAnonHook_NilWriter(t *testing.T) {
 	// Should succeed silently — no panic from nil writer.
 	if err := cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
 		t.Fatalf("flip should succeed with nil writer, got: %v", err)
+	}
+}
+
+// TestComposeAnonHook_SeedPrev_RestoredFalse — F26: after a Restore installs
+// iam.anon-enabled=false, seedPrev(false) corrects the banner-prev baseline.
+// A subsequent Set("iam.anon-enabled", "false") must NOT emit a spurious banner
+// (prev=false → new=false, no flip).
+func TestComposeAnonHook_SeedPrev_RestoredFalse(t *testing.T) {
+	var buf bytes.Buffer
+	onAnon, onProxy, _ := wireTLSPostureHooks("")
+	hook, seedPrev := composeAnonHookWithBanner(onAnon, true, &buf) // wire-time default: true
+
+	cfgStore := config.NewStore()
+	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
+		OnAnonEnabledChange: hook,
+		OnTrustedProxyCIDR:  onProxy,
+	})
+
+	// Simulate Restore installing iam.anon-enabled=false.
+	seedPrev(false)
+
+	// Now a Set("false") must not emit a banner: prev=false, new=false — no flip.
+	if err := cfgStore.Set(context.Background(), "trusted-proxy.cidr", "10.0.0.0/8"); err != nil {
+		t.Fatalf("set proxy: %v", err)
+	}
+	if err := cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
+		t.Fatalf("set anon false: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("no banner expected after seedPrev(false)+false→false, got: %q", buf.String())
+	}
+}
+
+// TestComposeAnonHook_SeedPrev_RestoredTrueAfterFalse — F26: after a Restore
+// re-installs iam.anon-enabled=true (e.g., operator re-enables anon), seedPrev
+// re-seeds the baseline to true so a subsequent false flip emits the banner.
+func TestComposeAnonHook_SeedPrev_RestoredTrueAfterFalse(t *testing.T) {
+	var buf bytes.Buffer
+	onAnon, onProxy, _ := wireTLSPostureHooks("")
+	hook, seedPrev := composeAnonHookWithBanner(onAnon, true, &buf)
+
+	cfgStore := config.NewStore()
+	config.RegisterClusterKeys(cfgStore, config.ReloadHooks{
+		OnAnonEnabledChange: hook,
+		OnTrustedProxyCIDR:  onProxy,
+	})
+	if err := cfgStore.Set(context.Background(), "trusted-proxy.cidr", "10.0.0.0/8"); err != nil {
+		t.Fatalf("set proxy: %v", err)
+	}
+	// First flip true→false consumes the prev snapshot.
+	if err := cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
+		t.Fatalf("first flip: %v", err)
+	}
+	buf.Reset()
+
+	// Simulate a Restore that re-installs anon=true.
+	seedPrev(true)
+
+	// Another true→false flip must emit the banner again.
+	if err := cfgStore.Set(context.Background(), "iam.anon-enabled", "true"); err != nil {
+		t.Fatalf("reset anon: %v", err)
+	}
+	if err := cfgStore.Set(context.Background(), "iam.anon-enabled", "false"); err != nil {
+		t.Fatalf("second flip: %v", err)
+	}
+	if !strings.Contains(buf.String(), "remains public") {
+		t.Fatalf("expected banner on second true→false flip, got: %q", buf.String())
 	}
 }

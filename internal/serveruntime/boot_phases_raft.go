@@ -138,7 +138,7 @@ func bootMetaRaftWiring(state *bootState) error {
 	// correct seed. state.bannerWriter is os.Stdout in production (set in
 	// Run); tests that route through bootstrap.Run can substitute a buffer
 	// before phase dispatch.
-	hooks.OnAnonEnabledChange = composeAnonHookWithBanner(onAnon, true, state.bannerWriter)
+	hooks.OnAnonEnabledChange, state.anonBannerSeedPrev = composeAnonHookWithBanner(onAnon, true, state.bannerWriter)
 	hooks.OnTrustedProxyCIDR = func(ctx context.Context, v string) error {
 		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
 		return onProxy(ctx, v)
@@ -157,6 +157,24 @@ func bootMetaRaftWiring(state *bootState) error {
 	}
 
 	config.RegisterClusterKeys(cfgStore, hooks)
+	// F25+F26: fire a post-restore callback so atomic snapshots (proxy CIDR set
+	// and banner-prev) are reconciled on every raft InstallSnapshot. Restore does
+	// not fire reload hooks, so without this the ProxyTrust CIDR set and the
+	// banner-prev bool would drift from the newly restored cfgStore values on
+	// peer-join and log-compaction restores after boot.
+	cfgStore.SetPostRestore(func(values map[string]string) {
+		// F25: update ProxyTrust and the TLS-posture refreshProxy snapshot.
+		cidr := values["trusted-proxy.cidr"]
+		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(cidr))
+		refreshProxy(cidr)
+		// F26: re-seed banner-prev so the next OnAnonEnabledChange hook firing
+		// compares against the restored value, not the stale wire-time seed.
+		anonEnabled := true // matches BoolSpec default for iam.anon-enabled
+		if v, ok := values["iam.anon-enabled"]; ok {
+			anonEnabled = v == "true"
+		}
+		state.anonBannerSeedPrev(anonEnabled)
+	})
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
 	return nil

@@ -75,6 +75,61 @@ func TestStore_ListAllShowsRegistry(t *testing.T) {
 	assert.True(t, keys["key.b"])
 }
 
+func TestStore_PostRestore_FiredWithValidatedValues(t *testing.T) {
+	s := config.NewStore()
+	s.Register("key.cidr", config.StringSpec{Default: ""})
+
+	var gotValues map[string]string
+	s.SetPostRestore(func(values map[string]string) {
+		gotValues = values
+	})
+
+	s.Restore(map[string]string{
+		"key.cidr":    "10.0.0.0/8",
+		"unknown.key": "ignored",
+	})
+
+	require.NotNil(t, gotValues)
+	assert.Equal(t, "10.0.0.0/8", gotValues["key.cidr"])
+	_, hasUnknown := gotValues["unknown.key"]
+	assert.False(t, hasUnknown, "unknown keys must be filtered before postRestore")
+}
+
+func TestStore_PostRestore_FiresOncePerRestore(t *testing.T) {
+	s := config.NewStore()
+	s.Register("key.x", config.BoolSpec{Default: false})
+
+	callCount := 0
+	s.SetPostRestore(func(_ map[string]string) { callCount++ })
+
+	s.Restore(map[string]string{"key.x": "true"})
+	s.Restore(map[string]string{"key.x": "false"})
+
+	assert.Equal(t, 2, callCount, "postRestore must fire exactly once per Restore call")
+}
+
+func TestStore_PostRestore_InvalidEntriesDroppedBeforeCallback(t *testing.T) {
+	s := config.NewStore()
+	// BoolSpec only accepts "true" or "false" — "notabool" is invalid.
+	s.Register("key.b", config.BoolSpec{Default: true})
+
+	var gotValues map[string]string
+	s.SetPostRestore(func(values map[string]string) { gotValues = values })
+
+	s.Restore(map[string]string{"key.b": "notabool"})
+
+	// Invalid value must not appear in the snapshot passed to postRestore.
+	assert.Empty(t, gotValues, "invalid entries must be dropped before postRestore receives values")
+}
+
+func TestStore_PostRestore_NilCallbackIsNoOp(t *testing.T) {
+	s := config.NewStore()
+	s.Register("key.x", config.StringSpec{Default: "default"})
+
+	// No SetPostRestore call — Restore must not panic.
+	assert.NotPanics(t, func() { s.Restore(map[string]string{"key.x": "v"}) })
+}
+
 func TestRegisterClusterKeys_AllPresent(t *testing.T) {
 	s := config.NewStore()
 	config.RegisterClusterKeys(s, config.ReloadHooks{})
