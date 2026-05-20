@@ -17,8 +17,6 @@ import (
 // Asymmetry note: cfg.VlogWarnRatio / cfg.VlogCriticalRatio derive from the
 // same cobra flags as opts.VlogOpts.WarnRatio / .CriticalRatio, so they're
 // sourced from opts.VlogOpts here instead of duplicate ServeOptions fields.
-//
-//nolint:unused // wired in Task 4 (RunFromOptions); options_to_config_test.go covers it now.
 func optionsToConfig(
 	opts ServeOptions,
 	addr string,
