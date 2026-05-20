@@ -433,9 +433,7 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 		}
 	}
 	if node == r.selfID {
-		n, err := r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
-		r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), err)
-		return n, err
+		return r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
 	}
 
 	shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
