@@ -17,19 +17,20 @@ import (
 func TestRangeGet_ChunkBoundaries(t *testing.T) {
 	t.Parallel()
 
-	const total = 64 << 20 // 4 segments × 16 MiB
+	const chunk = 1 << 20
+	const total = 4 * chunk
 	data := makePattern(total)
 
 	cases := []struct {
 		name     string
 		from, to int64
 	}{
-		{"start_of_chunk", 0, (16 << 20) - 1},
-		{"middle_of_chunk", 1 << 20, (1 << 20) + 4096},
-		{"end_of_chunk", (16 << 20) - 16, (16 << 20) - 1},
+		{"start_of_chunk", 0, chunk - 1},
+		{"middle_of_chunk", chunk / 2, (chunk / 2) + 4096},
+		{"end_of_chunk", chunk - 16, chunk - 1},
 		{"single_chunk_span", 100, 100 + 1024},
-		{"cross_chunk_boundary", (16 << 20) - 1024, (16 << 20) + 1024},
-		{"cross_many_chunks", 100, (48 << 20) + 100},
+		{"cross_chunk_boundary", chunk - 1024, chunk + 1024},
+		{"cross_many_chunks", 100, (3 * chunk) + 100},
 	}
 
 	backends := []struct {
@@ -62,8 +63,13 @@ func TestRangeGet_ChunkBoundaries(t *testing.T) {
 		t.Run(be.name, func(t *testing.T) {
 			t.Parallel()
 			b := be.make(t)
-			if _, err := b.PutObject(context.Background(), "test", "k", bytes.NewReader(data), "application/octet-stream"); err != nil {
-				t.Fatalf("PutObject: %v", err)
+			w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, chunk)
+			obj, err := w.Write(context.Background(), "test", "k", "application/octet-stream", bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("segment write: %v", err)
+			}
+			if err := b.PutObjectRecord(context.Background(), "test", "k", obj); err != nil {
+				t.Fatalf("PutObjectRecord: %v", err)
 			}
 			// Sanity: the object should have produced multiple segments so
 			// the boundary cases below actually cross chunk boundaries.

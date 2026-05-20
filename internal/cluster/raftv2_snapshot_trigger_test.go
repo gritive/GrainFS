@@ -8,6 +8,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -21,7 +22,7 @@ import (
 // assert the status surfaces it.
 func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir + "/meta"))
 	require.NoError(t, err)
 
 	rcfg := raft.DefaultConfig("v2-leader", nil)

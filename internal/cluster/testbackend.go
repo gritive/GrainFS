@@ -7,6 +7,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -26,7 +27,7 @@ func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
 	dir := t.TempDir()
 
 	metaDir := dir + "/meta"
-	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(metaDir))
 	if err != nil {
 		t.Fatalf("open badger: %v", err)
 	}

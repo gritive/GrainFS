@@ -16,6 +16,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
@@ -488,7 +489,7 @@ func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(
 func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) *GroupBackend {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir + "/meta"))
 	require.NoError(t, err)
 	node, closeRaft, err := newRaftNode(raft.DefaultConfig(nodeID, nil), dir)
 	require.NoError(t, err)
@@ -1423,7 +1424,8 @@ func TestClusterCoordinator_ReadAt_ForwardMalformedReplyReturnsError(t *testing.
 
 func TestClusterCoordinator_ReadAt_ForwardLargeRangeUsesReadStream(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("v"), int(DefaultMaxForwardBodyBytes)+1)
+	c.maxBody = 128 * 1024
+	body := bytes.Repeat([]byte("v"), int(c.maxBody)+1)
 	d.readReplyBy[raftpb.ForwardOpReadAt] = buildOKReply()
 	d.readBodyBy[raftpb.ForwardOpReadAt] = body
 	c.forward.WithReadStreamDialer(d.readStream)
@@ -2045,9 +2047,10 @@ func TestClusterCoordinator_PutObject_ForwardLeavesObjectIndexToReceiver(t *test
 func TestClusterCoordinator_PutObject_StreamForwardLeavesObjectIndexToReceiver(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
 	c.forward.WithStreamDialer(d.stream)
+	c.maxBody = 128 * 1024
 	proposer := &recordingObjectIndexProposer{}
 	c.WithObjectIndexProposer(proposer)
-	body := bytes.Repeat([]byte("z"), DefaultMaxForwardBodyBytes+1024)
+	body := bytes.Repeat([]byte("z"), int(c.maxBody)+1024)
 	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream", ContentType: "application/octet-stream", VersionID: "v1"},
 		"bk",
@@ -2072,12 +2075,13 @@ func TestClusterCoordinator_PutObject_ForwardRejectsSizeMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
-// TestClusterCoordinator_PutObject_TooLarge_413 verifies the DefaultMaxForwardBodyBytes
-// hard cap is enforced BEFORE encoding/forwarding — caller sees ErrEntityTooLarge without
-// any wire activity (recordingDialer recorded no calls).
+// TestClusterCoordinator_PutObject_TooLarge_413 verifies the forward body hard
+// cap is enforced BEFORE encoding/forwarding — caller sees ErrEntityTooLarge
+// without any wire activity (recordingDialer recorded no calls).
 func TestClusterCoordinator_PutObject_TooLarge_413(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardBodyBytes)+1) // one byte over cap
+	c.maxBody = 128 * 1024
+	body := bytes.Repeat([]byte("x"), int(c.maxBody)+1) // one byte over cap
 	_, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "")
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
@@ -2108,19 +2112,21 @@ func TestClusterCoordinator_UploadPart_ForwardRejectsSizeMismatch(t *testing.T) 
 	require.ErrorIs(t, err, ErrForwardBodySizeMismatch)
 }
 
-// TestClusterCoordinator_UploadPart_5MB_Cap — same enforcement on multipart.
-func TestClusterCoordinator_UploadPart_5MB_Cap(t *testing.T) {
+// TestClusterCoordinator_UploadPart_TooLarge_413 — same cap enforcement on multipart.
+func TestClusterCoordinator_UploadPart_TooLarge_413(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardBodyBytes)+1) // one byte over cap
+	c.maxBody = 128 * 1024
+	body := bytes.Repeat([]byte("x"), int(c.maxBody)+1) // one byte over cap
 	_, err := c.UploadPart(context.Background(), "bk", "k", "uid", 1, bytes.NewReader(body))
 	require.ErrorIs(t, err, storage.ErrEntityTooLarge)
 	require.Empty(t, d.calls)
 }
 
-func TestClusterCoordinator_PutObject_StreamForward_AboveLegacyCap(t *testing.T) {
+func TestClusterCoordinator_PutObject_StreamForward_AboveBodyCap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
-	body := bytes.Repeat([]byte("z"), DefaultMaxForwardBodyBytes+1024)
+	c.maxBody = 128 * 1024
+	body := bytes.Repeat([]byte("z"), int(c.maxBody)+1024)
 	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream"}, "bk",
 	)
@@ -2158,10 +2164,11 @@ func TestClusterCoordinator_PutObject_StreamDialerSmallBodyUsesSingleMessage(t *
 	require.Equal(t, body, args.BodyBytes())
 }
 
-func TestClusterCoordinator_UploadPart_StreamForward_AboveLegacyCap(t *testing.T) {
+func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
-	body := bytes.Repeat([]byte("p"), DefaultMaxForwardBodyBytes+1024)
+	c.maxBody = 128 * 1024
+	body := bytes.Repeat([]byte("p"), int(c.maxBody)+1024)
 	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)

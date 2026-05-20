@@ -8,6 +8,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/migration"
@@ -217,7 +218,7 @@ func TestMetaFSMCapabilityEvidenceAdvertisesNfsExportCreateAfterStoreWiring(t *t
 	ev := f.CapabilityEvidence("node-1", time.Unix(10, 0))
 	require.False(t, ev.Capabilities[compat.CapabilityNfsExportCreateV1])
 
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	store, err := nfsexport.OpenStore(db)

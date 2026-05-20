@@ -34,6 +34,39 @@ func calculateChecksum(data []byte) uint32 {
 	return sum
 }
 
+func checksumForGeneratedPattern(size int64) uint32 {
+	const cycleSum = 32640 // sum of byte values 0..255
+	fullCycles := size / 256
+	remainder := size % 256
+
+	sum := uint64(fullCycles) * cycleSum
+	for i := int64(0); i < remainder; i++ {
+		sum += uint64(byte(i))
+	}
+	return uint32(sum)
+}
+
+func readChecksum(r io.Reader) (int64, uint32, error) {
+	buf := make([]byte, 128*1024)
+	var total int64
+	var sum uint32
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			total += int64(n)
+			for _, b := range buf[:n] {
+				sum += uint32(b)
+			}
+		}
+		if err == io.EOF {
+			return total, sum, nil
+		}
+		if err != nil {
+			return total, sum, err
+		}
+	}
+}
+
 // testSizeName returns a human-readable size name.
 func testSizeName(size int64) string {
 	switch size {
@@ -71,7 +104,7 @@ func TestNFSv4LargeFileRead(t *testing.T) {
 		t.Run(testSizeName(size), func(t *testing.T) {
 			// Generate test data with known checksum
 			testData := generateTestData(size)
-			checksum := calculateChecksum(testData)
+			checksum := checksumForGeneratedPattern(size)
 
 			// Create bucket first
 			err := backend.CreateBucket(context.Background(), testBucket)
@@ -94,18 +127,17 @@ func TestNFSv4LargeFileRead(t *testing.T) {
 			}
 			defer rc.Close()
 
-			readData, err := io.ReadAll(rc)
+			readSize, readChecksum, err := readChecksum(rc)
 			if err != nil {
 				t.Fatalf("failed to read file: %v", err)
 			}
 			duration := time.Since(start)
 
 			// Verify data integrity
-			if int64(len(readData)) != size {
-				t.Errorf("size mismatch: got %d, want %d", len(readData), size)
+			if readSize != size {
+				t.Errorf("size mismatch: got %d, want %d", readSize, size)
 			}
 
-			readChecksum := calculateChecksum(readData)
 			if readChecksum != checksum {
 				t.Errorf("checksum mismatch: got %x, want %x", readChecksum, checksum)
 			}
@@ -141,7 +173,7 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 	for _, size := range sizes {
 		t.Run(testSizeName(size), func(t *testing.T) {
 			testData := generateTestData(size)
-			checksum := calculateChecksum(testData)
+			checksum := checksumForGeneratedPattern(size)
 
 			// Create bucket first
 			err := backend.CreateBucket(context.Background(), testBucket)
@@ -167,12 +199,14 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 			}
 			defer rc.Close()
 
-			readData, err := io.ReadAll(rc)
+			readSize, readChecksum, err := readChecksum(rc)
 			if err != nil {
 				t.Fatalf("failed to verify file: %v", err)
 			}
 
-			readChecksum := calculateChecksum(readData)
+			if readSize != size {
+				t.Errorf("size mismatch after write: got %d, want %d", readSize, size)
+			}
 			if readChecksum != checksum {
 				t.Errorf("checksum mismatch after write: got %x, want %x", readChecksum, checksum)
 			}
@@ -210,6 +244,7 @@ func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
 
 	// Create test data
 	testData := generateTestData(fileSize)
+	checksum := checksumForGeneratedPattern(fileSize)
 
 	// Launch concurrent writers
 	done := make(chan int, numConcurrent)
@@ -232,13 +267,17 @@ func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
 			}
 			defer rc.Close()
 
-			readData, err := io.ReadAll(rc)
+			readSize, readChecksum, err := readChecksum(rc)
 			if err != nil {
 				errors <- err
 				return
 			}
 
-			if calculateChecksum(readData) != calculateChecksum(testData) {
+			if readSize != fileSize {
+				errors <- fmt.Errorf("size mismatch for file %d: got %d want %d", idx, readSize, fileSize)
+				return
+			}
+			if readChecksum != checksum {
 				errors <- fmt.Errorf("checksum mismatch for file %d", idx)
 				return
 			}

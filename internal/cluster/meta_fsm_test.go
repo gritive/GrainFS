@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -801,7 +802,7 @@ func TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp(t *testing.T) {
 
 func newTestLifecycleDB(t *testing.T) *badger.DB {
 	t.Helper()
-	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -810,7 +811,7 @@ func newTestLifecycleDB(t *testing.T) *badger.DB {
 
 func openTestBadgerAt(t *testing.T, dir string) *badger.DB {
 	t.Helper()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir))
 	require.NoError(t, err)
 	return db
 }
