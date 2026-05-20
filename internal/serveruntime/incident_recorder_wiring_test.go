@@ -1,15 +1,13 @@
-package main
+package serveruntime
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/gritive/GrainFS/internal/serveruntime"
 )
 
 func TestIncidentRecorderInterfacesReturnNilInterfacesForNilRecorder(t *testing.T) {
-	clusterRecorder, scrubberRecorder := serveruntime.IncidentRecorderInterfaces(nil)
+	clusterRecorder, scrubberRecorder := IncidentRecorderInterfaces(nil)
 
 	require.Nil(t, clusterRecorder)
 	require.Nil(t, scrubberRecorder)
