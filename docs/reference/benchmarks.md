@@ -68,6 +68,14 @@ Use this protocol before publishing `GrainFS` vs RustFS vs MinIO results.
 | Observability | Capture CPU/RSS, process logs, and raw benchmark artifacts.          |
 | Repetition    | Run at least three iterations and report median plus spread.         |
 
+For publishable local results, run benchmark scripts with `BENCH_STRICT_HOST=1`.
+The S3 and Iceberg warp scripts write `host-preflight.txt` into the raw artifact
+directory and fail before starting benchmark backends when the host already has
+`grainfs serve` processes or the benchmark filesystem is at least 90 percent
+full. Without strict mode, those conditions are warning-only and the resulting
+throughput/RSS rows must be treated as contaminated unless the extra load is
+intentional and documented.
+
 RustFS and MinIO are valid comparison anchors. Do not claim parity until this
 document or an adjacent report links a reproducible run.
 

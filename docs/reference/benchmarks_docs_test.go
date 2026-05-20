@@ -52,6 +52,19 @@ func TestLatestIcebergBenchmarkTableSatisfiesDocumentedGates(t *testing.T) {
 	}
 }
 
+func TestBenchmarkReferenceDocumentsStrictHostPreflight(t *testing.T) {
+	body, err := os.ReadFile("benchmarks.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{"BENCH_STRICT_HOST=1", "host-preflight.txt", "contaminated"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("benchmark reference must document strict host preflight with %q", want)
+		}
+	}
+}
+
 func validateLatestS3BenchmarkGates(markdown string) error {
 	required := map[string]bool{
 		"put":           false,
