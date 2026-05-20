@@ -69,6 +69,38 @@ func TestLoadOrGenerateKEK_RejectsLoosePermissions(t *testing.T) {
 	}
 }
 
+// TestLoadKEK_StrictMissingReturnsErrNotFound is the §7 T57 (F#21) primitive:
+// callers that must NOT auto-generate (joining nodes, post-Restore runtime)
+// rely on LoadKEK returning ErrKEKNotFound to surface a remediation path.
+func TestLoadKEK_StrictMissingReturnsErrNotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/kek.key"
+	_, err := LoadKEK("file://" + path)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrKEKNotFound)
+	// The error must NOT have side-created the file (strict semantic).
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "LoadKEK must not create the file")
+}
+
+func TestLoadKEK_ReadExisting(t *testing.T) {
+	want := make([]byte, KEKSize)
+	for i := range want {
+		want[i] = byte(i)
+	}
+	path := t.TempDir() + "/kek.key"
+	require.NoError(t, os.WriteFile(path, want, 0o600))
+
+	kek, err := LoadKEK("file://" + path)
+	require.NoError(t, err)
+	assert.Equal(t, want, kek)
+}
+
+func TestLoadKEK_RejectKMS(t *testing.T) {
+	_, err := LoadKEK("kms://arn:aws:kms:us-east-1:123456789012:key/abc")
+	assert.True(t, errors.Is(err, ErrUnsupportedKEKSource))
+}
+
 func TestLoadOrGenerateKEK_RejectsSymlink(t *testing.T) {
 	d := t.TempDir()
 	real := d + "/real.key"

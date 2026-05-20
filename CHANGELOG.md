@@ -1,5 +1,109 @@
 # Changelog
 
+## [0.0.280.0] - 2026-05-20 - feat(cluster): §7 Cluster Lifecycle — KEK challenge-response handshake + grainfs cluster join
+
+§7 hardens the cluster admission path. A node that doesn't share the cluster's
+KEK can no longer slip into the membership and silently auto-generate divergent
+encryption keys. Operators get a clean `grainfs cluster join <peer>` CLI for
+offline bootstrap, and the existing `--join-pending` path now performs the
+handshake too. Startup refuses to boot when the KEK is missing or doesn't
+decrypt the wrapped DEK in the FSM snapshot, with a three-option remediation
+message naming the exact recovery paths (scp from healthy peer, restore from
+backup, or decommission and rejoin).
+
+The keeper-reconstruction race in the initial T57 work (where DEK rotation or
+JWT signing-key rotation entries could apply against a fresh-fallback keeper
+before the snapshot-derived keeper was installed) is closed structurally: raft
+Start now accepts a `preApplyLoop` callback that runs after Restore but before
+the apply goroutine launches, so reconstruction completes atomically.
+
+### Added
+
+- **`encrypt.HandshakeVerifier`** (`internal/encrypt/kek_handshake.go`) —
+  HMAC-SHA256 challenge-response with single-use 32-byte nonces. Replay
+  rejected (F#27), TTL 60s, wrong-KEK rejected (F#23). Mismatch burns the
+  nonce so guess-and-retry can't enumerate. `ComputeHandshakeResponse(kek,
+  nonce)` helper for joiners.
+- **Cluster-join handshake transport** —
+  `internal/cluster/meta_challenge.go` adds Challenge RPC (issues a nonce
+  via `MetaChallengeSender`/`MetaChallengeReceiver` over QUIC
+  `StreamMetaJoinChallenge = 0x16`). `internal/cluster/meta_join.go`
+  extends `JoinRequest` with `HandshakeNonce` + `HandshakeResponse`
+  fields and gates `Handle()` on `HandshakeVerifier.VerifyResponse`
+  AFTER the leader check (so non-leaders don't burn nonces) and BEFORE
+  `AddVoter`. New `JoinStatusKEKMismatch = "kek_mismatch"` propagates
+  back to the joiner.
+- **`grainfs cluster join <peer-addr>`** (`cmd/grainfs/cluster_join.go`)
+  — Cobra subcommand. Loads local KEK strictly, dials peer, runs
+  Challenge → response → Join. Exits 0 on success; non-zero with
+  `"KEK mismatch; scp kek.key from any healthy node"` remediation on
+  KEKMismatch.
+- **`encrypt.LoadKEK(source)`** (`internal/encrypt/kek.go`) — strict
+  load that returns `ErrKEKNotFound` when the file is absent. Permissions
+  check (`0o600`) still enforced. `LoadOrGenerateKEK` retained for the
+  very-first-node bootstrap path.
+- **`MetaRaft.Start(ctx, preApplyLoop func() error)`**
+  (`internal/cluster/meta_raft.go`) — callback runs synchronously between
+  Restore and the apply-loop goroutine. On error, `cancel()`+`close(done)`
+  so test cleanup paths stay safe.
+- **`rebuildDEKKeeperFromRestore`**
+  (`internal/serveruntime/dek_keeper_restore.go`) — wired as the
+  `preApplyLoop` callback. When the snapshot trailer carries wrapped DEK
+  versions, reconstructs the DEKKeeper via `encrypt.LoadFromFSM` and
+  swaps it into the FSM before any `DEKRotate` / `DEKVersionPrune` /
+  `JWTSigningKeyRotate` apply can run.
+
+### Changed
+
+- **Production wiring** for the handshake now lives in
+  `internal/serveruntime/boot_phases_forwarders.go`:
+  `NewMetaJoinReceiver(metaRaft).WithHandshakeVerifier(state.handshakeVerifier)`
+  + `MetaChallengeReceiver` registered on `StreamMetaJoinChallenge`. The
+  same `*HandshakeVerifier` instance is shared so the issued-nonce map is
+  consistent between Challenge and Join.
+- **`serveruntime.PerformMetaJoin`** signature changed to
+  `PerformMetaJoin(ctx, quicTransport, peers, nodeID, raftAddr, kek []byte)`.
+  Now runs Challenge → `ComputeHandshakeResponse` → Join. The
+  `--join-pending` boot path threads `state.kek` through.
+- **`wireDEKKeeper`** distinguishes between first-cluster-init and join
+  modes. If `joinMode || len(peers) > 0` → strict `LoadKEK` (refuses with
+  three-option remediation when `kek.key` is missing). Standalone path
+  keeps `LoadOrGenerateKEK` for the very first node.
+- **`cmd/grainfs/cluster_join.go`** switched to strict `LoadKEK` so a
+  joining node never auto-generates a divergent key before the
+  handshake refuses it.
+- **Cluster fixtures** (`tests/colimafixture/cluster.go`,
+  `tests/e2e/cluster_harness_test.go`, `tests/compat/harness_test.go`,
+  `tests/compat/scenario_install_snapshot_test.go`) — stage the seed
+  node's `kek.key` to each joining follower before booting. Mirrors the
+  production `scp` workflow operators must perform.
+- **`SetDEKKeeper`** doc-comment
+  (`internal/cluster/meta_fsm.go`) — describes the new pre-apply-loop
+  callback window. Old "must be called before raft starts replaying"
+  contract is updated.
+
+### Fixed
+
+- F#21 / F#22 closed: fresh joiners no longer silently auto-generate a
+  random KEK that diverges from the cluster's wrapped DEKs. The boot
+  refusal lists the three remediation paths explicitly.
+- F#23 / F#27 closed: wrong-KEK joins are rejected at the handshake
+  boundary; nonce replay rejected after first use; expired nonces
+  rejected after 60s; mismatched response burns the nonce.
+- F#30 closed: keeper reconstruction race between snapshot Restore and
+  `runApplyLoop` is eliminated via the `preApplyLoop` callback.
+
+### Known limitations
+
+- **F#29** (Iceberg REST API not audited to audit.s3) — predates §7,
+  follow-up tracked.
+- **F#25 / F#26** — §5 deferred items unchanged.
+- **Cluster-mode e2e** for T55 + T56 against real QUIC deferred — in-process
+  integration tests exercise the receiver code path; the spec's
+  "2-node smoke against full QUIC stand-up" is achievable but heavy.
+  Linux CI should run cluster fixtures (`tests/colimafixture`) to
+  exercise the production wiring end-to-end.
+
 ## [0.0.279.0] - 2026-05-20 - perf: reduce internal test resource cost
 
 Internal test runs now use substantially less memory and avoid several

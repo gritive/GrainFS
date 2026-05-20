@@ -86,7 +86,7 @@ func TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E(t *testing.T) {
 
 	for _, m := range metaNodes {
 		require.NoError(t, m.Bootstrap())
-		require.NoError(t, m.Start(context.Background()))
+		require.NoError(t, m.Start(context.Background(), nil))
 	}
 
 	// Election under mux must converge in the same window legacy does. 10s

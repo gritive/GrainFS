@@ -54,7 +54,12 @@ func TestInstallSnapshotPath(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(newDataDir) })
 
-	// Write .join-pending pointing to node 0's raft addr.
+	// Write .join-pending pointing to node 0's raft addr. §7 B3: stage the
+	// seed's kek.key first so wireDEKKeeper on the joiner can complete
+	// startup (it refuses to auto-generate a KEK in join mode).
+	seedKEK, kekErr := os.ReadFile(filepath.Join(c.dataDirs[0], "kek.key"))
+	require.NoError(t, kekErr, "read seed kek.key")
+	require.NoError(t, os.WriteFile(filepath.Join(newDataDir, "kek.key"), seedKEK, 0o600))
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 	require.NoError(t, os.WriteFile(
 		filepath.Join(newDataDir, ".join-pending"),

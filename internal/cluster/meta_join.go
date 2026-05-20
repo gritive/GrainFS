@@ -11,6 +11,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -27,11 +28,22 @@ const (
 	JoinStatusMixedVersion  JoinStatus = "mixed_version"
 	JoinStatusTimeout       JoinStatus = "timeout"
 	JoinStatusError         JoinStatus = "error"
+	// JoinStatusKEKMismatch is returned when the joiner's HMAC-SHA256 response
+	// does not match the leader's KEK (or the nonce is unknown / replayed /
+	// expired). The joiner is refused admission before AddVoter is called.
+	// §7 T55 (D#15, F#23).
+	JoinStatusKEKMismatch JoinStatus = "kek_mismatch"
 )
 
 type JoinRequest struct {
 	NodeID  string `json:"node_id"`
 	Address string `json:"address"`
+	// HandshakeNonce/Response carry the KEK challenge-response proof. The
+	// joiner first calls Challenge to obtain a fresh Nonce, computes
+	// HMAC-SHA256(KEK, Nonce) as Response, and sends both alongside Join.
+	// §7 T55 (D#15, F#23).
+	HandshakeNonce    []byte `json:"handshake_nonce,omitempty"`
+	HandshakeResponse []byte `json:"handshake_response,omitempty"`
 }
 
 type JoinReply struct {
@@ -98,6 +110,11 @@ type MetaJoinReceiver struct {
 	meta         metaJoinCoordinator
 	joinMu       sync.Mutex
 	postJoinHook func(context.Context, JoinRequest) error
+	// verifier, when non-nil, gates admission on the KEK challenge-response
+	// HMAC. T55 ships the plumbing; T57 will require verifier != nil at boot.
+	// When nil (legacy callers, unit tests not exercising the handshake), the
+	// HMAC gate is skipped so existing behavior is preserved.
+	verifier *encrypt.HandshakeVerifier
 }
 
 func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
@@ -106,6 +123,14 @@ func NewMetaJoinReceiver(meta metaJoinCoordinator) *MetaJoinReceiver {
 
 func (r *MetaJoinReceiver) WithPostJoinHook(fn func(context.Context, JoinRequest) error) *MetaJoinReceiver {
 	r.postJoinHook = fn
+	return r
+}
+
+// WithHandshakeVerifier installs the KEK handshake verifier used to gate
+// admission. The SAME verifier instance must be wired into the paired
+// MetaChallengeReceiver so the issued-nonce map is shared. §7 T55 (D#15, F#23).
+func (r *MetaJoinReceiver) WithHandshakeVerifier(v *encrypt.HandshakeVerifier) *MetaJoinReceiver {
+	r.verifier = v
 	return r
 }
 
@@ -135,6 +160,18 @@ func (r *MetaJoinReceiver) Handle(req *transport.Message) *transport.Message {
 			LeaderID:   leaderID,
 			LeaderAddr: leaderAddr,
 		})
+	}
+	// KEK handshake gate. Runs after the leader check so non-leaders return
+	// JoinStatusNotLeader without consuming a nonce on the leader's verifier
+	// (saves nonce churn on follower retries). §7 T55 (D#15, F#23).
+	if r.verifier != nil {
+		if err := r.verifier.VerifyResponse(joinReq.HandshakeNonce, joinReq.HandshakeResponse); err != nil {
+			return joinMessage(JoinReply{
+				Accepted: false,
+				Status:   JoinStatusKEKMismatch,
+				Message:  "KEK handshake failed: " + err.Error(),
+			})
+		}
 	}
 	r.joinMu.Lock()
 	defer r.joinMu.Unlock()
@@ -214,6 +251,8 @@ func joinStatusToFB(s JoinStatus) clusterpb.JoinStatus {
 		return clusterpb.JoinStatusTimeout
 	case JoinStatusError:
 		return clusterpb.JoinStatusError
+	case JoinStatusKEKMismatch:
+		return clusterpb.JoinStatusKEKMismatch
 	default:
 		return clusterpb.JoinStatusUnknown
 	}
@@ -237,6 +276,8 @@ func joinStatusFromFB(s clusterpb.JoinStatus) JoinStatus {
 		return JoinStatusTimeout
 	case clusterpb.JoinStatusError:
 		return JoinStatusError
+	case clusterpb.JoinStatusKEKMismatch:
+		return JoinStatusKEKMismatch
 	default:
 		return JoinStatus("")
 	}
@@ -247,9 +288,13 @@ func encodeJoinRequest(req JoinRequest) ([]byte, error) {
 	defer releaseMetaJoinBuilder(b)
 	nodeOff := b.CreateString(req.NodeID)
 	addrOff := b.CreateString(req.Address)
+	nonceOff := b.CreateByteVector(req.HandshakeNonce)
+	respOff := b.CreateByteVector(req.HandshakeResponse)
 	clusterpb.JoinRequestStart(b)
 	clusterpb.JoinRequestAddNodeId(b, nodeOff)
 	clusterpb.JoinRequestAddAddress(b, addrOff)
+	clusterpb.JoinRequestAddHandshakeNonce(b, nonceOff)
+	clusterpb.JoinRequestAddHandshakeResponse(b, respOff)
 	b.Finish(clusterpb.JoinRequestEnd(b))
 	fb := b.FinishedBytes()
 	out := make([]byte, 0, len(metaJoinRequestMagic)+len(fb))
@@ -270,6 +315,12 @@ func decodeJoinRequest(data []byte) (req JoinRequest, err error) {
 	fb := clusterpb.GetRootAsJoinRequest(data[len(metaJoinRequestMagic):], 0)
 	req.NodeID = string(fb.NodeId())
 	req.Address = string(fb.Address())
+	if n := fb.HandshakeNonceBytes(); len(n) > 0 {
+		req.HandshakeNonce = append([]byte(nil), n...)
+	}
+	if r := fb.HandshakeResponseBytes(); len(r) > 0 {
+		req.HandshakeResponse = append([]byte(nil), r...)
+	}
 	return req, nil
 }
 

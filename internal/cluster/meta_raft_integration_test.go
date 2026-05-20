@@ -62,14 +62,14 @@ func TestMetaRaft_ThreeNodeBootstrap_E2E(t *testing.T) {
 
 	// Bootstrap and start node-0 (singleton bootstrap).
 	require.NoError(t, m0.Bootstrap())
-	require.NoError(t, m0.Start(context.Background()))
+	require.NoError(t, m0.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m0.node.State() == raft.Leader
 	}, 3*time.Second, 20*time.Millisecond, "node-0 must become leader")
 
 	// Join node-1.
 	require.NoError(t, m1.Bootstrap())
-	require.NoError(t, m1.Start(context.Background()))
+	require.NoError(t, m1.Start(context.Background(), nil))
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel1()
@@ -86,7 +86,7 @@ func TestMetaRaft_ThreeNodeBootstrap_E2E(t *testing.T) {
 
 	// Join node-2.
 	require.NoError(t, m2.Bootstrap())
-	require.NoError(t, m2.Start(context.Background()))
+	require.NoError(t, m2.Start(context.Background(), nil))
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
@@ -121,7 +121,7 @@ func TestMetaRaft_ProposeShardGroup_E2E(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -192,7 +192,7 @@ func TestMetaRaft_QUICStaticFiveNodeBootstrap_E2E(t *testing.T) {
 
 	for _, m := range nodes {
 		require.NoError(t, m.Bootstrap())
-		require.NoError(t, m.Start(context.Background()))
+		require.NoError(t, m.Start(context.Background(), nil))
 	}
 
 	var leader *MetaRaft
@@ -298,7 +298,7 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 	}
 	for _, m := range metaNodes {
 		require.NoError(t, m.Bootstrap())
-		require.NoError(t, m.Start(context.Background()))
+		require.NoError(t, m.Start(context.Background(), nil))
 	}
 
 	require.Eventually(t, func() bool {

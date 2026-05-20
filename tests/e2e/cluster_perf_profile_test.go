@@ -218,7 +218,7 @@ func runPerfScenario(t *testing.T, sc perfScenario, outRoot string) *perfResult 
 	perfAccessKey, perfSecretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
 
 	for i := 1; i < perfNumNodes; i++ {
-		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}

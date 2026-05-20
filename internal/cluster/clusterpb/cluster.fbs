@@ -870,11 +870,14 @@ enum JoinStatus : byte {
   MixedVersion  = 6,
   Timeout       = 7,
   Error         = 8,
+  KEKMismatch   = 9,
 }
 
 table JoinRequest {
-  node_id : string;
-  address : string;
+  node_id            : string;
+  address            : string;
+  handshake_nonce    : [ubyte];
+  handshake_response : [ubyte];
 }
 
 table JoinReply {
@@ -883,6 +886,19 @@ table JoinReply {
   message     : string;
   leader_id   : string;
   leader_addr : string;
+}
+
+// ChallengeRequest is sent by a joining node to a peer to obtain a fresh
+// KEK-handshake nonce. The peer responds with ChallengeReply{nonce, ...}.
+// §7 T55 — cluster admission KEK gate (D#15, F#23).
+table ChallengeRequest {
+  node_id : string;
+}
+
+table ChallengeReply {
+  nonce   : [ubyte];
+  status  : JoinStatus = Unknown;
+  message : string;
 }
 
 // ============================================================================

@@ -268,7 +268,15 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 			return fmt.Errorf("meta-raft bootstrap: %w", err)
 		}
 	}
-	if err := state.metaRaft.Start(ctx); err != nil {
+	// §7 T57: the preApplyLoop callback runs AFTER Restore (so the DKVS
+	// trailer is decoded into FSM.PendingDEKVersions) and BEFORE the apply
+	// loop is launched. This is the only safe window to swap the DEKKeeper
+	// without racing DEKRotate / JWTSigningKeyRotate apply entries. On a
+	// fresh boot (no snapshot trailer) the callback is a no-op.
+	preApply := func() error {
+		return rebuildDEKKeeperFromRestore(state, state.metaRaft.FSM())
+	}
+	if err := state.metaRaft.Start(ctx, preApply); err != nil {
 		return fmt.Errorf("meta-raft start: %w", err)
 	}
 	// previous.key cleanup goroutine — deletes keys.d/previous.key after

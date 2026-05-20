@@ -27,9 +27,22 @@ var ErrKEKPermissionsTooLoose = errors.New("KEK file permissions must be 0o600")
 // the KEK load to an attacker-chosen 32-byte file.
 var ErrKEKSymlink = errors.New("KEK path must not be a symlink")
 
+// ErrKEKNotFound is returned by LoadKEK when the KEK file is absent. The
+// caller is expected to surface a remediation message (restore from backup /
+// scp from a healthy peer / decommission and rejoin) — auto-generating a
+// fresh KEK on a node that already holds FSM-wrapped DEKs would silently
+// orphan all cluster state, which is F#21.
+var ErrKEKNotFound = errors.New("KEK file not found")
+
 // LoadOrGenerateKEK loads a KEK from source or generates a random one if the
 // file does not exist. Only the "file://" scheme is supported; any other scheme
 // returns ErrUnsupportedKEKSource.
+//
+// Auto-generation is appropriate ONLY for the very-first-node bootstrap path
+// (a brand-new cluster with no prior FSM state). For any node that may have
+// previously persisted FSM-wrapped DEKs (joiner, restart, snapshot Restore),
+// use LoadKEK — which fails fast with ErrKEKNotFound rather than silently
+// generating a wrong KEK that can never decrypt the cluster's DEKs.
 //
 // Security invariants enforced on every load:
 //   - The path must be absolute. Relative paths or `..` traversal are rejected.
@@ -41,21 +54,57 @@ var ErrKEKSymlink = errors.New("KEK path must not be a symlink")
 // 32 cryptographically random bytes. If it exists its size must be exactly 32
 // bytes; any other size is an error.
 func LoadOrGenerateKEK(source string) ([]byte, error) {
+	path, err := parseKEKSource(source)
+	if err != nil {
+		return nil, err
+	}
+	kek, err := readKEK(path)
+	if err != nil {
+		if errors.Is(err, ErrKEKNotFound) {
+			return generateKEK(path)
+		}
+		return nil, err
+	}
+	return kek, nil
+}
+
+// LoadKEK loads a KEK from source. Unlike LoadOrGenerateKEK, it does NOT
+// auto-generate when the file is absent — it returns ErrKEKNotFound so the
+// caller can emit an operator-facing remediation path (F#21).
+//
+// Same security invariants as LoadOrGenerateKEK: file:// only, absolute path,
+// no symlinks, exactly mode 0o600, exactly 32 bytes.
+func LoadKEK(source string) ([]byte, error) {
+	path, err := parseKEKSource(source)
+	if err != nil {
+		return nil, err
+	}
+	return readKEK(path)
+}
+
+// parseKEKSource validates the source URI and returns the absolute filesystem
+// path. Only the "file://" scheme is supported.
+func parseKEKSource(source string) (string, error) {
 	const scheme = "file://"
 	if !strings.HasPrefix(source, scheme) {
-		return nil, ErrUnsupportedKEKSource
+		return "", ErrUnsupportedKEKSource
 	}
-
 	path := source[len(scheme):]
 	if !strings.HasPrefix(path, "/") {
-		return nil, fmt.Errorf("KEK path %q must be absolute", path)
+		return "", fmt.Errorf("KEK path %q must be absolute", path)
 	}
+	return path, nil
+}
 
+// readKEK opens and validates a KEK file. Returns ErrKEKNotFound if the file
+// does not exist; the caller decides whether to auto-generate (first-boot)
+// or surface the missing-file error (any post-bootstrap path).
+func readKEK(path string) ([]byte, error) {
 	// O_NOFOLLOW: if the path is a symlink, open fails with ELOOP.
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return generateKEK(path)
+			return nil, fmt.Errorf("%w: %s", ErrKEKNotFound, path)
 		}
 		// ELOOP shows up as a syscall error wrapping ELOOP — translate it.
 		var pe *os.PathError

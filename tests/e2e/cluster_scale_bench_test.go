@@ -108,7 +108,7 @@ func runScaleBench(t *testing.T, n int) scaleBenchResult {
 	accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
 
 	for i := 1; i < numNodes; i++ {
-		require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+		require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
