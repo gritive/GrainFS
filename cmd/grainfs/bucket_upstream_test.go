@@ -55,7 +55,7 @@ func TestCLI_UpstreamPut_AllFlags(t *testing.T) {
 	want := map[string]string{
 		"bucket":        "my-bucket",
 		"scheme":        "r2",
-		"endpoint":      "https://r2.example.com",
+		"upstream_url":  "https://r2.example.com",
 		"access_key":    "AKID",
 		"secret_key":    "SK",
 		"region":        "auto",

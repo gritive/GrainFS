@@ -15,7 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/bucketadmin"
 	"github.com/gritive/GrainFS/internal/s3auth"
-	"github.com/stretchr/testify/assert"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,20 +25,32 @@ import (
 // runs against both single-node and 4-node cluster fixtures to prove the
 // policy plane is at parity across topologies.
 
-func TestBucketPolicyE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runBucketPolicyCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Bucket policy", ginkgo.Label("bucket"), func() {
+	describeBucketPolicyContext("SingleNode", func() s3Target {
+		return newSingleNodeS3Target()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runBucketPolicyCases(t, newSharedClusterS3Target(t))
+	describeBucketPolicyContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describeBucketPolicyContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory()
+		})
+
+		runBucketPolicyCases(func() s3Target { return tgt })
 	})
 }
 
-func runBucketPolicyCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-
-	t.Run("SetAndGet", func(t *testing.T) {
-		bucket := tgt.uniqueBucket(t, "polset")
+func runBucketPolicyCases(getTgt func() s3Target) {
+	ginkgo.It("sets and reads bucket policy through admin and data planes (SetAndGet)", func() {
+		tb := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		bucket := createSpecBucket(tgt, "polset")
 		cli := tgt.pickNode(0)
 		ctx := context.Background()
 
@@ -51,46 +64,52 @@ func runBucketPolicyCases(t *testing.T, tgt s3Target) {
 			}]
 		}`, bucket)
 
-		adminPolicySet(t, tgt, bucket, []byte(policy))
+		adminPolicySet(tb, tgt, bucket, []byte(policy))
+		ginkgo.DeferCleanup(func() {
+			adminPolicyDelete(ginkgo.GinkgoTB(), tgt, bucket)
+		})
 
-		raw := adminPolicyGet(t, tgt, bucket)
-		assert.Contains(t, string(raw), "s3:GetObject")
+		raw := adminPolicyGet(tb, tgt, bucket)
+		gomega.Expect(string(raw)).To(gomega.ContainSubstring("s3:GetObject"))
 
 		got, err := cli.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 			Bucket: aws.String(bucket),
 		})
-		require.NoError(t, err)
-		require.NotNil(t, got.Policy)
-		assert.Contains(t, *got.Policy, "s3:GetObject")
-
-		adminPolicyDelete(t, tgt, bucket)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got.Policy).NotTo(gomega.BeNil())
+		gomega.Expect(*got.Policy).To(gomega.ContainSubstring("s3:GetObject"))
 	})
 
-	t.Run("InvalidJSON", func(t *testing.T) {
-		bucket := tgt.uniqueBucket(t, "polinval")
-		status, body := adminPolicySetRaw(t, tgt, bucket, []byte(`{invalid`))
-		assert.Equalf(t, http.StatusBadRequest, status, "body=%s", body)
+	ginkgo.It("rejects invalid policy JSON (InvalidJSON)", func() {
+		tb := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		bucket := createSpecBucket(tgt, "polinval")
+		status, body := adminPolicySetRaw(tb, tgt, bucket, []byte(`{invalid`))
+		gomega.Expect(status).To(gomega.Equal(http.StatusBadRequest), "body=%s", body)
 	})
 
-	t.Run("DataPlaneMutationDenied", func(t *testing.T) {
-		bucket := tgt.uniqueBucket(t, "poldenymutate")
+	ginkgo.It("denies data-plane policy mutation (DataPlaneMutationDenied)", func() {
+		tgt := getTgt()
+		bucket := createSpecBucket(tgt, "poldenymutate")
 
 		_, err := tgt.pickNode(0).PutBucketPolicy(context.Background(), &s3.PutBucketPolicyInput{
 			Bucket: aws.String(bucket),
 			Policy: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
 		})
-		require.Error(t, err)
-		require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err), "PutBucketPolicy err=%v", err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect([]int{http.StatusForbidden, http.StatusUnauthorized}).To(gomega.ContainElement(httpStatusFrom(err)), "PutBucketPolicy err=%v", err)
 
 		_, err = tgt.pickNode(0).DeleteBucketPolicy(context.Background(), &s3.DeleteBucketPolicyInput{
 			Bucket: aws.String(bucket),
 		})
-		require.Error(t, err)
-		require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err), "DeleteBucketPolicy err=%v", err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect([]int{http.StatusForbidden, http.StatusUnauthorized}).To(gomega.ContainElement(httpStatusFrom(err)), "DeleteBucketPolicy err=%v", err)
 	})
 
-	t.Run("DenyAction", func(t *testing.T) {
-		bucket := tgt.uniqueBucket(t, "poldeny")
+	ginkgo.It("enforces deny policies on object reads (DenyAction)", func() {
+		tb := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		bucket := createSpecBucket(tgt, "poldeny")
 		cli := tgt.pickNode(0)
 		ctx := context.Background()
 
@@ -99,7 +118,7 @@ func runBucketPolicyCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("secret.txt"),
 			Body:   strings.NewReader("secret data"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		policy := fmt.Sprintf(`{
 			"Version": "2012-10-17",
@@ -111,32 +130,35 @@ func runBucketPolicyCases(t *testing.T, tgt s3Target) {
 			}]
 		}`, bucket)
 
-		adminPolicySet(t, tgt, bucket, []byte(policy))
+		adminPolicySet(tb, tgt, bucket, []byte(policy))
+		ginkgo.DeferCleanup(func() {
+			adminPolicyDelete(ginkgo.GinkgoTB(), tgt, bucket)
+		})
 
 		req, err := http.NewRequest(http.MethodGet, tgt.endpoint(0)+"/"+bucket+"/secret.txt", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp.Body.Close()
-		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
 	})
 }
 
-func adminPolicyClient(t *testing.T, tgt s3Target) *bucketadmin.Client {
+func adminPolicyClient(t testing.TB, tgt s3Target) *bucketadmin.Client {
 	t.Helper()
 	c, err := bucketadmin.NewClient(tgt.adminSockPath())
 	require.NoError(t, err)
 	return c
 }
 
-func adminPolicySet(t *testing.T, tgt s3Target, bucket string, policy []byte) {
+func adminPolicySet(t testing.TB, tgt s3Target, bucket string, policy []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, adminPolicyClient(t, tgt).PolicySet(ctx, bucket, policy))
 }
 
-func adminPolicyGet(t *testing.T, tgt s3Target, bucket string) []byte {
+func adminPolicyGet(t testing.TB, tgt s3Target, bucket string) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -145,14 +167,14 @@ func adminPolicyGet(t *testing.T, tgt s3Target, bucket string) []byte {
 	return raw
 }
 
-func adminPolicyDelete(t *testing.T, tgt s3Target, bucket string) {
+func adminPolicyDelete(t testing.TB, tgt s3Target, bucket string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, adminPolicyClient(t, tgt).PolicyDelete(ctx, bucket))
 }
 
-func adminPolicySetRaw(t *testing.T, tgt s3Target, bucket string, body []byte) (int, []byte) {
+func adminPolicySetRaw(t testing.TB, tgt s3Target, bucket string, body []byte) (int, []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

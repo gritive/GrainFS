@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/clusteradmin"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,7 +35,7 @@ import (
 //     PerGroupPersistence and CrossNodeDispatch tests covered there.
 
 type mrCluster struct {
-	t             *testing.T
+	t             testing.TB
 	procs         []*exec.Cmd
 	dataDirs      []string
 	httpPorts     []int
@@ -62,12 +63,12 @@ type mrClusterOptions struct {
 	ExtraArgs     []string // extra flags appended to each node's serve command
 }
 
-func startStaticMRCluster(t *testing.T, numNodes int) *mrCluster {
+func startStaticMRCluster(t testing.TB, numNodes int) *mrCluster {
 	t.Helper()
 	return startStaticMRClusterWithOptions(t, numNodes, mrClusterOptions{})
 }
 
-func startStaticMRClusterWithOptions(t *testing.T, numNodes int, opts mrClusterOptions) *mrCluster {
+func startStaticMRClusterWithOptions(t testing.TB, numNodes int, opts mrClusterOptions) *mrCluster {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
@@ -94,7 +95,7 @@ func startStaticMRClusterWithOptions(t *testing.T, numNodes int, opts mrClusterO
 // newMRCluster allocates maxNodes port slots and temp dirs for a multi-raft
 // cluster. It does NOT start any processes. Callers (tryStartStaticMRCluster,
 // tryStartMRCluster) do the actual node startup.
-func newMRCluster(t *testing.T, maxNodes int, opts mrClusterOptions) (*mrCluster, error) {
+func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	c := &mrCluster{
 		t:          t,
@@ -134,7 +135,7 @@ func newMRCluster(t *testing.T, maxNodes int, opts mrClusterOptions) (*mrCluster
 	return c, nil
 }
 
-func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+func tryStartStaticMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	c, err := newMRCluster(t, numNodes, opts)
 	if err != nil {
@@ -546,8 +547,9 @@ func TestMultiRaftShardingAllNodeServicesE2E(t *testing.T) {
 //     ProposeBucketAssignment)
 //   - Subsequent CreateBucket on same name is idempotent (no error / 409)
 //   - Spread: 32 buckets all created without error
-func TestMultiRaftShardingBucketAssignmentE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("Multi-Raft bucket assignment", ginkgo.Label("bucket"), func() {
+	ginkgo.It("records bucket-to-group hash assignment", func() {
+		t := ginkgo.GinkgoTB()
 		// v0.0.7.1 PR-D: data-plane routing now enables auto-redirect to current leader.
 		// ClusterCoordinator routes bucket-scoped ops, and CreateBucket goes through
 		// the same forward path with try-each-peer reliability.
@@ -576,7 +578,7 @@ func TestMultiRaftShardingBucketAssignmentE2E(t *testing.T) {
 		}
 		t.Logf("32 buckets created + 5 idempotent re-creates ok")
 	})
-}
+})
 
 // ----- TestMultiRaftShardingRestartRecoveryE2E ----------------------------
 // Boot, create buckets, SIGTERM all, restart with same dataDirs, verify

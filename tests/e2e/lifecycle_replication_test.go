@@ -88,21 +88,12 @@ func (ls lifecycleSigner) signedLifecycleGet(t testing.TB, baseURL, bucket strin
 // getStatusJSON이 "peers" 2개를 보고할 때 완전히 합류한 것으로 간주.
 func waitClusterSettled(t testing.TB, leaderURL string) {
 	t.Helper()
-	gomega.Eventually(func() bool {
+	g := gomega.NewWithT(t)
+	g.Eventually(func() bool {
 		s := getStatusJSON(t, leaderURL)
 		return len(stringList(s["peers"])) == 2
 	}).WithTimeout(90*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(),
 		"3-node cluster must settle (peers==2)")
-}
-
-// TestLifecycleE2E collapses lifecycle replication checks (follower→leader
-// PUT forward, leader-change preserves replicated config) into one entry.
-// Both sub-specs need a 3-voter DynamicJoin cluster — the second one kills
-// the leader, so it runs last in Ordered Context order; the first sub-spec
-// runs against the pristine cluster.
-func TestLifecycleE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Lifecycle replication e2e")
 }
 
 var _ = ginkgo.Describe("Lifecycle replication", func() {
