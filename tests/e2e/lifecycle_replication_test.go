@@ -207,7 +207,14 @@ var _ = ginkgo.Describe("Lifecycle replication", func() {
 			tb.Logf("killing leader node %d (%s) to trigger re-election", currentLeaderIdx, initialLeader)
 			gomega.Expect(c.procs[currentLeaderIdx].Process.Signal(syscall.SIGKILL)).NotTo(gomega.HaveOccurred())
 			_ = c.procs[currentLeaderIdx].Wait()
-			c.procs[currentLeaderIdx] = nil // Stop() 중복 처리 방지
+			// 죽은 leader proc 슬롯의 nil 마킹은 spec 종료 후로 미룬다 —
+			// 본문은 currentLeaderIdx 슬롯을 더 이상 참조하지 않으니 안전하고,
+			// BeforeAll의 cluster cleanup(t.Cleanup)이 호출될 때 helper의 Stop()이
+			// 이미 죽은 proc을 두 번 정리하지 않도록 ginkgo.DeferCleanup으로 명시.
+			killedIdx := currentLeaderIdx
+			ginkgo.DeferCleanup(func() {
+				c.procs[killedIdx] = nil
+			})
 
 			// 생존 노드 양쪽에서 새 리더가 선출될 때까지 폴링.
 			tryStatusLeaderID := func(url string) string {
