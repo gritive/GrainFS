@@ -39,6 +39,15 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - internal 하위 패키지: cluster, raft, transport(QUIC), storage, vfs, volume, server, server/execution, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
+### cmd 경계 계약 (cmd thin-runner)
+`cmd/grainfs/*.go` (non-test) 는 다음 네 가지만 포함한다:
+1. cobra command 정의 (`var xxxCmd = &cobra.Command{...}`)
+2. flag 등록 (`cmd.Flags().String/Int/Bool/Duration(...)`)
+3. `init()` 트리 와이어링 (`parentCmd.AddCommand(...)`)
+4. 한 줄 `RunE`: `Options` 빌드 후 `<feature>admin.RunX(ctx, opts)` 호출
+
+HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 `internal/<feature>admin/` 또는 `internal/serveruntime/` 으로 이동한다. 가드: `cmd/grainfs/cmd_loc_guard_test.go` 가 file ≤ 250 LOC OR 함수 ≤ 90 LOC 를 강제. 상세: `docs/superpowers/specs/2026-05-20-cmd-thin-runner-design.md`.
+
 ### 보안 규칙
 - S3 인증: admin UDS로 부트스트랩한 SA의 access_key/secret_key로 HMAC-SHA256 서명 검증
 - At-rest Encryption: AES-256-GCM (기본 활성)
