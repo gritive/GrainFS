@@ -18,4 +18,5 @@ type ClusterStatus struct {
 	PeerStates        map[string]string
 	BucketAssignments map[string]string
 	ShardGroups       []ShardGroupEntry
+	ShardGroupLeaders map[string]string
 }

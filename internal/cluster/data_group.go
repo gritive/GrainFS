@@ -84,6 +84,25 @@ func (m *DataGroupManager) All() []*DataGroup {
 	return m.snap.Load().all
 }
 
+// LeaderIDs returns the currently known raft leader for locally instantiated
+// data groups. Placeholder groups and groups whose raft node has not observed a
+// leader yet are omitted.
+func (m *DataGroupManager) LeaderIDs() map[string]string {
+	snap := m.snap.Load()
+	out := make(map[string]string, len(snap.all))
+	for _, dg := range snap.all {
+		if dg == nil || dg.backend == nil || dg.backend.Node() == nil {
+			continue
+		}
+		leaderID := dg.backend.Node().LeaderID()
+		if leaderID == "" {
+			continue
+		}
+		out[dg.id] = leaderID
+	}
+	return out
+}
+
 // GroupForBucket resolves a bucket to its DataGroup via the supplied router.
 // Returns (nil, false) if router is nil, the bucket has no assignment and no
 // default group is set, or the assigned group has been removed from the manager.

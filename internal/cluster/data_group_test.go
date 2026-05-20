@@ -73,3 +73,20 @@ func TestDataGroupManager_GroupForBucket(t *testing.T) {
 	_, ok = mgr.GroupForBucket("photos", nil)
 	require.False(t, ok)
 }
+
+func TestDataGroupManager_LeaderIDs(t *testing.T) {
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-placeholder", []string{"node-0"}))
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"node-0", "node-1"}, &GroupBackend{
+		DistributedBackend: &DistributedBackend{node: &dataGroupLeaderNode{leaderID: "node-1"}},
+	}))
+
+	require.Equal(t, map[string]string{"group-1": "node-1"}, mgr.LeaderIDs())
+}
+
+type dataGroupLeaderNode struct {
+	RaftNode
+	leaderID string
+}
+
+func (n *dataGroupLeaderNode) LeaderID() string { return n.leaderID }

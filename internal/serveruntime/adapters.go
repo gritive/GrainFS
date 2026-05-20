@@ -334,6 +334,7 @@ type RaftClusterInfo struct {
 	backend  *cluster.DistributedBackend
 	addrBook cluster.NodeAddressBook
 	capGate  *cluster.CapabilityGate
+	dgMgr    *cluster.DataGroupManager
 }
 
 // peerReplicationEvidenceSource is a v1-only extension. v2 does not expose
@@ -353,6 +354,14 @@ func NewRaftClusterInfo(node cluster.RaftNode, peers []string, backend *cluster.
 // report per-peer evidence. nil keeps the adapter silent (returns empty map).
 func (r *RaftClusterInfo) WithCapabilityGate(g *cluster.CapabilityGate) *RaftClusterInfo {
 	r.capGate = g
+	return r
+}
+
+// WithDataGroups wires live data-group leadership into cluster status. The
+// meta FSM remains the source of shard group membership; this adds the local
+// raft node's latest leader observation for those groups.
+func (r *RaftClusterInfo) WithDataGroups(m *cluster.DataGroupManager) *RaftClusterInfo {
+	r.dgMgr = m
 	return r
 }
 
@@ -413,6 +422,7 @@ func (r *RaftClusterInfo) Snapshot() cluster.ClusterStatus {
 		PeerStates:        r.PeerStates(),
 		BucketAssignments: r.BucketAssignments(),
 		ShardGroups:       r.ShardGroups(),
+		ShardGroupLeaders: r.ShardGroupLeaders(),
 	}
 }
 
@@ -522,6 +532,25 @@ func (r *RaftClusterInfo) ShardGroups() []cluster.ShardGroupEntry {
 		return nil
 	}
 	return src.ShardGroups()
+}
+
+func (r *RaftClusterInfo) ShardGroupLeaders() map[string]string {
+	if r.dgMgr == nil {
+		return nil
+	}
+	raw := r.dgMgr.LeaderIDs()
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for groupID, leaderID := range raw {
+		if resolved := cluster.ResolveShardGroupPeer(r.addrBook, leaderID); resolved.NodeID != "" {
+			out[groupID] = resolved.NodeID
+			continue
+		}
+		out[groupID] = leaderID
+	}
+	return out
 }
 
 func (r *RaftClusterInfo) ObjectIndexSummary(bucket string) cluster.ObjectIndexSummary {

@@ -37,11 +37,15 @@ func (s *Server) clusterPlacement(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, s.clusterPlacementReport(bucket, key, limit))
 }
 
-func clusterStatusShardGroups(groups []cluster.ShardGroupEntry) []adminapi.ShardGroup {
+func clusterStatusShardGroups(groups []cluster.ShardGroupEntry, leaders map[string]string) []adminapi.ShardGroup {
 	out := make([]adminapi.ShardGroup, 0, len(groups))
 	for _, group := range groups {
 		peers := append([]string(nil), group.PeerIDs...)
-		out = append(out, adminapi.ShardGroup{ID: group.ID, PeerIDs: peers})
+		out = append(out, adminapi.ShardGroup{
+			ID:       group.ID,
+			PeerIDs:  peers,
+			LeaderID: leaders[group.ID],
+		})
 	}
 	return out
 }
