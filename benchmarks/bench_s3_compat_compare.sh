@@ -195,12 +195,21 @@ start_grainfs_single() {
 
   local data_dir="$BENCH_DIR/grainfs-single"
   local port
+  local extra=()
+  local extra_flags=()
   port="$(bench_free_port)"
   mkdir -p "$data_dir"
   register_target_data_dir "$data_dir"
   BENCH_ENCRYPTION_KEY_FILE="$data_dir/encryption.key"
   export BENCH_ENCRYPTION_KEY_FILE
   bench_generate_encryption_key_file "$BENCH_ENCRYPTION_KEY_FILE"
+  if [[ "$BENCH_PPROF" == "1" ]]; then
+    GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
+    extra+=(--pprof-port "$PPROF_BASE_PORT")
+  fi
+  if [[ -n "${EXTRA_GRAINFS_SERVE_FLAGS:-}" ]]; then
+    read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"
+  fi
 
   "$BINARY" serve \
     --data "$data_dir" \
@@ -212,9 +221,14 @@ start_grainfs_single() {
     --scrub-interval 0 \
     --lifecycle-interval 0 \
     --log-level warn \
+    "${extra[@]}" \
+    "${extra_flags[@]}" \
     >"$PROFILE_ROOT/grainfs-single.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "grainfs-single S3" 180 0.2 >&2
+  if [[ "$BENCH_PPROF" == "1" ]]; then
+    bench_wait_tcp_port "127.0.0.1" "$PPROF_BASE_PORT" "grainfs-single pprof" 60 0.2 >&2
+  fi
   bench_bootstrap_iam_credentials "$BINARY" "$data_dir" "bench-s3-compat" >&2
   GRAINFS_ADMIN_DATA_DIR="$data_dir"
   GRAINFS_SA_ID="$SA_ID"
@@ -860,8 +874,8 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     case "$op" in
       get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)
         prepare_grainfs_warp_bucket "$target" "$op"
-        if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
-          cpu_dir="$PROFILE_ROOT/grainfs-cluster/pprof-cpu-$op"
+        if [[ "$BENCH_PPROF" == "1" && "$target" == grainfs-* && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
+          cpu_dir="$PROFILE_ROOT/$target/pprof-cpu-$op"
           mkdir -p "$cpu_dir"
           cpu_pids=()
           for i in "${!GRAINFS_PPROF_PORTS[@]}"; do
@@ -885,9 +899,9 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     esac
   done
 
-  if [[ "$BENCH_PPROF" == "1" && "$target" == "grainfs-cluster" && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
+  if [[ "$BENCH_PPROF" == "1" && "$target" == grainfs-* && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
     for i in "${!GRAINFS_PPROF_PORTS[@]}"; do
-      snap_dir="$PROFILE_ROOT/grainfs-cluster/pprof-snap/node$((i+1))"
+      snap_dir="$PROFILE_ROOT/$target/pprof-snap/node$((i+1))"
       mkdir -p "$snap_dir"
       echo "[pprof] collecting node$((i+1)) heap/allocs/goroutine/mutex/block snapshots..."
       bench_collect_pprof "${GRAINFS_PPROF_PORTS[$i]}" "$snap_dir" heap allocs goroutine mutex block

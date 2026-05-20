@@ -54,6 +54,54 @@ func TestBenchS3CompatRecordsResourceSkew(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatCanProfileSingleNodeGrainFS(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	for _, want := range []string{
+		`GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")`,
+		`extra+=(--pprof-port "$PPROF_BASE_PORT")`,
+		`bench_wait_tcp_port "127.0.0.1" "$PPROF_BASE_PORT" "grainfs-single pprof"`,
+		`"$target" == grainfs-*`,
+		`"$PROFILE_ROOT/$target/pprof-snap/node$((i+1))"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_s3_compat_compare.sh must contain %q", want)
+		}
+	}
+}
+
+func TestBenchS3CompatSingleNodeAcceptsExtraServeFlags(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	start := strings.Index(script, "start_grainfs_single()")
+	if start < 0 {
+		t.Fatal("start_grainfs_single not found")
+	}
+	end := strings.Index(script[start:], "start_grainfs_cluster()")
+	if end < 0 {
+		t.Fatal("start_grainfs_cluster not found")
+	}
+	single := script[start : start+end]
+
+	for _, want := range []string{
+		`local extra_flags=()`,
+		`read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"`,
+		`"${extra_flags[@]}"`,
+	} {
+		if !strings.Contains(single, want) {
+			t.Fatalf("start_grainfs_single must contain %q", want)
+		}
+	}
+}
+
 func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
 	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
 	if err != nil {
