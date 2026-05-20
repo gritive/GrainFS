@@ -116,6 +116,9 @@ func (s *Server) wireAlertState() {
 }
 
 func (s *Server) wireBroadcastLogger() {
+	if !broadcastLoggerEnabled {
+		return
+	}
 	broadcastLoggerOnce.Do(func() {
 		multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
 		log.Logger = zerolog.New(multi).With().Timestamp().Logger()

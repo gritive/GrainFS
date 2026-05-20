@@ -40,7 +40,10 @@ func storageDBProvider(backend storage.Backend) storage.DBProvider {
 
 // broadcastLoggerOnce guards the global zerolog.Logger setup so it is wired
 // to the SSE hub exactly once, even when multiple Server instances are created.
-var broadcastLoggerOnce sync.Once
+var (
+	broadcastLoggerOnce    sync.Once
+	broadcastLoggerEnabled = true
+)
 
 // New creates a new S3 API server.
 func New(addr string, backend storage.Backend, opts ...Option) *Server {

@@ -204,7 +204,7 @@ func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	opts := []Option{WithMutationGate(gate), WithEventStore(evStore)}
+	opts := []Option{WithMutationGate(gate), WithEventStore(evStore), withEventQueueSize(testEventQueueSize)}
 	if ci != nil {
 		opts = append(opts, WithClusterInfo(ci))
 	}
