@@ -115,7 +115,8 @@ import os
 import sys
 
 out_dir = sys.argv[1]
-leaders = collections.Counter()
+by_group = {}
+conflicts = {}
 groups = set()
 for path in sorted(glob.glob(os.path.join(out_dir, "node*.json"))):
     try:
@@ -129,15 +130,21 @@ for path in sorted(glob.glob(os.path.join(out_dir, "node*.json"))):
         if group_id:
             groups.add(group_id)
         if leader:
-            leaders[leader] += 1
+            prev = by_group.setdefault(group_id, leader)
+            if prev != leader:
+                conflicts.setdefault(group_id, set()).update((prev, leader))
+leaders = collections.Counter(by_group.values())
 with open(os.path.join(out_dir, "leaders.tsv"), "w", encoding="utf-8") as f:
     f.write("leader_id\tgroups\n")
     for leader, count in sorted(leaders.items()):
         f.write(f"{leader}\t{count}\n")
 with open(os.path.join(out_dir, "summary.txt"), "w", encoding="utf-8") as f:
     f.write(f"groups_seen\t{len(groups)}\n")
+    f.write(f"groups_with_leader\t{len(by_group)}\n")
     for leader, count in sorted(leaders.items()):
         f.write(f"leader\t{leader}\t{count}\n")
+    for group_id, seen in sorted(conflicts.items()):
+        f.write(f"conflict\t{group_id}\t{','.join(sorted(seen))}\n")
 PY
 }
 
