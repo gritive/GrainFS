@@ -10,6 +10,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -19,7 +20,7 @@ import (
 // does NOT close it, so the t.Cleanup here owns the close.
 func openTestFSMStore(t *testing.T, dataDir string) *badger.DB {
 	t.Helper()
-	db, err := badger.Open(badger.DefaultOptions(filepath.Join(dataDir, "shared-fsm")).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(filepath.Join(dataDir, "shared-fsm")))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db

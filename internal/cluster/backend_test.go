@@ -19,6 +19,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -78,7 +79,7 @@ func newTestDistributedBackend(t testing.TB) *DistributedBackend {
 	dir := t.TempDir()
 
 	metaDir := dir + "/meta"
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	dbOpts := badgerutil.SmallOptions(metaDir)
 	db, err := badger.Open(dbOpts)
 	require.NoError(t, err)
 
@@ -1046,7 +1047,7 @@ func TestDistributedBackend_Close(t *testing.T) {
 	dir := t.TempDir()
 
 	metaDir := dir + "/meta"
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
+	dbOpts := badgerutil.SmallOptions(metaDir)
 	db, err := badger.Open(dbOpts)
 	require.NoError(t, err)
 

@@ -12,6 +12,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -22,7 +23,7 @@ func newTestGroupBackend(t testing.TB, groupID string) *GroupBackend {
 	dir := t.TempDir()
 
 	metaDir := dir + "/meta"
-	db, err := badger.Open(badger.DefaultOptions(metaDir).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(metaDir))
 	require.NoError(t, err)
 
 	cfg := raft.DefaultConfig("test-node", nil)
@@ -127,7 +128,7 @@ func TestGroupBackend_ListBuckets(t *testing.T) {
 
 func TestGroupBackend_CloseIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	db, err := badger.Open(badger.DefaultOptions(dir + "/meta").WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(dir + "/meta"))
 	require.NoError(t, err)
 
 	cfg := raft.DefaultConfig("test-node", nil)

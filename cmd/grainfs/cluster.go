@@ -68,6 +68,7 @@ func init() {
 		"Output format: text or json (status/peers/events; ignored elsewhere)")
 
 	clusterCmd.AddCommand(clusterStatusCmd)
+	clusterCmd.AddCommand(clusterJoinCmd())
 	clusterCmd.AddCommand(clusterRemovePeerCmd())
 	clusterCmd.AddCommand(clusterPeersCmd())
 	clusterCmd.AddCommand(clusterEventsCmd())

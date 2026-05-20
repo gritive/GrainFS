@@ -31,6 +31,7 @@ const (
 	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
+	StreamMetaJoinChallenge       StreamType = 0x16 // New node → meta-Raft leader KEK handshake nonce request (§7 T55)
 )
 
 type StreamClass byte
@@ -44,7 +45,7 @@ const (
 
 func ClassOf(st StreamType) StreamClass {
 	switch st {
-	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamMetaJoin, StreamReadIndex:
+	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamMetaJoin, StreamMetaJoinChallenge, StreamReadIndex:
 		return StreamClassMeta
 	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
 		return StreamClassData

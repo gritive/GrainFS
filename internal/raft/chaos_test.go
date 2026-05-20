@@ -39,6 +39,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,7 +104,7 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 // and the open *badger.DB (caller must store db; it will be closed on kill/stop).
 func (cc *chaosCluster) openNode(t *testing.T, idx int, id string) (*Node, *badger.DB) {
 	t.Helper()
-	db, err := badger.Open(badger.DefaultOptions(cc.dirs[idx]).WithLogger(nil))
+	db, err := badger.Open(badgerutil.RaftLogOptions(cc.dirs[idx], false))
 	require.NoError(t, err)
 
 	logStore, err := newBadgerLogStore(db, []byte("raft/v2/log/"))

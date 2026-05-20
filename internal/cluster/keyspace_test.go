@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
 func TestStateKeyspace_EmptyPrefixIsIdentity(t *testing.T) {
@@ -112,7 +113,7 @@ func TestStateKeyspace_NoCrossGroupCollision_PathologicalIDs(t *testing.T) {
 }
 
 func TestStateKeyspace_ScanGroupPrefix(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	if err != nil {
 		t.Fatal(err)
 	}

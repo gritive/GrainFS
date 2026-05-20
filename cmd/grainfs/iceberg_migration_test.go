@@ -25,7 +25,7 @@ func newStartedMetaCatalogForMigrationTest(t *testing.T, backend storage.Backend
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = meta.Close() })
 	require.NoError(t, meta.Bootstrap())
-	require.NoError(t, meta.Start(context.Background()))
+	require.NoError(t, meta.Start(context.Background(), nil))
 	require.Eventually(t, func() bool { return meta.Node().State() == raft.Leader }, 2*time.Second, 20*time.Millisecond)
 	return cluster.NewMetaCatalog(meta, backend, "s3://grainfs-tables/warehouse"), meta
 }

@@ -96,6 +96,15 @@ type bootState struct {
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
+	// kek holds the loaded 32-byte KEK so downstream phases (PerformMetaJoin
+	// handshake, MetaChallengeReceiver) can share the same key without
+	// re-reading kek.key from disk. Set by wireDEKKeeper.
+	kek []byte
+	// handshakeVerifier gates cluster-join admission via HMAC-SHA256 challenge-
+	// response. The SAME instance must be wired into both MetaJoinReceiver and
+	// MetaChallengeReceiver so the issued-nonce map is shared. Set by
+	// wireDEKKeeper; consumed by bootWALAndForwarders. §7 T55 / B1.
+	handshakeVerifier *encrypt.HandshakeVerifier
 	// refreshProxyCIDR re-seeds the trusted-proxy.cidr atomic snapshot used by
 	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
 	// start (so any snapshot Restore has already populated cfgStore).

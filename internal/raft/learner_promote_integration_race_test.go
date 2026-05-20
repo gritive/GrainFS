@@ -44,6 +44,7 @@ func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				i := i
 				t.Run(fmt.Sprintf("iter%d", i), func(t *testing.T) {
+					t.Parallel()
 					runPromoteRaceWithDelay(t, d)
 				})
 			}

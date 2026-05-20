@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -48,7 +49,7 @@ func setupTwoGroups(t *testing.T) (
 ) {
 	t.Helper()
 
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -416,7 +417,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 // IDs look prefix-y are written through the FSM and then read back through
 // DistributedBackend.ListObjects to prove no cross-group leakage.
 func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
@@ -504,7 +505,7 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 // GroupBackend.Close delegates DB-closure to DistributedBackend.Close, so this
 // test exercises the same invariant with far less stub scaffolding.
 func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
 	// NOTE: db.Close() is called explicitly at the end of this test, after
 	// both backends have been closed, to ensure the sequence is: backendA.Close

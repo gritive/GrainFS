@@ -497,8 +497,13 @@ func (f *MetaFSM) SetConfigStore(s *config.Store) {
 }
 
 // SetDEKKeeper wires the DEK keeper into the MetaFSM. Must be called before
-// the raft log starts replaying. nil means DEKRotate/DEKVersionPrune are safe
-// no-ops (not configured yet).
+// the apply loop starts — either pre-Start during bootMetaRaftWiring, or via
+// MetaRaft.Start's preApplyLoop callback (which runs AFTER Restore but BEFORE
+// the apply goroutine launches; that is how §7 T57 swaps in a keeper rebuilt
+// from the DKVS snapshot trailer). Calling SetDEKKeeper concurrently with the
+// apply loop races DEKRotate / DEKVersionPrune / JWTSigningKeyRotate.
+//
+// nil means DEKRotate/DEKVersionPrune are safe no-ops (not configured yet).
 func (f *MetaFSM) SetDEKKeeper(k *encrypt.DEKKeeper) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

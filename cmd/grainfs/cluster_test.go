@@ -55,11 +55,19 @@ func TestClusterCmd_Day2OpsRegistered(t *testing.T) {
 	}
 }
 
-func TestClusterJoinMovedToRoot(t *testing.T) {
-	assert.NotContains(t, clusterSubcommandNames(), "join",
-		"cluster join was moved to root as 'grainfs join' (bootstrap convention)")
+// TestJoinAndClusterJoinCoexist verifies the §7 T56 split:
+//
+//   - `grainfs join`           — runtime restart-into-join via admin UDS
+//     (root-level, established convention).
+//   - `grainfs cluster join`   — offline-bootstrap KEK challenge-response
+//     handshake directly over QUIC against a not-yet-running node.
+//
+// Both must exist; they target different operational scenarios.
+func TestJoinAndClusterJoinCoexist(t *testing.T) {
 	assert.Contains(t, rootSubcommandNames(), "join",
-		"join must be registered at root alongside serve / migrate / doctor / recover")
+		"root `join` (admin-UDS restart-into-join) must remain registered")
+	assert.Contains(t, clusterSubcommandNames(), "join",
+		"`cluster join` (§7 T56 offline-bootstrap KEK handshake) must be registered")
 }
 
 // clusterClientFromCmd helper tests.

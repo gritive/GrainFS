@@ -96,7 +96,7 @@ func TestMetaRaft_Bootstrap_SingleNode(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 
 	// Bootstrap is idempotent
 	require.NoError(t, m.Bootstrap())
@@ -116,7 +116,7 @@ func TestMetaRaft_JoinModeDoesNotSelfElectBeforeJoin(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 
 	require.Never(t, func() bool {
 		return m.node.IsLeader()
@@ -177,13 +177,13 @@ func TestMetaRaft_Join_AddsLearnerThenVoter(t *testing.T) {
 	t.Cleanup(func() { _ = m0.Close(); _ = m1.Close() })
 
 	require.NoError(t, m0.Bootstrap())
-	require.NoError(t, m0.Start(context.Background()))
+	require.NoError(t, m0.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m0.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
 
 	require.NoError(t, m1.Bootstrap())
-	require.NoError(t, m1.Start(context.Background()))
+	require.NoError(t, m1.Start(context.Background(), nil))
 
 	// Join: leader adds node-1
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -206,7 +206,7 @@ func TestMetaRaft_ProposeAddNode_CommitToFSM(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -232,7 +232,7 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 	m, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
 	require.NoError(t, err)
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -251,7 +251,7 @@ func TestMetaRaft_V2SnapshotRestoresFSMOnRestart(t *testing.T) {
 	restarted, err := NewMetaRaft(MetaRaftConfig{NodeID: "node-0", DataDir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = restarted.Close() })
-	require.NoError(t, restarted.Start(context.Background()))
+	require.NoError(t, restarted.Start(context.Background(), nil))
 
 	require.Eventually(t, func() bool {
 		for _, n := range restarted.FSM().Nodes() {
@@ -267,7 +267,7 @@ func TestMetaRaft_Close_StopsApplyLoop(t *testing.T) {
 	m := newSingleMetaRaft(t)
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -290,7 +290,7 @@ func TestMetaRaft_ProposeBucketAssignment_CommitToFSM(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -314,7 +314,7 @@ func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
 	})
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -338,7 +338,7 @@ func TestMetaRaft_ProposeObjectIndex_CommitToFSM(t *testing.T) {
 	t.Cleanup(reloadPutTraceSinkForTest)
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -378,7 +378,7 @@ func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -402,7 +402,7 @@ func TestMetaRaft_ProposeRebalancePlan_CommitToFSM(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -425,7 +425,7 @@ func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -446,7 +446,7 @@ func TestMetaRaft_ProposeIcebergCreateNamespace_ReturnsTypedApplyResult(t *testi
 	t.Cleanup(func() { _ = m.Close() })
 
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -485,16 +485,16 @@ func TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds(t *testing.T) {
 	t.Cleanup(func() { _ = m0.Close(); _ = m1.Close(); _ = m2.Close() })
 
 	require.NoError(t, m0.Bootstrap())
-	require.NoError(t, m0.Start(context.Background()))
+	require.NoError(t, m0.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m0.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
 
 	// Start joiners after m0 is leader so they don't interfere with election.
 	require.NoError(t, m1.Bootstrap())
-	require.NoError(t, m1.Start(context.Background()))
+	require.NoError(t, m1.Start(context.Background(), nil))
 	require.NoError(t, m2.Bootstrap())
-	require.NoError(t, m2.Start(context.Background()))
+	require.NoError(t, m2.Start(context.Background(), nil))
 
 	ctx := context.Background()
 	var wg sync.WaitGroup
