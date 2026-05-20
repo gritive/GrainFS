@@ -15,11 +15,12 @@ import (
 
 // fakeECObjectShardFetcher records calls and returns configurable data/errors.
 type fakeECObjectShardFetcher struct {
-	localShards          map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
-	remoteErr            map[string]error  // node → error to return
-	mu                   sync.Mutex
-	readShardCalls       int
-	readShardStreamCalls int
+	localShards               map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
+	remoteErr                 map[string]error  // node → error to return
+	mu                        sync.Mutex
+	readShardCalls            int
+	readShardStreamCalls      int
+	readShardRangeStreamCalls int
 }
 
 func (f *fakeECObjectShardFetcher) key(bucket, key string, idx int) string {
@@ -99,6 +100,9 @@ func (f *fakeECObjectShardFetcher) ReadShardRange(ctx context.Context, peer, buc
 }
 
 func (f *fakeECObjectShardFetcher) ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) (io.ReadCloser, error) {
+	f.mu.Lock()
+	f.readShardRangeStreamCalls++
+	f.mu.Unlock()
 	data, err := f.ReadShardRange(ctx, peer, bucket, key, shardIdx, offset, length)
 	if err != nil {
 		return nil, err
@@ -448,6 +452,32 @@ func TestECObjectReader_ReadAt_MultiShardSpan(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 8, n)
 	require.Equal(t, []byte("23456789"), buf)
+}
+
+func TestECObjectReader_ReadAt_CachesRemoteRange(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 0}
+	data := bytes.Repeat([]byte("x"), 256<<10)
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+	cache := shardcache.New(16 << 20)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, cache: cache, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c"}}
+	rec.K = cfg.DataShards
+
+	first := make([]byte, 128<<10)
+	n, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 0, first)
+	require.NoError(t, err)
+	require.Equal(t, len(first), n)
+	require.Equal(t, data[:len(first)], first)
+	require.Equal(t, 1, fetcher.readShardRangeStreamCalls)
+
+	second := make([]byte, len(first))
+	n, err = r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 0, second)
+	require.NoError(t, err)
+	require.Equal(t, len(second), n)
+	require.Equal(t, first, second)
+	require.Equal(t, 1, fetcher.readShardRangeStreamCalls)
 }
 
 func TestECObjectReader_ReadAt_PartialFillAtEnd(t *testing.T) {

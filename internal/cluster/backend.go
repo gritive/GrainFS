@@ -310,6 +310,14 @@ func shardCacheKey(bucket, shardKey string, idx int) string {
 	return fmt.Sprintf("%s/%s/%d", bucket, shardKey, idx)
 }
 
+func shardRangeCacheKey(bucket, shardKey string, idx int, offset, length int64) string {
+	return fmt.Sprintf("%s/%s/%d:%d:%d", bucket, shardKey, idx, offset, length)
+}
+
+func shardRangeCachePrefix(bucket, shardKey string, idx int) string {
+	return fmt.Sprintf("%s/%s/%d:", bucket, shardKey, idx)
+}
+
 // invalidateShardCache drops every shard slot for one shardKey. Used by
 // PutObject overwrite, DeleteObject, and repairShardEC so a subsequent
 // read sees post-write state. nShards covers the full k+m fan-out.
@@ -317,6 +325,7 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 	if b.shardCache == nil {
 		return
 	}
+	b.shardCache.InvalidatePrefix(fmt.Sprintf("%s/%s/", bucket, shardKey))
 	for i := 0; i < nShards; i++ {
 		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, i))
 	}
@@ -2835,6 +2844,7 @@ func (b *DistributedBackend) RepairShard(ctx context.Context, bucket, key, versi
 		// corrupted slot. Drop the cache entry so subsequent reads pull
 		// fresh data — repaint > stale.
 		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, shardIdx))
+		b.shardCache.InvalidatePrefix(shardRangeCachePrefix(bucket, shardKey, shardIdx))
 	}
 	return werr
 }

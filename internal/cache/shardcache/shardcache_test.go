@@ -140,6 +140,25 @@ func TestInvalidate_RemovesEntry(t *testing.T) {
 	require.Zero(t, c.Stats().ResidentByte, "resident bytes should be 0 after invalidate")
 }
 
+func TestInvalidatePrefix_RemovesMatchingEntries(t *testing.T) {
+	c := New(1024)
+	c.Put("bucket/key/0", []byte("AAAA"))
+	c.Put("bucket/key/0:0:4", []byte("BBBB"))
+	c.Put("bucket/other/0", []byte("CCCC"))
+
+	c.InvalidatePrefix("bucket/key/")
+
+	if _, ok := c.Get("bucket/key/0"); ok {
+		require.Fail(t, "full shard entry should be invalidated")
+	}
+	if _, ok := c.Get("bucket/key/0:0:4"); ok {
+		require.Fail(t, "range entry should be invalidated")
+	}
+	if _, ok := c.Get("bucket/other/0"); !ok {
+		require.Fail(t, "unrelated entry should remain")
+	}
+}
+
 func TestInvalidate_NoOpOnMissing(t *testing.T) {
 	c := New(64)
 	c.Invalidate("nope")

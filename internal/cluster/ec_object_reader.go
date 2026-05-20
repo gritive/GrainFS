@@ -425,8 +425,17 @@ func (r ecObjectReader) bufferedShardReaders(ctx context.Context, bucket, shardK
 // shard. Remote reads prefer buffered RPC when len(buf) <= maxShardRangeReplyBytes.
 func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, node string, shardIdx int, shardOffset int64, buf []byte) (int, error) {
 	readamp.RecordECShard(shardCacheKey(bucket, shardKey, shardIdx))
+	rangeCacheKey := ""
+	if r.cache != nil && len(buf) > 0 {
+		rangeCacheKey = shardRangeCacheKey(bucket, shardKey, shardIdx, shardOffset, int64(len(buf)))
+		if data, ok := r.cache.Get(rangeCacheKey); ok {
+			return copy(buf, data), nil
+		}
+	}
 	if node == r.selfID {
-		return r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
+		n, err := r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
+		r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), err)
+		return n, err
 	}
 
 	shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
@@ -446,6 +455,7 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 		if n != len(buf) || n != len(data) {
 			return n, io.ErrUnexpectedEOF
 		}
+		r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), nil)
 		return n, nil
 	}
 	rc, err := r.shards.ReadShardRangeStream(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
@@ -459,7 +469,18 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 	if r.peerHealth != nil {
 		r.peerHealth.MarkHealthy(node)
 	}
-	return io.ReadFull(rc, buf)
+	n, err := io.ReadFull(rc, buf)
+	r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), err)
+	return n, err
+}
+
+func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, err error) {
+	if key == "" || r.cache == nil || err != nil || n != want {
+		return
+	}
+	if r.cache.CanStore(key, int64(n)) {
+		r.cache.Put(key, data)
+	}
 }
 
 // cacheCanStore reports whether every shard slot for this object fits in the
