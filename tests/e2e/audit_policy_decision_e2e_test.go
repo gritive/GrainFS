@@ -31,11 +31,12 @@ import (
 // scenarios are exercised per the standard SingleNode/Cluster4Node duality:
 //
 //   - Allow: admin SA PUT/GET on a normal bucket — authz_latency_us must be
-//     non-zero (proves the latency clock runs end-to-end through committer
-//   - parquet + iceberg read).
+//     non-NULL.
 //   - Anon-allow: anonymous GET on /default/x — auth_status must read
 //     "anon_allow" so consumers can filter Phase 0 anonymous traffic
 //     separately from authenticated allows.
+//   - Deny: a non-admin SA without grants attempts PUT — auth_status must
+//     read "deny" and err_reason must be non-empty.
 //
 // Cluster mode reuses the same case helper to satisfy the parity rule for
 // user-facing audit columns.
@@ -100,6 +101,49 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 				requireAuthzLatencyNN: true,
 			})
 		t.Logf("policy_decision_allow_%s commit_interval=%s ok", tgt.name, commitInterval)
+	})
+
+	t.Run("DenyCarriesAuthStatusDenyAndErrReason", func(t *testing.T) {
+		// An unsigned PUT against a non-default bucket hits the Layer 1 IAM
+		// grant deny path (anonymous, no policy match). The audit row must
+		// carry auth_status="deny" and a non-empty err_reason populated by
+		// the authz handler via auditErrReasonKey.
+		id := tgt.caseSeq.Add(1)
+		bucket := fmt.Sprintf("test-policydec-deny-%s-%d", tgt.name, id)
+		if tgt.isCluster && tgt.cluster != nil {
+			tgt.cluster.GrantAdminOnBuckets(bucket)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, err := tgt.s3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
+				Bucket: aws.String(bucket),
+			})
+		})
+
+		const key = "policy-deny-obj"
+		// Anonymous (unsigned) PUT — must be rejected by Layer 1.
+		anonPutEndpoint := tgt.endpoint(0) + "/" + bucket + "/" + key
+		req, err := http.NewRequest(http.MethodPut, anonPutEndpoint,
+			strings.NewReader("nope"))
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.GreaterOrEqual(t, resp.StatusCode, 400, "unsigned PUT must be rejected")
+
+		whereClause := fmt.Sprintf(
+			"bucket = '%s' AND method = 'PUT' AND key = '%s' AND auth_status = 'deny'",
+			bucket, key,
+		)
+		requireAuditRowsWithDecision(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
+			whereClause, 1, 30*time.Second,
+			policyDecisionAssertion{
+				wantAuthStatus: "deny",
+			})
+		t.Logf("policy_decision_deny_%s ok", tgt.name)
 	})
 
 	t.Run("AnonAllowAuthStatusIsAnonAllow", func(t *testing.T) {
