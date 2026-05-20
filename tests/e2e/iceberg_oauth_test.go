@@ -16,10 +16,9 @@ import (
 // bucket. Dual-target: SingleNode + Cluster4Node, per R10 convention.
 //
 // Cases:
-//   - AnonPhase0_NoBearerNeeded — bootstrap SA's SigV4 keys reach S3 without
-//     minting a bearer. The shared fixture is Phase 2+; framing the case as
-//     "warehouse bucket reachable via SigV4 from node 0" avoids needing a
-//     dedicated Phase 0 fixture (advisor-vetted interpretation).
+//   - S3SigV4_NoBearerNeeded_PutGetRoundtrip — SigV4-authenticated PUT/GET on
+//     a warehouse bucket succeeds without ever minting a bearer, proving the
+//     S3 plane is not bearer-gated for SigV4 callers.
 //   - MintToken_HappyPath — POST grant_type=client_credentials with a valid
 //     ak/sk pair + PRINCIPAL_ROLE:<warehouse> scope; assert 3-segment JWT.
 //   - MintToken_WrongSecret_401 — same flow with a wrong secret; assert 401
@@ -37,8 +36,8 @@ func TestIcebergOAuthE2E(t *testing.T) {
 }
 
 func runIcebergOAuthCases(t *testing.T, tgt *icebergTarget) {
-	t.Run("AnonPhase0_NoBearerNeeded", func(t *testing.T) {
-		runIcebergOAuthAnonPhase0NoBearerNeeded(t, tgt)
+	t.Run("S3SigV4_NoBearerNeeded_PutGetRoundtrip", func(t *testing.T) {
+		runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t, tgt)
 	})
 	t.Run("MintToken_HappyPath", func(t *testing.T) {
 		runIcebergOAuthMintTokenHappyPath(t, tgt)
@@ -51,16 +50,20 @@ func runIcebergOAuthCases(t *testing.T, tgt *icebergTarget) {
 	})
 }
 
-// runIcebergOAuthAnonPhase0NoBearerNeeded asserts that the bootstrap admin SA
-// reaches the S3 plane via SigV4 alone — no bearer required. We interpret the
-// "Phase 0" framing as "S3-side traffic doesn't need an iceberg bearer", which
-// is exactly the contract the shared fixture exposes (Phase 2+, but the S3
-// gate is SigV4 not bearer).
-func runIcebergOAuthAnonPhase0NoBearerNeeded(t *testing.T, tgt *icebergTarget) {
+// runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip asserts that a
+// SigV4-authenticated S3 PUT/GET succeeds on a warehouse bucket without ever
+// minting a bearer token. This isolates the SigV4 path: bearer is not
+// required for S3 access when SigV4 succeeds.
+//
+// The spec-original "AnonPhase0" anon-PUT-to-default-bucket assertion is
+// covered separately by Task 71 (Phase 0 magical-moment quickstart) which
+// boots a fresh iam.anon-enabled=true fixture; this case does not duplicate
+// that scope.
+func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t *testing.T, tgt *icebergTarget) {
 	t.Helper()
-	bucket := tgt.uniqueWarehouse(t, "anonphase0")
-	key := "phase0/hello.txt"
-	body := []byte("phase0-no-bearer-needed")
+	bucket := tgt.uniqueWarehouse(t, "sigv4-nobearer")
+	key := "sigv4/hello.txt"
+	body := []byte("sigv4-no-bearer-needed")
 	ctx := context.Background()
 	_, err := tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
