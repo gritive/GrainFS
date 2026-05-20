@@ -50,9 +50,22 @@ type CreateResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ListItem mirrors adminapi.BucketInfo for the list view. Only Name and
+// HasUpstream are actually rendered by `grainfs bucket list`; the other
+// fields are accepted for forward-compat.
 type ListItem struct {
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
+	Name        string `json:"name"`
+	HasUpstream bool   `json:"has_upstream"`
+}
+
+// InfoResponse mirrors adminapi.BucketInfo for the info view.
+// ObjectCount is a pointer so the renderer can distinguish "0 objects"
+// from "unknown" (server omits the field when it cannot count).
+type InfoResponse struct {
+	Name        string `json:"name"`
+	ObjectCount *int64 `json:"object_count,omitempty"`
+	HasUpstream bool   `json:"has_upstream"`
+	Versioning  string `json:"versioning,omitempty"`
 }
 
 // --- Upstream credentials ---

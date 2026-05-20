@@ -50,17 +50,22 @@ func (c *Client) Create(ctx context.Context, name, attachSA, attachRole string) 
 	return resp, err
 }
 
-// List returns all buckets known to the server.
+// List returns all buckets known to the server. Server emits a
+// {"buckets":[...]} envelope; this function unwraps it so callers
+// see a flat slice.
 func (c *Client) List(ctx context.Context) ([]ListItem, error) {
-	var resp []ListItem
+	var resp struct {
+		Buckets []ListItem `json:"buckets"`
+	}
 	err := c.Get(ctx, "/v1/buckets", &resp)
-	return resp, err
+	return resp.Buckets, err
 }
 
-// InfoRaw returns the server's detail document verbatim so operator-facing
-// output is unchanged.
-func (c *Client) InfoRaw(ctx context.Context, name string) ([]byte, error) {
-	return c.GetRaw(ctx, "/v1/buckets/"+url.PathEscape(name))
+// Info returns the typed detail document for a bucket.
+func (c *Client) Info(ctx context.Context, name string) (InfoResponse, error) {
+	var resp InfoResponse
+	err := c.Get(ctx, "/v1/buckets/"+url.PathEscape(name), &resp)
+	return resp, err
 }
 
 // Delete removes a bucket; force and recursive map to query params.

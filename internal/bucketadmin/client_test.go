@@ -71,7 +71,8 @@ func TestClient_List(t *testing.T) {
 			t.Errorf("method = %s, want GET", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"b1","created_at":"2026-05-20T12:00:00Z"},{"name":"b2","created_at":"2026-05-20T13:00:00Z"}]`))
+		// Server returns the {"buckets":[...]} envelope; client unwraps it.
+		_, _ = w.Write([]byte(`{"buckets":[{"name":"b1","has_upstream":true},{"name":"b2","has_upstream":false}]}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -84,28 +85,39 @@ func TestClient_List(t *testing.T) {
 	if len(items) != 2 || items[0].Name != "b1" || items[1].Name != "b2" {
 		t.Errorf("items = %+v", items)
 	}
+	if !items[0].HasUpstream || items[1].HasUpstream {
+		t.Errorf("HasUpstream mismatch: %+v", items)
+	}
 }
 
-func TestClient_InfoRaw_PathEscape(t *testing.T) {
+func TestClient_Info_PathEscape(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/b%2Fx", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s, want GET", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"b/x","detail":"opaque"}`))
+		_, _ = w.Write([]byte(`{"name":"b/x","object_count":42,"has_upstream":true,"versioning":"Enabled"}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	c := NewClientForURL(srv.URL)
-	raw, err := c.InfoRaw(context.Background(), "b/x")
+	info, err := c.Info(context.Background(), "b/x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"name":"b/x","detail":"opaque"}`
-	if string(raw) != want {
-		t.Errorf("raw = %q, want %q", raw, want)
+	if info.Name != "b/x" {
+		t.Errorf("name = %q", info.Name)
+	}
+	if info.ObjectCount == nil || *info.ObjectCount != 42 {
+		t.Errorf("object_count = %v", info.ObjectCount)
+	}
+	if !info.HasUpstream {
+		t.Errorf("has_upstream = false")
+	}
+	if info.Versioning != "Enabled" {
+		t.Errorf("versioning = %q", info.Versioning)
 	}
 }
 
