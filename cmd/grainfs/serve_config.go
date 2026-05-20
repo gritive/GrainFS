@@ -2,7 +2,6 @@ package main
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
@@ -98,24 +97,4 @@ func buildClusterConfig(
 
 	serveruntime.ValidateRequiredIntervals(&cfg)
 	return cfg
-}
-
-// collectFlagsSnapshot walks every cobra flag once and produces the
-// map[string]string consumed by serveruntime.LogStartupConfigSnapshot.
-// Secret-bearing flags (cluster-key, alert-webhook-secret, heal-receipt-psk)
-// are redacted at the source so neither the structured log nor the on-disk
-// snapshot ever sees the raw value.
-func collectFlagsSnapshot(cmd *cobra.Command) map[string]string {
-	snap := make(map[string]string, 64)
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		switch f.Name {
-		case "cluster-key", "alert-webhook-secret", "heal-receipt-psk":
-			if f.Value.String() != "" {
-				snap[f.Name] = "<redacted>"
-			}
-			return
-		}
-		snap[f.Name] = f.Value.String()
-	})
-	return snap
 }
