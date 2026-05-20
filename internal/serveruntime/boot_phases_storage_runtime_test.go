@@ -66,19 +66,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	return ctx, state
 }
 
-// TestBootShardService_ComputesEffectiveEC — bootShardService resolves the EC
-// profile for the local cluster size and constructs a ShardService.
-func TestBootShardService_ComputesEffectiveEC(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-
-	require.NoError(t, bootShardService(ctx, state))
-	assert.Greater(t, state.effectiveEC.NumShards(), 0, "effective EC profile resolved")
-	assert.NotNil(t, state.shardSvc, "ShardService constructed")
-	// Single-node cluster → 1+0 auto profile.
-	assert.Equal(t, 1, state.effectiveEC.DataShards)
-	assert.Equal(t, 0, state.effectiveEC.ParityShards)
-}
-
 func TestRuntimeTopologyNodesPrefersJoinedMetaNodes(t *testing.T) {
 	nodes := []cluster.MetaNodeEntry{
 		{ID: "n0", Address: "127.0.0.1:7000"},
@@ -130,40 +117,11 @@ func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 	assert.Equal(t, []string{"n1", "n2", "n3"}, group.PeerIDs)
 }
 
-// TestBootStreamRouter_RegistersHandlersAndStartsNode — bootStreamRouter wires
-// the QUIC stream multiplexer and fires the data-plane raft apply loop. The
-// cleanup stack must grow by one (node.Stop registered for shutdown).
-func TestBootStreamRouter_RegistersHandlersAndStartsNode(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-	require.NoError(t, bootShardService(ctx, state))
-
-	cleanupsBefore := len(state.cleanups)
-	require.NoError(t, bootStreamRouter(state))
-	assert.NotNil(t, state.streamRouter, "StreamRouter constructed")
-	assert.Equal(t, cleanupsBefore+1, len(state.cleanups), "node.Stop cleanup pushed")
-}
-
-// TestBootOwnedGroupsAndEC_WiresDistBackend — runs the heavy phase end-to-end
-// with full prereqs, asserts distBackend is wired and the LoadReporter store
-// is constructed. The shutdown hook is exercised by the t.Cleanup stack.
-func TestBootOwnedGroupsAndEC_WiresDistBackend(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-	require.NoError(t, bootShardService(ctx, state))
-	require.NoError(t, bootStreamRouter(state))
-
-	require.NoError(t, bootOwnedGroupsAndEC(ctx, state, func(badgerrole.Decision) {}))
-	assert.NotNil(t, state.distBackend, "DistributedBackend constructed")
-	assert.NotNil(t, state.shardCache, "shard cache constructed")
-	assert.NotNil(t, state.rebalancer, "rebalancer constructed")
-	assert.NotNil(t, state.loadReporter, "LoadReporter constructed")
-	assert.NotNil(t, state.loadReporterStor, "LoadReporter store constructed")
-	assert.NotNil(t, state.stopApply, "stopApply channel constructed")
-}
-
 // TestBootStoragePhases_OrderingInvariant — witness test. Asserts each phase
 // boundary by checking which state fields are nil before vs populated after.
 // Mirrors the PR 4 ordering test pattern: if a refactor accidentally re-orders
-// the storage phases, the test catches it.
+// the storage phases, the test catches it. It also preserves the individual
+// phase population checks without paying for separate full boot prerequisites.
 func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
 
@@ -179,12 +137,17 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	require.NoError(t, bootShardService(ctx, state))
 	require.NotNil(t, state.shardSvc, "shardSvc after bootShardService")
 	require.Greater(t, state.effectiveEC.NumShards(), 0, "effectiveEC after bootShardService")
+	// Single-node cluster -> 1+0 auto profile.
+	assert.Equal(t, 1, state.effectiveEC.DataShards)
+	assert.Equal(t, 0, state.effectiveEC.ParityShards)
 	assert.Nil(t, state.streamRouter, "streamRouter not yet constructed")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 
 	// 2. StreamRouter — populates streamRouter; distBackend still nil.
+	cleanupsBefore := len(state.cleanups)
 	require.NoError(t, bootStreamRouter(state))
 	require.NotNil(t, state.streamRouter, "streamRouter after bootStreamRouter")
+	assert.Equal(t, cleanupsBefore+1, len(state.cleanups), "node.Stop cleanup pushed")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 
 	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + rebalancer +
@@ -194,4 +157,6 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	require.NotNil(t, state.shardCache, "shardCache after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.rebalancer, "rebalancer after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.loadReporter, "loadReporter after bootOwnedGroupsAndEC")
+	require.NotNil(t, state.loadReporterStor, "loadReporter store after bootOwnedGroupsAndEC")
+	require.NotNil(t, state.stopApply, "stopApply channel after bootOwnedGroupsAndEC")
 }
