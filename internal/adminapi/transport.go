@@ -68,6 +68,11 @@ func (t *Transport) Post(ctx context.Context, path string, in any, out any) erro
 	return t.Do(ctx, http.MethodPost, path, in, out)
 }
 
+// Put issues PUT path with optional JSON body and JSON-decoded response.
+func (t *Transport) Put(ctx context.Context, path string, in any, out any) error {
+	return t.Do(ctx, http.MethodPut, path, in, out)
+}
+
 // Patch issues PATCH path with optional JSON body and JSON-decoded response.
 func (t *Transport) Patch(ctx context.Context, path string, in any, out any) error {
 	return t.Do(ctx, http.MethodPatch, path, in, out)
