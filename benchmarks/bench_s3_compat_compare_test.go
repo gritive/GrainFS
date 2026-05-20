@@ -178,6 +178,28 @@ func TestBenchS3CompatCleanupOnlyAnnouncesWhenBackendsStarted(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatUsesUniqueDefaultBenchDir(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	if strings.Contains(script, `BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-s3-compat-compare}"`) {
+		t.Fatalf("default BENCH_DIR must not reuse and pre-delete a fixed /tmp path")
+	}
+	for _, want := range []string{
+		`BENCH_DIR_PROVIDED=0`,
+		`BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"`,
+		`if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then`,
+		`rm -rf "$BENCH_DIR"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_s3_compat_compare.sh must use unique default BENCH_DIR while preserving explicit BENCH_DIR cleanup with %q", want)
+		}
+	}
+}
+
 func TestIcebergBenchesUseHostPreflight(t *testing.T) {
 	for _, path := range []string{"bench_iceberg_table.sh", "bench_iceberg_table_cluster.sh"} {
 		body, err := os.ReadFile(path)

@@ -19,7 +19,12 @@ cd "$REPO_ROOT"
 BINARY="${BINARY:-./bin/grainfs}"
 TARGETS="${TARGETS:-grainfs-single,minio,rustfs}"
 PROFILE_ROOT="${PROFILE_ROOT:-benchmarks/profiles/s3-compat-compare-$(date +%Y%m%d-%H%M%S)}"
-BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-s3-compat-compare}"
+BENCH_DIR_PROVIDED=0
+if [[ -n "${BENCH_DIR:-}" ]]; then
+  BENCH_DIR_PROVIDED=1
+else
+  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"
+fi
 BUCKET="${BUCKET:-bench}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
 WARP_DURATION="${WARP_DURATION:-30s}"
@@ -64,7 +69,9 @@ if [[ -z "$WARP_BIN" ]]; then
 fi
 
 mkdir -p "$PROFILE_ROOT"
-rm -rf "$BENCH_DIR"
+if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then
+  rm -rf "$BENCH_DIR"
+fi
 mkdir -p "$BENCH_DIR"
 
 PIDS=()
