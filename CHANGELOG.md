@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.291.0] - 2026-05-20
+
+### Changed
+
+- Reduced forwarded put-object and upload-part FlatBuffers builder
+  preallocation by sizing body-bearing argument builders once for the body
+  instead of double-counting the payload.
+- Tightened forward argument allocation-bound tests to catch future oversized
+  preallocation regressions.
+- Stabilized the stale-term TimeoutNow raft test by waiting for the follower
+  to observe an election term before deriving a stale term.
+
 ## [0.0.290.0] - 2026-05-20
 
 ### Changed
