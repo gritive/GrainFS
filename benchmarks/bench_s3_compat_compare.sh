@@ -74,6 +74,7 @@ START_ACCESS_KEY=""
 START_SECRET_KEY=""
 START_MODE=""
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
+BACKENDS_STARTED=0
 
 set_start_info() {
   START_BASE_URL="$1"
@@ -83,7 +84,9 @@ set_start_info() {
 }
 
 cleanup() {
-  echo "[bench] stopping comparison backends..."
+  if [[ "$BACKENDS_STARTED" == "1" ]]; then
+    echo "[bench] stopping comparison backends..."
+  fi
   stop_pids "${PIDS[@]:-}"
   stop_child_backends
   if [[ "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
@@ -881,6 +884,7 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
   access_key="$START_ACCESS_KEY"
   secret_key="$START_SECRET_KEY"
   mode="$START_MODE"
+  BACKENDS_STARTED=1
   for op in "${WARP_OP_LIST[@]}"; do
     case "$op" in
       get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)

@@ -142,6 +142,24 @@ func TestBenchS3CompatCanFailFastOnDirtyHost(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatCleanupOnlyAnnouncesWhenBackendsStarted(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	for _, want := range []string{
+		`BACKENDS_STARTED=0`,
+		`BACKENDS_STARTED=1`,
+		`if [[ "$BACKENDS_STARTED" == "1" ]]; then`,
+		`[bench] stopping comparison backends`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_s3_compat_compare.sh cleanup should only announce started backends with %q", want)
+		}
+	}
+}
+
 func TestIcebergBenchesUseHostPreflight(t *testing.T) {
 	for _, path := range []string{"bench_iceberg_table.sh", "bench_iceberg_table_cluster.sh"} {
 		body, err := os.ReadFile(path)
