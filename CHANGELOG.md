@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.292.0] - 2026-05-20
+
+### Changed
+
+- Reduced forwarded object-read test fixture allocation by using smaller
+  threshold-crossing payloads for legacy and read-stream path coverage.
+- Sized forwarded get-object and read-at reply FlatBuffers builders with
+  metadata headroom so large replies avoid grow-buffer reallocations.
+- Added an allocation-bound guard for large forwarded get-object replies.
+
 ## [0.0.291.0] - 2026-05-20
 
 ### Changed
