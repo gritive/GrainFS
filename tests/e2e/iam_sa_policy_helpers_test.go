@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -42,9 +44,14 @@ func attachAdminPolicyOnBucket(t *testing.T, tgt iamAdminTarget, saID, bucket, r
 
 	doc := buildPolicyDocJSON(actions, resources)
 	polName := "test-" + sanitizeForBucket(t.Name()) + "-" + sanitizeForBucket(saID) + "-" + bucket + "-" + strings.ToLower(role)
-	// truncate to 63 chars (S3 bucket-name limit used as a max-length convention)
+	// When the name exceeds 63 chars, use a content hash to avoid truncation
+	// collisions (e.g. two attachAdminPolicyOnBucket calls with different
+	// buckets but the same long t.Name()/saID prefix would otherwise produce
+	// identical truncated names, causing the second PolicyPut to silently
+	// overwrite the first).
 	if len(polName) > 63 {
-		polName = polName[:63]
+		sum := sha256.Sum256([]byte(polName))
+		polName = "test-" + hex.EncodeToString(sum[:12])
 	}
 
 	cli := iamadmin.NewClientForURL(tgt.adminSockPath())
