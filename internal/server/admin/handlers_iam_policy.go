@@ -109,6 +109,9 @@ func AttachPolicyToSA(ctx context.Context, d *Deps, policyName, saID string) err
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
 	}
+	if policyName == "" || saID == "" {
+		return NewInvalid("policy and sa_id are required")
+	}
 	payload, err := cluster.EncodePolicyAttachToSAPutPayload(saID, policyName)
 	if err != nil {
 		return err
@@ -121,6 +124,9 @@ func DetachPolicyFromSA(ctx context.Context, d *Deps, policyName, saID string) e
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
 	}
+	if policyName == "" || saID == "" {
+		return NewInvalid("policy and sa_id are required")
+	}
 	payload, err := cluster.EncodePolicyAttachToSADeletePayload(saID, policyName)
 	if err != nil {
 		return err
@@ -132,6 +138,9 @@ func DetachPolicyFromSA(ctx context.Context, d *Deps, policyName, saID string) e
 func SimulatePolicy(ctx context.Context, d *Deps, req PolicySimulateRequest) (PolicySimulateResult, error) {
 	if d.IAMPolicy == nil {
 		return PolicySimulateResult{}, NewInternal("iam policy admin disabled")
+	}
+	if req.SAID == "" || req.Action == "" || req.Resource == "" {
+		return PolicySimulateResult{}, NewInvalid("sa_id, action, and resource are required")
 	}
 	return d.IAMPolicy.Simulate(ctx, req.SAID, req.Action, req.Resource)
 }
