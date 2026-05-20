@@ -95,8 +95,8 @@ func TestNFSv4LargeFileRead(t *testing.T) {
 	defer backend.Close()
 
 	sizes := []int64{
-		10 * 1024 * 1024, // under the 16MiB storage segment size
-		24 * 1024 * 1024, // crosses the segment boundary
+		10 * 1024 * 1024,                    // under the 16MiB storage segment size
+		int64(storage.DefaultChunkSize) + 1, // crosses the segment boundary
 	}
 
 	for _, size := range sizes {
@@ -157,8 +157,8 @@ func TestNFSv4LargeFileWrite(t *testing.T) {
 	defer backend.Close()
 
 	sizes := []int64{
-		10 * 1024 * 1024, // under the 16MiB storage segment size
-		24 * 1024 * 1024, // crosses the segment boundary
+		10 * 1024 * 1024,                    // under the 16MiB storage segment size
+		int64(storage.DefaultChunkSize) + 1, // crosses the segment boundary
 	}
 
 	for _, size := range sizes {
