@@ -124,6 +124,15 @@ func TestLocalExecution_ResolveObjectWrite_NonLeaderVoterReturnsLocalBackend(t *
 	require.Same(t, gb, got)
 }
 
+func TestLocalExecution_ResolveObjectPlacementRead_NonLeaderVoterReturnsLocalBackend(t *testing.T) {
+	gb := newGroupBackendWithRaftForTest(&flippableRaftNode{leaderSeq: []bool{false}})
+	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{"g1": gb}}
+	e := NewLocalExecution(groups)
+	got, err := e.ResolveObjectPlacementRead(context.Background(), RouteTarget{GroupID: "g1", SelfIsVoter: true})
+	require.NoError(t, err)
+	require.Same(t, gb, got)
+}
+
 // F3 regression — leadership flipped between route and execute.
 func TestLocalExecution_ResolveWrite_LeadershipFlipMidCall(t *testing.T) {
 	node := &flippableRaftNode{leaderSeq: []bool{false}}

@@ -218,14 +218,18 @@ func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
 		next.raw[k] = v
 	}
 	next.byBucket[bucket] = cp
-	next.raw[bucket] = policyJSON
+	next.raw[bucket] = append([]byte(nil), policyJSON...)
 	cs.state.Store(next)
 	return nil
 }
 
 // GetRaw returns the raw JSON policy for a bucket, or nil.
 func (cs *CompiledPolicyStore) GetRaw(bucket string) []byte {
-	return cs.state.Load().raw[bucket]
+	raw := cs.state.Load().raw[bucket]
+	if raw == nil {
+		return nil
+	}
+	return append([]byte(nil), raw...)
 }
 
 // Delete removes the policy for a bucket.

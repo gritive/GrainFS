@@ -64,15 +64,13 @@ func runNoPeersRestartPersistenceCases(t *testing.T) {
 
 	endpoint1 := fmt.Sprintf("http://127.0.0.1:%d", port1)
 	waitForPort(t, port1, 30*time.Second)
-	ak, sk := bootstrapAdminViaUDS(t, dir)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+	ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
 	client1 := s3ClientFor(endpoint1, ak, sk)
 
 	ctx := context.Background()
 
-	_, err = client1.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("persist-test"),
-	})
-	require.NoError(t, err)
+	require.NoError(t, adminCreateBucketWithPolicyAttachAny([]string{dir}, bootstrap.SAID, "persist-test", 30*time.Second))
 
 	testData := map[string]string{
 		"file1.txt":           "hello from local",
@@ -194,15 +192,12 @@ func runNoPeersMultipartCases(t *testing.T) {
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	client := s3ClientFor(endpoint, ak, sk)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
 
 	ctx := context.Background()
 
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String("mp-cluster"),
-	})
-	require.NoError(t, err)
+	require.NoError(t, adminCreateBucketWithPolicyAttachAny([]string{dir}, bootstrap.SAID, "mp-cluster", 30*time.Second))
 	waitForS3Write(t, client, "mp-cluster", "__grainfs_e2e_ready", 30*time.Second)
 	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String("mp-cluster"),
@@ -211,7 +206,7 @@ func runNoPeersMultipartCases(t *testing.T) {
 
 	// Multipart upload
 	key := "multipart-cluster.bin"
-	part1Data := bytes.Repeat([]byte("X"), 1024)
+	part1Data := bytes.Repeat([]byte("X"), 5*1024*1024)
 	part2Data := bytes.Repeat([]byte("Y"), 512)
 
 	initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +75,16 @@ func runNfsExportJSON(t *testing.T, dataDir, verb, bucket string, flags ...strin
 	t.Helper()
 	args := []string{"nfs", "export", verb, bucket, "--json"}
 	args = append(args, flags...)
-	out, code := runCLI(t, dataDir, args...)
+	var out string
+	var code int
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out, code = runCLI(t, dataDir, args...)
+		if code == 0 || !strings.Contains(out, "finish the rolling upgrade") || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	require.Equalf(t, 0, code, "%s", out)
 	return parseSingleNfsExport(t, out)
 }

@@ -160,6 +160,16 @@ func (b *DistributedBackend) ShardPaths(bucket, key, versionID string, totalShar
 func (b *DistributedBackend) readShardIntegrity(bucket, key, path string) (scrubber.ShardIntegrityResult, error) {
 	unlock := b.acquireShardReadLock(bucket, key)
 	defer unlock()
+	if b.shardSvc != nil {
+		if shardKey, shardIdx, ok := b.shardServiceKeyFromPath(bucket, path); ok {
+			if data, found, err := b.shardSvc.ReadLocalShardFromPack(bucket, shardKey, shardIdx); found || err != nil {
+				if err != nil {
+					return scrubber.ShardIntegrityResult{}, err
+				}
+				return scrubber.ShardIntegrityResult{Payload: data, Status: scrubber.ShardIntegrityVerified}, nil
+			}
+		}
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: %w", err)

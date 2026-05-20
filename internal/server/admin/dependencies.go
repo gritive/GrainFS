@@ -118,6 +118,8 @@ type IAMService interface {
 	ListSA(ctx context.Context) ([]iam.SAListItem, error)
 	GetSA(ctx context.Context, saID string) (iam.SAGetResponse, error)
 	DeleteSA(ctx context.Context, saID string) error
+	PutGrant(ctx context.Context, req iam.GrantPutRequest) error
+	DeleteGrant(ctx context.Context, req iam.GrantDeleteRequest) error
 	CreateKey(ctx context.Context, saID string, req iam.KeyCreateRequest) (iam.KeyCreateResponse, error)
 	RevokeKey(ctx context.Context, saID, accessKey string) error
 	PutBucketUpstream(ctx context.Context, req iam.BucketUpstreamPutRequest) error

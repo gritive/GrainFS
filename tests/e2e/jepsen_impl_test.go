@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,15 +43,12 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		ak, sk := bootstrapAdminViaUDS(t, dir)
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+		ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
 
 		// Create test bucket
 		client := s3ClientFor(endpoint, ak, sk)
-		_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String("jepsen-test"),
-		})
-		require.NoError(t, err)
-		waitForS3Write(t, client, "jepsen-test", "__grainfs_e2e_ready", 30*time.Second)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, bootstrap.SAID, "jepsen-test", client)
 
 		// Run Jepsen test: 10 clients, 100 ops each
 		t.Log("Starting concurrent writes with 10 clients...")

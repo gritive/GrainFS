@@ -58,6 +58,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	} else if cfg.PackThreshold > 0 {
 		log.Warn().Int("threshold", cfg.PackThreshold).Msg("packed blob fast path is currently single-node only; cluster routed backend keeps EC shard storage")
 	}
+	state.lifecycleBackend = routed
 
 	// Wrap it with WAL so routed object mutations are captured for PITR.
 	var backend storage.Backend = wal.NewBackend(routed, state.wal)

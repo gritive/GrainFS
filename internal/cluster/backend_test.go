@@ -142,6 +142,50 @@ func TestDistributedBackend_CreateAndHeadBucket(t *testing.T) {
 	require.ErrorIs(t, b.HeadBucket(context.Background(), "nope"), storage.ErrBucketNotFound)
 }
 
+func TestDistributedBackend_BucketPolicy(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	policy := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+
+	require.NoError(t, b.CreateBucket(ctx, "policy-bucket"))
+	require.NoError(t, b.SetBucketPolicy("policy-bucket", policy))
+
+	got, err := b.GetBucketPolicy("policy-bucket")
+	require.NoError(t, err)
+	require.Equal(t, policy, got)
+
+	require.NoError(t, b.DeleteBucketPolicy("policy-bucket"))
+	_, err = b.GetBucketPolicy("policy-bucket")
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+}
+
+func TestDistributedBackend_BucketPolicyDecryptsEncryptedFSMValue(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	policy := []byte(`{"Version":"2012-10-17","Statement":[{"Resource":"secret-policy-resource"}]}`)
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x48}, 32))
+	require.NoError(t, err)
+	b.fsm.SetEncryptor(enc)
+
+	require.NoError(t, b.CreateBucket(ctx, "policy-bucket"))
+	require.NoError(t, b.SetBucketPolicy("policy-bucket", policy))
+
+	err = b.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(b.ks().BucketPolicyKey("policy-bucket"))
+		require.NoError(t, err)
+		raw, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		require.True(t, encrypt.IsEncryptedValue(raw))
+		require.NotContains(t, string(raw), "secret-policy-resource")
+		return nil
+	})
+	require.NoError(t, err)
+
+	got, err := b.GetBucketPolicy("policy-bucket")
+	require.NoError(t, err)
+	require.Equal(t, policy, got)
+}
+
 func TestDistributedBackend_TruncateInternalBucketUpdatesPartialWriteObject(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()

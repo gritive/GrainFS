@@ -3,7 +3,7 @@ package bucketadmin
 import (
 	"bytes"
 	"context"
-	"io"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,7 +17,7 @@ func TestRunPolicyGet_Passthrough(t *testing.T) {
 			t.Errorf("method = %s, want GET", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
+		_, _ = w.Write([]byte(`{"policy":` + body + `}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -36,16 +36,18 @@ func TestRunPolicyGet_Passthrough(t *testing.T) {
 }
 
 func TestRunPolicySet_BodyVerbatim(t *testing.T) {
-	// CRITICAL: server must receive the policy bytes byte-for-byte equal
+	// CRITICAL: server must receive the policy field byte-for-byte equal
 	// to what we sent. No re-marshal, no key reorder.
 	inputPolicy := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`)
-	var receivedBytes []byte
+	var got struct {
+		Policy json.RawMessage `json:"policy"`
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/b/policy", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			t.Errorf("method = %s, want PUT", r.Method)
 		}
-		receivedBytes, _ = io.ReadAll(r.Body)
+		_ = json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(mux)
@@ -60,8 +62,8 @@ func TestRunPolicySet_BodyVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(receivedBytes, inputPolicy) {
-		t.Errorf("body mismatch\ngot:  %q\nwant: %q", receivedBytes, inputPolicy)
+	if !bytes.Equal(got.Policy, inputPolicy) {
+		t.Errorf("policy mismatch\ngot:  %q\nwant: %q", got.Policy, inputPolicy)
 	}
 	if out.String() != "" {
 		t.Errorf("expected no stdout, got %q", out.String())

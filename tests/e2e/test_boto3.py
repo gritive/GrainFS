@@ -120,7 +120,7 @@ def test_multipart_upload(s3):
     s3.create_bucket(Bucket=bucket)
 
     key = "multipart.bin"
-    part1 = b"A" * 1024
+    part1 = b"A" * (5 * 1024 * 1024)
     part2 = b"B" * 512
 
     # Create multipart upload

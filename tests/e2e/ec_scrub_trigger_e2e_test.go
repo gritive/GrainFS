@@ -62,10 +62,7 @@ func runECScrubTriggerCases(t *testing.T, c *e2eCluster) {
 
 	t.Run("FlowsThroughCluster", func(t *testing.T) {
 		const bucket = "ec-test"
-		c.GrantAdminOnBuckets(bucket)
-		_, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
-			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, c.accessKey, c.secretKey), bucket)
-		})
+		_, err := c.EnsureBucketWritable(ctx, bucket, 120*time.Second)
 		require.NoError(t, err)
 		for i := 0; i < 5; i++ {
 			payload := bytes.Repeat([]byte{byte('a' + i)}, 4096)

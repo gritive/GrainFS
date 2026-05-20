@@ -111,6 +111,11 @@ func (d *S3Destination) CreateBucket(ctx context.Context, bucket string) error {
 		if isAlreadyExists(err) {
 			return storage.ErrBucketAlreadyExists
 		}
+		if isAccessDenied(err) {
+			if _, headErr := d.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)}); headErr == nil {
+				return storage.ErrBucketAlreadyExists
+			}
+		}
 		return err
 	}
 	return nil
@@ -174,4 +179,8 @@ func isAlreadyExists(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "BucketAlreadyOwnedByYou") ||
 		strings.Contains(msg, "BucketAlreadyExists")
+}
+
+func isAccessDenied(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "AccessDenied")
 }

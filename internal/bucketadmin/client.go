@@ -91,7 +91,7 @@ func (c *Client) UpstreamPut(ctx context.Context, opts UpstreamPutOptions) error
 	body := map[string]string{
 		"bucket":        opts.Bucket,
 		"scheme":        opts.Scheme,
-		"endpoint":      opts.Endpoint,
+		"upstream_url":  opts.Endpoint,
 		"access_key":    opts.AccessKey,
 		"secret_key":    opts.SecretKey,
 		"region":        opts.Region,
@@ -102,7 +102,7 @@ func (c *Client) UpstreamPut(ctx context.Context, opts UpstreamPutOptions) error
 
 // UpstreamGetRaw returns the bucket's upstream credentials document verbatim.
 func (c *Client) UpstreamGetRaw(ctx context.Context, bucket string) ([]byte, error) {
-	return c.GetRaw(ctx, "/v1/upstreams/"+url.PathEscape(bucket))
+	return c.GetRaw(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/upstream")
 }
 
 // UpstreamListRaw returns the server's list of upstream-configured buckets verbatim.
@@ -112,21 +112,29 @@ func (c *Client) UpstreamListRaw(ctx context.Context) ([]byte, error) {
 
 // UpstreamDelete removes the upstream credentials for a bucket.
 func (c *Client) UpstreamDelete(ctx context.Context, bucket string) error {
-	return c.Transport.Delete(ctx, "/v1/upstreams/"+url.PathEscape(bucket), nil)
+	return c.Transport.Delete(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/upstream", nil)
 }
 
 // --- Policy ---
 
 // PolicyGetRaw returns the bucket's IAM policy document verbatim.
 func (c *Client) PolicyGetRaw(ctx context.Context, bucket string) ([]byte, error) {
-	return c.GetRaw(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy")
+	var resp struct {
+		Policy json.RawMessage `json:"policy"`
+	}
+	if err := c.Get(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", &resp); err != nil {
+		return nil, err
+	}
+	return resp.Policy, nil
 }
 
 // PolicySet sends the policy document bytes verbatim. Server is the
 // authority on validation.
 func (c *Client) PolicySet(ctx context.Context, bucket string, policy []byte) error {
-	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy",
-		json.RawMessage(policy), nil)
+	body := struct {
+		Policy json.RawMessage `json:"policy"`
+	}{Policy: json.RawMessage(policy)}
+	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", body, nil)
 }
 
 // PolicyDelete removes the IAM policy attached to a bucket.

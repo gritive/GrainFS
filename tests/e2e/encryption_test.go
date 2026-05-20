@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
+func startEncryptionServer(t *testing.T) (*s3.Client, string, string, func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-enc-e2e-*")
 	require.NoError(t, err)
@@ -47,8 +47,8 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
 
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	client := s3ClientFor(endpoint, ak, sk)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 60*time.Second)
+	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
 
 	cleanup := func() {
 		cmd.Process.Kill()
@@ -56,23 +56,20 @@ func startEncryptionServer(t *testing.T) (*s3.Client, string, func()) {
 		os.RemoveAll(dir)
 	}
 
-	return client, dir, cleanup
+	return client, dir, bootstrap.SAID, cleanup
 }
 
 func TestEncryption_AtRest(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
-		client, dataDir, cleanup := startEncryptionServer(t)
+		client, dataDir, saID, cleanup := startEncryptionServer(t)
 		defer cleanup()
 
 		ctx := context.Background()
 
-		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
-			Bucket: aws.String("enc-test"),
-		})
-		require.NoError(t, err)
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, "enc-test", client)
 
-		content := "this is sensitive data that must be encrypted at rest"
-		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		content := strings.Repeat("this is sensitive data that must be encrypted at rest\n", 2048)
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String("enc-test"),
 			Key:    aws.String("secret.txt"),
 			Body:   strings.NewReader(content),

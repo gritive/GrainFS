@@ -38,7 +38,7 @@ func TestRunUpstreamPut_BodyShape(t *testing.T) {
 	want := map[string]string{
 		"bucket":        "b",
 		"scheme":        "s3",
-		"endpoint":      "https://s3.example.com",
+		"upstream_url":  "https://s3.example.com",
 		"access_key":    "AK",
 		"secret_key":    "SK",
 		"region":        "us-east-1",
@@ -76,7 +76,7 @@ func TestRunUpstreamPut_NoStdout(t *testing.T) {
 func TestRunUpstreamGet_Passthrough(t *testing.T) {
 	body := `{"bucket":"b","scheme":"s3","endpoint":"x","access_key":"AK"}`
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/upstreams/b", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/buckets/b/upstream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s, want GET", r.Method)
 		}
@@ -127,7 +127,7 @@ func TestRunUpstreamList_Passthrough(t *testing.T) {
 func TestRunUpstreamDelete_NoStdout(t *testing.T) {
 	var sawMethod string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/upstreams/b", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/buckets/b/upstream", func(w http.ResponseWriter, r *http.Request) {
 		sawMethod = r.Method
 		w.WriteHeader(http.StatusOK)
 	})

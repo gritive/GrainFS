@@ -26,6 +26,14 @@ func DeleteSA(ctx context.Context, d *Deps, saID string) error {
 	return d.IAM.DeleteSA(ctx, saID)
 }
 
+func PutGrant(ctx context.Context, d *Deps, req iam.GrantPutRequest) error {
+	return d.IAM.PutGrant(ctx, req)
+}
+
+func DeleteGrant(ctx context.Context, d *Deps, req iam.GrantDeleteRequest) error {
+	return d.IAM.DeleteGrant(ctx, req)
+}
+
 func CreateKey(ctx context.Context, d *Deps, saID string, req iam.KeyCreateRequest) (iam.KeyCreateResponse, error) {
 	return d.IAM.CreateKey(ctx, saID, req)
 }

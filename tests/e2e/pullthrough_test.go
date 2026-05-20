@@ -50,6 +50,8 @@ func TestPullthroughE2E(t *testing.T) {
 // t.Cleanup at end-of-subtest.
 type pullthroughUpstream struct {
 	endpoint  string
+	dataDir   string
+	saID      string
 	accessKey string
 	secretKey string
 	client    *s3.Client
@@ -81,14 +83,16 @@ func startPullthroughUpstream(t *testing.T) *pullthroughUpstream {
 
 	require.NoError(t, waitForPortM(port, 30*time.Second))
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	client := s3ClientFor(endpoint, ak, sk)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
 	require.NoError(t, waitForIAMReady(client, 30*time.Second))
 
 	return &pullthroughUpstream{
 		endpoint:  endpoint,
-		accessKey: ak,
-		secretKey: sk,
+		dataDir:   dir,
+		saID:      bootstrap.SAID,
+		accessKey: bootstrap.AccessKey,
+		secretKey: bootstrap.SecretKey,
 		client:    client,
 	}
 }
@@ -97,13 +101,7 @@ func startPullthroughUpstream(t *testing.T) *pullthroughUpstream {
 // bucket the case will configure pull-through for) and registers cleanup.
 func (u *pullthroughUpstream) prepareBucket(t *testing.T, bucket string) {
 	t.Helper()
-	ctx := context.Background()
-	_, err := u.client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-	if err != nil && !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") &&
-		!strings.Contains(err.Error(), "BucketAlreadyExists") {
-		require.NoError(t, err)
-	}
-	waitForS3Write(t, u.client, bucket, "__grainfs_e2e_ready", 30*time.Second)
+	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{u.dataDir}, u.saID, bucket, u.client)
 	t.Cleanup(func() {
 		u.client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	})

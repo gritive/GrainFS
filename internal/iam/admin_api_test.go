@@ -2,6 +2,7 @@ package iam
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -351,6 +352,25 @@ func TestHandleKeyCreate_EmptyBuckets_LegacyPath(t *testing.T) {
 	}
 	if !legacyCalled {
 		t.Errorf("ProposeKeyCreate not called; calls=%v", p.calls)
+	}
+}
+
+func TestAdminAPI_GrantPut_AttachesBuiltinPolicy(t *testing.T) {
+	store := NewStore()
+	store.applySACreate(ServiceAccount{ID: "sa-1", Name: "alice"})
+	p := newFakeProposer()
+	api := NewAdminAPI(store, p, newTestEncryptor(t))
+
+	err := api.PutGrant(context.Background(), GrantPutRequest{
+		SAID:   "sa-1",
+		Bucket: "logs",
+		Role:   "Admin",
+	})
+	if err != nil {
+		t.Fatalf("PutGrant: %v", err)
+	}
+	if got, want := p.calls, []string{"PolicyAttachToSAPut:sa-1:bucket-admin"}; !equalSlices(got, want) {
+		t.Fatalf("calls = %v, want %v", got, want)
 	}
 }
 

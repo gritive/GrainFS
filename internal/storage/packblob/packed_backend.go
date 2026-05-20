@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -756,6 +757,21 @@ func (pb *PackedBackend) HeadObject(ctx context.Context, bucket, key string) (*s
 	return pb.inner.HeadObject(ctx, bucket, key)
 }
 
+func (pb *PackedBackend) deletePackedEntry(bucket, key string) bool {
+	pk := packedKey{bucket: bucket, key: key}
+	if v, loaded := pb.index.Load(pk); loaded {
+		entry := v.(*indexEntry)
+		if entry.Refcount.Add(-1) <= 0 {
+			// Compare-and-delete only if the entry is still the same pointer —
+			// protects against a concurrent Swap publishing a new entry under
+			// the same key.
+			pb.index.CompareAndDelete(pk, entry)
+		}
+		return true
+	}
+	return false
+}
+
 func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) error {
 	// Versioning-enabled buckets must route DELETE through the inner backend
 	// so a delete marker (with a freshly minted versionId) is recorded. The
@@ -773,37 +789,37 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 		}
 	}
 
-	pk := packedKey{bucket: bucket, key: key}
-	if v, loaded := pb.index.Load(pk); loaded {
-		entry := v.(*indexEntry)
-		if entry.Refcount.Add(-1) <= 0 {
-			// Compare-and-delete only if the entry is still the same
-			// pointer — protects against a concurrent Swap publishing a
-			// new entry under the same key.
-			pb.index.CompareAndDelete(pk, entry)
-		}
+	deletedPacked := pb.deletePackedEntry(bucket, key)
+	if deletedPacked {
 		return nil
 	}
 
 	return pb.inner.DeleteObject(ctx, bucket, key)
 }
 
-// DeleteObjectReturningMarker forwards to the inner backend so the wal.Backend
-// soft-delete path can obtain the freshly minted delete-marker versionId. This
-// method is only invoked on versioning-enabled buckets (the server's
-// object_mutation_runtime gates on bucket state), so unconditional delegation
-// is correct: the packed fast path never owns versioned keys.
+// DeleteObjectReturningMarker forwards to the inner backend only when bucket
+// versioning is enabled so the wal.Backend soft-delete path can obtain the
+// freshly minted delete-marker versionId. Non-versioned packed objects live in
+// this wrapper's index, so they must take the local DeleteObject path to clear
+// the packed entry instead of bypassing it through the inner backend.
 func (pb *PackedBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
-	sd, ok := pb.inner.(storage.VersionedSoftDeleter)
-	if !ok {
-		return "", storage.UnsupportedOperationError{Op: "DeleteObjectReturningMarker", Reason: storage.UnsupportedReasonNoAdapter}
+	deletedPacked := pb.deletePackedEntry(bucket, key)
+	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
+		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
+			sd, ok := pb.inner.(storage.VersionedSoftDeleter)
+			if !ok {
+				return "", storage.UnsupportedOperationError{Op: "DeleteObjectReturningMarker", Reason: storage.UnsupportedReasonNoAdapter}
+			}
+			return sd.DeleteObjectReturningMarker(bucket, key)
+		}
 	}
-	markerID, err := sd.DeleteObjectReturningMarker(bucket, key)
-	if err != nil {
+	if deletedPacked {
+		return "", nil
+	}
+	if err := pb.DeleteObject(context.Background(), bucket, key); err != nil {
 		return "", err
 	}
-	pb.evictPackedKey(bucket, key)
-	return markerID, nil
+	return "", nil
 }
 
 func (pb *PackedBackend) evictPackedKey(bucket, key string) {
@@ -994,61 +1010,105 @@ func (pb *PackedBackend) WalkObjects(ctx context.Context, bucket, prefix string,
 //
 // INVARIANT: PackedBackend hosts only objects in non-versioned buckets.
 // PutObjectWithRequest enforces this: versioning-enabled buckets forward to
-// inner unconditionally (lines 394–405). The dedup branch below protects
+// inner unconditionally (lines 394-405). The dedup branch below protects
 // against silently shadowing inner multi-version history with a packed
 // single-version record if the invariant is ever violated.
-//
-// inner.ScanObjectsGrouped is accessed via type assertion because
-// ScanObjectsGrouped is not part of the storage.Backend interface.
 func (pb *PackedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
-	type scanner interface {
-		ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
-	}
-	sc, ok := pb.inner.(scanner)
-	if !ok {
-		return nil, storage.UnsupportedOperationError{Op: "ScanObjectsGrouped", Reason: storage.UnsupportedReasonNoAdapter}
-	}
-	inner, err := sc.ScanObjectsGrouped(bucket)
-	if err != nil {
+	if err := pb.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, err
 	}
-
-	out := make(chan storage.ObjectKeyGroup, 64)
+	out := make(chan storage.ObjectKeyGroup, 16)
 	go func() {
 		defer close(out)
-		seenKeys := make(map[string]struct{})
-		pb.index.Range(func(k, v any) bool {
-			pk := k.(packedKey)
+		seenKeys := map[string]struct{}{}
+		var packed []storage.ObjectKeyGroup
+		pb.index.Range(func(rk, rv any) bool {
+			pk := rk.(packedKey)
 			if pk.bucket != bucket {
 				return true
 			}
-			ie := v.(*indexEntry)
-			if ie.Refcount.Load() <= 0 {
+			entry := rv.(*indexEntry)
+			if entry.Refcount.Load() <= 0 {
 				return true
 			}
 			seenKeys[pk.key] = struct{}{}
-			out <- storage.ObjectKeyGroup{
+			packed = append(packed, storage.ObjectKeyGroup{
 				Bucket: bucket,
 				Key:    pk.key,
 				Versions: []storage.ObjectVersionRecord{{
 					VersionID:      "",
 					IsLatest:       true,
 					IsDeleteMarker: false,
-					LastModified:   ie.LastModified, // int64 unix seconds — same unit as ObjectVersionRecord.LastModified
-					Size:           ie.OriginalSize,
-					ETag:           ie.ETag,
-					Tags:           cloneTags(ie.Tags),
+					LastModified:   entry.LastModified,
+					Size:           entry.OriginalSize,
+					ETag:           entry.ETag,
+					Tags:           cloneTags(entry.Tags),
 				}},
+			})
+			return true
+		})
+		sort.Slice(packed, func(i, j int) bool { return packed[i].Key < packed[j].Key })
+		for _, group := range packed {
+			out <- group
+		}
+		scan, ok := pb.inner.(interface {
+			ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error)
+		})
+		if !ok {
+			return
+		}
+		ch, err := scan.ScanObjectsGrouped(bucket)
+		if err != nil {
+			return
+		}
+		for group := range ch {
+			if _, ok := seenKeys[group.Key]; ok {
+				log.Warn().Str("bucket", bucket).Str("key", group.Key).
+					Msg("packblob: scan dedup - same key in packed and inner (invariant violation)")
+				continue
+			}
+			out <- group
+		}
+	}()
+	return out, nil
+}
+
+func (pb *PackedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
+	if err := pb.HeadBucket(context.Background(), bucket); err != nil {
+		return nil, err
+	}
+	out := make(chan scrubber.ObjectRecord, 16)
+	go func() {
+		defer close(out)
+		pb.index.Range(func(rk, rv any) bool {
+			pk := rk.(packedKey)
+			if pk.bucket != bucket {
+				return true
+			}
+			entry := rv.(*indexEntry)
+			if entry.Refcount.Load() <= 0 {
+				return true
+			}
+			out <- scrubber.ObjectRecord{
+				Bucket:       bucket,
+				Key:          pk.key,
+				ETag:         entry.ETag,
+				LastModified: entry.LastModified,
 			}
 			return true
 		})
-		for g := range inner {
-			if _, ok := seenKeys[g.Key]; ok {
-				log.Warn().Str("bucket", bucket).Str("key", g.Key).
-					Msg("packblob: scan dedup — same key in packed and inner (invariant violation)")
-				continue
-			}
-			out <- g
+		scan, ok := pb.inner.(interface {
+			ScanObjects(bucket string) (<-chan scrubber.ObjectRecord, error)
+		})
+		if !ok {
+			return
+		}
+		ch, err := scan.ScanObjects(bucket)
+		if err != nil {
+			return
+		}
+		for rec := range ch {
+			out <- rec
 		}
 	}()
 	return out, nil
@@ -1058,14 +1118,15 @@ func (pb *PackedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.Objec
 // metadata is stored by the inner backend (LocalBackend/DistributedBackend),
 // not in the packed blob index.
 func (pb *PackedBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
-	type scanner interface {
+	scan, ok := pb.inner.(interface {
 		ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error)
-	}
-	sc, ok := pb.inner.(scanner)
+	})
 	if !ok {
-		return nil, storage.UnsupportedOperationError{Op: "ScanLocalMultipartUploads", Reason: storage.UnsupportedReasonNoAdapter}
+		out := make(chan storage.MultipartUploadRecord)
+		close(out)
+		return out, nil
 	}
-	return sc.ScanLocalMultipartUploads(bucket)
+	return scan.ScanLocalMultipartUploads(bucket)
 }
 
 // --- Copy operations (Copier interface) ---

@@ -97,6 +97,7 @@ type Server struct {
 	auditNodeID    string
 
 	auditInternalAccessKey string
+	auditInternalSecretKey string
 	auditInternalVerifier  *s3auth.CachingVerifier
 
 	cluster       ClusterInfo

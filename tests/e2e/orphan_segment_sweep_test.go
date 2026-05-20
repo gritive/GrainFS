@@ -42,11 +42,7 @@ func runOrphanSegmentSweepCases(t *testing.T) {
 	// call includes it and the segment walker is invoked for this bucket.
 	const bucket = "orphan-sweep-test"
 	ctx := context.Background()
-	c.GrantAdminOnBuckets(bucket)
-	_, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second,
-		func(attemptCtx context.Context, endpoint string) error {
-			return tryCreateBucket(attemptCtx, ecS3Client(endpoint, c.accessKey, c.secretKey), bucket)
-		})
+	_, err := c.EnsureBucketWritable(ctx, bucket, 120*time.Second)
 	require.NoError(t, err, "bucket creation must succeed before seeding orphan")
 
 	// Seed a fake orphan raw segment on node 0.

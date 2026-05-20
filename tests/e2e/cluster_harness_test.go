@@ -284,12 +284,16 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 	// Bootstrap admin SA via UDS once the cluster has quorum. Try every
 	// node — only the leader's propose succeeds; others return an error
 	// and the helper retries the next data dir.
-	probeBucket := "__e2e-static-leader-probe"
+	probeBucket := "e2e-static-leader-probe"
 	admin, _ := bootstrapAdminViaUDSAnyResult(c.t, c.dataDirs, 60*time.Second)
 	c.accessKey, c.secretKey = admin.AccessKey, admin.SecretKey
 	c.saID = admin.SAID
 	c.wildcardAdmin = bootstrapResultHasWildcardAdmin(admin)
 	c.GrantAdminOnBuckets(probeBucket)
+	if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, probeBucket, 60*time.Second); err != nil {
+		c.Stop()
+		return nil, fmt.Errorf("create writable probe bucket via admin UDS: %w", err)
+	}
 
 	probeCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -301,7 +305,7 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 		1*time.Second,
 		func(ctx context.Context, endpoint string) error {
 			cli := ecS3Client(endpoint, c.accessKey, c.secretKey)
-			return tryCreateBucket(ctx, cli, probeBucket)
+			return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
 		},
 	)
 	if err != nil {
@@ -311,6 +315,58 @@ func (c *e2eCluster) startStaticPeers() (*e2eCluster, error) {
 	c.leaderIdx = leaderIdx
 	patchSnapshotInterval(c.t, c.dataDirs[c.leaderIdx], "0s")
 	return c, nil
+}
+
+func adminCreateBucketWithPolicyAttachAny(dataDirs []string, saID, bucket string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		for _, dir := range dataDirs {
+			sock := filepath.Join(dir, "admin.sock")
+			if _, err := os.Stat(sock); err != nil {
+				lastErr = err
+				continue
+			}
+			if err := tryAdminCreateBucketWithPolicyAttach(sock, bucket, saID, "bucket-admin"); err != nil {
+				lastErr = err
+				continue
+			}
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+func waitForAdminBucketWritable(
+	ctx context.Context,
+	dataDirs []string,
+	endpoints []string,
+	accessKey, secretKey, saID, bucket string,
+	timeout time.Duration,
+) (int, error) {
+	if err := adminCreateBucketWithPolicyAttachAny(dataDirs, saID, bucket, 60*time.Second); err != nil {
+		return -1, err
+	}
+	return waitForWritableEndpoint(
+		ctx,
+		endpoints,
+		timeout,
+		5*time.Second,
+		1*time.Second,
+		func(attemptCtx context.Context, endpoint string) error {
+			cli := ecS3Client(endpoint, accessKey, secretKey)
+			return tryPutObject(attemptCtx, cli, bucket, "__leader_probe", []byte("probe"))
+		},
+	)
+}
+
+func (c *e2eCluster) EnsureBucketWritable(ctx context.Context, bucket string, timeout time.Duration) (int, error) {
+	c.t.Helper()
+	if c.saID == "" {
+		return -1, fmt.Errorf("cannot create %s without bootstrap sa_id", bucket)
+	}
+	return waitForAdminBucketWritable(ctx, c.dataDirs, c.httpURLs, c.accessKey, c.secretKey, c.saID, bucket, timeout)
 }
 
 func (c *e2eCluster) startNode(t *testing.T, i int) *exec.Cmd {
@@ -460,7 +516,9 @@ func (c *e2eCluster) AwaitWriteFromNonOwner(bucket, key string, deadline time.Du
 	// Ensure probe bucket exists (idempotent).
 	c.GrantAdminOnBuckets(bucket)
 	ctx := context.Background()
-	_ = tryCreateBucket(ctx, c.S3Client(c.leaderIdx), bucket)
+	if err := adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucket, 60*time.Second); err != nil {
+		return fmt.Errorf("create probe bucket %s: %w", bucket, err)
+	}
 
 	end := time.Now().Add(deadline)
 	body := []byte("probe")

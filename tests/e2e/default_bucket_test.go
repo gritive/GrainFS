@@ -29,7 +29,7 @@ func TestDefaultBucket_ExistsOnStartup(t *testing.T) {
 			t.Fatal("expected 'default' bucket to exist on startup, but it was not found")
 		}
 
-		// Verify we can use the default bucket immediately
+		// Verify we can use the default bucket immediately.
 		_, err = testS3Client.HeadBucket(ctx, &s3.HeadBucketInput{
 			Bucket: aws.String("default"),
 		})

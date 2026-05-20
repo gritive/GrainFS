@@ -1036,6 +1036,44 @@ func TestFSM_SetObjectTags_SpecificVersion(t *testing.T) {
 	}))
 }
 
+func TestFSM_SetObjectTags_SpecificLatestVersionMirrorsLegacyCurrent(t *testing.T) {
+	db := newTestDB(t)
+	fsm := NewFSM(db, newStateKeyspaceEmpty())
+
+	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
+	require.NoError(t, fsm.Apply(data))
+	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
+	require.NoError(t, fsm.Apply(data))
+	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v1", ModTime: 1000, VersionID: "v1",
+	})
+	require.NoError(t, fsm.Apply(data))
+	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "file.txt", Size: 6, ETag: "etag-v2", ModTime: 2000, VersionID: "v2",
+	})
+	require.NoError(t, fsm.Apply(data))
+
+	tags := []storage.Tag{{Key: "env", Value: "prod"}}
+	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{
+		Bucket: "b", Key: "file.txt", VersionID: "v2", Tags: tags,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fsm.Apply(data))
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		legacyItem, err := txn.Get(objectMetaKey("b", "file.txt"))
+		if err != nil {
+			return err
+		}
+		return legacyItem.Value(func(val []byte) error {
+			m, merr := unmarshalObjectMeta(val)
+			require.NoError(t, merr)
+			require.Equal(t, tags, m.Tags, "versionId-less current reads must see latest version tags")
+			return nil
+		})
+	}))
+}
+
 func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 	db := newTestDB(t)
 	f := NewFSM(db, newStateKeyspaceEmpty())

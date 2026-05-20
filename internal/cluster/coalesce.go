@@ -144,8 +144,9 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 //     across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
 //  4. propose CmdCoalesceSegments with EC params; FSM apply stores them on
 //     the resulting CoalescedShardRef.
-//  5. Remove owner-local coalesced blob + raw segment files. EC shards are
-//     the source of truth from this point.
+//  5. Remove owner-local coalesced blob. Raw segment metadata is pruned by
+//     the FSM commit; raw segment files are left for the orphan scrubber so
+//     stale readers that observed pre-coalesce metadata can finish safely.
 //
 // Failure recovery: any error after EC write but before propose leaves
 // orphan EC shards. Best-effort cleanup (full scrubber sweep is deferred —
@@ -255,12 +256,9 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		cleanupMerged()
 		return fmt.Errorf("propose coalesce: %w", err)
 	}
-	// Source of truth is now the EC shards. Remove raw segments. Best-effort
-	// cleanup; unlink failures leave orphans
-	// (full sweep deferred — see TODOS.md).
-	for _, s := range snapshot {
-		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
-	}
+	// Source of truth is now the EC shards. Do not unlink raw segment files
+	// here: a concurrent GET may have observed pre-coalesce metadata and still
+	// needs those blobs. The orphan segment scrubber owns physical cleanup.
 	resultLabel = "success"
 	coalescedBytes = merged.Size
 	return nil

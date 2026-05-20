@@ -627,12 +627,13 @@ func iamListGrants(t *testing.T, sock, saFilter, bucketFilter string) []iamGrant
 
 // iamTestServer is the wired-up handle returned by startIAMTestServer.
 type iamTestServer struct {
-	S3URL       string
-	AdminSock   string
-	DataDir     string
-	BootstrapAK string
-	BootstrapSK string
-	Client      *s3.Client
+	S3URL         string
+	AdminSock     string
+	DataDir       string
+	BootstrapSAID string
+	BootstrapAK   string
+	BootstrapSK   string
+	Client        *s3.Client
 }
 
 // Stop is a no-op — cleanup happens via t.Cleanup hooks registered in
@@ -668,17 +669,19 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 	s3URL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
 
-	bootAK, bootSK := bootstrapAdminViaUDS(t, dir)
-	cli := s3ClientFor(s3URL, bootAK, bootSK)
+	bootstrap, err := bootstrapAdminResultViaUDSForTestMain(dir, 30*time.Second)
+	require.NoError(t, err, "bootstrap admin SA via UDS")
+	cli := s3ClientFor(s3URL, bootstrap.AccessKey, bootstrap.SecretKey)
 	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
 
 	return iamTestServer{
-		S3URL:       s3URL,
-		AdminSock:   filepath.Join(dir, "admin.sock"),
-		DataDir:     dir,
-		BootstrapAK: bootAK,
-		BootstrapSK: bootSK,
-		Client:      cli,
+		S3URL:         s3URL,
+		AdminSock:     filepath.Join(dir, "admin.sock"),
+		DataDir:       dir,
+		BootstrapSAID: bootstrap.SAID,
+		BootstrapAK:   bootstrap.AccessKey,
+		BootstrapSK:   bootstrap.SecretKey,
+		Client:        cli,
 	}
 }
 
@@ -687,16 +690,17 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 // Stop()/Start() cycles, so IAM state durability scenarios across restarts
 // can be exercised in-process.
 type iamTestServerHandle struct {
-	DataDir     string
-	S3URL       string
-	AdminSock   string
-	BootstrapAK string
-	BootstrapSK string
-	s3Port      int
-	nfsPort     int
-	nbdPort     int
-	cmd         *exec.Cmd
-	cli         *s3.Client
+	DataDir       string
+	S3URL         string
+	AdminSock     string
+	BootstrapSAID string
+	BootstrapAK   string
+	BootstrapSK   string
+	s3Port        int
+	nfsPort       int
+	nbdPort       int
+	cmd           *exec.Cmd
+	cli           *s3.Client
 	// firstStart tracks whether we've spawned the binary at least once.
 	// First Start bootstraps an admin SA via UDS; subsequent Start calls
 	// reuse the persisted creds (the IAM store rehydrates from snapshot
@@ -758,9 +762,11 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 	waitForPort(t, h.s3Port, 30*time.Second)
 
 	if !h.firstStart {
-		ak, sk := bootstrapAdminViaUDS(t, h.DataDir)
-		h.BootstrapAK = ak
-		h.BootstrapSK = sk
+		bootstrap, err := bootstrapAdminResultViaUDSForTestMain(h.DataDir, 30*time.Second)
+		require.NoError(t, err, "bootstrap admin SA via UDS")
+		h.BootstrapSAID = bootstrap.SAID
+		h.BootstrapAK = bootstrap.AccessKey
+		h.BootstrapSK = bootstrap.SecretKey
 	}
 
 	cli := s3ClientFor(h.S3URL, h.BootstrapAK, h.BootstrapSK)
@@ -812,7 +818,7 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 
 // TestIAMHelpers_StartServer_BootstrapAccepted smoke-tests that
 // startIAMTestServer brings up a server with bootstrap creds wired
-// correctly: HeadBucket on a missing bucket returns NotFound (not 401),
+// correctly: HeadBucket on a bucket provisioned for the bootstrap SA succeeds,
 // proving the SigV4 verifier accepts the bootstrap key pair.
 func runIAMHelpersStartServerBootstrapAccepted(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
@@ -821,19 +827,12 @@ func runIAMHelpersStartServerBootstrapAccepted(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		const bucket = "bootstrap-probe"
+		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{srv.DataDir}, srv.BootstrapSAID, bucket, srv.Client)
 		_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
-			Bucket: aws.String("__bootstrap_probe__"),
+			Bucket: aws.String(bucket),
 		})
-		if err == nil {
-			// 200 also means auth succeeded (probe bucket somehow existed).
-			return
-		}
-		// NotFound / NoSuchBucket → auth passed, just no such bucket.
-		// 401/403 → auth failed, fail the test.
-		msg := err.Error()
-		if !(contains(msg, "NotFound") || contains(msg, "NoSuchBucket") || contains(msg, "404")) {
-			t.Fatalf("HeadBucket with bootstrap creds returned non-auth error: %v", err)
-		}
+		require.NoError(t, err, "HeadBucket with bootstrap creds")
 	})
 }
 

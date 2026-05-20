@@ -49,11 +49,10 @@ test-unit:
 
 test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-s3-client-smoke-colima test-nfs4-colima test-cluster-mount-colima
 
-# Cluster-mount tests for 9P / NBD / NFSv4 share a single 3-node colima
-# fixture under tests/e2e/ (build tag colima). Single boot covers all three
-# protocols — net 3-boot to 1-boot reduction vs the old per-package layout.
 test-cluster-mount-colima: build
-	go test -v -count=1 -timeout 300s -run TestColimaCluster ./tests/e2e/
+	go test -v -tags colima -count=1 -timeout 300s -run Test9P_ClusterMount ./tests/9p_colima/
+	go test -v -tags colima -count=1 -timeout 300s -run TestNBD_ClusterMount ./tests/nbd_colima/
+	go test -v -tags colima -count=1 -timeout 300s -run TestNFS4_ClusterMount ./tests/nfs4_colima/
 
 test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
@@ -132,7 +131,7 @@ test-s3-client-smoke-colima:
 # FUSE-over-S3 throughput benchmark: compares direct S3 GET/PUT vs rclone mount
 # read/write to quantify the FUSE overhead. Run after test-fuse-s3-colima.
 bench-fuse-s3-colima: build
-	go test -v -tags colima -timeout 300s -run '^$$' -bench BenchmarkFUSE_S3_Throughput -benchtime 1x ./tests/fuse_s3_colima/
+	go test -v -tags colima -timeout 300s -run '^$$' -bench BenchmarkFUSE_S3_Throughput -benchtime 1x ./benchmarks/fuse_s3_colima/
 
 test-jepsen: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestJepsen -v -timeout 5m

@@ -37,6 +37,8 @@ type fakeBackend struct {
 	deleteErr     error
 	listErr       error
 	versioningErr error
+	policyErr     error
+	policy        []byte
 	mpuResult     []*storage.MultipartUpload
 	mpuErr        error
 }
@@ -49,6 +51,23 @@ func (f *fakeBackend) SetBucketVersioning(bucket, state string) error {
 func (f *fakeBackend) GetBucketVersioning(bucket string) (string, error) {
 	f.record(fmt.Sprintf("GetBucketVersioning:%s", bucket))
 	return "", nil
+}
+
+func (f *fakeBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
+	f.record(fmt.Sprintf("SetBucketPolicy:%s=%s", bucket, policyJSON))
+	f.policy = append([]byte(nil), policyJSON...)
+	return f.policyErr
+}
+
+func (f *fakeBackend) GetBucketPolicy(bucket string) ([]byte, error) {
+	f.record(fmt.Sprintf("GetBucketPolicy:%s", bucket))
+	return append([]byte(nil), f.policy...), f.policyErr
+}
+
+func (f *fakeBackend) DeleteBucketPolicy(bucket string) error {
+	f.record(fmt.Sprintf("DeleteBucketPolicy:%s", bucket))
+	f.policy = nil
+	return f.policyErr
 }
 
 // fakeShardGroupSourceWithAssignment extends fakeShardGroupSource with
@@ -98,6 +117,24 @@ func TestClusterCoordinatorSetBucketVersioningRejectsUnassignedBucket(t *testing
 	err := c.SetBucketVersioning("bk-missing", "Enabled")
 	require.ErrorIs(t, err, storage.ErrBucketNotFound)
 	require.NotContains(t, base.calls, "SetBucketVersioning:bk-missing=Enabled")
+}
+
+func TestClusterCoordinatorBucketPolicyPassesClusterAwareHeadBucket(t *testing.T) {
+	base := &fakeBackend{headErr: storage.ErrBucketNotFound}
+	meta := &fakeShardGroupSourceWithAssignment{
+		assignments: map[string]string{"bk-pol": "g1"},
+	}
+	c := NewClusterCoordinator(base, NewDataGroupManager(), NewRouter(NewDataGroupManager()), meta, "self")
+
+	require.NoError(t, c.SetBucketPolicy("bk-pol", []byte(`{"Version":"2012-10-17","Statement":[]}`)))
+	require.Contains(t, base.calls, `SetBucketPolicy:bk-pol={"Version":"2012-10-17","Statement":[]}`)
+
+	_, err := c.GetBucketPolicy("bk-pol")
+	require.NoError(t, err)
+	require.Contains(t, base.calls, "GetBucketPolicy:bk-pol")
+
+	require.NoError(t, c.DeleteBucketPolicy("bk-pol"))
+	require.Contains(t, base.calls, "DeleteBucketPolicy:bk-pol")
 }
 
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
@@ -778,6 +815,46 @@ func TestClusterCoordinator_GetObjectFallsBackToPlacementWhenIndexIsLagging(t *t
 	require.Equal(t, "image", string(body))
 }
 
+func TestClusterCoordinator_GetObjectECIndexedLocalVoterSurvivesMissingLeader(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "photos"))
+	obj, err := gb.PutObject(context.Background(), "photos", "img.jpg", strings.NewReader("image"), "image/jpeg")
+	require.NoError(t, err)
+	gb.testLeaderProbe = &flippableRaftNode{leaderSeq: []bool{false}}
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node", "dead-leader"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node", "dead-leader"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket:           "photos",
+		Key:              "img.jpg",
+		VersionID:        obj.VersionID,
+		PlacementGroupID: "group-1",
+		Size:             obj.Size,
+		ContentType:      obj.ContentType,
+		ETag:             obj.ETag,
+		ModTime:          obj.LastModified,
+		ECData:           1,
+		ECParity:         0,
+		NodeIDs:          []string{"test-node"},
+	}, false)))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	rc, got, err := c.GetObject(context.Background(), "photos", "img.jpg")
+	require.NoError(t, err)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, obj.VersionID, got.VersionID)
+	require.Equal(t, "image", string(body))
+}
+
 func TestClusterCoordinator_DeleteObjectVersion_RemovesObjectIndex(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
 	gb := newTestGroupBackend(t, "group-1")
@@ -963,6 +1040,77 @@ func TestClusterCoordinator_ListAllObjects_PreservesTags(t *testing.T) {
 			"Tags-forward fix isn't dead code on the routed cluster path")
 }
 
+func TestClusterCoordinator_ListAllObjects_SkipsAuditBucket(t *testing.T) {
+	base := &fakeBackend{listResult: []string{"photos", "grainfs-audit"}}
+	gb := newTestGroupBackend(t, "group-1")
+	_, err := gb.PutObject(context.Background(), "photos", "doc.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+	_, err = gb.PutObject(context.Background(), "grainfs-audit", "metadata/s3/00000.json", strings.NewReader("{}"), "application/json")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	router.AssignBucket("grainfs-audit", "group-1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, "photos", objs[0].Bucket)
+}
+
+func TestClusterCoordinator_ScanObjectsGrouped_BypassesObjectIndexForTags(t *testing.T) {
+	base := &fakeBackend{}
+	bucketGroup := newTestGroupBackend(t, "group-1")
+	objectGroup := newTestGroupBackend(t, "group-2")
+	require.NoError(t, bucketGroup.CreateBucket(context.Background(), "tagged"))
+	require.NoError(t, objectGroup.CreateBucket(context.Background(), "tagged"))
+	obj, err := objectGroup.PutObject(context.Background(), "tagged", "doc.txt", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	tags := []storage.Tag{{Key: "expire", Value: "yes"}}
+	require.NoError(t, objectGroup.SetObjectTags("tagged", "doc.txt", obj.VersionID, tags))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, bucketGroup))
+	mgr.Add(NewDataGroupWithBackend("group-2", []string{"test-node"}, objectGroup))
+	router := NewRouter(mgr)
+	router.AssignBucket("tagged", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-2", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "tagged", "group-1")))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket:           "tagged",
+		Key:              "doc.txt",
+		VersionID:        obj.VersionID,
+		PlacementGroupID: "group-2",
+		Size:             obj.Size,
+		ContentType:      obj.ContentType,
+		ETag:             obj.ETag,
+		ModTime:          obj.LastModified,
+	}, false)))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	ch, err := c.ScanObjectsGrouped("tagged")
+	require.NoError(t, err)
+	groups := drainObjectKeyGroups(t, ch)
+
+	require.Len(t, groups, 1)
+	require.Len(t, groups[0].Versions, 1)
+	require.Equal(t, tags, groups[0].Versions[0].Tags)
+
+	require.NoError(t, c.DeleteObject(context.Background(), "tagged", "doc.txt"))
+	_, err = c.HeadObject(context.Background(), "tagged", "doc.txt")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+}
+
 // TestClusterCoordinator_GetObjectTags_Forwarded is the regression guard for
 // adversarial review pass #3: ClusterCoordinator.GetObjectTags previously
 // returned "not implemented" when no local replica resolved, breaking S3
@@ -987,6 +1135,29 @@ func TestClusterCoordinator_GetObjectTags_Forwarded(t *testing.T) {
 	require.Equal(t, "bk", string(args.Bucket()))
 	require.Equal(t, "key.txt", string(args.Key()))
 	require.Equal(t, "", string(args.VersionId()))
+}
+
+func TestClusterCoordinator_RouteReadFallbackClearsMissingIndexError(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"self"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &emptyObjectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"self"}},
+		}},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithECConfig(ECConfig{DataShards: 1})
+
+	target, entry, indexed, err := c.routeIndexedReadOrBucket("bk", "missing.txt", "")
+
+	require.NoError(t, err)
+	require.False(t, indexed)
+	require.Equal(t, ObjectIndexEntry{}, entry)
+	require.Equal(t, "g1", target.GroupID)
 }
 
 func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
@@ -1521,6 +1692,53 @@ func TestClusterCoordinator_GetObject_FollowerVoterForwardsWhenLocalObjectIndexS
 	require.Empty(t, d.calls)
 	require.Len(t, d.readCalls, 1)
 	require.Equal(t, raftpb.ForwardOpGetObject, d.readCalls[0].op)
+}
+
+func TestClusterCoordinator_GetObject_ForwardsWhenLocalLeaderIsBehindObjectIndex(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "g1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bk"))
+	_, err := gb.PutObject(context.Background(), "bk", "k", strings.NewReader("foobar"), "text/plain")
+	require.NoError(t, err)
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"test-node", "peer-a"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("bk", "g1")
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"test-node", "peer-a"}},
+		}},
+		latest: map[string]ObjectIndexEntry{
+			"bk/k": {
+				Bucket: "bk", Key: "k", PlacementGroupID: "g1",
+				Size: 9, ContentType: "text/plain", ETag: "etag-current",
+				NodeIDs: []string{"test-node", "peer-a"},
+			},
+		},
+	}
+	d := &recordingDialer{
+		replyByOp: map[raftpb.ForwardOp][]byte{
+			raftpb.ForwardOpGetObject: buildGetObjectReply(
+				&storage.Object{Key: "k", Size: 9, ETag: "etag-current", ContentType: "text/plain"},
+				"bk", []byte("foobarbaz"),
+			),
+		},
+	}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	rc, obj, err := c.GetObject(context.Background(), "bk", "k")
+
+	require.NoError(t, err)
+	defer rc.Close()
+	require.Equal(t, int64(9), obj.Size)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, []byte("foobarbaz"), body)
+	require.Len(t, d.calls, 1)
+	require.Equal(t, raftpb.ForwardOpGetObject, d.calls[0].op)
 }
 
 func TestForwardReadValidator_IgnoresTerminalErrorAfterExpectedBytes(t *testing.T) {
@@ -2880,6 +3098,45 @@ func TestClusterCoordinator_AppendObject_ExistingObjectRoutesByObjectIndex(t *te
 	require.Len(t, d.streamCalls, 1)
 	require.Equal(t, "object-group", d.streamCalls[0].gid)
 	require.Equal(t, "object-peer", d.streamCalls[0].peer)
+}
+
+func TestClusterCoordinator_AppendObject_ForwardCommitsObjectIndexOnIngress(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("object-group", []string{"object-peer"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("b", "object-group")
+	metaGroups := map[string]ShardGroupEntry{
+		"object-group": {ID: "object-group", PeerIDs: []string{"object-peer"}},
+	}
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: metaGroups},
+		latest: map[string]ObjectIndexEntry{
+			"b/k": {Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "object-group", Size: 6},
+		},
+	}
+	d := &recordingDialer{
+		streamReplyBy: map[raftpb.ForwardOp][]byte{
+			raftpb.ForwardOpAppendObject: buildObjectReply(&storage.Object{
+				Key:       "k",
+				Size:      9,
+				VersionID: "v1",
+				ETag:      "etag-v1-9",
+			}, "b"),
+		},
+	}
+	proposer := &recordingObjectIndexProposer{}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial).WithStreamDialer(d.stream)).
+		WithObjectIndexProposer(proposer)
+
+	obj, err := c.AppendObject(context.Background(), "b", "k", 6, strings.NewReader("baz"))
+
+	require.NoError(t, err)
+	require.Equal(t, int64(9), obj.Size)
+	require.Len(t, proposer.entries, 1)
+	require.Equal(t, int64(9), proposer.entries[0].Size)
+	require.Equal(t, "object-group", proposer.entries[0].PlacementGroupID)
 }
 
 func TestClusterCoordinator_AppendObject_RejectsStaleOffsetFromObjectIndexBeforeReadingBody(t *testing.T) {

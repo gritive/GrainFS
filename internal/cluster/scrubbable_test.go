@@ -269,6 +269,24 @@ func TestReadShardIntegrity_EncryptedShardServiceShardVerified(t *testing.T) {
 	assert.Equal(t, "payload", string(got.Payload))
 }
 
+func TestReadShardIntegrity_SharedPackShardVerified(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{8}, 32))
+	require.NoError(t, err)
+	svc := NewShardService(t.TempDir(), nil, WithEncryptor(enc), WithShardPackThreshold(1024))
+	b.SetShardService(svc, []string{"test-node"})
+	require.NoError(t, svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("packed-payload")))
+
+	path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	got, err := b.ReadShardIntegrity("bkt", "key", path)
+	require.NoError(t, err)
+	assert.Equal(t, scrubber.ShardIntegrityVerified, got.Status)
+	assert.Equal(t, "packed-payload", string(got.Payload))
+}
+
 func TestReadShardIntegrity_LegacyRawUnverifiedButReadShardCompatible(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	dir := t.TempDir()
@@ -336,6 +354,22 @@ func writeVersionedObjectMetaTagged(t *testing.T, b *DistributedBackend, bucket,
 			return err
 		}
 		return txn.Set(latestKey(bucket, key), []byte(versionID))
+	}))
+}
+
+func writeLegacyObjectMetaTagged(t *testing.T, b *DistributedBackend, bucket, key, etag string, size int64, tags []storage.Tag) {
+	t.Helper()
+	meta, err := marshalObjectMeta(objectMeta{
+		Key:          key,
+		Size:         size,
+		ContentType:  "application/octet-stream",
+		ETag:         etag,
+		LastModified: time.Now().Unix(),
+		Tags:         tags,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(objectMetaKey(bucket, key), meta)
 	}))
 }
 
@@ -462,6 +496,26 @@ func TestDistributedBackend_ScanObjectsGrouped_PreservesTags(t *testing.T) {
 
 	require.Len(t, groups, 1)
 	require.Len(t, groups[0].Versions, 1)
+	assert.Equal(t, tags, groups[0].Versions[0].Tags)
+}
+
+func TestDistributedBackend_ScanObjectsGrouped_IncludesLegacyUnversionedObjects(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
+
+	tags := []storage.Tag{{Key: "expire", Value: "yes"}}
+	writeLegacyObjectMetaTagged(t, b, "bkt", "folder/tagged", "etag", 42, tags)
+
+	ch, err := b.ScanObjectsGrouped("bkt")
+	require.NoError(t, err)
+	groups := drainObjectKeyGroups(t, ch)
+
+	require.Len(t, groups, 1)
+	assert.Equal(t, "folder/tagged", groups[0].Key)
+	require.Len(t, groups[0].Versions, 1)
+	assert.Empty(t, groups[0].Versions[0].VersionID)
+	assert.True(t, groups[0].Versions[0].IsLatest)
+	assert.Equal(t, int64(42), groups[0].Versions[0].Size)
 	assert.Equal(t, tags, groups[0].Versions[0].Tags)
 }
 

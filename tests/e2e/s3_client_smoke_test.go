@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,9 +16,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestS3ClientSmokeE2E exercises three external S3-compatible clients
-// (mc, s3fs, goofys) against both shared single + shared cluster fixtures.
-// Each client gets its own sub-test and its own bucket via uniqueBucket.
+// TestS3ClientSmokeE2E exercises host-safe external S3-compatible clients
+// against both shared single + shared cluster fixtures. FUSE-backed clients
+// run from Linux in tests/fuse_s3_colima because macOS host FUSE availability
+// is not a reliable e2e prerequisite.
 func TestS3ClientSmokeE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runS3ClientSmokeCases(t, newSingleNodeS3Target())
@@ -32,13 +32,11 @@ func TestS3ClientSmokeE2E(t *testing.T) {
 func runS3ClientSmokeCases(t *testing.T, tgt s3Target) {
 	t.Helper()
 	t.Run("MinIOMC", func(t *testing.T) { testS3ClientSmokeMinIOMC(t, tgt) })
-	t.Run("S3FS", func(t *testing.T) { testS3ClientSmokeS3FS(t, tgt) })
-	t.Run("Goofys", func(t *testing.T) { testS3ClientSmokeGoofys(t, tgt) })
 }
 
 func testS3ClientSmokeMinIOMC(t *testing.T, tgt s3Target) {
-	if _, err := exec.LookPath("mc"); err != nil {
-	}
+	_, err := exec.LookPath("mc")
+	require.NoError(t, err, "mc is required for TestS3ClientSmokeE2E; install MinIO Client or run the Colima-specific FUSE smoke target separately")
 
 	bucket := tgt.uniqueBucket(t, "mc")
 	endpoint := tgt.endpoint(0)
@@ -56,98 +54,6 @@ func testS3ClientSmokeMinIOMC(t *testing.T, tgt s3Target) {
 	require.Contains(t, string(out), "smoke.txt")
 	runClientCommand(t, nil, "mc", "--config-dir", configDir, "rm", "grainfs/"+bucket+"/smoke.txt")
 	requireObjectDeleted(t, tgt, bucket, "smoke.txt")
-}
-
-func testS3ClientSmokeS3FS(t *testing.T, tgt s3Target) {
-	if runtime.GOOS == "windows" {
-	}
-	if _, err := exec.LookPath("s3fs"); err != nil {
-	}
-
-	bucket := tgt.uniqueBucket(t, "s3fs")
-	endpoint := tgt.endpoint(0)
-	tmpDir := t.TempDir()
-	passwdPath := filepath.Join(tmpDir, "passwd")
-	require.NoError(t, os.WriteFile(passwdPath, []byte(tgt.accessKey+":"+tgt.secretKey), 0o600))
-	mountDir := filepath.Join(tmpDir, "mnt")
-	require.NoError(t, os.MkdirAll(mountDir, 0o700))
-
-	args := []string{
-		bucket,
-		mountDir,
-		"-o", "passwd_file=" + passwdPath,
-		"-o", "url=" + endpoint,
-		"-o", "use_path_request_style",
-		"-o", "nomultipart",
-	}
-	if out, err := runClientCommandAllowError(t, nil, "s3fs", args...); err != nil {
-		skipIfMissingFUSE(t, "s3fs", out, err)
-		t.Fatalf("s3fs mount failed: %v\n%s", err, out)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("umount", mountDir).Run()
-	})
-
-	exerciseMountedClient(t, mountDir, "s3fs smoke")
-	requireObjectDeleted(t, tgt, bucket, "smoke.txt")
-}
-
-func testS3ClientSmokeGoofys(t *testing.T, tgt s3Target) {
-	if runtime.GOOS == "windows" {
-	}
-	if _, err := exec.LookPath("goofys"); err != nil {
-	}
-
-	bucket := tgt.uniqueBucket(t, "goofys")
-	endpoint := tgt.endpoint(0)
-	mountDir := filepath.Join(t.TempDir(), "mnt")
-	require.NoError(t, os.MkdirAll(mountDir, 0o700))
-	env := []string{
-		"AWS_ACCESS_KEY_ID=" + tgt.accessKey,
-		"AWS_SECRET_ACCESS_KEY=" + tgt.secretKey,
-		"AWS_REGION=us-east-1",
-	}
-
-	args := []string{
-		"--endpoint", endpoint,
-		"--region", "us-east-1",
-		bucket,
-		mountDir,
-	}
-	if out, err := runClientCommandAllowError(t, env, "goofys", args...); err != nil {
-		skipIfMissingFUSE(t, "goofys", out, err)
-		t.Fatalf("goofys mount failed: %v\n%s", err, out)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("umount", mountDir).Run()
-	})
-
-	exerciseMountedClient(t, mountDir, "goofys smoke")
-	requireObjectDeleted(t, tgt, bucket, "smoke.txt")
-}
-
-func exerciseMountedClient(t *testing.T, mountDir, content string) {
-	t.Helper()
-	path := filepath.Join(mountDir, "smoke.txt")
-	require.Eventually(t, func() bool {
-		return os.WriteFile(path, []byte(content), 0o600) == nil
-	}, 10*time.Second, 200*time.Millisecond)
-	got, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, content, string(got))
-	entries, err := os.ReadDir(mountDir)
-	require.NoError(t, err)
-	require.True(t, hasDirEntry(entries, "smoke.txt"))
-	require.NoError(t, os.Remove(path))
-}
-
-func hasDirEntry(entries []os.DirEntry, name string) bool {
-	for _, entry := range entries {
-		if entry.Name() == name {
-			return true
-		}
-	}
-	return false
 }
 
 func requireObjectDeleted(t *testing.T, tgt s3Target, bucket, key string) {
@@ -182,19 +88,4 @@ func runClientCommandAllowError(t *testing.T, env []string, name string, args ..
 		return out, fmt.Errorf("%s timed out", name)
 	}
 	return out, err
-}
-
-func skipIfMissingFUSE(t *testing.T, client string, out []byte, err error) {
-	t.Helper()
-	msg := strings.ToLower(string(out) + " " + err.Error())
-	for _, marker := range []string{
-		"fuse",
-		"operation not permitted",
-		"permission denied",
-		"device not configured",
-		"no such file or directory",
-	} {
-		if strings.Contains(msg, marker) {
-		}
-	}
 }

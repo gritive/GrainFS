@@ -9,11 +9,14 @@ import (
 	"time"
 
 	"github.com/hugelgupf/p9/p9"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var errStopReaddir = errors.New("p9server: stop readdir")
+
+const createHeadRetryTimeout = 10 * time.Second
 
 type objectKeyWalker interface {
 	WalkObjectKeys(ctx context.Context, bucket, prefix string, fn func(string) error) error
@@ -97,16 +100,21 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 	defer unlock()
 
 	ctx := context.Background()
-	if _, err := f.backend.HeadObject(ctx, f.bucket, key); err == nil {
+	if _, err := f.headObjectForCreate(ctx, key); err == nil {
 		return nil, p9.QID{}, 0, syscall.EEXIST
 	} else if !errors.Is(err, storage.ErrObjectNotFound) {
-		return nil, p9.QID{}, 0, syscall.EIO
+		if !isTransientCreateHeadError(err) {
+			log.Warn().Err(err).Str("bucket", f.bucket).Str("key", key).Msg("9p create: head object failed")
+			return nil, p9.QID{}, 0, syscall.EIO
+		}
+		log.Warn().Err(err).Str("bucket", f.bucket).Str("key", key).Msg("9p create: transient head object failed; proceeding with create")
 	}
 	if f.hasPrefix(dirMarkerKey(key)) {
 		return nil, p9.QID{}, 0, syscall.EISDIR
 	}
 	obj, err := f.backend.PutObject(ctx, f.bucket, key, bytes.NewReader(nil), "application/octet-stream")
 	if err != nil {
+		log.Warn().Err(err).Str("bucket", f.bucket).Str("key", key).Msg("9p create: put empty object failed")
 		return nil, p9.QID{}, 0, syscall.EIO
 	}
 	meta := p9FileMeta{
@@ -114,11 +122,28 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 		Mtime: time.Now().UnixNano(),
 	}
 	if err := saveP9FileMeta(ctx, f.backend, f.bucket, key, meta); err != nil {
+		log.Warn().Err(err).Str("bucket", f.bucket).Str("key", key).Msg("9p create: save metadata failed")
 		_ = f.backend.DeleteObject(ctx, f.bucket, key)
 		return nil, p9.QID{}, 0, syscall.EIO
 	}
 	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
 	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}, qid, 0, nil
+}
+
+func (f *bucketFile) headObjectForCreate(ctx context.Context, key string) (*storage.Object, error) {
+	deadline := time.Now().Add(createHeadRetryTimeout)
+	for {
+		obj, err := f.backend.HeadObject(ctx, f.bucket, key)
+		if err == nil || errors.Is(err, storage.ErrObjectNotFound) || !isTransientCreateHeadError(err) || time.Now().After(deadline) {
+			return obj, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func isTransientCreateHeadError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(err.Error(), "forward: internal reply error")
 }
 
 func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.QID, error) {

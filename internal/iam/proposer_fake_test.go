@@ -109,6 +109,18 @@ func (f *fakeProposer) ProposeBucketUpstreamCutover(_ context.Context, bucket st
 	return f.bucketUpstreamCutoverErr
 }
 
+func (f *fakeProposer) ProposePolicyAttachToSAPut(_ context.Context, saID, policy string) error {
+	f.calls = append(f.calls, "PolicyAttachToSAPut:"+saID+":"+policy)
+	f.dispatched = append(f.dispatched, "PolicyAttachToSAPut")
+	return nil
+}
+
+func (f *fakeProposer) ProposePolicyAttachToSADelete(_ context.Context, saID, policy string) error {
+	f.calls = append(f.calls, "PolicyAttachToSADelete:"+saID+":"+policy)
+	f.dispatched = append(f.dispatched, "PolicyAttachToSADelete")
+	return nil
+}
+
 func (f *fakeProposer) ProposeCreateBucketWithPolicyAttach(_ context.Context, bucket, sa, policy string) error {
 	f.calls = append(f.calls, "CreateBucketWithPolicyAttach:"+bucket+":"+sa+":"+policy)
 	f.dispatched = append(f.dispatched, "CreateBucketWithPolicyAttach")

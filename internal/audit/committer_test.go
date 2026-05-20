@@ -227,6 +227,52 @@ func TestCommitter_CommitsOutboxAndAcks(t *testing.T) {
 	<-done
 }
 
+func TestCommitter_LeaderFlushesOutboxOnShutdown(t *testing.T) {
+	catalog := newFakeCatalog()
+	backend := newFakeBackend()
+	outbox, err := audit.OpenOutbox(t.TempDir())
+	require.NoError(t, err)
+	defer outbox.Close()
+
+	initMeta := fmt.Sprintf(audit.S3InitialMetadata, "test-uuid", "s3://grainfs-audit/audit/s3", time.Now().UnixMilli())
+	_, err = catalog.CreateTable(context.Background(), "", icebergcatalog.Identifier{
+		Namespace: []string{audit.Namespace},
+		Name:      audit.TableS3,
+	}, icebergcatalog.CreateTableInput{
+		MetadataLocation: "s3://grainfs-audit/metadata/s3/00000-test.metadata.json",
+		Metadata:         json.RawMessage(initMeta),
+	})
+	require.NoError(t, err)
+	_, _ = backend.PutObject(context.Background(), audit.BucketName, "metadata/s3/00000-test.metadata.json", strings.NewReader(initMeta), "application/json")
+
+	require.NoError(t, outbox.AppendFinalized(context.Background(), audit.S3Event{
+		EventID: "evt-shutdown", RequestID: "req-shutdown", Ts: time.Now().UnixMicro(),
+		Bucket: "b", Key: "k", Method: "PUT", Operation: "PutObject", Status: 200,
+	}))
+
+	c := audit.NewCommitter(audit.CommitterConfig{
+		Outbox:   outbox,
+		Catalog:  catalog,
+		Backend:  backend,
+		IsLeader: func() bool { return true },
+		NodeID:   "leader-1",
+		Interval: 10 * time.Second,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run(ctx)
+	}()
+	cancel()
+	<-done
+
+	pending, err := outbox.Pending(context.Background(), 10)
+	require.NoError(t, err)
+	require.Empty(t, pending, "leader shutdown should commit and ack pending outbox rows")
+}
+
 func TestCommitter_FollowerShipsToLeader(t *testing.T) {
 	var shipped []audit.S3Event
 	var mu sync.Mutex

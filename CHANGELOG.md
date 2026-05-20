@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.293.0] - 2026-05-20
+
+### Changed
+
+- Moved FUSE/S3 client coverage under Colima-specific packages and split
+  cluster mount tests into 9p, NBD, and NFSv4 protocol suites.
+- Moved the Colima FUSE benchmark package under `benchmarks/` with its own
+  test harness.
+- Tightened Colima/FUSE prerequisite handling so required integration fixtures
+  fail explicitly instead of silently skipping.
+
+### Fixed
+
+- Skipped snapshot system buckets such as `grainfs-audit` during snapshot
+  object enumeration.
+- Restored volume scrub verification for shard-pack-backed shards and disabled
+  shard packing in direct-corruption e2e cases.
+- Kept forwarded PUT object-index ownership on the forward receiver, avoiding
+  duplicate ingress-side index commits.
+
 ## [0.0.292.0] - 2026-05-20
 
 ### Changed

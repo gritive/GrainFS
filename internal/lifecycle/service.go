@@ -61,11 +61,17 @@ type Service struct {
 	mpuCancel context.CancelFunc
 	mpuWG     sync.WaitGroup
 
+	testNow atomic.Pointer[testNowFunc]
+
 	// limiter is shared by both workers so the 100 deletes/sec/node cap
 	// holds across both object-side and MPU-side clauses.
 	limiter *rate.Limiter
 
 	logger zerolog.Logger
+}
+
+type testNowFunc struct {
+	fn func() time.Time
 }
 
 // NewService wires the service. backend/deleter may be nil for tests that do
@@ -244,6 +250,9 @@ func (s *Service) start(parent context.Context) {
 	}
 	workerCtx, cancel := context.WithCancel(parent)
 	w := NewWorker(s.store, s.backend, s.deleter, s.interval, s.limiter)
+	if now := s.testNow.Load(); now != nil {
+		w.SetNowForTest(now.fn)
+	}
 	s.cancelFn = cancel
 	s.worker.Store(w)
 	s.workerWG.Add(1)
@@ -280,6 +289,9 @@ func (s *Service) startMPUWorker(parent context.Context) {
 	}
 	workerCtx, cancel := context.WithCancel(parent)
 	w := NewMPUWorker(s.store, s.backend, s.deleter, s.interval, s.limiter, WithMPUNodeID(s.nodeID))
+	if now := s.testNow.Load(); now != nil {
+		w.SetNowForTest(now.fn)
+	}
 	s.mpuCancel = cancel
 	s.mpuWorker.Store(w)
 	s.mpuWG.Add(1)
@@ -337,6 +349,7 @@ func (s *Service) RunCycleForTest(ctx context.Context) {
 // SetNowForTest reconfigures the clock source on any currently-loaded
 // workers. Called after Run has started. Test seam.
 func (s *Service) SetNowForTest(now func() time.Time) {
+	s.testNow.Store(&testNowFunc{fn: now})
 	if w := s.worker.Load(); w != nil {
 		w.SetNowForTest(now)
 	}

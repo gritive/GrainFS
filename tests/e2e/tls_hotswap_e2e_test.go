@@ -35,9 +35,6 @@ import (
 )
 
 func TestTLSHotSwapE2E(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short mode")
-	}
 	t.Run("SingleNode", func(t *testing.T) {
 		runTLSHotSwapCase(t)
 	})

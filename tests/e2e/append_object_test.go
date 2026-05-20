@@ -262,6 +262,7 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 		ownerBucket := "append-owner-kill-" + tgt.name
 		tgt.createBkt(t, ownerBucket)
 		key := "obj-survive"
+		coalesceMetricBaseline := metricCounterTotal(t, tgt, `grainfs_append_coalesce_total{result="success"}`)
 
 		// Drive 16 appends to trigger coalesce → obj.Coalesced should have
 		// at least 1 entry. The owner is the data-Raft leader.
@@ -276,12 +277,7 @@ func runClusterOnlyAppendCases(t *testing.T, tgt s3Target) {
 		}
 		// Wait for coalesce to land (Metrics endpoint reports success).
 		require.Eventually(t, func() bool {
-			for i := 0; i < tgt.nodes; i++ {
-				if metricCounterAtLeast(t, tgt, i, `grainfs_append_coalesce_total{result="success"}`, 1) {
-					return true
-				}
-			}
-			return false
+			return metricCounterTotal(t, tgt, `grainfs_append_coalesce_total{result="success"}`) > coalesceMetricBaseline
 		}, 10*time.Second, 200*time.Millisecond)
 
 		// Identify the data-Raft leader (Task 23) and kill it.

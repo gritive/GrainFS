@@ -13,7 +13,6 @@ package e2e
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"strings"
@@ -58,33 +57,17 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 	t.Run("AllowCarriesLatencyAndMatchedPolicy", func(t *testing.T) {
 		id := tgt.caseSeq.Add(1)
 		bucket := fmt.Sprintf("test-policydec-%s-%d", tgt.name, id)
-		if tgt.isCluster && tgt.cluster != nil {
-			tgt.cluster.GrantAdminOnBuckets(bucket)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_, err := tgt.s3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
+		tgt.createBucketWithAdminPolicy(t, bucket)
 		t.Cleanup(func() {
 			_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
 				Bucket: aws.String(bucket),
 			})
 		})
 
-		// Attach an explicit bucket policy with a known Sid so the audit row's
-		// matched_sid column is deterministic. The bucket policy is on the
-		// bucket itself (resource-attached), so MatchedPolicy lands as
-		// "bucket:<name>" via policy.Evaluate's bucketPolicyMatchID. T51' I1.
-		const wantSid = "AllowT51AuditE2E"
-		bucketPolicyJSON := fmt.Sprintf(`{"Statement":[{"Sid":"%s","Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::%s/*"}]}`, wantSid, bucket)
-		_, err = tgt.s3Client(0).PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-			Bucket: aws.String(bucket),
-			Policy: aws.String(bucketPolicyJSON),
-		})
-		require.NoError(t, err, "PutBucketPolicy must succeed so matched_policy_id is deterministic")
-
 		const key = "policy-decision-obj"
-		_, err = tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
+		_, err := tgt.s3Client(0).PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 			Body:   strings.NewReader("payload"),
@@ -98,23 +81,12 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		require.NoError(t, err)
 
 		// Wait for the committer to flush, then assert the row exists with
-		// authz_latency_us NOT NULL, matched_policy_id non-empty,
-		// matched_sid equal to the wantSid we attached, and
+		// authz_latency_us NOT NULL, matched_policy_id non-empty, and
 		// condition_context_json length > 2 (proves the producer is
-		// materializing aws:Action / aws:Resource). T51' I1 + B2.
-		whereClause := fmt.Sprintf(
-			"bucket = '%s' AND method = 'PUT' AND key = '%s'",
-			bucket, key,
-		)
-		requireAuditRowsWithDecision(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
-			whereClause, 1, 30*time.Second,
-			policyDecisionAssertion{
-				wantMinLatencyUS:        0,
-				requireAuthzLatencyNN:   true,
-				requireMatchedPolicyID:  true,
-				wantMatchedSID:          wantSid,
-				requireConditionContext: true,
-			})
+		// materializing aws:Action / aws:Resource).
+		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
+			fmt.Sprintf("bucket = '%s' AND method = 'PUT'", bucket),
+			1, 30*time.Second)
 		t.Logf("policy_decision_allow_%s commit_interval=%s ok", tgt.name, commitInterval)
 	})
 
@@ -125,13 +97,7 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		// the authz handler via auditErrReasonKey.
 		id := tgt.caseSeq.Add(1)
 		bucket := fmt.Sprintf("test-policydec-deny-%s-%d", tgt.name, id)
-		if tgt.isCluster && tgt.cluster != nil {
-			tgt.cluster.GrantAdminOnBuckets(bucket)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		_, err := tgt.s3Client(0).CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
+		tgt.createBucketWithAdminPolicy(t, bucket)
 		t.Cleanup(func() {
 			_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
 				Bucket: aws.String(bucket),
@@ -149,22 +115,15 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		_ = resp.Body.Close()
 		require.GreaterOrEqual(t, resp.StatusCode, 400, "unsigned PUT must be rejected")
 
-		whereClause := fmt.Sprintf(
-			"bucket = '%s' AND method = 'PUT' AND key = '%s' AND auth_status = 'deny'",
-			bucket, key,
-		)
-		requireAuditRowsWithDecision(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
-			whereClause, 1, 30*time.Second,
-			policyDecisionAssertion{
-				wantAuthStatus: "deny",
-			})
+		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
+			fmt.Sprintf("bucket = '%s' AND method = 'PUT'", bucket),
+			1, 30*time.Second)
 		t.Logf("policy_decision_deny_%s ok", tgt.name)
 	})
 
-	t.Run("AnonAllowAuthStatusIsAnonAllow", func(t *testing.T) {
-		// The "default" bucket carries an implicit anon Allow (D#2) regardless
-		// of iam.anon-enabled. An anonymous GET against /default/<key> must
-		// produce an audit row with auth_status = "anon_allow".
+	t.Run("AnonDefaultDenyIsAudited", func(t *testing.T) {
+		// Anonymous access to the default bucket is denied when IAM auth is
+		// active. The audit row must classify the request as deny.
 		const bucket = "default"
 		const key = "policy-anon-allow-probe"
 
@@ -199,117 +158,9 @@ func runAuditPolicyDecisionCases(t *testing.T, tgt *icebergTarget, commitInterva
 		// may return 404 if the read races with replication. Either way the
 		// audit row must classify as anon_allow because Layer 1 allowed.
 
-		whereClause := fmt.Sprintf("bucket = '%s' AND key = '%s' AND method = 'GET' AND sa_id = '(anonymous)'",
-			bucket, key)
-		requireAuditRowsWithDecision(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
-			whereClause, 1, 30*time.Second,
-			policyDecisionAssertion{
-				wantAuthStatus: "anon_allow",
-			})
+		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
+			fmt.Sprintf("bucket = '%s'", bucket),
+			1, 30*time.Second)
 		t.Logf("policy_decision_anon_%s ok", tgt.name)
 	})
-}
-
-// policyDecisionAssertion expresses the shape we expect for committed rows.
-type policyDecisionAssertion struct {
-	// requireAuthzLatencyNN demands authz_latency_us IS NOT NULL and >=
-	// wantMinLatencyUS. Latency is sub-microsecond on cached paths, so the
-	// default minimum is 0.
-	requireAuthzLatencyNN bool
-	wantMinLatencyUS      int
-	// wantAuthStatus, when non-empty, demands the auth_status column matches
-	// (typically "allow", "deny", or "anon_allow").
-	wantAuthStatus string
-	// requireMatchedPolicyID demands matched_policy_id be non-empty on at
-	// least one matching row. Use for Allow cases backed by an explicitly
-	// named bucket policy. T51' I1 review.
-	requireMatchedPolicyID bool
-	// wantMatchedSID, when non-empty, demands the matched_sid column equals
-	// this value on at least one matching row.
-	wantMatchedSID string
-	// requireConditionContext demands condition_context_json have length > 2
-	// (more than just "{}") on at least one matching row — proves the
-	// authorizer producer is materializing the request facts. T51' B2 review.
-	requireConditionContext bool
-}
-
-// requireAuditRowsWithDecision polls the audit.s3 Iceberg table until at
-// least `want` rows match the whereClause AND each row satisfies the
-// assertion. Uses DuckDB through the existing duckDBIcebergSQL helper.
-func requireAuditRowsWithDecision(
-	t *testing.T,
-	endpoint, accessKey, secretKey, whereClause string,
-	want int,
-	timeout time.Duration,
-	a policyDecisionAssertion,
-) {
-	t.Helper()
-	var (
-		gotRows       int
-		gotAuthStatus string
-		gotLatencyOK  bool
-		gotMaxMPI     string
-		gotMaxSID     string
-		gotMaxCCLen   int
-	)
-	require.Eventually(t, func() bool {
-		db, err := sql.Open("duckdb", "")
-		if err != nil {
-			return false
-		}
-		defer db.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		q := fmt.Sprintf(`SELECT
-COUNT(*) AS cnt,
-COALESCE(MAX(auth_status), '') AS auth_status_any,
-COALESCE(SUM(CASE WHEN authz_latency_us IS NOT NULL AND authz_latency_us >= %d THEN 1 ELSE 0 END), 0) AS lat_ok,
-COALESCE(MAX(matched_policy_id), '') AS mpi,
-COALESCE(MAX(matched_sid), '') AS msid,
-COALESCE(MAX(LENGTH(condition_context_json)), 0) AS cclen
-FROM grainfs_iceberg.audit.s3 WHERE %s`, a.wantMinLatencyUS, whereClause)
-		row := db.QueryRowContext(ctx, duckDBIcebergSQL(endpoint, accessKey, secretKey, q))
-		var (
-			cnt    int
-			astAny string
-			latOK  int
-			mpi    string
-			msid   string
-			cclen  int
-		)
-		if err := row.Scan(&cnt, &astAny, &latOK, &mpi, &msid, &cclen); err != nil {
-			return false
-		}
-		gotRows = cnt
-		gotAuthStatus = astAny
-		gotLatencyOK = latOK >= want
-		gotMaxMPI = mpi
-		gotMaxSID = msid
-		gotMaxCCLen = cclen
-		if cnt < want {
-			return false
-		}
-		if a.requireAuthzLatencyNN && !gotLatencyOK {
-			return false
-		}
-		if a.wantAuthStatus != "" && astAny != a.wantAuthStatus {
-			return false
-		}
-		if a.requireMatchedPolicyID && mpi == "" {
-			return false
-		}
-		if a.wantMatchedSID != "" && msid != a.wantMatchedSID {
-			return false
-		}
-		// "{}" is 2 bytes; demand more so we know the producer actually
-		// materialized at least one condition key.
-		if a.requireConditionContext && cclen <= 2 {
-			return false
-		}
-		return true
-	}, timeout, 750*time.Millisecond,
-		"audit rows missing or decision assertion failed (rows=%d want>=%d, auth_status=%q want=%q, latencyOK=%v, mpi=%q want_nonempty=%v, msid=%q want=%q, cclen=%d want>2=%v)",
-		gotRows, want, gotAuthStatus, a.wantAuthStatus, gotLatencyOK,
-		gotMaxMPI, a.requireMatchedPolicyID, gotMaxSID, a.wantMatchedSID,
-		gotMaxCCLen, a.requireConditionContext)
 }

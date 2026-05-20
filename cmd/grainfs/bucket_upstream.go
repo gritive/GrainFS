@@ -16,7 +16,7 @@ var bucketUpstreamPutCmd = &cobra.Command{
 	Short: "Register or rotate the upstream credentials for a bucket",
 	Args:  cobra.ExactArgs(1),
 	Example: `  grainfs bucket upstream put my-bucket \
-      --scheme s3 --endpoint https://s3.example.com \
+      --scheme s3 --endpoint-url https://s3.example.com \
       --access-key AKID --secret-key SK \
       --region us-east-1 --remote-bucket upstream-bucket`,
 	RunE: func(c *cobra.Command, args []string) error {

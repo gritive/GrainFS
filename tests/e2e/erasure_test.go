@@ -35,6 +35,14 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 	ctx := context.Background()
 	cli := tgt.pickNode(0)
 
+	if tgt.isCluster {
+		probe := tgt.name + "-ec-mp-probe"
+		tgt.createBkt(t, probe)
+		gateCtx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+		defer cancel()
+		waitForMultipartListingCreate(t, gateCtx, cli, probe, multipartListingKey, 120*time.Second)
+	}
+
 	t.Run("BasicPutGet", func(t *testing.T) {
 		bucket := tgt.uniqueBucket(t, "basic")
 		cases := []struct {
@@ -94,7 +102,7 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 	t.Run("MultipartUpload", func(t *testing.T) {
 		bucket := tgt.uniqueBucket(t, "multipart")
 		key := "multipart-ec.bin"
-		part1Data := bytes.Repeat([]byte("A"), 1024)
+		part1Data := bytes.Repeat([]byte("A"), 5*1024*1024)
 		part2Data := bytes.Repeat([]byte("B"), 512)
 
 		initOut, err := cli.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
@@ -165,14 +173,8 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 		}
 		assert.True(t, found, "newly created bucket %s missing from ListBuckets", bucket)
 
-		// Empty bucket delete may race with routed ListObjects readiness on
-		// cluster, so retry within the same 30s envelope the standalone test used.
-		require.EventuallyWithT(t, func(c *assert.CollectT) {
-			_, err = cli.DeleteBucket(ctx, &s3.DeleteBucketInput{
-				Bucket: aws.String(bucket),
-			})
-			assert.NoError(c, err)
-		}, 30*time.Second, 250*time.Millisecond, "empty bucket deletion should wait for routed ListObjects readiness")
+		// Decision #8 keeps bucket deletion on the admin socket; data-plane
+		// bucket coverage here is HeadBucket/ListBuckets visibility.
 	})
 
 	t.Run("DeleteAndOverwrite", func(t *testing.T) {

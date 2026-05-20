@@ -33,7 +33,7 @@ func TestDegradedModeWritesBlockedE2E(t *testing.T) {
 			bucketName = "degraded-test"
 			numNodes   = 5
 		)
-		var accessKey, secretKey string
+		var accessKey, secretKey, saID string
 
 		httpPorts := make([]int, numNodes)
 		raftPorts := make([]int, numNodes)
@@ -93,7 +93,8 @@ func TestDegradedModeWritesBlockedE2E(t *testing.T) {
 		waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
 		time.Sleep(2 * time.Second)
 
-		accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
+		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, dataDirs[:1], 60*time.Second)
+		accessKey, secretKey, saID = bootstrap.AccessKey, bootstrap.SecretKey, bootstrap.SAID
 
 		for i := 1; i < numNodes; i++ {
 			require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
@@ -103,8 +104,6 @@ func TestDegradedModeWritesBlockedE2E(t *testing.T) {
 		waitForPortsParallel(t, httpPorts, 60*time.Second)
 		time.Sleep(4 * time.Second)
 
-		accessKey, secretKey = bootstrapAdminViaUDSAnyWithBucketGrants(t, dataDirs, 60*time.Second, bucketName)
-
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
 
@@ -113,18 +112,8 @@ func TestDegradedModeWritesBlockedE2E(t *testing.T) {
 		for i := range endpoints {
 			endpoints[i] = httpURL(i)
 		}
-		leaderIdx, err := waitForWritableEndpoint(
-			ctx,
-			endpoints,
-			180*time.Second,
-			5*time.Second,
-			1*time.Second,
-			func(attemptCtx context.Context, endpoint string) error {
-				c := ecS3Client(endpoint, accessKey, secretKey)
-				return tryCreateBucket(attemptCtx, c, bucketName)
-			},
-		)
-		require.NoError(t, err, "no leader found or CreateBucket never succeeded")
+		leaderIdx, err := waitForAdminBucketWritable(ctx, dataDirs, endpoints, accessKey, secretKey, saID, bucketName, 180*time.Second)
+		require.NoError(t, err, "no leader found or PutObject never succeeded")
 		client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
 		t.Logf("degraded test: leader node %d at %s", leaderIdx, httpURL(leaderIdx))
 

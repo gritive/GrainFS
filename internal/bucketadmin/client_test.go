@@ -3,7 +3,6 @@ package bucketadmin
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -191,7 +190,7 @@ func TestClient_UpstreamPut(t *testing.T) {
 	if method != http.MethodPut {
 		t.Errorf("method = %s", method)
 	}
-	if got["bucket"] != "b" || got["scheme"] != "s3" || got["endpoint"] != "https://s3.example.com" ||
+	if got["bucket"] != "b" || got["scheme"] != "s3" || got["upstream_url"] != "https://s3.example.com" ||
 		got["access_key"] != "AK" || got["secret_key"] != "SK" || got["region"] != "us-east-1" ||
 		got["remote_bucket"] != "remote-b" {
 		t.Errorf("got = %v", got)
@@ -200,7 +199,7 @@ func TestClient_UpstreamPut(t *testing.T) {
 
 func TestClient_UpstreamGetRaw(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/upstreams/b", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/buckets/b/upstream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s", r.Method)
 		}
@@ -245,7 +244,7 @@ func TestClient_UpstreamListRaw(t *testing.T) {
 func TestClient_UpstreamDelete(t *testing.T) {
 	var method string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/upstreams/b", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/buckets/b/upstream", func(w http.ResponseWriter, r *http.Request) {
 		method = r.Method
 		w.WriteHeader(http.StatusOK)
 	})
@@ -268,7 +267,7 @@ func TestClient_PolicyGetRaw(t *testing.T) {
 			t.Errorf("method = %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"Version":"2012-10-17","Statement":[]}`))
+		_, _ = w.Write([]byte(`{"policy":{"Version":"2012-10-17","Statement":[]}}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -284,15 +283,17 @@ func TestClient_PolicyGetRaw(t *testing.T) {
 }
 
 func TestClient_PolicySet_Verbatim(t *testing.T) {
-	// Critical: the body the server receives must be byte-for-byte the
+	// Critical: the policy field the server receives must preserve the
 	// policy bytes we sent (no re-marshal that would reorder keys).
 	policy := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*"}]}`)
-	var sawBody []byte
+	var got struct {
+		Policy json.RawMessage `json:"policy"`
+	}
 	var method string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/buckets/b/policy", func(w http.ResponseWriter, r *http.Request) {
 		method = r.Method
-		sawBody, _ = io.ReadAll(r.Body)
+		_ = json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(mux)
@@ -305,8 +306,8 @@ func TestClient_PolicySet_Verbatim(t *testing.T) {
 	if method != http.MethodPut {
 		t.Errorf("method = %s", method)
 	}
-	if string(sawBody) != string(policy) {
-		t.Errorf("body mismatch:\n got: %s\nwant: %s", sawBody, policy)
+	if string(got.Policy) != string(policy) {
+		t.Errorf("policy mismatch:\n got: %s\nwant: %s", got.Policy, policy)
 	}
 }
 

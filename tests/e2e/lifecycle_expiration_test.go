@@ -63,11 +63,20 @@ func runLifecycleExpirationCases(t *testing.T, tgt s3Target) {
 			}}},
 		})
 		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			_, err := client.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{
+				Bucket: aws.String(bucket),
+			})
+			return err == nil
+		}, 5*time.Second, 100*time.Millisecond, "lifecycle configuration did not become visible")
 
 		lc.AdvanceLifecycleClock(2 * 24 * time.Hour)
 		lc.RunLifecycleCycle(ctx)
 
-		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("drop")})
+		require.Eventually(t, func() bool {
+			_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String("drop")})
+			return err != nil
+		}, 5*time.Second, 100*time.Millisecond, "tag-matched object was not expired")
 		require.Error(t, err)
 		var apiErr smithy.APIError
 		if assert.ErrorAs(t, err, &apiErr) {
