@@ -53,3 +53,56 @@ func TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing
 	require.NoError(t, err)
 	require.Equal(t, tags, got, "tags from CreateMultipartUploadWithTags must materialise via the packed wrapper")
 }
+
+// TestPackedBackend_PutObjectThenSetTags_R1Regression guards against R1
+// (Phase 2 unblock fixes): in single-node mode the default --pack-threshold
+// (65537) packs small objects into PackedBackend's blob+index, completely
+// bypassing the inner ClusterCoordinator. The capability walker in
+// Operations.buildOperationsPlan unwraps past PackedBackend (no method
+// promotion through a non-embedded inner field) and binds tagsSetter to
+// ClusterCoordinator, which has no record of the packed object — returning
+// ErrObjectNotFound. The fix declares SetObjectTags/GetObjectTags directly
+// on PackedBackend, dispatching to its own index for packed objects and
+// delegating to inner for above-threshold objects.
+func TestPackedBackend_PutObjectThenSetTags_R1Regression(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	inner, err := storage.NewLocalBackend(dir + "/local")
+	require.NoError(t, err)
+	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
+	require.NoError(t, err)
+
+	require.NoError(t, pb.CreateBucket(ctx, "b"))
+
+	// Packed branch — body well below the 64KiB threshold.
+	smallTags := []storage.Tag{{Key: "expire", Value: "yes"}}
+	_, err = pb.PutObject(ctx, "b", "small", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, pb.SetObjectTags("b", "small", "", smallTags),
+		"SetObjectTags must find packed objects in PackedBackend's index (R1 regression guard)")
+	gotSmall, err := pb.GetObjectTags("b", "small", "")
+	require.NoError(t, err)
+	require.Equal(t, smallTags, gotSmall)
+
+	// Above-threshold branch — body larger than 64KiB lands on inner.
+	bigTags := []storage.Tag{{Key: "tier", Value: "cold"}}
+	big := strings.Repeat("x", 65*1024)
+	_, err = pb.PutObject(ctx, "b", "big", strings.NewReader(big), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, pb.SetObjectTags("b", "big", "", bigTags))
+	gotBig, err := pb.GetObjectTags("b", "big", "")
+	require.NoError(t, err)
+	require.Equal(t, bigTags, gotBig)
+
+	// SaveIndex / LoadIndex round-trip — packed-object tags must survive
+	// restart. Save, close, reopen, confirm the tag set replays from index.bin.
+	require.NoError(t, pb.SaveIndex())
+	require.NoError(t, pb.Close())
+	pb2, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pb2.Close() })
+	require.NoError(t, pb2.LoadIndex())
+	replay, err := pb2.GetObjectTags("b", "small", "")
+	require.NoError(t, err)
+	require.Equal(t, smallTags, replay, "packed-object tags must persist via index.bin")
+}

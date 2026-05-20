@@ -33,6 +33,7 @@ type indexEntry struct {
 	LastModified int64
 	UserMetadata map[string]string
 	SSEAlgorithm string
+	Tags         []storage.Tag // S3 object tags (R1 fix: packed objects must own their own tag set)
 }
 
 // packedKey identifies a packed object by its (bucket, key) tuple. It is the
@@ -219,6 +220,7 @@ func (pb *PackedBackend) SaveIndex() error {
 			LastModified: e.LastModified,
 			UserMetadata: cloneStringMap(e.UserMetadata),
 			SSEAlgorithm: e.SSEAlgorithm,
+			Tags:         cloneTags(e.Tags),
 		}
 		copyE.Refcount.Store(e.Refcount.Load())
 		m[pk] = copyE
@@ -493,6 +495,15 @@ func cloneStringMap(in map[string]string) map[string]string {
 	for k, v := range in {
 		out[k] = v
 	}
+	return out
+}
+
+func cloneTags(in []storage.Tag) []storage.Tag {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]storage.Tag, len(in))
+	copy(out, in)
 	return out
 }
 
@@ -983,6 +994,57 @@ func (pb *PackedBackend) CreateMultipartUploadWithTags(ctx context.Context, buck
 		return "", storage.UnsupportedOperationError{Op: "CreateMultipartUploadWithTags", Reason: storage.UnsupportedReasonNoAdapter}
 	}
 	return inner.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
+}
+
+// SetObjectTags satisfies storage.ObjectTagsSetter. Packed (small) objects
+// live entirely inside this backend's blob+index; their tags must live here
+// too, since the inner backend has no record of them. Objects above the pack
+// threshold live on the inner backend, so we delegate. R1 regression guard:
+// without this explicit dispatch, the capability walker in Operations skips
+// PackedBackend (no method) and binds to the inner ClusterCoordinator, which
+// returns ErrObjectNotFound for packed objects (PutObjectTagging 404).
+func (pb *PackedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
+	pk := packedKey{bucket: bucket, key: key}
+	if v, ok := pb.index.Load(pk); ok {
+		old := v.(*indexEntry)
+		// CAS-swap a fresh *indexEntry to preserve lock-free reads. Refcount
+		// is copied via atomic load/store so concurrent CopyObject increments
+		// observed before the swap survive.
+		nextTags := cloneTags(tags)
+		next := &indexEntry{
+			Location:     old.Location,
+			OriginalSize: old.OriginalSize,
+			ContentType:  old.ContentType,
+			ETag:         old.ETag,
+			LastModified: old.LastModified,
+			UserMetadata: cloneStringMap(old.UserMetadata),
+			SSEAlgorithm: old.SSEAlgorithm,
+			Tags:         nextTags,
+		}
+		next.Refcount.Store(old.Refcount.Load())
+		pb.index.Store(pk, next)
+		return nil
+	}
+	// Above-threshold object: delegate to inner.
+	setter, ok := pb.inner.(storage.ObjectTagsSetter)
+	if !ok {
+		return storage.UnsupportedOperationError{Op: "SetObjectTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return setter.SetObjectTags(bucket, key, versionID, tags)
+}
+
+// GetObjectTags satisfies storage.ObjectTagsGetter. Mirrors SetObjectTags's
+// packed-vs-inner split.
+func (pb *PackedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	pk := packedKey{bucket: bucket, key: key}
+	if v, ok := pb.index.Load(pk); ok {
+		return cloneTags(v.(*indexEntry).Tags), nil
+	}
+	getter, ok := pb.inner.(storage.ObjectTagsGetter)
+	if !ok {
+		return nil, storage.UnsupportedOperationError{Op: "GetObjectTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
+	return getter.GetObjectTags(bucket, key, versionID)
 }
 
 func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {

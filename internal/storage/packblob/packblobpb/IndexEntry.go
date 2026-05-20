@@ -142,8 +142,28 @@ func (rcv *IndexEntry) SseAlgorithm() []byte {
 	return nil
 }
 
+func (rcv *IndexEntry) Tags(obj *KV, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *IndexEntry) TagsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func IndexEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func IndexEntryAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -174,6 +194,12 @@ func IndexEntryStartUserMetadataVector(builder *flatbuffers.Builder, numElems in
 }
 func IndexEntryAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(sseAlgorithm), 0)
+}
+func IndexEntryAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(tags), 0)
+}
+func IndexEntryStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func IndexEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
