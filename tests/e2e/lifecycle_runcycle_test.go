@@ -24,7 +24,7 @@ func TestLifecycleWorkerE2E(t *testing.T) {
 	})
 
 	t.Run("Cluster4Node", func(t *testing.T) {
-		runLifecycleWorkerCases(t, newDedicatedCluster4NodeS3Target(t, nil))
+		runLifecycleWorkerCases(t, newDedicatedCluster4NodeS3Target(t, []string{"--lifecycle-interval=24h"}))
 	})
 }
 

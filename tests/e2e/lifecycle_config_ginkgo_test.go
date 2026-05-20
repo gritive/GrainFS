@@ -25,7 +25,7 @@ var _ = ginkgo.Describe("Lifecycle config", func() {
 		return tgt, newLifecycleFixture(t, tgt)
 	})
 	describeLifecycleConfigContext("Cluster4Node", func(t testing.TB) (s3Target, *lifecycleFixture) {
-		tgt := newDedicatedCluster4NodeS3Target(t, nil)
+		tgt := newDedicatedCluster4NodeS3Target(t, []string{"--lifecycle-interval=24h"})
 		return tgt, newLifecycleFixture(t, tgt)
 	})
 })
