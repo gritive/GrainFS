@@ -29,9 +29,11 @@ import (
 //     through httptest.NewServer to capture r.URL.Path verbatim. Asserts the
 //     captured path is exactly "/iceberg/v1/oauth/tokens" and the upstream
 //     returns 200.
-//   - CatalogBaseURI_NoTrailingV1 — asserts <endpoint>/iceberg/v1/config is
-//     reachable (200 or 401, NOT 404), proving /v1 is a path component under
-//     the /iceberg catalog base rather than a trailing segment of the base.
+//   - CatalogBaseURI_NoTrailingV1 — asserts <endpoint>/iceberg/v1/config
+//     exists (any non-404 response: 200, 401, or 403), proving /v1 is a path
+//     component under the /iceberg catalog base rather than a trailing segment
+//     of the base. The contract under test is the path string, not the auth
+//     posture, so the assertion is fixture-independent.
 func TestIcebergPathCaptureE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runIcebergPathCaptureCases(t, newSingleNodeIcebergTarget(t))
@@ -120,8 +122,15 @@ func runIcebergPathCaptureOutboundTokenPathExactMatch(t *testing.T, tgt *iceberg
 // runIcebergPathCaptureCatalogBaseURINoTrailingV1 verifies the catalog base
 // URI does NOT carry a trailing "/v1" — /v1 is a path component on
 // individual endpoints (/v1/config, /v1/oauth/tokens, /v1/namespaces, ...).
-// We probe <endpoint>/iceberg/v1/config and require it to exist (200 or 401);
-// a 404 here would mean /v1 is not a path prefix under /iceberg, i.e. the
+//
+// Path-existence check: any non-404 response proves `/iceberg/v1/config`
+// exists under the catalog base. We accept 200 (anon allowed), 401 (bearer
+// required), or 403 (SigV4 fallthrough with no signature) — the contract
+// under test is the path string, not the auth posture. This keeps the
+// assertion fixture-independent across Phase 0 (anon-enabled) and Phase 2
+// (anon-disabled) auth postures.
+//
+// A 404 here would mean /v1 is not a path prefix under /iceberg, i.e. the
 // catalog base has drifted to include /v1.
 func runIcebergPathCaptureCatalogBaseURINoTrailingV1(t *testing.T, tgt *icebergTarget) {
 	t.Helper()
@@ -134,6 +143,10 @@ func runIcebergPathCaptureCatalogBaseURINoTrailingV1(t *testing.T, tgt *icebergT
 
 	require.NotEqual(t, http.StatusNotFound, resp.StatusCode,
 		"catalog must expose /v1/config under /iceberg base (catalog base must NOT include /v1)")
-	require.Contains(t, []int{http.StatusOK, http.StatusUnauthorized}, resp.StatusCode,
-		"expected 200 or 401, got %d", resp.StatusCode)
+	require.Contains(t, []int{
+		http.StatusOK,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+	}, resp.StatusCode,
+		"expected 200/401/403 (path exists, auth posture varies), got %d", resp.StatusCode)
 }
