@@ -1853,7 +1853,15 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 	if storage.IsInternalBucket(bucket) {
 		return b.ReadAt(ctx, bucket, key, offset, buf)
 	}
-	if !obj.IsAppendable && len(obj.Segments) == 0 {
+	placementMeta := PlacementMeta{
+		VersionID:        obj.VersionID,
+		RingVersion:      RingVersion(obj.RingVersion),
+		ECData:           obj.ECData,
+		ECParity:         obj.ECParity,
+		NodeIDs:          obj.NodeIDs,
+		PlacementGroupID: obj.PlacementGroupID,
+	}
+	if !obj.IsAppendable && len(obj.Segments) == 0 && placementMeta.ECData == 0 && placementMeta.RingVersion == 0 && len(placementMeta.NodeIDs) == 0 {
 		return b.ReadAt(ctx, bucket, key, offset, buf)
 	}
 	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
@@ -1861,7 +1869,7 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 	} else if blocked {
 		return 0, objectQuarantinedError(bucket, key, q)
 	}
-	return b.readAtPreparedObject(ctx, bucket, key, obj, PlacementMeta{VersionID: obj.VersionID}, offset, buf)
+	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 }
 
 func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, key string, obj *storage.Object, placementMeta PlacementMeta, offset int64, buf []byte) (int, error) {
@@ -2408,16 +2416,21 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	// result.Tags aliases the caller's slice; do not introduce concurrent
 	// readers/writers on result after this point.
 	return &storage.Object{
-		Key:          plan.Key,
-		Size:         result.Size,
-		ContentType:  plan.ContentType,
-		ETag:         result.ETag,
-		LastModified: modTime,
-		VersionID:    plan.VersionID,
-		UserMetadata: cloneStringMap(plan.UserMetadata),
-		SSEAlgorithm: plan.SSEAlgorithm,
-		Parts:        result.Parts,
-		Tags:         result.Tags,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		LastModified:     modTime,
+		VersionID:        plan.VersionID,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
+		SSEAlgorithm:     plan.SSEAlgorithm,
+		PlacementGroupID: plan.PlacementGroupID,
+		RingVersion:      uint64(result.RingVersion),
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          cloneStringSlice(result.Placement),
+		Parts:            result.Parts,
+		Tags:             result.Tags,
 	}, nil
 }
 
@@ -2458,16 +2471,21 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	observePutStage(metricPath, "propose_meta", stageStart)
 
 	return &storage.Object{
-		Key:          plan.Key,
-		Size:         result.Size,
-		ContentType:  plan.ContentType,
-		ETag:         result.ETag,
-		LastModified: modTime,
-		VersionID:    plan.VersionID,
-		UserMetadata: cloneStringMap(plan.UserMetadata),
-		SSEAlgorithm: plan.SSEAlgorithm,
-		Parts:        result.Parts,
-		Tags:         result.Tags,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		LastModified:     modTime,
+		VersionID:        plan.VersionID,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
+		SSEAlgorithm:     plan.SSEAlgorithm,
+		PlacementGroupID: plan.PlacementGroupID,
+		RingVersion:      uint64(result.RingVersion),
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          cloneStringSlice(result.Placement),
+		Parts:            result.Parts,
+		Tags:             result.Tags,
 	}, nil
 }
 
@@ -2588,16 +2606,21 @@ func (b *DistributedBackend) putObjectSingleLocalShardFromReader(
 	observePutStage("ec_single", "propose_meta", stageStart)
 
 	return &storage.Object{
-		Key:          key,
-		Size:         result.Size,
-		ContentType:  contentType,
-		ETag:         result.ETag,
-		LastModified: result.ModTime,
-		VersionID:    versionID,
-		UserMetadata: cloneStringMap(userMetadata),
-		SSEAlgorithm: sseAlgorithm,
-		Parts:        parts,
-		Tags:         tags,
+		Key:              key,
+		Size:             result.Size,
+		ContentType:      contentType,
+		ETag:             result.ETag,
+		LastModified:     result.ModTime,
+		VersionID:        versionID,
+		UserMetadata:     cloneStringMap(userMetadata),
+		SSEAlgorithm:     sseAlgorithm,
+		PlacementGroupID: placementGroupID,
+		RingVersion:      uint64(result.RingVersion),
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          cloneStringSlice(result.Placement),
+		Parts:            parts,
+		Tags:             tags,
 	}, nil
 }
 
@@ -3245,19 +3268,24 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				return storage.ErrObjectNotFound
 			}
 			obj = storage.Object{
-				Key:          m.Key,
-				Size:         m.Size,
-				ContentType:  m.ContentType,
-				ETag:         m.ETag,
-				LastModified: m.LastModified,
-				VersionID:    versionID,
-				ACL:          m.ACL,
-				UserMetadata: cloneStringMap(m.UserMetadata),
-				SSEAlgorithm: m.SSEAlgorithm,
-				Segments:     m.Segments,
-				Parts:        m.Parts,
-				Coalesced:    coalescedRefsToStorage(m.Coalesced),
-				IsAppendable: m.IsAppendable,
+				Key:              m.Key,
+				Size:             m.Size,
+				ContentType:      m.ContentType,
+				ETag:             m.ETag,
+				LastModified:     m.LastModified,
+				VersionID:        versionID,
+				ACL:              m.ACL,
+				UserMetadata:     cloneStringMap(m.UserMetadata),
+				SSEAlgorithm:     m.SSEAlgorithm,
+				PlacementGroupID: m.PlacementGroupID,
+				RingVersion:      m.RingVersion,
+				ECData:           m.ECData,
+				ECParity:         m.ECParity,
+				NodeIDs:          cloneStringSlice(m.NodeIDs),
+				Segments:         m.Segments,
+				Parts:            m.Parts,
+				Coalesced:        coalescedRefsToStorage(m.Coalesced),
+				IsAppendable:     m.IsAppendable,
 				// Tags copied (not aliased) — m's backing bytes are reused by
 				// badger once the View tx returns.
 				Tags: append([]storage.Tag(nil), m.Tags...),
@@ -4253,19 +4281,24 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 			return storage.ErrMethodNotAllowed
 		}
 		obj = storage.Object{
-			Key:          m.Key,
-			Size:         m.Size,
-			ContentType:  m.ContentType,
-			ETag:         m.ETag,
-			LastModified: m.LastModified,
-			VersionID:    versionID,
-			ACL:          m.ACL,
-			UserMetadata: cloneStringMap(m.UserMetadata),
-			SSEAlgorithm: m.SSEAlgorithm,
-			Segments:     m.Segments,
-			Parts:        m.Parts,
-			Coalesced:    coalescedRefsToStorage(m.Coalesced),
-			IsAppendable: m.IsAppendable,
+			Key:              m.Key,
+			Size:             m.Size,
+			ContentType:      m.ContentType,
+			ETag:             m.ETag,
+			LastModified:     m.LastModified,
+			VersionID:        versionID,
+			ACL:              m.ACL,
+			UserMetadata:     cloneStringMap(m.UserMetadata),
+			SSEAlgorithm:     m.SSEAlgorithm,
+			PlacementGroupID: m.PlacementGroupID,
+			RingVersion:      m.RingVersion,
+			ECData:           m.ECData,
+			ECParity:         m.ECParity,
+			NodeIDs:          cloneStringSlice(m.NodeIDs),
+			Segments:         m.Segments,
+			Parts:            m.Parts,
+			Coalesced:        coalescedRefsToStorage(m.Coalesced),
+			IsAppendable:     m.IsAppendable,
 			// Tags copied (not aliased) — m's backing bytes are reused by
 			// badger once the View tx returns. Mirror of headObjectMeta.
 			Tags: append([]storage.Tag(nil), m.Tags...),

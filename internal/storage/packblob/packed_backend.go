@@ -686,6 +686,19 @@ func (pb *PackedBackend) ReadAt(ctx context.Context, bucket, key string, offset 
 	return ra.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+func (pb *PackedBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *storage.Object, offset int64, buf []byte) (int, error) {
+	if v, packed := pb.index.Load(packedKey{bucket: bucket, key: key}); packed {
+		entry := v.(*indexEntry)
+		if entry.Refcount.Load() > 0 {
+			return pb.ReadAt(ctx, bucket, key, offset, buf)
+		}
+	}
+	if prepared, ok := pb.inner.(storage.PreparedReadAt); ok {
+		return prepared.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+	}
+	return pb.ReadAt(ctx, bucket, key, offset, buf)
+}
+
 // WriteAt is a pass-through to inner. Packed (small S3 object) entries are
 // immutable blob slices and never receive pwrite traffic — internal buckets
 // (NFS4 / VFS Volume Device) live entirely on the inner path, so this is a

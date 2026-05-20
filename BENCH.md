@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 15:14 KST
+Updated: 2026-05-20 15:29 KST
 
 ## Goal
 
@@ -60,6 +60,7 @@ Updated: 2026-05-20 15:14 KST
 | stat      |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
 | versioned |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
 | retention |    0.00 |  19336.57 |      0 |               280.86 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
+| multipart | 2010.59 |    402.12 |      0 |               390.00 | slower than MinIO/RustFS; RSS below MinIO | after prepared ReadAt pass-through; artifact `benchmarks/profiles/grainfs-single-multipart-after-prepared-readat-final-check-20260520-152918` |
 
 ## GrainFS Optimization Notes
 
@@ -75,11 +76,13 @@ Updated: 2026-05-20 15:14 KST
 - `delete` memory candidate 2: Meta Raft snapshots were still created every 1024 applied log entries during object-heavy seed/delete workloads. Architecture review: this is durability-safe but too aggressive for single-node S3 warp because each snapshot serializes the full object index. Fix: raise the snapshot interval to 8192 applied log entries and make the threshold predicate unit-testable. e2e DELETE improved to 17734.67 obj/s with RSS 701.98 MiB. Throughput is well above both baselines, but RSS is still above MinIO DELETE 533.9 MiB and RustFS DELETE 232.11 MiB, so memory work continues.
 - `delete` memory candidate 3: pprof after snapshot threshold showed resident memory dominated by Badger memtable arenas, Badger block-cache allocator, and mmap-backed value logs across many small role DBs rather than the delete handler. Architecture fix: tune `SmallOptions` for GrainFS metadata roles: no block compression, no block cache, 2 MiB memtables, 256 KiB ValueThreshold, and 16 MiB value-log files. A 1 MiB memtable attempt regressed RSS to 547.31 MiB, so it was rejected. Final e2e checks after the accepted option set: PUT 548.30 MiB/s RSS 601.22 MiB, GET 1849.34 MiB/s RSS 767.03 MiB, DELETE 17964.91 obj/s RSS 460.70 MiB.
 - `versioned` candidate 1: architecture review found the existing shard pack was only wired to buffered local shard writes; versioned single-shard PUT uses `WriteLocalShardStreamContext`, so every 64 KiB version created a shard directory, temp file, fsync, and rename. Fix: route bounded streaming shard writes through the existing shard pack when the stream is below the pack threshold, and raise the default shard-pack threshold enough to include the 8-byte EC shard header for 64 KiB objects. e2e VERSIONED improved from 40.37 MiB/s, 645.87 obj/s to 182.82 MiB/s, 2925.17 obj/s; RSS stayed below MinIO at 486.23 MiB.
+- `multipart` candidate 1: architecture review and pprof showed multipart verification reads were entering the range-read fast path but wrapper boundaries dropped the prepared-object metadata, forcing `HeadObject`/Badger value copies before `ReadAt`. Fix: carry EC placement fields on `storage.Object` and preserve `ReadAtObject` through `PackedBackend`. pprof alloc_space fell from 6.88 GiB to 5.35 GiB and `readAtRangeReader.readAt` allocation fell from ~2.43 GiB to ~0.29 GiB, but clean e2e still fails the RustFS throughput gate. Remaining CPU is encrypted shard pread/decrypt plus socket write; next candidate should focus there.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
-- Continue GrainFS single-node benchmark with S3-only service flags: `multipart`, `multipart-put`, `append`.
+- Continue optimizing `multipart`: current clean e2e is 2010.59 MiB/s vs MinIO 3245.85/RustFS 3622.07; RSS is below MinIO.
+- Continue GrainFS single-node benchmark with S3-only service flags after multipart passes: `multipart-put`, `append`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.

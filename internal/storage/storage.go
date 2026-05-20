@@ -17,17 +17,22 @@ var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend
 
 // Object represents a stored object with metadata.
 type Object struct {
-	Key            string
-	Size           int64
-	ContentType    string
-	ETag           string
-	LastModified   int64  // Unix timestamp
-	VersionID      string // non-empty when bucket versioning is Enabled
-	IsDeleteMarker bool   // true when this object is a delete marker
-	ACL            uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
-	UserMetadata   map[string]string
-	SSEAlgorithm   string
-	Segments       []SegmentRef
+	Key              string
+	Size             int64
+	ContentType      string
+	ETag             string
+	LastModified     int64  // Unix timestamp
+	VersionID        string // non-empty when bucket versioning is Enabled
+	IsDeleteMarker   bool   // true when this object is a delete marker
+	ACL              uint8  // s3auth.ACLGrant bitmask; 0 = private (backward compat)
+	UserMetadata     map[string]string
+	SSEAlgorithm     string
+	PlacementGroupID string
+	RingVersion      uint64
+	ECData           uint8
+	ECParity         uint8
+	NodeIDs          []string
+	Segments         []SegmentRef
 	// Coalesced lists merged segment refs produced by background coalesce.
 	// Read path stitches Coalesced first, then Segments. Empty for legacy /
 	// pre-B2 appendable objects.
