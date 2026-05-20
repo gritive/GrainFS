@@ -43,6 +43,10 @@ func TestQUICTransport_SendReceive(t *testing.T) {
 	}
 }
 
+func TestQUICStreamCopyBufferSizedForMultipartRanges(t *testing.T) {
+	require.GreaterOrEqual(t, quicStreamCopyBufferSize, 1<<20)
+}
+
 func TestQUICTransport_CatchAllMissFallsThroughToInbox(t *testing.T) {
 	ctx := context.Background()
 

@@ -30,7 +30,7 @@ const (
 	quicKeepAlivePeriod        = 3 * time.Second
 	quicOpenStreamTimeout      = 750 * time.Millisecond
 	quicMaxRPCStreams          = 4096
-	quicStreamCopyBufferSize   = 256 << 10
+	quicStreamCopyBufferSize   = 1 << 20
 	quicInitialReceiveWindow   = 16 << 20
 	quicMaxStreamReceiveWindow = 32 << 20
 	quicMaxConnReceiveWindow   = 256 << 20
