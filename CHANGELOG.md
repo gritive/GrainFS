@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.300.1] - 2026-05-21
+
+### Tests
+
+- e2e: lifecycle expiration / lifecycle worker / lifecycle replication /
+  object tagging 4개 도메인을 Ginkgo v2 패턴으로 마이그레이션.
+  `BeforeAll`/`Ordered Context`/`NodeTimeout` hook로 fixture-share + spec
+  timeout 강제 → cluster boot 횟수 감소(예: object tagging 14→2회) →
+  e2e 실행 시간 단축.
+
 ## [0.0.300.0] - 2026-05-21 - feat(cli): §8 CLI Surface (config / iam policy+group+bucket / audit / status / iceberg config)
 
 §8 (CLI Surface) of the auth-redesign plan delivers the user-facing
