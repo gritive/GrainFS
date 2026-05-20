@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.275.0] - 2026-05-20 - perf(storage): reduce readamp workload allocation
+
+Follow-up internal test optimization for the read-amplification and block-cache
+workloads. This keeps the behavioral ratios under test while avoiding large
+synthetic object setup and unnecessary whole-buffer growth in hot storage paths.
+
+### Changed
+
+- Scaled `TestReadAmpStorage_Workload` to a smaller CachedBackend capacity while
+  preserving under-cache, over-cache, cold, and hot/cold-skew scenarios.
+- Reduced the block-cache real-vs-simulator workload to thousands of reads
+  without paying for extra metadata-heavy setup.
+- Made SegmentWriter size its first chunk exactly for standard in-memory readers
+  so single-chunk and empty-object writes avoid the extra 16 MiB EOF probe.
+- Replaced profiled `io.ReadAll` cache/segment-reader paths with exact-size
+  reads when object or segment metadata already provides the expected size.
+
 ## [0.0.274.0] - 2026-05-20 - perf(tests): trim remaining internal test latency
 
 Internal Go test runs now spend less time in synthetic setup and teardown while
