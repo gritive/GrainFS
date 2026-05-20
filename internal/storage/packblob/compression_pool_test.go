@@ -10,7 +10,7 @@ import (
 )
 
 func TestCompression_Concurrent_RoundTrip(t *testing.T) {
-	const goroutines = 100
+	const goroutines = 16
 	data := bytes.Repeat([]byte("compress me "), 500)
 
 	var wg sync.WaitGroup

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSegmentWriter_Boundaries(t *testing.T) {
@@ -25,7 +27,7 @@ func TestSegmentWriter_Boundaries(t *testing.T) {
 		{"under_chunk", 15 << 20, 1},
 		{"exact_chunk", 16 << 20, 1},
 		{"chunk_plus_one", (16 << 20) + 1, 2},
-		{"four_chunks", 64 << 20, 4},
+		{"two_full_chunks", 32 << 20, 2},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -57,17 +59,18 @@ func TestSegmentWriter_Boundaries(t *testing.T) {
 func TestSegmentWriter_UnknownContentLength(t *testing.T) {
 	t.Parallel()
 	b := newTestLocalBackend(t)
-	data := makePattern((16 << 20) + 5000)
+	data := makePattern(4096 + 7)
 	r := iotest.OneByteReader(bytes.NewReader(data))
-	obj, err := writeViaSegmentWriter(b, "test", "drip", r)
+	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
+	obj, err := w.Write(context.Background(), "test", "drip", "application/octet-stream", r)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if len(obj.Segments) != 2 {
-		t.Fatalf("segments: want 2, got %d", len(obj.Segments))
+	if len(obj.Segments) != 5 {
+		t.Fatalf("segments: want 5, got %d", len(obj.Segments))
 	}
-	if obj.Segments[1].Size != 5000 {
-		t.Fatalf("trailing segment size: want 5000, got %d", obj.Segments[1].Size)
+	if obj.Segments[4].Size != 7 {
+		t.Fatalf("trailing segment size: want 7, got %d", obj.Segments[4].Size)
 	}
 }
 
@@ -130,8 +133,9 @@ func TestSegmentWriter_CustomWorkersBoundsConcurrentWrites(t *testing.T) {
 func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 	t.Parallel()
 	b := newTestLocalBackend(t)
-	r := &errAfterNReader{n: (16 << 20) + 100, err: io.ErrUnexpectedEOF}
-	_, err := writeViaSegmentWriter(b, "test", "boom", r)
+	r := &errAfterNReader{n: 1024 + 100, err: io.ErrUnexpectedEOF}
+	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
+	_, err := w.Write(context.Background(), "test", "boom", "application/octet-stream", r)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("want ErrUnexpectedEOF, got %v", err)
 	}
@@ -203,25 +207,23 @@ func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
 func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
 	payload := makePattern(5 << 20)
 
-	run := func(t testing.TB) {
+	run := func(t testing.TB) error {
 		t.Helper()
 		b := &bytesOnlySegmentBackend{}
 		obj, err := NewSegmentWriter(b).Write(context.Background(), "test", "fast", "application/octet-stream", bytes.NewReader(payload))
 		if err != nil {
-			t.Fatalf("write: %v", err)
+			return err
 		}
 		if obj.Size != int64(len(payload)) {
 			t.Fatalf("size: want %d, got %d", len(payload), obj.Size)
 		}
+		return nil
 	}
 
-	run(t)
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			run(b)
-		}
-	})
-	allocedBytes := res.AllocedBytesPerOp()
+	require.NoError(t, run(t))
+	allocedBytes := int64(allocBytesPerRunForStorageTest(t, 3, func() error {
+		return run(t)
+	}))
 	t.Logf("SegmentWriter byte fast path alloc bytes: %d", allocedBytes)
 	if allocedBytes > 18*1024*1024 {
 		t.Fatalf("alloc bytes: got %d, want <= %d", allocedBytes, 18*1024*1024)

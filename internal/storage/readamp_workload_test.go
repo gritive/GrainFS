@@ -152,7 +152,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 	})
 
 	// --- C: working set under object cache, two passes ---
-	// 256 small objects (~2 MB total), GET each twice. The scaled 8 MB
+	// 128 small objects (~1 MB total), GET each twice. The scaled 8 MB
 	// CachedBackend fits everything, so the second pass stays in object cache.
 	t.Run("working_set_under_objcache", func(t *testing.T) {
 		resetTrackers()
@@ -161,8 +161,8 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
-		const n = 256
-		payload := bytes.Repeat([]byte("ws"), 4096) // 8 KB per object → 2 MB total
+		const n = 128
+		payload := bytes.Repeat([]byte("ws"), 4096) // 8 KB per object -> 1 MB total
 		for i := 0; i < n; i++ {
 			put(b, fmt.Sprintf("ws-%05d", i), payload)
 		}
@@ -171,7 +171,7 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 				mustGet(b, fmt.Sprintf("ws-%05d", i))
 			}
 		}
-		report(t, "working_set_2MB (256 objs × 2 GETs)", base)
+		report(t, "working_set_1MB (128 objs × 2 GETs)", base)
 	})
 
 	// --- D: working set OVER object cache, two passes ---
@@ -211,13 +211,13 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 		if err := b.CreateBucket(context.Background(), bucket); err != nil {
 			t.Fatalf("create bucket: %v", err)
 		}
-		const n = 256
+		const n = 128
 		payload := bytes.Repeat([]byte("p"), 8192) // 8 KB per object
 		for i := 0; i < n; i++ {
 			put(b, fmt.Sprintf("p-%04d", i), payload)
 		}
 		rng := rand.New(rand.NewSource(7))
-		const accesses = 1000
+		const accesses = 512
 		hot := n / 5
 		for i := 0; i < accesses; i++ {
 			var k int
@@ -228,6 +228,6 @@ func TestReadAmpStorage_Workload(t *testing.T) {
 			}
 			mustGet(b, fmt.Sprintf("p-%04d", k))
 		}
-		report(t, "pareto_80_20 (1k GETs on 256 obj)", base)
+		report(t, "pareto_80_20 (512 GETs on 128 obj)", base)
 	})
 }

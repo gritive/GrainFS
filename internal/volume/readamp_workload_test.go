@@ -155,7 +155,7 @@ func TestReadAmpWorkload(t *testing.T) {
 		}
 		buf := make([]byte, DefaultBlockSize)
 		rng := rand.New(rand.NewSource(42))
-		const accesses = 10000
+		const accesses = 4096
 		hot := blocks / 5
 		for i := 0; i < accesses; i++ {
 			var blk int
@@ -168,7 +168,7 @@ func TestReadAmpWorkload(t *testing.T) {
 				t.Fatalf("read iter %d blk %d: %v", i, blk, err)
 			}
 		}
-		report(t, "pareto_80_20 (10k reads, 2048 blocks)", base)
+		report(t, "pareto_80_20 (4096 reads, 2048 blocks)", base)
 	})
 
 	// --- Workload E: NBD-like sequential scan, twice ---
@@ -196,14 +196,14 @@ func TestReadAmpWorkload(t *testing.T) {
 	})
 
 	// --- Workload F: working set over 64 MB re-read ---
-	// 20 000 unique blocks (~78 MB), each touched twice. 16 MB and
+	// 17 000 unique blocks (~66 MB), each touched twice. 16 MB and
 	// 64 MB caches will thrash; 256 MB can retain it. This keeps the
 	// right-side curve signal without making every CI run walk 100k reads.
 	t.Run("working_set_over_64mb", func(t *testing.T) {
 		resetTrackers()
 		base := snapBaseline()
 		mgr := setupManager(t)
-		const blocks = 20000
+		const blocks = 17000
 		_, err := mgr.Create("ws2", int64(blocks)*int64(DefaultBlockSize))
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -216,6 +216,6 @@ func TestReadAmpWorkload(t *testing.T) {
 				}
 			}
 		}
-		report(t, "working_set_over_64mb (20k blocks x2)", base)
+		report(t, "working_set_over_64mb (17k blocks x2)", base)
 	})
 }

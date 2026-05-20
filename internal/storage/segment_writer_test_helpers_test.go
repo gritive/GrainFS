@@ -3,6 +3,10 @@ package storage
 import (
 	"context"
 	"io"
+	"runtime"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // makePattern returns a deterministic non-repeating byte pattern of length n.
@@ -14,6 +18,19 @@ func makePattern(n int) []byte {
 		out[i] = byte((i * 31) ^ (i >> 8))
 	}
 	return out
+}
+
+func allocBytesPerRunForStorageTest(t testing.TB, runs int, run func() error) uint64 {
+	t.Helper()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		require.NoError(t, run())
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
 }
 
 // errAfterNReader returns n bytes of data then err on subsequent reads.

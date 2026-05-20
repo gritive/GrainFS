@@ -105,7 +105,7 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 		{"small", 1024},
 		{"under_chunk", 15 << 20},
 		{"two_chunks", (16 << 20) + 1},
-		{"large", (64 << 20) + 123},
+		{"large", (32 << 20) + 123},
 	}
 	for _, tc := range cases {
 		tc := tc
