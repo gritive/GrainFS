@@ -52,10 +52,12 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	ss, policyStore = normalizeServerStorage(ss, policyStore)
 	backend := ss.Backend
 	s := &Server{
-		backend:     backend,
-		ops:         ss.Ops,
-		hub:         NewHub(),
-		policyStore: policyStore,
+		backend:                     backend,
+		ops:                         ss.Ops,
+		hub:                         NewHub(),
+		policyStore:                 policyStore,
+		readAfterWriteRetryTimeout:  defaultReadAfterWriteRetryTimeout,
+		readAfterWriteRetryInterval: defaultReadAfterWriteRetryInterval,
 	}
 	for _, opt := range opts {
 		opt(s)

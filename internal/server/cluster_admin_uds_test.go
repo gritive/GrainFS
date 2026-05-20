@@ -253,9 +253,7 @@ func startUDSAdminTestServerWithSrv(t *testing.T, sock string, s *Server) *http.
 
 	go h.Spin() //nolint:errcheck
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = h.Shutdown(ctx)
+		shutdownTestServer(t, h)
 	})
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -265,7 +263,7 @@ func startUDSAdminTestServerWithSrv(t *testing.T, sock string, s *Server) *http.
 			conn.Close()
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	return &http.Client{

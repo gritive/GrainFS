@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -192,7 +193,7 @@ func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) 
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	bopts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	bopts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(bopts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })

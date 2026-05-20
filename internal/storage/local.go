@@ -16,6 +16,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
 )
@@ -60,7 +61,7 @@ func newLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error)
 	}
 
 	dbDir := filepath.Join(root, "meta")
-	opts := badger.DefaultOptions(dbDir).WithLogger(nil)
+	opts := badgerutil.SmallOptions(dbDir)
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)

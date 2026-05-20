@@ -9,6 +9,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func ageNodeStatsForTest(t *testing.T, store *NodeStatsStore, nodeID string, age time.Duration) {
+	t.Helper()
+
+	store.writeMu.Lock()
+	defer store.writeMu.Unlock()
+
+	cur := *store.snap.Load()
+	ns, ok := cur[nodeID]
+	require.True(t, ok, "node stats entry must exist before aging")
+	ns.UpdatedAt = time.Now().Add(-age)
+
+	next := make(map[string]NodeStats, len(cur))
+	for id, existing := range cur {
+		next[id] = existing
+	}
+	next[nodeID] = ns
+	store.snap.Store(&next)
+}
+
 func TestNodeStatsStore_SetAndGet(t *testing.T) {
 	store := NewNodeStatsStore(1 * time.Minute)
 
@@ -42,7 +61,7 @@ func TestNodeStatsStore_TTL(t *testing.T) {
 	_, ok := store.Get("node-a")
 	require.True(t, ok)
 
-	time.Sleep(70 * time.Millisecond)
+	ageNodeStatsForTest(t, store, "node-a", 70*time.Millisecond)
 
 	_, ok = store.Get("node-a")
 	assert.False(t, ok, "expired entry should not be returned")
@@ -54,7 +73,8 @@ func TestNodeStatsStore_TTL_GetAll(t *testing.T) {
 	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 50.0})
 	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})
 
-	time.Sleep(70 * time.Millisecond)
+	ageNodeStatsForTest(t, store, "node-a", 70*time.Millisecond)
+	ageNodeStatsForTest(t, store, "node-b", 70*time.Millisecond)
 
 	all := store.GetAll()
 	assert.Empty(t, all, "expired entries should not appear in GetAll")
@@ -105,7 +125,7 @@ func TestNodeStatsStore_Len_ExcludesExpired(t *testing.T) {
 	store := NewNodeStatsStore(50 * time.Millisecond)
 
 	store.Set(NodeStats{NodeID: "node-a"})
-	time.Sleep(70 * time.Millisecond)
+	ageNodeStatsForTest(t, store, "node-a", 70*time.Millisecond)
 
 	assert.Equal(t, 0, store.Len())
 }
@@ -148,7 +168,7 @@ func TestNodeStatsStore_PurgesExpiredOnSet(t *testing.T) {
 	store := NewNodeStatsStore(50 * time.Millisecond)
 
 	store.Set(NodeStats{NodeID: "node-a"})
-	time.Sleep(70 * time.Millisecond)
+	ageNodeStatsForTest(t, store, "node-a", 70*time.Millisecond)
 
 	// trigger purge via a new Set
 	store.Set(NodeStats{NodeID: "node-b"})
@@ -217,7 +237,7 @@ func TestNodeStatsStore_TTL_PartialExpiry(t *testing.T) {
 	store := NewNodeStatsStore(50 * time.Millisecond)
 
 	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 50.0})
-	time.Sleep(70 * time.Millisecond)
+	ageNodeStatsForTest(t, store, "node-a", 70*time.Millisecond)
 
 	// node-b는 TTL 만료 후에 추가 — 유효해야 함
 	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 40.0})

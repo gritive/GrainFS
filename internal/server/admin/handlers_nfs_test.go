@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
@@ -80,7 +81,7 @@ func (f *fakeNFSDiag) ActiveMountClients(_ string) []string {
 
 func newAdminTestDepsWithNfs(t *testing.T) (*admin.Deps, *fakeBucketOps) {
 	t.Helper()
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -198,7 +199,7 @@ func TestAdminNfsExportDebugSurfacesBackendErrors(t *testing.T) {
 }
 
 func TestAdminNfsExportUpsertPropagationTimeout(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -222,7 +223,7 @@ func TestAdminNfsExportUpsertPropagationTimeout(t *testing.T) {
 }
 
 func TestAdminNfsExportUpsertCapabilityRejectIsUnsupported(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -348,7 +349,7 @@ func TestAdminDeleteBucketCascadesNfsExportAfterBucketDelete(t *testing.T) {
 }
 
 func TestAdminDeleteBucketCleansExportWhenBucketAlreadyMissing(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -375,7 +376,7 @@ func TestAdminDeleteBucketCleansExportWhenBucketAlreadyMissing(t *testing.T) {
 }
 
 func TestAdminDeleteBucketDoesNotRemoveExportWhenBucketDeleteFails(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -419,7 +420,7 @@ func (f *fakeBucketOpsConcurrentExportReadd) ForceDeleteBucket(ctx context.Conte
 }
 
 func TestAdminDeleteBucketClearsConcurrentExportReadd(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -451,7 +452,7 @@ func TestAdminDeleteBucketClearsConcurrentExportReadd(t *testing.T) {
 }
 
 func TestAdminDeleteBucketClearsExportAddedDuringDelete(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -484,7 +485,7 @@ func TestAdminDeleteBucketClearsExportAddedDuringDelete(t *testing.T) {
 }
 
 func TestAdminDeleteBucketLeavesCleanupMarkerWhenCascadeFailsAfterBucketDelete(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)
@@ -521,7 +522,7 @@ type assertAnError struct{}
 func (assertAnError) Error() string { return "raft unavailable" }
 
 func TestAdminNfsExportAllowsMultiNodeWhenBarrierIsWired(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
+	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	store, err := nfsexport.OpenStore(db)

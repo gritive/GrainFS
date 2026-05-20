@@ -50,6 +50,14 @@ func NewSegmentWriter(b segmentWriterBackend) *SegmentWriter {
 	return &SegmentWriter{backend: b, chunkSize: DefaultChunkSize, workers: DefaultPutWorkers}
 }
 
+// NewSegmentWriterWithChunkSize constructs a writer with a custom chunk size.
+func NewSegmentWriterWithChunkSize(b segmentWriterBackend, chunkSize int) *SegmentWriter {
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+	return &SegmentWriter{backend: b, chunkSize: chunkSize, workers: DefaultPutWorkers}
+}
+
 // Write streams r, returning an Object with segments populated and
 // Object.ETag set to md5(plaintext_full) — the simple-PUT rule.
 //
@@ -154,14 +162,14 @@ type chunkJob struct {
 // errors from the source indistinguishable from a normal short final chunk.
 func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<- chunkJob) error {
 	idx := 0
-	buf := make([]byte, w.chunkSize)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		n, readErr := fillChunk(r, buf)
+		body := make([]byte, w.chunkSize)
+		n, readErr := fillChunk(r, body)
 		// Empty-object case: first iteration, no bytes, clean EOF.
 		if n == 0 && errors.Is(readErr, io.EOF) && idx == 0 {
 			select {
@@ -172,8 +180,7 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 			return nil
 		}
 		if n > 0 {
-			body := make([]byte, n)
-			copy(body, buf[:n])
+			body = body[:n]
 			select {
 			case workCh <- chunkJob{idx: idx, body: body}:
 			case <-ctx.Done():

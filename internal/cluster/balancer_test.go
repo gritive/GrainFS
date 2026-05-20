@@ -560,7 +560,7 @@ func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
 	store.Set(NodeStats{NodeID: "self", DiskUsedPct: 10})
 	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{}}
 	cfg := testBalancerConfig()
-	cfg.gossipInterval.Store(100 * time.Millisecond)
+	cfg.gossipInterval.Store(20 * time.Millisecond)
 	cfg.warmupTimeout = 1 * time.Millisecond
 
 	p := NewBalancerProposer("self", store, node, cfg)
@@ -569,15 +569,13 @@ func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
 	go p.Run(ctx)
 	defer p.Stop()
 
-	// At 100ms interval, ~1 tick lands in 150ms (the first ticker.C fires at +100ms).
-	time.Sleep(150 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return p.TickCount() > 0
+	}, 100*time.Millisecond, 2*time.Millisecond, "initial slow ticker must fire")
 	prevTicks := p.TickCount()
 
-	// Speed up the interval. The ticker.Reset path fires from inside the next
-	// tick handler, so we must wait at least one full pre-reset interval
-	// (~100ms) for the reset to take effect.
-	cfg.gossipInterval.Store(10 * time.Millisecond)
-	time.Sleep(250 * time.Millisecond)
-	delta := p.TickCount() - prevTicks
-	assert.Greater(t, delta, int64(5), "ticker should reset to faster interval: got %d ticks in 250ms after speed-up", delta)
+	cfg.gossipInterval.Store(2 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return p.TickCount()-prevTicks > 5
+	}, 100*time.Millisecond, 2*time.Millisecond, "ticker should reset to faster interval")
 }

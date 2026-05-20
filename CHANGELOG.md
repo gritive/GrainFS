@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.271.0] - 2026-05-20 - perf(tests): speed up cluster and server suites
+
+### Changed
+
+- Shortened slow `internal/cluster` tests by replacing fixed sleeps with
+  condition-based waits, tightening MetaRaft/QUIC timing windows, reducing
+  oversized multipart and EC payloads, and using test-only chunk/reply limits
+  where the behavior under test does not require production-sized buffers.
+- Shortened `internal/server` tests by waiting for TCP readiness instead of
+  sleeping, using bounded test shutdowns for Hertz servers, and disabling
+  read-after-write retry only in generic test server helpers so production
+  retry behavior remains unchanged.
+- Reduced Badger allocation pressure in local metadata, audit outbox, and
+  test-only stores by reusing `badgerutil.SmallOptions` for small metadata DBs.
+- Trimmed avoidable storage allocations by letting `SegmentWriter` pass owned
+  chunk buffers directly to byte-oriented segment backends instead of copying
+  each chunk into a second slice.
+
 ## [0.0.270.0] - 2026-05-20 - feat(auth): §4 Iceberg JWT + OAuth + warehouse-aware MetaCatalog
 
 §4 lands the Iceberg Auth layer: clients can now mint short-lived bearer tokens

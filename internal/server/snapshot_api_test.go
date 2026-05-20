@@ -2,15 +2,12 @@ package server
 
 import (
 	"compress/gzip"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -36,11 +33,9 @@ func TestRestoreSnapshotUnsupportedFormatReturnsConflict(t *testing.T) {
 	srv := New(addr, backend, WithDataDir(dataDir))
 	go srv.Run() //nolint:errcheck
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		shutdownTestServer(t, srv)
 	})
-	waitForTestPort(t, addr)
+	waitForTCP(t, addr)
 
 	resp, err := http.Post("http://"+addr+"/admin/snapshots/1/restore", "application/json", nil)
 	require.NoError(t, err)
@@ -68,11 +63,9 @@ func TestRestoreLegacyGzipSnapshotReturnsConflict(t *testing.T) {
 	srv := New(addr, backend, WithDataDir(dataDir))
 	go srv.Run() //nolint:errcheck
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		shutdownTestServer(t, srv)
 	})
-	waitForTestPort(t, addr)
+	waitForTCP(t, addr)
 
 	resp, err := http.Post("http://"+addr+"/admin/snapshots/1/restore", "application/json", nil)
 	require.NoError(t, err)
@@ -111,22 +104,4 @@ func writeLegacySnapshotAPIFile(t *testing.T, path string) {
 	require.NoError(t, json.NewEncoder(gz).Encode(&snapshot.Snapshot{Seq: 1}))
 	require.NoError(t, gz.Close())
 	require.NoError(t, f.Close())
-}
-
-func waitForTestPort(t *testing.T, addr string) {
-	t.Helper()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		if !strings.Contains(err.Error(), "connection refused") {
-			t.Logf("waiting for %s: %v", addr, err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("server %s did not start", addr)
 }

@@ -160,7 +160,7 @@ func TestAuditSearcherClosedOnShutdown(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	require.NoError(t, srv.Shutdown(context.Background()))
+	shutdownTestServer(t, srv)
 	require.True(t, searcher.closed)
 }
 

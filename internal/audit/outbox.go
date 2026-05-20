@@ -8,6 +8,8 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+
+	"github.com/gritive/GrainFS/internal/badgerutil"
 )
 
 var ErrOutboxInvalidEvent = errors.New("audit outbox invalid event")
@@ -28,7 +30,7 @@ type OutboxStats struct {
 
 // OpenOutbox opens or creates a local durable audit outbox.
 func OpenOutbox(dir string) (*Outbox, error) {
-	opts := badger.DefaultOptions(dir).WithLogger(nil)
+	opts := badgerutil.SmallOptions(dir)
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err

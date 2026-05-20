@@ -118,9 +118,9 @@ func TestGetAndHeadObjectRetryTransientReadAfterWriteNotFound(t *testing.T) {
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		_ = s.Shutdown(context.Background())
+		shutdownTestServer(t, s)
 	})
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj", port))
 	require.NoError(t, err)
@@ -150,8 +150,8 @@ func TestGetObjectRetryTransientReadAfterWriteNotFoundBeyondSingleTick(t *testin
 
 	backend := &transientNotFoundBackend{
 		Backend:            local,
-		getFailuresBefore:  20,
-		headFailuresBefore: 20,
+		getFailuresBefore:  5,
+		headFailuresBefore: 5,
 	}
 	s := New("127.0.0.1:0", backend)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -164,12 +164,12 @@ func TestGetObjectRetryTransientReadAfterWriteNotFoundBeyondSingleTick(t *testin
 	require.NoError(t, rc.Close())
 	require.Equal(t, []byte("body"), body)
 	require.Equal(t, "obj", obj.Key)
-	require.Equal(t, int32(21), backend.getFailures.Load())
+	require.Equal(t, int32(6), backend.getFailures.Load())
 
 	got, err := s.headObjectWithReadAfterWriteRetry(ctx, "b", "obj")
 	require.NoError(t, err)
 	require.Equal(t, "obj", got.Key)
-	require.Equal(t, int32(21), backend.headFailures.Load())
+	require.Equal(t, int32(6), backend.headFailures.Load())
 }
 
 func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
@@ -188,9 +188,9 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		_ = s.Shutdown(context.Background())
+		shutdownTestServer(t, s)
 	})
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/obj", port), nil)
 	require.NoError(t, err)
@@ -237,9 +237,9 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		_ = s.Shutdown(context.Background())
+		shutdownTestServer(t, s)
 	})
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	resp, err := http.Get(base + "/b/obj?partNumber=2")
@@ -282,9 +282,9 @@ func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testin
 	}}))
 	go s.Run()
 	t.Cleanup(func() {
-		_ = s.Shutdown(context.Background())
+		shutdownTestServer(t, s)
 	})
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/private", port), nil)
 	require.NoError(t, err)
@@ -315,9 +315,9 @@ func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		_ = s.Shutdown(context.Background())
+		shutdownTestServer(t, s)
 	})
-	time.Sleep(100 * time.Millisecond)
+	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/large.bin", port), nil)
 	require.NoError(t, err)

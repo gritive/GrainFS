@@ -14,6 +14,17 @@ import (
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
+const (
+	testMetaRaftElectionTimeout  = 150 * time.Millisecond
+	testMetaRaftHeartbeatTimeout = 40 * time.Millisecond
+)
+
+func fastMetaRaftConfig(cfg MetaRaftConfig) MetaRaftConfig {
+	cfg.ElectionTimeout = testMetaRaftElectionTimeout
+	cfg.HeartbeatTimeout = testMetaRaftHeartbeatTimeout
+	return cfg
+}
+
 // TestMetaRaft_ThreeNodeBootstrap_E2E spins up a 3-node meta-Raft cluster
 // in-process using MetaTransportFake (no port binding) and verifies:
 //  1. node-0 bootstraps and becomes leader
@@ -150,12 +161,12 @@ func TestMetaRaft_QUICStaticFiveNodeBootstrap_E2E(t *testing.T) {
 			}
 		}
 
-		m, err := NewMetaRaft(MetaRaftConfig{
+		m, err := NewMetaRaft(fastMetaRaftConfig(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
 			RaftID:  addrs[i],
 			Peers:   peers,
 			DataDir: t.TempDir(),
-		})
+		}))
 		require.NoError(t, err)
 		tr := transport.MustNewQUICTransport("meta-raft-quic-test")
 		require.NoError(t, tr.Listen(context.Background(), addrs[i]))
@@ -236,16 +247,19 @@ func TestMetaRaft_QUICStaticFiveNodeSharedWithDataRaft_E2E(t *testing.T) {
 			}
 		}
 
-		dataNode, dataClose, err := newRaftNode(raft.DefaultConfig(addrs[i], peers), "")
+		dataCfg := raft.DefaultConfig(addrs[i], peers)
+		dataCfg.ElectionTimeout = testMetaRaftElectionTimeout
+		dataCfg.HeartbeatTimeout = testMetaRaftHeartbeatTimeout
+		dataNode, dataClose, err := newRaftNode(dataCfg, "")
 		require.NoError(t, err)
 		dataRPC := NewRaftQUICRPCTransport(transports[i], dataNode)
 		dataRPC.SetTransport()
-		metaNode, err := NewMetaRaft(MetaRaftConfig{
+		metaNode, err := NewMetaRaft(fastMetaRaftConfig(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
 			RaftID:  addrs[i],
 			Peers:   peers,
 			DataDir: t.TempDir(),
-		})
+		}))
 		require.NoError(t, err)
 		metaTransport := NewMetaTransportQUIC(transports[i], metaNode.Node())
 		metaNode.SetTransport(metaTransport)

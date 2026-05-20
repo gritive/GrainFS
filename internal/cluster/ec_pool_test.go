@@ -3,10 +3,25 @@ package cluster
 import (
 	"bytes"
 	"io"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func allocBytesPerRunForTest(t *testing.T, runs int, run func() error) uint64 {
+	t.Helper()
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		require.NoError(t, run())
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
+}
 
 func TestECSplit_AllocsBounded(t *testing.T) {
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
@@ -51,12 +66,7 @@ func TestECReconstructStreamTo_AllocBytesBounded(t *testing.T) {
 	}
 
 	require.NoError(t, run())
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			require.NoError(b, run())
-		}
-	})
-	allocedBytes := res.AllocedBytesPerOp()
+	allocedBytes := int64(allocBytesPerRunForTest(t, 3, run))
 	t.Logf("ECReconstructStreamTo alloc bytes after pool: %d", allocedBytes)
 	if allocedBytes > 256*1024 {
 		t.Errorf("ECReconstructStreamTo allocates %d B/op (want ≤256KiB)", allocedBytes)
@@ -81,12 +91,7 @@ func TestECReconstructStreamTo_MissingDataShardAllocBytesBounded(t *testing.T) {
 	}
 
 	require.NoError(t, run())
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			require.NoError(b, run())
-		}
-	})
-	allocedBytes := res.AllocedBytesPerOp()
+	allocedBytes := int64(allocBytesPerRunForTest(t, 3, run))
 	t.Logf("ECReconstructStreamTo missing data shard alloc bytes: %d", allocedBytes)
 	require.LessOrEqualf(t, allocedBytes, int64(12*1024*1024),
 		"ECReconstructStreamTo missing data shard allocates %d B/op (want ≤12MiB)", allocedBytes)

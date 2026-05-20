@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 )
 
@@ -29,7 +30,7 @@ func TestLifecycleStatus_NilService_Returns503(t *testing.T) {
 
 func TestLifecycleStatus_WithService_Returns200(t *testing.T) {
 	dbDir := t.TempDir()
-	opts := badger.DefaultOptions(dbDir).WithLogger(nil)
+	opts := badgerutil.SmallOptions(dbDir)
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })

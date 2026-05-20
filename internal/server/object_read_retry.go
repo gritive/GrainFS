@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	readAfterWriteRetryTimeout  = 500 * time.Millisecond
-	readAfterWriteRetryInterval = 10 * time.Millisecond
+	defaultReadAfterWriteRetryTimeout  = 500 * time.Millisecond
+	defaultReadAfterWriteRetryInterval = 10 * time.Millisecond
 )
 
 func (s *Server) getObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
-	result, err := retryReadAfterWrite(ctx, func() (objectReadResult, error) {
+	result, err := retryReadAfterWrite(ctx, s.readAfterWriteRetryTimeout, s.readAfterWriteRetryInterval, func() (objectReadResult, error) {
 		rc, obj, err := s.ops.GetObject(ctx, bucket, key)
 		return objectReadResult{body: rc, object: obj}, err
 	})
@@ -30,7 +30,7 @@ func (s *Server) loadObjectForGet(ctx context.Context, bucket, key, versionID st
 }
 
 func (s *Server) headObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	return retryReadAfterWrite(ctx, func() (*storage.Object, error) {
+	return retryReadAfterWrite(ctx, s.readAfterWriteRetryTimeout, s.readAfterWriteRetryInterval, func() (*storage.Object, error) {
 		return s.ops.HeadObject(ctx, bucket, key)
 	})
 }
@@ -40,22 +40,27 @@ type objectReadResult struct {
 	object *storage.Object
 }
 
-func retryReadAfterWrite[T any](ctx context.Context, lookup func() (T, error)) (T, error) {
-	deadline := time.Now().Add(readAfterWriteRetryTimeout)
+func retryReadAfterWrite[T any](ctx context.Context, timeout, interval time.Duration, lookup func() (T, error)) (T, error) {
+	result, err := lookup()
+	if timeout <= 0 || !errors.Is(err, storage.ErrObjectNotFound) {
+		return result, err
+	}
+
+	deadline := time.Now().Add(timeout)
 	var zero T
-	var lastErr error
+	lastErr := err
 	for {
-		result, err := lookup()
+		if time.Now().After(deadline) {
+			return zero, lastErr
+		}
+		if !sleepReadAfterWriteRetry(ctx, interval) {
+			return zero, ctx.Err()
+		}
+		result, err = lookup()
 		if !errors.Is(err, storage.ErrObjectNotFound) {
 			return result, err
 		}
 		lastErr = err
-		if time.Now().After(deadline) {
-			return zero, lastErr
-		}
-		if !sleepReadAfterWriteRetry(ctx) {
-			return zero, ctx.Err()
-		}
 	}
 }
 
@@ -70,8 +75,8 @@ func (s *Server) loadCopySourceObject(ctx context.Context, src storage.ObjectRef
 	return s.ops.HeadObject(ctx, src.Bucket, src.Key)
 }
 
-func sleepReadAfterWriteRetry(ctx context.Context) bool {
-	timer := time.NewTimer(readAfterWriteRetryInterval)
+func sleepReadAfterWriteRetry(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

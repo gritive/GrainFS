@@ -17,6 +17,8 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+var testMultipartMinPartBody = bytes.Repeat([]byte("a"), 5<<20)
+
 func uploadTestPart(t *testing.T, b *DistributedBackend, uploadID string, partNumber int, body []byte) storage.Part {
 	t.Helper()
 	part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", uploadID, partNumber, bytes.NewReader(body))
@@ -29,7 +31,7 @@ func TestBuildMultipartCompleteManifestRejectsDuplicatePartNumber(t *testing.T) 
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	p := uploadTestPart(t, b, up.UploadID, 1, testMultipartMinPartBody)
 
 	_, err = b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p, p})
 	require.ErrorIs(t, err, storage.ErrInvalidPart)
@@ -65,7 +67,7 @@ func TestBuildMultipartCompleteManifestRejectsETagMismatch(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1 := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	p1 := uploadTestPart(t, b, up.UploadID, 1, testMultipartMinPartBody)
 	p2 := uploadTestPart(t, b, up.UploadID, 2, []byte("tail"))
 	p2.ETag = "not-the-real-etag"
 
@@ -78,7 +80,7 @@ func TestBuildMultipartCompleteManifestRejectsMissingPartFile(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1 := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	p1 := uploadTestPart(t, b, up.UploadID, 1, testMultipartMinPartBody)
 	p2 := uploadTestPart(t, b, up.UploadID, 2, []byte("tail"))
 	require.NoError(t, os.Remove(b.partPath(up.UploadID, 2)))
 
@@ -94,7 +96,7 @@ func TestBuildMultipartCompleteManifestRejectsUnreadablePartFile(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	p := uploadTestPart(t, b, up.UploadID, 1, testMultipartMinPartBody)
 	partPath := b.partPath(up.UploadID, 1)
 	require.NoError(t, os.Chmod(partPath, 0))
 	t.Cleanup(func() {
@@ -125,7 +127,7 @@ func TestBuildMultipartCompleteManifestReturnsSortedPartsAndTotalSize(t *testing
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1 := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	p1 := uploadTestPart(t, b, up.UploadID, 1, testMultipartMinPartBody)
 	p2 := uploadTestPart(t, b, up.UploadID, 2, []byte("tail"))
 
 	manifest, err := b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p2, p1})
@@ -143,7 +145,7 @@ func TestMultipartCompleteManifestReaderStreamsInOrder(t *testing.T) {
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1Body := bytes.Repeat([]byte("a"), 5<<20)
+	p1Body := testMultipartMinPartBody
 	p2Body := []byte("tail")
 	p1 := uploadTestPart(t, b, up.UploadID, 1, p1Body)
 	p2 := uploadTestPart(t, b, up.UploadID, 2, p2Body)
@@ -156,7 +158,9 @@ func TestMultipartCompleteManifestReaderStreamsInOrder(t *testing.T) {
 	closeErr := rc.Close()
 	require.NoError(t, readErr)
 	require.NoError(t, closeErr)
-	require.Equal(t, append(append([]byte{}, p1Body...), p2Body...), got)
+	require.Equal(t, len(p1Body)+len(p2Body), len(got))
+	require.Equal(t, p1Body, got[:len(p1Body)])
+	require.Equal(t, p2Body, got[len(p1Body):])
 }
 
 func TestMultipartCompleteManifestOpenReturnsFreshReaders(t *testing.T) {
@@ -264,7 +268,7 @@ func TestMultipartCompleteManifestReaderPropagatesDeletedPartOnOpen(t *testing.T
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1 := uploadTestPart(t, b, up.UploadID, 1, bytes.Repeat([]byte("a"), 5<<20))
+	p1 := uploadTestPart(t, b, up.UploadID, 1, testMultipartMinPartBody)
 	p2 := uploadTestPart(t, b, up.UploadID, 2, []byte("tail"))
 
 	manifest, err := b.buildMultipartCompleteManifest(up.UploadID, []storage.Part{p1, p2})
@@ -349,7 +353,7 @@ func TestMultipartCompleteManifestEncryptedReaderReturnsPlaintext(t *testing.T) 
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1Body := bytes.Repeat([]byte("a"), 5<<20)
+	p1Body := testMultipartMinPartBody
 	p2Body := []byte("tail")
 	p1 := uploadTestPart(t, b, up.UploadID, 1, p1Body)
 	p2 := uploadTestPart(t, b, up.UploadID, 2, p2Body)

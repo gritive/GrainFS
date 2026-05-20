@@ -11,58 +11,65 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func TestClusterSegmentStore_OpenSegment_LocalDataShard(t *testing.T) {
+func TestChunkedSegmentStore_RoutesAndReads(t *testing.T) {
 	b, bucket, key, body := putChunkedTestObject(t)
 	obj, err := b.HeadObject(context.Background(), bucket, key)
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.Segments)
 
-	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
-	rc, err := store.OpenSegment(context.Background(), obj.Segments[0])
-	require.NoError(t, err)
-	defer rc.Close()
+	t.Run("OpenSegment_LocalDataShard", func(t *testing.T) {
+		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+		rc, err := store.OpenSegment(context.Background(), obj.Segments[0])
+		require.NoError(t, err)
+		defer rc.Close()
 
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, body[:storage.DefaultChunkSize], got)
-}
+		got, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.Equal(t, body[:obj.Segments[0].Size], got)
+	})
 
-func TestGetObject_ChunkedRoutesToSegmentStore(t *testing.T) {
-	b, bucket, key, body := putChunkedTestObject(t)
+	t.Run("GetObject_ChunkedRoutesToSegmentStore", func(t *testing.T) {
+		rc, gotObj, err := b.GetObject(context.Background(), bucket, key)
+		require.NoError(t, err)
+		require.NotNil(t, gotObj)
+		defer rc.Close()
 
-	rc, obj, err := b.GetObject(context.Background(), bucket, key)
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-	defer rc.Close()
+		got, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.Equal(t, body, got)
+	})
 
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, body, got)
-}
+	t.Run("GetObjectVersion_ChunkedRoutesToSegmentStore", func(t *testing.T) {
+		require.NotEmpty(t, obj.VersionID)
 
-func TestGetObjectVersion_ChunkedRoutesToSegmentStore(t *testing.T) {
-	b, bucket, key, body := putChunkedTestObject(t)
-	head, err := b.HeadObject(context.Background(), bucket, key)
-	require.NoError(t, err)
-	require.NotEmpty(t, head.VersionID)
-	require.NotEmpty(t, head.Segments)
+		versionHead, err := b.HeadObjectVersion(bucket, key, obj.VersionID)
+		require.NoError(t, err)
+		require.NotEmpty(t, versionHead.Segments)
 
-	versionHead, err := b.HeadObjectVersion(bucket, key, head.VersionID)
-	require.NoError(t, err)
-	require.NotEmpty(t, versionHead.Segments)
+		rc, gotObj, err := b.GetObjectVersion(bucket, key, obj.VersionID)
+		require.NoError(t, err)
+		require.NotNil(t, gotObj)
+		defer rc.Close()
 
-	rc, obj, err := b.GetObjectVersion(bucket, key, head.VersionID)
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-	defer rc.Close()
+		got, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.Equal(t, body, got)
+	})
 
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, body, got)
+	t.Run("ReadAt_CrossSegmentBoundary", func(t *testing.T) {
+		offset := obj.Segments[0].Size - 3
+		buf := make([]byte, 8)
+
+		n, err := b.ReadAt(context.Background(), bucket, key, offset, buf)
+		require.NoError(t, err)
+		require.Equal(t, len(buf), n)
+		require.Equal(t, body[offset:offset+int64(len(buf))], buf)
+	})
 }
 
 func TestCompleteMultipartUpload_ChunkedObjectPreservesParts(t *testing.T) {
 	b := setupECBackend(t)
+	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
 	}})
@@ -71,7 +78,7 @@ func TestCompleteMultipartUpload_ChunkedObjectPreservesParts(t *testing.T) {
 		bucket = "chunked-multipart-bucket"
 		key    = "large-multipart-object"
 	)
-	part1 := makeChunkedTestBody(storage.DefaultChunkSize)
+	part1 := makeChunkedTestBody(testChunkedMultipartChunkSize)
 	part2 := makeChunkedTestBody(4096)
 	want := append(append([]byte(nil), part1...), part2...)
 
@@ -131,17 +138,6 @@ func TestGetObject_AppendableNotRoutedToChunked(t *testing.T) {
 	require.Equal(t, []byte("hello world"), got)
 }
 
-func TestReadAt_Chunked_CrossSegmentBoundary(t *testing.T) {
-	b, bucket, key, body := putChunkedTestObject(t)
-	offset := int64(storage.DefaultChunkSize - 3)
-	buf := make([]byte, 8)
-
-	n, err := b.ReadAt(context.Background(), bucket, key, offset, buf)
-	require.NoError(t, err)
-	require.Equal(t, len(buf), n)
-	require.Equal(t, body[offset:offset+int64(len(buf))], buf)
-}
-
 func TestChunkedSegmentWindow_SelectsOnlyOverlappingSegments(t *testing.T) {
 	refs := []storage.SegmentRef{
 		{BlobID: "seg-0", Size: 10},
@@ -178,6 +174,7 @@ func TestClusterSegmentStore_PlacementRecordRequiresStoredPlacement(t *testing.T
 func putChunkedTestObject(t *testing.T) (*DistributedBackend, string, string, []byte) {
 	t.Helper()
 	b := setupECBackend(t)
+	b.chunkedPutChunkSize = testChunkedPutChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
 	}})
@@ -186,10 +183,13 @@ func putChunkedTestObject(t *testing.T) (*DistributedBackend, string, string, []
 		bucket = "chunked-bucket"
 		key    = "large-object"
 	)
-	body := makeChunkedTestBody(storage.DefaultChunkSize + 4096)
+	body := makeChunkedTestBody(testChunkedPutChunkSize + 4096)
+	sp := makeSpool(t, body)
 
 	require.NoError(t, b.CreateBucket(context.Background(), bucket))
-	_, err := b.PutObject(context.Background(), bucket, key, bytes.NewReader(body), "application/octet-stream")
+	_, err := b.putObjectChunked(context.Background(),
+		bucket, key, "v1", sp, "application/octet-stream",
+		nil, "", 0, false, "", nil, nil, nil)
 	require.NoError(t, err)
 
 	return b, bucket, key, body

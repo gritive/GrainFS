@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 
@@ -112,6 +113,9 @@ type Server struct {
 	jwtKeys       *iamjwt.KeySet
 	oauthHandler  *icebergOAuthHandler
 	bearerCfg     s3auth.ConfigReader // iam.anon-enabled check for bearer JWT path
+
+	readAfterWriteRetryTimeout  time.Duration
+	readAfterWriteRetryInterval time.Duration
 
 	// Iceberg §9.1 진단 계측 (default OFF). NewWithServerStorage가 boot 시 ENV에서 읽는다.
 	icebergAccessLogEnabled      atomic.Bool

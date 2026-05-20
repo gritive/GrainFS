@@ -69,6 +69,45 @@ func TestSegmentWriter_UnknownContentLength(t *testing.T) {
 	}
 }
 
+func TestSegmentWriter_CustomChunkSize(t *testing.T) {
+	t.Parallel()
+	b := newTestLocalBackend(t)
+	data := makePattern(4096 + 7)
+
+	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
+	obj, err := w.Write(context.Background(), "test", "small-chunks", "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(obj.Segments) != 5 {
+		t.Fatalf("segments: want 5, got %d", len(obj.Segments))
+	}
+	if obj.Segments[4].Size != 7 {
+		t.Fatalf("trailing segment size: want 7, got %d", obj.Segments[4].Size)
+	}
+}
+
+func TestSegmentWriter_UsesByteWriterFastPath(t *testing.T) {
+	t.Parallel()
+	b := &byteWriterBackend{}
+	data := makePattern(2048)
+
+	w := NewSegmentWriterWithChunkSize(b, 1024)
+	obj, err := w.Write(context.Background(), "test", "fast-path", "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if b.readerCalls != 0 {
+		t.Fatalf("reader path calls: want 0, got %d", b.readerCalls)
+	}
+	if b.byteCalls != 2 {
+		t.Fatalf("byte path calls: want 2, got %d", b.byteCalls)
+	}
+	if len(obj.Segments) != 2 {
+		t.Fatalf("segments: want 2, got %d", len(obj.Segments))
+	}
+}
+
 func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 	t.Parallel()
 	b := newTestLocalBackend(t)

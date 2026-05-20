@@ -55,12 +55,12 @@ func TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E(t *testing.T) {
 		mux := raft.NewGroupRaftQUICMux(tr)
 		mux.EnableMux(2, 5*time.Millisecond)
 
-		m, err := NewMetaRaft(MetaRaftConfig{
+		m, err := NewMetaRaft(fastMetaRaftConfig(MetaRaftConfig{
 			NodeID:  fmt.Sprintf("node-%d", i),
 			RaftID:  addrs[i],
 			Peers:   peers,
 			DataDir: t.TempDir(),
-		})
+		}))
 		require.NoError(t, err)
 
 		metaTransport := NewMetaTransportQUICMux(tr, m.Node(), mux)

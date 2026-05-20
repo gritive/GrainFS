@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testForwardReplyBytesLimit = 64 * 1024
+
 // TestForwardReceiver_PutObject_DispatchesToBackend verifies PutObject operation
 // is properly decoded and routed through the ForwardReceiver.
 //
@@ -85,10 +87,11 @@ func TestForwardReceiver_GetObject_DispatchesToBackend(t *testing.T) {
 
 func TestForwardReceiver_GetObjectVersion_TooLargeReturnsEntityTooLarge(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
+	rcv.maxForwardReplyBytes = testForwardReplyBytesLimit
 	gb := newTestGroupBackend(t, "g1")
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)), "application/octet-stream")
+	obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), testForwardReplyBytesLimit+1)), "application/octet-stream")
 	require.NoError(t, err)
 
 	payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
@@ -101,10 +104,11 @@ func TestForwardReceiver_GetObjectVersion_TooLargeReturnsEntityTooLarge(t *testi
 
 func TestForwardReceiver_GetObjectVersionRead_StreamsAboveReplyCap(t *testing.T) {
 	rcv, mgr := setupReceiver(t, "node1")
+	rcv.maxForwardReplyBytes = testForwardReplyBytesLimit
 	gb := newTestGroupBackend(t, "g1")
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-	body := bytes.Repeat([]byte("x"), int(DefaultMaxForwardReplyBytes)+1)
+	body := bytes.Repeat([]byte("x"), testForwardReplyBytesLimit+1)
 	obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(body), "application/octet-stream")
 	require.NoError(t, err)
 

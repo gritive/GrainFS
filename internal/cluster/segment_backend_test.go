@@ -35,7 +35,6 @@ type fakeSegmentBackendDeps struct {
 	writeRecord []ShardGroupEntry      // recorded chosen group per write call
 	writePeer   func(idx int) []string // override peer list per call
 	writeMu     sync.Mutex
-	writtenData map[int][]byte // idx → data bytes echoed back
 
 	deleteCalls []deleteCall
 
@@ -68,10 +67,6 @@ func (f *fakeSegmentBackendDeps) writeSegment(ctx context.Context, idx int, in w
 	if err, ok := f.writeErrAt[idx]; ok {
 		return PlacementRecord{}, "", "", err
 	}
-	if f.writtenData == nil {
-		f.writtenData = make(map[int][]byte)
-	}
-	f.writtenData[idx] = append([]byte(nil), in.Data...)
 	f.writeRecord = append(f.writeRecord, in.Group)
 	var peers []string
 	if f.writePeer != nil {
@@ -114,6 +109,12 @@ func newCSBWithDeps(deps *fakeSegmentBackendDeps, blobIDs []string) *clusterSegm
 		proposeFn:       deps.propose,
 		ecConfigFn:      func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
 	}
+}
+
+func newCSBWithTestChunks(deps *fakeSegmentBackendDeps, blobIDs []string) *clusterSegmentBackend {
+	csb := newCSBWithDeps(deps, blobIDs)
+	csb.chunkSize = testChunkedPutChunkSize
+	return csb
 }
 
 // fourPGFixture returns 4 placement groups, each with K+M=6 peers.
@@ -176,6 +177,8 @@ func TestClusterSegmentBackend_WriteSegment_RecordsPlacement(t *testing.T) {
 	}
 }
 
+const testChunkedPutChunkSize = 64 << 10
+
 // makeSpool writes payload to a temp file and returns a *spooledObject.
 func makeSpool(t *testing.T, payload []byte) *spooledObject {
 	t.Helper()
@@ -203,7 +206,7 @@ func chunkFanoutMetricCount(t *testing.T) uint64 {
 }
 
 func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("A"), 4*chunk) // exactly 4 segments
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -212,7 +215,7 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	body, err := sp.Open()
 	require.NoError(t, err)
@@ -283,7 +286,7 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 }
 
 func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("M"), 4*chunk) // exactly 4 segments
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -292,7 +295,7 @@ func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	before := chunkFanoutMetricCount(t)
 	body, err := sp.Open()
@@ -308,7 +311,7 @@ func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
 }
 
 func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("B"), 3*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -318,7 +321,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	body, err := sp.Open()
 	require.NoError(t, err)
@@ -351,7 +354,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 	// beforeCommit hook failure exercises the same defer-cleanup path as
 	// the chunker-error case: all completed segments must be torn down
 	// before returning, and no raft commit must happen.
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("F"), 2*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -360,7 +363,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	hookErr := errors.New("beforeCommit failed (e.g. quota check)")
 	body, err := sp.Open()
@@ -384,7 +387,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 }
 
 func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("D"), 2*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -394,7 +397,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	body, err := sp.Open()
 	require.NoError(t, err)
@@ -419,7 +422,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 }
 
 func TestPutObjectChunked_PartialFailRollsBackBlobs_DeleteShardsBestEffort(t *testing.T) {
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("E"), 2*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -430,7 +433,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_DeleteShardsBestEffort(t *te
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	body, err := sp.Open()
 	require.NoError(t, err)
@@ -487,7 +490,7 @@ func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 // without a Tags field — applyPutObjectMeta then wrote empty Tags,
 // clobbering any caller-supplied tags on every large-object PUT.
 func TestChunkedPut_PreservesTags(t *testing.T) {
-	chunk := storage.DefaultChunkSize
+	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("T"), 2*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -496,7 +499,7 @@ func TestChunkedPut_PreservesTags(t *testing.T) {
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	wantTags := []storage.Tag{
 		{Key: "env", Value: "prod"},
@@ -585,12 +588,11 @@ func (e *errReaderAfter) Read(p []byte) (int, error) {
 // completed before the failure (and any partial blobs recorded in
 // placements), with no PutObjectMetaCmd proposed.
 func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
-	chunk := int64(storage.DefaultChunkSize)
-	// 48 MiB of payload, but the wrapped reader will error at byte 24 MiB —
-	// after segment 0's full 16 MiB has been delivered and 8 MiB into
-	// segment 1's chunk read.
+	chunk := int64(testChunkedPutChunkSize)
+	// Three chunks of payload, but the wrapped reader will error halfway
+	// through segment 1's chunk read.
 	totalPayload := 3 * chunk
-	errAt := chunk + (chunk / 2) // 24 MiB
+	errAt := chunk + (chunk / 2)
 	payload := bytes.Repeat([]byte("C"), int(totalPayload))
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
@@ -601,7 +603,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 	for i := range blobIDs {
 		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
 	}
-	csb := newCSBWithDeps(deps, blobIDs)
+	csb := newCSBWithTestChunks(deps, blobIDs)
 
 	spBody, err := sp.Open()
 	require.NoError(t, err)
@@ -640,5 +642,5 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 			"placement[%d] blob %s must be cleaned up on chunker error", i, p.BlobID)
 	}
 	assert.True(t, recordedAny,
-		"chunker error after 24 MiB must have allowed at least segment 0 to record a placement")
+		"chunker error after segment 0 must have allowed at least one placement to be recorded")
 }

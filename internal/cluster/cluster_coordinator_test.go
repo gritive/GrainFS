@@ -713,16 +713,7 @@ func TestClusterCoordinator_PutObjectWithResultUsesObjectIndexForMissingPrevious
 
 func TestClusterCoordinator_ListObjects_UsesObjectIndexAcrossPlacementGroups(t *testing.T) {
 	base := &fakeBackend{listResult: []string{"photos"}}
-	gb1 := newTestGroupBackend(t, "group-1")
-	gb2 := newTestGroupBackend(t, "group-2")
-	a, err := gb1.PutObject(context.Background(), "photos", "a.txt", strings.NewReader("a"), "text/plain")
-	require.NoError(t, err)
-	b, err := gb2.PutObject(context.Background(), "photos", "b.txt", strings.NewReader("bb"), "text/plain")
-	require.NoError(t, err)
-
 	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb1))
-	mgr.Add(NewDataGroupWithBackend("group-2", []string{"test-node"}, gb2))
 	router := NewRouter(mgr)
 	router.AssignBucket("photos", "group-1")
 	meta := NewMetaFSM()
@@ -730,14 +721,14 @@ func TestClusterCoordinator_ListObjects_UsesObjectIndexAcrossPlacementGroups(t *
 	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-2", []string{"test-node"})))
 	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
 	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
-		Bucket: "photos", Key: "a.txt", VersionID: a.VersionID,
-		PlacementGroupID: "group-1", Size: a.Size, ContentType: a.ContentType,
-		ETag: a.ETag, ModTime: a.LastModified,
+		Bucket: "photos", Key: "a.txt", VersionID: "v-a",
+		PlacementGroupID: "group-1", Size: 1, ContentType: "text/plain",
+		ETag: "etag-a", ModTime: 100,
 	}, false)))
 	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
-		Bucket: "photos", Key: "b.txt", VersionID: b.VersionID,
-		PlacementGroupID: "group-2", Size: b.Size, ContentType: b.ContentType,
-		ETag: b.ETag, ModTime: b.LastModified,
+		Bucket: "photos", Key: "b.txt", VersionID: "v-b",
+		PlacementGroupID: "group-2", Size: 2, ContentType: "text/plain",
+		ETag: "etag-b", ModTime: 200,
 	}, false)))
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
 		WithObjectIndexProposer(noopObjectIndexProposer{})

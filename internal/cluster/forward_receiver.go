@@ -28,8 +28,9 @@ type ForwardReceiver struct {
 	// scrubLookup is wired via WithScrubSessionLookup; reads happen on every
 	// inbound forward and writes only at startup, but we use atomic.Pointer
 	// so -race is clean even if rewiring ever lands.
-	scrubLookup   atomic.Pointer[ScrubSessionLookup]
-	indexProposer objectIndexProposer // nil = no index commit (single-node / test)
+	scrubLookup          atomic.Pointer[ScrubSessionLookup]
+	indexProposer        objectIndexProposer // nil = no index commit (single-node / test)
+	maxForwardReplyBytes int64               // zero uses DefaultMaxForwardReplyBytes
 }
 
 const (
@@ -117,6 +118,13 @@ func putForwardReadAtBuffer(buf []byte, class int) {
 
 func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 	return &ForwardReceiver{groups: groups}
+}
+
+func (r *ForwardReceiver) forwardReplyBytesLimit() int64 {
+	if r.maxForwardReplyBytes > 0 {
+		return r.maxForwardReplyBytes
+	}
+	return DefaultMaxForwardReplyBytes
 }
 
 // WithScrubSessionLookup wires the per-node Director session lookup so the
@@ -559,11 +567,12 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) *transport
 		return statusReply(mapErrorToStatus(err))
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(io.LimitReader(rc, DefaultMaxForwardReplyBytes+1))
+	replyLimit := r.forwardReplyBytesLimit()
+	body, err := io.ReadAll(io.LimitReader(rc, replyLimit+1))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if int64(len(body)) > DefaultMaxForwardReplyBytes {
+	if int64(len(body)) > replyLimit {
 		return statusReply(raftpb.ForwardStatusEntityTooLarge)
 	}
 	if obj.Size != int64(len(body)) {
@@ -588,11 +597,12 @@ func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) *tr
 		return statusReply(mapErrorToStatus(err))
 	}
 	defer rc.Close()
-	body, err := io.ReadAll(io.LimitReader(rc, DefaultMaxForwardReplyBytes+1))
+	replyLimit := r.forwardReplyBytesLimit()
+	body, err := io.ReadAll(io.LimitReader(rc, replyLimit+1))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	if int64(len(body)) > DefaultMaxForwardReplyBytes {
+	if int64(len(body)) > replyLimit {
 		return statusReply(raftpb.ForwardStatusEntityTooLarge)
 	}
 	if obj.Size != int64(len(body)) {

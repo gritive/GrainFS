@@ -96,7 +96,7 @@ func TestClusterPutGet_10MiB_2plus2_RoundTrip(t *testing.T) {
 	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 2})
 
 	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
-	input := append(bytes.Repeat([]byte{'A'}, 5<<20), bytes.Repeat([]byte{'B'}, 5<<20)...)
+	input := makeABPayload(5 << 20)
 	_, err := backend.PutObject(context.Background(), "b", "k", bytes.NewReader(input), "application/octet-stream")
 	require.NoError(t, err)
 
@@ -209,8 +209,9 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "b"))
 
-	part1 := bytes.Repeat([]byte{'A'}, 5<<20)
-	part2 := bytes.Repeat([]byte{'B'}, 5<<20)
+	payload := makeABPayload(5 << 20)
+	part1 := payload[:5<<20]
+	part2 := payload[5<<20:]
 
 	mu, err := backend.CreateMultipartUpload(ctx, "b", "k", "application/octet-stream")
 	require.NoError(t, err)
@@ -233,13 +234,12 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 
-	expected := append(append([]byte{}, part1...), part2...)
 	t.Logf("got: size=%d obj.Size=%d A=%d B=%d", len(got), obj.Size,
 		bytes.Count(got, []byte{'A'}), bytes.Count(got, []byte{'B'}))
-	if !bytes.Equal(got, expected) {
+	if !bytes.Equal(got, payload) {
 		first := -1
-		for i := 0; i < len(got) && i < len(expected); i++ {
-			if got[i] != expected[i] {
+		for i := 0; i < len(got) && i < len(payload); i++ {
+			if got[i] != payload[i] {
 				first = i
 				break
 			}
@@ -257,5 +257,14 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 				bytes.Count(got[start:end], []byte{'B'}))
 		}
 	}
-	require.Equal(t, expected, got, "multipart round-trip must match")
+	require.Equal(t, payload, got, "multipart round-trip must match")
+}
+
+func makeABPayload(half int) []byte {
+	payload := make([]byte, 2*half)
+	for i := 0; i < half; i++ {
+		payload[i] = 'A'
+		payload[half+i] = 'B'
+	}
+	return payload
 }

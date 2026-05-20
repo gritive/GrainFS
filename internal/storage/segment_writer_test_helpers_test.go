@@ -52,3 +52,22 @@ func writeViaSegmentWriter(b *LocalBackend, bucket, key string, r io.Reader) (*O
 	}
 	return obj, nil
 }
+
+type byteWriterBackend struct {
+	readerCalls int
+	byteCalls   int
+}
+
+func (b *byteWriterBackend) WriteSegment(ctx context.Context, bucket, key string, idx int, r io.Reader) (SegmentRef, error) {
+	b.readerCalls++
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return SegmentRef{}, err
+	}
+	return SegmentRef{BlobID: key, Size: int64(len(data))}, nil
+}
+
+func (b *byteWriterBackend) WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (SegmentRef, error) {
+	b.byteCalls++
+	return SegmentRef{BlobID: key, Size: int64(len(data))}, nil
+}

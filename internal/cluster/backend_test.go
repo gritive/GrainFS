@@ -516,7 +516,9 @@ func TestDistributedBackend_PutObjectTopologyWriteReportsUnavailableTarget(t *te
 	b.SetShardService(NewShardService(t.TempDir(), nil), []string{"n1", "n2", "n3"})
 
 	group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
-	ctx := ContextWithPlacementGroupEntry(context.Background(), group)
+	baseCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ctx := ContextWithPlacementGroupEntry(baseCtx, group)
 
 	_, err := b.PutObject(ctx, "bucket", "key.txt", strings.NewReader("hello"), "text/plain")
 	require.ErrorIs(t, err, ErrPlacementTargetsUnavailable)
@@ -820,7 +822,9 @@ func TestDistributedBackend_MultipartComplete(t *testing.T) {
 	defer rc.Close()
 
 	data, _ := io.ReadAll(rc)
-	require.Equal(t, append(part1, part2...), data)
+	require.Equal(t, len(part1)+len(part2), len(data))
+	require.Equal(t, part1, data[:len(part1)])
+	require.Equal(t, part2, data[len(part1):])
 }
 
 func TestDistributedBackend_ChunkedMultipartCompleteStoresSegmentsAndParts(t *testing.T) {
@@ -828,9 +832,9 @@ func TestDistributedBackend_ChunkedMultipartCompleteStoresSegmentsAndParts(t *te
 	configureChunkedMultipartTestBackend(t, b)
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 
-	part1 := bytes.Repeat([]byte("A"), 5<<20)
-	part2 := bytes.Repeat([]byte("B"), 5<<20)
-	part3 := bytes.Repeat([]byte("C"), (6<<20)+1)
+	part1 := bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)
+	part2 := bytes.Repeat([]byte("B"), testChunkedMultipartChunkSize)
+	part3 := []byte("C")
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "large-mp.bin", "application/octet-stream")
 	require.NoError(t, err)
 	p1, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(part1))
@@ -867,9 +871,9 @@ func TestDistributedBackend_ChunkedMultipartCompleteFailurePreservesUpload(t *te
 	require.NoError(t, b.CreateBucket(context.Background(), "bucket"))
 	up, err := b.CreateMultipartUpload(context.Background(), "bucket", "large-mp.bin", "application/octet-stream")
 	require.NoError(t, err)
-	p1, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), 5<<20)))
+	p1, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)))
 	require.NoError(t, err)
-	p2, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader(bytes.Repeat([]byte("B"), (12<<20)+1)))
+	p2, err := b.UploadPart(context.Background(), "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader([]byte("B")))
 	require.NoError(t, err)
 
 	b.testBeforeChunkedMultipartCommit = func() error { return errors.New("injected commit preflight failure") }
@@ -888,10 +892,13 @@ func configureChunkedMultipartTestBackend(t *testing.T, b *DistributedBackend) {
 	nodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
 	b.SetShardService(NewShardService(b.root, nil), nodes)
 	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
+	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 		"group-0": {ID: "group-0", PeerIDs: nodes},
 	}})
 }
+
+const testChunkedMultipartChunkSize = 5 << 20
 
 func TestDistributedBackend_EncryptedMultipartHidesPartPlaintext(t *testing.T) {
 	b := newTestDistributedBackend(t)

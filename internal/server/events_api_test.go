@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -32,7 +33,7 @@ func setupTestServerWithEventsAndBackend(t *testing.T) (string, *storage.LocalBa
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
@@ -102,7 +103,7 @@ func TestEmitEvent_BoundedQueueNoGoroutineLeak(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })

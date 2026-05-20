@@ -141,6 +141,8 @@ type DistributedBackend struct {
 	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	router     *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
+	// chunkedPutChunkSize is a test seam; zero keeps the production default.
+	chunkedPutChunkSize int
 
 	// bypassBucketCheck skips the HeadBucket pre-check in PutObject. Set by
 	// GroupBackend: bucket existence is guaranteed by the router (design doc
@@ -2146,7 +2148,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	// legacy single-group setups (b.shardGroup == nil) fall back to the
 	// existing single-blob EC path even for large objects. Once a cluster
 	// wires SetShardGroupSource, large objects automatically segment.
-	if chunkedPathThresholdMet(sp.Size) && b.shardGroup != nil {
+	if b.chunkedPathThresholdMet(sp.Size) && b.shardGroup != nil {
 		return b.putObjectChunked(
 			ctx, bucket, key, versionID, sp,
 			contentType, userMetadata, sseAlgorithm,
@@ -3939,7 +3941,7 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	versionID := newVersionID()
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
-		if chunkedPathThresholdMet(manifest.TotalSize) && b.shardGroup != nil {
+		if b.chunkedPathThresholdMet(manifest.TotalSize) && b.shardGroup != nil {
 			beforeCommit := b.testBeforeChunkedMultipartCommit
 			obj, err = b.putMultipartObjectChunked(ctx, bucket, key, versionID, uploadID, manifest, meta.ContentType, nil, "", 0, false, "", beforeCommit, meta.Tags)
 		} else {
