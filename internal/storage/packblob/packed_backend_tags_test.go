@@ -2,7 +2,9 @@ package packblob
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,16 +56,11 @@ func TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing
 	require.Equal(t, tags, got, "tags from CreateMultipartUploadWithTags must materialise via the packed wrapper")
 }
 
-// TestPackedBackend_PutObjectThenSetTags_R1Regression guards against R1
-// (Phase 2 unblock fixes): in single-node mode the default --pack-threshold
-// (65537) packs small objects into PackedBackend's blob+index, completely
-// bypassing the inner ClusterCoordinator. The capability walker in
-// Operations.buildOperationsPlan unwraps past PackedBackend (no method
-// promotion through a non-embedded inner field) and binds tagsSetter to
-// ClusterCoordinator, which has no record of the packed object — returning
-// ErrObjectNotFound. The fix declares SetObjectTags/GetObjectTags directly
-// on PackedBackend, dispatching to its own index for packed objects and
-// delegating to inner for above-threshold objects.
+// TestPackedBackend_PutObjectThenSetTags_R1Regression covers the
+// SetObjectTags/GetObjectTags dispatch on PackedBackend: packed objects
+// (below threshold) read/write via the local index, above-threshold objects
+// delegate to inner, and packed-object tags survive a SaveIndex/LoadIndex
+// round-trip.
 func TestPackedBackend_PutObjectThenSetTags_R1Regression(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -105,4 +102,66 @@ func TestPackedBackend_PutObjectThenSetTags_R1Regression(t *testing.T) {
 	replay, err := pb2.GetObjectTags("b", "small", "")
 	require.NoError(t, err)
 	require.Equal(t, smallTags, replay, "packed-object tags must persist via index.bin")
+}
+
+// TestPackedBackend_SetObjectTags_RejectsVersionID guards parity with
+// LocalBackend.SetObjectTags: versionID != "" is not supported.
+func TestPackedBackend_SetObjectTags_RejectsVersionID(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	inner, err := storage.NewLocalBackend(dir + "/local")
+	require.NoError(t, err)
+	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pb.Close() })
+	require.NoError(t, pb.CreateBucket(ctx, "b"))
+	_, err = pb.PutObject(ctx, "b", "k", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	err = pb.SetObjectTags("b", "k", "some-version", []storage.Tag{{Key: "k", Value: "v"}})
+	require.Error(t, err)
+	var unsupported storage.UnsupportedOperationError
+	require.ErrorAs(t, err, &unsupported)
+
+	_, err = pb.GetObjectTags("b", "k", "some-version")
+	require.Error(t, err)
+	require.ErrorAs(t, err, &unsupported)
+}
+
+// TestPackedBackend_SetObjectTags_ConcurrentCAS verifies the CAS retry loop:
+// N concurrent writers, each assigning a distinct tag set, must all land
+// (no lost updates) — the final read returns one of the N expected sets.
+// Run with -race to catch any read-modify-write that bypasses the CAS.
+func TestPackedBackend_SetObjectTags_ConcurrentCAS(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	inner, err := storage.NewLocalBackend(dir + "/local")
+	require.NoError(t, err)
+	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pb.Close() })
+	require.NoError(t, pb.CreateBucket(ctx, "b"))
+	_, err = pb.PutObject(ctx, "b", "k", strings.NewReader("hi"), "text/plain")
+	require.NoError(t, err)
+
+	const writers = 32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			tags := []storage.Tag{{Key: "writer", Value: fmt.Sprintf("%d", i)}}
+			require.NoError(t, pb.SetObjectTags("b", "k", "", tags))
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	got, err := pb.GetObjectTags("b", "k", "")
+	require.NoError(t, err)
+	require.Len(t, got, 1, "exactly one writer's tag set must win")
+	require.Equal(t, "writer", got[0].Key)
 }

@@ -62,8 +62,8 @@ func encodeIndex(entries map[packedKey]*indexEntry) ([]byte, error) {
 		}
 		mdVec := b.EndVector(len(kvOffsets))
 
-		// tags vector — order is the on-the-wire order (S3 tag set is an
-		// ordered list per RFC, but in-memory we preserve caller order).
+		// tags vector — preserve caller order so SetObjectTags/GetObjectTags
+		// round-trip yields the same slice.
 		tagOffsets := make([]flatbuffers.UOffsetT, 0, len(e.Tags))
 		for _, t := range e.Tags {
 			kOff := b.CreateString(t.Key)

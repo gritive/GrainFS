@@ -33,7 +33,7 @@ type indexEntry struct {
 	LastModified int64
 	UserMetadata map[string]string
 	SSEAlgorithm string
-	Tags         []storage.Tag // S3 object tags (R1 fix: packed objects must own their own tag set)
+	Tags         []storage.Tag // S3 object tags
 }
 
 // packedKey identifies a packed object by its (bucket, key) tuple. It is the
@@ -999,18 +999,33 @@ func (pb *PackedBackend) CreateMultipartUploadWithTags(ctx context.Context, buck
 // SetObjectTags satisfies storage.ObjectTagsSetter. Packed (small) objects
 // live entirely inside this backend's blob+index; their tags must live here
 // too, since the inner backend has no record of them. Objects above the pack
-// threshold live on the inner backend, so we delegate. R1 regression guard:
-// without this explicit dispatch, the capability walker in Operations skips
-// PackedBackend (no method) and binds to the inner ClusterCoordinator, which
-// returns ErrObjectNotFound for packed objects (PutObjectTagging 404).
+// threshold live on the inner backend, so we delegate.
+//
+// versionID != "" is rejected for parity with LocalBackend.SetObjectTags.
+//
+// Concurrency: read-modify-write on the index uses a sync.Map.CompareAndSwap
+// retry loop. This handles both concurrent SetObjectTags calls (no lost
+// updates) and SetObjectTags racing PutObject's Swap (line ~433): if the
+// entry pointer changes under us we re-read and rebuild. If the entry is
+// gone (deleted/overwritten such that the new owner is on inner), we surface
+// ErrObjectNotFound rather than resurrecting stale state.
 func (pb *PackedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
+	if versionID != "" {
+		return storage.UnsupportedOperationError{Op: "SetObjectTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
 	pk := packedKey{bucket: bucket, key: key}
-	if v, ok := pb.index.Load(pk); ok {
+	for {
+		v, ok := pb.index.Load(pk)
+		if !ok {
+			// Not in the packed index — either above-threshold (delegate to
+			// inner) or genuinely absent. Let inner decide.
+			setter, ok := pb.inner.(storage.ObjectTagsSetter)
+			if !ok {
+				return storage.UnsupportedOperationError{Op: "SetObjectTags", Reason: storage.UnsupportedReasonNoAdapter}
+			}
+			return setter.SetObjectTags(bucket, key, versionID, tags)
+		}
 		old := v.(*indexEntry)
-		// CAS-swap a fresh *indexEntry to preserve lock-free reads. Refcount
-		// is copied via atomic load/store so concurrent CopyObject increments
-		// observed before the swap survive.
-		nextTags := cloneTags(tags)
 		next := &indexEntry{
 			Location:     old.Location,
 			OriginalSize: old.OriginalSize,
@@ -1019,23 +1034,23 @@ func (pb *PackedBackend) SetObjectTags(bucket, key, versionID string, tags []sto
 			LastModified: old.LastModified,
 			UserMetadata: cloneStringMap(old.UserMetadata),
 			SSEAlgorithm: old.SSEAlgorithm,
-			Tags:         nextTags,
+			Tags:         cloneTags(tags),
 		}
 		next.Refcount.Store(old.Refcount.Load())
-		pb.index.Store(pk, next)
-		return nil
+		if pb.index.CompareAndSwap(pk, old, next) {
+			return nil
+		}
+		// Another writer raced us; re-read and rebuild.
 	}
-	// Above-threshold object: delegate to inner.
-	setter, ok := pb.inner.(storage.ObjectTagsSetter)
-	if !ok {
-		return storage.UnsupportedOperationError{Op: "SetObjectTags", Reason: storage.UnsupportedReasonNoAdapter}
-	}
-	return setter.SetObjectTags(bucket, key, versionID, tags)
 }
 
 // GetObjectTags satisfies storage.ObjectTagsGetter. Mirrors SetObjectTags's
-// packed-vs-inner split.
+// packed-vs-inner split and versionID guard. Read-only: a single Load is
+// sufficient (no CAS retry needed).
 func (pb *PackedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	if versionID != "" {
+		return nil, storage.UnsupportedOperationError{Op: "GetObjectTags", Reason: storage.UnsupportedReasonNoAdapter}
+	}
 	pk := packedKey{bucket: bucket, key: key}
 	if v, ok := pb.index.Load(pk); ok {
 		return cloneTags(v.(*indexEntry).Tags), nil
