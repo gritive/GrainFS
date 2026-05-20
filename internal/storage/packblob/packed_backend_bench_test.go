@@ -2,6 +2,7 @@ package packblob
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 
@@ -40,6 +41,32 @@ func BenchmarkPackblob_SaveIndex(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				if err := pb.SaveIndex(); err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkPackedBackend_ListObjectsPage_LargePackedIndex(b *testing.B) {
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("entries=%d", n), func(b *testing.B) {
+			pb, _ := setupPackedBackend(b, n)
+			b.Cleanup(func() { _ = pb.Close() })
+
+			ctx := context.Background()
+			marker := "key-50000"
+			if n < 100_000 {
+				marker = "key-500"
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				objs, _, err := pb.ListObjectsPage(ctx, "bench", "key-", marker, 1000)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(objs) == 0 {
+					b.Fatal("empty page")
 				}
 			}
 		})

@@ -101,6 +101,11 @@ func TestPackedBackend_VersionedDeleteInvalidatesPackedObject(t *testing.T) {
 
 	_, _, err = pb.GetObject(context.Background(), "test", "small.txt")
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+
+	objs, truncated, err := pb.ListObjectsPage(context.Background(), "test", "", "", 10)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Empty(t, objs)
 }
 
 func TestPackedBackend_DeleteBucketSeesPackedObjects(t *testing.T) {
@@ -455,6 +460,79 @@ func TestPackedBackend_ListObjectsPage(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objs, 2)
 	assert.True(t, truncated, "should report truncated when more entries remain")
+}
+
+func TestPackedBackend_ListObjectsPage_AfterPackedOverwriteNoDuplicate(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+
+	_, err := pb.PutObject(context.Background(), "test", "dup.txt", strings.NewReader("one"), "text/plain")
+	require.NoError(t, err)
+	_, err = pb.PutObject(context.Background(), "test", "dup.txt", strings.NewReader("second"), "text/plain")
+	require.NoError(t, err)
+
+	objs, truncated, err := pb.ListObjectsPage(context.Background(), "test", "", "", 10)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, objs, 1)
+	require.Equal(t, "dup.txt", objs[0].Key)
+	require.Equal(t, int64(len("second")), objs[0].Size)
+}
+
+func TestPackedBackend_ListObjectsPage_AfterDeleteOmitsPackedKey(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+
+	_, err := pb.PutObject(context.Background(), "test", "gone.txt", strings.NewReader("small"), "text/plain")
+	require.NoError(t, err)
+	require.NoError(t, pb.DeleteObject(context.Background(), "test", "gone.txt"))
+
+	objs, truncated, err := pb.ListObjectsPage(context.Background(), "test", "", "", 10)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Empty(t, objs)
+}
+
+func TestPackedBackend_ListObjectsPage_LargeOverwriteEvictsPackedKey(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+
+	_, err := pb.PutObject(context.Background(), "test", "same.txt", strings.NewReader("small"), "text/plain")
+	require.NoError(t, err)
+	large := strings.Repeat("x", 70*1024)
+	_, err = pb.PutObject(context.Background(), "test", "same.txt", strings.NewReader(large), "text/plain")
+	require.NoError(t, err)
+
+	objs, truncated, err := pb.ListObjectsPage(context.Background(), "test", "", "", 10)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, objs, 1)
+	require.Equal(t, "same.txt", objs[0].Key)
+	require.Equal(t, int64(len(large)), objs[0].Size)
+}
+
+func TestPackedBackend_EvictPackedKeyIfSameKeepsNewerPackedEntry(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "test"))
+
+	_, err := pb.PutObject(context.Background(), "test", "same.txt", strings.NewReader("old"), "text/plain")
+	require.NoError(t, err)
+	pk := packedKey{bucket: "test", key: "same.txt"}
+	oldEntryAny, ok := pb.index.Load(pk)
+	require.True(t, ok)
+	oldEntry := oldEntryAny.(*indexEntry)
+
+	_, err = pb.PutObject(context.Background(), "test", "same.txt", strings.NewReader("newer"), "text/plain")
+	require.NoError(t, err)
+	pb.evictPackedKeyIfSame(pk, oldEntry)
+
+	rc, obj, err := pb.GetObject(context.Background(), "test", "same.txt")
+	require.NoError(t, err)
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "newer", string(data))
+	require.Equal(t, int64(len("newer")), obj.Size)
 }
 
 func TestPackedBackend_BucketOperations(t *testing.T) {
