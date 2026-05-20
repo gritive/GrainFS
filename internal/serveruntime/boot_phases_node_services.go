@@ -26,7 +26,7 @@ func bootResharderAndDegraded(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
 	// Ring reshard and EC reshard share a DataGroup manager registry but run on
-	// independent intervals. Both are always-on (validated in buildClusterConfig).
+	// independent intervals. Both are always-on (validated in optionsToConfig).
 	// Ring reshard is correctness-critical (stale ring placement blocks reads when
 	// old nodes are removed); EC reshard is optimization-only (N×→EC, profile upgrade).
 	{

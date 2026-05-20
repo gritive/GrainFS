@@ -13,13 +13,9 @@ import (
 // maps into Config is propagated under optionsToConfig. Sentinels per type use
 // distinguishable non-zero values so an accidental field swap is caught.
 //
-// Mapping rule (per Task 3 plan): each cmd.Flags().Get* call in
-// cmd/grainfs/serve_config.go:buildClusterConfig has a 1:1 counterpart here,
-// via the matching opts.<Field>.
-//
 // Known asymmetry: cfg.VlogWarnRatio and cfg.VlogCriticalRatio derive from the
-// same flags as opts.VlogOpts.WarnRatio / .CriticalRatio (single flag origin),
-// so they're sourced from opts.VlogOpts here.
+// same flag origin as opts.VlogOpts.WarnRatio / .CriticalRatio, so they're
+// sourced from opts.VlogOpts here.
 func TestOptionsToConfigFieldParity(t *testing.T) {
 	opts := ServeOptions{
 		Version:     "v9.9.9-test",

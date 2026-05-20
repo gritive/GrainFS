@@ -6,17 +6,12 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 )
 
-// optionsToConfig is the cobra-free twin of cmd/grainfs/serve_config.go's
-// buildClusterConfig. Field-for-field identical mapping: every Config field
-// that buildClusterConfig sets, this sets from the matching ServeOptions field.
+// optionsToConfig is the cobra-free mapping from ServeOptions to Config.
+// Field-for-field identical: every Config field is set from the matching
+// ServeOptions field.
 //
-// Pre-resolved arguments (addr, authOpts, encryptor, iamStore, iamApplier) sit
-// upstream of cobra and are passed through unchanged (see Q9 of the cmd-thin
-// grill).
-//
-// Asymmetry note: cfg.VlogWarnRatio / cfg.VlogCriticalRatio derive from the
-// same cobra flags as opts.VlogOpts.WarnRatio / .CriticalRatio, so they're
-// sourced from opts.VlogOpts here instead of duplicate ServeOptions fields.
+// Pre-resolved arguments (addr, authOpts, encryptor, iamStore, iamApplier)
+// sit upstream of cobra and are passed through unchanged.
 func optionsToConfig(
 	opts ServeOptions,
 	addr string,
