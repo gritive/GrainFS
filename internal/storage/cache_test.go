@@ -260,6 +260,26 @@ func TestCachedBackend_LargeObjectNotCached(t *testing.T) {
 	assert.Equal(t, int64(0), cb.Stats().Hits)
 }
 
+func TestCachedBackend_DefaultCacheStoresMultipartSizedObject(t *testing.T) {
+	cb, _ := newTestCachedBackend(t)
+	require.NoError(t, cb.CreateBucket(context.Background(), "test"))
+
+	data := strings.Repeat("x", 5<<20)
+	_, err := cb.PutObject(context.Background(), "test", "multipart-sized", strings.NewReader(data), "text/plain")
+	require.NoError(t, err)
+
+	rc1, _, err := cb.GetObject(context.Background(), "test", "multipart-sized")
+	require.NoError(t, err)
+	require.NoError(t, rc1.Close())
+
+	rc2, _, err := cb.GetObject(context.Background(), "test", "multipart-sized")
+	require.NoError(t, err)
+	require.NoError(t, rc2.Close())
+
+	require.Equal(t, int64(1), cb.Stats().Misses)
+	require.Equal(t, int64(1), cb.Stats().Hits)
+}
+
 func TestCachedBackend_PassthroughBucketOps(t *testing.T) {
 	cb, _ := newTestCachedBackend(t)
 

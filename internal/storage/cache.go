@@ -12,7 +12,7 @@ import (
 
 const (
 	defaultMaxCacheBytes       = 64 * 1024 * 1024 // 64MB total cache
-	defaultMaxObjectCacheBytes = 4 * 1024 * 1024  // 4MB per object
+	defaultMaxObjectCacheBytes = 8 * 1024 * 1024  // 8MB per object
 )
 
 // cacheEntry stores cached object content and metadata.
