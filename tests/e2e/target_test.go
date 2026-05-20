@@ -23,6 +23,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -353,30 +354,29 @@ func newDedicatedCluster4NodeS3Target(t testing.TB, extraArgs []string) s3Target
 // S3-spec-compliant bucket name from target + test + case. Pure helper unit
 // check — fixture is not used — but wrapped in the canonical
 // SingleNode/Cluster4Node shape for grep/inventory consistency.
-func TestBucketNameForE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+var _ = ginkgo.Describe("Bucket name helper", ginkgo.Label("bucket"), func() {
+	ginkgo.It("derives valid names for a single-node target", func() {
+		t := ginkgo.GinkgoTB()
 		_ = newSingleNodeS3Target()
 		runBucketNameForCases(t)
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
+
+	ginkgo.It("derives valid names for a cluster target", func() {
+		t := ginkgo.GinkgoTB()
 		_ = newSharedClusterS3Target(t)
 		runBucketNameForCases(t)
 	})
-}
+})
 
-func runBucketNameForCases(t *testing.T) {
+func runBucketNameForCases(t testing.TB) {
 	t.Helper()
 
-	t.Run("ShortNameRoundtrip", func(t *testing.T) {
-		got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
-		require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
-		require.LessOrEqual(t, len(got), 63)
-	})
+	got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
+	require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
+	require.LessOrEqual(t, len(got), 63)
 
-	t.Run("LongNameTruncatedWithHash", func(t *testing.T) {
-		long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
-		require.LessOrEqual(t, len(long), 63)
-		require.GreaterOrEqual(t, len(long), 3)
-		require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
-	})
+	long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
+	require.LessOrEqual(t, len(long), 63)
+	require.GreaterOrEqual(t, len(long), 3)
+	require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
 }
