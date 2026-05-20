@@ -27,7 +27,7 @@ Updated: 2026-05-20 17:33 KST
 | list          |    0.00 | 31285.46 |      0 |               1158.5 | object/s workload                                                                                                              |
 | stat          |    0.00 | 14601.34 |      0 |                727.2 | object/s workload                                                                                                              |
 | versioned     |  129.32 |  2069.14 |      0 |                602.0 | complete                                                                                                                       |
-| retention     |    0.00 |  3897.55 |      0 |              pending | command ended before after-sample                                                                                              |
+| retention     |    0.00 |  6546.51 |      0 |               646.83 | artifact `benchmarks/profiles/baseline-minio-single-retention-rss-20260520-172824`                                             |
 | multipart     | 3245.85 |   649.17 |      0 |              1101.73 | artifact `benchmarks/profiles/baseline-minio-single-multipart-20260520-133526`                                                 |
 | multipart-put |  321.18 |    64.24 |      0 |              1579.06 | artifact `benchmarks/profiles/baseline-minio-single-multipart-put-20260520-133631`                                             |
 | append        |     n/a |      n/a | 146687 |               663.12 | invalid baseline: unsupported append PUT API errors; raw artifact `benchmarks/profiles/baseline-minio-single-append-20260520-133747` |

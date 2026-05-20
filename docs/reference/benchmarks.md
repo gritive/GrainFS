@@ -124,7 +124,7 @@ with at-rest encryption and S3-only benchmark flags:
 | list | 0.00 | 31285.46 | 0 | 1158.50 | 0.00 | 11869.98 | 0 | 605.75 | 0.00 | 434233.02 | 0 | 150.38 | `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950` |
 | stat | 0.00 | 14601.34 | 0 | 727.20 | 0.00 | 9428.66 | 0 | 187.55 | 0.00 | 58557.94 | 0 | 126.72 | `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109` |
 | versioned | 129.32 | 2069.14 | 0 | 602.00 | 75.57 | 1209.13 | 0 | 407.53 | 182.82 | 2925.17 | 0 | 486.23 | `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
-| retention | 0.00 | 3897.55 | 0 | pending | 0.00 | 3208.87 | 0 | 367.53 | 0.00 | 19336.57 | 0 | 280.86 | `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
+| retention | 0.00 | 6546.51 | 0 | 646.83 | 0.00 | 3208.87 | 0 | 367.53 | 0.00 | 19336.57 | 0 | 280.86 | `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
 | multipart | 3245.85 | 649.17 | 0 | 1101.73 | 3622.07 | 724.41 | 0 | 475.05 | 3986.73 | 797.35 | 0 | 675.98 | `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
 | multipart-put | 321.18 | 64.24 | 0 | 1579.06 | 614.95 | 122.99 | 0 | 539.89 | 804.95 | 160.99 | 0 | 879.59 | `benchmarks/profiles/grainfs-single-multipart-put-after-complete-8m-limit24-20260520-170108` |
 | append | n/a | n/a | 146687 | 663.12 | n/a | n/a | 78801 | 119.12 | 78.39 | 1254.28 | 0 | 326.50 | `benchmarks/profiles/grainfs-single-append-initial-20260520-170436` |
@@ -151,7 +151,7 @@ Observed S3 deltas:
 - `GrainFS` GET throughput was 4.04x the MinIO GET baseline and 4.22x the
   RustFS GET baseline, with lower RSS than MinIO.
 - `GrainFS` passed the measured non-append S3 throughput gates with 0 errors
-  and lower RSS than MinIO where a MinIO RSS sample was available.
+  and lower RSS than MinIO.
 
 The official comparison uses `warp`; the old k6 mixed workload has been removed.
 
