@@ -2,7 +2,6 @@ package iamadmin
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
@@ -82,34 +81,4 @@ func (c *Client) KeyCreateRaw(ctx context.Context, saID string, buckets []string
 func (c *Client) KeyRevoke(ctx context.Context, saID, accessKey string) error {
 	return c.Delete(ctx,
 		"/v1/iam/sa/"+url.PathEscape(saID)+"/key/"+url.PathEscape(accessKey), nil)
-}
-
-// --- Grant ---
-
-// GrantPut grants the given role on a bucket to the SA. role is one of Read|Write|Admin.
-func (c *Client) GrantPut(ctx context.Context, saID, bucket, role string) error {
-	body := map[string]string{"sa_id": saID, "bucket": bucket, "role": role}
-	return c.Put(ctx, "/v1/iam/grant", body, nil)
-}
-
-// GrantDelete removes the SA's grant on the named bucket.
-func (c *Client) GrantDelete(ctx context.Context, saID, bucket string) error {
-	body := map[string]string{"sa_id": saID, "bucket": bucket}
-	return c.Do(ctx, http.MethodDelete, "/v1/iam/grant", body, nil)
-}
-
-// GrantListRaw mirrors existing behavior: server body verbatim.
-func (c *Client) GrantListRaw(ctx context.Context, saFilter, bucketFilter string) ([]byte, error) {
-	path := "/v1/iam/grant"
-	q := url.Values{}
-	if saFilter != "" {
-		q.Set("sa", saFilter)
-	}
-	if bucketFilter != "" {
-		q.Set("bucket", bucketFilter)
-	}
-	if encoded := q.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	return c.GetRaw(ctx, path)
 }

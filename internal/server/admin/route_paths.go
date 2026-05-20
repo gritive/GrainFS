@@ -49,7 +49,6 @@ const (
 	routePathIAMSAByID    = "/iam/sa/:id"
 	routePathIAMSAKey     = "/iam/sa/:id/key"
 	routePathIAMSAKeyByAK = "/iam/sa/:id/key/:ak"
-	routePathIAMGrant     = "/iam/grant"
 
 	routePathUpstreams        = "/upstreams"
 	routePathBucketUpstream   = "/buckets/:bucket/upstream"

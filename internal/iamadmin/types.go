@@ -80,24 +80,3 @@ type KeyRevokeOptions struct {
 	SAID      string
 	AccessKey string
 }
-
-// --- Grant ---
-
-type GrantPutOptions struct {
-	BaseOptions
-	SAID   string
-	Bucket string
-	Role   string
-}
-
-type GrantDeleteOptions struct {
-	BaseOptions
-	SAID   string
-	Bucket string
-}
-
-type GrantListOptions struct {
-	BaseOptions
-	SAFilter     string
-	BucketFilter string
-}
