@@ -159,6 +159,21 @@ func RenderClusterConfigDiff(w io.Writer, resp *ClusterConfigResponse) error {
 	return tw.Flush()
 }
 
+// RotateKeyPhaseLabel maps a rotate-key Phase integer to its human label.
+// 1=steady, 2=begun, 3=switched; anything else is rendered as "unknown".
+func RotateKeyPhaseLabel(p int) string {
+	switch p {
+	case 1:
+		return "steady"
+	case 2:
+		return "begun"
+	case 3:
+		return "switched"
+	default:
+		return "unknown"
+	}
+}
+
 // ParseClusterConfigKVs turns ["k=v",...] into a map. Values parse as JSON
 // literals first (so 30, true, "x" work); non-JSON values like https://…
 // URLs fall back to a plain string.

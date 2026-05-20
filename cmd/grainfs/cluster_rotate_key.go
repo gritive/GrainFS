@@ -123,7 +123,7 @@ func clusterRotateKeyStatus() *cobra.Command {
 			if resp.Error != "" {
 				return fmt.Errorf("server: %s", resp.Error)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "phase: %s (%d)\n", phaseLabel(resp.Phase), resp.Phase)
+			fmt.Fprintf(cmd.OutOrStdout(), "phase: %s (%d)\n", clusteradmin.RotateKeyPhaseLabel(resp.Phase), resp.Phase)
 			if resp.RotationID != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "rotation_id: %s\n", resp.RotationID)
 			}
@@ -156,23 +156,10 @@ func clusterRotateKeyAbort() *cobra.Command {
 			if resp.Error != "" {
 				return fmt.Errorf("server: %s", resp.Error)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Rotation aborted. Phase now: %s (%d)\n", phaseLabel(resp.Phase), resp.Phase)
+			fmt.Fprintf(cmd.OutOrStdout(), "Rotation aborted. Phase now: %s (%d)\n", clusteradmin.RotateKeyPhaseLabel(resp.Phase), resp.Phase)
 			return nil
 		},
 	}
 	c.Flags().String("reason", "operator", "abort reason (logged in raft entry)")
 	return c
-}
-
-func phaseLabel(p int) string {
-	switch p {
-	case 1:
-		return "steady"
-	case 2:
-		return "begun"
-	case 3:
-		return "switched"
-	default:
-		return "unknown"
-	}
 }
