@@ -74,6 +74,23 @@ func TestBenchS3CompatCanProfileSingleNodeGrainFS(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatDoesNotPublishErroredWarpRows(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	for _, want := range []string{
+		`if errors > 0:`,
+		`sys.exit(f"non-zero warp errors: {errors}")`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_s3_compat_compare.sh must reject errored warp analyze rows with %q", want)
+		}
+	}
+}
+
 func TestBenchS3CompatSingleNodeAcceptsExtraServeFlags(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {

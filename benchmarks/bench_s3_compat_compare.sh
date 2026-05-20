@@ -690,12 +690,14 @@ elif op == "delete":
     obj_s = objects / (millis / 1000.0)
 else:
     sys.exit("missing Average line")
+if errors > 0:
+    sys.exit(f"non-zero warp errors: {errors}")
 row = [target, mode, op, f"{mib:.2f}", f"{obj_s:.2f}", str(errors), artifact_dir]
 with open(out_path, "a", encoding="utf-8") as f:
     f.write("\t".join(row) + "\n")
 PY
   then
-    echo "warp-$op: missing average throughput for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
+    echo "warp-$op: analyze result not publishable for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
 }
 
