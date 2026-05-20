@@ -87,11 +87,11 @@ func finalizeAuditEnvelopeEvent(c *app.RequestContext, ev audit.S3Event, start t
 
 // newAuditAuthFailureEvent constructs an audit row for SigV4 / authn rejection
 // that aborts INSIDE authMiddleware — before auditEnvelopeMiddleware can call
-// c.Next. The envelope finalizer (and rememberAuthzDecision) therefore never
-// run on this path; the row is written directly via appendFinalizedAuditEvent.
-// ErrReason carries the deny token; matched_policy_id / matched_sid /
-// authz_latency_us / condition_context_json are intentionally zero (no Layer 1
-// policy evaluation happened).
+// c.Next. The envelope finalizer therefore never runs on this path; the row
+// is written directly via appendFinalizedAuditEvent with ErrReason="authn".
+// matched_policy_id / matched_sid / authz_latency_us / condition_context_json
+// stay empty for the same reason as the scope-mismatch / internal-bucket
+// aux-deny paths: no Layer 1 policy was evaluated for this rejection.
 func (s *Server) newAuditAuthFailureEvent(
 	ctx context.Context,
 	c *app.RequestContext,

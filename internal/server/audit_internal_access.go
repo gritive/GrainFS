@@ -36,14 +36,12 @@ func (s *Server) authorizeAuditInternalBucket(ctx context.Context, c *app.Reques
 	}
 
 	s.iamAudit.RecordDeny(ctx, iam.PrincipalFromContext(ctx), bucket, key, action, "internal_bucket")
+	// Deny on internal-bucket reservation. Sets auditErrReasonKey so the audit
+	// envelope finalizer records the reason on the audit.s3 row. Policy-decision
+	// columns (matched_policy_id / matched_sid / authz_latency_us /
+	// condition_context_json) stay empty because no Layer 1 policy was evaluated
+	// for this rejection.
 	c.Set(auditErrReasonKey, "internal_bucket")
-	// Stash a minimal Decision so the audit envelope finalizer records the
-	// reason on the audit.s3 row. matched_policy_id / matched_sid / latency /
-	// condition_context stay empty — no Layer 1 policy was consulted.
-	rememberAuthzDecision(c, s3auth.Decision{
-		Allow:  false,
-		Detail: s3auth.AuthzDetail{Reason: "internal_bucket"},
-	})
 	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access denied to internal bucket")
 	c.Abort()
 	return auditInternalBucketDenied
