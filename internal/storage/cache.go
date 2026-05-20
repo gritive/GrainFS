@@ -188,8 +188,9 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 		return rc, obj, nil
 	}
 
-	// Small objects: buffer and cache
-	data, err := io.ReadAll(rc)
+	// Small objects: buffer exactly once from the known metadata size. io.ReadAll
+	// grows geometrically and showed up in readamp workload profiles.
+	data, err := readExactlySizedObject(rc, meta.Size)
 	rc.Close()
 	if err != nil {
 		return nil, nil, err
@@ -198,6 +199,20 @@ func (cb *CachedBackend) GetObject(ctx context.Context, bucket, key string) (io.
 	cb.put(ck, cacheEntry{data: data, obj: *obj, size: int64(len(data))})
 
 	return newCachedObjectReader(data), obj, nil
+}
+
+func readExactlySizedObject(r io.Reader, size int64) ([]byte, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("negative object size %d", size)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // HeadObject returns cached metadata on hit.

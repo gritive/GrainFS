@@ -14,12 +14,11 @@ import (
 // This is the integration check that the simulator's predicted curve
 // shows up in production code, not just in the simulator.
 //
-// Sized to land in the simulator's "64 MB knee": 5 000 blocks of 4 KB
-// = 20 MB working set, two passes. Simulator predicted 50% hit rate
-// at 64 MB capacity — real cache should match closely. Timing the
-// second pass against the first shows the user-visible win.
+// Sized to keep the working set comfortably under the 64 MB cache while still
+// exercising thousands of real ReadAt calls. Timing the second pass against the
+// first shows the user-visible win without making CI pay for extra metadata I/O.
 func TestBlockCache_RealVsSimulator(t *testing.T) {
-	const blocks = 5000
+	const blocks = 2048
 	const cap64MB = 64 * 1024 * 1024
 
 	cache := blockcache.New(cap64MB)

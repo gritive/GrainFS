@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -96,7 +97,8 @@ func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType stri
 
 	chunkerErr := make(chan error, 1)
 	go func() {
-		chunkerErr <- w.chunkLoop(cctx, tee, workCh)
+		firstChunkSize, exactFirstChunk := firstChunkBufferSize(r, w.chunkSize)
+		chunkerErr <- w.chunkLoop(cctx, tee, workCh, firstChunkSize, exactFirstChunk)
 		close(workCh)
 	}()
 
@@ -160,7 +162,7 @@ type chunkJob struct {
 // io.ErrUnexpectedEOF surfaced by the upstream, etc.). io.ReadFull would
 // rewrite EOF→ErrUnexpectedEOF mid-buffer, making real ErrUnexpectedEOF
 // errors from the source indistinguishable from a normal short final chunk.
-func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<- chunkJob) error {
+func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<- chunkJob, firstChunkSize int, exactFirstChunk bool) error {
 	idx := 0
 	for {
 		select {
@@ -168,7 +170,19 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 			return ctx.Err()
 		default:
 		}
-		body := make([]byte, w.chunkSize)
+		if idx == 0 && exactFirstChunk && firstChunkSize == 0 {
+			select {
+			case workCh <- chunkJob{idx: idx, body: nil}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return nil
+		}
+		chunkSize := w.chunkSize
+		if idx == 0 && firstChunkSize > 0 && firstChunkSize < chunkSize {
+			chunkSize = firstChunkSize
+		}
+		body := make([]byte, chunkSize)
 		n, readErr := fillChunk(r, body)
 		// Empty-object case: first iteration, no bytes, clean EOF.
 		if n == 0 && errors.Is(readErr, io.EOF) && idx == 0 {
@@ -187,6 +201,9 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 				return ctx.Err()
 			}
 			idx++
+			if exactFirstChunk {
+				return nil
+			}
 		}
 		// Clean end-of-stream from the source.
 		if errors.Is(readErr, io.EOF) {
@@ -196,6 +213,21 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 			return readErr
 		}
 	}
+}
+
+func firstChunkBufferSize(r io.Reader, defaultSize int) (int, bool) {
+	switch rr := r.(type) {
+	case *bytes.Reader:
+		n := rr.Len()
+		return n, n <= defaultSize
+	case *bytes.Buffer:
+		n := rr.Len()
+		return n, n <= defaultSize
+	case *strings.Reader:
+		n := rr.Len()
+		return n, n <= defaultSize
+	}
+	return defaultSize, false
 }
 
 // fillChunk reads up to len(buf) bytes from r using a plain io.Read loop.
