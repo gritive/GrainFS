@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 16:35 KST
+Updated: 2026-05-20 16:37 KST
 
 ## Goal
 
@@ -50,17 +50,18 @@ Updated: 2026-05-20 16:35 KST
 
 ## GrainFS Single-Node Benchmark
 
-| op        |   MiB/s |     obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                 |
-| --------- | ------: | --------: | -----: | -------------------: | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| put       |  548.30 |   8772.82 |      0 |               601.22 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`        |
-| get       | 1849.34 |  29589.49 |      0 |               767.03 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`        |
-| delete    |    0.00 |  17964.91 |      0 |               460.70 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`          |
-| mixed     |  176.17 |   2818.79 |      0 |               251.75 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750`      |
-| list      |    0.00 | 434233.02 |      0 |               150.38 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950`       |
-| stat      |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
-| versioned |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
-| retention |    0.00 |  19336.57 |      0 |               280.86 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
-| multipart | 3986.73 |    797.35 |      0 |               675.98 | faster than MinIO/RustFS; RSS below MinIO | after bounded metadata-only HeadObject cache; artifact `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
+| op            |   MiB/s |     obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                 |
+| ------------- | ------: | --------: | -----: | -------------------: | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| put           |  548.30 |   8772.82 |      0 |               601.22 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`        |
+| get           | 1849.34 |  29589.49 |      0 |               767.03 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`        |
+| delete        |    0.00 |  17964.91 |      0 |               460.70 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`          |
+| mixed         |  176.17 |   2818.79 |      0 |               251.75 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750`      |
+| list          |    0.00 | 434233.02 |      0 |               150.38 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950`       |
+| stat          |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
+| versioned     |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
+| retention     |    0.00 |  19336.57 |      0 |               280.86 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
+| multipart     | 3986.73 |    797.35 |      0 |               675.98 | faster than MinIO/RustFS; RSS below MinIO | after bounded metadata-only HeadObject cache; artifact `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
+| multipart-put |  311.07 |     62.21 |      0 |               376.03 | slower than MinIO/RustFS; RSS below MinIO | initial measurement; artifact `benchmarks/profiles/grainfs-single-multipart-put-initial-20260520-163634`                              |
 
 ## GrainFS Optimization Notes
 
@@ -91,7 +92,8 @@ Updated: 2026-05-20 16:35 KST
 
 ## Open Items
 
-- Continue GrainFS single-node benchmark with S3-only service flags after multipart passes: `multipart-put`, `append`.
+- Optimize `multipart-put`: current clean e2e is 311.07 MiB/s vs MinIO 321.18/RustFS 614.95; RSS is below MinIO.
+- Continue GrainFS single-node benchmark with S3-only service flags after multipart-put passes: `append`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
