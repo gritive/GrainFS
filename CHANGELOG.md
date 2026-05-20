@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.0.300.0] - 2026-05-21 - feat(cli): §8 CLI Surface (config / iam policy+group+bucket / audit / status / iceberg config)
+
+§8 (CLI Surface) of the auth-redesign plan delivers the user-facing
+admin CLI surface backed by the admin UDS:
+
+- `grainfs config set/get/unset/list (--all)` — cluster-wide config
+  with isatty-aware table vs JSON output, full catalog including
+  type/default/description.
+- `grainfs iam sa create/get/list/delete` + `iam key create/revoke`
+  cleanup; legacy Grant subtree removed.
+- `grainfs iam policy put/get/delete/attach/detach/list/validate/simulate`
+  with Resource:* warning (`--i-know` to suppress); built-in policy
+  delete refused server-side; validate runs locally without UDS;
+  simulate routes through the real evaluator.
+- `grainfs iam group create/delete/list + member add/remove + policy
+  attach/detach` over admin UDS.
+- `grainfs iam bucket create [--attach-sa --attach-policy] + delete +
+  policy put/delete + list` — `create` with attach uses the §3
+  CreateBucketWithPolicyAttach atomic MetaCmd.
+- `grainfs audit query <SQL> | recent-denies | by-sa | by-request-id`
+  via embedded DuckDB on admin UDS; SELECT-only enforcement, 500-row
+  cap (`audit.MaxSearchLimit`); rejects `--`/`/*` SQL comments
+  defense-in-depth (F37).
+- `grainfs status [--json]` — single-screen cluster/phase/iam/
+  encryption/tls/trusted_proxy/audit/jwt_keys/banner. Phase derivation
+  (0 → 3) computed server-side.
+- `grainfs iceberg config --warehouse --sa [--no-reveal] [--json]` —
+  client-agnostic OAuth bundle for Iceberg clients; `--no-reveal`
+  zeros the wire response defense-in-depth.
+
+Plumbing: new thin-runner packages `internal/iamadmin/policy_ops.go`,
+`internal/iamadmin/group_ops.go`, `internal/iamadmin/bucket_ops.go`,
+`internal/auditadmin/`, `internal/statusadmin/`, `internal/icebergadmin/`.
+New admin handlers: `handlers_config.go`, `handlers_iam_policy.go`,
+`handlers_iam_group.go`, `handlers_audit.go`, `handlers_status.go`,
+`handlers_iceberg_config.go`. Routes registered through the shared
+admin UDS group with peer-cred middleware.
+
+`config.Store.SetPostRestore` reconciles atomic snapshots
+(trusted-proxy.cidr ProxyTrust, anon-banner prev) after raft
+InstallSnapshot (F25/F26).
+
+E2E coverage: TestIAMPolicyE2E / TestIAMBootstrapE2E / TestIAMGroupE2E /
+TestIAMBucketE2E / TestIAMServiceAccountE2E all dual-target
+(SingleNode + Cluster4Node). Legacy Grant helpers removed.
+
 ## [0.0.299.0] - 2026-05-21
 
 ### Changed
@@ -262,6 +308,43 @@ Task 6 verify gate에서 신규 발견됐으나 v0.0.283.0 (#475)에서 master�
   cache-read-amplification workloads, compression concurrency, EC shard writes,
   shared FSM isolation, and NFS large-file integrity while lowering CI memory
   and CPU cost.
+
+## [0.0.284.0] - 2026-05-20 - feat(cli): §8 CLI Surface (config / iam policy+group+bucket / audit / status / iceberg config)
+
+§8 (CLI Surface) of the auth-redesign plan delivers the user-facing
+admin CLI surface backed by the admin UDS:
+
+- `grainfs config set/get/unset/list (--all)` — cluster-wide config
+  with isatty-aware table vs JSON output, full catalog including
+  type/default/description.
+- `grainfs iam sa create/get/list/delete` + `iam key create/revoke`
+  cleanup; legacy Grant subtree removed.
+- `grainfs iam policy put/get/delete/attach/detach/list/validate/simulate`
+  with Resource:* warning (`--i-know` to suppress); built-in policy
+  delete refused server-side; validate runs locally without UDS;
+  simulate routes through the real evaluator.
+- `grainfs iam group create/delete/list + member add/remove + policy
+  attach/detach` over admin UDS.
+- `grainfs iam bucket create [--attach-sa --attach-policy] + delete +
+  policy put/delete + list` — `create` with attach uses the §3
+  CreateBucketWithPolicyAttach atomic MetaCmd.
+- `grainfs audit query <SQL> | recent-denies | by-sa | by-request-id`
+  via embedded DuckDB on admin UDS; SELECT-only enforcement, 500-row
+  cap (`audit.MaxSearchLimit`).
+- `grainfs status [--json]` — single-screen cluster/phase/iam/
+  encryption/tls/trusted_proxy/audit/jwt_keys/banner. Phase derivation
+  (0 → 3) computed server-side.
+- `grainfs iceberg config --warehouse --sa [--no-reveal] [--json]` —
+  client-agnostic OAuth bundle for Iceberg clients; `--no-reveal`
+  zeros the wire response defense-in-depth.
+
+Plumbing: new thin-runner packages `internal/iamadmin/policy_ops.go`,
+`internal/iamadmin/group_ops.go`, `internal/iamadmin/bucket_ops.go`,
+`internal/auditadmin/`, `internal/statusadmin/`, `internal/icebergadmin/`.
+New admin handlers: `handlers_config.go`, `handlers_iam_policy.go`,
+`handlers_iam_group.go`, `handlers_audit.go`, `handlers_status.go`,
+`handlers_iceberg_config.go`. Routes registered through the shared
+admin UDS group with peer-cred middleware.
 
 ## [0.0.283.0] - 2026-05-20
 

@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,6 +163,25 @@ func (s *Store) applyBucketUpstreamDelete(bucket string) {
 	ns := s.cow()
 	delete(ns.bucketUpstreams, bucket)
 	s.commit(ns)
+}
+
+// ListKeysForSA returns all AccessKey entries whose SAID matches saID,
+// sorted by CreatedAt ascending (oldest first) for determinism.
+// Returns an empty slice (not nil) when no keys are found.
+func (s *Store) ListKeysForSA(saID string) []*AccessKey {
+	st := s.snapshot()
+	var out []*AccessKey
+	for _, k := range st.keysByAK {
+		if k.SAID == saID {
+			out = append(out, k)
+		}
+	}
+	// Sort oldest-first so callers that pick [0] get the oldest key deterministically.
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	if out == nil {
+		out = []*AccessKey{}
+	}
+	return out
 }
 
 // LookupBucketUpstream returns the BucketUpstream record for the given bucket,

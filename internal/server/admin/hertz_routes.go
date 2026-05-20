@@ -28,8 +28,12 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerResource(g, d)
 	registerDashboard(g, d)
 	registerIAM(g, d)
+	registerConfig(g, d)
 	registerBucket(g, d)
 	registerNfsExports(g, d)
+	registerAudit(g, d)
+	registerStatus(g, d)
+	registerIceberg(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the
@@ -46,7 +50,12 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 	registerStorageUI(g, d)
 	// Dashboard token endpoints are intentionally NOT mounted on /ui/api;
 	// they live only on the local admin Unix socket.
-	registerIAM(g, d)
+	// Policy and group admin endpoints are intentionally NOT mounted on /ui/api:
+	// they grant powers (attach Resource:* policies, create groups, modify SA
+	// membership) that are root-equivalent. The CLI Resource:* warning lives in
+	// the binary; the wire shape carries no such guard. Dashboard-token holders
+	// get the SA / Key / BucketUpstream surface only.
+	registerIAMUI(g, d)
 	// registerBucket is intentionally NOT mounted on /ui/api: AdminGetBucket
 	// performs an unbounded CountObjects walk (full Badger scan) that any
 	// dashboard-token holder could trigger remotely, causing write starvation.
@@ -58,6 +67,17 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 func RegisterIAMOnly(h *server.Hertz, d *Deps) {
 	g := h.Group(routePrefixAdmin)
 	registerIAM(g, d)
+}
+
+func registerStatus(g router, d *Deps) {
+	g.GET(routePathStatus, wrapZero(d, GetStatus))
+}
+
+func registerIceberg(g router, d *Deps) {
+	if d.IcebergConfig == nil {
+		return
+	}
+	g.POST(routePathIcebergConfig, wrapBody[IcebergConfigRequest, IcebergConfigResponse](d, IcebergConfig))
 }
 
 func registerCluster(g router, d *Deps) {

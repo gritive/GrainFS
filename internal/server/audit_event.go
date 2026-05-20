@@ -26,6 +26,9 @@ func normalizeAuditEvent(ev audit.S3Event) audit.S3Event {
 	ev.EventID = auditString16(ev.EventID)
 	ev.NodeID = auditString16(ev.NodeID)
 	ev.RequestID = auditString16(ev.RequestID)
+	if ev.SAID == "" {
+		ev.SAID = audit.AnonSAID
+	}
 	ev.SAID = auditString16(ev.SAID)
 	ev.SourceIP = auditString16(ev.SourceIP)
 	ev.UserAgent = auditString16(ev.UserAgent)

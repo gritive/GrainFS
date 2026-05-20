@@ -25,9 +25,16 @@ type Deps struct {
 	ScrubAggregator      ScrubAggregator          // optional; nil → GET /v1/scrub/jobs/<id> returns local-only
 	VolumePlacement      VolumePlacementSource    // optional; nil disables replica/EC volume health signal
 	IAM                  IAMService               // optional; nil disables IAM admin endpoints
+	IAMPolicy            IAMPolicyService         // optional; nil disables IAM policy admin endpoints
+	IAMGroup             IAMGroupService          // optional; nil disables IAM group admin endpoints
 	BucketWithPolicyProp BucketWithPolicyProposer // optional; nil → create-only path (no attach)
+	ConfigProposer       ConfigProposer           // optional; nil disables config write endpoints
+	ConfigStore          ConfigStoreReader        // optional; nil disables config read endpoints
 	Buckets              BucketOps                // optional; nil disables bucket CRUD admin endpoints
 	NfsExports           NfsExportService         // optional; nil disables NFS export admin endpoints
+	IcebergConfig        IcebergConfigService     // optional; nil disables iceberg config endpoint
+	AuditQuery           AuditQueryService        // optional; nil disables audit admin endpoints
+	Status               StatusService            // optional; nil disables GET /v1/status
 	Protocols            StorageProtocolStatusResp
 	NFSDiag              NFSDiag // optional; nil disables live NFS lookup/client diagnostics
 	Token                *dashboard.TokenStore
@@ -44,6 +51,8 @@ type ScrubVolumeResp = adminapi.ScrubVolumeResp
 type ScrubJobInfo = adminapi.ScrubJobInfo
 type ListScrubJobsResp = adminapi.ListScrubJobsResp
 type VolumeInfo = adminapi.VolumeInfo
+type IcebergConfigRequest = adminapi.IcebergConfigRequest
+type IcebergConfigResponse = adminapi.IcebergConfigResponse
 type BucketPolicyResp = adminapi.BucketPolicyResp
 type BucketPolicySetReq = adminapi.BucketPolicySetReq
 type BucketVersioningResp = adminapi.BucketVersioningResp

@@ -71,8 +71,8 @@ func newFSMWithIAMAndAttach(t *testing.T, saID, policyName string, policyDoc []b
 	if err := f.applyCmd(buildSACreateCmdForAtomic(t, saID)); err != nil {
 		t.Fatalf("seed SA: %v", err)
 	}
-	// Seed policy.
-	if err := f.applyCmd(buildPolicyPutCmd(t, policyName, policyDoc, false)); err != nil {
+	// Seed policy. Use isBuiltin=true so the FSM guard allows seeding a built-in name.
+	if err := f.applyCmd(buildPolicyPutCmd(t, policyName, policyDoc, true)); err != nil {
 		t.Fatalf("seed policy: %v", err)
 	}
 

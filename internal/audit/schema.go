@@ -7,6 +7,11 @@ const (
 	BucketName = "grainfs-audit"
 	SystemSA   = "system:audit"
 	Warehouse  = "default"
+	// AnonSAID is the canonical sentinel written into the sa_id column of
+	// audit.s3 rows for anonymous (unauthenticated) requests. Using a
+	// non-empty sentinel lets analytics queries distinguish anonymous traffic
+	// from genuine empty-attribution write bugs via WHERE sa_id = '(anonymous)'.
+	AnonSAID = "(anonymous)"
 )
 
 // S3Event is one row of the audit.s3 Iceberg table.

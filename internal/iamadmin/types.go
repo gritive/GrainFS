@@ -81,23 +81,139 @@ type KeyRevokeOptions struct {
 	AccessKey string
 }
 
-// --- Grant ---
+// --- Policy ---
 
-type GrantPutOptions struct {
+type PolicyPutOptions struct {
 	BaseOptions
-	SAID   string
-	Bucket string
-	Role   string
+	Name     string
+	FilePath string
 }
 
-type GrantDeleteOptions struct {
+type PolicyGetOptions struct {
 	BaseOptions
-	SAID   string
+	Name string
+}
+
+type PolicyListOptions struct {
+	BaseOptions
+}
+
+type PolicyDeleteOptions struct {
+	BaseOptions
+	Name string
+}
+
+// PolicyAttachOptions holds options for attaching a policy to an SA.
+// Use 'grainfs iam group policy attach' to attach to a group.
+type PolicyAttachOptions struct {
+	BaseOptions
+	PolicyName string
+	SAID       string
+	IKnow      bool // suppress Resource:* warning
+}
+
+type PolicyDetachOptions struct {
+	BaseOptions
+	PolicyName string
+	SAID       string
+}
+
+// PolicyValidateOptions performs local validation only — no UDS dial.
+type PolicyValidateOptions struct {
+	BaseOptions
+	FilePath string
+}
+
+type PolicySimulateOptions struct {
+	BaseOptions
+	SAID     string
+	Action   string
+	Resource string
+}
+
+// PolicySimulateRequest is the wire type sent to POST /v1/iam/policy/simulate.
+type PolicySimulateRequest struct {
+	SAID     string `json:"sa_id"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+}
+
+// PolicySimulateResponse is the wire type received from POST /v1/iam/policy/simulate.
+type PolicySimulateResponse struct {
+	Effect        string `json:"effect"`
+	MatchedPolicy string `json:"matched_policy"`
+	MatchedSID    string `json:"matched_sid"`
+	Reason        string `json:"reason"`
+}
+
+// --- Group ---
+
+type GroupCreateOptions struct {
+	BaseOptions
+	Name string
+}
+
+type GroupDeleteOptions struct {
+	BaseOptions
+	Name string
+}
+
+type GroupMemberAddOptions struct {
+	BaseOptions
+	GroupName string
+	SAID      string
+}
+
+type GroupMemberRemoveOptions struct {
+	BaseOptions
+	GroupName string
+	SAID      string
+}
+
+type GroupPolicyAttachOptions struct {
+	BaseOptions
+	GroupName  string
+	PolicyName string
+}
+
+type GroupPolicyDetachOptions struct {
+	BaseOptions
+	GroupName  string
+	PolicyName string
+}
+
+// --- Bucket (iam bucket subtree) ---
+
+type BucketCreateOptions struct {
+	BaseOptions
+	Name         string
+	AttachSA     string // optional; must be paired with AttachPolicy
+	AttachPolicy string // optional; must be paired with AttachSA
+}
+
+type BucketDeleteOptions struct {
+	BaseOptions
+	Name  string
+	Force bool
+}
+
+type BucketListOptions struct {
+	BaseOptions
+}
+
+type BucketPolicyPutOptions struct {
+	BaseOptions
+	Bucket string
+	Policy []byte // raw JSON; sent verbatim
+}
+
+type BucketPolicyDeleteOptions struct {
+	BaseOptions
 	Bucket string
 }
 
-type GrantListOptions struct {
-	BaseOptions
-	SAFilter     string
-	BucketFilter string
+// BucketListItem is one entry in the bucket list response.
+type BucketListItem struct {
+	Name        string `json:"name"`
+	HasUpstream bool   `json:"has_upstream"`
 }

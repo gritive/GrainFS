@@ -109,6 +109,11 @@ type bootState struct {
 	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
 	// start (so any snapshot Restore has already populated cfgStore).
 	refreshProxyCIDR func(string)
+	// anonBannerSeedPrev re-seeds the internal prev atomic.Bool inside the
+	// composeAnonHookWithBanner closure. Called from the config.Store
+	// post-restore callback (F26) so runtime Restores keep the hook's
+	// comparison baseline in sync with the restored iam.anon-enabled value.
+	anonBannerSeedPrev func(bool)
 	// proxyTrust validates Forwarded / X-Forwarded-* headers when the request
 	// arrives from a trusted upstream (trusted-proxy.cidr). Built at raft-phase
 	// wire time so its SetCIDRs is also driven by OnTrustedProxyCIDR. Passed
@@ -193,6 +198,11 @@ type bootState struct {
 	mutationGate      *server.MutationGate
 	volMgr            *volume.Manager
 	auditSearchWarmup func(context.Context) error
+	// auditSearcher is the DuckDB-backed audit searcher. Created in
+	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
+	// Passed to admin.Deps so `grainfs audit` commands can query it via the
+	// admin Unix socket (§8 T64).
+	auditSearcher *audit.DuckDBSearcher
 	// auditOutbox is the per-node durable audit outbox. Created in
 	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
 	// Kept on bootState so the OnAuditDenyOnly reload-hook closure registered

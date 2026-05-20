@@ -20,7 +20,8 @@ func NewUnsupported(msg string, details map[string]any) *Error {
 	raw, _ := json.Marshal(details)
 	return &Error{Code: "unsupported", Message: msg, Details: raw}
 }
-func NewRetry(msg string) *Error { return &Error{Code: "retry", Message: msg} }
+func NewRetry(msg string) *Error       { return &Error{Code: "retry", Message: msg} }
+func NewUnavailable(msg string) *Error { return &Error{Code: "unavailable", Message: msg} }
 func NewBucketNotFound(bucket string) *Error {
 	return (&Error{Code: "bucket_not_found", Message: "bucket '" + bucket + "' does not exist"}).
 		WithParam("bucket").

@@ -2,7 +2,7 @@ package iamadmin
 
 import (
 	"context"
-	"net/http"
+	"encoding/json"
 	"net/url"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
@@ -84,32 +84,134 @@ func (c *Client) KeyRevoke(ctx context.Context, saID, accessKey string) error {
 		"/v1/iam/sa/"+url.PathEscape(saID)+"/key/"+url.PathEscape(accessKey), nil)
 }
 
-// --- Grant ---
+// --- Policy ---
 
-// GrantPut grants the given role on a bucket to the SA. role is one of Read|Write|Admin.
-func (c *Client) GrantPut(ctx context.Context, saID, bucket, role string) error {
-	body := map[string]string{"sa_id": saID, "bucket": bucket, "role": role}
-	return c.Put(ctx, "/v1/iam/grant", body, nil)
+// PolicyPut uploads a custom policy document to the admin server.
+func (c *Client) PolicyPut(ctx context.Context, name string, doc []byte) error {
+	return c.Do(ctx, "PUT", "/v1/iam/policy/"+url.PathEscape(name), json.RawMessage(doc), nil)
 }
 
-// GrantDelete removes the SA's grant on the named bucket.
-func (c *Client) GrantDelete(ctx context.Context, saID, bucket string) error {
-	body := map[string]string{"sa_id": saID, "bucket": bucket}
-	return c.Do(ctx, http.MethodDelete, "/v1/iam/grant", body, nil)
+// PolicyGet returns the raw policy document bytes for the named policy.
+func (c *Client) PolicyGet(ctx context.Context, name string) ([]byte, error) {
+	return c.GetRaw(ctx, "/v1/iam/policy/"+url.PathEscape(name))
 }
 
-// GrantListRaw mirrors existing behavior: server body verbatim.
-func (c *Client) GrantListRaw(ctx context.Context, saFilter, bucketFilter string) ([]byte, error) {
-	path := "/v1/iam/grant"
-	q := url.Values{}
-	if saFilter != "" {
-		q.Set("sa", saFilter)
+// PolicyList returns the names of all policies known to the admin server.
+func (c *Client) PolicyList(ctx context.Context) ([]string, error) {
+	var resp []string
+	err := c.Get(ctx, "/v1/iam/policy", &resp)
+	return resp, err
+}
+
+// PolicyDelete deletes the named policy; the server refuses built-in names.
+func (c *Client) PolicyDelete(ctx context.Context, name string) error {
+	return c.Delete(ctx, "/v1/iam/policy/"+url.PathEscape(name), nil)
+}
+
+// PolicyAttachToSA attaches a policy to the named ServiceAccount via Raft.
+func (c *Client) PolicyAttachToSA(ctx context.Context, policyName, saID string) error {
+	return c.Put(ctx,
+		"/v1/iam/policy/"+url.PathEscape(policyName)+"/attach/sa/"+url.PathEscape(saID),
+		nil, nil)
+}
+
+// PolicyDetachFromSA detaches a policy from the named ServiceAccount via Raft.
+func (c *Client) PolicyDetachFromSA(ctx context.Context, policyName, saID string) error {
+	return c.Delete(ctx,
+		"/v1/iam/policy/"+url.PathEscape(policyName)+"/attach/sa/"+url.PathEscape(saID),
+		nil)
+}
+
+// PolicySimulate evaluates a hypothetical request against current cluster IAM state.
+func (c *Client) PolicySimulate(ctx context.Context, req PolicySimulateRequest) (PolicySimulateResponse, error) {
+	var resp PolicySimulateResponse
+	err := c.Post(ctx, "/v1/iam/policy/simulate", req, &resp)
+	return resp, err
+}
+
+// --- Group ---
+
+// GroupCreate creates a named group (empty policies; attach via GroupPolicyAttach).
+func (c *Client) GroupCreate(ctx context.Context, name string) error {
+	return c.Put(ctx, "/v1/iam/group/"+url.PathEscape(name), nil, nil)
+}
+
+// GroupDelete removes the named group via Raft.
+func (c *Client) GroupDelete(ctx context.Context, name string) error {
+	return c.Delete(ctx, "/v1/iam/group/"+url.PathEscape(name), nil)
+}
+
+// GroupMemberAdd adds saID as a member of group via Raft.
+func (c *Client) GroupMemberAdd(ctx context.Context, group, saID string) error {
+	return c.Put(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/member/"+url.PathEscape(saID),
+		nil, nil)
+}
+
+// GroupMemberRemove removes saID from group via Raft.
+func (c *Client) GroupMemberRemove(ctx context.Context, group, saID string) error {
+	return c.Delete(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/member/"+url.PathEscape(saID),
+		nil)
+}
+
+// GroupPolicyAttach attaches a policy to a group via Raft.
+func (c *Client) GroupPolicyAttach(ctx context.Context, group, policy string) error {
+	return c.Put(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/policy/"+url.PathEscape(policy),
+		nil, nil)
+}
+
+// GroupPolicyDetach detaches a policy from a group via Raft.
+func (c *Client) GroupPolicyDetach(ctx context.Context, group, policy string) error {
+	return c.Delete(ctx,
+		"/v1/iam/group/"+url.PathEscape(group)+"/policy/"+url.PathEscape(policy),
+		nil)
+}
+
+// --- Bucket (iam bucket subtree) ---
+
+// BucketCreate creates a bucket. When both attachSA and attachPolicy are
+// non-empty the server routes through MetaCmd 62 (CreateBucketWithPolicyAttach).
+func (c *Client) BucketCreate(ctx context.Context, name, attachSA, attachPolicy string) error {
+	body := map[string]any{"name": name}
+	if attachSA != "" {
+		body["attach_sa"] = attachSA
 	}
-	if bucketFilter != "" {
-		q.Set("bucket", bucketFilter)
+	if attachPolicy != "" {
+		body["attach_policy"] = attachPolicy
 	}
-	if encoded := q.Encode(); encoded != "" {
-		path += "?" + encoded
+	return c.Post(ctx, "/v1/buckets", body, nil)
+}
+
+// BucketDelete removes the named bucket. force=true forces deletion of all objects first.
+func (c *Client) BucketDelete(ctx context.Context, name string, force bool) error {
+	path := "/v1/buckets/" + url.PathEscape(name)
+	if force {
+		path += "?force=true"
 	}
-	return c.GetRaw(ctx, path)
+	return c.Delete(ctx, path, nil)
+}
+
+// BucketList returns all user-facing buckets (__grainfs_* excluded by server).
+func (c *Client) BucketList(ctx context.Context) ([]BucketListItem, error) {
+	var resp struct {
+		Buckets []BucketListItem `json:"buckets"`
+	}
+	err := c.Get(ctx, "/v1/buckets", &resp)
+	return resp.Buckets, err
+}
+
+// BucketPolicyPut sends a raw JSON policy document wrapped in the server's
+// BucketPolicySetReq envelope ({"policy": <doc>}).
+func (c *Client) BucketPolicyPut(ctx context.Context, bucket string, policy []byte) error {
+	body := struct {
+		Policy json.RawMessage `json:"policy"`
+	}{Policy: json.RawMessage(policy)}
+	return c.Put(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", body, nil)
+}
+
+// BucketPolicyDelete removes the bucket policy.
+func (c *Client) BucketPolicyDelete(ctx context.Context, bucket string) error {
+	return c.Delete(ctx, "/v1/buckets/"+url.PathEscape(bucket)+"/policy", nil)
 }

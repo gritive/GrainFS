@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -109,6 +111,46 @@ type NFSDiag interface {
 // falls back to the existing create-only flow.
 type BucketWithPolicyProposer interface {
 	ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error
+}
+
+// IAMGroupService is the slim interface group admin handlers need.
+// Kept separate from IAMPolicyService because group operations use distinct
+// Raft MetaCmdTypes (52-55, 58-59) and distinct FSM stores. nil disables
+// group admin endpoints.
+type IAMGroupService interface {
+	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
+}
+
+// ConfigProposer is the slim interface config admin handlers need to write
+// cluster-wide config via Raft. Satisfied by *cluster.MetaRaft.
+// nil disables config write endpoints.
+type ConfigProposer interface {
+	ProposeConfigPut(ctx context.Context, key, value string) error
+	ProposeConfigDelete(ctx context.Context, key string) error
+}
+
+// ConfigStoreReader is the slim interface config admin handlers need to read
+// the current config state. Satisfied by *config.Store.
+// nil disables config read endpoints.
+type ConfigStoreReader interface {
+	GetString(key string) (value string, present bool)
+	ListAll() []config.Entry
+}
+
+// StatusService is the slim interface the status admin handler needs.
+// Satisfied by *StatusAdapter in serveruntime; nil disables the status endpoint.
+type StatusService interface {
+	Report() adminapi.StatusReport
+}
+
+// IcebergConfigService is the slim interface the iceberg config handler needs.
+// Satisfied by an adapter in serveruntime that pulls from iam.Store.
+// nil disables the iceberg config endpoint.
+type IcebergConfigService interface {
+	// RevealSAKeyPair returns the first active AccessKey + plaintext SecretKey
+	// for the given ServiceAccount. Returns an error when the SA or any
+	// active key is not found.
+	RevealSAKeyPair(ctx context.Context, saID string) (accessKey, secretKey string, err error)
 }
 
 // IAMService is the slim interface the IAM admin handlers need.

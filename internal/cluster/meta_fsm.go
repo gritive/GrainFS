@@ -20,6 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
+	iambuiltin "github.com/gritive/GrainFS/internal/iam/builtin"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
@@ -1134,11 +1135,16 @@ func (f *MetaFSM) applyPolicyPut(payload []byte) error {
 	if f.policyStore == nil {
 		return nil // safe no-op until wired
 	}
-	name, docJSON, builtin, err := DecodePolicyPutPayload(payload)
+	name, docJSON, isBuiltin, err := DecodePolicyPutPayload(payload)
 	if err != nil {
 		return fmt.Errorf("meta_fsm: PolicyPut: %w", err)
 	}
-	if err := f.policyStore.Put(context.Background(), name, docJSON, builtin); err != nil {
+	// FSM-side guard: refuse any non-bootstrap payload that claims a built-in
+	// name (isBuiltin=false means it came from the CLI/handler path, not seed).
+	if !isBuiltin && iambuiltin.IsBuiltinName(name) {
+		return fmt.Errorf("meta_fsm: PolicyPut: refusing to overwrite built-in policy %q", name)
+	}
+	if err := f.policyStore.Put(context.Background(), name, docJSON, isBuiltin); err != nil {
 		return fmt.Errorf("meta_fsm: PolicyPut store: %w", err)
 	}
 	if f.policyResolver != nil {

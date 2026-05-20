@@ -8,7 +8,7 @@ import (
 
 var iamCmd = &cobra.Command{
 	Use:   "iam",
-	Short: "Manage GrainFS IAM (ServiceAccounts, AccessKeys, Grants)",
+	Short: "Manage GrainFS IAM (ServiceAccounts, AccessKeys, Policies)",
 }
 
 // iamBaseOptionsFromCmd reads the flags every iam runner shares and builds
@@ -81,7 +81,7 @@ var iamSAGetCmd = &cobra.Command{
 
 var iamSADeleteCmd = &cobra.Command{
 	Use:     "delete <sa_id>",
-	Short:   "Delete an SA (cascades to its keys + grants via FSM)",
+	Short:   "Delete an SA (cascades to its keys + policy attachments via FSM)",
 	Example: `  grainfs iam sa delete sa-abc123`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(c *cobra.Command, args []string) error {
@@ -131,61 +131,6 @@ var iamKeyRevokeCmd = &cobra.Command{
 	},
 }
 
-// --- grant ---
-
-var iamGrantCmd = &cobra.Command{Use: "grant", Short: "Manage Grants"}
-
-var iamGrantPutCmd = &cobra.Command{
-	Use:     "put <sa_id> <bucket> <role>",
-	Short:   "Grant role on bucket to SA (role: Read|Write|Admin)",
-	Example: `  grainfs iam grant put sa-abc123 my-bucket Write`,
-	Args:    cobra.ExactArgs(3),
-	RunE: func(c *cobra.Command, args []string) error {
-		base, err := iamBaseOptionsFromCmd(c)
-		if err != nil {
-			return err
-		}
-		return iamadmin.RunGrantPut(c.Context(), iamadmin.GrantPutOptions{
-			BaseOptions: base, SAID: args[0], Bucket: args[1], Role: args[2],
-		})
-	},
-}
-
-var iamGrantDeleteCmd = &cobra.Command{
-	Use:     "delete <sa_id> <bucket>",
-	Short:   "Remove grant from SA on bucket",
-	Example: `  grainfs iam grant delete sa-abc123 my-bucket`,
-	Args:    cobra.ExactArgs(2),
-	RunE: func(c *cobra.Command, args []string) error {
-		base, err := iamBaseOptionsFromCmd(c)
-		if err != nil {
-			return err
-		}
-		return iamadmin.RunGrantDelete(c.Context(), iamadmin.GrantDeleteOptions{
-			BaseOptions: base, SAID: args[0], Bucket: args[1],
-		})
-	},
-}
-
-var iamGrantListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List grants (filter with --sa or --bucket)",
-	Example: `  grainfs iam grant list
-  grainfs iam grant list --sa sa-abc123
-  grainfs iam grant list --bucket my-bucket`,
-	RunE: func(c *cobra.Command, args []string) error {
-		base, err := iamBaseOptionsFromCmd(c)
-		if err != nil {
-			return err
-		}
-		sa, _ := c.Flags().GetString("sa")
-		bucket, _ := c.Flags().GetString("bucket")
-		return iamadmin.RunGrantList(c.Context(), iamadmin.GrantListOptions{
-			BaseOptions: base, SAFilter: sa, BucketFilter: bucket,
-		})
-	},
-}
-
 func init() {
 	iamCmd.PersistentFlags().String("endpoint", "",
 		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
@@ -194,12 +139,9 @@ func init() {
 	iamSACreateCmd.Flags().String("description", "", "free-form SA description")
 	iamKeyCreateCmd.Flags().StringSlice("bucket", nil,
 		"restrict the new key to specific buckets (repeatable; default: unrestricted)")
-	iamGrantListCmd.Flags().String("sa", "", "filter by sa_id")
-	iamGrantListCmd.Flags().String("bucket", "", "filter by bucket")
 
 	iamSACmd.AddCommand(iamSACreateCmd, iamSAListCmd, iamSAGetCmd, iamSADeleteCmd)
 	iamKeyCmd.AddCommand(iamKeyCreateCmd, iamKeyRevokeCmd)
-	iamGrantCmd.AddCommand(iamGrantPutCmd, iamGrantDeleteCmd, iamGrantListCmd)
-	iamCmd.AddCommand(iamSACmd, iamKeyCmd, iamGrantCmd)
+	iamCmd.AddCommand(iamSACmd, iamKeyCmd)
 	rootCmd.AddCommand(iamCmd)
 }
