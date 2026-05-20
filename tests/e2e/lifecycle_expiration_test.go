@@ -15,19 +15,18 @@ import (
 
 // TestLifecycleExpirationE2E exercises the leader-side expiration path via the
 // public S3 lifecycle API + the test-control endpoints in
-// internal/server/lifecycle_testctl_api.go. The fixture spawns a dedicated
-// single-node binary with --lifecycle-interval=24h (the package-global
-// single-node target boots with --lifecycle-interval=0, which disables the
-// service entirely).
+// internal/server/lifecycle_testctl_api.go.
 //
-// Cluster4Node target is intentionally NOT used: newSharedClusterS3Target
-// keeps --lifecycle-interval=0 on every cluster node, and re-booting a full
-// 4-node cluster just for these cases would double the package boot cost.
-// Cluster coverage of lifecycle replication is owned by
-// lifecycle_replication_test.go (TestLifecycleE2E).
+// SingleNode은 newDedicatedSingleNodeS3Target으로, Cluster4Node는
+// newDedicatedCluster4NodeS3Target으로 부트한다 — 두 fixture 모두
+// --lifecycle-interval=24h로 lifecycle 서비스를 활성화한다. DM
+// sub-test가 versioning을 요구하므로 Cluster4Node 분기는 필수.
 func TestLifecycleExpirationE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runLifecycleExpirationCases(t, newDedicatedSingleNodeS3Target(t, []string{"--lifecycle-interval=24h"}))
+	})
+	t.Run("Cluster4Node", func(t *testing.T) {
+		runLifecycleExpirationCases(t, newDedicatedCluster4NodeS3Target(t, nil))
 	})
 }
 
