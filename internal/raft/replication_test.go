@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +32,168 @@ func mustLogEntry(n *Node, idx uint64) LogEntry {
 	}
 	return e
 }
+
+var _ = ginkgo.Describe("Replication scenarios", func() {
+	startCapturedReplicationCluster := func(ids ...string) ([]*capturedNode, func(), error) {
+		if len(ids) != 3 {
+			return nil, nil, fmt.Errorf("startCapturedReplicationCluster expects exactly 3 ids")
+		}
+
+		net := newMemNetwork()
+		captures := make([]*capturedNode, 0, len(ids))
+		for i, id := range ids {
+			electionTimeout := slowElectionTimeout
+			if i == 0 {
+				electionTimeout = fastElectionTimeout
+			}
+			node, err := NewNode(Config{
+				ID:               id,
+				Peers:            otherIDsLocal(ids, id),
+				ElectionTimeout:  electionTimeout,
+				HeartbeatTimeout: testHeartbeat,
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			captures = append(captures, &capturedNode{node: node, doneCh: make(chan struct{})})
+		}
+		for _, capture := range captures {
+			capture.node.SetTransport(net.Register(capture.node.cfg.ID, capture.node))
+		}
+		for _, capture := range captures {
+			capture.node.Start()
+			go func(capture *capturedNode) {
+				defer close(capture.doneCh)
+				for entry := range capture.node.ApplyCh() {
+					capture.applied = append(capture.applied, entry)
+				}
+			}(capture)
+		}
+
+		stopped := false
+		cleanup := func() {
+			if stopped {
+				return
+			}
+			stopped = true
+			for _, capture := range captures {
+				capture.node.Stop()
+			}
+			for _, capture := range captures {
+				<-capture.doneCh
+			}
+		}
+		return captures, cleanup, nil
+	}
+
+	waitForReplicationCommitted := func(captures []*capturedNode, idx uint64, timeout time.Duration) error {
+		return waitFor(timeout, func() bool {
+			for _, capture := range captures {
+				if capture.node.CommittedIndex() < idx {
+					return false
+				}
+			}
+			return true
+		})
+	}
+
+	ginkgo.Context("captured three-voter cluster", func() {
+		var captures []*capturedNode
+		var cleanup func()
+		var leader *Node
+
+		ginkgo.BeforeEach(func() {
+			var err error
+			captures, cleanup, err = startCapturedReplicationCluster("n1", "n2", "n3")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.DeferCleanup(cleanup)
+			leader = captures[0].node
+			gomega.Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).To(gomega.Succeed(), "n1 did not become leader")
+		})
+
+		ginkgo.It("replicates one proposed entry to all voters", func(ginkgo.SpecContext) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			idx, err := leader.ProposeWait(ctx, []byte("hello"))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(idx).To(gomega.Equal(uint64(2)), "first user proposal follows the leader no-op")
+			gomega.Expect(waitForReplicationCommitted(captures, 2, 2*time.Second)).To(gomega.Succeed())
+
+			cleanup()
+			for _, capture := range captures {
+				entries := capture.applied
+				gomega.Expect(entries).To(gomega.HaveLen(2), "%s applied count", capture.node.cfg.ID)
+				gomega.Expect(entries[0].Index).To(gomega.Equal(uint64(1)), "%s no-op index", capture.node.cfg.ID)
+				gomega.Expect(entries[0].Type).To(gomega.Equal(LogEntryNoOp), "%s no-op type", capture.node.cfg.ID)
+				gomega.Expect(entries[1].Index).To(gomega.Equal(uint64(2)), "%s user entry index", capture.node.cfg.ID)
+				gomega.Expect(entries[1].Command).To(gomega.Equal([]byte("hello")), "%s user entry command", capture.node.cfg.ID)
+				gomega.Expect(entries[1].Term).To(gomega.Equal(uint64(1)), "%s user entry term", capture.node.cfg.ID)
+			}
+		}, ginkgo.NodeTimeout(5*time.Second))
+
+		ginkgo.It("applies multiple proposals in submission order", func(ginkgo.SpecContext) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			const proposals = 5
+			for i := 1; i <= proposals; i++ {
+				idx, err := leader.ProposeWait(ctx, []byte(fmt.Sprintf("cmd-%d", i)))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Expect(idx).To(gomega.Equal(uint64(i + 1)))
+			}
+			gomega.Expect(waitForReplicationCommitted(captures, proposals+1, 2*time.Second)).To(gomega.Succeed())
+
+			cleanup()
+			for _, capture := range captures {
+				entries := capture.applied
+				gomega.Expect(entries).To(gomega.HaveLen(proposals+1), "%s applied count", capture.node.cfg.ID)
+				gomega.Expect(entries[0].Type).To(gomega.Equal(LogEntryNoOp), "%s entries[0] is no-op", capture.node.cfg.ID)
+				for i := 1; i <= proposals; i++ {
+					entry := entries[i]
+					gomega.Expect(entry.Index).To(gomega.Equal(uint64(i+1)), "%s entry[%d].Index", capture.node.cfg.ID, i)
+					gomega.Expect(entry.Command).To(gomega.Equal([]byte(fmt.Sprintf("cmd-%d", i))), "%s entry[%d].Command", capture.node.cfg.ID, i)
+				}
+			}
+		}, ginkgo.NodeTimeout(8*time.Second))
+
+		ginkgo.It("commits the leader no-op after election", func() {
+			leaderTerm := leader.Term()
+			gomega.Expect(waitForReplicationCommitted(captures, 1, 2*time.Second)).To(gomega.Succeed())
+
+			cleanup()
+			for _, capture := range captures {
+				entries := capture.applied
+				gomega.Expect(entries).NotTo(gomega.BeEmpty(), "%s must have at least the no-op", capture.node.cfg.ID)
+				noOp := entries[0]
+				gomega.Expect(noOp.Index).To(gomega.Equal(uint64(1)), "%s no-op index", capture.node.cfg.ID)
+				gomega.Expect(noOp.Term).To(gomega.Equal(leaderTerm), "%s no-op term", capture.node.cfg.ID)
+				gomega.Expect(noOp.Type).To(gomega.Equal(LogEntryNoOp), "%s no-op type", capture.node.cfg.ID)
+			}
+		})
+
+		ginkgo.It("keeps apply order consistent across followers", func(ginkgo.SpecContext) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			const proposals = 3
+			for i := 1; i <= proposals; i++ {
+				_, err := leader.ProposeWait(ctx, []byte(fmt.Sprintf("v%d", i)))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+			gomega.Expect(waitForReplicationCommitted(captures, proposals+1, 2*time.Second)).To(gomega.Succeed())
+
+			cleanup()
+			for _, capture := range captures {
+				entries := capture.applied
+				gomega.Expect(entries).To(gomega.HaveLen(proposals+1), "%s applied count", capture.node.cfg.ID)
+				for i, entry := range entries {
+					gomega.Expect(entry.Index).To(gomega.Equal(uint64(i+1)), "%s entry[%d].Index", capture.node.cfg.ID, i)
+				}
+			}
+		}, ginkgo.NodeTimeout(8*time.Second))
+	})
+})
 
 func TestAppendEntriesRejectsNonContiguousBatch(t *testing.T) {
 	n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}, ElectionTimeout: time.Hour})
@@ -152,79 +316,6 @@ func (c *capturedNode) readApplied() []LogEntry {
 	c.node.Stop()
 	<-c.doneCh
 	return c.applied
-}
-
-// TestReplication_BasicHappyPath: 3-voter cluster, n1 wins election, leader
-// proposes one entry, all three nodes apply it.
-func TestReplication_BasicHappyPath(t *testing.T) {
-	caps := startCapturingCluster(t, "n1", "n2", "n3")
-	n1 := caps[0].node
-
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
-		"n1 did not become leader")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	// becomeLeader appends a no-op at index 1 (Raft §5.4.2). The first user
-	// propose therefore lands at index 2.
-	idx, err := n1.ProposeWait(ctx, []byte("hello"))
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), idx, "first user ProposeWait returns index 2 (no-op at index 1)")
-
-	// All three nodes must reach commitIndex >= 2.
-	waitForCommitted(t, caps, 2, 2*time.Second)
-
-	// Drain by stopping nodes; verify each captured the no-op and the proposed entry.
-	for _, c := range caps {
-		entries := c.readApplied()
-		require.Len(t, entries, 2, "%s applied count (no-op + hello)", c.node.cfg.ID)
-		// Index 1: no-op
-		require.Equal(t, uint64(1), entries[0].Index, "%s no-op index", c.node.cfg.ID)
-		require.Equal(t, LogEntryNoOp, entries[0].Type, "%s no-op type", c.node.cfg.ID)
-		// Index 2: user entry
-		require.Equal(t, uint64(2), entries[1].Index, "%s user entry index", c.node.cfg.ID)
-		require.Equal(t, []byte("hello"), entries[1].Command, "%s user entry command", c.node.cfg.ID)
-		// Term comes from the leader at propose time; since n1 won term 1
-		// uncontested, both entries must carry term 1.
-		require.Equal(t, uint64(1), entries[1].Term, "%s user entry term", c.node.cfg.ID)
-	}
-}
-
-// TestReplication_MultiplePropose: 3-voter cluster, leader proposes 5
-// commands; all three nodes apply them in submission order.
-func TestReplication_MultiplePropose(t *testing.T) {
-	caps := startCapturingCluster(t, "n1", "n2", "n3")
-	n1 := caps[0].node
-
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// no-op is at index 1; user commands land at indices 2..N+1.
-	const N = 5
-	for i := 1; i <= N; i++ {
-		cmd := []byte(fmt.Sprintf("cmd-%d", i))
-		idx, err := n1.ProposeWait(ctx, cmd)
-		require.NoError(t, err)
-		require.Equal(t, uint64(i+1), idx, "ProposeWait #%d returns index %d (no-op at 1)", i, i+1)
-	}
-
-	waitForCommitted(t, caps, N+1, 2*time.Second)
-
-	for _, c := range caps {
-		entries := c.readApplied()
-		require.Len(t, entries, N+1, "%s applied count (no-op + %d user)", c.node.cfg.ID, N)
-		// entries[0] is the no-op; entries[1..N] are user commands.
-		require.Equal(t, LogEntryNoOp, entries[0].Type, "%s entries[0] is no-op", c.node.cfg.ID)
-		for i := 1; i <= N; i++ {
-			e := entries[i]
-			require.Equal(t, uint64(i+1), e.Index, "%s entry[%d].Index", c.node.cfg.ID, i)
-			require.Equal(t, []byte(fmt.Sprintf("cmd-%d", i)), e.Command,
-				"%s entry[%d].Command", c.node.cfg.ID, i)
-		}
-	}
 }
 
 // dropAETransport wraps a Transport and drops all SendAppendEntries calls
@@ -874,69 +965,6 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 		require.Equal(t, conflictIdx, n.st.nextIndex["p1"],
 			"nextIndex must fall back to ConflictIndex when leader lacks ConflictTerm")
 	})
-}
-
-// TestBecomeLeader_AppendsNoOp verifies that a newly elected multi-voter leader
-// appends a LogEntryNoOp entry at its current term immediately on election.
-// After replication settles, all followers' commitIndex must advance to 1 (the
-// no-op index).
-func TestBecomeLeader_AppendsNoOp(t *testing.T) {
-	caps := startCapturingCluster(t, "n1", "n2", "n3")
-	n1 := caps[0].node
-
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }),
-		"n1 did not become leader")
-
-	leaderTerm := n1.Term()
-
-	// All three nodes must commit the no-op at index 1.
-	waitForCommitted(t, caps, 1, 2*time.Second)
-
-	// Stop all nodes and inspect captured entries.
-	for _, c := range caps {
-		entries := c.readApplied()
-		require.GreaterOrEqual(t, len(entries), 1, "%s must have at least the no-op", c.node.cfg.ID)
-		noOp := entries[0]
-		require.Equal(t, uint64(1), noOp.Index, "%s no-op index", c.node.cfg.ID)
-		require.Equal(t, leaderTerm, noOp.Term, "%s no-op term", c.node.cfg.ID)
-		require.Equal(t, LogEntryNoOp, noOp.Type, "%s no-op type", c.node.cfg.ID)
-	}
-}
-
-// TestReplication_ApplyOrderAcrossFollowers: assert all three nodes apply
-// the same sequence of entries (no reordering) when multiple proposes happen
-// in rapid succession. Different from TestReplication_MultiplePropose because
-// this drives proposes back-to-back without waiting between, exercising the
-// in-flight pipeline.
-func TestReplication_ApplyOrderAcrossFollowers(t *testing.T) {
-	caps := startCapturingCluster(t, "n1", "n2", "n3")
-	n1 := caps[0].node
-
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Three proposes serialised through ProposeWait (each blocks on commit).
-	// The actor processes them sequentially; between two adjacent proposes,
-	// the leader's commitIndex moves and a fresh AE round propagates.
-	// No-op at index 1; user entries at indices 2..N+1.
-	const N = 3
-	for i := 1; i <= N; i++ {
-		_, err := n1.ProposeWait(ctx, []byte(fmt.Sprintf("v%d", i)))
-		require.NoError(t, err)
-	}
-
-	waitForCommitted(t, caps, N+1, 2*time.Second)
-
-	for _, c := range caps {
-		entries := c.readApplied()
-		require.Len(t, entries, N+1, "%s: N user + 1 no-op", c.node.cfg.ID)
-		// Index monotonically increasing: no-op at 1, user entries at 2..N+1.
-		for i, e := range entries {
-			require.Equal(t, uint64(i+1), e.Index, "%s entry[%d].Index", c.node.cfg.ID, i)
-		}
-	}
 }
 
 // blockingAETransport wraps a Transport and blocks SendAppendEntries calls to a
