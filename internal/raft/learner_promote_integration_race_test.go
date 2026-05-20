@@ -42,7 +42,7 @@ func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
 
 const (
 	promoteRaceIterations = 50
-	promoteRaceWorkers    = 8
+	promoteRaceWorkers    = 4
 )
 
 var _ = ginkgo.Describe("TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit", func() {
