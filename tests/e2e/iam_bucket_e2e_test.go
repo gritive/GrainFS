@@ -2,28 +2,25 @@ package e2e
 
 import (
 	"context"
-	"testing"
+	"errors"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smithy "github.com/aws/smithy-go"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
-// TestIAMBucketE2E validates the IAM bucket admin plane (create/delete/list/
-// policy-put/delete and data-plane create-denied) against both single-node
-// and cluster fixtures.
-func TestIAMBucketE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIAMBucketCases(t, newSingleNodeIAMAdminTarget())
+var _ = ginkgo.Describe("IAM bucket", func() {
+	describeIAMBucketContext("SingleNode", func() iamAdminTarget {
+		return newSingleNodeIAMAdminTarget()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runIAMBucketCases(t, newSharedClusterIAMAdminTarget(t))
+	describeIAMBucketContext("Cluster4Node", func() iamAdminTarget {
+		return newSharedClusterIAMAdminTarget(ginkgo.GinkgoTB())
 	})
-}
+})
 
 // validBucketPolicyDoc is a minimal S3 bucket policy accepted by
 // policy.ParsePolicy (requires Effect="Allow"|"Deny").
@@ -52,81 +49,106 @@ const validBucketPolicyDoc = `{
 //     ErrUnsupportedOperation in the shared e2e fixtures (storage backend does
 //     not support per-bucket policy storage in this configuration). The route
 //     and handler are exercised by unit tests in handlers_bucket_policy.go.
-func runIAMBucketCases(t *testing.T, tgt iamAdminTarget) {
-	t.Helper()
-	ctx := context.Background()
+func describeIAMBucketContext(name string, factory func() iamAdminTarget) {
+	ginkgo.Context(name, func() {
+		var (
+			ctx context.Context
+			tgt iamAdminTarget
+		)
 
+		ginkgo.BeforeEach(func() {
+			ctx = context.Background()
+			tgt = factory()
+		})
+
+		runIAMBucketCases(func() context.Context { return ctx }, func() iamAdminTarget { return tgt })
+	})
+}
+
+func runIAMBucketCases(getCtx func() context.Context, getTgt func() iamAdminTarget) {
 	// CreateDelete: create via IAM admin plane, verify it appears in list, then
 	// delete. The post-create list membership and the absence of errors on
 	// create/delete are the primary invariants.
-	t.Run("CreateDelete", func(t *testing.T) {
+	ginkgo.It("creates, lists, and deletes buckets through IAM admin (CreateDelete)", func() {
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
-		name := bucketNameFor(tgt.name, t.Name(), "create-delete")
-		t.Cleanup(func() { _ = c.BucketDelete(ctx, name, false) })
+		name := iamSpecBucketName(tgt, "create-delete")
+		ginkgo.DeferCleanup(func() { _ = c.BucketDelete(ctx, name, false) })
 
-		require.NoError(t, c.BucketCreate(ctx, name, "", ""))
+		gomega.Expect(c.BucketCreate(ctx, name, "", "")).To(gomega.Succeed())
 
 		items, err := c.BucketList(ctx)
-		require.NoError(t, err)
-		assert.Contains(t, bucketItemNames(items), name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(bucketItemNames(items)).To(gomega.ContainElement(name))
 
-		require.NoError(t, c.BucketDelete(ctx, name, false))
+		gomega.Expect(c.BucketDelete(ctx, name, false)).To(gomega.Succeed())
 	})
 
 	// List: create two buckets, verify both appear in list.
-	t.Run("List", func(t *testing.T) {
+	ginkgo.It("lists multiple IAM-created buckets (List)", func() {
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
-		name1 := bucketNameFor(tgt.name, t.Name(), "list-a")
-		name2 := bucketNameFor(tgt.name, t.Name(), "list-b")
-		t.Cleanup(func() {
+		name1 := iamSpecBucketName(tgt, "list-a")
+		name2 := iamSpecBucketName(tgt, "list-b")
+		ginkgo.DeferCleanup(func() {
 			_ = c.BucketDelete(ctx, name1, false)
 			_ = c.BucketDelete(ctx, name2, false)
 		})
 
-		require.NoError(t, c.BucketCreate(ctx, name1, "", ""))
-		require.NoError(t, c.BucketCreate(ctx, name2, "", ""))
+		gomega.Expect(c.BucketCreate(ctx, name1, "", "")).To(gomega.Succeed())
+		gomega.Expect(c.BucketCreate(ctx, name2, "", "")).To(gomega.Succeed())
 
 		items, err := c.BucketList(ctx)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		names := bucketItemNames(items)
-		assert.Contains(t, names, name1)
-		assert.Contains(t, names, name2)
+		gomega.Expect(names).To(gomega.ContainElement(name1))
+		gomega.Expect(names).To(gomega.ContainElement(name2))
 	})
 
 	// CreateWithAttach: create a bucket and atomically attach an SA + policy
 	// via MetaCmd 62. Verify the bucket exists (attach success is implicit:
 	// if the MetaCmd fails, BucketCreate rolls back the bucket creation and
 	// returns an error).
-	t.Run("CreateWithAttach", func(t *testing.T) {
+	ginkgo.It("creates buckets with SA/policy attachment (CreateWithAttach)", func() {
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
-		name := bucketNameFor(tgt.name, t.Name(), "create-attach")
-		t.Cleanup(func() { _ = c.BucketDelete(ctx, name, false) })
+		name := iamSpecBucketName(tgt, "create-attach")
+		ginkgo.DeferCleanup(func() { _ = c.BucketDelete(ctx, name, false) })
 
-		saID, _, _ := tgt.uniqueSA(t, "create-attach")
+		saID, _, _ := tgt.uniqueSA(ginkgo.GinkgoTB(), "create-attach")
 
 		// Use the built-in "readwrite" policy (allows PutObject / GetObject).
-		require.NoError(t, c.BucketCreate(ctx, name, saID, "readwrite"))
+		gomega.Expect(c.BucketCreate(ctx, name, saID, "readwrite")).To(gomega.Succeed())
 
 		// Bucket must be present after create-with-attach.
 		items, err := c.BucketList(ctx)
-		require.NoError(t, err)
-		assert.Contains(t, bucketItemNames(items), name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(bucketItemNames(items)).To(gomega.ContainElement(name))
 	})
 
 	// DataplaneCreateRefused: S3 CreateBucket on the data plane must always
 	// return AccessDenied per Decision #8 (admin-UDS-only actions). The SA
 	// used here has full admin credentials; the denial is unconditional.
-	t.Run("DataplaneCreateRefused", func(t *testing.T) {
-		name := bucketNameFor(tgt.name, t.Name(), "dp-create-refused")
+	ginkgo.It("refuses data-plane bucket creation (DataplaneCreateRefused)", func() {
+		ctx := getCtx()
+		tgt := getTgt()
+		name := iamSpecBucketName(tgt, "dp-create-refused")
 		s3c := tgt.pickNode(0)
 		_, err := s3c.CreateBucket(ctx, &s3.CreateBucketInput{
 			Bucket: aws.String(name),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("AccessDenied"))
 	})
+}
+
+func iamSpecBucketName(tgt iamAdminTarget, caseName string) string {
+	return bucketNameFor(tgt.name, ginkgo.CurrentSpecReport().FullText(), caseName)
 }
 
 // bucketItemNames extracts bucket names from a BucketListItem slice.

@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,11 +17,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
-
-func TestBucketsE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Buckets e2e")
-}
 
 var _ = ginkgo.Describe("Buckets", func() {
 	describeBucketContext("SingleNode", func() s3Target {

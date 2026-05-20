@@ -368,7 +368,7 @@ func iamUDSClient(sock string) *http.Client {
 
 // iamDo issues an admin UDS request and decodes JSON into out (if non-nil).
 // Fatals the test on transport / non-2xx errors.
-func iamDo(t *testing.T, sock, method, path string, body any, out any) {
+func iamDo(t testing.TB, sock, method, path string, body any, out any) {
 	t.Helper()
 	var rdr io.Reader
 	if body != nil {
@@ -396,7 +396,7 @@ func iamDo(t *testing.T, sock, method, path string, body any, out any) {
 // iamCreateSA POSTs /v1/iam/sa and returns the SA's id + first key pair.
 // Waits for the new key to propagate to the verifier before returning so
 // downstream tests can sign immediately without hitting "unknown access key".
-func iamCreateSA(t *testing.T, sock, name string) iamSAResult {
+func iamCreateSA(t testing.TB, sock, name string) iamSAResult {
 	t.Helper()
 	var out iamSAResult
 	iamDo(t, sock, "POST", "/v1/iam/sa",
@@ -449,7 +449,7 @@ func iamWaitKeyReady(t testing.TB, s3URL, ak, sk string, timeout time.Duration) 
 }
 
 // iamSADelete DELETEs the given SA. 204 on success.
-func iamSADelete(t *testing.T, sock, saID string) {
+func iamSADelete(t testing.TB, sock, saID string) {
 	t.Helper()
 	iamDo(t, sock, "DELETE", "/v1/iam/sa/"+saID, nil, nil)
 }

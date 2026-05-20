@@ -26,10 +26,10 @@ type iamAdminTarget struct {
 	secretKey string
 	// uniqueSA creates a fresh ServiceAccount scoped to the calling sub-test.
 	// Returns (saID, accessKey, secretKey). Registers t.Cleanup to delete the SA.
-	uniqueSA func(t *testing.T, caseName string) (saID, ak, sk string)
+	uniqueSA func(t testing.TB, caseName string) (saID, ak, sk string)
 	// uniqueBucket creates a bucket and registers t.Cleanup(DeleteBucket).
 	// Returns the actual bucket name used.
-	uniqueBucket func(t *testing.T, caseName string) string
+	uniqueBucket func(t testing.TB, caseName string) string
 	// dataDirs returns all per-node data directories. Used for at-rest
 	// persistence assertions (e.g. secret-not-on-disk scans).
 	dataDirs  func() []string
@@ -63,7 +63,7 @@ func newSingleNodeIAMAdminTarget() iamAdminTarget {
 		},
 		accessKey: testAccessKey,
 		secretKey: testSecretKey,
-		uniqueSA: func(t *testing.T, caseName string) (string, string, string) {
+		uniqueSA: func(t testing.TB, caseName string) (string, string, string) {
 			t.Helper()
 			sock := testServerDataDir + "/admin.sock"
 			name := "sa-" + sanitizeForBucket(caseName)
@@ -73,7 +73,7 @@ func newSingleNodeIAMAdminTarget() iamAdminTarget {
 			})
 			return out.SAID, out.AccessKey, out.SecretKey
 		},
-		uniqueBucket: func(t *testing.T, caseName string) string {
+		uniqueBucket: func(t testing.TB, caseName string) string {
 			t.Helper()
 			name := bucketNameFor("single", t.Name(), caseName)
 			createBucket(t, name)
@@ -88,7 +88,7 @@ func newSingleNodeIAMAdminTarget() iamAdminTarget {
 
 // newSharedClusterIAMAdminTarget returns an iamAdminTarget backed by the
 // shared 4-node cluster fixture (same fixture as newSharedClusterS3Target).
-func newSharedClusterIAMAdminTarget(t *testing.T) iamAdminTarget {
+func newSharedClusterIAMAdminTarget(t testing.TB) iamAdminTarget {
 	t.Helper()
 	c := getOrInitSharedCluster(t)
 	return iamAdminTarget{
@@ -108,7 +108,7 @@ func newSharedClusterIAMAdminTarget(t *testing.T) iamAdminTarget {
 		},
 		accessKey: c.accessKey,
 		secretKey: c.secretKey,
-		uniqueSA: func(t *testing.T, caseName string) (string, string, string) {
+		uniqueSA: func(t testing.TB, caseName string) (string, string, string) {
 			t.Helper()
 			sock := c.dataDirs[c.leaderIdx] + "/admin.sock"
 			name := "sa-" + sanitizeForBucket(caseName)
@@ -118,7 +118,7 @@ func newSharedClusterIAMAdminTarget(t *testing.T) iamAdminTarget {
 			})
 			return out.SAID, out.AccessKey, out.SecretKey
 		},
-		uniqueBucket: func(t *testing.T, caseName string) string {
+		uniqueBucket: func(t testing.TB, caseName string) string {
 			t.Helper()
 			name := bucketNameFor("cluster4", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
