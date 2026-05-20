@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
 // makeSharedEncryptionKeyFile writes a 32-byte raw key to a temp file and
@@ -98,12 +99,10 @@ func bootstrapAdminViaUDSAny(t testing.TB, dataDirs []string, timeout time.Durat
 func bootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB, dataDirs []string, timeout time.Duration, buckets ...string) (accessKey, secretKey string) {
 	t.Helper()
 	out, sock := bootstrapAdminViaUDSAnyResult(t, dataDirs, timeout)
-	if !bootstrapResultHasWildcardAdmin(out) {
-		if out.SAID == "" {
-			t.Fatalf("bootstrap response for %s had no wildcard grant and no sa_id", sock)
-		}
-		grantAdminOnBucketsViaUDSAny(t, dataDirs, out.SAID, buckets, timeout)
+	if out.SAID == "" {
+		t.Fatalf("bootstrap response for %s had no sa_id", sock)
 	}
+	policyAttachAdminOnBucketsViaUDSAny(t, dataDirs, out.SAID, buckets, timeout)
 	return out.AccessKey, out.SecretKey
 }
 
@@ -130,21 +129,24 @@ func bootstrapAdminViaUDSAnyResult(t testing.TB, dataDirs []string, timeout time
 	return iamSAResult{}, ""
 }
 
-func bootstrapResultHasWildcardAdmin(out iamSAResult) bool {
-	for _, grant := range out.Grants {
-		if grant.Bucket == "*" && strings.EqualFold(grant.Role, "admin") {
-			return true
-		}
-	}
+// bootstrapResultHasWildcardAdmin reports whether the bootstrap SA was already
+// granted wildcard admin at creation time. The server no longer returns a
+// grants field in the SA create response (removed in §8 T60), so this is
+// always false. Kept to allow callers to short-circuit cleanly.
+func bootstrapResultHasWildcardAdmin(_ iamSAResult) bool {
 	return false
 }
 
-func grantAdminOnBucketsViaUDSAny(t testing.TB, dataDirs []string, saID string, buckets []string, timeout time.Duration) {
+// policyAttachAdminOnBucketsViaUDSAny attaches a per-bucket admin policy to
+// saID by trying each data-dir's admin UDS in turn until one accepts the
+// request. Replaces the legacy grantAdminOnBucketsViaUDSAny which targeted
+// the now-removed /v1/iam/grant route.
+func policyAttachAdminOnBucketsViaUDSAny(t testing.TB, dataDirs []string, saID string, buckets []string, timeout time.Duration) {
 	t.Helper()
 	for _, bucket := range buckets {
 		deadline := time.Now().Add(timeout)
 		var lastErr error
-		granted := false
+		attached := false
 		for time.Now().Before(deadline) {
 			for _, dir := range dataDirs {
 				sock := filepath.Join(dir, "admin.sock")
@@ -152,49 +154,45 @@ func grantAdminOnBucketsViaUDSAny(t testing.TB, dataDirs []string, saID string, 
 					lastErr = err
 					continue
 				}
-				if err := tryIAMGrantPut(sock, saID, bucket, "Admin"); err != nil {
+				if err := tryPolicyAttachAdminOnBucket(sock, saID, bucket); err != nil {
 					lastErr = err
 					continue
 				}
-				granted = true
+				attached = true
 				break
 			}
-			if granted {
+			if attached {
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		if !granted {
-			t.Fatalf("grant Admin for %s on %s did not succeed within %v: %v", saID, bucket, timeout, lastErr)
+		if !attached {
+			t.Fatalf("attach admin policy for %s on %s did not succeed within %v: %v", saID, bucket, timeout, lastErr)
 		}
 	}
 }
 
-func tryIAMGrantPut(sock, saID, bucket, role string) error {
-	body, err := json.Marshal(map[string]string{"sa_id": saID, "bucket": bucket, "role": role})
-	if err != nil {
-		return err
-	}
+// tryPolicyAttachAdminOnBucket puts a bucket-admin inline policy and attaches
+// it to saID via the admin UDS at sock.
+func tryPolicyAttachAdminOnBucket(sock, saID, bucket string) error {
+	cli := iamadmin.NewClientForURL(sock)
+	polName := "harness-admin-" + bucket
+	doc := buildPolicyDocJSON([]string{"s3:*"}, []string{
+		"arn:aws:s3:::" + bucket,
+		"arn:aws:s3:::" + bucket + "/*",
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "PUT", "http://unix/v1/iam/grant", bytes.NewReader(body))
-	if err != nil {
-		return err
+	if err := cli.PolicyPut(ctx, polName, doc); err != nil {
+		return fmt.Errorf("PolicyPut %s: %w", polName, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := iamUDSClient(sock).Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("grant %s %s on %s via %s -> %d: %s", role, saID, bucket, sock, resp.StatusCode, string(respBody))
+	if err := cli.PolicyAttachToSA(ctx, polName, saID); err != nil {
+		return fmt.Errorf("PolicyAttachToSA %s->%s: %w", polName, saID, err)
 	}
 	return nil
 }
 
-func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing.T) {
+func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
 		t.Cleanup(func() { _ = os.Remove(sock) })
@@ -211,8 +209,7 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing
 				"name":"admin",
 				"access_key":"ak",
 				"secret_key":"sk",
-				"created_at":"2026-05-13T00:00:00Z",
-				"grants":[{"sa_id":"019e-test-sa","bucket":"ec-test","role":"admin"}]
+				"created_at":"2026-05-13T00:00:00Z"
 			}`)
 			}),
 		}
@@ -231,9 +228,6 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants(t *testing
 		require.Equal(t, "019e-test-sa", got.SAID)
 		require.Equal(t, "ak", got.AccessKey)
 		require.Equal(t, "sk", got.SecretKey)
-		require.Len(t, got.Grants, 1)
-		require.Equal(t, "ec-test", got.Grants[0].Bucket)
-		require.Equal(t, "admin", got.Grants[0].Role)
 	})
 }
 
@@ -247,25 +241,28 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t *testing.T) {
 		require.NoError(t, err)
 		defer ln.Close()
 
-		granted := make(chan map[string]string, 1)
+		policyPut := make(chan string, 1)
+		policyAttach := make(chan string, 1)
 		srv := &http.Server{
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				switch r.URL.Path {
-				case "/v1/iam/sa":
+				switch {
+				case r.URL.Path == "/v1/iam/sa":
 					require.Equal(t, http.MethodPost, r.Method)
 					_, _ = io.WriteString(w, `{
-					"sa_id":"regular-sa",
-					"name":"admin",
-					"access_key":"ak",
-					"secret_key":"sk",
-					"created_at":"2026-05-13T00:00:00Z"
-				}`)
-				case "/v1/iam/grant":
-					require.Equal(t, http.MethodPut, r.Method)
-					var body map[string]string
-					require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-					granted <- body
+						"sa_id":"regular-sa",
+						"name":"admin",
+						"access_key":"ak",
+						"secret_key":"sk",
+						"created_at":"2026-05-13T00:00:00Z"
+					}`)
+				case strings.HasPrefix(r.URL.Path, "/v1/iam/policy/") && r.Method == http.MethodPut &&
+					!strings.Contains(r.URL.Path, "/attach/"):
+					policyPut <- r.URL.Path
+					w.WriteHeader(http.StatusNoContent)
+				case strings.HasPrefix(r.URL.Path, "/v1/iam/policy/") && r.Method == http.MethodPut &&
+					strings.Contains(r.URL.Path, "/attach/sa/"):
+					policyAttach <- r.URL.Path
 					w.WriteHeader(http.StatusNoContent)
 				default:
 					http.NotFound(w, r)
@@ -287,110 +284,16 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t *testing.T) {
 		require.Equal(t, "sk", sk)
 
 		select {
-		case body := <-granted:
-			require.Equal(t, "regular-sa", body["sa_id"])
-			require.Equal(t, "__probe", body["bucket"])
-			require.Equal(t, "Admin", body["role"])
+		case path := <-policyPut:
+			require.Contains(t, path, "harness-admin-__probe")
 		case <-time.After(time.Second):
-			t.Fatal("expected explicit grant request")
+			t.Fatal("expected policy PUT request")
 		}
-	})
-}
-
-func runClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
-		dir, err := os.MkdirTemp("/tmp", "grainfs-cluster-grant-*")
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		sock := filepath.Join(dir, "admin.sock")
-		ln, err := net.Listen("unix", sock)
-		require.NoError(t, err)
-		defer ln.Close()
-
-		granted := make(chan map[string]string, 1)
-		srv := &http.Server{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "/v1/iam/grant", r.URL.Path)
-				require.Equal(t, http.MethodPut, r.Method)
-				var body map[string]string
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-				granted <- body
-				w.WriteHeader(http.StatusNoContent)
-			}),
-		}
-		done := make(chan struct{})
-		go func() {
-			_ = srv.Serve(ln)
-			close(done)
-		}()
-		t.Cleanup(func() {
-			_ = srv.Close()
-			<-done
-		})
-
-		c := &e2eCluster{
-			t:        t,
-			dataDirs: []string{dir},
-			saID:     "regular-sa",
-		}
-		c.GrantAdminOnBuckets("__probe")
-
 		select {
-		case body := <-granted:
-			require.Equal(t, "regular-sa", body["sa_id"])
-			require.Equal(t, "__probe", body["bucket"])
-			require.Equal(t, "Admin", body["role"])
+		case path := <-policyAttach:
+			require.Contains(t, path, "regular-sa")
 		case <-time.After(time.Second):
-			t.Fatal("expected explicit grant request")
-		}
-	})
-}
-
-func runMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
-		dir, err := os.MkdirTemp("/tmp", "grainfs-mr-cluster-grant-*")
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		sock := filepath.Join(dir, "admin.sock")
-		ln, err := net.Listen("unix", sock)
-		require.NoError(t, err)
-		defer ln.Close()
-
-		granted := make(chan map[string]string, 1)
-		srv := &http.Server{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "/v1/iam/grant", r.URL.Path)
-				require.Equal(t, http.MethodPut, r.Method)
-				var body map[string]string
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-				granted <- body
-				w.WriteHeader(http.StatusNoContent)
-			}),
-		}
-		done := make(chan struct{})
-		go func() {
-			_ = srv.Serve(ln)
-			close(done)
-		}()
-		t.Cleanup(func() {
-			_ = srv.Close()
-			<-done
-		})
-
-		c := &mrCluster{
-			t:        t,
-			dataDirs: []string{dir},
-			saID:     "regular-sa",
-		}
-		c.GrantAdminOnBuckets("__probe")
-
-		select {
-		case body := <-granted:
-			require.Equal(t, "regular-sa", body["sa_id"])
-			require.Equal(t, "__probe", body["bucket"])
-			require.Equal(t, "Admin", body["role"])
-		case <-time.After(time.Second):
-			t.Fatal("expected explicit grant request")
+			t.Fatal("expected policy attach request")
 		}
 	})
 }
@@ -434,12 +337,11 @@ func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 
 // iamSAResult is the deserialized response from POST /v1/iam/sa.
 type iamSAResult struct {
-	SAID      string     `json:"sa_id"`
-	Name      string     `json:"name"`
-	AccessKey string     `json:"access_key"`
-	SecretKey string     `json:"secret_key"`
-	CreatedAt time.Time  `json:"created_at"`
-	Grants    []iamGrant `json:"grants,omitempty"`
+	SAID      string    `json:"sa_id"`
+	Name      string    `json:"name"`
+	AccessKey string    `json:"access_key"`
+	SecretKey string    `json:"secret_key"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // iamKeyResult is the deserialized response from POST /v1/iam/sa/{id}/key.
@@ -449,13 +351,6 @@ type iamKeyResult struct {
 	SAID      string     `json:"sa_id"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-}
-
-// iamGrant matches the GrantListItem wire shape.
-type iamGrant struct {
-	SAID   string `json:"sa_id"`
-	Bucket string `json:"bucket"`
-	Role   string `json:"role"`
 }
 
 // iamUDSClient builds an *http.Client that dials the admin Unix socket.
@@ -575,21 +470,6 @@ func iamPutBucketUpstream(t *testing.T, sock, bucket, upstreamURL, ak, sk string
 	iamDo(t, sock, "PUT", "/v1/upstreams", body, nil)
 }
 
-// iamGrantPut PUTs an explicit grant (Role: Read|Write|Admin, exact bucket).
-func iamGrantPut(t *testing.T, sock, saID, bucket, role string) {
-	t.Helper()
-	iamDo(t, sock, "PUT", "/v1/iam/grant",
-		map[string]string{"sa_id": saID, "bucket": bucket, "role": role}, nil)
-}
-
-// iamGrantDelete removes the grant for (saID, bucket). Pass "*" as bucket
-// to remove the wildcard grant via the Phase-5c HandleGrantDelete route.
-func iamGrantDelete(t *testing.T, sock, saID, bucket string) {
-	t.Helper()
-	iamDo(t, sock, "DELETE", "/v1/iam/grant",
-		map[string]string{"sa_id": saID, "bucket": bucket}, nil)
-}
-
 // iamKeyRevoke marks the given access_key revoked.
 func iamKeyRevoke(t *testing.T, sock, saID, accessKey string) {
 	t.Helper()
@@ -603,25 +483,6 @@ func iamKeyCreateExpiringIn(t *testing.T, sock, saID string, ttl time.Duration) 
 	var out iamKeyResult
 	iamDo(t, sock, "POST", "/v1/iam/sa/"+saID+"/key",
 		map[string]any{"expires_at": exp.Format(time.RFC3339Nano)}, &out)
-	return out
-}
-
-// iamListGrants returns all grants matching optional sa / bucket filters.
-func iamListGrants(t *testing.T, sock, saFilter, bucketFilter string) []iamGrant {
-	t.Helper()
-	q := url.Values{}
-	if saFilter != "" {
-		q.Set("sa", saFilter)
-	}
-	if bucketFilter != "" {
-		q.Set("bucket", bucketFilter)
-	}
-	path := "/v1/iam/grant"
-	if enc := q.Encode(); enc != "" {
-		path += "?" + enc
-	}
-	var out []iamGrant
-	iamDo(t, sock, "GET", path, nil, &out)
 	return out
 }
 
@@ -818,7 +679,7 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 	})
 }
 
-// TestIAMHelpers_StartServer_BootstrapAccepted smoke-tests that
+// runIAMHelpersStartServerBootstrapAccepted smoke-tests that
 // startIAMTestServer brings up a server with bootstrap creds wired
 // correctly: HeadBucket on a bucket provisioned for the bootstrap SA succeeds,
 // proving the SigV4 verifier accepts the bootstrap key pair.
@@ -838,19 +699,9 @@ func runIAMHelpersStartServerBootstrapAccepted(t *testing.T) {
 	})
 }
 
-func contains(s, sub string) bool {
-	return bytes.Contains([]byte(s), []byte(sub))
-}
-
 // TestIAMBootstrapHelpersE2E groups single-node IAM bootstrap helper checks.
 func TestIAMBootstrapHelpersE2E(t *testing.T) {
 	t.Run("BootstrapAdminViaUDSAnyWithBucketGrants", runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants)
-	t.Run("TryBootstrapAdminViaUDSResultPreservesSAIDAndGrants", runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAIDAndGrants)
+	t.Run("TryBootstrapAdminViaUDSResultPreservesSAID", runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID)
 	t.Run("StartServerBootstrapAccepted", runIAMHelpersStartServerBootstrapAccepted)
-}
-
-// TestClusterGrantAdminHelpersE2E groups cluster GrantAdminOnBuckets helper checks.
-func TestClusterGrantAdminHelpersE2E(t *testing.T) {
-	t.Run("E2EClusterGrantAdminOnBuckets", runClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA)
-	t.Run("MRClusterGrantAdminOnBuckets", runMRClusterGrantAdminOnBucketsIssuesExplicitGrantForRegularSA)
 }

@@ -561,7 +561,7 @@ func (c *e2eCluster) GrantAdminOnBuckets(buckets ...string) {
 	if c.saID == "" {
 		c.t.Fatalf("cannot grant bucket admin without bootstrap sa_id")
 	}
-	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
+	policyAttachAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }
 
 // TestNormalizeE2EClusterOptionsE2E groups harness option-normalize checks.

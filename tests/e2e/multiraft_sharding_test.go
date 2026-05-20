@@ -394,7 +394,7 @@ func (c *mrCluster) GrantAdminOnBuckets(buckets ...string) {
 	if c.saID == "" {
 		c.t.Fatalf("cannot grant bucket admin without bootstrap sa_id")
 	}
-	grantAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
+	policyAttachAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }
 
 // addNode starts the next pre-allocated node slot and writes .join-pending so
