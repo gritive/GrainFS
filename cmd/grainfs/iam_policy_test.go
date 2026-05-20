@@ -196,6 +196,34 @@ func TestCLI_PolicyValidate_Local(t *testing.T) {
 	}
 }
 
+// TestCLI_PolicyPut_BuiltinRefused: server returns 403 for built-in put; CLI exits non-zero.
+func TestCLI_PolicyPut_BuiltinRefused(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/policy/readonly", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"code":"forbidden","message":"cannot overwrite built-in policy: \"readonly\""}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+	fixture := writeFixturePolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`)
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"iam", "--endpoint", sock, "policy", "put", "readonly", "--file", fixture})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err == nil {
+		t.Fatal("expected refusal on built-in put, got nil error")
+	}
+	if s := out.String(); !strings.Contains(s, "built-in") && !strings.Contains(s, "forbidden") {
+		t.Errorf("output missing 'built-in' or 'forbidden':\n%s", s)
+	}
+}
+
 // TestCLI_PolicySimulate: simulate POST returns effect; CLI prints "Allow".
 func TestCLI_PolicySimulate(t *testing.T) {
 	mux := http.NewServeMux()

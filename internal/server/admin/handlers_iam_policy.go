@@ -43,6 +43,9 @@ func PutPolicy(ctx context.Context, d *Deps, name string, docJSON []byte) error 
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
 	}
+	if builtin.IsBuiltinName(name) {
+		return NewForbidden(fmt.Sprintf("cannot overwrite built-in policy: %q", name))
+	}
 	// Parse to fail-fast; avoids a useless Raft round-trip.
 	if _, err := policy.Parse(docJSON); err != nil {
 		return NewInvalid(fmt.Sprintf("invalid policy: %v", err))
