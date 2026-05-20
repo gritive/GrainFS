@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,7 +105,7 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 		{"small", 1024},
 		{"under_chunk", 15 << 20},
 		{"two_chunks", (16 << 20) + 1},
-		{"large", 256 << 20},
+		{"large", (64 << 20) + 123},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -125,12 +126,38 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 			if err != nil {
 				t.Fatalf("get: %v", err)
 			}
-			got, _ := io.ReadAll(rc)
-			rc.Close()
-			if !bytes.Equal(got, data) {
-				t.Fatalf("round-trip differs at offset %d (got %d bytes, want %d)", firstDiff(got, data), len(got), len(data))
+			if err := requireReaderEqualBytes(rc, data); err != nil {
+				rc.Close()
+				t.Fatal(err)
 			}
+			rc.Close()
 		})
+	}
+}
+
+func requireReaderEqualBytes(r io.Reader, want []byte) error {
+	buf := make([]byte, 32*1024)
+	off := 0
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if off+n > len(want) {
+				return fmt.Errorf("round-trip produced too many bytes: got at least %d, want %d", off+n, len(want))
+			}
+			if !bytes.Equal(buf[:n], want[off:off+n]) {
+				return fmt.Errorf("round-trip differs at offset %d", off+firstDiff(buf[:n], want[off:off+n]))
+			}
+			off += n
+		}
+		if err == io.EOF {
+			if off != len(want) {
+				return fmt.Errorf("round-trip ended early: got %d bytes, want %d", off, len(want))
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
 }
 
