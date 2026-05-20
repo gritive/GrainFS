@@ -346,6 +346,16 @@ func readEncryptedShardChunkAt(r io.ReaderAt, enc *encrypt.Encryptor, aadBase []
 	}
 	nonce := encryptedChunkNonce(noncePrefix, chunkIdx)
 	aad := encryptedChunkAAD(aadBase, chunkIdx)
+	if inChunk == 0 && len(dst) >= int(plainLen) {
+		plaintext, err := enc.OpenWithNonceAAD(dst[:0], nonce[:], ciphertext, aad)
+		if err != nil {
+			return 0, fmt.Errorf("decrypt shard chunk %d: %w", chunkIdx, err)
+		}
+		if uint32(len(plaintext)) != plainLen {
+			return 0, fmt.Errorf("encrypted shard chunk %d plaintext length mismatch: got %d, want %d", chunkIdx, len(plaintext), plainLen)
+		}
+		return len(plaintext), nil
+	}
 	if cap(*plainBuf) < int(plainLen) {
 		*plainBuf = make([]byte, plainLen)
 	}
