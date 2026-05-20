@@ -170,11 +170,9 @@ func init() {
 	_ = iamPolicyValidateCmd.MarkFlagRequired("file")
 
 	iamPolicyAttachCmd.Flags().String("sa", "", "ServiceAccount ID to attach to")
-	iamPolicyAttachCmd.Flags().String("group", "", "group name to attach to")
 	iamPolicyAttachCmd.Flags().Bool("i-know", false, "suppress Resource:* scope warning")
 
 	iamPolicyDetachCmd.Flags().String("sa", "", "ServiceAccount ID to detach from")
-	iamPolicyDetachCmd.Flags().String("group", "", "group name to detach from")
 
 	iamPolicySimulateCmd.Flags().String("sa", "", "ServiceAccount ID")
 	iamPolicySimulateCmd.Flags().String("action", "", "IAM action (e.g. s3:GetObject)")
