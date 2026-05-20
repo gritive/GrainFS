@@ -74,8 +74,10 @@ START_ACCESS_KEY=""
 START_SECRET_KEY=""
 START_MODE=""
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
+BENCH_STRICT_HOST="${BENCH_STRICT_HOST:-0}"
 HOST_GRAINFS_SERVE_COUNT=0
 HOST_DISK_USED_PCT=""
+HOST_PREFLIGHT_FAILURES=0
 
 collect_host_preflight() {
   local out="$PROFILE_ROOT/host-preflight.txt"
@@ -89,6 +91,13 @@ collect_host_preflight() {
   )"
   disk_line="$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR == 2 { print $5 }' || true)"
   HOST_DISK_USED_PCT="${disk_line%%%}"
+  HOST_PREFLIGHT_FAILURES=0
+  if (( ${HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
+    HOST_PREFLIGHT_FAILURES=1
+  fi
+  if [[ -n "${HOST_DISK_USED_PCT:-}" ]] && (( HOST_DISK_USED_PCT >= 90 )); then
+    HOST_PREFLIGHT_FAILURES=1
+  fi
   {
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "repo: $REPO_ROOT"
@@ -99,6 +108,8 @@ collect_host_preflight() {
     uptime 2>/dev/null || true
     echo
     echo "preexisting_grainfs_serve_count: ${HOST_GRAINFS_SERVE_COUNT:-0}"
+    echo "strict_host: ${BENCH_STRICT_HOST}"
+    echo "preflight_failures: ${HOST_PREFLIGHT_FAILURES}"
     ps -axo pid,ppid,pcpu,rss,etime,command 2>/dev/null | grep -F 'grainfs serve' | grep -v grep || true
   } >"$out"
 }
@@ -867,6 +878,10 @@ target_enabled() {
 : >"$PROFILE_ROOT/resource-results.tsv"
 : >"$PROFILE_ROOT/skipped.txt"
 collect_host_preflight
+if [[ "$BENCH_STRICT_HOST" == "1" && "$HOST_PREFLIGHT_FAILURES" == "1" ]]; then
+  echo "[error] host preflight failed; see $PROFILE_ROOT/host-preflight.txt" >&2
+  exit 1
+fi
 write_summary_header
 RUN_FAILURES=0
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
