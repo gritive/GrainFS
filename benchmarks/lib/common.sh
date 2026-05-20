@@ -4,8 +4,12 @@ BENCH_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCHMARKS_DIR="$(cd "$BENCH_LIB_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$BENCHMARKS_DIR/.." && pwd)"
 BENCH_STRICT_HOST="${BENCH_STRICT_HOST:-0}"
+BENCH_MAX_LOAD_PER_CPU="${BENCH_MAX_LOAD_PER_CPU:-1.0}"
 BENCH_HOST_GRAINFS_SERVE_COUNT=0
 BENCH_HOST_DISK_USED_PCT=""
+BENCH_HOST_LOAD1=""
+BENCH_HOST_CPU_COUNT=""
+BENCH_HOST_LOAD_PER_CPU=""
 BENCH_HOST_PREFLIGHT_FAILURES=0
 
 bench_collect_host_preflight() {
@@ -19,11 +23,33 @@ bench_collect_host_preflight() {
   )"
   disk_line="$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR == 2 { print $5 }' || true)"
   BENCH_HOST_DISK_USED_PCT="${disk_line%%%}"
+  IFS=' ' read -r BENCH_HOST_LOAD1 BENCH_HOST_CPU_COUNT BENCH_HOST_LOAD_PER_CPU < <(
+    python3 - "$BENCH_MAX_LOAD_PER_CPU" <<'PY'
+import os
+import sys
+
+try:
+    load1 = os.getloadavg()[0]
+except OSError:
+    load1 = 0.0
+cpus = os.cpu_count() or 1
+print(f"{load1:.2f} {cpus} {load1 / cpus:.2f}")
+PY
+  )
   BENCH_HOST_PREFLIGHT_FAILURES=0
   if (( ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
     BENCH_HOST_PREFLIGHT_FAILURES=1
   fi
   if [[ -n "${BENCH_HOST_DISK_USED_PCT:-}" ]] && (( BENCH_HOST_DISK_USED_PCT >= 90 )); then
+    BENCH_HOST_PREFLIGHT_FAILURES=1
+  fi
+  if python3 - "$BENCH_HOST_LOAD_PER_CPU" "$BENCH_MAX_LOAD_PER_CPU" <<'PY'
+import sys
+
+load_per_cpu, max_load_per_cpu = sys.argv[1], sys.argv[2]
+sys.exit(0 if float(load_per_cpu) > float(max_load_per_cpu) else 1)
+PY
+  then
     BENCH_HOST_PREFLIGHT_FAILURES=1
   fi
   {
@@ -36,6 +62,10 @@ bench_collect_host_preflight() {
     uptime 2>/dev/null || true
     echo
     echo "preexisting_grainfs_serve_count: ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0}"
+    echo "load1: ${BENCH_HOST_LOAD1}"
+    echo "cpu_count: ${BENCH_HOST_CPU_COUNT}"
+    echo "load_per_cpu: ${BENCH_HOST_LOAD_PER_CPU}"
+    echo "max_load_per_cpu: ${BENCH_MAX_LOAD_PER_CPU}"
     echo "strict_host: ${BENCH_STRICT_HOST}"
     echo "preflight_failures: ${BENCH_HOST_PREFLIGHT_FAILURES}"
     ps -axo pid,ppid,pcpu,rss,etime,command 2>/dev/null | awk '/grainfs serve/ { print }' || true
@@ -58,6 +88,16 @@ bench_print_host_preflight_warnings() {
   if [[ -n "${BENCH_HOST_DISK_USED_PCT:-}" ]] && (( BENCH_HOST_DISK_USED_PCT >= 90 )); then
     echo
     echo "> Warning: host preflight found filesystem usage at ${BENCH_HOST_DISK_USED_PCT}%. Low free disk can skew write-heavy benchmark results."
+  fi
+  if python3 - "$BENCH_HOST_LOAD_PER_CPU" "$BENCH_MAX_LOAD_PER_CPU" <<'PY'
+import sys
+
+load_per_cpu, max_load_per_cpu = sys.argv[1], sys.argv[2]
+sys.exit(0 if float(load_per_cpu) > float(max_load_per_cpu) else 1)
+PY
+  then
+    echo
+    echo "> Warning: host preflight found load ${BENCH_HOST_LOAD1} across ${BENCH_HOST_CPU_COUNT} CPUs (${BENCH_HOST_LOAD_PER_CPU}/CPU), above BENCH_MAX_LOAD_PER_CPU=${BENCH_MAX_LOAD_PER_CPU}."
   fi
 }
 

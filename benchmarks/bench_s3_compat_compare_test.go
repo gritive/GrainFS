@@ -132,7 +132,10 @@ func TestBenchS3CompatCanFailFastOnDirtyHost(t *testing.T) {
 	}
 	for _, want := range []string{
 		`BENCH_STRICT_HOST`,
+		`BENCH_MAX_LOAD_PER_CPU`,
+		`BENCH_HOST_LOAD_PER_CPU`,
 		`BENCH_HOST_PREFLIGHT_FAILURES=1`,
+		`float(load_per_cpu) > float(max_load_per_cpu)`,
 		`if [[ "$BENCH_STRICT_HOST" == "1" && "${BENCH_HOST_PREFLIGHT_FAILURES:-0}" == "1" ]]; then`,
 		`exit 1`,
 	} {
