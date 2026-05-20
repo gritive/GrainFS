@@ -1,0 +1,16 @@
+Register a bucket as an NFSv4 export
+
+Usage:
+  grainfs nfs export add <bucket> [flags]
+
+Flags:
+      --dry-run   validate only; do not propose change
+  -h, --help      help for add
+      --json      emit machine-readable JSON output
+      --quiet     suppress stdout on success
+      --ro        register as read-only export
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --log-level string   log level: debug, info, warn, error (default "info")
+      --timeout duration   admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)

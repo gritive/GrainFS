@@ -1,0 +1,18 @@
+Update an NFSv4 export
+
+Usage:
+  grainfs nfs export update <bucket> [flags]
+
+Flags:
+      --dry-run                 validate only; do not propose change
+  -h, --help                    help for update
+      --json                    emit machine-readable JSON output
+      --quiesce-wait duration   wait before switching to read-only
+      --quiet                   suppress stdout on success
+      --ro                      set export read-only
+      --rw                      set export read-write
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --log-level string   log level: debug, info, warn, error (default "info")
+      --timeout duration   admin command timeout (e.g. 30s, 5m); unset = 30s default; 0 = uncapped (for long follow loops)
