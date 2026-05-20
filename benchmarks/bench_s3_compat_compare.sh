@@ -644,15 +644,18 @@ run_warp_case() {
     args+=(--noclear)
   fi
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then
+    RUN_FAILURES=1
     echo "warp-$op: non-zero exit for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
 
   if [[ ! -f "$data_file" ]]; then
+    RUN_FAILURES=1
     echo "warp-$op: missing benchdata for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
     return 0
   fi
 
   if ! "$WARP_BIN" analyze "$data_file" >"$out_dir/analyze.out" 2>&1; then
+    RUN_FAILURES=1
     echo "warp-$op: analyze failed for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
     return 0
   fi
@@ -697,6 +700,7 @@ with open(out_path, "a", encoding="utf-8") as f:
     f.write("\t".join(row) + "\n")
 PY
   then
+    RUN_FAILURES=1
     echo "warp-$op: analyze result not publishable for $target; see $out_dir/analyze.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
 }
@@ -826,6 +830,7 @@ write_summary_header
 : >"$PROFILE_ROOT/warp-results.tsv"
 : >"$PROFILE_ROOT/resource-results.tsv"
 : >"$PROFILE_ROOT/skipped.txt"
+RUN_FAILURES=0
 IFS=',' read -ra WARP_OP_LIST <<<"$WARP_OPS"
 
 for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-cluster; do
@@ -928,3 +933,6 @@ if [[ -s "$PROFILE_ROOT/skipped.txt" ]]; then
 fi
 echo
 echo "[bench] profiles saved to $PROFILE_ROOT"
+if (( RUN_FAILURES != 0 )); then
+  exit 1
+fi

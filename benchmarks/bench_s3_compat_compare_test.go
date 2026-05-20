@@ -91,6 +91,25 @@ func TestBenchS3CompatDoesNotPublishErroredWarpRows(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatExitsNonZeroForUnpublishableWarpResults(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	for _, want := range []string{
+		`RUN_FAILURES=0`,
+		`RUN_FAILURES=1`,
+		`if (( RUN_FAILURES != 0 )); then`,
+		`exit 1`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_s3_compat_compare.sh must propagate warp measurement failures with %q", want)
+		}
+	}
+}
+
 func TestBenchS3CompatSingleNodeAcceptsExtraServeFlags(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {
