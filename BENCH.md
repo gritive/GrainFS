@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 14:56 KST
+Updated: 2026-05-20 14:59 KST
 
 ## Goal
 
@@ -55,6 +55,7 @@ Updated: 2026-05-20 14:56 KST
 | put    |  548.30 |  8772.82 |      0 |               601.22 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`                                                                       |
 | get    | 1849.34 | 29589.49 |      0 |               767.03 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`                                                                       |
 | delete |    0.00 | 17964.91 |      0 |               460.70 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`                                                                         |
+| mixed  |  176.17 |  2818.79 |      0 |               251.75 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750`                                                                     |
 
 ## GrainFS Optimization Notes
 
@@ -73,7 +74,7 @@ Updated: 2026-05-20 14:56 KST
 
 ## Open Items
 
-- Continue GrainFS single-node benchmark with S3-only service flags: `mixed`, `list`, `stat`, `versioned`, `retention`, `multipart`, `multipart-put`, `append`.
-- Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 337.39 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 621.27 MiB vs MinIO 796.3.
+- Continue GrainFS single-node benchmark with S3-only service flags: `list`, `stat`, `versioned`, `retention`, `multipart`, `multipart-put`, `append`.
+- Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.
 - For every GrainFS optimization candidate, explicitly evaluate zero allocation, zero copy, and lock-free options; record either the applied change or the reason it was rejected.
