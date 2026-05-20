@@ -876,7 +876,7 @@ func (r *forwardReadValidator) Close() error {
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, entry, hasEntry, err := c.routeReadOrBucketWithEntry(bucket, key, "")
+	target, _, _, err := c.routeReadOrBucketWithEntry(bucket, key, "")
 	if err != nil {
 		return nil, err
 	}
@@ -884,11 +884,6 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 		return nil, err
 	} else if gb != nil {
 		return gb.HeadObject(ctx, bucket, key)
-	}
-	if hasEntry {
-		if obj, ok, err := c.headObjectLocalCurrentFollower(ctx, bucket, key, target, entry); ok {
-			return obj, err
-		}
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter
@@ -899,25 +894,6 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 		return nil, err
 	}
 	return objectFromReply(reply)
-}
-
-func (c *ClusterCoordinator) headObjectLocalCurrentFollower(ctx context.Context, bucket, key string, target RouteTarget, entry ObjectIndexEntry) (*storage.Object, bool, error) {
-	if storage.IsInternalBucket(bucket) || !target.SelfIsVoter || target.SelfIsLeader || c.groups == nil {
-		return nil, false, nil
-	}
-	dg := c.groups.Get(target.GroupID)
-	if dg == nil || dg.Backend() == nil {
-		return nil, false, nil
-	}
-	gb := dg.Backend()
-	obj, _, err := gb.headObjectMeta(ctx, bucket, key)
-	if err != nil {
-		return nil, false, nil
-	}
-	if !objectMatchesIndexForFollowerHead(obj, entry) {
-		return nil, false, nil
-	}
-	return obj, true, nil
 }
 
 func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
@@ -1782,29 +1758,6 @@ func objectMatchesIndexForFollowerRead(obj *storage.Object, entry ObjectIndexEnt
 	}
 	if entry.VersionID != "" && obj.VersionID != entry.VersionID {
 		return false
-	}
-	return true
-}
-
-func objectMatchesIndexForFollowerHead(obj *storage.Object, entry ObjectIndexEntry) bool {
-	if !objectMatchesIndexForFollowerRead(obj, entry) {
-		return false
-	}
-	if entry.ContentType != "" && obj.ContentType != entry.ContentType {
-		return false
-	}
-	if entry.ModTime != 0 && obj.LastModified != entry.ModTime {
-		return false
-	}
-	if len(entry.Parts) > 0 {
-		if len(obj.Parts) != len(entry.Parts) {
-			return false
-		}
-		for i := range entry.Parts {
-			if obj.Parts[i] != entry.Parts[i] {
-				return false
-			}
-		}
 	}
 	return true
 }
