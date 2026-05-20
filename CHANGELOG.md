@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.0.282.0] - 2026-05-20 - refactor(cmd): move bucket commands to internal/bucketadmin
+
+Continuation of the cmd thin-runner refactor (step 2/7). All four
+`cmd/grainfs/bucket*.go` files shrunk to thin runners over the new
+`internal/bucketadmin/` package. `cmd/grainfs/admin_uds_client.go` —
+the temporary shim introduced in step 1 — is deleted now that bucket
+files are no longer consumers.
+
+- **New package: `internal/bucketadmin/`** — mirrors the iamadmin
+  shape (client, types, endpoint, errors, format, helpers, plus
+  per-area ops files: bucket / upstream / policy / versioning). 55
+  unit tests against an httptest.Server.
+- **Deleted: `cmd/grainfs/admin_uds_client.go`** — zero production
+  consumers after bucket migration. The test-only
+  `admin_uds_testhelpers_test.go` stays (nfs tests still use it).
+- **LOC reduction**: bucket.go 186→123, bucket_upstream.go 196→116,
+  bucket_policy.go 128→98, bucket_versioning.go 109→70 (619→407,
+  -34%). Combined test files 964→339 LOC (-65%), with wire/render/
+  orchestration coverage now in `internal/bucketadmin/*_test.go`.
+- **CLI surface preserved verbatim** — all flag names, defaults, env
+  binding (`GRAINFS_ADMIN_SOCKET`), `--help` text. New
+  `cmd/grainfs/bucket_help_test.go` golden snapshot test guards C1.
+
+**Behavior change (low risk):** `bucket --json` mode for `create`,
+`list`, `info`, `versioning get` now re-marshals from typed structs
+→ JSON keys come out alphabetically. Field names and values unchanged.
+Raw passthrough preserved for `upstream get/list` and `policy get`.
+
+**Behavior changes (also low risk, matching step 1):**
+
+- `bucket` commands no longer apply a client-side 30s timeout
+  (`adminapi.Transport` has none). Admin UDS is local so practical
+  effect is nil. Matches the precedent established in v0.0.281.0.
+- Error messages now use the `adminapi.Error` envelope. The legacy
+  prefix `admin <METHOD> <path> -> <status>: <body>` is gone.
+
+Part of: cmd thin-runner refactor (step 2/7).
+Spec: docs/superpowers/specs/2026-05-20-cmd-thin-runner-step2-bucket-design.md
+Master spec: docs/superpowers/specs/2026-05-20-cmd-thin-runner-design.md
+
 ## [0.0.281.0] - 2026-05-20 - refactor(cmd): move iam.go business logic to internal/iamadmin
 
 `cmd/grainfs/iam.go` shrunk from 350 LOC to a thin runner (~205 LOC),
