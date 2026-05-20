@@ -11,6 +11,7 @@ package cluster
 //     sidesteps the issue entirely by iterating `lat:` pointers instead.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -337,4 +338,111 @@ func (b *DistributedBackend) OwnedShards(bucket, key, versionID, nodeID string) 
 // and writes the correct on-disk path (shardKey = key + "/" + versionID).
 func (b *DistributedBackend) RepairShardLocal(bucket, key, versionID string, shardIdx int) error {
 	return b.RepairShard(context.Background(), bucket, key, versionID, shardIdx)
+}
+
+// ScanObjectsGrouped streams every version of every object key in the bucket,
+// grouped by key, newest-first within a group. Per the lifecycle split
+// execution model this runs on the leader only — followers reach the
+// lifecycle Service through a leader-gated path.
+//
+// Built on ListObjectVersions which already reads versioned records with Tags
+// (Phase 2 of Object Tagging API) and returns versions sorted by (Key ASC,
+// VersionID DESC) — exactly the order needed to fold consecutive same-Key
+// entries into one ObjectKeyGroup. Delete markers pass through with
+// IsDeleteMarker=true so noncurrent expiration logic can see them.
+//
+// Unlike LocalBackend.ScanObjectsGrouped (one synthetic version per key),
+// this is genuinely version-aware: cluster mode does NOT delegate to the
+// local read scan because versioning is a cluster-only feature.
+func (b *DistributedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.ObjectKeyGroup, error) {
+	if err := b.HeadBucket(context.Background(), bucket); err != nil {
+		return nil, err
+	}
+	out := make(chan storage.ObjectKeyGroup, 16)
+	go func() {
+		defer close(out)
+		// maxKeys=0 disables truncation in ListObjectVersions.
+		versions, err := b.ListObjectVersions(bucket, "", 0)
+		if err != nil {
+			return
+		}
+		var currentKey string
+		var buf []storage.ObjectVersionRecord
+		flush := func() {
+			if currentKey == "" && len(buf) == 0 {
+				return
+			}
+			out <- storage.ObjectKeyGroup{
+				Bucket:   bucket,
+				Key:      currentKey,
+				Versions: buf,
+			}
+			buf = nil
+		}
+		for _, v := range versions {
+			if v == nil {
+				continue
+			}
+			if v.Key != currentKey {
+				flush()
+				currentKey = v.Key
+			}
+			buf = append(buf, storage.ObjectVersionRecord{
+				VersionID:      v.VersionID,
+				IsLatest:       v.IsLatest,
+				IsDeleteMarker: v.IsDeleteMarker,
+				LastModified:   v.LastModified,
+				Size:           v.Size,
+				ETag:           v.ETag,
+				Tags:           append([]storage.Tag(nil), v.Tags...),
+			})
+		}
+		flush()
+	}()
+	return out, nil
+}
+
+// ScanLocalMultipartUploads enumerates in-progress multipart uploads in the
+// given bucket on THIS node by iterating the local `mpu:` keyspace. Each
+// cluster node enumerates its own stranded uploads — there is no cross-node
+// MPU aggregation by design (see lifecycle-minio-parity-design.md).
+//
+// Mirrors ListMultipartUploads's iteration pattern but filters by bucket and
+// emits MultipartUploadRecord for the lifecycle worker.
+func (b *DistributedBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
+	if err := b.HeadBucket(context.Background(), bucket); err != nil {
+		return nil, err
+	}
+	out := make(chan storage.MultipartUploadRecord, 16)
+	bucketBytes := []byte(bucket)
+	go func() {
+		defer close(out)
+		_ = b.db.View(func(txn *badger.Txn) error {
+			return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item *badger.Item) error {
+				raw, err := b.itemValueCopy(item)
+				if err != nil {
+					return err
+				}
+				meta, err := unmarshalClusterMultipartMeta(raw)
+				if err != nil {
+					return fmt.Errorf("unmarshal clusterMultipartMeta: %w", err)
+				}
+				if meta.Bucket == "" || meta.Key == "" {
+					return nil
+				}
+				if !bytes.Equal([]byte(meta.Bucket), bucketBytes) {
+					return nil
+				}
+				uploadID := strings.TrimPrefix(string(rawKey), "mpu:")
+				out <- storage.MultipartUploadRecord{
+					Bucket:      meta.Bucket,
+					Key:         meta.Key,
+					UploadID:    uploadID,
+					InitiatedAt: meta.CreatedAt,
+				}
+				return nil
+			})
+		})
+	}()
+	return out, nil
 }

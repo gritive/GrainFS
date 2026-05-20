@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.0.273.0] - 2026-05-20 - feat(lifecycle): MinIO-Parity Phase 1 — Filter/Expiration/AbortMPU + worker rework
+
+AWS/MinIO-parity lifecycle 규칙 평가 + worker 재설계. 새 Filter (Tag/Size/And), Expiration.Date + ExpiredObjectDeleteMarker, AbortIncompleteMultipartUpload, hardened Validate, N×ListObjectVersions bottleneck 제거. Split execution: object-side는 leader-only, MPU-side는 모든 node.
+
+### Added
+
+- **Filter 확장**: `Filter.Tag` (단일 tag), `Filter.ObjectSizeGreaterThan` / `LessThan` (AWS strict semantics: `>` / `<`), `Filter.And` (2+ criteria — Prefix/Tags/ObjectSize). `MatchFilter(v *storage.ObjectVersionRecord, key, *Filter) bool` pure function.
+- **Expiration 확장**: `Expiration.Date` (UTC midnight 강제), `Expiration.ExpiredObjectDeleteMarker` (lone DM reclaim). `ExpirationTriggerDays(LM_unix, N)` = start-of-day(LM_UTC) + (N+1) days — AWS wall-clock semantics.
+- **AbortIncompleteMultipartUpload**: `DaysAfterInitiation > 0`. MPU worker가 per-node로 실행.
+- **Validate 강화**: ID 중복 거부, Days/Date/ExpiredObjectDeleteMarker 상호 배타성, `Filter.flat` vs `And` 배타성, `And` ≥ 2 criteria, `aws:` tag prefix 거부 (top-level + And), tag charset via `tagging.Validate`, ObjectSize ordering.
+- **Backend scanning interface**: `LocalBackend.ScanObjectsGrouped(bucket)` (1 version/key — unversioned), `DistributedBackend.ScanObjectsGrouped(bucket)` (versioned via ListObjectVersions, multi-key grouping), `LocalBackend.ScanLocalMultipartUploads(bucket)` + `DistributedBackend.ScanLocalMultipartUploads(bucket)` (node-local MPU enumeration with `InitiatedAt`).
+- **MPUWorker (per-node)**: `internal/lifecycle/worker_mpu.go`. Filter.Prefix 만 honor (uploads have no tags/size). 공유 `*rate.Limiter`로 100 deletes/sec/node 캡 + weighted abort (`MultipartUploadPartCount` based, burst-capped).
+- **Service split execution**: `Service.Run` 시 MPU worker 무조건 시작 (per-node, always on), object worker는 leader 추적 유지. 두 worker 공유 limiter.
+- **Status API extensions**: `mpu_worker_running`, `aborted_uploads`, `delete_markers_reclaimed`, `last_cycle_seconds`, `buckets` JSON 필드. `/api/cluster/lifecycle/status` 응답에서 노출.
+- **Prometheus metrics**: `grainfs_lifecycle_aborted_uploads_total{bucket,node_id}`, `_delete_markers_reclaimed_total{bucket}`, `_rule_match_total{rule_id,action}` (expire/expire_noncurrent/expire_delete_marker/abort_mpu), `_cycle_seconds{bucket}` histogram, `_group_versions` histogram.
+- **Test seams**: `Service.RunCycleForTest` / `SetNowForTest` / `RunMPUCycleForTest`. `POST /api/cluster/lifecycle/test/{run-cycle,set-now}` HTTP endpoints (`routeFeatureLifecycle` 게이트). `LifecycleFixture` e2e helper (`tests/e2e/lifecycle_fixture_test.go`).
+
+### Changed
+
+- **Worker rework (N×ListObjectVersions 제거)**: object-side worker가 `ScanObjectsGrouped` 한 번으로 모든 version 그룹 emit. `applyRulesToGroup`에서 current version → Filter+Expiration, noncurrent versions → NoncurrentVersionExpiration. 회귀 가드: `TestWorker_NoNListVersionsCalls`.
+- **Filter scope**: AWS spec 일치로 NoncurrentVersionExpiration은 Filter gate를 거치지 않음 (이전엔 prefix mismatch 시 noncurrent도 skip — behavior change). 노트 in code.
+- **`Operations.CreateMultipartUploadWithTags` wrapper promotion**: `MultipartPartCounter` optional interface 추가 + `wal.Backend` / `pullthrough.Backend` / `packblob.PackedBackend` forwarders (`ObjectDeleter.MultipartUploadPartCount` reachable from production wrapper stack).
+- **Type relocation**: `ObjectKeyGroup`, `ObjectVersionRecord`, `MultipartUploadRecord`를 `internal/scrubber`에서 `internal/storage`로 이동 (import cycle 회피 — scrubber가 이미 storage import).
+
+### Verified (unit + integration)
+
+- `internal/lifecycle/` 전체 PASS (13개 commits 기능, e2e harness 무관). `make build` clean (lint + vet + gofmt + golangci-lint).
+- 핵심 회귀 테스트: `TestWorker_NoNListVersionsCalls`, `TestValidate_Hardening` (13 cases), `TestMatchFilter_*` (5 cases), `TestExpirationTrigger_*` (5 cases), `TestMPUWorker_*` (3 cases incl. burst-cap regression guard), `TestService_(MPUWorkerStartsOnFollower|BothWorkersStartOnLeader)`, `TestLifecycleStatus_JSONShape`, metrics testutil-based assertion.
+
+### Known limitations / deferred
+
+- **E2E coverage incomplete**: `tests/e2e/lifecycle_expiration_test.go::TestLifecycleExpirationE2E` (Task 14)의 LifecycleFixture infrastructure + SingleNode TagFilter case는 land. 다만 SingleNode TagFilter case는 master pre-existing `PutObjectTagging` 404 NoSuchKey regression으로 FAIL (Phase 2 머지 후 SingleNode `LocalBackend` 경로에서 introduced). Size/And/Date/DeleteMarker/AbortMPU e2e sub-tests (원 Task 15-16)은 두 번째 master pre-existing infrastructure regression (dedicated single-node target IAM admin grant 404)으로 별도 phase로 이월. Production code 자체는 unit-verified.
+- **Cluster e2e (Task 17)**: leadership-change-mid-scan double-process 회귀 가드 colima 테스트는 이월. cluster harness 확장 필요.
+- **Bench (Task 18)**: N×ListObjectVersions 제거 효과 측정 bench는 이월. 회귀 가드는 `TestWorker_NoNListVersionsCalls`로 보장.
+
 ## [0.0.272.0] - 2026-05-20 - feat(server): §5 Server Posture — request-id, TLS hot-swap, posture gate, ProxyTrust, Phase 0 banner
 
 §5 hardens the data-plane HTTP server. Every response now carries a stable

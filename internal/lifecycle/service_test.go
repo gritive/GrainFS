@@ -167,11 +167,11 @@ func TestService_Status_RunningReflectsWorker(t *testing.T) {
 	defer cancel()
 	go s.Run(ctx)
 	lead.set(true) // become leader → executor starts
-	require.Eventually(t, func() bool { return s.workerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return s.WorkerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
 	st := s.Status()
 	assert.True(t, st.Running)
 	lead.set(false) // become follower → executor stops
-	require.Eventually(t, func() bool { return !s.workerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return !s.WorkerRunningForTest() }, 2*time.Second, 10*time.Millisecond)
 	assert.False(t, s.Status().Running)
 }
 
@@ -247,13 +247,58 @@ func TestService_Run_StartsWorkerOnLeader_StopsOnFollower(t *testing.T) {
 
 	// Initially follower: worker must not be running.
 	time.Sleep(40 * time.Millisecond)
-	assert.False(t, svc.workerRunningForTest())
+	assert.False(t, svc.WorkerRunningForTest())
 
 	lead.set(true)
-	require.Eventually(t, svc.workerRunningForTest, 200*time.Millisecond, 5*time.Millisecond, "worker should start on leader")
+	require.Eventually(t, svc.WorkerRunningForTest, 200*time.Millisecond, 5*time.Millisecond, "worker should start on leader")
 
 	lead.set(false)
-	require.Eventually(t, func() bool { return !svc.workerRunningForTest() }, 200*time.Millisecond, 5*time.Millisecond, "worker should stop on follower")
+	require.Eventually(t, func() bool { return !svc.WorkerRunningForTest() }, 200*time.Millisecond, 5*time.Millisecond, "worker should stop on follower")
+
+	cancel()
+	<-done
+}
+
+// TestService_MPUWorkerStartsOnFollower asserts the per-node MPU worker runs
+// even when the node is a follower (split execution model). The object-side
+// worker must remain leader-only.
+func TestService_MPUWorkerStartsOnFollower(t *testing.T) {
+	be := &mockBackend{buckets: []string{}}
+	del := &mockDeleter{}
+	lead := &signalLeadership{leader: false}
+	svc := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { svc.Run(ctx); close(done) }()
+
+	require.Eventually(t, svc.MPUWorkerRunningForTest, 2*time.Second, 10*time.Millisecond,
+		"MPU worker must run on followers (split execution model)")
+	assert.False(t, svc.WorkerRunningForTest(),
+		"object-side worker must NOT run on followers")
+
+	cancel()
+	<-done
+}
+
+// TestService_BothWorkersStartOnLeader asserts both workers run when the node
+// is the leader.
+func TestService_BothWorkersStartOnLeader(t *testing.T) {
+	be := &mockBackend{buckets: []string{}}
+	del := &mockDeleter{}
+	lead := &signalLeadership{leader: true}
+	svc := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { svc.Run(ctx); close(done) }()
+
+	require.Eventually(t, svc.MPUWorkerRunningForTest, 2*time.Second, 10*time.Millisecond,
+		"MPU worker must run on every node")
+	require.Eventually(t, svc.WorkerRunningForTest, 2*time.Second, 10*time.Millisecond,
+		"object-side worker must run on leader")
 
 	cancel()
 	<-done

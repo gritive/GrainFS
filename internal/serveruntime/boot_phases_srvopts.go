@@ -245,6 +245,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			state.distBackend,                        // Scrubbable
 			storage.NewOperations(state.distBackend), // ObjectDeleter
 			cfg.LifecycleInterval,
+			lifecycle.WithNodeID(nodeID),
 		)
 		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
 	}

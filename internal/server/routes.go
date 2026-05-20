@@ -16,6 +16,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerClusterAPI(h)
 	s.registerBalancerAPI(h)
 	s.registerLifecycleStatusAPI(h)
+	s.registerLifecycleTestCtlAPI(h)
 	s.registerSnapshotAPI(h)
 	s.registerRaftSnapshotAPI(h)
 	s.registerPITRAPI(h)

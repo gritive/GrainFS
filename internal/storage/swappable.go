@@ -193,6 +193,16 @@ func (sb *SwappableBackend) ListParts(ctx context.Context, bucket, key, uploadID
 	return (*sb.inner.Load()).ListParts(ctx, bucket, key, uploadID, maxParts)
 }
 
+// MultipartUploadPartCount forwards to the inner backend when it implements
+// MultipartPartCounter. Returns (0, nil) otherwise so callers using the
+// count as a rate-limiter weight fall back to weight=1.
+func (sb *SwappableBackend) MultipartUploadPartCount(bucket, key, uploadID string) (int, error) {
+	if c, ok := (*sb.inner.Load()).(MultipartPartCounter); ok {
+		return c.MultipartUploadPartCount(bucket, key, uploadID)
+	}
+	return 0, nil
+}
+
 // ListAllObjects implements Snapshotable by delegating to the inner backend.
 func (sb *SwappableBackend) ListAllObjects() ([]SnapshotObject, error) {
 	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {

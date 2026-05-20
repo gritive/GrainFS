@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/time/rate"
 )
 
 // Proposer is the seam between Service and the cluster meta-Raft proposer.
@@ -42,6 +43,9 @@ type Service struct {
 	backend    Scrubbable    // for executor; may be nil in unit tests
 	deleter    ObjectDeleter // for executor; may be nil in unit tests
 	interval   time.Duration
+	// nodeID labels per-node MPU metrics. Empty string when unset (unit
+	// tests, single-node bootstraps that haven't generated a node ID yet).
+	nodeID string
 
 	// worker is published by Run()'s reconcile loop. Status loads it
 	// lock-free; nil means this node is not the current leader.
@@ -51,21 +55,45 @@ type Service struct {
 	cancelFn context.CancelFunc
 	workerWG sync.WaitGroup
 
+	// mpuWorker runs per-node (every node, always on) for AbortIncompleteMPU.
+	// Independent of leadership — split execution model.
+	mpuWorker atomic.Pointer[MPUWorker]
+	mpuCancel context.CancelFunc
+	mpuWG     sync.WaitGroup
+
+	// limiter is shared by both workers so the 100 deletes/sec/node cap
+	// holds across both object-side and MPU-side clauses.
+	limiter *rate.Limiter
+
 	logger zerolog.Logger
 }
 
 // NewService wires the service. backend/deleter may be nil for tests that do
 // not exercise Run.
-func NewService(store *Store, prop Proposer, lead LeadershipSignal, backend Scrubbable, deleter ObjectDeleter, interval time.Duration) *Service {
-	return &Service{
+func NewService(store *Store, prop Proposer, lead LeadershipSignal, backend Scrubbable, deleter ObjectDeleter, interval time.Duration, opts ...ServiceOption) *Service {
+	s := &Service{
 		store:      store,
 		proposer:   prop,
 		leadership: lead,
 		backend:    backend,
 		deleter:    deleter,
 		interval:   interval,
+		limiter:    rate.NewLimiter(100, 10), // 100 deletes/sec/node, burst 10 — shared by both workers
 		logger:     log.With().Str("component", "lifecycle-service").Logger(),
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// ServiceOption configures a Service at construction.
+type ServiceOption func(*Service)
+
+// WithNodeID sets the node identifier propagated to the per-node MPU worker
+// for metric labelling.
+func WithNodeID(nodeID string) ServiceOption {
+	return func(s *Service) { s.nodeID = nodeID }
 }
 
 // Enabled reports whether the lifecycle service is active. With the service
@@ -87,20 +115,28 @@ func (s *Service) GetRaw(bucket string) ([]byte, error) {
 
 // Status is a point-in-time view of the lifecycle executor for the
 // /api/cluster/lifecycle/status admin endpoint. When the node is not the
-// leader the executor is not running and all counters are zero.
+// leader the object-side executor is not running and its counters are
+// zero; the per-node MPU worker runs on every node so MPUWorkerRunning /
+// AbortedUploads are populated independently of leadership.
 type Status struct {
-	Running        bool      `json:"running"`
-	LastRun        time.Time `json:"last_run,omitempty"`
-	ObjectsChecked int64     `json:"objects_checked"`
-	Expired        int64     `json:"expired"`
-	VersionsPruned int64     `json:"versions_pruned"`
-	Buckets        []string  `json:"buckets"` // buckets with a lifecycle config persisted locally
+	Running                bool      `json:"running"`
+	MPUWorkerRunning       bool      `json:"mpu_worker_running"`
+	LastRun                time.Time `json:"last_run,omitempty"`
+	LastCycleSeconds       float64   `json:"last_cycle_seconds"`
+	ObjectsChecked         int64     `json:"objects_checked"`
+	Expired                int64     `json:"expired"`
+	VersionsPruned         int64     `json:"versions_pruned"`
+	AbortedUploads         int64     `json:"aborted_uploads"`
+	DeleteMarkersReclaimed int64     `json:"delete_markers_reclaimed"`
+	Buckets                []string  `json:"buckets"` // buckets with a lifecycle config persisted locally
 }
 
 // Status returns the current executor status. Safe to call on any node; a
-// follower returns Status{Running: false}.
+// follower returns Status{Running: false} but still surfaces MPU-side
+// fields populated by the per-node MPU worker.
 func (s *Service) Status() Status {
 	w := s.worker.Load()
+	mpu := s.mpuWorker.Load()
 	buckets, err := s.store.ListBuckets()
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("lifecycle status: ListBuckets failed")
@@ -108,18 +144,24 @@ func (s *Service) Status() Status {
 	if buckets == nil {
 		buckets = []string{}
 	}
-	if w == nil {
-		return Status{Running: false, Buckets: buckets}
+	st := Status{
+		MPUWorkerRunning: mpu != nil,
+		Buckets:          buckets,
 	}
-	st := w.Stats()
-	return Status{
-		Running:        true,
-		LastRun:        st.LastRun,
-		ObjectsChecked: st.ObjectsChecked,
-		Expired:        st.Expired,
-		VersionsPruned: st.VersionsPruned,
-		Buckets:        buckets,
+	if mpu != nil {
+		st.AbortedUploads = mpu.AbortedTotal()
 	}
+	if w != nil {
+		ws := w.Stats()
+		st.Running = true
+		st.LastRun = ws.LastRun
+		st.LastCycleSeconds = ws.LastCycleSeconds
+		st.ObjectsChecked = ws.ObjectsChecked
+		st.Expired = ws.Expired
+		st.VersionsPruned = ws.VersionsPruned
+		st.DeleteMarkersReclaimed = ws.DeleteMarkersReclaimed
+	}
+	return st
 }
 
 // Apply validates a raw S3 wire XML lifecycle configuration and proposes it
@@ -148,6 +190,10 @@ func (s *Service) Delete(ctx context.Context, bucket string) error {
 // executor. Ported from cluster.LifecycleManager.Run, adapted to use the
 // LeadershipSignal seam so this module does not depend on internal/raft.
 func (s *Service) Run(ctx context.Context) {
+	// MPU worker is per-node, always on: starts on every node regardless of
+	// leadership (split execution model — see spec § "Cluster / Raft").
+	s.startMPUWorker(ctx)
+
 	events, cancel := s.leadership.Subscribe()
 	defer cancel()
 
@@ -157,11 +203,13 @@ func (s *Service) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			s.stop()
+			s.stopMPUWorker()
 			return
 		case _, ok := <-events:
 			if !ok {
 				// LeadershipSignal closed the channel; treat as terminal.
 				s.stop()
+				s.stopMPUWorker()
 				return
 			}
 			s.reconcile(ctx)
@@ -195,7 +243,7 @@ func (s *Service) start(parent context.Context) {
 		return
 	}
 	workerCtx, cancel := context.WithCancel(parent)
-	w := NewWorker(s.store, s.backend, s.deleter, s.interval)
+	w := NewWorker(s.store, s.backend, s.deleter, s.interval, s.limiter)
 	s.cancelFn = cancel
 	s.worker.Store(w)
 	s.workerWG.Add(1)
@@ -220,9 +268,78 @@ func (s *Service) stop() {
 	s.workerWG.Wait()
 }
 
-// workerRunningForTest exposes internal state to package-internal tests only.
+// startMPUWorker spins up the per-node MPUWorker. Idempotent: a second call
+// while the worker is running is a no-op. Independent of leadership.
+func (s *Service) startMPUWorker(parent context.Context) {
+	if s.mpuWorker.Load() != nil {
+		return
+	}
+	if s.backend == nil || s.deleter == nil {
+		s.logger.Warn().Msg("MPU worker not started: backend/deleter unset")
+		return
+	}
+	workerCtx, cancel := context.WithCancel(parent)
+	w := NewMPUWorker(s.store, s.backend, s.deleter, s.interval, s.limiter, WithMPUNodeID(s.nodeID))
+	s.mpuCancel = cancel
+	s.mpuWorker.Store(w)
+	s.mpuWG.Add(1)
+	go func() {
+		defer s.mpuWG.Done()
+		s.logger.Info().Dur("interval", s.interval).Msg("starting lifecycle MPU worker (per-node, always on)")
+		w.Run(workerCtx)
+		s.logger.Info().Msg("lifecycle MPU worker stopped")
+	}()
+}
+
+func (s *Service) stopMPUWorker() {
+	if s.mpuWorker.Load() == nil {
+		return
+	}
+	cancel := s.mpuCancel
+	s.mpuCancel = nil
+	s.mpuWorker.Store(nil)
+	if cancel != nil {
+		cancel()
+	}
+	s.mpuWG.Wait()
+}
+
+// WorkerRunningForTest exposes whether the leader-only object worker is
+// running. Test seam.
 //
 //nolint:unused // referenced by service_test.go.
-func (s *Service) workerRunningForTest() bool {
+func (s *Service) WorkerRunningForTest() bool {
 	return s.worker.Load() != nil
+}
+
+// MPUWorkerRunningForTest exposes whether the per-node MPU worker is
+// running. Test seam.
+//
+//nolint:unused // referenced by service_test.go.
+func (s *Service) MPUWorkerRunningForTest() bool {
+	return s.mpuWorker.Load() != nil
+}
+
+// RunCycleForTest synchronously runs one object-side cycle on the loaded
+// worker, if any. Followers (worker not loaded) return immediately. The MPU
+// worker is per-node and always loaded once Run has started, so we also
+// drive one MPU cycle in the same call. Test seam.
+func (s *Service) RunCycleForTest(ctx context.Context) {
+	if w := s.worker.Load(); w != nil {
+		w.RunCycleForTest(ctx)
+	}
+	if mpu := s.mpuWorker.Load(); mpu != nil {
+		mpu.RunCycleForTest(ctx)
+	}
+}
+
+// SetNowForTest reconfigures the clock source on any currently-loaded
+// workers. Called after Run has started. Test seam.
+func (s *Service) SetNowForTest(now func() time.Time) {
+	if w := s.worker.Load(); w != nil {
+		w.SetNowForTest(now)
+	}
+	if mpu := s.mpuWorker.Load(); mpu != nil {
+		mpu.SetNowForTest(now)
+	}
 }

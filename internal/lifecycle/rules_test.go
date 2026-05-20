@@ -61,12 +61,16 @@ func TestValidate_NegativeDays(t *testing.T) {
 }
 
 func TestValidate_ZeroDays(t *testing.T) {
+	// Days=0 is the absent-value sentinel now (Task 2 hardening).
+	// A bare Expiration with only Days=0 is treated as "no Days constraint"
+	// and is valid (the AWS spec allows Expiration shapes that only carry
+	// Date or ExpiredObjectDeleteMarker — Days is optional).
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{
 			{ID: "r", Status: "Enabled", Expiration: &Expiration{Days: 0}},
 		},
 	}
-	assert.Error(t, Validate(cfg))
+	assert.NoError(t, Validate(cfg))
 }
 
 func TestXMLRoundTrip(t *testing.T) {
