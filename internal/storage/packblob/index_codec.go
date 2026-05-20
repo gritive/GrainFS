@@ -6,6 +6,7 @@ import (
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob/packblobpb"
 )
 
@@ -61,6 +62,23 @@ func encodeIndex(entries map[packedKey]*indexEntry) ([]byte, error) {
 		}
 		mdVec := b.EndVector(len(kvOffsets))
 
+		// tags vector — preserve caller order so SetObjectTags/GetObjectTags
+		// round-trip yields the same slice.
+		tagOffsets := make([]flatbuffers.UOffsetT, 0, len(e.Tags))
+		for _, t := range e.Tags {
+			kOff := b.CreateString(t.Key)
+			vOff := b.CreateString(t.Value)
+			packblobpb.KVStart(b)
+			packblobpb.KVAddKey(b, kOff)
+			packblobpb.KVAddValue(b, vOff)
+			tagOffsets = append(tagOffsets, packblobpb.KVEnd(b))
+		}
+		packblobpb.IndexEntryStartTagsVector(b, len(tagOffsets))
+		for i := len(tagOffsets) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(tagOffsets[i])
+		}
+		tagsVec := b.EndVector(len(tagOffsets))
+
 		packblobpb.IndexEntryStart(b)
 		packblobpb.IndexEntryAddKey(b, keyOff)
 		packblobpb.IndexEntryAddLocation(b, locOff)
@@ -71,6 +89,7 @@ func encodeIndex(entries map[packedKey]*indexEntry) ([]byte, error) {
 		packblobpb.IndexEntryAddLastModified(b, e.LastModified)
 		packblobpb.IndexEntryAddUserMetadata(b, mdVec)
 		packblobpb.IndexEntryAddSseAlgorithm(b, sseOff)
+		packblobpb.IndexEntryAddTags(b, tagsVec)
 		entryOffsets = append(entryOffsets, packblobpb.IndexEntryEnd(b))
 	}
 
@@ -129,6 +148,18 @@ func decodeIndexStorage(data []byte) (out map[packedKey]*indexEntry, err error) 
 				md[string(kv.Key())] = string(kv.Value())
 			}
 			ent.UserMetadata = md
+		}
+		tagN := raw.TagsLength()
+		if tagN > 0 {
+			tags := make([]storage.Tag, 0, tagN)
+			var kv packblobpb.KV
+			for j := 0; j < tagN; j++ {
+				if !raw.Tags(&kv, j) {
+					continue
+				}
+				tags = append(tags, storage.Tag{Key: string(kv.Key()), Value: string(kv.Value())})
+			}
+			ent.Tags = tags
 		}
 		out[pk] = ent
 	}

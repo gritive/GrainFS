@@ -33,6 +33,7 @@ func s3AuthzRequestFromHertz(c *app.RequestContext) s3AuthzRequest {
 			args.Has("versions"),
 			args.Has("retention"),
 			args.Has("object-lock"),
+			args.Has("lifecycle"),
 		),
 	}
 }

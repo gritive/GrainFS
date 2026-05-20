@@ -8,7 +8,7 @@ import "github.com/gritive/GrainFS/internal/s3auth"
 // subresources from regular bucket/object operations.
 func s3ActionEnum(
 	method, path string,
-	hasKey, hasPolicyQuery, hasVersioningQuery, hasVersionsQuery, hasRetentionQuery, hasObjectLockQuery bool,
+	hasKey, hasPolicyQuery, hasVersioningQuery, hasVersionsQuery, hasRetentionQuery, hasObjectLockQuery, hasLifecycleQuery bool,
 ) s3auth.S3Action {
 	if hasPolicyQuery && !hasKey {
 		switch method {
@@ -20,6 +20,19 @@ func s3ActionEnum(
 			return s3auth.DeleteBucketPolicy
 		}
 	}
+	if hasLifecycleQuery && !hasKey {
+		switch method {
+		case "GET":
+			return s3auth.GetBucketLifecycleConfiguration
+		case "PUT":
+			return s3auth.PutBucketLifecycleConfiguration
+		case "DELETE":
+			return s3auth.DeleteBucketLifecycleConfiguration
+		}
+	}
+	// TODO: similar bucket-subresource gaps may exist for ?tagging / ?acl /
+	// ?cors / ?notification / ?logging — surface in their own surgical fixes
+	// when manifested.
 	if hasVersioningQuery && !hasKey {
 		switch method {
 		case "GET":

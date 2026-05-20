@@ -25,6 +25,7 @@ table IndexEntry {
   last_modified  : int64;
   user_metadata  : [KV];
   sse_algorithm  : string;
+  tags           : [KV];    // S3 object tags
 }
 
 table Index {
