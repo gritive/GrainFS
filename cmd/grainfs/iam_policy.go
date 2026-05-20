@@ -78,7 +78,7 @@ var iamPolicyDeleteCmd = &cobra.Command{
 
 var iamPolicyAttachCmd = &cobra.Command{
 	Use:   "attach <policy>",
-	Short: "Attach a policy to a ServiceAccount (--sa) or group (--group)",
+	Short: "Attach a policy to a ServiceAccount (--sa); use 'grainfs iam group policy attach' for groups",
 	Example: `  grainfs iam policy attach readonly --sa sa-abc123
   grainfs iam policy attach my-pol --sa sa-abc123 --i-know`,
 	Args: cobra.ExactArgs(1),
@@ -88,13 +88,11 @@ var iamPolicyAttachCmd = &cobra.Command{
 			return err
 		}
 		said, _ := c.Flags().GetString("sa")
-		groupID, _ := c.Flags().GetString("group")
 		iKnow, _ := c.Flags().GetBool("i-know")
 		return iamadmin.RunPolicyAttach(c.Context(), iamadmin.PolicyAttachOptions{
 			BaseOptions: base,
 			PolicyName:  args[0],
 			SAID:        said,
-			GroupID:     groupID,
 			IKnow:       iKnow,
 		})
 	},
@@ -102,7 +100,7 @@ var iamPolicyAttachCmd = &cobra.Command{
 
 var iamPolicyDetachCmd = &cobra.Command{
 	Use:     "detach <policy>",
-	Short:   "Detach a policy from a ServiceAccount (--sa) or group (--group)",
+	Short:   "Detach a policy from a ServiceAccount (--sa); use 'grainfs iam group policy detach' for groups",
 	Example: `  grainfs iam policy detach readonly --sa sa-abc123`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(c *cobra.Command, args []string) error {
@@ -111,12 +109,10 @@ var iamPolicyDetachCmd = &cobra.Command{
 			return err
 		}
 		said, _ := c.Flags().GetString("sa")
-		groupID, _ := c.Flags().GetString("group")
 		return iamadmin.RunPolicyDetach(c.Context(), iamadmin.PolicyDetachOptions{
 			BaseOptions: base,
 			PolicyName:  args[0],
 			SAID:        said,
-			GroupID:     groupID,
 		})
 	},
 }

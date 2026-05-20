@@ -103,13 +103,12 @@ type PolicyDeleteOptions struct {
 	Name string
 }
 
-// PolicyAttachOptions holds options for attaching a policy to an SA or group.
-// Exactly one of SAID or GroupID should be set.
+// PolicyAttachOptions holds options for attaching a policy to an SA.
+// Use 'grainfs iam group policy attach' to attach to a group.
 type PolicyAttachOptions struct {
 	BaseOptions
 	PolicyName string
 	SAID       string
-	GroupID    string
 	IKnow      bool // suppress Resource:* warning
 }
 
@@ -117,7 +116,6 @@ type PolicyDetachOptions struct {
 	BaseOptions
 	PolicyName string
 	SAID       string
-	GroupID    string
 }
 
 // PolicyValidateOptions performs local validation only — no UDS dial.

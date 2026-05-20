@@ -100,7 +100,7 @@ func RunPolicyAttach(ctx context.Context, opts PolicyAttachOptions) error {
 	if opts.SAID != "" {
 		return c.PolicyAttachToSA(ctx, opts.PolicyName, opts.SAID)
 	}
-	return fmt.Errorf("attach requires --sa (or --group) to be specified")
+	return fmt.Errorf("attach requires --sa; to attach a policy to a group use 'grainfs iam group policy attach'")
 }
 
 // RunPolicyDetach detaches a policy from an SA.
@@ -114,7 +114,7 @@ func RunPolicyDetach(ctx context.Context, opts PolicyDetachOptions) error {
 	if opts.SAID != "" {
 		return c.PolicyDetachFromSA(ctx, opts.PolicyName, opts.SAID)
 	}
-	return fmt.Errorf("detach requires --sa (or --group) to be specified")
+	return fmt.Errorf("detach requires --sa; to detach a policy from a group use 'grainfs iam group policy detach'")
 }
 
 // RunPolicyValidate reads the policy file and parses it locally — no UDS dial.
