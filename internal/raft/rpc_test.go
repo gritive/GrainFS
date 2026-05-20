@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,6 +83,52 @@ func startFollowerWithPeers(t *testing.T, id string, peers ...string) *Node {
 	}()
 	return n
 }
+
+var _ = ginkgo.Describe("RPC integration", func() {
+	ginkgo.Context("memTransport", func() {
+		var network *memNetwork
+		var n1 *Node
+		var n2 *Node
+		var transport Transport
+
+		ginkgo.BeforeEach(func() {
+			var err error
+			network = newMemNetwork()
+			n1, err = NewNode(Config{ID: "n1", Peers: []string{"n2"}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			n2, err = NewNode(Config{ID: "n2", Peers: []string{"n1"}, ElectionTimeout: time.Hour})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			transport = network.Register("n1", n1)
+			network.Register("n2", n2)
+			n1.SetTransport(transport)
+
+			for _, node := range []*Node{n1, n2} {
+				node.Start()
+				ginkgo.DeferCleanup(node.Stop)
+				go func(node *Node) {
+					for range node.ApplyCh() {
+					}
+				}(node)
+			}
+		})
+
+		ginkgo.It("routes RequestVote through the destination actor", func() {
+			reply, err := transport.SendRequestVote("n2", &RequestVoteArgs{
+				Term:        5,
+				CandidateID: "n1",
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(reply.VoteGranted).To(gomega.BeTrue())
+			gomega.Expect(reply.Term).To(gomega.Equal(uint64(5)))
+			gomega.Expect(n2.Term()).To(gomega.Equal(uint64(5)))
+			gomega.Expect(n2.State()).To(gomega.Equal(Follower))
+
+			_, err = transport.SendRequestVote("ghost", &RequestVoteArgs{Term: 1})
+			gomega.Expect(err).To(gomega.MatchError(ErrUnknownPeer))
+		})
+	})
+})
 
 // TestHandleRequestVote_GrantHappyPath: single-voter leader at term 1 receives
 // a RequestVote at a higher term from an empty-log candidate. Per Raft §5.4
@@ -242,46 +290,4 @@ func TestHandleAppendEntries_HeartbeatStepDown(t *testing.T) {
 	require.False(t, reply3.Success, "stale-term AE must be rejected")
 	require.Equal(t, uint64(2), reply3.Term)
 	require.Equal(t, "newleader", n.LeaderID(), "leaderID unchanged on stale AE")
-}
-
-// TestMemTransport_RoutesRequestVote: smoke test that memTransport actually
-// dispatches into the destination Node's actor. Two single-voter nodes share
-// a memNetwork; n1 sends RequestVote(term=2) to n2 via Transport.
-func TestMemTransport_RoutesRequestVote(t *testing.T) {
-	net := newMemNetwork()
-
-	n1, err := NewNode(Config{ID: "n1", Peers: []string{"n2"}})
-	require.NoError(t, err)
-	n2, err := NewNode(Config{ID: "n2", Peers: []string{"n1"}, ElectionTimeout: time.Hour})
-	require.NoError(t, err)
-	n1.Start()
-	n2.Start()
-	t.Cleanup(n1.Stop)
-	t.Cleanup(n2.Stop)
-	go func() {
-		for range n1.ApplyCh() {
-		}
-	}()
-	go func() {
-		for range n2.ApplyCh() {
-		}
-	}()
-
-	tr := net.Register("n1", n1)
-	net.Register("n2", n2)
-	n1.SetTransport(tr)
-
-	reply, err := tr.SendRequestVote("n2", &RequestVoteArgs{
-		Term:        5,
-		CandidateID: "n1",
-	})
-	require.NoError(t, err)
-	require.True(t, reply.VoteGranted)
-	require.Equal(t, uint64(5), reply.Term)
-	require.Equal(t, uint64(5), n2.Term())
-	require.Equal(t, Follower, n2.State())
-
-	// Unknown peer returns ErrUnknownPeer.
-	_, err = tr.SendRequestVote("ghost", &RequestVoteArgs{Term: 1})
-	require.ErrorIs(t, err, ErrUnknownPeer)
 }
