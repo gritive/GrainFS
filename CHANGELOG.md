@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.0.283.0] - 2026-05-20
+
+### Added
+
+- Published the single-node S3 and Iceberg benchmark reference for the
+  `s3bench` optimization pass. The reference now covers PUT, GET, DELETE,
+  MIXED, LIST, STAT, VERSIONED, RETENTION, MULTIPART, MULTIPART-PUT,
+  APPEND, and Iceberg catalog read/commit/mixed/sustained workloads.
+- Added benchmark harness evidence capture for host preflight state,
+  per-target resource snapshots, pprof capture on single-node and cluster
+  GrainFS runs, non-zero warp error rejection, and strict dirty-host gates.
+- Added docs tests that keep the benchmark reference, README performance
+  table, append caveat, Iceberg rows, and final throughput/RSS gates in sync.
+
+### Changed
+
+- Improved S3 read and multipart performance with prepared EC read placement,
+  follower-local current reads, remote-focused EC range caching, fewer shard
+  fanouts, streaming multipart parts, upload-part request streaming, and
+  zero-copy-oriented shard/range buffer reuse.
+- Improved small-object GET/PUT paths by reusing packed-object buffers,
+  avoiding small response copies, exposing raw cached bodies to Hertz, and
+  preserving prepared range reads through storage wrappers.
+- Reduced cluster metadata and Badger memory pressure with smaller small-store
+  options, object-index snapshot key reuse, lower meta snapshot churn, and
+  chunked raft snapshots for large Badger snapshot payloads.
+- Tightened append handling with stale-offset rejection before body reads,
+  same-object append admission locks, append metadata reuse, duplicate checksum
+  decode removal, and clearer best-effort append benchmark treatment.
+- Updated Iceberg benchmark scripts for current warp flags, collision-free
+  commit workloads, controlled sustained RPS, and warehouse bucket policy setup.
+
+### Fixed
+
+- Fixed stale follower HEAD/GET read paths so follower reads only serve data
+  proven current against the object index.
+- Fixed versioned delete over packed objects by evicting stale packblob index
+  entries when delete marker creation is delegated to the inner backend.
+- Fixed raft snapshot persistence for large snapshot bodies by chunking values
+  below the Badger value-log size limit and cleaning old chunks on replacement.
+- Fixed benchmark result publishing so errored warp runs, including unsupported
+  MinIO/RustFS append runs, cannot appear as comparable throughput rows.
+- Fixed host preflight process scanning so the scanner itself is not counted as
+  a pre-existing `grainfs serve` process.
+
 ## [0.0.282.0] - 2026-05-20 - refactor(cmd): move bucket commands to internal/bucketadmin
 
 Continuation of the cmd thin-runner refactor (step 2/7). All four
