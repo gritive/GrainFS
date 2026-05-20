@@ -48,14 +48,14 @@ func TestClusterConfig_FollowerForward_E2E(t *testing.T) {
 	t.Cleanup(func() { _ = m0.Close(); _ = m1.Close(); _ = m2.Close() })
 
 	require.NoError(t, m0.Bootstrap())
-	require.NoError(t, m0.Start(ctx))
+	require.NoError(t, m0.Start(ctx, nil))
 	require.Eventually(t, func() bool { return m0.node.State() == raft.Leader },
 		3*time.Second, 20*time.Millisecond, "node-0 must become leader")
 
 	require.NoError(t, m1.Bootstrap())
-	require.NoError(t, m1.Start(ctx))
+	require.NoError(t, m1.Start(ctx, nil))
 	require.NoError(t, m2.Bootstrap())
-	require.NoError(t, m2.Start(ctx))
+	require.NoError(t, m2.Start(ctx, nil))
 
 	joinCtx, joinCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer joinCancel()

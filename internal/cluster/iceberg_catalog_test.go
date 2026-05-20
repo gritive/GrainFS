@@ -28,7 +28,7 @@ func TestMetaCatalogLoadTableReadsMetadataFromWarehouseObject(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -62,7 +62,7 @@ func TestMetaCatalogLoadTableReusesMetadataReadAfterCreate(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -97,7 +97,7 @@ func BenchmarkMetaCatalogLoadTableRepeated(b *testing.B) {
 	m := newSingleMetaRaft(b)
 	b.Cleanup(func() { _ = m.Close() })
 	require.NoError(b, m.Bootstrap())
-	require.NoError(b, m.Start(context.Background()))
+	require.NoError(b, m.Start(context.Background(), nil))
 	require.Eventually(b, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -136,7 +136,7 @@ func TestMetaCatalogLeaderListCommitAndDelete(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -225,7 +225,7 @@ func TestMetaCatalogFollowerWriteForwarderCommitsOnLeader(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -252,7 +252,7 @@ func TestMetaCatalogFollowerCreateTableReturnsForwardedLeaderRead(t *testing.T) 
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -304,7 +304,7 @@ func TestMetaCatalogFollowerCreateTableReturnsProvidedMetadataWithoutLeaderObjec
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -357,7 +357,7 @@ func TestMetaForwarderSkipsNonLeaderAndCommitsBucketAssignment(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -385,7 +385,7 @@ func TestMetaForwardReceiverRejectsRawGatedCommand(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -404,7 +404,7 @@ func TestMetaForwardReceiverAllowsLegacyRawMigrationCutover(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -423,7 +423,7 @@ func TestMetaForwardReceiverRevalidatesGateOnLeader(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -467,7 +467,7 @@ func TestMetaForwardReceiverRefreshesGateBeforeGatedProposal(t *testing.T) {
 	leader := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = leader.Close() })
 	require.NoError(t, leader.Bootstrap())
-	require.NoError(t, leader.Start(context.Background()))
+	require.NoError(t, leader.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return leader.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -726,7 +726,7 @@ func TestMetaCatalog_TwoWarehousesIsolated(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -789,7 +789,7 @@ func TestMetaCatalog_EmptyWarehouseResolvesToDefault(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)
@@ -848,7 +848,7 @@ func TestMetaCatalog_MetadataCache_WarehouseScoped(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
 	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background()))
+	require.NoError(t, m.Start(context.Background(), nil))
 	require.Eventually(t, func() bool {
 		return m.node.State() == raft.Leader
 	}, 2*time.Second, 20*time.Millisecond)

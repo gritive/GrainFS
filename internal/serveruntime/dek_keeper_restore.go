@@ -9,13 +9,22 @@ import (
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 )
 
-// bootDEKKeeperFromRestore runs AFTER bootMetaRaftStart, by which time raft
-// Restore (if any) has populated MetaFSM.PendingDEKVersions. When the snapshot
-// trailer carries wrapped DEKs, the fresh keeper installed by wireDEKKeeper
-// (NewDEKKeeper) is replaced with one reconstructed from those wrapped bytes
-// via encrypt.LoadFromFSM.
+// rebuildDEKKeeperFromRestore is the post-Restore / pre-apply-loop callback
+// passed to MetaRaft.Start. By contract it runs:
 //
-// This is the operator-visible failure point for the two §7 F#21 / F#22 modes:
+//  1. AFTER fsm.Restore — so fsm.PendingDEKVersions() reflects the DKVS
+//     trailer (if any) from the latest snapshot.
+//  2. BEFORE the apply-loop goroutine is launched — so this is the ONLY safe
+//     window to call fsm.SetDEKKeeper without racing apply paths that consume
+//     the keeper (DEKRotate, DEKVersionPrune, JWTSigningKeyRotate). Calling
+//     SetDEKKeeper after `go runApplyLoop` would race with a queued rotation
+//     that mutates the fresh (wrong) keeper, causing silent data loss when
+//     the post-Restore swap then overwrites that rotation.
+//
+// When the snapshot trailer carries wrapped DEKs, the fresh keeper installed
+// by wireDEKKeeper (NewDEKKeeper) is replaced with one reconstructed via
+// encrypt.LoadFromFSM. This is the operator-visible failure point for the
+// two §7 F#21 / F#22 modes:
 //
 //   - KEK missing (F#21): the raft snapshot has wrapped DEKs but the node's
 //     kek.key file is gone. LoadKEK returns ErrKEKNotFound; we surface a
@@ -27,11 +36,11 @@ import (
 //     returns an unwrap error; we wrap it with a remediation pointing at
 //     scp-from-peer.
 //
-// When the snapshot has NO wrapped DEKs (PendingDEKVersions returns nil or
-// empty), this phase is a no-op — the fresh keeper from wireDEKKeeper is left
-// in place. That covers the first-boot path where wireDEKKeeper's
-// LoadOrGenerateKEK created kek.key from scratch.
-func bootDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
+// When the snapshot has NO wrapped DEKs (PendingDEKVersions returns empty),
+// this is a no-op — the fresh keeper from wireDEKKeeper is left in place.
+// That covers the first-boot path where wireDEKKeeper's LoadOrGenerateKEK
+// created kek.key from scratch.
+func rebuildDEKKeeperFromRestore(state *bootState, fsm *cluster.MetaFSM) error {
 	versions, _ := fsm.PendingDEKVersions()
 	if len(versions) == 0 {
 		// No DKVS trailer in the snapshot — first boot, or a snapshot taken

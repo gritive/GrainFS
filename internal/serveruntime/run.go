@@ -128,16 +128,10 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootRotationAndAdminAPI(state); err != nil {
 		return err
 	}
+	// §7 T57: bootMetaRaftStart's preApplyLoop callback handles post-Restore
+	// DEK-keeper reconstruction (F#21 / F#22) atomically between Restore and
+	// the apply-loop launch — see rebuildDEKKeeperFromRestore.
 	if err := bootMetaRaftStart(ctx, state, StartRotationSocket); err != nil {
-		return err
-	}
-
-	// §7 T57: Restore has run (inside bootMetaRaftStart); if the snapshot carried
-	// a DKVS trailer, the FSM now holds pendingDEKVersions. Swap the fresh
-	// keeper from wireDEKKeeper for one reconstructed via LoadFromFSM, and
-	// refuse startup with an explicit remediation message if the KEK is
-	// missing (F#21) or does not unwrap the persisted DEKs (F#22).
-	if err := bootDEKKeeperFromRestore(state, state.metaRaft.FSM()); err != nil {
 		return err
 	}
 

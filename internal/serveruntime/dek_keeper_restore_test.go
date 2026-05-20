@@ -68,7 +68,7 @@ func TestStartup_RefusesWhenKEKMissing(t *testing.T) {
 	// also unset (test environment) so KEKSource() defaults to dataDir/kek.key,
 	// which does not exist.
 
-	err = bootDEKKeeperFromRestore(state, fsm)
+	err = rebuildDEKKeeperFromRestore(state, fsm)
 	require.Error(t, err, "missing KEK with FSM-wrapped DEKs must refuse startup")
 	assert.Contains(t, err.Error(), "KEK not found",
 		"error must include the literal 'KEK not found' for operator grep-ability")
@@ -100,7 +100,7 @@ func TestStartup_RefusesWhenKEKDoesNotDecryptDEK(t *testing.T) {
 	require.NotEqual(t, clusterKEK, wrongKEK, "test fixture must use distinct KEK bytes")
 	writeKEKFile(t, dataDir, wrongKEK)
 
-	err = bootDEKKeeperFromRestore(state, fsm)
+	err = rebuildDEKKeeperFromRestore(state, fsm)
 	require.Error(t, err, "wrong KEK with FSM-wrapped DEKs must refuse startup")
 	assert.Contains(t, err.Error(), "decrypt",
 		"error must include the literal 'decrypt' so operators can grep the cause")
@@ -120,6 +120,6 @@ func TestStartup_NoOpWhenSnapshotHasNoWrappedDEKs(t *testing.T) {
 
 	// No kek.key written, no env var — the no-op branch must NOT touch the
 	// filesystem, so this still succeeds.
-	require.NoError(t, bootDEKKeeperFromRestore(state, fsm))
+	require.NoError(t, rebuildDEKKeeperFromRestore(state, fsm))
 	assert.Nil(t, state.dekKeeper, "no-op branch must leave state untouched")
 }

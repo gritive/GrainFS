@@ -230,7 +230,19 @@ func (m *MetaRaft) Bootstrap() error {
 }
 
 // Start launches the Raft node and the FSM apply loop.
-func (m *MetaRaft) Start(ctx context.Context) error {
+//
+// preApplyLoop, if non-nil, is invoked AFTER Restore (so FSM.PendingDEKVersions
+// etc. are populated) but BEFORE the apply-loop goroutine is launched. This is
+// the only safe window for swapping FSM-installed dependencies that the apply
+// path consumes — e.g. the DEKKeeper reconstructed via encrypt.LoadFromFSM
+// from the snapshot trailer (§7 T57 / F#21 / F#22). Calling SetDEKKeeper after
+// `go runApplyLoop` would race with a queued DEKRotate / JWTSigningKeyRotate
+// that rotates the fresh (wrong) keeper, causing silent data loss when the
+// post-Restore swap then overwrites that rotation.
+//
+// If preApplyLoop returns an error, the apply loop is NOT started and the
+// error propagates — startup is refused.
+func (m *MetaRaft) Start(ctx context.Context, preApplyLoop func() error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	if snap, err := m.node.LatestSnapshot(); err != nil {
@@ -242,6 +254,18 @@ func (m *MetaRaft) Start(ctx context.Context) error {
 		}
 		m.lastApplied.Store(snap.Index)
 		m.lastSnapshotIndex = snap.Index
+	}
+	if preApplyLoop != nil {
+		if err := preApplyLoop(); err != nil {
+			// Tear down what we set up. The apply-loop goroutine has NOT been
+			// launched, so m.done would never be closed; Close() would hang
+			// waiting on it. Clear m.cancel and close m.done ourselves so a
+			// caller's deferred Close (typical t.Cleanup pattern) is safe.
+			cancel()
+			m.cancel = nil
+			close(m.done)
+			return err
+		}
 	}
 	m.node.Start()
 	go m.runApplyLoop(ctx)
