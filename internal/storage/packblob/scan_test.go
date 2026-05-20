@@ -110,6 +110,38 @@ func TestPackedBackend_ListBucketsFusesPackedAndInner(t *testing.T) {
 	require.True(t, set["bucket-c"], "index-only bucket must appear after fuse")
 }
 
+// TestPackedBackend_DeleteObjectReturningMarker_CleanupPackedIndex_NonVersioning
+// guards against R5: when DeleteObjectReturningMarker is invoked on a
+// non-versioning bucket containing a packed object, the packed index entry must
+// be evicted so a subsequent HeadObject does not find the object alive.
+// Operations.DeleteObjectReturningMarker enters the versionedSoftDeleter branch
+// without a bucket-level versioning check, so PackedBackend.DeleteObjectReturningMarker
+// is called on both versioning-enabled AND non-versioning buckets.
+func TestPackedBackend_DeleteObjectReturningMarker_CleanupPackedIndex_NonVersioning(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	ctx := context.Background()
+	const bucket = "b"
+	require.NoError(t, pb.CreateBucket(ctx, bucket))
+
+	// Small body → goes into packed index (below 64 KiB threshold)
+	body := []byte("small")
+	_, err := pb.PutObject(ctx, bucket, "k", bytes.NewReader(body), "text/plain")
+	require.NoError(t, err)
+
+	// Verify it's alive in packed index
+	_, err = pb.HeadObject(ctx, bucket, "k")
+	require.NoError(t, err, "packed object must be alive before delete")
+
+	// Delete via the marker-returning path (lifecycle worker's actual surface)
+	marker, err := pb.DeleteObjectReturningMarker(bucket, "k")
+	require.NoError(t, err)
+	require.Equal(t, "", marker, "non-versioning bucket must return empty marker")
+
+	// After delete, HeadObject must NOT find the object (R5 guard)
+	_, err = pb.HeadObject(ctx, bucket, "k")
+	require.Error(t, err, "packed index entry must be evicted on DeleteObjectReturningMarker (R5 guard)")
+}
+
 // TestPackedBackend_ScanObjectsGroupedDedupBranchPrefersPacked guards against
 // the case where the same key exists in both the packed index and inner. The
 // packed entry must win and only one group must be emitted (no duplicate).
