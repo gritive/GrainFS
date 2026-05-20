@@ -237,150 +237,150 @@ var _ = ginkgo.Describe("ReadIndex", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(idx).To(gomega.BeNumerically(">=", 0))
 	}, ginkgo.NodeTimeout(10*time.Second))
-})
 
-var _ = ginkgo.Describe("Apply pipeline", func() {
-	ginkgo.It("keeps actor commands live while a slow FSM consumer drains entries", func(ginkgo.SpecContext) {
-		net := newMemNetwork()
-		ids := []string{"a1", "a2", "a3"}
-		nodes := make([]*Node, 3)
-		for i, id := range ids {
-			peers := otherIDsLocal(ids, id)
-			electionTimeout := slowElectionTimeout
-			if i == 0 {
-				electionTimeout = fastElectionTimeout
+	ginkgo.Context("apply pipeline", func() {
+		ginkgo.It("keeps actor commands live while a slow FSM consumer drains entries", func(ginkgo.SpecContext) {
+			net := newMemNetwork()
+			ids := []string{"a1", "a2", "a3"}
+			nodes := make([]*Node, 3)
+			for i, id := range ids {
+				peers := otherIDsLocal(ids, id)
+				electionTimeout := slowElectionTimeout
+				if i == 0 {
+					electionTimeout = fastElectionTimeout
+				}
+				node, err := NewNode(Config{
+					ID:               id,
+					Peers:            peers,
+					ElectionTimeout:  electionTimeout,
+					HeartbeatTimeout: testHeartbeat,
+				})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				nodes[i] = node
 			}
-			node, err := NewNode(Config{
-				ID:               id,
-				Peers:            peers,
-				ElectionTimeout:  electionTimeout,
-				HeartbeatTimeout: testHeartbeat,
-			})
+			for _, node := range nodes {
+				node.SetTransport(net.Register(node.cfg.ID, node))
+			}
+			for _, node := range nodes {
+				node.Start()
+			}
+			defer func() {
+				for i := len(nodes) - 1; i >= 0; i-- {
+					nodes[i].Stop()
+				}
+			}()
+
+			leader := nodes[0]
+			go func() {
+				for entry := range leader.ApplyCh() {
+					_ = entry
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+			for _, node := range nodes[1:] {
+				go func(node *Node) {
+					for range node.ApplyCh() {
+					}
+				}(node)
+			}
+
+			gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
+
+			const n = 200
+			pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer pcancel()
+			for i := 0; i < n; i++ {
+				_, err := leader.ProposeWait(pctx, []byte{byte(i)})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "propose %d failed; actor likely wedged on slow FSM", i)
+			}
+
+			rctx, rcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer rcancel()
+			idx, err := leader.ReadIndex(rctx)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "ReadIndex during slow apply drain; actor wedged?")
+			gomega.Expect(idx).To(gomega.BeNumerically(">=", n), "barrier must reflect all committed entries")
+		}, ginkgo.NodeTimeout(10*time.Second))
+
+		ginkgo.It("preserves FIFO delivery with a slow FSM consumer", func(ginkgo.SpecContext) {
+			node, err := NewNode(Config{ID: "n1"})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			nodes[i] = node
-		}
-		for _, node := range nodes {
-			node.SetTransport(net.Register(node.cfg.ID, node))
-		}
-		for _, node := range nodes {
 			node.Start()
-		}
-		defer func() {
-			for i := len(nodes) - 1; i >= 0; i-- {
-				nodes[i].Stop()
-			}
-		}()
+			defer node.Stop()
 
-		leader := nodes[0]
-		go func() {
-			for entry := range leader.ApplyCh() {
-				_ = entry
-				time.Sleep(5 * time.Millisecond)
-			}
-		}()
-		for _, node := range nodes[1:] {
-			go func(node *Node) {
-				for range node.ApplyCh() {
+			gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
+
+			const n = 200
+			delivered := make([]uint64, 0, n)
+			deliveredMu := sync.Mutex{}
+			done := make(chan struct{})
+			go func() {
+				count := 0
+				for entry := range node.ApplyCh() {
+					if entry.Type == LogEntryNoOp {
+						continue
+					}
+					time.Sleep(time.Millisecond)
+					deliveredMu.Lock()
+					delivered = append(delivered, entry.Index)
+					count++
+					current := count
+					deliveredMu.Unlock()
+					if current >= n {
+						close(done)
+						return
+					}
 				}
-			}(node)
-		}
+			}()
 
-		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed())
+			pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer pcancel()
+			for i := 0; i < n; i++ {
+				_, err := node.ProposeWait(pctx, []byte{byte(i)})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 
-		const n = 200
-		pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer pcancel()
-		for i := 0; i < n; i++ {
-			_, err := leader.ProposeWait(pctx, []byte{byte(i)})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "propose %d failed; actor likely wedged on slow FSM", i)
-		}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				ginkgo.Fail(fmt.Sprintf("apply consumer didn't see all %d entries", n))
+			}
 
-		rctx, rcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer rcancel()
-		idx, err := leader.ReadIndex(rctx)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "ReadIndex during slow apply drain; actor wedged?")
-		gomega.Expect(idx).To(gomega.BeNumerically(">=", n), "barrier must reflect all committed entries")
-	}, ginkgo.NodeTimeout(10*time.Second))
+			deliveredMu.Lock()
+			defer deliveredMu.Unlock()
+			gomega.Expect(delivered).To(gomega.HaveLen(n))
+			for i := 1; i < len(delivered); i++ {
+				gomega.Expect(delivered[i]).To(gomega.BeNumerically(">", delivered[i-1]),
+					"applyCh delivery must be FIFO by Index; got delivered[%d]=%d, delivered[%d]=%d",
+					i-1, delivered[i-1], i, delivered[i])
+			}
+		}, ginkgo.NodeTimeout(15*time.Second))
 
-	ginkgo.It("preserves FIFO delivery with a slow FSM consumer", func(ginkgo.SpecContext) {
-		node, err := NewNode(Config{ID: "n1"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		node.Start()
-		defer node.Stop()
+		ginkgo.It("flushes ready entries during apply loop shutdown", func() {
+			for attempt := 0; attempt < 50; attempt++ {
+				node, err := NewNode(Config{ID: fmt.Sprintf("n%d", attempt)})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
+				go node.applyLoop()
 
-		const n = 200
-		delivered := make([]uint64, 0, n)
-		deliveredMu := sync.Mutex{}
-		done := make(chan struct{})
-		go func() {
-			count := 0
-			for entry := range node.ApplyCh() {
-				if entry.Type == LogEntryNoOp {
-					continue
+				want := []LogEntry{
+					{Term: 1, Index: 1, Type: LogEntryNoOp},
+					{Term: 1, Index: 2, Command: []byte("v1")},
+					{Term: 1, Index: 3, Command: []byte("v2")},
+					{Term: 1, Index: 4, Command: []byte("v3")},
 				}
-				time.Sleep(time.Millisecond)
-				deliveredMu.Lock()
-				delivered = append(delivered, entry.Index)
-				count++
-				current := count
-				deliveredMu.Unlock()
-				if current >= n {
-					close(done)
-					return
+				for _, entry := range want {
+					node.applyInCh <- entry
 				}
+
+				close(node.stopCh)
+				close(node.applyInCh)
+
+				var got []LogEntry
+				for entry := range node.ApplyCh() {
+					got = append(got, entry)
+				}
+				gomega.Expect(got).To(gomega.Equal(want))
 			}
-		}()
-
-		pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer pcancel()
-		for i := 0; i < n; i++ {
-			_, err := node.ProposeWait(pctx, []byte{byte(i)})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		}
-
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			ginkgo.Fail(fmt.Sprintf("apply consumer didn't see all %d entries", n))
-		}
-
-		deliveredMu.Lock()
-		defer deliveredMu.Unlock()
-		gomega.Expect(delivered).To(gomega.HaveLen(n))
-		for i := 1; i < len(delivered); i++ {
-			gomega.Expect(delivered[i]).To(gomega.BeNumerically(">", delivered[i-1]),
-				"applyCh delivery must be FIFO by Index; got delivered[%d]=%d, delivered[%d]=%d",
-				i-1, delivered[i-1], i, delivered[i])
-		}
-	}, ginkgo.NodeTimeout(15*time.Second))
-
-	ginkgo.It("flushes ready entries during apply loop shutdown", func() {
-		for attempt := 0; attempt < 50; attempt++ {
-			node, err := NewNode(Config{ID: fmt.Sprintf("n%d", attempt)})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-			go node.applyLoop()
-
-			want := []LogEntry{
-				{Term: 1, Index: 1, Type: LogEntryNoOp},
-				{Term: 1, Index: 2, Command: []byte("v1")},
-				{Term: 1, Index: 3, Command: []byte("v2")},
-				{Term: 1, Index: 4, Command: []byte("v3")},
-			}
-			for _, entry := range want {
-				node.applyInCh <- entry
-			}
-
-			close(node.stopCh)
-			close(node.applyInCh)
-
-			var got []LogEntry
-			for entry := range node.ApplyCh() {
-				got = append(got, entry)
-			}
-			gomega.Expect(got).To(gomega.Equal(want))
-		}
+		})
 	})
 })
