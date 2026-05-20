@@ -319,6 +319,29 @@ bench_wait_cluster_leader() {
   return 1
 }
 
+bench_wait_shard_group_count() {
+  local base_url="$1"
+  local expected="$2"
+  local attempts="${3:-120}"
+  local sleep_seconds="${4:-0.5}"
+
+  for attempt in $(seq 1 "$attempts"); do
+    local status count
+    status=$(curl -sf "$base_url/api/cluster/status" 2>/dev/null || true)
+    if [[ -n "$status" ]]; then
+      count=$(python3 -c 'import sys,json; print(len((json.load(sys.stdin) or {}).get("shard_groups") or []))' <<<"$status" 2>/dev/null || true)
+      if [[ -n "$count" && "$count" =~ ^[0-9]+$ && "$count" -ge "$expected" ]]; then
+        [[ "${BENCH_QUIET:-0}" == "1" ]] || echo "[bench] shard groups ready: $count/$expected (attempt $attempt)"
+        return 0
+      fi
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  echo "shard groups not ready at $base_url: expected >= $expected" >&2
+  return 1
+}
+
 bench_create_bucket_retry() {
   local base_url="$1"
   local bucket="$2"

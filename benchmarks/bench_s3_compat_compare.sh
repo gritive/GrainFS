@@ -340,6 +340,11 @@ start_grainfs_cluster() {
   # × 0.25s = 30s budget; the legacy fixed 45s sleep is gone. Followers
   # report state="Follower" on the same endpoint, so we don't poll them.
   bench_wait_cluster_leader "${urls[0]}" 120 0.25 >&2
+  local expected_shard_groups=$((GRAINFS_CLUSTER_NODES * 4))
+  if (( expected_shard_groups < 8 )); then
+    expected_shard_groups=8
+  fi
+  bench_wait_shard_group_count "${urls[0]}" "$expected_shard_groups" 240 0.5 >&2
   GRAINFS_ADMIN_DATA_DIR="$cluster_dir/n1"
   GRAINFS_SA_ID="$SA_ID"
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
