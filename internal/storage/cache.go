@@ -36,12 +36,14 @@ type cachedObjectReader struct {
 }
 
 type cachedObjectReaderState struct {
-	r bytes.Reader
+	r    bytes.Reader
+	data []byte
 }
 
 func newCachedObjectReader(data []byte) *cachedObjectReader {
 	st := cachedObjectReaderStatePool.Get()
 	st.r.Reset(data)
+	st.data = data
 	return &cachedObjectReader{st: st}
 }
 
@@ -59,6 +61,13 @@ func (r *cachedObjectReader) WriteTo(w io.Writer) (int64, error) {
 	return r.st.r.WriteTo(w)
 }
 
+func (r *cachedObjectReader) RawBody() []byte {
+	if r.st == nil {
+		return nil
+	}
+	return r.st.data
+}
+
 func (r *cachedObjectReader) Close() error {
 	st := r.st
 	if st == nil {
@@ -66,6 +75,7 @@ func (r *cachedObjectReader) Close() error {
 	}
 	r.st = nil
 	st.r.Reset(nil)
+	st.data = nil
 	cachedObjectReaderStatePool.Put(st)
 	return nil
 }
