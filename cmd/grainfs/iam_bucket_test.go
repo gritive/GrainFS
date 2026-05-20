@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -180,7 +181,7 @@ func TestCLI_IAMBucketPolicyPutDelete(t *testing.T) {
 
 	// Create a temp policy file.
 	policyFile := t.TempDir() + "/policy.json"
-	if err := writeTempFile(policyFile, policyDoc); err != nil {
+	if err := os.WriteFile(policyFile, []byte(policyDoc), 0644); err != nil {
 		t.Fatalf("write temp policy: %v", err)
 	}
 

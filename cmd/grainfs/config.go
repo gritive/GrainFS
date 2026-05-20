@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -9,7 +10,28 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
+
+// configRequest dials the admin UDS via the shared adminapi.Transport and
+// returns the raw response body. Replaces the legacy iamRequest helper that
+// was removed when cmd/grainfs/admin_uds_client.go was deleted in PR #474.
+func configRequest(ctx context.Context, sock, method, path string, body any) ([]byte, error) {
+	t, err := adminapi.NewTransport(sock)
+	if err != nil {
+		return nil, err
+	}
+	switch method {
+	case "GET":
+		return t.GetRaw(ctx, path)
+	case "PUT":
+		return nil, t.Put(ctx, path, body, nil)
+	case "DELETE":
+		return nil, t.Delete(ctx, path, nil)
+	}
+	return nil, fmt.Errorf("configRequest: unsupported method %q", method)
+}
 
 // stdoutIsTerminal returns true when os.Stdout is connected to a real terminal.
 // Under `go test`, stdout is a pipe → returns false (JSON path).
@@ -54,7 +76,7 @@ func configSetCmd() *cobra.Command {
 				return err
 			}
 			key, value := args[0], args[1]
-			_, err = iamRequest(c.Context(), sock, "PUT",
+			_, err = configRequest(c.Context(), sock, "PUT",
 				"/v1/config/"+url.PathEscape(key),
 				map[string]string{"value": value})
 			if err != nil {
@@ -83,7 +105,7 @@ func configGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := iamRequest(c.Context(), sock, "GET",
+			out, err := configRequest(c.Context(), sock, "GET",
 				"/v1/config/"+url.PathEscape(args[0]), nil)
 			if err != nil {
 				return err
@@ -129,7 +151,7 @@ func configUnsetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = iamRequest(c.Context(), sock, "DELETE",
+			_, err = configRequest(c.Context(), sock, "DELETE",
 				"/v1/config/"+url.PathEscape(args[0]), nil)
 			if err != nil {
 				return err
@@ -162,7 +184,7 @@ func configListCmd() *cobra.Command {
 			if all {
 				path += "?all=true"
 			}
-			raw, err := iamRequest(c.Context(), sock, "GET", path, nil)
+			raw, err := configRequest(c.Context(), sock, "GET", path, nil)
 			if err != nil {
 				return err
 			}
