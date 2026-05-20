@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.303.0] - 2026-05-21
+
+### Tests
+
+- Bucket-related e2e coverage now runs as native Ginkgo v2 specs with one
+  central non-integration suite, shared hook setup, `DeferCleanup` cleanup, and
+  `bucket` labels for focused runs.
+- Bucket API, upstream, IAM bucket, bucket policy, default bucket, cluster join
+  default bucket, bucket naming, and multi-Raft bucket assignment tests no
+  longer use legacy `testing.T` subtests.
+- Fixed rebased test expectations for bucket upstream JSON (`upstream_url`) and
+  made lifecycle replication cluster settling use `gomega.NewWithT` so it works
+  from both Ginkgo and plain `testing.T`.
+
 ## [0.0.302.1] - 2026-05-21
 
 ### Changed
