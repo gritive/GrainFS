@@ -143,6 +143,16 @@ type StatusService interface {
 	Report() adminapi.StatusReport
 }
 
+// IcebergConfigService is the slim interface the iceberg config handler needs.
+// Satisfied by an adapter in serveruntime that pulls from iam.Store.
+// nil disables the iceberg config endpoint.
+type IcebergConfigService interface {
+	// RevealSAKeyPair returns the first active AccessKey + plaintext SecretKey
+	// for the given ServiceAccount. Returns an error when the SA or any
+	// active key is not found.
+	RevealSAKeyPair(ctx context.Context, saID string) (accessKey, secretKey string, err error)
+}
+
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
 type IAMService interface {

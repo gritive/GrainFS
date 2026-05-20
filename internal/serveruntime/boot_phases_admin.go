@@ -61,6 +61,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}),
 		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
 		IAM:                  state.iamAdminAPI,
+		IcebergConfig:        newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:            iamPolicyAdminService(state),
 		IAMGroup:             iamGroupAdminService(state),
 		BucketWithPolicyProp: state.iamProposer,

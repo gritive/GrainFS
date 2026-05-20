@@ -164,6 +164,31 @@ func (s *Store) applyBucketUpstreamDelete(bucket string) {
 	s.commit(ns)
 }
 
+// ListKeysForSA returns all AccessKey entries whose SAID matches saID,
+// sorted by CreatedAt ascending (oldest first) for determinism.
+// Returns an empty slice (not nil) when no keys are found.
+func (s *Store) ListKeysForSA(saID string) []*AccessKey {
+	st := s.snapshot()
+	var out []*AccessKey
+	for _, k := range st.keysByAK {
+		if k.SAID == saID {
+			out = append(out, k)
+		}
+	}
+	// Sort oldest-first so callers that pick [0] get the oldest key deterministically.
+	for i := 0; i < len(out)-1; i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[i].CreatedAt.After(out[j].CreatedAt) {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	if out == nil {
+		out = []*AccessKey{}
+	}
+	return out
+}
+
 // LookupBucketUpstream returns the BucketUpstream record for the given bucket,
 // or (nil, false) if no upstream is configured. Lock-free read via atomic
 // snapshot pointer.

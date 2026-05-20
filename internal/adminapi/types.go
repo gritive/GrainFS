@@ -575,3 +575,22 @@ type BucketVersioningResp struct {
 type BucketVersioningSetReq struct {
 	Status string `json:"status"`
 }
+
+// --- Iceberg config wire types ---
+
+// IcebergConfigRequest is the JSON body for POST /v1/iceberg/config.
+type IcebergConfigRequest struct {
+	Warehouse string `json:"warehouse"`
+	SAID      string `json:"sa"`
+	NoReveal  bool   `json:"no_reveal,omitempty"`
+}
+
+// IcebergConfigResponse is the JSON body returned by POST /v1/iceberg/config.
+// ClientSecret is empty when the server received NoReveal=true.
+type IcebergConfigResponse struct {
+	CatalogURI    string `json:"catalog_uri"`
+	OAuthTokenURI string `json:"oauth_token_uri"`
+	Warehouse     string `json:"warehouse"`
+	ClientID      string `json:"client_id"`
+	ClientSecret  string `json:"client_secret"`
+}
