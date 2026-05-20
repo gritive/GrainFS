@@ -1,10 +1,10 @@
 package raft
 
 import (
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 // Election test timing knobs. Node 1 (the prospective leader) gets a much
@@ -18,171 +18,100 @@ const (
 	testHeartbeat       = 30 * time.Millisecond
 )
 
-// startCluster wires three Nodes through a memNetwork. n1 has a short election
-// timeout; n2 and n3 have long ones. All three start as Follower; n1 wins the
-// first election deterministically.
-//
-// The caller receives the three Nodes and a teardown closure registered via
-// t.Cleanup. ApplyCh of each Node is drained in the background.
-func startCluster(t *testing.T, ids ...string) (nodes []*Node, net *memNetwork) {
-	t.Helper()
-	require.Len(t, ids, 3, "startCluster expects exactly 3 ids")
+var _ = ginkgo.Describe("Election", func() {
+	ginkgo.Context("three-voter cluster", func() {
+		var nodes []*Node
+		var n1, n2, n3 *Node
 
-	net = newMemNetwork()
-	nodes = make([]*Node, 0, len(ids))
-
-	for i, id := range ids {
-		// Build peers list = ids except self.
-		peers := make([]string, 0, len(ids)-1)
-		for _, p := range ids {
-			if p != id {
-				peers = append(peers, p)
-			}
-		}
-
-		electionTimeout := slowElectionTimeout
-		if i == 0 {
-			electionTimeout = fastElectionTimeout
-		}
-		n, err := NewNode(Config{
-			ID:               id,
-			Peers:            peers,
-			ElectionTimeout:  electionTimeout,
-			HeartbeatTimeout: testHeartbeat,
+		ginkgo.BeforeEach(func() {
+			var err error
+			var cleanup func()
+			nodes, _, cleanup, err = startRaftIntegrationCluster("n1", "n2", "n3")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.DeferCleanup(cleanup)
+			n1, n2, n3 = nodes[0], nodes[1], nodes[2]
 		})
-		require.NoError(t, err)
-		nodes = append(nodes, n)
-	}
 
-	// Register transports BEFORE starting actors so the first Candidate's
-	// outbound RequestVote can route immediately.
-	for _, n := range nodes {
-		tr := net.Register(n.cfg.ID, n)
-		n.SetTransport(tr)
-	}
-	for _, n := range nodes {
-		n.Start()
-		t.Cleanup(n.Stop)
-		go func(n *Node) {
-			for range n.ApplyCh() {
+		ginkgo.It("elects the short-timeout node as leader", func(ginkgo.SpecContext) {
+			gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 did not become leader")
+			gomega.Expect(n1.State()).To(gomega.Equal(Leader))
+			gomega.Expect(n1.LeaderID()).To(gomega.Equal("n1"))
+
+			gomega.Expect(waitFor(2*time.Second, func() bool {
+				return n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
+			})).To(gomega.Succeed(), "followers did not learn the leader")
+			gomega.Expect(n2.State()).To(gomega.Equal(Follower))
+			gomega.Expect(n3.State()).To(gomega.Equal(Follower))
+		}, ginkgo.NodeTimeout(5*time.Second))
+
+		ginkgo.It("prevents follower re-election with heartbeats", func(ginkgo.SpecContext) {
+			gomega.Expect(waitFor(2*time.Second, func() bool {
+				return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
+			})).To(gomega.Succeed(), "cluster did not stabilise on n1")
+			leaderTerm := n1.Term()
+
+			deadline := time.Now().Add(500 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				gomega.Expect(n2.Term()).To(gomega.Equal(leaderTerm), "n2 term must not advance under heartbeat")
+				gomega.Expect(n3.Term()).To(gomega.Equal(leaderTerm), "n3 term must not advance under heartbeat")
+				gomega.Expect(n2.State()).To(gomega.Equal(Follower), "n2 must remain Follower")
+				gomega.Expect(n3.State()).To(gomega.Equal(Follower), "n3 must remain Follower")
+				time.Sleep(20 * time.Millisecond)
 			}
-		}(n)
-	}
-	return nodes, net
-}
+		}, ginkgo.NodeTimeout(5*time.Second))
 
-// TestElection_SingleCandidateWins: 3-node cluster, n1's short timeout makes
-// it Candidate first. n2 and n3 grant their votes; n1 reaches majority (2/3)
-// and becomes Leader.
-func TestElection_SingleCandidateWins(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+		ginkgo.It("steps down a leader that observes a higher-term RequestVote", func(ginkgo.SpecContext) {
+			gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed())
+			leaderTerm := n1.Term()
 
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n1.IsLeader()
-	}), "n1 did not become leader")
+			reply := n1.HandleRequestVote(&RequestVoteArgs{
+				Term:         leaderTerm + 5,
+				CandidateID:  "n2",
+				LastLogIndex: 1,
+				LastLogTerm:  leaderTerm,
+			})
 
-	require.Equal(t, Leader, n1.State())
-	require.Equal(t, "n1", n1.LeaderID())
+			gomega.Expect(reply.VoteGranted).To(gomega.BeTrue(), "leader must grant a higher-term vote from an up-to-date candidate")
+			gomega.Expect(reply.Term).To(gomega.Equal(leaderTerm + 5))
+			gomega.Expect(n1.State()).To(gomega.Equal(Follower), "leader must step down")
+			gomega.Expect(n1.IsLeader()).To(gomega.BeFalse())
+			gomega.Expect(n1.Term()).To(gomega.Equal(leaderTerm + 5))
+			gomega.Expect(n1.rs.Load().votedFor).To(gomega.Equal("n2"))
+		}, ginkgo.NodeTimeout(5*time.Second))
 
-	// Followers should converge on the new leader (via heartbeat).
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
-	}), "followers did not learn the leader")
+		ginkgo.It("propagates the elected leader term across the cluster", func(ginkgo.SpecContext) {
+			gomega.Expect(waitFor(2*time.Second, func() bool {
+				return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
+			})).To(gomega.Succeed())
 
-	require.Equal(t, Follower, n2.State())
-	require.Equal(t, Follower, n3.State())
-}
-
-// TestElection_HeartbeatPreventsReElection: once n1 is leader, periodic
-// heartbeats keep n2/n3 election timers reset. The followers' term must not
-// advance during a sustained leadership period.
-func TestElection_HeartbeatPreventsReElection(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
-
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
-	}), "cluster did not stabilise on n1")
-
-	leaderTerm := n1.Term()
-
-	// Watch for 500ms — well beyond a follower's election timeout window.
-	// Heartbeats every 30ms must keep the followers parked.
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		require.Equal(t, leaderTerm, n2.Term(), "n2 term must not advance under heartbeat")
-		require.Equal(t, leaderTerm, n3.Term(), "n3 term must not advance under heartbeat")
-		require.Equal(t, Follower, n2.State(), "n2 must remain Follower")
-		require.Equal(t, Follower, n3.State(), "n3 must remain Follower")
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// TestElection_LeaderStepsDownOnHigherTerm: a Leader observing a higher-term
-// RequestVote steps down to Follower at the new term. Inject the RequestVote
-// directly via Handle so the test does not depend on a second cluster's
-// election timing.
-func TestElection_LeaderStepsDownOnHigherTerm(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
-
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n1.IsLeader() }))
-	leaderTerm := n1.Term()
-
-	// The leader has a no-op entry at index 1 (becomeLeader §5.4.2). The
-	// intruder's log must be at least as up-to-date (same term, same index).
-	reply := n1.HandleRequestVote(&RequestVoteArgs{
-		Term:         leaderTerm + 5,
-		CandidateID:  "n2",
-		LastLogIndex: 1,
-		LastLogTerm:  leaderTerm,
+			term := n1.Term()
+			gomega.Expect(n2.Term()).To(gomega.Equal(term), "n2 term must match leader")
+			gomega.Expect(n3.Term()).To(gomega.Equal(term), "n3 term must match leader")
+			gomega.Expect(term).To(gomega.BeNumerically(">=", 1), "election advances term at least once")
+		}, ginkgo.NodeTimeout(5*time.Second))
 	})
 
-	require.True(t, reply.VoteGranted, "leader must grant a higher-term vote from an up-to-date candidate")
-	require.Equal(t, leaderTerm+5, reply.Term)
-	require.Equal(t, Follower, n1.State(), "leader must step down")
-	require.False(t, n1.IsLeader())
-	require.Equal(t, leaderTerm+5, n1.Term())
-	require.Equal(t, "n2", n1.rs.Load().votedFor)
-}
+	ginkgo.It("rejects higher-term RequestVote from a non-voter without stepping down", func(ginkgo.SpecContext) {
+		node, err := NewNode(Config{ID: "n1", ElectionTimeout: time.Hour, HeartbeatTimeout: 10 * time.Millisecond})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		node.Start()
+		ginkgo.DeferCleanup(node.Stop)
 
-func TestElection_RejectsHigherTermVoteFromNonVoter(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1", ElectionTimeout: time.Hour, HeartbeatTimeout: 10 * time.Millisecond})
-	require.NoError(t, err)
-	n.Start()
-	defer n.Stop()
+		gomega.Expect(waitFor(2*time.Second, node.IsLeader)).To(gomega.Succeed())
+		leaderTerm := node.Term()
 
-	require.NoError(t, waitFor(2*time.Second, func() bool { return n.IsLeader() }))
-	leaderTerm := n.Term()
+		reply := node.HandleRequestVote(&RequestVoteArgs{
+			Term:         leaderTerm + 5,
+			CandidateID:  "n2",
+			LastLogIndex: 1,
+			LastLogTerm:  leaderTerm,
+		})
 
-	reply := n.HandleRequestVote(&RequestVoteArgs{
-		Term:         leaderTerm + 5,
-		CandidateID:  "n2",
-		LastLogIndex: 1,
-		LastLogTerm:  leaderTerm,
-	})
+		gomega.Expect(reply.VoteGranted).To(gomega.BeFalse())
+		gomega.Expect(reply.Term).To(gomega.Equal(leaderTerm))
+		gomega.Expect(node.IsLeader()).To(gomega.BeTrue(), "non-voter RequestVote must not step down the leader")
+		gomega.Expect(node.Term()).To(gomega.Equal(leaderTerm))
+		gomega.Expect(node.rs.Load().votedFor).To(gomega.BeEmpty())
+	}, ginkgo.NodeTimeout(5*time.Second))
 
-	require.False(t, reply.VoteGranted)
-	require.Equal(t, leaderTerm, reply.Term)
-	require.True(t, n.IsLeader(), "non-voter RequestVote must not step down the leader")
-	require.Equal(t, leaderTerm, n.Term())
-	require.Empty(t, n.rs.Load().votedFor)
-}
-
-// TestElection_TermAgreementAcrossCluster: after election stabilises, all
-// three nodes report the same term. Sanity check that the heartbeat path
-// propagates the leader's term to followers.
-func TestElection_TermAgreementAcrossCluster(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
-
-	require.NoError(t, waitFor(2*time.Second, func() bool {
-		return n1.IsLeader() && n2.LeaderID() == "n1" && n3.LeaderID() == "n1"
-	}))
-
-	term := n1.Term()
-	require.Equal(t, term, n2.Term(), "n2 term must match leader")
-	require.Equal(t, term, n3.Term(), "n3 term must match leader")
-	require.GreaterOrEqual(t, term, uint64(1), "election advances term at least once")
-}
+})

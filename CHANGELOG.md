@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.301.0] - 2026-05-21
+
+### Tests
+
+- internal/raft integration-style tests now run through one Ginkgo v2 suite
+  with Gomega assertions and native `DeferCleanup` teardown. The migrated
+  specs keep one top-level `Describe` per file and share common cluster/node
+  fixtures through Ginkgo hooks and helpers, reducing duplicated setup while
+  preserving the existing Raft scenarios.
+- Removed migrated legacy raft fixtures and `testing.T` cleanup paths from the
+  converted specs, leaving the remaining non-Ginkgo tests limited to unit,
+  property, and white-box cases that were outside this integration migration.
+
 ## [0.0.300.2] - 2026-05-21
 
 ### Changed

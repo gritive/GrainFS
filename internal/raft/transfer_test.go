@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 // timeoutNowRecorder wraps a Transport and records the peer that receives a
@@ -32,224 +31,152 @@ func (r *timeoutNowRecorder) SendTimeoutNow(peer string, args *TimeoutNowArgs) (
 	return r.inner.SendTimeoutNow(peer, args)
 }
 
-// TestTransferLeadership_ReturnsErrNoPeers verifies that TransferLeadership on a
-// single-voter (solo) cluster returns ErrNoPeers immediately. A solo leader has
-// no peers to transfer to so the call must be rejected without modifying state.
-func TestTransferLeadership_ReturnsErrNoPeers(t *testing.T) {
-	n, err := NewNode(Config{
-		ID:              "solo",
-		ElectionTimeout: fastElectionTimeout,
-	})
-	require.NoError(t, err)
-	net := newMemNetwork()
-	n.SetTransport(net.Register("solo", n))
-	n.Start()
-	t.Cleanup(n.Stop)
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
+var _ = ginkgo.Describe("Transfer leadership", func() {
+	ginkgo.It("returns ErrNoPeers for a solo leader without stepping down", func(ginkgo.SpecContext) {
+		node, cleanup, err := startRaftIntegrationSingleVoter("solo")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 
-	// Solo leader auto-bootstraps immediately.
-	require.Eventually(t, n.IsLeader, 2*time.Second, 10*time.Millisecond, "solo node must be leader")
+		got := node.TransferLeadership()
+		gomega.Expect(got).To(gomega.MatchError(gomega.MatchRegexp(ErrNoPeers.Error())))
+		gomega.Expect(errors.Is(got, ErrNoPeers)).To(gomega.BeTrue(), "expected ErrNoPeers, got: %v", got)
+		gomega.Expect(node.IsLeader()).To(gomega.BeTrue(), "solo node must stay leader after ErrNoPeers")
+	}, ginkgo.NodeTimeout(5*time.Second))
 
-	got := n.TransferLeadership()
-	require.Error(t, got)
-	assert.True(t, errors.Is(got, ErrNoPeers), "expected ErrNoPeers, got: %v", got)
-	// Must still be leader — the step-down should not have happened.
-	assert.True(t, n.IsLeader(), "solo node must stay leader after ErrNoPeers")
-}
+	ginkgo.It("returns ErrNotLeader when called on a follower", func(ginkgo.SpecContext) {
+		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 
-// TestTransferLeadership_ReturnsErrNotLeaderOnFollower verifies that
-// TransferLeadership returns ErrNotLeader when called on a node that is not the
-// current leader.
-func TestTransferLeadership_ReturnsErrNotLeaderOnFollower(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
+		leader := nodes[0]
+		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
 
-	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
+		follower := nodes[1]
+		gomega.Expect(follower.IsLeader()).To(gomega.BeFalse())
+		got := follower.TransferLeadership()
+		gomega.Expect(errors.Is(got, ErrNotLeader)).To(gomega.BeTrue(), "expected ErrNotLeader, got: %v", got)
+	}, ginkgo.NodeTimeout(5*time.Second))
 
-	// n2 is a follower.
-	n2 := nodes[1]
-	require.False(t, n2.IsLeader())
+	ginkgo.It("steps down the leader and allows a new leader to emerge", func(ginkgo.SpecContext) {
+		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 
-	got := n2.TransferLeadership()
-	require.Error(t, got)
-	assert.True(t, errors.Is(got, ErrNotLeader), "expected ErrNotLeader, got: %v", got)
-}
+		n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
 
-// TestTransferLeadership_LeaderStepsDown verifies that the leader steps down to
-// Follower after calling TransferLeadership. The leader must not be the leader
-// after the call returns, and the cluster must elect a new leader.
-func TestTransferLeadership_LeaderStepsDown(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1, n2, n3 := nodes[0], nodes[1], nodes[2]
+		gomega.Expect(n1.TransferLeadership()).To(gomega.Succeed(), "TransferLeadership must return nil on a multi-voter leader")
+		gomega.Expect(n1.IsLeader()).To(gomega.BeFalse(), "n1 must not be leader after TransferLeadership")
+		gomega.Expect(waitFor(5*time.Second, func() bool {
+			return n2.IsLeader() || n3.IsLeader()
+		})).To(gomega.Succeed(), "a new leader must emerge after transfer")
+	}, ginkgo.NodeTimeout(10*time.Second))
 
-	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
+	ginkgo.It("lets a follower accept TimeoutNow", func(ginkgo.SpecContext) {
+		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 
-	err := n1.TransferLeadership()
-	require.NoError(t, err, "TransferLeadership must return nil on a multi-voter leader")
+		n1, n2 := nodes[0], nodes[1]
+		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
 
-	// n1 must have stepped down.
-	assert.False(t, n1.IsLeader(), "n1 must not be leader after TransferLeadership")
-
-	// The cluster must elect a new leader within a reasonable timeout.
-	require.Eventually(t, func() bool {
-		return n2.IsLeader() || n3.IsLeader()
-	}, 5*time.Second, 20*time.Millisecond, "a new leader must emerge after transfer")
-}
-
-// TestHandleTimeoutNow_FollowerBecomesCandidate verifies that a Follower that
-// receives a TimeoutNow RPC transitions to Candidate (and eventually Leader in a
-// single-voter scenario) immediately without waiting for its election timer.
-func TestHandleTimeoutNow_FollowerBecomesCandidate(t *testing.T) {
-	// Build a 3-voter cluster where n1 is the leader. We send TimeoutNow
-	// directly to n2 (a follower) and verify it starts an election.
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
-	n2 := nodes[1]
-
-	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
-
-	term := n1.Term()
-
-	// Send TimeoutNow to n2 directly (simulating what the leader would do).
-	reply := n2.HandleTimeoutNow(&TimeoutNowArgs{
-		Term:   term,
-		Leader: "n1",
-	})
-	require.True(t, reply.Success, "n2 must accept TimeoutNow when it is a Follower")
-}
-
-// TestHandleTimeoutNow_StaleTermRejected verifies that a node rejects a
-// TimeoutNow RPC whose term is lower than its own currentTerm. The node must
-// not become a Candidate: Success=false and the node remains a Follower.
-func TestHandleTimeoutNow_StaleTermRejected(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
-	n2 := nodes[1]
-
-	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
-	require.Eventually(t, func() bool {
-		return n2.Term() > 0
-	}, 2*time.Second, 10*time.Millisecond, "n2 must observe an election term")
-
-	// Advance n2's term via a higher-term RequestVote (so currentTerm > 1).
-	currentTerm := n2.Term()
-	require.Greater(t, currentTerm, uint64(0), "follower must have a term after election")
-
-	// Send TimeoutNow with a term strictly less than n2's current term.
-	staleTerm := currentTerm - 1
-	if staleTerm == 0 {
-		// If currentTerm is 1 we cannot go below; bump n2's term first.
-		n2.HandleRequestVote(&RequestVoteArgs{
-			Term:         currentTerm + 5,
-			CandidateID:  "intruder",
-			LastLogIndex: n2.CommittedIndex(),
-			LastLogTerm:  currentTerm + 5,
+		reply := n2.HandleTimeoutNow(&TimeoutNowArgs{
+			Term:   n1.Term(),
+			Leader: "n1",
 		})
-		currentTerm = n2.Term()
-		staleTerm = currentTerm - 1
-	}
+		gomega.Expect(reply.Success).To(gomega.BeTrue(), "n2 must accept TimeoutNow when it is a Follower")
+	}, ginkgo.NodeTimeout(5*time.Second))
 
-	reply := n2.HandleTimeoutNow(&TimeoutNowArgs{
-		Term:   staleTerm,
-		Leader: "stale-leader",
-	})
-	assert.False(t, reply.Success, "stale-term TimeoutNow must be rejected")
-	assert.GreaterOrEqual(t, reply.Term, currentTerm, "reply must carry n2's currentTerm")
-	// n2 must not have started an election — it must still be a Follower.
-	assert.False(t, n2.IsLeader(), "n2 must not become leader from a stale TimeoutNow")
-}
+	ginkgo.It("rejects stale-term TimeoutNow without making the node leader", func(ginkgo.SpecContext) {
+		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 
-// TestHandleTimeoutNow_LeaderIgnores verifies that a Leader that receives a
-// TimeoutNow RPC ignores it (Success=false). A Leader is already leading and
-// should not start a new election.
-func TestHandleTimeoutNow_LeaderIgnores(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
+		n1, n2 := nodes[0], nodes[1]
+		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
+		gomega.Expect(waitFor(2*time.Second, func() bool {
+			return n2.Term() > 0
+		})).To(gomega.Succeed(), "n2 must observe an election term")
 
-	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
+		currentTerm := n2.Term()
+		gomega.Expect(currentTerm).To(gomega.BeNumerically(">", 0), "follower must have a term after election")
 
-	// Send TimeoutNow to the leader itself — should be ignored.
-	reply := n1.HandleTimeoutNow(&TimeoutNowArgs{
-		Term:   n1.Term(),
-		Leader: "n2", // simulated: some other node thinks it's leader
-	})
-	assert.False(t, reply.Success, "leader must ignore TimeoutNow (Success must be false)")
-}
-
-// TestTransferLeadership_TargetHasHigherMatchIndex verifies that TransferLeadership
-// selects the peer with the highest matchIndex. In a 3-voter cluster where n2
-// has replicated more entries than n3, TransferLeadership should send TimeoutNow
-// to n2. The test selectively removes n3 from the memNetwork before proposing
-// entries so that only n2 accumulates matchIndex, then restores n3 and wraps
-// n1's transport with a recorder to observe which peer receives TimeoutNow.
-func TestTransferLeadership_TargetHasHigherMatchIndex(t *testing.T) {
-	// Build cluster: n1 (fast) leads, n2 and n3 are followers.
-	nodes, net := startCluster(t, "n1", "n2", "n3")
-	n1, n3 := nodes[0], nodes[2]
-
-	require.Eventually(t, n1.IsLeader, 2*time.Second, 10*time.Millisecond, "n1 must be leader")
-
-	// Remove n3 from the memNetwork so n1 cannot route RPCs to it. This causes
-	// n1's AppendEntries to n3 to fail (ErrUnknownPeer), leaving n3's matchIndex
-	// at 0 while n2 continues to receive entries. The cluster maintains quorum
-	// with n1+n2 so entries commit.
-	net.mu.Lock()
-	delete(net.nodes, "n3")
-	net.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	for i := 0; i < 5; i++ {
-		_, err := n1.ProposeWait(ctx, []byte("entry"))
-		require.NoError(t, err, "proposal must succeed with n1+n2 quorum")
-	}
-
-	// Re-register n3 so it can receive TimeoutNow (though we expect n2 to be
-	// selected, not n3).
-	net.mu.Lock()
-	net.nodes["n3"] = n3
-	net.mu.Unlock()
-
-	// Wrap n1's transport with the recorder. Re-registering n1 in the memNetwork
-	// returns a fresh memTransport; the recorder delegates to it.
-	innerTransport := net.Register("n1", n1)
-	rec := &timeoutNowRecorder{inner: innerTransport}
-	n1.SetTransport(rec)
-
-	err := n1.TransferLeadership()
-	require.NoError(t, err, "TransferLeadership must succeed")
-	assert.False(t, n1.IsLeader(), "n1 must have stepped down")
-
-	// The TimeoutNow is dispatched in a goroutine by the actor; wait for it.
-	// n2 must be selected: matchIndex ≥ 5 while n3 was offline (matchIndex 0).
-	require.Eventually(t, func() bool {
-		return rec.target.Load() != nil
-	}, 2*time.Second, 10*time.Millisecond, "TimeoutNow must have been sent to some peer")
-	got := rec.target.Load()
-	assert.Equal(t, "n2", *got, "n2 (highest matchIndex) must receive TimeoutNow")
-}
-
-// TestTransferLeadership_StoppedNodeReturnsErrNodeStopped verifies that calling
-// TransferLeadership on a stopped node returns ErrNodeStopped without blocking.
-func TestTransferLeadership_StoppedNodeReturnsErrNodeStopped(t *testing.T) {
-	n, err := NewNode(Config{
-		ID:              "solo",
-		ElectionTimeout: fastElectionTimeout,
-	})
-	require.NoError(t, err)
-	net := newMemNetwork()
-	n.SetTransport(net.Register("solo", n))
-	n.Start()
-	go func() {
-		for range n.ApplyCh() {
+		staleTerm := currentTerm - 1
+		if staleTerm == 0 {
+			n2.HandleRequestVote(&RequestVoteArgs{
+				Term:         currentTerm + 5,
+				CandidateID:  "intruder",
+				LastLogIndex: n2.CommittedIndex(),
+				LastLogTerm:  currentTerm + 5,
+			})
+			currentTerm = n2.Term()
+			staleTerm = currentTerm - 1
 		}
-	}()
 
-	n.Stop()
+		reply := n2.HandleTimeoutNow(&TimeoutNowArgs{
+			Term:   staleTerm,
+			Leader: "stale-leader",
+		})
+		gomega.Expect(reply.Success).To(gomega.BeFalse(), "stale-term TimeoutNow must be rejected")
+		gomega.Expect(reply.Term).To(gomega.BeNumerically(">=", currentTerm), "reply must carry n2's currentTerm")
+		gomega.Expect(n2.IsLeader()).To(gomega.BeFalse(), "n2 must not become leader from a stale TimeoutNow")
+	}, ginkgo.NodeTimeout(5*time.Second))
 
-	got := n.TransferLeadership()
-	assert.True(t, errors.Is(got, ErrNodeStopped), "expected ErrNodeStopped, got: %v", got)
-}
+	ginkgo.It("has leaders ignore TimeoutNow", func(ginkgo.SpecContext) {
+		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
+
+		leader := nodes[0]
+		gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
+
+		reply := leader.HandleTimeoutNow(&TimeoutNowArgs{
+			Term:   leader.Term(),
+			Leader: "n2",
+		})
+		gomega.Expect(reply.Success).To(gomega.BeFalse(), "leader must ignore TimeoutNow")
+	}, ginkgo.NodeTimeout(5*time.Second))
+
+	ginkgo.It("targets the peer with the highest match index", func(ginkgo.SpecContext) {
+		nodes, net, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
+
+		n1, n3 := nodes[0], nodes[2]
+		gomega.Expect(waitFor(2*time.Second, n1.IsLeader)).To(gomega.Succeed(), "n1 must be leader")
+
+		net.mu.Lock()
+		delete(net.nodes, "n3")
+		net.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for i := 0; i < 5; i++ {
+			_, err := n1.ProposeWait(ctx, []byte("entry"))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "proposal %d must succeed with n1+n2 quorum", i)
+		}
+
+		net.mu.Lock()
+		net.nodes["n3"] = n3
+		net.mu.Unlock()
+
+		rec := &timeoutNowRecorder{inner: net.Register("n1", n1)}
+		n1.SetTransport(rec)
+
+		gomega.Expect(n1.TransferLeadership()).To(gomega.Succeed(), "TransferLeadership must succeed")
+		gomega.Expect(n1.IsLeader()).To(gomega.BeFalse(), "n1 must have stepped down")
+		gomega.Expect(waitFor(2*time.Second, func() bool {
+			return rec.target.Load() != nil
+		})).To(gomega.Succeed(), "TimeoutNow must have been sent to some peer")
+		gomega.Expect(*rec.target.Load()).To(gomega.Equal("n2"), "n2 must receive TimeoutNow")
+	}, ginkgo.NodeTimeout(10*time.Second))
+
+	ginkgo.It("returns ErrNodeStopped for stopped nodes", func(ginkgo.SpecContext) {
+		node, cleanup, err := startRaftIntegrationSingleVoter("solo")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		cleanup()
+
+		got := node.TransferLeadership()
+		gomega.Expect(errors.Is(got, ErrNodeStopped)).To(gomega.BeTrue(), "expected ErrNodeStopped, got: %v", got)
+	}, ginkgo.NodeTimeout(5*time.Second))
+})

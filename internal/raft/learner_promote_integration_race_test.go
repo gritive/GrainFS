@@ -1,12 +1,15 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 // TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit pins the M6.0
@@ -31,37 +34,88 @@ import (
 // The chosen matrix exercises the envelope this fix targets. Production
 // e2e (election 750–1500ms, RTT 50–200ms) sits comfortably in this
 // regime.
-func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
-	const iterations = 50
+const (
+	promoteRaceIterations = 50
+	promoteRaceWorkers    = 4
+)
+
+var _ = ginkgo.Describe("TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit", func() {
 	delays := []time.Duration{
 		10 * time.Millisecond,
 		20 * time.Millisecond,
 		30 * time.Millisecond,
 	}
-	for _, d := range delays {
-		d := d
-		t.Run(fmt.Sprintf("delay=%s", d), func(t *testing.T) {
-			for i := 0; i < iterations; i++ {
-				i := i
-				t.Run(fmt.Sprintf("iter%d", i), func(t *testing.T) {
-					t.Parallel()
-					runPromoteRaceWithDelay(t, d)
-				})
-			}
-		})
+
+	for _, delay := range delays {
+		delay := delay
+		ginkgo.It(fmt.Sprintf("keeps leader stable with delay=%s", delay), func(ginkgo.SpecContext) {
+			err := runPromoteRaceIterations(delay)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}, ginkgo.NodeTimeout(90*time.Second))
 	}
+})
+
+type promoteRaceResult struct {
+	delay time.Duration
+	iter  int
+	err   error
 }
 
-func runPromoteRaceWithDelay(t *testing.T, aeDelay time.Duration) {
-	t.Helper()
+func runPromoteRaceIterations(delay time.Duration) error {
+	jobs := make(chan int)
+	results := make(chan promoteRaceResult, promoteRaceIterations)
 
-	fix := startMembershipCluster(t, []string{"n1"})
+	var wg sync.WaitGroup
+	for worker := 0; worker < promoteRaceWorkers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for iter := range jobs {
+				results <- promoteRaceResult{
+					delay: delay,
+					iter:  iter,
+					err:   checkPromoteRaceWithDelay(delay),
+				}
+			}
+		}()
+	}
+
+	for iter := 0; iter < promoteRaceIterations; iter++ {
+		jobs <- iter
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	var failures []string
+	for result := range results {
+		if result.err != nil {
+			failures = append(failures, fmt.Sprintf("delay=%s iter=%d: %v", result.delay, result.iter, result.err))
+		}
+	}
+	if len(failures) > 0 {
+		return errors.New(strings.Join(failures, "\n"))
+	}
+	return nil
+}
+
+func checkPromoteRaceWithDelay(aeDelay time.Duration) error {
+	fix, cleanup, err := startPromoteRaceCluster([]string{"n1"})
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	leader := fix.nodes[0]
-	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }),
-		"n1 must bootstrap as leader")
+	if err := waitFor(2*time.Second, func() bool { return leader.IsLeader() }); err != nil {
+		return fmt.Errorf("n1 must bootstrap as leader: %w", err)
+	}
 	leaderTermBefore := leader.Term()
 
-	n2 := fix.addNode(t, "n2", []string{"n1"}, fastElectionTimeout)
+	n2, err := addPromoteRaceNode(fix, "n2", []string{"n1"}, fastElectionTimeout)
+	if err != nil {
+		return err
+	}
 
 	// Wrap transports so we can flip latency on AFTER the AddLearner
 	// catchup phase, isolating the delay to the PromoteToVoter dance.
@@ -70,10 +124,14 @@ func runPromoteRaceWithDelay(t *testing.T, aeDelay time.Duration) {
 	leader.SetTransport(leaderDelay)
 	n2.SetTransport(n2Delay)
 
-	require.NoError(t, leader.AddLearner("n2", "n2-addr"))
-	require.NoError(t, waitFor(3*time.Second, func() bool {
+	if err := leader.AddLearner("n2", "n2-addr"); err != nil {
+		return fmt.Errorf("AddLearner n2: %w", err)
+	}
+	if err := waitFor(3*time.Second, func() bool {
 		return leader.peerMatchIndexForTest("n2") >= leader.CommittedIndex()
-	}), "n2 must catch up to leader commit before promote")
+	}); err != nil {
+		return fmt.Errorf("n2 must catch up to leader commit before promote: %w", err)
+	}
 
 	leaderDelay.enable()
 	n2Delay.enable()
@@ -82,19 +140,102 @@ func runPromoteRaceWithDelay(t *testing.T, aeDelay time.Duration) {
 		n2Delay.disable()
 	}()
 
-	err := leader.PromoteToVoter("n2")
-	require.NoError(t, err,
-		"PromoteToVoter must not fail (Cnew commit election race)")
-	require.True(t, leader.IsLeader(),
-		"n1 must remain leader after promote — stepdown indicates the race fired")
-	require.Equal(t, leaderTermBefore, leader.Term(),
-		"leader term must not advance — stepdown+re-election would bump it")
+	if err := leader.PromoteToVoter("n2"); err != nil {
+		return fmt.Errorf("PromoteToVoter must not fail (Cnew commit election race): %w", err)
+	}
+	if !leader.IsLeader() {
+		return fmt.Errorf("n1 must remain leader after promote; state=%v term=%d", leader.State(), leader.Term())
+	}
+	if got := leader.Term(); got != leaderTermBefore {
+		return fmt.Errorf("leader term advanced after promote: before=%d after=%d", leaderTermBefore, got)
+	}
 
 	cfg := leader.Configuration()
-	require.Len(t, cfg.Servers, 2)
-	for _, s := range cfg.Servers {
-		require.Equal(t, Voter, s.Suffrage, "all servers must be Voter post-promote")
+	if len(cfg.Servers) != 2 {
+		return fmt.Errorf("post-promote server count: got=%d want=2", len(cfg.Servers))
 	}
+	for _, server := range cfg.Servers {
+		if server.Suffrage != Voter {
+			return fmt.Errorf("server %s suffrage after promote: got=%v want=%v", server.ID, server.Suffrage, Voter)
+		}
+	}
+	return nil
+}
+
+func startPromoteRaceCluster(ids []string) (*membershipFixture, func(), error) {
+	if len(ids) == 0 {
+		return nil, nil, errors.New("startPromoteRaceCluster: ids must not be empty")
+	}
+
+	fix := &membershipFixture{net: newMemNetwork()}
+	for i, id := range ids {
+		peers := make([]string, 0, len(ids)-1)
+		for _, peer := range ids {
+			if peer != id {
+				peers = append(peers, peer)
+			}
+		}
+
+		electionTimeout := slowElectionTimeout
+		if i == 0 {
+			electionTimeout = fastElectionTimeout
+		}
+		node, err := NewNode(Config{
+			ID:               id,
+			Peers:            peers,
+			ElectionTimeout:  electionTimeout,
+			HeartbeatTimeout: testHeartbeat,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("NewNode %s: %w", id, err)
+		}
+		fix.nodes = append(fix.nodes, node)
+	}
+
+	for _, node := range fix.nodes {
+		node.SetTransport(fix.net.Register(node.cfg.ID, node))
+	}
+	for _, node := range fix.nodes {
+		startPromoteRaceNode(fix, node)
+	}
+
+	cleanup := func() {
+		for i := len(fix.nodes) - 1; i >= 0; i-- {
+			fix.nodes[i].Stop()
+		}
+		fix.wg.Wait()
+	}
+	return fix, cleanup, nil
+}
+
+func addPromoteRaceNode(fix *membershipFixture, id string, seedPeers []string, electionTimeout time.Duration) (*Node, error) {
+	if electionTimeout == 0 {
+		electionTimeout = slowElectionTimeout
+	}
+	node, err := NewNode(Config{
+		ID:               id,
+		Peers:            seedPeers,
+		ElectionTimeout:  electionTimeout,
+		HeartbeatTimeout: testHeartbeat,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("NewNode %s: %w", id, err)
+	}
+
+	node.SetTransport(fix.net.Register(id, node))
+	fix.nodes = append(fix.nodes, node)
+	startPromoteRaceNode(fix, node)
+	return node, nil
+}
+
+func startPromoteRaceNode(fix *membershipFixture, node *Node) {
+	node.Start()
+	fix.wg.Add(1)
+	go func() {
+		defer fix.wg.Done()
+		for range node.ApplyCh() {
+		}
+	}()
 }
 
 // delayTransport wraps a Transport and (when armed) sleeps for delay
