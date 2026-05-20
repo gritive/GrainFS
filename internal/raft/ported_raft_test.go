@@ -17,96 +17,92 @@ package raft
 //   TestHasQuorum_* — v1 white-box (n.checkQuorumAcks); covered via election_test.go behaviourally.
 
 import (
+	"errors"
 	"sync"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-// TestConfiguration_ConcurrentReads verifies that Configuration() is safe to
-// call from multiple goroutines concurrently while the node is running (race
-// detector coverage). v1 equivalent: TestConfiguration_ConcurrentReads.
-func TestConfiguration_ConcurrentReads(t *testing.T) {
-	nodes, net := startCluster(t, "n1", "n2", "n3")
-	_ = net
+var _ = ginkgo.Describe("Ported raft scenarios", func() {
+	ginkgo.It("allows concurrent Configuration reads while the node is running", func(ginkgo.SpecContext) {
+		nodes, _, cleanup, err := startRaftIntegrationCluster("n1", "n2", "n3")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(cleanup)
 
-	// Wait for a leader.
-	require.NoError(t, waitFor(5*time.Second, func() bool {
-		for _, n := range nodes {
-			if n.IsLeader() {
-				return true
+		gomega.Expect(waitFor(5*time.Second, func() bool {
+			for _, node := range nodes {
+				if node.IsLeader() {
+					return true
+				}
 			}
+			return false
+		})).To(gomega.Succeed())
+
+		var wg sync.WaitGroup
+		const workers = 8
+		const readsPerWorker = 64
+		errCh := make(chan error, workers*readsPerWorker)
+
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < readsPerWorker; j++ {
+					cfg := nodes[0].Configuration()
+					if len(cfg.Servers) == 0 {
+						errCh <- errors.New("Configuration returned no servers")
+					}
+				}
+			}()
 		}
-		return false
-	}))
 
-	// Run 500 concurrent Configuration() reads on node 0 while the cluster
-	// is active. The race detector will catch unsynchronised accesses.
-	var wg sync.WaitGroup
-	const workers = 8
-	const readsPerWorker = 64
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
+		done := make(chan struct{})
 		go func() {
-			defer wg.Done()
-			for j := 0; j < readsPerWorker; j++ {
-				cfg := nodes[0].Configuration()
-				assert.NotEmpty(t, cfg.Servers)
+			wg.Wait()
+			close(done)
+			close(errCh)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			ginkgo.Fail("concurrent Configuration() reads timed out")
+		}
+		for err := range errCh {
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		cfg := nodes[0].Configuration()
+		gomega.Expect(cfg.Servers).To(gomega.HaveLen(3))
+		for _, server := range cfg.Servers {
+			gomega.Expect(server.Suffrage).To(gomega.Equal(Voter))
+		}
+	}, ginkgo.NodeTimeout(10*time.Second))
+
+	ginkgo.It("waits for goroutines when stopping a node", func(ginkgo.SpecContext) {
+		node, err := NewNode(Config{ID: "n1"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		node.Start()
+
+		go func() {
+			for range node.ApplyCh() {
 			}
 		}()
-	}
 
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+		time.Sleep(20 * time.Millisecond)
 
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("concurrent Configuration() reads timed out")
-	}
+		done := make(chan struct{})
+		go func() {
+			node.Stop()
+			close(done)
+		}()
 
-	// Final sanity: 3-voter cluster reports 3 servers.
-	cfg := nodes[0].Configuration()
-	assert.Len(t, cfg.Servers, 3)
-	for _, s := range cfg.Servers {
-		assert.Equal(t, Voter, s.Suffrage)
-	}
-}
-
-// TestNode_Stop_WaitsForGoroutines verifies that Stop() blocks until the actor
-// goroutine has exited rather than returning immediately, so the caller can
-// safely release resources (stores, transports) after Stop returns.
-// v1 equivalent: TestNode_Close_WaitsForGoroutines.
-func TestNode_Stop_WaitsForGoroutines(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1"})
-	require.NoError(t, err)
-	n.Start()
-
-	// Drain ApplyCh to avoid blocking the actor on commit delivery.
-	go func() {
-		for range n.ApplyCh() {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			ginkgo.Fail("Stop() did not return within 2s; actor goroutine may have leaked")
 		}
-	}()
-
-	// Brief pause so the actor goroutine is fully running.
-	time.Sleep(20 * time.Millisecond)
-
-	done := make(chan struct{})
-	go func() {
-		n.Stop()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Success: Stop returned promptly.
-	case <-time.After(2 * time.Second):
-		t.Fatal("Stop() did not return within 2s — actor goroutine may have leaked")
-	}
-}
+	}, ginkgo.NodeTimeout(5*time.Second))
+})
