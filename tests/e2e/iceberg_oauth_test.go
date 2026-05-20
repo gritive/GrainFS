@@ -25,9 +25,10 @@ import (
 //     ak/sk pair + PRINCIPAL_ROLE:<warehouse> scope; assert 3-segment JWT.
 //   - MintToken_WrongSecret_401 — same flow with a wrong secret; assert 401
 //     and empty token.
-//   - BearerGatedS3_GetObjectAuthedOK — SA that minted a bearer must still
+//   - PostMintToken_SigV4StillWorks — SA that minted a bearer must still
 //     PUT/GET on the warehouse bucket via SigV4 (the bearer is the iceberg-side
-//     credential; S3-side is SigV4 throughout).
+//     credential; S3-side is SigV4 throughout). Proves minting a bearer does
+//     not break the SigV4 path — the test never sends the bearer.
 func TestIcebergOAuthE2E(t *testing.T) {
 	t.Run("SingleNode", func(t *testing.T) {
 		runIcebergOAuthCases(t, newSingleNodeIcebergTarget(t))
@@ -47,8 +48,8 @@ func runIcebergOAuthCases(t *testing.T, tgt *icebergTarget) {
 	t.Run("MintToken_WrongSecret_401", func(t *testing.T) {
 		runIcebergOAuthMintTokenWrongSecret401(t, tgt)
 	})
-	t.Run("BearerGatedS3_GetObjectAuthedOK", func(t *testing.T) {
-		runIcebergOAuthBearerGatedS3GetObjectAuthedOK(t, tgt)
+	t.Run("PostMintToken_SigV4StillWorks", func(t *testing.T) {
+		runIcebergOAuthPostMintTokenSigV4StillWorks(t, tgt)
 	})
 }
 
@@ -115,10 +116,12 @@ func runIcebergOAuthMintTokenWrongSecret401(t *testing.T, tgt *icebergTarget) {
 	require.Empty(t, jwt, "wrong-secret response must not include a JWT")
 }
 
-// runIcebergOAuthBearerGatedS3GetObjectAuthedOK confirms that an SA which has
+// runIcebergOAuthPostMintTokenSigV4StillWorks confirms that an SA which has
 // just minted a bearer can still PUT/GET on its warehouse bucket via SigV4
-// (S3 side is SigV4 throughout — the bearer is iceberg-side only).
-func runIcebergOAuthBearerGatedS3GetObjectAuthedOK(t *testing.T, tgt *icebergTarget) {
+// (S3 side is SigV4 throughout — the bearer is iceberg-side only). The
+// bearer is intentionally never sent; the test value is proving that the
+// act of minting does not break the SigV4 path.
+func runIcebergOAuthPostMintTokenSigV4StillWorks(t *testing.T, tgt *icebergTarget) {
 	t.Helper()
 	warehouse := tgt.uniqueWarehouse(t, "bearer-s3")
 	saID, ak, sk := tgt.adminCreateSA(t, "bearer-s3")

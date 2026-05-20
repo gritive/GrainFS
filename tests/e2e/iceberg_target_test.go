@@ -99,6 +99,10 @@ func (tgt *icebergTarget) adminCreateSA(t *testing.T, namePrefix string) (saID, 
 	t.Cleanup(func() {
 		iamSADelete(t, sock, out.SAID)
 	})
+	// Wait for Raft propagation on cluster targets — without this, MintToken
+	// happy-path can race the key apply and return 401 (indistinguishable
+	// from a real wrong-secret 401, masking both flakes and false passes).
+	iamWaitKeyReady(t, tgt.endpoint(0), out.AccessKey, out.SecretKey, 30*time.Second)
 	return out.SAID, out.AccessKey, out.SecretKey
 }
 
