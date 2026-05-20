@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -78,8 +79,21 @@ func runClusterJoin(cmd *cobra.Command, args []string) error {
 	}
 
 	nc := nodeconfig.New(dataDir)
-	kek, err := encrypt.LoadOrGenerateKEK(nc.KEKSource())
+	// §7 T57 (F#21): a joining node MUST already have the cluster's KEK
+	// in place — auto-generating a fresh random KEK here would produce a
+	// node whose KEK can never decrypt the cluster's FSM-wrapped DEKs and
+	// whose Challenge handshake would fail anyway. LoadKEK (strict) makes
+	// that failure mode loud and explicit.
+	kek, err := encrypt.LoadKEK(nc.KEKSource())
 	if err != nil {
+		if errors.Is(err, encrypt.ErrKEKNotFound) {
+			return fmt.Errorf("KEK not found at %s. "+
+				"A joining node must already hold the cluster's KEK before "+
+				"`cluster join` can complete the challenge-response handshake. "+
+				"Copy kek.key from any healthy peer (e.g. `scp peer:/var/lib/grainfs/kek.key %s`) "+
+				"and re-run cluster join. Underlying error: %w",
+				nc.KEKSource(), nc.KEKSource()[len("file://"):], err)
+		}
 		return fmt.Errorf("load KEK: %w", err)
 	}
 
