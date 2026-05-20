@@ -16,6 +16,7 @@ const (
 	JoinStatusMixedVersion  JoinStatus = 6
 	JoinStatusTimeout       JoinStatus = 7
 	JoinStatusError         JoinStatus = 8
+	JoinStatusKEKMismatch   JoinStatus = 9
 )
 
 var EnumNamesJoinStatus = map[JoinStatus]string{
@@ -28,6 +29,7 @@ var EnumNamesJoinStatus = map[JoinStatus]string{
 	JoinStatusMixedVersion:  "MixedVersion",
 	JoinStatusTimeout:       "Timeout",
 	JoinStatusError:         "Error",
+	JoinStatusKEKMismatch:   "KEKMismatch",
 }
 
 var EnumValuesJoinStatus = map[string]JoinStatus{
@@ -40,6 +42,7 @@ var EnumValuesJoinStatus = map[string]JoinStatus{
 	"MixedVersion":  JoinStatusMixedVersion,
 	"Timeout":       JoinStatusTimeout,
 	"Error":         JoinStatusError,
+	"KEKMismatch":   JoinStatusKEKMismatch,
 }
 
 func (v JoinStatus) String() string {

@@ -261,7 +261,7 @@ func TestJoinStatus_DriftGuard(t *testing.T) {
 	cases := []JoinStatus{
 		JoinStatusOK, JoinStatusAlreadyMember, JoinStatusNotLeader,
 		JoinStatusAddrMismatch, JoinStatusClusterFull, JoinStatusMixedVersion,
-		JoinStatusTimeout, JoinStatusError,
+		JoinStatusTimeout, JoinStatusError, JoinStatusKEKMismatch,
 	}
 	for _, s := range cases {
 		fb := joinStatusToFB(s)
