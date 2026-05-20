@@ -71,6 +71,9 @@ table PutObjectArgs {
   key:string;
   content_type:string;
   body:[ubyte];
+  // Optional S3 system metadata for forwarded PUT requests. Appended for
+  // wire compatibility; old peers read it as empty.
+  sse_algorithm:string;
 }
 
 table GetObjectArgs {
@@ -239,6 +242,9 @@ table ForwardObjectMeta {
   // Get/Head/List response carries S3 object tags. Empty/missing reads
   // as len()==0 (back-compat: appended field; older peers send no tags).
   tags:[Tag];
+  // Optional S3 server-side-encryption algorithm, e.g. AES256. Appended for
+  // wire compatibility; old peers read it as empty.
+  sse_algorithm:string;
 }
 
 table ForwardObjectVersionMeta {

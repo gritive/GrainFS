@@ -2701,6 +2701,37 @@ func TestClusterCoordinator_PutObject_ForwardLeavesObjectIndexToReceiver(t *test
 	require.Empty(t, proposer.entries, "forward receiver owns object-index commit for forwarded PUTs")
 }
 
+func TestClusterCoordinator_PutObjectWithRequest_ForwardPreservesSSE(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
+	body := []byte("sse-forward")
+	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{
+			Key:          "k",
+			Size:         int64(len(body)),
+			ETag:         "etag-put",
+			ContentType:  "application/octet-stream",
+			VersionID:    "v1",
+			SSEAlgorithm: "AES256",
+		},
+		"bk",
+	)
+
+	obj, err := c.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+		Bucket:         "bk",
+		Key:            "k",
+		Body:           bytes.NewReader(body),
+		ContentType:    "application/octet-stream",
+		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: "AES256"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "AES256", obj.SSEAlgorithm)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.calls[1].op)
+
+	args := raftpb.GetRootAsPutObjectArgs(d.calls[1].args, 0)
+	require.Equal(t, "AES256", string(args.SseAlgorithm()))
+}
+
 func TestClusterCoordinator_PutObject_StreamForwardLeavesObjectIndexToReceiver(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a", "self"})
 	c.forward.WithStreamDialer(d.stream)

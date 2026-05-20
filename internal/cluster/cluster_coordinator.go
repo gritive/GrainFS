@@ -764,6 +764,26 @@ func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 	}
 }
 
+func logForwardReplyDecodeError(err error, bucket, key, groupID string, op raftpb.ForwardOp, reply []byte) {
+	status := ""
+	hasObject := false
+	if len(reply) > 0 {
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
+		status = fr.Status().String()
+		hasObject = fr.Object(nil) != nil
+	}
+	log.Warn().
+		Err(err).
+		Str("bucket", bucket).
+		Str("key", key).
+		Str("group_id", groupID).
+		Str("op", op.String()).
+		Str("forward_status", status).
+		Bool("has_object", hasObject).
+		Int("reply_bytes", len(reply)).
+		Msg("forward: decode reply failed")
+}
+
 func objectIndexEntryToObject(entry ObjectIndexEntry) *storage.Object {
 	obj := &storage.Object{
 		Key:          entry.Key,
@@ -1105,7 +1125,11 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	if err != nil {
 		return nil, err
 	}
-	return objectFromReply(reply)
+	obj, err := objectFromReply(reply)
+	if err != nil {
+		logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpHeadObject, reply)
+	}
+	return obj, err
 }
 
 func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
@@ -1516,7 +1540,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 		}
 		return obj, c.commitObjectIndex(ctx, bucket, key, obj, group, false)
 	}
-	if len(userMetadata) > 0 || req.SystemMetadata.SSEAlgorithm != "" || req.ACL != nil {
+	if len(userMetadata) > 0 || req.ACL != nil {
 		return nil, storage.UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: storage.UnsupportedReasonNoAdapter}
 	}
 	if c.forward == nil {
@@ -1524,7 +1548,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 	}
 
 	if c.forward.streamDialer != nil && forwardBodyExceedsSingleFrameCap(r, c.maxBody) {
-		args := buildPutObjectArgs(bucket, key, contentType, nil)
+		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm)
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 			Bucket:      bucket,
 			Key:         key,
@@ -1543,6 +1567,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 		}
 		obj, err := objectFromReply(reply)
 		if err != nil {
+			logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpPutObject, reply)
 			return nil, err
 		}
 		return obj, nil
@@ -1552,7 +1577,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 	if err != nil {
 		return nil, err
 	}
-	args := buildPutObjectArgs(bucket, key, contentType, body)
+	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm)
 	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 		Bucket:      bucket,
 		Key:         key,
@@ -1571,6 +1596,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 	}
 	obj, err := objectFromReply(reply)
 	if err != nil {
+		logForwardReplyDecodeError(err, bucket, key, target.GroupID, raftpb.ForwardOpPutObject, reply)
 		return nil, err
 	}
 	if obj.Size != int64(len(body)) {
@@ -1598,10 +1624,22 @@ func (c *ClusterCoordinator) PutObjectWithUserMetadataResult(
 func (c *ClusterCoordinator) PutObjectWithRequestResult(ctx context.Context, req storage.PutObjectRequest) (*storage.PutObjectResult, error) {
 	previous, err := c.previousObjectForMutation(ctx, req.Bucket, req.Key)
 	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("bucket", req.Bucket).
+			Str("key", req.Key).
+			Bool("has_sse", req.SystemMetadata.SSEAlgorithm != "").
+			Msg("coordinator put: previous object lookup failed")
 		return nil, err
 	}
 	obj, err := c.PutObjectWithRequest(ctx, req)
 	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("bucket", req.Bucket).
+			Str("key", req.Key).
+			Bool("has_sse", req.SystemMetadata.SSEAlgorithm != "").
+			Msg("coordinator put: write failed")
 		return nil, err
 	}
 	facts, err := objectFactsForMutation("PutObject", obj)

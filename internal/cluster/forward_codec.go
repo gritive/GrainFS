@@ -27,23 +27,31 @@ var errInternalReply = errors.New("forward: internal reply error")
 // --- Args builders (request side) ---
 
 func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, len(body)))
+	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "")
+}
+
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string) []byte {
+	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
+	sse := b.CreateString(sseAlgorithm)
 	bodyOff := b.CreateByteVector(body)
 	raftpb.PutObjectArgsStart(b)
 	raftpb.PutObjectArgsAddBucket(b, bk)
 	raftpb.PutObjectArgsAddKey(b, k)
 	raftpb.PutObjectArgsAddContentType(b, ct)
 	raftpb.PutObjectArgsAddBody(b, bodyOff)
+	if sseAlgorithm != "" {
+		raftpb.PutObjectArgsAddSseAlgorithm(b, sse)
+	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func putObjectArgsBuilderSize(bucket, key, contentType string, bodyLen int) int {
+func putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm string, bodyLen int) int {
 	const tableOverhead = 128
-	return bodyLen + len(bucket) + len(key) + len(contentType) + tableOverhead
+	return bodyLen + len(bucket) + len(key) + len(contentType) + len(sseAlgorithm) + tableOverhead
 }
 
 func buildGetObjectArgs(bucket, key string) []byte {
@@ -499,6 +507,7 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	etag := b.CreateString(obj.ETag)
 	ct := b.CreateString(obj.ContentType)
 	vid := b.CreateString(obj.VersionID)
+	sse := b.CreateString(obj.SSEAlgorithm)
 	partsOff := appendPartsVector(b, obj.Parts)
 	tagsOff := appendForwardTagsVector(b, obj.Tags, raftpb.ForwardObjectMetaStartTagsVector)
 	raftpb.ForwardObjectMetaStart(b)
@@ -514,6 +523,9 @@ func buildObjectReply(obj *storage.Object, bucket string) []byte {
 	}
 	if tagsOff != 0 {
 		raftpb.ForwardObjectMetaAddTags(b, tagsOff)
+	}
+	if obj.SSEAlgorithm != "" {
+		raftpb.ForwardObjectMetaAddSseAlgorithm(b, sse)
 	}
 	metaOff := raftpb.ForwardObjectMetaEnd(b)
 
@@ -532,6 +544,7 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	etag := b.CreateString(obj.ETag)
 	ct := b.CreateString(obj.ContentType)
 	vid := b.CreateString(obj.VersionID)
+	sse := b.CreateString(obj.SSEAlgorithm)
 	bodyOff := b.CreateByteVector(body)
 	partsOff := appendPartsVector(b, obj.Parts)
 	tagsOff := appendForwardTagsVector(b, obj.Tags, raftpb.ForwardObjectMetaStartTagsVector)
@@ -550,6 +563,9 @@ func buildGetObjectReply(obj *storage.Object, bucket string, body []byte) []byte
 	if tagsOff != 0 {
 		raftpb.ForwardObjectMetaAddTags(b, tagsOff)
 	}
+	if obj.SSEAlgorithm != "" {
+		raftpb.ForwardObjectMetaAddSseAlgorithm(b, sse)
+	}
 	metaOff := raftpb.ForwardObjectMetaEnd(b)
 
 	raftpb.ForwardReplyStart(b)
@@ -564,6 +580,7 @@ func getObjectReplyBuilderSize(obj *storage.Object, bucket string, bodyLen int) 
 	const tableOverhead = 1024
 	return bodyLen +
 		len(bucket) + len(obj.Key) + len(obj.ETag) + len(obj.ContentType) + len(obj.VersionID) +
+		len(obj.SSEAlgorithm) +
 		len(obj.Parts)*96 + len(obj.Tags)*96 +
 		tableOverhead
 }
@@ -590,6 +607,7 @@ func buildObjectsReply(bucket string, objs []*storage.Object) []byte {
 		etag := b.CreateString(o.ETag)
 		ct := b.CreateString(o.ContentType)
 		vid := b.CreateString(o.VersionID)
+		sse := b.CreateString(o.SSEAlgorithm)
 		// Tags vector MUST be built before the parent ForwardObjectMetaStart
 		// (FBS nested-vector rule). Per-element inside the loop is required.
 		tagsOff := appendForwardTagsVector(b, o.Tags, raftpb.ForwardObjectMetaStartTagsVector)
@@ -603,6 +621,9 @@ func buildObjectsReply(bucket string, objs []*storage.Object) []byte {
 		raftpb.ForwardObjectMetaAddVersionId(b, vid)
 		if tagsOff != 0 {
 			raftpb.ForwardObjectMetaAddTags(b, tagsOff)
+		}
+		if o.SSEAlgorithm != "" {
+			raftpb.ForwardObjectMetaAddSseAlgorithm(b, sse)
 		}
 		metas[i] = raftpb.ForwardObjectMetaEnd(b)
 	}
@@ -833,6 +854,7 @@ func objectFromReply(reply []byte) (*storage.Object, error) {
 		VersionID:    string(meta.VersionId()),
 		Parts:        readPartsVector(meta),
 		Tags:         readForwardTagsVector(meta.TagsLength(), meta.Tags),
+		SSEAlgorithm: string(meta.SseAlgorithm()),
 	}, nil
 }
 
@@ -859,6 +881,7 @@ func objectsFromReply(reply []byte) ([]*storage.Object, error) {
 			VersionID:    string(meta.VersionId()),
 			Parts:        readPartsVector(&meta),
 			Tags:         readForwardTagsVector(meta.TagsLength(), meta.Tags),
+			SSEAlgorithm: string(meta.SseAlgorithm()),
 		})
 	}
 	return out, nil
