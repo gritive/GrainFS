@@ -32,6 +32,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerBucket(g, d)
 	registerNfsExports(g, d)
 	registerAudit(g, d)
+	registerStatus(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the
@@ -60,6 +61,10 @@ func RegisterUI(h *server.Hertz, d *Deps) {
 func RegisterIAMOnly(h *server.Hertz, d *Deps) {
 	g := h.Group(routePrefixAdmin)
 	registerIAM(g, d)
+}
+
+func registerStatus(g router, d *Deps) {
+	g.GET(routePathStatus, wrapZero(d, GetStatus))
 }
 
 func registerCluster(g router, d *Deps) {

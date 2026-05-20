@@ -66,6 +66,8 @@ const (
 	routePathAuditBySA         = "/audit/by-sa/:said"
 	routePathAuditByRequestID  = "/audit/by-request-id/:rid"
 
+	routePathStatus = "/status"
+
 	routePathUpstreams        = "/upstreams"
 	routePathBucketUpstream   = "/buckets/:bucket/upstream"
 	routePathMigrationCutover = "/migration/cutover"

@@ -137,6 +137,12 @@ type ConfigStoreReader interface {
 	ListAll() []config.Entry
 }
 
+// StatusService is the slim interface the status admin handler needs.
+// Satisfied by *StatusAdapter in serveruntime; nil disables the status endpoint.
+type StatusService interface {
+	Report() adminapi.StatusReport
+}
+
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
 type IAMService interface {

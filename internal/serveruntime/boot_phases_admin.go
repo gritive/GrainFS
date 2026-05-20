@@ -73,6 +73,15 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	if state.auditSearcher != nil {
 		state.adminDeps.AuditQuery = state.auditSearcher
 	}
+	state.adminDeps.Status = NewStatusAdapter(
+		state.nodeID,
+		cfg.DataDir,
+		NewPeerHealthAdapter(state.distBackend),
+		state.iamAdminAPI,
+		state.dekKeeper,
+		state.metaRaft,
+		state.cfgStore,
+	)
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
 	admin.RegisterUI(dataHertz, state.adminDeps)
