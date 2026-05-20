@@ -61,6 +61,11 @@ const (
 	routePathIAMGroupMember       = "/iam/group/:name/member/:said"
 	routePathIAMGroupPolicyAttach = "/iam/group/:name/policy/:policy"
 
+	routePathAuditQuery        = "/audit/query"
+	routePathAuditRecentDenies = "/audit/recent-denies"
+	routePathAuditBySA         = "/audit/by-sa/:said"
+	routePathAuditByRequestID  = "/audit/by-request-id/:rid"
+
 	routePathUpstreams        = "/upstreams"
 	routePathBucketUpstream   = "/buckets/:bucket/upstream"
 	routePathMigrationCutover = "/migration/cutover"

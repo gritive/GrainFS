@@ -32,6 +32,7 @@ type Deps struct {
 	ConfigStore          ConfigStoreReader        // optional; nil disables config read endpoints
 	Buckets              BucketOps                // optional; nil disables bucket CRUD admin endpoints
 	NfsExports           NfsExportService         // optional; nil disables NFS export admin endpoints
+	AuditQuery           AuditQueryService        // optional; nil disables audit admin endpoints
 	Protocols            StorageProtocolStatusResp
 	NFSDiag              NFSDiag // optional; nil disables live NFS lookup/client diagnostics
 	Token                *dashboard.TokenStore

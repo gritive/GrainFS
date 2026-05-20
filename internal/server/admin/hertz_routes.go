@@ -31,6 +31,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerConfig(g, d)
 	registerBucket(g, d)
 	registerNfsExports(g, d)
+	registerAudit(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the

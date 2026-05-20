@@ -193,6 +193,11 @@ type bootState struct {
 	mutationGate      *server.MutationGate
 	volMgr            *volume.Manager
 	auditSearchWarmup func(context.Context) error
+	// auditSearcher is the DuckDB-backed audit searcher. Created in
+	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
+	// Passed to admin.Deps so `grainfs audit` commands can query it via the
+	// admin Unix socket (§8 T64).
+	auditSearcher *audit.DuckDBSearcher
 	// auditOutbox is the per-node durable audit outbox. Created in
 	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
 	// Kept on bootState so the OnAuditDenyOnly reload-hook closure registered

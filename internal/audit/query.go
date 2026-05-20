@@ -170,6 +170,71 @@ func (s *DuckDBSearcher) SearchS3(ctx context.Context, f SearchFilter) ([]Search
 	return out, rows.Err()
 }
 
+// Query executes a read-only SQL statement against the DuckDB/Iceberg catalog
+// and returns the column names and rows as string slices. Only SELECT and WITH
+// statements are accepted; multi-statement input (containing a semicolon after
+// the first token) is rejected as a safety measure.
+//
+// The caller is responsible for imposing a LIMIT in the SQL itself; this method
+// stops reading after MaxSearchLimit rows as a server-side safety net.
+func (s *DuckDBSearcher) Query(ctx context.Context, rawSQL string) (columns []string, rows [][]string, err error) {
+	if s == nil || s.cfg.Endpoint == "" {
+		return nil, nil, fmt.Errorf("audit searcher is not configured")
+	}
+	stmt := strings.TrimSpace(rawSQL)
+	lower := strings.ToLower(stmt)
+	if !strings.HasPrefix(lower, "select") && !strings.HasPrefix(lower, "with") {
+		return nil, nil, fmt.Errorf("only SELECT or WITH statements are allowed")
+	}
+	// Reject compound statements (simple heuristic: semicolon present outside
+	// string literals). DuckDB itself accepts multi-statement strings, so we
+	// guard here rather than relying on the driver.
+	if strings.Contains(stmt, ";") {
+		return nil, nil, fmt.Errorf("compound statements (semicolons) are not allowed")
+	}
+
+	db, err := s.open(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	dbRows, err := db.QueryContext(ctx, stmt)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer dbRows.Close()
+
+	columns, err = dbRows.Columns()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rows = [][]string{}
+	for dbRows.Next() {
+		if len(rows) >= MaxSearchLimit {
+			break
+		}
+		vals := make([]any, len(columns))
+		ptrs := make([]any, len(columns))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := dbRows.Scan(ptrs...); err != nil {
+			return nil, nil, err
+		}
+		row := make([]string, len(columns))
+		for i, v := range vals {
+			if v == nil {
+				row[i] = ""
+			} else {
+				row[i] = fmt.Sprintf("%v", v)
+			}
+		}
+		rows = append(rows, row)
+	}
+	return columns, rows, dbRows.Err()
+}
+
 func (s *DuckDBSearcher) Warmup(ctx context.Context) error {
 	_, err := s.open(ctx)
 	return err

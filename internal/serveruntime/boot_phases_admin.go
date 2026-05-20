@@ -70,6 +70,9 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
+	if state.auditSearcher != nil {
+		state.adminDeps.AuditQuery = state.auditSearcher
+	}
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
 	admin.RegisterUI(dataHertz, state.adminDeps)
