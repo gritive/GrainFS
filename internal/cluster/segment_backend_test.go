@@ -553,6 +553,27 @@ func TestPutObjectChunked_SizeGuard_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestAcquireChunkedMultipartCompleteSlotHonorsContext(t *testing.T) {
+	oldSlots := chunkedMultipartCompleteSlots
+	chunkedMultipartCompleteSlots = make(chan struct{}, 1)
+	t.Cleanup(func() { chunkedMultipartCompleteSlots = oldSlots })
+
+	release, err := acquireChunkedMultipartCompleteSlot(context.Background())
+	require.NoError(t, err)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = acquireChunkedMultipartCompleteSlot(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestChunkedMultipartCompleteChunkSizeCapsDefault(t *testing.T) {
+	require.Equal(t, 8<<20, chunkedMultipartCompleteChunkSize(storage.DefaultChunkSize))
+	require.Equal(t, 4<<20, chunkedMultipartCompleteChunkSize(4<<20))
+	require.Equal(t, 8<<20, chunkedMultipartCompleteChunkSize(0))
+}
+
 // errReaderAfter wraps an underlying io.Reader; once the cumulative bytes
 // returned to callers reaches `at`, the next Read returns
 // io.ErrUnexpectedEOF. Bytes prior to the threshold are passed through

@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 func TestSegmentWriter_Boundaries(t *testing.T) {
@@ -108,6 +110,23 @@ func TestSegmentWriter_UsesByteWriterFastPath(t *testing.T) {
 	}
 }
 
+func TestSegmentWriter_CustomWorkersBoundsConcurrentWrites(t *testing.T) {
+	b := &countingConcurrentBytesBackend{}
+	data := makePattern(4 << 10)
+
+	w := NewSegmentWriterWithChunkSizeAndWorkers(b, 1024, 1)
+	obj, err := w.Write(context.Background(), "test", "serial", "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if obj.Size != int64(len(data)) {
+		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
+	}
+	if got := b.maxActive.Load(); got != 1 {
+		t.Fatalf("max concurrent writes: want 1, got %d", got)
+	}
+}
+
 func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 	t.Parallel()
 	b := newTestLocalBackend(t)
@@ -131,6 +150,32 @@ func (b *bytesOnlySegmentBackend) WriteSegment(context.Context, string, string, 
 
 func (b *bytesOnlySegmentBackend) WriteSegmentBytes(_ context.Context, _ string, _ string, idx int, data []byte) (SegmentRef, error) {
 	b.calls++
+	return SegmentRef{
+		BlobID:   string(rune('a' + idx)),
+		Size:     int64(len(data)),
+		Checksum: ChecksumOf(data),
+	}, nil
+}
+
+type countingConcurrentBytesBackend struct {
+	active    atomic.Int32
+	maxActive atomic.Int32
+}
+
+func (b *countingConcurrentBytesBackend) WriteSegment(context.Context, string, string, int, io.Reader) (SegmentRef, error) {
+	return SegmentRef{}, errors.New("reader path should not be used")
+}
+
+func (b *countingConcurrentBytesBackend) WriteSegmentBytes(_ context.Context, _ string, _ string, idx int, data []byte) (SegmentRef, error) {
+	active := b.active.Add(1)
+	for {
+		max := b.maxActive.Load()
+		if active <= max || b.maxActive.CompareAndSwap(max, active) {
+			break
+		}
+	}
+	time.Sleep(time.Millisecond)
+	b.active.Add(-1)
 	return SegmentRef{
 		BlobID:   string(rune('a' + idx)),
 		Size:     int64(len(data)),

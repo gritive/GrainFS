@@ -59,6 +59,16 @@ func NewSegmentWriterWithChunkSize(b segmentWriterBackend, chunkSize int) *Segme
 	return &SegmentWriter{backend: b, chunkSize: chunkSize, workers: DefaultPutWorkers}
 }
 
+func NewSegmentWriterWithChunkSizeAndWorkers(b segmentWriterBackend, chunkSize, workers int) *SegmentWriter {
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+	return &SegmentWriter{backend: b, chunkSize: chunkSize, workers: workers}
+}
+
 // Write streams r, returning an Object with segments populated and
 // Object.ETag set to md5(plaintext_full) — the simple-PUT rule.
 //
