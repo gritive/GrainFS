@@ -19,7 +19,11 @@ import (
 // (PutBucketLifecycleConfiguration). Manifests at HEAD as 403 AccessDenied
 // on PutBucketLifecycleConfiguration with "IAM grant denies this action".
 func TestDedicatedSingleNode_AdminGrant_Regression(t *testing.T) {
-	tgt := newDedicatedSingleNodeS3Target(t, nil)
+	// --lifecycle-interval=24h boots the lifecycle service so
+	// PutBucketLifecycleConfiguration reaches the handler instead of 501
+	// NotImplemented. The IAM grant — not the service availability — is what
+	// this regression guards.
+	tgt := newDedicatedSingleNodeS3Target(t, []string{"--lifecycle-interval=24h"})
 	client := tgt.pickNode(0)
 	ctx := context.Background()
 

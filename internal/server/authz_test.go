@@ -30,33 +30,38 @@ func TestS3ActionEnum(t *testing.T) {
 		hasVersions   bool
 		hasRetention  bool
 		hasObjectLock bool
+		hasLifecycle  bool
 		want          s3auth.S3Action
 	}{
-		{"GET", "/bucket/key", true, false, false, false, false, false, s3auth.GetObject},
-		{"GET", "/bucket", false, false, false, false, false, false, s3auth.ListBucket},
-		{"HEAD", "/bucket/key", true, false, false, false, false, false, s3auth.HeadObject},
-		{"HEAD", "/bucket", false, false, false, false, false, false, s3auth.ListBucket},
-		{"PUT", "/bucket/key", true, false, false, false, false, false, s3auth.PutObject},
-		{"PUT", "/bucket", false, false, false, false, false, false, s3auth.CreateBucket},
-		{"DELETE", "/bucket/key", true, false, false, false, false, false, s3auth.DeleteObject},
-		{"DELETE", "/bucket", false, false, false, false, false, false, s3auth.DeleteBucket},
-		{"POST", "/bucket/key", true, false, false, false, false, false, s3auth.PutObject}, // multipart
-		{"UNKNOWN", "/bucket", false, false, false, false, false, false, s3auth.UnknownAction},
+		{"GET", "/bucket/key", true, false, false, false, false, false, false, s3auth.GetObject},
+		{"GET", "/bucket", false, false, false, false, false, false, false, s3auth.ListBucket},
+		{"HEAD", "/bucket/key", true, false, false, false, false, false, false, s3auth.HeadObject},
+		{"HEAD", "/bucket", false, false, false, false, false, false, false, s3auth.ListBucket},
+		{"PUT", "/bucket/key", true, false, false, false, false, false, false, s3auth.PutObject},
+		{"PUT", "/bucket", false, false, false, false, false, false, false, s3auth.CreateBucket},
+		{"DELETE", "/bucket/key", true, false, false, false, false, false, false, s3auth.DeleteObject},
+		{"DELETE", "/bucket", false, false, false, false, false, false, false, s3auth.DeleteBucket},
+		{"POST", "/bucket/key", true, false, false, false, false, false, false, s3auth.PutObject}, // multipart
+		{"UNKNOWN", "/bucket", false, false, false, false, false, false, false, s3auth.UnknownAction},
 		// Phase 5d #4: ?policy CRUD maps to dedicated S3Actions.
-		{"GET", "/bucket", false, true, false, false, false, false, s3auth.GetBucketPolicy},
-		{"PUT", "/bucket", false, true, false, false, false, false, s3auth.PutBucketPolicy},
-		{"DELETE", "/bucket", false, true, false, false, false, false, s3auth.DeleteBucketPolicy},
-		{"GET", "/bucket", false, false, true, false, false, false, s3auth.GetBucketVersioning},
-		{"PUT", "/bucket", false, false, true, false, false, false, s3auth.PutBucketVersioning},
-		{"GET", "/bucket", false, false, false, true, false, false, s3auth.ListBucketVersions},
-		{"GET", "/bucket/key", true, false, false, false, true, false, s3auth.GetObjectRetention},
-		{"PUT", "/bucket/key", true, false, false, false, true, false, s3auth.PutObjectRetention},
-		{"GET", "/bucket", false, false, false, false, false, true, s3auth.GetBucketObjectLockConfiguration},
+		{"GET", "/bucket", false, true, false, false, false, false, false, s3auth.GetBucketPolicy},
+		{"PUT", "/bucket", false, true, false, false, false, false, false, s3auth.PutBucketPolicy},
+		{"DELETE", "/bucket", false, true, false, false, false, false, false, s3auth.DeleteBucketPolicy},
+		{"GET", "/bucket", false, false, true, false, false, false, false, s3auth.GetBucketVersioning},
+		{"PUT", "/bucket", false, false, true, false, false, false, false, s3auth.PutBucketVersioning},
+		{"GET", "/bucket", false, false, false, true, false, false, false, s3auth.ListBucketVersions},
+		{"GET", "/bucket/key", true, false, false, false, true, false, false, s3auth.GetObjectRetention},
+		{"PUT", "/bucket/key", true, false, false, false, true, false, false, s3auth.PutObjectRetention},
+		{"GET", "/bucket", false, false, false, false, false, true, false, s3auth.GetBucketObjectLockConfiguration},
+		// R2: ?lifecycle subresource maps to dedicated S3Actions (bucket-scoped only).
+		{"GET", "/bucket", false, false, false, false, false, false, true, s3auth.GetBucketLifecycleConfiguration},
+		{"PUT", "/bucket", false, false, false, false, false, false, true, s3auth.PutBucketLifecycleConfiguration},
+		{"DELETE", "/bucket", false, false, false, false, false, false, true, s3auth.DeleteBucketLifecycleConfiguration},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.method+"_hasKey="+boolStr(tt.hasKey)+"_hasPolicy="+boolStr(tt.hasPolicy), func(t *testing.T) {
-			got := s3ActionEnum(tt.method, tt.path, tt.hasKey, tt.hasPolicy, tt.hasVersioning, tt.hasVersions, tt.hasRetention, tt.hasObjectLock)
+		t.Run(tt.method+"_hasKey="+boolStr(tt.hasKey)+"_hasPolicy="+boolStr(tt.hasPolicy)+"_hasLifecycle="+boolStr(tt.hasLifecycle), func(t *testing.T) {
+			got := s3ActionEnum(tt.method, tt.path, tt.hasKey, tt.hasPolicy, tt.hasVersioning, tt.hasVersions, tt.hasRetention, tt.hasObjectLock, tt.hasLifecycle)
 			assert.Equal(t, tt.want, got)
 		})
 	}

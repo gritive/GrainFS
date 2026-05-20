@@ -39,6 +39,12 @@ const (
 	GetObjectRetention
 	PutObjectRetention
 	GetBucketObjectLockConfiguration
+	// Bucket lifecycle: ?lifecycle subresource on PUT/GET/DELETE without an
+	// object key. Append-only — never renumber existing values; the on-disk
+	// MetaCmd numbering and audit log records pin these enum values.
+	GetBucketLifecycleConfiguration
+	PutBucketLifecycleConfiguration
+	DeleteBucketLifecycleConfiguration
 )
 
 // Principal identifies the caller of an S3 request.
@@ -113,6 +119,12 @@ func (a S3Action) PolicyActionString() string {
 		return "s3:PutObjectRetention"
 	case GetBucketObjectLockConfiguration:
 		return "s3:GetBucketObjectLockConfiguration"
+	case GetBucketLifecycleConfiguration:
+		return "s3:GetBucketLifecycleConfiguration"
+	case PutBucketLifecycleConfiguration:
+		return "s3:PutBucketLifecycleConfiguration"
+	case DeleteBucketLifecycleConfiguration:
+		return "s3:DeleteBucketLifecycleConfiguration"
 	default:
 		return "s3:Unknown"
 	}
@@ -126,7 +138,8 @@ func isReadAction(action S3Action) bool {
 		action == GetBucketVersioning ||
 		action == ListBucketVersions ||
 		action == GetObjectRetention ||
-		action == GetBucketObjectLockConfiguration
+		action == GetBucketObjectLockConfiguration ||
+		action == GetBucketLifecycleConfiguration
 }
 
 // IsAuthorizedByACL checks whether accessKey may perform action given the object's ACL.
