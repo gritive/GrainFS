@@ -509,6 +509,23 @@ type TransferLeaderResult struct {
 	TargetHint string `json:"target_hint,omitempty"`
 }
 
+// --- Config admin wire types ---
+
+// ConfigEntry is the JSON representation of one config key in admin responses.
+type ConfigEntry struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Kind        string `json:"kind"`
+	Default     string `json:"default"`
+	Set         bool   `json:"set"`
+	Description string `json:"description"`
+}
+
+// ConfigSetReq is the body for PUT /v1/config/:key.
+type ConfigSetReq struct {
+	Value string `json:"value"`
+}
+
 // --- Bucket admin wire types ---
 
 // BucketInfo is the JSON representation of a bucket in admin responses.
@@ -557,4 +574,23 @@ type BucketVersioningResp struct {
 // BucketVersioningSetReq is the body for PUT /v1/buckets/:name/versioning.
 type BucketVersioningSetReq struct {
 	Status string `json:"status"`
+}
+
+// --- Iceberg config wire types ---
+
+// IcebergConfigRequest is the JSON body for POST /v1/iceberg/config.
+type IcebergConfigRequest struct {
+	Warehouse string `json:"warehouse"`
+	SAID      string `json:"sa"`
+	NoReveal  bool   `json:"no_reveal,omitempty"`
+}
+
+// IcebergConfigResponse is the JSON body returned by POST /v1/iceberg/config.
+// ClientSecret is empty when the server received NoReveal=true.
+type IcebergConfigResponse struct {
+	CatalogURI    string `json:"catalog_uri"`
+	OAuthTokenURI string `json:"oauth_token_uri"`
+	Warehouse     string `json:"warehouse"`
+	ClientID      string `json:"client_id"`
+	ClientSecret  string `json:"client_secret"`
 }

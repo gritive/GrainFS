@@ -220,6 +220,28 @@ func newKid() (string, error) {
 // NewKid generates a new random key ID. Exported for use by the meta-FSM apply path.
 func NewKid() (string, error) { return newKid() }
 
+// CurrentKID returns the KID of the current signing key, or empty string if
+// no current key is loaded. Safe for concurrent use.
+func (ks *KeySet) CurrentKID() string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if ks.current == nil {
+		return ""
+	}
+	return ks.current.kid
+}
+
+// PreviousKID returns the KID of the previous (demoted) signing key, or empty
+// string if no previous key exists. Safe for concurrent use.
+func (ks *KeySet) PreviousKID() string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if ks.previous == nil {
+		return ""
+	}
+	return ks.previous.kid
+}
+
 // KeySeed is the persisted, wrapped representation of a JWT signing key stored
 // in the meta-FSM snapshot. WrappedSecret is sealed with the DEK identified by DekGen.
 type KeySeed struct {

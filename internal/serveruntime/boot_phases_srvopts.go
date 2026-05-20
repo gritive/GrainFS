@@ -343,6 +343,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			})
 			srvOpts = append(srvOpts, server.WithAuditSearcher(searcher))
 			state.auditSearchWarmup = searcher.Warmup
+			state.auditSearcher = searcher
 		} else {
 			log.Warn().Str("addr", cfg.Addr).Msg("audit search disabled: HTTP address does not resolve to a stable local endpoint")
 		}

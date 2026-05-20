@@ -1,0 +1,45 @@
+Cluster-key rotation tooling. Operations:
+
+  begin   — propose a new PSK for the cluster (leader only)
+  status  — print the current rotation state
+  abort   — cancel an in-flight rotation (leader only)
+
+Communication uses a Unix domain socket bound by the running server with mode
+0600, so only the operator on the local node can issue rotation commands. Pass
+the socket path via --endpoint (e.g. --endpoint ./tmp/rotate.sock); the server
+logs the path on startup ("rotate endpoint"). The rotate-key socket is
+distinct from admin.sock so PSK-bearing operations stay owner-only.
+
+Workflow (online rolling, zero-downtime):
+  1. Generate or supply a new 32-byte PSK (64 hex chars).
+  2. Run 'cluster rotate-key begin --new-key=...' on the meta-raft leader.
+  3. The cluster auto-progresses through phases:
+       phase 1 → 2 (begin):    accept set = [OLD, NEW], present OLD
+       phase 2 → 3 (switch):   accept = [OLD, NEW], present NEW (after grace)
+       phase 3 → steady:       accept = [NEW], OLD demoted to previous.key
+  4. Operator must distribute the same new PSK to all peers' --cluster-key
+     environment / config so future restarts pick it up. Workers consume
+     keys.d/next.key from disk during rotation.
+
+Failures roll back automatically:
+  - phase 2 abort: revert to OLD
+  - phase 3 abort: forward-roll to NEW (D18; some peers already present NEW)
+  - global timeout (30 min): auto-abort
+
+Usage:
+  grainfs cluster rotate-key [command]
+
+Available Commands:
+  abort       Cancel an in-flight rotation
+  begin       Start a new rotation with the supplied PSK
+  status      Show current rotation state
+
+Flags:
+      --endpoint string   rotate-key socket path (NOT admin.sock; default <data-dir>/rotate.sock); server logs the path on startup as "rotate endpoint"
+  -h, --help              help for rotate-key
+
+Global Flags:
+      --format string      Output format: text or json (status/peers/events; ignored elsewhere) (default "text")
+      --log-level string   log level: debug, info, warn, error (default "info")
+
+Use "grainfs cluster rotate-key [command] --help" for more information about a command.

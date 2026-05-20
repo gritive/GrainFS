@@ -188,3 +188,90 @@ func TestCLI_KeyCreate_NoBucketFlag(t *testing.T) {
 		t.Fatalf("body should not contain \"buckets\" key when --bucket not used; got %v", gotBody)
 	}
 }
+
+// TestCLI_IAMSACreate_PrintsAccessKey verifies that iam sa create prints both
+// access_key and secret_key in text mode (regression guard for the thin-runner
+// refactor).
+func TestCLI_IAMSACreate_PrintsAccessKey(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sa_id":"sa-x","name":"admin","access_key":"AKX","secret_key":"SKX"}`)
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"iam", "--endpoint", sock, "sa", "create", "admin"})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\noutput: %s", err, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "AKX") {
+		t.Errorf("output missing access_key value AKX:\n%s", s)
+	}
+	if !strings.Contains(s, "SKX") {
+		t.Errorf("output missing secret_key value SKX:\n%s", s)
+	}
+}
+
+// TestCLI_IAMSAList_AfterCreate verifies that two SA creates followed by list
+// shows both names in the output.
+func TestCLI_IAMSAList_AfterCreate(t *testing.T) {
+	var createCount int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/iam/sa", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "POST":
+			createCount++
+			w.Header().Set("Content-Type", "application/json")
+			name := fmt.Sprintf("sa-%d", createCount)
+			fmt.Fprintf(w, `{"sa_id":"%s","name":"","access_key":"AK","secret_key":"SK"}`, name)
+		case "GET":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[{"sa_id":"sa-1","name":"alice","description":"","created_at":"2026-05-20T12:00:00Z","num_keys":1,"num_grants":0},{"sa_id":"sa-2","name":"bob","description":"","created_at":"2026-05-20T12:00:00Z","num_keys":1,"num_grants":0}]`)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	sock := startFakeAdminUDS(t, mux)
+
+	run := func(args ...string) {
+		t.Helper()
+		rootCmd.SetArgs(append([]string{"iam", "--endpoint", sock}, args...))
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetContext(context.Background())
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+	}
+
+	run("sa", "create", "alice")
+	run("sa", "create", "bob")
+
+	var out bytes.Buffer
+	rootCmd.SetArgs([]string{"iam", "--endpoint", sock, "sa", "list"})
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetContext(context.Background())
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("execute list: %v\noutput: %s", err, out.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "alice") {
+		t.Errorf("output missing 'alice':\n%s", s)
+	}
+	if !strings.Contains(s, "bob") {
+		t.Errorf("output missing 'bob':\n%s", s)
+	}
+	if createCount != 2 {
+		t.Errorf("expected 2 POST requests, got %d", createCount)
+	}
+}

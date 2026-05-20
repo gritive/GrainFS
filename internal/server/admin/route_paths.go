@@ -42,11 +42,33 @@ const (
 	routePathNfsDebug   = "/nfs/exports/:name/debug"
 	routePathNfsExport  = "/nfs/exports/:name"
 
+	routePathConfig      = "/config"
+	routePathConfigByKey = "/config/:key"
+
 	routePathIAMSA        = "/iam/sa"
 	routePathIAMSAByID    = "/iam/sa/:id"
 	routePathIAMSAKey     = "/iam/sa/:id/key"
 	routePathIAMSAKeyByAK = "/iam/sa/:id/key/:ak"
-	routePathIAMGrant     = "/iam/grant"
+
+	routePathIAMPolicy         = "/iam/policy"
+	routePathIAMPolicySimulate = "/iam/policy/simulate"
+	routePathIAMPolicyByName   = "/iam/policy/:name"
+	routePathIAMPolicyAttachSA = "/iam/policy/:name/attach/sa/:said"
+
+	// Group routes: member and policy sub-paths listed before bare :name to
+	// ensure more-specific routes are registered first.
+	routePathIAMGroupByName       = "/iam/group/:name"
+	routePathIAMGroupMember       = "/iam/group/:name/member/:said"
+	routePathIAMGroupPolicyAttach = "/iam/group/:name/policy/:policy"
+
+	routePathAuditQuery        = "/audit/query"
+	routePathAuditRecentDenies = "/audit/recent-denies"
+	routePathAuditBySA         = "/audit/by-sa/:said"
+	routePathAuditByRequestID  = "/audit/by-request-id/:rid"
+
+	routePathIcebergConfig = "/iceberg/config"
+
+	routePathStatus = "/status"
 
 	routePathUpstreams        = "/upstreams"
 	routePathBucketUpstream   = "/buckets/:bucket/upstream"

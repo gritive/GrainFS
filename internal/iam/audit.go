@@ -6,6 +6,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
@@ -120,7 +121,7 @@ func (a *AuditLogger) emit(ctx context.Context, saID, bucket, key string, action
 		return
 	}
 	if saID == "" {
-		saID = "(anonymous)"
+		saID = audit.AnonSAID
 	}
 	ev := AuditEvent{
 		Timestamp:        time.Now().UTC(),

@@ -35,12 +35,12 @@ import (
 	"math/rand"
 	"os"
 	"sync"
-	"testing"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 // chaosCluster is a 3-voter cluster for the chaos test. Unlike propertyCluster,
@@ -61,13 +61,15 @@ type chaosCluster struct {
 }
 
 // newChaosCluster builds a fresh 3-voter cluster backed by BadgerDB stores.
-func newChaosCluster(t *testing.T) *chaosCluster {
-	t.Helper()
-
+func newChaosCluster() (*chaosCluster, error) {
 	ids := [3]string{"a", "b", "c"}
 	var dirs [3]string
 	for i := range dirs {
-		dirs[i] = t.TempDir()
+		dir, err := os.MkdirTemp("", "raft-chaos-*")
+		if err != nil {
+			return nil, err
+		}
+		dirs[i] = dir
 	}
 
 	net := newPartitionNet()
@@ -83,7 +85,10 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 	}
 
 	for i, id := range ids {
-		n, db := cc.openNode(t, i, id)
+		n, db, err := cc.openNode(i, id)
+		if err != nil {
+			return nil, err
+		}
 		cc.nodes[i] = n
 		cc.dbs[i] = db
 	}
@@ -97,20 +102,27 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 		cc.drainNode(i)
 	}
 
-	return cc
+	return cc, nil
 }
 
 // openNode creates a Node backed by BadgerDB at cc.dirs[idx]. Returns the Node
 // and the open *badger.DB (caller must store db; it will be closed on kill/stop).
-func (cc *chaosCluster) openNode(t *testing.T, idx int, id string) (*Node, *badger.DB) {
-	t.Helper()
+func (cc *chaosCluster) openNode(idx int, id string) (*Node, *badger.DB, error) {
 	db, err := badger.Open(badgerutil.RaftLogOptions(cc.dirs[idx], false))
-	require.NoError(t, err)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	logStore, err := newBadgerLogStore(db, []byte("raft/v2/log/"))
-	require.NoError(t, err)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
 	stable, err := newBadgerStableStore(db, []byte("raft/v2/hardstate/"))
-	require.NoError(t, err)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
 
 	peers := make([]string, 0, 2)
 	for _, p := range cc.ids {
@@ -130,8 +142,11 @@ func (cc *chaosCluster) openNode(t *testing.T, idx int, id string) (*Node, *badg
 		LogStore:         logStore,
 		StableStore:      stable,
 	})
-	require.NoError(t, err)
-	return n, db
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return n, db, nil
 }
 
 // drainNode starts a background goroutine that forwards applyCh entries for
@@ -166,8 +181,7 @@ func (cc *chaosCluster) drainNode(idx int) {
 
 // Stop shuts down all live nodes, waits for drain goroutines, closes ObsCh,
 // and closes all open Badger DBs.
-func (cc *chaosCluster) Stop(t *testing.T) {
-	t.Helper()
+func (cc *chaosCluster) Stop() {
 	close(cc.stopCh)
 
 	cc.mu.Lock()
@@ -218,14 +232,13 @@ func (cc *chaosCluster) waitForLeader(timeout time.Duration) *Node {
 
 // KillNode stops node idx if it is alive, closes its BadgerDB, and marks it dead.
 // The node must not be the current leader (use StepDownLeader first or call on a follower).
-func (cc *chaosCluster) KillNode(t *testing.T, idx int) {
-	t.Helper()
+func (cc *chaosCluster) KillNode(idx int) error {
 	cc.mu.Lock()
 	n := cc.nodes[idx]
 	db := cc.dbs[idx]
 	if n == nil {
 		cc.mu.Unlock()
-		return // already dead
+		return nil
 	}
 	cc.nodes[idx] = nil
 	cc.dbs[idx] = nil
@@ -233,24 +246,27 @@ func (cc *chaosCluster) KillNode(t *testing.T, idx int) {
 
 	n.Stop()
 	if db != nil {
-		require.NoError(t, db.Close())
+		return db.Close()
 	}
+	return nil
 }
 
 // StartNode restarts node idx from its persistent BadgerDB directory.
 // The node must be dead (previously KillNode'd). After restart the node is
 // live and registered in the network, and a new drain goroutine is started.
-func (cc *chaosCluster) StartNode(t *testing.T, idx int) {
-	t.Helper()
+func (cc *chaosCluster) StartNode(idx int) error {
 	cc.mu.Lock()
 	if cc.nodes[idx] != nil {
 		cc.mu.Unlock()
-		return // already live
+		return nil
 	}
 	cc.mu.Unlock()
 
 	id := cc.ids[idx]
-	n, db := cc.openNode(t, idx, id)
+	n, db, err := cc.openNode(idx, id)
+	if err != nil {
+		return err
+	}
 	// Re-register in the net so existing nodes can route RPCs to this node.
 	n.SetTransport(cc.Net.Register(id, n))
 	n.Start()
@@ -261,6 +277,7 @@ func (cc *chaosCluster) StartNode(t *testing.T, idx int) {
 	cc.mu.Unlock()
 
 	cc.drainNode(idx)
+	return nil
 }
 
 // liveFollowers returns indices of live nodes that are not the current leader.
@@ -437,170 +454,154 @@ func parseDuration(envKey string, defaultDur time.Duration) time.Duration {
 	return d
 }
 
-// TestChaos_Sustained runs a duration-bounded imperative chaos loop against a
-// 3-voter cluster. Duration is controlled by RAFT_CHAOS_DURATION (default 10s).
-// All six Raft invariants are asserted after each action.
-//
-// Per-PR CI: default 10s smoke run (runs as part of go test ./internal/raft/v2/).
-// Nightly: RAFT_CHAOS_DURATION=30m make test-raft-v2-chaos.
-func TestChaos_Sustained(t *testing.T) {
-	duration := parseDuration("RAFT_CHAOS_DURATION", 10*time.Second)
+var _ = ginkgo.Describe("Chaos scenarios", func() {
+	var cc *chaosCluster
 
-	cc := newChaosCluster(t)
-	t.Cleanup(func() { cc.Stop(t) })
+	ginkgo.BeforeEach(func() {
+		var err error
+		cc, err = newChaosCluster()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(func() {
+			cc.Stop()
+			for _, dir := range cc.dirs {
+				_ = os.RemoveAll(dir)
+			}
+		})
+	})
 
-	// Seed from env for reproducibility; default seed produces a fixed sequence.
-	var seed int64 = 1234
-	if s := os.Getenv("RAFT_CHAOS_SEED"); s != "" {
-		if _, err := fmt.Sscanf(s, "%d", &seed); err != nil {
-			seed = 1234
+	ginkgo.It("sustains random faults without violating raft invariants", func(ginkgo.SpecContext) {
+		duration := parseDuration("RAFT_CHAOS_DURATION", 10*time.Second)
+
+		var seed int64 = 1234
+		if s := os.Getenv("RAFT_CHAOS_SEED"); s != "" {
+			if _, err := fmt.Sscanf(s, "%d", &seed); err != nil {
+				seed = 1234
+			}
 		}
-	}
-	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // test code
+		rng := rand.New(rand.NewSource(seed)) //nolint:gosec // test code
 
-	// Wait for initial leader before starting chaos.
-	require.NotNil(t, cc.waitForLeader(3*time.Second), "cluster must elect a leader before chaos begins")
+		gomega.Expect(cc.waitForLeader(3*time.Second)).NotTo(gomega.BeNil(), "cluster must elect a leader before chaos begins")
 
-	obs := newChaosObs()
-	var history []chaosActionRecord
+		obs := newChaosObs()
+		var history []chaosActionRecord
 
-	// 8 actions: Propose, StepDown, Partition, Heal, SetDropRate, SetReorderDelay,
-	// KillFollower, RestartKilled.
-	type actionFn func() chaosActionRecord
-
-	actions := []actionFn{
-		// 1. Propose
-		func() chaosActionRecord {
-			leader := cc.leader()
-			ar := chaosActionRecord{kind: chaosPropose, leaderExisted: leader != nil}
-			if leader != nil {
-				obs.proposeCounter++
-				cmd := []byte(fmt.Sprintf("chaos-cmd-%d", obs.proposeCounter))
-				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				defer cancel()
-				if idx, err := leader.ProposeWait(ctx, cmd); err == nil {
-					ar.proposed = &proposedEntry{index: idx}
+		type actionFn func() chaosActionRecord
+		actions := []actionFn{
+			func() chaosActionRecord {
+				leader := cc.leader()
+				record := chaosActionRecord{kind: chaosPropose, leaderExisted: leader != nil}
+				if leader != nil {
+					obs.proposeCounter++
+					cmd := []byte(fmt.Sprintf("chaos-cmd-%d", obs.proposeCounter))
+					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					defer cancel()
+					if idx, err := leader.ProposeWait(ctx, cmd); err == nil {
+						record.proposed = &proposedEntry{index: idx}
+					}
 				}
-			}
-			return ar
-		},
-		// 2. StepDownLeader
-		func() chaosActionRecord {
-			leader := cc.leader()
-			ar := chaosActionRecord{kind: chaosStepDown, leaderExisted: leader != nil}
-			if leader != nil {
-				higherTerm := leader.Term() + 10
-				leader.HandleRequestVote(&RequestVoteArgs{
-					Term:         higherTerm,
-					CandidateID:  "chaos-intruder",
-					LastLogIndex: leader.CommittedIndex(),
-					LastLogTerm:  higherTerm,
-				})
-			}
-			return ar
-		},
-		// 3. Partition (isolate one node)
-		func() chaosActionRecord {
-			ar := chaosActionRecord{kind: chaosPartition, leaderExisted: cc.leader() != nil}
-			cc.mu.Lock()
-			idx := rng.Intn(3)
-			id := cc.ids[idx]
-			cc.mu.Unlock()
-			cc.Net.Partition(id)
-			return ar
-		},
-		// 4. Heal all partitions + reset drop/reorder
-		func() chaosActionRecord {
-			ar := chaosActionRecord{kind: chaosHeal, leaderExisted: cc.leader() != nil}
-			cc.Net.Heal()
-			cc.Net.SetDropRate(0)
-			cc.Net.SetReorderDelay(0)
-			return ar
-		},
-		// 5. SetDropRate (0–30%)
-		func() chaosActionRecord {
-			rate := rng.Float64() * 0.30
-			cc.Net.SetDropRate(rate)
-			return chaosActionRecord{kind: chaosSetDropRate, leaderExisted: cc.leader() != nil}
-		},
-		// 6. SetReorderDelay (0–20ms)
-		func() chaosActionRecord {
-			ms := time.Duration(rng.Intn(20)) * time.Millisecond
-			cc.Net.SetReorderDelay(ms)
-			return chaosActionRecord{kind: chaosSetReorderDelay, leaderExisted: cc.leader() != nil}
-		},
-		// 7. KillFollower (pick a live non-leader node)
-		func() chaosActionRecord {
-			ar := chaosActionRecord{kind: chaosKillFollower, leaderExisted: cc.leader() != nil}
-			followers := cc.liveFollowers()
-			if len(followers) == 0 {
-				return ar // no follower to kill
-			}
-			pick := followers[rng.Intn(len(followers))]
-			cc.KillNode(t, pick)
-			return ar
-		},
-		// 8. RestartKilled (restart a dead node)
-		func() chaosActionRecord {
-			ar := chaosActionRecord{kind: chaosRestartKilled, leaderExisted: cc.leader() != nil}
-			dead := cc.deadNodes()
-			if len(dead) == 0 {
-				return ar // no dead node
-			}
-			pick := dead[rng.Intn(len(dead))]
-			// Drain ObsCh and reset the node's observation history before
-			// restart. After restart the node replays its log from index 1
-			// through applyCh; keeping old high-index entries in nodeApplied
-			// would cause false-positive monotonicity violations.
-			obs.drain(cc.ObsCh)
-			obs.resetNodeHistory(cc.ids[pick])
-			cc.StartNode(t, pick)
-			// Give the restarted node a moment to reconnect to the cluster.
-			time.Sleep(20 * time.Millisecond)
-			return ar
-		},
-		// 9. TransferLeader — ask the current leader to step down gracefully
-		func() chaosActionRecord {
-			ar := chaosActionRecord{kind: chaosTransferLeader, leaderExisted: cc.leader() != nil}
-			leader := cc.leader()
-			if leader == nil {
-				return ar
-			}
-			// Errors are intentionally ignored: ErrNoPeers is valid for a
-			// cluster that is momentarily partitioned to a single voter.
-			leader.TransferLeadership() //nolint:errcheck
-			return ar
-		},
-	}
-
-	deadline := time.Now().Add(duration)
-	actionCount := 0
-	actionCounts := make(map[chaosActionKind]int)
-	for time.Now().Before(deadline) {
-		fn := actions[rng.Intn(len(actions))]
-		ar := fn()
-		history = append(history, ar)
-		actionCount++
-		actionCounts[ar.kind]++
-
-		if err := obs.checkAll(cc, history); err != nil {
-			t.Fatalf("invariant violation after %d chaos actions: %v", actionCount, err)
+				return record
+			},
+			func() chaosActionRecord {
+				leader := cc.leader()
+				record := chaosActionRecord{kind: chaosStepDown, leaderExisted: leader != nil}
+				if leader != nil {
+					higherTerm := leader.Term() + 10
+					leader.HandleRequestVote(&RequestVoteArgs{
+						Term:         higherTerm,
+						CandidateID:  "chaos-intruder",
+						LastLogIndex: leader.CommittedIndex(),
+						LastLogTerm:  higherTerm,
+					})
+				}
+				return record
+			},
+			func() chaosActionRecord {
+				record := chaosActionRecord{kind: chaosPartition, leaderExisted: cc.leader() != nil}
+				cc.mu.Lock()
+				idx := rng.Intn(3)
+				id := cc.ids[idx]
+				cc.mu.Unlock()
+				cc.Net.Partition(id)
+				return record
+			},
+			func() chaosActionRecord {
+				record := chaosActionRecord{kind: chaosHeal, leaderExisted: cc.leader() != nil}
+				cc.Net.Heal()
+				cc.Net.SetDropRate(0)
+				cc.Net.SetReorderDelay(0)
+				return record
+			},
+			func() chaosActionRecord {
+				rate := rng.Float64() * 0.30
+				cc.Net.SetDropRate(rate)
+				return chaosActionRecord{kind: chaosSetDropRate, leaderExisted: cc.leader() != nil}
+			},
+			func() chaosActionRecord {
+				delay := time.Duration(rng.Intn(20)) * time.Millisecond
+				cc.Net.SetReorderDelay(delay)
+				return chaosActionRecord{kind: chaosSetReorderDelay, leaderExisted: cc.leader() != nil}
+			},
+			func() chaosActionRecord {
+				record := chaosActionRecord{kind: chaosKillFollower, leaderExisted: cc.leader() != nil}
+				followers := cc.liveFollowers()
+				if len(followers) == 0 {
+					return record
+				}
+				pick := followers[rng.Intn(len(followers))]
+				gomega.Expect(cc.KillNode(pick)).To(gomega.Succeed())
+				return record
+			},
+			func() chaosActionRecord {
+				record := chaosActionRecord{kind: chaosRestartKilled, leaderExisted: cc.leader() != nil}
+				dead := cc.deadNodes()
+				if len(dead) == 0 {
+					return record
+				}
+				pick := dead[rng.Intn(len(dead))]
+				obs.drain(cc.ObsCh)
+				obs.resetNodeHistory(cc.ids[pick])
+				gomega.Expect(cc.StartNode(pick)).To(gomega.Succeed())
+				time.Sleep(20 * time.Millisecond)
+				return record
+			},
+			func() chaosActionRecord {
+				record := chaosActionRecord{kind: chaosTransferLeader, leaderExisted: cc.leader() != nil}
+				leader := cc.leader()
+				if leader == nil {
+					return record
+				}
+				leader.TransferLeadership() //nolint:errcheck
+				return record
+			},
 		}
-	}
 
-	kindNames := map[chaosActionKind]string{
-		chaosPropose:         "Propose",
-		chaosStepDown:        "StepDown",
-		chaosPartition:       "Partition",
-		chaosHeal:            "Heal",
-		chaosSetDropRate:     "SetDropRate",
-		chaosSetReorderDelay: "SetReorderDelay",
-		chaosKillFollower:    "KillFollower",
-		chaosRestartKilled:   "RestartKilled",
-		chaosTransferLeader:  "TransferLeader",
-	}
-	t.Logf("TestChaos_Sustained: %d actions in %s", actionCount, duration)
-	for k, name := range kindNames {
-		t.Logf("  %-20s %d", name, actionCounts[k])
-	}
-}
+		deadline := time.Now().Add(duration)
+		actionCount := 0
+		actionCounts := make(map[chaosActionKind]int)
+		for time.Now().Before(deadline) {
+			action := actions[rng.Intn(len(actions))]
+			record := action()
+			history = append(history, record)
+			actionCount++
+			actionCounts[record.kind]++
+
+			gomega.Expect(obs.checkAll(cc, history)).To(gomega.Succeed(), "invariant violation after %d chaos actions", actionCount)
+		}
+
+		kindNames := map[chaosActionKind]string{
+			chaosPropose:         "Propose",
+			chaosStepDown:        "StepDown",
+			chaosPartition:       "Partition",
+			chaosHeal:            "Heal",
+			chaosSetDropRate:     "SetDropRate",
+			chaosSetReorderDelay: "SetReorderDelay",
+			chaosKillFollower:    "KillFollower",
+			chaosRestartKilled:   "RestartKilled",
+			chaosTransferLeader:  "TransferLeader",
+		}
+		fmt.Fprintf(ginkgo.GinkgoWriter, "Chaos: %d actions in %s\n", actionCount, duration)
+		for kind, name := range kindNames {
+			fmt.Fprintf(ginkgo.GinkgoWriter, "  %-20s %d\n", name, actionCounts[kind])
+		}
+	}, ginkgo.NodeTimeout(parseDuration("RAFT_CHAOS_DURATION", 10*time.Second)+5*time.Second))
+})

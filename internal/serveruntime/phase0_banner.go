@@ -27,14 +27,21 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 )
 
-// composeAnonHookWithBanner returns a new OnAnonEnabledChange hook that runs
-// the supplied inner hook (typically the TLS posture check from
-// wireTLSPostureHooks) and, on a successful true→false transition, emits the
-// "s3://default remains public" INFO banner exactly once per transition.
+// composeAnonHookWithBanner returns a new OnAnonEnabledChange hook and a
+// seedPrev function. The hook runs the supplied inner hook (typically the TLS
+// posture check from wireTLSPostureHooks) and, on a successful true→false
+// transition, emits the "s3://default remains public" INFO banner exactly once
+// per transition.
 //
 // initialAnon must be the value of iam.anon-enabled in the cfgStore at wire
-// time. It seeds the atomic snapshot so the first hook firing has a correct
-// previous value to compare against.
+// time. It seeds the atomic prev snapshot so the first hook firing has a
+// correct previous value to compare against.
+//
+// seedPrev re-seeds the internal prev snapshot after a raft Restore: because
+// Restore does not fire reload hooks, a subsequent legitimate Set would compare
+// against the stale wire-time seed rather than the restored value. Call
+// seedPrev with the restored iam.anon-enabled value from the post-restore
+// callback (F26).
 //
 // w is the destination for the INFO banner (os.Stdout in production, a buffer
 // in tests). A nil writer disables the banner emission but the wrapper still
@@ -44,10 +51,10 @@ func composeAnonHookWithBanner(
 	inner func(context.Context, bool) error,
 	initialAnon bool,
 	w io.Writer,
-) func(context.Context, bool) error {
+) (hook func(context.Context, bool) error, seedPrev func(v bool)) {
 	var prev atomic.Bool
 	prev.Store(initialAnon)
-	return func(ctx context.Context, newAnon bool) error {
+	hook = func(ctx context.Context, newAnon bool) error {
 		if inner != nil {
 			if err := inner(ctx, newAnon); err != nil {
 				// Posture check rejected — Set will roll back; keep snapshot
@@ -61,6 +68,8 @@ func composeAnonHookWithBanner(
 		}
 		return nil
 	}
+	seedPrev = func(v bool) { prev.Store(v) }
+	return hook, seedPrev
 }
 
 // bootPhase0Banner emits the Phase 0 anonymous-access startup banner to

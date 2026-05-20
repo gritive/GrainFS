@@ -26,7 +26,7 @@ func statusForCode(c string) int {
 		return consts.StatusUnauthorized
 	case "forbidden":
 		return consts.StatusForbidden
-	case "retry":
+	case "retry", "unavailable":
 		return consts.StatusServiceUnavailable
 	case "export_propagation_timeout":
 		return consts.StatusGatewayTimeout

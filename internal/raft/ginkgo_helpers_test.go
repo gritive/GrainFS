@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -113,6 +115,82 @@ func startGinkgoNode(n *Node) {
 	DeferCleanup(n.Stop)
 	go func() {
 		for range n.ApplyCh() {
+		}
+	}()
+}
+
+func startPromoteRaceCluster(ids []string) (*membershipFixture, func(), error) {
+	if len(ids) == 0 {
+		return nil, nil, errors.New("startPromoteRaceCluster: ids must not be empty")
+	}
+
+	fix := &membershipFixture{net: newMemNetwork()}
+	for i, id := range ids {
+		peers := make([]string, 0, len(ids)-1)
+		for _, peer := range ids {
+			if peer != id {
+				peers = append(peers, peer)
+			}
+		}
+
+		electionTimeout := slowElectionTimeout
+		if i == 0 {
+			electionTimeout = fastElectionTimeout
+		}
+		node, err := NewNode(Config{
+			ID:               id,
+			Peers:            peers,
+			ElectionTimeout:  electionTimeout,
+			HeartbeatTimeout: testHeartbeat,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("NewNode %s: %w", id, err)
+		}
+		fix.nodes = append(fix.nodes, node)
+	}
+
+	for _, node := range fix.nodes {
+		node.SetTransport(fix.net.Register(node.cfg.ID, node))
+	}
+	for _, node := range fix.nodes {
+		startPromoteRaceNode(fix, node)
+	}
+
+	cleanup := func() {
+		for i := len(fix.nodes) - 1; i >= 0; i-- {
+			fix.nodes[i].Stop()
+		}
+		fix.wg.Wait()
+	}
+	return fix, cleanup, nil
+}
+
+func addPromoteRaceNode(fix *membershipFixture, id string, seedPeers []string, electionTimeout time.Duration) (*Node, error) {
+	if electionTimeout == 0 {
+		electionTimeout = slowElectionTimeout
+	}
+	node, err := NewNode(Config{
+		ID:               id,
+		Peers:            seedPeers,
+		ElectionTimeout:  electionTimeout,
+		HeartbeatTimeout: testHeartbeat,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("NewNode %s: %w", id, err)
+	}
+
+	node.SetTransport(fix.net.Register(id, node))
+	fix.nodes = append(fix.nodes, node)
+	startPromoteRaceNode(fix, node)
+	return node, nil
+}
+
+func startPromoteRaceNode(fix *membershipFixture, node *Node) {
+	node.Start()
+	fix.wg.Add(1)
+	go func() {
+		defer fix.wg.Done()
+		for range node.ApplyCh() {
 		}
 	}()
 }

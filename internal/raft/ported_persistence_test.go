@@ -13,102 +13,77 @@ package raft
 // stopped-node behaviour"). These tests provide explicit regression coverage.
 
 import (
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-// TestNode_RequestVoteAfterStopDoesNotPanic verifies that HandleRequestVote
-// called after Stop returns a zero-value reply without panicking. The actor
-// may have already flushed its cmdCh, so the call must not block or attempt
-// to write to a closed store.
-func TestNode_RequestVoteAfterStopDoesNotPanic(t *testing.T) {
-	n, err := NewNode(Config{ID: "A", Peers: []string{"B"}})
-	require.NoError(t, err)
-	n.Start()
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
+var _ = ginkgo.Describe("Stopped-node RPC safety", func() {
+	var node *Node
 
-	n.Stop()
-
-	require.NotPanics(t, func() {
-		reply := n.HandleRequestVote(&RequestVoteArgs{
-			Term:        2,
-			CandidateID: "B",
-		})
-		require.NotNil(t, reply)
-		require.False(t, reply.VoteGranted)
+	ginkgo.BeforeEach(func() {
+		var err error
+		node, err = NewNode(Config{ID: "A", Peers: []string{"B"}})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		node.Start()
+		go func(node *Node) {
+			for range node.ApplyCh() {
+			}
+		}(node)
+		node.Stop()
 	})
-}
 
-// TestNode_AppendEntriesAfterStopDoesNotPanic verifies that HandleAppendEntries
-// called after Stop returns a reply without panicking or blocking.
-func TestNode_AppendEntriesAfterStopDoesNotPanic(t *testing.T) {
-	n, err := NewNode(Config{ID: "A", Peers: []string{"B"}})
-	require.NoError(t, err)
-	n.Start()
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
-
-	n.Stop()
-
-	require.NotPanics(t, func() {
-		reply := n.HandleAppendEntries(&AppendEntriesArgs{
-			Term:     2,
-			LeaderID: "B",
-		})
-		require.NotNil(t, reply)
-		require.False(t, reply.Success)
+	ginkgo.It("returns a RequestVote reply after Stop without panicking", func() {
+		gomega.Expect(func() {
+			reply := node.HandleRequestVote(&RequestVoteArgs{
+				Term:        2,
+				CandidateID: "B",
+			})
+			gomega.Expect(reply).NotTo(gomega.BeNil())
+			gomega.Expect(reply.VoteGranted).To(gomega.BeFalse())
+		}).NotTo(gomega.Panic())
 	})
-}
 
-// TestNode_InstallSnapshotAfterStopDoesNotPanic verifies that
-// HandleInstallSnapshot called after Stop returns a reply without panicking.
-func TestNode_InstallSnapshotAfterStopDoesNotPanic(t *testing.T) {
-	n, err := NewNode(Config{ID: "A", Peers: []string{"B"}})
-	require.NoError(t, err)
-	n.Start()
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
-
-	n.Stop()
-
-	require.NotPanics(t, func() {
-		reply := n.HandleInstallSnapshot(&InstallSnapshotArgs{
-			Term:              2,
-			LeaderID:          "B",
-			LastIncludedIndex: 10,
-			LastIncludedTerm:  2,
-			Data:              []byte("snapshot"),
-			Configuration:     []string{"A"},
-		})
-		require.NotNil(t, reply)
+	ginkgo.It("returns an AppendEntries reply after Stop without panicking", func() {
+		gomega.Expect(func() {
+			reply := node.HandleAppendEntries(&AppendEntriesArgs{
+				Term:     2,
+				LeaderID: "B",
+			})
+			gomega.Expect(reply).NotTo(gomega.BeNil())
+			gomega.Expect(reply.Success).To(gomega.BeFalse())
+		}).NotTo(gomega.Panic())
 	})
-}
 
-// TestNode_StopIsIdempotent verifies that calling Stop multiple times is safe.
-func TestNode_StopIsIdempotent(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1"})
-	require.NoError(t, err)
-	n.Start()
-
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
-
-	require.NoError(t, waitFor(time.Second, func() bool { return n.IsLeader() }))
-
-	require.NotPanics(t, func() {
-		n.Stop()
-		n.Stop()
-		n.Stop()
+	ginkgo.It("returns an InstallSnapshot reply after Stop without panicking", func() {
+		gomega.Expect(func() {
+			reply := node.HandleInstallSnapshot(&InstallSnapshotArgs{
+				Term:              2,
+				LeaderID:          "B",
+				LastIncludedIndex: 10,
+				LastIncludedTerm:  2,
+				Data:              []byte("snapshot"),
+				Configuration:     []string{"A"},
+			})
+			gomega.Expect(reply).NotTo(gomega.BeNil())
+		}).NotTo(gomega.Panic())
 	})
-}
+
+	ginkgo.It("allows Stop to be called multiple times", func() {
+		node, err := NewNode(Config{ID: "n1"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		node.Start()
+		go func() {
+			for range node.ApplyCh() {
+			}
+		}()
+
+		gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
+		gomega.Expect(func() {
+			node.Stop()
+			node.Stop()
+			node.Stop()
+		}).NotTo(gomega.Panic())
+	})
+})

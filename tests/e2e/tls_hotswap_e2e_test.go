@@ -64,6 +64,7 @@ func runTLSHotSwapCase(t *testing.T) {
 		"GRAINFS_TLS_CERT="+certPath,
 		"GRAINFS_TLS_KEY="+keyPath,
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())

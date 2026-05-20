@@ -68,6 +68,22 @@ func TestRenderPeersTable(t *testing.T) {
 	assert.Contains(t, out, "down")
 }
 
+func TestRotateKeyPhaseLabel(t *testing.T) {
+	cases := []struct {
+		phase int
+		want  string
+	}{
+		{1, "steady"},
+		{2, "begun"},
+		{3, "switched"},
+		{0, "unknown"},
+		{99, "unknown"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, RotateKeyPhaseLabel(tc.phase), "phase=%d", tc.phase)
+	}
+}
+
 func TestFilterEventsByAction(t *testing.T) {
 	events := []Event{
 		{Action: "cluster-join"},

@@ -1,0 +1,13 @@
+Reset one or more keys to defaults
+
+Usage:
+  grainfs cluster config reset <key> [<key> ...] [flags]
+
+Flags:
+  -h, --help                help for reset
+      --if-match-rev uint   optimistic-concurrency: require this rev or fail with 409
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --format string      Output format: text or json (status/peers/events; ignored elsewhere) (default "text")
+      --log-level string   log level: debug, info, warn, error (default "info")

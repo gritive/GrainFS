@@ -16,6 +16,11 @@ import (
 	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
+// HeaderIfMatchRev is the optimistic-concurrency request header carrying the
+// expected cluster-config rev. Centralised here so client + handler + tests
+// agree on the exact spelling; a typo on one side would silently disable OCC.
+const HeaderIfMatchRev = "If-Match-Rev"
+
 // Client speaks to a single grainfs server's admin endpoints. Transport
 // plumbing (UDS/HTTP dispatch, JSON marshal, error envelope) lives in
 // adminapi; this type only wires endpoint methods.
@@ -132,4 +137,71 @@ func (c *Client) BalancerStatus(ctx context.Context) (*BalancerStatus, error) {
 		return nil, err
 	}
 	return &b, nil
+}
+
+// ClusterConfigGet fetches GET /v1/cluster/config. The returned response
+// carries the effective-key map + per-key source ("default" | "explicit")
+// used by the `grainfs cluster config show/get/diff` subcommands.
+func (c *Client) ClusterConfigGet(ctx context.Context) (*ClusterConfigResponse, error) {
+	var out ClusterConfigResponse
+	if err := c.Get(ctx, "/v1/cluster/config", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClusterConfigPatchRawResponse is the raw-body return shape for
+// ClusterConfigPatchRaw. Raw is the server's response body verbatim so
+// callers (e.g. the CLI) can print future server-side fields without this
+// package needing a typed bump. Rev is the parsed `rev` field for callers
+// that just want the new revision.
+type ClusterConfigPatchRawResponse struct {
+	Rev uint64
+	Raw []byte
+}
+
+// ClusterConfigPatch applies a strongly-typed patch. Prefer this for
+// in-process Go callers. For callers that build the body as a free-form map
+// (e.g. the CLI parsing `key=value` strings), use ClusterConfigPatchRaw.
+//
+// expectedRev != 0 sets the If-Match-Rev header for optimistic concurrency.
+// Returns the new rev as reported by the server response body.
+func (c *Client) ClusterConfigPatch(ctx context.Context, req ClusterConfigPatchRequest, expectedRev uint64) (uint64, error) {
+	var resp struct {
+		Rev uint64 `json:"rev"`
+	}
+	headers := ifMatchRevHeaders(expectedRev)
+	if err := c.PatchWithHeaders(ctx, "/v1/cluster/config", headers, req, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Rev, nil
+}
+
+// ClusterConfigPatchRaw is the free-form variant for callers that build the
+// body as a map (the CLI parses `<kebab-key>=<json-value>` pairs into a map
+// to avoid kebab→field-name reflection). The map keys must match the kebab
+// JSON tags of ClusterConfigPatchRequest; the server unmarshal accepts both.
+//
+// Returns the server response body verbatim (Raw) plus the parsed Rev so
+// CLI callers can pass new server-side fields through without a typed bump.
+func (c *Client) ClusterConfigPatchRaw(ctx context.Context, body map[string]any, expectedRev uint64) (*ClusterConfigPatchRawResponse, error) {
+	headers := ifMatchRevHeaders(expectedRev)
+	raw, err := c.PatchRawWithHeaders(ctx, "/v1/cluster/config", headers, body)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Rev uint64 `json:"rev"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("parse patch response: %w", err)
+	}
+	return &ClusterConfigPatchRawResponse{Rev: parsed.Rev, Raw: raw}, nil
+}
+
+func ifMatchRevHeaders(expectedRev uint64) map[string]string {
+	if expectedRev == 0 {
+		return nil
+	}
+	return map[string]string{HeaderIfMatchRev: strconv.FormatUint(expectedRev, 10)}
 }

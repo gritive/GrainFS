@@ -1,6 +1,7 @@
 package clusteradmin
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -105,4 +106,90 @@ func EventDetail(e Event) string {
 		parts = append(parts, "key="+e.Key)
 	}
 	return strings.Join(parts, " ")
+}
+
+// RenderClusterConfigShow prints the REV header + a KEY/EFFECTIVE/SOURCE
+// tabwriter table. With asJSON, emits the raw response verbatim.
+func RenderClusterConfigShow(w io.Writer, resp *ClusterConfigResponse, asJSON bool) error {
+	if asJSON {
+		return json.NewEncoder(w).Encode(resp)
+	}
+	fmt.Fprintf(w, "REV: %d\n\n", resp.Rev)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "KEY\tEFFECTIVE\tSOURCE")
+	keys := make([]string, 0, len(resp.Source))
+	for k := range resp.Source {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(tw, "%s\t%v\t%s\n", k, resp.Effective[k], resp.Source[k])
+	}
+	return tw.Flush()
+}
+
+// RenderClusterConfigGet prints "<key> = <value>  (<source>)" or the JSON
+// envelope used by `cluster config get --json`.
+func RenderClusterConfigGet(w io.Writer, resp *ClusterConfigResponse, key string, asJSON bool) error {
+	if asJSON {
+		return json.NewEncoder(w).Encode(map[string]any{
+			"key":    key,
+			"value":  resp.Effective[key],
+			"source": resp.Source[key],
+		})
+	}
+	fmt.Fprintf(w, "%s = %v  (%s)\n", key, resp.Effective[key], resp.Source[key])
+	return nil
+}
+
+// RenderClusterConfigDiff prints only rows whose source == "explicit".
+func RenderClusterConfigDiff(w io.Writer, resp *ClusterConfigResponse) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "KEY\tVALUE")
+	keys := make([]string, 0)
+	for k, src := range resp.Source {
+		if src == "explicit" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(tw, "%s\t%v\n", k, resp.Effective[k])
+	}
+	return tw.Flush()
+}
+
+// RotateKeyPhaseLabel maps a rotate-key Phase integer to its human label.
+// 1=steady, 2=begun, 3=switched; anything else is rendered as "unknown".
+func RotateKeyPhaseLabel(p int) string {
+	switch p {
+	case 1:
+		return "steady"
+	case 2:
+		return "begun"
+	case 3:
+		return "switched"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseClusterConfigKVs turns ["k=v",...] into a map. Values parse as JSON
+// literals first (so 30, true, "x" work); non-JSON values like https://…
+// URLs fall back to a plain string.
+// Duplicate keys: last occurrence wins.
+func ParseClusterConfigKVs(kvs []string) (map[string]any, error) {
+	out := map[string]any{}
+	for _, kv := range kvs {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid <key>=<value>: %q", kv)
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(v), &parsed); err != nil {
+			parsed = v
+		}
+		out[k] = parsed
+	}
+	return out, nil
 }

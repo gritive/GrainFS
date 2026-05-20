@@ -29,7 +29,6 @@ func TestIAMHelp_Golden(t *testing.T) {
 				"--json",
 				"sa",
 				"key",
-				"grant",
 			},
 		},
 		{
@@ -70,21 +69,6 @@ func TestIAMHelp_Golden(t *testing.T) {
 			args: []string{"iam", "key", "revoke", "--help"},
 			must: []string{"Revoke an AccessKey"},
 		},
-		{
-			name: "iam grant put",
-			args: []string{"iam", "grant", "put", "--help"},
-			must: []string{"Grant role on bucket", "Read|Write|Admin"},
-		},
-		{
-			name: "iam grant delete",
-			args: []string{"iam", "grant", "delete", "--help"},
-			must: []string{"Remove grant"},
-		},
-		{
-			name: "iam grant list",
-			args: []string{"iam", "grant", "list", "--help"},
-			must: []string{"List grants", "--sa", "--bucket"},
-		},
 	}
 	// Reset every singleton command's --help flag after the suite. cobra
 	// persists --help on the command it parsed; if left set, subsequent
@@ -102,10 +86,9 @@ func TestIAMHelp_Golden(t *testing.T) {
 		}
 		for _, c := range []*cobra.Command{
 			rootCmd,
-			iamCmd, iamSACmd, iamKeyCmd, iamGrantCmd,
+			iamCmd, iamSACmd, iamKeyCmd,
 			iamSACreateCmd, iamSAListCmd, iamSAGetCmd, iamSADeleteCmd,
 			iamKeyCreateCmd, iamKeyRevokeCmd,
-			iamGrantPutCmd, iamGrantDeleteCmd, iamGrantListCmd,
 		} {
 			resetHelpFlag(c)
 		}

@@ -61,11 +61,28 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}),
 		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
 		IAM:                  state.iamAdminAPI,
+		IcebergConfig:        newIcebergConfigAdapter(state.cfg.IAMStore),
+		IAMPolicy:            iamPolicyAdminService(state),
+		IAMGroup:             iamGroupAdminService(state),
 		BucketWithPolicyProp: state.iamProposer,
+		ConfigProposer:       state.metaRaft,
+		ConfigStore:          state.cfgStore,
 		Buckets:              storage.NewOperations(state.backend),
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		Protocols:            storageProtocolStatusFromConfig(cfg),
 	}
+	if state.auditSearcher != nil {
+		state.adminDeps.AuditQuery = state.auditSearcher
+	}
+	state.adminDeps.Status = NewStatusAdapter(
+		state.nodeID,
+		cfg.DataDir,
+		NewPeerHealthAdapter(state.distBackend),
+		state.iamAdminAPI,
+		state.dekKeeper,
+		state.metaRaft,
+		state.cfgStore,
+	)
 	dataHertz := srv.HertzEngine()
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
 	admin.RegisterUI(dataHertz, state.adminDeps)
@@ -119,6 +136,25 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		_ = adminSrv.Stop(stopCtx)
 	})
 	return nil
+}
+
+// iamPolicyAdminService returns a wired admin.IAMPolicyService if MetaRaft and
+// IAM policy stores are available; otherwise returns nil (disables the policy
+// admin endpoints).
+func iamPolicyAdminService(state *bootState) admin.IAMPolicyService {
+	if state.metaRaft == nil || state.iamPolicyStores == nil {
+		return nil
+	}
+	return NewIAMPolicyAdminAdapter(state.iamPolicyStores, state.metaRaft.Propose)
+}
+
+// iamGroupAdminService returns a wired admin.IAMGroupService if MetaRaft is
+// available; otherwise returns nil (disables group admin endpoints).
+func iamGroupAdminService(state *bootState) admin.IAMGroupService {
+	if state.metaRaft == nil {
+		return nil
+	}
+	return &iamGroupAdminAdapter{propose: state.metaRaft.Propose}
 }
 
 func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {

@@ -362,7 +362,7 @@ func grantAdminOnBucketViaUDSForTestMain(dataDir, saID, bucket string, timeout t
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		if err := tryIAMGrantPut(sock, saID, bucket, "Admin"); err != nil {
+		if err := tryPolicyAttachAdminOnBucket(sock, saID, bucket); err != nil {
 			lastErr = err
 			time.Sleep(50 * time.Millisecond)
 			continue
@@ -693,6 +693,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--lifecycle-interval", "0",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "start isolated server")
@@ -798,8 +799,26 @@ func terminateProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil {
 		return
 	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
+	pid := cmd.Process.Pid
+	// If Setpgid was set, pid == pgid; killing the negative pid kills the
+	// entire process group (the grainfs leader and any children it spawned).
+	// Falls back to a plain Kill if syscall.Kill returns ESRCH.
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return
+	}
+	// Give it ~500ms to exit cleanly, then escalate. The goroutine is the sole
+	// owner of Process.Wait on this path — waitpid is not safe for concurrent
+	// reapers, so we never call Wait from the caller goroutine here.
+	done := make(chan struct{})
+	go func() { _, _ = cmd.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		<-done // wait for the reaper goroutine to finish after SIGKILL takes effect
+	}
 }
 
 // createBucket creates a bucket for testing and returns a cleanup function.

@@ -2,111 +2,84 @@ package raft
 
 import (
 	"context"
-	"testing"
+	"fmt"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-// TestRaftV2Metrics_LeaderTransitionsCounter verifies that becomeLeader() and
-// stepDownToFollower() increment actorLeaderTransitions. We use a 3-voter
-// cluster: n1 wins election (becomeLeader → +1), then we stop n1 causing
-// n2 or n3 to elect a new leader (another becomeLeader → +1). Additionally
-// n1's step-down on losing leadership also increments the counter.
-func TestRaftV2Metrics_LeaderTransitionsCounter(t *testing.T) {
-	before := testutil.ToFloat64(actorLeaderTransitions)
+var _ = ginkgo.Describe("Raft metrics", func() {
+	ginkgo.Context("single-voter node", func() {
+		var node *Node
 
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
+		ginkgo.BeforeEach(func() {
+			var err error
+			var cleanup func()
+			node, cleanup, err = startRaftIntegrationSingleVoter("metrics-n1")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.DeferCleanup(cleanup)
+		})
 
-	// Wait for n1 to become leader.
-	require.NoError(t, waitFor(2*time.Second, n1.IsLeader), "n1 did not become leader")
+		ginkgo.It("increments actorTermBumps during bootstrap", func(ginkgo.SpecContext) {
+			before := testutil.ToFloat64(actorTermBumps)
 
-	// At least one becomeLeader occurred.
-	afterElect := testutil.ToFloat64(actorLeaderTransitions)
-	assert.Greater(t, afterElect, before,
-		"actorLeaderTransitions should have incremented after initial election")
-}
+			extra, extraCleanup, err := startRaftIntegrationSingleVoter("tb-n1")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			defer extraCleanup()
+			gomega.Expect(extra.IsLeader()).To(gomega.BeTrue())
 
-// TestRaftV2Metrics_TermBumpsCounter verifies that actorTermBumps increments
-// during an election. The single-voter path bumps term to 1 on bootstrap;
-// the 3-voter path bumps term each time a candidate increments currentTerm.
-func TestRaftV2Metrics_TermBumpsCounter(t *testing.T) {
-	// Single-voter: bootstrap must bump term from 0 to 1.
-	before := testutil.ToFloat64(actorTermBumps)
+			after := testutil.ToFloat64(actorTermBumps)
+			gomega.Expect(after).To(gomega.BeNumerically(">", before), "actorTermBumps should increment during single-voter bootstrap")
+		}, ginkgo.NodeTimeout(5*time.Second))
 
-	n, err := NewNode(Config{ID: "tb-n1"})
-	require.NoError(t, err)
-	n.Start()
-	t.Cleanup(n.Stop)
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
+		ginkgo.It("keeps the propose hot-path benchmark documented", func(ginkgo.SpecContext) {
+			ctx := context.Background()
+			for i := 0; i < 10; i++ {
+				_, err := node.ProposeWait(ctx, []byte("warmup"))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 
-	require.NoError(t, waitFor(2*time.Second, n.IsLeader), "single-voter did not become leader")
+			fmt.Fprintln(ginkgo.GinkgoWriter, "Hot-path alloc check: run BenchmarkProposeWait_SingleNode_NoFsync -benchmem to verify 5 allocs/op")
+		}, ginkgo.NodeTimeout(5*time.Second))
+	})
 
-	after := testutil.ToFloat64(actorTermBumps)
-	assert.Greater(t, after, before, "actorTermBumps should increment during single-voter bootstrap")
-}
+	ginkgo.Context("three-voter cluster", func() {
+		var nodes []*Node
+		var leader *Node
+		var leaderTransitionsBefore float64
 
-// TestRaftV2Metrics_ZeroAllocHotPath is a documentation-only test that records
-// the alloc/op baseline. The actual enforcement is done via the bench comparison
-// in commit 8. Running this test prints the benchmark result for reference.
-//
-// Baseline (pre-PR 23): 5 allocs/op
-// Post-PR 23:           5 allocs/op  — no regression.
-func TestRaftV2Metrics_ZeroAllocHotPath(t *testing.T) {
-	n, err := NewNode(Config{ID: "alloc-n1"})
-	require.NoError(t, err)
-	n.Start()
-	t.Cleanup(n.Stop)
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
+		ginkgo.BeforeEach(func() {
+			var err error
+			var cleanup func()
+			leaderTransitionsBefore = testutil.ToFloat64(actorLeaderTransitions)
+			nodes, _, cleanup, err = startRaftIntegrationCluster("n1", "n2", "n3")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.DeferCleanup(cleanup)
+			leader = nodes[0]
+			gomega.Expect(waitFor(2*time.Second, leader.IsLeader)).To(gomega.Succeed(), "n1 did not become leader")
+		})
 
-	require.NoError(t, waitFor(2*time.Second, n.IsLeader), "single-voter did not become leader")
+		ginkgo.It("increments actorLeaderTransitions after initial election", func(ginkgo.SpecContext) {
+			_ = nodes
+			after := testutil.ToFloat64(actorLeaderTransitions)
+			gomega.Expect(after).To(gomega.BeNumerically(">", leaderTransitionsBefore),
+				"actorLeaderTransitions should have incremented after initial election")
+		}, ginkgo.NodeTimeout(5*time.Second))
 
-	// Warm up: ensure the actor goroutine is running and leader path is hot.
-	ctx := context.Background()
-	for i := 0; i < 10; i++ {
-		_, err := n.ProposeWait(ctx, []byte("warmup"))
-		require.NoError(t, err)
-	}
+		ginkgo.It("records AppendEntries duration observations", func(ginkgo.SpecContext) {
+			beforeCount := testutil.CollectAndCount(actorAppendEntriesRPCDuration)
 
-	// The actual alloc verification is done by the benchmark:
-	//   go test -bench=BenchmarkProposeWait_SingleNode_NoFsync -benchmem \
-	//      -count=3 -benchtime=2s -run '^$' ./internal/raft/v2
-	// Expected: 5 allocs/op (unchanged from pre-PR-23 baseline).
-	t.Log("Hot-path alloc check: run BenchmarkProposeWait_SingleNode_NoFsync -benchmem to verify 5 allocs/op")
-}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := leader.ProposeWait(ctx, []byte("ae-metric-test"))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-// TestRaftV2Metrics_AppendEntriesDuration verifies that handleAppendEntries
-// records duration samples in actorAppendEntriesRPCDuration. We use a 3-voter
-// cluster and drive some proposes so followers receive AE RPCs.
-// Verification uses testutil.CollectAndCount on the whole histogram family.
-func TestRaftV2Metrics_AppendEntriesDuration(t *testing.T) {
-	nodes, _ := startCluster(t, "n1", "n2", "n3")
-	n1 := nodes[0]
-
-	require.NoError(t, waitFor(2*time.Second, n1.IsLeader), "n1 did not become leader")
-
-	// Snapshot total number of metric series before.
-	beforeCount := testutil.CollectAndCount(actorAppendEntriesRPCDuration)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := n1.ProposeWait(ctx, []byte("ae-metric-test"))
-	require.NoError(t, err)
-
-	// Give heartbeats time to propagate so followers observe AE.
-	require.NoError(t, waitFor(500*time.Millisecond, func() bool {
-		return testutil.CollectAndCount(actorAppendEntriesRPCDuration) > beforeCount ||
-			// If series were already registered before (e.g. from other tests),
-			// accept that count is non-zero (> 0) after the propose.
-			testutil.CollectAndCount(actorAppendEntriesRPCDuration) > 0
-	}), "actorAppendEntriesRPCDuration did not record any observations in 3-voter cluster")
-}
+			gomega.Expect(waitFor(500*time.Millisecond, func() bool {
+				return testutil.CollectAndCount(actorAppendEntriesRPCDuration) > beforeCount ||
+					testutil.CollectAndCount(actorAppendEntriesRPCDuration) > 0
+			})).To(gomega.Succeed(), "actorAppendEntriesRPCDuration did not record observations")
+		}, ginkgo.NodeTimeout(5*time.Second))
+	})
+})

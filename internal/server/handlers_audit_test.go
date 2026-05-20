@@ -11,6 +11,6 @@ import (
 // TestWithAuditEmitterOptionExists confirms WithAuditEmitter server option is exposed.
 // Fails to compile until Step 2 adds it to server.go.
 func TestWithAuditEmitterOptionExists(t *testing.T) {
-	e := audit.NewEmitter("test-node")
+	e := audit.NewEmitterWithRingCapacity("test-node", 1)
 	_ = server.WithAuditEmitter(e)
 }

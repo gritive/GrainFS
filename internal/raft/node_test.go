@@ -3,105 +3,60 @@ package raft
 import (
 	"bytes"
 	"context"
-	"testing"
 	"time"
+
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-// TestSingleNode_ProposeRoundTrip validates the actor model end-to-end:
-//   - On Start, a single-voter node auto-promotes to Leader (bootstrap state,
-//     not real election — election is out of scope for PR 1).
-//   - readState snapshot reflects the leader role for hot-path readers.
-//   - Propose appends a LogEntry that surfaces on ApplyCh with the original
-//     command bytes, and the published commitIndex advances accordingly.
-//   - Stop returns cleanly without leaking goroutines.
-func TestSingleNode_ProposeRoundTrip(t *testing.T) {
-	cfg := Config{ID: "n1"} // single voter (Peers empty == only self)
-	n, err := NewNode(cfg)
-	if err != nil {
-		t.Fatalf("NewNode: %v", err)
-	}
+var _ = ginkgo.Describe("Single-node actor", func() {
+	var node *Node
 
-	n.Start()
-	defer n.Stop()
+	ginkgo.BeforeEach(func() {
+		var err error
+		node, err = NewNode(Config{ID: "n1"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		node.Start()
+		ginkgo.DeferCleanup(node.Stop)
+		gomega.Expect(waitFor(time.Second, node.IsLeader)).To(gomega.Succeed())
+	})
 
-	// Allow the actor goroutine to publish the initial leader readState.
-	if err := waitFor(time.Second, func() bool { return n.IsLeader() }); err != nil {
-		t.Fatalf("node did not become leader: %v", err)
-	}
+	ginkgo.It("round-trips a proposed command through ApplyCh", func(ginkgo.SpecContext) {
+		gomega.Expect(node.State()).To(gomega.Equal(Leader))
+		gomega.Expect(node.Term()).To(gomega.Equal(uint64(1)))
+		gomega.Expect(node.IsLeader()).To(gomega.BeTrue())
+		gomega.Expect(node.LeaderID()).To(gomega.Equal("n1"))
+		gomega.Expect(node.CommittedIndex()).To(gomega.Equal(uint64(0)))
 
-	if got, want := n.State(), Leader; got != want {
-		t.Fatalf("State() = %v, want %v", got, want)
-	}
-	if got, want := n.Term(), uint64(1); got != want {
-		t.Fatalf("Term() = %d, want %d", got, want)
-	}
-	if !n.IsLeader() {
-		t.Fatalf("IsLeader() = false, want true")
-	}
-	if got, want := n.LeaderID(), "n1"; got != want {
-		t.Fatalf("LeaderID() = %q, want %q", got, want)
-	}
-	if got, want := n.CommittedIndex(), uint64(0); got != want {
-		t.Fatalf("CommittedIndex() = %d, want %d", got, want)
-	}
+		cmd := []byte("hello")
+		gomega.Expect(node.Propose(cmd)).To(gomega.Succeed())
 
-	cmd := []byte("hello")
-	if err := n.Propose(cmd); err != nil {
-		t.Fatalf("Propose: %v", err)
-	}
-
-	select {
-	case entry := <-n.ApplyCh():
-		if !bytes.Equal(entry.Command, cmd) {
-			t.Fatalf("ApplyCh entry.Command = %q, want %q", entry.Command, cmd)
+		select {
+		case entry := <-node.ApplyCh():
+			gomega.Expect(bytes.Equal(entry.Command, cmd)).To(gomega.BeTrue())
+			gomega.Expect(entry.Index).To(gomega.Equal(uint64(1)))
+			gomega.Expect(entry.Term).To(gomega.Equal(uint64(1)))
+		case <-time.After(time.Second):
+			ginkgo.Fail("timeout waiting for ApplyCh entry")
 		}
-		if entry.Index != 1 {
-			t.Fatalf("entry.Index = %d, want 1", entry.Index)
-		}
-		if entry.Term != 1 {
-			t.Fatalf("entry.Term = %d, want 1", entry.Term)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("timeout waiting for ApplyCh entry")
-	}
 
-	if got, want := n.CommittedIndex(), uint64(1); got != want {
-		t.Fatalf("CommittedIndex() after propose = %d, want %d", got, want)
-	}
-}
+		gomega.Expect(node.CommittedIndex()).To(gomega.Equal(uint64(1)))
+	}, ginkgo.NodeTimeout(5*time.Second))
 
-// TestSingleNode_ProposeWait validates that ProposeWait blocks until the entry
-// is committed and returns its log index.
-func TestSingleNode_ProposeWait(t *testing.T) {
-	n, err := NewNode(Config{ID: "n1"})
-	if err != nil {
-		t.Fatalf("NewNode: %v", err)
-	}
-	n.Start()
-	defer n.Stop()
+	ginkgo.It("waits for commit and returns the log index", func(ginkgo.SpecContext) {
+		go func() {
+			for range node.ApplyCh() {
+			}
+		}()
 
-	if err := waitFor(time.Second, func() bool { return n.IsLeader() }); err != nil {
-		t.Fatalf("node did not become leader: %v", err)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 
-	// Drain ApplyCh in the background so the actor's send doesn't block while
-	// ProposeWait waits for commit completion.
-	go func() {
-		for range n.ApplyCh() {
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	idx, err := n.ProposeWait(ctx, []byte("payload"))
-	if err != nil {
-		t.Fatalf("ProposeWait: %v", err)
-	}
-	if idx != 1 {
-		t.Fatalf("ProposeWait index = %d, want 1", idx)
-	}
-}
+		idx, err := node.ProposeWait(ctx, []byte("payload"))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(idx).To(gomega.Equal(uint64(1)))
+	}, ginkgo.NodeTimeout(5*time.Second))
+})
 
 // waitFor polls cond until it returns true or the deadline elapses. Returns
 // nil on success, ctx error on timeout. Used to bridge the brief async window
