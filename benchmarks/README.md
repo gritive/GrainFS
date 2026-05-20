@@ -73,6 +73,16 @@ Failures are recorded as raw `warp.out` and `analyze.out` artifacts under the
 profile directory. k6-based S3 benchmark scripts have been removed; S3
 performance claims should use `warp`.
 
+Every comparison run writes `host-preflight.txt` in the profile directory and
+adds summary warnings when the host already has `grainfs serve` processes or
+the benchmark filesystem is at least 90 percent full. Use strict mode for
+publishable runs so contaminated host state fails before any benchmark server
+starts:
+
+```bash
+BENCH_STRICT_HOST=1 WARP_OPS=put,get make bench-s3-compat-compare
+```
+
 ## Iceberg Table API
 
 `make bench-iceberg-table` and `make bench-iceberg-table-cluster` run MinIO
@@ -93,6 +103,9 @@ Tune the workload with:
 VUS=16 DURATION=1m make bench-iceberg-table
 VUS=16 DURATION=1m make bench-iceberg-table-cluster
 ```
+
+Iceberg benchmark scripts use the same host preflight and `BENCH_STRICT_HOST=1`
+fail-fast behavior as the S3 comparison script.
 
 ## NFS Multi-Bucket Export Baseline
 
