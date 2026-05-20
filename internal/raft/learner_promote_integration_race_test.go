@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -35,11 +34,6 @@ import (
 // The chosen matrix exercises the envelope this fix targets. Production
 // e2e (election 750–1500ms, RTT 50–200ms) sits comfortably in this
 // regime.
-func TestPromoteToVoter_BroadcastsHeartbeatOnCnewCommit(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Raft learner promotion integration race")
-}
-
 const (
 	promoteRaceIterations = 50
 	promoteRaceWorkers    = 4

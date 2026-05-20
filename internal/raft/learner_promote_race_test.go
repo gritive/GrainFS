@@ -1,10 +1,10 @@
 package raft
 
 import (
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 // TestLearnerPromote_LeaderStaysLeader_NoStepdown exercises the race the
@@ -21,60 +21,65 @@ import (
 //   - n2 IsVoter in the resulting config
 //
 // Run with -count=100 to surface a statistical race.
-func TestLearnerPromote_LeaderStaysLeader_NoStepdown(t *testing.T) {
-	fix := startMembershipCluster(t, []string{"n1"})
-	leader := fix.nodes[0]
-	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }),
-		"n1 must bootstrap as leader")
-	leaderTermBefore := leader.Term()
+var _ = ginkgo.Describe("Learner promote leader stability", func() {
+	ginkgo.It("keeps a solo-voter leader stable while promoting a learner", func(ginkgo.SpecContext) {
+		fix, cleanup, err := startPromoteRaceCluster([]string{"n1"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		defer cleanup()
 
-	fix.addNode(t, "n2", []string{"n1"}, fastElectionTimeout)
+		leader := fix.nodes[0]
+		gomega.Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).
+			NotTo(gomega.HaveOccurred(), "n1 must bootstrap as leader")
+		leaderTermBefore := leader.Term()
 
-	require.NoError(t, leader.AddLearner("n2", "n2-addr"))
-	require.NoError(t, waitFor(3*time.Second, func() bool {
-		return leader.peerMatchIndexForTest("n2") >= leader.CommittedIndex()
-	}), "n2 must catch up to leader commit before promote")
+		_, err = addPromoteRaceNode(fix, "n2", []string{"n1"}, fastElectionTimeout)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	require.NoError(t, leader.PromoteToVoter("n2"), "PromoteToVoter must not fail (race regression)")
+		gomega.Expect(leader.AddLearner("n2", "n2-addr")).To(gomega.Succeed())
+		gomega.Expect(waitFor(3*time.Second, func() bool {
+			return leader.peerMatchIndexForTest("n2") >= leader.CommittedIndex()
+		})).NotTo(gomega.HaveOccurred(), "n2 must catch up to leader commit before promote")
 
-	require.True(t, leader.IsLeader(), "n1 must remain leader after promote (stepdown race)")
-	require.Equal(t, leaderTermBefore, leader.Term(),
-		"leader term must not advance — a stepdown+re-election would bump term")
+		gomega.Expect(leader.PromoteToVoter("n2")).
+			To(gomega.Succeed(), "PromoteToVoter must not fail (race regression)")
+		gomega.Expect(leader.IsLeader()).To(gomega.BeTrue(), "n1 must remain leader after promote (stepdown race)")
+		gomega.Expect(leader.Term()).
+			To(gomega.Equal(leaderTermBefore), "leader term must not advance after stepdown+re-election")
 
-	// Final config: 2 voters, no learners.
-	cfg := leader.Configuration()
-	require.Len(t, cfg.Servers, 2)
-	for _, s := range cfg.Servers {
-		require.Equal(t, Voter, s.Suffrage, "all servers must be Voter post-promote")
-	}
-}
+		cfg := leader.Configuration()
+		gomega.Expect(cfg.Servers).To(gomega.HaveLen(2))
+		for _, server := range cfg.Servers {
+			gomega.Expect(server.Suffrage).To(gomega.Equal(Voter), "server %s must be Voter post-promote", server.ID)
+		}
+	}, ginkgo.NodeTimeout(10*time.Second))
 
-// TestLearnerPromote_LeaderStaysLeader_3Voters runs the same scenario but
-// starting from a 3-voter cluster + 1 learner → 4 voters. The race is the
-// same — n4 might campaign right after its Cnew applies — but the leader
-// has more peers, exercising the broadcastHeartbeat fan-out path.
-func TestLearnerPromote_LeaderStaysLeader_3Voters(t *testing.T) {
-	fix := startMembershipCluster(t, []string{"n1", "n2", "n3"})
-	leader := fix.nodes[0]
-	require.NoError(t, waitFor(2*time.Second, func() bool { return leader.IsLeader() }),
-		"n1 must win election in 3-voter cluster")
-	leaderTermBefore := leader.Term()
+	ginkgo.It("keeps a three-voter leader stable while promoting a learner", func(ginkgo.SpecContext) {
+		fix, cleanup, err := startPromoteRaceCluster([]string{"n1", "n2", "n3"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		defer cleanup()
 
-	fix.addNode(t, "n4", []string{"n1", "n2", "n3"}, fastElectionTimeout)
+		leader := fix.nodes[0]
+		gomega.Expect(waitFor(2*time.Second, func() bool { return leader.IsLeader() })).
+			NotTo(gomega.HaveOccurred(), "n1 must win election in 3-voter cluster")
+		leaderTermBefore := leader.Term()
 
-	require.NoError(t, leader.AddLearner("n4", "n4-addr"))
-	require.NoError(t, waitFor(3*time.Second, func() bool {
-		return leader.peerMatchIndexForTest("n4") >= leader.CommittedIndex()
-	}), "n4 must catch up")
+		_, err = addPromoteRaceNode(fix, "n4", []string{"n1", "n2", "n3"}, fastElectionTimeout)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	require.NoError(t, leader.PromoteToVoter("n4"))
-	require.True(t, leader.IsLeader(), "n1 must remain leader (3-voter promote race)")
-	require.Equal(t, leaderTermBefore, leader.Term(),
-		"leader term must not advance after 3-voter promote")
+		gomega.Expect(leader.AddLearner("n4", "n4-addr")).To(gomega.Succeed())
+		gomega.Expect(waitFor(3*time.Second, func() bool {
+			return leader.peerMatchIndexForTest("n4") >= leader.CommittedIndex()
+		})).NotTo(gomega.HaveOccurred(), "n4 must catch up")
 
-	cfg := leader.Configuration()
-	require.Len(t, cfg.Servers, 4)
-	for _, s := range cfg.Servers {
-		require.Equal(t, Voter, s.Suffrage)
-	}
-}
+		gomega.Expect(leader.PromoteToVoter("n4")).To(gomega.Succeed())
+		gomega.Expect(leader.IsLeader()).To(gomega.BeTrue(), "n1 must remain leader (3-voter promote race)")
+		gomega.Expect(leader.Term()).
+			To(gomega.Equal(leaderTermBefore), "leader term must not advance after 3-voter promote")
+
+		cfg := leader.Configuration()
+		gomega.Expect(cfg.Servers).To(gomega.HaveLen(4))
+		for _, server := range cfg.Servers {
+			gomega.Expect(server.Suffrage).To(gomega.Equal(Voter))
+		}
+	}, ginkgo.NodeTimeout(10*time.Second))
+})
