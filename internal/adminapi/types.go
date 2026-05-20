@@ -533,6 +533,10 @@ type CreateBucketAdminReq struct {
 	Name         string `json:"name"`
 	AttachSA     string `json:"attach_sa,omitempty"`
 	AttachPolicy string `json:"attach_policy,omitempty"`
+	Attach       *struct {
+		SA     string `json:"sa,omitempty"`
+		Policy string `json:"policy,omitempty"`
+	} `json:"attach,omitempty"`
 }
 
 // BucketPolicyResp is the JSON body returned by GET /v1/buckets/:name/policy.

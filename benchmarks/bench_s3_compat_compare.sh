@@ -254,7 +254,7 @@ start_grainfs_cluster() {
   fi
   bench_require_binary "$BINARY"
 
-  local cluster_dir="$BENCH_DIR/grainfs-cluster"
+  local cluster_dir="$BENCH_DIR/gfc"
   local enc_key_file="$cluster_dir/encryption.key"
   local http_ports=()
   local raft_ports=()
@@ -312,8 +312,12 @@ start_grainfs_cluster() {
   }
 
   start_grainfs_cluster_node 1
+  local kek_file="$cluster_dir/n1/kek.key"
+  bench_wait_file "$kek_file" "grainfs-cluster node1 KEK" 100 0.2 >&2
   bench_bootstrap_iam_credentials "$BINARY" "$cluster_dir/n1" "bench-s3-compat-cluster" >&2
   for idx in $(seq 2 "$GRAINFS_CLUSTER_NODES"); do
+    cp "$kek_file" "$cluster_dir/n${idx}/kek.key"
+    chmod 600 "$cluster_dir/n${idx}/kek.key"
     printf '%s' "127.0.0.1:${raft_ports[0]}" >"$cluster_dir/n${idx}/.join-pending"
     chmod 600 "$cluster_dir/n${idx}/.join-pending"
     start_grainfs_cluster_node "$idx"
@@ -889,6 +893,9 @@ for target in grainfs-single grainfs-cluster minio minio-cluster rustfs rustfs-c
     case "$op" in
       get|put|delete|mixed|list|stat|versioned|retention|multipart|multipart-put|append)
         prepare_grainfs_warp_bucket "$target" "$op"
+        if [[ "$target" == grainfs-* && -n "$GRAINFS_ADMIN_DATA_DIR" ]]; then
+          bench_wait_s3_bucket_auth_ready "$base_url" "$access_key" "$secret_key" "warp-${target}-${op}" "${BENCH_S3_AUTH_READY_ATTEMPTS:-120}" "${BENCH_S3_AUTH_READY_SLEEP:-0.25}"
+        fi
         if [[ "$BENCH_PPROF" == "1" && "$target" == grainfs-* && ${#GRAINFS_PPROF_PORTS[@]} -gt 0 ]]; then
           cpu_dir="$PROFILE_ROOT/$target/pprof-cpu-$op"
           mkdir -p "$cpu_dir"

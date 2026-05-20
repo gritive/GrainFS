@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.294.0] - 2026-05-20
+
+### Added
+
+- Added S3 benchmark readiness checks and coverage for cluster KEK staging,
+  signed bucket readiness, bounded batch deletes, and packed LIST index
+  behavior.
+
+### Changed
+
+- Improved the S3 benchmark cluster setup so GrainFS joiner nodes receive the
+  node1 KEK before joining and benchmark data directories stay within macOS
+  socket path limits.
+- Made S3 multi-object delete handling bounded-concurrent while preserving
+  response ordering for each requested key.
+- Added a packed-object list index so LIST pagination narrows by bucket,
+  prefix, and marker instead of scanning the whole packed index.
+
+### Fixed
+
+- Fixed admin bucket creation with nested policy-attach payloads so benchmark
+  service accounts receive the intended bucket policy before warp starts.
+- Fixed stale packed-index eviction when large or versioned writes race with
+  newer packed writes for the same key.
+
 ## [0.0.293.0] - 2026-05-20
 
 ### Changed
