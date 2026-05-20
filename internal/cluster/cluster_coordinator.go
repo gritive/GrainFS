@@ -312,6 +312,15 @@ func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOff
 	if c.indexWriter != nil && metaObjectIndexAdapter(c.meta) != nil && !storage.IsInternalBucket(bucket) {
 		target, entry, err := state.opRouter.RouteObjectRead(bucket, key, "")
 		if err == nil {
+			if entry.Size > expectedOffset {
+				log.Debug().
+					Str("bucket", bucket).
+					Str("key", key).
+					Int64("indexed_size", entry.Size).
+					Int64("offset", expectedOffset).
+					Msg("append stale offset rejected from object index before body read")
+				return RouteTarget{}, ShardGroupEntry{}, storage.ErrAppendOffsetMismatch
+			}
 			group, ok := c.meta.ShardGroup(entry.PlacementGroupID)
 			if !ok {
 				return RouteTarget{}, ShardGroupEntry{}, ErrNoGroup

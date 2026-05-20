@@ -2657,6 +2657,40 @@ func TestClusterCoordinator_AppendObject_ExistingObjectRoutesByObjectIndex(t *te
 	require.Equal(t, "object-peer", d.streamCalls[0].peer)
 }
 
+func TestClusterCoordinator_AppendObject_RejectsStaleOffsetFromObjectIndexBeforeReadingBody(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("object-group", []string{"object-peer"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("b", "object-group")
+	metaGroups := map[string]ShardGroupEntry{
+		"object-group": {ID: "object-group", PeerIDs: []string{"object-peer"}},
+	}
+	meta := &objectIndexMeta{
+		fakeShardGroupSource: fakeShardGroupSource{groups: metaGroups},
+		latest: map[string]ObjectIndexEntry{
+			"b/k": {Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "object-group", Size: 10},
+		},
+	}
+	d := &recordingDialer{
+		replyByOp:     map[raftpb.ForwardOp][]byte{},
+		streamReplyBy: map[raftpb.ForwardOp][]byte{},
+		readReplyBy:   map[raftpb.ForwardOp][]byte{},
+		readBodyBy:    map[raftpb.ForwardOp][]byte{},
+	}
+	reader := newExposedForwardBodyReader([]byte("chunk"))
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithForwardSender(NewForwardSender(d.dial).WithStreamDialer(d.stream)).
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+
+	_, err := c.AppendObject(context.Background(), "b", "k", 5, reader)
+
+	require.ErrorIs(t, err, storage.ErrAppendOffsetMismatch)
+	require.Zero(t, reader.readCalls)
+	require.Empty(t, d.streamCalls)
+}
+
 func TestClusterCoordinator_AppendObject_IndexMissFallsBackToWriteRoute(t *testing.T) {
 	base := &fakeBackend{}
 	mgr := NewDataGroupManager()

@@ -128,8 +128,10 @@ type DistributedBackend struct {
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks                       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
 	multipartLocks                   sync.Map                            // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
+	appendLocks                      [appendLockStripeCount]sync.Mutex   // striped owner-side admission locks for same-object AppendObject
 	incidentRecorder                 IncidentRecorder                    // nil disables zero-ops incident recording
 	testBeforeChunkedMultipartCommit func() error                        // test-only hook for chunked multipart commit preflight
+	testBeforeAppendSegmentWrite     func()                              // test-only hook after append pre-check before segment write
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard

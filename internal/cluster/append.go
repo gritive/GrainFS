@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -22,6 +23,26 @@ import (
 // returning 503 SlowDown to the client.
 var ErrStalePlacement = errors.New("append: placement group changed mid-request")
 
+const appendLockStripeCount = 256
+const appendLockFNV32AOffset = 2166136261
+const appendLockFNV32APrime = 16777619
+
+func (b *DistributedBackend) appendAdmissionLock(bucket, key string) *sync.Mutex {
+	h := uint32(appendLockFNV32AOffset)
+	h = appendLockHashString(h, bucket)
+	h *= appendLockFNV32APrime
+	h = appendLockHashString(h, key)
+	return &b.appendLocks[h&(appendLockStripeCount-1)]
+}
+
+func appendLockHashString(h uint32, s string) uint32 {
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= appendLockFNV32APrime
+	}
+	return h
+}
+
 // AppendObject implements storage.AppendObjecter for DistributedBackend.
 // Owner-node entry point — ClusterCoordinator handles non-owner forwarding
 // (Task 21).
@@ -33,6 +54,10 @@ var ErrStalePlacement = errors.New("append: placement group changed mid-request"
 //     transparently (Phase A Tasks 14-16).
 //  4. Re-HeadObject for fresh result reflecting committed segment list.
 func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	lock := b.appendAdmissionLock(bucket, key)
+	lock.Lock()
+	defer lock.Unlock()
+
 	// Step 1: cluster-aware pre-check.
 	existing, err := b.HeadObject(ctx, bucket, key)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
@@ -73,6 +98,9 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	if cfg := b.coalesceCfg.Load(); existing != nil && cfg != nil && chunkSize > 0 && cfg.SizeCapBytes > 0 &&
 		existing.Size+chunkSize > cfg.SizeCapBytes {
 		return nil, storage.ErrAppendObjectTooLarge
+	}
+	if b.testBeforeAppendSegmentWrite != nil {
+		b.testBeforeAppendSegmentWrite()
 	}
 
 	// Step 2: write segment blob to owner-node disk.
