@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 16:11 KST
+Updated: 2026-05-20 16:14 KST
 
 ## Goal
 
@@ -84,6 +84,7 @@ Updated: 2026-05-20 16:11 KST
 - `multipart` rejected candidate: `CachedBackend.GetObject` can avoid a cache-miss `HeadObject` because `GetObject` already returns metadata. The unit test reproduced the duplicate lookup, but clean e2e regressed to 2646.15 MiB/s. The change was reverted; like the server-level duplicate lookup, the pre-read metadata call appears to warm the read path enough to matter for this workload.
 - `multipart` candidate 4: warp's multipart GET object is 5 MiB because of S3's multipart minimum part size, but the default object cache admitted only objects up to 4 MiB. Architecture review: the object cache is already lock-free for hits and bounded to 64 MiB total, so admitting 5 MiB hot objects is a small memory tradeoff that removes repeated EC shard pread/decrypt work. Fix: raise the default per-object cache limit to 8 MiB. TDD: `TestCachedBackend_DefaultCacheStoresMultipartSizedObject`. Clean e2e improved reproducibly to 3439.01/3468.12 MiB/s with RSS 649.23/634.14 MiB, above MinIO but still below RustFS.
 - `multipart` rejected candidate: enabling 64 MiB shard cache without code changes measured 2920.93 MiB/s, worse than the 8 MiB object-cache result. Adding local `ReadLocalShardAt` range cache support made the unit test pass but e2e fell to 2823.96 MiB/s and RSS rose to 1294.84 MiB, above MinIO's multipart RSS. The change was reverted; range cache admission needs a tighter policy before it is usable for this workload.
+- `multipart` rejected candidate: combining the 8 MiB object-cache change with the 128 KiB Hertz copy buffer measured 2739.80 MiB/s and 666.08 MiB RSS, so the copy-buffer change remains rejected.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
