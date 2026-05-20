@@ -89,8 +89,15 @@ func startCompatCluster(t *testing.T, binaries []string) *compatCluster {
 	c.accessKey = ak
 	c.secretKey = sk
 
-	// Start followers.
+	// Start followers. §7 B3: stage the seed's kek.key before each follower
+	// boots in join mode (wireDEKKeeper refuses to auto-generate a KEK).
+	seedKEK, kekErr := os.ReadFile(filepath.Join(c.dataDirs[0], "kek.key"))
+	require.NoError(t, kekErr, "read seed kek.key")
 	for i := 1; i < n; i++ {
+		require.NoError(t,
+			os.WriteFile(filepath.Join(c.dataDirs[i], "kek.key"), seedKEK, 0o600),
+			"stage joiner kek.key for node %d", i,
+		)
 		joinPending := filepath.Join(c.dataDirs[i], ".join-pending")
 		raftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 		require.NoError(t,

@@ -109,7 +109,7 @@ func runClusterECPutGet5Node(t *testing.T) {
 		waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
 		time.Sleep(2 * time.Second)
 		for i := 1; i < numNodes; i++ {
-			require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+			require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
 			procs[i] = startNode(i)
 			time.Sleep(150 * time.Millisecond)
 		}
@@ -461,7 +461,7 @@ func runClusterECTopologyChange(t *testing.T) {
 		require.NoError(t, waitForPortsParallelErrWithProcesses(httpPorts[:1], procs[:1], 60*time.Second))
 		time.Sleep(2 * time.Second)
 		for i := 1; i < numNodes; i++ {
-			require.NoError(t, writeNodeJoinPending(dataDirs[i], raftAddr(0)))
+			require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
 			procs[i] = startNode(i)
 			require.NoError(t, waitForPortsParallelErrWithProcesses(httpPorts[i:i+1], procs[i:i+1], 90*time.Second))
 		}

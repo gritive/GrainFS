@@ -159,9 +159,22 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 	}
 	c.SAID, c.AccessKey, c.SecretKey = saID, ak, sk
 
+	// §7 B3 — followers must have the cluster KEK in place BEFORE serve
+	// boots; otherwise wireDEKKeeper refuses startup in join mode. Mirror the
+	// real operator workflow (`scp <peer>:<data>/kek.key`) by copying the
+	// seed's kek.key into each follower's data dir.
+	seedKEK := filepath.Join(c.DataDirs[0], "kek.key")
+	if err := waitForFile(seedKEK, 30*time.Second); err != nil {
+		c.Stop()
+		t.Fatalf("seed kek.key did not appear: %v", err)
+	}
 	// Followers join via .join-pending file containing seed raft addr.
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.RaftPorts[0])
 	for i := 1; i < numNodes; i++ {
+		if err := copyFileMode(seedKEK, filepath.Join(c.DataDirs[i], "kek.key"), 0o600); err != nil {
+			c.Stop()
+			t.Fatalf("copy kek.key to follower %d: %v", i, err)
+		}
 		if err := writeJoinPending(c.DataDirs[i], seedRaftAddr); err != nil {
 			c.Stop()
 			t.Fatalf("write .join-pending node %d: %v", i, err)
@@ -336,6 +349,18 @@ func makeEncryptionKeyFile(t testing.TB) string {
 // cluster.
 func writeJoinPending(dataDir, seedRaftAddr string) error {
 	return os.WriteFile(filepath.Join(dataDir, ".join-pending"), []byte(seedRaftAddr), 0o600)
+}
+
+// copyFileMode copies src into dst with the given permission. Used by the
+// cluster fixture to plant the seed's kek.key on follower data dirs before
+// they boot in join mode — wireDEKKeeper refuses to auto-generate a KEK on a
+// joiner (§7 B3 / F#21).
+func copyFileMode(src, dst string, mode os.FileMode) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, mode)
 }
 
 func waitForFile(path string, timeout time.Duration) error {

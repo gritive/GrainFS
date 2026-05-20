@@ -133,13 +133,22 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	metaForwardReceiver := cluster.NewMetaProposeForwardReceiver(metaRaft).
 		WithGateRefresh(func() { refreshCapabilityGate(state) })
 	state.streamRouter.Handle(transport.StreamMetaProposeForward, metaForwardReceiver.Handle)
-	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
-		if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
-			return err
-		}
-		return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
-	})
+	// §7 B1 — share the same *encrypt.HandshakeVerifier instance between the
+	// Join receiver (reads issued-nonce map) and the Challenge receiver
+	// (writes it). state.handshakeVerifier is set by wireDEKKeeper alongside
+	// state.kek; the verifier is keyed by the local KEK so VerifyResponse
+	// passes iff the joiner holds the same KEK.
+	metaJoinReceiver := cluster.NewMetaJoinReceiver(metaRaft).
+		WithHandshakeVerifier(state.handshakeVerifier).
+		WithPostJoinHook(func(joinCtx context.Context, req cluster.JoinRequest) error {
+			if err := addJoinedNodeToLegacyDataRaft(joinCtx, state.node, state.metaRaft.FSM().Nodes(), req.NodeID); err != nil {
+				return err
+			}
+			return expandShardGroupsForJoinedNode(joinCtx, state, req.NodeID)
+		})
 	state.streamRouter.Handle(transport.StreamMetaJoin, metaJoinReceiver.Handle)
+	metaChallengeReceiver := cluster.NewMetaChallengeReceiver(state.handshakeVerifier)
+	state.streamRouter.Handle(transport.StreamMetaJoinChallenge, metaChallengeReceiver.Handle)
 	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		msg := &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: payload}
 		reply, err := quicTransport.Call(callCtx, peer, msg)
@@ -185,7 +194,7 @@ func bootWALAndForwarders(ctx context.Context, state *bootState) error {
 	state.streamRouter.Handle(transport.StreamMetaCatalogRead, metaReadReceiver.Handle)
 
 	if state.joinMode {
-		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr); err != nil {
+		if err := PerformMetaJoin(ctx, quicTransport, []string{state.joinAddr}, state.nodeID, state.raftAddr, state.kek); err != nil {
 			return err
 		}
 		if err := WaitForShardGroupCount(ctx, metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {

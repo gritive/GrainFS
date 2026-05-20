@@ -157,7 +157,7 @@ func tryStartStaticMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) 
 
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 	for i := 1; i < numNodes; i++ {
-		if err := writeNodeJoinPending(c.dataDirs[i], seedRaftAddr); err != nil {
+		if err := writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr); err != nil {
 			c.Stop()
 			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
 		}
@@ -240,7 +240,7 @@ func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCl
 	// Start followers sequentially: wait for each before starting next.
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
 	for i := 1; i < numNodes; i++ {
-		if err := writeNodeJoinPending(c.dataDirs[i], seedRaftAddr); err != nil {
+		if err := writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr); err != nil {
 			c.Stop()
 			return nil, fmt.Errorf("write join-pending node %d: %w", i, err)
 		}
@@ -400,7 +400,7 @@ func (c *mrCluster) addNode(t *testing.T) {
 		t.Fatalf("addNode: nodeCount %d exceeds pre-allocated MaxNodes %d", i, len(c.procs))
 	}
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
-	require.NoError(t, writeNodeJoinPending(c.dataDirs[i], seedRaftAddr),
+	require.NoError(t, writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr),
 		"addNode: write join-pending node %d", i)
 	c.procs[i] = c.startNode(i)
 	require.NoError(t,

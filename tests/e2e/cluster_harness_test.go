@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -367,16 +368,32 @@ func (c *e2eCluster) raftAddr(i int) string {
 
 // writeJoinPending writes the .join-pending sentinel into node i's data dir
 // so that grainfs serve boots directly in join mode without a separate restart.
+// Also stages the seed's kek.key into the joiner's data dir — wireDEKKeeper
+// refuses to auto-generate a KEK on a joining node (§7 B3 / F#21).
 func (c *e2eCluster) writeJoinPending(i int, seedRaftAddr string) error {
-	return writeNodeJoinPending(c.dataDirs[i], seedRaftAddr)
+	return writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr)
 }
 
 // writeNodeJoinPending writes the .join-pending sentinel into dataDir so that
 // grainfs serve boots directly in join mode. Use before starting non-seed nodes
 // in tests that manage processes directly (outside e2eCluster).
-func writeNodeJoinPending(dataDir, seedRaftAddr string) error {
+//
+// seedDataDir is the seed node's data dir; the seed's kek.key is copied into
+// dataDir so the joiner can complete the KEK handshake. If seedDataDir is
+// empty, kek-staging is skipped (legacy single-node tests).
+func writeNodeJoinPending(dataDir, seedDataDir, seedRaftAddr string) error {
+	if seedDataDir != "" {
+		seedKEK := filepath.Join(seedDataDir, "kek.key")
+		if data, err := os.ReadFile(seedKEK); err == nil {
+			if werr := os.WriteFile(filepath.Join(dataDir, "kek.key"), data, 0o600); werr != nil {
+				return fmt.Errorf("stage joiner kek.key: %w", werr)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("read seed kek.key: %w", err)
+		}
+	}
 	return os.WriteFile(
-		fmt.Sprintf("%s/%s", dataDir, joinPendingFile),
+		filepath.Join(dataDir, joinPendingFile),
 		[]byte(seedRaftAddr), 0o600,
 	)
 }
