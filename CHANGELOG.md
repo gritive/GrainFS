@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.293.0] - 2026-05-20
+
+### Changed
+
+- Stabilized `DEKKeeper.Active` copy testing by comparing against the original
+  wrapped DEK bytes instead of a random sentinel byte.
+- Relaxed the balancer hot-reload ticker test's fast-tick observation window
+  to avoid scheduler-sensitive false failures while still proving interval
+  reset behavior.
+
 ## [0.0.292.0] - 2026-05-20
 
 ### Changed
