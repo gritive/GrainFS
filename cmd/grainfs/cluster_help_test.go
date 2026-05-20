@@ -14,7 +14,7 @@ import (
 // subcommand name, flag name, default, hidden status, deprecation, or help
 // text fails this test. Treat failures as a CLI contract change — most
 // updates here need a CHANGELOG entry. Regenerate via the capture block
-// near the bottom of this file's doc comment.
+// in the "Regenerate goldens:" section below.
 //
 // Regenerate goldens:
 //
