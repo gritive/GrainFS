@@ -135,6 +135,7 @@ func (w *Worker) Stats() Stats {
 }
 
 func (w *Worker) runCycle(ctx context.Context) {
+	log.Info().Msg("R4-debug: Worker.runCycle entered")
 	start := w.currentTime()
 	defer func() {
 		elapsed := w.currentTime().Sub(start).Seconds()
@@ -146,6 +147,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 		log.Error().Err(err).Msg("lifecycle: list buckets")
 		return
 	}
+	log.Info().Int("bucket_count", len(buckets)).Strs("buckets", buckets).Msg("R4-debug: ListBuckets result")
 
 	for _, bucket := range buckets {
 		if ctx.Err() != nil {
@@ -157,9 +159,10 @@ func (w *Worker) runCycle(ctx context.Context) {
 			continue
 		}
 		if cfg == nil {
+			log.Warn().Str("bucket", bucket).Msg("R4-debug: store.Get returned nil config")
 			continue
 		}
-
+		log.Info().Str("bucket", bucket).Int("rule_count", len(cfg.Rules)).Msg("R4-debug: dispatching runBucketCycle")
 		w.runBucketCycle(ctx, bucket, cfg.Rules, now)
 	}
 
@@ -171,6 +174,7 @@ func (w *Worker) runCycle(ctx context.Context) {
 // per-bucket timing is separate from Worker.lastCycleSecondsBits (which spans
 // the whole runCycle across all buckets and feeds Stats().LastCycleSeconds).
 func (w *Worker) runBucketCycle(ctx context.Context, bucket string, rules []Rule, now time.Time) {
+	log.Info().Str("bucket", bucket).Time("now", now).Msg("R4-debug: runBucketCycle entered")
 	bucketStart := w.currentTime()
 	defer func() {
 		metrics.LifecycleCycleSeconds.WithLabelValues(bucket).
@@ -183,15 +187,19 @@ func (w *Worker) runBucketCycle(ctx context.Context, bucket string, rules []Rule
 		return
 	}
 
+	groupCount := 0
 	for g := range groups {
+		groupCount++
 		if ctx.Err() != nil {
 			go drainGroups(groups) // drain producer to prevent goroutine leak
 			return
 		}
+		log.Info().Str("bucket", bucket).Str("key", g.Key).Int("versions", len(g.Versions)).Msg("R4-debug: processing object group")
 		metrics.LifecycleGroupVersions.Observe(float64(len(g.Versions)))
 		w.objectsChecked.Add(int64(len(g.Versions)))
 		w.applyRulesToGroup(ctx, g, rules, now)
 	}
+	log.Info().Str("bucket", bucket).Int("group_count", groupCount).Msg("R4-debug: runBucketCycle done")
 }
 
 func drainGroups(ch <-chan storage.ObjectKeyGroup) {
@@ -253,6 +261,9 @@ func (w *Worker) applyExpiration(ctx context.Context, g storage.ObjectKeyGroup, 
 	default:
 		return
 	}
+	log.Info().Str("bucket", g.Bucket).Str("key", g.Key).Time("now", now).Time("trigger", trigger).
+		Int64("last_modified", current.LastModified).Bool("expired", !now.Before(trigger)).
+		Msg("R4-debug: applyExpiration check")
 	if !now.Before(trigger) {
 		if w.deleteObject(ctx, g.Bucket, g.Key) {
 			metrics.LifecycleRuleMatch.WithLabelValues(ruleID, "expire").Inc()

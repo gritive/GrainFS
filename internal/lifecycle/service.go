@@ -220,6 +220,7 @@ func (s *Service) Run(ctx context.Context) {
 func (s *Service) reconcile(ctx context.Context) {
 	isLeader := s.leadership.IsLeader()
 	running := s.worker.Load() != nil
+	s.logger.Info().Bool("is_leader", isLeader).Bool("worker_running", running).Msg("R4-debug: reconcile entered")
 	switch {
 	case isLeader && !running:
 		if buckets, err := s.store.ListBuckets(); err != nil {
@@ -325,8 +326,13 @@ func (s *Service) MPUWorkerRunningForTest() bool {
 // worker is per-node and always loaded once Run has started, so we also
 // drive one MPU cycle in the same call. Test seam.
 func (s *Service) RunCycleForTest(ctx context.Context) {
-	if w := s.worker.Load(); w != nil {
+	w := s.worker.Load()
+	isLeader := s.leadership.IsLeader()
+	s.logger.Info().Bool("is_leader", isLeader).Bool("worker_loaded", w != nil).Msg("R4-debug: Service.RunCycleForTest called")
+	if w != nil {
 		w.RunCycleForTest(ctx)
+	} else {
+		s.logger.Warn().Bool("is_leader", isLeader).Msg("R4-debug: worker not loaded — RunCycleForTest is a no-op")
 	}
 	if mpu := s.mpuWorker.Load(); mpu != nil {
 		mpu.RunCycleForTest(ctx)

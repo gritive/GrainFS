@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/rs/zerolog/log"
 )
 
 // registerLifecycleTestCtlAPI wires the e2e-only deterministic-drive endpoints.
@@ -27,11 +28,15 @@ func (s *Server) registerLifecycleTestCtlAPI(h *server.Hertz) {
 }
 
 func (s *Server) lifecycleTestRunCycleHandler(ctx context.Context, c *app.RequestContext) {
+	log.Info().Msg("R4-debug: testctl run-cycle endpoint reached")
 	if !s.routeFeatureAvailable(routeFeatureLifecycle) {
+		log.Warn().Msg("R4-debug: lifecycle feature unavailable (s.lifecycle == nil) — 503")
 		c.JSON(consts.StatusServiceUnavailable, map[string]any{"enabled": false})
 		return
 	}
+	log.Info().Msg("R4-debug: dispatching to Service.RunCycleForTest")
 	s.lifecycle.RunCycleForTest(ctx)
+	log.Info().Msg("R4-debug: Service.RunCycleForTest returned")
 	c.JSON(consts.StatusOK, map[string]any{"ok": true})
 }
 
