@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.293.0] - 2026-05-20
+## [0.0.294.0] - 2026-05-20
 
 ### Changed
 
@@ -19,6 +19,16 @@
   shard packing in direct-corruption e2e cases.
 - Kept forwarded PUT object-index ownership on the forward receiver, avoiding
   duplicate ingress-side index commits.
+
+## [0.0.293.0] - 2026-05-20
+
+### Changed
+
+- Stabilized `DEKKeeper.Active` copy testing by comparing against the original
+  wrapped DEK bytes instead of a random sentinel byte.
+- Relaxed the balancer hot-reload ticker test's fast-tick observation window
+  to avoid scheduler-sensitive false failures while still proving interval
+  reset behavior.
 
 ## [0.0.292.0] - 2026-05-20
 

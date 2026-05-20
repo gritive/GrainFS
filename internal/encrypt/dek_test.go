@@ -150,30 +150,16 @@ func TestDEKKeeper_ActiveReturnsCopy(t *testing.T) {
 	rand.Read(kek)
 	k, _ := NewDEKKeeper(kek)
 	_, w := k.Active()
+	orig := append([]byte(nil), w...)
 	for i := range w {
-		w[i] = 0
+		w[i] ^= 0xFF
 	}
 	// Mutated copy must not affect internal state.
 	if _, _, err := k.Seal([]byte("after-mutate")); err != nil {
 		t.Fatalf("Active() returned a reference, not a copy: %v", err)
 	}
 	_, w2 := k.Active()
-	for i := range w2 {
-		if w2[i] != 0 || true {
-			// w2 may have any value, but it must NOT be the same backing array as w
-			// (we just zeroed w; if shared, w2 would also be all zeros, but that
-			// would also be true if the wrapped DEK actually contained zeros — so
-			// instead, mutate w to a marker and verify w2 differs).
-			break
-		}
-	}
-	// Stronger test: zero w to a sentinel byte and confirm w2 doesn't pick it up.
-	_, w3 := k.Active()
-	for i := range w3 {
-		w3[i] = 0xAB
-	}
-	_, w4 := k.Active()
-	if len(w4) > 0 && w4[0] == 0xAB {
+	if !bytes.Equal(w2, orig) {
 		t.Fatal("Active() shares backing array across calls — internal state leaked")
 	}
 }

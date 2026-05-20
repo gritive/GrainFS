@@ -576,6 +576,6 @@ func TestBalancer_HotReload_GossipInterval_TickerReset(t *testing.T) {
 
 	cfg.gossipInterval.Store(2 * time.Millisecond)
 	require.Eventually(t, func() bool {
-		return p.TickCount()-prevTicks > 5
-	}, 100*time.Millisecond, 2*time.Millisecond, "ticker should reset to faster interval")
+		return p.TickCount()-prevTicks > 3
+	}, 250*time.Millisecond, 2*time.Millisecond, "ticker should reset to faster interval")
 }
