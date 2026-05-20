@@ -244,6 +244,7 @@ func startIcebergE2EServerWithExtraArgs(t *testing.T, dataDir string, raftPort i
 	}
 	args = append(args, extraArgs...)
 	cmd := exec.Command(getBinary(), args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())

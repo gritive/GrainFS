@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -107,6 +108,7 @@ func runCLI(t *testing.T, dataDir string, args ...string) (stdout string, exitCo
 		full = append(full, "--endpoint", filepath.Join(dataDir, "admin.sock"))
 	}
 	cmd := exec.Command(getBinary(), full...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return string(out), 0

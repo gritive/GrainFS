@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -282,6 +283,7 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 	args = append(args, extraArgs...)
 
 	cmd := exec.Command(getBinary(), args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "start single-node grainfs")

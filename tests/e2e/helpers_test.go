@@ -693,6 +693,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 		"--lifecycle-interval", "0",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "start isolated server")

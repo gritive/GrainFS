@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -401,6 +402,7 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 	args = append(args, c.extraArgs...)
 
 	cmd := exec.Command(getBinary(), args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	require.NoError(t, cmd.Start(), "start e2e cluster node %d", i)

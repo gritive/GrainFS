@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -37,6 +38,7 @@ func runClusterPSKRefusesEmptyClusterKey(t *testing.T) {
 			"--nbd-port", "0",
 			"--encryption-key-file", encKeyFile,
 		)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		out, err := cmd.CombinedOutput()
 		require.Error(t, err, "process must exit non-zero without --cluster-key")
 		if !strings.Contains(string(out), "--cluster-key is required") {
@@ -90,6 +92,7 @@ func runClusterPSKDifferentJoinFails(t *testing.T) {
 		})
 
 		leader := exec.CommandContext(leaderCtx, getBinary(), leaderArgs...)
+		leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		leader.Stdout = leaderLog
 		leader.Stderr = leaderLog
 		require.NoError(t, leader.Start())
@@ -123,6 +126,7 @@ func runClusterPSKDifferentJoinFails(t *testing.T) {
 			"--lifecycle-interval", "0",
 		}
 		joiner := exec.CommandContext(joinerCtx, getBinary(), joinerArgs...)
+		joiner.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		out, joinErr := combinedOutputWithWaitDelay(joiner)
 
 		require.Error(t, joinErr, "joiner with mismatched --cluster-key must not succeed. out: %s", string(out))

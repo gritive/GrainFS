@@ -661,6 +661,7 @@ func startIAMTestServer(t *testing.T) iamTestServer {
 		"--lifecycle-interval", "0",
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "start IAM e2e server")
@@ -754,6 +755,7 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 	}
 
 	cmd := exec.Command(getBinary(), args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "start IAM e2e server")
