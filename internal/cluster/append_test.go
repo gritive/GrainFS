@@ -207,6 +207,29 @@ func TestAppendObjectSerializesSameObjectBeforeSegmentWrite(t *testing.T) {
 	}
 }
 
+func TestAppendObjectReusesVersionIDAcrossSegments(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	if err := b.CreateBucket(ctx, "test"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	first, err := b.AppendObject(ctx, "test", "k", 0, bytes.NewReader([]byte("aaaa")))
+	if err != nil {
+		t.Fatalf("first AppendObject: %v", err)
+	}
+	second, err := b.AppendObject(ctx, "test", "k", 4, bytes.NewReader([]byte("bbbb")))
+	if err != nil {
+		t.Fatalf("second AppendObject: %v", err)
+	}
+	if first.VersionID == "" {
+		t.Fatal("first append returned empty VersionID")
+	}
+	if second.VersionID != first.VersionID {
+		t.Fatalf("second append VersionID=%q, want existing %q", second.VersionID, first.VersionID)
+	}
+}
+
 func TestAppendObjectConvertsPlainPutAtCurrentOffset(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
