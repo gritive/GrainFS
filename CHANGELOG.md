@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.302.0] - 2026-05-21
+
+### Tests
+
+- **§9 Session 1 e2e (T68-T70)**: Iceberg OAuth + bearer-gated S3 access dual-target test
+  suite. Covers OAuth2 token mint flow (`POST /iceberg/v1/oauth/tokens` form-encoded
+  client_credentials), DuckDB-compatible wire-shape (lowercase `bearer` `token_type` per
+  duckdb/duckdb_iceberg#18483), iceberg-go SDK outbound URL path capture (F#8), JWT
+  3-segment shape, wrong-secret 401 path, and SigV4 access on warehouse buckets after
+  bearer mint. Three new dual-target tests (`TestIcebergOAuthE2E`,
+  `TestIcebergClientShapeE2E`, `TestIcebergPathCaptureE2E`) with 16 sub-cases across
+  SingleNode + Cluster3Node fixtures. Extends shared `icebergTarget` helper with
+  `mintToken`, `uniqueWarehouse`, `adminCreateSA` (with `iamWaitKeyReady` for cluster
+  Raft propagation), and `adminAttachPolicy` methods.
+
 ## [0.0.301.0] - 2026-05-21
 
 ### Tests
