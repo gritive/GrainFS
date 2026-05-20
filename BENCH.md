@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 14:32 KST
+Updated: 2026-05-20 14:41 KST
 
 ## Goal
 
@@ -50,11 +50,11 @@ Updated: 2026-05-20 14:32 KST
 
 ## GrainFS Single-Node Benchmark
 
-| op  |   MiB/s |    obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                                                                                |
-| --- | ------: | -------: | -----: | -------------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| put |  337.39 |  5398.29 |      0 |               621.27 | faster than MinIO/RustFS; RSS below MinIO | S3-only services-off run with `--audit-iceberg=false --dedup=false --block-cache-size=0 --shard-cache-size=0`; artifact `benchmarks/profiles/grainfs-single-put-s3only-services-off-20260520-143500` |
-| get | 1051.93 | 16830.92 |      0 |               801.30 | faster than MinIO/RustFS; RSS below MinIO | after raw-body response and encrypted blob read buffer reuse; artifact `benchmarks/profiles/grainfs-single-get-after-read-rawbody-pools-20260520-145200`                                             |
-| delete |    0.00 |  6051.41 |      0 |               789.33 | faster than MinIO/RustFS; RSS above MinIO | S3-only services-off run; artifact `benchmarks/profiles/grainfs-single-delete-s3only-services-off-20260520-145500`                                                                                   |
+| op     |   MiB/s |    obj/s | errors | max RSS MiB after op | baseline verdict                          | notes                                                                                                                                                                                                |
+| ------ | ------: | -------: | -----: | -------------------: | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| put    |  337.39 |  5398.29 |      0 |               621.27 | faster than MinIO/RustFS; RSS below MinIO | S3-only services-off run with `--audit-iceberg=false --dedup=false --block-cache-size=0 --shard-cache-size=0`; artifact `benchmarks/profiles/grainfs-single-put-s3only-services-off-20260520-143500` |
+| get    | 1051.93 | 16830.92 |      0 |               801.30 | faster than MinIO/RustFS; RSS below MinIO | after raw-body response and encrypted blob read buffer reuse; artifact `benchmarks/profiles/grainfs-single-get-after-read-rawbody-pools-20260520-145200`                                             |
+| delete |    0.00 |  6511.14 |      0 |               811.88 | faster than MinIO/RustFS; RSS above MinIO | after MetaFSM snapshot sort-key optimization; artifact `benchmarks/profiles/grainfs-single-delete-after-snapshot-sortkey-20260520-151000`                                                            |
 
 ## GrainFS Optimization Notes
 
@@ -66,6 +66,7 @@ Updated: 2026-05-20 14:32 KST
 - `get` first S3-only measurement: throughput satisfies the baseline gate, but RSS is 1051.78 MiB versus MinIO GET 919.2 MiB. Next step: review GET architecture, then collect GET pprof heap/allocs before choosing a fix.
 - `get` memory candidates: architecture review found three buffers for 64 KiB packed objects: encrypted blob read, CachedBackend reader, and server small-body response copy. pprof alloc_space confirmed `BlobStore.Read` and `writeObjectBody` as the dominant churn. Fixes: raw body fast path for packed/cache readers and pooled encrypted blob read key/payload/AAD buffers. Micro benchmarks: raw response path ~0.9-2.1 us/op, 1992 B/op versus normal reader ~6.8-9.1 us/op, 67568 B/op; `BenchmarkEncryptedBlobStoreRead64KBNoCompress` is 2 alloc/op. e2e GET RSS improved to 801.30 MiB, below MinIO GET RSS 919.2 MiB.
 - `delete` first S3-only measurement: throughput satisfies the baseline gate, but RSS is 789.33 MiB versus MinIO DELETE 533.9 MiB. Next step: review DELETE architecture, then collect pprof heap/allocs before choosing a fix.
+- `delete` memory candidate 1: pprof showed seed/snapshot churn rather than the DELETE fast path itself. `MetaFSM.Snapshot` sorted object index entries by rebuilding `objectIndexVersionKey` inside the comparator, causing O(n log n) string allocation. Fix: carry the existing object-index map key as a snapshot sort key. Micro benchmark `BenchmarkMetaFSMSnapshotObjectIndex4096`: ~2.1-2.3 ms/op, ~3.4 MiB/op, ~80-96 allocs/op after the change. pprof alloc_space fell from 8.88 GiB to 4.24 GiB and `objectIndexVersionKey` disappeared from the alloc_space top list; e2e DELETE RSS remains above MinIO, so continue investigation.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
