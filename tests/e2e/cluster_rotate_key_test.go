@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -54,6 +55,7 @@ func TestRotateKeyHappyPathE2E(t *testing.T) {
 		defer os.Remove(logFile.Name())
 
 		srv := exec.CommandContext(ctx, getBinary(), args...)
+		srv.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		srv.Stdout = logFile
 		srv.Stderr = logFile
 		require.NoError(t, srv.Start())
@@ -135,6 +137,7 @@ func TestRotateKeyStatusOnlyOnSoloModeE2E(t *testing.T) {
 		defer os.Remove(logFile.Name())
 
 		srv := exec.CommandContext(ctx, getBinary(), args...)
+		srv.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		srv.Stdout = logFile
 		srv.Stderr = logFile
 		require.NoError(t, srv.Start())
@@ -206,6 +209,7 @@ func runRotateKeyCLI(t *testing.T, dataDir, action string, extra ...func(map[str
 func runRotateKeyCLIBeginGenerate(t *testing.T, dataDir string) rotationCLIResp {
 	t.Helper()
 	cmd := exec.Command(getBinary(), "cluster", "rotate-key", "begin", "--generate", "--endpoint", filepath.Join(dataDir, "rotate.sock"))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
