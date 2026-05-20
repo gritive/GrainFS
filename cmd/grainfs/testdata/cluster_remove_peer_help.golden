@@ -1,0 +1,27 @@
+Remove a voter from the meta-Raft cluster via §4.3 joint consensus.
+
+The endpoint is the admin Unix socket — run this on the leader node.
+Pre-flight refuses the request if it would drop live voters below the
+post-removal quorum; pass --force to override (e.g., evicting a permanently
+dead peer when ChangeMembership can still commit).
+
+Usage:
+  grainfs cluster remove-peer <id> [flags]
+
+Examples:
+  # Evict a dead voter (quorum stays intact)
+  grainfs cluster --endpoint <data-dir>/admin.sock remove-peer node-3 --yes
+
+  # Force-evict despite quorum loss (last-resort disaster recovery)
+  grainfs cluster --endpoint <data-dir>/admin.sock remove-peer node-2 --force --yes
+
+Flags:
+      --force              Bypass pre-flight quorum check
+  -h, --help               help for remove-peer
+      --timeout duration   Request timeout (default 30s)
+  -y, --yes                Skip interactive confirmation
+
+Global Flags:
+      --endpoint string    admin Unix socket path (required, e.g. ./tmp/admin.sock)
+      --format string      Output format: text or json (status/peers/events; ignored elsewhere) (default "text")
+      --log-level string   log level: debug, info, warn, error (default "info")
