@@ -42,6 +42,9 @@ const (
 	routePathNfsDebug   = "/nfs/exports/:name/debug"
 	routePathNfsExport  = "/nfs/exports/:name"
 
+	routePathConfig      = "/config"
+	routePathConfigByKey = "/config/:key"
+
 	routePathIAMSA        = "/iam/sa"
 	routePathIAMSAByID    = "/iam/sa/:id"
 	routePathIAMSAKey     = "/iam/sa/:id/key"

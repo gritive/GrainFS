@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -109,6 +110,22 @@ type NFSDiag interface {
 // falls back to the existing create-only flow.
 type BucketWithPolicyProposer interface {
 	ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error
+}
+
+// ConfigProposer is the slim interface config admin handlers need to write
+// cluster-wide config via Raft. Satisfied by *cluster.MetaRaft.
+// nil disables config write endpoints.
+type ConfigProposer interface {
+	ProposeConfigPut(ctx context.Context, key, value string) error
+	ProposeConfigDelete(ctx context.Context, key string) error
+}
+
+// ConfigStoreReader is the slim interface config admin handlers need to read
+// the current config state. Satisfied by *config.Store.
+// nil disables config read endpoints.
+type ConfigStoreReader interface {
+	GetString(key string) (value string, present bool)
+	ListAll() []config.Entry
 }
 
 // IAMService is the slim interface the IAM admin handlers need.

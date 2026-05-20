@@ -509,6 +509,23 @@ type TransferLeaderResult struct {
 	TargetHint string `json:"target_hint,omitempty"`
 }
 
+// --- Config admin wire types ---
+
+// ConfigEntry is the JSON representation of one config key in admin responses.
+type ConfigEntry struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Kind        string `json:"kind"`
+	Default     string `json:"default"`
+	Set         bool   `json:"set"`
+	Description string `json:"description"`
+}
+
+// ConfigSetReq is the body for PUT /v1/config/:key.
+type ConfigSetReq struct {
+	Value string `json:"value"`
+}
+
 // --- Bucket admin wire types ---
 
 // BucketInfo is the JSON representation of a bucket in admin responses.

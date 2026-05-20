@@ -19,11 +19,12 @@ var ErrInvalidValue = errors.New("invalid value for config key")
 
 // Entry is a snapshot of one registered key as returned by ListAll.
 type Entry struct {
-	Key     string
-	Value   string
-	Kind    string
-	Default string
-	Set     bool // true if an explicit value overrides the default
+	Key         string
+	Value       string
+	Kind        string
+	Default     string
+	Set         bool   // true if an explicit value overrides the default
+	Description string // human-readable one-line description from Spec
 }
 
 // Store is the in-memory config registry. It is safe for concurrent reads.
@@ -176,11 +177,12 @@ func (s *Store) ListAll() []Entry {
 			v = spec.defaultStr()
 		}
 		entries = append(entries, Entry{
-			Key:     key,
-			Value:   v,
-			Kind:    spec.kind(),
-			Default: spec.defaultStr(),
-			Set:     set,
+			Key:         key,
+			Value:       v,
+			Kind:        spec.kind(),
+			Default:     spec.defaultStr(),
+			Set:         set,
+			Description: spec.Description(),
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })

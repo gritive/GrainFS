@@ -28,6 +28,7 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerResource(g, d)
 	registerDashboard(g, d)
 	registerIAM(g, d)
+	registerConfig(g, d)
 	registerBucket(g, d)
 	registerNfsExports(g, d)
 }

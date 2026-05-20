@@ -62,6 +62,8 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
 		IAM:                  state.iamAdminAPI,
 		BucketWithPolicyProp: state.iamProposer,
+		ConfigProposer:       state.metaRaft,
+		ConfigStore:          state.cfgStore,
 		Buckets:              storage.NewOperations(state.backend),
 		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		Protocols:            storageProtocolStatusFromConfig(cfg),
