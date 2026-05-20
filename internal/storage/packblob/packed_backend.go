@@ -87,7 +87,8 @@ type PackedBackend struct {
 	blobDir   string
 	threshold int64 // objects below this size go into blobs
 
-	index sync.Map // packedKey → *indexEntry
+	index     sync.Map // packedKey → *indexEntry
+	listIndex packedListIndex
 
 	stopSave chan struct{} // signals the background index-save goroutine to stop
 }
@@ -203,6 +204,7 @@ func (pb *PackedBackend) deleteBucketIndex(bucket string) {
 		}
 		return true
 	})
+	pb.listIndex.removeBucket(bucket)
 }
 
 // SaveIndex persists the in-memory index to {blobDir}/index.bin (FlatBuffers).
@@ -255,6 +257,7 @@ func (pb *PackedBackend) LoadIndex() error {
 		}
 		for pk, e := range entries {
 			pb.index.Store(pk, e)
+			pb.listIndex.add(pk)
 		}
 		return nil
 	}
@@ -285,6 +288,7 @@ func (pb *PackedBackend) LoadIndex() error {
 		}
 		e.Refcount.Store(1)
 		pb.index.Store(pk, e)
+		pb.listIndex.add(pk)
 	}
 	return nil
 }
@@ -386,6 +390,7 @@ func (pb *PackedBackend) AppendObject(ctx context.Context, bucket, key string, e
 			}
 			if pb.index.CompareAndDelete(pk, entry) {
 				entry.Refcount.Add(-1)
+				pb.listIndex.remove(pk)
 			}
 		}
 	}
@@ -407,6 +412,11 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 	if err := pb.inner.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
+	pk := packedKey{bucket: bucket, key: key}
+	var previousPacked *indexEntry
+	if v, loaded := pb.index.Load(pk); loaded {
+		previousPacked = v.(*indexEntry)
+	}
 
 	data, large, pooledCandidate, err := readPackedCandidateReusable(req.Body, pb.threshold)
 	if pooledCandidate {
@@ -419,7 +429,12 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 	// Large objects pass through to inner backend
 	if large {
 		req.Body = io.MultiReader(bytes.NewReader(data), req.Body)
-		return putInnerWithRequest(ctx, pb.inner, req)
+		obj, err := putInnerWithRequest(ctx, pb.inner, req)
+		if err != nil {
+			return nil, err
+		}
+		pb.evictPackedKeyIfSame(pk, previousPacked)
+		return obj, nil
 	}
 
 	// Versioning-enabled buckets must round-trip through the inner backend so
@@ -431,14 +446,18 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 	if versioner, ok := pb.inner.(storage.BucketVersioner); ok {
 		if state, vErr := versioner.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
 			req.Body = bytes.NewReader(data)
-			return putInnerWithRequest(ctx, pb.inner, req)
+			obj, err := putInnerWithRequest(ctx, pb.inner, req)
+			if err != nil {
+				return nil, err
+			}
+			pb.evictPackedKeyIfSame(pk, previousPacked)
+			return obj, nil
 		}
 	}
 
 	// Small object → pack into blob. The blob storage layer keys entries by
 	// the legacy "bucket/key" string (its on-disk format), so we serialize
 	// the tuple here. The in-memory index uses the typed packedKey below.
-	pk := packedKey{bucket: bucket, key: key}
 	loc, err := pb.blobStore.Append(pk.String(), data)
 	if err != nil {
 		return nil, fmt.Errorf("blob append: %w", err)
@@ -464,6 +483,7 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 	if prev, loaded := pb.index.Swap(pk, e); loaded {
 		prev.(*indexEntry).Refcount.Add(-1)
 	}
+	pb.listIndex.add(pk)
 
 	return &storage.Object{
 		Key:          key,
@@ -765,7 +785,9 @@ func (pb *PackedBackend) deletePackedEntry(bucket, key string) bool {
 			// Compare-and-delete only if the entry is still the same pointer —
 			// protects against a concurrent Swap publishing a new entry under
 			// the same key.
-			pb.index.CompareAndDelete(pk, entry)
+			if pb.index.CompareAndDelete(pk, entry) {
+				pb.listIndex.remove(pk)
+			}
 		}
 		return true
 	}
@@ -828,7 +850,18 @@ func (pb *PackedBackend) evictPackedKey(bucket, key string) {
 		entry := v.(*indexEntry)
 		if pb.index.CompareAndDelete(pk, entry) {
 			entry.Refcount.Add(-1)
+			pb.listIndex.remove(pk)
 		}
+	}
+}
+
+func (pb *PackedBackend) evictPackedKeyIfSame(pk packedKey, entry *indexEntry) {
+	if entry == nil {
+		return
+	}
+	if pb.index.CompareAndDelete(pk, entry) {
+		entry.Refcount.Add(-1)
+		pb.listIndex.remove(pk)
 	}
 }
 
@@ -893,24 +926,21 @@ func (pb *PackedBackend) ListObjectsPage(ctx context.Context, bucket, prefix, ma
 	if err != nil {
 		return nil, false, err
 	}
-	// Collect packed-index matches past marker. Sort happens after merge so
-	// inner ordering and packed-only entries interleave correctly by key.
+	// Collect packed-index matches past marker. listIndex narrows the scan to
+	// the requested bucket/prefix page; sync.Map remains the metadata authority.
 	packed := make(map[string]*storage.Object)
-	pb.index.Range(func(rk, rv any) bool {
-		pk := rk.(packedKey)
-		entry := rv.(*indexEntry)
+	packedKeys, packedTruncated := pb.listIndex.page(bucket, prefix, marker, maxKeys+1)
+	for _, key := range packedKeys {
+		v, ok := pb.index.Load(packedKey{bucket: bucket, key: key})
+		if !ok {
+			continue
+		}
+		entry := v.(*indexEntry)
 		if entry.Refcount.Load() <= 0 {
-			return true
+			continue
 		}
-		if pk.bucket != bucket || !strings.HasPrefix(pk.key, prefix) {
-			return true
-		}
-		if marker != "" && pk.key <= marker {
-			return true
-		}
-		packed[pk.key] = packedObjectFromEntry(pk.key, entry, nil)
-		return true
-	})
+		packed[key] = packedObjectFromEntry(key, entry, nil)
+	}
 
 	// Merge: packed entries override inner when same key, plus packed-only.
 	seen := make(map[string]bool, len(inner))
@@ -930,7 +960,7 @@ func (pb *PackedBackend) ListObjectsPage(ctx context.Context, bucket, prefix, ma
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
 
-	truncated := innerTruncated
+	truncated := innerTruncated || packedTruncated
 	if maxKeys > 0 && len(merged) > maxKeys {
 		merged = merged[:maxKeys]
 		truncated = true
@@ -1207,6 +1237,7 @@ func (pb *PackedBackend) CopyObjectWithRequest(ctx context.Context, req storage.
 			if prev, loaded := pb.index.Swap(dstIKey, dst); loaded {
 				prev.(*indexEntry).Refcount.Add(-1)
 			}
+			pb.listIndex.add(dstIKey)
 
 			h := md5.Sum(data)
 			return &storage.Object{
@@ -1456,6 +1487,7 @@ func (pb *PackedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, 
 		pb.index.Delete(k)
 		return true
 	})
+	pb.listIndex.clear()
 	for _, pr := range packedRestores {
 		e := &indexEntry{
 			Location:     pr.loc,
@@ -1467,6 +1499,7 @@ func (pb *PackedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, 
 		}
 		e.Refcount.Store(1)
 		pb.index.Store(pr.key, e)
+		pb.listIndex.add(pr.key)
 		restored++
 	}
 

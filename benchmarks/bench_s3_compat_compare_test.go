@@ -225,6 +225,74 @@ func TestBenchS3CompatSingleNodeAcceptsExtraServeFlags(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatClusterStagesKEKBeforeJoinersStart(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	start := strings.Index(script, "start_grainfs_cluster()")
+	if start < 0 {
+		t.Fatal("start_grainfs_cluster not found")
+	}
+	end := strings.Index(script[start:], "start_minio()")
+	if end < 0 {
+		t.Fatal("start_minio not found")
+	}
+	cluster := script[start : start+end]
+
+	if !strings.Contains(cluster, `local cluster_dir="$BENCH_DIR/gfc"`) {
+		t.Fatalf("start_grainfs_cluster must keep data dir names short so admin.sock does not exceed Unix socket path limits")
+	}
+	for _, want := range []string{
+		`local kek_file="$cluster_dir/n1/kek.key"`,
+		`bench_wait_file "$kek_file" "grainfs-cluster node1 KEK"`,
+		`cp "$kek_file" "$cluster_dir/n${idx}/kek.key"`,
+		`chmod 600 "$cluster_dir/n${idx}/kek.key"`,
+	} {
+		if !strings.Contains(cluster, want) {
+			t.Fatalf("start_grainfs_cluster must stage KEK for joiners with %q", want)
+		}
+	}
+	if strings.Index(cluster, `cp "$kek_file" "$cluster_dir/n${idx}/kek.key"`) > strings.Index(cluster, `start_grainfs_cluster_node "$idx"`) {
+		t.Fatalf("start_grainfs_cluster must copy KEK before starting joiner nodes")
+	}
+}
+
+func TestBenchS3CompatWaitsForGrainFSBucketAuthOnEveryClusterNode(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	common, err := os.ReadFile("lib/common.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonScript := string(common)
+
+	if !strings.Contains(commonScript, "bench_wait_s3_bucket_auth_ready()") {
+		t.Fatalf("common.sh must define bench_wait_s3_bucket_auth_ready")
+	}
+	if !strings.Contains(commonScript, `AWS_ACCESS_KEY_ID="$access_key"`) {
+		t.Fatalf("bench_wait_s3_bucket_auth_ready must use the benchmark access key")
+	}
+	if !strings.Contains(commonScript, `--endpoint-url "$url" s3api head-bucket --bucket "$bucket"`) {
+		t.Fatalf("bench_wait_s3_bucket_auth_ready must probe each endpoint with signed HeadBucket")
+	}
+
+	prepare := strings.Index(script, `prepare_grainfs_warp_bucket "$target" "$op"`)
+	waitReady := strings.Index(script, `bench_wait_s3_bucket_auth_ready "$base_url" "$access_key" "$secret_key" "warp-${target}-${op}"`)
+	run := strings.Index(script, `run_warp_case "$target" "$base_url" "$access_key" "$secret_key" "$op"`)
+	if waitReady < 0 {
+		t.Fatalf("bench_s3_compat_compare.sh must wait for GrainFS bucket auth readiness before warp")
+	}
+	if !(prepare < waitReady && waitReady < run) {
+		t.Fatalf("bucket auth readiness wait must run after bucket preparation and before warp")
+	}
+}
+
 func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
 	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
 	if err != nil {
