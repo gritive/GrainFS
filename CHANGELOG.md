@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.0.303.0] - 2026-05-21
+
+### Tests
+
+- internal/raft integration-style election, membership, learner promotion,
+  and learner quorum coverage now runs through the shared Ginkgo v2 suite
+  with Gomega assertions and Ginkgo-native cleanup.
+- The migrated raft specs keep one top-level `Describe` per file, share
+  setup through `BeforeEach`/helpers, and remove orphan `testing.T` fixtures
+  from the converted files.
+
+## [0.0.302.1] - 2026-05-21
+
+### Changed
+
+- **Refactor**: nfs CLI commands now use `internal/nfsadmin` for the debug
+  path. `cmd/grainfs/nfs_debug.go` shrinks from 92 → 23 LOC. The
+  `client.ExportDebug` orchestration and rendering function move into
+  `internal/nfsadmin/{debug_ops.go,format.go}` as `RunDebug` + exported
+  `RenderExportDebug`. No flag, output, or protocol change.
+  (cmd thin-runner step 6/7)
+
+### Added
+
+- `cmd/grainfs/nfs_help_test.go` — C1 contract guard with 7 `--help`
+  golden snapshots covering `nfs`, `nfs export {add,remove,update,list}`,
+  and `nfs debug`. Mirrors the cluster/iam/bucket help-test pattern.
+- `cmd/grainfs/cmd_loc_guard_test.go` — cmd thin-runner contract guard.
+  Enforces: each non-test `cmd/grainfs/*.go` must satisfy
+  file ≤ 250 LOC OR every top-level function ≤ 90 LOC. Prevents
+  regression of the thin-runner refactor (step 7).
+- `CLAUDE.md` documents the cmd boundary contract with pointers to the
+  master spec and the new lint guard.
+
 ## [0.0.302.0] - 2026-05-21
 
 ### Tests
