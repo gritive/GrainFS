@@ -15,6 +15,19 @@ import (
 // assertion succeeds and the detailed audit emit path actually fires in
 // production. Both methods take s3auth.AuditAllowDetails (with
 // iam.AuditDetails as a Go type alias for the same type). T51' B1 review.
+//
+// Audit emission has two INDEPENDENT sinks:
+//
+//  1. AuditEmitter (iam.AuditLogger): structured zerolog line "iam.authz";
+//     immediate, per-call. RecordAllowDetailed/RecordDenyDetailed/
+//     RecordAnonAllow carry matched_policy_id / matched_sid /
+//     authz_latency_us / condition_context.
+//  2. audit.s3 Iceberg table (auditSink below): built from the request context
+//     via rememberAuthzDecision → auditAuthzDecisionKey →
+//     finalizeAuditEnvelopeEvent; flushed via outbox at request end.
+//
+// Both are fed from the same Decision; if you change the Decision shape,
+// update BOTH paths.
 var _ s3auth.AuditEmitterDetailed = (*iam.AuditLogger)(nil)
 
 type auditSink struct {

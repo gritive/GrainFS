@@ -22,6 +22,13 @@ func (s *Server) authorizeAccessKeyScope(ctx context.Context, c *app.RequestCont
 	saID := iam.PrincipalFromContext(ctx)
 	s.iamAudit.RecordDeny(ctx, saID, bucket, key, action, "key_scope_mismatch")
 	c.Set(auditErrReasonKey, "key_scope_mismatch")
+	// Stash a minimal Decision so the audit envelope finalizer records the
+	// reason on the audit.s3 row. matched_policy_id / matched_sid / latency /
+	// condition_context stay empty — Layer 0 scope check ran before Layer 1.
+	rememberAuthzDecision(c, s3auth.Decision{
+		Allow:  false,
+		Detail: s3auth.AuthzDetail{Reason: "key_scope_mismatch"},
+	})
 	writeXMLError(c, consts.StatusForbidden, "AccessDenied", "Access key scope denies this bucket")
 	c.Abort()
 	return false

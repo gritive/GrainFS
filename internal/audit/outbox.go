@@ -92,8 +92,12 @@ func (o *Outbox) SetDenyOnly(v bool) {
 	o.denyOnly.Store(v)
 }
 
-// DenyOnly reports the current deny-only filter state. Exported for tests
-// and for diagnostics; production callers should not branch on it.
+// DenyOnly reports the current filter state. EXPORTED FOR TESTS AND
+// DIAGNOSTICS ONLY. Production code must never branch on this — it's a
+// write-path filter, not a decision gate. The atomic load is not
+// synchronized with any in-flight write, so a caller using DenyOnly() to
+// decide whether to record an event would race with the filter at the
+// durable-write point.
 func (o *Outbox) DenyOnly() bool {
 	if o == nil {
 		return false

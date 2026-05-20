@@ -2,6 +2,7 @@ package s3auth
 
 import (
 	"context"
+	"math"
 	"time"
 )
 
@@ -66,6 +67,18 @@ type PolicyChecker interface {
 	Allow(ctx context.Context, in PermCheckInput) bool
 }
 
+// Audit emission has two INDEPENDENT sinks:
+//
+//  1. AuditEmitter (this interface): structured zerolog line "iam.authz";
+//     immediate, per-call. AuditEmitterDetailed extension carries
+//     matched_policy_id / matched_sid / authz_latency_us / condition_context.
+//  2. audit.s3 Iceberg table (internal/audit + internal/server/audit_envelope_event.go):
+//     built from the request context via rememberAuthzDecision; flushed via
+//     outbox at request end.
+//
+// Both are fed from the same Decision; if you change the Decision shape,
+// update BOTH paths.
+//
 // AuditEmitter records authorization decisions. *iam.AuditLogger satisfies this.
 type AuditEmitter interface {
 	RecordAllow(ctx context.Context, saID, bucket, key string, action S3Action)
@@ -199,8 +212,8 @@ func elapsedUS(t0 time.Time) int32 {
 	if us < 0 {
 		return 0
 	}
-	if us > int64(int32(^uint32(0)>>1)) {
-		return int32(^uint32(0) >> 1)
+	if us > math.MaxInt32 {
+		return math.MaxInt32
 	}
 	return int32(us)
 }

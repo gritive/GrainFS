@@ -33,8 +33,10 @@ func TestIcebergSchemaJSON_Includes_T48_Columns(t *testing.T) {
 
 func TestS3InitialMetadata_LastColumnID_Updated(t *testing.T) {
 	// S3InitialMetadata is a printf template; just grep the literal claim that
-	// last-column-id is at least 27. Parsing the rendered JSON is brittle
-	// (placeholders for table-uuid/location/last-updated-ms).
+	// last-column-id matches currentSchemaLastColumnID. Parsing the rendered
+	// JSON is brittle (placeholders for table-uuid/location/last-updated-ms).
+	// Equality (not >=) catches drift between the const and the literal in
+	// either direction.
 	re := regexp.MustCompile(`"last-column-id":(\d+)`)
 	m := re.FindStringSubmatch(S3InitialMetadata)
 	if m == nil {
@@ -44,7 +46,7 @@ func TestS3InitialMetadata_LastColumnID_Updated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("last-column-id not an int: %v", err)
 	}
-	if got < 27 {
-		t.Fatalf("last-column-id = %d, want >= 27", got)
+	if got != currentSchemaLastColumnID {
+		t.Fatalf("last-column-id = %d, want %d (drift between currentSchemaLastColumnID const and S3InitialMetadata literal)", got, currentSchemaLastColumnID)
 	}
 }

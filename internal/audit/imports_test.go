@@ -18,6 +18,9 @@ import (
 // Note: this test relies on Go's convention that `go test` runs with the
 // working directory set to the package directory, so the `*.go` glob is
 // resolved against internal/audit/.
+//
+// NOTE: This guards DIRECT imports only. Transitive imports (a→b→server) are
+// NOT detected; rely on the package's layering rules for that.
 func TestImports_NoServerPackage(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

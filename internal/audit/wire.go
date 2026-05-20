@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 )
 
 // EncodeS3Batch serializes a slice of S3Events to binary.
@@ -102,24 +101,14 @@ func EncodeS3Batch(events []S3Event) ([]byte, error) {
 	return buf, nil
 }
 
-// encodeConditionContext renders the map as a sorted-key JSON object so the
-// wire encoding is deterministic across nodes. Returns "" for nil/empty.
+// encodeConditionContext renders the map as a JSON object. Determinism
+// across nodes is guaranteed by encoding/json, which sorts map[string]string
+// keys lexicographically. Returns "" for nil/empty.
 func encodeConditionContext(m map[string]string) (string, error) {
 	if len(m) == 0 {
 		return "", nil
 	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := make(map[string]string, len(m))
-	// Re-insert sorted; encoding/json sorts map keys lexicographically, so
-	// the resulting JSON object is deterministic by construction.
-	for _, k := range keys {
-		out[k] = m[k]
-	}
-	b, err := json.Marshal(out)
+	b, err := json.Marshal(m)
 	if err != nil {
 		return "", err
 	}

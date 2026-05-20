@@ -307,14 +307,15 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			return fmt.Errorf("audit outbox: %w", err)
 		}
 		state.AddCleanup(func() { _ = auditOutbox.Close() })
-		// Publish to bootState so the OnAuditDenyOnly hook (registered in
-		// bootMetaRaftWiring before the outbox existed) can target it.
-		// Initial state is seeded from cfgStore in case the audit.deny-only key
-		// was already set (e.g. cluster joined a setup that had it on).
-		state.auditOutbox = auditOutbox
+		// Seed initial deny-only state BEFORE publishing the outbox pointer:
+		// the OnAuditDenyOnly hook (registered earlier in bootMetaRaftWiring)
+		// looks up state.auditOutbox to call SetDenyOnly; if we published
+		// first and then read cfgStore, a hook firing in between could land
+		// a fresher value that our stale snapshot would then overwrite.
 		if v, ok := state.cfgStore.GetBool("audit.deny-only"); ok {
 			auditOutbox.SetDenyOnly(v)
 		}
+		state.auditOutbox = auditOutbox
 		auditAccessKey := "AKGFAUDIT" + strings.ReplaceAll(uuid.NewString(), "-", "")
 		auditSecretKey := uuid.NewString() + uuid.NewString()
 		srvOpts = append(srvOpts,
