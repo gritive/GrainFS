@@ -1,6 +1,6 @@
 # Benchmark Progress
 
-Updated: 2026-05-20 15:33 KST
+Updated: 2026-05-20 15:39 KST
 
 ## Goal
 
@@ -60,7 +60,7 @@ Updated: 2026-05-20 15:33 KST
 | stat      |    0.00 |  58557.94 |      0 |               126.72 | faster than MinIO/RustFS; RSS below MinIO | after small Badger option tuning; artifact `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`       |
 | versioned |  182.82 |   2925.17 |      0 |               486.23 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
 | retention |    0.00 |  19336.57 |      0 |               280.86 | faster than MinIO/RustFS; RSS below MinIO | after streaming shard-pack fast path; artifact `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
-| multipart | 2451.06 |    490.21 |      0 |               626.56 | slower than MinIO/RustFS; RSS below MinIO | after direct encrypted range decrypt; artifact `benchmarks/profiles/grainfs-single-multipart-after-direct-decrypt-readat-20260520-153319` |
+| multipart | 3568.66 |    713.73 |      0 |               630.25 | faster than MinIO; slower than RustFS; RSS below MinIO | after full-part streaming fallback; artifact `benchmarks/profiles/grainfs-single-multipart-after-full-part-stream-20260520-153925` |
 
 ## GrainFS Optimization Notes
 
@@ -78,11 +78,12 @@ Updated: 2026-05-20 15:33 KST
 - `versioned` candidate 1: architecture review found the existing shard pack was only wired to buffered local shard writes; versioned single-shard PUT uses `WriteLocalShardStreamContext`, so every 64 KiB version created a shard directory, temp file, fsync, and rename. Fix: route bounded streaming shard writes through the existing shard pack when the stream is below the pack threshold, and raise the default shard-pack threshold enough to include the 8-byte EC shard header for 64 KiB objects. e2e VERSIONED improved from 40.37 MiB/s, 645.87 obj/s to 182.82 MiB/s, 2925.17 obj/s; RSS stayed below MinIO at 486.23 MiB.
 - `multipart` candidate 1: architecture review and pprof showed multipart verification reads were entering the range-read fast path but wrapper boundaries dropped the prepared-object metadata, forcing `HeadObject`/Badger value copies before `ReadAt`. Fix: carry EC placement fields on `storage.Object` and preserve `ReadAtObject` through `PackedBackend`. pprof alloc_space fell from 6.88 GiB to 5.35 GiB and `readAtRangeReader.readAt` allocation fell from ~2.43 GiB to ~0.29 GiB, but clean e2e still fails the RustFS throughput gate. Remaining CPU is encrypted shard pread/decrypt plus socket write; next candidate should focus there.
 - `multipart` candidate 2: zero-copy review of `ReadEncryptedShardRangeAt` found full aligned chunk reads decrypted into a temporary plaintext chunk and copied into the caller range buffer. Fix: decrypt directly into the caller buffer for aligned full-chunk reads, preserving the old buffered path for partial chunks. Clean e2e improved from 2010.59 MiB/s to 2451.06 MiB/s, still below MinIO/RustFS.
+- `multipart` candidate 3: warp `multipart` reads `partNumber=1` for objects whose only part spans the full object. Architecture review showed forcing that full-part request through `ReadAtObject` converts a normal whole-object stream into pread/range-reader work with no correctness benefit. Fix: when the requested multipart part exactly covers the object, fall back to the existing GetObject streaming path; partial parts still use ReadAt. Clean e2e improved to 3568.66 MiB/s and 630.25 MiB RSS, now above MinIO but still slightly below RustFS.
 - ReadAll audit status: production `ReadAll` candidates exist, but initial PUT pprof points first to packblob intake/encryption churn and Badger/Ristretto resident memory rather than an unbounded `ReadAll` on this single-node PUT path.
 
 ## Open Items
 
-- Continue optimizing `multipart`: current clean e2e is 2451.06 MiB/s vs MinIO 3245.85/RustFS 3622.07; RSS is below MinIO.
+- Continue optimizing `multipart`: current clean e2e is 3568.66 MiB/s vs MinIO 3245.85/RustFS 3622.07; RSS is below MinIO.
 - Continue GrainFS single-node benchmark with S3-only service flags after multipart passes: `multipart-put`, `append`.
 - Continue GrainFS single PUT profiling only if later changes regress the current S3-only result. Current PUT gate is satisfied: 548.30 MiB/s vs MinIO 175.14/RustFS 26.62, RSS 601.22 MiB vs MinIO 796.3.
 - Audit GrainFS `ReadAll` usage before optimizing hot paths. Each use needs justification: bounded input, non-hot path, unavoidable protocol buffering, or replacement with streaming/ReaderAt/zero-copy path.

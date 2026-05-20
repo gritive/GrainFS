@@ -84,6 +84,10 @@ func (s *Server) getObjectPartNumberReadAt(ctx context.Context, c *app.RequestCo
 		return true
 	}
 
+	if start == 0 && end+1 == obj.Size {
+		return false
+	}
+
 	s.writeObjectReadHeaders(c, obj, false)
 	etag := fmt.Sprintf("\"%s\"", partETag)
 	c.Header("ETag", etag)

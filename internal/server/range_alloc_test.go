@@ -276,7 +276,7 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.Zero(t, backend.getObjCalls.Load())
 }
 
-func TestGetObjectPartNumber_MultipartFloorUsesSingleReadAt(t *testing.T) {
+func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
 	tmp := t.TempDir()
 	local, err := storage.NewLocalBackend(tmp)
 	require.NoError(t, err)
@@ -313,9 +313,9 @@ func TestGetObjectPartNumber_MultipartFloorUsesSingleReadAt(t *testing.T) {
 
 	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
 	require.Equal(t, int64(len(payload)), n)
-	require.Equal(t, int32(1), backend.preparedReadAtCalls.Load())
-	require.Equal(t, int64(len(payload)), backend.lastReadSize.Load())
-	require.Zero(t, backend.getObjCalls.Load())
+	require.Zero(t, backend.readAtCalls.Load())
+	require.Zero(t, backend.preparedReadAtCalls.Load())
+	require.Equal(t, int32(1), backend.getObjCalls.Load())
 }
 
 func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testing.T) {
