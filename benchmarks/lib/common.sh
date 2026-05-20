@@ -5,7 +5,9 @@ BENCHMARKS_DIR="$(cd "$BENCH_LIB_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$BENCHMARKS_DIR/.." && pwd)"
 BENCH_STRICT_HOST="${BENCH_STRICT_HOST:-0}"
 BENCH_MAX_LOAD_PER_CPU="${BENCH_MAX_LOAD_PER_CPU:-1.0}"
+BENCH_ALLOW_EXTERNAL_GRAINFS="${BENCH_ALLOW_EXTERNAL_GRAINFS:-0}"
 BENCH_HOST_GRAINFS_SERVE_COUNT=0
+BENCH_HOST_GRAINFS_ALLOWED=0
 BENCH_HOST_DISK_USED_PCT=""
 BENCH_HOST_LOAD1=""
 BENCH_HOST_CPU_COUNT=""
@@ -37,8 +39,13 @@ print(f"{load1:.2f} {cpus} {load1 / cpus:.2f}")
 PY
   )
   BENCH_HOST_PREFLIGHT_FAILURES=0
+  BENCH_HOST_GRAINFS_ALLOWED=0
   if (( ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0} > 0 )); then
-    BENCH_HOST_PREFLIGHT_FAILURES=1
+    if [[ "$BENCH_ALLOW_EXTERNAL_GRAINFS" == "1" ]]; then
+      BENCH_HOST_GRAINFS_ALLOWED=1
+    else
+      BENCH_HOST_PREFLIGHT_FAILURES=1
+    fi
   fi
   if [[ -n "${BENCH_HOST_DISK_USED_PCT:-}" ]] && (( BENCH_HOST_DISK_USED_PCT >= 90 )); then
     BENCH_HOST_PREFLIGHT_FAILURES=1
@@ -62,6 +69,8 @@ PY
     uptime 2>/dev/null || true
     echo
     echo "preexisting_grainfs_serve_count: ${BENCH_HOST_GRAINFS_SERVE_COUNT:-0}"
+    echo "allow_external_grainfs: ${BENCH_ALLOW_EXTERNAL_GRAINFS}"
+    echo "external_grainfs_allowed: ${BENCH_HOST_GRAINFS_ALLOWED}"
     echo "load1: ${BENCH_HOST_LOAD1}"
     echo "cpu_count: ${BENCH_HOST_CPU_COUNT}"
     echo "load_per_cpu: ${BENCH_HOST_LOAD_PER_CPU}"
