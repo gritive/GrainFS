@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.309.0] - 2026-05-21
+
+### Fixed
+
+- **S3 cluster — GET/HEAD on missing or deleted objects now returns 404 NoSuchKey,
+  matching SingleNode behavior.** Two distinct cluster routing bugs in the same
+  data-plane forward-routing layer were both surfacing as 404-contract violations:
+  - GET on a never-existed key in a fresh cluster returned 500 "forward: no reachable
+    peer" instead of 404. Cause: `routeIndexedReadOrBucket` falling back to
+    `routeWriteOrBucket`, which picks a placement group that may be lazily
+    raft-instantiated and not yet leader-elected. The forward returned `NotLeader`
+    replies, mapped to `ErrNoReachablePeer`, surfaced as HTTP 500.
+  - GET after DELETE on `/default/<key>` returned 405 MethodNotAllowed instead of 404.
+    Cause: cluster coordinator dispatched delete-marker index entries through the
+    local-EC `GetObjectVersion(deleteMarkerVID)` path, which legitimately returns
+    `ErrMethodNotAllowed` for explicit versioned reads but is wrong for the unversioned
+    "latest" caller. (F#46)
+- Cluster-coordinator `GetObject`/`HeadObject` now short-circuit delete-marker entries
+  before the local-EC branch, and short-circuit missing-index lookups (`!indexed`)
+  after the local-read attempts but before forward. The local-read fallback for the
+  legitimate indexed-lagging case (read-after-write race) is preserved; only the
+  never-existed-key forward is bypassed. Internal buckets are exempt from the
+  missing-object short-circuit so internal flows that depend on forward-or-error
+  behavior are not affected.
+
 ## [0.0.308.0] - 2026-05-21
 
 ### Fixed
