@@ -1,9 +1,11 @@
 package e2e
 
-import "testing"
+import "github.com/onsi/ginkgo/v2"
 
-func runNBDCases(t *testing.T, tgt *nbdTarget) {
-	t.Run("ReadWriteRoundTrip", func(t *testing.T) {
+func runNBDCases(getTgt func() *nbdTarget) {
+	ginkgo.It("round-trips writes and reads", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		device := tgt.uniqueDevice(t, "rw-roundtrip", 4*1024*1024)
 
 		// Cluster fixture requires an explicit admin grant for the internal
@@ -13,7 +15,7 @@ func runNBDCases(t *testing.T, tgt *nbdTarget) {
 		}
 
 		client := dialE2ENBD(t, tgt.nbdAddr(0), device)
-		defer client.Close()
+		ginkgo.DeferCleanup(client.Close)
 
 		body := []byte("nbd-matrix-roundtrip-payload")
 		client.WriteAt(t, 0, body)
@@ -26,12 +28,23 @@ func runNBDCases(t *testing.T, tgt *nbdTarget) {
 // the shared 4-node cluster fixtures, mirroring the TestBucketsE2E dual-target
 // convention so the same NBD client-side behaviors are exercised against both
 // deployment shapes.
-func TestNBDMatrixE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runNBDCases(t, newSingleNodeNBDTarget(t))
-	})
+var _ = ginkgo.Describe("NBD matrix", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() *nbdTarget
+	}{
+		{name: "SingleNode", mk: func() *nbdTarget { return newSingleNodeNBDTarget(ginkgo.GinkgoTB()) }},
+		{name: "Cluster4Node", mk: func() *nbdTarget { return newSharedClusterNBDTarget(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt *nbdTarget
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runNBDCases(t, newSharedClusterNBDTarget(t))
-	})
-}
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
+
+			runNBDCases(func() *nbdTarget { return tgt })
+		})
+	}
+})
