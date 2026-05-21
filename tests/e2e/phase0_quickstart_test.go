@@ -170,31 +170,18 @@ func runPhase0QuickstartCases(t *testing.T, tgt *phase0Target) {
 		require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, delResp.StatusCode,
 			"Phase 0 anon DELETE on s3://default must succeed; got %d", delResp.StatusCode)
 
-		// Verify object is gone.
-		//
-		// Phase 0 banner contract: anon GET on a deleted /default key must
-		// return 404 NoSuchKey. SingleNode is the contract-faithful path.
-		//
-		// Known cluster S3 routing gap (F#46, sibling to F#45): the cluster
-		// data-plane returns 405 MethodNotAllowed instead of 404 for a path
-		// whose object was just DELETEd — the routing layer treats
-		// not-present-here as a method-routing failure rather than a key-
-		// lookup failure. We still pin "denied somehow" on cluster (404 OR
-		// 405) so DELETE-without-effect would be caught (200 would fail).
-		// When F#46 lands, tighten back to require.Equal(404) on both branches.
+		// Verify object is gone. Phase 0 banner contract: anon GET on a
+		// deleted /default key must return 404 NoSuchKey on both single and
+		// cluster (F#46 fix applied — see ClusterCoordinator.GetObject's
+		// IsDeleteMarker short-circuit).
 		getReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+key, nil)
 		require.NoError(t, err)
 		getResp, err := http.DefaultClient.Do(getReq)
 		require.NoError(t, err)
 		getResp.Body.Close()
-		expectedNotFound := []int{http.StatusNotFound}
-		if tgt.nodeCount > 1 {
-			expectedNotFound = []int{http.StatusNotFound, http.StatusMethodNotAllowed}
-		}
-		require.Containsf(t, expectedNotFound, getResp.StatusCode,
-			"DELETE should remove the object; anon GET status=%d (expected one of %v)",
-			getResp.StatusCode, expectedNotFound)
+		require.Equalf(t, http.StatusNotFound, getResp.StatusCode,
+			"DELETE should remove the object; anon GET status=%d", getResp.StatusCode)
 	})
 
 	t.Run("IcebergAnonRequestStillRequiresBearer", func(t *testing.T) {

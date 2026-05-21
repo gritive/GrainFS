@@ -84,11 +84,6 @@ Work these in order. Do not run them in parallel.
       the leakage, but a future L2/L3 refactor could expose it. The Phase 0 banner
       only promises `/default`. Tighten L1 to bucket==default. Discovered during
       T71/F#41b.
-    - **Cluster missing-object-500**: Data-plane GET on a non-existent object in
-      a fresh cluster fixture returns 500 "forward: no reachable peer" instead of
-      404 NoSuchKey. Object-owner routing should resolve to default-on-this-node
-      when no shard owner exists. Discovered during T73 cluster pummel loop; test
-      works around by pre-seeding the probe key.
     - **F#42 (Pass-1 MEDIUM-1)**: Phase 0 anon Allow paths emit no audit row
       (`request_authz.go:148` gates recordAllow on `AuthEnabled()`). Phase 2
       anon-to-default IS audited via `AnonAllow` flag. Phase 0 long-lived state
@@ -100,16 +95,6 @@ Work these in order. Do not run them in parallel.
       goroutines) to lift sample density, OR document the cluster-density gap
       so a future maintainer doesn't assume burst coverage.
       `tests/e2e/phase_transition_test.go:170-201`.
-    - **F#46 (Pass-2 LOW-1 follow-up)**: Cluster S3 routing on **deleted**
-      objects returns 405 MethodNotAllowed instead of 404 NoSuchKey. Sibling
-      to the "Cluster missing-object-500" entry above; both point at the same
-      data-plane routing layer treating not-present-here as a method-routing
-      failure rather than a key-lookup failure. Test pins both single-node 404
-      (true contract) and cluster 404-or-405 (current gap) via
-      `tgt.nodeCount > 1` branch in `phase0_quickstart_test.go`. When fixed,
-      tighten the cluster branch back to `require.Equal(404)`. Discovered
-      during Pass 2 of /review-forever on T71 anon DELETE addition.
-
 - [ ] **Auth redesign DX follow-ups** (from `docs/superpowers/specs/2026-05-19-auth-redesign.md`
   Codex review, medium+cosmetic tier). All single-PR-sized, ship after the main
   redesign lands:
