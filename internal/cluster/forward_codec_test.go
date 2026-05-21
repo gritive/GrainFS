@@ -201,3 +201,11 @@ func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
 	require.Equal(t, "k", string(args.Key()))
 	require.Equal(t, "vid-1", string(args.VersionId()))
 }
+
+// buildPutObjectArgs is a test-only convenience wrapper around
+// buildPutObjectArgsWithSSE. Production paths always pass an SSE algorithm
+// explicitly (even empty string) per the SSE preservation work in #504, so the
+// no-SSE wrapper is unused outside tests.
+func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
+	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "")
+}

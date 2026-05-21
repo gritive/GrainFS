@@ -10,43 +10,56 @@ It exposes object, file, and block interfaces over one storage layer:
 - **Block storage:** NBD for Linux clients
 - **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows
 
-## Quick Start
+## Quick Start (30 seconds)
 
 ```bash
-make build
-
-CLUSTER_KEY=$(openssl rand -hex 32)
-
-./bin/grainfs serve --data ./storage --port 9000 --cluster-key "$CLUSTER_KEY" &
-
-# Bootstrap the first admin service account through the local admin socket.
-./bin/grainfs iam sa create admin --endpoint ./storage/admin.sock
-# {"sa_id":"sa-default","access_key":"GRAIN...","secret_key":"<one-time>",...}
-
-export GRAINFS_ADMIN_SOCKET=./storage/admin.sock
+./grainfs serve --data ./tmp --port 9000
 ```
 
-Use the returned `access_key` and `secret_key` with any SigV4 S3 client:
+In another terminal:
 
 ```bash
-export AWS_ACCESS_KEY_ID=<access_key>
-export AWS_SECRET_ACCESS_KEY=<secret_key>
-export AWS_DEFAULT_REGION=us-east-1
-
-aws --endpoint-url http://localhost:9000 s3 mb s3://test
-aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://test/
-aws --endpoint-url http://localhost:9000 s3 ls s3://test/
+echo "hello grainfs" > file.txt
+aws --no-sign-request --endpoint-url http://localhost:9000 s3 cp file.txt s3://default/
+aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/
 ```
 
-The server creates a `default` bucket at startup and exposes the object browser
-at `http://localhost:9000/ui/`. S3 requests return `401` until an operator
-creates the first service account.
+That's it. You have a working S3 + Iceberg server.
 
-For all serve flags, use:
+> ⚠ **Phase 0 anonymous mode**: any client on this port can read/write `s3://default`. To require authentication, run `grainfs iam sa create <name>` — this flips the cluster to Phase 2. See [`docs/operators/cluster-lifecycle.md`](docs/operators/cluster-lifecycle.md).
+
+### Optional: cluster / production setup
+
+<details>
+<summary>Cluster (Phase 1)</summary>
+
+`scp` `./tmp/kek.key` from node A to node B, then `./grainfs cluster join <nodeA>:9000`.
+</details>
+
+<details>
+<summary>Auth + Iceberg (Phase 2)</summary>
 
 ```bash
-./bin/grainfs serve --help
+grainfs iam sa create admin
+grainfs iam policy attach --sa <id> --policy readwrite --i-know
+grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite
 ```
+
+For Iceberg client config (DuckDB / Trino / Spark / PyIceberg / warp):
+
+```bash
+grainfs iceberg config --warehouse analytics --sa <id>
+```
+
+See [`docs/users/oauth2-iceberg-quickstart.md`](docs/users/oauth2-iceberg-quickstart.md).
+</details>
+
+<details>
+<summary>Production (Phase 3)</summary>
+
+TLS / encryption-key / audit / proxy-trust — all hot-applyable via `config set`.
+See [`docs/operators/cluster-lifecycle.md`](docs/operators/cluster-lifecycle.md).
+</details>
 
 ## What It Supports
 

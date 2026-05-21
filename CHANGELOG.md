@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.307.0] - 2026-05-21
+
+### Documentation
+
+- **§9 Session 3 (T74-T78)** — Auth-redesign user-facing documentation:
+  - `README.md` Quick Start rewritten as Phase 0 magical-moment block: 3 commands,
+    ~30s to a working S3 + Iceberg server with anon access to `s3://default`. Legacy
+    `aws s3 mb` references removed (bucket lifecycle is admin-UDS-only).
+  - `docs/users/oauth2-iceberg-quickstart.md` (new): OAuth2 token + 5-client setup
+    (DuckDB / Trino / Spark / PyIceberg / warp) for Phase 2+ clusters.
+  - `docs/users/iam-policy-from-aws.md` (new): AWS IAM JSON subset reference with
+    Supported / Unsupported lists + 7 paste-able examples.
+  - `docs/operators/cluster-lifecycle.md` (new): Phase 0 → 3 walkthrough covering
+    TLS hot-swap, KEK/DEK rotation, JWT rotation, audit query, read-only mode.
+  - `docs/operators/troubleshooting-auth.md` (new): 401/403/KEK/JWT/TLS posture
+    diagnosis recipes with concrete remediation commands.
+
 ## [0.0.306.0] - 2026-05-21
 
 ### Fixed
