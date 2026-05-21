@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,10 +79,16 @@ func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64
 	if len(payload) > MaxPayloadBytes {
 		return 0, fmt.Errorf("datawal: payload too large: %d", len(payload))
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	rec.Payload = append([]byte(nil), payload...)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if w.file == nil {
 		return 0, fmt.Errorf("datawal: wal is closed")
 	}
@@ -91,9 +98,17 @@ func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64
 	}
 	prevSeq := w.lastSeq
 	prevTimestamp := w.lastTimestamp
-	w.lastSeq++
-	rec.Seq = w.lastSeq
-	rec.Timestamp = w.nextTimestamp(time.Now().UnixNano())
+	nextSeq, err := w.nextSeq()
+	if err != nil {
+		return 0, err
+	}
+	nextTimestamp, err := w.nextTimestamp(time.Now().UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	w.lastSeq = nextSeq
+	rec.Seq = nextSeq
+	rec.Timestamp = nextTimestamp
 	if w.enc != nil {
 		err = EncodeEncryptedRecord(w.file, rec, w.enc)
 	} else {
@@ -244,12 +259,22 @@ func (w *WAL) rollbackAppend(offset int64) error {
 	return nil
 }
 
-func (w *WAL) nextTimestamp(now int64) int64 {
+func (w *WAL) nextSeq() (uint64, error) {
+	if w.lastSeq == math.MaxUint64 {
+		return 0, fmt.Errorf("datawal: sequence overflow")
+	}
+	return w.lastSeq + 1, nil
+}
+
+func (w *WAL) nextTimestamp(now int64) (int64, error) {
 	if now <= w.lastTimestamp {
+		if w.lastTimestamp == math.MaxInt64 {
+			return 0, fmt.Errorf("datawal: timestamp overflow")
+		}
 		now = w.lastTimestamp + 1
 	}
 	w.lastTimestamp = now
-	return now
+	return now, nil
 }
 
 type walState struct {

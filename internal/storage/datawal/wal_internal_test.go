@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -56,6 +57,37 @@ func TestAppendTimestampMonotonicWhenClockMovesBackward(t *testing.T) {
 	require.Greater(t, timestamps[1], timestamps[0])
 }
 
+func TestAppendReaderStopsWhenContextCanceledAfterPayloadRead(t *testing.T) {
+	f := &failingWALFile{failAfter: -1}
+	w := &WAL{file: f}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	_, err := w.AppendReader(ctx, Record{Op: OpSegmentPut}, &cancelAfterReadReader{cancel: cancel, data: []byte("payload")})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, uint64(0), w.lastSeq)
+	require.Empty(t, f.data)
+}
+
+func TestAppendRejectsSequenceOverflow(t *testing.T) {
+	f := &failingWALFile{failAfter: -1}
+	w := &WAL{file: f, lastSeq: math.MaxUint64}
+
+	_, err := w.Append(context.Background(), Record{Op: OpSegmentPut})
+	require.Error(t, err)
+	require.Equal(t, uint64(math.MaxUint64), w.lastSeq)
+	require.Empty(t, f.data)
+}
+
+func TestAppendRejectsTimestampOverflow(t *testing.T) {
+	f := &failingWALFile{failAfter: -1}
+	w := &WAL{file: f, lastTimestamp: math.MaxInt64}
+
+	_, err := w.Append(context.Background(), Record{Op: OpSegmentPut})
+	require.Error(t, err)
+	require.Equal(t, int64(math.MaxInt64), w.lastTimestamp)
+	require.Empty(t, f.data)
+}
+
 func TestEncryptedRecordRejectsSealedFrameAboveDecodeLimit(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)
@@ -66,6 +98,22 @@ func TestEncryptedRecordRejectsSealedFrameAboveDecodeLimit(t *testing.T) {
 	err = EncodeEncryptedRecord(&buf, Record{Op: OpSegmentPut, Bucket: bucket, Payload: payload}, enc)
 	require.Error(t, err)
 	require.Empty(t, buf.Bytes())
+}
+
+type cancelAfterReadReader struct {
+	cancel context.CancelFunc
+	data   []byte
+	done   bool
+}
+
+func (r *cancelAfterReadReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	copy(p, r.data)
+	r.cancel()
+	return len(r.data), io.EOF
 }
 
 type failingWALFile struct {
