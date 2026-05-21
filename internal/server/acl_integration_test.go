@@ -31,7 +31,7 @@ func setupECAuthServer(t interface {
 	var err error
 	backend, err = storage.NewLocalBackend(dir)
 	Expect(err).NotTo(HaveOccurred())
-	t.Cleanup(func() { backend.Close() })
+	DeferCleanup(backend.Close)
 
 	const (
 		accessKey = "testkey"
@@ -41,7 +41,7 @@ func setupECAuthServer(t interface {
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithAuth(creds))
-	t.Cleanup(func() { shutdownTestServer(t, srv) })
+	DeferCleanup(shutdownTestServer, t, srv)
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)

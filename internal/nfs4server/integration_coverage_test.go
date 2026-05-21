@@ -19,7 +19,7 @@ func newNFS4Client(t nfsTestTB, addr string) *nfs4Client {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	Expect(err).NotTo(HaveOccurred())
-	t.Cleanup(func() { conn.Close() })
+	DeferCleanup(conn.Close)
 	return &nfs4Client{t: t, conn: conn}
 }
 
