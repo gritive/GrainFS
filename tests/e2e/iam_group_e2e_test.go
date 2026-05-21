@@ -4,17 +4,32 @@ import (
 	"context"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestIAMGroupE2E validates the IAM group admin plane (create/delete/member/
-// policy-attach/detach) against both single-node and cluster fixtures.
-func TestIAMGroupE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIAMGroupCases(t, newSingleNodeIAMAdminTarget())
+var _ = ginkgo.Describe("IAM group", func() {
+	describeIAMGroupContext("SingleNode", func(testing.TB) iamAdminTarget {
+		return newSingleNodeIAMAdminTarget()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runIAMGroupCases(t, newSharedClusterIAMAdminTarget(t))
+	describeIAMGroupContext("Cluster4Node", func(tb testing.TB) iamAdminTarget {
+		return newSharedClusterIAMAdminTarget(tb)
+	})
+})
+
+func describeIAMGroupContext(name string, factory func(testing.TB) iamAdminTarget) {
+	ginkgo.Context(name, func() {
+		var (
+			ctx context.Context
+			tgt iamAdminTarget
+		)
+
+		ginkgo.BeforeEach(func() {
+			ctx = context.Background()
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runIAMGroupCases(func() context.Context { return ctx }, func() iamAdminTarget { return tgt })
 	})
 }
 
@@ -41,15 +56,15 @@ func groupNameFor(tgtName, caseName string) string {
 //     wrapped as *adminapi.Error by the handler and therefore resolves to
 //     500 Internal Server Error rather than 404. Covered by the store
 //     unit tests (group/store_test.go) instead.
-func runIAMGroupCases(t *testing.T, tgt iamAdminTarget) {
-	t.Helper()
-	ctx := context.Background()
-
+func runIAMGroupCases(getCtx func() context.Context, getTgt func() iamAdminTarget) {
 	// CreateDelete: create a group, delete it; cleanup handles the second delete.
-	t.Run("CreateDelete", func(t *testing.T) {
+	ginkgo.It("creates and deletes groups (CreateDelete)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		name := groupNameFor(tgt.name, "create-delete")
-		t.Cleanup(func() { _ = c.GroupDelete(ctx, name) })
+		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, name) })
 
 		require.NoError(t, c.GroupCreate(ctx, name))
 
@@ -60,10 +75,13 @@ func runIAMGroupCases(t *testing.T, tgt iamAdminTarget) {
 	})
 
 	// MemberAddRemove: add a SA, remove it; both calls must succeed.
-	t.Run("MemberAddRemove", func(t *testing.T) {
+	ginkgo.It("adds and removes group members (MemberAddRemove)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		grp := groupNameFor(tgt.name, "member-add-remove")
-		t.Cleanup(func() { _ = c.GroupDelete(ctx, grp) })
+		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, grp) })
 		require.NoError(t, c.GroupCreate(ctx, grp))
 
 		saID, _, _ := tgt.uniqueSA(t, "member-sa")
@@ -74,10 +92,13 @@ func runIAMGroupCases(t *testing.T, tgt iamAdminTarget) {
 
 	// PolicyAttachDetach: attach the built-in "readonly" policy to a group,
 	// then detach it. Both Raft proposals must succeed.
-	t.Run("PolicyAttachDetach", func(t *testing.T) {
+	ginkgo.It("attaches and detaches group policies (PolicyAttachDetach)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		grp := groupNameFor(tgt.name, "policy-attach-detach")
-		t.Cleanup(func() { _ = c.GroupDelete(ctx, grp) })
+		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, grp) })
 		require.NoError(t, c.GroupCreate(ctx, grp))
 
 		require.NoError(t, c.GroupPolicyAttach(ctx, grp, "readonly"))
@@ -86,10 +107,13 @@ func runIAMGroupCases(t *testing.T, tgt iamAdminTarget) {
 
 	// MultiMember: add two SAs to a group, remove both; verifies the store
 	// handles overlapping membership without corruption.
-	t.Run("MultiMember", func(t *testing.T) {
+	ginkgo.It("handles multiple group members (MultiMember)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		grp := groupNameFor(tgt.name, "multi-member")
-		t.Cleanup(func() { _ = c.GroupDelete(ctx, grp) })
+		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, grp) })
 		require.NoError(t, c.GroupCreate(ctx, grp))
 
 		saID1, _, _ := tgt.uniqueSA(t, "multi-member-sa1")
