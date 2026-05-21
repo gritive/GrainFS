@@ -4,11 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Raft snapshot admin", func() {
@@ -40,24 +38,24 @@ func runRaftSnapshotAdminCases(getTgt func() s3Target) {
 		_ = tgt.uniqueBucket(t, "raftsnap")
 
 		resp, err := http.Post(endpoint+"/admin/raft/snapshot", "application/json", nil) //nolint:noctx
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		var trigger struct {
 			Index     uint64 `json:"index"`
 			Term      uint64 `json:"term"`
 			SizeBytes int    `json:"size_bytes"`
 		}
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&trigger))
-		require.NotZero(t, trigger.Index)
-		require.NotZero(t, trigger.Term)
-		require.Positive(t, trigger.SizeBytes)
+		gomega.Expect(json.NewDecoder(resp.Body).Decode(&trigger)).To(gomega.Succeed())
+		gomega.Expect(trigger.Index).NotTo(gomega.BeZero())
+		gomega.Expect(trigger.Term).NotTo(gomega.BeZero())
+		gomega.Expect(trigger.SizeBytes).To(gomega.BeNumerically(">", 0))
 
 		statusResp, err := http.Get(endpoint + "/admin/raft/snapshot") //nolint:noctx
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer statusResp.Body.Close()
-		require.Equal(t, http.StatusOK, statusResp.StatusCode)
+		gomega.Expect(statusResp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		var status struct {
 			Available bool   `json:"available"`
@@ -65,21 +63,21 @@ func runRaftSnapshotAdminCases(getTgt func() s3Target) {
 			Term      uint64 `json:"term"`
 			SizeBytes int    `json:"size_bytes"`
 		}
-		require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&status))
-		assert.True(t, status.Available)
-		assert.Equal(t, trigger.Index, status.Index)
-		assert.Equal(t, trigger.Term, status.Term)
-		assert.Equal(t, trigger.SizeBytes, status.SizeBytes)
+		gomega.Expect(json.NewDecoder(statusResp.Body).Decode(&status)).To(gomega.Succeed())
+		gomega.Expect(status.Available).To(gomega.BeTrue())
+		gomega.Expect(status.Index).To(gomega.Equal(trigger.Index))
+		gomega.Expect(status.Term).To(gomega.Equal(trigger.Term))
+		gomega.Expect(status.SizeBytes).To(gomega.Equal(trigger.SizeBytes))
 
 		metricsResp, err := http.Get(endpoint + "/metrics") //nolint:noctx
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer metricsResp.Body.Close()
-		require.Equal(t, http.StatusOK, metricsResp.StatusCode)
+		gomega.Expect(metricsResp.StatusCode).To(gomega.Equal(http.StatusOK))
 		body, err := io.ReadAll(metricsResp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		metrics := string(body)
-		assert.Contains(t, metrics, "grainfs_raft_snapshot_trigger_total")
-		assert.Contains(t, metrics, "grainfs_raft_snapshot_last_index")
-		assert.True(t, strings.Contains(metrics, "grainfs_raft_snapshot_last_size_bytes"))
+		gomega.Expect(metrics).To(gomega.ContainSubstring("grainfs_raft_snapshot_trigger_total"))
+		gomega.Expect(metrics).To(gomega.ContainSubstring("grainfs_raft_snapshot_last_index"))
+		gomega.Expect(metrics).To(gomega.ContainSubstring("grainfs_raft_snapshot_last_size_bytes"))
 	})
 }
