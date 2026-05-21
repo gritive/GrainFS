@@ -94,6 +94,37 @@ func bootTLSPostureGate(state *bootState) error {
 	return enforceTLSPosture(state.cfgStore, nc)
 }
 
+// iamPostureChecker adapts enforceTLSPosture to the iam.PostureChecker
+// interface. F#26-tls-posture: the AdminAPI calls CheckAnonOff before the
+// FIRST SA create on an empty store and rejects the RPC if the local TLS
+// posture would refuse the implied iam.anon-enabled → false flip.
+//
+// Local-posture check is correct here because all admin RPCs land on a single
+// node's UDS; raft replication of SA happens after this gate. The cluster-wide
+// reload hook (reloadHookPostureCheck) remains the authoritative cluster gate.
+type iamPostureChecker struct {
+	cfg *config.Store
+	nc  *nodeconfig.NodeConfig
+}
+
+func (p *iamPostureChecker) CheckAnonOff(_ context.Context) error {
+	// Simulate the post-flip posture: pin anon=false and reuse
+	// enforceTLSPostureValues so the operator gets the same three-knob
+	// remediation message the boot gate / reload hook would produce.
+	// Live posture's anon is still true in Phase 0 — using enforceTLSPosture
+	// directly would always return nil here.
+	if p.cfg == nil || p.nc == nil {
+		return nil
+	}
+	proxy, _ := p.cfg.GetString("trusted-proxy.cidr")
+	return enforceTLSPostureValues(false, p.nc.TLSCertPath(), p.nc.TLSKeyPath(), proxy)
+}
+
+// newIAMPostureChecker builds the adapter wired into AdminAPI at boot.
+func newIAMPostureChecker(cfg *config.Store, nc *nodeconfig.NodeConfig) *iamPostureChecker {
+	return &iamPostureChecker{cfg: cfg, nc: nc}
+}
+
 // wireTLSPostureHooks builds the OnAnonEnabledChange + OnTrustedProxyCIDR pair
 // that keep the runtime posture gate live.
 //

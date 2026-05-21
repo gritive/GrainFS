@@ -1,5 +1,77 @@
 # Changelog
 
+## [0.0.309.0] - 2026-05-21
+
+### Fixed
+
+- **S3 cluster — GET/HEAD on missing or deleted objects now returns 404 NoSuchKey,
+  matching SingleNode behavior.** Two distinct cluster routing bugs in the same
+  data-plane forward-routing layer were both surfacing as 404-contract violations:
+  - GET on a never-existed key in a fresh cluster returned 500 "forward: no reachable
+    peer" instead of 404. Cause: `routeIndexedReadOrBucket` falling back to
+    `routeWriteOrBucket`, which picks a placement group that may be lazily
+    raft-instantiated and not yet leader-elected. The forward returned `NotLeader`
+    replies, mapped to `ErrNoReachablePeer`, surfaced as HTTP 500.
+  - GET after DELETE on `/default/<key>` returned 405 MethodNotAllowed instead of 404.
+    Cause: cluster coordinator dispatched delete-marker index entries through the
+    local-EC `GetObjectVersion(deleteMarkerVID)` path, which legitimately returns
+    `ErrMethodNotAllowed` for explicit versioned reads but is wrong for the unversioned
+    "latest" caller. (F#46)
+- Cluster-coordinator `GetObject`/`HeadObject` now short-circuit delete-marker entries
+  before the local-EC branch, and short-circuit missing-index lookups (`!indexed`)
+  after the local-read attempts but before forward. The local-read fallback for the
+  legitimate indexed-lagging case (read-after-write race) is preserved; only the
+  never-existed-key forward is bypassed. Internal buckets are exempt from the
+  missing-object short-circuit so internal flows that depend on forward-or-error
+  behavior are not affected.
+
+## [0.0.308.0] - 2026-05-21
+
+### Fixed
+
+- **S3 default-bucket implicit anon policy is now fail-closed on transient
+  resolver errors.** When the policy resolver returned a transient Badger error
+  while checking whether `default` had an explicit bucket policy, the
+  authorizer previously fell through to the Phase 0 anon check and allowed the
+  request, silently turning an unreadable Deny policy into an Allow. The
+  authorizer now returns Deny with `resolver: HasBucketPolicy: <err>` when the
+  resolver fails. (F#43)
+
+- **First `grainfs iam sa create` now refuses to commit when the local node's
+  TLS posture would block the implied anon-disable flip.** Previously, the
+  cluster committed the SA, then `iam.anon-enabled` failed to flip to false
+  because the reload hook refused on bad TLS posture, and the warning was
+  swallowed in the FSM apply log — leaving the cluster with an authenticated
+  SA in store but anon still enabled. The admin UDS now pre-checks the
+  posture: with no TLS cert and no `trusted-proxy.cidr`, the first SA create
+  returns HTTP 412 with a remediation hint naming all three operator knobs
+  (cert path, `GRAINFS_TLS_CERT/KEY`, `grainfs config set trusted-proxy.cidr`).
+  Subsequent SA creates are unaffected. (F#26-tls-posture)
+
+### Changed
+
+- Server boot now fails fast when the S3 server-options phase finds
+  `cfgStore` or `iamPolicyStores` unwired, instead of silently skipping the
+  Phase 0 anon middleware and policy authorizer. Surfaces boot-phase ordering
+  bugs at the right place rather than at runtime. (F#45)
+
+## [0.0.307.0] - 2026-05-21
+
+### Documentation
+
+- **§9 Session 3 (T74-T78)** — Auth-redesign user-facing documentation:
+  - `README.md` Quick Start rewritten as Phase 0 magical-moment block: 3 commands,
+    ~30s to a working S3 + Iceberg server with anon access to `s3://default`. Legacy
+    `aws s3 mb` references removed (bucket lifecycle is admin-UDS-only).
+  - `docs/users/oauth2-iceberg-quickstart.md` (new): OAuth2 token + 5-client setup
+    (DuckDB / Trino / Spark / PyIceberg / warp) for Phase 2+ clusters.
+  - `docs/users/iam-policy-from-aws.md` (new): AWS IAM JSON subset reference with
+    Supported / Unsupported lists + 7 paste-able examples.
+  - `docs/operators/cluster-lifecycle.md` (new): Phase 0 → 3 walkthrough covering
+    TLS hot-swap, KEK/DEK rotation, JWT rotation, audit query, read-only mode.
+  - `docs/operators/troubleshooting-auth.md` (new): 401/403/KEK/JWT/TLS posture
+    diagnosis recipes with concrete remediation commands.
+
 ## [0.0.306.0] - 2026-05-21
 
 ### Fixed

@@ -26,10 +26,6 @@ var errInternalReply = errors.New("forward: internal reply error")
 
 // --- Args builders (request side) ---
 
-func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "")
-}
-
 func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)

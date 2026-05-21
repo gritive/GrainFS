@@ -848,7 +848,15 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+	// F#46: unversioned GET against a delete-marker latest version must be
+	// 404 NoSuchKey, not 405 MethodNotAllowed. The object index keeps a
+	// delete-marker entry whose VersionID points at the marker; routing
+	// down to gb.GetObjectVersion(marker) returns ErrMethodNotAllowed
+	// (correct for explicit version reads, wrong for the unversioned
+	// "latest" caller). Single-node GET hits headObjectMeta which already
+	// folds delete-marker → ErrObjectNotFound, so this short-circuit
+	// restores single/cluster parity.
+	if indexed && entry.IsDeleteMarker {
 		return nil, nil, storage.ErrObjectNotFound
 	}
 	if indexed && entry.ECData > 0 {
@@ -901,6 +909,17 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 		if rc, obj, ok, err := c.getObjectLocalCurrentFollower(ctx, bucket, key, target, entry); ok {
 			return rc, obj, err
 		}
+	}
+	// FU#4 missing-object-500: if we got here on a non-indexed routing
+	// fallback for a user-facing bucket, no authoritative source claims the
+	// key exists. Forwarding to the routeWriteOrBucket-selected placement
+	// group can surface ErrNoReachablePeer (no leader/quorum) and bubble
+	// out as S3 500. The S3 contract says never-existed key must be 404
+	// NoSuchKey — treat absence-of-index-entry-and-no-local-evidence as
+	// NotFound. Local-current-follower / local-stale-against-index paths
+	// above already covered the legitimate read-after-write race window.
+	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+		return nil, nil, storage.ErrObjectNotFound
 	}
 	if c.forward == nil {
 		return nil, nil, ErrCoordinatorNoRouter
@@ -1104,17 +1123,25 @@ func (r *forwardReadValidator) Close() error {
 }
 
 func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
-	target, _, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
+	target, entry, indexed, err := c.routeIndexedReadOrBucket(bucket, key, "")
 	if err != nil {
 		return nil, err
 	}
-	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+	// F#46: unversioned HEAD against a delete-marker latest version must be
+	// 404 NoSuchKey, not 405 MethodNotAllowed. See GetObject for full context.
+	if indexed && entry.IsDeleteMarker {
 		return nil, storage.ErrObjectNotFound
 	}
 	if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.HeadObject(ctx, bucket, key)
+	}
+	// FU#4 missing-object-500: see GetObject — fall back to NotFound when no
+	// authoritative source has the key and we'd otherwise forward to a
+	// placement group with no quorum yet.
+	if c.indexWriter != nil && !indexed && !storage.IsInternalBucket(bucket) {
+		return nil, storage.ErrObjectNotFound
 	}
 	if c.forward == nil {
 		return nil, ErrCoordinatorNoRouter

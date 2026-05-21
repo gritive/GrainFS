@@ -75,7 +75,10 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 	// transitions (i.e., it does NOT depend on iam.anon-enabled).
 	if saID == "" && bucket == reservedname.DefaultBucketName {
 		hasExplicit, err := a.resolver.HasBucketPolicy(ctx, reservedname.DefaultBucketName)
-		if err == nil && !hasExplicit {
+		if err != nil {
+			return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: HasBucketPolicy: " + err.Error(), ConditionContext: cc}
+		}
+		if !hasExplicit {
 			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonDefaultBucketImplicitAnon, ConditionContext: cc}
 		}
 	}

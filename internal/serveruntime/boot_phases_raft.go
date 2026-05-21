@@ -13,6 +13,7 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/nfsexport"
+	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -265,6 +266,15 @@ func bootRotationAndAdminAPI(state *bootState) error {
 	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil && state.cfg.Encryptor != nil {
 		state.iamProposer = &iam.MetaProposer{Propose: state.metaRaft.Propose}
 		state.iamAdminAPI = iam.NewAdminAPI(state.cfg.IAMStore, state.iamProposer, state.cfg.Encryptor)
+		// F#26-tls-posture: gate the first SA create on local TLS posture so
+		// the admin UDS rejects with a remediation hint instead of letting
+		// the FSM-level anon flip silently fail. cfgStore is populated by
+		// bootHTTPServerAndAdmin which runs before this phase.
+		if state.cfgStore != nil {
+			state.iamAdminAPI.SetPostureChecker(
+				newIAMPostureChecker(state.cfgStore, nodeconfig.New(state.cfg.DataDir)),
+			)
+		}
 	}
 	return nil
 }

@@ -84,50 +84,17 @@ Work these in order. Do not run them in parallel.
       the leakage, but a future L2/L3 refactor could expose it. The Phase 0 banner
       only promises `/default`. Tighten L1 to bucket==default. Discovered during
       T71/F#41b.
-    - **F#26-tls-posture**: `meta_fsm.go applyIAMSACreate` silently warns when the
-      iam.anon-enabled flip can't apply (TLS posture refuses — no cert and no
-      trusted-proxy.cidr). Operator must re-issue the config set manually. Surface
-      this with a clear error rather than warning; consider failing the SA create
-      until posture is satisfied OR document the precondition in the runbook.
-      T73 fixtures seed `trusted-proxy.cidr=127.0.0.1/32` to work around it.
-    - **Cluster missing-object-500**: Data-plane GET on a non-existent object in
-      a fresh cluster fixture returns 500 "forward: no reachable peer" instead of
-      404 NoSuchKey. Object-owner routing should resolve to default-on-this-node
-      when no shard owner exists. Discovered during T73 cluster pummel loop; test
-      works around by pre-seeding the probe key.
     - **F#42 (Pass-1 MEDIUM-1)**: Phase 0 anon Allow paths emit no audit row
       (`request_authz.go:148` gates recordAllow on `AuthEnabled()`). Phase 2
       anon-to-default IS audited via `AnonAllow` flag. Phase 0 long-lived state
       needs a forensic trail — anon writes to /default during Phase 0 should
       produce at least a single coarse audit row per request. Trade-off: audit
       table volume vs. forensic capability.
-    - **F#43 (Pass-1 LOW-1)**: `authorizer.go:77-81` D#2 implicit-anon path takes
-      hard-fail-closed on `HasBucketPolicy` Badger error. Transient read
-      contention during Phase 0→2 flip could observe a 503/deny on `/default`
-      despite banner's atomicity claim. Either retry-once + log, or cache
-      "default has no policy" until a bucket-policy mutation event invalidates.
-      Discovered during T73 NoTornStateDuringFlip cluster sample analysis.
     - **F#44 (Pass-1 LOW-2)**: T73 cluster prober runs ~12 samples vs ~11811 on
       single-node (QUIC forward saturates). Parallelize cluster prober (5-10
       goroutines) to lift sample density, OR document the cluster-density gap
       so a future maintainer doesn't assume burst coverage.
       `tests/e2e/phase_transition_test.go:170-201`.
-    - **F#45 (Pass-1 LOW-3)**: `WithBearerConfig` boot ordering implicit —
-      `serveruntime/boot_phases_srvopts.go:165-167` wires it iff
-      `state.cfgStore != nil`, paired with `WithPolicyAuthorizer`. Custom
-      serveruntimes that wire one without the other silently lose Phase 0 anon
-      for non-default buckets. Add a `server.New` post-condition assertion
-      `policyAuthorizer != nil && bearerCfg == nil → panic`.
-    - **F#46 (Pass-2 LOW-1 follow-up)**: Cluster S3 routing on **deleted**
-      objects returns 405 MethodNotAllowed instead of 404 NoSuchKey. Sibling
-      to the "Cluster missing-object-500" entry above; both point at the same
-      data-plane routing layer treating not-present-here as a method-routing
-      failure rather than a key-lookup failure. Test pins both single-node 404
-      (true contract) and cluster 404-or-405 (current gap) via
-      `tgt.nodeCount > 1` branch in `phase0_quickstart_test.go`. When fixed,
-      tighten the cluster branch back to `require.Equal(404)`. Discovered
-      during Pass 2 of /review-forever on T71 anon DELETE addition.
-
 - [ ] **Auth redesign DX follow-ups** (from `docs/superpowers/specs/2026-05-19-auth-redesign.md`
   Codex review, medium+cosmetic tier). All single-PR-sized, ship after the main
   redesign lands:
