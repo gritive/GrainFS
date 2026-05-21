@@ -79,6 +79,7 @@ type clusterTestTB interface {
 	TempDir() string
 	Errorf(format string, args ...interface{})
 	FailNow()
+	Fatalf(format string, args ...interface{})
 }
 
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.

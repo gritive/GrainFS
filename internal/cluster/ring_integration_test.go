@@ -9,21 +9,21 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/stretchr/testify/assert"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 )
 
-func putBytes(t *testing.T, b *DistributedBackend, bucket, key string, data []byte) {
+func putBytes(t clusterTestTB, b *DistributedBackend, bucket, key string, data []byte) {
 	t.Helper()
 	_, err := b.PutObject(context.Background(), bucket, key, bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 }
 
 // proposeRing은 테스트 전용 — nodeIDs로 Ring v1을 FSM에 직접 propose한다.
-func proposeRing(t *testing.T, b *DistributedBackend, nodeIDs []string) {
+func proposeRing(t clusterTestTB, b *DistributedBackend, nodeIDs []string) {
 	t.Helper()
 	ring := NewRing(1, nodeIDs, 10)
 	err := b.propose(context.Background(), CmdSetRing, SetRingCmd{
@@ -34,111 +34,99 @@ func proposeRing(t *testing.T, b *DistributedBackend, nodeIDs []string) {
 	require.NoError(t, err)
 }
 
-func TestRing_PutObjectEC_UsesRingVersion(t *testing.T) {
-	backend := NewSingletonBackendForTest(t)
+var _ = Describe("Ring integration", func() {
+	var (
+		t       clusterTestTB
+		ctx     context.Context
+		backend *DistributedBackend
+	)
 
-	const selfAddr = "self"
-	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
-	backend.SetShardService(svc, []string{selfAddr})
-	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1}) // 1+1 so 1 node works
+	BeforeEach(func() {
+		t = GinkgoT()
+		ctx = context.Background()
+		backend = NewSingletonBackendForTest(t)
+	})
 
-	// 링 초기화
-	proposeRing(t, backend, []string{selfAddr})
+	configureSingleNodeEC := func(selfAddr string) {
+		svc := NewShardService(t.TempDir(), nil)
+		backend.SetShardService(svc, []string{selfAddr})
+		backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
+	}
 
-	// 링 버전이 FSM에 반영됐는지 확인
-	rv := backend.CurrentRingVersion()
-	assert.Equal(t, RingVersion(1), rv, "ring version should be 1 after init")
+	It("uses ring version for EC PutObject", func() {
+		const selfAddr = "self"
+		configureSingleNodeEC(selfAddr)
+		proposeRing(t, backend, []string{selfAddr})
 
-	// 버킷 생성 + 오브젝트 PUT
-	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
-	content := []byte("hello ring ec world")
-	putBytes(t, backend, "bucket", "key", content)
+		Expect(backend.CurrentRingVersion()).To(Equal(RingVersion(1)), "ring version should be 1 after init")
 
-	// GET — RingVersion 기반 경로로 복구 가능해야 함
-	rc, obj, err := backend.GetObject(context.Background(), "bucket", "key")
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-	defer rc.Close()
+		Expect(backend.CreateBucket(ctx, "bucket")).To(Succeed())
+		content := []byte("hello ring ec world")
+		putBytes(t, backend, "bucket", "key", content)
 
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	assert.True(t, bytes.Equal(content, got), "content must round-trip via ring EC path")
-}
+		rc, obj, err := backend.GetObject(ctx, "bucket", "key")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj).NotTo(BeNil())
+		DeferCleanup(rc.Close)
 
-func TestRing_CompleteMultipartEC_UsesRingVersion(t *testing.T) {
-	backend := NewSingletonBackendForTest(t)
+		got, err := io.ReadAll(rc)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(content), "content must round-trip via ring EC path")
+	})
 
-	const selfAddr = "self"
-	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
-	backend.SetShardService(svc, []string{selfAddr})
-	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
-	proposeRing(t, backend, []string{selfAddr})
+	It("uses ring version for multipart complete", func() {
+		const selfAddr = "self"
+		configureSingleNodeEC(selfAddr)
+		proposeRing(t, backend, []string{selfAddr})
 
-	ctx := context.Background()
-	require.NoError(t, backend.CreateBucket(ctx, "bucket"))
-	up, err := backend.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
-	require.NoError(t, err)
-	part, err := backend.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("multipart ring payload")))
-	require.NoError(t, err)
-	_, err = backend.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
-	require.NoError(t, err)
+		Expect(backend.CreateBucket(ctx, "bucket")).To(Succeed())
+		up, err := backend.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+		Expect(err).NotTo(HaveOccurred())
+		part, err := backend.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("multipart ring payload")))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = backend.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
+		Expect(err).NotTo(HaveOccurred())
 
-	_, placement, err := backend.headObjectMeta(ctx, "bucket", "mp.bin")
-	require.NoError(t, err)
-	require.Equal(t, RingVersion(1), placement.RingVersion)
-}
+		_, placement, err := backend.headObjectMeta(ctx, "bucket", "mp.bin")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(placement.RingVersion).To(Equal(RingVersion(1)))
+	})
 
-func TestRing_GetObjectFallsBackWhenNoRing(t *testing.T) {
-	backend := NewSingletonBackendForTest(t)
+	It("falls back when no ring is configured", func() {
+		const selfAddr = "self"
+		configureSingleNodeEC(selfAddr)
 
-	const selfAddr = "self"
-	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
-	backend.SetShardService(svc, []string{selfAddr})
-	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
+		Expect(backend.CreateBucket(ctx, "bucket")).To(Succeed())
+		content := []byte("no ring fallback")
+		putBytes(t, backend, "bucket", "key", content)
 
-	// 링을 초기화하지 않은 상태: PlacementForNodes 경로
-	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
-	content := []byte("no ring fallback")
-	putBytes(t, backend, "bucket", "key", content)
+		rc, obj, err := backend.GetObject(ctx, "bucket", "key")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj).NotTo(BeNil())
+		DeferCleanup(rc.Close)
 
-	rc, obj, err := backend.GetObject(context.Background(), "bucket", "key")
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-	defer rc.Close()
+		got, err := io.ReadAll(rc)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(content))
+	})
 
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	assert.Equal(t, content, got)
-}
+	It("reports zero ring version before init", func() {
+		Expect(backend.CurrentRingVersion()).To(Equal(RingVersion(0)))
+	})
 
-func TestRing_CurrentRingVersion_ZeroBeforeInit(t *testing.T) {
-	backend := NewSingletonBackendForTest(t)
-	assert.Equal(t, RingVersion(0), backend.CurrentRingVersion())
-}
+	It("reports ring version after init", func() {
+		proposeRing(t, backend, []string{"node-A", "node-B"})
+		Expect(backend.CurrentRingVersion()).To(Equal(RingVersion(1)))
+	})
 
-func TestRing_CurrentRingVersion_AfterInit(t *testing.T) {
-	backend := NewSingletonBackendForTest(t)
-	proposeRing(t, backend, []string{"node-A", "node-B"})
-	assert.Equal(t, RingVersion(1), backend.CurrentRingVersion())
-}
+	It("noops when resharding to the current ring version", func() {
+		const selfAddr = "self"
+		configureSingleNodeEC(selfAddr)
 
-func TestRing_ReshardToRing_NoopWhenSameVersion(t *testing.T) {
-	backend := NewSingletonBackendForTest(t)
+		proposeRing(t, backend, []string{selfAddr})
+		Expect(backend.CreateBucket(ctx, "b")).To(Succeed())
+		putBytes(t, backend, "b", "k", []byte("data"))
 
-	const selfAddr = "self"
-	shardDir := t.TempDir()
-	svc := NewShardService(shardDir, nil)
-	backend.SetShardService(svc, []string{selfAddr})
-	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
-
-	proposeRing(t, backend, []string{selfAddr})
-	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
-	putBytes(t, backend, "b", "k", []byte("data"))
-
-	// ReshardToRing with current ring version should be a no-op
-	err := backend.ReshardToRing(context.Background(), "b", "k", RingVersion(1))
-	require.NoError(t, err)
-}
+		Expect(backend.ReshardToRing(ctx, "b", "k", RingVersion(1))).To(Succeed())
+	})
+})
