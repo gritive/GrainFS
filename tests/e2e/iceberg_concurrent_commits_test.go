@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -80,11 +80,11 @@ func runIcebergConcurrentCommitCase(t testing.TB, tgt s3Target) {
 	// is a trivial assertion that the catalog is up.
 	for i, u := range httpURLs {
 		req, err := http.NewRequest(http.MethodGet, u+"/iceberg/v1/config?warehouse=warehouse", nil)
-		require.NoError(t, err, "node %d config probe build", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "node %d config probe build", i)
 		s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err, "node %d config probe", i)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "node %d config probe", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "node %d config probe", i)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK), "node %d config probe", i)
 		resp.Body.Close()
 	}
 
@@ -194,7 +194,7 @@ func runIcebergConcurrentCommitCase(t testing.TB, tgt s3Target) {
 			"`iceberg-rare-quic-stream-local-cancel-under-load`",
 			got503, total, 100.0*float64(got503)/float64(total))
 	}
-	require.LessOrEqual(t, got503, threshold,
+	gomega.Expect(got503).To(gomega.BeNumerically("<=", threshold),
 		"got %d × 503 across %d concurrent commits — exceeds tolerated rate (%d). "+
 			"Meta-forward path lost the leader more often than the known transient baseline.",
 		got503, total, threshold)
@@ -253,11 +253,11 @@ func postIcebergCommit(t testing.TB, url, body, accessKey, secretKey string) int
 func postIcebergJSONHelper(t testing.TB, url, body, accessKey, secretKey string, wantStatus int) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body)))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	if resp.StatusCode != wantStatus {
 		buf, _ := io.ReadAll(resp.Body)

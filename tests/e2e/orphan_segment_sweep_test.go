@@ -11,7 +11,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Orphan segment sweep", func() {
@@ -37,26 +37,26 @@ func runOrphanSegmentSweepCases(t testing.TB) {
 	const bucket = "orphan-sweep-test"
 	ctx := context.Background()
 	_, err := c.EnsureBucketWritable(ctx, bucket, 120*time.Second)
-	require.NoError(t, err, "bucket creation must succeed before seeding orphan")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bucket creation must succeed before seeding orphan")
 
 	// Seed a fake orphan raw segment on node 0.
 	// Path layout: <dataDir>/data/<bucket>/<key>_segments/<blobID>
 	dataRoot := c.dataDirs[0]
 	orphanPath := filepath.Join(dataRoot, "data", bucket, "orphan-key_segments", "fake-blob")
-	require.NoError(t, os.MkdirAll(filepath.Dir(orphanPath), 0o755))
-	require.NoError(t, os.WriteFile(orphanPath, []byte("orphan-content"), 0o644))
+	gomega.Expect(os.MkdirAll(filepath.Dir(orphanPath), 0o755)).To(gomega.Succeed())
+	gomega.Expect(os.WriteFile(orphanPath, []byte("orphan-content"), 0o644)).To(gomega.Succeed())
 
 	// Backdate mtime past the (shortened) age gate so the walker considers
 	// the file eligible immediately.
 	past := time.Now().Add(-10 * time.Second)
-	require.NoError(t, os.Chtimes(orphanPath, past, past))
+	gomega.Expect(os.Chtimes(orphanPath, past, past)).To(gomega.Succeed())
 
 	// Wait for 2 scrubber cycles (500ms × 2 + margin). The first cycle
 	// tombstones the file; the second cycle deletes it.
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		_, err := os.Stat(orphanPath)
 		return os.IsNotExist(err)
-	}, 15*time.Second, 200*time.Millisecond,
+	}, 15*time.Second, 200*time.Millisecond).Should(gomega.BeTrue(),
 		"orphan segment should be deleted within 2 scrub cycles")
 
 	// Assert the counter metric was incremented on at least one node.
@@ -90,7 +90,7 @@ func runOrphanSegmentSweepCases(t testing.TB) {
 		}
 	}
 
-	require.True(t, metricFound, "metric %q not found in /metrics output", metricName)
-	require.NotEqual(t, metricName+" 0", metricLine,
+	gomega.Expect(metricFound).To(gomega.BeTrue(), "metric %q not found in /metrics output", metricName)
+	gomega.Expect(metricLine).NotTo(gomega.Equal(metricName+" 0"),
 		"metric should have incremented past 0")
 }
