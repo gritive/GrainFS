@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestThreeNodeRevocationE2E proves F#14: when an SA's policy is detached (or
@@ -97,8 +97,8 @@ func runRevocationDetachPolicy(t testing.TB, tgt iamAdminTarget) {
 		policyActionsForRole(t, "Write"),
 		[]string{"arn:aws:s3:::" + bucket, "arn:aws:s3:::" + bucket + "/*"},
 	)
-	require.NoError(t, cli.PolicyPut(ctx, polName, doc))
-	require.NoError(t, cli.PolicyAttachToSA(ctx, polName, saID))
+	gomega.Expect(cli.PolicyPut(ctx, polName, doc)).To(gomega.Succeed())
+	gomega.Expect(cli.PolicyAttachToSA(ctx, polName, saID)).To(gomega.Succeed())
 	ginkgo.DeferCleanup(func() {
 		_ = cli.PolicyDetachFromSA(ctx, polName, saID)
 		_ = cli.PolicyDelete(ctx, polName)
@@ -106,29 +106,29 @@ func runRevocationDetachPolicy(t testing.TB, tgt iamAdminTarget) {
 
 	// Wait for the key+policy to land on node 0 (the bootstrap path), then
 	// confirm the follower also sees them by driving a real PUT on the
-	// follower endpoint. require.Eventually absorbs the apply propagation
+	// follower endpoint. Eventually absorbs the apply propagation
 	// jitter before we start the post-detach timing.
 	iamWaitKeyReady(t, tgt.endpoint(0), ak, sk, 30*time.Second)
 
 	nodeIdx := pickFollowerIdx(tgt)
 	s3c := ecS3Client(tgt.endpoint(nodeIdx), ak, sk)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("pre-revoke.txt"),
 			Body:   bytes.NewReader([]byte("ok")),
 		})
 		return err == nil
-	}, 5*time.Second, 50*time.Millisecond, "pre-revoke PUT on node %d must succeed", nodeIdx)
+	}, 5*time.Second, 50*time.Millisecond).Should(gomega.BeTrue(), "pre-revoke PUT on node %d must succeed", nodeIdx)
 
 	// Detach on the leader (admin UDS routes there). Start the clock AFTER
 	// the RPC returns — we want to measure propagation, not RPC overhead.
-	require.NoError(t, cli.PolicyDetachFromSA(ctx, polName, saID))
+	gomega.Expect(cli.PolicyDetachFromSA(ctx, polName, saID)).To(gomega.Succeed())
 	t0 := time.Now()
 
 	deadline := revocationPropagationDeadline()
 	var propagated time.Duration
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("post-revoke-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".txt"),
@@ -146,7 +146,7 @@ func runRevocationDetachPolicy(t testing.TB, tgt iamAdminTarget) {
 			return true
 		}
 		return false
-	}, deadline, 10*time.Millisecond,
+	}, deadline, 10*time.Millisecond).Should(gomega.BeTrue(),
 		"policy detach must propagate within %v (node %d, isCluster=%v)", deadline, nodeIdx, tgt.isCluster)
 
 	t.Logf("policy detach propagated in %v on node %d (isCluster=%v)", propagated, nodeIdx, tgt.isCluster)
@@ -167,23 +167,23 @@ func runRevocationKeyRevoke(t testing.TB, tgt iamAdminTarget) {
 
 	nodeIdx := pickFollowerIdx(tgt)
 	s3c := ecS3Client(tgt.endpoint(nodeIdx), ak, sk)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("pre-revoke.txt"),
 			Body:   bytes.NewReader([]byte("ok")),
 		})
 		return err == nil
-	}, 5*time.Second, 50*time.Millisecond, "pre-revoke PUT on node %d must succeed", nodeIdx)
+	}, 5*time.Second, 50*time.Millisecond).Should(gomega.BeTrue(), "pre-revoke PUT on node %d must succeed", nodeIdx)
 
 	// Revoke the access key on the leader.
 	cli := tgt.iamClient()
-	require.NoError(t, cli.KeyRevoke(ctx, saID, ak))
+	gomega.Expect(cli.KeyRevoke(ctx, saID, ak)).To(gomega.Succeed())
 	t0 := time.Now()
 
 	deadline := revocationPropagationDeadline()
 	var propagated time.Duration
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("post-revoke-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".txt"),
@@ -202,7 +202,7 @@ func runRevocationKeyRevoke(t testing.TB, tgt iamAdminTarget) {
 			return true
 		}
 		return false
-	}, deadline, 10*time.Millisecond,
+	}, deadline, 10*time.Millisecond).Should(gomega.BeTrue(),
 		"key revoke must propagate within %v (node %d, isCluster=%v)", deadline, nodeIdx, tgt.isCluster)
 
 	t.Logf("key revoke propagated in %v on node %d (isCluster=%v)", propagated, nodeIdx, tgt.isCluster)
