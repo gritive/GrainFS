@@ -20,7 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/clusteradmin"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // multiraft_sharding_test.go — e2e validation for live multi-raft sharding
@@ -90,7 +90,7 @@ func startStaticMRClusterWithOptions(t testing.TB, numNodes int, opts mrClusterO
 		lastErr = err
 		t.Logf("startStaticMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
 	}
-	require.Failf(t, "startStaticMRCluster failed", "failed after %d attempts: %v", maxAttempts, lastErr)
+	ginkgo.Fail(fmt.Sprintf("startStaticMRCluster failed: failed after %d attempts: %v", maxAttempts, lastErr))
 	return nil
 }
 
@@ -320,7 +320,7 @@ func startMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) *mrCluste
 		lastErr = err
 		t.Logf("startMRCluster attempt %d/%d failed: %v", attempt, maxAttempts, err)
 	}
-	require.Failf(t, "startMRCluster failed", "failed after %d attempts: %v", maxAttempts, lastErr)
+	ginkgo.Fail(fmt.Sprintf("startMRCluster failed: failed after %d attempts: %v", maxAttempts, lastErr))
 	return nil
 }
 
@@ -330,7 +330,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	binary := getBinary()
 	raftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[i])
 	logFile, err := os.CreateTemp("", fmt.Sprintf("mrshard-node-%d-*.log", i))
-	require.NoError(t, err, "create multi-raft node log file")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create multi-raft node log file")
 	ginkgo.DeferCleanup(func() {
 		_ = logFile.Close()
 		if t.Failed() && keepE2EArtifacts() {
@@ -360,7 +360,7 @@ func (c *mrCluster) startNode(i int) *exec.Cmd {
 	cmd := exec.Command(binary, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start(), "start node %d", i)
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 	return cmd
 }
 
@@ -419,12 +419,11 @@ func (c *mrCluster) addNode(t testing.TB) {
 		t.Fatalf("addNode: nodeCount %d exceeds pre-allocated MaxNodes %d", i, len(c.procs))
 	}
 	seedRaftAddr := fmt.Sprintf("127.0.0.1:%d", c.raftPorts[0])
-	require.NoError(t, writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr),
-		"addNode: write join-pending node %d", i)
+	gomega.Expect(writeNodeJoinPending(c.dataDirs[i], c.dataDirs[0], seedRaftAddr)).
+		To(gomega.Succeed(), "addNode: write join-pending node %d", i)
 	c.procs[i] = c.startNode(i)
-	require.NoError(t,
-		waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second),
-		"addNode: node %d not ready", i)
+	gomega.Expect(waitForPortsParallelErrWithProcesses(c.httpPorts[i:i+1], c.procs[i:i+1], 90*time.Second)).
+		To(gomega.Succeed(), "addNode: node %d not ready", i)
 	c.nodeCount++
 
 	// Update leaderIdx by querying the seed node's admin UDS.
@@ -483,7 +482,7 @@ func waitForShardGroupCount(t testing.TB, dataDir string, minGroups int, timeout
 	t.Helper()
 	sock := filepath.Join(dataDir, "admin.sock")
 	cli := clusteradmin.NewClient(sock)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		status, err := cli.Status(ctx)
@@ -491,7 +490,8 @@ func waitForShardGroupCount(t testing.TB, dataDir string, minGroups int, timeout
 			return false
 		}
 		return len(status.ShardGroups) >= minGroups
-	}, timeout, time.Second, "expected >= %d shard groups in %s", minGroups, dataDir)
+	}).WithTimeout(timeout).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "expected >= %d shard groups in %s", minGroups, dataDir)
 }
 
 // ----- TestMultiRaftShardingBootE2E --------------------------------------
@@ -513,14 +513,14 @@ func runMultiRaftShardingBoot(t testing.TB) {
 	// nodes must use the auto EC width from the cluster size at creation time.
 	for i := 1; i <= 7; i++ {
 		gid := fmt.Sprintf("group-%d", i)
-		require.NotZero(t, groupDirs[gid], "seed group %s must have at least one voter directory", gid)
+		gomega.Expect(groupDirs[gid]).NotTo(gomega.BeZero(), "seed group %s must have at least one voter directory", gid)
 	}
 	for i := 8; i < 20; i++ {
 		gid := fmt.Sprintf("group-%d", i)
 		creationClusterSize := i/4 + 1
 		wantVoters := cluster.AutoECConfigForClusterSize(creationClusterSize).NumShards()
 		voterCount := groupDirs[gid]
-		require.Equal(t, wantVoters, voterCount,
+		gomega.Expect(voterCount).To(gomega.Equal(wantVoters),
 			"group %s expected %d voter dirs, got %d", gid, wantVoters, voterCount)
 	}
 	t.Logf("boot ok: %d distinct groups with directories across 5 nodes", len(groupDirs))
@@ -567,16 +567,16 @@ func runMultiRaftShardingBucketAssignment(t testing.TB) {
 	}
 
 	for i := 0; i < 32; i++ {
-		require.NoErrorf(t, createBucket(fmt.Sprintf("bkt-%d", i)), "CreateBucket bkt-%d", i)
+		gomega.Expect(createBucket(fmt.Sprintf("bkt-%d", i))).To(gomega.Succeed(), "CreateBucket bkt-%d", i)
 	}
 
 	// Idempotency: re-create 5 buckets, expect either nil or AlreadyOwnedByYou
 	for i := 0; i < 5; i++ {
 		err := createBucket(fmt.Sprintf("bkt-%d", i))
 		if err != nil {
-			require.Truef(t,
+			gomega.Expect(
 				strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") ||
-					strings.Contains(err.Error(), "bucket already exists"),
+					strings.Contains(err.Error(), "bucket already exists")).To(gomega.BeTrue(),
 				"unexpected non-idempotent error on bkt-%d: %v", i, err)
 		}
 	}
@@ -604,7 +604,7 @@ func runMultiRaftShardingRestartRecovery(t testing.TB) {
 
 	// Capture the group directory layout before restart.
 	beforeDirs := countGroupDirsAcrossNodes(c)
-	require.NotEmpty(t, beforeDirs, "expected group dirs before restart")
+	gomega.Expect(beforeDirs).NotTo(gomega.BeEmpty(), "expected group dirs before restart")
 
 	// SIGTERM all and wait for clean exit.
 	for _, p := range c.procs {
@@ -643,12 +643,12 @@ func runMultiRaftShardingRestartRecovery(t testing.TB) {
 			return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
 		},
 	)
-	require.NoError(t, err, "no leader after restart")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "no leader after restart")
 	c.leaderIdx = leaderIdx
 
 	afterDirs := countGroupDirsAcrossNodes(c)
 	for gid, beforeCount := range beforeDirs {
-		require.GreaterOrEqual(t, afterDirs[gid], beforeCount,
+		gomega.Expect(afterDirs[gid]).To(gomega.BeNumerically(">=", beforeCount),
 			"group %s lost voter directories after restart: before=%d after=%d",
 			gid, beforeCount, afterDirs[gid])
 	}
@@ -730,7 +730,7 @@ func runMultiRaftShardingPerGroupPersistence(t testing.TB) {
 			return tryPutObject(ctx, cli, probeBucket, "__leader_probe", []byte("probe"))
 		},
 	)
-	require.NoError(t, err, "no leader after per-group persistence restart")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "no leader after per-group persistence restart")
 	c.leaderIdx = leaderIdx
 
 	restartCtx, restartCancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -764,10 +764,10 @@ func requireMRPutObjectEventually(t testing.TB, ctx context.Context, client *s3.
 		}
 		time.Sleep(2 * time.Second)
 	}
-	require.Failf(t, "PutObject never became readable",
+	ginkgo.Fail(fmt.Sprintf(
 		"PutObject %s/%s never became readable with committed body: lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
 		bucket, key, lastErr, versionID, headSize, len(got), string(got),
-	)
+	))
 }
 
 func requireMRPutObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, data []byte) {
@@ -800,10 +800,10 @@ func requireMRPutObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, 
 		}
 		time.Sleep(2 * time.Second)
 	}
-	require.Failf(t, "PutObject never became readable",
+	ginkgo.Fail(fmt.Sprintf(
 		"PutObject %s/%s never became readable with committed body: lastNode=%d lastErr=%v versionID=%q headSize=%d gotLen=%d got=%q",
 		bucket, key, lastNode, lastErr, versionID, headSize, len(got), string(got),
-	)
+	))
 }
 
 func tryPutObjectVersioned(parent context.Context, client *s3.Client, bucket, key string, data []byte) (string, error) {
@@ -841,12 +841,13 @@ func requireMRGetObjectEventually(t testing.TB, ctx context.Context, client *s3.
 	t.Helper()
 	var lastErr error
 	var got []byte
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		got, lastErr = getObjectBytes(ctx, client, bucket, key)
 		return lastErr == nil && bytes.Equal(got, want)
-	}, 60*time.Second, 2*time.Second,
-		"GetObject %s/%s never returned committed object: lastErr=%v got=%q",
-		bucket, key, lastErr, string(got))
+	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).
+		Should(gomega.BeTrue(),
+			"GetObject %s/%s never returned committed object: lastErr=%v got=%q",
+			bucket, key, lastErr, string(got))
 }
 
 func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
@@ -854,7 +855,7 @@ func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, 
 	var lastErr error
 	var got []byte
 	var lastNode int
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i, endpoint := range c.liveURLs() {
 			client := ecS3Client(endpoint, c.accessKey, c.secretKey)
 			got, lastErr = getObjectBytes(ctx, client, bucket, key)
@@ -865,9 +866,10 @@ func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, 
 			}
 		}
 		return false
-	}, 90*time.Second, 2*time.Second,
-		"GetObject %s/%s never returned committed object from any node: lastNode=%d lastErr=%v got=%q",
-		bucket, key, lastNode, lastErr, string(got))
+	}).WithTimeout(90*time.Second).WithPolling(2*time.Second).
+		Should(gomega.BeTrue(),
+			"GetObject %s/%s never returned committed object from any node: lastNode=%d lastErr=%v got=%q",
+			bucket, key, lastNode, lastErr, string(got))
 }
 
 // ----- TestMultiRaftShardingCrossNodeDispatchE2E -------------------------
@@ -900,11 +902,11 @@ func runMultiRaftShardingCrossNodeDispatch(t testing.TB) {
 		Bucket: aws.String("cross-node-test"),
 		Key:    aws.String("dispatch-key"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = getOut.Body.Close() })
 	readBody, err := io.ReadAll(getOut.Body)
-	require.NoError(t, err)
-	require.Equal(t, body, string(readBody))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(string(readBody)).To(gomega.Equal(body))
 	t.Log("cross-node dispatch ok: non-voter PUT forwarded to leader and persisted")
 }
 
@@ -930,9 +932,9 @@ func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 	for forwardIdx == c.leaderIdx || forwardIdx == killIdx {
 		forwardIdx++
 	}
-	require.NotNil(t, c.procs[killIdx], "target process must exist")
+	gomega.Expect(c.procs[killIdx]).NotTo(gomega.BeNil(), "target process must exist")
 	t.Logf("killing placement target node %d at %s", killIdx, c.httpURLs[killIdx])
-	require.NoError(t, c.procs[killIdx].Process.Signal(syscall.SIGTERM))
+	gomega.Expect(c.procs[killIdx].Process.Signal(syscall.SIGTERM)).To(gomega.Succeed())
 	_ = c.procs[killIdx].Wait()
 	c.procs[killIdx] = nil
 
@@ -940,11 +942,11 @@ func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 		Bucket: aws.String(bucket),
 		Key:    aws.String(existingKey),
 	})
-	require.NoError(t, err, "existing object must remain readable with k live shards")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "existing object must remain readable with k live shards")
 	ginkgo.DeferCleanup(func() { _ = readOut.Body.Close() })
 	readBody, err := io.ReadAll(readOut.Body)
-	require.NoError(t, err)
-	require.Equal(t, existingBody, string(readBody))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(string(readBody)).To(gomega.Equal(existingBody))
 
 	requireS3PutEventually503(t, ctx, leaderClient, bucket, "leader-after-target-loss")
 	requireS3PutEventually503(t, ctx, ecS3Client(c.httpURLs[forwardIdx], c.accessKey, c.secretKey), bucket, "forwarded-after-target-loss")
@@ -952,7 +954,7 @@ func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 
 func requireS3PutEventually503(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
 		defer cancelPut()
 		_, err := client.PutObject(putCtx, &s3.PutObjectInput{
@@ -967,7 +969,8 @@ func requireS3PutEventually503(t testing.TB, ctx context.Context, client *s3.Cli
 		}
 		errStr := err.Error()
 		return strings.Contains(errStr, "503") || strings.Contains(errStr, "ServiceUnavailable")
-	}, 45*time.Second, time.Second, "expected missing topology placement target to surface as S3 503")
+	}).WithTimeout(45*time.Second).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "expected missing topology placement target to surface as S3 503")
 }
 
 // ----- TestMultiRaftShardingGroupLeaderFailoverE2E ------------------------
@@ -998,9 +1001,9 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	t.Logf("killing leader node %d to trigger group failover", killIdx)
 
 	// SIGTERM the leader process.
-	require.NotNil(t, c.procs[killIdx], "leader process must exist")
+	gomega.Expect(c.procs[killIdx]).NotTo(gomega.BeNil(), "leader process must exist")
 	err := c.procs[killIdx].Process.Signal(syscall.SIGTERM)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	_ = c.procs[killIdx].Wait()
 
 	// Original object should still be readable from a surviving node.
@@ -1039,7 +1042,7 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 		Key:    aws.String("s3-file.txt"),
 		Body:   bytes.NewReader([]byte(s3Body)),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	const nfsBody = "written-via-nfs"
 	if !runNFSv4SmokeClient(t, c.nfs4Ports[0], nfs4Bucket, s3Body, nfsBody) {
@@ -1048,18 +1051,18 @@ func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
 			Key:    aws.String("nfs-file.txt"),
 			Body:   bytes.NewReader([]byte(nfsBody)),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
 	getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(nfs4Bucket),
 		Key:    aws.String("nfs-file.txt"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = getOut.Body.Close() })
 	nfsReadBody, err := io.ReadAll(getOut.Body)
-	require.NoError(t, err)
-	require.Equal(t, nfsBody, string(nfsReadBody))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(string(nfsReadBody)).To(gomega.Equal(nfsBody))
 
 	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
 }
@@ -1083,7 +1086,7 @@ func runLocalNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody
 	t.Helper()
 
 	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() {
 		_ = exec.Command("umount", mountDir).Run()
 		_ = os.Remove(mountDir)
@@ -1100,13 +1103,14 @@ func runLocalNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody
 	}
 
 	nfsFilePath := filepath.Join(mountDir, bucket, "s3-file.txt")
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		data, err := os.ReadFile(nfsFilePath)
 		return err == nil && string(data) == s3Body
-	}, 30*time.Second, 500*time.Millisecond, "object not visible via NFSv4")
+	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
+		Should(gomega.BeTrue(), "object not visible via NFSv4")
 
 	nfsNewFilePath := filepath.Join(mountDir, bucket, "nfs-file.txt")
-	require.NoError(t, os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0o644))
+	gomega.Expect(os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0o644)).To(gomega.Succeed())
 }
 
 func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) bool {
@@ -1141,10 +1145,11 @@ func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBod
 	)
 
 	nfsFilePath := mountDir + "/" + bucket + "/s3-file.txt"
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		out, err := colimaSSHCombinedOutput(2*time.Second, "sudo", "cat", nfsFilePath)
 		return err == nil && string(out) == s3Body
-	}, 30*time.Second, 500*time.Millisecond, "object not visible via Colima NFSv4 mount")
+	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
+		Should(gomega.BeTrue(), "object not visible via Colima NFSv4 mount")
 
 	nfsNewFilePath := mountDir + "/" + bucket + "/nfs-file.txt"
 	runColimaSSH(t, "sudo", "bash", "-c",
@@ -1200,8 +1205,8 @@ func runMultiRaftShardingNBDRoutesThroughCoordinator(t testing.TB) {
 		Bucket: aws.String("__grainfs_volumes"),
 		Prefix: aws.String("__vol/default/"),
 	})
-	require.NoError(t, err)
-	require.NotEmpty(t, out.Contents)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(out.Contents).NotTo(gomega.BeEmpty())
 }
 
 func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.TB) {
@@ -1218,12 +1223,12 @@ func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.T
 	icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
 
 	nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	nsReq.Header.Set("Content-Type", "application/json")
 	resp, err := icebergClient.Do(nsReq)
-	require.NoError(t, err)
-	require.Less(t, resp.StatusCode, 300)
-	require.NoError(t, resp.Body.Close())
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 300))
+	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
 
 	createTableBody := `{
 		"name":"t",
@@ -1231,23 +1236,23 @@ func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.T
 		"properties":{}
 	}`
 	tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	tblReq.Header.Set("Content-Type", "application/json")
 	resp, err = icebergClient.Do(tblReq)
-	require.NoError(t, err)
-	require.Less(t, resp.StatusCode, 300)
-	require.NoError(t, resp.Body.Close())
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 300))
+	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
 
 	loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	loadResp, err := icebergClient.Do(loadReq)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, loadResp.StatusCode)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(loadResp.StatusCode).To(gomega.Equal(http.StatusOK))
 	loadBody, err := io.ReadAll(loadResp.Body)
-	require.NoError(t, err)
-	require.NoError(t, loadResp.Body.Close())
-	require.Contains(t, string(loadBody), `"metadata-location"`)
-	require.Contains(t, string(loadBody), `s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(loadResp.Body.Close()).To(gomega.Succeed())
+	gomega.Expect(string(loadBody)).To(gomega.ContainSubstring(`"metadata-location"`))
+	gomega.Expect(string(loadBody)).To(gomega.ContainSubstring(`s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`))
 
 	var got []byte
 	var readErr error
@@ -1266,8 +1271,8 @@ func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.T
 		}
 		time.Sleep(time.Second)
 	}
-	require.NoError(t, readErr)
-	require.Contains(t, string(got), `"format-version"`)
+	gomega.Expect(readErr).NotTo(gomega.HaveOccurred())
+	gomega.Expect(string(got)).To(gomega.ContainSubstring(`"format-version"`))
 }
 
 // TestTwoNodeAvailabilityTrapE2E verifies the well-known 2-node quorum trap:
@@ -1294,9 +1299,9 @@ func runTwoNodeAvailabilityTrap(t testing.TB) {
 	// Kill the non-leader node to break metaRaft quorum (needs 2/2).
 	followerIdx := 1 - c.leaderIdx
 	t.Logf("killing follower node %d to break 2-node quorum", followerIdx)
-	require.NotNil(t, c.procs[followerIdx])
-	require.NotNil(t, c.procs[followerIdx].Process)
-	require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGTERM))
+	gomega.Expect(c.procs[followerIdx]).NotTo(gomega.BeNil())
+	gomega.Expect(c.procs[followerIdx].Process).NotTo(gomega.BeNil())
+	gomega.Expect(c.procs[followerIdx].Process.Signal(syscall.SIGTERM)).To(gomega.Succeed())
 	_ = c.procs[followerIdx].Wait()
 	c.procs[followerIdx] = nil
 
@@ -1313,7 +1318,7 @@ func runTwoNodeAvailabilityTrap(t testing.TB) {
 		Key:    aws.String("after-quorum-loss"),
 		Body:   bytes.NewReader([]byte("blocked")),
 	}, func(o *s3.Options) { o.RetryMaxAttempts = 1 })
-	require.Error(t, writeErr, "expected write to fail after 2-node quorum loss (got success — split-brain?)")
+	gomega.Expect(writeErr).To(gomega.HaveOccurred(), "expected write to fail after 2-node quorum loss (got success — split-brain?)")
 }
 
 // TestDynamicGroupSeeding1to5E2E verifies that each dynamic node join
