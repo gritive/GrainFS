@@ -19,8 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 const multipartPartSize = 5 * 1024 * 1024 // 5 MiB — warp's minimum part.size
@@ -58,7 +57,7 @@ func runMultipartGetPartNumberCases(getTgt func() s3Target) {
 			Key:         aws.String(key),
 			ContentType: aws.String("application/octet-stream"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		uploadID := initOut.UploadId
 
 		p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
@@ -68,7 +67,7 @@ func runMultipartGetPartNumberCases(getTgt func() s3Target) {
 			PartNumber: aws.Int32(1),
 			Body:       bytes.NewReader(part1),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:     aws.String(bucket),
@@ -77,7 +76,7 @@ func runMultipartGetPartNumberCases(getTgt func() s3Target) {
 			PartNumber: aws.Int32(2),
 			Body:       bytes.NewReader(part2),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 			Bucket:   aws.String(bucket),
@@ -90,23 +89,23 @@ func runMultipartGetPartNumberCases(getTgt func() s3Target) {
 				},
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Full GET — must return concatenated plaintext, no encryption overhead leaked.
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer out.Body.Close()
 		body, err := io.ReadAll(out.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		expected := append(append([]byte{}, part1...), part2...)
-		assert.Equal(t, int64(len(expected)), aws.ToInt64(out.ContentLength), "Content-Length header")
-		assert.Equal(t, len(expected), len(body), "body byte length")
+		gomega.Expect(aws.ToInt64(out.ContentLength)).To(gomega.Equal(int64(len(expected))), "Content-Length header")
+		gomega.Expect(len(body)).To(gomega.Equal(len(expected)), "body byte length")
 		if len(body) == len(expected) {
-			assert.Equal(t, expected[:32], body[:32], "first 32 bytes")
-			assert.Equal(t, expected[len(expected)-32:], body[len(body)-32:], "last 32 bytes")
+			gomega.Expect(body[:32]).To(gomega.Equal(expected[:32]), "first 32 bytes")
+			gomega.Expect(body[len(body)-32:]).To(gomega.Equal(expected[len(expected)-32:]), "last 32 bytes")
 		}
 
 		assertPart(t, client, ctx, bucket, key, 1, part1, 2)
@@ -117,7 +116,7 @@ func runMultipartGetPartNumberCases(getTgt func() s3Target) {
 			Key:        aws.String(key),
 			PartNumber: aws.Int32(3),
 		})
-		require.Error(t, err, "partNumber > parts count must error")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "partNumber > parts count must error")
 	})
 }
 
@@ -128,17 +127,17 @@ func assertPart(t testing.TB, client *s3.Client, ctx context.Context, bucket, ke
 		Key:        aws.String(key),
 		PartNumber: aws.Int32(partN),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer out.Body.Close()
 
-	assert.Equal(t, int64(len(expected)), aws.ToInt64(out.ContentLength), "part %d Content-Length", partN)
-	assert.Equal(t, totalParts, aws.ToInt32(out.PartsCount), "part %d x-amz-mp-parts-count", partN)
+	gomega.Expect(aws.ToInt64(out.ContentLength)).To(gomega.Equal(int64(len(expected))), "part %d Content-Length", partN)
+	gomega.Expect(aws.ToInt32(out.PartsCount)).To(gomega.Equal(totalParts), "part %d x-amz-mp-parts-count", partN)
 
 	body, err := io.ReadAll(out.Body)
-	require.NoError(t, err, "part %d ReadAll", partN)
-	assert.Equal(t, len(expected), len(body), "part %d body length", partN)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "part %d ReadAll", partN)
+	gomega.Expect(len(body)).To(gomega.Equal(len(expected)), "part %d body length", partN)
 	if len(body) == len(expected) {
-		assert.Equal(t, expected[:32], body[:32], "part %d first 32 bytes", partN)
-		assert.Equal(t, expected[len(expected)-32:], body[len(body)-32:], "part %d last 32 bytes", partN)
+		gomega.Expect(body[:32]).To(gomega.Equal(expected[:32]), "part %d first 32 bytes", partN)
+		gomega.Expect(body[len(body)-32:]).To(gomega.Equal(expected[len(expected)-32:]), "part %d last 32 bytes", partN)
 	}
 }
