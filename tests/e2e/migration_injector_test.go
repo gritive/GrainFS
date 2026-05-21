@@ -12,8 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestMigrationInjector_CopiesFromSourceToDest verifies the `grainfs migrate inject`
@@ -27,7 +26,7 @@ var _ = ginkgo.Describe("Migration injector", func() {
 
 			// --- Source GrainFS ---
 			srcDir, err := os.MkdirTemp("", "grainfs-migrate-src-*")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(os.RemoveAll, srcDir)
 
 			srcPort := freePort()
@@ -42,7 +41,7 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			)
 			srcCmd.Stdout = os.Stdout
 			srcCmd.Stderr = os.Stderr
-			require.NoError(t, srcCmd.Start())
+			gomega.Expect(srcCmd.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(terminateProcess, srcCmd)
 			waitForPort(t, srcPort, 30*time.Second)
 
@@ -57,17 +56,17 @@ var _ = ginkgo.Describe("Migration injector", func() {
 				Key:    aws.String("hello.txt"),
 				Body:   strings.NewReader("hello from source"),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			_, err = srcClient.PutObject(ctx, &s3.PutObjectInput{
 				Bucket: aws.String("data"),
 				Key:    aws.String("world.txt"),
 				Body:   strings.NewReader("world from source"),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// --- Destination GrainFS ---
 			dstDir, err := os.MkdirTemp("", "grainfs-migrate-dst-*")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(os.RemoveAll, dstDir)
 
 			dstPort := freePort()
@@ -82,7 +81,7 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			)
 			dstCmd.Stdout = os.Stdout
 			dstCmd.Stderr = os.Stderr
-			require.NoError(t, dstCmd.Start())
+			gomega.Expect(dstCmd.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(terminateProcess, dstCmd)
 			waitForPort(t, dstPort, 30*time.Second)
 
@@ -103,7 +102,7 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			)
 			injectCmd.Stdout = os.Stdout
 			injectCmd.Stderr = os.Stderr
-			require.NoError(t, injectCmd.Run(), "migrate inject must succeed")
+			gomega.Expect(injectCmd.Run()).To(gomega.Succeed(), "migrate inject must succeed")
 
 			// Verify objects are in destination
 			for _, key := range []string{"hello.txt", "world.txt"} {
@@ -111,10 +110,10 @@ var _ = ginkgo.Describe("Migration injector", func() {
 					Bucket: aws.String("data"),
 					Key:    aws.String(key),
 				})
-				require.NoError(t, err, "object %s must exist in destination after migration", key)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "object %s must exist in destination after migration", key)
 				body, _ := io.ReadAll(getResp.Body)
 				getResp.Body.Close()
-				assert.True(t, strings.Contains(string(body), "source"), "content must match source")
+				gomega.Expect(string(body)).To(gomega.ContainSubstring("source"), "content must match source")
 			}
 		})
 	})

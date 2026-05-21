@@ -5,8 +5,7 @@ import (
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterPlacementCLIE2E exercises the `grainfs cluster placement`
@@ -37,7 +36,6 @@ var _ = ginkgo.Describe("Cluster placement CLI", func() {
 
 func runClusterPlacementCLICases(getTgt func() s3Target) {
 	ginkgo.It("renders fallback or placement table without a bucket", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -46,7 +44,7 @@ func runClusterPlacementCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"placement",
 		).Output()
-		require.NoError(t, err, "placement command must succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "placement command must succeed")
 
 		output := string(out)
 		hasFallback := false
@@ -56,11 +54,10 @@ func runClusterPlacementCLICases(getTgt func() s3Target) {
 				break
 			}
 		}
-		assert.True(t, hasFallback, "expected one of fallback or table render; got: %q", output)
+		gomega.Expect(hasFallback).To(gomega.BeTrue(), "expected one of fallback or table render; got: %q", output)
 	})
 
 	ginkgo.It("renders fallback or bucket status for an unknown bucket", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -69,14 +66,14 @@ func runClusterPlacementCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"placement", "no-such-bucket",
 		).Output()
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		output := string(out)
-		assert.True(t,
+		gomega.Expect(
 			strings.Contains(output, "not assigned") ||
 				strings.Contains(output, "single-node mode") ||
 				strings.Contains(output, "no shard groups configured") ||
-				strings.Contains(output, "Bucket: no-such-bucket"),
+				strings.Contains(output, "Bucket: no-such-bucket")).To(gomega.BeTrue(),
 			"expected not-assigned or fallback; got: %q", output)
 	})
 }

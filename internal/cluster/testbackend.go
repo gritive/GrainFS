@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"fmt"
-	"testing"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -10,6 +9,13 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
+
+type singletonBackendTestTB interface {
+	Helper()
+	Cleanup(func())
+	TempDir() string
+	Fatalf(format string, args ...interface{})
+}
 
 // NewSingletonBackendForTest spins up a DistributedBackend as a one-node
 // Raft cluster with no peers, suitable for package tests in other modules
@@ -22,7 +28,7 @@ import (
 //
 // As of M5 PR 29 the GRAINFS_RAFT_V2 flag is gone; this helper always
 // instantiates a v2 raft node via newRaftNode.
-func NewSingletonBackendForTest(t *testing.T) *DistributedBackend {
+func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
 

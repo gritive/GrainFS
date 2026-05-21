@@ -17,8 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster scrubber", func() {
@@ -55,13 +54,13 @@ var _ = ginkgo.Describe("Cluster scrubber", func() {
 			ginkgo.DeferCleanup(cancel)
 
 			leaderIdx, err := cluster.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
-			require.NoError(t, err, "no leader ready")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "no leader ready")
 			client := cluster.S3Client(leaderIdx)
 
 			// PUT a random object large enough to exercise all 5 shards.
 			payload := make([]byte, 256*1024)
 			_, err = rand.Read(payload)
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			sum := sha256.Sum256(payload)
 
 			_, err = client.PutObject(ctx, &s3.PutObjectInput{
@@ -69,7 +68,7 @@ var _ = ginkgo.Describe("Cluster scrubber", func() {
 				Key:    aws.String(keyName),
 				Body:   bytes.NewReader(payload),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Locate a node that actually holds shard 0 on disk. We don't assume
 			// placement order and we don't know the versionID (UUIDv7) ahead of
@@ -93,31 +92,31 @@ var _ = ginkgo.Describe("Cluster scrubber", func() {
 					break
 				}
 			}
-			require.NotEmpty(t, victimShard, "expected at least one node to hold shard_0 on disk")
+			gomega.Expect(victimShard).NotTo(gomega.BeEmpty(), "expected at least one node to hold shard_0 on disk")
 
 			// Kill shard 0 on the victim node. The scrubber on that node should
 			// detect the missing local shard, call RepairShard, pull the other 4
 			// shards from peers, reconstruct shard 0, and rewrite it to disk.
-			require.NoError(t, os.Remove(victimShard))
+			gomega.Expect(os.Remove(victimShard)).To(gomega.Succeed())
 			t.Logf("deleted shard 0 at %s (node %d)", victimShard, victimNode)
 
 			// Wait up to 30s (15 scrub cycles at 2s) for the shard to be restored.
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				info, err := os.Stat(victimShard)
 				return err == nil && info.Size() > 0
-			}, 30*time.Second, 500*time.Millisecond, "scrubber did not restore shard 0")
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "scrubber did not restore shard 0")
 
 			// GET must still round-trip byte-identical.
 			out, err := client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String(keyName),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(out.Body.Close)
 			var gotBuf bytes.Buffer
 			_, err = gotBuf.ReadFrom(out.Body)
-			require.NoError(t, err)
-			assert.Equal(t, sum, sha256.Sum256(gotBuf.Bytes()), "content must match after auto-repair")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(sha256.Sum256(gotBuf.Bytes())).To(gomega.Equal(sum), "content must match after auto-repair")
 		})
 	})
 })

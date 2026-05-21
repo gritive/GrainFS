@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterConfigHotReloadFollowerObservesE2E validates the
@@ -38,18 +38,18 @@ var _ = ginkgo.Describe("Cluster config hot reload", func() {
 			rev := SetClusterConfig(t, leaderDir, map[string]any{
 				"disk-warn-threshold": newWarn,
 			})
-			require.Greater(t, rev, uint64(0), "PATCH must return a non-zero rev")
+			gomega.Expect(rev).To(gomega.BeNumerically(">", 0), "PATCH must return a non-zero rev")
 
 			// Follower's GET /v1/cluster/config eventually shows the new value. JSON
 			// numbers decode as float64 in map[string]any.
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				got := GetClusterConfig(t, followerDir)
 				if got.Rev < rev {
 					return false
 				}
 				v, ok := got.Effective["disk-warn-threshold"].(float64)
 				return ok && v == newWarn
-			}, 10*time.Second, 200*time.Millisecond,
+			}, 10*time.Second, 200*time.Millisecond).Should(gomega.BeTrue(),
 				"follower (node %d) must observe leader-applied disk-warn-threshold=%.2f",
 				followerIdx, newWarn)
 		})

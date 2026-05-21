@@ -11,8 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("S3 versioning", ginkgo.Label("bucket"), func() {
@@ -43,7 +42,6 @@ func describeVersioningContext(name string, factory func() s3Target) {
 
 func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 	enableVersioning := func(bkt string) {
-		t := ginkgo.GinkgoTB()
 		client := getClient()
 		_, err := client.PutBucketVersioning(context.Background(),
 			&s3.PutBucketVersioningInput{
@@ -52,20 +50,19 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 					Status: types.BucketVersioningStatusEnabled,
 				},
 			})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
 	putVersion := func(bkt, key, body string) string {
-		t := ginkgo.GinkgoTB()
 		client := getClient()
 		out, err := client.PutObject(context.Background(), &s3.PutObjectInput{
 			Bucket: aws.String(bkt),
 			Key:    aws.String(key),
 			Body:   strings.NewReader(body),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		vid := aws.ToString(out.VersionId)
-		require.NotEmpty(t, vid, "PutObject must return a VersionId on versioning-enabled bucket")
+		gomega.Expect(vid).NotTo(gomega.BeEmpty(), "PutObject must return a VersionId on versioning-enabled bucket")
 		return vid
 	}
 
@@ -79,14 +76,14 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		// Before enabling, grainfs reports an "Unversioned" Status (server
 		// quirk; AWS S3 returns empty). Just assert it's not Enabled yet.
 		gout, err := client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(bkt)})
-		require.NoError(t, err)
-		assert.NotEqual(t, types.BucketVersioningStatusEnabled, gout.Status)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(gout.Status).NotTo(gomega.Equal(types.BucketVersioningStatusEnabled))
 
 		enableVersioning(bkt)
 
 		gout, err = client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(bkt)})
-		require.NoError(t, err)
-		assert.Equal(t, types.BucketVersioningStatusEnabled, gout.Status)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(gout.Status).To(gomega.Equal(types.BucketVersioningStatusEnabled))
 	})
 
 	ginkgo.It("puts and gets by version ID (PutGetByVersionID)", func() {
@@ -100,21 +97,21 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 
 		vid1 := putVersion(bkt, key, "content-v1")
 		vid2 := putVersion(bkt, key, "content-v2")
-		assert.NotEqual(t, vid1, vid2)
+		gomega.Expect(vid2).NotTo(gomega.Equal(vid1))
 
 		latest, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bkt), Key: aws.String(key)})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(latest.Body.Close)
 		latestBody, _ := io.ReadAll(latest.Body)
-		assert.Equal(t, []byte("content-v2"), latestBody)
+		gomega.Expect(latestBody).To(gomega.Equal([]byte("content-v2")))
 
 		v1, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid1),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(v1.Body.Close)
 		v1Body, _ := io.ReadAll(v1.Body)
-		assert.Equal(t, []byte("content-v1"), v1Body)
+		gomega.Expect(v1Body).To(gomega.Equal([]byte("content-v1")))
 	})
 
 	ginkgo.It("heads by version ID (HeadByVersionID)", func() {
@@ -133,25 +130,25 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		h1, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid1),
 		})
-		require.NoError(t, err)
-		assert.Equal(t, vid1, aws.ToString(h1.VersionId))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToString(h1.VersionId)).To(gomega.Equal(vid1))
 
 		// HEAD ?versionId=<vid2> → 200, x-amz-version-id == vid2.
 		h2, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid2),
 		})
-		require.NoError(t, err)
-		assert.Equal(t, vid2, aws.ToString(h2.VersionId))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToString(h2.VersionId)).To(gomega.Equal(vid2))
 
 		// HEAD with non-existent versionId → 404 NotFound.
 		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key),
 			VersionId: aws.String("01999999-9999-7999-9999-999999999999"),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "NotFound", apiErr.ErrorCode())
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("NotFound"))
 	})
 
 	ginkgo.It("heads by version ID through all nodes (HeadByVersionID_AllNodes)", func() {
@@ -168,8 +165,8 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 			h, err := c.HeadObject(ctx, &s3.HeadObjectInput{
 				Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid),
 			})
-			require.NoErrorf(t, err, "HEAD ?versionId via node %d failed", i)
-			assert.Equal(t, vid, aws.ToString(h.VersionId), "node %d returned wrong version id", i)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "HEAD ?versionId via node %d failed", i)
+			gomega.Expect(aws.ToString(h.VersionId)).To(gomega.Equal(vid), "node %d returned wrong version id", i)
 		}
 	})
 
@@ -187,20 +184,20 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		delOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		markerID := aws.ToString(delOut.VersionId)
-		require.NotEmpty(t, markerID)
+		gomega.Expect(markerID).NotTo(gomega.BeEmpty())
 
 		// HEAD ?versionId=<markerID> → 405 MethodNotAllowed + x-amz-delete-marker.
 		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(markerID),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		// aws-sdk-go-v2 surfaces 405 either as a generic APIError with status
 		// code 405 or as an HTTP response error. Accept both shapes.
 		var httpErr interface{ HTTPStatusCode() int }
 		if errors.As(err, &httpErr) {
-			assert.Equal(t, 405, httpErr.HTTPStatusCode())
+			gomega.Expect(httpErr.HTTPStatusCode()).To(gomega.Equal(405))
 		}
 	})
 
@@ -218,14 +215,14 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		delOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		markerID := aws.ToString(delOut.VersionId)
-		require.NotEmpty(t, markerID)
+		gomega.Expect(markerID).NotTo(gomega.BeEmpty())
 
 		_, err = client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key),
 		})
-		require.Error(t, err, "GET after soft-delete must return 404")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "GET after soft-delete must return 404")
 	})
 
 	ginkgo.It("hard deletes a specific version ID (HardDeleteByVersionID)", func() {
@@ -242,12 +239,12 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid1),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String(key), VersionId: aws.String(vid1),
 		})
-		require.Error(t, err, "GET of hard-deleted version must fail")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "GET of hard-deleted version must fail")
 	})
 
 	ginkgo.It("lists object versions (ListVersions)", func() {
@@ -267,7 +264,7 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		// Strict equivalence is covered by internal/server/versioning_test.go
 		// (TestListObjectVersions_EC).
 		out, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bkt)})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		seen := map[string]bool{}
 		latestCount := 0
 		for _, v := range out.Versions {
@@ -275,12 +272,12 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 			seen[id] = true
 			if aws.ToBool(v.IsLatest) {
 				latestCount++
-				assert.Equal(t, vid2, id, "IsLatest must point at vid2")
+				gomega.Expect(id).To(gomega.Equal(vid2), "IsLatest must point at vid2")
 			}
 		}
-		assert.True(t, seen[vid1], "vid1 missing from ListObjectVersions")
-		assert.True(t, seen[vid2], "vid2 missing from ListObjectVersions")
-		assert.Equal(t, 1, latestCount, "exactly one IsLatest version expected")
+		gomega.Expect(seen[vid1]).To(gomega.BeTrue(), "vid1 missing from ListObjectVersions")
+		gomega.Expect(seen[vid2]).To(gomega.BeTrue(), "vid2 missing from ListObjectVersions")
+		gomega.Expect(latestCount).To(gomega.Equal(1), "exactly one IsLatest version expected")
 		// DeleteMarkers behavior is exercised by the dedicated
 		// ListVersionsWithDeleteMarker case below; this case focuses on real
 		// version enumeration only. Cluster may emit phantom markers from
@@ -297,11 +294,11 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		key := "file.txt"
 		_ = putVersion(bkt, key, "v1")
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bkt), Key: aws.String(key)})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		out, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bkt)})
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, len(out.DeleteMarkers), 1, "expected >=1 delete marker")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(len(out.DeleteMarkers)).To(gomega.BeNumerically(">=", 1), "expected >=1 delete marker")
 		latestMarker := false
 		for _, m := range out.DeleteMarkers {
 			if aws.ToBool(m.IsLatest) {
@@ -309,6 +306,6 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 				break
 			}
 		}
-		assert.True(t, latestMarker, "exactly one delete marker must be IsLatest")
+		gomega.Expect(latestMarker).To(gomega.BeTrue(), "exactly one delete marker must be IsLatest")
 	})
 }

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 type e2eNfsExport struct {
@@ -56,24 +56,24 @@ func runNFSMultiExportCLICases(getTgt func() s3Target) {
 		bucket := tgt.uniqueBucket(t, "nfsexp")
 
 		added := runNfsExportJSON(t, dataDir, "add", bucket, "--ro")
-		require.Equal(t, bucket, added.Bucket)
-		require.True(t, added.ReadOnly)
-		require.Equal(t, uint64(1), added.FsidMajor)
-		require.NotZero(t, added.FsidMinor)
-		require.Equal(t, uint64(1), added.Generation)
+		gomega.Expect(added.Bucket).To(gomega.Equal(bucket))
+		gomega.Expect(added.ReadOnly).To(gomega.BeTrue())
+		gomega.Expect(added.FsidMajor).To(gomega.Equal(uint64(1)))
+		gomega.Expect(added.FsidMinor).NotTo(gomega.BeZero())
+		gomega.Expect(added.Generation).To(gomega.Equal(uint64(1)))
 
 		list := listNfsExports(t, dataDir)
-		require.Contains(t, exportBuckets(list), bucket)
+		gomega.Expect(exportBuckets(list)).To(gomega.ContainElement(bucket))
 
 		updated := runNfsExportJSON(t, dataDir, "update", bucket, "--rw")
-		require.Equal(t, bucket, updated.Bucket)
-		require.False(t, updated.ReadOnly)
-		require.Greater(t, updated.Generation, added.Generation)
-		require.Equal(t, added.FsidMinor, updated.FsidMinor, "fsid minor must remain stable across update")
+		gomega.Expect(updated.Bucket).To(gomega.Equal(bucket))
+		gomega.Expect(updated.ReadOnly).To(gomega.BeFalse())
+		gomega.Expect(updated.Generation).To(gomega.BeNumerically(">", added.Generation))
+		gomega.Expect(updated.FsidMinor).To(gomega.Equal(added.FsidMinor), "fsid minor must remain stable across update")
 
 		out, code := runCLI(t, dataDir, "nfs", "export", "remove", bucket, "--quiet")
-		require.Equal(t, 0, code, out)
-		require.NotContains(t, exportBuckets(listNfsExports(t, dataDir)), bucket)
+		gomega.Expect(code).To(gomega.Equal(0), out)
+		gomega.Expect(exportBuckets(listNfsExports(t, dataDir))).NotTo(gomega.ContainElement(bucket))
 	})
 
 	ginkgo.It("rejects a missing bucket", func() {
@@ -82,8 +82,8 @@ func runNFSMultiExportCLICases(getTgt func() s3Target) {
 		dataDir := filepath.Dir(tgt.adminSockPath())
 		missing := fmt.Sprintf("nfs-missing-%d", freePort())
 		out, code := runCLI(t, dataDir, "nfs", "export", "add", missing)
-		require.NotEqual(t, 0, code)
-		require.Contains(t, out, "bucket_not_found")
+		gomega.Expect(code).NotTo(gomega.Equal(0))
+		gomega.Expect(out).To(gomega.ContainSubstring("bucket_not_found"))
 	})
 }
 
@@ -101,29 +101,29 @@ func runNfsExportJSON(t testing.TB, dataDir, verb, bucket string, flags ...strin
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	require.Equalf(t, 0, code, "%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), "%s", out)
 	return parseSingleNfsExport(t, out)
 }
 
 func parseSingleNfsExport(t testing.TB, raw string) e2eNfsExport {
 	t.Helper()
 	var resp e2eNfsExportList
-	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp))
-	require.Len(t, resp.Exports, 1)
+	gomega.Expect(json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp)).To(gomega.Succeed())
+	gomega.Expect(resp.Exports).To(gomega.HaveLen(1))
 	return resp.Exports[0]
 }
 
 func listNfsExports(t testing.TB, dataDir string) []e2eNfsExport {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--json")
-	require.Equalf(t, 0, code, "%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), "%s", out)
 	return parseNfsExportList(t, out)
 }
 
 func parseNfsExportList(t testing.TB, raw string) []e2eNfsExport {
 	t.Helper()
 	var resp e2eNfsExportList
-	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp))
+	gomega.Expect(json.Unmarshal([]byte(strings.TrimSpace(raw)), &resp)).To(gomega.Succeed())
 	return resp.Exports
 }
 

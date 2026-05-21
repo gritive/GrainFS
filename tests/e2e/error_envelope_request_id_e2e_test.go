@@ -17,11 +17,9 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestErrorEnvelopeRequestIDE2E covers §5 T42 on single + cluster targets.
@@ -48,24 +46,23 @@ var _ = ginkgo.Describe("Error envelope request ID", func() {
 
 func runErrorEnvelopeRequestIDCases(getTgt func() s3Target) {
 	ginkgo.It("propagates an incoming request ID into S3 XML errors", func() {
-		t := ginkgo.GinkgoTB()
 		endpoint := getTgt().endpoint(0)
 		const incoming = "rid-test-s3"
 		// Unsigned GET on a non-existent bucket — SigV4 gate produces an XML
 		// auth error envelope via writeXMLError. We don't care WHICH XML
 		// error is returned; only that the rid was propagated into the body.
 		req, err := http.NewRequest(http.MethodGet, endpoint+"/no-such-bucket-rid-test/", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		req.Header.Set(reqIDHeader, incoming)
 
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		require.GreaterOrEqual(t, resp.StatusCode, 400, "expected an error response")
-		assert.Equal(t, incoming, resp.Header.Get(reqIDHeader),
+		gomega.Expect(resp.StatusCode).To(gomega.BeNumerically(">=", 400), "expected an error response")
+		gomega.Expect(resp.Header.Get(reqIDHeader)).To(gomega.Equal(incoming),
 			"server must preserve client-supplied X-GrainFS-Request-Id")
 
 		var env struct {
@@ -73,91 +70,88 @@ func runErrorEnvelopeRequestIDCases(getTgt func() s3Target) {
 			Code      string   `xml:"Code"`
 			RequestID string   `xml:"RequestId"`
 		}
-		require.NoError(t, xml.Unmarshal(body, &env), "body must be S3 XML error: %s", body)
-		assert.Equal(t, incoming, env.RequestID,
+		gomega.Expect(xml.Unmarshal(body, &env)).To(gomega.Succeed(), "body must be S3 XML error: %s", body)
+		gomega.Expect(env.RequestID).To(gomega.Equal(incoming),
 			"S3 XML <RequestId> must echo X-GrainFS-Request-Id; body=%s", body)
 	})
 
 	ginkgo.It("propagates a generated request ID into S3 XML errors", func() {
-		t := ginkgo.GinkgoTB()
 		endpoint := getTgt().endpoint(0)
 		// Omit the incoming header — server generates a UUIDv7; the rid in the
 		// response body must match the rid in the response header.
 		req, err := http.NewRequest(http.MethodGet, endpoint+"/no-such-bucket-rid-gen/", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		hdrRid := resp.Header.Get(reqIDHeader)
-		require.NotEmpty(t, hdrRid, "server must generate rid when absent")
+		gomega.Expect(hdrRid).NotTo(gomega.BeEmpty(), "server must generate rid when absent")
 
 		var env struct {
 			XMLName   xml.Name `xml:"Error"`
 			RequestID string   `xml:"RequestId"`
 		}
-		require.NoError(t, xml.Unmarshal(body, &env), "body must be S3 XML error: %s", body)
-		assert.Equal(t, hdrRid, env.RequestID,
+		gomega.Expect(xml.Unmarshal(body, &env)).To(gomega.Succeed(), "body must be S3 XML error: %s", body)
+		gomega.Expect(env.RequestID).To(gomega.Equal(hdrRid),
 			"S3 XML <RequestId> must match X-GrainFS-Request-Id header (generated path)")
 	})
 
 	ginkgo.It("propagates an incoming request ID into Iceberg JSON errors", func() {
-		t := ginkgo.GinkgoTB()
 		endpoint := getTgt().endpoint(0)
 		const incoming = "rid-test-iceberg"
 		// Unsigned Iceberg request — SigV4 gate rejects → writeIcebergError
 		// remaps to 401 JSON envelope.
 		req, err := http.NewRequest(http.MethodGet,
 			endpoint+"/iceberg/v1/config?warehouse=rid-test-warehouse", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		req.Header.Set(reqIDHeader, incoming)
 
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		require.GreaterOrEqual(t, resp.StatusCode, 400, "expected an error response")
-		assert.Equal(t, incoming, resp.Header.Get(reqIDHeader),
+		gomega.Expect(resp.StatusCode).To(gomega.BeNumerically(">=", 400), "expected an error response")
+		gomega.Expect(resp.Header.Get(reqIDHeader)).To(gomega.Equal(incoming),
 			"server must preserve client-supplied X-GrainFS-Request-Id")
-		require.Contains(t, resp.Header.Get("Content-Type"), "application/json",
+		gomega.Expect(resp.Header.Get("Content-Type")).To(gomega.ContainSubstring("application/json"),
 			"iceberg error envelope must be JSON")
 
 		var env map[string]any
-		require.NoError(t, json.Unmarshal(body, &env),
+		gomega.Expect(json.Unmarshal(body, &env)).To(gomega.Succeed(),
 			"body must be Iceberg JSON error: %s", body)
 		gotRid, _ := env["request_id"].(string)
-		assert.Equal(t, incoming, gotRid,
+		gomega.Expect(gotRid).To(gomega.Equal(incoming),
 			"Iceberg JSON request_id must echo X-GrainFS-Request-Id; body=%s", body)
 	})
 
 	ginkgo.It("propagates a generated request ID into Iceberg JSON errors", func() {
-		t := ginkgo.GinkgoTB()
 		endpoint := getTgt().endpoint(0)
 		req, err := http.NewRequest(http.MethodGet,
 			endpoint+"/iceberg/v1/config?warehouse=rid-test-warehouse-gen", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		hdrRid := resp.Header.Get(reqIDHeader)
-		require.NotEmpty(t, hdrRid, "server must generate rid when absent")
-		require.True(t, strings.Contains(resp.Header.Get("Content-Type"), "application/json"),
+		gomega.Expect(hdrRid).NotTo(gomega.BeEmpty(), "server must generate rid when absent")
+		gomega.Expect(resp.Header.Get("Content-Type")).To(gomega.ContainSubstring("application/json"),
 			"iceberg error envelope must be JSON")
 
 		var env map[string]any
-		require.NoError(t, json.Unmarshal(body, &env),
+		gomega.Expect(json.Unmarshal(body, &env)).To(gomega.Succeed(),
 			"body must be Iceberg JSON error: %s", body)
 		gotRid, _ := env["request_id"].(string)
-		assert.Equal(t, hdrRid, gotRid,
+		gomega.Expect(gotRid).To(gomega.Equal(hdrRid),
 			"Iceberg JSON request_id must match X-GrainFS-Request-Id header (generated path)")
 	})
 }

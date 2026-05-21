@@ -5,8 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterStatusCLIE2E verifies `grainfs cluster status` against both
@@ -39,7 +38,6 @@ var _ = ginkgo.Describe("Cluster admin CLI status", func() {
 
 func runClusterStatusCLICases(getTgt func() s3Target) {
 	ginkgo.It("renders JSON", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -52,18 +50,17 @@ func runClusterStatusCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"status", "--format", "json",
 		).Output()
-		require.NoError(t, err, "cluster status command must succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cluster status command must succeed")
 
 		var status map[string]any
-		require.NoError(t, json.Unmarshal(out, &status), "output must be valid JSON")
+		gomega.Expect(json.Unmarshal(out, &status)).To(gomega.Succeed(), "output must be valid JSON")
 
-		assert.Equal(t, "cluster", status["mode"], "unified path must report mode=cluster")
+		gomega.Expect(status["mode"]).To(gomega.Equal("cluster"), "unified path must report mode=cluster")
 		peers, _ := status["peers"].([]any)
-		assert.Len(t, peers, expectedPeers, "peer count must match deployment shape")
+		gomega.Expect(peers).To(gomega.HaveLen(expectedPeers), "peer count must match deployment shape")
 	})
 
 	ginkgo.It("renders text", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -72,10 +69,10 @@ func runClusterStatusCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"status", "--format", "text",
 		).Output()
-		require.NoError(t, err, "cluster status command must succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cluster status command must succeed")
 
 		output := string(out)
-		assert.Contains(t, output, "mode", "human-readable output must include mode")
-		assert.Contains(t, output, "cluster", "unified path shows cluster mode")
+		gomega.Expect(output).To(gomega.ContainSubstring("mode"), "human-readable output must include mode")
+		gomega.Expect(output).To(gomega.ContainSubstring("cluster"), "unified path shows cluster mode")
 	})
 }

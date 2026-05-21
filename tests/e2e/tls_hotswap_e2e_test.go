@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("TLS hot swap", func() {
@@ -46,7 +46,7 @@ var _ = ginkgo.Describe("TLS hot swap", func() {
 
 func runTLSHotSwapCase(t testing.TB) {
 	dataDir, err := os.MkdirTemp("", "grainfs-tls-hotswap-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(os.RemoveAll, dataDir)
 
 	certDir := t.TempDir()
@@ -70,7 +70,7 @@ func runTLSHotSwapCase(t testing.TB) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 	ginkgo.DeferCleanup(terminateProcess, cmd)
 
 	waitForPort(t, port, 30*time.Second)
@@ -86,19 +86,19 @@ func runTLSHotSwapCase(t testing.TB) {
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 	resp, err := plainClient.Get(plaintextURL)
-	require.NoError(t, err, "plaintext GET /metrics must succeed before TLS swap")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "plaintext GET /metrics must succeed before TLS swap")
 	ginkgo.DeferCleanup(resp.Body.Close)
 	_, _ = io.Copy(io.Discard, resp.Body)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 	// Phase 2: write self-signed cert + key, SIGHUP.
 	writeSelfSignedCertE2E(t, certPath, keyPath)
-	require.NoError(t, cmd.Process.Signal(syscall.SIGHUP))
+	gomega.Expect(cmd.Process.Signal(syscall.SIGHUP)).To(gomega.Succeed())
 
 	// Phase 3: after a short settle, plaintext must fail and TLS must succeed.
 	// Reload is synchronous on the signal handler goroutine, but we still
 	// allow a brief window for the goroutine to be scheduled.
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		httpsURL := fmt.Sprintf("https://127.0.0.1:%d/metrics", port)
 		client := &http.Client{
 			Transport: &http.Transport{
@@ -113,7 +113,7 @@ func runTLSHotSwapCase(t testing.TB) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
 		return r.StatusCode == http.StatusOK
-	}, 10*time.Second, 100*time.Millisecond, "TLS probe must succeed after SIGHUP")
+	}, 10*time.Second, 100*time.Millisecond).Should(gomega.BeTrue(), "TLS probe must succeed after SIGHUP")
 
 	// And a plaintext probe must now fail at the protocol layer: the server
 	// expects a ClientHello, so the HTTP request line confuses it. We accept
@@ -123,7 +123,7 @@ func runTLSHotSwapCase(t testing.TB) {
 	if err == nil {
 		_, _ = io.Copy(io.Discard, r2.Body)
 		_ = r2.Body.Close()
-		require.NotEqual(t, http.StatusOK, r2.StatusCode,
+		gomega.Expect(r2.StatusCode).NotTo(gomega.Equal(http.StatusOK),
 			"plaintext GET on TLS-active port must not succeed")
 	}
 }
@@ -135,7 +135,7 @@ func runTLSHotSwapCase(t testing.TB) {
 func writeSelfSignedCertE2E(t testing.TB, certPath, keyPath string) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	tpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "grainfs-e2e"},
@@ -147,9 +147,9 @@ func writeSelfSignedCertE2E(t testing.TB, certPath, keyPath string) {
 		DNSNames:     []string{"localhost"},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &priv.PublicKey, priv)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	keyDER, err := x509.MarshalECPrivateKey(priv)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
-	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)).To(gomega.Succeed())
+	gomega.Expect(os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)).To(gomega.Succeed())
 }

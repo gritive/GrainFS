@@ -6,8 +6,7 @@ import (
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestSplitBrainE2E asserts the grainfs_split_brain_suspected metric is
@@ -37,36 +36,34 @@ var _ = ginkgo.Describe("Split brain metrics", func() {
 
 func runSplitBrainCases(getTgt func() s3Target) {
 	ginkgo.It("exposes the split brain indicator metric", func() {
-		t := ginkgo.GinkgoTB()
 		endpoint := getTgt().endpoint(0)
 		resp, err := http.Get(endpoint + "/metrics")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		assert.Contains(t, string(body), "grainfs_split_brain_suspected",
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(string(body)).To(gomega.ContainSubstring("grainfs_split_brain_suspected"),
 			"/metrics must expose split brain indicator")
 	})
 
 	ginkgo.It("reports zero in steady state", func() {
-		t := ginkgo.GinkgoTB()
 		endpoint := getTgt().endpoint(0)
 		resp, err := http.Get(endpoint + "/metrics")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
 
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		for _, line := range strings.Split(string(body), "\n") {
 			if strings.HasPrefix(line, "grainfs_split_brain_suspected") && !strings.HasPrefix(line, "#") {
-				assert.Contains(t, line, "0",
+				gomega.Expect(line).To(gomega.ContainSubstring("0"),
 					"split_brain_suspected must be 0 in steady state, got: %q", line)
 				return
 			}
 		}
-		require.Fail(t, "grainfs_split_brain_suspected metric not found in /metrics output")
+		ginkgo.Fail("grainfs_split_brain_suspected metric not found in /metrics output")
 	})
 }

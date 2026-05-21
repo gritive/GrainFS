@@ -14,14 +14,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 func startEncryptionServer(t testing.TB) (*s3.Client, string, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-enc-e2e-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	keyFile := filepath.Join(dir, "encryption.key")
@@ -29,7 +28,7 @@ func startEncryptionServer(t testing.TB) (*s3.Client, string, string) {
 	for i := range key {
 		key[i] = byte(i)
 	}
-	require.NoError(t, os.WriteFile(keyFile, key, 0o600))
+	gomega.Expect(os.WriteFile(keyFile, key, 0o600)).To(gomega.Succeed())
 
 	binary := getBinary()
 	port := freePort()
@@ -44,7 +43,7 @@ func startEncryptionServer(t testing.TB) (*s3.Client, string, string) {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 	ginkgo.DeferCleanup(func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -77,7 +76,7 @@ var _ = ginkgo.Describe("Encryption at rest", func() {
 				Key:    aws.String("secret.txt"),
 				Body:   strings.NewReader(content),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			var shardPaths []string
 			shardRoot := filepath.Join(dataDir, "shards", "enc-test", "secret.txt")
@@ -90,25 +89,25 @@ var _ = ginkgo.Describe("Encryption at rest", func() {
 				}
 				return nil
 			})
-			require.NoError(t, err)
-			require.NotEmpty(t, shardPaths, "expected encrypted object shards under %s", shardRoot)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(shardPaths).NotTo(gomega.BeEmpty(), "expected encrypted object shards under %s", shardRoot)
 
 			for _, shardPath := range shardPaths {
 				rawShard, err := os.ReadFile(shardPath)
-				require.NoError(t, err)
-				assert.NotContains(t, string(rawShard), "sensitive data", "raw shard %s must not contain plaintext", shardPath)
-				assert.NotContains(t, string(rawShard), content, "raw shard %s must not contain full plaintext", shardPath)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Expect(string(rawShard)).NotTo(gomega.ContainSubstring("sensitive data"), "raw shard %s must not contain plaintext", shardPath)
+				gomega.Expect(string(rawShard)).NotTo(gomega.ContainSubstring(content), "raw shard %s must not contain full plaintext", shardPath)
 			}
 
 			getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String("enc-test"),
 				Key:    aws.String("secret.txt"),
 			})
-			require.NoError(t, err)
-			defer getOut.Body.Close()
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.DeferCleanup(getOut.Body.Close)
 
 			body, _ := io.ReadAll(getOut.Body)
-			assert.Equal(t, content, string(body))
+			gomega.Expect(string(body)).To(gomega.Equal(content))
 		})
 	})
 })

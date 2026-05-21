@@ -3,12 +3,12 @@ package e2e
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/iam/policy"
@@ -61,17 +61,17 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 		name := "e2e-pgd-" + tgt.name
 		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, name) })
 
-		require.NoError(t, c.PolicyPut(ctx, name, []byte(validPolicyDoc)))
+		gomega.Expect(c.PolicyPut(ctx, name, []byte(validPolicyDoc))).To(gomega.Succeed())
 
 		raw, err := c.PolicyGet(ctx, name)
-		require.NoError(t, err)
-		require.NotEmpty(t, raw)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(raw).NotTo(gomega.BeEmpty())
 
 		// Round-tripped doc must be parseable.
 		_, err = policy.Parse(raw)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		require.NoError(t, c.PolicyDelete(ctx, name))
+		gomega.Expect(c.PolicyDelete(ctx, name)).To(gomega.Succeed())
 
 		// After delete: Get must return 404.
 		_, err = c.PolicyGet(ctx, name)
@@ -79,17 +79,16 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 	})
 
 	ginkgo.It("lists custom policies (ListIncludesCustom)", func() {
-		t := ginkgo.GinkgoTB()
 		ctx := getCtx()
 		tgt := getTgt()
 		c := tgt.iamClient()
 		name := "e2e-list-" + tgt.name
 		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, name) })
-		require.NoError(t, c.PolicyPut(ctx, name, []byte(validPolicyDoc)))
+		gomega.Expect(c.PolicyPut(ctx, name, []byte(validPolicyDoc))).To(gomega.Succeed())
 
 		names, err := c.PolicyList(ctx)
-		require.NoError(t, err)
-		require.Contains(t, names, name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(names).To(gomega.ContainElement(name))
 	})
 
 	ginkgo.It("rejects writes to builtin policy names (PutBuiltinName_403)", func() {
@@ -146,12 +145,12 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 		c := tgt.iamClient()
 		policyName := "e2e-attach-" + tgt.name
 		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, policyName) })
-		require.NoError(t, c.PolicyPut(ctx, policyName, []byte(validPolicyDoc)))
+		gomega.Expect(c.PolicyPut(ctx, policyName, []byte(validPolicyDoc))).To(gomega.Succeed())
 
 		saID, _, _ := tgt.uniqueSA(t, "attach-detach")
 
-		require.NoError(t, c.PolicyAttachToSA(ctx, policyName, saID))
-		require.NoError(t, c.PolicyDetachFromSA(ctx, policyName, saID))
+		gomega.Expect(c.PolicyAttachToSA(ctx, policyName, saID)).To(gomega.Succeed())
+		gomega.Expect(c.PolicyDetachFromSA(ctx, policyName, saID)).To(gomega.Succeed())
 	})
 
 	// --- Simulate ---
@@ -163,11 +162,11 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 		c := tgt.iamClient()
 		policyName := "e2e-sim-allow-" + tgt.name
 		ginkgo.DeferCleanup(func() { _ = c.PolicyDelete(ctx, policyName) })
-		require.NoError(t, c.PolicyPut(ctx, policyName, []byte(validPolicyDoc)))
+		gomega.Expect(c.PolicyPut(ctx, policyName, []byte(validPolicyDoc))).To(gomega.Succeed())
 
 		saID, _, _ := tgt.uniqueSA(t, "simulate-allow")
 
-		require.NoError(t, c.PolicyAttachToSA(ctx, policyName, saID))
+		gomega.Expect(c.PolicyAttachToSA(ctx, policyName, saID)).To(gomega.Succeed())
 		ginkgo.DeferCleanup(func() { _ = c.PolicyDetachFromSA(ctx, policyName, saID) })
 
 		resp, err := c.PolicySimulate(ctx, iamadmin.PolicySimulateRequest{
@@ -175,8 +174,8 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 			Action:   "s3:GetObject",
 			Resource: "arn:aws:s3:::test-bucket/key",
 		})
-		require.NoError(t, err)
-		assert.Equal(t, "Allow", resp.Effect)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(resp.Effect).To(gomega.Equal("Allow"))
 	})
 
 	ginkgo.It("simulates implicit deny policy decisions (Simulate_Deny)", func() {
@@ -192,8 +191,8 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 			Action:   "s3:GetObject",
 			Resource: "arn:aws:s3:::test-bucket/key",
 		})
-		require.NoError(t, err)
-		assert.Equal(t, "Deny", resp.Effect)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(resp.Effect).To(gomega.Equal("Deny"))
 	})
 
 	ginkgo.It("rejects policy simulation with an empty service account id (SimulateEmptySAID_400)", func() {
@@ -212,15 +211,14 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 	// --- Local validation (no UDS dial) ---
 
 	ginkgo.It("validates policy documents locally (Validate_Local)", func() {
-		t := ginkgo.GinkgoTB()
 		// Valid doc must parse without error.
 		_, err := policy.Parse([]byte(validPolicyDoc))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Invalid doc (bad Effect) must return an error.
 		badDoc := `{"Statement":[{"Effect":"Maybe","Action":["s3:GetObject"],"Resource":["*"]}]}`
 		_, err = policy.Parse([]byte(badDoc))
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 }
 
@@ -228,12 +226,12 @@ func runIAMPolicyCases(getCtx func() context.Context, getTgt func() iamAdminTarg
 // HTTP status code. Fails the test with a descriptive message if not.
 func requireAdminStatus(t testing.TB, err error, wantStatus int) {
 	t.Helper()
-	require.Error(t, err, "expected an error with status %d", wantStatus)
+	gomega.Expect(err).To(gomega.HaveOccurred(), "expected an error with status %d", wantStatus)
 	var aerr *adminapi.Error
 	if !errors.As(err, &aerr) {
-		t.Fatalf("expected *adminapi.Error, got %T: %v", err, err)
+		ginkgo.Fail(fmt.Sprintf("expected *adminapi.Error, got %T: %v", err, err))
 	}
-	require.Equalf(t, wantStatus, aerr.Status,
+	gomega.Expect(aerr.Status).To(gomega.Equal(wantStatus),
 		"expected HTTP %d from admin, got %d (code=%q msg=%q)",
 		wantStatus, aerr.Status, aerr.Code, aerr.Message)
 }

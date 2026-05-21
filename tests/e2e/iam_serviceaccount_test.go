@@ -20,7 +20,7 @@ import (
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 
@@ -146,12 +146,13 @@ func runIAMSAExpiredKey(t testing.TB, tgt iamAdminTarget) {
 	}
 
 	var err error
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		_, err = expCli.HeadBucket(ctx, &s3.HeadBucketInput{
 			Bucket: aws.String(bucket),
 		})
 		return err != nil
-	}, 3*time.Second, 50*time.Millisecond, "expiring key should stop authenticating after expires_at")
+	}).WithTimeout(3*time.Second).WithPolling(50*time.Millisecond).
+		Should(gomega.BeTrue(), "expiring key should stop authenticating after expires_at")
 
 	if err == nil {
 		t.Fatalf("HEAD after expiry succeeded; expected auth failure")
@@ -348,7 +349,7 @@ func runIAMSAScopedRight(t testing.TB, tgt iamAdminTarget) {
 		Bucket: aws.String(bucket), Key: aws.String("obj1"),
 		Body: strings.NewReader("hello"),
 	})
-	require.NoError(t, err, "PutObject")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject")
 
 	saID, _, _ := tgt.uniqueSA(t, "alice-st1")
 	attachAdminPolicyOnBucket(t, tgt, saID, bucket, "Read")
@@ -361,10 +362,10 @@ func runIAMSAScopedRight(t testing.TB, tgt iamAdminTarget) {
 	out, err := cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket), Key: aws.String("obj1"),
 	})
-	require.NoError(t, err, "GetObject on in-scope bucket")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "GetObject on in-scope bucket")
 	defer out.Body.Close()
 	got, _ := io.ReadAll(out.Body)
-	require.Equal(t, "hello", string(got), "GetObject body")
+	gomega.Expect(string(got)).To(gomega.Equal("hello"), "GetObject body")
 }
 
 // runIAMSAScopedWrong: scoped key for "logs" is blocked on "reports".
@@ -379,7 +380,7 @@ func runIAMSAScopedWrong(t testing.TB, tgt iamAdminTarget) {
 		Bucket: aws.String(reportsBucket), Key: aws.String("secret"),
 		Body: strings.NewReader("classified"),
 	})
-	require.NoError(t, err, "PutObject reports")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject reports")
 
 	// SA alice gets grants on both buckets but a key scoped to logs only.
 	saID, _, _ := tgt.uniqueSA(t, "alice-st2")
@@ -392,9 +393,9 @@ func runIAMSAScopedWrong(t testing.TB, tgt iamAdminTarget) {
 	_, err = cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(reportsBucket), Key: aws.String("secret"),
 	})
-	require.Error(t, err, "GetObject on out-of-scope bucket succeeded; expected 403")
+	gomega.Expect(err).To(gomega.HaveOccurred(), "GetObject on out-of-scope bucket succeeded; expected 403")
 	status := httpStatusFrom(err)
-	require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, status,
+	gomega.Expect([]int{http.StatusForbidden, http.StatusUnauthorized}).To(gomega.ContainElement(status),
 		"GetObject out-of-scope: err=%v; want 403", err)
 }
 
@@ -425,7 +426,7 @@ func runIAMSALegacyKey(t testing.TB, tgt iamAdminTarget) {
 			Bucket: aws.String(bkt), Key: aws.String("obj"),
 			Body: strings.NewReader("data"),
 		})
-		require.NoErrorf(t, err, "PutObject %s", bkt)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject %s", bkt)
 	}
 
 	saID, _, _ := tgt.uniqueSA(t, "bob-st4")
@@ -443,7 +444,7 @@ func runIAMSALegacyKey(t testing.TB, tgt iamAdminTarget) {
 		out, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bkt), Key: aws.String("obj"),
 		})
-		require.NoErrorf(t, err, "legacy key GetObject on %s (backward compat broken)", bkt)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "legacy key GetObject on %s (backward compat broken)", bkt)
 		out.Body.Close()
 	}
 }
@@ -471,7 +472,7 @@ func runIAMSAScopedSnapshot(t testing.TB, tgt iamAdminTarget) {
 		endpoint:      func(i int) string { return h.S3URL },
 	}
 	for _, bkt := range []string{"st5-logs", "st5-reports"} {
-		require.NoErrorf(t, bootIAMCli.BucketCreate(ctx, bkt, "", ""), "BucketCreate %s via admin UDS", bkt)
+		gomega.Expect(bootIAMCli.BucketCreate(ctx, bkt, "", "")).To(gomega.Succeed(), "BucketCreate %s via admin UDS", bkt)
 		attachAdminPolicyOnBucket(t, seedTgt, seed.SAID, bkt, "Admin")
 	}
 	iamWaitKeyReady(t, h.S3URL, seed.AccessKey, seed.SecretKey, 10*time.Second)
@@ -480,7 +481,7 @@ func runIAMSAScopedSnapshot(t testing.TB, tgt iamAdminTarget) {
 		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
 		Body: strings.NewReader("persistent"),
 	})
-	require.NoError(t, err, "PutObject st5-logs")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject st5-logs")
 
 	// SA with policy on "st5-logs" via the policy API, issued a key scoped to "st5-logs".
 	alice := iamCreateSA(t, h.AdminSock, "alice-st5")
@@ -505,15 +506,15 @@ func runIAMSAScopedSnapshot(t testing.TB, tgt iamAdminTarget) {
 	out, err2 := scopedCli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("st5-logs"), Key: aws.String("obj"),
 	})
-	require.NoError(t, err2, "GetObject on in-scope bucket after restart")
+	gomega.Expect(err2).NotTo(gomega.HaveOccurred(), "GetObject on in-scope bucket after restart")
 	out.Body.Close()
 
 	// Out-of-scope bucket must still be blocked.
 	_, err2 = scopedCli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("st5-reports"), Key: aws.String("obj"),
 	})
-	require.Error(t, err2, "GetObject on out-of-scope bucket after restart succeeded; expected 403")
-	require.Containsf(t, []int{http.StatusForbidden, http.StatusUnauthorized}, httpStatusFrom(err2),
+	gomega.Expect(err2).To(gomega.HaveOccurred(), "GetObject on out-of-scope bucket after restart succeeded; expected 403")
+	gomega.Expect([]int{http.StatusForbidden, http.StatusUnauthorized}).To(gomega.ContainElement(httpStatusFrom(err2)),
 		"GetObject out-of-scope after restart: want 403")
 }
 
@@ -612,16 +613,16 @@ func iamAdminRaw(t testing.TB, sock, method, path string, body any) (int, []byte
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
-		require.NoError(t, err, "iamAdminRaw: marshal")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "iamAdminRaw: marshal")
 		rdr = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(context.Background(), method, "http://unix"+path, rdr)
-	require.NoError(t, err, "iamAdminRaw: build request")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "iamAdminRaw: build request")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoErrorf(t, err, "iamAdminRaw: %s %s", method, path)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "iamAdminRaw: %s %s", method, path)
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, respBody
@@ -667,12 +668,12 @@ func runGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t testing.TB) {
 	dir := t.TempDir()
 	metaPath := filepath.Join(dir, "meta_raft", "raft-v2", "000001.vlog")
 	groupPath := filepath.Join(dir, "groups", "group-1", "raft-v2", "000001.vlog")
-	require.NoError(t, os.MkdirAll(filepath.Dir(metaPath), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Dir(groupPath), 0o755))
-	require.NoError(t, os.WriteFile(groupPath, []byte("control-plane-secret"), 0o644))
-	require.Empty(t, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
+	gomega.Expect(os.MkdirAll(filepath.Dir(metaPath), 0o755)).To(gomega.Succeed())
+	gomega.Expect(os.MkdirAll(filepath.Dir(groupPath), 0o755)).To(gomega.Succeed())
+	gomega.Expect(os.WriteFile(groupPath, []byte("control-plane-secret"), 0o644)).To(gomega.Succeed())
+	gomega.Expect(grepIAMControlPlaneDataDir(t, dir, "control-plane-secret")).To(gomega.BeEmpty())
 
 	err := os.WriteFile(metaPath, []byte("control-plane-secret"), 0o644)
-	require.NoError(t, err)
-	require.Equal(t, []string{metaPath}, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(grepIAMControlPlaneDataDir(t, dir, "control-plane-secret")).To(gomega.Equal([]string{metaPath}))
 }

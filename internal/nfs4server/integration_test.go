@@ -3,31 +3,38 @@ package nfs4server
 import (
 	"context"
 	"net"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func startTestNFS4Server(t *testing.T) (string, *Server) {
+type nfsTestTB interface {
+	Helper()
+	Cleanup(func())
+	TempDir() string
+	Errorf(format string, args ...interface{})
+	FailNow()
+}
+
+func startTestNFS4Server(t nfsTestTB) (string, *Server) {
 	t.Helper()
 
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
+	failNFS4TestOnError(t, err)
 
 	// Create the NFS4 bucket
-	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	failNFS4TestOnError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
 
 	srv := NewServer(backend)
 	srv.SetExportsForTest(buildSnap(map[string]exportConfig{
 		legacyNFS4Bucket: {fsidMajor: 1, fsidMinor: 1, generation: 1},
 	}))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	failNFS4TestOnError(t, err)
 
 	srv.mu.Lock()
 	srv.listener = ln
@@ -47,291 +54,276 @@ func startTestNFS4Server(t *testing.T) (string, *Server) {
 	return ln.Addr().String(), srv
 }
 
-func TestE2E_NullProcedure(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	// Build NULL RPC call (procedure 0)
-	w := &XDRWriter{}
-	w.WriteUint32(1)           // XID
-	w.WriteUint32(rpcMsgCall)  // CALL
-	w.WriteUint32(2)           // RPC version
-	w.WriteUint32(rpcProgNFS)  // program
-	w.WriteUint32(rpcVersNFS4) // version
-	w.WriteUint32(0)           // procedure = NULL
-	w.WriteUint32(authNone)    // cred flavor
-	w.WriteUint32(0)           // cred body len
-	w.WriteUint32(authNone)    // verf flavor
-	w.WriteUint32(0)           // verf body len
-
-	require.NoError(t, writeRPCFrame(conn, w.Bytes()))
-
-	// Read reply
-	reply, err := readRPCFrame(conn)
-	require.NoError(t, err)
-	assert.True(t, len(reply) >= 24, "reply should have RPC header")
-
-	// Parse XID from reply
-	r := NewXDRReader(reply)
-	xid, _ := r.ReadUint32()
-	assert.Equal(t, uint32(1), xid)
+func failNFS4TestOnError(t nfsTestTB, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	t.Errorf("unexpected error: %v", err)
+	t.FailNow()
 }
 
-func TestE2E_CompoundPutRootFH_GetFH(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
+var _ = Describe("NFS4 integration", func() {
+	var (
+		addr string
+		t    nfsTestTB
+	)
 
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	require.NoError(t, err)
-	defer conn.Close()
+	BeforeEach(func() {
+		t = GinkgoT()
+		addr, _ = startTestNFS4Server(t)
+	})
 
-	// Build COMPOUND: PUTROOTFH + GETFH
-	compound := &XDRWriter{}
-	compound.WriteString("") // tag
-	compound.WriteUint32(0)  // minor version
-	compound.WriteUint32(2)  // 2 ops
-	compound.WriteUint32(uint32(OpPutRootFH))
-	compound.WriteUint32(uint32(OpGetFH))
+	dial := func() net.Conn {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(conn.Close)
+		return conn
+	}
 
-	// Wrap in RPC call
-	rpc := &XDRWriter{}
-	rpc.WriteUint32(2) // XID
-	rpc.WriteUint32(rpcMsgCall)
-	rpc.WriteUint32(2) // RPC version
-	rpc.WriteUint32(rpcProgNFS)
-	rpc.WriteUint32(rpcVersNFS4)
-	rpc.WriteUint32(1) // procedure = COMPOUND
-	rpc.WriteUint32(authNone)
-	rpc.WriteUint32(0)
-	rpc.WriteUint32(authNone)
-	rpc.WriteUint32(0)
-	rpc.buf.Write(compound.Bytes())
+	It("handles the NULL procedure", func() {
+		conn := dial()
 
-	require.NoError(t, writeRPCFrame(conn, rpc.Bytes()))
+		w := &XDRWriter{}
+		w.WriteUint32(1)
+		w.WriteUint32(rpcMsgCall)
+		w.WriteUint32(2)
+		w.WriteUint32(rpcProgNFS)
+		w.WriteUint32(rpcVersNFS4)
+		w.WriteUint32(0)
+		w.WriteUint32(authNone)
+		w.WriteUint32(0)
+		w.WriteUint32(authNone)
+		w.WriteUint32(0)
 
-	reply, err := readRPCFrame(conn)
-	require.NoError(t, err)
+		Expect(writeRPCFrame(conn, w.Bytes())).To(Succeed())
 
-	// Parse reply: XID + reply header + COMPOUND4res
-	r := NewXDRReader(reply)
-	xid, _ := r.ReadUint32()
-	assert.Equal(t, uint32(2), xid)
+		reply, err := readRPCFrame(conn)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(len(reply)).To(BeNumerically(">=", 24), "reply should have RPC header")
 
-	// Skip RPC reply header (msg_type + reply_stat + verf + accept_stat)
-	r.ReadUint32() // msg_type = REPLY
-	r.ReadUint32() // reply_stat = MSG_ACCEPTED
-	r.ReadUint32() // verf flavor
-	r.ReadOpaque() // verf body
-	r.ReadUint32() // accept_stat = SUCCESS
+		r := NewXDRReader(reply)
+		xid, _ := r.ReadUint32()
+		Expect(xid).To(Equal(uint32(1)))
+	})
 
-	// COMPOUND4res: status + tag + results
-	status, _ := r.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), status)
+	It("handles PUTROOTFH and GETFH compounds", func() {
+		conn := dial()
 
-	tag, _ := r.ReadString()
-	assert.Equal(t, "", tag)
+		compound := &XDRWriter{}
+		compound.WriteString("")
+		compound.WriteUint32(0)
+		compound.WriteUint32(2)
+		compound.WriteUint32(uint32(OpPutRootFH))
+		compound.WriteUint32(uint32(OpGetFH))
 
-	opCount, _ := r.ReadUint32()
-	assert.Equal(t, uint32(2), opCount)
+		rpc := &XDRWriter{}
+		rpc.WriteUint32(2)
+		rpc.WriteUint32(rpcMsgCall)
+		rpc.WriteUint32(2)
+		rpc.WriteUint32(rpcProgNFS)
+		rpc.WriteUint32(rpcVersNFS4)
+		rpc.WriteUint32(1)
+		rpc.WriteUint32(authNone)
+		rpc.WriteUint32(0)
+		rpc.WriteUint32(authNone)
+		rpc.WriteUint32(0)
+		rpc.buf.Write(compound.Bytes())
 
-	// Result 1: PUTROOTFH
-	op1Code, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpPutRootFH), op1Code)
-	op1Status, _ := r.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), op1Status)
+		Expect(writeRPCFrame(conn, rpc.Bytes())).To(Succeed())
 
-	// Result 2: GETFH
-	op2Code, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpGetFH), op2Code)
-	op2Status, _ := r.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), op2Status)
+		reply, err := readRPCFrame(conn)
+		Expect(err).NotTo(HaveOccurred())
 
-	// GETFH returns a filehandle opaque
-	fh, _ := r.ReadOpaque()
-	assert.Equal(t, 16, len(fh), "filehandle should be 16 bytes")
-}
+		r := NewXDRReader(reply)
+		xid, _ := r.ReadUint32()
+		Expect(xid).To(Equal(uint32(2)))
 
-func TestE2E_CompoundSetClientID(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadOpaque()
+		r.ReadUint32()
 
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	require.NoError(t, err)
-	defer conn.Close()
+		status, _ := r.ReadUint32()
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
-	// Build COMPOUND: SETCLIENTID
-	compound := &XDRWriter{}
-	compound.WriteString("") // tag
-	compound.WriteUint32(0)  // minor version
-	compound.WriteUint32(1)  // 1 op
-	compound.WriteUint32(uint32(OpSetClientID))
-	// args: verifier(8) + id(opaque) + callback(program+netid+addr) + callback_ident
-	compound.WriteUint64(12345)           // verifier
-	compound.WriteString("test-client")   // id
-	compound.WriteUint32(0)               // cb_program
-	compound.WriteString("tcp")           // netid
-	compound.WriteString("127.0.0.1.0.0") // addr
-	compound.WriteUint32(0)               // callback_ident
+		tag, _ := r.ReadString()
+		Expect(tag).To(Equal(""))
 
-	rpc := &XDRWriter{}
-	rpc.WriteUint32(3)
-	rpc.WriteUint32(rpcMsgCall)
-	rpc.WriteUint32(2)
-	rpc.WriteUint32(rpcProgNFS)
-	rpc.WriteUint32(rpcVersNFS4)
-	rpc.WriteUint32(1) // COMPOUND
-	rpc.WriteUint32(authNone)
-	rpc.WriteUint32(0)
-	rpc.WriteUint32(authNone)
-	rpc.WriteUint32(0)
-	rpc.buf.Write(compound.Bytes())
+		opCount, _ := r.ReadUint32()
+		Expect(opCount).To(Equal(uint32(2)))
 
-	require.NoError(t, writeRPCFrame(conn, rpc.Bytes()))
+		op1Code, _ := r.ReadUint32()
+		Expect(op1Code).To(Equal(uint32(OpPutRootFH)))
+		op1Status, _ := r.ReadUint32()
+		Expect(op1Status).To(Equal(uint32(NFS4_OK)))
 
-	reply, err := readRPCFrame(conn)
-	require.NoError(t, err)
+		op2Code, _ := r.ReadUint32()
+		Expect(op2Code).To(Equal(uint32(OpGetFH)))
+		op2Status, _ := r.ReadUint32()
+		Expect(op2Status).To(Equal(uint32(NFS4_OK)))
 
-	r := NewXDRReader(reply)
-	xid, _ := r.ReadUint32()
-	assert.Equal(t, uint32(3), xid)
+		fh, _ := r.ReadOpaque()
+		Expect(fh).To(HaveLen(16), "filehandle should be 16 bytes")
+	})
 
-	// Skip RPC header
-	r.ReadUint32() // msg_type
-	r.ReadUint32() // reply_stat
-	r.ReadUint32() // verf flavor
-	r.ReadOpaque() // verf body
-	r.ReadUint32() // accept_stat
+	It("handles SETCLIENTID compounds", func() {
+		conn := dial()
 
-	// COMPOUND status
-	status, _ := r.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), status)
-}
+		compound := &XDRWriter{}
+		compound.WriteString("")
+		compound.WriteUint32(0)
+		compound.WriteUint32(1)
+		compound.WriteUint32(uint32(OpSetClientID))
+		compound.WriteUint64(12345)
+		compound.WriteString("test-client")
+		compound.WriteUint32(0)
+		compound.WriteString("tcp")
+		compound.WriteString("127.0.0.1.0.0")
+		compound.WriteUint32(0)
 
-func TestE2E_WriteAndReadFile(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
+		rpc := &XDRWriter{}
+		rpc.WriteUint32(3)
+		rpc.WriteUint32(rpcMsgCall)
+		rpc.WriteUint32(2)
+		rpc.WriteUint32(rpcProgNFS)
+		rpc.WriteUint32(rpcVersNFS4)
+		rpc.WriteUint32(1)
+		rpc.WriteUint32(authNone)
+		rpc.WriteUint32(0)
+		rpc.WriteUint32(authNone)
+		rpc.WriteUint32(0)
+		rpc.buf.Write(compound.Bytes())
 
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	require.NoError(t, err)
-	defer conn.Close()
+		Expect(writeRPCFrame(conn, rpc.Bytes())).To(Succeed())
 
-	// Step 1: PUTROOTFH + LOOKUP(export) + OPEN(CREATE) "test.txt" + WRITE + CLOSE
-	compound := &XDRWriter{}
-	compound.WriteString("") // tag
-	compound.WriteUint32(0)  // minor version
-	compound.WriteUint32(5)  // 5 ops: PUTROOTFH, LOOKUP, OPEN, WRITE, CLOSE
+		reply, err := readRPCFrame(conn)
+		Expect(err).NotTo(HaveOccurred())
 
-	// PUTROOTFH
-	compound.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(compound)
+		r := NewXDRReader(reply)
+		xid, _ := r.ReadUint32()
+		Expect(xid).To(Equal(uint32(3)))
 
-	// OPEN (CREATE)
-	compound.WriteUint32(uint32(OpOpen))
-	compound.WriteUint32(0)          // seqid
-	compound.WriteUint32(2)          // OPEN4_SHARE_ACCESS_WRITE
-	compound.WriteUint32(0)          // OPEN4_SHARE_DENY_NONE
-	compound.WriteUint64(1)          // owner clientid
-	compound.WriteString("owner-1")  // owner
-	compound.WriteUint32(1)          // opentype = OPEN4_CREATE
-	compound.WriteUint32(0)          // createmode = UNCHECKED4
-	compound.WriteUint32(0)          // fattr bitmap len = 0
-	compound.WriteOpaque(nil)        // empty attrvals
-	compound.WriteUint32(0)          // claim = CLAIM_NULL
-	compound.WriteString("test.txt") // filename
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadOpaque()
+		r.ReadUint32()
 
-	// WRITE
-	compound.WriteUint32(uint32(OpWrite))
-	// stateid (16 bytes) — placeholder
-	compound.WriteUint32(1) // seqid
-	compound.WriteUint64(0)
-	compound.WriteUint32(0)
-	compound.WriteUint64(0) // offset
-	compound.WriteUint32(2) // FILE_SYNC
-	compound.WriteOpaque([]byte("hello nfs4!"))
+		status, _ := r.ReadUint32()
+		Expect(status).To(Equal(uint32(NFS4_OK)))
+	})
 
-	// CLOSE
-	compound.WriteUint32(uint32(OpClose))
-	compound.WriteUint32(0) // seqid
-	compound.WriteUint32(0)
-	compound.WriteUint64(0)
-	compound.WriteUint32(0) // stateid
+	It("writes and reads a file", func() {
+		conn := dial()
 
-	rpc := buildRPCCallFrame(4, compound.Bytes())
-	require.NoError(t, writeRPCFrame(conn, rpc))
+		compound := &XDRWriter{}
+		compound.WriteString("")
+		compound.WriteUint32(0)
+		compound.WriteUint32(5)
 
-	reply, err := readRPCFrame(conn)
-	require.NoError(t, err)
+		compound.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(compound)
 
-	r := NewXDRReader(reply)
-	r.ReadUint32() // XID
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadOpaque()
-	r.ReadUint32() // RPC header
+		compound.WriteUint32(uint32(OpOpen))
+		compound.WriteUint32(0)
+		compound.WriteUint32(2)
+		compound.WriteUint32(0)
+		compound.WriteUint64(1)
+		compound.WriteString("owner-1")
+		compound.WriteUint32(1)
+		compound.WriteUint32(0)
+		compound.WriteUint32(0)
+		compound.WriteOpaque(nil)
+		compound.WriteUint32(0)
+		compound.WriteString("test.txt")
 
-	status, _ := r.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), status, "write compound should succeed")
+		compound.WriteUint32(uint32(OpWrite))
+		compound.WriteUint32(1)
+		compound.WriteUint64(0)
+		compound.WriteUint32(0)
+		compound.WriteUint64(0)
+		compound.WriteUint32(2)
+		compound.WriteOpaque([]byte("hello nfs4!"))
 
-	// Step 2: PUTROOTFH + LOOKUP(export) + LOOKUP "test.txt" + READ
-	compound2 := &XDRWriter{}
-	compound2.WriteString("")
-	compound2.WriteUint32(0)
-	compound2.WriteUint32(4) // PUTROOTFH, LOOKUP export, LOOKUP file, READ
+		compound.WriteUint32(uint32(OpClose))
+		compound.WriteUint32(0)
+		compound.WriteUint32(0)
+		compound.WriteUint64(0)
+		compound.WriteUint32(0)
 
-	compound2.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(compound2)
-	writeLookupFile(compound2, "test.txt")
+		rpc := buildRPCCallFrame(4, compound.Bytes())
+		Expect(writeRPCFrame(conn, rpc)).To(Succeed())
 
-	compound2.WriteUint32(uint32(OpRead))
-	compound2.WriteUint32(0)
-	compound2.WriteUint64(0)
-	compound2.WriteUint32(0)    // stateid
-	compound2.WriteUint64(0)    // offset
-	compound2.WriteUint32(1024) // count
+		reply, err := readRPCFrame(conn)
+		Expect(err).NotTo(HaveOccurred())
 
-	rpc2 := buildRPCCallFrame(5, compound2.Bytes())
-	require.NoError(t, writeRPCFrame(conn, rpc2))
+		r := NewXDRReader(reply)
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadOpaque()
+		r.ReadUint32()
 
-	reply2, err := readRPCFrame(conn)
-	require.NoError(t, err)
+		status, _ := r.ReadUint32()
+		Expect(status).To(Equal(uint32(NFS4_OK)), "write compound should succeed")
 
-	r2 := NewXDRReader(reply2)
-	r2.ReadUint32() // XID
-	r2.ReadUint32()
-	r2.ReadUint32()
-	r2.ReadUint32()
-	r2.ReadOpaque()
-	r2.ReadUint32() // RPC header
+		compound2 := &XDRWriter{}
+		compound2.WriteString("")
+		compound2.WriteUint32(0)
+		compound2.WriteUint32(4)
 
-	status2, _ := r2.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), status2, "read compound should succeed")
+		compound2.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(compound2)
+		writeLookupFile(compound2, "test.txt")
 
-	r2.ReadString() // tag
-	opCount, _ := r2.ReadUint32()
-	assert.Equal(t, uint32(4), opCount)
+		compound2.WriteUint32(uint32(OpRead))
+		compound2.WriteUint32(0)
+		compound2.WriteUint64(0)
+		compound2.WriteUint32(0)
+		compound2.WriteUint64(0)
+		compound2.WriteUint32(1024)
 
-	// Skip PUTROOTFH result
-	r2.ReadUint32()
-	r2.ReadUint32()
-	// Skip LOOKUP result
-	r2.ReadUint32()
-	r2.ReadUint32()
-	// Skip LOOKUP file result
-	r2.ReadUint32()
-	r2.ReadUint32()
-	// READ result
-	readOpCode, _ := r2.ReadUint32()
-	assert.Equal(t, uint32(OpRead), readOpCode)
-	readStatus, _ := r2.ReadUint32()
-	assert.Equal(t, uint32(NFS4_OK), readStatus)
+		rpc2 := buildRPCCallFrame(5, compound2.Bytes())
+		Expect(writeRPCFrame(conn, rpc2)).To(Succeed())
 
-	// READ data: eof(4) + data(opaque)
-	r2.ReadUint32() // eof
-	readData, err := r2.ReadOpaque()
-	require.NoError(t, err)
-	assert.Equal(t, "hello nfs4!", string(readData))
-}
+		reply2, err := readRPCFrame(conn)
+		Expect(err).NotTo(HaveOccurred())
+
+		r2 := NewXDRReader(reply2)
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadOpaque()
+		r2.ReadUint32()
+
+		status2, _ := r2.ReadUint32()
+		Expect(status2).To(Equal(uint32(NFS4_OK)), "read compound should succeed")
+
+		r2.ReadString()
+		opCount, _ := r2.ReadUint32()
+		Expect(opCount).To(Equal(uint32(4)))
+
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		readOpCode, _ := r2.ReadUint32()
+		Expect(readOpCode).To(Equal(uint32(OpRead)))
+		readStatus, _ := r2.ReadUint32()
+		Expect(readStatus).To(Equal(uint32(NFS4_OK)))
+
+		r2.ReadUint32()
+		readData, err := r2.ReadOpaque()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(readData)).To(Equal("hello nfs4!"))
+	})
+})
 
 func buildRPCCallFrame(xid uint32, compoundData []byte) []byte {
 	rpc := &XDRWriter{}

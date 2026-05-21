@@ -5,125 +5,78 @@ import (
 	"context"
 	"io"
 	"os"
-	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestSendfileIntegration tests that SetBodyStream with *os.File works
-func TestSendfileIntegration(t *testing.T) {
-	// Create temporary backend
-	tmpDir, err := os.MkdirTemp("", "grainfs-sendfile-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+var _ = Describe("Sendfile integration", func() {
+	var (
+		ctx     context.Context
+		backend storage.Backend
+	)
 
-	backend, err := storage.NewLocalBackend(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create backend: %v", err)
-	}
+	BeforeEach(func() {
+		ctx = context.Background()
+		tmpDir, err := os.MkdirTemp("", "grainfs-sendfile-test-*")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(os.RemoveAll, tmpDir)
 
-	// Create test bucket
-	if err := backend.CreateBucket(context.Background(), "test-bucket"); err != nil {
-		t.Fatalf("Failed to create bucket: %v", err)
-	}
+		backend, err = storage.NewLocalBackend(tmpDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(backend.CreateBucket(ctx, "test-bucket")).To(Succeed())
 
-	// Create small object (<16KB) - should use standard path
-	smallData := bytes.Repeat([]byte("A"), 1024) // 1KB
-	if _, err := backend.PutObject(context.Background(), "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream"); err != nil {
-		t.Fatalf("Failed to put small object: %v", err)
-	}
+		smallData := bytes.Repeat([]byte("A"), 1024)
+		_, err = backend.PutObject(ctx, "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
+		Expect(err).NotTo(HaveOccurred())
 
-	// Create large object (>16KB) - should use sendfile
-	largeData := bytes.Repeat([]byte("B"), 32*1024) // 32KB
-	if _, err := backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream"); err != nil {
-		t.Fatalf("Failed to put large object: %v", err)
-	}
+		largeData := bytes.Repeat([]byte("B"), 32*1024)
+		_, err = backend.PutObject(ctx, "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
+		Expect(err).NotTo(HaveOccurred())
+	})
 
-	// Create server
-	s := New("127.0.0.1:0", backend)
-	defer shutdownTestServer(t, s)
-
-	// Test small object
-	t.Run("SmallObject", func(t *testing.T) {
+	It("reads small objects through the standard path", func() {
 		rc, obj, err := backend.GetObject(context.Background(), "test-bucket", "small")
-		if err != nil {
-			t.Fatalf("Failed to get small object: %v", err)
-		}
-		defer rc.Close()
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(rc.Close)
 
-		// Verify size
-		if obj.Size != 1024 {
-			t.Errorf("Expected size 1024, got %d", obj.Size)
-		}
+		Expect(obj.Size).To(Equal(int64(1024)))
 
-		// Verify data can be read
 		data, err := io.ReadAll(rc)
-		if err != nil {
-			t.Fatalf("Failed to read small object: %v", err)
-		}
-		if len(data) != 1024 {
-			t.Errorf("Expected 1024 bytes, got %d", len(data))
-		}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(HaveLen(1024))
 	})
 
-	// Test large object
-	t.Run("LargeObject", func(t *testing.T) {
-		rc, obj, err := backend.GetObject(context.Background(), "test-bucket", "large")
-		if err != nil {
-			t.Fatalf("Failed to get large object: %v", err)
-		}
-		defer rc.Close()
+	It("reads large objects through an os.File", func() {
+		rc, obj, err := backend.GetObject(ctx, "test-bucket", "large")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(rc.Close)
 
-		// Verify size
-		if obj.Size != 32*1024 {
-			t.Errorf("Expected size %d, got %d", 32*1024, obj.Size)
-		}
+		Expect(obj.Size).To(Equal(int64(32 * 1024)))
 
-		// Verify data can be read
 		data, err := io.ReadAll(rc)
-		if err != nil {
-			t.Fatalf("Failed to read large object: %v", err)
-		}
-		if len(data) != 32*1024 {
-			t.Errorf("Expected %d bytes, got %d", 32*1024, len(data))
-		}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(HaveLen(32 * 1024))
 
-		// Verify it's actually *os.File (type assertion)
-		if file, ok := rc.(*os.File); ok {
-			t.Logf("Large object is *os.File, fd=%d", file.Fd())
-		} else {
-			t.Errorf("Large object is not *os.File, got %T", rc)
-		}
+		_, ok := rc.(*os.File)
+		Expect(ok).To(BeTrue(), "large object reader should be *os.File")
 	})
-}
 
-// TestZeroCopyThreshold tests the 16KB threshold logic
-func TestZeroCopyThreshold(t *testing.T) {
-	tests := []struct {
-		name     string
-		size     int64
-		expected string // "zero-copy" or "standard"
-	}{
-		{"1KB", 1 * 1024, "standard"},
-		{"16KB", 16 * 1024, "standard"},
-		{"16KB+1", 16*1024 + 1, "zero-copy"},
-		{"32KB", 32 * 1024, "zero-copy"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Threshold check logic
-			useZeroCopy := tt.size > 16*1024
+	DescribeTable("uses the expected zero-copy threshold",
+		func(size int64, expected string) {
+			useZeroCopy := size > 16*1024
 			result := "standard"
 			if useZeroCopy {
 				result = "zero-copy"
 			}
 
-			if result != tt.expected {
-				t.Errorf("Size %d: expected %s, got %s", tt.size, tt.expected, result)
-			}
-		})
-	}
-}
+			Expect(result).To(Equal(expected))
+		},
+		Entry("1KB", int64(1*1024), "standard"),
+		Entry("16KB", int64(16*1024), "standard"),
+		Entry("16KB+1", int64(16*1024+1), "zero-copy"),
+		Entry("32KB", int64(32*1024), "zero-copy"),
+	)
+})

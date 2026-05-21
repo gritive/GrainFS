@@ -12,8 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // vfsStatResponse is the response from VFS stat operations.
@@ -31,19 +30,19 @@ func vfsStatCall(t testing.TB, endpoint string, req map[string]string, resp *vfs
 	t.Helper()
 
 	body, err := json.Marshal(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	httpResp, err := http.Post(endpoint+"/admin/debug/vfs/stat", "application/json", bytes.NewReader(body)) //nolint:noctx
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(httpResp.Body.Close)
 
 	respBody, err := io.ReadAll(httpResp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	require.Equal(t, http.StatusOK, httpResp.StatusCode, "VFS stat failed: %s", string(respBody))
+	gomega.Expect(httpResp.StatusCode).To(gomega.Equal(http.StatusOK), "VFS stat failed: %s", string(respBody))
 
 	err = json.Unmarshal(respBody, resp)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 }
 
 // Cross-protocol specs exercise S3 ↔ VFS coherency: an S3 PUT must be
@@ -94,15 +93,15 @@ func runCrossProtocolCases(getTgt func() s3Target, getClient func() *s3.Client, 
 			Key:    aws.String(key),
 			Body:   bytes.NewReader([]byte(content)),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		head, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		assert.NotNil(t, head.ContentLength)
-		assert.Equal(t, int64(len(content)), *head.ContentLength)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(head.ContentLength).NotTo(gomega.BeNil())
+		gomega.Expect(*head.ContentLength).To(gomega.Equal(int64(len(content))))
 
 		var statResp vfsStatResponse
 		vfsStatCall(t, endpoint, map[string]string{
@@ -110,10 +109,10 @@ func runCrossProtocolCases(getTgt func() s3Target, getClient func() *s3.Client, 
 			"file_path":   key,
 		}, &statResp)
 
-		assert.True(t, statResp.Exists, "VFS should see file after S3 PUT")
-		assert.Equal(t, key, statResp.Name)
-		assert.Equal(t, int64(len(content)), statResp.Size)
-		assert.Equal(t, false, statResp.IsDir)
+		gomega.Expect(statResp.Exists).To(gomega.BeTrue(), "VFS should see file after S3 PUT")
+		gomega.Expect(statResp.Name).To(gomega.Equal(key))
+		gomega.Expect(statResp.Size).To(gomega.Equal(int64(len(content))))
+		gomega.Expect(statResp.IsDir).To(gomega.BeFalse())
 	})
 
 	ginkgo.It("removes deleted S3 objects from VFS stat", func() {
@@ -131,14 +130,14 @@ func runCrossProtocolCases(getTgt func() s3Target, getClient func() *s3.Client, 
 			Key:    aws.String(key),
 			Body:   bytes.NewReader([]byte(content)),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		head, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		assert.NotNil(t, head)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(head).NotTo(gomega.BeNil())
 
 		statReq := map[string]string{
 			"volume_name": bucket,
@@ -146,13 +145,13 @@ func runCrossProtocolCases(getTgt func() s3Target, getClient func() *s3.Client, 
 		}
 		var statResp vfsStatResponse
 		vfsStatCall(t, endpoint, statReq, &statResp)
-		assert.True(t, statResp.Exists, "VFS should see file before delete")
+		gomega.Expect(statResp.Exists).To(gomega.BeTrue(), "VFS should see file before delete")
 
 		_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Eventual consistency window (Raft commit + cache invalidation).
 		time.Sleep(200 * time.Millisecond)
@@ -161,9 +160,9 @@ func runCrossProtocolCases(getTgt func() s3Target, getClient func() *s3.Client, 
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		assert.Error(t, err, "S3 HEAD should fail after delete")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "S3 HEAD should fail after delete")
 
 		vfsStatCall(t, endpoint, statReq, &statResp)
-		assert.False(t, statResp.Exists, "VFS should not see deleted file")
+		gomega.Expect(statResp.Exists).To(gomega.BeFalse(), "VFS should not see deleted file")
 	})
 }

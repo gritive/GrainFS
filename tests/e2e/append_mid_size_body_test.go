@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestAppendMidSizeBodyE2E proves AppendObject accepts 8 MiB bodies after
@@ -38,11 +38,11 @@ func runMidSizeAppendCase(t testing.TB, tgt s3Target) {
 	tgt.createBkt(t, bucket)
 	key := "obj-8mib"
 	body := bytes.Repeat([]byte("m"), 8*1024*1024)
-	require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, body))
+	gomega.Expect(putAppend(tgt.pickNode(0), bucket, key, 0, body)).To(gomega.Succeed())
 	lastNode := tgt.nodes - 1
 	if lastNode < 0 {
 		lastNode = 0
 	}
 	got := getObject(t, tgt.pickNode(lastNode), bucket, key)
-	require.Equal(t, body, got)
+	gomega.Expect(got).To(gomega.Equal(body))
 }

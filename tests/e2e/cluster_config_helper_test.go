@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // clusterConfigGetResponse mirrors adminapi.ClusterConfigResponse for the JSON
@@ -46,21 +46,21 @@ func adminUDSClient(dataDir string) *http.Client {
 func SetClusterConfig(t testing.TB, dataDir string, body map[string]any) uint64 {
 	t.Helper()
 	buf, err := json.Marshal(body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req, err := http.NewRequest(http.MethodPatch, "http://unix/v1/cluster/config", bytes.NewReader(buf))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := adminUDSClient(dataDir).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	require.Equalf(t, http.StatusOK, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"PATCH /v1/cluster/config: %d: %s", resp.StatusCode, respBody)
 	var out struct {
 		Rev uint64 `json:"rev"`
 	}
-	require.NoError(t, json.Unmarshal(respBody, &out))
+	gomega.Expect(json.Unmarshal(respBody, &out)).To(gomega.Succeed())
 	return out.Rev
 }
 
@@ -71,7 +71,7 @@ func SetClusterConfig(t testing.TB, dataDir string, body map[string]any) uint64 
 // on any voter's admin UDS is sufficient.
 func patchSnapshotInterval(t testing.TB, dataDir string, dur string) {
 	t.Helper()
-	require.NoError(t, patchSnapshotIntervalM(dataDir, dur), "PATCH snapshot-interval")
+	gomega.Expect(patchSnapshotIntervalM(dataDir, dur)).To(gomega.Succeed(), "PATCH snapshot-interval")
 }
 
 // patchSnapshotIntervalM is the TestMain-friendly variant of
@@ -105,12 +105,12 @@ func patchSnapshotIntervalM(dataDir string, dur string) error {
 func GetClusterConfig(t testing.TB, dataDir string) clusterConfigGetResponse {
 	t.Helper()
 	resp, err := adminUDSClient(dataDir).Get("http://unix/v1/cluster/config")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	require.Equalf(t, http.StatusOK, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"GET /v1/cluster/config: %d: %s", resp.StatusCode, respBody)
 	var out clusterConfigGetResponse
-	require.NoError(t, json.Unmarshal(respBody, &out))
+	gomega.Expect(json.Unmarshal(respBody, &out)).To(gomega.Succeed())
 	return out
 }

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 func adminUnixHTTPClient(socketPath string) *http.Client {
@@ -67,14 +67,14 @@ func runECScrubTriggerFlowsThroughCluster(t testing.TB, c *e2eCluster) {
 
 	const bucket = "ec-test"
 	_, err := c.EnsureBucketWritable(ctx, bucket, 120*time.Second)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	for i := 0; i < 5; i++ {
 		payload := bytes.Repeat([]byte{byte('a' + i)}, 4096)
 		key := fmt.Sprintf("k-%d", i)
 		_, err := waitForWritableEndpoint(ctx, c.httpURLs, 120*time.Second, 5*time.Second, time.Second, func(attemptCtx context.Context, endpoint string) error {
 			return tryPutObject(attemptCtx, ecS3Client(endpoint, c.accessKey, c.secretKey), bucket, key, payload)
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
 	time.Sleep(2 * time.Second)
@@ -82,7 +82,7 @@ func runECScrubTriggerFlowsThroughCluster(t testing.TB, c *e2eCluster) {
 	body, _ := json.Marshal(map[string]any{"bucket": bucket, "scope": "full"})
 	var httpCli *http.Client
 	var resp *http.Response
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for _, dir := range c.dataDirs {
 			candidate := adminUnixHTTPClient(filepath.Join(dir, "admin.sock"))
 			r, postErr := candidate.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
@@ -97,14 +97,14 @@ func runECScrubTriggerFlowsThroughCluster(t testing.TB, c *e2eCluster) {
 			r.Body.Close()
 		}
 		return false
-	}, 30*time.Second, 500*time.Millisecond, "POST /v1/scrub must reach the meta-Raft leader")
+	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "POST /v1/scrub must reach the meta-Raft leader")
 	var sr map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&sr))
+	gomega.Expect(json.NewDecoder(resp.Body).Decode(&sr)).To(gomega.Succeed())
 	ginkgo.DeferCleanup(resp.Body.Close)
 	sessionID, _ := sr["session_id"].(string)
-	require.NotEmpty(t, sessionID)
+	gomega.Expect(sessionID).NotTo(gomega.BeEmpty())
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		r, err := httpCli.Get("http://unix/v1/scrub/jobs/" + sessionID)
 		if err != nil {
 			return false
@@ -116,22 +116,22 @@ func runECScrubTriggerFlowsThroughCluster(t testing.TB, c *e2eCluster) {
 		}
 		status, _ := info["status"].(string)
 		return status == "done"
-	}, 60*time.Second, 1*time.Second, "scrub session must reach done within 60s")
+	}).WithTimeout(60*time.Second).WithPolling(1*time.Second).Should(gomega.BeTrue(), "scrub session must reach done within 60s")
 
 	r, err := httpCli.Get("http://unix/v1/scrub/jobs/" + sessionID)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(r.Body.Close)
 	var info map[string]any
-	require.NoError(t, json.NewDecoder(r.Body).Decode(&info))
+	gomega.Expect(json.NewDecoder(r.Body).Decode(&info)).To(gomega.Succeed())
 	t.Logf("session %s: bucket=%v scope=%v status=%v checked=%v detected=%v repaired=%v partial=%v",
 		sessionID, info["bucket"], info["scope"], info["status"],
 		info["checked"], info["detected"], info["repaired"], info["partial"])
 
 	checked, ok := info["checked"].(float64)
-	require.True(t, ok, "checked must decode as a JSON number")
-	require.Equal(t, "done", info["status"], "session must reach done")
-	require.Equal(t, bucket, info["bucket"], "bucket field must round-trip")
-	require.Greater(t, checked, float64(0), "EC resolver and aggregation path must report checked objects")
+	gomega.Expect(ok).To(gomega.BeTrue(), "checked must decode as a JSON number")
+	gomega.Expect(info["status"]).To(gomega.Equal("done"), "session must reach done")
+	gomega.Expect(info["bucket"]).To(gomega.Equal(bucket), "bucket field must round-trip")
+	gomega.Expect(checked).To(gomega.BeNumerically(">", float64(0)), "EC resolver and aggregation path must report checked objects")
 }
 
 func runECScrubTriggerDedupHitReturnsExistingSession(t testing.TB, c *e2eCluster) {
@@ -143,25 +143,25 @@ func runECScrubTriggerDedupHitReturnsExistingSession(t testing.TB, c *e2eCluster
 	body, _ := json.Marshal(map[string]any{"bucket": "dedup-bk", "scope": "full"})
 
 	first, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var firstResp map[string]any
 	decodeScrubTriggerResp(t, first, &firstResp)
-	require.True(t, firstResp["created"].(bool), "first call: created=true expected")
+	gomega.Expect(firstResp["created"].(bool)).To(gomega.BeTrue(), "first call: created=true expected")
 	firstID := firstResp["session_id"].(string)
 
 	second, err := httpCli.Post("http://unix/v1/scrub", "application/json", bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var secondResp map[string]any
 	decodeScrubTriggerResp(t, second, &secondResp)
-	require.False(t, secondResp["created"].(bool), "second call: dedup hit must return Created=false")
-	require.Equal(t, firstID, secondResp["session_id"].(string), "dedup must return same SessionID")
+	gomega.Expect(secondResp["created"].(bool)).To(gomega.BeFalse(), "second call: dedup hit must return Created=false")
+	gomega.Expect(secondResp["session_id"].(string)).To(gomega.Equal(firstID), "dedup must return same SessionID")
 }
 
 func decodeScrubTriggerResp(t testing.TB, resp *http.Response, out *map[string]any) {
 	t.Helper()
 	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", string(body))
-	require.NoError(t, json.Unmarshal(body, out))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusCreated), "body: %s", string(body))
+	gomega.Expect(json.Unmarshal(body, out)).To(gomega.Succeed())
 }

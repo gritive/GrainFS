@@ -22,7 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // Audit policy decision specs assert that the policy decision columns added in
@@ -85,13 +85,13 @@ func runAuditPolicyDecisionCases(getTgt func() *icebergTarget) {
 			Key:    aws.String(key),
 			Body:   strings.NewReader("payload"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = tgt.s3Client(0).GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Wait for the committer to flush, then assert the row exists with
 		// authz_latency_us NOT NULL, matched_policy_id non-empty, and
@@ -127,7 +127,7 @@ func runAuditPolicyDecisionCases(getTgt func() *icebergTarget) {
 			Key:    aws.String(key),
 			Body:   strings.NewReader("nope"),
 		})
-		require.Error(t, err, "signed PUT without grants must be rejected")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "signed PUT without grants must be rejected")
 
 		countAuditRows(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey,
 			fmt.Sprintf("bucket = '%s' AND method = 'PUT'", bucket),
@@ -153,7 +153,7 @@ func runAuditPolicyDecisionCases(getTgt func() *icebergTarget) {
 			Key:    aws.String(key),
 			Body:   strings.NewReader("anon"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(func() {
 			_, _ = tgt.s3Client(0).DeleteObject(context.Background(), &s3.DeleteObjectInput{
 				Bucket: aws.String(bucket),
@@ -166,9 +166,9 @@ func runAuditPolicyDecisionCases(getTgt func() *icebergTarget) {
 		// Allow a brief replication window before the unsigned read.
 		time.Sleep(500 * time.Millisecond)
 		req, err := http.NewRequest(http.MethodGet, anonGetEndpoint, nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		// The implicit anon Allow on /default returns 200; some configurations
 		// may return 404 if the read races with replication. Either way the

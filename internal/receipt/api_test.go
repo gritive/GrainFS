@@ -50,7 +50,7 @@ func (f *fakePeerQuerier) Query(ctx context.Context, id string) ([]byte, bool, e
 	return f.broadcast, f.broadcastFound, f.broadcastErr
 }
 
-func mustSignedReceipt(t *testing.T, id string, ts time.Time) *HealReceipt {
+func mustSignedReceipt(t cleanupTestTB, id string, ts time.Time) *HealReceipt {
 	t.Helper()
 	ks, err := NewKeyStore(Key{ID: "psk-test", Secret: []byte("test-secret")})
 	require.NoError(t, err)

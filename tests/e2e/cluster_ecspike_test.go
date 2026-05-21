@@ -16,8 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster/ecspike"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // ecspikeNode is one of the 6 grainfs local processes used by the spike.
@@ -62,7 +61,7 @@ func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 		dir, err := os.MkdirTemp("", fmt.Sprintf("ecspike-node%d-*", i))
 		if err != nil {
 			cleanup()
-			require.NoErrorf(t, err, "mkdtemp node %d", i)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp node %d", i)
 		}
 		port := freePort()
 		args := []string{
@@ -79,7 +78,7 @@ func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 		logFile, err := os.CreateTemp("", fmt.Sprintf("ecspike-node-%d-*.log", i))
 		if err != nil {
 			cleanup()
-			require.NoErrorf(t, err, "create node %d log", i)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create node %d log", i)
 		}
 		cmd.Stderr = logFile
 		// Assign before Start so cleanup() can remove dir even if Start fails.
@@ -99,11 +98,10 @@ func startEcspikeClusterOpts(t testing.TB) ([]*ecspikeNode, func()) {
 		})
 		if err := cmd.Start(); err != nil {
 			cleanup()
-			require.NoErrorf(t, err, "start node %d", i)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "start node %d", i)
 		}
-		require.NoErrorf(t,
-			waitForPortsParallelErrWithProcesses([]int{port}, []*exec.Cmd{cmd}, 30*time.Second),
-			"server did not start on port %d; stderr saved to %s", port, logFile.Name())
+		gomega.Expect(waitForPortsParallelErrWithProcesses([]int{port}, []*exec.Cmd{cmd}, 30*time.Second)).
+			To(gomega.Succeed(), "server did not start on port %d; stderr saved to %s", port, logFile.Name())
 		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 10*time.Second)
 		nodes[i].saID = bootstrap.SAID
 		nodes[i].ak = bootstrap.AccessKey
@@ -122,10 +120,11 @@ func requireECSpikeBucketsReady(t testing.TB, ctx context.Context, cfg *ecspike.
 	}
 	for _, ep := range cfg.Nodes {
 		node := byEndpoint[ep]
-		require.NotNil(t, node, "node for endpoint %s", ep)
-		require.NotEmpty(t, node.saID, "bootstrap SA ID for %s", ep)
+		gomega.Expect(node).NotTo(gomega.BeNil(), "node for endpoint %s", ep)
+		gomega.Expect(node.saID).NotTo(gomega.BeEmpty(), "bootstrap SA ID for %s", ep)
 		sock := filepath.Join(node.dataDir, "admin.sock")
-		require.NoErrorf(t, tryAdminCreateBucketWithPolicyAttach(sock, cfg.Bucket, node.saID, "bucket-admin"), "admin create bucket on %s", ep)
+		gomega.Expect(tryAdminCreateBucketWithPolicyAttach(sock, cfg.Bucket, node.saID, "bucket-admin")).
+			To(gomega.Succeed(), "admin create bucket on %s", ep)
 		client := clients[ep]
 		waitForS3Write(t, client, cfg.Bucket, readinessKey, 30*time.Second)
 		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -175,9 +174,9 @@ var _ = ginkgo.Describe("EC spike cluster", func() {
 		for i := 0; i < objCount; i++ {
 			data := make([]byte, objSize)
 			_, err := rand.Read(data)
-			require.NoError(t, err, "rand data")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "rand data")
 			key := fmt.Sprintf("obj-%02d", i)
-			require.NoErrorf(t, ecspike.Put(ctx, cfg, key, data), "Put %s", key)
+			gomega.Expect(ecspike.Put(ctx, cfg, key, data)).To(gomega.Succeed(), "Put %s", key)
 			originals[key] = sha256.Sum256(data)
 		}
 
@@ -189,11 +188,12 @@ var _ = ginkgo.Describe("EC spike cluster", func() {
 		// Reconstruct every object and verify SHA256.
 		for key, wantSum := range originals {
 			got, err := ecspike.Get(ctx, cfg, key)
-			if !assert.NoErrorf(t, err, "Get %s after node kill", key) {
+			if err != nil {
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Get %s after node kill", key)
 				continue
 			}
 			gotSum := sha256.Sum256(got)
-			assert.Equalf(t, wantSum, gotSum, "Get %s: sha256 mismatch (len=%d)", key, len(got))
+			gomega.Expect(gotSum).To(gomega.Equal(wantSum), "Get %s: sha256 mismatch (len=%d)", key, len(got))
 		}
 
 		if t.Failed() {
@@ -241,14 +241,14 @@ func measureECSpikeP95(t testing.TB) {
 	const objSize = 16 * 1024 * 1024
 	data := make([]byte, objSize)
 	_, err := rand.Read(data)
-	require.NoError(t, err, "rand data")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "rand data")
 
 	latencies := make([]time.Duration, iter)
 	t.Logf("ecspike: measuring p95 with %d × %d-byte PUTs", iter, objSize)
 	for i := 0; i < iter; i++ {
 		key := fmt.Sprintf("lat-%03d", i)
 		start := time.Now()
-		require.NoErrorf(t, ecspike.Put(ctx, cfg, key, data), "Put %s", key)
+		gomega.Expect(ecspike.Put(ctx, cfg, key, data)).To(gomega.Succeed(), "Put %s", key)
 		latencies[i] = time.Since(start)
 	}
 

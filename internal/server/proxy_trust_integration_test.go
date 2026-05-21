@@ -13,11 +13,12 @@ package server
 
 import (
 	"net"
-	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/common/test/mock"
 	"github.com/cloudwego/hertz/pkg/network"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // remoteAddrConn wraps mock.Conn and overrides RemoteAddr so tests can plug
@@ -34,14 +35,11 @@ func (r *remoteAddrConn) RemoteAddr() net.Addr { return r.addr }
 // to the given host:port and whose request headers carry the three forwarding
 // headers under test. host must be a host:port string (matches what a real
 // TCP listener would produce).
-func newContextWithRemote(t *testing.T, hostPort, forwarded, xfProto, xfFor string) *app.RequestContext {
-	t.Helper()
+func newContextWithRemote(hostPort, forwarded, xfProto, xfFor string) *app.RequestContext {
 	c := app.NewContext(0)
 
 	addr, err := net.ResolveTCPAddr("tcp", hostPort)
-	if err != nil {
-		t.Fatalf("ResolveTCPAddr(%q): %v", hostPort, err)
-	}
+	Expect(err).NotTo(HaveOccurred())
 	conn := &remoteAddrConn{Conn: mock.NewConn(""), addr: addr}
 	// Assert the embed satisfies network.Conn so a Hertz upgrade can't break
 	// this test silently.
@@ -66,96 +64,69 @@ func stubServer(trusted []string) *Server {
 	return &Server{proxyTrust: NewProxyTrust(trusted)}
 }
 
-func TestAuthoritativeClientIP_UntrustedRemoteIgnoresSpoofyHeaders(t *testing.T) {
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "203.0.113.7:54321",
-		`for=192.0.2.99;proto=https`, // spoofy
-		"https", "192.0.2.99")
-	got := s.authoritativeClientIP(c)
-	if got != "203.0.113.7" {
-		t.Fatalf("untrusted remote: got %q, want %q (raw remote, port stripped)", got, "203.0.113.7")
-	}
-}
+var _ = Describe("Proxy trust integration", func() {
+	It("ignores spoofed headers from untrusted remotes", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("203.0.113.7:54321",
+			`for=192.0.2.99;proto=https`,
+			"https", "192.0.2.99")
 
-func TestAuthoritativeClientIP_TrustedForwardedAccepted(t *testing.T) {
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "10.0.0.5:7777",
-		`for=198.51.100.1;proto=https`, "", "")
-	got := s.authoritativeClientIP(c)
-	if got != "198.51.100.1" {
-		t.Fatalf("trusted + Forwarded: got %q, want %q", got, "198.51.100.1")
-	}
-}
+		Expect(s.authoritativeClientIP(c)).To(Equal("203.0.113.7"))
+	})
 
-func TestAuthoritativeClientIP_TrustedForwardedWrongProtoFallsBack(t *testing.T) {
-	// Contract: Authoritative returns (_, false) when proto != https. The
-	// helper then falls back to the raw remote (documented in its godoc:
-	// audit/policy still need a non-empty SourceIP; header-driven
-	// 400-rejection is a follow-up). Lock that behavior in here so a future
-	// change to "return empty on reject" can't silently regress logging.
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "10.0.0.5:7777",
-		`for=198.51.100.2;proto=http`, "", "")
-	got := s.authoritativeClientIP(c)
-	if got != "10.0.0.5" {
-		t.Fatalf("trusted + wrong-proto Forwarded: got %q, want %q (fallback to remote)", got, "10.0.0.5")
-	}
-}
+	It("accepts trusted Forwarded headers", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("10.0.0.5:7777",
+			`for=198.51.100.1;proto=https`, "", "")
 
-func TestAuthoritativeClientIP_TrustedXForwardedForAccepted(t *testing.T) {
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "10.0.0.5:7777", "",
-		"https", "198.51.100.3, 10.0.0.5")
-	got := s.authoritativeClientIP(c)
-	if got != "198.51.100.3" {
-		t.Fatalf("trusted + XFF: got %q, want %q", got, "198.51.100.3")
-	}
-}
+		Expect(s.authoritativeClientIP(c)).To(Equal("198.51.100.1"))
+	})
 
-func TestAuthoritativeClientIP_TrustedAllTrustedChainFallsBack(t *testing.T) {
-	// Same fallback contract as wrong-proto: Authoritative rejects, helper
-	// degrades to remote so audit/policy still have a SourceIP.
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "10.0.0.5:7777", "",
-		"https", "10.0.0.7, 10.0.0.5")
-	got := s.authoritativeClientIP(c)
-	if got != "10.0.0.5" {
-		t.Fatalf("trusted + all-trusted XFF: got %q, want %q (fallback to remote)", got, "10.0.0.5")
-	}
-}
+	It("falls back to remote address for wrong Forwarded proto", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("10.0.0.5:7777",
+			`for=198.51.100.2;proto=http`, "", "")
 
-func TestAuthoritativeClientIP_TrustedForwardedIPv6Bracketed(t *testing.T) {
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "10.0.0.5:7777",
-		`for="[2001:db8::1]";proto=https`, "", "")
-	got := s.authoritativeClientIP(c)
-	if got != "2001:db8::1" {
-		t.Fatalf("trusted + Forwarded IPv6: got %q, want %q", got, "2001:db8::1")
-	}
-}
+		Expect(s.authoritativeClientIP(c)).To(Equal("10.0.0.5"))
+	})
 
-// Explicitly assert the helper strips host:port from c.RemoteAddr() before
-// consulting the CIDR set. If this regresses we'd start ignoring the
-// trusted-proxy chain because the host:port string never matches a /8.
-func TestAuthoritativeClientIP_StripsRemotePort(t *testing.T) {
-	s := stubServer([]string{"10.0.0.0/8"})
-	c := newContextWithRemote(t, "10.0.0.5:54321",
-		`for=198.51.100.1;proto=https`, "", "")
-	got := s.authoritativeClientIP(c)
-	if got != "198.51.100.1" {
-		t.Fatalf("host:port remote not stripped before CIDR match: got %q, want %q",
-			got, "198.51.100.1")
-	}
-}
+	It("accepts trusted X-Forwarded-For headers", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("10.0.0.5:7777", "",
+			"https", "198.51.100.3, 10.0.0.5")
 
-// Nil proxyTrust (construction-only test fixtures) must still produce a
-// usable SourceIP — the raw remote with port stripped.
-func TestAuthoritativeClientIP_NilProxyTrustReturnsBareRemote(t *testing.T) {
-	s := &Server{} // no proxyTrust wired
-	c := newContextWithRemote(t, "203.0.113.7:54321",
-		`for=evil;proto=https`, "https", "evil")
-	got := s.authoritativeClientIP(c)
-	if got != "203.0.113.7" {
-		t.Fatalf("nil proxyTrust: got %q, want %q", got, "203.0.113.7")
-	}
-}
+		Expect(s.authoritativeClientIP(c)).To(Equal("198.51.100.3"))
+	})
+
+	It("falls back when every X-Forwarded-For hop is trusted", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("10.0.0.5:7777", "",
+			"https", "10.0.0.7, 10.0.0.5")
+
+		Expect(s.authoritativeClientIP(c)).To(Equal("10.0.0.5"))
+	})
+
+	It("accepts bracketed IPv6 in trusted Forwarded headers", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("10.0.0.5:7777",
+			`for="[2001:db8::1]";proto=https`, "", "")
+
+		Expect(s.authoritativeClientIP(c)).To(Equal("2001:db8::1"))
+	})
+
+	It("strips the remote port before CIDR matching", func() {
+		s := stubServer([]string{"10.0.0.0/8"})
+		c := newContextWithRemote("10.0.0.5:54321",
+			`for=198.51.100.1;proto=https`, "", "")
+
+		Expect(s.authoritativeClientIP(c)).To(Equal("198.51.100.1"))
+	})
+
+	It("returns the bare remote address when proxy trust is nil", func() {
+		s := &Server{}
+		c := newContextWithRemote("203.0.113.7:54321",
+			`for=evil;proto=https`, "https", "evil")
+
+		Expect(s.authoritativeClientIP(c)).To(Equal("203.0.113.7"))
+	})
+})

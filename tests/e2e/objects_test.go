@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -21,8 +22,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 func stringReader(s string) io.Reader {
@@ -66,20 +66,20 @@ func runObjectCases(getTgt func() s3Target) {
 			Body:        stringReader("hello grainfs"),
 			ContentType: aws.String("text/plain"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("hello.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 
 		body, err := io.ReadAll(out.Body)
-		require.NoError(t, err)
-		assert.Equal(t, "hello grainfs", string(body))
-		assert.Equal(t, "text/plain", aws.ToString(out.ContentType))
-		assert.Equal(t, int64(13), aws.ToInt64(out.ContentLength))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(string(body)).To(gomega.Equal("hello grainfs"))
+		gomega.Expect(aws.ToString(out.ContentType)).To(gomega.Equal("text/plain"))
+		gomega.Expect(aws.ToInt64(out.ContentLength)).To(gomega.Equal(int64(13)))
 	})
 
 	ginkgo.It("heads an object (Head)", func() {
@@ -100,9 +100,9 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("meta.txt"),
 		})
-		require.NoError(t, err)
-		assert.Equal(t, int64(13), aws.ToInt64(out.ContentLength))
-		assert.NotEmpty(t, aws.ToString(out.ETag))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToInt64(out.ContentLength)).To(gomega.Equal(int64(13)))
+		gomega.Expect(aws.ToString(out.ETag)).NotTo(gomega.BeEmpty())
 	})
 
 	ginkgo.It("returns NotFound when heading a missing object (HeadNotFound)", func() {
@@ -117,11 +117,11 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("nope.txt"),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		assert.Equalf(t, "NotFound", apiErr.ErrorCode(), "head missing object error: %v", err)
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("NotFound"), "head missing object error: %v", err)
 	})
 
 	ginkgo.It("deletes an object (Delete)", func() {
@@ -142,13 +142,13 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("to-delete.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("to-delete.txt"),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("deletes a nonexistent object idempotently (DeleteNonexistent)", func() {
@@ -163,11 +163,10 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("never-existed.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("rejects put to a nonexistent bucket (PutToNonexistentBucket)", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		client := tgt.pickNode(0)
 		ctx := context.Background()
@@ -177,7 +176,7 @@ func runObjectCases(getTgt func() s3Target) {
 			Key:    aws.String("file.txt"),
 			Body:   stringReader("data"),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("rejects get for a missing object (GetNonexistent)", func() {
@@ -192,7 +191,7 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("nope.txt"),
 		})
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("overwrites an object (Overwrite)", func() {
@@ -218,12 +217,12 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("file.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 
 		body, _ := io.ReadAll(out.Body)
-		assert.Equal(t, "version2", string(body))
-		assert.Equal(t, int64(8), aws.ToInt64(out.ContentLength))
+		gomega.Expect(string(body)).To(gomega.Equal("version2"))
+		gomega.Expect(aws.ToInt64(out.ContentLength)).To(gomega.Equal(int64(8)))
 	})
 
 	ginkgo.It("handles nested keys (NestedKey)", func() {
@@ -244,11 +243,11 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("path/to/deep/file.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 
 		body, _ := io.ReadAll(out.Body)
-		assert.Equal(t, "nested", string(body))
+		gomega.Expect(string(body)).To(gomega.Equal("nested"))
 	})
 
 	ginkgo.It("lists objects (List)", func() {
@@ -274,8 +273,8 @@ func runObjectCases(getTgt func() s3Target) {
 		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(bucket),
 		})
-		require.NoError(t, err)
-		assert.Len(t, out.Contents, 3)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Contents).To(gomega.HaveLen(3))
 	})
 
 	ginkgo.It("lists objects with a prefix (ListWithPrefix)", func() {
@@ -302,10 +301,10 @@ func runObjectCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Prefix: aws.String("docs/"),
 		})
-		require.NoError(t, err)
-		assert.Len(t, out.Contents, 2)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Contents).To(gomega.HaveLen(2))
 		for _, obj := range out.Contents {
-			assert.True(t, strings.HasPrefix(aws.ToString(obj.Key), "docs/"))
+			gomega.Expect(aws.ToString(obj.Key)).To(gomega.HavePrefix("docs/"))
 		}
 	})
 
@@ -323,18 +322,18 @@ func runObjectCases(getTgt func() s3Target) {
 			Key:    aws.String("large.bin"),
 			Body:   bytes.NewReader(data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("large.bin"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 
-		assert.Equal(t, int64(len(data)), aws.ToInt64(out.ContentLength))
+		gomega.Expect(aws.ToInt64(out.ContentLength)).To(gomega.Equal(int64(len(data))))
 		body, _ := io.ReadAll(out.Body)
-		assert.Equal(t, data, body)
+		gomega.Expect(body).To(gomega.Equal(data))
 	})
 
 	ginkgo.It("accepts browser form upload (FormUpload)", func() {
@@ -350,19 +349,19 @@ func runObjectCases(getTgt func() s3Target) {
 		// so retry transient 5xx responses at startup.
 		var lastStatus int
 		var lastErr error
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			var buf bytes.Buffer
 			w := multipart.NewWriter(&buf)
-			require.NoError(t, w.WriteField("key", "uploaded.txt"))
-			require.NoError(t, w.WriteField("Content-Type", "text/plain"))
-			require.NoError(t, w.WriteField("success_action_status", "201"))
+			gomega.Expect(w.WriteField("key", "uploaded.txt")).To(gomega.Succeed())
+			gomega.Expect(w.WriteField("Content-Type", "text/plain")).To(gomega.Succeed())
+			gomega.Expect(w.WriteField("success_action_status", "201")).To(gomega.Succeed())
 			writeSignedPostPolicy(t, w, tgt, bucket, "uploaded.txt")
 
 			fw, err := w.CreateFormFile("file", "uploaded.txt")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			_, err = fw.Write([]byte("form upload content"))
-			require.NoError(t, err)
-			require.NoError(t, w.Close())
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(w.Close()).To(gomega.Succeed())
 
 			req, _ := http.NewRequest(http.MethodPost, tgt.endpoint(0)+"/"+bucket, &buf)
 			req.Header.Set("Content-Type", w.FormDataContentType())
@@ -375,17 +374,18 @@ func runObjectCases(getTgt func() s3Target) {
 			defer resp.Body.Close()
 			lastStatus = resp.StatusCode
 			return resp.StatusCode == http.StatusCreated
-		}, 30*time.Second, 500*time.Millisecond, "form upload status=%d err=%v", lastStatus, lastErr)
+		}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
+			Should(gomega.BeTrue(), "form upload status=%d err=%v", lastStatus, lastErr)
 
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("uploaded.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 
 		data, _ := io.ReadAll(out.Body)
-		assert.Equal(t, "form upload content", string(data))
+		gomega.Expect(string(data)).To(gomega.Equal("form upload content"))
 	})
 }
 
@@ -404,9 +404,9 @@ func writeSignedPostPolicy(t testing.TB, w *multipart.Writer, tgt s3Target, buck
 		},
 	}
 	raw, err := json.Marshal(policy)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	policyB64 := base64.StdEncoding.EncodeToString(raw)
-	require.NoError(t, w.WriteField("policy", policyB64))
-	require.NoError(t, w.WriteField("X-Amz-Credential", credential))
-	require.NoError(t, w.WriteField("X-Amz-Signature", s3auth.SignPostPolicy(policyB64, tgt.secretKey, date, "us-east-1", "s3")))
+	gomega.Expect(w.WriteField("policy", policyB64)).To(gomega.Succeed())
+	gomega.Expect(w.WriteField("X-Amz-Credential", credential)).To(gomega.Succeed())
+	gomega.Expect(w.WriteField("X-Amz-Signature", s3auth.SignPostPolicy(policyB64, tgt.secretKey, date, "us-east-1", "s3"))).To(gomega.Succeed())
 }

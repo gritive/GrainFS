@@ -5,8 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterBalancerStatusCLIE2E verifies `cluster balancer status` on
@@ -35,7 +34,6 @@ var _ = ginkgo.Describe("Cluster admin CLI balancer status", func() {
 
 func runClusterBalancerStatusCLICases(getTgt func() s3Target) {
 	ginkgo.It("renders JSON", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -44,16 +42,15 @@ func runClusterBalancerStatusCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"balancer", "status", "--format", "json",
 		).Output()
-		require.NoError(t, err, "balancer status command must succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "balancer status command must succeed")
 
 		var b map[string]any
-		require.NoError(t, json.Unmarshal(out, &b), "output must be valid JSON")
+		gomega.Expect(json.Unmarshal(out, &b)).To(gomega.Succeed(), "output must be valid JSON")
 		_, ok := b["available"]
-		assert.True(t, ok, "available field expected: %v", b)
+		gomega.Expect(ok).To(gomega.BeTrue(), "available field expected: %v", b)
 	})
 
 	ginkgo.It("renders text", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -62,9 +59,9 @@ func runClusterBalancerStatusCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"balancer", "status",
 		).Output()
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		output := string(out)
-		assert.Contains(t, output, "balancer:")
+		gomega.Expect(output).To(gomega.ContainSubstring("balancer:"))
 	})
 }

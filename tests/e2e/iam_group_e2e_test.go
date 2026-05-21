@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("IAM group", func() {
@@ -59,19 +59,18 @@ func groupNameFor(tgtName, caseName string) string {
 func runIAMGroupCases(getCtx func() context.Context, getTgt func() iamAdminTarget) {
 	// CreateDelete: create a group, delete it; cleanup handles the second delete.
 	ginkgo.It("creates and deletes groups (CreateDelete)", func() {
-		t := ginkgo.GinkgoTB()
 		ctx := getCtx()
 		tgt := getTgt()
 		c := tgt.iamClient()
 		name := groupNameFor(tgt.name, "create-delete")
 		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, name) })
 
-		require.NoError(t, c.GroupCreate(ctx, name))
+		gomega.Expect(c.GroupCreate(ctx, name)).To(gomega.Succeed())
 
 		// Idempotent second create must not error (FSM upsert semantics).
-		require.NoError(t, c.GroupCreate(ctx, name))
+		gomega.Expect(c.GroupCreate(ctx, name)).To(gomega.Succeed())
 
-		require.NoError(t, c.GroupDelete(ctx, name))
+		gomega.Expect(c.GroupDelete(ctx, name)).To(gomega.Succeed())
 	})
 
 	// MemberAddRemove: add a SA, remove it; both calls must succeed.
@@ -82,27 +81,26 @@ func runIAMGroupCases(getCtx func() context.Context, getTgt func() iamAdminTarge
 		c := tgt.iamClient()
 		grp := groupNameFor(tgt.name, "member-add-remove")
 		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, grp) })
-		require.NoError(t, c.GroupCreate(ctx, grp))
+		gomega.Expect(c.GroupCreate(ctx, grp)).To(gomega.Succeed())
 
 		saID, _, _ := tgt.uniqueSA(t, "member-sa")
 
-		require.NoError(t, c.GroupMemberAdd(ctx, grp, saID))
-		require.NoError(t, c.GroupMemberRemove(ctx, grp, saID))
+		gomega.Expect(c.GroupMemberAdd(ctx, grp, saID)).To(gomega.Succeed())
+		gomega.Expect(c.GroupMemberRemove(ctx, grp, saID)).To(gomega.Succeed())
 	})
 
 	// PolicyAttachDetach: attach the built-in "readonly" policy to a group,
 	// then detach it. Both Raft proposals must succeed.
 	ginkgo.It("attaches and detaches group policies (PolicyAttachDetach)", func() {
-		t := ginkgo.GinkgoTB()
 		ctx := getCtx()
 		tgt := getTgt()
 		c := tgt.iamClient()
 		grp := groupNameFor(tgt.name, "policy-attach-detach")
 		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, grp) })
-		require.NoError(t, c.GroupCreate(ctx, grp))
+		gomega.Expect(c.GroupCreate(ctx, grp)).To(gomega.Succeed())
 
-		require.NoError(t, c.GroupPolicyAttach(ctx, grp, "readonly"))
-		require.NoError(t, c.GroupPolicyDetach(ctx, grp, "readonly"))
+		gomega.Expect(c.GroupPolicyAttach(ctx, grp, "readonly")).To(gomega.Succeed())
+		gomega.Expect(c.GroupPolicyDetach(ctx, grp, "readonly")).To(gomega.Succeed())
 	})
 
 	// MultiMember: add two SAs to a group, remove both; verifies the store
@@ -114,14 +112,14 @@ func runIAMGroupCases(getCtx func() context.Context, getTgt func() iamAdminTarge
 		c := tgt.iamClient()
 		grp := groupNameFor(tgt.name, "multi-member")
 		ginkgo.DeferCleanup(func() { _ = c.GroupDelete(ctx, grp) })
-		require.NoError(t, c.GroupCreate(ctx, grp))
+		gomega.Expect(c.GroupCreate(ctx, grp)).To(gomega.Succeed())
 
 		saID1, _, _ := tgt.uniqueSA(t, "multi-member-sa1")
 		saID2, _, _ := tgt.uniqueSA(t, "multi-member-sa2")
 
-		require.NoError(t, c.GroupMemberAdd(ctx, grp, saID1))
-		require.NoError(t, c.GroupMemberAdd(ctx, grp, saID2))
-		require.NoError(t, c.GroupMemberRemove(ctx, grp, saID1))
-		require.NoError(t, c.GroupMemberRemove(ctx, grp, saID2))
+		gomega.Expect(c.GroupMemberAdd(ctx, grp, saID1)).To(gomega.Succeed())
+		gomega.Expect(c.GroupMemberAdd(ctx, grp, saID2)).To(gomega.Succeed())
+		gomega.Expect(c.GroupMemberRemove(ctx, grp, saID1)).To(gomega.Succeed())
+		gomega.Expect(c.GroupMemberRemove(ctx, grp, saID2)).To(gomega.Succeed())
 	})
 }

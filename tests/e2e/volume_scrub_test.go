@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // findVolumeBlockOnDisk walks dataDir for the on-disk file backing a volume
@@ -30,8 +30,8 @@ func findVolumeBlockOnDisk(t testing.TB, dataDir, vol string, blockNum int) stri
 		hit = p
 		return nil
 	})
-	require.NoError(t, err)
-	require.NotEmpty(t, hit, "could not find on-disk block %s for volume %s under %s", want, vol, dataDir)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(hit).NotTo(gomega.BeEmpty(), "could not find on-disk block %s for volume %s under %s", want, vol, dataDir)
 	return hit
 }
 
@@ -150,7 +150,7 @@ var _ = ginkgo.Describe("Volume scrub", func() {
 func tempVolumeScrubDir(t testing.TB) string {
 	t.Helper()
 	dataDir, err := os.MkdirTemp("", "grainfs-volume-scrub-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(os.RemoveAll, dataDir)
 	return dataDir
 }
@@ -159,20 +159,20 @@ func runFindVolumeBlockOnDiskLegacyCurrentLayout(t testing.TB) {
 	t.Helper()
 	dataDir := tempVolumeScrubDir(t)
 	blockPath := filepath.Join(dataDir, "groups", "g1", "data", "__grainfs_volumes", ".obj", "__vol", "vs2", "blk_000000000000_vabc", "current")
-	require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
-	require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
+	gomega.Expect(os.MkdirAll(filepath.Dir(blockPath), 0o755)).To(gomega.Succeed())
+	gomega.Expect(os.WriteFile(blockPath, []byte("data"), 0o644)).To(gomega.Succeed())
 
-	require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
+	gomega.Expect(findVolumeBlockOnDisk(t, dataDir, "vs2", 0)).To(gomega.Equal(blockPath))
 }
 
 func runFindVolumeBlockOnDiskShardLayout(t testing.TB) {
 	t.Helper()
 	dataDir := tempVolumeScrubDir(t)
 	blockPath := filepath.Join(dataDir, "shards", "__grainfs_volumes", "__vol", "vs2", "blk_000000000000_vabc", "019e20ca-0000-7000-8000-000000000000", "shard_0")
-	require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
-	require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
+	gomega.Expect(os.MkdirAll(filepath.Dir(blockPath), 0o755)).To(gomega.Succeed())
+	gomega.Expect(os.WriteFile(blockPath, []byte("data"), 0o644)).To(gomega.Succeed())
 
-	require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
+	gomega.Expect(findVolumeBlockOnDisk(t, dataDir, "vs2", 0)).To(gomega.Equal(blockPath))
 }
 
 // volumeScrubFactory builds a fresh per-case fixture with the given grainfs
@@ -198,7 +198,7 @@ func truncateAVolumeBlock(t testing.TB, tgt s3Target, vol string, blockNum int) 
 	if !tgt.isCluster {
 		dataDir := scrubDataDir(tgt, 0)
 		p := findVolumeBlockOnDisk(t, dataDir, vol, blockNum)
-		require.NoError(t, os.Truncate(p, 1))
+		gomega.Expect(os.Truncate(p, 1)).To(gomega.Succeed())
 		return 0, p
 	}
 	for i, dd := range tgt.cluster.dataDirs {
@@ -207,7 +207,7 @@ func truncateAVolumeBlock(t testing.TB, tgt s3Target, vol string, blockNum int) 
 		for _, p := range hits {
 			if strings.Contains(p, "/shards/__grainfs_volumes/") &&
 				strings.HasPrefix(filepath.Base(p), "shard_") {
-				require.NoError(t, os.Truncate(p, 1))
+				gomega.Expect(os.Truncate(p, 1)).To(gomega.Succeed())
 				return i, p
 			}
 		}
@@ -235,13 +235,13 @@ func runVolumeScrubHealthyNoop(t testing.TB, mk volumeScrubFactory, dedup bool) 
 	tgt := mk(t, dedupArg)
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "write-at", vol, "--offset", "0", "--content", "hello")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "scrub", vol)
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "Repaired=0", "got:\n%s", out)
-	require.Contains(t, out, "Detected=0", "got:\n%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Repaired=0"), "got:\n%s", out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Detected=0"), "got:\n%s", out)
 }
 
 func runVolumeScrubDryRunDetectsCorruption(t testing.TB, mk volumeScrubFactory, dedup bool) {
@@ -256,21 +256,21 @@ func runVolumeScrubDryRunDetectsCorruption(t testing.TB, mk volumeScrubFactory, 
 	tgt := mk(t, dedupArg, "--pack-threshold=0", "--shard-pack-threshold=0")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "write-at", vol, "--offset", "0", "--content", "abcd1234")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 
 	nodeIdx, blockPath := truncateAVolumeBlock(t, tgt, vol, 0)
 	nodeDD := scrubDataDir(tgt, nodeIdx)
 
 	out, code = runCLI(t, nodeDD, "volume", "scrub", vol, "--dry-run")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "Detected=1", "got:\n%s", out)
-	require.Contains(t, out, "Repaired=0", "dry-run must not repair; got:\n%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Detected=1"), "got:\n%s", out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Repaired=0"), "dry-run must not repair; got:\n%s", out)
 
 	fi, err := os.Stat(blockPath)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), fi.Size(), "dry-run must leave the local file untouched")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(fi.Size()).To(gomega.Equal(int64(1)), "dry-run must leave the local file untouched")
 }
 
 func runVolumeScrubRepairBehavior(t testing.TB, mk volumeScrubFactory, dedup bool) {
@@ -287,20 +287,20 @@ func runVolumeScrubRepairBehavior(t testing.TB, mk volumeScrubFactory, dedup boo
 	tgt := mk(t, dedupArg, "--pack-threshold=0", "--shard-pack-threshold=0")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "write-at", vol, "--offset", "0", "--content", "QWERTY")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 
 	nodeIdx, _ := truncateAVolumeBlock(t, tgt, vol, 0)
 	nodeDD := scrubDataDir(tgt, nodeIdx)
 
 	out, code = runCLI(t, nodeDD, "volume", "scrub", vol)
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "Detected=1", "got:\n%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Detected=1"), "got:\n%s", out)
 	if tgt.isCluster {
-		require.Contains(t, out, "Repaired=1", "cluster peer-pull must repair; got:\n%s", out)
+		gomega.Expect(out).To(gomega.ContainSubstring("Repaired=1"), "cluster peer-pull must repair; got:\n%s", out)
 	} else {
-		require.Contains(t, out, "Unrepairable=1", "single node has no peer; got:\n%s", out)
+		gomega.Expect(out).To(gomega.ContainSubstring("Unrepairable=1"), "single node has no peer; got:\n%s", out)
 	}
 }
 
@@ -313,14 +313,14 @@ func runVolumeScrubAdminTriggerWorksAtZeroInterval(t testing.TB, mk volumeScrubF
 	tgt := mk(t, "--dedup=false", "--scrub-interval=0")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", "vsi0", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "write-at", "vsi0", "--offset", "0", "--content", "x")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "scrub", "vsi0")
-	require.Equal(t, 0, code, out)
-	require.NotContains(t, out, "scrub director not configured", "got:\n%s", out)
-	require.Contains(t, out, "Detected=0", "got:\n%s", out)
-	require.Contains(t, out, "Repaired=0", "got:\n%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
+	gomega.Expect(out).NotTo(gomega.ContainSubstring("scrub director not configured"), "got:\n%s", out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Detected=0"), "got:\n%s", out)
+	gomega.Expect(out).To(gomega.ContainSubstring("Repaired=0"), "got:\n%s", out)
 }
 
 func runVolumeScrubStatusListCancel(t testing.TB, mk volumeScrubFactory) {
@@ -329,25 +329,25 @@ func runVolumeScrubStatusListCancel(t testing.TB, mk volumeScrubFactory) {
 	tgt := mk(t, "--dedup=false")
 	dd := scrubDataDir(tgt, 0)
 	out, code := runCLI(t, dd, "volume", "create", "vs4", "--size", "1Mi")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	out, code = runCLI(t, dd, "volume", "write-at", "vs4", "--offset", "0", "--content", "data")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 
 	out, code = runCLI(t, dd, "volume", "scrub", "vs4", "--detach")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	// Parse session id out of "Triggered scrub: session=<uuid> ..."
 	idx := strings.Index(out, "session=")
-	require.Greater(t, idx, -1, "no session id in output: %s", out)
+	gomega.Expect(idx).To(gomega.BeNumerically(">", -1), "no session id in output: %s", out)
 	rest := out[idx+len("session="):]
 	end := strings.IndexByte(rest, ' ')
-	require.Greater(t, end, 0)
+	gomega.Expect(end).To(gomega.BeNumerically(">", 0))
 	sessionID := rest[:end]
 
 	out, code = runCLI(t, dd, "volume", "scrub", "list")
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, sessionID)
+	gomega.Expect(code).To(gomega.Equal(0), out)
+	gomega.Expect(out).To(gomega.ContainSubstring(sessionID))
 
 	out, code = runCLI(t, dd, "volume", "scrub", "status", sessionID)
-	require.Equal(t, 0, code, out)
-	require.Contains(t, out, sessionID)
+	gomega.Expect(code).To(gomega.Equal(0), out)
+	gomega.Expect(out).To(gomega.ContainSubstring(sessionID))
 }

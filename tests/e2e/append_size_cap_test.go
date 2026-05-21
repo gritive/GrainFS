@@ -9,7 +9,7 @@ import (
 
 	"github.com/aws/smithy-go"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestAppendSizeCapE2E pins the design § Follow-up 2 contract:
@@ -51,12 +51,12 @@ func runSizeCapCases(getTgt func() s3Target, smallCap int64) {
 		bucket := tgt.uniqueBucket(t, "reject")
 		key := "obj-over"
 		body := bytes.Repeat([]byte("x"), int(smallCap-1))
-		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, body))
+		gomega.Expect(putAppend(tgt.pickNode(0), bucket, key, 0, body)).To(gomega.Succeed())
 		err := putAppend(tgt.pickNode(0), bucket, key, smallCap-1, []byte("yz"))
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		require.Equal(t, "EntityTooLarge", apiErr.ErrorCode(),
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("EntityTooLarge"),
 			"over-cap append must surface EntityTooLarge, got %s", apiErr.ErrorCode())
 	})
 
@@ -66,7 +66,7 @@ func runSizeCapCases(getTgt func() s3Target, smallCap int64) {
 		bucket := tgt.uniqueBucket(t, "race")
 		key := "obj-race"
 		prefill := bytes.Repeat([]byte("x"), int(smallCap-4))
-		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, prefill))
+		gomega.Expect(putAppend(tgt.pickNode(0), bucket, key, 0, prefill)).To(gomega.Succeed())
 
 		var wg sync.WaitGroup
 		var successes atomic.Int64
@@ -92,8 +92,8 @@ func runSizeCapCases(getTgt func() s3Target, smallCap int64) {
 			}(i)
 		}
 		wg.Wait()
-		require.Equal(t, int64(1), successes.Load(), "exactly one append must win")
-		require.Equal(t, int64(tgt.nodes-1), rejects.Load(),
+		gomega.Expect(successes.Load()).To(gomega.Equal(int64(1)), "exactly one append must win")
+		gomega.Expect(rejects.Load()).To(gomega.Equal(int64(tgt.nodes-1)),
 			"all losers must surface EntityTooLarge or InvalidWriteOffset")
 	})
 }

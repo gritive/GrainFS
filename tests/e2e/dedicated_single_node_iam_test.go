@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestDedicatedSingleNode_AdminGrant_Regression guards against R2
@@ -37,13 +37,13 @@ var _ = ginkgo.Describe("Dedicated single-node IAM", func() {
 			Key:    aws.String("k"),
 			Body:   stringReader("body"),
 		})
-		require.NoError(t, err, "PutObject must succeed under dedicated single-node admin SA")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject must succeed under dedicated single-node admin SA")
 
 		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("k"),
 		})
-		require.NoError(t, err, "HeadObject must succeed under dedicated single-node admin SA")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "HeadObject must succeed under dedicated single-node admin SA")
 
 		// Sub-case 2: management API — PutBucketLifecycleConfiguration must
 		// succeed (R2 primary manifestation at HEAD: 403 AccessDenied).
@@ -58,6 +58,6 @@ var _ = ginkgo.Describe("Dedicated single-node IAM", func() {
 				}},
 			},
 		})
-		require.NoError(t, err, "PutBucketLifecycleConfiguration must succeed (R2 regression guard)")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutBucketLifecycleConfiguration must succeed (R2 regression guard)")
 	})
 })

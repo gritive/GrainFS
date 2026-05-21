@@ -4,8 +4,7 @@ import (
 	"os/exec"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestServeFlagsRejectionE2E is a regression gate locking the removal of
@@ -31,12 +30,11 @@ func runServeFlagsRejectionCases() {
 	for _, c := range cases {
 		c := c
 		ginkgo.It("rejects "+c.flag, func() {
-			t := ginkgo.GinkgoTB()
 			cmd := exec.Command(binary, "serve", c.flag, "value", "--data", "/tmp/_unused_serve_flags_test", "--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
 			out, err := cmd.CombinedOutput()
-			require.Error(t, err, "binary must exit non-zero when %s is present", c.flag)
-			assert.Contains(t, string(out), "unknown flag", "stderr must mention 'unknown flag' for %s; got: %s", c.flag, string(out))
-			assert.Contains(t, string(out), c.flag, "stderr should reference the rejected flag name; got: %s", string(out))
+			gomega.Expect(err).To(gomega.HaveOccurred(), "binary must exit non-zero when %s is present", c.flag)
+			gomega.Expect(string(out)).To(gomega.ContainSubstring("unknown flag"), "stderr must mention 'unknown flag' for %s; got: %s", c.flag, string(out))
+			gomega.Expect(string(out)).To(gomega.ContainSubstring(c.flag), "stderr should reference the rejected flag name; got: %s", string(out))
 		})
 	}
 }

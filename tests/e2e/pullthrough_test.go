@@ -16,8 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // Pull-through cache exercises the pull-through cache layer end-to-end
@@ -82,7 +81,7 @@ func startPullthroughUpstream(t testing.TB) *pullthroughUpstream {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-pullthrough-upstream-")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	port := freePort()
@@ -98,14 +97,14 @@ func startPullthroughUpstream(t testing.TB) *pullthroughUpstream {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start upstream grainfs")
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start upstream grainfs")
 	ginkgo.DeferCleanup(terminateProcess, cmd)
 
-	require.NoError(t, waitForPortM(port, 30*time.Second))
+	gomega.Expect(waitForPortM(port, 30*time.Second)).To(gomega.Succeed())
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
 	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
-	require.NoError(t, waitForIAMReady(client, 30*time.Second))
+	gomega.Expect(waitForIAMReady(client, 30*time.Second)).To(gomega.Succeed())
 
 	return &pullthroughUpstream{
 		endpoint:  endpoint,
@@ -140,7 +139,7 @@ func runPullthroughFetchesFromUpstream(t testing.TB, tgt s3Target, upstream *pul
 		Key:    aws.String("data/file.txt"),
 		Body:   strings.NewReader("upstream-content"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Wire the local bucket to the upstream via admin UDS.
 	iamPutBucketUpstream(t, tgt.adminSockPath(), bucket, upstream.endpoint, upstream.accessKey, upstream.secretKey)
@@ -152,20 +151,20 @@ func runPullthroughFetchesFromUpstream(t testing.TB, tgt s3Target, upstream *pul
 		Bucket: aws.String(bucket),
 		Key:    aws.String("data/file.txt"),
 	})
-	require.NoError(t, err, "pull-through GET must succeed")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "pull-through GET must succeed")
 	ginkgo.DeferCleanup(getResp.Body.Close)
 	body, _ := io.ReadAll(getResp.Body)
-	assert.Equal(t, "upstream-content", string(body), "pull-through must return upstream content")
+	gomega.Expect(string(body)).To(gomega.Equal("upstream-content"), "pull-through must return upstream content")
 
 	// Second GET — local cache hit, no upstream needed.
 	getResp2, err := local.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("data/file.txt"),
 	})
-	require.NoError(t, err, "cached GET must succeed")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cached GET must succeed")
 	ginkgo.DeferCleanup(getResp2.Body.Close)
 	body2, _ := io.ReadAll(getResp2.Body)
-	assert.Equal(t, "upstream-content", string(body2))
+	gomega.Expect(string(body2)).To(gomega.Equal("upstream-content"))
 }
 
 func runPullthroughLargeObject(t testing.TB, tgt s3Target, upstream *pullthroughUpstream) {
@@ -180,7 +179,7 @@ func runPullthroughLargeObject(t testing.TB, tgt s3Target, upstream *pullthrough
 	// (parity gap with single tracked in TODOS.md).
 	payload := make([]byte, 5*1024*1024)
 	_, err := rand.Read(payload)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	ctx := context.Background()
 	_, err = upstream.client.PutObject(ctx, &s3.PutObjectInput{
@@ -189,7 +188,7 @@ func runPullthroughLargeObject(t testing.TB, tgt s3Target, upstream *pullthrough
 		Body:          bytes.NewReader(payload),
 		ContentLength: aws.Int64(int64(len(payload))),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	iamPutBucketUpstream(t, tgt.adminSockPath(), bucket, upstream.endpoint, upstream.accessKey, upstream.secretKey)
 
@@ -200,20 +199,20 @@ func runPullthroughLargeObject(t testing.TB, tgt s3Target, upstream *pullthrough
 		Bucket: aws.String(bucket),
 		Key:    aws.String("bigfile.bin"),
 	})
-	require.NoError(t, err, "pull-through GET must succeed for large object")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "pull-through GET must succeed for large object")
 	ginkgo.DeferCleanup(getResp.Body.Close)
 	got, err := io.ReadAll(getResp.Body)
-	require.NoError(t, err)
-	assert.Equal(t, payload, got, "pull-through must return bytes-identical content for large object")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got).To(gomega.Equal(payload), "pull-through must return bytes-identical content for large object")
 
 	// Second GET: cache hit.
 	getResp2, err := local.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("bigfile.bin"),
 	})
-	require.NoError(t, err, "cached GET must succeed")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cached GET must succeed")
 	ginkgo.DeferCleanup(getResp2.Body.Close)
 	got2, err := io.ReadAll(getResp2.Body)
-	require.NoError(t, err)
-	assert.Equal(t, payload, got2, "cached object must be bytes-identical to original")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got2).To(gomega.Equal(payload), "cached object must be bytes-identical to original")
 }

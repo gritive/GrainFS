@@ -16,8 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Multipart uploads", func() {
@@ -79,8 +78,8 @@ func runMultipartCases(getTgt func() s3Target) {
 			Key:         aws.String(key),
 			ContentType: aws.String("application/octet-stream"),
 		})
-		require.NoError(t, err)
-		require.NotEmpty(t, aws.ToString(initOut.UploadId))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToString(initOut.UploadId)).NotTo(gomega.BeEmpty())
 
 		uploadID := initOut.UploadId
 
@@ -91,7 +90,7 @@ func runMultipartCases(getTgt func() s3Target) {
 			PartNumber: aws.Int32(1),
 			Body:       bytes.NewReader(part1Data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:     aws.String(bucket),
@@ -100,7 +99,7 @@ func runMultipartCases(getTgt func() s3Target) {
 			PartNumber: aws.Int32(2),
 			Body:       bytes.NewReader(part2Data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 			Bucket:   aws.String(bucket),
@@ -113,19 +112,19 @@ func runMultipartCases(getTgt func() s3Target) {
 				},
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		expected := append(part1Data, part2Data...)
-		assert.Equal(t, expected, body)
-		assert.Equal(t, int64(len(expected)), aws.ToInt64(getOut.ContentLength))
+		gomega.Expect(body).To(gomega.Equal(expected))
+		gomega.Expect(aws.ToInt64(getOut.ContentLength)).To(gomega.Equal(int64(len(expected))))
 	})
 
 	ginkgo.It("aborts a multipart upload", func() {
@@ -137,7 +136,7 @@ func runMultipartCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String("aborted.bin"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		client.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:     aws.String(bucket),
@@ -152,13 +151,13 @@ func runMultipartCases(getTgt func() s3Target) {
 			Key:      aws.String("aborted.bin"),
 			UploadId: initOut.UploadId,
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("aborted.bin"),
 		})
-		assert.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("lists incomplete multipart uploads and parts", func() {
@@ -185,7 +184,7 @@ func runMultipartCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		completedParts := make([]types.CompletedPart, len(partsData))
 		for i, data := range partsData {
@@ -196,7 +195,7 @@ func runMultipartCases(getTgt func() s3Target) {
 				PartNumber: aws.Int32(int32(i + 1)),
 				Body:       bytes.NewReader(data),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			completedParts[i] = types.CompletedPart{
 				PartNumber: aws.Int32(int32(i + 1)),
 				ETag:       pOut.ETag,
@@ -211,21 +210,21 @@ func runMultipartCases(getTgt func() s3Target) {
 				Parts: completedParts,
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		var expected []byte
 		for _, d := range partsData {
 			expected = append(expected, d...)
 		}
-		assert.Equal(t, expected, body)
+		gomega.Expect(body).To(gomega.Equal(expected))
 	})
 }
 
@@ -263,9 +262,9 @@ func createIncompleteMultipartListingFixture(t testing.TB, ctx context.Context, 
 		Key:         aws.String(fixture.Key),
 		ContentType: aws.String("application/octet-stream"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	fixture.Upload = aws.ToString(initOut.UploadId)
-	require.NotEmpty(t, fixture.Upload)
+	gomega.Expect(fixture.Upload).NotTo(gomega.BeEmpty())
 	t.Cleanup(func() {
 		_, _ = client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
 			Bucket:   aws.String(fixture.Bucket),
@@ -281,7 +280,7 @@ func createIncompleteMultipartListingFixture(t testing.TB, ctx context.Context, 
 		PartNumber: aws.Int32(1),
 		Body:       bytes.NewReader([]byte(partLabel + "-one")),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String(fixture.Bucket),
 		Key:        aws.String(fixture.Key),
@@ -289,7 +288,7 @@ func createIncompleteMultipartListingFixture(t testing.TB, ctx context.Context, 
 		PartNumber: aws.Int32(2),
 		Body:       bytes.NewReader([]byte(partLabel + "-two")),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	fixture.ETagOne = aws.ToString(p1.ETag)
 	fixture.ETagTwo = aws.ToString(p2.ETag)
 	return fixture
@@ -299,7 +298,7 @@ func waitForMultipartListingCreate(t testing.TB, ctx context.Context, client *s3
 	t.Helper()
 
 	var lastErr error
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
@@ -318,7 +317,8 @@ func waitForMultipartListingCreate(t testing.TB, ctx context.Context, client *s3
 			return false
 		}
 		return true
-	}, timeout, time.Second, "multipart listing create gate did not open: %v", lastErr)
+	}).WithTimeout(timeout).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "multipart listing create gate did not open: %v", lastErr)
 }
 
 func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3.Client, fixture multipartListingFixture, waitForParts bool) {
@@ -334,15 +334,15 @@ func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3
 		return err
 	}
 	if waitForParts {
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return listUploads() == nil && len(uploads.Uploads) == 1
-		}, 30*time.Second, 500*time.Millisecond)
+		}).WithTimeout(30 * time.Second).WithPolling(500 * time.Millisecond).Should(gomega.BeTrue())
 	} else {
-		require.NoError(t, listUploads())
+		gomega.Expect(listUploads()).To(gomega.Succeed())
 	}
-	require.Len(t, uploads.Uploads, 1)
-	assert.Equal(t, fixture.Key, aws.ToString(uploads.Uploads[0].Key))
-	assert.Equal(t, fixture.Upload, aws.ToString(uploads.Uploads[0].UploadId))
+	gomega.Expect(uploads.Uploads).To(gomega.HaveLen(1))
+	gomega.Expect(aws.ToString(uploads.Uploads[0].Key)).To(gomega.Equal(fixture.Key))
+	gomega.Expect(aws.ToString(uploads.Uploads[0].UploadId)).To(gomega.Equal(fixture.Upload))
 
 	var parts *s3.ListPartsOutput
 	listParts := func() error {
@@ -355,11 +355,11 @@ func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3
 		return err
 	}
 	if waitForParts {
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return listParts() == nil && multipartListingPartsMatch(parts, fixture)
-		}, 30*time.Second, 500*time.Millisecond)
+		}).WithTimeout(30 * time.Second).WithPolling(500 * time.Millisecond).Should(gomega.BeTrue())
 	} else {
-		require.NoError(t, listParts())
+		gomega.Expect(listParts()).To(gomega.Succeed())
 	}
 	assertMultipartListingParts(t, parts, fixture)
 }
@@ -377,9 +377,9 @@ func multipartListingPartsMatch(parts *s3.ListPartsOutput, fixture multipartList
 func assertMultipartListingParts(t testing.TB, parts *s3.ListPartsOutput, fixture multipartListingFixture) {
 	t.Helper()
 
-	require.Len(t, parts.Parts, 2)
-	assert.Equal(t, int32(1), aws.ToInt32(parts.Parts[0].PartNumber))
-	assert.Equal(t, fixture.ETagOne, aws.ToString(parts.Parts[0].ETag))
-	assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
-	assert.Equal(t, fixture.ETagTwo, aws.ToString(parts.Parts[1].ETag))
+	gomega.Expect(parts.Parts).To(gomega.HaveLen(2))
+	gomega.Expect(aws.ToInt32(parts.Parts[0].PartNumber)).To(gomega.Equal(int32(1)))
+	gomega.Expect(aws.ToString(parts.Parts[0].ETag)).To(gomega.Equal(fixture.ETagOne))
+	gomega.Expect(aws.ToInt32(parts.Parts[1].PartNumber)).To(gomega.Equal(int32(2)))
+	gomega.Expect(aws.ToString(parts.Parts[1].ETag)).To(gomega.Equal(fixture.ETagTwo))
 }

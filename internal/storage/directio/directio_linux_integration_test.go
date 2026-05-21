@@ -6,36 +6,39 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestLinuxDirectIOIntegration_RoundTrip(t *testing.T) {
-	dir := os.Getenv("GRAINFS_DIRECTIO_TEST_DIR")
-	if dir == "" {
-		dir = t.TempDir()
-	} else {
-		require.NoError(t, os.MkdirAll(dir, 0o755))
-	}
+var _ = Describe("Linux DirectIO integration", func() {
+	It("round-trips an aligned write", func() {
+		dir := os.Getenv("GRAINFS_DIRECTIO_TEST_DIR")
+		if dir == "" {
+			dir = GinkgoT().TempDir()
+		} else {
+			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+		}
 
-	path := filepath.Join(dir, "directio-round-trip")
-	payload := bytes.Repeat([]byte("grainfs-directio-"), 513)
+		path := filepath.Join(dir, "directio-round-trip")
+		payload := bytes.Repeat([]byte("grainfs-directio-"), 513)
 
-	f, err := OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	require.NoError(t, err, "directio integration target must support Linux O_DIRECT")
+		f, err := OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		Expect(err).NotTo(HaveOccurred(), "directio integration target must support Linux O_DIRECT")
+		DeferCleanup(f.Close)
 
-	buf, alignedLen := AlignedCopy(payload)
-	require.Equal(t, 0, alignedLen%PageSize())
+		buf, alignedLen := AlignedCopy(payload)
+		Expect(alignedLen % PageSize()).To(Equal(0))
 
-	n, err := f.Write(buf)
-	require.NoError(t, err)
-	require.Equal(t, alignedLen, n)
-	require.NoError(t, f.Sync())
-	require.NoError(t, f.Truncate(int64(len(payload))))
-	require.NoError(t, f.Close())
+		n, err := f.Write(buf)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n).To(Equal(alignedLen))
+		Expect(f.Sync()).To(Succeed())
+		Expect(f.Truncate(int64(len(payload)))).To(Succeed())
+		Expect(f.Close()).To(Succeed())
 
-	got, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
-}
+		got, err := os.ReadFile(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(payload))
+	})
+})

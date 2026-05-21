@@ -13,7 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // lifecycleFixture drives the in-process lifecycle worker(s) deterministically
@@ -61,7 +61,7 @@ func (f *lifecycleFixture) AdvanceLifecycleClock(d time.Duration) {
 	f.now = f.now.Add(d)
 	f.startSet = true
 	payload, err := json.Marshal(map[string]int64{"unix_nano": f.now.UnixNano()})
-	require.NoError(f.t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	for _, url := range f.urls {
 		f.postSigned(url+routePathLifecycleTestSetNow, payload)
 	}
@@ -76,7 +76,7 @@ func (f *lifecycleFixture) ResetClock() {
 	f.now = time.Now()
 	f.startSet = true
 	payload, err := json.Marshal(map[string]int64{"unix_nano": f.now.UnixNano()})
-	require.NoError(f.t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	for _, url := range f.urls {
 		f.postSigned(url+routePathLifecycleTestSetNow, payload)
 	}
@@ -110,22 +110,22 @@ func (f *lifecycleFixture) postSigned(url string, body []byte) {
 	payloadHash := hex.EncodeToString(sum[:])
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	require.NoError(f.t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 	err = f.signer.SignHTTP(ctx, f.creds, req, payloadHash, "s3", "us-east-1", time.Now())
-	require.NoError(f.t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(f.t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		f.t.Logf("POST %s -> %d: %s", url, resp.StatusCode, string(respBody))
 	}
-	require.Equal(f.t, http.StatusOK, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"lifecycle test-ctl endpoint must succeed (route requires lifecycle service enabled — pass --lifecycle-interval=24h to the fixture)")
 }
 

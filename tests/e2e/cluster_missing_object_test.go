@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterMissingObjectE2E pins the S3 contract for anon GET/HEAD on a key
@@ -58,74 +58,71 @@ func describeClusterMissingObjectContext(name string, factory func(testing.TB) *
 
 func runClusterMissingObjectCases(getTgt func() *phase0Target) {
 	ginkgo.It("returns 404 for GET on a never-existed key", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		key := "/default/never-existed-" + uuid.NewString() + ".txt"
 		req, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+key, nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		require.Equalf(t, http.StatusNotFound, resp.StatusCode,
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusNotFound),
 			"anon GET on never-existed key must be 404 NoSuchKey (got %d body=%s)",
 			resp.StatusCode, string(body))
-		require.Containsf(t, string(body), "NoSuchKey",
+		gomega.Expect(string(body)).To(gomega.ContainSubstring("NoSuchKey"),
 			"404 body must carry NoSuchKey error code (got %s)", string(body))
 	})
 
 	ginkgo.It("returns 404 for HEAD on a never-existed key", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		key := "/default/never-existed-head-" + uuid.NewString() + ".txt"
 		req, err := http.NewRequestWithContext(context.Background(),
 			http.MethodHead, tgt.s3URL(0)+key, nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer resp.Body.Close()
-		require.Equalf(t, http.StatusNotFound, resp.StatusCode,
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusNotFound),
 			"anon HEAD on never-existed key must be 404 (got %d)", resp.StatusCode)
 	})
 
 	ginkgo.It("returns 404 for GET after deleting a key", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		key := "/default/deleted-" + uuid.NewString() + ".txt"
 
 		// PUT — must succeed under Phase 0 anon contract.
 		putReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+key, bytes.NewReader([]byte("transient")))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		putResp, err := http.DefaultClient.Do(putReq)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = putResp.Body.Close()
-		require.Equalf(t, http.StatusOK, putResp.StatusCode,
+		gomega.Expect(putResp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"anon PUT precondition for delete test (got %d)", putResp.StatusCode)
 
 		// DELETE — should succeed (200 or 204).
 		delReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodDelete, tgt.s3URL(0)+key, nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		delResp, err := http.DefaultClient.Do(delReq)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = delResp.Body.Close()
-		require.Containsf(t, []int{http.StatusOK, http.StatusNoContent}, delResp.StatusCode,
+		gomega.Expect([]int{http.StatusOK, http.StatusNoContent}).To(gomega.ContainElement(delResp.StatusCode),
 			"anon DELETE must succeed (got %d)", delResp.StatusCode)
 
 		// GET — must observe the latest as "not found", not a 405.
 		getReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+key, nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		getResp, err := http.DefaultClient.Do(getReq)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer getResp.Body.Close()
 		body, _ := io.ReadAll(getResp.Body)
-		require.Equalf(t, http.StatusNotFound, getResp.StatusCode,
+		gomega.Expect(getResp.StatusCode).To(gomega.Equal(http.StatusNotFound),
 			"anon GET on deleted key must be 404 NoSuchKey (got %d body=%s)",
 			getResp.StatusCode, summarizeBody(body))
-		require.Containsf(t, string(body), "NoSuchKey",
+		gomega.Expect(string(body)).To(gomega.ContainSubstring("NoSuchKey"),
 			"404 body must carry NoSuchKey error code (got %s)", summarizeBody(body))
 	})
 }

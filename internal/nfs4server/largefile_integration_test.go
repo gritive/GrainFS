@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 const (
@@ -83,240 +84,146 @@ func testSizeName(size int64) string {
 	}
 }
 
-func TestNFSv4LargeFileRead(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
+var _ = Describe("NFS4 large file integration", func() {
+	var (
+		ctx     context.Context
+		backend *storage.LocalBackend
+	)
 
-	backend, err := storage.NewLocalBackend(t.TempDir())
-	if err != nil {
-		t.Fatalf("failed to create backend: %v", err)
-	}
-	defer backend.Close()
+	BeforeEach(func() {
+		if testing.Short() {
+			Skip("Skipping large file test in short mode")
+		}
 
-	sizes := []int64{
-		10 * 1024 * 1024,                    // under the 16MiB storage segment size
-		int64(storage.DefaultChunkSize) + 1, // crosses the segment boundary
-	}
+		ctx = context.Background()
+		var err error
+		backend, err = storage.NewLocalBackend(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(backend.Close)
 
-	for _, size := range sizes {
-		t.Run(testSizeName(size), func(t *testing.T) {
+		err = backend.CreateBucket(ctx, testBucket)
+		if err != nil && err != storage.ErrBucketAlreadyExists {
+			Fail(fmt.Sprintf("failed to create bucket: %v", err))
+		}
+	})
+
+	DescribeTable("reads large files",
+		func(size int64) {
 			checksum := checksumForGeneratedPattern(size)
-
-			// Create bucket first
-			err := backend.CreateBucket(context.Background(), testBucket)
-			if err != nil && err != storage.ErrBucketAlreadyExists {
-				t.Fatalf("failed to create bucket: %v", err)
-			}
 
 			// Upload file via storage backend directly
 			key := "test-largefile.bin"
-			_, err = backend.PutObject(context.Background(), testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
-			if err != nil {
-				t.Fatalf("failed to upload test file: %v", err)
-			}
+			_, err := backend.PutObject(ctx, testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
+			Expect(err).NotTo(HaveOccurred())
 
 			// Read via backend (simulating NFSv4 read)
-			start := time.Now()
-			rc, _, err := backend.GetObject(context.Background(), testBucket, key)
-			if err != nil {
-				t.Fatalf("failed to open file: %v", err)
-			}
-			defer rc.Close()
+			rc, _, err := backend.GetObject(ctx, testBucket, key)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(rc.Close)
 
 			readSize, readChecksum, err := readChecksum(rc)
-			if err != nil {
-				t.Fatalf("failed to read file: %v", err)
-			}
-			duration := time.Since(start)
+			Expect(err).NotTo(HaveOccurred())
 
 			// Verify data integrity
-			if readSize != size {
-				t.Errorf("size mismatch: got %d, want %d", readSize, size)
-			}
+			Expect(readSize).To(Equal(size))
+			Expect(readChecksum).To(Equal(checksum))
+		},
+		Entry(testSizeName(10*1024*1024), int64(10*1024*1024)),
+		Entry(testSizeName(int64(storage.DefaultChunkSize)+1), int64(storage.DefaultChunkSize)+1),
+	)
 
-			if readChecksum != checksum {
-				t.Errorf("checksum mismatch: got %x, want %x", readChecksum, checksum)
-			}
-
-			throughput := float64(size) / duration.Seconds()
-			t.Logf("Size: %d, Throughput: %.2f MB/s, Duration: %v", size, throughput/(1024*1024), duration)
-		})
-	}
-}
-
-func TestNFSv4LargeFileWrite(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
-
-	backend, err := storage.NewLocalBackend(t.TempDir())
-	if err != nil {
-		t.Fatalf("failed to create backend: %v", err)
-	}
-	defer backend.Close()
-
-	sizes := []int64{
-		10 * 1024 * 1024,                    // under the 16MiB storage segment size
-		int64(storage.DefaultChunkSize) + 1, // crosses the segment boundary
-	}
-
-	for _, size := range sizes {
-		t.Run(testSizeName(size), func(t *testing.T) {
+	DescribeTable("writes large files",
+		func(size int64) {
 			checksum := checksumForGeneratedPattern(size)
-
-			// Create bucket first
-			err := backend.CreateBucket(context.Background(), testBucket)
-			if err != nil && err != storage.ErrBucketAlreadyExists {
-				t.Fatalf("failed to create bucket: %v", err)
-			}
 
 			key := "test-write-largefile.bin"
 
 			// Write via backend (simulating NFSv4 write)
-			start := time.Now()
-			_, err = backend.PutObject(context.Background(), testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
-			duration := time.Since(start)
-
-			if err != nil {
-				t.Fatalf("failed to write file: %v", err)
-			}
+			_, err := backend.PutObject(ctx, testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
+			Expect(err).NotTo(HaveOccurred())
 
 			// Verify via direct read
-			rc, _, err := backend.GetObject(context.Background(), testBucket, key)
-			if err != nil {
-				t.Fatalf("failed to read back file: %v", err)
-			}
-			defer rc.Close()
+			rc, _, err := backend.GetObject(ctx, testBucket, key)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(rc.Close)
 
 			readSize, readChecksum, err := readChecksum(rc)
-			if err != nil {
-				t.Fatalf("failed to verify file: %v", err)
-			}
+			Expect(err).NotTo(HaveOccurred())
 
-			if readSize != size {
-				t.Errorf("size mismatch after write: got %d, want %d", readSize, size)
-			}
-			if readChecksum != checksum {
-				t.Errorf("checksum mismatch after write: got %x, want %x", readChecksum, checksum)
-			}
+			Expect(readSize).To(Equal(size))
+			Expect(readChecksum).To(Equal(checksum))
+		},
+		Entry(testSizeName(10*1024*1024), int64(10*1024*1024)),
+		Entry(testSizeName(int64(storage.DefaultChunkSize)+1), int64(storage.DefaultChunkSize)+1),
+	)
 
-			throughput := float64(size) / duration.Seconds()
-			t.Logf("Write Size: %d, Throughput: %.2f MB/s", size, throughput/(1024*1024))
-		})
-	}
-}
+	It("handles concurrent large files", func() {
+		const numConcurrent = 6
+		const fileSize = 8 * 1024 * 1024
+		checksum := checksumForGeneratedPattern(fileSize)
 
-func TestNFSv4ConcurrentLargeFiles(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
+		done := make(chan int, numConcurrent)
+		errors := make(chan error, numConcurrent)
 
-	backend, err := storage.NewLocalBackend(t.TempDir())
-	if err != nil {
-		t.Fatalf("failed to create backend: %v", err)
-	}
-	defer backend.Close()
+		for i := 0; i < numConcurrent; i++ {
+			go func(idx int) {
+				key := fmt.Sprintf("test-concurrent-%d.bin", idx)
+				_, err := backend.PutObject(ctx, testBucket, key, newGeneratedPatternReader(fileSize), "application/octet-stream")
+				if err != nil {
+					errors <- err
+					return
+				}
 
-	// Create bucket first
-	err = backend.CreateBucket(context.Background(), testBucket)
-	if err != nil && err != storage.ErrBucketAlreadyExists {
-		t.Fatalf("failed to create bucket: %v", err)
-	}
+				rc, _, err := backend.GetObject(ctx, testBucket, key)
+				if err != nil {
+					errors <- err
+					return
+				}
+				defer rc.Close()
 
-	const numConcurrent = 6
-	const fileSize = 8 * 1024 * 1024
-	checksum := checksumForGeneratedPattern(fileSize)
+				readSize, readChecksum, err := readChecksum(rc)
+				if err != nil {
+					errors <- err
+					return
+				}
+				if readSize != fileSize {
+					errors <- fmt.Errorf("size mismatch for file %d: got %d want %d", idx, readSize, fileSize)
+					return
+				}
+				if readChecksum != checksum {
+					errors <- fmt.Errorf("checksum mismatch for file %d", idx)
+					return
+				}
 
-	// Launch concurrent writers
-	done := make(chan int, numConcurrent)
-	errors := make(chan error, numConcurrent)
-
-	for i := 0; i < numConcurrent; i++ {
-		go func(idx int) {
-			key := fmt.Sprintf("test-concurrent-%d.bin", idx)
-			_, err := backend.PutObject(context.Background(), testBucket, key, newGeneratedPatternReader(fileSize), "application/octet-stream")
-			if err != nil {
-				errors <- err
-				return
-			}
-
-			// Verify
-			rc, _, err := backend.GetObject(context.Background(), testBucket, key)
-			if err != nil {
-				errors <- err
-				return
-			}
-			defer rc.Close()
-
-			readSize, readChecksum, err := readChecksum(rc)
-			if err != nil {
-				errors <- err
-				return
-			}
-
-			if readSize != fileSize {
-				errors <- fmt.Errorf("size mismatch for file %d: got %d want %d", idx, readSize, fileSize)
-				return
-			}
-			if readChecksum != checksum {
-				errors <- fmt.Errorf("checksum mismatch for file %d", idx)
-				return
-			}
-
-			done <- idx
-		}(i)
-	}
-
-	// Wait for all goroutines
-	for i := 0; i < numConcurrent; i++ {
-		select {
-		case <-done:
-			// Success
-		case err := <-errors:
-			t.Fatalf("concurrent transfer failed: %v", err)
-		}
-	}
-}
-
-func TestNFSv4BufferPoolNoLeaks(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping large file test in short mode")
-	}
-
-	backend, err := storage.NewLocalBackend(t.TempDir())
-	if err != nil {
-		t.Fatalf("failed to create backend: %v", err)
-	}
-	defer backend.Close()
-
-	// Create bucket first
-	err = backend.CreateBucket(context.Background(), testBucket)
-	if err != nil && err != storage.ErrBucketAlreadyExists {
-		t.Fatalf("failed to create bucket: %v", err)
-	}
-
-	// Cover all buffer tiers without repeating large object I/O.
-	sizes := []int64{
-		100 * 1024,       // 100KB (small)
-		2 * 1024 * 1024,  // 2MB (medium)
-		10*1024*1024 + 1, // just over the large-buffer threshold
-	}
-
-	for i, size := range sizes {
-		key := fmt.Sprintf("test-leak-%d.bin", i)
-
-		_, err := backend.PutObject(context.Background(), testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
-		if err != nil {
-			t.Fatalf("failed to write file %d: %v", i, err)
+				done <- idx
+			}(i)
 		}
 
-		rc, _, err := backend.GetObject(context.Background(), testBucket, key)
-		if err != nil {
-			t.Fatalf("failed to read file %d: %v", i, err)
+		for i := 0; i < numConcurrent; i++ {
+			select {
+			case <-done:
+			case err := <-errors:
+				Expect(err).NotTo(HaveOccurred())
+			}
 		}
-		rc.Close()
-	}
+	})
 
-	// Test passes if no panic or OOM occurs
-}
+	It("covers buffer pool tiers without leaks", func() {
+		sizes := []int64{
+			100 * 1024,
+			2 * 1024 * 1024,
+			10*1024*1024 + 1,
+		}
+
+		for i, size := range sizes {
+			key := fmt.Sprintf("test-leak-%d.bin", i)
+
+			_, err := backend.PutObject(ctx, testBucket, key, newGeneratedPatternReader(size), "application/octet-stream")
+			Expect(err).NotTo(HaveOccurred())
+
+			rc, _, err := backend.GetObject(ctx, testBucket, key)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rc.Close()).To(Succeed())
+		}
+	})
+})

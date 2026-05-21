@@ -9,7 +9,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func openTestDB(t *testing.T) *badger.DB {
+type cleanupTestTB interface {
+	Helper()
+	Cleanup(func())
+	Errorf(format string, args ...interface{})
+	FailNow()
+}
+
+func openTestDB(t cleanupTestTB) *badger.DB {
 	t.Helper()
 	opts := badger.DefaultOptions("").WithInMemory(true).WithLogger(nil)
 	db, err := badger.Open(opts)

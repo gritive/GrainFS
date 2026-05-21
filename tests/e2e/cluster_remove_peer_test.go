@@ -11,8 +11,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster remove peer", func() {
@@ -40,7 +39,7 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 			t := ginkgo.GinkgoTB()
 
 			leaderIdx := c.leaderIdx
-			require.GreaterOrEqual(t, leaderIdx, 0, "harness must have identified leader")
+			gomega.Expect(leaderIdx).To(gomega.BeNumerically(">=", 0), "harness must have identified leader")
 
 			// Pick the first non-leader.
 			followerIdx := -1
@@ -50,7 +49,7 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 					break
 				}
 			}
-			require.GreaterOrEqual(t, followerIdx, 0)
+			gomega.Expect(followerIdx).To(gomega.BeNumerically(">=", 0))
 			// /api/cluster/status.peers reports node IDs, and remove-peer accepts the
 			// same identifier.
 			deadID := c.nodeID(followerIdx)
@@ -75,7 +74,7 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 			}
 
 			// Kill the follower hard so it never rejoins during the test.
-			require.NoError(t, c.procs[followerIdx].Process.Signal(syscall.SIGKILL))
+			gomega.Expect(c.procs[followerIdx].Process.Signal(syscall.SIGKILL)).To(gomega.Succeed())
 			_ = c.procs[followerIdx].Wait()
 			c.procs[followerIdx] = nil
 
@@ -86,20 +85,20 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			ginkgo.DeferCleanup(cancel)
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, leaderURL+"/api/cluster/remove-peer", bytes.NewReader(body))
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := http.DefaultClient.Do(req)
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			require.Equal(t, http.StatusOK, resp.StatusCode, "remove-peer must succeed, body=%s", string(respBody))
+			gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK), "remove-peer must succeed, body=%s", string(respBody))
 
 			// After remove, leader's remote voter set shrinks from 2 to 1, no longer contains the removed id.
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				s := getStatusJSON(t, leaderURL)
 				voters := stringList(s["peers"])
 				return len(voters) == 1 && !containsString(voters, deadID)
-			}, 30*time.Second, 500*time.Millisecond, "voter set must shrink to 1 remote without the removed id")
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "voter set must shrink to 1 remote without the removed id")
 
 			// Audit event must surface in the event log.
 			events := getEventLog(t, leaderURL)
@@ -110,7 +109,7 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 					break
 				}
 			}
-			assert.True(t, found, "cluster-remove-peer event must appear in /api/eventlog")
+			gomega.Expect(found).To(gomega.BeTrue(), "cluster-remove-peer event must appear in /api/eventlog")
 		})
 	})
 })
@@ -118,20 +117,20 @@ var _ = ginkgo.Describe("Cluster remove peer", func() {
 func getStatusJSON(t testing.TB, base string) map[string]any {
 	t.Helper()
 	resp, err := http.Get(base + "/api/cluster/status")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	out := map[string]any{}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	gomega.Expect(json.NewDecoder(resp.Body).Decode(&out)).To(gomega.Succeed())
 	return out
 }
 
 func getEventLog(t testing.TB, base string) []map[string]any {
 	t.Helper()
 	resp, err := http.Get(base + "/api/eventlog?since=300&limit=200")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	var events []map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&events))
+	gomega.Expect(json.NewDecoder(resp.Body).Decode(&events)).To(gomega.Succeed())
 	return events
 }
 

@@ -24,7 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // s3Target abstracts a fixture (single-node or cluster) for e2e tests that
@@ -70,7 +70,7 @@ func newSingleNodeS3Target() s3Target {
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("single", t.Name(), caseName)
 			createBucket(t, name)
-			t.Cleanup(func() {
+			ginkgo.DeferCleanup(func() {
 				testS3Client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
@@ -181,7 +181,7 @@ func newSharedClusterS3Target(t testing.TB) s3Target {
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
-			t.Cleanup(func() {
+			ginkgo.DeferCleanup(func() {
 				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
@@ -237,7 +237,7 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("cluster4", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, name, c.S3Client(c.leaderIdx))
-			t.Cleanup(func() {
+			ginkgo.DeferCleanup(func() {
 				c.S3Client(c.leaderIdx).DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
@@ -264,8 +264,8 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-e2e-single-dedicated-")
-	require.NoError(t, err)
-	t.Cleanup(func() {
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	ginkgo.DeferCleanup(func() {
 		_ = os.RemoveAll(dir)
 	})
 
@@ -287,22 +287,22 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start single-node grainfs")
-	t.Cleanup(func() {
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start single-node grainfs")
+	ginkgo.DeferCleanup(func() {
 		terminateProcess(cmd)
 	})
 
-	require.NoError(t, waitForPortM(port, 30*time.Second), "wait for HTTP port")
+	gomega.Expect(waitForPortM(port, 30*time.Second)).To(gomega.Succeed(), "wait for HTTP port")
 
 	admin, err := bootstrapAdminResultViaUDSForTestMain(dir, 30*time.Second)
-	require.NoError(t, err, "bootstrap admin SA via UDS")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA via UDS")
 	ak, sk := admin.AccessKey, admin.SecretKey
 
-	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
+	gomega.Expect(patchSnapshotIntervalM(dir, "0s")).To(gomega.Succeed(), "disable auto-snapshot")
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	client := ecS3Client(endpoint, ak, sk)
-	require.NoError(t, waitForIAMReady(client, 30*time.Second), "wait for IAM ready")
+	gomega.Expect(waitForIAMReady(client, 30*time.Second)).To(gomega.Succeed(), "wait for IAM ready")
 
 	return s3Target{
 		name:  "single-dedicated",
@@ -321,7 +321,7 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 		uniqueBucket: func(t testing.TB, caseName string) string {
 			name := bucketNameFor("single-dedicated", t.Name(), caseName)
 			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, name, client)
-			t.Cleanup(func() {
+			ginkgo.DeferCleanup(func() {
 				client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(name)})
 			})
 			return name
@@ -362,11 +362,11 @@ func runBucketNameForCases(t testing.TB) {
 	t.Helper()
 
 	got := bucketNameFor("single", "TestS3FooE2E/SingleNode/Put", "basic")
-	require.Equal(t, "single-tests3fooe2e-singlenode-put-basic", got)
-	require.LessOrEqual(t, len(got), 63)
+	gomega.Expect(got).To(gomega.Equal("single-tests3fooe2e-singlenode-put-basic"))
+	gomega.Expect(len(got)).To(gomega.BeNumerically("<=", 63))
 
 	long := bucketNameFor("cluster4", "TestS3VersioningE2E/Cluster4Node/ListObjectVersionsWithDeleteMarker", "basic")
-	require.LessOrEqual(t, len(long), 63)
-	require.GreaterOrEqual(t, len(long), 3)
-	require.Regexp(t, `^cluster4-basic-[0-9a-f]{8}$`, long)
+	gomega.Expect(len(long)).To(gomega.BeNumerically("<=", 63))
+	gomega.Expect(len(long)).To(gomega.BeNumerically(">=", 3))
+	gomega.Expect(long).To(gomega.MatchRegexp(`^cluster4-basic-[0-9a-f]{8}$`))
 }

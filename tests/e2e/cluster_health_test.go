@@ -5,8 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterHealthCLIE2E verifies `grainfs cluster health` against both
@@ -37,7 +36,6 @@ var _ = ginkgo.Describe("Cluster admin CLI health", func() {
 
 func runClusterHealthCLICases(getTgt func() s3Target) {
 	ginkgo.It("renders JSON", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -46,17 +44,16 @@ func runClusterHealthCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"health", "--format", "json",
 		).Output()
-		require.NoError(t, err, "cluster health command must succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cluster health command must succeed")
 
 		var h map[string]any
-		require.NoError(t, json.Unmarshal(out, &h), "output must be valid JSON")
-		assert.Contains(t, []any{"cluster", "local"}, h["mode"])
+		gomega.Expect(json.Unmarshal(out, &h)).To(gomega.Succeed(), "output must be valid JSON")
+		gomega.Expect([]any{"cluster", "local"}).To(gomega.ContainElement(h["mode"]))
 		_, ok := h["quorum"].(map[string]any)
-		assert.True(t, ok, "quorum object expected")
+		gomega.Expect(ok).To(gomega.BeTrue(), "quorum object expected")
 	})
 
 	ginkgo.It("renders text", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		binary := getBinary()
 		sock := tgt.adminSockPath()
@@ -65,10 +62,10 @@ func runClusterHealthCLICases(getTgt func() s3Target) {
 			"--endpoint", sock,
 			"health",
 		).Output()
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		output := string(out)
-		assert.Contains(t, output, "mode:")
-		assert.Contains(t, output, "ISSUES")
+		gomega.Expect(output).To(gomega.ContainSubstring("mode:"))
+		gomega.Expect(output).To(gomega.ContainSubstring("ISSUES"))
 	})
 }

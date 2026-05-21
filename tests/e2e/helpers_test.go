@@ -24,7 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var (
@@ -199,20 +199,18 @@ func TestMain(m *testing.M) {
 
 var _ = ginkgo.Describe("E2E helper utilities", func() {
 	ginkgo.It("returns when a watched process exits while waiting for ports", func() {
-		t := ginkgo.GinkgoTB()
 		cmd := exec.Command("sh", "-c", "exit 7")
-		require.NoError(t, cmd.Start())
+		gomega.Expect(cmd.Start()).To(gomega.Succeed())
 
 		started := time.Now()
 		err := waitForPortsParallelErrWithProcesses([]int{freePort()}, []*exec.Cmd{cmd}, 5*time.Second)
 
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "process exited")
-		require.Less(t, time.Since(started), time.Second)
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("process exited"))
+		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", time.Second))
 	})
 
 	ginkgo.It("returns from CombinedOutput when a descendant keeps the pipe open", func() {
-		t := ginkgo.GinkgoTB()
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		ginkgo.DeferCleanup(cancel)
 
@@ -220,15 +218,15 @@ var _ = ginkgo.Describe("E2E helper utilities", func() {
 		started := time.Now()
 		out, err := combinedOutputWithWaitDelay(cmd)
 
-		require.Error(t, err)
-		require.Empty(t, out)
-		require.Less(t, time.Since(started), 2*time.Second)
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect(out).To(gomega.BeEmpty())
+		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", 2*time.Second))
 	})
 
 	ginkgo.It("terminates signal-ignoring cluster processes", func() {
 		t := ginkgo.GinkgoTB()
 		cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 60")
-		require.NoError(t, cmd.Start())
+		gomega.Expect(cmd.Start()).To(gomega.Succeed())
 		ginkgo.DeferCleanup(terminateProcess, cmd)
 
 		c := &e2eCluster{
@@ -238,15 +236,15 @@ var _ = ginkgo.Describe("E2E helper utilities", func() {
 		started := time.Now()
 		c.Stop()
 
-		require.Less(t, time.Since(started), time.Second)
-		require.Error(t, cmd.Process.Signal(syscall.Signal(0)))
+		gomega.Expect(time.Since(started)).To(gomega.BeNumerically("<", time.Second))
+		gomega.Expect(cmd.Process.Signal(syscall.Signal(0))).To(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("keeps admin socket paths short", func() {
 		t := ginkgo.GinkgoTB()
 		dir := shortTempDir(t)
-		require.Less(t, len(filepath.Join(dir, "admin.sock")), 104)
-		require.Less(t, len(filepath.Join(dir, "rotate.sock")), 104)
+		gomega.Expect(len(filepath.Join(dir, "admin.sock"))).To(gomega.BeNumerically("<", 104))
+		gomega.Expect(len(filepath.Join(dir, "rotate.sock"))).To(gomega.BeNumerically("<", 104))
 	})
 })
 
@@ -538,7 +536,7 @@ func waitForPort(t testing.TB, port int, timeout time.Duration) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	require.Failf(t, "server did not start", "server did not start on port %d within %v", port, timeout)
+	ginkgo.Fail(fmt.Sprintf("server did not start on port %d within %v", port, timeout))
 }
 
 // waitForPortsParallel waits for all ports to become available concurrently.
@@ -673,13 +671,13 @@ func waitForS3Write(t testing.TB, client *s3.Client, bucket, key string, timeout
 		lastErr = err
 		time.Sleep(250 * time.Millisecond)
 	}
-	require.Failf(t, "bucket did not become writable", "bucket %s did not become writable within %v: %v", bucket, timeout, lastErr)
+	ginkgo.Fail(fmt.Sprintf("bucket %s did not become writable within %v: %v", bucket, timeout, lastErr))
 }
 
 func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-e2e-isolated-*")
-	require.NoError(t, err, "mkdtemp")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	port := freePort()
@@ -695,7 +693,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start isolated server")
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start isolated server")
 	t.Cleanup(func() { terminateProcess(cmd) })
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -708,7 +706,7 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	// the auto-snapshot loop PATCH it back to a non-zero interval explicitly.
 	patchSnapshotInterval(t, dir, "0s")
 	cli := s3ClientFor(url, ak, sk)
-	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
+	gomega.Expect(waitForIAMReady(cli, 30*time.Second)).To(gomega.Succeed())
 	return url, cli
 }
 

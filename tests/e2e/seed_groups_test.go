@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Seed groups", func() {
@@ -31,7 +31,7 @@ func runSeedGroupsAutoCases(getGroupDirs func() map[string]int) {
 		// group-1..N-1, so verify the auto-seeded normal group headroom.
 		for i := 1; i < wantSeedGroups; i++ {
 			gid := fmt.Sprintf("group-%d", i)
-			require.NotZero(t, groupDirs[gid], "automatic seed group %s must exist", gid)
+			gomega.Expect(groupDirs[gid]).NotTo(gomega.BeZero(), "automatic seed group %s must exist", gid)
 		}
 		t.Logf("auto seed-groups test passed: %d groups seeded across %d nodes", wantSeedGroups, numNodes)
 	})

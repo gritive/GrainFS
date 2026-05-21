@@ -10,7 +10,6 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 // seedLogEntries replaces the node's log store with the given entries. Must be
@@ -534,8 +533,9 @@ var _ = ginkgo.Describe("Replication scenarios", func() {
 })
 
 func TestAppendEntriesRejectsNonContiguousBatch(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n, err := NewNode(Config{ID: "follower", Peers: []string{"leader"}, ElectionTimeout: time.Hour})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	n.Start()
 	t.Cleanup(n.Stop)
 	go func() {
@@ -555,9 +555,9 @@ func TestAppendEntriesRejectsNonContiguousBatch(t *testing.T) {
 		LeaderCommit: 0,
 	})
 
-	require.False(t, reply.Success)
+	g.Expect(reply.Success).To(gomega.BeFalse())
 	n.Stop()
-	require.Equal(t, uint64(0), n.st.log.LastIndex(), "malformed batch must not partially append")
+	g.Expect(n.st.log.LastIndex()).To(gomega.Equal(uint64(0)), "malformed batch must not partially append")
 }
 
 // startClusterCapture is the replication-test counterpart of startCluster.
@@ -581,7 +581,8 @@ type capturedNode struct {
 // applied-entry slices, one per node.
 func startCapturingCluster(t *testing.T, ids ...string) []*capturedNode {
 	t.Helper()
-	require.Len(t, ids, 3, "startCapturingCluster expects exactly 3 ids")
+	g := gomega.NewWithT(t)
+	g.Expect(ids).To(gomega.HaveLen(3), "startCapturingCluster expects exactly 3 ids")
 
 	net := newMemNetwork()
 	caps := make([]*capturedNode, 0, len(ids))
@@ -603,7 +604,7 @@ func startCapturingCluster(t *testing.T, ids ...string) []*capturedNode {
 			ElectionTimeout:  electionTimeout,
 			HeartbeatTimeout: testHeartbeat,
 		})
-		require.NoError(t, err)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
 		caps = append(caps, &capturedNode{node: n, doneCh: make(chan struct{})})
 	}
 
@@ -637,14 +638,15 @@ func startCapturingCluster(t *testing.T, ids ...string) []*capturedNode {
 // applyCh and the capture goroutine drains.
 func waitForCommitted(t *testing.T, caps []*capturedNode, idx uint64, timeout time.Duration) {
 	t.Helper()
-	require.NoError(t, waitFor(timeout, func() bool {
+	g := gomega.NewWithT(t)
+	g.Expect(waitFor(timeout, func() bool {
 		for _, c := range caps {
 			if c.node.CommittedIndex() < idx {
 				return false
 			}
 		}
 		return true
-	}), "not all nodes reached commitIndex >= %d", idx)
+	})).To(gomega.Succeed(), "not all nodes reached commitIndex >= %d", idx)
 }
 
 // readApplied stops the node and returns the captured entries. After Stop
@@ -704,6 +706,7 @@ func otherIDsLocal(ids []string, self string) []string {
 // [{T2,I2,X}, {T2,I3,Y}]. Expected: follower truncates indices 2-3, appends
 // the new entries; final log = [{T1,I1,A}, {T2,I2,X}, {T2,I3,Y}].
 func TestReplication_TruncateMultipleEntries(t *testing.T) {
+	g := gomega.NewWithT(t)
 	// Two peers so the Node starts as Follower (single-voter would auto-Leader).
 	n, err := NewNode(Config{
 		ID:               "n1",
@@ -711,7 +714,7 @@ func TestReplication_TruncateMultipleEntries(t *testing.T) {
 		ElectionTimeout:  time.Hour, // park election timer; we drive AE manually
 		HeartbeatTimeout: testHeartbeat,
 	})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	// Seed the log BEFORE Start. Safe: the actor goroutine has not yet been
 	// launched, so we are the sole writer.
 	seedLogEntries(n, []LogEntry{
@@ -741,34 +744,35 @@ func TestReplication_TruncateMultipleEntries(t *testing.T) {
 		},
 		LeaderCommit: 0,
 	})
-	require.True(t, reply.Success, "AE with valid PrevLog should succeed")
+	g.Expect(reply.Success).To(gomega.BeTrue(), "AE with valid PrevLog should succeed")
 
 	// Stop, then read st.log under quiescence (actor exited; sole-writer
 	// invariant trivially holds because we are the only goroutine left).
 	n.Stop()
-	require.Equal(t, uint64(3), n.st.log.LastIndex(), "log length after truncate+append")
+	g.Expect(n.st.log.LastIndex()).To(gomega.Equal(uint64(3)), "log length after truncate+append")
 	e1 := mustLogEntry(n, 1)
-	require.Equal(t, uint64(1), e1.Term)
-	require.Equal(t, []byte("A"), e1.Command)
+	g.Expect(e1.Term).To(gomega.Equal(uint64(1)))
+	g.Expect(e1.Command).To(gomega.Equal([]byte("A")))
 	e2 := mustLogEntry(n, 2)
-	require.Equal(t, uint64(2), e2.Term)
-	require.Equal(t, []byte("X"), e2.Command)
+	g.Expect(e2.Term).To(gomega.Equal(uint64(2)))
+	g.Expect(e2.Command).To(gomega.Equal([]byte("X")))
 	e3 := mustLogEntry(n, 3)
-	require.Equal(t, uint64(2), e3.Term)
-	require.Equal(t, []byte("Y"), e3.Command)
+	g.Expect(e3.Term).To(gomega.Equal(uint64(2)))
+	g.Expect(e3.Command).To(gomega.Equal([]byte("Y")))
 }
 
 // TestReplication_ConflictHintShortLog: follower's log is shorter than
 // PrevLogIndex. Reply must carry ConflictTerm=0 and
 // ConflictIndex=lastLogIndex+1 (Case 1 of the §5.3 hint).
 func TestReplication_ConflictHintShortLog(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	// Seed: only one entry at index 1.
 	seedLogEntries(n, []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}})
 	n.st.currentTerm = 1
@@ -789,22 +793,23 @@ func TestReplication_ConflictHintShortLog(t *testing.T) {
 		PrevLogTerm:  2,
 		Entries:      nil,
 	})
-	require.False(t, reply.Success)
-	require.Equal(t, uint64(0), reply.ConflictTerm, "ConflictTerm=0 for short log")
-	require.Equal(t, uint64(2), reply.ConflictIndex, "ConflictIndex = lastLogIndex+1")
+	g.Expect(reply.Success).To(gomega.BeFalse())
+	g.Expect(reply.ConflictTerm).To(gomega.Equal(uint64(0)), "ConflictTerm=0 for short log")
+	g.Expect(reply.ConflictIndex).To(gomega.Equal(uint64(2)), "ConflictIndex = lastLogIndex+1")
 }
 
 // TestReplication_ConflictHintTermMismatch: follower has an entry at
 // PrevLogIndex but with a different term. The reply must carry the conflicting
 // term and the first index where that term begins (Case 2 of §5.3).
 func TestReplication_ConflictHintTermMismatch(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	// Seed: log = [{T1,I1}, {T2,I2}, {T2,I3}, {T2,I4}, {T3,I5}].
 	// Leader probes PrevLogIndex=4 with PrevLogTerm=99 → mismatch at I4.
 	// Conflict term = 2; first index of term 2 in our log = 2.
@@ -831,9 +836,9 @@ func TestReplication_ConflictHintTermMismatch(t *testing.T) {
 		PrevLogIndex: 4,
 		PrevLogTerm:  99, // forces term mismatch at I4 (we have T2 there)
 	})
-	require.False(t, reply.Success)
-	require.Equal(t, uint64(2), reply.ConflictTerm, "ConflictTerm = follower's term at PrevLogIndex")
-	require.Equal(t, uint64(2), reply.ConflictIndex, "ConflictIndex = first index of conflicting term")
+	g.Expect(reply.Success).To(gomega.BeFalse())
+	g.Expect(reply.ConflictTerm).To(gomega.Equal(uint64(2)), "ConflictTerm = follower's term at PrevLogIndex")
+	g.Expect(reply.ConflictIndex).To(gomega.Equal(uint64(2)), "ConflictIndex = first index of conflicting term")
 }
 
 // countingAETransport wraps a Transport and counts SendAppendEntries calls
@@ -906,13 +911,14 @@ func (c *capturingAETransport) SendTimeoutNow(peer string, args *TimeoutNowArgs)
 // an AE whose Entries[0].Index doesn't match args.PrevLogIndex+1.
 // Follower's log must remain unchanged on rejection.
 func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n, err := NewNode(Config{
 		ID:               "n1",
 		Peers:            []string{"p1", "p2"},
 		ElectionTimeout:  time.Hour,
 		HeartbeatTimeout: testHeartbeat,
 	})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	seedLogEntries(n, []LogEntry{{Term: 1, Index: 1, Command: []byte("A")}})
 	n.st.currentTerm = 1
 	n.rs.Store(n.st.snapshot())
@@ -935,14 +941,14 @@ func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
 		},
 		LeaderCommit: 0,
 	})
-	require.False(t, reply.Success, "AE with mismatched entry index must be rejected")
+	g.Expect(reply.Success).To(gomega.BeFalse(), "AE with mismatched entry index must be rejected")
 
 	// Log must be unchanged.
 	n.Stop()
-	require.Equal(t, uint64(1), n.st.log.LastIndex(), "follower log must be unchanged after rejection")
+	g.Expect(n.st.log.LastIndex()).To(gomega.Equal(uint64(1)), "follower log must be unchanged after rejection")
 	e := mustLogEntry(n, 1)
-	require.Equal(t, uint64(1), e.Index)
-	require.Equal(t, []byte("A"), e.Command)
+	g.Expect(e.Index).To(gomega.Equal(uint64(1)))
+	g.Expect(e.Command).To(gomega.Equal([]byte("A")))
 }
 
 // TestApplyConflictHint_BoundedScanOnLargeLog verifies that applyConflictHint
@@ -955,6 +961,7 @@ func TestAE_RejectsMismatchedEntryIndex(t *testing.T) {
 // The test seeds leader state (log, nextIndex, matchIndex) before Start() so
 // the actor sees an already-promoted Leader without running a real election.
 func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
+	g := gomega.NewWithT(t)
 	const N = 100
 	const conflictIdx = uint64(5)
 
@@ -968,7 +975,7 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 			ElectionTimeout:  time.Hour, // park election timer — we want stable leader
 			HeartbeatTimeout: testHeartbeat,
 		})
-		require.NoError(t, nerr)
+		g.Expect(nerr).NotTo(gomega.HaveOccurred())
 		n.st.currentTerm = logTerm
 		n.st.state = Leader
 		n.st.leaderID = id
@@ -1022,7 +1029,7 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		n.Stop()
 
-		require.Equal(t, uint64(N+1), n.st.nextIndex["p1"],
+		g.Expect(n.st.nextIndex["p1"]).To(gomega.Equal(uint64(N+1)),
 			"nextIndex must be past the rightmost entry at ConflictTerm")
 	})
 
@@ -1042,7 +1049,7 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		n.Stop()
 
-		require.Equal(t, conflictIdx, n.st.nextIndex["p1"],
+		g.Expect(n.st.nextIndex["p1"]).To(gomega.Equal(conflictIdx),
 			"nextIndex must fall back to ConflictIndex when leader lacks ConflictTerm")
 	})
 }
@@ -1172,13 +1179,14 @@ func (b *blockEntryReplyTransport) SendAppendEntries(peer string, args *AppendEn
 // at end-of-loop (which would leave commitIndex at oldCommit on stopCh).
 func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 	makeNode := func(t *testing.T) *Node {
+		g := gomega.NewWithT(t)
 		n, err := NewNode(Config{
 			ID:               "n1",
 			Peers:            []string{"p1", "p2"},
 			ElectionTimeout:  time.Hour,
 			HeartbeatTimeout: testHeartbeat,
 		})
-		require.NoError(t, err)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
 
 		const N = 5
 		entries := make([]LogEntry, N)
@@ -1197,6 +1205,7 @@ func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 	}
 
 	t.Run("ZeroDeliveries", func(t *testing.T) {
+		g := gomega.NewWithT(t)
 		n := makeNode(t)
 		// Unbuffered applyInCh: every send blocks; pre-closed stopCh wins immediately.
 		// (applyInCh replaces the actor's old direct applyCh send after the apply
@@ -1206,11 +1215,12 @@ func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 		close(n.stopCh)
 
 		n.applyCommitted(0, 5)
-		require.Equal(t, uint64(0), n.st.commitIndex,
+		g.Expect(n.st.commitIndex).To(gomega.Equal(uint64(0)),
 			"commitIndex must stay at oldCommit when Stop wins the first send")
 	})
 
 	t.Run("PartialDelivery", func(t *testing.T) {
+		g := gomega.NewWithT(t)
 		n := makeNode(t)
 		// Unbuffered applyInCh; a consumer goroutine reads exactly K entries
 		// then closes stopCh. This makes the Stop point deterministic: the
@@ -1231,7 +1241,7 @@ func TestApplyCommitted_StopRaceLeavesCommitIndexConsistent(t *testing.T) {
 		n.applyCommitted(0, 5)
 		<-consumerDone
 
-		require.Equal(t, uint64(K), n.st.commitIndex,
+		g.Expect(n.st.commitIndex).To(gomega.Equal(uint64(K)),
 			"commitIndex must equal K (last fully-enqueued entry's index) after partial delivery")
 	})
 }

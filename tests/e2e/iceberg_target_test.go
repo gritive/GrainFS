@@ -15,7 +15,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
@@ -43,7 +44,7 @@ func (tgt *icebergTarget) uniqueNamespace(t testing.TB, caseName string) string 
 	t.Helper()
 	id := tgt.caseSeq.Add(1)
 	ns := fmt.Sprintf("ns_%s_%s_%d", tgt.name, sanitizeForBucket(caseName), id)
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		tgt.runExecBestEffort(fmt.Sprintf(
 			"DROP SCHEMA IF EXISTS grainfs_iceberg.%s CASCADE;", ns))
 	})
@@ -105,7 +106,7 @@ func (tgt *icebergTarget) adminCreateSA(t testing.TB, namePrefix string) (saID, 
 	sock := tgt.adminSockPath()
 	name := "sa-" + sanitizeForBucket(t.Name()) + "-" + sanitizeForBucket(namePrefix)
 	out := iamCreateSA(t, sock, name)
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		iamSADelete(t, sock, out.SAID)
 	})
 	// Wait for Raft propagation on cluster targets — without this, MintToken
@@ -123,9 +124,9 @@ func (tgt *icebergTarget) adminAttachPolicy(t testing.TB, saID, policyName strin
 	t.Helper()
 	cli := iamadmin.NewClientForURL(tgt.adminSockPath())
 	ctx := context.Background()
-	require.NoErrorf(t, cli.PolicyAttachToSA(ctx, policyName, saID),
+	gomega.Expect(cli.PolicyAttachToSA(ctx, policyName, saID)).To(gomega.Succeed(),
 		"PolicyAttachToSA %s -> %s", policyName, saID)
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_ = cli.PolicyDetachFromSA(ctx, policyName, saID)
 	})
 }
@@ -139,7 +140,7 @@ func (tgt *icebergTarget) uniqueWarehouse(t testing.TB, suffix string) string {
 	t.Helper()
 	name := bucketNameFor(tgt.name, t.Name(), suffix)
 	createBucketWithAdminPolicyAttachViaUDSAny(t, tgt.dataDirs, tgt.saID, name, tgt.s3Client(0))
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_, _ = tgt.s3Client(0).DeleteBucket(context.Background(), &s3.DeleteBucketInput{
 			Bucket: aws.String(name),
 		})
@@ -149,7 +150,7 @@ func (tgt *icebergTarget) uniqueWarehouse(t testing.TB, suffix string) string {
 
 // mintToken POSTs grant_type=client_credentials to the iceberg OAuth token
 // endpoint. Returns (jwt, 200) on success; ("", non-200) on auth failure.
-// Transport/IO/decode errors fail the test via require.NoError.
+// Transport/IO/decode errors fail the test via Gomega assertions.
 func (tgt *icebergTarget) mintToken(t testing.TB, clientID, clientSecret, warehouse string) (string, int) {
 	t.Helper()
 	form := url.Values{}
@@ -160,15 +161,15 @@ func (tgt *icebergTarget) mintToken(t testing.TB, clientID, clientSecret, wareho
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		tgt.endpoint(0)+"/iceberg/v1/oauth/tokens", strings.NewReader(form.Encode()))
-	require.NoError(t, err, "mintToken: build request")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mintToken: build request")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err, "mintToken: HTTP do")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mintToken: HTTP do")
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err, "mintToken: read body")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mintToken: read body")
 
 	if resp.StatusCode != http.StatusOK {
 		return "", resp.StatusCode

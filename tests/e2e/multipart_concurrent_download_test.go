@@ -34,8 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Multipart concurrent downloads", func() {
@@ -95,11 +94,11 @@ func runMultipartUploadPartRecreatesClusterPartDir(t testing.TB, tgt s3Target) {
 		Key:         aws.String(key),
 		ContentType: aws.String("application/octet-stream"),
 	})
-	require.NoError(t, err)
-	require.NotNil(t, initOut.UploadId)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(initOut.UploadId).NotTo(gomega.BeNil())
 
 	removed := removeClusterMultipartUploadDirs(t, tgt, *initOut.UploadId)
-	require.NotEmpty(t, removed)
+	gomega.Expect(removed).NotTo(gomega.BeEmpty())
 
 	body := bytes.Repeat([]byte{'A'}, 1024)
 	part, err := client.UploadPart(ctx, &s3.UploadPartInput{
@@ -109,7 +108,7 @@ func runMultipartUploadPartRecreatesClusterPartDir(t testing.TB, tgt s3Target) {
 		PartNumber: aws.Int32(1),
 		Body:       bytes.NewReader(body),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(bucket),
@@ -119,17 +118,17 @@ func runMultipartUploadPartRecreatesClusterPartDir(t testing.TB, tgt s3Target) {
 			Parts: []types.CompletedPart{{PartNumber: aws.Int32(1), ETag: part.ETag}},
 		},
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
-	require.NoError(t, err)
-	require.Equal(t, body, got)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got).To(gomega.Equal(body))
 }
 
 // Isolation: 10 MiB single PUT (no multipart) on cluster, full body GET +
@@ -152,7 +151,7 @@ func runClusterSimpleLargeObjectFullGet(t testing.TB, tgt s3Target) {
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(body),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	for w := 0; w < tgt.nodes; w++ {
 		cli := tgt.pickNode(w)
@@ -160,10 +159,10 @@ func runClusterSimpleLargeObjectFullGet(t testing.TB, tgt s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 		got, err := io.ReadAll(out.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		if !bytes.Equal(got, body) {
 			first := -1
 			for i := 0; i < len(got) && i < len(body); i++ {
@@ -190,7 +189,7 @@ func runClusterSimpleLargeObjectFullGet(t testing.TB, tgt s3Target) {
 				}
 				t.Logf("got block %d (offset %d): %s (A=%d B=%d)", blk, start, label, aCount, bCount)
 			}
-			require.Equalf(t, body, got, "node %d (simple PUT) full GET corrupted at byte %d", w, first)
+			gomega.Expect(got).To(gomega.Equal(body), "node %d (simple PUT) full GET corrupted at byte %d", w, first)
 		}
 	}
 }
@@ -218,7 +217,7 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 		Key:         aws.String(key),
 		ContentType: aws.String("application/octet-stream"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	uploadID := initOut.UploadId
 
 	p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
@@ -228,7 +227,7 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 		PartNumber: aws.Int32(1),
 		Body:       bytes.NewReader(part1),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String(bucket),
@@ -237,7 +236,7 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 		PartNumber: aws.Int32(2),
 		Body:       bytes.NewReader(part2),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(bucket),
@@ -250,7 +249,7 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 			},
 		},
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// 16 concurrent GETs distributed round-robin across nodes. Mirrors the
 	// warp `multipart --concurrent 16` pattern that triggers the bulk-class
@@ -338,18 +337,18 @@ func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 			t.Logf("err[%d]: %v", i, e)
 		}
 	}
-	assert.Empty(t, errs, "concurrent multipart part GETs must not error under load")
-	assert.Equal(t, workers*iterationsPerGoro, okCount, "expected every worker iteration to succeed")
+	gomega.Expect(errs).To(gomega.BeEmpty(), "concurrent multipart part GETs must not error under load")
+	gomega.Expect(okCount).To(gomega.Equal(workers*iterationsPerGoro), "expected every worker iteration to succeed")
 }
 
 func removeClusterMultipartUploadDirs(t testing.TB, tgt s3Target, uploadID string) []string {
 	t.Helper()
-	require.NotNil(t, tgt.cluster)
+	gomega.Expect(tgt.cluster).NotTo(gomega.BeNil())
 
 	matches := findClusterMultipartUploadDirs(t, tgt, uploadID)
 	var removed []string
 	for _, match := range matches {
-		require.NoError(t, os.RemoveAll(match))
+		gomega.Expect(os.RemoveAll(match)).To(gomega.Succeed())
 		removed = append(removed, match)
 	}
 	return removed
@@ -357,12 +356,12 @@ func removeClusterMultipartUploadDirs(t testing.TB, tgt s3Target, uploadID strin
 
 func findClusterMultipartUploadDirs(t testing.TB, tgt s3Target, uploadID string) []string {
 	t.Helper()
-	require.NotNil(t, tgt.cluster)
+	gomega.Expect(tgt.cluster).NotTo(gomega.BeNil())
 
 	var matches []string
 	for _, dataDir := range tgt.cluster.dataDirs {
 		found, err := filepath.Glob(filepath.Join(dataDir, "groups", "*", "parts", uploadID))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		matches = append(matches, found...)
 	}
 	return matches

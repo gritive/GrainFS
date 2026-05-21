@@ -2,92 +2,11 @@ package cluster
 
 import (
 	"context"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
-
-// TestBalancerIntegration_ProposesOnImbalance verifies that BalancerProposer.Run()
-// automatically proposes CmdMigrateShard when disk usage is imbalanced.
-func TestBalancerIntegration_ProposesOnImbalance(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
-	store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30})
-
-	node := &mockRaftNode{
-		state:   2, // leader
-		nodeID:  "leader",
-		peerIDs: []string{"peer-a"},
-	}
-
-	cfg := defaultFakeBalancerCfg()
-	cfg.warmupTimeout = 1 * time.Millisecond // immediate
-	cfg.migrationRate = 1
-
-	p := NewBalancerProposer("leader", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	go p.Run(ctx)
-
-	// Wait for at least one proposal
-	require.Eventually(t, func() bool {
-		return node.ProposedLen() > 0
-	}, 400*time.Millisecond, 10*time.Millisecond, "timeout: no CmdMigrateShard proposed within 400ms")
-
-	require.Greater(t, node.ProposedLen(), 0)
-	cmd, err := DecodeCommand(node.ProposedAt(0))
-	require.NoError(t, err)
-	assert.Equal(t, CmdMigrateShard, cmd.Type, "should propose CmdMigrateShard")
-
-	migrate, err := decodeMigrateShardCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "leader", migrate.SrcNode)
-	assert.Equal(t, "peer-a", migrate.DstNode)
-}
-
-// TestBalancerIntegration_ExecutorNotifyLoop verifies the MigrationExecutor full loop:
-// Execute() copies shards, proposes CmdMigrationDone, waits for NotifyCommit, then deletes src.
-func TestBalancerIntegration_ExecutorNotifyLoop(t *testing.T) {
-	var shards [4][]byte
-	for i := range shards {
-		shards[i] = []byte{byte(i)}
-	}
-
-	// Track delete calls
-	var deletedSrc string
-	mover := &notifyMover{
-		shards:   shards[:],
-		onDelete: func(peer string) { deletedSrc = peer },
-	}
-
-	// The raft node auto-calls NotifyCommit on Propose (simulates immediate FSM apply)
-	var exec *MigrationExecutor
-	node := &notifyLoopRaft{onPropose: func() {
-		exec.NotifyCommit("bucket", "key", "v1")
-	}}
-
-	exec = cleanupMigrationExecutor(t, NewMigrationExecutor(mover, node, len(shards)))
-
-	task := MigrationTask{
-		Bucket:    "bucket",
-		Key:       "key",
-		VersionID: "v1",
-		SrcNode:   "src-node",
-		DstNode:   "dst-node",
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	err := exec.Execute(ctx, task)
-	require.NoError(t, err)
-	assert.Equal(t, "src-node", deletedSrc, "src shards should be deleted after commit")
-}
 
 // notifyMover is a ShardMover that reads from a fixed in-memory shard slice
 // and tracks delete calls.
@@ -130,44 +49,112 @@ func (r *notifyLoopRaft) Propose(data []byte) error {
 
 func (r *notifyLoopRaft) NodeID() string { return "test-node" }
 
-// TestBalancerIntegration_DiskCollector verifies that DiskCollector drives
-// UpdateDiskStats → GossipSender skip guard → BalancerProposer triggers migration
-// when a real DiskCollector with injected 80% disk usage runs alongside a peer at 20%.
-func TestBalancerIntegration_DiskCollector(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+var _ = Describe("Balancer integration", func() {
+	It("proposes migration on imbalance", func() {
+		store := NewNodeStatsStore(1 * time.Minute)
+		store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
+		store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30})
 
-	// Seed both nodes so GossipSender skip guard passes for local node.
-	store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 0.0})
-	store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 20.0, DiskAvailBytes: 200 << 30})
+		node := &mockRaftNode{
+			state:   2,
+			nodeID:  "leader",
+			peerIDs: []string{"peer-a"},
+		}
 
-	node := &mockRaftNode{
-		state:   2,
-		nodeID:  "leader",
-		peerIDs: []string{"peer-a"},
-	}
+		cfg := defaultFakeBalancerCfg()
+		cfg.warmupTimeout = 1 * time.Millisecond
+		cfg.migrationRate = 1
 
-	cfg := defaultFakeBalancerCfg()
-	cfg.warmupTimeout = 1 * time.Millisecond
-	cfg.migrationRate = 1
+		p := NewBalancerProposer("leader", store, node, cfg)
+		p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 
-	p := NewBalancerProposer("leader", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		DeferCleanup(cancel)
+		go p.Run(ctx)
 
-	// Real DiskCollector with injected 80% disk usage.
-	collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond, nil)
-	collector.SetStatFunc(func(string) (float64, uint64) { return 80.0, 1 << 30 })
+		Eventually(func() int {
+			return node.ProposedLen()
+		}, 400*time.Millisecond, 10*time.Millisecond).Should(BeNumerically(">", 0), "timeout: no CmdMigrateShard proposed within 400ms")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+		cmd, err := DecodeCommand(node.ProposedAt(0))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cmd.Type).To(Equal(CmdMigrateShard), "should propose CmdMigrateShard")
 
-	go collector.Run(ctx)
-	go p.Run(ctx)
+		migrate, err := decodeMigrateShardCmd(cmd.Data)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(migrate.SrcNode).To(Equal("leader"))
+		Expect(migrate.DstNode).To(Equal("peer-a"))
+	})
 
-	require.Eventually(t, func() bool {
-		return node.ProposedLen() > 0
-	}, 1*time.Second, 10*time.Millisecond, "timeout: no CmdMigrateShard proposed within 1s")
+	It("deletes source shards after migration commit", func() {
+		var shards [4][]byte
+		for i := range shards {
+			shards[i] = []byte{byte(i)}
+		}
 
-	cmd, err := DecodeCommand(node.ProposedAt(0))
-	require.NoError(t, err)
-	assert.Equal(t, CmdMigrateShard, cmd.Type)
-}
+		var deletedSrc string
+		mover := &notifyMover{
+			shards:   shards[:],
+			onDelete: func(peer string) { deletedSrc = peer },
+		}
+
+		var exec *MigrationExecutor
+		node := &notifyLoopRaft{onPropose: func() {
+			exec.NotifyCommit("bucket", "key", "v1")
+		}}
+
+		exec = NewMigrationExecutor(mover, node, len(shards))
+		DeferCleanup(exec.Stop)
+
+		task := MigrationTask{
+			Bucket:    "bucket",
+			Key:       "key",
+			VersionID: "v1",
+			SrcNode:   "src-node",
+			DstNode:   "dst-node",
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		DeferCleanup(cancel)
+
+		Expect(exec.Execute(ctx, task)).To(Succeed())
+		Expect(deletedSrc).To(Equal("src-node"), "src shards should be deleted after commit")
+	})
+
+	It("triggers migration from disk collector stats", func() {
+		store := NewNodeStatsStore(1 * time.Minute)
+
+		store.Set(NodeStats{NodeID: "leader", DiskUsedPct: 0.0})
+		store.Set(NodeStats{NodeID: "peer-a", DiskUsedPct: 20.0, DiskAvailBytes: 200 << 30})
+
+		node := &mockRaftNode{
+			state:   2,
+			nodeID:  "leader",
+			peerIDs: []string{"peer-a"},
+		}
+
+		cfg := defaultFakeBalancerCfg()
+		cfg.warmupTimeout = 1 * time.Millisecond
+		cfg.migrationRate = 1
+
+		p := NewBalancerProposer("leader", store, node, cfg)
+		p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
+
+		collector := NewDiskCollector("leader", "/tmp", store, 10*time.Millisecond, nil)
+		collector.SetStatFunc(func(string) (float64, uint64) { return 80.0, 1 << 30 })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		DeferCleanup(cancel)
+
+		go collector.Run(ctx)
+		go p.Run(ctx)
+
+		Eventually(func() int {
+			return node.ProposedLen()
+		}, 1*time.Second, 10*time.Millisecond).Should(BeNumerically(">", 0), "timeout: no CmdMigrateShard proposed within 1s")
+
+		cmd, err := DecodeCommand(node.ProposedAt(0))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cmd.Type).To(Equal(CmdMigrateShard))
+	})
+})

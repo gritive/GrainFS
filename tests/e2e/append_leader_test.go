@@ -2,15 +2,14 @@ package e2e
 
 import (
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Append leader helpers", func() {
 	ginkgo.Context("SingleNode", func() {
 		ginkgo.It("finds the single-group owner", func() {
-			t := ginkgo.GinkgoTB()
-			require.Equal(t, -1, findOwnerForSingleGroup(nil))
-			require.Equal(t, 2, findOwnerForSingleGroup(&e2eCluster{leaderIdx: 2}))
+			gomega.Expect(findOwnerForSingleGroup(nil)).To(gomega.Equal(-1))
+			gomega.Expect(findOwnerForSingleGroup(&e2eCluster{leaderIdx: 2})).To(gomega.Equal(2))
 		})
 	})
 })

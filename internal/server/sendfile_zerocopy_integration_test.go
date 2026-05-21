@@ -7,365 +7,229 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestE2EZeroCopyDataIntegrity tests that zero-copy doesn't compromise data integrity
-func TestE2EZeroCopyDataIntegrity(t *testing.T) {
-	// Setup
-	tmpDir, err := os.MkdirTemp("", "grainfs-e2e-integrity-*")
-	require.NoError(t, err, "Failed to create temp dir")
-	defer os.RemoveAll(tmpDir)
+var _ = Describe("Zero-copy sendfile integration", func() {
+	var (
+		ctx     context.Context
+		backend *storage.LocalBackend
+	)
 
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err, "Failed to create backend")
+	BeforeEach(func() {
+		ctx = context.Background()
+		tmpDir, err := os.MkdirTemp("", "grainfs-e2e-zerocopy-*")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(os.RemoveAll, tmpDir)
 
-	err = backend.CreateBucket(context.Background(), "test-bucket")
-	require.NoError(t, err, "Failed to create bucket")
+		backend, err = storage.NewLocalBackend(tmpDir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(backend.Close)
+		Expect(backend.CreateBucket(ctx, "test-bucket")).To(Succeed())
+	})
 
-	// Test various file sizes
-	sizes := []int{
-		1 * 1024,    // 1KB (small - fallback)
-		16 * 1024,   // 16KB (threshold)
-		16*1024 + 1, // 16KB+1 (zero-copy)
-		32 * 1024,   // 32KB (zero-copy)
-		64 * 1024,   // 64KB (zero-copy)
-		1024 * 1024, // 1MB (zero-copy)
+	startServer := func() string {
+		port := freePort(GinkgoT())
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		s := New(addr, backend)
+		DeferCleanup(shutdownTestServer, GinkgoT(), s)
+		go func() {
+			if err := s.Run(); err != nil && err != http.ErrServerClosed {
+				GinkgoWriter.Printf("server error: %v\n", err)
+			}
+		}()
+		waitForTCP(GinkgoT(), addr)
+		return "http://" + addr
 	}
 
-	for _, size := range sizes {
-		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
-			// Create test data with known checksum
-			originalData := bytes.Repeat([]byte("X"), size)
+	putPublicObject := func(key string, data []byte) {
+		_, err := backend.PutObject(ctx, "test-bucket", key, bytes.NewReader(data), "application/octet-stream")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(backend.SetObjectACL("test-bucket", key, 1)).To(Succeed())
+	}
 
-			// Calculate checksum
+	DescribeTable("preserves object data integrity",
+		func(size int) {
+			originalData := bytes.Repeat([]byte("X"), size)
 			expectedChecksum := fmt.Sprintf("%x", simpleChecksum(originalData))
 
-			// Upload
 			key := fmt.Sprintf("test-%d", size)
-			_, err := backend.PutObject(context.Background(), "test-bucket", key, bytes.NewReader(originalData), "application/octet-stream")
-			require.NoError(t, err, "Failed to put object")
+			_, err := backend.PutObject(ctx, "test-bucket", key, bytes.NewReader(originalData), "application/octet-stream")
+			Expect(err).NotTo(HaveOccurred())
 
-			// Download
-			rc, _, err := backend.GetObject(context.Background(), "test-bucket", key)
-			require.NoError(t, err, "Failed to get object")
-			defer rc.Close()
+			rc, _, err := backend.GetObject(ctx, "test-bucket", key)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(rc.Close)
 
 			downloadedData, err := io.ReadAll(rc)
-			require.NoError(t, err, "Failed to read object")
+			Expect(err).NotTo(HaveOccurred())
 
-			// Verify checksum
-			actualChecksum := fmt.Sprintf("%x", simpleChecksum(downloadedData))
+			Expect(fmt.Sprintf("%x", simpleChecksum(downloadedData))).To(Equal(expectedChecksum))
+			Expect(downloadedData).To(Equal(originalData))
+		},
+		Entry("1KB", 1*1024),
+		Entry("16KB", 16*1024),
+		Entry("16KB+1", 16*1024+1),
+		Entry("32KB", 32*1024),
+		Entry("64KB", 64*1024),
+		Entry("1MB", 1024*1024),
+	)
 
-			require.Equal(t, expectedChecksum, actualChecksum, "Checksum mismatch")
-			require.Equal(t, originalData, downloadedData, "Data mismatch")
+	It("serves concurrent zero-copy reads without data mismatch", func() {
+		testData := bytes.Repeat([]byte("C"), 64*1024)
+		_, err := backend.PutObject(ctx, "test-bucket", "concurrent", bytes.NewReader(testData), "application/octet-stream")
+		Expect(err).NotTo(HaveOccurred())
 
-			t.Logf("✓ Data integrity verified for %d bytes (checksum: %s)", size, actualChecksum)
-		})
-	}
-}
+		const numGoroutines = 100
+		errors := make(chan error, numGoroutines)
+		for i := 0; i < numGoroutines; i++ {
+			go func() {
+				rc, _, err := backend.GetObject(ctx, "test-bucket", "concurrent")
+				if err != nil {
+					errors <- fmt.Errorf("get object failed: %w", err)
+					return
+				}
+				defer rc.Close()
 
-// TestE2EZeroCopyConcurrentAccess tests concurrent access to verify no race conditions
-func TestE2EZeroCopyConcurrentAccess(t *testing.T) {
-	// Setup
-	tmpDir, err := os.MkdirTemp("", "grainfs-e2e-concurrent-*")
-	require.NoError(t, err, "Failed to create temp dir")
-	defer os.RemoveAll(tmpDir)
+				data, err := io.ReadAll(rc)
+				if err != nil {
+					errors <- fmt.Errorf("read failed: %w", err)
+					return
+				}
+				if !bytes.Equal(data, testData) {
+					errors <- fmt.Errorf("data mismatch")
+					return
+				}
+				errors <- nil
+			}()
+		}
 
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err, "Failed to create backend")
+		for i := 0; i < numGoroutines; i++ {
+			Expect(<-errors).NotTo(HaveOccurred())
+		}
+	})
 
-	err = backend.CreateBucket(context.Background(), "test-bucket")
-	require.NoError(t, err, "Failed to create bucket")
+	It("round-trips multiple large files in sequence", func() {
+		const (
+			numFiles = 12
+			fileSize = 128 * 1024
+		)
+		for i := 0; i < numFiles; i++ {
+			data := bytes.Repeat([]byte(fmt.Sprintf("%d", i%10)), fileSize)
+			key := fmt.Sprintf("file-%04d", i)
+			_, err := backend.PutObject(ctx, "test-bucket", key, bytes.NewReader(data), "application/octet-stream")
+			Expect(err).NotTo(HaveOccurred())
+		}
 
-	// Create test object
-	testData := bytes.Repeat([]byte("C"), 64*1024)
-	_, err = backend.PutObject(context.Background(), "test-bucket", "concurrent", bytes.NewReader(testData), "application/octet-stream")
-	require.NoError(t, err, "Failed to put object")
+		for i := 0; i < numFiles; i++ {
+			key := fmt.Sprintf("file-%04d", i)
+			expectedData := bytes.Repeat([]byte(fmt.Sprintf("%d", i%10)), fileSize)
 
-	// Concurrent access
-	numGoroutines := 100
-	errors := make(chan error, numGoroutines)
-
-	for i := 0; i < numGoroutines; i++ {
-		go func() {
-			rc, _, err := backend.GetObject(context.Background(), "test-bucket", "concurrent")
-			if err != nil {
-				errors <- fmt.Errorf("get object failed: %w", err)
-				return
-			}
-			defer rc.Close()
-
+			rc, _, err := backend.GetObject(ctx, "test-bucket", key)
+			Expect(err).NotTo(HaveOccurred())
 			data, err := io.ReadAll(rc)
-			if err != nil {
-				errors <- fmt.Errorf("read failed: %w", err)
-				return
-			}
-
-			if !bytes.Equal(data, testData) {
-				errors <- fmt.Errorf("data mismatch")
-				return
-			}
-
-			errors <- nil
-		}()
-	}
-
-	// Collect errors
-	for i := 0; i < numGoroutines; i++ {
-		err := <-errors
-		require.NoError(t, err, "Goroutine %d failed", i)
-	}
-
-	t.Logf("✓ Concurrent access test passed (%d goroutines)", numGoroutines)
-}
-
-// TestE2EZeroCopyMultipleFiles tests multiple files in sequence
-func TestE2EZeroCopyMultipleFiles(t *testing.T) {
-	// Setup
-	tmpDir, err := os.MkdirTemp("", "grainfs-e2e-multiple-*")
-	require.NoError(t, err, "Failed to create temp dir")
-	defer os.RemoveAll(tmpDir)
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err, "Failed to create backend")
-
-	err = backend.CreateBucket(context.Background(), "test-bucket")
-	require.NoError(t, err, "Failed to create bucket")
-
-	// Upload multiple files
-	numFiles := 12
-	fileSize := 128 * 1024 // 128KB
-
-	for i := 0; i < numFiles; i++ {
-		data := bytes.Repeat([]byte(fmt.Sprintf("%d", i%10)), fileSize)
-		key := fmt.Sprintf("file-%04d", i)
-
-		_, err := backend.PutObject(context.Background(), "test-bucket", key, bytes.NewReader(data), "application/octet-stream")
-		require.NoError(t, err, "Failed to put file %s", key)
-	}
-
-	// Download all files and verify
-	for i := 0; i < numFiles; i++ {
-		key := fmt.Sprintf("file-%04d", i)
-		expectedData := bytes.Repeat([]byte(fmt.Sprintf("%d", i%10)), fileSize)
-
-		rc, _, err := backend.GetObject(context.Background(), "test-bucket", key)
-		require.NoError(t, err, "Failed to get file %s", key)
-
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		require.NoError(t, err, "Failed to read file %s", key)
-
-		require.Equal(t, expectedData, data, "Data mismatch for file %s", key)
-	}
-
-	t.Logf("✓ Multiple files test passed (%d files)", numFiles)
-}
-
-// TestE2EZeroCopyHTTPServer tests zero-copy through actual HTTP server
-func TestE2EZeroCopyHTTPServer(t *testing.T) {
-	// Setup
-	tmpDir, err := os.MkdirTemp("", "grainfs-e2e-http-*")
-	require.NoError(t, err, "Failed to create temp dir")
-	defer os.RemoveAll(tmpDir)
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err, "Failed to create backend")
-
-	err = backend.CreateBucket(context.Background(), "test-bucket")
-	require.NoError(t, err, "Failed to create bucket")
-
-	// Create test objects (small and large)
-	smallData := bytes.Repeat([]byte("S"), 1*1024)  // 1KB
-	largeData := bytes.Repeat([]byte("L"), 64*1024) // 64KB
-
-	_, err = backend.PutObject(context.Background(), "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
-	require.NoError(t, err, "Failed to put small object")
-	require.NoError(t, backend.SetObjectACL("test-bucket", "small", 1)) // ACLPublicRead
-
-	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
-	require.NoError(t, err, "Failed to put large object")
-	require.NoError(t, backend.SetObjectACL("test-bucket", "large", 1)) // ACLPublicRead
-
-	// Start server
-	s := New("127.0.0.1:14857", backend)
-	go func() {
-		if err := s.Run(); err != nil && err != http.ErrServerClosed {
-			t.Logf("Server error: %v", err)
+			Expect(rc.Close()).To(Succeed())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(data).To(Equal(expectedData))
 		}
-	}()
-	defer shutdownTestServer(t, s)
-
-	waitForTCP(t, "127.0.0.1:14857")
-
-	client := &http.Client{}
-
-	// Test small file (should use fallback path)
-	t.Run("SmallFile", func(t *testing.T) {
-		resp, err := client.Get("http://127.0.0.1:14857/test-bucket/small")
-		require.NoError(t, err, "GET request failed")
-		defer resp.Body.Close()
-
-		require.Equal(t, http.StatusOK, resp.StatusCode, "Expected status OK")
-
-		data, err := io.ReadAll(resp.Body)
-		require.NoError(t, err, "Failed to read response")
-
-		require.Equal(t, smallData, data, "Data mismatch for small file")
-		require.Equal(t, len(smallData), len(data), "Size mismatch for small file")
-
-		t.Logf("✓ Small file (1KB) downloaded correctly via fallback path")
 	})
 
-	// Test large file (should use zero-copy)
-	t.Run("LargeFile", func(t *testing.T) {
-		resp, err := client.Get("http://127.0.0.1:14857/test-bucket/large")
-		require.NoError(t, err, "GET request failed")
-		defer resp.Body.Close()
+	It("serves small and large public objects through HTTP", func() {
+		smallData := bytes.Repeat([]byte("S"), 1*1024)
+		largeData := bytes.Repeat([]byte("L"), 64*1024)
+		putPublicObject("small", smallData)
+		putPublicObject("large", largeData)
 
-		require.Equal(t, http.StatusOK, resp.StatusCode, "Expected status OK")
+		baseURL := startServer()
+		client := &http.Client{}
 
+		resp, err := client.Get(baseURL + "/test-bucket/small")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 		data, err := io.ReadAll(resp.Body)
-		require.NoError(t, err, "Failed to read response")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(smallData))
 
-		require.Equal(t, largeData, data, "Data mismatch for large file")
-		require.Equal(t, len(largeData), len(data), "Size mismatch for large file")
-
-		t.Logf("✓ Large file (64KB) downloaded correctly via zero-copy")
+		resp, err = client.Get(baseURL + "/test-bucket/large")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		data, err = io.ReadAll(resp.Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(largeData))
 	})
-}
 
-// TestE2EZeroCopyRangeRequest tests that range requests return partial content (206)
-func TestE2EZeroCopyRangeRequest(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "grainfs-e2e-range-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	It("serves bounded range requests as partial content", func() {
+		largeData := bytes.Repeat([]byte("R"), 64*1024)
+		putPublicObject("large", largeData)
+		baseURL := startServer()
 
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
-
-	err = backend.CreateBucket(context.Background(), "test-bucket")
-	require.NoError(t, err)
-
-	// 64KB object so the range is clearly within bounds
-	largeData := bytes.Repeat([]byte("R"), 64*1024)
-	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
-	require.NoError(t, err)
-	require.NoError(t, backend.SetObjectACL("test-bucket", "large", 1)) // ACLPublicRead
-
-	s := New("127.0.0.1:14858", backend)
-	go func() {
-		if err := s.Run(); err != nil && err != http.ErrServerClosed {
-			t.Logf("Server error: %v", err)
-		}
-	}()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14858")
-
-	t.Run("PartialContent206", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", "http://127.0.0.1:14858/test-bucket/large", nil)
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/test-bucket/large", nil)
+		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Range", "bytes=0-1023")
-
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		require.Equal(t, http.StatusPartialContent, resp.StatusCode, "Expected 206 Partial Content")
-		require.NotEmpty(t, resp.Header.Get("Content-Range"), "Expected Content-Range header")
-		require.Equal(t, "bytes 0-1023/65536", resp.Header.Get("Content-Range"))
-
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusPartialContent))
+		Expect(resp.Header.Get("Content-Range")).To(Equal("bytes 0-1023/65536"))
 		data, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, 1024, len(data), "Expected 1024 bytes")
-		require.Equal(t, largeData[:1024], data, "Range data must match")
-	})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(largeData[:1024]))
 
-	t.Run("MidRange", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", "http://127.0.0.1:14858/test-bucket/large", nil)
+		req, err = http.NewRequest(http.MethodGet, baseURL+"/test-bucket/large", nil)
+		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Range", "bytes=1024-2047")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		require.Equal(t, http.StatusPartialContent, resp.StatusCode)
-		data, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, largeData[1024:2048], data, "Mid-range data must match")
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusPartialContent))
+		data, err = io.ReadAll(resp.Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(largeData[1024:2048]))
 	})
-}
 
-// TestE2EZeroCopyRangeEdgeCases tests edge cases for range requests via real server
-func TestE2EZeroCopyRangeEdgeCases(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "grainfs-e2e-range-edge-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	It("handles range edge cases through HTTP", func() {
+		largeData := bytes.Repeat([]byte("E"), 64*1024)
+		putPublicObject("large", largeData)
+		baseURL := startServer()
 
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
-
-	largeData := bytes.Repeat([]byte("E"), 64*1024)
-	_, err = backend.PutObject(context.Background(), "test-bucket", "large", bytes.NewReader(largeData), "application/octet-stream")
-	require.NoError(t, err)
-	require.NoError(t, backend.SetObjectACL("test-bucket", "large", 1)) // ACLPublicRead
-
-	s := New("127.0.0.1:14860", backend)
-	go func() {
-		if err := s.Run(); err != nil && err != http.ErrServerClosed {
-			t.Logf("Server error: %v", err)
-		}
-	}()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14860")
-
-	t.Run("out-of-bounds start returns 416", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", "http://127.0.0.1:14860/test-bucket/large", nil)
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/test-bucket/large", nil)
+		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Range", "bytes=99999-100000")
-
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Body.Close()).To(Succeed())
+		Expect(resp.StatusCode).To(Equal(http.StatusRequestedRangeNotSatisfiable))
+		Expect(resp.Header.Get("Content-Range")).To(ContainSubstring("bytes */"))
 
-		require.Equal(t, http.StatusRequestedRangeNotSatisfiable, resp.StatusCode)
-		require.Contains(t, resp.Header.Get("Content-Range"), "bytes */")
-	})
-
-	t.Run("open-end range (resume)", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", "http://127.0.0.1:14860/test-bucket/large", nil)
+		req, err = http.NewRequest(http.MethodGet, baseURL+"/test-bucket/large", nil)
+		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Range", "bytes=1024-")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusPartialContent))
 		data, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, len(largeData)-1024, len(data), "open-end range should return rest of file")
-		require.Equal(t, largeData[1024:], data)
-	})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(largeData[1024:]))
 
-	t.Run("suffix range (last N bytes)", func(t *testing.T) {
-		req, _ := http.NewRequest("GET", "http://127.0.0.1:14860/test-bucket/large", nil)
+		req, err = http.NewRequest(http.MethodGet, baseURL+"/test-bucket/large", nil)
+		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Range", "bytes=-512")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		require.Equal(t, http.StatusPartialContent, resp.StatusCode)
-		data, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, 512, len(data), "suffix range should return last 512 bytes")
-		require.Equal(t, largeData[len(largeData)-512:], data)
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusPartialContent))
+		data, err = io.ReadAll(resp.Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(largeData[len(largeData)-512:]))
 	})
-}
+})
 
 // simpleChecksum is a simple checksum for testing (not cryptographically secure)
 func simpleChecksum(data []byte) byte {

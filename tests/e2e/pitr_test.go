@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -12,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 type pitrResponse struct {
@@ -45,10 +46,9 @@ func createPITRSnapshot(t testing.TB, serverURL, reason string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	require.Failf(t,
-		"snapshot should become available after cluster data groups are ready",
-		"lastErr=%v status=%d body=%s",
-		lastErr, lastStatus, lastBody)
+	ginkgo.Fail(fmt.Sprintf(
+		"snapshot should become available after cluster data groups are ready: lastErr=%v status=%d body=%s",
+		lastErr, lastStatus, lastBody))
 }
 
 var _ = ginkgo.Describe("PITR", func() {
@@ -77,18 +77,16 @@ func runPITRCases(getTgt func() s3Target) {
 
 	// Invalid-input cases first so they don't accumulate fixture state.
 	ginkgo.It("rejects an invalid target time", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		serverURL := tgt.endpoint(0)
 
 		resp, err := postJSON(serverURL+"/admin/pitr", map[string]string{"to": "not-a-time"})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
-		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusBadRequest))
 	})
 
 	ginkgo.It("rejects a target before any snapshot", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		serverURL := tgt.endpoint(0)
 
@@ -97,9 +95,9 @@ func runPITRCases(getTgt func() s3Target) {
 		// what other sub-tests have already run on this fixture.
 		veryOldTime := time.Unix(1, 0).UTC().Format(time.RFC3339Nano)
 		resp, err := postJSON(serverURL+"/admin/pitr", map[string]string{"to": veryOldTime})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
-		require.True(t, resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest,
+		gomega.Expect(resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest).To(gomega.BeTrue(),
 			"expected 404 or 400, got %d", resp.StatusCode)
 	})
 
@@ -118,7 +116,7 @@ func runPITRCases(getTgt func() s3Target) {
 				Key:    aws.String(key),
 				Body:   strings.NewReader("included-" + key),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		pivotTime := time.Now().UTC()
@@ -131,40 +129,40 @@ func runPITRCases(getTgt func() s3Target) {
 				Key:    aws.String(key),
 				Body:   strings.NewReader("excluded-" + key),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		listOut, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
-		require.Len(t, listOut.Contents, 5, "5 objects before PITR")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(listOut.Contents).To(gomega.HaveLen(5), "5 objects before PITR")
 
 		pitrResp, err := postJSON(serverURL+"/admin/pitr", map[string]string{
 			"to": pivotTime.Format(time.RFC3339Nano),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(pitrResp.Body.Close)
-		require.Equal(t, http.StatusOK, pitrResp.StatusCode, "PITR should succeed")
+		gomega.Expect(pitrResp.StatusCode).To(gomega.Equal(http.StatusOK), "PITR should succeed")
 
 		var pr pitrResponse
-		require.NoError(t, json.NewDecoder(pitrResp.Body).Decode(&pr))
-		require.GreaterOrEqual(t, pr.WALEntriesReplayed, 3, "at least 3 WAL entries replayed")
+		gomega.Expect(json.NewDecoder(pitrResp.Body).Decode(&pr)).To(gomega.Succeed())
+		gomega.Expect(pr.WALEntriesReplayed).To(gomega.BeNumerically(">=", 3), "at least 3 WAL entries replayed")
 		for _, b := range pr.StaleBlobs {
-			require.NotEqual(t, bucket, b["bucket"], "unexpected stale blob in test bucket: %v", b)
+			gomega.Expect(b["bucket"]).NotTo(gomega.Equal(bucket), "unexpected stale blob in test bucket: %v", b)
 		}
 
 		listOut2, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
-		require.Len(t, listOut2.Contents, 3, "only 3 included objects after PITR")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(listOut2.Contents).To(gomega.HaveLen(3), "only 3 included objects after PITR")
 
 		for _, key := range included {
 			getResp, err := client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.NoError(t, err, "get %s after PITR", key)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "get %s after PITR", key)
 			ginkgo.DeferCleanup(getResp.Body.Close)
 			body, _ := io.ReadAll(getResp.Body)
-			require.Equal(t, "included-"+key, string(body))
+			gomega.Expect(string(body)).To(gomega.Equal("included-" + key))
 		}
 
 		for _, key := range excluded {
@@ -172,7 +170,7 @@ func runPITRCases(getTgt func() s3Target) {
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.Error(t, err, "excluded %s should not exist after PITR", key)
+			gomega.Expect(err).To(gomega.HaveOccurred(), "excluded %s should not exist after PITR", key)
 		}
 	})
 
@@ -190,7 +188,7 @@ func runPITRCases(getTgt func() s3Target) {
 				Key:    aws.String(key),
 				Body:   strings.NewReader("original-" + key),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		createPITRSnapshot(t, serverURL, "pitr-excl-base")
@@ -205,30 +203,30 @@ func runPITRCases(getTgt func() s3Target) {
 				Key:    aws.String(key),
 				Body:   strings.NewReader("extra-" + key),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		listOut, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
-		require.Len(t, listOut.Contents, 5)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(listOut.Contents).To(gomega.HaveLen(5))
 
 		pitrResp, err := postJSON(serverURL+"/admin/pitr", map[string]string{
 			"to": pivotTime.Format(time.RFC3339Nano),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(pitrResp.Body.Close)
-		require.Equal(t, http.StatusOK, pitrResp.StatusCode)
+		gomega.Expect(pitrResp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		listOut2, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
-		require.NoError(t, err)
-		require.Len(t, listOut2.Contents, 2, "only 2 original objects after PITR")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(listOut2.Contents).To(gomega.HaveLen(2), "only 2 original objects after PITR")
 
 		for _, key := range extras {
 			_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.Error(t, err, "extra %s should not exist after PITR", key)
+			gomega.Expect(err).To(gomega.HaveOccurred(), "extra %s should not exist after PITR", key)
 		}
 	})
 }

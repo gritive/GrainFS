@@ -18,7 +18,7 @@ import (
 	"github.com/aws/smithy-go/logging"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/receipt"
 )
@@ -78,7 +78,7 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		dataDirs := make([]string, 3)
 		for i := range dataDirs {
 			d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-receipt-e2e-%d-*", i))
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			dataDirs[i] = d
 			ginkgo.DeferCleanup(os.RemoveAll, d)
 		}
@@ -120,7 +120,7 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 			)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
-			require.NoError(t, cmd.Start(), "start node %d", i)
+			gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 			return cmd
 		}
 
@@ -142,7 +142,7 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 		accessKey, secretKey = bootstrapAdminViaUDSAny(t, dataDirs[:1], 60*time.Second)
 
 		for i := 1; i < 3; i++ {
-			require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
+			gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
 			procs[i] = startNode(i)
 			time.Sleep(150 * time.Millisecond)
 		}
@@ -177,39 +177,38 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 	ginkgo.It("answers locally for a node's own receipt", func() {
 		t := ginkgo.GinkgoTB()
 		body, status := signedGet(t, ctx, signer, creds, httpURL(0)+"/api/receipts/"+idLocalA)
-		require.Equal(t, http.StatusOK, status, "node A should answer locally for its own receipt; body=%s", body)
-		require.Contains(t, string(body), idLocalA)
+		gomega.Expect(status).To(gomega.Equal(http.StatusOK), "node A should answer locally for its own receipt; body=%s", body)
+		gomega.Expect(string(body)).To(gomega.ContainSubstring(idLocalA))
 	})
 
 	ginkgo.It("routes via gossip cache to a peer", func() {
 		t := ginkgo.GinkgoTB()
 		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCHot)
-		require.Equal(t, http.StatusOK, status, "node B should route via gossip cache to C; body=%s", body)
-		require.Contains(t, string(body), idCHot)
+		gomega.Expect(status).To(gomega.Equal(http.StatusOK), "node B should route via gossip cache to C; body=%s", body)
+		gomega.Expect(string(body)).To(gomega.ContainSubstring(idCHot))
 	})
 
 	ginkgo.It("falls back to broadcast for receipts outside the gossip window", func() {
 		t := ginkgo.GinkgoTB()
 		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idCOld)
-		require.Equal(t, http.StatusOK, status, "node B should find receipt via broadcast fan-out; body=%s", body)
-		require.Contains(t, string(body), idCOld)
+		gomega.Expect(status).To(gomega.Equal(http.StatusOK), "node B should find receipt via broadcast fan-out; body=%s", body)
+		gomega.Expect(string(body)).To(gomega.ContainSubstring(idCOld))
 	})
 
 	ginkgo.It("returns 404 for missing receipts", func() {
 		t := ginkgo.GinkgoTB()
 		body, status := signedGet(t, ctx, signer, creds, httpURL(1)+"/api/receipts/"+idMissing)
-		require.Equal(t, http.StatusNotFound, status, "missing receipt must return 404, got body=%s", body)
+		gomega.Expect(status).To(gomega.Equal(http.StatusNotFound), "missing receipt must return 404, got body=%s", body)
 	})
 
 	ginkgo.It("allows unauthenticated reads while Phase 0 anonymous mode is enabled", func() {
-		t := ginkgo.GinkgoTB()
 		resp, err := http.Get(httpURL(0) + "/api/receipts/" + idLocalA)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "unsigned request should follow Phase 0 anonymous mode; body=%s", body)
-		require.Contains(t, string(body), idLocalA)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK), "unsigned request should follow Phase 0 anonymous mode; body=%s", body)
+		gomega.Expect(string(body)).To(gomega.ContainSubstring(idLocalA))
 	})
 })
 
@@ -219,10 +218,10 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 func seedReceipt(t testing.TB, dataDir, psk, id string, ts time.Time, bucket, key string) {
 	t.Helper()
 	dir := filepath.Join(dataDir, "receipts")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
+	gomega.Expect(os.MkdirAll(dir, 0o755)).To(gomega.Succeed())
 
 	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer func() { _ = db.Close() }()
 
 	store, err := receipt.NewStore(db, receipt.StoreOptions{
@@ -230,20 +229,20 @@ func seedReceipt(t testing.TB, dataDir, psk, id string, ts time.Time, bucket, ke
 		FlushThreshold: 1,
 		FlushInterval:  time.Second,
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer func() { _ = store.Close() }()
 
 	ks, err := receipt.NewKeyStore(receipt.Key{ID: "cluster", Secret: []byte(psk)})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	r := &receipt.HealReceipt{
 		ReceiptID: id,
 		Timestamp: ts,
 		Object:    receipt.ObjectRef{Bucket: bucket, Key: key},
 	}
-	require.NoError(t, receipt.Sign(r, ks))
-	require.NoError(t, store.Put(r))
-	require.NoError(t, store.Flush())
+	gomega.Expect(receipt.Sign(r, ks)).To(gomega.Succeed())
+	gomega.Expect(store.Put(r)).To(gomega.Succeed())
+	gomega.Expect(store.Flush()).To(gomega.Succeed())
 }
 
 // signedGet issues a SigV4-signed GET against the heal-receipt API and
@@ -255,17 +254,17 @@ func seedReceipt(t testing.TB, dataDir, psk, id string, ts time.Time, bucket, ke
 func signedGet(t testing.TB, ctx context.Context, signer *v4.Signer, creds aws.Credentials, url string) ([]byte, int) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	sum := sha256.Sum256(nil)
 	payloadHash := hex.EncodeToString(sum[:])
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 	err = signer.SignHTTP(ctx, creds, req, payloadHash, "s3", "us-east-1", time.Now())
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return body, resp.StatusCode
 }

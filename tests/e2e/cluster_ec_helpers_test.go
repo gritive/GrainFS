@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // Cluster EC S3 op context exercises the clusterECS3OpContext helper
@@ -16,35 +16,33 @@ var _ = ginkgo.Describe("Cluster EC S3 op context", func() {
 
 func runClusterECS3OpContextCases() {
 	ginkgo.It("gives expired parent contexts a fresh budget (ExpiredParentGetsFreshBudget)", func() {
-		t := ginkgo.GinkgoTB()
 		parent, cancelParent := context.WithCancel(context.Background())
 		cancelParent()
 
 		ctx, cancel := clusterECS3OpContext(parent, 50*time.Millisecond)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 
-		require.NoError(t, ctx.Err())
+		gomega.Expect(ctx.Err()).NotTo(gomega.HaveOccurred())
 		select {
 		case <-ctx.Done():
-			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+			gomega.Expect(ctx.Err()).To(gomega.MatchError(context.DeadlineExceeded))
 		case <-time.After(100 * time.Millisecond):
-			require.Fail(t, "operation context did not enforce its timeout")
+			ginkgo.Fail("operation context did not enforce its timeout")
 		}
 	})
 
 	ginkgo.It("inherits cancellation from live parent contexts (LiveParentStillCancelsChild)", func() {
-		t := ginkgo.GinkgoTB()
 		parent, cancelParent := context.WithCancel(context.Background())
 		ctx, cancel := clusterECS3OpContext(parent, time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 
 		cancelParent()
 
 		select {
 		case <-ctx.Done():
-			require.ErrorIs(t, ctx.Err(), context.Canceled)
+			gomega.Expect(ctx.Err()).To(gomega.MatchError(context.Canceled))
 		case <-time.After(100 * time.Millisecond):
-			require.Fail(t, "operation context did not inherit live parent cancellation")
+			ginkgo.Fail("operation context did not inherit live parent cancellation")
 		}
 	})
 }

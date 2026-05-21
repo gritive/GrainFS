@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // snapshotResponse mirrors internal/snapshot.Snapshot for JSON decoding.
@@ -82,10 +82,9 @@ func createSnapshotE2E(t testing.TB, serverURL, reason string) snapshotResponse 
 		return snap
 	}
 
-	require.Failf(t,
-		"snapshot should become available after cluster data groups are ready",
-		"lastErr=%v status=%d body=%s",
-		lastErr, lastStatus, lastBody)
+	ginkgo.Fail(fmt.Sprintf(
+		"snapshot should become available after cluster data groups are ready: lastErr=%v status=%d body=%s",
+		lastErr, lastStatus, lastBody))
 	return snapshotResponse{}
 }
 
@@ -137,13 +136,13 @@ func runSnapshotCases(getTgt func() s3Target, getServerURL func() string, getCli
 				Key:    aws.String(key),
 				Body:   strings.NewReader("content-" + key),
 			})
-			require.NoError(t, err, "put %s", key)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "put %s", key)
 		}
 
 		snap := createSnapshotE2E(t, serverURL, "e2e-test")
-		require.NotZero(t, snap.Seq, "snapshot seq must be non-zero")
-		require.NotEmpty(t, snap.Timestamp)
-		require.Positive(t, snap.ObjectCount, "snapshot must contain objects")
+		gomega.Expect(snap.Seq).NotTo(gomega.BeZero(), "snapshot seq must be non-zero")
+		gomega.Expect(snap.Timestamp).NotTo(gomega.BeEmpty())
+		gomega.Expect(snap.ObjectCount).To(gomega.BeNumerically(">", 0), "snapshot must contain objects")
 
 		extras := []string{"extra1.txt", "extra2.txt"}
 		for _, key := range extras {
@@ -152,43 +151,43 @@ func runSnapshotCases(getTgt func() s3Target, getServerURL func() string, getCli
 				Key:    aws.String(key),
 				Body:   strings.NewReader("extra-" + key),
 			})
-			require.NoError(t, err, "put extra %s", key)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "put extra %s", key)
 		}
 
 		listOut, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(bucket),
 		})
-		require.NoError(t, err)
-		require.Len(t, listOut.Contents, 7, "7 objects before restore")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(listOut.Contents).To(gomega.HaveLen(7), "7 objects before restore")
 
 		restoreURL := fmt.Sprintf("%s/admin/snapshots/%d/restore", serverURL, snap.Seq)
 		restoreResp, err := postJSON(restoreURL, nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(restoreResp.Body.Close)
 		restoreBody, err := io.ReadAll(restoreResp.Body)
-		require.NoError(t, err)
-		require.Equalf(t, http.StatusOK, restoreResp.StatusCode, "restore status: %s", restoreBody)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(restoreResp.StatusCode).To(gomega.Equal(http.StatusOK), "restore status: %s", restoreBody)
 
 		var rr restoreResponse
-		require.NoError(t, json.Unmarshal(restoreBody, &rr))
-		require.GreaterOrEqual(t, rr.RestoredObjects, 5, "at least 5 objects restored")
-		require.Empty(t, rr.StaleBlobs, "no stale blobs: blobs still exist")
+		gomega.Expect(json.Unmarshal(restoreBody, &rr)).To(gomega.Succeed())
+		gomega.Expect(rr.RestoredObjects).To(gomega.BeNumerically(">=", 5), "at least 5 objects restored")
+		gomega.Expect(rr.StaleBlobs).To(gomega.BeEmpty(), "no stale blobs: blobs still exist")
 
 		listOut2, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(bucket),
 		})
-		require.NoError(t, err)
-		require.Len(t, listOut2.Contents, 5, "5 objects after restore (extras removed)")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(listOut2.Contents).To(gomega.HaveLen(5), "5 objects after restore (extras removed)")
 
 		for _, key := range objects {
 			getResp, err := client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.NoError(t, err, "get %s after restore", key)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "get %s after restore", key)
 			ginkgo.DeferCleanup(getResp.Body.Close)
 			body, _ := io.ReadAll(getResp.Body)
-			require.Equal(t, "content-"+key, string(body))
+			gomega.Expect(string(body)).To(gomega.Equal("content-" + key))
 		}
 
 		for _, key := range extras {
@@ -196,7 +195,7 @@ func runSnapshotCases(getTgt func() s3Target, getServerURL func() string, getCli
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.Error(t, err, "extra object %s should be gone after restore", key)
+			gomega.Expect(err).To(gomega.HaveOccurred(), "extra object %s should be gone after restore", key)
 		}
 	})
 
@@ -208,30 +207,29 @@ func runSnapshotCases(getTgt func() s3Target, getServerURL func() string, getCli
 		}
 
 		listResp, err := http.Get(serverURL + "/admin/snapshots") //nolint:noctx
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(listResp.Body.Close)
-		require.Equal(t, http.StatusOK, listResp.StatusCode)
+		gomega.Expect(listResp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		var lr snapshotListResponse
-		require.NoError(t, json.NewDecoder(listResp.Body).Decode(&lr))
-		require.GreaterOrEqual(t, len(lr.Snapshots), 2)
+		gomega.Expect(json.NewDecoder(listResp.Body).Decode(&lr)).To(gomega.Succeed())
+		gomega.Expect(len(lr.Snapshots)).To(gomega.BeNumerically(">=", 2))
 
 		for i := 1; i < len(lr.Snapshots); i++ {
-			require.Less(t, lr.Snapshots[i-1].Seq, lr.Snapshots[i].Seq)
+			gomega.Expect(lr.Snapshots[i-1].Seq).To(gomega.BeNumerically("<", lr.Snapshots[i].Seq))
 		}
 	})
 
 	ginkgo.It("returns not found for missing snapshot restores", func() {
-		t := ginkgo.GinkgoTB()
 		serverURL := getServerURL()
 		restoreResp, err := postJSON(serverURL+"/admin/snapshots/999999/restore", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(restoreResp.Body.Close)
-		require.Equal(t, http.StatusNotFound, restoreResp.StatusCode)
+		gomega.Expect(restoreResp.StatusCode).To(gomega.Equal(http.StatusNotFound))
 
 		var er errorResponse
-		require.NoError(t, json.NewDecoder(restoreResp.Body).Decode(&er))
-		require.NotEmpty(t, er.Error)
-		require.NotEmpty(t, er.Hint)
+		gomega.Expect(json.NewDecoder(restoreResp.Body).Decode(&er)).To(gomega.Succeed())
+		gomega.Expect(er.Error).NotTo(gomega.BeEmpty())
+		gomega.Expect(er.Hint).NotTo(gomega.BeEmpty())
 	})
 }

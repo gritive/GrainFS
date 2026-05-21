@@ -28,7 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Large objects", func() {
@@ -87,22 +87,22 @@ func runLargeObjectCases(getTgt func() s3Target) {
 			Key:    aws.String("blob"),
 			Body:   bytes.NewReader(data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("blob"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 		got, err := io.ReadAll(out.Body)
-		require.NoError(t, err)
-		require.Equal(t, len(data), len(got), "100 MiB length")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got).To(gomega.HaveLen(len(data)), "100 MiB length")
 		requireByteEqual(t, data, got, "100 MiB body must round-trip byte-identical")
 
 		sum := md5.Sum(data)
 		wantETag := `"` + hex.EncodeToString(sum[:]) + `"`
-		require.Equal(t, wantETag, aws.ToString(out.ETag), "simple-PUT ETag = MD5(plaintext)")
+		gomega.Expect(aws.ToString(out.ETag)).To(gomega.Equal(wantETag), "simple-PUT ETag = MD5(plaintext)")
 	})
 
 	ginkgo.It("round-trips a 256MiB object", func() {
@@ -125,17 +125,17 @@ func runLargeObjectCases(getTgt func() s3Target) {
 			Key:    aws.String("blob"),
 			Body:   bytes.NewReader(data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		out, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("blob"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(out.Body.Close)
 		got, err := io.ReadAll(out.Body)
-		require.NoError(t, err)
-		require.Equal(t, len(data), len(got), "256 MiB length")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got).To(gomega.HaveLen(len(data)), "256 MiB length")
 		requireByteEqual(t, data, got, "256 MiB body must round-trip byte-identical")
 	})
 
@@ -156,29 +156,29 @@ func runLargeObjectRoundTrip(t testing.TB, tgt s3Target, bucketCase string, size
 		Key:    aws.String("blob"),
 		Body:   bytes.NewReader(data),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	out, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("blob"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
-	require.NoError(t, err)
-	require.Equal(t, len(data), len(got), "%d-byte length", size)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got).To(gomega.HaveLen(len(data)), "%d-byte length", size)
 	requireByteEqual(t, data, got, "%d-byte body must round-trip byte-identical", size)
 
 	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("blob"),
 	})
-	require.NoError(t, err)
-	require.Equal(t, aws.ToString(out.ETag), aws.ToString(head.ETag), "ETag must remain stable across GET and HEAD")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(aws.ToString(head.ETag)).To(gomega.Equal(aws.ToString(out.ETag)), "ETag must remain stable across GET and HEAD")
 
 	sum := md5.Sum(data)
 	wantETag := `"` + hex.EncodeToString(sum[:]) + `"`
-	require.Equal(t, wantETag, aws.ToString(out.ETag), "simple-PUT ETag = MD5(plaintext)")
+	gomega.Expect(aws.ToString(out.ETag)).To(gomega.Equal(wantETag), "simple-PUT ETag = MD5(plaintext)")
 }
 
 func requireByteEqual(t testing.TB, want, got []byte, msgAndArgs ...any) {
@@ -211,12 +211,12 @@ func requireByteEqual(t testing.TB, want, got []byte, msgAndArgs ...any) {
 			return
 		}
 	}
-	require.Equal(t, want, got, msgAndArgs...)
+	gomega.Expect(got).To(gomega.Equal(want), msgAndArgs...)
 }
 
 func runClusterFanoutBreadth(t testing.TB, tgt s3Target) {
 	t.Helper()
-	require.True(t, tgt.isCluster, "fan-out breadth case requires cluster fixture")
+	gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "fan-out breadth case requires cluster fixture")
 	ctx := context.Background()
 	client := tgt.pickNode(0)
 	bucket := tgt.uniqueBucket(t, "fanoutbreadth")
@@ -227,9 +227,9 @@ func runClusterFanoutBreadth(t testing.TB, tgt s3Target) {
 		Key:    aws.String("blob"),
 		Body:   bytes.NewReader(data),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		var totalCount, totalSum float64
 		for i := 0; i < tgt.nodes; i++ {
 			count, sum, ok := chunkFanoutHistogram(t, tgt, i)
@@ -239,7 +239,7 @@ func runClusterFanoutBreadth(t testing.TB, tgt s3Target) {
 			}
 		}
 		return totalCount >= 1 && totalSum >= 2
-	}, 10*time.Second, 200*time.Millisecond, "chunk fan-out breadth histogram was not observed")
+	}).WithTimeout(10*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(), "chunk fan-out breadth histogram was not observed")
 }
 
 func runLargeObjectRangeAcrossChunkBoundary(t testing.TB, tgt s3Target) {
@@ -259,7 +259,7 @@ func runLargeObjectRangeAcrossChunkBoundary(t testing.TB, tgt s3Target) {
 		Key:    aws.String("blob"),
 		Body:   bytes.NewReader(data),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Range that crosses the first 16 MiB chunk boundary.
 	from := int64((16 << 20) - 1024)
@@ -269,22 +269,22 @@ func runLargeObjectRangeAcrossChunkBoundary(t testing.TB, tgt s3Target) {
 		Key:    aws.String("blob"),
 		Range:  aws.String("bytes=" + strconv.FormatInt(from, 10) + "-" + strconv.FormatInt(to, 10)),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
-	require.NoError(t, err)
-	require.Equal(t, data[from:to+1], got, "range across boundary must match")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got).To(gomega.Equal(data[from:to+1]), "range across boundary must match")
 }
 
 func runLargeObjectClusterAppendable(t testing.TB, tgt s3Target) {
 	t.Helper()
-	require.True(t, tgt.isCluster, "appendable case requires cluster fixture")
+	gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "appendable case requires cluster fixture")
 	bucket := tgt.uniqueBucket(t, "appendable")
 	client := tgt.pickNode(0)
 	key := "appendable"
-	require.NoError(t, putAppend(client, bucket, key, 0, []byte("large-object-")))
-	require.NoError(t, putAppend(client, bucket, key, int64(len("large-object-")), []byte("append")))
-	require.Equal(t, []byte("large-object-append"), getObject(t, client, bucket, key))
+	gomega.Expect(putAppend(client, bucket, key, 0, []byte("large-object-"))).To(gomega.Succeed())
+	gomega.Expect(putAppend(client, bucket, key, int64(len("large-object-")), []byte("append"))).To(gomega.Succeed())
+	gomega.Expect(getObject(t, client, bucket, key)).To(gomega.Equal([]byte("large-object-append")))
 }
 
 func chunkFanoutHistogram(t testing.TB, tgt s3Target, nodeIdx int) (count, sum float64, ok bool) {

@@ -2,24 +2,23 @@ package nfs4server
 
 import (
 	"net"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // nfs4Client wraps a TCP connection with helpers for building NFS4 compounds.
 type nfs4Client struct {
-	t    *testing.T
+	t    nfsTestTB
 	conn net.Conn
 	xid  uint32
 }
 
-func newNFS4Client(t *testing.T, addr string) *nfs4Client {
+func newNFS4Client(t nfsTestTB, addr string) *nfs4Client {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 	t.Cleanup(func() { conn.Close() })
 	return &nfs4Client{t: t, conn: conn}
 }
@@ -35,10 +34,10 @@ func (c *nfs4Client) sendCompound(ops []byte, opCount uint32) []byte {
 	compound.buf.Write(ops)
 
 	frame := buildRPCCallFrame(c.xid, compound.Bytes())
-	require.NoError(c.t, writeRPCFrame(c.conn, frame))
+	Expect(writeRPCFrame(c.conn, frame)).To(Succeed())
 
 	reply, err := readRPCFrame(c.conn)
-	require.NoError(c.t, err)
+	Expect(err).NotTo(HaveOccurred())
 	return reply
 }
 
@@ -103,382 +102,342 @@ func (c *nfs4Client) writeTestFile(name string, data []byte) {
 
 	reply := c.sendCompound(ops.Bytes(), 5)
 	status, _ := c.parseCompoundReply(reply)
-	assert.Equal(c.t, uint32(NFS4_OK), status, "writeTestFile %q should succeed", name)
+	Expect(status).To(Equal(uint32(NFS4_OK)), "writeTestFile %q should succeed", name)
 }
 
-// TestE2E_ReadDir verifies that files written to the legacy export appear in READDIR output.
-func TestE2E_ReadDir(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
+var _ = Describe("NFS4 integration coverage", func() {
+	var (
+		t nfsTestTB
+		c *nfs4Client
+	)
 
-	// Write 3 files
-	c.writeTestFile("alpha.txt", []byte("aaa"))
-	c.writeTestFile("beta.txt", []byte("bbb"))
-	c.writeTestFile("gamma.txt", []byte("ccc"))
+	BeforeEach(func() {
+		t = GinkgoT()
+		addr, _ := startTestNFS4Server(t)
+		c = newNFS4Client(t, addr)
+	})
 
-	// PUTROOTFH + LOOKUP(export) + READDIR
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(ops)
-	ops.WriteUint32(uint32(OpReadDir))
-	ops.WriteUint64(0)    // cookie = 0 (start)
-	ops.WriteUint64(0)    // cookieverf (8 bytes)
-	ops.WriteUint32(4096) // dircount
-	ops.WriteUint32(4096) // maxcount
-	ops.WriteUint32(0)    // attr bitmap len = 0
+	It("lists files written to the legacy export", func() {
+		c.writeTestFile("alpha.txt", []byte("aaa"))
+		c.writeTestFile("beta.txt", []byte("bbb"))
+		c.writeTestFile("gamma.txt", []byte("ccc"))
 
-	reply := c.sendCompound(ops.Bytes(), 3)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(ops)
+		ops.WriteUint32(uint32(OpReadDir))
+		ops.WriteUint64(0)
+		ops.WriteUint64(0)
+		ops.WriteUint32(4096)
+		ops.WriteUint32(4096)
+		ops.WriteUint32(0)
 
-	// Skip PUTROOTFH + LOOKUP(export) results
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
+		reply := c.sendCompound(ops.Bytes(), 3)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
-	// Parse READDIR result
-	readDirOp, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpReadDir), readDirOp)
-	readDirStatus, _ := r.ReadUint32()
-	require.Equal(t, uint32(NFS4_OK), readDirStatus)
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
 
-	// Parse cookieverf (8 bytes) + entries
-	r.ReadUint64() // cookieverf
+		readDirOp, _ := r.ReadUint32()
+		Expect(readDirOp).To(Equal(uint32(OpReadDir)))
+		readDirStatus, _ := r.ReadUint32()
+		Expect(readDirStatus).To(Equal(uint32(NFS4_OK)))
 
-	var names []string
-	for {
-		follows, err := r.ReadUint32()
-		if err != nil || follows == 0 {
-			break
-		}
-		r.ReadUint64() // cookie
-		name, _ := r.ReadString()
-		r.ReadUint32() // bitmap len (0)
-		r.ReadOpaque() // attrvals (empty)
-		names = append(names, name)
-	}
-
-	assert.Contains(t, names, "alpha.txt")
-	assert.Contains(t, names, "beta.txt")
-	assert.Contains(t, names, "gamma.txt")
-}
-
-func TestE2E_ReadDir_PropagatesRequestedAttrs(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
-
-	content := []byte("hello readdir attrs")
-	c.writeTestFile("with-attrs.txt", content)
-
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(ops)
-	ops.WriteUint32(uint32(OpReadDir))
-	ops.WriteUint64(0)    // cookie = 0 (start)
-	ops.WriteUint64(0)    // cookieverf (8 bytes)
-	ops.WriteUint32(4096) // dircount
-	ops.WriteUint32(4096) // maxcount
-	ops.WriteUint32(2)    // attr bitmap len
-	ops.WriteUint32(1<<1 | 1<<4)
-	ops.WriteUint32(0)
-
-	reply := c.sendCompound(ops.Bytes(), 3)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
-
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-
-	readDirOp, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpReadDir), readDirOp)
-	readDirStatus, _ := r.ReadUint32()
-	require.Equal(t, uint32(NFS4_OK), readDirStatus)
-	r.ReadUint64() // cookieverf
-
-	for {
-		follows, err := r.ReadUint32()
-		require.NoError(t, err)
-		if follows == 0 {
-			break
-		}
-		r.ReadUint64() // cookie
-		name, _ := r.ReadString()
-		bitmapLen, _ := r.ReadUint32()
-		var word0 uint32
-		for i := uint32(0); i < bitmapLen; i++ {
-			word, _ := r.ReadUint32()
-			if i == 0 {
-				word0 = word
+		r.ReadUint64()
+		var names []string
+		for {
+			follows, err := r.ReadUint32()
+			if err != nil || follows == 0 {
+				break
 			}
+			r.ReadUint64()
+			name, _ := r.ReadString()
+			r.ReadUint32()
+			r.ReadOpaque()
+			names = append(names, name)
+		}
+
+		Expect(names).To(ContainElement("alpha.txt"))
+		Expect(names).To(ContainElement("beta.txt"))
+		Expect(names).To(ContainElement("gamma.txt"))
+	})
+
+	It("propagates requested READDIR attrs", func() {
+		content := []byte("hello readdir attrs")
+		c.writeTestFile("with-attrs.txt", content)
+
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(ops)
+		ops.WriteUint32(uint32(OpReadDir))
+		ops.WriteUint64(0)
+		ops.WriteUint64(0)
+		ops.WriteUint32(4096)
+		ops.WriteUint32(4096)
+		ops.WriteUint32(2)
+		ops.WriteUint32(1<<1 | 1<<4)
+		ops.WriteUint32(0)
+
+		reply := c.sendCompound(ops.Bytes(), 3)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
+
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+
+		readDirOp, _ := r.ReadUint32()
+		Expect(readDirOp).To(Equal(uint32(OpReadDir)))
+		readDirStatus, _ := r.ReadUint32()
+		Expect(readDirStatus).To(Equal(uint32(NFS4_OK)))
+		r.ReadUint64()
+
+		for {
+			follows, err := r.ReadUint32()
+			Expect(err).NotTo(HaveOccurred())
+			if follows == 0 {
+				break
+			}
+			r.ReadUint64()
+			name, _ := r.ReadString()
+			bitmapLen, _ := r.ReadUint32()
+			var word0 uint32
+			for i := uint32(0); i < bitmapLen; i++ {
+				word, _ := r.ReadUint32()
+				if i == 0 {
+					word0 = word
+				}
+			}
+			attrVals, err := r.ReadOpaque()
+			Expect(err).NotTo(HaveOccurred())
+			if name != "with-attrs.txt" {
+				continue
+			}
+
+			Expect(word0&(1<<1)).NotTo(BeZero(), "READDIR entry should include requested TYPE attr")
+			Expect(word0&(1<<4)).NotTo(BeZero(), "READDIR entry should include requested SIZE attr")
+			ar := NewXDRReader(attrVals)
+			fileType, _ := ar.ReadUint32()
+			fileSize, _ := ar.ReadUint64()
+			Expect(fileType).To(Equal(uint32(NF4REG)))
+			Expect(fileSize).To(Equal(uint64(len(content))))
+			return
+		}
+		Fail("READDIR did not return with-attrs.txt")
+	})
+
+	It("returns file GETATTR type and size", func() {
+		content := []byte("hello getattr test")
+		c.writeTestFile("attrs.txt", content)
+
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(ops)
+		writeLookupFile(ops, "attrs.txt")
+		ops.WriteUint32(uint32(OpGetAttr))
+		ops.WriteUint32(2)
+		ops.WriteUint32(0x12)
+		ops.WriteUint32(0)
+
+		reply := c.sendCompound(ops.Bytes(), 4)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
+
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+
+		getAttrOp, _ := r.ReadUint32()
+		Expect(getAttrOp).To(Equal(uint32(OpGetAttr)))
+		getAttrStatus, _ := r.ReadUint32()
+		Expect(getAttrStatus).To(Equal(uint32(NFS4_OK)))
+
+		bitmapLen, _ := r.ReadUint32()
+		for range bitmapLen {
+			r.ReadUint32()
 		}
 		attrVals, err := r.ReadOpaque()
-		require.NoError(t, err)
-		if name != "with-attrs.txt" {
-			continue
-		}
+		Expect(err).NotTo(HaveOccurred())
 
-		require.NotZero(t, word0&(1<<1), "READDIR entry should include requested TYPE attr")
-		require.NotZero(t, word0&(1<<4), "READDIR entry should include requested SIZE attr")
-		ar := NewXDRReader(attrVals)
-		fileType, _ := ar.ReadUint32()
-		fileSize, _ := ar.ReadUint64()
-		require.Equal(t, uint32(NF4REG), fileType)
-		require.Equal(t, uint64(len(content)), fileSize)
-		return
-	}
-	require.Fail(t, "READDIR did not return with-attrs.txt")
-}
+		Expect(len(attrVals)).To(BeNumerically(">=", 12))
+		attrReader := NewXDRReader(attrVals)
+		fileType, _ := attrReader.ReadUint32()
+		fileSize, _ := attrReader.ReadUint64()
 
-// TestE2E_GetAttr_File verifies that GETATTR returns correct type and size.
-func TestE2E_GetAttr_File(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
+		Expect(fileType).To(Equal(uint32(NF4REG)), "should be a regular file")
+		Expect(fileSize).To(Equal(uint64(len(content))), "size should match content length")
+	})
 
-	content := []byte("hello getattr test")
-	c.writeTestFile("attrs.txt", content)
+	It("reads from a non-zero offset", func() {
+		c.writeTestFile("offset.txt", []byte("hello world"))
 
-	// PUTROOTFH + LOOKUP(export) + LOOKUP(file) + GETATTR
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(ops)
-	writeLookupFile(ops, "attrs.txt")
-	ops.WriteUint32(uint32(OpGetAttr))
-	ops.WriteUint32(2)    // bitmap len = 2
-	ops.WriteUint32(0x12) // request type (bit1) + size (bit4)
-	ops.WriteUint32(0)
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(ops)
+		writeLookupFile(ops, "offset.txt")
+		ops.WriteUint32(uint32(OpRead))
+		ops.WriteUint32(0)
+		ops.WriteUint64(0)
+		ops.WriteUint32(0)
+		ops.WriteUint64(6)
+		ops.WriteUint32(1024)
 
-	reply := c.sendCompound(ops.Bytes(), 4)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
+		reply := c.sendCompound(ops.Bytes(), 4)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
-	// Skip PUTROOTFH + LOOKUP(export) + LOOKUP(file) results
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-
-	// Parse GETATTR result
-	getAttrOp, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpGetAttr), getAttrOp)
-	getAttrStatus, _ := r.ReadUint32()
-	require.Equal(t, uint32(NFS4_OK), getAttrStatus)
-
-	// Parse: bitmap + attrvals
-	bitmapLen, _ := r.ReadUint32()
-	for range bitmapLen {
 		r.ReadUint32()
-	}
-	attrVals, err := r.ReadOpaque()
-	require.NoError(t, err)
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
 
-	// attrVals contains: type(4) + size(8)
-	require.GreaterOrEqual(t, len(attrVals), 12)
-	attrReader := NewXDRReader(attrVals)
-	fileType, _ := attrReader.ReadUint32()
-	fileSize, _ := attrReader.ReadUint64()
+		readOp, _ := r.ReadUint32()
+		Expect(readOp).To(Equal(uint32(OpRead)))
+		readStatus, _ := r.ReadUint32()
+		Expect(readStatus).To(Equal(uint32(NFS4_OK)))
 
-	assert.Equal(t, uint32(NF4REG), fileType, "should be a regular file")
-	assert.Equal(t, uint64(len(content)), fileSize, "size should match content length")
-}
+		r.ReadUint32()
+		data, err := r.ReadOpaque()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal([]byte("world")))
+	})
 
-// TestE2E_ReadAtOffset verifies partial reads from a non-zero offset.
-func TestE2E_ReadAtOffset(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
+	It("returns eof for reads beyond EOF", func() {
+		c.writeTestFile("short.txt", []byte("hi"))
 
-	c.writeTestFile("offset.txt", []byte("hello world"))
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		writeLookupLegacyExport(ops)
+		writeLookupFile(ops, "short.txt")
+		ops.WriteUint32(uint32(OpRead))
+		ops.WriteUint32(0)
+		ops.WriteUint64(0)
+		ops.WriteUint32(0)
+		ops.WriteUint64(0)
+		ops.WriteUint32(1024)
 
-	// PUTROOTFH + LOOKUP(export) + LOOKUP(file) + READ at offset 6
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(ops)
-	writeLookupFile(ops, "offset.txt")
-	ops.WriteUint32(uint32(OpRead))
-	ops.WriteUint32(0)
-	ops.WriteUint64(0)
-	ops.WriteUint32(0)    // stateid
-	ops.WriteUint64(6)    // offset = 6
-	ops.WriteUint32(1024) // count
+		reply := c.sendCompound(ops.Bytes(), 4)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
-	reply := c.sendCompound(ops.Bytes(), 4)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
 
-	// Skip PUTROOTFH + LOOKUP(export) + LOOKUP(file) results
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
-	r.ReadUint32()
+		eof, _ := r.ReadUint32()
+		data, err := r.ReadOpaque()
+		Expect(err).NotTo(HaveOccurred())
 
-	readOp, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpRead), readOp)
-	readStatus, _ := r.ReadUint32()
-	require.Equal(t, uint32(NFS4_OK), readStatus)
+		Expect(eof).To(Equal(uint32(1)), "should be EOF")
+		Expect(data).To(Equal([]byte("hi")))
+	})
 
-	r.ReadUint32() // eof
-	data, err := r.ReadOpaque()
-	require.NoError(t, err)
-	assert.Equal(t, []byte("world"), data)
-}
+	It("echoes requested ACCESS permission bits", func() {
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		ops.WriteUint32(uint32(OpAccess))
+		ops.WriteUint32(0x1F)
 
-// TestE2E_ReadBeyondEOF verifies that reading past EOF returns eof=true.
-func TestE2E_ReadBeyondEOF(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
+		reply := c.sendCompound(ops.Bytes(), 2)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
-	c.writeTestFile("short.txt", []byte("hi"))
+		r.ReadUint32()
+		r.ReadUint32()
 
-	// PUTROOTFH + LOOKUP(export) + LOOKUP(file) + READ with count > file size
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	writeLookupLegacyExport(ops)
-	writeLookupFile(ops, "short.txt")
-	ops.WriteUint32(uint32(OpRead))
-	ops.WriteUint32(0)
-	ops.WriteUint64(0)
-	ops.WriteUint32(0)    // stateid
-	ops.WriteUint64(0)    // offset = 0
-	ops.WriteUint32(1024) // count = 1024 (much larger than file)
+		accessOp, _ := r.ReadUint32()
+		Expect(accessOp).To(Equal(uint32(OpAccess)))
+		accessStatus, _ := r.ReadUint32()
+		Expect(accessStatus).To(Equal(uint32(NFS4_OK)))
 
-	reply := c.sendCompound(ops.Bytes(), 4)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
+		r.ReadUint32()
+		access, _ := r.ReadUint32()
+		Expect(access).To(Equal(uint32(0x1F)), "ACCESS should grant all requested bits")
+	})
 
-	r.ReadUint32()
-	r.ReadUint32() // PUTROOTFH
-	r.ReadUint32()
-	r.ReadUint32() // LOOKUP export
-	r.ReadUint32()
-	r.ReadUint32() // LOOKUP file
-	r.ReadUint32() // READ op code
-	r.ReadUint32() // READ status
+	It("confirms SETCLIENTID", func() {
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpSetClientID))
+		ops.WriteUint64(99999)
+		ops.WriteString("confirm-test-client")
+		ops.WriteUint32(0)
+		ops.WriteString("tcp")
+		ops.WriteString("127.0.0.1.0.0")
+		ops.WriteUint32(0)
 
-	eof, _ := r.ReadUint32()
-	data, err := r.ReadOpaque()
-	require.NoError(t, err)
+		reply := c.sendCompound(ops.Bytes(), 1)
+		status, r := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
-	assert.Equal(t, uint32(1), eof, "should be EOF")
-	assert.Equal(t, []byte("hi"), data)
-}
+		r.ReadUint32()
+		r.ReadUint32()
+		clientID, _ := r.ReadUint64()
+		r.ReadUint64()
 
-// TestE2E_Access verifies that ACCESS echoes back the requested permission bits.
-func TestE2E_Access(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
+		ops2 := &XDRWriter{}
+		ops2.WriteUint32(uint32(OpSetClientIDConfirm))
+		ops2.WriteUint64(clientID)
+		ops2.WriteUint64(clientID)
 
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	ops.WriteUint32(uint32(OpAccess))
-	ops.WriteUint32(0x1F) // REQUEST_ALL
+		reply2 := c.sendCompound(ops2.Bytes(), 1)
+		status2, _ := c.parseCompoundReply(reply2)
+		Expect(status2).To(Equal(uint32(NFS4_OK)))
+	})
 
-	reply := c.sendCompound(ops.Bytes(), 2)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
+	It("reuses a retrieved filehandle via PUTFH", func() {
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpPutRootFH))
+		ops.WriteUint32(uint32(OpGetFH))
 
-	r.ReadUint32()
-	r.ReadUint32() // PUTROOTFH
+		reply := c.sendCompound(ops.Bytes(), 2)
+		_, r := c.parseCompoundReply(reply)
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		r.ReadUint32()
+		rootFH, err := r.ReadOpaque()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rootFH).To(HaveLen(16))
 
-	accessOp, _ := r.ReadUint32()
-	assert.Equal(t, uint32(OpAccess), accessOp)
-	accessStatus, _ := r.ReadUint32()
-	require.Equal(t, uint32(NFS4_OK), accessStatus)
+		ops2 := &XDRWriter{}
+		ops2.WriteUint32(uint32(OpPutFH))
+		ops2.WriteOpaque(rootFH)
+		ops2.WriteUint32(uint32(OpGetFH))
 
-	r.ReadUint32() // supported
-	access, _ := r.ReadUint32()
-	assert.Equal(t, uint32(0x1F), access, "ACCESS should grant all requested bits")
-}
+		reply2 := c.sendCompound(ops2.Bytes(), 2)
+		status2, r2 := c.parseCompoundReply(reply2)
+		Expect(status2).To(Equal(uint32(NFS4_OK)))
 
-// TestE2E_SetClientIDConfirm verifies the full SETCLIENTID → SETCLIENTIDCONFIRM sequence.
-func TestE2E_SetClientIDConfirm(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		r2.ReadUint32()
+		returnedFH, err := r2.ReadOpaque()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(returnedFH).To(Equal(rootFH), "PUTFH + GETFH should return same filehandle")
+	})
 
-	// Step 1: SETCLIENTID
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpSetClientID))
-	ops.WriteUint64(99999) // verifier
-	ops.WriteString("confirm-test-client")
-	ops.WriteUint32(0)               // cb_program
-	ops.WriteString("tcp")           // netid
-	ops.WriteString("127.0.0.1.0.0") // addr
-	ops.WriteUint32(0)               // callback_ident
+	It("accepts RENEW lease renewal", func() {
+		ops := &XDRWriter{}
+		ops.WriteUint32(uint32(OpRenew))
+		ops.WriteUint64(12345)
 
-	reply := c.sendCompound(ops.Bytes(), 1)
-	status, r := c.parseCompoundReply(reply)
-	require.Equal(t, uint32(NFS4_OK), status)
-
-	r.ReadUint32()
-	r.ReadUint32() // SETCLIENTID op code + status
-	clientID, _ := r.ReadUint64()
-	r.ReadUint64() // confirm verifier
-
-	// Step 2: SETCLIENTIDCONFIRM
-	ops2 := &XDRWriter{}
-	ops2.WriteUint32(uint32(OpSetClientIDConfirm))
-	ops2.WriteUint64(clientID) // clientid
-	ops2.WriteUint64(clientID) // confirm verifier (same as clientid in our impl)
-
-	reply2 := c.sendCompound(ops2.Bytes(), 1)
-	status2, _ := c.parseCompoundReply(reply2)
-	assert.Equal(t, uint32(NFS4_OK), status2)
-}
-
-// TestE2E_PutFH_GetFH verifies that a retrieved filehandle can be re-used via PUTFH.
-func TestE2E_PutFH_GetFH(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
-
-	// Step 1: Get root FH
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpPutRootFH))
-	ops.WriteUint32(uint32(OpGetFH))
-
-	reply := c.sendCompound(ops.Bytes(), 2)
-	_, r := c.parseCompoundReply(reply)
-	r.ReadUint32()
-	r.ReadUint32() // PUTROOTFH
-	r.ReadUint32()
-	r.ReadUint32() // GETFH op + status
-	rootFH, err := r.ReadOpaque()
-	require.NoError(t, err)
-	require.Len(t, rootFH, 16)
-
-	// Step 2: Use PUTFH with the retrieved filehandle + GETFH to verify same FH
-	ops2 := &XDRWriter{}
-	ops2.WriteUint32(uint32(OpPutFH))
-	ops2.WriteOpaque(rootFH)
-	ops2.WriteUint32(uint32(OpGetFH))
-
-	reply2 := c.sendCompound(ops2.Bytes(), 2)
-	status2, r2 := c.parseCompoundReply(reply2)
-	require.Equal(t, uint32(NFS4_OK), status2)
-
-	r2.ReadUint32()
-	r2.ReadUint32() // PUTFH
-	r2.ReadUint32()
-	r2.ReadUint32() // GETFH op + status
-	returnedFH, err := r2.ReadOpaque()
-	require.NoError(t, err)
-	assert.Equal(t, rootFH, returnedFH, "PUTFH + GETFH should return same filehandle")
-}
-
-// TestE2E_Renew verifies RENEW operation is accepted (lease renewal).
-func TestE2E_Renew(t *testing.T) {
-	addr, _ := startTestNFS4Server(t)
-	c := newNFS4Client(t, addr)
-
-	ops := &XDRWriter{}
-	ops.WriteUint32(uint32(OpRenew))
-	ops.WriteUint64(12345) // clientid
-
-	reply := c.sendCompound(ops.Bytes(), 1)
-	status, _ := c.parseCompoundReply(reply)
-	assert.Equal(t, uint32(NFS4_OK), status)
-}
+		reply := c.sendCompound(ops.Bytes(), 1)
+		status, _ := c.parseCompoundReply(reply)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
+	})
+})

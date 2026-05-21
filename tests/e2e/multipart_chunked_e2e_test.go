@@ -28,8 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 const streamingPayloadSentinel = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
@@ -69,7 +68,7 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 			Key:         aws.String(key),
 			ContentType: aws.String("application/octet-stream"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		uploadID := aws.ToString(initOut.UploadId)
 
 		// Upload part 1 via raw chunked HTTP — bypasses aws-sdk-go-v2's
@@ -87,22 +86,22 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 				},
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Full GET: body must be the plaintext, not the chunked framing.
 		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getOut.Body.Close)
 		body, err := io.ReadAll(getOut.Body)
-		require.NoError(t, err)
-		assert.Equal(t, int64(len(plaintext)), aws.ToInt64(getOut.ContentLength),
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToInt64(getOut.ContentLength)).To(gomega.Equal(int64(len(plaintext))),
 			"Content-Length must match plaintext (not framed bytes)")
-		assert.Equal(t, len(plaintext), len(body), "body length")
+		gomega.Expect(body).To(gomega.HaveLen(len(plaintext)), "body length")
 		if len(body) == len(plaintext) {
-			assert.Equal(t, plaintext, body, "body bytes")
+			gomega.Expect(body).To(gomega.Equal(plaintext), "body bytes")
 		}
 
 		// ?partNumber=1 GET: same expectation.
@@ -111,15 +110,15 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 			Key:        aws.String(key),
 			PartNumber: aws.Int32(1),
 		})
-		require.NoError(t, err)
-		defer partOut.Body.Close()
-		assert.Equal(t, int64(len(plaintext)), aws.ToInt64(partOut.ContentLength),
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(partOut.Body.Close)
+		gomega.Expect(aws.ToInt64(partOut.ContentLength)).To(gomega.Equal(int64(len(plaintext))),
 			"?partNumber=1 Content-Length must match plaintext")
 		partBody, err := io.ReadAll(partOut.Body)
-		require.NoError(t, err)
-		assert.Equal(t, len(plaintext), len(partBody), "?partNumber=1 body length")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(partBody).To(gomega.HaveLen(len(plaintext)), "?partNumber=1 body length")
 		if len(partBody) == len(plaintext) {
-			assert.Equal(t, plaintext, partBody, "?partNumber=1 body bytes")
+			gomega.Expect(partBody).To(gomega.Equal(plaintext), "?partNumber=1 body bytes")
 		}
 	})
 
@@ -139,7 +138,7 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 			Key:         aws.String(key),
 			ContentType: aws.String("application/octet-stream"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		uploadID := aws.ToString(initOut.UploadId)
 
 		completed := make([]types.CompletedPart, 0, 3)
@@ -151,7 +150,7 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 				PartNumber: aws.Int32(int32(i + 1)),
 				Body:       bytes.NewReader(body),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			completed = append(completed, types.CompletedPart{
 				PartNumber: aws.Int32(int32(i + 1)),
 				ETag:       out.ETag,
@@ -166,18 +165,18 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 				Parts: completed,
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getOut.Body.Close)
 		got, err := io.ReadAll(getOut.Body)
-		require.NoError(t, err)
-		require.Equal(t, int64(len(want)), aws.ToInt64(getOut.ContentLength))
-		require.True(t, bytes.Equal(want, got), "body mismatch")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToInt64(getOut.ContentLength)).To(gomega.Equal(int64(len(want))))
+		gomega.Expect(got).To(gomega.Equal(want), "body mismatch")
 	})
 
 	ginkgo.It("reads correctly when a segment spans a part boundary", func() {
@@ -195,7 +194,7 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		uploadID := aws.ToString(initOut.UploadId)
 
 		completed := make([]types.CompletedPart, 0, 3)
@@ -207,7 +206,7 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 				PartNumber: aws.Int32(int32(i + 1)),
 				Body:       bytes.NewReader(body),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			completed = append(completed, types.CompletedPart{
 				PartNumber: aws.Int32(int32(i + 1)),
 				ETag:       out.ETag,
@@ -222,18 +221,18 @@ func runMultipartChunkedCases(getTgt func() s3Target) {
 				Parts: completed,
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		defer getOut.Body.Close()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getOut.Body.Close)
 		got, err := io.ReadAll(getOut.Body)
-		require.NoError(t, err)
-		require.Equal(t, int64(len(want)), aws.ToInt64(getOut.ContentLength))
-		require.True(t, bytes.Equal(want, got), "body mismatch")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToInt64(getOut.ContentLength)).To(gomega.Equal(int64(len(want))))
+		gomega.Expect(got).To(gomega.Equal(want), "body mismatch")
 	})
 }
 
@@ -256,7 +255,7 @@ func uploadPartChunked(t testing.TB, ctx context.Context, tgt s3Target, bucket, 
 	url := fmt.Sprintf("%s/%s/%s?partNumber=%d&uploadId=%s",
 		tgt.endpoint(0), bucket, key, partN, uploadID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body.Bytes()))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.ContentLength = int64(body.Len())
 	req.Header.Set("Content-Encoding", "aws-chunked")
 	req.Header.Set("X-Amz-Decoded-Content-Length", fmt.Sprintf("%d", len(plaintext)))
@@ -266,15 +265,15 @@ func uploadPartChunked(t testing.TB, ctx context.Context, tgt s3Target, bucket, 
 		o.DisableURIPathEscaping = true
 	})
 	creds := aws.Credentials{AccessKeyID: tgt.accessKey, SecretAccessKey: tgt.secretKey}
-	require.NoError(t, signer.SignHTTP(ctx, creds, req, streamingPayloadSentinel, "s3", "us-east-1", time.Now()))
+	gomega.Expect(signer.SignHTTP(ctx, creds, req, streamingPayloadSentinel, "s3", "us-east-1", time.Now())).To(gomega.Succeed())
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	ginkgo.DeferCleanup(resp.Body.Close)
 	respBody, _ := io.ReadAll(resp.Body)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "UploadPart status (body=%s)", string(respBody))
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK), "UploadPart status (body=%s)", string(respBody))
 
 	etag := resp.Header.Get("ETag")
-	require.NotEmpty(t, etag, "ETag header on UploadPart response")
+	gomega.Expect(etag).NotTo(gomega.BeEmpty(), "ETag header on UploadPart response")
 	return etag
 }

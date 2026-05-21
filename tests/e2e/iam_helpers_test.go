@@ -21,7 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
@@ -33,13 +33,13 @@ import (
 func makeSharedEncryptionKeyFile(t testing.TB) string {
 	t.Helper()
 	f, err := os.CreateTemp("", "grainfs-e2e-enckey-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var key [32]byte
 	_, err = rand.Read(key[:])
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	_, err = f.Write(key[:])
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(f.Close()).To(gomega.Succeed())
 	t.Cleanup(func() { _ = os.Remove(f.Name()) })
 	return f.Name()
 }
@@ -66,26 +66,26 @@ func bootstrapAdminViaUDS(t testing.TB, dataDir string) (accessKey, secretKey st
 	}
 
 	// FU#3 / F#26-tls-posture: see tryBootstrapAdminViaUDSResult for rationale.
-	require.NoError(t, seedBootstrapTrustedProxyCIDR(sock), "seed trusted-proxy.cidr")
+	gomega.Expect(seedBootstrapTrustedProxyCIDR(sock)).To(gomega.Succeed(), "seed trusted-proxy.cidr")
 	client := iamUDSClient(sock)
 	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
 	req, err := http.NewRequestWithContext(context.Background(), "POST",
 		"http://unix/v1/iam/sa", body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
-	require.Truef(t, resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated,
+	gomega.Expect(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated).To(gomega.BeTrue(),
 		"bootstrap via %s: got %d", sock, resp.StatusCode)
 
 	var out struct {
 		AccessKey string `json:"access_key"`
 		SecretKey string `json:"secret_key"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
-	require.NotEmpty(t, out.AccessKey)
-	require.NotEmpty(t, out.SecretKey)
+	gomega.Expect(json.NewDecoder(resp.Body).Decode(&out)).To(gomega.Succeed())
+	gomega.Expect(out.AccessKey).NotTo(gomega.BeEmpty())
+	gomega.Expect(out.SecretKey).NotTo(gomega.BeEmpty())
 	return out.AccessKey, out.SecretKey
 }
 
@@ -199,12 +199,12 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
 	ginkgo.DeferCleanup(func() { _ = os.Remove(sock) })
 	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = ln.Close() })
 
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.Equal(t, "/v1/iam/sa", r.URL.Path)
+			gomega.Expect(r.URL.Path).To(gomega.Equal("/v1/iam/sa"))
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{
 				"sa_id":"019e-test-sa",
@@ -226,19 +226,19 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
 	})
 
 	got, err := tryBootstrapAdminViaUDSResult(sock)
-	require.NoError(t, err)
-	require.Equal(t, "019e-test-sa", got.SAID)
-	require.Equal(t, "ak", got.AccessKey)
-	require.Equal(t, "sk", got.SecretKey)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got.SAID).To(gomega.Equal("019e-test-sa"))
+	gomega.Expect(got.AccessKey).To(gomega.Equal("ak"))
+	gomega.Expect(got.SecretKey).To(gomega.Equal("sk"))
 }
 
 func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 	dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "admin.sock")
 	ln, err := net.Listen("unix", sock)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = ln.Close() })
 
 	policyPut := make(chan string, 1)
@@ -248,7 +248,7 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 			w.Header().Set("Content-Type", "application/json")
 			switch {
 			case r.URL.Path == "/v1/iam/sa":
-				require.Equal(t, http.MethodPost, r.Method)
+				gomega.Expect(r.Method).To(gomega.Equal(http.MethodPost))
 				_, _ = io.WriteString(w, `{
 						"sa_id":"regular-sa",
 						"name":"admin",
@@ -280,18 +280,18 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 	})
 
 	ak, sk := bootstrapAdminViaUDSAnyWithBucketGrants(t, []string{dir}, time.Second, "__probe")
-	require.Equal(t, "ak", ak)
-	require.Equal(t, "sk", sk)
+	gomega.Expect(ak).To(gomega.Equal("ak"))
+	gomega.Expect(sk).To(gomega.Equal("sk"))
 
 	select {
 	case path := <-policyPut:
-		require.Contains(t, path, "harness-admin-__probe")
+		gomega.Expect(path).To(gomega.ContainSubstring("harness-admin-__probe"))
 	case <-time.After(time.Second):
 		t.Fatal("expected policy PUT request")
 	}
 	select {
 	case path := <-policyAttach:
-		require.Contains(t, path, "regular-sa")
+		gomega.Expect(path).To(gomega.ContainSubstring("regular-sa"))
 	case <-time.After(time.Second):
 		t.Fatal("expected policy attach request")
 	}
@@ -409,23 +409,23 @@ func iamDo(t testing.TB, sock, method, path string, body any, out any) {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
-		require.NoError(t, err, "marshal body")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "marshal body")
 		rdr = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(context.Background(), method, "http://unix"+path, rdr)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoErrorf(t, err, "admin %s %s", method, path)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "admin %s %s", method, path)
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		t.Fatalf("admin %s %s -> %d: %s", method, path, resp.StatusCode, string(respBody))
 	}
 	if out != nil && len(respBody) > 0 {
-		require.NoErrorf(t, json.Unmarshal(respBody, out), "decode %s %s", method, path)
+		gomega.Expect(json.Unmarshal(respBody, out)).To(gomega.Succeed(), "decode %s %s", method, path)
 	}
 }
 
@@ -545,7 +545,7 @@ func startIAMTestServer(t testing.TB) iamTestServer {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-*")
-	require.NoError(t, err, "mkdtemp")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	port := freePort()
@@ -561,16 +561,16 @@ func startIAMTestServer(t testing.TB) iamTestServer {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start IAM e2e server")
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start IAM e2e server")
 	t.Cleanup(func() { terminateProcess(cmd) })
 
 	s3URL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
 
 	bootstrap, err := bootstrapAdminResultViaUDSForTestMain(dir, 30*time.Second)
-	require.NoError(t, err, "bootstrap admin SA via UDS")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA via UDS")
 	cli := s3ClientFor(s3URL, bootstrap.AccessKey, bootstrap.SecretKey)
-	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
+	gomega.Expect(waitForIAMReady(cli, 30*time.Second)).To(gomega.Succeed())
 
 	return iamTestServer{
 		S3URL:         s3URL,
@@ -613,7 +613,7 @@ func startIAMTestServerWithRestart(t testing.TB) *iamTestServerHandle {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-restart-*")
-	require.NoError(t, err, "mkdtemp")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	h := &iamTestServerHandle{
@@ -655,14 +655,14 @@ func (h *iamTestServerHandle) Start(t testing.TB) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start IAM e2e server")
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start IAM e2e server")
 	h.cmd = cmd
 
 	waitForPort(t, h.s3Port, 30*time.Second)
 
 	if !h.firstStart {
 		bootstrap, err := bootstrapAdminResultViaUDSForTestMain(h.DataDir, 30*time.Second)
-		require.NoError(t, err, "bootstrap admin SA via UDS")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA via UDS")
 		h.BootstrapSAID = bootstrap.SAID
 		h.BootstrapAK = bootstrap.AccessKey
 		h.BootstrapSK = bootstrap.SecretKey
@@ -670,7 +670,7 @@ func (h *iamTestServerHandle) Start(t testing.TB) {
 
 	cli := s3ClientFor(h.S3URL, h.BootstrapAK, h.BootstrapSK)
 	h.cli = cli
-	require.NoError(t, waitForIAMReady(cli, 30*time.Second))
+	gomega.Expect(waitForIAMReady(cli, 30*time.Second)).To(gomega.Succeed())
 	h.firstStart = true
 }
 
@@ -730,7 +730,7 @@ func runIAMHelpersStartServerBootstrapAccepted(t testing.TB) {
 	_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
-	require.NoError(t, err, "HeadBucket with bootstrap creds")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "HeadBucket with bootstrap creds")
 }
 
 var _ = ginkgo.Describe("IAM bootstrap helpers", func() {

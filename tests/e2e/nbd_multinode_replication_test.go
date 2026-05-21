@@ -8,7 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("NBD multinode replication", func() {
@@ -45,8 +45,8 @@ var _ = ginkgo.Describe("NBD multinode replication", func() {
 				Bucket: aws.String("__grainfs_volumes"),
 				Prefix: aws.String("__vol/default/"),
 			})
-			require.NoError(t, err)
-			require.NotEmpty(t, out.Contents)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(out.Contents).NotTo(gomega.BeEmpty())
 		})
 	})
 })

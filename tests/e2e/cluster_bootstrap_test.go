@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // joinViaUDS sends POST /v1/cluster/join to the admin socket and returns the
@@ -22,22 +22,22 @@ import (
 func joinViaUDS(t testing.TB, sock, peerAddr string) (int, map[string]string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"peer_addr": peerAddr})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	req, err := http.NewRequestWithContext(
 		context.Background(), http.MethodPost,
 		"http://unix/v1/cluster/join", bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
 
 	raw, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var out map[string]string
-	require.NoError(t, json.Unmarshal(raw, &out))
+	gomega.Expect(json.Unmarshal(raw, &out)).To(gomega.Succeed())
 	return resp.StatusCode, out
 }
 
@@ -71,8 +71,8 @@ func runClusterBootstrapJoinUDSAlreadyMember(t testing.TB) {
 
 		sock := filepath.Join(c.dataDirs[0], "admin.sock")
 		code, body := joinViaUDS(t, sock, c.raftAddr(1))
-		require.Equal(t, 200, code, "unexpected status; body: %v", body)
-		require.Equal(t, "already_member", body["status"],
+		gomega.Expect(code).To(gomega.Equal(200), "unexpected status; body: %v", body)
+		gomega.Expect(body["status"]).To(gomega.Equal("already_member"),
 			"expected already_member for a joined node; got %v", body)
 	}
 }
@@ -100,8 +100,8 @@ func runClusterBootstrapJoinCLIIdempotent(t testing.TB) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				out, err := runGrainFSJoin(ctx, sock, peerAddr)
-				require.NoError(t, err, "grainfs join attempt %d: %s", i, out)
-				require.Contains(t, out, "already_member",
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "grainfs join attempt %d: %s", i, out)
+				gomega.Expect(out).To(gomega.ContainSubstring("already_member"),
 					"attempt %d: expected already_member in output: %s", i, out)
 			}()
 		}
@@ -134,15 +134,15 @@ func runClusterBootstrapDataPresentBlocksJoin(t testing.TB) {
 		})
 
 		// Create a bucket so HasUserData() → true.
-		require.NoError(t, adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, "guard-test-bucket", 30*time.Second))
+		gomega.Expect(adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, "guard-test-bucket", 30*time.Second)).To(gomega.Succeed())
 
 		// Any non-self, non-empty host:port works — the data guard fires before
 		// the handler tries to reach the peer.
 		sock := filepath.Join(c.dataDirs[0], "admin.sock")
 		code, body := joinViaUDS(t, sock, "127.0.0.1:19999")
-		require.Equal(t, 409, code, "expected 409 when solo has data and force=false; body: %v", body)
-		require.Equal(t, "data_present", body["status"])
-		require.Contains(t, body["message"], "force=true",
+		gomega.Expect(code).To(gomega.Equal(409), "expected 409 when solo has data and force=false; body: %v", body)
+		gomega.Expect(body["status"]).To(gomega.Equal("data_present"))
+		gomega.Expect(body["message"]).To(gomega.ContainSubstring("force=true"),
 			"message must hint at --force; got: %s", body["message"])
 	}
 }

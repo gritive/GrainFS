@@ -2,13 +2,14 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"syscall"
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Dynamic join quorum", func() {
@@ -42,7 +43,7 @@ var _ = ginkgo.Describe("Dynamic join quorum", func() {
 			// Settle to 3 voters (peers excludes self, so len == 2).
 			leaderURL := c.httpURLs[c.leaderIdx]
 			var leaderID string
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				s := getStatusJSON(t, leaderURL)
 				voters := stringList(s["peers"])
 				if len(voters) == 2 {
@@ -50,7 +51,7 @@ var _ = ginkgo.Describe("Dynamic join quorum", func() {
 					return leaderID != ""
 				}
 				return false
-			}, 90*time.Second, 500*time.Millisecond, "cluster must settle to 3 voters")
+			}, 90*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "cluster must settle to 3 voters")
 
 			// Find and SIGKILL the leader.
 			leaderIdx := -1
@@ -60,9 +61,9 @@ var _ = ginkgo.Describe("Dynamic join quorum", func() {
 					break
 				}
 			}
-			require.GreaterOrEqual(t, leaderIdx, 0, "must locate the current leader by node id")
+			gomega.Expect(leaderIdx).To(gomega.BeNumerically(">=", 0), "must locate the current leader by node id")
 			t.Logf("killing leader node %d (%s) to trigger re-election", leaderIdx, leaderID)
-			require.NoError(t, c.procs[leaderIdx].Process.Signal(syscall.SIGKILL))
+			gomega.Expect(c.procs[leaderIdx].Process.Signal(syscall.SIGKILL)).To(gomega.Succeed())
 			_ = c.procs[leaderIdx].Wait()
 			c.procs[leaderIdx] = nil // prevent double-handling in cluster Stop()
 
@@ -73,7 +74,7 @@ var _ = ginkgo.Describe("Dynamic join quorum", func() {
 					survivorIdxs = append(survivorIdxs, i)
 				}
 			}
-			require.Len(t, survivorIdxs, 2, "must have exactly 2 surviving nodes")
+			gomega.Expect(survivorIdxs).To(gomega.HaveLen(2), "must have exactly 2 surviving nodes")
 
 			// Poll the survivors directly (tolerating transient HTTP errors during the
 			// election) until one of them reports a *different* leader id.
@@ -104,8 +105,7 @@ var _ = ginkgo.Describe("Dynamic join quorum", func() {
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-			require.Failf(t, "no new leader elected",
-				"two survivors must elect a new leader within 30s after killing %s", leaderID)
+			ginkgo.Fail(fmt.Sprintf("two survivors must elect a new leader within 30s after killing %s", leaderID))
 		})
 	})
 })

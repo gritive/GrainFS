@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // JepsenTestRunner executes concurrent operations to test linearizability.
@@ -56,7 +57,8 @@ func (j *JepsenTestRunner) RunConcurrentPuts(ctx context.Context, bucket, key st
 }
 
 // VerifyLinearizable checks that the final state is consistent (no data loss).
-func (j *JepsenTestRunner) VerifyLinearizable(ctx context.Context, t require.TestingT, bucket, key string) {
+func (j *JepsenTestRunner) VerifyLinearizable(ctx context.Context, t testing.TB, bucket, key string) {
+	t.Helper()
 	// All clients should see the same final value
 	var lastContent []byte
 	for i := 0; i < j.numClients; i++ {
@@ -64,14 +66,14 @@ func (j *JepsenTestRunner) VerifyLinearizable(ctx context.Context, t require.Tes
 			Bucket: &bucket,
 			Key:    &key,
 		})
-		require.NoError(t, err, "client %d should get object", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "client %d should get object", i)
 		defer resp.Body.Close()
 
 		content, err := io.ReadAll(resp.Body)
-		require.NoError(t, err, "client %d should read object", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "client %d should read object", i)
 
 		if lastContent != nil {
-			require.Equal(t, string(lastContent), string(content),
+			gomega.Expect(string(content)).To(gomega.Equal(string(lastContent)),
 				"all clients should see same value (linearizability)")
 		}
 		lastContent = content
