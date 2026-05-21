@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestAppendTimestampMonotonicWhenClockMovesBackward(t *testing.T) {
 	require.Greater(t, w.lastTimestamp, first)
 
 	var timestamps []int64
-	_, err = scanRecords(bytes.NewReader(f.data), fileModePlain, nil, func(rec Record) error {
+	_, err = scanRecords(bytes.NewReader(f.data), fileModePlain, nil, true, func(rec Record) error {
 		timestamps = append(timestamps, rec.Timestamp)
 		return nil
 	})
@@ -98,6 +99,18 @@ func TestEncryptedRecordRejectsSealedFrameAboveDecodeLimit(t *testing.T) {
 	err = EncodeEncryptedRecord(&buf, Record{Op: OpSegmentPut, Bucket: bucket, Payload: payload}, enc)
 	require.Error(t, err)
 	require.Empty(t, buf.Bytes())
+}
+
+func TestNonLatestSegmentTornTailFailsReplayAndOpen(t *testing.T) {
+	dir := t.TempDir()
+	writePlainSegmentForTest(t, dir, 1, []Record{{Seq: 1, Timestamp: 1, Op: OpSegmentPut, Key: "first"}}, []byte{0x00, 0x00, 0x00, 0x20, 0xaa})
+	writePlainSegmentForTest(t, dir, 2, []Record{{Seq: 2, Timestamp: 2, Op: OpSegmentPut, Key: "second"}}, nil)
+
+	err := Replay(context.Background(), dir, 0, nil, func(Record) error { return nil })
+	require.Error(t, err)
+
+	_, err = Open(dir, nil)
+	require.Error(t, err)
 }
 
 type cancelAfterReadReader struct {
@@ -184,3 +197,16 @@ func (o osFileInfo) Mode() os.FileMode  { return 0 }
 func (o osFileInfo) ModTime() time.Time { return time.Time{} }
 func (o osFileInfo) IsDir() bool        { return false }
 func (o osFileInfo) Sys() any           { return nil }
+
+func writePlainSegmentForTest(t *testing.T, dir string, seq uint64, records []Record, tail []byte) {
+	t.Helper()
+	f, err := os.Create(filepath.Join(dir, segmentName(seq)))
+	require.NoError(t, err)
+	defer f.Close()
+	require.NoError(t, writeHeader(f, fileModePlain))
+	for _, rec := range records {
+		require.NoError(t, EncodeRecord(f, rec))
+	}
+	_, err = f.Write(tail)
+	require.NoError(t, err)
+}

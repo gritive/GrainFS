@@ -155,8 +155,8 @@ func Replay(ctx context.Context, dir string, fromSeq uint64, enc *encrypt.Encryp
 	if err != nil {
 		return err
 	}
-	for _, path := range files {
-		if err := replayFile(ctx, path, fromSeq, enc, fn); err != nil {
+	for i, path := range files {
+		if err := replayFile(ctx, path, i == len(files)-1, fromSeq, enc, fn); err != nil {
 			return err
 		}
 	}
@@ -290,8 +290,8 @@ func scanState(dir string, enc *encrypt.Encryptor) (walState, error) {
 		return walState{}, err
 	}
 	var state walState
-	for _, path := range files {
-		goodBytes, err := scanFileWithOffset(path, enc, func(rec Record) error {
+	for i, path := range files {
+		goodBytes, err := scanFileWithOffset(path, enc, i == len(files)-1, func(rec Record) error {
 			if rec.Seq > state.seq {
 				state.seq = rec.Seq
 			}
@@ -309,8 +309,8 @@ func scanState(dir string, enc *encrypt.Encryptor) (walState, error) {
 	return state, nil
 }
 
-func replayFile(ctx context.Context, path string, fromSeq uint64, enc *encrypt.Encryptor, fn func(Record) error) error {
-	return scanFile(path, enc, func(rec Record) error {
+func replayFile(ctx context.Context, path string, allowTruncatedTail bool, fromSeq uint64, enc *encrypt.Encryptor, fn func(Record) error) error {
+	return scanFile(path, enc, allowTruncatedTail, func(rec Record) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -321,12 +321,12 @@ func replayFile(ctx context.Context, path string, fromSeq uint64, enc *encrypt.E
 	})
 }
 
-func scanFile(path string, enc *encrypt.Encryptor, fn func(Record) error) error {
-	_, err := scanFileWithOffset(path, enc, fn)
+func scanFile(path string, enc *encrypt.Encryptor, allowTruncatedTail bool, fn func(Record) error) error {
+	_, err := scanFileWithOffset(path, enc, allowTruncatedTail, fn)
 	return err
 }
 
-func scanFileWithOffset(path string, enc *encrypt.Encryptor, fn func(Record) error) (int64, error) {
+func scanFileWithOffset(path string, enc *encrypt.Encryptor, allowTruncatedTail bool, fn func(Record) error) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -339,11 +339,11 @@ func scanFileWithOffset(path string, enc *encrypt.Encryptor, fn func(Record) err
 	if err := checkMode(mode, enc); err != nil {
 		return 0, err
 	}
-	goodBytes, err := scanRecords(f, mode, enc, fn)
+	goodBytes, err := scanRecords(f, mode, enc, allowTruncatedTail, fn)
 	return goodBytes, err
 }
 
-func scanRecords(r io.ReadSeeker, mode byte, enc *encrypt.Encryptor, fn func(Record) error) (int64, error) {
+func scanRecords(r io.ReadSeeker, mode byte, enc *encrypt.Encryptor, allowTruncatedTail bool, fn func(Record) error) (int64, error) {
 	goodBytes, err := r.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, err
@@ -355,7 +355,10 @@ func scanRecords(r io.ReadSeeker, mode byte, enc *encrypt.Encryptor, fn func(Rec
 			return goodBytes, err
 		}
 		body, err := readFrame(r)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if err == io.EOF {
+			return beforeFrame, nil
+		}
+		if err == io.ErrUnexpectedEOF && allowTruncatedTail {
 			return beforeFrame, nil
 		}
 		if err != nil {
