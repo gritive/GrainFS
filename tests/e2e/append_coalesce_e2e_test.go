@@ -29,7 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestAppendCoalesceE2E is the Phase B3 omnibus e2e for AppendObject coalesce.
@@ -77,13 +77,13 @@ func runCoalesceCase(t testing.TB, tgt s3Target) {
 	var expected []byte
 	for i := 0; i < numChunks; i++ {
 		chunk := bytes.Repeat([]byte{byte(i + 1)}, chunkSize)
-		require.NoError(t, putAppend(client, bucket, key, off, chunk), "chunk %d", i)
+		gomega.Expect(putAppend(client, bucket, key, off, chunk)).To(gomega.Succeed(), "chunk %d", i)
 		off += int64(len(chunk))
 		expected = append(expected, chunk...)
 	}
 
 	// Full-body round-trip from any node.
-	require.Equal(t, expected, getObject(t, client, bucket, key))
+	gomega.Expect(getObject(t, client, bucket, key)).To(gomega.Equal(expected))
 
 	// Wait for coalesce. The trigger fires when >= COALESCE_SEGMENT_COUNT (16)
 	// segments accumulate; with numChunks=20 we should observe a non-empty
@@ -116,14 +116,14 @@ func runCoalesceCase(t testing.TB, tgt s3Target) {
 	rangeStart := int64(16*chunkSize - 1024)
 	rangeEnd := int64(16*chunkSize + 1024) // [start, end) inclusive end exclusive
 	rangeBody, err := getObjectRange(client, bucket, key, rangeStart, rangeEnd-1)
-	require.NoError(t, err)
-	require.Equal(t, expected[rangeStart:rangeEnd], rangeBody, "range [%d,%d) mismatch", rangeStart, rangeEnd)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(rangeBody).To(gomega.Equal(expected[rangeStart:rangeEnd]), "range [%d,%d) mismatch", rangeStart, rangeEnd)
 
 	// Metrics endpoint: at least one coalesce success across all nodes. We
 	// inspect each node's /metrics; the OWNER node observed the success.
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		return metricCounterTotal(t, tgt, `grainfs_append_coalesce_total{result="success"}`) > coalesceMetricBaseline
-	}, 10*time.Second, 200*time.Millisecond, "no node reported a coalesce success")
+	}, 10*time.Second, 200*time.Millisecond).Should(gomega.BeTrue(), "no node reported a coalesce success")
 }
 
 // getObjectRange issues a Range GET (inclusive end per HTTP semantics).

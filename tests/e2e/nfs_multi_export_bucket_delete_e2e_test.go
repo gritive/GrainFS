@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 func runNFSExportCases(getTgt func() *nfsTarget) {
@@ -18,10 +18,10 @@ func runNFSExportCases(getTgt func() *nfsTarget) {
 		tgt := getTgt()
 		bucket, _ := tgt.uniqueExport(t, "delete-cascade")
 		out, code := runCLI(t, tgt.dataDir(tgt.leaderIdx), "bucket", "delete", bucket, "--force")
-		require.Equalf(t, 0, code, "bucket delete failed: %s", out)
-		require.Eventually(t, func() bool {
+		gomega.Expect(code).To(gomega.Equal(0), "bucket delete failed: %s", out)
+		gomega.Eventually(func() bool {
 			return !exportListHasBucketOnDataDir(t, tgt.dataDir(0), bucket)
-		}, 5*time.Second, 100*time.Millisecond)
+		}, 5*time.Second, 100*time.Millisecond).Should(gomega.BeTrue())
 	})
 
 	ginkgo.It("keeps the export when bucket deletion fails", func() {
@@ -35,11 +35,11 @@ func runNFSExportCases(getTgt func() *nfsTarget) {
 			Key:    aws.String("key.txt"),
 			Body:   bytes.NewReader([]byte("still here")),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		out, code := runCLI(t, tgt.dataDir(tgt.leaderIdx), "bucket", "delete", bucket)
-		require.NotEqual(t, 0, code, out)
-		require.Contains(t, out, "bucket not empty")
-		require.True(t, exportListHasBucketOnDataDir(t, tgt.dataDir(0), bucket))
+		gomega.Expect(code).NotTo(gomega.Equal(0), out)
+		gomega.Expect(out).To(gomega.ContainSubstring("bucket not empty"))
+		gomega.Expect(exportListHasBucketOnDataDir(t, tgt.dataDir(0), bucket)).To(gomega.BeTrue())
 	})
 }
 
