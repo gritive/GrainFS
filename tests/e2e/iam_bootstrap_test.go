@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smithy "github.com/aws/smithy-go"
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("IAM bootstrap", func() {
@@ -59,23 +59,21 @@ func runIAMBootstrapCases(t testing.TB, tgt iamBootstrapTarget) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		ginkgo.DeferCleanup(cancel)
 		_, err := cli.ListBuckets(ctx, &s3.ListBucketsInput{})
-		require.Error(t, err, "ListBuckets with fabricated key must fail before bootstrap")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "ListBuckets with fabricated key must fail before bootstrap")
 
 		var apiErr smithy.APIError
-		require.True(t, errors.As(err, &apiErr), "expected smithy APIError, got %T: %v", err, err)
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue(), "expected smithy APIError, got %T: %v", err, err)
 		// Acceptable codes from the S3 auth path.
 		code := apiErr.ErrorCode()
-		require.Contains(t,
-			[]string{"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch"},
-			code,
+		gomega.Expect([]string{"AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch"}).To(gomega.ContainElement(code),
 			"unexpected error code %q from pre-bootstrap sigv4: %v", code, err,
 		)
 	}
 
 	{
 		admin, _ := bootstrapAdminViaUDSAnyResult(t, tgt.dataDirs(), 30*time.Second)
-		require.NotEmpty(t, admin.AccessKey, "first SA bootstrap must return non-empty access_key")
-		require.NotEmpty(t, admin.SecretKey, "first SA bootstrap must return non-empty secret_key")
+		gomega.Expect(admin.AccessKey).NotTo(gomega.BeEmpty(), "first SA bootstrap must return non-empty access_key")
+		gomega.Expect(admin.SecretKey).NotTo(gomega.BeEmpty(), "first SA bootstrap must return non-empty secret_key")
 
 		bootstrapAK = admin.AccessKey
 		bootstrapSK = admin.SecretKey
@@ -84,14 +82,14 @@ func runIAMBootstrapCases(t testing.TB, tgt iamBootstrapTarget) {
 		// Exactly one SA must be present after bootstrap.
 		var saList []map[string]any
 		iamDo(t, tgt.adminSock(), "GET", "/v1/iam/sa", nil, &saList)
-		require.Len(t, saList, 1, "exactly one SA must exist after first-bootstrap; got %v", saList)
+		gomega.Expect(saList).To(gomega.HaveLen(1), "exactly one SA must exist after first-bootstrap; got %v", saList)
 
 		// The SA ID must be a non-empty string (UUIDv7, not legacy "sa-default").
-		require.NotEmpty(t, bootstrapSAID, "first SA must have a non-empty sa_id")
+		gomega.Expect(bootstrapSAID).NotTo(gomega.BeEmpty(), "first SA must have a non-empty sa_id")
 	}
 
 	{
-		require.NotEmpty(t, bootstrapSAID, "prerequisite FirstSAWildcardGrant must run first")
+		gomega.Expect(bootstrapSAID).NotTo(gomega.BeEmpty(), "prerequisite FirstSAWildcardGrant must run first")
 
 		sock := tgt.adminSock()
 
@@ -100,22 +98,22 @@ func runIAMBootstrapCases(t testing.TB, tgt iamBootstrapTarget) {
 			Name string `json:"name"`
 		}
 		iamDo(t, sock, "POST", "/v1/iam/sa", map[string]string{"name": "user1"}, &out)
-		require.NotEmpty(t, out.SAID, "second SA must have non-empty sa_id")
-		require.NotEqual(t, bootstrapSAID, out.SAID, "second SA must have a different sa_id from the first")
+		gomega.Expect(out.SAID).NotTo(gomega.BeEmpty(), "second SA must have non-empty sa_id")
+		gomega.Expect(out.SAID).NotTo(gomega.Equal(bootstrapSAID), "second SA must have a different sa_id from the first")
 	}
 
 	{
-		require.NotEmpty(t, bootstrapAK, "prerequisite FirstSAWildcardGrant must run first")
+		gomega.Expect(bootstrapAK).NotTo(gomega.BeEmpty(), "prerequisite FirstSAWildcardGrant must run first")
 
 		cli := s3ClientFor(tgt.s3URL(), bootstrapAK, bootstrapSK)
-		require.NoError(t, waitForIAMReady(cli, 30*time.Second))
+		gomega.Expect(waitForIAMReady(cli, 30*time.Second)).To(gomega.Succeed())
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		ginkgo.DeferCleanup(cancel)
 
 		// ListBuckets — admin SA must succeed.
 		_, err := cli.ListBuckets(ctx, &s3.ListBucketsInput{})
-		require.NoError(t, err, "ListBuckets")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "ListBuckets")
 
 		// CreateBucket with bucket-admin policy attached to the bootstrap SA.
 		bucket := "f4-bootstrap-bucket-" + tgt.name
@@ -128,17 +126,17 @@ func runIAMBootstrapCases(t testing.TB, tgt iamBootstrapTarget) {
 			Key:    aws.String("obj1"),
 			Body:   strings.NewReader(payload),
 		})
-		require.NoError(t, err, "PutObject")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject")
 
 		// GetObject — body must round-trip.
 		getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("obj1"),
 		})
-		require.NoError(t, err, "GetObject")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "GetObject")
 		ginkgo.DeferCleanup(getOut.Body.Close)
 		body, err := io.ReadAll(getOut.Body)
-		require.NoError(t, err, "read GetObject body")
-		require.Equal(t, payload, string(body), "object body round-trip mismatch")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "read GetObject body")
+		gomega.Expect(string(body)).To(gomega.Equal(payload), "object body round-trip mismatch")
 	}
 }
