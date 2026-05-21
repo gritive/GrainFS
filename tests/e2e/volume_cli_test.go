@@ -21,11 +21,11 @@ import (
 // directory (Unix-socket paths on macOS are capped at 104 chars, so /var/folders
 // TempDir can't host the admin socket). Returns the data dir + HTTP port + a
 // teardown closure.
-func startTestServer(t *testing.T, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
+func startTestServer(t testing.TB, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
 	return startTestServerOnPort(t, 0, extraArgs...)
 }
 
-func startTestServerOnPort(t *testing.T, port int, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
+func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir string, httpPort int, stop func()) {
 	t.Helper()
 	binary := getBinary()
 	if _, err := os.Stat(binary); err != nil {
@@ -84,7 +84,7 @@ func startTestServerOnPort(t *testing.T, port int, extraArgs ...string) (dataDir
 
 // waitForVolumeReady retries `volume list` until it returns 0 (cluster ready
 // to serve volume bucket queries) or the deadline expires.
-func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
+func waitForVolumeReady(t testing.TB, dataDir string, timeout time.Duration) {
 	t.Helper()
 	binary, err := filepath.Abs(getBinary())
 	require.NoError(t, err)

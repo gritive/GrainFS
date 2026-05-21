@@ -32,7 +32,7 @@ func cowDataDir(tgt s3Target) string {
 	return filepath.Dir(tgt.adminSockPath())
 }
 
-func cowCreateVolume(t *testing.T, dataDir, name string, sizeBytes int64) {
+func cowCreateVolume(t testing.TB, dataDir, name string, sizeBytes int64) {
 	t.Helper()
 	var (
 		out  string
@@ -44,7 +44,7 @@ func cowCreateVolume(t *testing.T, dataDir, name string, sizeBytes int64) {
 	}, 30*time.Second, 500*time.Millisecond, "create volume %s: code=%d output=%s", name, code, out)
 }
 
-func cowDeleteVolume(t *testing.T, dataDir, name string) {
+func cowDeleteVolume(t testing.TB, dataDir, name string) {
 	t.Helper()
 	var (
 		out  string
@@ -56,7 +56,7 @@ func cowDeleteVolume(t *testing.T, dataDir, name string) {
 	}, 30*time.Second, 500*time.Millisecond, "delete volume %s: code=%d output=%s", name, code, out)
 }
 
-func cowCleanupVolume(t *testing.T, dataDir, name string) {
+func cowCleanupVolume(t testing.TB, dataDir, name string) {
 	t.Helper()
 	var (
 		out  string
@@ -76,7 +76,7 @@ func cowCleanupVolume(t *testing.T, dataDir, name string) {
 	}
 }
 
-func cowCreateSnapshot(t *testing.T, dataDir, volName string) string {
+func cowCreateSnapshot(t testing.TB, dataDir, volName string) string {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "create", volName, "--format", "json")
 	require.Equal(t, 0, code, out)
@@ -86,13 +86,13 @@ func cowCreateSnapshot(t *testing.T, dataDir, volName string) string {
 	return snap.ID
 }
 
-func cowRollback(t *testing.T, dataDir, volName, snapID string) {
+func cowRollback(t testing.TB, dataDir, volName, snapID string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "rollback", volName, snapID)
 	require.Equal(t, 0, code, out)
 }
 
-func cowListSnapshots(t *testing.T, dataDir, volName string) []cowSnapResp {
+func cowListSnapshots(t testing.TB, dataDir, volName string) []cowSnapResp {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "list", volName, "--format", "json")
 	require.Equal(t, 0, code, out)
@@ -101,7 +101,7 @@ func cowListSnapshots(t *testing.T, dataDir, volName string) []cowSnapResp {
 	return snaps
 }
 
-func cowDeleteSnapshot(t *testing.T, dataDir, volName, snapID string) {
+func cowDeleteSnapshot(t testing.TB, dataDir, volName, snapID string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "delete", volName, snapID)
 	require.Equal(t, 0, code, out)
