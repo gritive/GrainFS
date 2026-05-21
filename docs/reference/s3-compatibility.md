@@ -56,7 +56,7 @@ binary and data compatibility across rolling upgrades.
 | Bucket controls   | Bucket replication                      | Not supported | `GrainFS` has Raft/EC replication; S3 bucket replication is not claimed.           |
 | Object governance | Object Lock / retention / legal hold    | Not supported | Blocked on a separate governance design covering versioning, deletes, lifecycle, and permissions. |
 | Query             | S3 Select                               | Not supported |                                                                                  |
-| Encryption        | SSE-S3 headers                          | Supported     | Server tests and `TestS3SSE` e2e cover AES256 PUT response, HEAD/GET response, and CopyObject header preservation. |
+| Encryption        | SSE-S3 headers                          | Supported     | Server tests and `S3 SSE` Ginkgo e2e cover AES256 PUT response, HEAD/GET response, and CopyObject header preservation. |
 | Encryption        | SSE-KMS headers                         | Not supported | KMS key semantics are not implemented; fail-closed server tests reject KMS headers with `NotImplemented`. |
 | Encryption        | SSE-C headers                           | Not supported | Customer-supplied key semantics are not implemented; fail-closed server tests reject SSE-C headers with `NotImplemented`. |
 
@@ -70,4 +70,4 @@ binary and data compatibility across rolling upgrades.
 | rclone mount / FUSE-over-S3 | Partial    | S3 semantics mean rename is copy+delete and POSIX chmod/chown/locking are not supported over FUSE. |
 | s3fs                        | Not supported | `TestFUSE_S3_S3FS` must pass in the Colima Linux VM via `make test-s3-client-smoke-colima` before promotion. |
 | goofys                      | Not supported | `TestFUSE_S3_Goofys` must pass in the Colima Linux VM via `make test-s3-client-smoke-colima` before promotion. |
-| MinIO client (`mc`)         | Supported  | `TestS3ClientSmoke/MinIOMC` covers write, read, list, delete, and deletion verification.           |
+| MinIO client (`mc`)         | Supported  | `S3 client smoke` Ginkgo e2e covers write, read, list, delete, and deletion verification.           |
