@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/gomega"
+
 	"github.com/gritive/GrainFS/internal/volumeadmin"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -38,29 +39,29 @@ func ensureE2ENBDVolume(t testing.TB, ctx context.Context, c *e2eCluster, name s
 		leaderIdx = 0
 	}
 	cli, err := volumeadmin.NewClient(filepath.Join(c.dataDirs[leaderIdx], "admin.sock"))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	_, err = cli.CreateVolume(ctx, volumeadmin.CreateVolumeReq{Name: name, Size: size})
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 }
 
 func dialE2ENBD(t testing.TB, addr string, export string) *e2eNBDClient {
 	t.Helper()
 	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).Dial("tcp", addr)
-	require.NoError(t, err)
-	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(conn.SetDeadline(time.Now().Add(5 * time.Second))).To(gomega.Succeed())
 	t.Cleanup(func() { _ = conn.SetDeadline(time.Time{}) })
 
 	hdr := make([]byte, 18)
 	_, err = io.ReadFull(conn, hdr)
-	require.NoError(t, err)
-	require.Equal(t, e2eNBDMagic, binary.BigEndian.Uint64(hdr[0:8]))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(binary.BigEndian.Uint64(hdr[0:8])).To(gomega.Equal(e2eNBDMagic))
 
 	clientFlags := make([]byte, 4)
 	binary.BigEndian.PutUint32(clientFlags, 1)
 	_, err = conn.Write(clientFlags)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := []byte(export)
 	opt := make([]byte, 16+len(name))
@@ -69,12 +70,12 @@ func dialE2ENBD(t testing.TB, addr string, export string) *e2eNBDClient {
 	binary.BigEndian.PutUint32(opt[12:16], uint32(len(name)))
 	copy(opt[16:], name)
 	_, err = conn.Write(opt)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	exportData := make([]byte, 134)
 	_, err = io.ReadFull(conn, exportData)
-	require.NoError(t, err)
-	require.NoError(t, conn.SetDeadline(time.Time{}))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(conn.SetDeadline(time.Time{})).To(gomega.Succeed())
 
 	return &e2eNBDClient{conn: conn}
 }
@@ -94,12 +95,12 @@ func (c *e2eNBDClient) WriteAt(t testing.TB, off uint64, data []byte) {
 	binary.BigEndian.PutUint32(req[24:28], uint32(len(data)))
 	copy(req[28:], data)
 	_, err := c.conn.Write(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	reply := make([]byte, 16)
 	_, err = io.ReadFull(c.conn, reply)
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "write error")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(binary.BigEndian.Uint32(reply[4:8])).To(gomega.Equal(uint32(0)), "write error")
 }
 
 func (c *e2eNBDClient) Flush(t testing.TB) {
@@ -110,12 +111,12 @@ func (c *e2eNBDClient) Flush(t testing.TB) {
 	binary.BigEndian.PutUint16(req[6:8], uint16(e2eNBDCmdFlush))
 	binary.BigEndian.PutUint64(req[8:16], c.handle)
 	_, err := c.conn.Write(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	reply := make([]byte, 16)
 	_, err = io.ReadFull(c.conn, reply)
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "flush error")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(binary.BigEndian.Uint32(reply[4:8])).To(gomega.Equal(uint32(0)), "flush error")
 }
 
 func requireNBDReadEventually(t testing.TB, client *e2eNBDClient, off uint64, want []byte) {
@@ -132,14 +133,14 @@ func requireNBDReadEventually(t testing.TB, client *e2eNBDClient, off uint64, wa
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	require.Failf(t, "NBD read did not return committed bytes",
-		"offset=%d got=%x want=%x err=%v", off, got, want, lastErr)
+	gomega.Expect(got).To(gomega.Equal(want),
+		"NBD read did not return committed bytes: offset=%d got=%x want=%x err=%v", off, got, want, lastErr)
 }
 
 func (c *e2eNBDClient) ReadAt(t testing.TB, off uint64, size uint32) []byte {
 	t.Helper()
 	got, err := c.tryReadAt(off, size)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return got
 }
 
