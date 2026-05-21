@@ -102,7 +102,7 @@ func runLifecycleExpirationCases(getTgt func() s3Target, getLC func() *lifecycle
 			"tag-matched object was not expired")
 		var apiErr smithy.APIError
 		if errors.As(headErr, &apiErr) {
-			// master testify 'assert.Equal' soft-fail 의미 보존: Cluster4Node
+			// Legacy soft-fail 의미 보존: Cluster4Node
 			// 분기는 현재 expiration 후 HeadObject가 MethodNotAllowed(DM 처리
 			// 경로)를 반환할 수 있다. NotFound 일관화는 별도 phase. 1:1 마이그레이션
 			// 의미 유지를 위해 두 코드 모두 허용한다.

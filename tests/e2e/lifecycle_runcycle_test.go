@@ -90,7 +90,7 @@ func runLifecycleWorkerCases(getTgt func() s3Target, getLC func() *lifecycleFixt
 		gomega.Expect(err).To(gomega.HaveOccurred(), "lifecycle worker must expire the object after cycle (R4 regression guard)")
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) {
-			// master testify 'assert.Equal' soft-fail 의미 보존:
+			// Legacy soft-fail 의미 보존:
 			// Cluster4Node 분기는 NotFound 또는 MethodNotAllowed 모두 가능.
 			gomega.Expect(apiErr.ErrorCode()).To(gomega.Or(
 				gomega.Equal("NotFound"),
