@@ -47,8 +47,10 @@ func ensureE2ENBDVolume(t testing.TB, ctx context.Context, c *e2eCluster, name s
 
 func dialE2ENBD(t testing.TB, addr string, export string) *e2eNBDClient {
 	t.Helper()
-	conn, err := net.Dial("tcp", addr)
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).Dial("tcp", addr)
 	require.NoError(t, err)
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	t.Cleanup(func() { _ = conn.SetDeadline(time.Time{}) })
 
 	hdr := make([]byte, 18)
 	_, err = io.ReadFull(conn, hdr)
@@ -72,6 +74,7 @@ func dialE2ENBD(t testing.TB, addr string, export string) *e2eNBDClient {
 	exportData := make([]byte, 134)
 	_, err = io.ReadFull(conn, exportData)
 	require.NoError(t, err)
+	require.NoError(t, conn.SetDeadline(time.Time{}))
 
 	return &e2eNBDClient{conn: conn}
 }
@@ -141,6 +144,9 @@ func (c *e2eNBDClient) ReadAt(t testing.TB, off uint64, size uint32) []byte {
 }
 
 func (c *e2eNBDClient) tryReadAt(off uint64, size uint32) ([]byte, error) {
+	_ = c.conn.SetDeadline(time.Now().Add(5 * time.Second))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+
 	c.handle++
 	req := make([]byte, 28)
 	binary.BigEndian.PutUint32(req[0:4], e2eNBDRequestMagic)
