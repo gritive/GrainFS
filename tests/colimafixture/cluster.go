@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -423,6 +424,11 @@ func bootstrapAdminSA(sock string, timeout time.Duration) (saID, ak, sk string, 
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
+		if err := seedBootstrapTrustedProxyCIDR(client, sock); err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
 		body := strings.NewReader(`{"name":"admin","description":"colima cluster fixture bootstrap"}`)
 		req, rerr := http.NewRequestWithContext(context.Background(), "POST",
 			"http://unix/v1/iam/sa", body)
@@ -437,8 +443,9 @@ func bootstrapAdminSA(sock string, timeout time.Duration) (saID, ak, sk string, 
 			continue
 		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			buf, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("bootstrap status %d", resp.StatusCode)
+			lastErr = fmt.Errorf("bootstrap status %d: %s", resp.StatusCode, string(buf))
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
@@ -462,6 +469,26 @@ func bootstrapAdminSA(sock string, timeout time.Duration) (saID, ak, sk string, 
 		return out.SAID, out.AccessKey, out.SecretKey, nil
 	}
 	return "", "", "", fmt.Errorf("bootstrap admin SA: %w", lastErr)
+}
+
+func seedBootstrapTrustedProxyCIDR(client *http.Client, sock string) error {
+	body := strings.NewReader(`{"value":"127.0.0.1/32"}`)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut,
+		"http://unix/v1/config/trusted-proxy.cidr", body)
+	if err != nil {
+		return fmt.Errorf("build trusted-proxy.cidr seed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("seed trusted-proxy.cidr: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		buf, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("seed trusted-proxy.cidr on %s -> %d: %s", sock, resp.StatusCode, string(buf))
+	}
+	return nil
 }
 
 // waitForMembership polls the seed's admin UDS until Status reports a leader
