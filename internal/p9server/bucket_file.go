@@ -37,6 +37,7 @@ type bucketFile struct {
 	prefix      string
 	binding     fhBinding    // set by rootFile.Walk when IAM gate is wired
 	exportStore exportGetter // nil = no gate
+	cfg         ConfigReader // nil = no anon flip gate
 }
 
 func (f *bucketFile) isReadOnly() bool {
@@ -47,9 +48,33 @@ func (f *bucketFile) isReadOnly() bool {
 	return ok && cfg.ReadOnly
 }
 
+// anonRejected reports whether this file's binding is anon (saID="") and
+// iam.anon-enabled has been flipped false. Returns false when cfg is not
+// wired, when the binding is mount-SA-confirmed, or when anon is still
+// enabled.
+//
+// NFS§B T12: per-op guard for Phase 0 → Phase 2 transitions. Mirrors the
+// S3 path (§9 T73) and the NFSv4 anonRejected (Dispatcher).
+func (f *bucketFile) anonRejected() bool {
+	if f.cfg == nil {
+		return false
+	}
+	if f.binding.saID != "" {
+		return false
+	}
+	anon, ok := f.cfg.GetBool("iam.anon-enabled")
+	if !ok {
+		return false
+	}
+	return !anon
+}
+
 func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix, binding: f.binding, exportStore: f.exportStore}, nil
+		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix, binding: f.binding, exportStore: f.exportStore, cfg: f.cfg}, nil
+	}
+	if f.anonRejected() {
+		return nil, nil, syscall.EACCES
 	}
 	name := names[0]
 	if isP9ReservedName(name) {
@@ -62,7 +87,7 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 1 {
 		if obj, err := f.backend.HeadObject(context.Background(), f.bucket, key); err == nil {
 			oqid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
-			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj, exportStore: f.exportStore}
+			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj, exportStore: f.exportStore, binding: f.binding, cfg: f.cfg}
 			return []p9.QID{oqid}, of, nil
 		}
 	}
@@ -70,7 +95,7 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 		return nil, nil, syscall.ENOENT
 	}
 	bqid := p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, key)}
-	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: key + "/", exportStore: f.exportStore}
+	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: key + "/", binding: f.binding, exportStore: f.exportStore, cfg: f.cfg}
 	if len(names) == 1 {
 		return []p9.QID{bqid}, bf, nil
 	}
@@ -82,10 +107,16 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 }
 
 func (f *bucketFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
+	if f.anonRejected() {
+		return p9.QID{}, 0, syscall.EACCES
+	}
 	return p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, f.prefix)}, 0, nil
 }
 
 func (f *bucketFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
+	if f.anonRejected() {
+		return p9.QID{}, p9.AttrMask{}, p9.Attr{}, syscall.EACCES
+	}
 	qid := p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, f.prefix)}
 	valid := p9.AttrMask{Mode: true, NLink: true}
 	mode := uint32(0755)
@@ -97,6 +128,9 @@ func (f *bucketFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 }
 
 func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.File, p9.QID, uint32, error) {
+	if f.anonRejected() {
+		return nil, p9.QID{}, 0, syscall.EACCES
+	}
 	if f.isReadOnly() {
 		return nil, p9.QID{}, 0, syscall.EROFS
 	}
@@ -147,7 +181,7 @@ func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.File
 		return nil, p9.QID{}, 0, syscall.EIO
 	}
 	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
-	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj, exportStore: f.exportStore}, qid, 0, nil
+	return &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj, exportStore: f.exportStore, binding: f.binding, cfg: f.cfg}, qid, 0, nil
 }
 
 func (f *bucketFile) headObjectForCreate(ctx context.Context, key string) (*storage.Object, error) {
@@ -167,6 +201,9 @@ func isTransientCreateHeadError(err error) bool {
 }
 
 func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.QID, error) {
+	if f.anonRejected() {
+		return p9.QID{}, syscall.EACCES
+	}
 	if f.isReadOnly() {
 		return p9.QID{}, syscall.EROFS
 	}
@@ -215,6 +252,9 @@ func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid
 }
 
 func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
+	if f.anonRejected() {
+		return syscall.EACCES
+	}
 	if f.isReadOnly() {
 		return syscall.EROFS
 	}
@@ -311,6 +351,9 @@ func (f *bucketFile) rmdir(key string) error {
 // crash-atomic rename, so this copies destination data and metadata before
 // deleting the source.
 func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) error {
+	if f.anonRejected() {
+		return syscall.EACCES
+	}
 	if f.isReadOnly() {
 		return syscall.EROFS
 	}
@@ -320,6 +363,9 @@ func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) er
 	}
 	if dst.bucket != f.bucket {
 		return syscall.EXDEV
+	}
+	if dst.anonRejected() {
+		return syscall.EACCES
 	}
 	if !validObjectName(oldName) || !validObjectName(newName) {
 		return syscall.EINVAL
@@ -390,6 +436,9 @@ func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) er
 }
 
 func (f *bucketFile) Readdir(offset uint64, count uint32) (p9.Dirents, error) {
+	if f.anonRejected() {
+		return nil, syscall.EACCES
+	}
 	if count == 0 {
 		return nil, nil
 	}

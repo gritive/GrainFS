@@ -434,6 +434,9 @@ func (d *Dispatcher) opGetFH() OpResult {
 }
 
 func (d *Dispatcher) opLookup(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+	}
 	name := string(data)
 	if err := validateComponentName(name); err != nil {
 		return OpResult{OpCode: OpLookup, Status: NFS4ERR_INVAL}
@@ -494,7 +497,18 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 		if d.server.mountSAStore != nil && childKey == "" {
 			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
 		} else {
-			d.state.BindFHGeneration(fh, childBucket, gen)
+			// T12 propagation fix: a fresh subdir fh must inherit the parent's
+			// saID binding so the per-op anon flip gate (anonRejected) can
+			// distinguish mount-SA-bound subdir sessions from anon ones.
+			// BindFHGeneration preserves an existing saID, but a freshly-
+			// created fh has saID="" which would mis-classify as anon. Pull
+			// parent's saID explicitly when it is set.
+			parentBind, ok := d.state.FHBinding(d.currentFH)
+			if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+				d.state.BindFHWithSAID(fh, childBucket, parentBind.saID, gen)
+			} else {
+				d.state.BindFHGeneration(fh, childBucket, gen)
+			}
 		}
 	}
 	d.currentFH = fh
@@ -505,6 +519,39 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 // fhSAIDPending is the sentinel stored in stateBinding.saID for a bucket-level
 // fh that is awaiting the next LOOKUP to determine mount-SA vs anon binding.
 const fhSAIDPending = "(pending)"
+
+// anonRejected reports whether the given fh's anon binding is no longer
+// allowed: the binding has saID="" (anon confirmed) AND iam.anon-enabled is
+// false. Returns false when the gate is not wired (cfg==nil), when the fh
+// has no binding (pseudo-root / unbound), when the binding is mount-SA
+// confirmed (saID!="" and not pending), or when iam.anon-enabled=true.
+//
+// NFS§B T12: per-op guard for Phase 0 → Phase 2 transitions. Mirrors the
+// S3 path (§9 T73): active anon-bound sessions must be rejected on the
+// next op after the first SA create flips iam.anon-enabled=false.
+//
+// Hot path: one map RLock + one cfg RLock per op when the gate is wired.
+// Zero allocation. The branch is dead when cfg==nil (the production wiring
+// passes config.Store; tests inject a stub).
+func (d *Dispatcher) anonRejected(fh FileHandle) bool {
+	if d.server == nil || d.server.cfg == nil {
+		return false
+	}
+	binding, ok := d.state.FHBinding(fh)
+	if !ok {
+		return false
+	}
+	if binding.saID != "" {
+		// "(pending)" or "<mount-sa-name>" — not an anon binding.
+		return false
+	}
+	anon, ok := d.server.cfg.GetBool("iam.anon-enabled")
+	if !ok {
+		// Key not registered: be conservative and do not block.
+		return false
+	}
+	return !anon
+}
 
 // opLookupResolvePending handles the 2nd LOOKUP from a bucket fh with
 // saID="(pending)". It resolves the 'name' component as either a mount-SA
@@ -567,6 +614,9 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 }
 
 func (d *Dispatcher) opCreate(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ACCESS}
+	}
 	// data pre-processed by readOpArgs: objType(uint32) + objname(string)
 	if len(data) < 8 {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
@@ -590,7 +640,15 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	fh := d.state.GetOrCreateFH(newPath)
 	if d.server != nil {
 		bucket, _ := extractBucketAndKey(newPath)
-		d.state.BindFHGeneration(fh, bucket, d.server.exportGeneration(bucket))
+		gen := d.server.exportGeneration(bucket)
+		// T12: propagate parent's saID so the new fh inherits the session
+		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		parentBind, ok := d.state.FHBinding(d.currentFH)
+		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
+		} else {
+			d.state.BindFHGeneration(fh, bucket, gen)
+		}
 	}
 	d.currentFH = fh
 	d.currentPath = newPath
@@ -607,6 +665,9 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opGetAttr(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpGetAttr, Status: NFS4ERR_ACCESS}
+	}
 	// Parse client's requested bitmap (GETATTR4args.attr_request = bitmap4<>)
 	var reqBit attrBitmap
 	if len(data) >= 4 {
@@ -907,6 +968,9 @@ func (d *Dispatcher) isPathReadOnly(p string) bool {
 }
 
 func (d *Dispatcher) opAccess(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpAccess, Status: NFS4ERR_ACCESS}
+	}
 	var requested uint32
 	if len(data) >= 4 {
 		requested = binary.BigEndian.Uint32(data)
@@ -918,6 +982,9 @@ func (d *Dispatcher) opAccess(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opReadDir(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpReadDir, Status: NFS4ERR_ACCESS}
+	}
 	var reqBit attrBitmap
 	if len(data) >= 28 {
 		bitmapLen := binary.BigEndian.Uint32(data[24:28])
@@ -987,6 +1054,9 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opRead(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpRead, Status: NFS4ERR_ACCESS}
+	}
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_SERVERFAULT}
 	}
@@ -1096,6 +1166,9 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opWrite(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_ACCESS}
+	}
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_SERVERFAULT}
 	}
@@ -1301,6 +1374,9 @@ func (r *skipThenReader) Read(p []byte) (int, error) {
 }
 
 func (d *Dispatcher) opOpen(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpOpen, Status: NFS4ERR_ACCESS}
+	}
 	if len(data) < 8 {
 		return OpResult{OpCode: OpOpen, Status: NFS4ERR_INVAL}
 	}
@@ -1346,7 +1422,15 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	fh := d.state.GetOrCreateFH(childPath)
 	if d.server != nil {
 		bucket, _ := extractBucketAndKey(childPath)
-		d.state.BindFHGeneration(fh, bucket, d.server.exportGeneration(bucket))
+		gen := d.server.exportGeneration(bucket)
+		// T12: propagate parent's saID so the new fh inherits the session
+		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		parentBind, ok := d.state.FHBinding(d.currentFH)
+		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
+		} else {
+			d.state.BindFHGeneration(fh, bucket, gen)
+		}
 	}
 	d.currentFH = fh
 	d.currentPath = childPath
@@ -1407,6 +1491,9 @@ func (d *Dispatcher) opRestoreFH() OpResult {
 }
 
 func (d *Dispatcher) opSetAttr(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_ACCESS}
+	}
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_NOFILEHANDLE}
 	}
@@ -1542,6 +1629,9 @@ func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opRemove(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpRemove, Status: NFS4ERR_ACCESS}
+	}
 	name := string(data)
 	if err := validateComponentName(name); err != nil {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_INVAL}
@@ -1582,6 +1672,11 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opRename(data []byte) OpResult {
+	// Rename involves both savedFH (source parent) and currentFH (dest parent).
+	// Reject if either is anon-bound and the flip happened.
+	if d.anonRejected(d.savedFH) || d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_ACCESS}
+	}
 	r := NewXDRReader(data)
 	oldName, err := r.ReadString()
 	if err != nil {

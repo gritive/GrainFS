@@ -29,6 +29,14 @@ type p9Authorizer interface {
 	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
 }
 
+// ConfigReader is the small slice of the config store that the 9P server
+// reads. The concrete *config.Store satisfies it; tests inject stubs.
+// Used per-op to re-check iam.anon-enabled for anon-bound sessions
+// (NFS§B T12, §9 T73 parity).
+type ConfigReader interface {
+	GetBool(key string) (bool, bool)
+}
+
 // Server is a 9P2000.L server backed by a storage.Backend.
 type Server struct {
 	backend  storage.Backend
@@ -61,6 +69,14 @@ func WithAuthorizer(authz p9Authorizer) ServerOption {
 // per-bucket ReadOnly on all mutation operations (T11).
 func WithExportStore(store exportGetter) ServerOption {
 	return func(a *attacher) { a.exportStore = store }
+}
+
+// WithConfigReader wires the config store so the 9P server can re-check
+// iam.anon-enabled on every fh-bearing op for anon-bound sessions
+// (NFS§B T12, §9 T73 parity). nil keeps the previous behaviour
+// (no per-op anon flip gate).
+func WithConfigReader(c ConfigReader) ServerOption {
+	return func(a *attacher) { a.cfg = c }
 }
 
 // NewServer creates a 9P server backed by backend.
@@ -189,6 +205,7 @@ type attacher struct {
 	mountSAStore *mountsastore.Store
 	authorizer   p9Authorizer
 	exportStore  exportGetter
+	cfg          ConfigReader
 }
 
 func (a *attacher) Attach() (p9.File, error) {
@@ -198,5 +215,6 @@ func (a *attacher) Attach() (p9.File, error) {
 		mountSAStore: a.mountSAStore,
 		authorizer:   a.authorizer,
 		exportStore:  a.exportStore,
+		cfg:          a.cfg,
 	}, nil
 }

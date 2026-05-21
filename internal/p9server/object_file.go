@@ -23,6 +23,8 @@ type objectFile struct {
 	key         string
 	meta        *storage.Object
 	exportStore exportGetter // nil = no gate
+	binding     fhBinding    // inherited from the bucketFile that produced this file
+	cfg         ConfigReader // inherited; nil = no anon flip gate
 
 	dirtyLoaded bool
 	dirty       bool
@@ -35,6 +37,22 @@ func (f *objectFile) isReadOnly() bool {
 	}
 	cfg, ok := f.exportStore.Get(f.bucket)
 	return ok && cfg.ReadOnly
+}
+
+// anonRejected mirrors bucketFile.anonRejected for objectFile. See the
+// bucketFile method for the full contract.
+func (f *objectFile) anonRejected() bool {
+	if f.cfg == nil {
+		return false
+	}
+	if f.binding.saID != "" {
+		return false
+	}
+	anon, ok := f.cfg.GetBool("iam.anon-enabled")
+	if !ok {
+		return false
+	}
+	return !anon
 }
 
 const maxFallbackObjectSize = 64 << 20
@@ -52,12 +70,15 @@ func resolveContentType(ctx context.Context, backend storage.Backend, bucket, ke
 
 func (f *objectFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta, exportStore: f.exportStore}, nil
+		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta, exportStore: f.exportStore, binding: f.binding, cfg: f.cfg}, nil
 	}
 	return nil, nil, syscall.ENOTDIR
 }
 
 func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
+	if f.anonRejected() {
+		return p9.QID{}, 0, syscall.EACCES
+	}
 	switch mode.Mode() {
 	case p9.ReadOnly, p9.WriteOnly, p9.ReadWrite:
 	default:
@@ -70,6 +91,9 @@ func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 }
 
 func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
+	if f.anonRejected() {
+		return p9.QID{}, p9.AttrMask{}, p9.Attr{}, syscall.EACCES
+	}
 	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}
 	if f.dirtyLoaded {
 		fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
@@ -104,6 +128,9 @@ func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 }
 
 func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
+	if f.anonRejected() {
+		return syscall.EACCES
+	}
 	if isP9ReservedKey(f.key) {
 		return syscall.EPERM
 	}
@@ -202,6 +229,9 @@ func (f *objectFile) resize(ctx context.Context, size int64) error {
 }
 
 func (f *objectFile) ReadAt(buf []byte, offset int64) (int, error) {
+	if f.anonRejected() {
+		return 0, syscall.EACCES
+	}
 	if f.dirtyLoaded {
 		return bytes.NewReader(f.dirtyData).ReadAt(buf, offset)
 	}
@@ -230,6 +260,9 @@ func (f *objectFile) ReadAt(buf []byte, offset int64) (int, error) {
 }
 
 func (f *objectFile) WriteAt(buf []byte, offset int64) (int, error) {
+	if f.anonRejected() {
+		return 0, syscall.EACCES
+	}
 	if offset < 0 {
 		return 0, syscall.EINVAL
 	}

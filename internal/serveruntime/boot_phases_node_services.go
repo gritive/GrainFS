@@ -184,6 +184,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 		iamCfg = &NodeServicesIAMConfig{
 			MountSAStore: state.mountSAStore,
 			Authorizer:   s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore),
+			CfgStore:     state.cfgStore,
 		}
 	}
 	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, iamCfg)

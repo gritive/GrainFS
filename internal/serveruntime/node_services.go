@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/nbd"
 	"github.com/gritive/GrainFS/internal/nfs4server"
@@ -84,10 +85,16 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 }
 
 // NodeServicesIAMConfig carries optional IAM gate dependencies for NFS/9P
-// servers (NFS§B T8). Nil fields disable the IAM gate (backward compat).
+// servers (NFS§B T8 + T12). Nil fields disable the corresponding gate
+// (backward compat).
+//
+// CfgStore is read per-op on the NFS/9P data path to enforce the Phase 0 →
+// Phase 2 anon flip (T12 / §9 T73 parity): active anon-bound sessions are
+// rejected on the next op after iam.anon-enabled is flipped false.
 type NodeServicesIAMConfig struct {
 	MountSAStore *mountsastore.Store
 	Authorizer   *s3auth.Authorizer
+	CfgStore     *config.Store
 }
 
 // StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
@@ -117,6 +124,9 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			}
 			if iamCfg != nil && iamCfg.Authorizer != nil {
 				nfs4Opts = append(nfs4Opts, nfs4server.WithNFS4Authorizer(iamCfg.Authorizer))
+			}
+			if iamCfg != nil && iamCfg.CfgStore != nil {
+				nfs4Opts = append(nfs4Opts, nfs4server.WithConfigReader(iamCfg.CfgStore))
 			}
 			svc.nfs4Srv = nfs4server.NewServer(backend, nfs4Opts...)
 			go func() {
@@ -151,7 +161,17 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			svc.p9Err = fmt.Errorf("9p listen %s: %w", addr, err)
 			log.Error().Err(svc.p9Err).Msg("9p server start failed")
 		} else {
-			svc.p9Srv = p9server.NewServer(backend)
+			var p9Opts []p9server.ServerOption
+			if iamCfg != nil && iamCfg.MountSAStore != nil {
+				p9Opts = append(p9Opts, p9server.WithMountSAStore(iamCfg.MountSAStore))
+			}
+			if iamCfg != nil && iamCfg.Authorizer != nil {
+				p9Opts = append(p9Opts, p9server.WithAuthorizer(iamCfg.Authorizer))
+			}
+			if iamCfg != nil && iamCfg.CfgStore != nil {
+				p9Opts = append(p9Opts, p9server.WithConfigReader(iamCfg.CfgStore))
+			}
+			svc.p9Srv = p9server.NewServer(backend, p9Opts...)
 			go func() {
 				if err := svc.p9Srv.Serve(ctx, ln); err != nil && ctx.Err() == nil {
 					log.Error().Err(err).Msg("9p server error")

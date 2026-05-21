@@ -35,6 +35,18 @@ type Server struct {
 	//   /<bucket>            → evaluate grainfs:NFSMount with anon saID
 	mountSAStore *mountsastore.Store
 	authorizer   nfsAuthorizer
+
+	// NFS§B T12: per-op anon-binding gate. cfg is read at the top of each
+	// fh-bearing op to reject active anon-bound sessions on the next op
+	// after iam.anon-enabled is flipped false (Phase 0 → Phase 2).
+	// nil = no gate (backward compat).
+	cfg ConfigReader
+}
+
+// ConfigReader is the small slice of the config store that the NFS server
+// reads. The concrete *config.Store satisfies it; tests inject stubs.
+type ConfigReader interface {
+	GetBool(key string) (bool, bool)
 }
 
 // nfsAuthorizer is the slice of s3auth.Authorizer consumed by the NFS IAM gate.
@@ -57,6 +69,13 @@ func WithMountSAStore(s *mountsastore.Store) ServerOption {
 // The concrete *s3auth.Authorizer satisfies nfsAuthorizer; tests may inject stubs.
 func WithNFS4Authorizer(a nfsAuthorizer) ServerOption {
 	return func(srv *Server) { srv.authorizer = a }
+}
+
+// WithConfigReader wires the config store so the NFS server can re-check
+// iam.anon-enabled on every fh-bearing op (NFS§B T12, §9 T73 parity). nil
+// keeps the previous behaviour (no per-op anon flip gate).
+func WithConfigReader(c ConfigReader) ServerOption {
+	return func(srv *Server) { srv.cfg = c }
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
