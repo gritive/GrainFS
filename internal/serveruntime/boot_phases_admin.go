@@ -12,6 +12,7 @@ import (
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
+	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -47,6 +48,11 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		return fmt.Errorf("dashboard token: %w", err)
 	}
 	state.tokenStore = tokenStore
+	if state.iamAdminAPI != nil && state.cfgStore != nil {
+		state.iamAdminAPI.SetPostureChecker(
+			newIAMPostureChecker(state.cfgStore, nodeconfig.New(state.cfg.DataDir)),
+		)
+	}
 	state.adminDeps = &admin.Deps{
 		Manager:    srv.VolumeManager(),
 		Token:      tokenStore,

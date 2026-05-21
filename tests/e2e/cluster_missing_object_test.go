@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,18 +38,28 @@ import (
 //
 // Dual-target pattern per project memory:
 //
-//	TestXxxE2E + SingleNode + Cluster3Node + runXxxCases helper.
-func TestClusterMissingObjectE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runClusterMissingObjectCases(t, newPhase0SingleNodeTarget(t))
-	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runClusterMissingObjectCases(t, newPhase0ClusterTarget(t))
+//	Describe + SingleNode + Cluster3Node + shared case helper.
+var _ = ginkgo.Describe("Cluster missing object", func() {
+	describeClusterMissingObjectContext("SingleNode", newPhase0SingleNodeTarget)
+	describeClusterMissingObjectContext("Cluster3Node", newPhase0ClusterTarget)
+})
+
+func describeClusterMissingObjectContext(name string, factory func(testing.TB) *phase0Target) {
+	ginkgo.Context(name, func() {
+		var tgt *phase0Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runClusterMissingObjectCases(func() *phase0Target { return tgt })
 	})
 }
 
-func runClusterMissingObjectCases(t *testing.T, tgt *phase0Target) {
-	t.Run("GET_NeverExistedKey_Returns404", func(t *testing.T) {
+func runClusterMissingObjectCases(getTgt func() *phase0Target) {
+	ginkgo.It("returns 404 for GET on a never-existed key", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		key := "/default/never-existed-" + uuid.NewString() + ".txt"
 		req, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+key, nil)
@@ -64,7 +75,9 @@ func runClusterMissingObjectCases(t *testing.T, tgt *phase0Target) {
 			"404 body must carry NoSuchKey error code (got %s)", string(body))
 	})
 
-	t.Run("HEAD_NeverExistedKey_Returns404", func(t *testing.T) {
+	ginkgo.It("returns 404 for HEAD on a never-existed key", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		key := "/default/never-existed-head-" + uuid.NewString() + ".txt"
 		req, err := http.NewRequestWithContext(context.Background(),
 			http.MethodHead, tgt.s3URL(0)+key, nil)
@@ -76,7 +89,9 @@ func runClusterMissingObjectCases(t *testing.T, tgt *phase0Target) {
 			"anon HEAD on never-existed key must be 404 (got %d)", resp.StatusCode)
 	})
 
-	t.Run("GET_DeletedKey_Returns404", func(t *testing.T) {
+	ginkgo.It("returns 404 for GET after deleting a key", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		key := "/default/deleted-" + uuid.NewString() + ".txt"
 
 		// PUT — must succeed under Phase 0 anon contract.
