@@ -6,10 +6,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -21,7 +21,12 @@ import (
 // signing helper, and the backend. LocalBackend is sufficient because ACL
 // serialization correctness is covered by cluster/apply_test.go; here we
 // test the HTTP layer.
-func setupECAuthServer(t *testing.T) (baseURL string, sign func(*http.Request), backend *storage.LocalBackend) {
+func setupECAuthServer(t interface {
+	serverTestTB
+	serverCleanupTB
+	TempDir() string
+	Cleanup(func())
+}) (baseURL string, sign func(*http.Request), backend *storage.LocalBackend) {
 	t.Helper()
 	dir := t.TempDir()
 	var err error
@@ -37,6 +42,7 @@ func setupECAuthServer(t *testing.T) (baseURL string, sign func(*http.Request), 
 	port := freePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithAuth(creds))
+	t.Cleanup(func() { shutdownTestServer(t, srv) })
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)
@@ -54,72 +60,75 @@ func setupECAuthServer(t *testing.T) (baseURL string, sign func(*http.Request), 
 	return base, signFn, backend
 }
 
-// TestACL_PublicRead_AnonymousGetAllowed: PUT with x-amz-acl:public-read → anonymous GET → 200
-func TestACL_PublicRead_AnonymousGetAllowed(t *testing.T) {
-	base, sign, backend := setupECAuthServer(t)
-	mustCreateBucket(t, backend, "testbucket")
+var _ = Describe("ACL integration", func() {
+	var (
+		base    string
+		sign    func(*http.Request)
+		backend *storage.LocalBackend
+	)
 
-	// PUT object with public-read ACL
-	body := []byte("hello world")
-	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket/public.txt", bytes.NewReader(body))
-	req.Header.Set("x-amz-acl", "public-read")
-	sign(req)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	BeforeEach(func() {
+		base, sign, backend = setupECAuthServer(GinkgoT())
+		mustCreateBucket(GinkgoT(), backend, "testbucket")
+	})
 
-	// Anonymous GET → should succeed (public-read ACL)
-	req, _ = http.NewRequest(http.MethodGet, base+"/testbucket/public.txt", nil)
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	It("allows anonymous GET for public-read objects", func() {
+		body := []byte("hello world")
+		req, err := http.NewRequest(http.MethodPut, base+"/testbucket/public.txt", bytes.NewReader(body))
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("x-amz-acl", "public-read")
+		sign(req)
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Body.Close()).To(Succeed())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
-	data, _ := io.ReadAll(resp.Body)
-	assert.Equal(t, body, data)
-}
+		req, err = http.NewRequest(http.MethodGet, base+"/testbucket/public.txt", nil)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
-// TestACL_Private_AnonymousGetDenied: private object → anonymous GET → 403
-func TestACL_Private_AnonymousGetDenied(t *testing.T) {
-	base, sign, backend := setupECAuthServer(t)
-	mustCreateBucket(t, backend, "testbucket")
+		data, err := io.ReadAll(resp.Body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal(body))
+	})
 
-	// PUT private object
-	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket/private.txt", bytes.NewReader([]byte("secret")))
-	sign(req)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	It("denies anonymous GET for private objects", func() {
+		req, err := http.NewRequest(http.MethodPut, base+"/testbucket/private.txt", bytes.NewReader([]byte("secret")))
+		Expect(err).NotTo(HaveOccurred())
+		sign(req)
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Body.Close()).To(Succeed())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
-	// Anonymous GET → 403
-	req, _ = http.NewRequest(http.MethodGet, base+"/testbucket/private.txt", nil)
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-}
+		req, err = http.NewRequest(http.MethodGet, base+"/testbucket/private.txt", nil)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Body.Close()).To(Succeed())
+		Expect(resp.StatusCode).To(Equal(http.StatusForbidden))
+	})
 
-// TestACL_PublicRead_AuthenticatedGetAllowed: public-read object → authenticated GET → 200
-func TestACL_PublicRead_AuthenticatedGetAllowed(t *testing.T) {
-	base, sign, backend := setupECAuthServer(t)
-	mustCreateBucket(t, backend, "testbucket")
+	It("allows authenticated GET for public-read objects", func() {
+		body := []byte("public data")
+		req, err := http.NewRequest(http.MethodPut, base+"/testbucket/pub.txt", bytes.NewReader(body))
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("x-amz-acl", "public-read")
+		sign(req)
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Body.Close()).To(Succeed())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
-	body := []byte("public data")
-	req, _ := http.NewRequest(http.MethodPut, base+"/testbucket/pub.txt", bytes.NewReader(body))
-	req.Header.Set("x-amz-acl", "public-read")
-	sign(req)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Authenticated GET still works
-	req, _ = http.NewRequest(http.MethodGet, base+"/testbucket/pub.txt", nil)
-	sign(req)
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-}
+		req, err = http.NewRequest(http.MethodGet, base+"/testbucket/pub.txt", nil)
+		Expect(err).NotTo(HaveOccurred())
+		sign(req)
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(resp.Body.Close)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	})
+})

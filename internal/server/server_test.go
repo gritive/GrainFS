@@ -27,7 +27,13 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func freePort(t *testing.T) int {
+type serverTestTB interface {
+	Helper()
+	Errorf(format string, args ...interface{})
+	FailNow()
+}
+
+func freePort(t serverTestTB) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "freePort")
@@ -54,7 +60,12 @@ func waitForTCP(t testing.TB, addr string) {
 	t.Fatalf("server %s did not become ready: %v", addr, lastErr)
 }
 
-func shutdownTestServer(t testing.TB, srv interface {
+type serverCleanupTB interface {
+	Helper()
+	Logf(format string, args ...any)
+}
+
+func shutdownTestServer(t serverCleanupTB, srv interface {
 	Shutdown(context.Context) error
 }) {
 	t.Helper()
@@ -113,9 +124,9 @@ func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.
 // data plane. Use in tests that need a bucket to exist as precondition without
 // testing the CreateBucket endpoint itself (D#8: CreateBucket is admin-UDS-only
 // on the S3 plane).
-func mustCreateBucket(t *testing.T, backend *storage.LocalBackend, name string) {
+func mustCreateBucket(t serverTestTB, backend *storage.LocalBackend, name string) {
 	t.Helper()
-	require.NoError(t, backend.CreateBucket(t.Context(), name), "mustCreateBucket %q", name)
+	require.NoError(t, backend.CreateBucket(context.Background(), name), "mustCreateBucket %q", name)
 }
 
 type recordingReadIndexer struct {
