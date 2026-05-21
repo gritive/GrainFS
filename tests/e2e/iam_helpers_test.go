@@ -468,13 +468,13 @@ func iamPutBucketUpstream(t testing.TB, sock, bucket, upstreamURL, ak, sk string
 }
 
 // iamKeyRevoke marks the given access_key revoked.
-func iamKeyRevoke(t *testing.T, sock, saID, accessKey string) {
+func iamKeyRevoke(t testing.TB, sock, saID, accessKey string) {
 	t.Helper()
 	iamDo(t, sock, "DELETE", "/v1/iam/sa/"+saID+"/key/"+accessKey, nil, nil)
 }
 
 // iamKeyCreateExpiringIn rotates a new key with a future ExpiresAt.
-func iamKeyCreateExpiringIn(t *testing.T, sock, saID string, ttl time.Duration) iamKeyResult {
+func iamKeyCreateExpiringIn(t testing.TB, sock, saID string, ttl time.Duration) iamKeyResult {
 	t.Helper()
 	exp := time.Now().UTC().Add(ttl)
 	var out iamKeyResult
@@ -570,7 +570,7 @@ type iamTestServerHandle struct {
 // startIAMTestServerWithRestart spawns the server but returns a handle whose
 // Stop()/Start() preserves the data dir. Bootstrap creds remain valid across
 // restarts because they're durably persisted in the IAM store.
-func startIAMTestServerWithRestart(t *testing.T) *iamTestServerHandle {
+func startIAMTestServerWithRestart(t testing.TB) *iamTestServerHandle {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-restart-*")
@@ -599,7 +599,7 @@ func startIAMTestServerWithRestart(t *testing.T) *iamTestServerHandle {
 // waits until the IAM verifier accepts the bootstrap creds. On the first
 // call the admin SA is bootstrapped via UDS; subsequent calls reuse the
 // persisted creds (snapshot/raft replay rehydrates the IAM store).
-func (h *iamTestServerHandle) Start(t *testing.T) {
+func (h *iamTestServerHandle) Start(t testing.TB) {
 	t.Helper()
 
 	args := []string{"serve",
@@ -638,7 +638,7 @@ func (h *iamTestServerHandle) Start(t *testing.T) {
 // Stop sends SIGTERM and waits for the process to exit, giving Raft and
 // BadgerDB time to flush state cleanly. terminateProcess is SIGKILL-based
 // and would skip the orderly shutdown path needed by ET5.
-func (h *iamTestServerHandle) Stop(t *testing.T) {
+func (h *iamTestServerHandle) Stop(t testing.TB) {
 	t.Helper()
 	if h.cmd == nil || h.cmd.Process == nil {
 		return

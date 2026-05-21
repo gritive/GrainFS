@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
@@ -46,36 +47,48 @@ func httpStatusFrom(err error) int {
 	return 0
 }
 
-// TestIAMServiceAccountE2E groups every IAM service-account / scoped-key /
-// security check under one entry using the shared dual-target pattern.
-func TestIAMServiceAccountE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIAMServiceAccountCases(t, newSingleNodeIAMAdminTarget())
+var _ = ginkgo.Describe("IAM service accounts", func() {
+	describeIAMServiceAccountContext("SingleNode", func(testing.TB) iamAdminTarget {
+		return newSingleNodeIAMAdminTarget()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runIAMServiceAccountCases(t, newSharedClusterIAMAdminTarget(t))
+	describeIAMServiceAccountContext("Cluster4Node", func(t testing.TB) iamAdminTarget {
+		return newSharedClusterIAMAdminTarget(t)
 	})
-}
 
-func runIAMServiceAccountCases(t *testing.T, tgt iamAdminTarget) {
-	t.Run("ET1_RevokedKey_Returns401", func(t *testing.T) { runIAMSARevokedKey(t, tgt) })
-	t.Run("ET1_ExpiredKey_Returns401", func(t *testing.T) { runIAMSAExpiredKey(t, tgt) })
-	t.Run("ET2_RoleOpMatrix", func(t *testing.T) { runIAMSARoleOpMatrix(t, tgt) })
-	t.Run("ET3_PresignedURL_RevokedKey_401", func(t *testing.T) { runIAMSAPresignedRevoked(t, tgt) })
-	t.Run("SC8_NoPlaintextSecretOnDisk", func(t *testing.T) { runIAMSANoPlaintext(t, tgt) })
-	t.Run("ET6_WildcardRemovalPreservesDefaultSA", func(t *testing.T) { runIAMSAWildcardRemoval(t, tgt) })
-	t.Run("ScopedKey_RightBucket_OK", func(t *testing.T) { runIAMSAScopedRight(t, tgt) })
-	t.Run("ScopedKey_WrongBucket_403", func(t *testing.T) { runIAMSAScopedWrong(t, tgt) })
-	t.Run("KeyCreate_OverScope_400", func(t *testing.T) { runIAMSAKeyOverScope(t, tgt) })
-	t.Run("LegacyKey_NilScope_AccessAllGrants", func(t *testing.T) { runIAMSALegacyKey(t, tgt) })
-	t.Run("ScopedKey_SnapshotRoundtrip", func(t *testing.T) { runIAMSAScopedSnapshot(t, tgt) })
-	t.Run("PolicyBypassClosed", func(t *testing.T) { runIAMSAPolicyBypass(t, tgt) })
+	ginkgo.Context("Control plane data directory", func() {
+		ginkgo.It("scans only meta raft", func() {
+			runGrepIAMControlPlaneDataDirScansOnlyMetaRaft(ginkgo.GinkgoTB())
+		})
+	})
+})
+
+func describeIAMServiceAccountContext(name string, factory func(testing.TB) iamAdminTarget) {
+	ginkgo.Context(name, func() {
+		var tgt iamAdminTarget
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("rejects revoked keys", func() { runIAMSARevokedKey(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("rejects expired keys", func() { runIAMSAExpiredKey(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("enforces the role operation matrix", func() { runIAMSARoleOpMatrix(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("rejects presigned URLs after key revocation", func() { runIAMSAPresignedRevoked(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("does not persist plaintext secrets on disk", func() { runIAMSANoPlaintext(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("preserves the default service account after wildcard removal", func() { runIAMSAWildcardRemoval(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("allows scoped keys on the right bucket", func() { runIAMSAScopedRight(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("denies scoped keys on the wrong bucket", func() { runIAMSAScopedWrong(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("rejects over-scoped key creation", func() { runIAMSAKeyOverScope(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("lets legacy nil-scope keys access all grants", func() { runIAMSALegacyKey(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("round-trips scoped keys through snapshots", func() { runIAMSAScopedSnapshot(ginkgo.GinkgoTB(), tgt) })
+		ginkgo.It("closes the policy bypass", func() { runIAMSAPolicyBypass(ginkgo.GinkgoTB(), tgt) })
+	})
 }
 
 // runIAMSARevokedKey: alice creates an SA + bucket-scoped policy + bucket
 // (via admin), PUTs an object, then admin revokes alice's only key.
 // The next S3 operation must be denied (401/403).
-func runIAMSARevokedKey(t *testing.T, tgt iamAdminTarget) {
+func runIAMSARevokedKey(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -111,7 +124,7 @@ func runIAMSARevokedKey(t *testing.T, tgt iamAdminTarget) {
 
 // runIAMSAExpiredKey: rotate a short-TTL key for the SA, wait until expiry is
 // observed, request must fail.
-func runIAMSAExpiredKey(t *testing.T, tgt iamAdminTarget) {
+func runIAMSAExpiredKey(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -154,7 +167,7 @@ func runIAMSAExpiredKey(t *testing.T, tgt iamAdminTarget) {
 // denied on the data plane regardless of policy. The Admin_CreateBucket case
 // from the legacy grant model is replaced with Admin_PutObject to preserve
 // coverage of the Admin role.
-func runIAMSARoleOpMatrix(t *testing.T, tgt iamAdminTarget) {
+func runIAMSARoleOpMatrix(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -188,63 +201,61 @@ func runIAMSARoleOpMatrix(t *testing.T, tgt iamAdminTarget) {
 	}
 
 	for i, tc := range cases {
-		tc := tc
-		t.Run(fmt.Sprintf("%s_%s", tc.role, tc.op), func(t *testing.T) {
-			saID, saAK, saSK := tgt.uniqueSA(t, fmt.Sprintf("et2-%s-%s-%d", tc.role, tc.op, i))
-			attachAdminPolicyOnBucket(t, tgt, saID, sharedBucket, tc.role)
-			iamWaitKeyReady(t, tgt.endpoint(0), saAK, saSK, 10*time.Second)
-			cli := s3ClientForSA(tgt, saAK, saSK)
+		ginkgo.By(fmt.Sprintf("%s_%s", tc.role, tc.op))
+		saID, saAK, saSK := tgt.uniqueSA(t, fmt.Sprintf("et2-%s-%s-%d", tc.role, tc.op, i))
+		attachAdminPolicyOnBucket(t, tgt, saID, sharedBucket, tc.role)
+		iamWaitKeyReady(t, tgt.endpoint(0), saAK, saSK, 10*time.Second)
+		cli := s3ClientForSA(tgt, saAK, saSK)
 
-			targetKey := fmt.Sprintf("k-%s-%s-%d", tc.role, tc.op, i)
-			var err error
+		targetKey := fmt.Sprintf("k-%s-%s-%d", tc.role, tc.op, i)
+		var err error
 
-			switch tc.op {
-			case "Get":
-				_, err = cli.GetObject(ctx, &s3.GetObjectInput{
-					Bucket: aws.String(sharedBucket), Key: aws.String("seed"),
-				})
-			case "Put":
-				_, err = cli.PutObject(ctx, &s3.PutObjectInput{
-					Bucket: aws.String(sharedBucket), Key: aws.String(targetKey),
-					Body: strings.NewReader("v"),
-				})
-			case "Delete":
-				// Pre-create the object as bootstrap so Delete has a target.
-				if _, e := bootCli.PutObject(ctx, &s3.PutObjectInput{
-					Bucket: aws.String(sharedBucket), Key: aws.String(targetKey),
-					Body: strings.NewReader("v"),
-				}); e != nil {
-					t.Fatalf("bootstrap pre-Put for Delete: %v", e)
-				}
-				_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket: aws.String(sharedBucket), Key: aws.String(targetKey),
-				})
-			default:
-				t.Fatalf("unhandled op %q", tc.op)
+		switch tc.op {
+		case "Get":
+			_, err = cli.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(sharedBucket), Key: aws.String("seed"),
+			})
+		case "Put":
+			_, err = cli.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(sharedBucket), Key: aws.String(targetKey),
+				Body: strings.NewReader("v"),
+			})
+		case "Delete":
+			// Pre-create the object as bootstrap so Delete has a target.
+			if _, e := bootCli.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(sharedBucket), Key: aws.String(targetKey),
+				Body: strings.NewReader("v"),
+			}); e != nil {
+				t.Fatalf("bootstrap pre-Put for Delete: %v", e)
 			}
+			_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(sharedBucket), Key: aws.String(targetKey),
+			})
+		default:
+			t.Fatalf("unhandled op %q", tc.op)
+		}
 
-			if tc.allow {
-				if err != nil {
-					t.Fatalf("%s %s: expected allow but got err: %v", tc.role, tc.op, err)
-				}
-				return
+		if tc.allow {
+			if err != nil {
+				t.Fatalf("%s %s: expected allow but got err: %v", tc.role, tc.op, err)
 			}
-			// expected deny
-			if err == nil {
-				t.Fatalf("%s %s: expected deny but request succeeded", tc.role, tc.op)
-			}
-			status := httpStatusFrom(err)
-			if status != http.StatusForbidden && status != http.StatusUnauthorized {
-				t.Fatalf("%s %s: expected 401/403, got status=%d err=%v",
-					tc.role, tc.op, status, err)
-			}
-		})
+			continue
+		}
+		// expected deny
+		if err == nil {
+			t.Fatalf("%s %s: expected deny but request succeeded", tc.role, tc.op)
+		}
+		status := httpStatusFrom(err)
+		if status != http.StatusForbidden && status != http.StatusUnauthorized {
+			t.Fatalf("%s %s: expected 401/403, got status=%d err=%v",
+				tc.role, tc.op, status, err)
+		}
 	}
 }
 
 // runIAMSAPresignedRevoked: alice presigns a GET, admin revokes alice's key,
 // the presigned URL must no longer work.
-func runIAMSAPresignedRevoked(t *testing.T, tgt iamAdminTarget) {
+func runIAMSAPresignedRevoked(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -300,7 +311,7 @@ func runIAMSAPresignedRevoked(t *testing.T, tgt iamAdminTarget) {
 // runIAMSANoPlaintext asserts the at-rest invariant on the IAM control-plane
 // persistence path. IAM secrets must not appear in plaintext in any node's
 // meta_raft directory.
-func runIAMSANoPlaintext(t *testing.T, tgt iamAdminTarget) {
+func runIAMSANoPlaintext(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 
 	saID, ak, sk := tgt.uniqueSA(t, "sc8")
@@ -320,14 +331,14 @@ func runIAMSANoPlaintext(t *testing.T, tgt iamAdminTarget) {
 // MetaCmdTypeIAMGrantWildcardDelete has no apply branch in the FSM (retained
 // for backcompat with pre-§2 snapshots only). Coverage of sa-default isolation
 // is now provided by policy-based unit tests.
-func runIAMSAWildcardRemoval(t *testing.T, _ iamAdminTarget) {
+func runIAMSAWildcardRemoval(t testing.TB, _ iamAdminTarget) {
 	t.Skip("legacy: wildcard grant removed in §2; /v1/iam/grant endpoints unregistered; " +
 		"sa-default isolation is covered by policy-model unit tests")
 }
 
 // runIAMSAScopedRight: scoped key for "logs" bucket grants access to objects
 // inside "logs".
-func runIAMSAScopedRight(t *testing.T, tgt iamAdminTarget) {
+func runIAMSAScopedRight(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -357,7 +368,7 @@ func runIAMSAScopedRight(t *testing.T, tgt iamAdminTarget) {
 }
 
 // runIAMSAScopedWrong: scoped key for "logs" is blocked on "reports".
-func runIAMSAScopedWrong(t *testing.T, tgt iamAdminTarget) {
+func runIAMSAScopedWrong(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -395,14 +406,14 @@ func runIAMSAScopedWrong(t *testing.T, tgt iamAdminTarget) {
 // otherwise). In the policy model, CreateKey only validates bucket name
 // syntax — no policy-level over-scope check has been implemented. The
 // scoped-key enforcement at request time is preserved (ScopedKey_WrongBucket_403).
-func runIAMSAKeyOverScope(t *testing.T, _ iamAdminTarget) {
+func runIAMSAKeyOverScope(t testing.TB, _ iamAdminTarget) {
 	t.Skip("legacy: over-scope 400 was grant-model only; policy model has no key-create scope gate; " +
 		"runtime enforcement is covered by ScopedKey_WrongBucket_403")
 }
 
 // runIAMSALegacyKey: a key issued without --bucket (BucketScope == nil) must
 // still access all buckets the SA has policy on. Pre-v0.0.99.0 backward compat.
-func runIAMSALegacyKey(t *testing.T, tgt iamAdminTarget) {
+func runIAMSALegacyKey(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -441,7 +452,7 @@ func runIAMSALegacyKey(t *testing.T, tgt iamAdminTarget) {
 // after a cluster restart (snapshot + raft replay).
 // Cluster4Node is skipped: the shared cluster fixture is process-global and
 // cannot be safely restarted without disrupting other concurrent tests.
-func runIAMSAScopedSnapshot(t *testing.T, tgt iamAdminTarget) {
+func runIAMSAScopedSnapshot(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	if tgt.isCluster {
 		t.Skip("snapshot-roundtrip requires stop/start; shared cluster fixture cannot be restarted")
@@ -509,7 +520,7 @@ func runIAMSAScopedSnapshot(t *testing.T, tgt iamAdminTarget) {
 // runIAMSAPolicyBypass verifies that bucket policy CRUD flows through the IAM
 // authz layer. alice (Read on alice-bucket) must not be able to
 // PUT/GET/DELETE bob's bucket policy.
-func runIAMSAPolicyBypass(t *testing.T, tgt iamAdminTarget) {
+func runIAMSAPolicyBypass(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -586,7 +597,7 @@ func runIAMSAPolicyBypass(t *testing.T, tgt iamAdminTarget) {
 }
 
 // iamKeyCreateScoped issues a new scoped key for saID restricted to buckets.
-func iamKeyCreateScoped(t *testing.T, sock, saID string, buckets []string) iamKeyResult {
+func iamKeyCreateScoped(t testing.TB, sock, saID string, buckets []string) iamKeyResult {
 	t.Helper()
 	var out iamKeyResult
 	iamDo(t, sock, "POST", "/v1/iam/sa/"+saID+"/key",
@@ -596,7 +607,7 @@ func iamKeyCreateScoped(t *testing.T, sock, saID string, buckets []string) iamKe
 
 // iamAdminRaw issues a raw admin UDS request and returns (statusCode, body).
 // Unlike iamDo it does NOT fatal on 4xx so callers can assert error cases.
-func iamAdminRaw(t *testing.T, sock, method, path string, body any) (int, []byte) {
+func iamAdminRaw(t testing.TB, sock, method, path string, body any) (int, []byte) {
 	t.Helper()
 	var rdr io.Reader
 	if body != nil {
@@ -616,13 +627,13 @@ func iamAdminRaw(t *testing.T, sock, method, path string, body any) (int, []byte
 	return resp.StatusCode, respBody
 }
 
-func grepIAMControlPlaneDataDir(t *testing.T, root, needle string) []string {
+func grepIAMControlPlaneDataDir(t testing.TB, root, needle string) []string {
 	t.Helper()
 	return grepDataDir(t, filepath.Join(root, "meta_raft"), needle)
 }
 
 // grepDataDir scans every regular file under root for needle.
-func grepDataDir(t *testing.T, root, needle string) []string {
+func grepDataDir(t testing.TB, root, needle string) []string {
 	t.Helper()
 	if _, err := os.Stat(root); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -651,18 +662,17 @@ func grepDataDir(t *testing.T, root, needle string) []string {
 	return hits
 }
 
-func TestGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		dir := t.TempDir()
-		metaPath := filepath.Join(dir, "meta_raft", "raft-v2", "000001.vlog")
-		groupPath := filepath.Join(dir, "groups", "group-1", "raft-v2", "000001.vlog")
-		require.NoError(t, os.MkdirAll(filepath.Dir(metaPath), 0o755))
-		require.NoError(t, os.MkdirAll(filepath.Dir(groupPath), 0o755))
-		require.NoError(t, os.WriteFile(groupPath, []byte("control-plane-secret"), 0o644))
-		require.Empty(t, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
+func runGrepIAMControlPlaneDataDirScansOnlyMetaRaft(t testing.TB) {
+	t.Helper()
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, "meta_raft", "raft-v2", "000001.vlog")
+	groupPath := filepath.Join(dir, "groups", "group-1", "raft-v2", "000001.vlog")
+	require.NoError(t, os.MkdirAll(filepath.Dir(metaPath), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(groupPath), 0o755))
+	require.NoError(t, os.WriteFile(groupPath, []byte("control-plane-secret"), 0o644))
+	require.Empty(t, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
 
-		err := os.WriteFile(metaPath, []byte("control-plane-secret"), 0o644)
-		require.NoError(t, err)
-		require.Equal(t, []string{metaPath}, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
-	})
+	err := os.WriteFile(metaPath, []byte("control-plane-secret"), 0o644)
+	require.NoError(t, err)
+	require.Equal(t, []string{metaPath}, grepIAMControlPlaneDataDir(t, dir, "control-plane-secret"))
 }
