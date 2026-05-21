@@ -60,7 +60,6 @@ type ReshardManager struct {
 	logger   zerolog.Logger
 
 	maxObjectsPerRun int
-	ecReshardEnabled bool
 
 	totalConverted atomic.Uint64
 	totalSkipped   atomic.Uint64
@@ -73,23 +72,10 @@ type ReshardManager struct {
 // full pass; use longer intervals (≥ 5 min) to limit I/O on large clusters.
 func NewReshardManager(backend Converter, leader Leader, interval time.Duration) *ReshardManager {
 	return &ReshardManager{
-		backend:          backend,
-		leader:           leader,
-		interval:         interval,
-		logger:           log.With().Str("component", "reshard-manager").Logger(),
-		ecReshardEnabled: true,
-	}
-}
-
-// NewRingReshardManager returns a ReshardManager that only runs ring-topology
-// placement migration. EC conversion/upgrade is disabled.
-func NewRingReshardManager(backend Converter, leader Leader, interval time.Duration) *ReshardManager {
-	return &ReshardManager{
-		backend:          backend,
-		leader:           leader,
-		interval:         interval,
-		logger:           log.With().Str("component", "ring-reshard-manager").Logger(),
-		ecReshardEnabled: false,
+		backend:  backend,
+		leader:   leader,
+		interval: interval,
+		logger:   log.With().Str("component", "reshard-manager").Logger(),
 	}
 }
 
@@ -103,14 +89,6 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 	if m.leader != nil && !m.leader.IsLeader() {
 		m.logger.Debug().Msg("reshard: skipping — not leader")
 		return 0, 0, 0
-	}
-
-	if !m.ecReshardEnabled {
-		cv, sk, er := m.runRingOnly(ctx)
-		m.totalConverted.Add(uint64(cv))
-		m.totalSkipped.Add(uint64(sk))
-		m.totalErrors.Add(uint64(er))
-		return cv, sk, er
 	}
 
 	if !m.backend.ECActive() {
@@ -228,12 +206,6 @@ func (m *ReshardManager) desiredConfigForRef(ref ObjectMetaRef) (ECConfig, bool)
 		return DesiredECConfigForGroup(group), true
 	}
 	return m.backend.EffectiveECConfig(), true
-}
-
-// runRingOnly is a no-op stub; ring-based resharding has been removed.
-// NewRingReshardManager and this function will be deleted in Task 6.
-func (m *ReshardManager) runRingOnly(_ context.Context) (converted, skipped, errs int) {
-	return 0, 0, 0
 }
 
 // Start runs Run in a loop until ctx is cancelled.

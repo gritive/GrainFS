@@ -53,7 +53,6 @@ type ServeOptions struct {
 	ScrubInterval            time.Duration // --scrub-interval
 	ScrubOrphanAge           time.Duration // --scrub-orphan-age
 	ReshardInterval          time.Duration // --reshard-interval
-	RingReshardInterval      time.Duration // --ring-reshard-interval
 	DataGroupRefreshInterval time.Duration // --datagroup-refresh-interval
 	DegradedInterval         time.Duration // --degraded-check-interval
 	LifecycleInterval        time.Duration // --lifecycle-interval

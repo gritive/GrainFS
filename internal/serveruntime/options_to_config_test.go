@@ -48,7 +48,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		ScrubInterval:            7 * time.Second,
 		ScrubOrphanAge:           11 * time.Minute,
 		ReshardInterval:          13 * time.Second,
-		RingReshardInterval:      17 * time.Second,
 		DataGroupRefreshInterval: 19 * time.Second,
 		DegradedInterval:         23 * time.Second,
 		LifecycleInterval:        29 * time.Second,
@@ -163,7 +162,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.ScrubInterval, cfg.ScrubInterval)
 	require.Equal(t, opts.ScrubOrphanAge, cfg.ScrubOrphanAge)
 	require.Equal(t, opts.ReshardInterval, cfg.ReshardInterval)
-	require.Equal(t, opts.RingReshardInterval, cfg.RingReshardInterval)
 	require.Equal(t, opts.DataGroupRefreshInterval, cfg.DataGroupRefreshInterval)
 	require.Equal(t, opts.DegradedInterval, cfg.DegradedInterval)
 

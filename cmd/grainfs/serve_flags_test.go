@@ -34,12 +34,6 @@ func TestServeReshardIntervalDefault(t *testing.T) {
 	assert.Equal(t, defaultReshardInterval.String(), flag.DefValue)
 }
 
-func TestServeRingReshardIntervalDefault(t *testing.T) {
-	flag := serveCmd.Flags().Lookup("ring-reshard-interval")
-	require.NotNil(t, flag)
-	assert.Equal(t, time.Hour.String(), flag.DefValue)
-}
-
 func TestServeDatagroupRefreshIntervalDefault(t *testing.T) {
 	flag := serveCmd.Flags().Lookup("datagroup-refresh-interval")
 	require.NotNil(t, flag)
