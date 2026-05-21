@@ -17,14 +17,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 func runIcebergDuckDBLocalCatalogSurvivesRestartAndDrop(t testing.TB) {
 	dataDir, err := os.MkdirTemp("", "grainfs-iceberg-duckdb-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dataDir) })
 	raftPort := freePort()
 	encKeyFile := makeSharedEncryptionKeyFile(t)
@@ -110,7 +110,7 @@ func runIcebergAuditCases(t testing.TB, tgt *icebergTarget, commitInterval time.
 			Key:    aws.String(key),
 			Body:   strings.NewReader("hello audit"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 	writeElapsed := time.Since(writeStart)
 
@@ -135,9 +135,9 @@ func runAuditIcebergSingleDuckDB(t testing.TB) {
 
 func requireAuditSearchAPIRows(t testing.TB, endpoint, accessKey, secretKey, bucket string, want int, timeout time.Duration) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		req, err := http.NewRequest(http.MethodGet, endpoint+"/api/audit/s3?bucket="+bucket+"&operation=PutObject&limit=20", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		req.Host = req.URL.Host
 		s3auth.SignRequest(req, accessKey, secretKey, "us-east-1")
 		resp, err := http.DefaultClient.Do(req)
@@ -163,7 +163,7 @@ func requireAuditSearchAPIRows(t testing.TB, endpoint, accessKey, secretKey, buc
 			}
 		}
 		return got >= want
-	}, timeout, 500*time.Millisecond, "audit search API must return committed PutObject rows")
+	}).WithTimeout(timeout).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "audit search API must return committed PutObject rows")
 }
 
 func requireIcebergClusterS3Ready(t testing.TB, cluster *mrCluster, bucket string) {
@@ -179,9 +179,9 @@ func requireIcebergClusterS3Ready(t testing.TB, cluster *mrCluster, bucket strin
 		Key:    aws.String(key),
 		Body:   strings.NewReader(body),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for _, endpoint := range cluster.httpURLs {
 			readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			out, err := ecS3Client(endpoint, cluster.accessKey, cluster.secretKey).GetObject(readCtx, &s3.GetObjectInput{
@@ -200,7 +200,7 @@ func requireIcebergClusterS3Ready(t testing.TB, cluster *mrCluster, bucket strin
 			}
 		}
 		return true
-	}, 45*time.Second, 500*time.Millisecond)
+	}).WithTimeout(45 * time.Second).WithPolling(500 * time.Millisecond).Should(gomega.BeTrue())
 }
 
 type icebergE2EServer struct {
@@ -232,7 +232,7 @@ func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort i
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 
 	waitForPort(t, port, 10*time.Second)
 	time.Sleep(3 * time.Second)
@@ -267,7 +267,7 @@ func runDuckDBIcebergSQLWithCreds(t testing.TB, endpoint, accessKey, secretKey, 
 	t.Helper()
 
 	got := runDuckDBIcebergCLI(t, endpoint, accessKey, secretKey, query)
-	require.Equal(t, want, got)
+	gomega.Expect(got).To(gomega.Equal(want))
 }
 
 func runDuckDBIcebergExecWithCreds(t testing.TB, endpoint, accessKey, secretKey, query string) {
@@ -281,7 +281,7 @@ func runDuckDBIcebergCLI(t testing.TB, endpoint, accessKey, secretKey, query str
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "duckdb", "-csv", "-noheader", "-c", duckDBIcebergSQL(endpoint, accessKey, secretKey, query))
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "duckdb output:\n%s", out)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "duckdb output:\n%s", out)
 	return lastNonEmptyLine(string(out))
 }
 
@@ -338,7 +338,7 @@ func runAuditIcebergClusterFollowerShipDuckDB(t testing.TB) {
 			Key:    aws.String(key),
 			Body:   strings.NewReader("hello follower audit"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 	writeElapsed := time.Since(writeStart)
 
@@ -381,13 +381,13 @@ func runAuditIcebergClusterLeaderFlap(t testing.TB) {
 		Key:    aws.String("before-flap"),
 		Body:   strings.NewReader("pre-flap data"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Kill the leader to force re-election.
 	oldLeaderIdx := cluster.leaderIdx
 	leaderProc := cluster.procs[cluster.leaderIdx]
 	if leaderProc != nil && leaderProc.Process != nil {
-		require.NoError(t, leaderProc.Process.Signal(syscall.SIGTERM))
+		gomega.Expect(leaderProc.Process.Signal(syscall.SIGTERM)).To(gomega.Succeed())
 		_ = leaderProc.Wait()
 		cluster.procs[oldLeaderIdx] = nil
 	}
@@ -409,7 +409,7 @@ func runAuditIcebergClusterLeaderFlap(t testing.TB) {
 func countAuditRows(t testing.TB, endpoint, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
 	t.Helper()
 	bucket := auditWhereBucket(whereClause)
-	require.NotEmpty(t, bucket, "countAuditRows requires a bucket predicate: %s", whereClause)
+	gomega.Expect(bucket).NotTo(gomega.BeEmpty(), "countAuditRows requires a bucket predicate: %s", whereClause)
 	operation := ""
 	if strings.Contains(whereClause, "method = 'PUT'") {
 		operation = "PutObject"
@@ -430,15 +430,14 @@ func countAuditRows(t testing.TB, endpoint, accessKey, secretKey, whereClause st
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	require.Failf(t, "audit rows not committed",
-		"timeout=%s bucket=%q operation=%q rows=%d want=%d lastErr=%v",
-		timeout, bucket, operation, lastRows, want, lastErr)
+	ginkgo.Fail(fmt.Sprintf("audit rows not committed: timeout=%s bucket=%q operation=%q rows=%d want=%d lastErr=%v",
+		timeout, bucket, operation, lastRows, want, lastErr))
 }
 
 func countAuditRowsAnyEndpoint(t testing.TB, endpoints []string, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
 	t.Helper()
 	bucket := auditWhereBucket(whereClause)
-	require.NotEmpty(t, bucket, "countAuditRowsAnyEndpoint requires a bucket predicate: %s", whereClause)
+	gomega.Expect(bucket).NotTo(gomega.BeEmpty(), "countAuditRowsAnyEndpoint requires a bucket predicate: %s", whereClause)
 	operation := ""
 	if strings.Contains(whereClause, "method = 'PUT'") {
 		operation = "PutObject"
@@ -464,9 +463,8 @@ func countAuditRowsAnyEndpoint(t testing.TB, endpoints []string, accessKey, secr
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	require.Failf(t, "audit rows not committed",
-		"timeout=%s bucket=%q operation=%q endpoint=%q rows=%d want=%d lastErr=%v",
-		timeout, bucket, operation, lastEndpoint, lastRows, want, lastErr)
+	ginkgo.Fail(fmt.Sprintf("audit rows not committed: timeout=%s bucket=%q operation=%q endpoint=%q rows=%d want=%d lastErr=%v",
+		timeout, bucket, operation, lastEndpoint, lastRows, want, lastErr))
 }
 
 func auditWhereBucket(whereClause string) string {
