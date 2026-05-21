@@ -33,28 +33,58 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestMultipartConcurrentDownloadE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runMultipartConcurrentDownloadCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Multipart concurrent downloads", func() {
+	describeMultipartConcurrentDownloadTarget("SingleNode", func(testing.TB) s3Target {
+		return newSingleNodeS3Target()
+	})
+	describeMultipartConcurrentDownloadTarget("Cluster4Node", func(t testing.TB) s3Target {
+		return newSharedClusterS3Target(t)
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runMultipartConcurrentDownloadCases(t, newSharedClusterS3Target(t))
+	ginkgo.Context("Cluster4Node", func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("recreates the cluster part directory during upload part", func() {
+			runMultipartUploadPartRecreatesClusterPartDir(ginkgo.GinkgoTB(), tgt)
+		})
+
+		ginkgo.It("serves a simple large object from every node", func() {
+			runClusterSimpleLargeObjectFullGet(ginkgo.GinkgoTB(), tgt)
+		})
+	})
+})
+
+func describeMultipartConcurrentDownloadTarget(name string, factory func(testing.TB) s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("handles concurrent multipart part GETs", func() {
+			runMultipartConcurrentDownloadCases(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
-func TestMultipartUploadPartRecreatesClusterPartDirE2E(t *testing.T) {
-	tgt := newSharedClusterS3Target(t)
+func runMultipartUploadPartRecreatesClusterPartDir(t testing.TB, tgt s3Target) {
+	t.Helper()
 	client := tgt.pickNode(0)
 
 	probe := tgt.name + "-mp-put-dir-probe"
 	tgt.createBkt(t, probe)
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-	defer cancel()
+	ginkgo.DeferCleanup(cancel)
 	waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
 
 	bucket := tgt.uniqueBucket(t, "mp-put-dir")
@@ -96,8 +126,8 @@ func TestMultipartUploadPartRecreatesClusterPartDirE2E(t *testing.T) {
 		Key:    aws.String(key),
 	})
 	require.NoError(t, err)
+	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
-	_ = out.Body.Close()
 	require.NoError(t, err)
 	require.Equal(t, body, got)
 }
@@ -107,9 +137,8 @@ func TestMultipartUploadPartRecreatesClusterPartDirE2E(t *testing.T) {
 // from "multipart-specific corruption". If this fails, the bug is in the
 // cluster GET/forward path (EC read or stream forwarding), not multipart.
 // If this passes, the bug is multipart-only.
-func TestClusterSimpleLargeObjectFullGetE2E(t *testing.T) {
-	tgt := newSharedClusterS3Target(t)
-
+func runClusterSimpleLargeObjectFullGet(t testing.TB, tgt s3Target) {
+	t.Helper()
 	ctx := context.Background()
 	bucket := tgt.uniqueBucket(t, "simple-large")
 	key := "warp-simple.bin"
@@ -132,8 +161,8 @@ func TestClusterSimpleLargeObjectFullGetE2E(t *testing.T) {
 			Key:    aws.String(key),
 		})
 		require.NoError(t, err)
+		ginkgo.DeferCleanup(out.Body.Close)
 		got, err := io.ReadAll(out.Body)
-		_ = out.Body.Close()
 		require.NoError(t, err)
 		if !bytes.Equal(got, body) {
 			first := -1
@@ -166,14 +195,14 @@ func TestClusterSimpleLargeObjectFullGetE2E(t *testing.T) {
 	}
 }
 
-func runMultipartConcurrentDownloadCases(t *testing.T, tgt s3Target) {
+func runMultipartConcurrentDownloadCases(t testing.TB, tgt s3Target) {
 	client := tgt.pickNode(0)
 
 	if tgt.isCluster {
 		probe := tgt.name + "-mp-cd-probe"
 		tgt.createBkt(t, probe)
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
 	}
 
@@ -313,7 +342,7 @@ func runMultipartConcurrentDownloadCases(t *testing.T, tgt s3Target) {
 	assert.Equal(t, workers*iterationsPerGoro, okCount, "expected every worker iteration to succeed")
 }
 
-func removeClusterMultipartUploadDirs(t *testing.T, tgt s3Target, uploadID string) []string {
+func removeClusterMultipartUploadDirs(t testing.TB, tgt s3Target, uploadID string) []string {
 	t.Helper()
 	require.NotNil(t, tgt.cluster)
 
@@ -326,7 +355,7 @@ func removeClusterMultipartUploadDirs(t *testing.T, tgt s3Target, uploadID strin
 	return removed
 }
 
-func findClusterMultipartUploadDirs(t *testing.T, tgt s3Target, uploadID string) []string {
+func findClusterMultipartUploadDirs(t testing.TB, tgt s3Target, uploadID string) []string {
 	t.Helper()
 	require.NotNil(t, tgt.cluster)
 

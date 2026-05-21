@@ -337,7 +337,7 @@ func putAppend(client *s3.Client, bucket, key string, offset int64, body []byte)
 	return err
 }
 
-func getObject(t *testing.T, client *s3.Client, bucket, key string) []byte {
+func getObject(t testing.TB, client *s3.Client, bucket, key string) []byte {
 	t.Helper()
 	resp, err := client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
