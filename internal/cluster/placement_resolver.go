@@ -11,14 +11,6 @@ var (
 	ErrPlacementCorrupt = errors.New("placement metadata corrupt")
 )
 
-type PlacementSource string
-
-const (
-	PlacementSourceRing     PlacementSource = "ring"
-	PlacementSourceMetadata PlacementSource = "metadata"
-	PlacementSourceLegacy   PlacementSource = "legacy"
-)
-
 type PlacementMeta struct {
 	VersionID        string
 	RingVersion      RingVersion
@@ -34,7 +26,6 @@ type ResolvedPlacement struct {
 	VersionID string
 	ShardKey  string
 	Record    PlacementRecord
-	Source    PlacementSource
 }
 
 type PlacementResolver interface {
@@ -57,58 +48,20 @@ func (b *DistributedBackend) ResolvePlacement(ctx context.Context, bucket, key s
 		ShardKey:  shardKey,
 	}
 
-	if meta.RingVersion > 0 {
-		cfg, err := placementConfig(meta)
-		if err != nil {
-			return ResolvedPlacement{}, fmt.Errorf("%w: %s/%s ring metadata: %v", ErrPlacementCorrupt, bucket, key, err)
-		}
-		ring, err := b.fsm.GetRingStore().GetRing(meta.RingVersion)
-		if err != nil {
-			return ResolvedPlacement{}, fmt.Errorf("%w: ring %d for %s/%s: %v", ErrPlacementCorrupt, meta.RingVersion, bucket, key, err)
-		}
-		nodes := ring.PlacementForKey(cfg, shardKey)
-		if len(nodes) != cfg.NumShards() {
-			return ResolvedPlacement{}, fmt.Errorf("%w: ring placement length %d != k+m %d for %s/%s", ErrPlacementCorrupt, len(nodes), cfg.NumShards(), bucket, key)
-		}
-		base.Record = PlacementRecord{Nodes: nodes, K: cfg.DataShards, M: cfg.ParityShards}
-		base.Source = PlacementSourceRing
-		return base, nil
+	if len(meta.NodeIDs) == 0 {
+		return ResolvedPlacement{}, fmt.Errorf("%w: no placement for %s/%s", ErrNotEC, bucket, shardKey)
 	}
 
-	if len(meta.NodeIDs) > 0 {
-		cfg, err := placementConfig(meta)
-		if err != nil {
-			return ResolvedPlacement{}, fmt.Errorf("%w: %s/%s metadata: %v", ErrPlacementCorrupt, bucket, key, err)
-		}
-		if len(meta.NodeIDs) != cfg.NumShards() {
-			return ResolvedPlacement{}, fmt.Errorf("%w: metadata placement length %d != k+m %d for %s/%s", ErrPlacementCorrupt, len(meta.NodeIDs), cfg.NumShards(), bucket, key)
-		}
-		base.Record = PlacementRecord{Nodes: meta.NodeIDs, K: cfg.DataShards, M: cfg.ParityShards}
-		base.Source = PlacementSourceMetadata
-		return base, nil
+	cfg, err := placementConfig(meta)
+	if err != nil {
+		return ResolvedPlacement{}, fmt.Errorf("%w: %s/%s metadata: %v", ErrPlacementCorrupt, bucket, key, err)
 	}
-
-	if b.fsm != nil {
-		if rec, err := b.fsm.LookupShardPlacement(bucket, shardKey); err == nil && len(rec.Nodes) > 0 {
-			base.Record = rec
-			base.Source = PlacementSourceLegacy
-			return base, nil
-		} else if err != nil {
-			return ResolvedPlacement{}, fmt.Errorf("lookup shard placement: %w", err)
-		}
-		if meta.VersionID != "" {
-			if rec, err := b.fsm.LookupShardPlacement(bucket, key); err == nil && len(rec.Nodes) > 0 {
-				base.ShardKey = key
-				base.Record = rec
-				base.Source = PlacementSourceLegacy
-				return base, nil
-			} else if err != nil {
-				return ResolvedPlacement{}, fmt.Errorf("lookup bare shard placement: %w", err)
-			}
-		}
+	if len(meta.NodeIDs) != cfg.NumShards() {
+		return ResolvedPlacement{}, fmt.Errorf("%w: metadata placement length %d != k+m %d for %s/%s",
+			ErrPlacementCorrupt, len(meta.NodeIDs), cfg.NumShards(), bucket, key)
 	}
-
-	return ResolvedPlacement{}, fmt.Errorf("%w: no placement for %s/%s", ErrNotEC, bucket, shardKey)
+	base.Record = PlacementRecord{Nodes: meta.NodeIDs, K: cfg.DataShards, M: cfg.ParityShards}
+	return base, nil
 }
 
 func placementConfig(meta PlacementMeta) (ECConfig, error) {

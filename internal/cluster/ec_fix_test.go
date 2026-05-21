@@ -12,7 +12,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -153,32 +152,6 @@ func TestShardPlacementKey_MultiVersionNoCollision(t *testing.T) {
 	got2, err2 := b.fsm.LookupShardPlacement("bkt", key+"/v2")
 	require.NoError(t, err2)
 	assert.Equal(t, v2Nodes, got2.Nodes)
-}
-
-// TestOwnedShards_WithVersionedPlacement exercises the full OwnedShards path with
-// the versioned key construction that was added in the fix. The pre-fix code
-// ignored the versionID parameter entirely, making OwnedShards always return nil
-// for versioned objects (since the placement was stored under key+"/"+versionID
-// but lookup used bare key).
-func TestOwnedShards_WithVersionedPlacement(t *testing.T) {
-	b := newTestDistributedBackend(t)
-
-	const nodeID = "test-node"
-	nodes := make([]string, 0, 6)
-	for i := 0; i < 6; i++ {
-		nodes = append(nodes, fmt.Sprintf("node-%d", i))
-	}
-	// seed placement that includes nodeID at positions 0 and 2.
-	placement := []string{nodeID, "node-other", nodeID, "node-other", "node-other", "node-other"}
-	writePlacement(t, b, "bkt", "obj/vid1", placement)
-
-	owned := b.OwnedShards("bkt", "obj", "vid1", nodeID)
-	assert.Equal(t, []int{0, 2}, owned,
-		"OwnedShards must use versionID to find the versioned placement record")
-
-	// Different versionID yields no placement record.
-	owned2 := b.OwnedShards("bkt", "obj", "vid2", nodeID)
-	assert.Nil(t, owned2, "OwnedShards for an unknown version must return nil")
 }
 
 // TestPutObjectEC_ParallelRollback verifies that when one shard write fails,

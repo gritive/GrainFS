@@ -2701,7 +2701,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 		if rerr == nil {
 			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size)
 			if ecErr != nil {
-				return nil, nil, fmt.Errorf("ec reconstruct %s/%s via %s: %w", bucket, key, resolved.Source, ecErr)
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s: %w", bucket, key, ecErr)
 			}
 			return rc, obj, nil
 		}
@@ -2967,7 +2967,7 @@ func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key stri
 	}
 	oldData, err := b.newECObjectReader().ReadObject(ctx, bucket, resolved.ShardKey, resolved.Record)
 	if err != nil {
-		return fmt.Errorf("reshard: reconstruct from %s: %w", resolved.Source, err)
+		return fmt.Errorf("reshard: reconstruct: %w", err)
 	}
 
 	// EC 디코딩 결과가 원본과 일치하는지 검증 (Reed-Solomon은 무손실이어야 함).
@@ -4376,7 +4376,7 @@ func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io
 		if rerr == nil {
 			rc, ecErr := b.getObjectECReaderAtShardKey(ctx, bucket, resolved.ShardKey, resolved.Record, obj.Size)
 			if ecErr != nil {
-				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s via %s: %w", bucket, key, versionID, resolved.Source, ecErr)
+				return nil, nil, fmt.Errorf("ec reconstruct %s/%s@%s: %w", bucket, key, versionID, ecErr)
 			}
 			return rc, obj, nil
 		}
