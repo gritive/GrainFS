@@ -11,8 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("EC objects", ginkgo.Label("bucket"), func() {
@@ -74,18 +73,18 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 				Key:    aws.String(tc.key),
 				Body:   strings.NewReader(tc.content),
 			})
-			require.NoError(t, err, tc.name)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), tc.name)
 
 			getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucket),
 				Key:    aws.String(tc.key),
 			})
-			require.NoError(t, err, tc.name)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), tc.name)
 			ginkgo.DeferCleanup(getOut.Body.Close)
 
 			body, _ := io.ReadAll(getOut.Body)
-			assert.Equal(t, tc.content, string(body), tc.name)
-			assert.Equal(t, int64(len(tc.content)), aws.ToInt64(getOut.ContentLength), tc.name)
+			gomega.Expect(string(body)).To(gomega.Equal(tc.content), tc.name)
+			gomega.Expect(aws.ToInt64(getOut.ContentLength)).To(gomega.Equal(int64(len(tc.content))), tc.name)
 		}
 	})
 
@@ -102,17 +101,17 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 			Key:    aws.String("large.bin"),
 			Body:   bytes.NewReader(data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("large.bin"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
-		assert.Equal(t, data, body)
+		gomega.Expect(body).To(gomega.Equal(data))
 	})
 
 	ginkgo.It("completes multipart upload (MultipartUpload)", func() {
@@ -129,7 +128,7 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		p1, err := cli.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:     aws.String(bucket),
@@ -138,7 +137,7 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 			PartNumber: aws.Int32(1),
 			Body:       bytes.NewReader(part1Data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		p2, err := cli.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:     aws.String(bucket),
@@ -147,7 +146,7 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 			PartNumber: aws.Int32(2),
 			Body:       bytes.NewReader(part2Data),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = cli.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 			Bucket:   aws.String(bucket),
@@ -160,18 +159,18 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 				},
 			},
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		expected := append(part1Data, part2Data...)
-		assert.Equal(t, expected, body)
+		gomega.Expect(body).To(gomega.Equal(expected))
 	})
 
 	ginkgo.It("exposes bucket operations (BucketOperations)", func() {
@@ -184,10 +183,10 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 		_, err := cli.HeadBucket(ctx, &s3.HeadBucketInput{
 			Bucket: aws.String(bucket),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		listOut, err := cli.ListBuckets(ctx, &s3.ListBucketsInput{})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		found := false
 		for _, b := range listOut.Buckets {
 			if aws.ToString(b.Name) == bucket {
@@ -195,7 +194,7 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 				break
 			}
 		}
-		assert.True(t, found, "newly created bucket %s missing from ListBuckets", bucket)
+		gomega.Expect(found).To(gomega.BeTrue(), "newly created bucket %s missing from ListBuckets", bucket)
 
 		// Decision #8 keeps bucket deletion on the admin socket; data-plane
 		// bucket coverage here is HeadBucket/ListBuckets visibility.
@@ -213,42 +212,42 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 			Key:    aws.String("file.txt"),
 			Body:   strings.NewReader("v1"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("file.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("file.txt"),
 		})
-		assert.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 
 		_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("over.txt"),
 			Body:   strings.NewReader("version1"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("over.txt"),
 			Body:   strings.NewReader("version2"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("over.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
-		assert.Equal(t, "version2", string(body))
+		gomega.Expect(string(body)).To(gomega.Equal("version2"))
 	})
 }
