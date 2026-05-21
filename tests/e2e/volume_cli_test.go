@@ -14,7 +14,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // startTestServer launches `grainfs serve` against a freshly-created /tmp data
@@ -32,7 +32,7 @@ func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir
 	}
 
 	dir, err := os.MkdirTemp("/tmp", "grainfs-vol-cli-")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	httpPort = port
 	if httpPort == 0 {
@@ -52,14 +52,14 @@ func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 
 	stop = func() {
 		cancel()
 		_ = cmd.Wait()
 		_ = os.RemoveAll(dir)
 	}
-	t.Cleanup(stop)
+	ginkgo.DeferCleanup(stop)
 
 	waitForPort(t, httpPort, 5*time.Second)
 	// Wait for admin.sock too.
@@ -87,7 +87,7 @@ func startTestServerOnPort(t testing.TB, port int, extraArgs ...string) (dataDir
 func waitForVolumeReady(t testing.TB, dataDir string, timeout time.Duration) {
 	t.Helper()
 	binary, err := filepath.Abs(getBinary())
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	deadline := time.Now().Add(timeout)
 	var lastOut string
 	for time.Now().Before(deadline) {
@@ -164,28 +164,26 @@ var _ = ginkgo.Describe("Volume CLI guards", func() {
 
 func runVolumeCLIGuardsCases(tgt func() s3Target) {
 	ginkgo.It("prints a hint when no endpoint is configured", func() {
-		t := ginkgo.GinkgoTB()
 		cwd, err := os.MkdirTemp("/tmp", "grainfs-noctx-")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(os.RemoveAll, cwd)
 
 		binary, err := filepath.Abs(getBinary())
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		cmd := exec.Command(binary, "volume", "list")
 		cmd.Dir = cwd
 		out, err := cmd.CombinedOutput()
-		require.Error(t, err)
-		require.Contains(t, string(out), "admin endpoint not configured")
-		require.Contains(t, string(out), "Hint")
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect(string(out)).To(gomega.ContainSubstring("admin endpoint not configured"))
+		gomega.Expect(string(out)).To(gomega.ContainSubstring("Hint"))
 	})
 
 	ginkgo.It("keeps admin volume paths off the data plane", func() {
-		t := ginkgo.GinkgoTB()
 		resp, err := http.Get(tgt().endpoint(0) + "/volumes/")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 		body, _ := io.ReadAll(resp.Body)
-		require.NotContains(t, string(body), `"volumes":`,
+		gomega.Expect(string(body)).NotTo(gomega.ContainSubstring(`"volumes":`),
 			"data plane should no longer expose the admin volumes endpoint")
 	})
 }
