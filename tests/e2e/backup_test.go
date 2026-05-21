@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Backup", func() {
@@ -27,7 +27,7 @@ var _ = ginkgo.Describe("Backup", func() {
 			}
 
 			dir, err := os.MkdirTemp("", "grainfs-backup-test-*")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 			dataDir := filepath.Join(dir, "data")
@@ -56,7 +56,7 @@ var _ = ginkgo.Describe("Backup", func() {
 			)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
-			require.NoError(t, cmd.Start())
+			gomega.Expect(cmd.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(terminateProcess, cmd)
 
 			endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -67,7 +67,7 @@ var _ = ginkgo.Describe("Backup", func() {
 			ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
 			client := s3ClientFor(endpoint, ak, sk)
 
-			require.NoError(t, adminCreateBucketWithPolicyAttachAny([]string{dataDir}, bootstrap.SAID, "backup-test", 30*time.Second))
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny([]string{dataDir}, bootstrap.SAID, "backup-test", 30*time.Second)).To(gomega.Succeed())
 			waitForS3Write(t, client, "backup-test", "__grainfs_e2e_ready", 30*time.Second)
 			_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 				Bucket: aws.String("backup-test"),
@@ -87,7 +87,7 @@ var _ = ginkgo.Describe("Backup", func() {
 					Key:    aws.String(key),
 					Body:   strings.NewReader(content),
 				})
-				require.NoError(t, err, "put %s", key)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "put %s", key)
 			}
 
 			// Stop GrainFS to ensure data is flushed
@@ -102,7 +102,7 @@ var _ = ginkgo.Describe("Backup", func() {
 			initCmd := exec.Command("restic", "init")
 			initCmd.Stdout = os.Stdout
 			initCmd.Stderr = os.Stderr
-			require.NoError(t, initCmd.Run())
+			gomega.Expect(initCmd.Run()).To(gomega.Succeed())
 
 			// Step 3: Create backup using grainfs backup command
 			t.Log("Step 3: Creating backup...")
@@ -113,14 +113,14 @@ var _ = ginkgo.Describe("Backup", func() {
 			)
 			backupCmd.Stdout = os.Stdout
 			backupCmd.Stderr = os.Stderr
-			require.NoError(t, backupCmd.Run())
+			gomega.Expect(backupCmd.Run()).To(gomega.Succeed())
 
 			// Step 4: Verify backup was created
 			t.Log("Step 4: Verifying backup...")
 			snapshotsCmd := exec.Command("restic", "snapshots", "--json")
 			output, err := snapshotsCmd.CombinedOutput()
-			require.NoError(t, err, "list snapshots: %s", output)
-			require.Contains(t, string(output), "paths", "snapshot should contain paths")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "list snapshots: %s", output)
+			gomega.Expect(string(output)).To(gomega.ContainSubstring("paths"), "snapshot should contain paths")
 
 			// Step 5: Corrupt original data (simulate disaster)
 			t.Log("Step 5: Simulating data corruption...")
@@ -135,7 +135,7 @@ var _ = ginkgo.Describe("Backup", func() {
 			)
 			restoreCmd.Stdout = os.Stdout
 			restoreCmd.Stderr = os.Stderr
-			require.NoError(t, restoreCmd.Run())
+			gomega.Expect(restoreCmd.Run()).To(gomega.Succeed())
 
 			// Step 7: Verify restored data
 			t.Log("Step 7: Verifying restored data...")
@@ -162,7 +162,7 @@ var _ = ginkgo.Describe("Backup", func() {
 			)
 			cmd2.Stdout = os.Stdout
 			cmd2.Stderr = os.Stderr
-			require.NoError(t, cmd2.Start())
+			gomega.Expect(cmd2.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(terminateProcess, cmd2)
 
 			restoreEndpoint := fmt.Sprintf("http://127.0.0.1:%d", restorePort)
@@ -172,7 +172,7 @@ var _ = ginkgo.Describe("Backup", func() {
 
 			// Verify all objects are present
 			var listOut *s3.ListObjectsV2Output
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				var err error
@@ -196,7 +196,7 @@ var _ = ginkgo.Describe("Backup", func() {
 					}
 				}
 				return true
-			}, 60*time.Second, time.Second, "list objects after restore")
+			}, 60*time.Second, time.Second).Should(gomega.BeTrue(), "list objects after restore")
 
 			// Verify object contents
 			for key, expectedContent := range testData {
@@ -204,12 +204,12 @@ var _ = ginkgo.Describe("Backup", func() {
 					Bucket: aws.String("backup-test"),
 					Key:    aws.String(key),
 				})
-				require.NoError(t, err, "get %s after restore", key)
-				defer resp.Body.Close()
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "get %s after restore", key)
+				ginkgo.DeferCleanup(resp.Body.Close)
 
 				content, err := io.ReadAll(resp.Body)
-				require.NoError(t, err, "read %s after restore", key)
-				require.Equal(t, expectedContent, string(content), "content of %s should match", key)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "read %s after restore", key)
+				gomega.Expect(string(content)).To(gomega.Equal(expectedContent), "content of %s should match", key)
 			}
 
 			t.Log("✅ Backup and restore test passed - data integrity verified")
