@@ -448,9 +448,15 @@ start_minio() {
     volume_args+=("$data_dir/d{1...${drives}}")
   fi
 
-  MINIO_ROOT_USER="$MINIO_ACCESS_KEY" \
-  MINIO_ROOT_PASSWORD="$MINIO_SECRET_KEY" \
-  "$MINIO_BIN" server "${volume_args[@]}" \
+  local env_args=(
+    "MINIO_ROOT_USER=$MINIO_ACCESS_KEY"
+    "MINIO_ROOT_PASSWORD=$MINIO_SECRET_KEY"
+  )
+  if [[ "$drives" -gt 1 && -z "${MINIO_CI_CD:-}" ]]; then
+    env_args+=("MINIO_CI_CD=1")
+    echo "  minio local multi-drive uses MINIO_CI_CD=1 for synthetic same-filesystem drives"
+  fi
+  env "${env_args[@]}" "$MINIO_BIN" server "${volume_args[@]}" \
     --address "127.0.0.1:$port" \
     --console-address "127.0.0.1:$console_port" \
     >"$PROFILE_ROOT/minio.log" 2>&1 &
