@@ -181,7 +181,7 @@ func requireAuditSearchAPIRows(t *testing.T, endpoint, accessKey, secretKey, buc
 	}, timeout, 500*time.Millisecond, "audit search API must return committed PutObject rows")
 }
 
-func requireIcebergClusterS3Ready(t *testing.T, cluster *mrCluster, bucket string) {
+func requireIcebergClusterS3Ready(t testing.TB, cluster *mrCluster, bucket string) {
 	t.Helper()
 
 	const key = "__iceberg_cluster_readiness"
@@ -223,11 +223,11 @@ type icebergE2EServer struct {
 	stop     func()
 }
 
-func startIcebergE2EServer(t *testing.T, dataDir string, raftPort int, encKeyFile string) icebergE2EServer {
+func startIcebergE2EServer(t testing.TB, dataDir string, raftPort int, encKeyFile string) icebergE2EServer {
 	return startIcebergE2EServerWithExtraArgs(t, dataDir, raftPort, encKeyFile)
 }
 
-func startIcebergE2EServerWithExtraArgs(t *testing.T, dataDir string, raftPort int, encKeyFile string, extraArgs ...string) icebergE2EServer {
+func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort int, encKeyFile string, extraArgs ...string) icebergE2EServer {
 	t.Helper()
 
 	port := freePort()
@@ -278,19 +278,19 @@ func startIcebergE2EServerWithExtraArgs(t *testing.T, dataDir string, raftPort i
 	}
 }
 
-func runDuckDBIcebergSQLWithCreds(t *testing.T, endpoint, accessKey, secretKey, query, want string) {
+func runDuckDBIcebergSQLWithCreds(t testing.TB, endpoint, accessKey, secretKey, query, want string) {
 	t.Helper()
 
 	got := runDuckDBIcebergCLI(t, endpoint, accessKey, secretKey, query)
 	require.Equal(t, want, got)
 }
 
-func runDuckDBIcebergExecWithCreds(t *testing.T, endpoint, accessKey, secretKey, query string) {
+func runDuckDBIcebergExecWithCreds(t testing.TB, endpoint, accessKey, secretKey, query string) {
 	t.Helper()
 	_ = runDuckDBIcebergCLI(t, endpoint, accessKey, secretKey, query)
 }
 
-func runDuckDBIcebergCLI(t *testing.T, endpoint, accessKey, secretKey, query string) string {
+func runDuckDBIcebergCLI(t testing.TB, endpoint, accessKey, secretKey, query string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

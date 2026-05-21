@@ -39,7 +39,7 @@ type icebergTarget struct {
 // uniqueNamespace returns a fresh namespace name and registers Cleanup that
 // best-effort drops the schema. Use as per-case isolation unit on iceberg
 // targets when the test creates iceberg DDL.
-func (tgt *icebergTarget) uniqueNamespace(t *testing.T, caseName string) string {
+func (tgt *icebergTarget) uniqueNamespace(t testing.TB, caseName string) string {
 	t.Helper()
 	id := tgt.caseSeq.Add(1)
 	ns := fmt.Sprintf("ns_%s_%s_%d", tgt.name, sanitizeForBucket(caseName), id)
@@ -51,13 +51,13 @@ func (tgt *icebergTarget) uniqueNamespace(t *testing.T, caseName string) string 
 }
 
 // runSQL executes a single-row SELECT and asserts the scanned column equals want.
-func (tgt *icebergTarget) runSQL(t *testing.T, query, want string) {
+func (tgt *icebergTarget) runSQL(t testing.TB, query, want string) {
 	t.Helper()
 	runDuckDBIcebergSQLWithCreds(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey, query, want)
 }
 
 // runExec executes a statement (no return) and asserts success.
-func (tgt *icebergTarget) runExec(t *testing.T, query string) {
+func (tgt *icebergTarget) runExec(t testing.TB, query string) {
 	t.Helper()
 	runDuckDBIcebergExecWithCreds(t, tgt.endpoint(0), tgt.accessKey, tgt.secretKey, query)
 }
@@ -72,7 +72,7 @@ func (tgt *icebergTarget) runExecBestEffort(stmt string) {
 	_ = cmd.Run()
 }
 
-func (tgt *icebergTarget) createBucketWithAdminPolicy(t *testing.T, bucket string) {
+func (tgt *icebergTarget) createBucketWithAdminPolicy(t testing.TB, bucket string) {
 	t.Helper()
 	// Idempotent: shared cluster fixture is reused across multiple iceberg
 	// tests, each of which constructs a fresh icebergTarget. HeadBucket-skip
@@ -100,7 +100,7 @@ func (tgt *icebergTarget) adminSockPath() string {
 // a t.Cleanup to delete it. Returns (saID, accessKey, secretKey). Mirrors the
 // shape of iamAdminTarget.uniqueSA but lives on icebergTarget so OAuth e2e
 // cases can mint bearers without composing the iamAdminTarget abstraction.
-func (tgt *icebergTarget) adminCreateSA(t *testing.T, namePrefix string) (saID, ak, sk string) {
+func (tgt *icebergTarget) adminCreateSA(t testing.TB, namePrefix string) (saID, ak, sk string) {
 	t.Helper()
 	sock := tgt.adminSockPath()
 	name := "sa-" + sanitizeForBucket(t.Name()) + "-" + sanitizeForBucket(namePrefix)
@@ -119,7 +119,7 @@ func (tgt *icebergTarget) adminCreateSA(t *testing.T, namePrefix string) (saID, 
 // registers a t.Cleanup that detaches on test exit. policyName must be a
 // known builtin (e.g. "readwrite", "readonly", "bucket-admin") or a policy
 // previously installed via PolicyPut.
-func (tgt *icebergTarget) adminAttachPolicy(t *testing.T, saID, policyName string) {
+func (tgt *icebergTarget) adminAttachPolicy(t testing.TB, saID, policyName string) {
 	t.Helper()
 	cli := iamadmin.NewClientForURL(tgt.adminSockPath())
 	ctx := context.Background()
@@ -135,7 +135,7 @@ func (tgt *icebergTarget) adminAttachPolicy(t *testing.T, saID, policyName strin
 // registers a t.Cleanup that best-effort deletes the bucket. The bucket name
 // is derived from t.Name() + suffix to stay stable per sub-test while keeping
 // re-runs collision-free across t.Name() variants.
-func (tgt *icebergTarget) uniqueWarehouse(t *testing.T, suffix string) string {
+func (tgt *icebergTarget) uniqueWarehouse(t testing.TB, suffix string) string {
 	t.Helper()
 	name := bucketNameFor(tgt.name, t.Name(), suffix)
 	createBucketWithAdminPolicyAttachViaUDSAny(t, tgt.dataDirs, tgt.saID, name, tgt.s3Client(0))
@@ -150,7 +150,7 @@ func (tgt *icebergTarget) uniqueWarehouse(t *testing.T, suffix string) string {
 // mintToken POSTs grant_type=client_credentials to the iceberg OAuth token
 // endpoint. Returns (jwt, 200) on success; ("", non-200) on auth failure.
 // Transport/IO/decode errors fail the test via require.NoError.
-func (tgt *icebergTarget) mintToken(t *testing.T, clientID, clientSecret, warehouse string) (string, int) {
+func (tgt *icebergTarget) mintToken(t testing.TB, clientID, clientSecret, warehouse string) (string, int) {
 	t.Helper()
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
@@ -186,7 +186,7 @@ func (tgt *icebergTarget) mintToken(t *testing.T, clientID, clientSecret, wareho
 
 // newSingleNodeIcebergTarget boots a single grainfs node with the iceberg
 // catalog enabled. startIcebergE2EServer registers its own t.Cleanup for stop.
-func newSingleNodeIcebergTarget(t *testing.T) *icebergTarget {
+func newSingleNodeIcebergTarget(t testing.TB) *icebergTarget {
 	t.Helper()
 	dataDir := shortTempDir(t)
 	raftPort := freePort()
@@ -211,7 +211,7 @@ func newSingleNodeIcebergTarget(t *testing.T) *icebergTarget {
 }
 
 // newSharedClusterIcebergTarget reuses the shared mrCluster fixture.
-func newSharedClusterIcebergTarget(t *testing.T) *icebergTarget {
+func newSharedClusterIcebergTarget(t testing.TB) *icebergTarget {
 	t.Helper()
 	c := getOrInitSharedMRCluster(t)
 	tgt := &icebergTarget{
@@ -233,7 +233,7 @@ func newSharedClusterIcebergTarget(t *testing.T) *icebergTarget {
 // --- audit-enabled variants (for the audit matrix cases) ---
 
 // newSingleNodeIcebergTargetWithAudit boots a single node with --audit-iceberg.
-func newSingleNodeIcebergTargetWithAudit(t *testing.T, commitInterval time.Duration) *icebergTarget {
+func newSingleNodeIcebergTargetWithAudit(t testing.TB, commitInterval time.Duration) *icebergTarget {
 	t.Helper()
 	dataDir := shortTempDir(t)
 	raftPort := freePort()
@@ -265,7 +265,7 @@ func newSingleNodeIcebergTargetWithAudit(t *testing.T, commitInterval time.Durat
 
 // newSharedClusterIcebergTargetWithAudit boots a dedicated cluster (NOT shared)
 // because audit flags can't be retrofitted onto a running cluster fixture.
-func newSharedClusterIcebergTargetWithAudit(t *testing.T, commitInterval time.Duration) *icebergTarget {
+func newSharedClusterIcebergTargetWithAudit(t testing.TB, commitInterval time.Duration) *icebergTarget {
 	t.Helper()
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
 		disableNFS4: true,

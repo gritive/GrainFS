@@ -8,11 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-// TestIcebergClientShapeE2E pins the wire-level JSON response shape that the
-// DuckDB iceberg extension parses (see duckdb/duckdb_iceberg#18483).
+// The Iceberg client shape specs pin the wire-level JSON response shape that
+// the DuckDB iceberg extension parses (see duckdb/duckdb_iceberg#18483).
 //
 // DuckDB's iceberg extension is strict about the OAuth2 token response:
 // it requires token_type == "bearer" (lowercase), even though RFC 6749 §5.1
@@ -25,21 +26,31 @@ import (
 //   - CreateSecretParameterCompatibility — the OAUTH2_SERVER_URI path that
 //     DuckDB's CREATE SECRET passes verbatim (catalog_base + /v1/oauth/tokens)
 //     accepts form-encoded client_credentials and returns a 3-segment JWT.
-func TestIcebergClientShapeE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIcebergClientShapeCases(t, newSingleNodeIcebergTarget(t))
+var _ = ginkgo.Describe("Iceberg client response shape", func() {
+	describeIcebergClientShapeContext("SingleNode", func(t testing.TB) *icebergTarget {
+		return newSingleNodeIcebergTarget(t)
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runIcebergClientShapeCases(t, newSharedClusterIcebergTarget(t))
-	})
-}
 
-func runIcebergClientShapeCases(t *testing.T, tgt *icebergTarget) {
-	t.Run("TokenResponseLowercaseBearer", func(t *testing.T) {
-		runIcebergClientShapeTokenResponseLowercaseBearer(t, tgt)
+	describeIcebergClientShapeContext("Cluster3Node", func(t testing.TB) *icebergTarget {
+		return newSharedClusterIcebergTarget(t)
 	})
-	t.Run("CreateSecretParameterCompatibility", func(t *testing.T) {
-		runIcebergClientShapeCreateSecretParameterCompatibility(t, tgt)
+})
+
+func describeIcebergClientShapeContext(name string, factory func(testing.TB) *icebergTarget) {
+	ginkgo.Context(name, func() {
+		var tgt *icebergTarget
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("emits lowercase bearer token responses", func() {
+			runIcebergClientShapeTokenResponseLowercaseBearer(ginkgo.GinkgoTB(), tgt)
+		})
+
+		ginkgo.It("accepts DuckDB CREATE SECRET token parameters", func() {
+			runIcebergClientShapeCreateSecretParameterCompatibility(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
@@ -48,7 +59,7 @@ func runIcebergClientShapeCases(t *testing.T, tgt *icebergTarget) {
 // asserts the response body has token_type:"bearer" verbatim in lowercase.
 // DuckDB iceberg extension issue duckdb/duckdb_iceberg#18483 documents the
 // strict lowercase requirement.
-func runIcebergClientShapeTokenResponseLowercaseBearer(t *testing.T, tgt *icebergTarget) {
+func runIcebergClientShapeTokenResponseLowercaseBearer(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	wh := tgt.uniqueWarehouse(t, "bearershape")
 	saID, ak, sk := tgt.adminCreateSA(t, "bearer")
@@ -68,7 +79,7 @@ func runIcebergClientShapeTokenResponseLowercaseBearer(t *testing.T, tgt *iceber
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	ginkgo.DeferCleanup(resp.Body.Close)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var body struct {
@@ -87,7 +98,7 @@ func runIcebergClientShapeTokenResponseLowercaseBearer(t *testing.T, tgt *iceber
 // OAUTH2_SERVER_URI path that DuckDB's CREATE SECRET passes verbatim — the
 // server must accept form-encoded client_credentials at exactly the
 // /iceberg/v1/oauth/tokens path and return a compact-serialization JWT.
-func runIcebergClientShapeCreateSecretParameterCompatibility(t *testing.T, tgt *icebergTarget) {
+func runIcebergClientShapeCreateSecretParameterCompatibility(t testing.TB, tgt *icebergTarget) {
 	t.Helper()
 	wh := tgt.uniqueWarehouse(t, "createsec")
 	saID, ak, sk := tgt.adminCreateSA(t, "createsec")
