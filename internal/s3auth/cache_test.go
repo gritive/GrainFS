@@ -112,13 +112,13 @@ func TestVerifier_HeaderAuthIgnoresEmptyPresignMarker(t *testing.T) {
 		key, err := v.Verify(req)
 		require.NoError(t, err, rawQuery)
 		require.Equal(t, "testkey", key, rawQuery)
-		require.False(t, hasPresignedAlgorithm(req), rawQuery)
+		require.False(t, HasPresignedAlgorithm(req), rawQuery)
 	}
 }
 
 func TestHasPresignedAlgorithmAcceptsEscapedQueryKey(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://localhost/mybucket/mykey?X%2dAmz-Algorithm=AWS4-HMAC-SHA256", nil)
-	require.True(t, hasPresignedAlgorithm(req))
+	require.True(t, HasPresignedAlgorithm(req))
 }
 
 // BenchmarkVerify confirms that cache hits are ≥10x faster than cold HMAC verification.

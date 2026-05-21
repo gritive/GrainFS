@@ -105,7 +105,7 @@ func (cv *CachingVerifier) LookupSecret(accessKey string) string {
 // presigned URL query params. Returns empty strings on malformed or missing input.
 func parseCredentialFull(r *http.Request) (accessKey, date, region, service, scope string) {
 	var credential string
-	if hasPresignedAlgorithm(r) {
+	if HasPresignedAlgorithm(r) {
 		credential = r.URL.Query().Get("X-Amz-Credential")
 	} else {
 		auth := r.Header.Get("Authorization")
@@ -125,7 +125,7 @@ func parseCredentialFull(r *http.Request) (accessKey, date, region, service, sco
 // presignedExpiry returns the remaining duration until a presigned URL expires,
 // or 0 if not a presigned URL or expiry cannot be determined.
 func presignedExpiry(r *http.Request) time.Duration {
-	if !hasPresignedAlgorithm(r) {
+	if !HasPresignedAlgorithm(r) {
 		return 0
 	}
 	q := r.URL.Query()
