@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,19 +16,9 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// TestLifecycleExpirationE2E exercises the leader-side expiration path via the
-// public S3 lifecycle API + the test-control endpoints in
+// Lifecycle expiration exercises the leader-side expiration path via the public
+// S3 lifecycle API and the test-control endpoints in
 // internal/server/lifecycle_testctl_api.go.
-//
-// SingleNode은 newDedicatedSingleNodeS3Target으로, Cluster4Node는
-// newDedicatedCluster4NodeS3Target으로 부트 — 두 fixture 모두
-// --lifecycle-interval=24h로 lifecycle 서비스를 활성화한다. DM sub-spec이
-// versioning을 요구하므로 SingleNode에서는 Skip.
-func TestLifecycleExpirationE2E(t *testing.T) {
-	gomega.RegisterFailHandler(ginkgo.Fail)
-	ginkgo.RunSpecs(t, "Lifecycle expiration e2e")
-}
-
 var _ = ginkgo.Describe("Lifecycle expiration", func() {
 	describeLifecycleExpirationContext("SingleNode", func() (s3Target, *lifecycleFixture) {
 		tb := ginkgo.GinkgoTB()
