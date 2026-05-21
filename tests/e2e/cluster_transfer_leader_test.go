@@ -7,8 +7,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster transfer leader", func() {
@@ -30,7 +29,7 @@ var _ = ginkgo.Describe("Cluster transfer leader", func() {
 			t := ginkgo.GinkgoTB()
 
 			leaderIdx := c.leaderIdx
-			require.GreaterOrEqual(t, leaderIdx, 0, "harness must have identified leader")
+			gomega.Expect(leaderIdx).To(gomega.BeNumerically(">=", 0), "harness must have identified leader")
 
 			// Wait for membership to settle (3-node). Dynamic-join can take time.
 			leaderURL := c.httpURLs[leaderIdx]
@@ -48,7 +47,7 @@ var _ = ginkgo.Describe("Cluster transfer leader", func() {
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-			require.True(t, settled, "cluster must settle to 3 voters")
+			gomega.Expect(settled).To(gomega.BeTrue(), "cluster must settle to 3 voters")
 
 			// Re-confirm leader index just before invoking CLI — leaderIdx may have
 			// drifted between harness settle and now. Status reports node ids
@@ -61,7 +60,7 @@ var _ = ginkgo.Describe("Cluster transfer leader", func() {
 					break
 				}
 			}
-			require.GreaterOrEqual(t, currentLeaderIdx, 0, "must locate current leader by node id")
+			gomega.Expect(currentLeaderIdx).To(gomega.BeNumerically(">=", 0), "must locate current leader by node id")
 
 			binary := getBinary()
 			sock := filepath.Join(c.dataDirs[currentLeaderIdx], "admin.sock")
@@ -69,26 +68,24 @@ var _ = ginkgo.Describe("Cluster transfer leader", func() {
 				"--endpoint", sock,
 				"transfer-leader", "--wait", "--timeout", "30s",
 			).CombinedOutput()
-			require.NoError(t, err, "transfer-leader command must succeed; out=%s", out)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "transfer-leader command must succeed; out=%s", out)
 
 			// Verify leader changed and term advanced.
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				s := getStatusJSON(t, leaderURL)
 				newLeader, _ := s["leader_id"].(string)
 				newTerm, _ := s["term"].(float64)
 				return newLeader != "" && newLeader != initialLeader && newTerm > initialTerm
-			}, 30*time.Second, 500*time.Millisecond, "leader must change and term must advance")
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "leader must change and term must advance")
 
 			output := string(out)
-			assert.Contains(t, output, "old_leader")
-			assert.Contains(t, output, "new leader")
+			gomega.Expect(output).To(gomega.ContainSubstring("old_leader"))
+			gomega.Expect(output).To(gomega.ContainSubstring("new leader"))
 		})
 	})
 
 	ginkgo.Context("SingleNodeNoPeers", func() {
 		ginkgo.It("rejects transfer-leader without peers", func() {
-			t := ginkgo.GinkgoTB()
-
 			binary := getBinary()
 			sock := filepath.Join(testServerDataDir, "admin.sock")
 
@@ -99,17 +96,17 @@ var _ = ginkgo.Describe("Cluster transfer leader", func() {
 			out, err := cmd.CombinedOutput()
 			// Either 503 (single-node) or 409 (not leader) — both acceptable; the
 			// CLI exits non-zero with a TransferLeaderError-derived message.
-			require.Error(t, err, "single-node transfer-leader must fail; out=%s", out)
+			gomega.Expect(err).To(gomega.HaveOccurred(), "single-node transfer-leader must fail; out=%s", out)
 			output := string(out)
 			// Must not be a happy-path success.
-			assert.NotContains(t, output, "(use --wait")
+			gomega.Expect(output).NotTo(gomega.ContainSubstring("(use --wait"))
 
 			// Sanity: server still up afterwards.
 			statusOut, sErr := exec.Command(binary, "cluster", "--endpoint", sock, "status", "--format", "json").Output()
-			require.NoError(t, sErr)
+			gomega.Expect(sErr).NotTo(gomega.HaveOccurred())
 			var s map[string]any
-			require.NoError(t, json.Unmarshal(statusOut, &s))
-			require.NotNil(t, s["mode"])
+			gomega.Expect(json.Unmarshal(statusOut, &s)).To(gomega.Succeed())
+			gomega.Expect(s["mode"]).NotTo(gomega.BeNil())
 		})
 	})
 })
