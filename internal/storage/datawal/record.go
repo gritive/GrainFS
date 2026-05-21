@@ -226,6 +226,9 @@ func unmarshalRecordBody(body []byte) (Record, error) {
 	if rec.Target, off, err = readString(body, off); err != nil {
 		return rec, err
 	}
+	if len(rec.Bucket)+len(rec.Key)+len(rec.Target) > maxMetadataBytes {
+		return rec, fmt.Errorf("datawal: metadata too large")
+	}
 	if len(body[off:]) < sha256.Size+8 {
 		return rec, io.ErrUnexpectedEOF
 	}

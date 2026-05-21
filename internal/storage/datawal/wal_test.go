@@ -3,6 +3,7 @@ package datawal_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"hash/crc32"
 	"io"
@@ -291,6 +292,24 @@ func TestEncodeRejectsOversizeMetadata(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDecodeRejectsOversizeAggregateMetadata(t *testing.T) {
+	raw := encodeRawPlainRecord(t, strings.Repeat("b", 600<<10), strings.Repeat("k", 600<<10), "", []byte("ok"))
+
+	_, err := datawal.DecodeRecord(bytes.NewReader(raw))
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, datawal.AppendRawForTest(dir, raw))
+
+	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	require.Error(t, err)
+}
+
 func TestSegmentDiscoveryRequiresExactName(t *testing.T) {
 	dir := t.TempDir()
 	w, err := datawal.Open(dir, nil)
@@ -316,4 +335,46 @@ type zeroReader struct{}
 func (zeroReader) Read(p []byte) (int, error) {
 	clear(p)
 	return len(p), nil
+}
+
+func encodeRawPlainRecord(t *testing.T, bucket, key, target string, payload []byte) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	var fixed [8]byte
+	binary.BigEndian.PutUint64(fixed[:], 1)
+	body.Write(fixed[:])
+	binary.BigEndian.PutUint64(fixed[:], 1)
+	body.Write(fixed[:])
+	body.WriteByte(byte(datawal.OpSegmentPut))
+	binary.BigEndian.PutUint64(fixed[:], 0)
+	body.Write(fixed[:])
+	binary.BigEndian.PutUint64(fixed[:], uint64(len(payload)))
+	body.Write(fixed[:])
+	writeRawString(t, &body, bucket)
+	writeRawString(t, &body, key)
+	writeRawString(t, &body, target)
+	sum := sha256.Sum256(payload)
+	body.Write(sum[:])
+	binary.BigEndian.PutUint64(fixed[:], uint64(len(payload)))
+	body.Write(fixed[:])
+	body.Write(payload)
+
+	var frame bytes.Buffer
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(body.Len()))
+	frame.Write(lenBuf[:])
+	frame.Write(body.Bytes())
+	binary.BigEndian.PutUint32(lenBuf[:], crc32.ChecksumIEEE(body.Bytes()))
+	frame.Write(lenBuf[:])
+	return frame.Bytes()
+}
+
+func writeRawString(t *testing.T, buf *bytes.Buffer, s string) {
+	t.Helper()
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+	_, err := buf.Write(lenBuf[:])
+	require.NoError(t, err)
+	_, err = buf.WriteString(s)
+	require.NoError(t, err)
 }
