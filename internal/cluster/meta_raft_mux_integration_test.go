@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"testing"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E validates that meta-raft can
@@ -26,120 +25,121 @@ import (
 //
 // 3 nodes is the minimum for genuine quorum behavior. We use 50ms heartbeat
 // / 750ms election to keep the test fast; mux flush window is 5ms.
-func TestMetaRaft_QUICMux_ThreeNodeBootstrap_E2E(t *testing.T) {
-	t.Parallel()
+var _ = Describe("Meta-Raft mux integration", func() {
+	It("bootstraps three QUIC mux nodes and replicates bucket assignment", func() {
+		t := GinkgoT()
 
-	const numNodes = 3
+		const numNodes = 3
 
-	addrs := make([]string, numNodes)
-	for i := range addrs {
-		addrs[i] = freeUDPAddr(t)
-	}
-
-	transports := make([]*transport.QUICTransport, numNodes)
-	muxes := make([]*raft.GroupRaftQUICMux, numNodes)
-	metaNodes := make([]*MetaRaft, numNodes)
-	for i := range metaNodes {
-		peers := make([]string, 0, numNodes-1)
-		for j := range addrs {
-			if i != j {
-				peers = append(peers, addrs[j])
-			}
+		addrs := make([]string, numNodes)
+		for i := range addrs {
+			addrs[i] = freeUDPAddrForMuxSpec()
 		}
 
-		tr := transport.MustNewQUICTransport("meta-mux-e2e-psk")
-		require.NoError(t, tr.Listen(context.Background(), addrs[i]))
+		transports := make([]*transport.QUICTransport, numNodes)
+		muxes := make([]*raft.GroupRaftQUICMux, numNodes)
+		metaNodes := make([]*MetaRaft, numNodes)
+		for i := range metaNodes {
+			peers := make([]string, 0, numNodes-1)
+			for j := range addrs {
+				if i != j {
+					peers = append(peers, addrs[j])
+				}
+			}
 
-		// Mux on every node, before NewMetaTransportQUICMux. The constructor
-		// auto-registers the meta node so receiver-side __meta__ dispatch
-		// is wired before any inbound call lands.
-		mux := raft.NewGroupRaftQUICMux(tr)
-		mux.EnableMux(2, 5*time.Millisecond)
+			tr := transport.MustNewQUICTransport("meta-mux-e2e-psk")
+			Expect(tr.Listen(context.Background(), addrs[i])).To(Succeed())
 
-		m, err := NewMetaRaft(fastMetaRaftConfig(MetaRaftConfig{
-			NodeID:  fmt.Sprintf("node-%d", i),
-			RaftID:  addrs[i],
-			Peers:   peers,
-			DataDir: t.TempDir(),
-		}))
-		require.NoError(t, err)
+			// Mux on every node, before NewMetaTransportQUICMux. The constructor
+			// auto-registers the meta node so receiver-side __meta__ dispatch
+			// is wired before any inbound call lands.
+			mux := raft.NewGroupRaftQUICMux(tr)
+			mux.EnableMux(2, 5*time.Millisecond)
 
-		metaTransport := NewMetaTransportQUICMux(tr, m.Node(), mux)
-		m.SetTransport(metaTransport)
+			m, err := NewMetaRaft(fastMetaRaftConfig(MetaRaftConfig{
+				NodeID:  fmt.Sprintf("node-%d", i),
+				RaftID:  addrs[i],
+				Peers:   peers,
+				DataDir: t.TempDir(),
+			}))
+			Expect(err).NotTo(HaveOccurred())
 
-		transports[i] = tr
-		muxes[i] = mux
-		metaNodes[i] = m
-	}
+			metaTransport := NewMetaTransportQUICMux(tr, m.Node(), mux)
+			m.SetTransport(metaTransport)
 
-	t.Cleanup(func() {
+			transports[i] = tr
+			muxes[i] = mux
+			metaNodes[i] = m
+		}
+
+		DeferCleanup(func() {
+			for _, m := range metaNodes {
+				if m != nil {
+					_ = m.Close()
+				}
+			}
+			for _, tr := range transports {
+				if tr != nil {
+					_ = tr.Close()
+				}
+			}
+		})
+
 		for _, m := range metaNodes {
-			if m != nil {
-				_ = m.Close()
-			}
+			Expect(m.Bootstrap()).To(Succeed())
+			Expect(m.Start(context.Background(), nil)).To(Succeed())
 		}
-		for _, tr := range transports {
-			if tr != nil {
-				_ = tr.Close()
+
+		// Election under mux must converge in the same window legacy does. 10s
+		// matches the existing five-node legacy test.
+		var leader *MetaRaft
+		Eventually(func() bool {
+			leader = nil
+			for _, m := range metaNodes {
+				if m.IsLeader() {
+					if leader != nil {
+						return false
+					}
+					leader = m
+				}
 			}
-		}
-	})
+			return leader != nil
+		}, 10*time.Second, 50*time.Millisecond).Should(BeTrue(), "three-node meta-Raft on mux must elect exactly one leader")
 
-	for _, m := range metaNodes {
-		require.NoError(t, m.Bootstrap())
-		require.NoError(t, m.Start(context.Background(), nil))
-	}
+		// State replicates through mux (heartbeat-batched AE for entries-bearing
+		// catches up followers). Bucket assignment is a small cmd, fits in one
+		// frame.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		DeferCleanup(cancel)
+		Expect(leader.ProposeBucketAssignment(ctx, "photos", "group-0")).To(Succeed())
 
-	// Election under mux must converge in the same window legacy does. 10s
-	// matches the existing five-node legacy test.
-	var leader *MetaRaft
-	require.Eventually(t, func() bool {
-		leader = nil
-		for _, m := range metaNodes {
-			if m.IsLeader() {
-				if leader != nil {
+		Eventually(func() bool {
+			for _, m := range metaNodes {
+				if m.FSM().BucketAssignments()["photos"] != "group-0" {
 					return false
 				}
-				leader = m
 			}
+			return true
+		}, 5*time.Second, 50*time.Millisecond).Should(BeTrue(), "bucket assignment must replicate over mux to every meta-Raft node")
+
+		// Sanity check: every node still reports the meta node registered. If
+		// an OnBroken handler had cleared metaNode somewhere along the way,
+		// later traffic would silently fail with "unknown group __meta__".
+		for i, mux := range muxes {
+			// Reach in via the same lookup path the receiver uses.
+			// (lookupNode is unexported; this asserts via MuxEnabled + a
+			// no-op call to dispatchToLocalGroup is overkill - we instead
+			// re-invoke ProposeBucketAssignment from a different node to
+			// force another round-trip.)
+			_ = mux
+			Expect(metaNodes[i].FSM().BucketAssignments()["photos"]).To(Equal("group-0"))
 		}
-		return leader != nil
-	}, 10*time.Second, 50*time.Millisecond, "three-node meta-Raft on mux must elect exactly one leader")
+	})
+})
 
-	// State replicates through mux (heartbeat-batched AE for entries-bearing
-	// catches up followers). Bucket assignment is a small cmd, fits in one
-	// frame.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	require.NoError(t, leader.ProposeBucketAssignment(ctx, "photos", "group-0"))
-
-	require.Eventually(t, func() bool {
-		for _, m := range metaNodes {
-			if m.FSM().BucketAssignments()["photos"] != "group-0" {
-				return false
-			}
-		}
-		return true
-	}, 5*time.Second, 50*time.Millisecond, "bucket assignment must replicate over mux to every meta-Raft node")
-
-	// Sanity check: every node still reports the meta node registered. If
-	// an OnBroken handler had cleared metaNode somewhere along the way,
-	// later traffic would silently fail with "unknown group __meta__".
-	for i, mux := range muxes {
-		// Reach in via the same lookup path the receiver uses.
-		// (lookupNode is unexported; this asserts via MuxEnabled + a
-		// no-op call to dispatchToLocalGroup is overkill — we instead
-		// re-invoke ProposeBucketAssignment from a different node to
-		// force another round-trip.)
-		_ = mux
-		assert.True(t, metaNodes[i].FSM().BucketAssignments()["photos"] == "group-0")
-	}
-}
-
-func freeUDPAddr(t *testing.T) string {
-	t.Helper()
+func freeUDPAddrForMuxSpec() string {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 	defer pc.Close()
 	return pc.LocalAddr().String()
 }
