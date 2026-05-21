@@ -9,6 +9,9 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/reservedname"
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
 // icebergSigV4SkewWindow is the maximum allowed clock drift between a SigV4
@@ -78,6 +81,47 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		}
 
 		isIceberg := routeSurfaceForPath(path) == routeSurfaceIceberg
+
+		// Phase 0 anon fast path (F#41) + default-bucket extension (F#41-ext):
+		// when the caller sent no Authorization header, defer the allow/deny
+		// decision to the authorizer (s3auth.Authorizer at
+		// internal/s3auth/authorizer.go) in either of two cases:
+		//
+		//   1. iam.anon-enabled=true (Phase 0): authorizer short-circuits with
+		//      ReasonAnonEnabled for any bucket; this is the original F#41.
+		//   2. bucket=="default" (F#41-ext): authorizer's D#2 implicit-anon
+		//      Allow path (authorizer.go:73-81) emits
+		//      ReasonDefaultBucketImplicitAnon for any verb on s3://default
+		//      regardless of iam.anon-enabled. The startup banner promises
+		//      "default remains public" and this guarantee must survive the
+		//      Phase 0 → Phase 2 flip (F#26 banner contract). Without (2),
+		//      unsigned PUT/LIST on /default returned 403 from
+		//      authenticateSignedRequest in Phase 2 before the authorizer
+		//      ever ran — banner-vs-behavior mismatch surfaced by T73.
+		//
+		// Authenticated requests (Authorization header present) are NOT
+		// affected by either branch — SigV4 verification still runs, revoked
+		// keys still fail, presigned URLs still go through the verifier.
+		//
+		// Iceberg surface is excluded — iceberg routes have their own anon-aware
+		// per-route guards (see icebergGuarded + iceberg_authn.go), and routing
+		// anon iceberg through SigV4-bypass here would break the bearer trust
+		// boundary.
+		//
+		// Presigned URLs (X-Amz-Algorithm in query) are NOT anon — they carry
+		// SigV4 in the query string. Those must continue through
+		// authenticateSignedRequest so revoked-key checks fire. Use the
+		// canonical s3auth.HasPresignedAlgorithm helper so the predicate
+		// matches the verifier's (handles percent-encoded keys + empty values).
+		if !isIceberg &&
+			r.Header.Get("Authorization") == "" &&
+			!s3auth.HasPresignedAlgorithm(r) &&
+			(s.anonEnabled() || bucket == reservedname.DefaultBucketName) {
+			ctx = WithAccessKey(ctx, "")
+			c.Next(ctx)
+			return
+		}
+
 		if isIceberg {
 			// Bearer requests skip SigV4 entirely — the icebergGuarded middleware
 			// on each route performs JWT verification and policy gating.
@@ -112,6 +156,21 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		ctx = nextCtx
 		c.Next(ctx)
 	}
+}
+
+// anonEnabled reports whether iam.anon-enabled=true on the cluster config
+// store. Reused on the S3 surface to gate the F#41 anon fast path so that the
+// Phase 0 startup banner contract (read/write s3://default with no auth) holds
+// across all verbs. Returns false when the config reader is not wired (the key
+// defaults to true at registration, but we treat "no reader" as conservatively
+// disabled rather than implicitly allowing). bearerCfg is wired by
+// WithBearerConfig from the same cfgStore as the iceberg branch.
+func (s *Server) anonEnabled() bool {
+	if s.bearerCfg == nil {
+		return false
+	}
+	v, ok := s.bearerCfg.GetBool("iam.anon-enabled")
+	return ok && v
 }
 
 // icebergSkewReject returns a non-empty rejection reason if the request's

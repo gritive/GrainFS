@@ -186,6 +186,20 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 	// Layer 3: object ACL (post-load only).
 	if phase == PhasePostLoad {
 		if !IsAuthorizedByACL(in.ObjectACL, in.Principal.AccessKey, in.Action) {
+			// F#41b: when Layer 1 returned the default-bucket implicit-anon
+			// allow (D#2), the Phase 0 banner contract ("any client can
+			// read/write s3://default") requires that the ACL gate not deny
+			// anonymous access. Other anon-allow paths (iam.anon-enabled on
+			// non-default buckets) and authenticated-private cases stay
+			// gated by ACL — the carve-out is scoped to the specific reason
+			// emitted by authorizer.go:79.
+			if detail.Reason == ReasonDefaultBucketImplicitAnon {
+				lat := elapsedUS(t0)
+				if authEnabled {
+					r.recordAllow(ctx, saID, in, detail, lat)
+				}
+				return Decision{Allow: true, Layer: "default_bucket_implicit_anon", Detail: detail, AuthzLatencyUS: lat}
+			}
 			reason := aclDenyReason(in.Principal.AccessKey)
 			lat := elapsedUS(t0)
 			r.recordDeny(ctx, saID, in, reason, detail, lat)
