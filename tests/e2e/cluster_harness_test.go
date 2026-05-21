@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -136,27 +137,23 @@ func rejectRemovedECExtraArgs(args []string) {
 	}
 }
 
-func runNormalizeOptionsRejectsRemovedZeroConfigFlags(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity", "--seed-groups=2", "--seed-groups"} {
-			t.Run(arg, func(t *testing.T) {
-				require.PanicsWithValue(t,
-					fmt.Sprintf("removed zero-config flag %q: use Nodes to select the automatic profile", arg),
-					func() {
-						normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
-					})
+func runNormalizeOptionsRejectsRemovedZeroConfigFlags(t testing.TB) {
+	t.Helper()
+	for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity", "--seed-groups=2", "--seed-groups"} {
+		require.PanicsWithValue(t,
+			fmt.Sprintf("removed zero-config flag %q: use Nodes to select the automatic profile", arg),
+			func() {
+				normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
 			})
-		}
-	})
+	}
 }
 
-func runNormalizeOptionsAllowsNonECExtraArgs(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		opts := normalizeE2EClusterOptions(e2eClusterOptions{
-			ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
-		})
-		require.Equal(t, []string{"--vlog-warn-ratio=0.001"}, opts.ExtraArgs)
+func runNormalizeOptionsAllowsNonECExtraArgs(t testing.TB) {
+	t.Helper()
+	opts := normalizeE2EClusterOptions(e2eClusterOptions{
+		ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
 	})
+	require.Equal(t, []string{"--vlog-warn-ratio=0.001"}, opts.ExtraArgs)
 }
 
 func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, error) {
@@ -564,8 +561,12 @@ func (c *e2eCluster) GrantAdminOnBuckets(buckets ...string) {
 	policyAttachAdminOnBucketsViaUDSAny(c.t, c.dataDirs, c.saID, buckets, 60*time.Second)
 }
 
-// TestNormalizeE2EClusterOptionsE2E groups harness option-normalize checks.
-func TestNormalizeE2EClusterOptionsE2E(t *testing.T) {
-	t.Run("AllowsNonECExtraArgs", runNormalizeOptionsAllowsNonECExtraArgs)
-	t.Run("RejectsRemovedZeroConfigFlags", runNormalizeOptionsRejectsRemovedZeroConfigFlags)
-}
+var _ = ginkgo.Describe("E2E cluster harness options", func() {
+	ginkgo.It("allows non-EC extra args", func() {
+		runNormalizeOptionsAllowsNonECExtraArgs(ginkgo.GinkgoTB())
+	})
+
+	ginkgo.It("rejects removed zero-config flags", func() {
+		runNormalizeOptionsRejectsRemovedZeroConfigFlags(ginkgo.GinkgoTB())
+	})
+})
