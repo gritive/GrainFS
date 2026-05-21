@@ -90,9 +90,8 @@ var _ = Describe("Ring integration", func() {
 		_, err = backend.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())
 
-		_, placement, err := backend.headObjectMeta(ctx, "bucket", "mp.bin")
+		_, _, err = backend.headObjectMeta(ctx, "bucket", "mp.bin")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(placement.RingVersion).To(Equal(RingVersion(1)))
 	})
 
 	It("falls back when no ring is configured", func() {

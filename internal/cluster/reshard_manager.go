@@ -152,11 +152,10 @@ func (m *ReshardManager) Run(ctx context.Context) (converted, skipped, errs int)
 			break
 		}
 		resolved, lookupErr := m.backend.ResolvePlacement(ctx, ref.Bucket, ref.Key, PlacementMeta{
-			VersionID:   ref.VersionID,
-			RingVersion: ref.RingVersion,
-			ECData:      ref.ECData,
-			ECParity:    ref.ECParity,
-			NodeIDs:     ref.NodeIDs,
+			VersionID: ref.VersionID,
+			ECData:    ref.ECData,
+			ECParity:  ref.ECParity,
+			NodeIDs:   ref.NodeIDs,
 		})
 		if errors.Is(lookupErr, ErrNotEC) {
 			// No placement yet: N× replication object, convert to EC.

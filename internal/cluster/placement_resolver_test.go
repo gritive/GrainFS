@@ -113,10 +113,9 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	assert.Equal(t, int64(123), obj.Size)
 	assert.Equal(t, "v1", obj.VersionID)
 	assert.Equal(t, PlacementMeta{
-		VersionID:   "v1",
-		RingVersion: 7,
-		ECData:      2,
-		ECParity:    1,
-		NodeIDs:     []string{"n0", "n1", "n2"},
+		VersionID: "v1",
+		ECData:    2,
+		ECParity:  1,
+		NodeIDs:   []string{"n0", "n1", "n2"},
 	}, meta)
 }

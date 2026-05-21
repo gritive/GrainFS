@@ -118,11 +118,10 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 				return int(missing), ctx.Err()
 			}
 			resolved, rerr := m.resolver.ResolvePlacement(ctx, ref.Bucket, ref.Key, PlacementMeta{
-				VersionID:   ref.VersionID,
-				RingVersion: ref.RingVersion,
-				ECData:      ref.ECData,
-				ECParity:    ref.ECParity,
-				NodeIDs:     ref.NodeIDs,
+				VersionID: ref.VersionID,
+				ECData:    ref.ECData,
+				ECParity:  ref.ECParity,
+				NodeIDs:   ref.NodeIDs,
 			})
 			if errors.Is(rerr, ErrNotEC) {
 				continue

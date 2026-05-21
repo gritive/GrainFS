@@ -13,7 +13,6 @@ var (
 
 type PlacementMeta struct {
 	VersionID        string
-	RingVersion      RingVersion
 	ECData           uint8
 	ECParity         uint8
 	NodeIDs          []string
