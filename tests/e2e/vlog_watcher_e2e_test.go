@@ -20,7 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // scrapeMetric returns the first sample value matching name + label substring,
@@ -29,10 +29,10 @@ import (
 func scrapeMetric(t testing.TB, endpoint, name, labelSubstr string) float64 {
 	t.Helper()
 	resp, err := http.Get(endpoint + "/metrics")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	for _, line := range strings.Split(string(body), "\n") {
 		if !strings.HasPrefix(line, name) {
 			continue
@@ -145,18 +145,17 @@ func runVlogWatcherMetricsLive(t testing.TB, tgt s3Target) {
 	t.Helper()
 	endpoint := tgt.endpoint(0)
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
-	}, 8*time.Second, 200*time.Millisecond,
+	}).WithTimeout(8*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(),
 		"vlog_limit_bytes must be > 0 (proves statfs Snapshot() ran)")
 
-	require.GreaterOrEqual(t,
-		scrapeMetric(t, endpoint, "grainfs_vlog_used_ratio", ""), 0.0,
+	gomega.Expect(scrapeMetric(t, endpoint, "grainfs_vlog_used_ratio", "")).To(gomega.BeNumerically(">=", 0.0),
 		"vlog_used_ratio gauge must be present (recorder running)")
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		return scrapeMetric(t, endpoint, "grainfs_vlog_bytes_by_category", `category="meta"`) >= 0
-	}, 8*time.Second, 200*time.Millisecond,
+	}).WithTimeout(8*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(),
 		"meta category must have a vlog_bytes_by_category sample")
 }
 
@@ -176,17 +175,17 @@ func runVlogWatcherSustainedWriteNoStarvation(t testing.TB, tgt s3Target) {
 				Key:    aws.String(fmt.Sprintf("k-%d", j)),
 				Body:   bytes.NewReader(payload),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 	}
 
 	categories := []string{"meta"}
 	for _, cat := range categories {
 		labelSubstr := fmt.Sprintf(`category=%q`, cat)
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", labelSubstr)
 			return v > 0
-		}, 10*time.Second, 200*time.Millisecond,
+		}).WithTimeout(10*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(),
 			"GC runs counter must advance for category=%s within 10s", cat)
 	}
 }
@@ -197,9 +196,9 @@ func runVlogWatcherFiresOnLeak(t testing.TB, tgt s3Target) {
 	cli := tgt.pickNode(0)
 	ctx := context.Background()
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		return scrapeMetric(t, endpoint, "grainfs_vlog_limit_bytes", "") > 0
-	}, 8*time.Second, 200*time.Millisecond, "watcher must be running")
+	}).WithTimeout(8*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(), "watcher must be running")
 
 	bucket := tgt.uniqueBucket(t, "vlogleak")
 	payload := make([]byte, 4096)
@@ -210,18 +209,18 @@ func runVlogWatcherFiresOnLeak(t testing.TB, tgt s3Target) {
 			Key:    aws.String(fmt.Sprintf("k-%d", i)),
 			Body:   bytes.NewReader(payload),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
 	// Badger's db.Size() metric is refreshed by an internal 1-minute ticker.
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for _, inc := range fetchIncidentsSafe(t, endpoint) {
 			if inc.Cause == "vlog_pressure" {
 				return true
 			}
 		}
 		return false
-	}, 90*time.Second, 1*time.Second,
+	}).WithTimeout(90*time.Second).WithPolling(1*time.Second).Should(gomega.BeTrue(),
 		"watcher must record a vlog_pressure incident once vlog crosses warn ratio")
 }
 
@@ -242,13 +241,13 @@ func runGCTickerRecoversAfterDeletion(t testing.TB, tgt s3Target) {
 			Key:    aws.String(fmt.Sprintf("k-%d", i)),
 			Body:   bytes.NewReader([]byte("payload")),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		v := scrapeMetric(t, endpoint, "grainfs_badger_gc_runs_total", `category="meta"`)
 		return v > 0
-	}, 10*time.Second, 200*time.Millisecond, "meta category GC counter must advance")
+	}).WithTimeout(10*time.Second).WithPolling(200*time.Millisecond).Should(gomega.BeTrue(), "meta category GC counter must advance")
 }
 
 // Strict registry plants an unregistered .vlog file before the
@@ -263,9 +262,9 @@ func runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(t testing.TB, tgt s
 
 	// Plant an unregistered vlog directory before the 3s smoke defer expires.
 	plantDir := filepath.Join(dataDir, "fake-rogue-db")
-	require.NoError(t, os.MkdirAll(plantDir, 0o755))
+	gomega.Expect(os.MkdirAll(plantDir, 0o755)).To(gomega.Succeed())
 	plantFile := filepath.Join(plantDir, "000001.vlog")
-	require.NoError(t, os.WriteFile(plantFile, []byte("rogue"), 0o644))
+	gomega.Expect(os.WriteFile(plantFile, []byte("rogue"), 0o644)).To(gomega.Succeed())
 
 	// Either path is acceptable: process exits non-zero, or incident is
 	// recorded. We probe by hitting the data-plane HTTP server: when
@@ -294,7 +293,7 @@ func runVlogStrictRegistryPlantedFileTriggersFatalOrIncident(t testing.TB, tgt s
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	require.True(t, exited || incidentRaised,
+	gomega.Expect(exited || incidentRaised).To(gomega.BeTrue(),
 		"strict mode must fatally exit or emit registry_under_populated incident")
 }
 
