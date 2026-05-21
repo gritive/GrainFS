@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,20 +26,38 @@ func getBinary() string {
 	return binary
 }
 
+var _ = ginkgo.Describe("Cluster and no-peers behavior", func() {
+	ginkgo.Context("NoPeers Multipart SingleNode", func() {
+		ginkgo.It("completes a multipart upload", func() {
+			runNoPeersMultipartCases(ginkgo.GinkgoTB())
+		})
+	})
+
+	ginkgo.Context("NoPeers RestartPersistence SingleNode", func() {
+		ginkgo.It("preserves objects across restart", func() {
+			runNoPeersRestartPersistenceCases(ginkgo.GinkgoTB())
+		})
+	})
+
+	ginkgo.Context("MultipartListFanout Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		ginkgo.It("lists incomplete multipart uploads from every node", func() {
+			runMultipartListFanoutCases(ginkgo.GinkgoTB(), tgt)
+		})
+	})
+})
+
 // TestNoPeersRestartPersistenceE2E exercises stop+restart on the same dataDir
 // — single-binary semantics. Cluster has no analogue (raft handles
 // process-restart differently), so this is single-node-only by nature.
-func runNoPeersRestartPersistence(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runNoPeersRestartPersistenceCases(t)
-	})
-}
-
-func runNoPeersRestartPersistenceCases(t *testing.T) {
+func runNoPeersRestartPersistenceCases(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-e2e-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	binary := getBinary()
 
@@ -61,6 +80,12 @@ func runNoPeersRestartPersistenceCases(t *testing.T) {
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
 	require.NoError(t, cmd1.Start())
+	cmd1Running := true
+	ginkgo.DeferCleanup(func() {
+		if cmd1Running {
+			terminateProcess(cmd1)
+		}
+	})
 
 	endpoint1 := fmt.Sprintf("http://127.0.0.1:%d", port1)
 	waitForPort(t, port1, 30*time.Second)
@@ -92,6 +117,7 @@ func runNoPeersRestartPersistenceCases(t *testing.T) {
 
 	// Stop server and wait for full teardown
 	terminateProcess(cmd1)
+	cmd1Running = false
 	time.Sleep(200 * time.Millisecond) // let OS release file locks
 
 	// Step 2: Restart on a different port and verify data is intact
@@ -109,9 +135,7 @@ func runNoPeersRestartPersistenceCases(t *testing.T) {
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
 	require.NoError(t, cmd2.Start())
-	defer func() {
-		terminateProcess(cmd2)
-	}()
+	ginkgo.DeferCleanup(terminateProcess, cmd2)
 
 	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", port2)
 	waitForPort(t, port2, 30*time.Second)
@@ -159,17 +183,11 @@ func runNoPeersRestartPersistenceCases(t *testing.T) {
 // TestNoPeersMultipartE2E exercises multipart against a single-binary
 // no-peers server. The cluster shape's multipart coverage lives in
 // TestMultipartE2E/Cluster4Node; this case stays single-only by design.
-func runNoPeersMultipart(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runNoPeersMultipartCases(t)
-	})
-}
-
-func runNoPeersMultipartCases(t *testing.T) {
+func runNoPeersMultipartCases(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-mp-*")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	binary := getBinary()
 	port := freePort()
@@ -186,9 +204,7 @@ func runNoPeersMultipartCases(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
-	defer func() {
-		terminateProcess(cmd)
-	}()
+	ginkgo.DeferCleanup(terminateProcess, cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
@@ -258,7 +274,7 @@ func runNoPeersMultipartCases(t *testing.T) {
 	assert.Equal(t, expected, body)
 }
 
-// TestClusterMultipartListFanoutE2E verifies that an incomplete multipart
+// Multipart list fanout verifies that an incomplete multipart
 // upload created on the leader is visible from every cluster node — i.e.
 // metadata fan-out works. Cluster-only by nature: the case probes per-node
 // visibility, which has no single-node analogue. Runs on the shared cluster.
@@ -266,18 +282,12 @@ func runNoPeersMultipartCases(t *testing.T) {
 // The plain multipart-list assertion is already exercised by
 // TestMultipartE2E/Cluster4Node/List; this test adds the per-node fanout
 // assertion on top of the same fixture.
-func TestClusterMultipartListFanoutE2E(t *testing.T) {
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runMultipartListFanoutCases(t, newSharedClusterS3Target(t))
-	})
-}
-
-func runMultipartListFanoutCases(t *testing.T, tgt s3Target) {
+func runMultipartListFanoutCases(t testing.TB, tgt s3Target) {
 	t.Helper()
 	require.True(t, tgt.isCluster, "multipart list fanout requires cluster fixture")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-	defer cancel()
+	ginkgo.DeferCleanup(cancel)
 
 	bucket := tgt.uniqueBucket(t, "mpfanout")
 	// Any node is fine — cluster forwards writes to the owning peer. We use
@@ -288,14 +298,6 @@ func runMultipartListFanoutCases(t *testing.T, tgt s3Target) {
 	fixture := createIncompleteMultipartListingFixture(t, ctx, driver, bucket, "cluster-fanout-part")
 
 	for i := 0; i < tgt.nodes; i++ {
-		t.Run(fmt.Sprintf("node-%d", i+1), func(t *testing.T) {
-			assertMultipartListingFeature(t, ctx, tgt.pickNode(i), fixture, true)
-		})
+		assertMultipartListingFeature(t, ctx, tgt.pickNode(i), fixture, true)
 	}
-}
-
-// TestNoPeersE2E groups single-node (no-peers) behaviors.
-func TestNoPeersE2E(t *testing.T) {
-	t.Run("Multipart", runNoPeersMultipart)
-	t.Run("RestartPersistence", runNoPeersRestartPersistence)
 }
