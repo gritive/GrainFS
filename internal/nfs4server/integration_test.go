@@ -24,17 +24,17 @@ func startTestNFS4Server(t nfsTestTB) (string, *Server) {
 
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
-	Expect(err).NotTo(HaveOccurred())
+	failNFS4TestOnError(t, err)
 
 	// Create the NFS4 bucket
-	Expect(backend.CreateBucket(context.Background(), legacyNFS4Bucket)).To(Succeed())
+	failNFS4TestOnError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
 
 	srv := NewServer(backend)
 	srv.SetExportsForTest(buildSnap(map[string]exportConfig{
 		legacyNFS4Bucket: {fsidMajor: 1, fsidMinor: 1, generation: 1},
 	}))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	Expect(err).NotTo(HaveOccurred())
+	failNFS4TestOnError(t, err)
 
 	srv.mu.Lock()
 	srv.listener = ln
@@ -52,6 +52,15 @@ func startTestNFS4Server(t nfsTestTB) (string, *Server) {
 
 	t.Cleanup(func() { srv.Close() })
 	return ln.Addr().String(), srv
+}
+
+func failNFS4TestOnError(t nfsTestTB, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	t.Errorf("unexpected error: %v", err)
+	t.FailNow()
 }
 
 var _ = Describe("NFS4 integration", func() {
