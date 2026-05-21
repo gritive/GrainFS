@@ -214,6 +214,10 @@ func (w *WAL) openAppendFile(state walState) error {
 			f.Close()
 			return err
 		}
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return err
+		}
 		if err := syncDir(w.dir); err != nil {
 			f.Close()
 			return err

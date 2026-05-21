@@ -162,6 +162,9 @@ func readFrame(r io.Reader) ([]byte, error) {
 }
 
 func marshalRecordBody(rec Record) ([]byte, error) {
+	if !validOp(rec.Op) {
+		return nil, fmt.Errorf("datawal: invalid op %d", rec.Op)
+	}
 	if len(rec.Payload) > MaxPayloadBytes {
 		return nil, fmt.Errorf("datawal: payload too large: %d", len(rec.Payload))
 	}
@@ -211,6 +214,9 @@ func unmarshalRecordBody(body []byte) (Record, error) {
 	off += 8
 	rec.Op = body[off]
 	off++
+	if !validOp(rec.Op) {
+		return rec, fmt.Errorf("datawal: invalid op %d", rec.Op)
+	}
 	rec.Offset = int64(binary.BigEndian.Uint64(body[off:]))
 	off += 8
 	rec.Size = int64(binary.BigEndian.Uint64(body[off:]))
@@ -271,4 +277,13 @@ func readString(body []byte, off int) (string, int, error) {
 		return "", off, io.ErrUnexpectedEOF
 	}
 	return string(body[off : off+n]), off + n, nil
+}
+
+func validOp(op byte) bool {
+	switch op {
+	case OpSegmentPut, OpObjectWriteAt, OpObjectTruncate, OpShardPut, OpShardPackPut, OpShardPackDelete, OpSpoolPut:
+		return true
+	default:
+		return false
+	}
 }

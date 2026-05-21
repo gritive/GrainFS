@@ -125,6 +125,26 @@ func TestDecodeRejectsChecksumMismatch(t *testing.T) {
 	require.ErrorIs(t, err, datawal.ErrChecksumMismatch)
 }
 
+func TestRejectsInvalidOpOnEncodeDecodeAndReplay(t *testing.T) {
+	var buf bytes.Buffer
+	require.Error(t, datawal.EncodeRecord(&buf, datawal.Record{Op: 0xff, Payload: []byte("bad")}))
+
+	raw := encodeRawPlainRecord(t, 0xff, "", "", "", []byte("bad"))
+	_, err := datawal.DecodeRecord(bytes.NewReader(raw))
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Payload: []byte("ok")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, datawal.AppendRawForTest(dir, raw))
+
+	err = datawal.Replay(context.Background(), dir, 0, nil, func(datawal.Record) error { return nil })
+	require.Error(t, err)
+}
+
 func TestDecodeRejectsTrailingBytesInCompleteRecord(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, datawal.EncodeRecord(&buf, datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k", Payload: []byte("hello")}))
@@ -317,7 +337,7 @@ func TestEncodeRejectsOversizeMetadata(t *testing.T) {
 }
 
 func TestDecodeRejectsOversizeAggregateMetadata(t *testing.T) {
-	raw := encodeRawPlainRecord(t, strings.Repeat("b", 600<<10), strings.Repeat("k", 600<<10), "", []byte("ok"))
+	raw := encodeRawPlainRecord(t, byte(datawal.OpSegmentPut), strings.Repeat("b", 600<<10), strings.Repeat("k", 600<<10), "", []byte("ok"))
 
 	_, err := datawal.DecodeRecord(bytes.NewReader(raw))
 	require.Error(t, err)
@@ -361,7 +381,7 @@ func (zeroReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func encodeRawPlainRecord(t *testing.T, bucket, key, target string, payload []byte) []byte {
+func encodeRawPlainRecord(t *testing.T, op byte, bucket, key, target string, payload []byte) []byte {
 	t.Helper()
 	var body bytes.Buffer
 	var fixed [8]byte
@@ -369,7 +389,7 @@ func encodeRawPlainRecord(t *testing.T, bucket, key, target string, payload []by
 	body.Write(fixed[:])
 	binary.BigEndian.PutUint64(fixed[:], 1)
 	body.Write(fixed[:])
-	body.WriteByte(byte(datawal.OpSegmentPut))
+	body.WriteByte(op)
 	binary.BigEndian.PutUint64(fixed[:], 0)
 	body.Write(fixed[:])
 	binary.BigEndian.PutUint64(fixed[:], uint64(len(payload)))
