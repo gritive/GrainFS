@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.305.0] - 2026-05-21
+
+### Fixed
+
+- Forwarded S3 PUT requests now preserve SSE-S3 (`AES256`) metadata across
+  non-owner nodes, including forwarded object replies used by HEAD, GET, and
+  list responses.
+- S3 PUT mutation results now use backend-native request result paths when
+  available, avoiding an extra previous-object read on cluster writes that can
+  fail before the write reaches the owner group.
+- Forward debug logging now tolerates malformed replies and reports forward
+  status/object presence without masking the original decode error path.
+
+### Tests
+
+- S3 client smoke and SSE e2e coverage now run as native Ginkgo v2 specs with
+  one top-level `Describe` per file, shared `BeforeEach` fixture setup, and
+  `DeferCleanup` bucket cleanup.
+- Added focused cluster/storage regression coverage for preserving SSE metadata
+  through forwarded PUT requests and backend-native mutation result delegation.
+
 ## [0.0.304.1] - 2026-05-21
 
 ### Fixed
