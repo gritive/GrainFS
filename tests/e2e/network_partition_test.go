@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Network partition", func() {
@@ -28,7 +28,7 @@ var _ = ginkgo.Describe("Network partition", func() {
 func runNetworkPartitionWithWrite(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-network-partition-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
 	binary := getBinary()
 	port := freePort()
@@ -61,8 +61,8 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
-	require.NoError(t, err, "create toxiproxy proxy")
-	require.Equal(t, http.StatusCreated, resp.StatusCode, "create toxiproxy proxy")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create toxiproxy proxy")
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusCreated), "create toxiproxy proxy")
 	resp.Body.Close()
 
 	// Start grainfs on actual port
@@ -75,7 +75,7 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 	ginkgo.DeferCleanup(func() { terminateProcess(cmd) })
 
 	waitForPort(t, proxyPort, 30*time.Second)
@@ -96,7 +96,7 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 		Key:    aws.String("before-partition"),
 		Body:   strings.NewReader("data before partition"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Inject network partition: 100% packet loss
 	toxicURL := fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics", toxiPort)
@@ -104,8 +104,8 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 	req, _ = http.NewRequest("POST", toxicURL, strings.NewReader(toxicPayload))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = client.Do(req)
-	require.NoError(t, err)
-	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, resp.StatusCode, "create network partition toxic")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(resp.StatusCode), "create network partition toxic")
 	resp.Body.Close()
 
 	// Attempt write during partition (should fail or timeout)
@@ -117,7 +117,7 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 		Key:    aws.String("during-partition"),
 		Body:   strings.NewReader("data during partition"),
 	})
-	require.Error(t, err, "write during network partition should fail")
+	gomega.Expect(err).To(gomega.HaveOccurred(), "write during network partition should fail")
 
 	// Remove partition
 	req, _ = http.NewRequest("DELETE", fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics/partition", toxiPort), nil)
@@ -135,12 +135,12 @@ func runNetworkPartitionWithWrite(t testing.TB) {
 		Bucket: aws.String("partition-test"),
 		Key:    aws.String("before-partition"),
 	})
-	require.NoError(t, err, "data before partition should be intact")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "data before partition should be intact")
 	ginkgo.DeferCleanup(func() { _ = getResp.Body.Close() })
 
 	content, err := io.ReadAll(getResp.Body)
-	require.NoError(t, err)
-	require.Equal(t, "data before partition", string(content))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(string(content)).To(gomega.Equal("data before partition"))
 
 	t.Log("Network partition test passed - data integrity verified")
 }

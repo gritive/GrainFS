@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestSmokeDeploymentE2E is a fast deployment smoke test (under 2 minutes,
@@ -38,7 +38,7 @@ func runSmokeDeploymentCases() {
 		t := ginkgo.GinkgoTB()
 		var err error
 		dir, err = os.MkdirTemp("", "grainfs-smoke-*")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
 
 		binary := getBinary()
@@ -53,7 +53,7 @@ func runSmokeDeploymentCases() {
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		require.NoError(t, cmd.Start())
+		gomega.Expect(cmd.Start()).To(gomega.Succeed())
 		ginkgo.DeferCleanup(func() { terminateProcess(cmd) })
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -68,11 +68,10 @@ func runSmokeDeploymentCases() {
 
 	// Test 1: Health check
 	ginkgo.It("passes the health check (HealthCheck)", func() {
-		t := ginkgo.GinkgoTB()
 		// Verify server is responding
 		resp, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
-		require.NoError(t, err, "health check should succeed")
-		require.NotNil(t, resp, "health check response should not be nil")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "health check should succeed")
+		gomega.Expect(resp).NotTo(gomega.BeNil(), "health check response should not be nil")
 	})
 
 	// Test 2: Create bucket through the admin control plane.
@@ -83,48 +82,44 @@ func runSmokeDeploymentCases() {
 
 	// Test 3: Put object
 	ginkgo.It("puts an object (PutObject)", func() {
-		t := ginkgo.GinkgoTB()
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String("smoke-test"),
 			Key:    aws.String("test-object"),
 			Body:   strings.NewReader("smoke test data"),
 		})
-		require.NoError(t, err, "put object should succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "put object should succeed")
 	})
 
 	// Test 4: Get object
 	ginkgo.It("gets the object (GetObject)", func() {
-		t := ginkgo.GinkgoTB()
 		resp, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String("smoke-test"),
 			Key:    aws.String("test-object"),
 		})
-		require.NoError(t, err, "get object should succeed")
-		defer resp.Body.Close()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "get object should succeed")
+		ginkgo.DeferCleanup(resp.Body.Close)
 
 		content, err := io.ReadAll(resp.Body)
-		require.NoError(t, err, "read object body should succeed")
-		require.Equal(t, "smoke test data", string(content), "object content should match")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "read object body should succeed")
+		gomega.Expect(string(content)).To(gomega.Equal("smoke test data"), "object content should match")
 	})
 
 	// Test 5: Delete object
 	ginkgo.It("deletes the object (DeleteObject)", func() {
-		t := ginkgo.GinkgoTB()
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String("smoke-test"),
 			Key:    aws.String("test-object"),
 		})
-		require.NoError(t, err, "delete object should succeed")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "delete object should succeed")
 	})
 
 	// Test 6: List objects (should be empty)
 	ginkgo.It("lists no objects after delete (ListObjects)", func() {
-		t := ginkgo.GinkgoTB()
 		resp, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String("smoke-test"),
 		})
-		require.NoError(t, err, "list objects should succeed")
-		require.Len(t, resp.Contents, 0, "bucket should be empty after delete")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "list objects should succeed")
+		gomega.Expect(resp.Contents).To(gomega.BeEmpty(), "bucket should be empty after delete")
 	})
 
 }
