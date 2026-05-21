@@ -6,7 +6,6 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 // rpcTimeout bounds every reply wait so a misbehaving handler fails the test
@@ -17,6 +16,7 @@ const rpcTimeout = 2 * time.Second
 // reply, failing the test on timeout.
 func awaitRequestVote(t *testing.T, n *Node, args *RequestVoteArgs) *RequestVoteReply {
 	t.Helper()
+	g := gomega.NewWithT(t)
 	type result struct {
 		reply *RequestVoteReply
 	}
@@ -24,7 +24,7 @@ func awaitRequestVote(t *testing.T, n *Node, args *RequestVoteArgs) *RequestVote
 	go func() { ch <- result{n.HandleRequestVote(args)} }()
 	select {
 	case r := <-ch:
-		require.NotNil(t, r.reply, "HandleRequestVote returned nil reply")
+		g.Expect(r.reply).NotTo(gomega.BeNil(), "HandleRequestVote returned nil reply")
 		return r.reply
 	case <-time.After(rpcTimeout):
 		t.Fatalf("HandleRequestVote timed out after %s", rpcTimeout)
@@ -35,6 +35,7 @@ func awaitRequestVote(t *testing.T, n *Node, args *RequestVoteArgs) *RequestVote
 // awaitAppendEntries is the AppendEntries counterpart to awaitRequestVote.
 func awaitAppendEntries(t *testing.T, n *Node, args *AppendEntriesArgs) *AppendEntriesReply {
 	t.Helper()
+	g := gomega.NewWithT(t)
 	type result struct {
 		reply *AppendEntriesReply
 	}
@@ -42,7 +43,7 @@ func awaitAppendEntries(t *testing.T, n *Node, args *AppendEntriesArgs) *AppendE
 	go func() { ch <- result{n.HandleAppendEntries(args)} }()
 	select {
 	case r := <-ch:
-		require.NotNil(t, r.reply, "HandleAppendEntries returned nil reply")
+		g.Expect(r.reply).NotTo(gomega.BeNil(), "HandleAppendEntries returned nil reply")
 		return r.reply
 	case <-time.After(rpcTimeout):
 		t.Fatalf("HandleAppendEntries timed out after %s", rpcTimeout)
@@ -52,8 +53,9 @@ func awaitAppendEntries(t *testing.T, n *Node, args *AppendEntriesArgs) *AppendE
 
 func startFollowerWithPeers(t *testing.T, id string, peers ...string) *Node {
 	t.Helper()
+	g := gomega.NewWithT(t)
 	n, err := NewNode(Config{ID: id, Peers: peers, ElectionTimeout: time.Hour})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	n.Start()
 	t.Cleanup(n.Stop)
 	go func() {
@@ -196,6 +198,7 @@ var _ = ginkgo.Describe("RPC integration", func() {
 // the node must step down to Follower, advance to the higher term, and grant
 // the vote (its own log is empty too, so the candidate is "as up-to-date").
 func TestHandleRequestVote_GrantHappyPath(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n := startFollowerWithPeers(t, "n1", "other")
 
 	reply := awaitRequestVote(t, n, &RequestVoteArgs{
@@ -205,17 +208,18 @@ func TestHandleRequestVote_GrantHappyPath(t *testing.T) {
 		LastLogTerm:  0,
 	})
 
-	require.True(t, reply.VoteGranted, "expected VoteGranted=true")
-	require.Equal(t, uint64(2), reply.Term)
+	g.Expect(reply.VoteGranted).To(gomega.BeTrue(), "expected VoteGranted=true")
+	g.Expect(reply.Term).To(gomega.Equal(uint64(2)))
 
-	require.Equal(t, Follower, n.State())
-	require.Equal(t, uint64(2), n.Term())
-	require.Equal(t, "other", n.rs.Load().votedFor)
+	g.Expect(n.State()).To(gomega.Equal(Follower))
+	g.Expect(n.Term()).To(gomega.Equal(uint64(2)))
+	g.Expect(n.rs.Load().votedFor).To(gomega.Equal("other"))
 }
 
 // TestHandleRequestVote_DenyStaleTerm: a candidate with a lower term than
 // ours must be denied without state change.
 func TestHandleRequestVote_DenyStaleTerm(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n := startFollowerWithPeers(t, "n1", "bumper", "stale")
 
 	// Force the actor to term 5 by sending a higher-term step-down RPC,
@@ -224,7 +228,7 @@ func TestHandleRequestVote_DenyStaleTerm(t *testing.T) {
 		Term:        5,
 		CandidateID: "bumper",
 	})
-	require.Equal(t, uint64(5), n.Term())
+	g.Expect(n.Term()).To(gomega.Equal(uint64(5)))
 
 	beforeVotedFor := n.rs.Load().votedFor
 	beforeState := n.State()
@@ -234,11 +238,11 @@ func TestHandleRequestVote_DenyStaleTerm(t *testing.T) {
 		CandidateID: "stale",
 	})
 
-	require.False(t, reply.VoteGranted)
-	require.Equal(t, uint64(5), reply.Term)
-	require.Equal(t, uint64(5), n.Term(), "term must not regress")
-	require.Equal(t, beforeState, n.State())
-	require.Equal(t, beforeVotedFor, n.rs.Load().votedFor, "votedFor must be unchanged on stale term")
+	g.Expect(reply.VoteGranted).To(gomega.BeFalse())
+	g.Expect(reply.Term).To(gomega.Equal(uint64(5)))
+	g.Expect(n.Term()).To(gomega.Equal(uint64(5)), "term must not regress")
+	g.Expect(n.State()).To(gomega.Equal(beforeState))
+	g.Expect(n.rs.Load().votedFor).To(gomega.Equal(beforeVotedFor), "votedFor must be unchanged on stale term")
 }
 
 // TestHandleRequestVote_DenyAlreadyVoted: at the same term, after voting for
@@ -246,6 +250,7 @@ func TestHandleRequestVote_DenyStaleTerm(t *testing.T) {
 // (split-vote prevention). We then verify that a request at a HIGHER term
 // from B succeeds because the term advance clears votedFor.
 func TestHandleRequestVote_DenyAlreadyVoted(t *testing.T) {
+	g := gomega.NewWithT(t)
 	n := startFollowerWithPeers(t, "n1", "alice", "bob")
 
 	// Step 1: term advances to 2, vote granted to "alice".
@@ -253,24 +258,24 @@ func TestHandleRequestVote_DenyAlreadyVoted(t *testing.T) {
 		Term:        2,
 		CandidateID: "alice",
 	})
-	require.True(t, r1.VoteGranted)
-	require.Equal(t, "alice", n.rs.Load().votedFor)
+	g.Expect(r1.VoteGranted).To(gomega.BeTrue())
+	g.Expect(n.rs.Load().votedFor).To(gomega.Equal("alice"))
 
 	// Step 2: same term, different candidate → deny.
 	r2 := awaitRequestVote(t, n, &RequestVoteArgs{
 		Term:        2,
 		CandidateID: "bob",
 	})
-	require.False(t, r2.VoteGranted, "should deny: already voted for alice in term 2")
-	require.Equal(t, uint64(2), r2.Term)
-	require.Equal(t, "alice", n.rs.Load().votedFor, "votedFor must remain alice")
+	g.Expect(r2.VoteGranted).To(gomega.BeFalse(), "should deny: already voted for alice in term 2")
+	g.Expect(r2.Term).To(gomega.Equal(uint64(2)))
+	g.Expect(n.rs.Load().votedFor).To(gomega.Equal("alice"), "votedFor must remain alice")
 
 	// Step 3: higher term from bob → step down clears votedFor, grant.
 	r3 := awaitRequestVote(t, n, &RequestVoteArgs{
 		Term:        3,
 		CandidateID: "bob",
 	})
-	require.True(t, r3.VoteGranted)
-	require.Equal(t, uint64(3), r3.Term)
-	require.Equal(t, "bob", n.rs.Load().votedFor)
+	g.Expect(r3.VoteGranted).To(gomega.BeTrue())
+	g.Expect(r3.Term).To(gomega.Equal(uint64(3)))
+	g.Expect(n.rs.Load().votedFor).To(gomega.Equal("bob"))
 }

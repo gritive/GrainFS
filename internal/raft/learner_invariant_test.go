@@ -9,7 +9,6 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
 
@@ -23,25 +22,26 @@ import (
 // Learners never count regardless of their matchIndex.
 func TestLearner_LearnersDoNotCount(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
+		g := gomega.NewWithT(t)
 		n, err := NewNode(Config{
 			ID:               "L",
 			Peers:            nil,
 			ElectionTimeout:  fastElectionTimeout,
 			HeartbeatTimeout: testHeartbeat,
 		})
-		require.NoError(t, err)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
 		rt.Cleanup(n.Stop)
 		n.Start()
 		go func() {
 			for range n.ApplyCh() {
 			}
 		}()
-		require.NoError(t, waitFor(2*time.Second, func() bool { return n.IsLeader() }))
+		g.Expect(waitFor(2*time.Second, func() bool { return n.IsLeader() })).To(gomega.Succeed())
 
 		numLearners := rapid.IntRange(0, 5).Draw(rt, "numLearners")
 		for i := 0; i < numLearners; i++ {
 			id := fmt.Sprintf("learn-%d", i)
-			require.NoError(t, n.AddLearner(id, fmt.Sprintf("addr-%d", i)))
+			g.Expect(n.AddLearner(id, fmt.Sprintf("addr-%d", i))).To(gomega.Succeed())
 		}
 		numProposes := rapid.IntRange(0, 10).Draw(rt, "numProposes")
 		for i := 0; i < numProposes; i++ {
@@ -66,8 +66,8 @@ func TestLearner_LearnersDoNotCount(t *testing.T) {
 				learnerCount++
 			}
 		}
-		require.Equal(t, 1, voterCount, "must remain solo-voter")
-		require.Equal(t, numLearners, learnerCount)
+		g.Expect(voterCount).To(gomega.Equal(1), "must remain solo-voter")
+		g.Expect(learnerCount).To(gomega.Equal(numLearners))
 		// Voter quorum {self}: commitIndex bounded by self's lastLogIndex.
 		// We assert this via the actor's own books (CommittedIndex).
 		// Routing through the actor: capture state via the readState
