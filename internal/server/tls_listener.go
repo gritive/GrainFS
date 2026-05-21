@@ -124,7 +124,7 @@ func (h *HotTLSListener) Accept() (net.Conn, error) {
 	}
 	st := h.state.Load()
 	if st == nil || st.cfg == nil {
-		return c, nil
+		return newResponseReadFromConn(c), nil
 	}
 	return tls.Server(c, st.cfg), nil
 }
