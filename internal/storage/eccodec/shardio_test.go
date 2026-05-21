@@ -173,6 +173,13 @@ func TestEncryptedShardReader_RoundTripMultiChunk(t *testing.T) {
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	assert.Equal(t, data, got)
+
+	closer, ok := r.(io.Closer)
+	require.True(t, ok)
+	require.NoError(t, closer.Close())
+	require.NoError(t, closer.Close())
+	_, err = r.Read(make([]byte, 1))
+	require.Error(t, err)
 }
 
 func TestEncryptedShardRangeReader_DoesNotReadSkippedChunks(t *testing.T) {

@@ -1577,7 +1577,16 @@ func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.Read
 			_ = f.Close()
 			return nil, fmt.Errorf("decrypt shard: %w", err)
 		}
-		return &multiReadCloser{Reader: r, close: f.Close}, nil
+		return &multiReadCloser{Reader: r, close: func() error {
+			var closeErr error
+			if closer, ok := r.(io.Closer); ok {
+				closeErr = closer.Close()
+			}
+			if err := f.Close(); closeErr == nil {
+				closeErr = err
+			}
+			return closeErr
+		}}, nil
 	}
 	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
 		info, err := f.Stat()
