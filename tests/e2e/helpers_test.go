@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,8 +197,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestWaitForPortsParallelErrWithProcessesReturnsWhenProcessExits(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+var _ = ginkgo.Describe("E2E helper utilities", func() {
+	ginkgo.It("returns when a watched process exits while waiting for ports", func() {
+		t := ginkgo.GinkgoTB()
 		cmd := exec.Command("sh", "-c", "exit 7")
 		require.NoError(t, cmd.Start())
 
@@ -208,12 +210,11 @@ func TestWaitForPortsParallelErrWithProcessesReturnsWhenProcessExits(t *testing.
 		require.Contains(t, err.Error(), "process exited")
 		require.Less(t, time.Since(started), time.Second)
 	})
-}
 
-func TestCombinedOutputWithWaitDelayReturnsWhenDescendantKeepsPipeOpen(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+	ginkgo.It("returns from CombinedOutput when a descendant keeps the pipe open", func() {
+		t := ginkgo.GinkgoTB()
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 5 & wait")
 		started := time.Now()
@@ -223,13 +224,12 @@ func TestCombinedOutputWithWaitDelayReturnsWhenDescendantKeepsPipeOpen(t *testin
 		require.Empty(t, out)
 		require.Less(t, time.Since(started), 2*time.Second)
 	})
-}
 
-func TestE2EClusterStopTerminatesSignalIgnoringProcesses(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+	ginkgo.It("terminates signal-ignoring cluster processes", func() {
+		t := ginkgo.GinkgoTB()
 		cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 60")
 		require.NoError(t, cmd.Start())
-		t.Cleanup(func() { terminateProcess(cmd) })
+		ginkgo.DeferCleanup(terminateProcess, cmd)
 
 		c := &e2eCluster{
 			procs:    []*exec.Cmd{cmd},
@@ -241,15 +241,14 @@ func TestE2EClusterStopTerminatesSignalIgnoringProcesses(t *testing.T) {
 		require.Less(t, time.Since(started), time.Second)
 		require.Error(t, cmd.Process.Signal(syscall.Signal(0)))
 	})
-}
 
-func TestShortTempDirKeepsAdminSocketPathShort(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+	ginkgo.It("keeps admin socket paths short", func() {
+		t := ginkgo.GinkgoTB()
 		dir := shortTempDir(t)
 		require.Less(t, len(filepath.Join(dir, "admin.sock")), 104)
 		require.Less(t, len(filepath.Join(dir, "rotate.sock")), 104)
 	})
-}
+})
 
 func combinedOutputWithWaitDelay(cmd *exec.Cmd) ([]byte, error) {
 	cmd.WaitDelay = time.Second

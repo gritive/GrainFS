@@ -246,7 +246,7 @@ func runRotateKeyCLIBeginGenerate(t *testing.T, dataDir string) rotationCLIResp 
 // t.TempDir() which on macOS produces /var/folders/.../<long-test-name>/...
 // paths that exceed the 104-byte UNIX_PATH_MAX. rotate.sock + a long path
 // silently fails listen with "invalid argument".
-func shortTempDir(t *testing.T) string {
+func shortTempDir(t testing.TB) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "rk-")
 	if err != nil {
