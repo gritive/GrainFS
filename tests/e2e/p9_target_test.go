@@ -84,11 +84,51 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 	}
 }
 
-// newClusterP9Target intentionally omitted. See F-§B-cluster-fixture-coupling
-// in the T14 report: mrCluster registers its cleanup via ginkgo.DeferCleanup,
-// which panics from plain t.Run nodes. Cluster3Node coverage is deferred until
-// either (a) mrCluster migrates to t.Cleanup, or (b) these tests convert to
-// Ginkgo (which would violate feedback_e2e_test_style).
+// newClusterP9Target boots a 3-node mrCluster with --9p-port wired on every
+// node. Cluster is bootstrapped (Phase 2) — anon attach to /default is NOT
+// possible (the 9P attach gate does not honor S3's default-bucket implicit-anon
+// allow path; see commit body for F-§B-9P-anon-attach-phase2 finding).
+// Cluster3Node sub-contexts therefore cover only MountSA Miss/NoPolicy cases
+// which exercise the resolver pre-check + authorizer deny path, both of which
+// are Phase-agnostic.
+//
+// Caller must be in a Ginkgo node (BeforeAll/BeforeEach) — newMRCluster
+// registers cleanup via ginkgo.DeferCleanup.
+func newClusterP9Target(t testing.TB) *p9Target {
+	t.Helper()
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
+		disableNBD:    true,
+		disableNFS4:   true,
+		enableP9:      true,
+		FastBootstrap: true,
+	})
+
+	// Snapshot per-node addresses for closure capture. Leader can shift but
+	// p9 ports and admin socks are tied to data dirs; the leader's admin sock
+	// is where MountSA writes must land.
+	p9Addrs := make([]string, 3)
+	socks := make([]string, 3)
+	urls := make([]string, 3)
+	dataDirs := append([]string(nil), c.dataDirs...)
+	for i := 0; i < 3; i++ {
+		p9Addrs[i] = fmt.Sprintf("127.0.0.1:%d", c.p9Ports[i])
+		socks[i] = c.dataDirs[i] + "/admin.sock"
+		urls[i] = c.httpURLs[i]
+	}
+
+	return &p9Target{
+		name:   "cluster3",
+		p9Addr: func(i int) string { return p9Addrs[i%3] },
+		adminSock: func(i int) string {
+			// Admin writes target the current leader's sock; reads from any.
+			return c.dataDirs[c.leaderIdx] + "/admin.sock"
+		},
+		s3URL:     func(i int) string { return urls[i%3] },
+		dataDirs:  func() []string { return dataDirs },
+		nodeCount: 3,
+		isCluster: true,
+	}
+}
 
 // dialP9 opens a hugelgupf/p9 client connected to the target's 9P port.
 // Caller must Close() the returned client.

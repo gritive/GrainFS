@@ -4,19 +4,36 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 )
 
-// TestIAMMountSAE2E validates the MountSA admin plane (create/list/get/delete,
+// IAM MountSA validates the MountSA admin plane (create/list/get/delete,
 // policy attach/detach, cross-namespace guard) against both single-node and
 // cluster fixtures.
-func TestIAMMountSAE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runIAMMountSACases(t, newSingleNodeIAMAdminTarget())
+var _ = ginkgo.Describe("IAM MountSA", ginkgo.Label("iam", "mountsa"), func() {
+	describeIAMMountSAContext("SingleNode", func(testing.TB) iamAdminTarget {
+		return newSingleNodeIAMAdminTarget()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runIAMMountSACases(t, newSharedClusterIAMAdminTarget(t))
+	describeIAMMountSAContext("Cluster4Node", func(tb testing.TB) iamAdminTarget {
+		return newSharedClusterIAMAdminTarget(tb)
+	})
+})
+
+func describeIAMMountSAContext(name string, factory func(testing.TB) iamAdminTarget) {
+	ginkgo.Context(name, func() {
+		var (
+			ctx context.Context
+			tgt iamAdminTarget
+		)
+
+		ginkgo.BeforeEach(func() {
+			ctx = context.Background()
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runIAMMountSACases(func() context.Context { return ctx }, func() iamAdminTarget { return tgt })
 	})
 }
 
@@ -27,20 +44,20 @@ func mountSANameFor(tgtName, caseName string) string {
 
 // runIAMMountSACases exercises MountSA CRUD, policy attach/detach, and
 // cross-namespace guard against the given target.
-func runIAMMountSACases(t *testing.T, tgt iamAdminTarget) {
-	t.Helper()
-	ctx := context.Background()
-
+func runIAMMountSACases(getCtx func() context.Context, getTgt func() iamAdminTarget) {
 	// CreateListGetDelete: full CRUD round-trip.
-	t.Run("CreateListGetDelete", func(t *testing.T) {
+	ginkgo.It("supports MountSA CRUD round-trip (CreateListGetDelete)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		name := mountSANameFor(tgt.name, "crud")
-		t.Cleanup(func() { _ = c.MountSADelete(ctx, name) })
+		ginkgo.DeferCleanup(func() { _ = c.MountSADelete(ctx, name) })
 
 		created, err := c.MountSACreate(ctx, name, 1001, "e2e-test")
 		require.NoError(t, err)
-		assert.Equal(t, name, created.Name)
-		assert.Equal(t, uint32(1001), created.UID)
+		gomega.Expect(created.Name).To(gomega.Equal(name))
+		gomega.Expect(created.UID).To(gomega.Equal(uint32(1001)))
 
 		// List must contain the new entry.
 		items, err := c.MountSAList(ctx)
@@ -49,7 +66,7 @@ func runIAMMountSACases(t *testing.T, tgt iamAdminTarget) {
 		for _, it := range items {
 			if it.Name == name {
 				found = true
-				assert.Equal(t, uint32(1001), it.UID)
+				gomega.Expect(it.UID).To(gomega.Equal(uint32(1001)))
 			}
 		}
 		require.True(t, found, "mount-sa %q must appear in list", name)
@@ -57,8 +74,8 @@ func runIAMMountSACases(t *testing.T, tgt iamAdminTarget) {
 		// Get must return the entry.
 		got, err := c.MountSAGet(ctx, name)
 		require.NoError(t, err)
-		assert.Equal(t, name, got.Name)
-		assert.Equal(t, uint32(1001), got.UID)
+		gomega.Expect(got.Name).To(gomega.Equal(name))
+		gomega.Expect(got.UID).To(gomega.Equal(uint32(1001)))
 
 		// Delete must succeed.
 		require.NoError(t, c.MountSADelete(ctx, name))
@@ -69,10 +86,13 @@ func runIAMMountSACases(t *testing.T, tgt iamAdminTarget) {
 	})
 
 	// PolicyAttachDetach: attach the built-in NFSMountOnly, then detach it.
-	t.Run("PolicyAttachDetach", func(t *testing.T) {
+	ginkgo.It("attaches and detaches NFSMountOnly (PolicyAttachDetach)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		name := mountSANameFor(tgt.name, "policy-attach")
-		t.Cleanup(func() { _ = c.MountSADelete(ctx, name) })
+		ginkgo.DeferCleanup(func() { _ = c.MountSADelete(ctx, name) })
 
 		_, err := c.MountSACreate(ctx, name, 1002, "")
 		require.NoError(t, err)
@@ -83,10 +103,13 @@ func runIAMMountSACases(t *testing.T, tgt iamAdminTarget) {
 
 	// CrossNamespaceGuard: attaching an S3-SA builtin to a MountSA must be
 	// rejected (403 Forbidden via ValidateForMountSAAttach).
-	t.Run("CrossNamespaceGuard_RejectS3Policy", func(t *testing.T) {
+	ginkgo.It("rejects attaching S3 policy to MountSA (CrossNamespaceGuard_RejectS3Policy)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		name := mountSANameFor(tgt.name, "xns-guard")
-		t.Cleanup(func() { _ = c.MountSADelete(ctx, name) })
+		ginkgo.DeferCleanup(func() { _ = c.MountSADelete(ctx, name) })
 
 		_, err := c.MountSACreate(ctx, name, 1003, "")
 		require.NoError(t, err)
@@ -97,7 +120,10 @@ func runIAMMountSACases(t *testing.T, tgt iamAdminTarget) {
 	})
 
 	// GetNotFound: GET on a non-existent MountSA must return a non-nil error.
-	t.Run("GetNotFound", func(t *testing.T) {
+	ginkgo.It("returns error on Get for missing MountSA (GetNotFound)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
 		c := tgt.iamClient()
 		_, err := c.MountSAGet(ctx, "does-not-exist-"+sanitizeForBucket(tgt.name))
 		require.Error(t, err, "GET on missing mount-sa must error")
