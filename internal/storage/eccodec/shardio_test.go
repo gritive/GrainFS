@@ -197,16 +197,11 @@ func BenchmarkEncryptedShardReaderRead5MiB(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		r, err := NewEncryptedShardReader(bytes.NewReader(payload), enc, aad)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if _, err := io.Copy(io.Discard, r); err != nil {
-			b.Fatal(err)
-		}
+		require.NoError(b, err)
+		_, err = io.Copy(io.Discard, r)
+		require.NoError(b, err)
 		if closer, ok := r.(io.Closer); ok {
-			if err := closer.Close(); err != nil {
-				b.Fatal(err)
-			}
+			require.NoError(b, closer.Close())
 		}
 	}
 }
