@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -212,6 +213,12 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 			MountSAStore: state.mountSAStore,
 			Authorizer:   s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore),
 			CfgStore:     state.cfgStore,
+		}
+		if state.auditOutbox != nil {
+			outbox := state.auditOutbox
+			iamCfg.AuditHook = func(ev audit.S3Event) {
+				_ = outbox.AppendFinalized(context.Background(), ev)
+			}
 		}
 	}
 	nodeSvc := StartNodeServices(ctx, state.backend, state.volMgr, cfg.NFS4Port, cfg.NBDPort, cfg.P9Bind, cfg.P9Port, state.distBackend, iamCfg)

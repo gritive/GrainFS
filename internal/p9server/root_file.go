@@ -4,10 +4,12 @@ import (
 	"context"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -25,6 +27,9 @@ type rootFile struct {
 	authorizer   p9Authorizer
 	exportStore  exportGetter
 	cfg          ConfigReader
+	// T15 NFS§C: audit hook. When non-nil, called after every grainfs:9PAttach
+	// allow/deny decision. nil = no audit emit (backward compat).
+	auditHook func(audit.S3Event)
 }
 
 // Walk processes the first-path-component as <mount-sa>@<bucket> per D#6 of
@@ -47,7 +52,7 @@ type rootFile struct {
 //   - bucket not found                          → ENOENT
 func (f *rootFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &rootFile{backend: f.backend, locks: f.locks, mountSAStore: f.mountSAStore, authorizer: f.authorizer, exportStore: f.exportStore, cfg: f.cfg}, nil
+		return nil, &rootFile{backend: f.backend, locks: f.locks, mountSAStore: f.mountSAStore, authorizer: f.authorizer, exportStore: f.exportStore, cfg: f.cfg, auditHook: f.auditHook}, nil
 	}
 	bucket, binding, err := f.resolveFirstComponent(names[0])
 	if err != nil {
@@ -112,11 +117,29 @@ func (f *rootFile) resolveFirstComponent(component string) (bucket string, bindi
 		if res.Decision != policy.DecisionAllow {
 			log.Debug().Str("saID", saID).Str("bucket", bkt).
 				Str("reason", res.Reason).Msg("p9: Walk 9PAttach denied")
+			if f.auditHook != nil {
+				f.auditHook(audit.S3Event{
+					Ts:         time.Now().UnixMicro(),
+					SAID:       saID,
+					Bucket:     bkt,
+					AuthStatus: "deny",
+					Source:     "9p",
+				})
+			}
 			return "", fhBinding{}, syscall.EACCES
 		}
 	}
 
 	log.Debug().Str("saID", saID).Str("bucket", bkt).Msg("p9: Walk mount-SA confirmed")
+	if f.auditHook != nil {
+		f.auditHook(audit.S3Event{
+			Ts:         time.Now().UnixMicro(),
+			SAID:       saID,
+			Bucket:     bkt,
+			AuthStatus: "allow",
+			Source:     "9p",
+		})
+	}
 	return bkt, fhBinding{saID: saID, bucket: bkt}, nil
 }
 
@@ -130,10 +153,28 @@ func (f *rootFile) resolveAnon(ctx context.Context, bucket string) (string, fhBi
 		if res.Decision != policy.DecisionAllow {
 			log.Debug().Str("bucket", bucket).
 				Str("reason", res.Reason).Msg("p9: Walk anon 9PAttach denied")
+			if f.auditHook != nil {
+				f.auditHook(audit.S3Event{
+					Ts:         time.Now().UnixMicro(),
+					SAID:       "", // anon: empty string (F#39)
+					Bucket:     bucket,
+					AuthStatus: "deny",
+					Source:     "9p",
+				})
+			}
 			return "", fhBinding{}, syscall.EACCES
 		}
 	}
 	log.Debug().Str("bucket", bucket).Msg("p9: Walk anon confirmed")
+	if f.auditHook != nil {
+		f.auditHook(audit.S3Event{
+			Ts:         time.Now().UnixMicro(),
+			SAID:       "", // anon: empty string (F#39)
+			Bucket:     bucket,
+			AuthStatus: "allow",
+			Source:     "9p",
+		})
+	}
 	return bucket, fhBinding{saID: "", bucket: bucket}, nil
 }
 

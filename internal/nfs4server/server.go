@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -41,6 +42,11 @@ type Server struct {
 	// after iam.anon-enabled is flipped false (Phase 0 → Phase 2).
 	// nil = no gate (backward compat).
 	cfg ConfigReader
+
+	// T15 NFS§C: audit hook. When non-nil, called after every grainfs:NFSMount
+	// allow/deny decision with a populated audit.S3Event (Source="nfs4").
+	// nil = no audit emit (backward compat, tests without audit wired).
+	auditHook func(audit.S3Event)
 }
 
 // ConfigReader is the small slice of the config store that the NFS server
@@ -76,6 +82,14 @@ func WithNFS4Authorizer(a nfsAuthorizer) ServerOption {
 // keeps the previous behaviour (no per-op anon flip gate).
 func WithConfigReader(c ConfigReader) ServerOption {
 	return func(srv *Server) { srv.cfg = c }
+}
+
+// WithAuditHook wires a hook that is called with a populated audit.S3Event
+// after every grainfs:NFSMount allow/deny decision (T15 NFS§C). The hook is
+// called synchronously on the RPC goroutine; implementations must not block.
+// nil keeps the previous behaviour (no audit emit).
+func WithAuditHook(hook func(audit.S3Event)) ServerOption {
+	return func(srv *Server) { srv.auditHook = hook }
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.

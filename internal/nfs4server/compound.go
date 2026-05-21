@@ -15,6 +15,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -571,6 +572,16 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 			if res.Decision != decisionAllow {
 				log.Debug().Str("saID", name).Str("bucket", childBucket).
 					Str("reason", res.Reason).Msg("nfs4: NFSMount denied")
+				if d.server.auditHook != nil {
+					d.server.auditHook(audit.S3Event{
+						Ts:         time.Now().UnixMicro(),
+						SAID:       name,
+						SourceIP:   d.clientAddr,
+						Bucket:     childBucket,
+						AuthStatus: "deny",
+						Source:     "nfs4",
+					})
+				}
 				return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
 			}
 		}
@@ -580,6 +591,16 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 		d.currentFH = fh
 		d.currentPath = childPath
 		log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP mount-SA confirmed")
+		if d.server.auditHook != nil {
+			d.server.auditHook(audit.S3Event{
+				Ts:         time.Now().UnixMicro(),
+				SAID:       name,
+				SourceIP:   d.clientAddr,
+				Bucket:     childBucket,
+				AuthStatus: "allow",
+				Source:     "nfs4",
+			})
+		}
 		return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 	}
 
@@ -600,6 +621,16 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 		if res.Decision != decisionAllow {
 			log.Debug().Str("bucket", childBucket).
 				Str("reason", res.Reason).Msg("nfs4: anon NFSMount denied")
+			if d.server.auditHook != nil {
+				d.server.auditHook(audit.S3Event{
+					Ts:         time.Now().UnixMicro(),
+					SAID:       "", // anon: empty string (F#39)
+					SourceIP:   d.clientAddr,
+					Bucket:     childBucket,
+					AuthStatus: "deny",
+					Source:     "nfs4",
+				})
+			}
 			return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
 		}
 	}
@@ -610,6 +641,16 @@ func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childK
 	d.currentFH = fh
 	d.currentPath = childPath
 	log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP anon path confirmed")
+	if d.server.auditHook != nil {
+		d.server.auditHook(audit.S3Event{
+			Ts:         time.Now().UnixMicro(),
+			SAID:       "", // anon: empty string (F#39)
+			SourceIP:   d.clientAddr,
+			Bucket:     childBucket,
+			AuthStatus: "allow",
+			Source:     "nfs4",
+		})
+	}
 	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 }
 

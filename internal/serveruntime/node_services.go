@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/nbd"
@@ -91,10 +92,14 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 // CfgStore is read per-op on the NFS/9P data path to enforce the Phase 0 →
 // Phase 2 anon flip (T12 / §9 T73 parity): active anon-bound sessions are
 // rejected on the next op after iam.anon-enabled is flipped false.
+//
+// AuditHook is called synchronously after every grainfs:NFSMount /
+// grainfs:9PAttach allow/deny decision (T15 NFS§C). nil = no audit emit.
 type NodeServicesIAMConfig struct {
 	MountSAStore *mountsastore.Store
 	Authorizer   *s3auth.Authorizer
 	CfgStore     *config.Store
+	AuditHook    func(audit.S3Event)
 }
 
 // StartNodeServices spawns NFSv4, NBD, and 9P servers if their respective ports
@@ -127,6 +132,9 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			}
 			if iamCfg != nil && iamCfg.CfgStore != nil {
 				nfs4Opts = append(nfs4Opts, nfs4server.WithConfigReader(iamCfg.CfgStore))
+			}
+			if iamCfg != nil && iamCfg.AuditHook != nil {
+				nfs4Opts = append(nfs4Opts, nfs4server.WithAuditHook(iamCfg.AuditHook))
 			}
 			svc.nfs4Srv = nfs4server.NewServer(backend, nfs4Opts...)
 			go func() {
@@ -170,6 +178,9 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 			}
 			if iamCfg != nil && iamCfg.CfgStore != nil {
 				p9Opts = append(p9Opts, p9server.WithConfigReader(iamCfg.CfgStore))
+			}
+			if iamCfg != nil && iamCfg.AuditHook != nil {
+				p9Opts = append(p9Opts, p9server.WithAuditHook(iamCfg.AuditHook))
 			}
 			svc.p9Srv = p9server.NewServer(backend, p9Opts...)
 			go func() {

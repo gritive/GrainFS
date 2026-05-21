@@ -10,6 +10,7 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/nfsexport"
@@ -77,6 +78,14 @@ func WithExportStore(store exportGetter) ServerOption {
 // (no per-op anon flip gate).
 func WithConfigReader(c ConfigReader) ServerOption {
 	return func(a *attacher) { a.cfg = c }
+}
+
+// WithAuditHook wires a hook that is called with a populated audit.S3Event
+// after every grainfs:9PAttach allow/deny decision (T15 NFS§C). The hook is
+// called synchronously on the Walk goroutine; implementations must not block.
+// nil keeps the previous behaviour (no audit emit).
+func WithAuditHook(hook func(audit.S3Event)) ServerOption {
+	return func(a *attacher) { a.auditHook = hook }
 }
 
 // NewServer creates a 9P server backed by backend.
@@ -206,6 +215,7 @@ type attacher struct {
 	authorizer   p9Authorizer
 	exportStore  exportGetter
 	cfg          ConfigReader
+	auditHook    func(audit.S3Event)
 }
 
 func (a *attacher) Attach() (p9.File, error) {
@@ -216,5 +226,6 @@ func (a *attacher) Attach() (p9.File, error) {
 		authorizer:   a.authorizer,
 		exportStore:  a.exportStore,
 		cfg:          a.cfg,
+		auditHook:    a.auditHook,
 	}, nil
 }
