@@ -156,6 +156,30 @@ func TestShardService_SharedPackWriteLocalShardStream(t *testing.T) {
 	assert.Equal(t, plaintext, got)
 }
 
+func TestShardService_WriteLocalShardStreamSizedContextBypassesPackForLargeShard(t *testing.T) {
+	key := bytes.Repeat([]byte("k"), 32)
+	enc, err := encrypt.NewEncryptor(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	svc := NewShardService(
+		dir,
+		transport.MustNewQUICTransport("test-cluster-psk"),
+		WithEncryptor(enc),
+		WithShardPackThreshold(1024),
+	)
+
+	plaintext := []byte("streamed shard data")
+	require.NoError(t, svc.WriteLocalShardStreamSizedContext(context.Background(), "bkt", "obj/v1", 0, bytes.NewReader(plaintext), 1024))
+
+	_, err = os.Stat(filepath.Join(dir, "shards", "bkt", "obj/v1", "shard_0"))
+	require.NoError(t, err)
+
+	got, err := svc.ReadLocalShard("bkt", "obj/v1", 0)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
+}
+
 func TestShardService_SharedPackDefaultDoesNotSyncEveryAppend(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(

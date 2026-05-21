@@ -1159,6 +1159,18 @@ func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, b
 }
 
 func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, true)
+}
+
+func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
+	allowPack := true
+	if s.shardPack != nil && s.packThreshold > 0 && streamSize >= int64(s.packThreshold) {
+		allowPack = false
+	}
+	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, allowPack)
+}
+
+func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, allowPack bool) error {
 	// When a data WAL is wired we cannot stream directly to disk: the WAL must
 	// observe the full payload before any file mutation so recovery can replay
 	// it. Buffer the body (bounded by datawal.MaxPayloadBytes minus the
@@ -1183,7 +1195,7 @@ func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket,
 		}
 		return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
 	}
-	if s.shardPack != nil && s.packThreshold > 0 {
+	if allowPack && s.shardPack != nil && s.packThreshold > 0 {
 		packed, handled, err := s.tryWriteLocalShardStreamPack(ctx, bucket, key, shardIdx, body)
 		if err != nil {
 			return err

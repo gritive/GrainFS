@@ -25,6 +25,10 @@ type ecObjectShardStore interface {
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
 }
 
+type ecObjectSizedShardStore interface {
+	WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error
+}
+
 type ecObjectPeerHealth interface {
 	MarkHealthy(peer string) bool
 	MarkUnhealthy(peer string) bool
@@ -385,7 +389,11 @@ func (w ecObjectWriter) writeSingleLocalReader(
 		body = io.TeeReader(body, bodyHash)
 	}
 	shardBody := io.MultiReader(bytes.NewReader(header[:]), body)
-	if err := w.shards.WriteLocalShardStreamContext(ctx, plan.Bucket, shardKey, 0, shardBody); err != nil {
+	if sized, ok := w.shards.(ecObjectSizedShardStore); ok {
+		if err := sized.WriteLocalShardStreamSizedContext(ctx, plan.Bucket, shardKey, 0, shardBody, int64(shardHeaderSize)+sp.Size); err != nil {
+			return ecObjectWriteResult{}, fmt.Errorf("write single local shard: %w", err)
+		}
+	} else if err := w.shards.WriteLocalShardStreamContext(ctx, plan.Bucket, shardKey, 0, shardBody); err != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("write single local shard: %w", err)
 	}
 	observePutStage(metricPath, "write_local_shard", stageStart)
