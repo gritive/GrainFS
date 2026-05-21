@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,4 +54,25 @@ func TestPlaceShards_CountClamping(t *testing.T) {
 func TestPlaceShards_EmptyNodes(t *testing.T) {
 	got := PlaceShards("k", nil, nil, 3)
 	assert.Nil(t, got)
+}
+
+func TestPlaceShards_Distribution_Uniform(t *testing.T) {
+	const trials = 10000
+	const tolerance = 0.10 // ±10%
+	nodes := []string{"n1", "n2", "n3", "n4", "n5"}
+
+	counts := map[string]int{}
+	for i := 0; i < trials; i++ {
+		got := PlaceShards(fmt.Sprintf("key/%d", i), nodes, nil, 1)
+		require.Len(t, got, 1)
+		counts[got[0]]++
+	}
+
+	expected := float64(trials) / float64(len(nodes))
+	for _, n := range nodes {
+		got := float64(counts[n])
+		ratio := got / expected
+		assert.InDelta(t, 1.0, ratio, tolerance,
+			"node %s primary count %v not within ±%v of %v", n, got, tolerance, expected)
+	}
 }
