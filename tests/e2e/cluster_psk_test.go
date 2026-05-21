@@ -11,7 +11,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster PSK", func() {
@@ -25,9 +25,9 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			raft := freePort()
 
 			// Write .join-pending to trigger join mode (which requires --cluster-key).
-			require.NoError(t, os.WriteFile(
+			gomega.Expect(os.WriteFile(
 				fmt.Sprintf("%s/%s", dir, joinPendingFile),
-				[]byte(fmt.Sprintf("127.0.0.1:%d", freePort())), 0o600))
+				[]byte(fmt.Sprintf("127.0.0.1:%d", freePort())), 0o600)).To(gomega.Succeed())
 
 			cmd := exec.Command(getBinary(), "serve",
 				"--data", dir,
@@ -40,7 +40,7 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			out, err := cmd.CombinedOutput()
-			require.Error(t, err, "process must exit non-zero without --cluster-key")
+			gomega.Expect(err).To(gomega.HaveOccurred(), "process must exit non-zero without --cluster-key")
 			if !strings.Contains(string(out), "--cluster-key is required") {
 				t.Fatalf("expected '--cluster-key is required' in output, got:\n%s", string(out))
 			}
@@ -80,7 +80,7 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 				"--lifecycle-interval", "0",
 			}
 			leaderLog, err := os.CreateTemp("", "leader-*.log")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(func() {
 				if t.Failed() {
 					if b, err := os.ReadFile(leaderLog.Name()); err == nil {
@@ -94,7 +94,7 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			leader.Stdout = leaderLog
 			leader.Stderr = leaderLog
-			require.NoError(t, leader.Start())
+			gomega.Expect(leader.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(func() {
 				leaderCancel()
 				_ = leader.Wait()
@@ -104,9 +104,9 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 
 			// Joiner with keyB: write .join-pending pointing to leader, then boot.
 			// Must fail (SPKI mismatch on QUIC handshake; cluster join cannot complete).
-			require.NoError(t, os.WriteFile(
+			gomega.Expect(os.WriteFile(
 				fmt.Sprintf("%s/%s", joinerDataDir, joinPendingFile),
-				[]byte(fmt.Sprintf("127.0.0.1:%d", leaderRaft)), 0o600))
+				[]byte(fmt.Sprintf("127.0.0.1:%d", leaderRaft)), 0o600)).To(gomega.Succeed())
 
 			joinerCtx, joinerCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			ginkgo.DeferCleanup(joinerCancel)
@@ -128,9 +128,9 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 			joiner.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			out, joinErr := combinedOutputWithWaitDelay(joiner)
 
-			require.Error(t, joinErr, "joiner with mismatched --cluster-key must not succeed. out: %s", string(out))
-			require.False(t, errors.Is(joinerCtx.Err(), context.DeadlineExceeded), "joiner must fail from PSK rejection, not from test timeout. out: %s", string(out))
-			require.Contains(t, string(out), "peer cert SPKI", "joiner should surface the PSK/SPKI rejection. out: %s", string(out))
+			gomega.Expect(joinErr).To(gomega.HaveOccurred(), "joiner with mismatched --cluster-key must not succeed. out: %s", string(out))
+			gomega.Expect(errors.Is(joinerCtx.Err(), context.DeadlineExceeded)).To(gomega.BeFalse(), "joiner must fail from PSK rejection, not from test timeout. out: %s", string(out))
+			gomega.Expect(string(out)).To(gomega.ContainSubstring("peer cert SPKI"), "joiner should surface the PSK/SPKI rejection. out: %s", string(out))
 		})
 	})
 })
