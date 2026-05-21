@@ -3,9 +3,9 @@ package e2e
 import (
 	"encoding/json"
 	"net/http"
-	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,23 +24,30 @@ func nodeSettled(baseURL string) bool {
 	return len(stringList(out["peers"])) == 2
 }
 
-func TestE2EClusterKillAndRestart(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
-		c := startE2ECluster(t, e2eClusterOptions{
-			Nodes:      3,
-			Mode:       ClusterModeDynamicJoin,
-			ClusterKey: "E2E-HARNESS-KILL",
-			LogPrefix:  "harness-kill",
-			DisableNFS: true, DisableNBD: true,
+var _ = ginkgo.Describe("E2E cluster kill and restart", func() {
+	ginkgo.Context("Cluster3Node", func() {
+		var c *e2eCluster
+
+		ginkgo.BeforeEach(func() {
+			c = startE2ECluster(ginkgo.GinkgoTB(), e2eClusterOptions{
+				Nodes:      3,
+				Mode:       ClusterModeDynamicJoin,
+				ClusterKey: "E2E-HARNESS-KILL",
+				LogPrefix:  "harness-kill",
+				DisableNFS: true, DisableNBD: true,
+			})
 		})
 
-		victim := (c.leaderIdx + 1) % 3
-		c.KillNode(victim)
-		waitClusterSettled(t, c.httpURLs[c.leaderIdx])
+		ginkgo.It("restarts a killed follower and waits for it to settle", func() {
+			t := ginkgo.GinkgoTB()
+			victim := (c.leaderIdx + 1) % 3
+			c.KillNode(victim)
+			waitClusterSettled(t, c.httpURLs[c.leaderIdx])
 
-		c.RestartNode(t, victim)
-		require.Eventually(t, func() bool {
-			return nodeSettled(c.httpURLs[victim])
-		}, 90*time.Second, 500*time.Millisecond, "restarted node never settled")
+			c.RestartNode(t, victim)
+			require.Eventually(t, func() bool {
+				return nodeSettled(c.httpURLs[victim])
+			}, 90*time.Second, 500*time.Millisecond, "restarted node never settled")
+		})
 	})
-}
+})
