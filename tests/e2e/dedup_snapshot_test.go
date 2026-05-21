@@ -63,10 +63,4 @@ var _ = ginkgo.Describe("Dedup snapshots", func() {
 			}
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("boots the shared cluster fixture", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })

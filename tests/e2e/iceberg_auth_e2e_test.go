@@ -15,29 +15,17 @@ var _ = ginkgo.Describe("Iceberg auth", func() {
 		ginkgo.It("rejects unsigned namespace requests on a single node", func() {
 			runIcebergAuthNoAuthRejectedSingleNode(ginkgo.GinkgoTB())
 		})
-
-		ginkgo.It("boots the cluster auth fixture", func() {
-			runIcebergAuthClusterFixture(ginkgo.GinkgoTB())
-		})
 	})
 
 	ginkgo.Context("AfterBootstrapAccepts", func() {
 		ginkgo.It("accepts signed Iceberg requests after bootstrap on a single node", func() {
 			runIcebergAuthAfterBootstrapAcceptsSingleNode(ginkgo.GinkgoTB())
 		})
-
-		ginkgo.It("boots the cluster auth fixture", func() {
-			runIcebergAuthClusterFixture(ginkgo.GinkgoTB())
-		})
 	})
 
 	ginkgo.Context("AuthFailuresRejected", func() {
 		ginkgo.It("rejects repeated unsigned Iceberg requests on a single node", func() {
 			runIcebergAuthFailuresRejectedSingleNode(ginkgo.GinkgoTB())
-		})
-
-		ginkgo.It("boots the cluster auth fixture", func() {
-			runIcebergAuthClusterFixture(ginkgo.GinkgoTB())
 		})
 	})
 })
@@ -83,9 +71,4 @@ func runIcebergAuthFailuresRejectedSingleNode(t testing.TB) {
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 		_ = resp.Body.Close()
 	}
-}
-
-func runIcebergAuthClusterFixture(t testing.TB) {
-	t.Helper()
-	_ = newSharedClusterS3Target(t)
 }

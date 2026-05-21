@@ -15,17 +15,6 @@ import (
 )
 
 var _ = ginkgo.Describe("Orphan segment sweep", func() {
-	ginkgo.Context("SingleNode", func() {
-		ginkgo.BeforeEach(func() {
-			_ = newSingleNodeS3Target()
-		})
-
-		ginkgo.It("mirrors the cluster orphan walker fixture shape", func() {
-			// Single-node scrubber is exercised by Volume scrub; this entry is
-			// the dual-fixture mirror for the cluster orphan walker.
-		})
-	})
-
 	ginkgo.Context("Cluster4Node", func() {
 		ginkgo.It("deletes old orphan segments and increments metrics", func() {
 			runOrphanSegmentSweepCases(ginkgo.GinkgoTB())

@@ -98,26 +98,17 @@ func filepathWalkBlock(dataDir, vol string, blockNum int, hits *[]string) error 
 	})
 }
 
-// Volume scrub verifies the helper resolves both on-disk
-// layouts (legacy `current` and EC `shard_N`). Pure unit test — no fixture.
 // FindVolumeBlockOnDisk verifies the helper resolves both on-disk
-// layouts (legacy `current` and EC `shard_N`). Pure helper unit check, no
-// fixture used, but wrapped in the canonical SingleNode/Cluster4Node shape
-// for grep/inventory consistency.
+// layouts (legacy `current` and EC `shard_N`).
 var _ = ginkgo.Describe("Volume scrub", func() {
-	registerFindTarget := func(name string, setup func(testing.TB)) {
-		ginkgo.Context("FindVolumeBlockOnDisk "+name, func() {
-			ginkgo.BeforeEach(func() {
-				setup(ginkgo.GinkgoTB())
-			})
-			ginkgo.It("finds a legacy current-layout block", func() {
-				runFindVolumeBlockOnDiskLegacyCurrentLayout(ginkgo.GinkgoTB())
-			})
-			ginkgo.It("finds an EC shard-layout block", func() {
-				runFindVolumeBlockOnDiskShardLayout(ginkgo.GinkgoTB())
-			})
+	ginkgo.Context("FindVolumeBlockOnDisk", func() {
+		ginkgo.It("finds a legacy current-layout block", func() {
+			runFindVolumeBlockOnDiskLegacyCurrentLayout(ginkgo.GinkgoTB())
 		})
-	}
+		ginkgo.It("finds an EC shard-layout block", func() {
+			runFindVolumeBlockOnDiskShardLayout(ginkgo.GinkgoTB())
+		})
+	})
 
 	registerScrubTarget := func(name string, mk volumeScrubFactory) {
 		ginkgo.Context("Scrub "+name, func() {
@@ -148,12 +139,6 @@ var _ = ginkgo.Describe("Volume scrub", func() {
 		})
 	}
 
-	registerFindTarget("SingleNode", func(testing.TB) {
-		_ = newSingleNodeS3Target()
-	})
-	registerFindTarget("Cluster4Node", func(t testing.TB) {
-		_ = newSharedClusterS3Target(t)
-	})
 	registerScrubTarget("SingleNode", func(t testing.TB, args ...string) s3Target {
 		return newDedicatedSingleNodeS3Target(t, args)
 	})

@@ -13,23 +13,10 @@ import (
 // reject each as "unknown flag" with non-zero exit. Same regression class
 // as PR #258's incomplete --access-key removal — without this test, a
 // future commit could silently reintroduce one of the flags. The rejection
-// is binary CLI behavior and identical on both branches by design, but the
-// SingleNode/Cluster4Node shape is kept for grep/inventory consistency.
+// is binary CLI behavior and does not require a running fixture.
 var _ = ginkgo.Describe("Serve flags rejection", func() {
-	describeServeFlagsRejectionContext("SingleNode", func() {
-		_ = newSingleNodeS3Target()
-	})
-	describeServeFlagsRejectionContext("Cluster4Node", func() {
-		_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-	})
+	runServeFlagsRejectionCases()
 })
-
-func describeServeFlagsRejectionContext(name string, setup func()) {
-	ginkgo.Context(name, func() {
-		ginkgo.BeforeEach(setup)
-		runServeFlagsRejectionCases()
-	})
-}
 
 func runServeFlagsRejectionCases() {
 	binary := getBinary()

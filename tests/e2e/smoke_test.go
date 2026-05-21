@@ -23,11 +23,6 @@ var _ = ginkgo.Describe("Smoke deployment", func() {
 	ginkgo.Context("SingleNode", ginkgo.Ordered, func() {
 		runSmokeDeploymentCases()
 	})
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("initializes the shared cluster fixture", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })
 
 func runSmokeDeploymentCases() {

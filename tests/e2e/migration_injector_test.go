@@ -118,10 +118,4 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			}
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("starts the shared cluster fixture", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })

@@ -8,26 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestClusterECS3OpContextE2E exercises the clusterECS3OpContext helper
-// (per-operation deadline regardless of parent context state). Both
-// sub-tests are pure unit checks on the helper function — no fixture is
-// touched — but we run them under SingleNode/Cluster4Node sub-test
-// branches for shape parity with the rest of the suite.
+// Cluster EC S3 op context exercises the clusterECS3OpContext helper
+// (per-operation deadline regardless of parent context state).
 var _ = ginkgo.Describe("Cluster EC S3 op context", func() {
-	describeClusterECS3OpContext("SingleNode", func() {
-		_ = newSingleNodeS3Target()
-	})
-	describeClusterECS3OpContext("Cluster4Node", func() {
-		_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-	})
+	runClusterECS3OpContextCases()
 })
-
-func describeClusterECS3OpContext(name string, setup func()) {
-	ginkgo.Context(name, func() {
-		ginkgo.BeforeEach(setup)
-		runClusterECS3OpContextCases()
-	})
-}
 
 func runClusterECS3OpContextCases() {
 	ginkgo.It("gives expired parent contexts a fresh budget (ExpiredParentGetsFreshBudget)", func() {

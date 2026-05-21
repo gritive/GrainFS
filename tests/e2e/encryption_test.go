@@ -111,10 +111,4 @@ var _ = ginkgo.Describe("Encryption at rest", func() {
 			assert.Equal(t, content, string(body))
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("starts the shared cluster fixture", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })

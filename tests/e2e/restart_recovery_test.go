@@ -22,17 +22,6 @@ var _ = ginkgo.Describe("Restart recovery orphan sweep", func() {
 			runRestartRecoveryOrphanSweepCases(ginkgo.GinkgoTB())
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.BeforeEach(func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-
-		ginkgo.It("mirrors the per-node startup recovery fixture shape", func() {
-			// Full per-node assertion arrives when cluster startup-event
-			// surfacing is wired.
-		})
-	})
 })
 
 func runRestartRecoveryOrphanSweepCases(t testing.TB) {

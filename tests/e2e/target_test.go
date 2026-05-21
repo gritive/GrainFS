@@ -350,21 +350,11 @@ func newDedicatedCluster4NodeS3Target(t testing.TB, extraArgs []string) s3Target
 	return tgt
 }
 
-// TestBucketNameForE2E verifies the bucketNameFor helper that derives an
-// S3-spec-compliant bucket name from target + test + case. Pure helper unit
-// check — fixture is not used — but wrapped in the canonical
-// SingleNode/Cluster4Node shape for grep/inventory consistency.
+// Bucket name helper verifies the bucketNameFor helper that derives an
+// S3-spec-compliant bucket name from target + test + case.
 var _ = ginkgo.Describe("Bucket name helper", ginkgo.Label("bucket"), func() {
-	ginkgo.It("derives valid names for a single-node target", func() {
-		t := ginkgo.GinkgoTB()
-		_ = newSingleNodeS3Target()
-		runBucketNameForCases(t)
-	})
-
-	ginkgo.It("derives valid names for a cluster target", func() {
-		t := ginkgo.GinkgoTB()
-		_ = newSharedClusterS3Target(t)
-		runBucketNameForCases(t)
+	ginkgo.It("derives valid names", func() {
+		runBucketNameForCases(ginkgo.GinkgoTB())
 	})
 })
 

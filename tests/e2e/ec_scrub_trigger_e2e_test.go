@@ -41,15 +41,6 @@ func adminUnixHTTPClient(socketPath string) *http.Client {
 //   - DedupHitReturnsExistingSession: a second identical POST returns the
 //     same SessionID with created=false (LookupDedup short-circuit).
 var _ = ginkgo.Describe("EC scrub trigger", func() {
-	ginkgo.Context("SingleNode", func() {
-		ginkgo.It("mirrors the target shape without cluster-only assertions", func() {
-			_ = newSingleNodeS3Target()
-			// EC scrub trigger semantics require a multi-raft cluster (replica
-			// fan-out for the source resolver); the single-node branch is the
-			// shape mirror so the entry follows the dual sub-test convention.
-		})
-	})
-
 	ginkgo.Context("Cluster3Node", func() {
 		var c *e2eCluster
 

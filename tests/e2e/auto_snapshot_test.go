@@ -57,12 +57,6 @@ var _ = ginkgo.Describe("Auto snapshot", func() {
 				"at least 2 auto-snapshots should have been created with 1s interval")
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("starts the shared cluster fixture", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })
 
 func waitForAutoSnapshots(t testing.TB, endpoint string, want int, timeout time.Duration) []map[string]any {

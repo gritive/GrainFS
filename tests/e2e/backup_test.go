@@ -215,10 +215,4 @@ var _ = ginkgo.Describe("Backup", func() {
 			t.Log("✅ Backup and restore test passed - data integrity verified")
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("starts the shared cluster fixture", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })
