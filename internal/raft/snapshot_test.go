@@ -12,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 var _ = ginkgo.Describe("Snapshot scenarios", func() {
@@ -481,12 +480,13 @@ var _ = ginkgo.Describe("Snapshot scenarios", func() {
 })
 
 func TestBadgerSnapshotStore_RoundTripsCanonicalMetadata(t *testing.T) {
+	g := gomega.NewWithT(t)
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	t.Cleanup(func() { g.Expect(db.Close()).To(gomega.Succeed()) })
 
 	store, err := NewBadgerSnapshotStore(db, []byte("raft/v2/snap/"))
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	in := &Snapshot{
 		Index:                12,
 		Term:                 3,
@@ -500,29 +500,30 @@ func TestBadgerSnapshotStore_RoundTripsCanonicalMetadata(t *testing.T) {
 		Data:                 []byte("fsm"),
 	}
 
-	require.NoError(t, store.Save(in))
+	g.Expect(store.Save(in)).To(gomega.Succeed())
 	out, err := store.Latest()
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	require.Equal(t, uint64(12), out.Index)
-	require.Equal(t, uint64(3), out.Term)
-	require.Equal(t, []Server{{ID: "old-a", Suffrage: Voter}, {ID: "learner-a", Suffrage: NonVoter}}, out.Servers)
-	require.Equal(t, uint8(99), out.FormatVersion)
-	require.Equal(t, JointEntering, out.JointPhase)
-	require.Equal(t, []string{"old-a", "old-b"}, out.JointOldVoters)
-	require.Equal(t, []string{"old-a", "old-c"}, out.JointNewVoters)
-	require.Equal(t, uint64(11), out.JointEnterIndex)
-	require.Equal(t, []string{"learner-a"}, out.JointManagedLearners)
-	require.Equal(t, []byte("fsm"), out.Data)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(out).NotTo(gomega.BeNil())
+	g.Expect(out.Index).To(gomega.Equal(uint64(12)))
+	g.Expect(out.Term).To(gomega.Equal(uint64(3)))
+	g.Expect(out.Servers).To(gomega.Equal([]Server{{ID: "old-a", Suffrage: Voter}, {ID: "learner-a", Suffrage: NonVoter}}))
+	g.Expect(out.FormatVersion).To(gomega.Equal(uint8(99)))
+	g.Expect(out.JointPhase).To(gomega.Equal(JointEntering))
+	g.Expect(out.JointOldVoters).To(gomega.Equal([]string{"old-a", "old-b"}))
+	g.Expect(out.JointNewVoters).To(gomega.Equal([]string{"old-a", "old-c"}))
+	g.Expect(out.JointEnterIndex).To(gomega.Equal(uint64(11)))
+	g.Expect(out.JointManagedLearners).To(gomega.Equal([]string{"learner-a"}))
+	g.Expect(out.Data).To(gomega.Equal([]byte("fsm")))
 }
 
 func TestBadgerSnapshotStore_RoundTripsLargeSnapshotData(t *testing.T) {
+	g := gomega.NewWithT(t)
 	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	t.Cleanup(func() { g.Expect(db.Close()).To(gomega.Succeed()) })
 
 	store, err := NewBadgerSnapshotStore(db, []byte("raft/v2/snap/"))
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	data := make([]byte, 17<<20)
 	for i := range data {
@@ -535,23 +536,24 @@ func TestBadgerSnapshotStore_RoundTripsLargeSnapshotData(t *testing.T) {
 		Data:              data,
 	}
 
-	require.NoError(t, store.Save(in))
+	g.Expect(store.Save(in)).To(gomega.Succeed())
 	out, err := store.Latest()
-	require.NoError(t, err)
-	require.NotNil(t, out)
-	require.Equal(t, in.LastIncludedIndex, out.LastIncludedIndex)
-	require.Equal(t, in.LastIncludedTerm, out.LastIncludedTerm)
-	require.Equal(t, in.Configuration, out.Configuration)
-	require.Equal(t, data, out.Data)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(out).NotTo(gomega.BeNil())
+	g.Expect(out.LastIncludedIndex).To(gomega.Equal(in.LastIncludedIndex))
+	g.Expect(out.LastIncludedTerm).To(gomega.Equal(in.LastIncludedTerm))
+	g.Expect(out.Configuration).To(gomega.Equal(in.Configuration))
+	g.Expect(out.Data).To(gomega.Equal(data))
 }
 
 func TestBadgerSnapshotStore_ReplacingLargeSnapshotRemovesOldChunks(t *testing.T) {
+	g := gomega.NewWithT(t)
 	db, err := badger.Open(badgerutil.SmallOptions(t.TempDir()))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	t.Cleanup(func() { g.Expect(db.Close()).To(gomega.Succeed()) })
 
 	store, err := newBadgerSnapshotStore(db, []byte("raft/v2/snap/"))
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	large := &Snapshot{
 		LastIncludedIndex: 12,
@@ -559,14 +561,14 @@ func TestBadgerSnapshotStore_ReplacingLargeSnapshotRemovesOldChunks(t *testing.T
 		Configuration:     []string{"n1"},
 		Data:              make([]byte, 17<<20),
 	}
-	require.NoError(t, store.Save(large))
+	g.Expect(store.Save(large)).To(gomega.Succeed())
 	oldChunkKey := store.chunkKey(snapshotChunkID(large), 0)
 
 	err = db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(oldChunkKey)
 		return err
 	})
-	require.NoError(t, err)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	small := &Snapshot{
 		LastIncludedIndex: 13,
@@ -574,13 +576,13 @@ func TestBadgerSnapshotStore_ReplacingLargeSnapshotRemovesOldChunks(t *testing.T
 		Configuration:     []string{"n1"},
 		Data:              []byte("small"),
 	}
-	require.NoError(t, store.Save(small))
+	g.Expect(store.Save(small)).To(gomega.Succeed())
 
 	err = db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(oldChunkKey)
 		return err
 	})
-	require.ErrorIs(t, err, badger.ErrKeyNotFound)
+	g.Expect(err).To(gomega.MatchError(badger.ErrKeyNotFound))
 }
 
 // snapshotCountingTransport wraps a Transport and counts SendInstallSnapshot
