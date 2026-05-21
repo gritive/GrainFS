@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.314.0] - 2026-05-21
+
+### Fixed
+
+- **Mount-SA Allow path now functional end-to-end.** The IAM policy resolver
+  previously only looked up service-account policies in the S3 SA pool, so
+  mount-SA principals (NFSv4 / 9P) silently fell through to Deny even when a
+  policy granted `grainfs:NFSMount` or `grainfs:9PAttach`. The resolver now
+  branches on `PrincipalType` and consults the mount-SA pool with a type-prefixed
+  cache key, so mount-SA Allow decisions reach the wire.
+- **9P anon attach to `/default` survives the Phase 0 → Phase 2 flip.** The
+  per-operation gate that rejects anonymous-bound 9P sessions when anon is
+  disabled now exempts the default bucket, preserving the documented
+  implicit-anon carve-out instead of breaking it the moment TLS posture
+  promotes the cluster to Phase 2.
+
 ## [0.0.313.0] - 2026-05-21
 
 ### Fixed
