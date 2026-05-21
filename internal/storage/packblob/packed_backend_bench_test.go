@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -39,9 +41,7 @@ func BenchmarkPackblob_SaveIndex(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				if err := pb.SaveIndex(); err != nil {
-					b.Fatal(err)
-				}
+				require.NoError(b, pb.SaveIndex())
 			}
 		})
 	}
@@ -62,12 +62,8 @@ func BenchmarkPackedBackend_ListObjectsPage_LargePackedIndex(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				objs, _, err := pb.ListObjectsPage(ctx, "bench", "key-", marker, 1000)
-				if err != nil {
-					b.Fatal(err)
-				}
-				if len(objs) == 0 {
-					b.Fatal("empty page")
-				}
+				require.NoError(b, err)
+				require.NotEmpty(b, objs)
 			}
 		})
 	}
@@ -83,18 +79,30 @@ func BenchmarkReadPackedCandidateReusable_SizedSmall(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		r.Reset(body)
 		got, large, pooled, err := readPackedCandidateReusable(&r, threshold)
-		if err != nil {
-			b.Fatal(err)
-		}
-		if large {
-			b.Fatal("candidate unexpectedly routed as large")
-		}
-		if len(got) != len(body) {
-			b.Fatalf("len=%d want %d", len(got), len(body))
-		}
+		require.NoError(b, err)
+		require.False(b, large, "candidate unexpectedly routed as large")
+		require.Len(b, got, len(body))
 		if pooled {
 			releasePackedCandidateBuffer(got)
 		}
+	}
+}
+
+func BenchmarkPackedBackend_PutLargeSizedReaderPassThrough5MiB(b *testing.B) {
+	inner := &capturePutBackend{}
+	pb, err := NewPackedBackend(inner, b.TempDir(), 64*1024)
+	require.NoError(b, err)
+	b.Cleanup(func() { require.NoError(b, pb.Close()) })
+
+	body := bytes.Repeat([]byte("x"), 5*1024*1024)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for i := 0; i < b.N; i++ {
+		reader := bytes.NewReader(body)
+		_, err := pb.PutObject(context.Background(), "bench", fmt.Sprintf("large-%d.bin", i), reader, "application/octet-stream")
+		require.NoError(b, err)
+		require.Same(b, reader, inner.body)
 	}
 }
 
@@ -103,13 +111,9 @@ func newBenchPackedBackend(b *testing.B, dir string) *PackedBackend {
 	// Same pattern as newTestPackedBackend (test file :19), but accepts a
 	// b *testing.B and a pre-allocated dir for predictable bench fixtures.
 	inner, err := storage.NewLocalBackend(dir + "/local")
-	if err != nil {
-		b.Fatal(err)
-	}
+	require.NoError(b, err)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { pb.Close() })
+	require.NoError(b, err)
+	b.Cleanup(func() { require.NoError(b, pb.Close()) })
 	return pb
 }
