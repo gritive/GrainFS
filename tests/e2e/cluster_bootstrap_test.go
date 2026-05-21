@@ -13,12 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
 // joinViaUDS sends POST /v1/cluster/join to the admin socket and returns the
 // HTTP status code and decoded response body.
-func joinViaUDS(t *testing.T, sock, peerAddr string) (int, map[string]string) {
+func joinViaUDS(t testing.TB, sock, peerAddr string) (int, map[string]string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"peer_addr": peerAddr})
 	require.NoError(t, err)
@@ -31,7 +32,7 @@ func joinViaUDS(t *testing.T, sock, peerAddr string) (int, map[string]string) {
 
 	resp, err := iamUDSClient(sock).Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	ginkgo.DeferCleanup(resp.Body.Close)
 
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
@@ -40,11 +41,25 @@ func joinViaUDS(t *testing.T, sock, peerAddr string) (int, map[string]string) {
 	return resp.StatusCode, out
 }
 
-// TestBootstrapJoinUDSAlreadyMemberE2E verifies that calling the admin UDS
-// /v1/cluster/join endpoint on a node that is already part of a multi-node
-// cluster returns status "already_member" (no-op, idempotent).
-func runClusterBootstrapJoinUDSAlreadyMember(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+var _ = ginkgo.Describe("Cluster bootstrap join", func() {
+	ginkgo.Context("Cluster3Node", func() {
+		ginkgo.It("blocks join when solo node already has data", func() {
+			runClusterBootstrapDataPresentBlocksJoin(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("keeps the join CLI idempotent", func() {
+			runClusterBootstrapJoinCLIIdempotent(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("returns already_member for a joined node via UDS", func() {
+			runClusterBootstrapJoinUDSAlreadyMember(ginkgo.GinkgoTB())
+		})
+	})
+})
+
+func runClusterBootstrapJoinUDSAlreadyMember(t testing.TB) {
+	t.Helper()
+	{
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes:      2,
 			Mode:       ClusterModeDynamicJoin,
@@ -59,14 +74,15 @@ func runClusterBootstrapJoinUDSAlreadyMember(t *testing.T) {
 		require.Equal(t, 200, code, "unexpected status; body: %v", body)
 		require.Equal(t, "already_member", body["status"],
 			"expected already_member for a joined node; got %v", body)
-	})
+	}
 }
 
 // TestBootstrapJoinCLIIdempotentE2E verifies that running `grainfs join`
 // twice for the same peer on an already-joined node prints "already_member"
 // and exits zero both times.
-func runClusterBootstrapJoinCLIIdempotent(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+func runClusterBootstrapJoinCLIIdempotent(t testing.TB) {
+	t.Helper()
+	{
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes:      2,
 			Mode:       ClusterModeDynamicJoin,
@@ -89,7 +105,7 @@ func runClusterBootstrapJoinCLIIdempotent(t *testing.T) {
 					"attempt %d: expected already_member in output: %s", i, out)
 			}()
 		}
-	})
+	}
 }
 
 // runGrainFSJoin runs `grainfs join <peerAddr> --endpoint <sock>` and returns
@@ -104,8 +120,9 @@ func runGrainFSJoin(ctx context.Context, sock, peerAddr string) (string, error) 
 // TestBootstrapDataPresentBlocksJoinE2E verifies that a solo node with
 // existing user data rejects a join request with 409 data_present when
 // force=false (the default).
-func runClusterBootstrapDataPresentBlocksJoin(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
+func runClusterBootstrapDataPresentBlocksJoin(t testing.TB) {
+	t.Helper()
+	{
 		// Nodes:1 + ClusterModeDynamicJoin → single solo node with admin SA bootstrapped.
 		c := startE2ECluster(t, e2eClusterOptions{
 			Nodes:      1,
@@ -127,12 +144,5 @@ func runClusterBootstrapDataPresentBlocksJoin(t *testing.T) {
 		require.Equal(t, "data_present", body["status"])
 		require.Contains(t, body["message"], "force=true",
 			"message must hint at --force; got: %s", body["message"])
-	})
-}
-
-// TestClusterBootstrapJoinE2E groups cluster join bootstrap scenarios.
-func TestClusterBootstrapJoinE2E(t *testing.T) {
-	t.Run("DataPresentBlocksJoin", runClusterBootstrapDataPresentBlocksJoin)
-	t.Run("JoinCLIIdempotent", runClusterBootstrapJoinCLIIdempotent)
-	t.Run("JoinUDSAlreadyMember", runClusterBootstrapJoinUDSAlreadyMember)
+	}
 }
