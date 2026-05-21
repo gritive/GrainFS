@@ -290,6 +290,11 @@ bench_bootstrap_iam_credentials() {
 
   echo "  bootstrapping IAM credentials..."
   bench_wait_admin_socket "$data_dir" 100 0.2
+  curl -sf --unix-socket "$admin_sock" \
+    -X PUT \
+    -H 'Content-Type: application/json' \
+    -d '{"value":"127.0.0.1/32"}' \
+    'http://unix/v1/config/trusted-proxy.cidr' >/dev/null
 
   bootstrap_json=$("$binary" iam --json sa create "$name" --endpoint "$admin_sock")
   SA_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sa_id"])' <<<"$bootstrap_json")

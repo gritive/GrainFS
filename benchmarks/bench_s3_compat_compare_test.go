@@ -221,30 +221,36 @@ func TestIcebergBenchesUseHostPreflight(t *testing.T) {
 	}
 }
 
-func TestBenchS3CompatSingleNodeAcceptsExtraServeFlags(t *testing.T) {
+func TestBenchS3CompatDoesNotAcceptArbitraryServeFlags(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := string(body)
 
-	start := strings.Index(script, "start_grainfs_single()")
-	if start < 0 {
-		t.Fatal("start_grainfs_single not found")
-	}
-	end := strings.Index(script[start:], "start_grainfs_cluster()")
-	if end < 0 {
-		t.Fatal("start_grainfs_cluster not found")
-	}
-	single := script[start : start+end]
-
-	for _, want := range []string{
-		`local extra_flags=()`,
-		`read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"`,
-		`"${extra_flags[@]}"`,
+	for _, forbidden := range []string{
+		`EXTRA_GRAINFS_SERVE_FLAGS`,
+		`extra_flags`,
 	} {
-		if !strings.Contains(single, want) {
-			t.Fatalf("start_grainfs_single must contain %q", want)
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("bench_s3_compat_compare.sh must not accept arbitrary serve flags via %q", forbidden)
+		}
+	}
+}
+
+func TestBenchBootstrapIAMSeedsTrustedProxyCIDR(t *testing.T) {
+	body, err := os.ReadFile("lib/common.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+	for _, want := range []string{
+		`/v1/config/trusted-proxy.cidr`,
+		`{"value":"127.0.0.1/32"}`,
+		`curl -sf --unix-socket "$admin_sock"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_bootstrap_iam_credentials must seed trusted proxy CIDR with %q", want)
 		}
 	}
 }
