@@ -29,7 +29,7 @@ func newIcebergSigV4Client(t testing.TB, accessKey, secretKey, region string) *h
 			secretKey: secretKey,
 			region:    region,
 			service:   "s3",
-			inner:     http.DefaultTransport,
+			inner:     &http.Transport{DisableKeepAlives: true},
 		},
 		Timeout: 30 * time.Second,
 	}
