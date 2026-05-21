@@ -1092,6 +1092,24 @@ table MetaIAMPolicyStoresSnapshot {
   sa_attachments:[MetaIAMPolicyAttachSAEntry];
   group_attachments:[MetaIAMPolicyAttachGroupEntry];
   bucket_policies:[MetaIAMBucketPolicyEntry];
+  // §A: NFS/9P mount service accounts (T3). Added after the original 5 fields
+  // so pre-§A snapshots decode cleanly (new optional vector fields default to empty).
+  mount_sas:[MetaMountSAEntry];
+  mount_sa_attachments:[MetaIAMPolicyAttachMountSAEntry];
+}
+
+// MetaMountSAEntry: one MountSA record in the IPST snapshot.
+table MetaMountSAEntry {
+  name:string;
+  numeric_uid:uint32;
+  created_at:int64;
+  created_by:string;
+}
+
+// MetaIAMPolicyAttachMountSAEntry: policy attachment snapshot for one MountSA.
+table MetaIAMPolicyAttachMountSAEntry {
+  mount_sa:string;
+  policies:[string];
 }
 
 // MountSACreatePayload: create a NFS/9P mount service account.

@@ -118,6 +118,48 @@ func (s *Store) IsEmpty() bool {
 	return len(*s.snap.Load()) == 0
 }
 
+// ReplaceAll atomically replaces all MountSAs in Badger with the provided slice.
+// All existing mountsa/ keys are deleted in the same transaction before writing
+// the new entries. The in-memory snapshot is rebuilt after the transaction commits.
+func (s *Store) ReplaceAll(entries []MountSA) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		// Delete all existing keys under the prefix.
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(keyPrefix)
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		var toDelete [][]byte
+		for it.Rewind(); it.Valid(); it.Next() {
+			key := make([]byte, len(it.Item().Key()))
+			copy(key, it.Item().Key())
+			toDelete = append(toDelete, key)
+		}
+		it.Close()
+		for _, k := range toDelete {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		// Write new entries.
+		for _, sa := range entries {
+			v, err := json.Marshal(sa)
+			if err != nil {
+				return fmt.Errorf("mountsa: marshal %q: %w", sa.Name, err)
+			}
+			if err := txn.Set([]byte(keyPrefix+sa.Name), v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return s.rebuildSnapshotLocked()
+}
+
 // rebuildSnapshotLocked re-reads all entries from Badger and atomically
 // replaces the in-memory snapshot. Must be called with s.mu held.
 func (s *Store) rebuildSnapshotLocked() error {

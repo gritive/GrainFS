@@ -5,19 +5,21 @@ import (
 	"sync"
 )
 
-// InMemoryStore holds SA→policy and group→policy attach mappings.
+// InMemoryStore holds SA→policy, group→policy, and MountSA→policy attach mappings.
 // All methods are safe for concurrent use.
 type InMemoryStore struct {
-	mu       sync.RWMutex
-	saToPols map[string]map[string]struct{}
-	grpToPol map[string]map[string]struct{}
+	mu            sync.RWMutex
+	saToPols      map[string]map[string]struct{}
+	grpToPol      map[string]map[string]struct{}
+	mountSAToPols map[string]map[string]struct{}
 }
 
 // NewInMemoryStore returns an empty InMemoryStore.
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
-		saToPols: make(map[string]map[string]struct{}),
-		grpToPol: make(map[string]map[string]struct{}),
+		saToPols:      make(map[string]map[string]struct{}),
+		grpToPol:      make(map[string]map[string]struct{}),
+		mountSAToPols: make(map[string]map[string]struct{}),
 	}
 }
 
@@ -87,6 +89,39 @@ func (s *InMemoryStore) GroupPolicies(_ context.Context, group string) ([]string
 	return out, nil
 }
 
+// AttachToMountSA attaches policy to the MountSA identified by mountSA.
+func (s *InMemoryStore) AttachToMountSA(_ context.Context, mountSA, policy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mountSAToPols[mountSA] == nil {
+		s.mountSAToPols[mountSA] = make(map[string]struct{})
+	}
+	s.mountSAToPols[mountSA][policy] = struct{}{}
+	return nil
+}
+
+// DetachFromMountSA removes policy from the MountSA identified by mountSA.
+// Detaching a policy that was never attached is a no-op.
+func (s *InMemoryStore) DetachFromMountSA(_ context.Context, mountSA, policy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mountSAToPols[mountSA] != nil {
+		delete(s.mountSAToPols[mountSA], policy)
+	}
+	return nil
+}
+
+// MountSAPolicies returns the list of policies directly attached to mountSA.
+func (s *InMemoryStore) MountSAPolicies(_ context.Context, mountSA string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.mountSAToPols[mountSA]))
+	for p := range s.mountSAToPols[mountSA] {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // SAAttachEntry is a snapshot of one SA's policy attachments.
 type SAAttachEntry struct {
 	SAID     string
@@ -99,10 +134,17 @@ type GroupAttachEntry struct {
 	Policies []string
 }
 
+// MountSAAttachEntry is a snapshot of one MountSA's policy attachments.
+type MountSAAttachEntry struct {
+	MountSA  string
+	Policies []string
+}
+
 // AttachSnapshot is the full snapshot of an InMemoryStore.
 type AttachSnapshot struct {
-	SAAttachments    []SAAttachEntry
-	GroupAttachments []GroupAttachEntry
+	SAAttachments      []SAAttachEntry
+	GroupAttachments   []GroupAttachEntry
+	MountSAAttachments []MountSAAttachEntry
 }
 
 // Snapshot returns a copy of all attach mappings for serialization.
@@ -125,7 +167,15 @@ func (s *InMemoryStore) Snapshot() AttachSnapshot {
 		}
 		grpEntries = append(grpEntries, GroupAttachEntry{Group: grp, Policies: ps})
 	}
-	return AttachSnapshot{SAAttachments: saEntries, GroupAttachments: grpEntries}
+	msaEntries := make([]MountSAAttachEntry, 0, len(s.mountSAToPols))
+	for msa, pols := range s.mountSAToPols {
+		ps := make([]string, 0, len(pols))
+		for p := range pols {
+			ps = append(ps, p)
+		}
+		msaEntries = append(msaEntries, MountSAAttachEntry{MountSA: msa, Policies: ps})
+	}
+	return AttachSnapshot{SAAttachments: saEntries, GroupAttachments: grpEntries, MountSAAttachments: msaEntries}
 }
 
 // ReplaceAll atomically replaces all attach mappings with the provided snapshot.
@@ -147,5 +197,13 @@ func (s *InMemoryStore) ReplaceAll(snap AttachSnapshot) {
 			pols[p] = struct{}{}
 		}
 		s.grpToPol[e.Group] = pols
+	}
+	s.mountSAToPols = make(map[string]map[string]struct{}, len(snap.MountSAAttachments))
+	for _, e := range snap.MountSAAttachments {
+		pols := make(map[string]struct{}, len(e.Policies))
+		for _, p := range e.Policies {
+			pols[p] = struct{}{}
+		}
+		s.mountSAToPols[e.MountSA] = pols
 	}
 }

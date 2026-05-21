@@ -23,6 +23,7 @@ import (
 	iambuiltin "github.com/gritive/GrainFS/internal/iam/builtin"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -203,6 +204,10 @@ const (
 	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
 	MetaCmdTypeJWTSigningKeyRotate          = clusterpb.MetaCmdTypeJWTSigningKeyRotate
 	MetaCmdTypeJWTSigningKeyPrune           = clusterpb.MetaCmdTypeJWTSigningKeyPrune
+	MetaCmdTypeMountSACreate                = clusterpb.MetaCmdTypeMountSACreate
+	MetaCmdTypeMountSADelete                = clusterpb.MetaCmdTypeMountSADelete
+	MetaCmdTypeMountSAAttachPolicy          = clusterpb.MetaCmdTypeMountSAAttachPolicy
+	MetaCmdTypeMountSADetachPolicy          = clusterpb.MetaCmdTypeMountSADetachPolicy
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -396,13 +401,17 @@ type MetaFSM struct {
 	// Group* commands are safe no-ops when nil.
 	groupStore *group.InMemoryStore
 
-	// policyAttachStore is the SA/group→policy attachment store. nil until
+	// policyAttachStore is the SA/group/MountSA→policy attachment store. nil until
 	// SetPolicyAttachStore is called; PolicyAttach* commands are safe no-ops when nil.
 	policyAttachStore *policyattach.InMemoryStore
 
 	// bucketPolicyStore is the per-bucket policy document store. nil until
 	// SetBucketPolicyStore is called; BucketPolicy* commands are safe no-ops when nil.
 	bucketPolicyStore *bucketpolicy.InMemoryStore
+
+	// mountSAStore is the NFS/9P mount service account store backed by Badger.
+	// nil until SetMountSAStore is called; MountSA* commands return an error when nil.
+	mountSAStore *mountsastore.Store
 
 	// cfgStore is the cluster-wide config registry. nil until SetConfigStore is
 	// called; ConfigPut/ConfigDelete commands are safe no-ops when nil.
@@ -576,6 +585,15 @@ func (f *MetaFSM) SetBucketPolicyStore(s *bucketpolicy.InMemoryStore) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bucketPolicyStore = s
+}
+
+// SetMountSAStore wires the NFS/9P mount service account store into the
+// MetaFSM. Must be called before the raft log starts replaying. nil means
+// MountSA* commands return an error.
+func (f *MetaFSM) SetMountSAStore(s *mountsastore.Store) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mountSAStore = s
 }
 
 // dekRefCount returns the number of ObjectIndexEntry records that reference
@@ -830,6 +848,14 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyBucketPolicyPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketPolicyDelete:
 		return f.applyBucketPolicyDelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMountSACreate:
+		return f.applyMountSACreate(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMountSADelete:
+		return f.applyMountSADelete(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMountSAAttachPolicy:
+		return f.applyMountSAAttachPolicy(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeMountSADetachPolicy:
+		return f.applyMountSADetachPolicy(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDEKRotate:
@@ -1356,6 +1382,80 @@ func (f *MetaFSM) applyBucketPolicyDelete(payload []byte) error {
 	if f.policyResolver != nil {
 		// Only cache entries for this bucket are stale.
 		f.policyResolver.Invalidate(nil, []string{bucket})
+	}
+	return nil
+}
+
+// applyMountSACreate handles MetaCmdTypeMountSACreate — creates a NFS/9P mount SA.
+func (f *MetaFSM) applyMountSACreate(payload []byte) error {
+	if f.mountSAStore == nil {
+		return fmt.Errorf("meta_fsm: MountSACreate: store not wired")
+	}
+	sa, err := mountsastore.DecodeCreatePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MountSACreate: %w", err)
+	}
+	if err := f.mountSAStore.ApplyCreate(sa); err != nil {
+		return fmt.Errorf("meta_fsm: MountSACreate store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// T4 will narrow this to mount-SA namespace; broad invalidation is safe.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+// applyMountSADelete handles MetaCmdTypeMountSADelete — deletes a NFS/9P mount SA.
+func (f *MetaFSM) applyMountSADelete(payload []byte) error {
+	if f.mountSAStore == nil {
+		return fmt.Errorf("meta_fsm: MountSADelete: store not wired")
+	}
+	name, err := mountsastore.DecodeDeletePayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MountSADelete: %w", err)
+	}
+	if err := f.mountSAStore.ApplyDelete(name); err != nil {
+		return fmt.Errorf("meta_fsm: MountSADelete store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+// applyMountSAAttachPolicy handles MetaCmdTypeMountSAAttachPolicy.
+func (f *MetaFSM) applyMountSAAttachPolicy(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return fmt.Errorf("meta_fsm: MountSAAttachPolicy: policyAttachStore not wired")
+	}
+	mountSA, pol, err := mountsastore.DecodeAttachPolicyPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MountSAAttachPolicy: %w", err)
+	}
+	if err := f.policyAttachStore.AttachToMountSA(context.Background(), mountSA, pol); err != nil {
+		return fmt.Errorf("meta_fsm: MountSAAttachPolicy store: %w", err)
+	}
+	if f.policyResolver != nil {
+		// T4 will narrow cache invalidation to mount-SA namespace.
+		f.policyResolver.Invalidate(nil, nil)
+	}
+	return nil
+}
+
+// applyMountSADetachPolicy handles MetaCmdTypeMountSADetachPolicy.
+func (f *MetaFSM) applyMountSADetachPolicy(payload []byte) error {
+	if f.policyAttachStore == nil {
+		return fmt.Errorf("meta_fsm: MountSADetachPolicy: policyAttachStore not wired")
+	}
+	mountSA, pol, err := mountsastore.DecodeDetachPolicyPayload(payload)
+	if err != nil {
+		return fmt.Errorf("meta_fsm: MountSADetachPolicy: %w", err)
+	}
+	if err := f.policyAttachStore.DetachFromMountSA(context.Background(), mountSA, pol); err != nil {
+		return fmt.Errorf("meta_fsm: MountSADetachPolicy store: %w", err)
+	}
+	if f.policyResolver != nil {
+		f.policyResolver.Invalidate(nil, nil)
 	}
 	return nil
 }
@@ -2699,12 +2799,12 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		}
 	}
 
-	// Append IPST trailer after the DKVS trailer. Emit when any of the 4 §2
+	// Append IPST trailer after the DKVS trailer. Emit when any of the §2 or §A
 	// policy stores is wired. An empty payload (all stores nil or all empty)
 	// is still emitted so the trailer presence signals "new-format snapshot"
 	// to Restore, which can safely skip decode on an empty payload. Only
-	// skip the trailer entirely when all 4 stores are nil (not yet wired).
-	if f.policyStore != nil || f.groupStore != nil || f.policyAttachStore != nil || f.bucketPolicyStore != nil {
+	// skip the trailer entirely when all stores are nil (not yet wired).
+	if f.policyStore != nil || f.groupStore != nil || f.policyAttachStore != nil || f.bucketPolicyStore != nil || f.mountSAStore != nil {
 		var polSnap []policystore.PolicyEntry
 		if f.policyStore != nil {
 			polSnap = f.policyStore.Snapshot()
@@ -2721,7 +2821,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		if f.bucketPolicyStore != nil {
 			bpSnap = f.bucketPolicyStore.Snapshot()
 		}
-		ipstPayload, err := encodeMetaIAMPolicyStoresSnapshot(polSnap, grpSnap, attachSnap, bpSnap)
+		var mountSASnap []mountsastore.MountSA
+		if f.mountSAStore != nil {
+			mountSASnap = f.mountSAStore.ListAll()
+		}
+		ipstPayload, err := encodeMetaIAMPolicyStoresSnapshot(polSnap, grpSnap, attachSnap, bpSnap, mountSASnap)
 		if err != nil {
 			return nil, fmt.Errorf("meta_fsm: Snapshot: encode IAM policy stores: %w", err)
 		}
@@ -3118,23 +3222,24 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		hasDEKData = true
 	}
 
-	// IPST: decode IAM policy stores snapshot.
+	// IPST: decode IAM policy stores snapshot (§2 + §A stores).
 	type ipstDecoded struct {
 		polSnap    []policystore.PolicyEntry
 		grpSnap    []group.GroupEntry
 		attachSnap policyattach.AttachSnapshot
 		bpSnap     []bucketpolicy.BucketPolicyEntry
+		mountSAs   []mountsastore.MountSA
 	}
 	var newIPST *ipstDecoded
 	if len(ipstData) > 0 {
-		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil && f.mountSAStore == nil {
 			log.Warn().Int("ipst_len", len(ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
 		} else {
-			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
+			polSnap, grpSnap, attachSnap, bpSnap, mountSAs, err := decodeMetaIAMPolicyStoresSnapshot(ipstData)
 			if err != nil {
 				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
 			}
-			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap}
+			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap, mountSAs}
 		}
 	}
 
@@ -3246,9 +3351,9 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.cfgStore.Restore(newCfgValues)
 	}
 
-	// IPST commit — apply all 4 policy stores.
+	// IPST commit — apply all §2 + §A policy stores.
 	if newIPST != nil {
-		// Warn per nil store. The 4 stores form a single coherent unit
+		// Warn per nil store. The stores form a single coherent unit
 		// (group memberships, attached policies, bucket policies all reference
 		// each other); silently dropping one half desyncs the others against
 		// the snapshot. The all-nil path warns once above; here we surface
@@ -3272,6 +3377,15 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			log.Warn().Int("entries", len(newIPST.bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
 		} else {
 			f.bucketPolicyStore.ReplaceAll(newIPST.bpSnap)
+		}
+		if f.mountSAStore == nil {
+			if len(newIPST.mountSAs) > 0 {
+				log.Warn().Int("entries", len(newIPST.mountSAs)).Msg("meta_fsm: Restore: IPST has MountSA entries but mountSAStore not wired; entries dropped")
+			}
+		} else {
+			if err := f.mountSAStore.ReplaceAll(newIPST.mountSAs); err != nil {
+				return fmt.Errorf("meta_fsm: Restore: MountSA store ReplaceAll: %w", err)
+			}
 		}
 		// Invalidate the resolver cache so stale pre-restore entries don't
 		// survive the snapshot install. Empty saIDs+buckets nukes the full cache.

@@ -141,8 +141,48 @@ func (rcv *MetaIAMPolicyStoresSnapshot) BucketPoliciesLength() int {
 	return 0
 }
 
+func (rcv *MetaIAMPolicyStoresSnapshot) MountSas(obj *MetaMountSAEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaIAMPolicyStoresSnapshot) MountSasLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MetaIAMPolicyStoresSnapshot) MountSaAttachments(obj *MetaIAMPolicyAttachMountSAEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaIAMPolicyStoresSnapshot) MountSaAttachmentsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaIAMPolicyStoresSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(7)
 }
 func MetaIAMPolicyStoresSnapshotAddPolicies(builder *flatbuffers.Builder, policies flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(policies), 0)
@@ -172,6 +212,18 @@ func MetaIAMPolicyStoresSnapshotAddBucketPolicies(builder *flatbuffers.Builder, 
 	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(bucketPolicies), 0)
 }
 func MetaIAMPolicyStoresSnapshotStartBucketPoliciesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaIAMPolicyStoresSnapshotAddMountSas(builder *flatbuffers.Builder, mountSas flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(mountSas), 0)
+}
+func MetaIAMPolicyStoresSnapshotStartMountSasVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaIAMPolicyStoresSnapshotAddMountSaAttachments(builder *flatbuffers.Builder, mountSaAttachments flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(mountSaAttachments), 0)
+}
+func MetaIAMPolicyStoresSnapshotStartMountSaAttachmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaIAMPolicyStoresSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
