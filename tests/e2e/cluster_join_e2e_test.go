@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster join", ginkgo.Label("bucket"), func() {
@@ -33,14 +33,14 @@ var _ = ginkgo.Describe("Cluster join", ginkgo.Label("bucket"), func() {
 			for i, endpoint := range c.httpURLs {
 				client := c.S3Client(i)
 				out, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
-				require.NoError(t, err)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				var defaults int
 				for _, bucket := range out.Buckets {
 					if aws.ToString(bucket.Name) == "default" {
 						defaults++
 					}
 				}
-				require.Equal(t, 1, defaults, "default bucket should exist once as shared cluster metadata at %s", endpoint)
+				gomega.Expect(defaults).To(gomega.Equal(1), "default bucket should exist once as shared cluster metadata at %s", endpoint)
 			}
 		})
 	})
@@ -83,21 +83,21 @@ func runClusterJoinedNodeEdgeForwardsBeforeDataReady(t testing.TB) {
 	body := []byte("hello dynamic join")
 
 	_, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
-	require.NoError(t, err)
-	require.NoError(t, tryPutObject(ctx, joinClient, bucket, key, body))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(tryPutObject(ctx, joinClient, bucket, key, body)).To(gomega.Succeed())
 
 	gotSeed, err := getObjectBytes(ctx, seedClient, bucket, key)
-	require.NoError(t, err)
-	require.Equal(t, body, gotSeed)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(gotSeed).To(gomega.Equal(body))
 	gotJoin, err := getObjectBytes(ctx, joinClient, bucket, key)
-	require.NoError(t, err)
-	require.Equal(t, body, gotJoin)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(gotJoin).To(gomega.Equal(body))
 
 	_, err = joinClient.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 }
 
 func runClusterJoinAllServicesAvailable(t testing.TB) {
@@ -119,22 +119,22 @@ func runClusterJoinAllServicesAvailable(t testing.TB) {
 
 	reqBody := []byte(`{"namespace":["join_ns"],"properties":{"owner":"e2e"}}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader(reqBody))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, c.httpURLs[0]+"/iceberg/v1/namespaces", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err = client.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
 	data, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Contains(t, string(data), "join_ns")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
+	gomega.Expect(string(data)).To(gomega.ContainSubstring("join_ns"))
 }
 
 func runClusterJoinDynamicJoinServicesNodeCount(t testing.TB, nodes int) {
@@ -157,37 +157,37 @@ func runClusterJoinDynamicJoinServicesNodeCount(t testing.TB, nodes int) {
 
 	bucket := fmt.Sprintf("dynamic-join-services-%d", nodes)
 	_, err := c.EnsureBucketWritable(ctx, bucket, 60*time.Second)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	for i := range c.httpURLs {
 		key := fmt.Sprintf("node-%d.txt", i)
 		body := []byte(fmt.Sprintf("node %d through dynamic join", i))
-		require.NoError(t, tryPutObject(ctx, c.S3Client(i), bucket, key, body))
+		gomega.Expect(tryPutObject(ctx, c.S3Client(i), bucket, key, body)).To(gomega.Succeed())
 		got, err := getObjectBytes(ctx, c.S3Client(i), bucket, key)
-		require.NoError(t, err)
-		require.Equal(t, body, got)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(got).To(gomega.Equal(body))
 	}
 
 	client := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
 	namespace := fmt.Sprintf("join_matrix_%d", nodes)
 	reqBody := []byte(fmt.Sprintf(`{"namespace":["%s"],"properties":{"owner":"e2e"}}`, namespace))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpURLs[nodes-1]+"/iceberg/v1/namespaces", bytes.NewReader(reqBody))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 	for i, endpoint := range c.httpURLs {
 		req, err = http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/iceberg/v1/namespaces", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp, err = client.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		data, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "iceberg list namespaces on node %d", i)
-		require.Contains(t, string(data), namespace, "iceberg namespace should be visible on node %d", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK), "iceberg list namespaces on node %d", i)
+		gomega.Expect(string(data)).To(gomega.ContainSubstring(namespace), "iceberg namespace should be visible on node %d", i)
 	}
 }
