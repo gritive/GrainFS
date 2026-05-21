@@ -429,7 +429,7 @@ func runAuditIcebergClusterLeaderFlap(t *testing.T) {
 // countAuditRows polls the server-side audit searcher until the expected count
 // is reached. The searcher itself uses DuckDB with the internal audit reader
 // credential; direct test-S3 credentials cannot read the grainfs-audit bucket.
-func countAuditRows(t *testing.T, endpoint, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
+func countAuditRows(t testing.TB, endpoint, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
 	t.Helper()
 	bucket := auditWhereBucket(whereClause)
 	require.NotEmpty(t, bucket, "countAuditRows requires a bucket predicate: %s", whereClause)
@@ -458,7 +458,7 @@ func countAuditRows(t *testing.T, endpoint, accessKey, secretKey, whereClause st
 		timeout, bucket, operation, lastRows, want, lastErr)
 }
 
-func countAuditRowsAnyEndpoint(t *testing.T, endpoints []string, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
+func countAuditRowsAnyEndpoint(t testing.TB, endpoints []string, accessKey, secretKey, whereClause string, want int, timeout time.Duration) {
 	t.Helper()
 	bucket := auditWhereBucket(whereClause)
 	require.NotEmpty(t, bucket, "countAuditRowsAnyEndpoint requires a bucket predicate: %s", whereClause)
@@ -506,7 +506,7 @@ func auditWhereBucket(whereClause string) string {
 	return rest[:end]
 }
 
-func auditSearchRows(t *testing.T, endpoint, accessKey, secretKey, bucket, operation string) (int, error) {
+func auditSearchRows(t testing.TB, endpoint, accessKey, secretKey, bucket, operation string) (int, error) {
 	t.Helper()
 	q := url.Values{}
 	q.Set("bucket", bucket)
