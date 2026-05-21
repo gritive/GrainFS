@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
@@ -60,11 +60,11 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		putReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+"/default/before-flip.txt",
 			bytes.NewReader([]byte("before")))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		putResp, err := http.DefaultClient.Do(putReq)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = putResp.Body.Close()
-		require.Equal(t, http.StatusOK, putResp.StatusCode,
+		gomega.Expect(putResp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"Phase 0 anon PUT to /default must succeed before flip")
 
 		// Trigger Phase 2 flip by creating the first SA.
@@ -72,10 +72,10 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 
 		// Wait for iam.anon-enabled to read false. Single-node flips on the
 		// same apply round; cluster needs Raft propagation to the queried node.
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return !isAnonEnabled(t, tgt.adminSock(0))
-		}, 2*time.Second, 50*time.Millisecond,
-			"iam.anon-enabled must flip to false after first SA create")
+		}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).
+			Should(gomega.BeTrue(), "iam.anon-enabled must flip to false after first SA create")
 
 		// F#41-extension: default-bucket anon access is independent of
 		// iam.anon-enabled (banner guarantee — "default remains public"). All
@@ -88,42 +88,42 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		// GET — reads back the Phase 0 PUT.
 		getReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+"/default/before-flip.txt", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		getResp, err := http.DefaultClient.Do(getReq)
-		require.NoError(t, err)
-		defer getResp.Body.Close()
-		require.Equalf(t, http.StatusOK, getResp.StatusCode,
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getResp.Body.Close)
+		gomega.Expect(getResp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"Phase 2 anon GET on /default must succeed (banner promise); status=%d",
 			getResp.StatusCode)
 		body, err := io.ReadAll(getResp.Body)
-		require.NoError(t, err)
-		require.Equal(t, []byte("before"), body)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(body).To(gomega.Equal([]byte("before")))
 
 		// PUT — writes after the flip. F#41-ext core assertion.
 		putReq2, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+"/default/after-flip.txt",
 			bytes.NewReader([]byte("after")))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		putResp2, err := http.DefaultClient.Do(putReq2)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = putResp2.Body.Close()
-		require.Equalf(t, http.StatusOK, putResp2.StatusCode,
+		gomega.Expect(putResp2.StatusCode).To(gomega.Equal(http.StatusOK),
 			"Phase 2 anon PUT on /default must succeed (banner: 'default remains public'); status=%d",
 			putResp2.StatusCode)
 
 		// LIST — subresource GET. Must also pass authn in Phase 2.
 		listReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodGet, tgt.s3URL(0)+"/default/?list-type=2", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		listResp, err := http.DefaultClient.Do(listReq)
-		require.NoError(t, err)
-		defer listResp.Body.Close()
-		require.Equalf(t, http.StatusOK, listResp.StatusCode,
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(listResp.Body.Close)
+		gomega.Expect(listResp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"Phase 2 anon LIST on /default must succeed (banner: 'default remains public'); status=%d",
 			listResp.StatusCode)
 		listBody, err := io.ReadAll(listResp.Body)
-		require.NoError(t, err)
-		require.Contains(t, string(listBody), "after-flip.txt",
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(string(listBody)).To(gomega.ContainSubstring("after-flip.txt"),
 			"LIST response must show the post-flip anon PUT key")
 	})
 
@@ -134,26 +134,25 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 
 		// Trigger Phase 2 via first SA create.
 		flipToPhase2(t, tgt.adminSock(0))
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return !isAnonEnabled(t, tgt.adminSock(0))
-		}, 2*time.Second, 50*time.Millisecond,
-			"iam.anon-enabled must flip to false after first SA create")
+		}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).
+			Should(gomega.BeTrue(), "iam.anon-enabled must flip to false after first SA create")
 
 		// Create a non-default bucket via admin UDS (no anon policy attached).
 		bucket := bucketNameFor(tgtName, "phase-tx", "nondef")
-		require.NoError(t, adminCreateBucket(t, tgt.adminSock(0), bucket),
+		gomega.Expect(adminCreateBucket(t, tgt.adminSock(0), bucket)).To(gomega.Succeed(),
 			"admin UDS bucket create must succeed in Phase 2")
 
 		// Anon PUT to non-default bucket must be denied (401 or 403).
 		req, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+"/"+bucket+"/anon-try.txt",
 			bytes.NewReader([]byte("x")))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		require.Containsf(t, []int{http.StatusUnauthorized, http.StatusForbidden},
-			resp.StatusCode,
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(resp.Body.Close)
+		gomega.Expect([]int{http.StatusUnauthorized, http.StatusForbidden}).To(gomega.ContainElement(resp.StatusCode),
 			"anon PUT to non-default bucket %q in Phase 2 must be denied (got %d)",
 			bucket, resp.StatusCode)
 	})
@@ -171,11 +170,11 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		seedReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut, tgt.s3URL(0)+"/default/"+probeKey,
 			bytes.NewReader([]byte("torn-state-probe")))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		seedResp, err := http.DefaultClient.Do(seedReq)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = seedResp.Body.Close()
-		require.Equal(t, http.StatusOK, seedResp.StatusCode,
+		gomega.Expect(seedResp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"Phase 0 anon PUT seed must succeed")
 
 		// Pummel anon GETs against /default/<probeKey> while flipping. The
@@ -224,9 +223,9 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 		t.Logf("flip-probe counts: ok=%d deny=%d other=%d err=%d",
 			atomic.LoadInt32(&defaultOK), atomic.LoadInt32(&defaultDeny),
 			atomic.LoadInt32(&defaultOther), atomic.LoadInt32(&errCount))
-		require.Greater(t, atomic.LoadInt32(&defaultOK), int32(0),
+		gomega.Expect(atomic.LoadInt32(&defaultOK)).To(gomega.BeNumerically(">", int32(0)),
 			"expected at least some anon-to-/default to be allowed through during the flip window")
-		require.Equalf(t, int32(0), atomic.LoadInt32(&defaultDeny),
+		gomega.Expect(atomic.LoadInt32(&defaultDeny)).To(gomega.Equal(int32(0)),
 			"anon to /default MUST NEVER be denied during or after the Phase 0→2 flip (F#26 atomic guarantee); deny count=%d",
 			atomic.LoadInt32(&defaultDeny))
 	})
@@ -246,17 +245,16 @@ func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
 func seedTrustedProxyForFlip(t testing.TB, sock string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"value": "127.0.0.1/32"})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodPut, "http://unix/v1/config/trusted-proxy.cidr",
 		bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
-	require.Truef(t,
-		resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent,
+	gomega.Expect(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent).To(gomega.BeTrue(),
 		"PUT /v1/config/trusted-proxy.cidr → %d", resp.StatusCode)
 }
 
@@ -275,20 +273,20 @@ func isAnonEnabled(t testing.TB, sock string) bool {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodGet, "http://unix/v1/config/iam.anon-enabled", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
-	require.Equalf(t, http.StatusOK, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"GET /v1/config/iam.anon-enabled → %d", resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var entry struct {
 		Value string `json:"value"`
 	}
-	require.NoError(t, json.Unmarshal(body, &entry))
+	gomega.Expect(json.Unmarshal(body, &entry)).To(gomega.Succeed())
 	v, err := strconv.ParseBool(entry.Value)
-	require.NoErrorf(t, err, "parse iam.anon-enabled value %q", entry.Value)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "parse iam.anon-enabled value %q", entry.Value)
 	return v
 }
 
