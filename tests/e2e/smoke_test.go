@@ -7,11 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,49 +19,61 @@ import (
 // critical path only). Single-node-only: probes the single-binary install
 // surface; cluster smoke is covered by the cluster_bootstrap/cluster_join
 // suites.
-func TestSmokeDeploymentE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runSmokeDeploymentCases(t)
+var _ = ginkgo.Describe("Smoke deployment", func() {
+	ginkgo.Context("SingleNode", ginkgo.Ordered, func() {
+		runSmokeDeploymentCases()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
+	ginkgo.Context("Cluster4Node", func() {
+		ginkgo.It("initializes the shared cluster fixture", func() {
+			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
 	})
-}
+})
 
-func runSmokeDeploymentCases(t *testing.T) {
-	t.Helper()
-
-	dir, err := os.MkdirTemp("", "grainfs-smoke-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-
-	binary := getBinary()
-	port := freePort()
-
-	// Start server
-	cmd := exec.Command(binary, "serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+func runSmokeDeploymentCases() {
+	var (
+		ctx       context.Context
+		cancel    context.CancelFunc
+		dir       string
+		bootstrap iamSAResult
+		client    *s3.Client
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-	defer terminateProcess(cmd)
 
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 30*time.Second)
+	ginkgo.BeforeAll(func() {
+		t := ginkgo.GinkgoTB()
+		var err error
+		dir, err = os.MkdirTemp("", "grainfs-smoke-*")
+		require.NoError(t, err)
+		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+		binary := getBinary()
+		port := freePort()
 
-	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
-	client := s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
+		cmd := exec.Command(binary, "serve",
+			"--data", dir,
+			"--port", fmt.Sprintf("%d", port),
+			"--nfs4-port", fmt.Sprintf("%d", freePort()),
+			"--nbd-port", fmt.Sprintf("%d", freePort()),
+			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		require.NoError(t, cmd.Start())
+		ginkgo.DeferCleanup(func() { terminateProcess(cmd) })
+
+		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+		waitForPort(t, port, 30*time.Second)
+
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		ginkgo.DeferCleanup(cancel)
+
+		bootstrap, _ = bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
+		client = s3ClientFor(endpoint, bootstrap.AccessKey, bootstrap.SecretKey)
+	})
 
 	// Test 1: Health check
-	t.Run("HealthCheck", func(t *testing.T) {
+	ginkgo.It("passes the health check (HealthCheck)", func() {
+		t := ginkgo.GinkgoTB()
 		// Verify server is responding
 		resp, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 		require.NoError(t, err, "health check should succeed")
@@ -69,12 +81,14 @@ func runSmokeDeploymentCases(t *testing.T) {
 	})
 
 	// Test 2: Create bucket through the admin control plane.
-	t.Run("CreateBucket", func(t *testing.T) {
+	ginkgo.It("creates the smoke bucket through the admin plane (CreateBucket)", func() {
+		t := ginkgo.GinkgoTB()
 		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, bootstrap.SAID, "smoke-test", client)
 	})
 
 	// Test 3: Put object
-	t.Run("PutObject", func(t *testing.T) {
+	ginkgo.It("puts an object (PutObject)", func() {
+		t := ginkgo.GinkgoTB()
 		_, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String("smoke-test"),
 			Key:    aws.String("test-object"),
@@ -84,7 +98,8 @@ func runSmokeDeploymentCases(t *testing.T) {
 	})
 
 	// Test 4: Get object
-	t.Run("GetObject", func(t *testing.T) {
+	ginkgo.It("gets the object (GetObject)", func() {
+		t := ginkgo.GinkgoTB()
 		resp, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String("smoke-test"),
 			Key:    aws.String("test-object"),
@@ -98,7 +113,8 @@ func runSmokeDeploymentCases(t *testing.T) {
 	})
 
 	// Test 5: Delete object
-	t.Run("DeleteObject", func(t *testing.T) {
+	ginkgo.It("deletes the object (DeleteObject)", func() {
+		t := ginkgo.GinkgoTB()
 		_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String("smoke-test"),
 			Key:    aws.String("test-object"),
@@ -107,7 +123,8 @@ func runSmokeDeploymentCases(t *testing.T) {
 	})
 
 	// Test 6: List objects (should be empty)
-	t.Run("ListObjects", func(t *testing.T) {
+	ginkgo.It("lists no objects after delete (ListObjects)", func() {
+		t := ginkgo.GinkgoTB()
 		resp, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket: aws.String("smoke-test"),
 		})
@@ -115,5 +132,4 @@ func runSmokeDeploymentCases(t *testing.T) {
 		require.Len(t, resp.Contents, 0, "bucket should be empty after delete")
 	})
 
-	t.Log("✅ Smoke test passed - deployment verified")
 }
