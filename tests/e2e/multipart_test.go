@@ -15,21 +15,38 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func runMultipart(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runMultipartCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Multipart uploads", func() {
+	runMultipartSpecs()
+	runMultipartChunkedUploadPartSpecs()
+	runMultipartGetPartNumberSpecs()
+})
+
+func runMultipartSpecs() {
+	ginkgo.Context("Multipart SingleNode", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSingleNodeS3Target()
+		})
+		runMultipartCases(func() s3Target { return tgt })
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runMultipartCases(t, newSharedClusterS3Target(t))
+	ginkgo.Context("Multipart Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+		runMultipartCases(func() s3Target { return tgt })
 	})
 }
 
-func runMultipartCases(t *testing.T, tgt s3Target) {
+func multipartFixture(getTgt func() s3Target, probePrefix string) (testing.TB, s3Target, *s3.Client) {
+	t := ginkgo.GinkgoTB()
+	tgt := getTgt()
 	client := tgt.pickNode(0)
 
 	// Cluster fixtures reject CreateMultipartUpload until the
@@ -37,20 +54,21 @@ func runMultipartCases(t *testing.T, tgt s3Target) {
 	// handshake. Gate once on a probe bucket so per-case CreateMultipartUpload
 	// calls don't race the upgrade. Single-node fixtures don't need this
 	// gate; if the shared server ever returns 503 here it indicates a
-	// pre-existing failure in an unrelated test (see TestEncryption_AtRest,
-	// TestPITR_*, TestSnapshot_CreateAndRestore — all known-broken on -short).
+	// pre-existing failure in unrelated tests.
 	if tgt.isCluster {
-		probe := tgt.name + "-mp-probe"
-		tgt.createBkt(t, probe)
+		probe := tgt.uniqueBucket(t, probePrefix)
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		waitForMultipartListingCreate(t, ctx, client, probe, multipartListingKey, 120*time.Second)
 	}
+	return t, tgt, client
+}
 
-	t.Run("Complete", func(t *testing.T) {
+func runMultipartCases(getTgt func() s3Target) {
+	ginkgo.It("completes a multipart upload", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-probe")
 		ctx := context.Background()
-		bucket := tgt.name + "-mp-complete"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "mp-complete")
 
 		key := "multipart-file.bin"
 		part1Data := bytes.Repeat([]byte("A"), 5<<20)
@@ -110,10 +128,10 @@ func runMultipartCases(t *testing.T, tgt s3Target) {
 		assert.Equal(t, int64(len(expected)), aws.ToInt64(getOut.ContentLength))
 	})
 
-	t.Run("Abort", func(t *testing.T) {
+	ginkgo.It("aborts a multipart upload", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-probe")
 		ctx := context.Background()
-		bucket := tgt.name + "-mp-abort"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "mp-abort")
 
 		initOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 			Bucket: aws.String(bucket),
@@ -143,18 +161,18 @@ func runMultipartCases(t *testing.T, tgt s3Target) {
 		assert.Error(t, err)
 	})
 
-	t.Run("List", func(t *testing.T) {
+	ginkgo.It("lists incomplete multipart uploads and parts", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-probe")
 		ctx := context.Background()
-		bucket := tgt.name + "-mp-list"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "mp-list")
 
 		exerciseMultipartListingFeature(t, ctx, client, bucket, "part", tgt.isCluster)
 	})
 
-	t.Run("ThreeParts", func(t *testing.T) {
+	ginkgo.It("completes a three-part upload", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-probe")
 		ctx := context.Background()
-		bucket := tgt.name + "-mp-three"
-		tgt.createBkt(t, bucket)
+		bucket := tgt.uniqueBucket(t, "mp-three")
 
 		key := "three-parts.bin"
 		partsData := [][]byte{
@@ -306,11 +324,22 @@ func waitForMultipartListingCreate(t testing.TB, ctx context.Context, client *s3
 func assertMultipartListingFeature(t testing.TB, ctx context.Context, client *s3.Client, fixture multipartListingFixture, waitForParts bool) {
 	t.Helper()
 
-	uploads, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
-		Bucket: aws.String(fixture.Bucket),
-		Prefix: aws.String(fixture.Prefix),
-	})
-	require.NoError(t, err)
+	var uploads *s3.ListMultipartUploadsOutput
+	listUploads := func() error {
+		var err error
+		uploads, err = client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+			Bucket: aws.String(fixture.Bucket),
+			Prefix: aws.String(fixture.Prefix),
+		})
+		return err
+	}
+	if waitForParts {
+		require.Eventually(t, func() bool {
+			return listUploads() == nil && len(uploads.Uploads) == 1
+		}, 30*time.Second, 500*time.Millisecond)
+	} else {
+		require.NoError(t, listUploads())
+	}
 	require.Len(t, uploads.Uploads, 1)
 	assert.Equal(t, fixture.Key, aws.ToString(uploads.Uploads[0].Key))
 	assert.Equal(t, fixture.Upload, aws.ToString(uploads.Uploads[0].UploadId))
@@ -353,11 +382,4 @@ func assertMultipartListingParts(t testing.TB, parts *s3.ListPartsOutput, fixtur
 	assert.Equal(t, fixture.ETagOne, aws.ToString(parts.Parts[0].ETag))
 	assert.Equal(t, int32(2), aws.ToInt32(parts.Parts[1].PartNumber))
 	assert.Equal(t, fixture.ETagTwo, aws.ToString(parts.Parts[1].ETag))
-}
-
-// TestMultipartsE2E groups all S3 multipart scenarios under one entry.
-func TestMultipartsE2E(t *testing.T) {
-	t.Run("Multipart", runMultipart)
-	t.Run("ChunkedUploadPart", runMultipartChunkedUploadPart)
-	t.Run("GetPartNumber", runMultipartGetPartNumber)
 }
