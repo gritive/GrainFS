@@ -12,26 +12,38 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const reqIDHeader = "X-GrainFS-Request-Id"
 
-func TestRequestIDE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runRequestIDCases(t, newSingleNodeS3Target())
-	})
+var _ = ginkgo.Describe("Request ID", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runRequestIDCases(t, newSharedClusterS3Target(t))
-	})
-}
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-func runRequestIDCases(t *testing.T, tgt s3Target) {
-	endpoint := tgt.endpoint(0)
+			runRequestIDCases(func() s3Target { return tgt })
+		})
+	}
+})
 
-	t.Run("GeneratesIfAbsent", func(t *testing.T) {
+func runRequestIDCases(getTgt func() s3Target) {
+	ginkgo.It("generates a request ID when absent", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		req, err := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
 		require.NoError(t, err)
 		resp, err := http.DefaultClient.Do(req)
@@ -52,7 +64,9 @@ func runRequestIDCases(t *testing.T, tgt s3Target) {
 			"x-amz-request-id must mirror X-GrainFS-Request-Id")
 	})
 
-	t.Run("PreservesIncoming", func(t *testing.T) {
+	ginkgo.It("preserves an incoming request ID", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		const incoming = "client-rid-e2e-12345"
 		req, err := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
 		require.NoError(t, err)
@@ -71,7 +85,9 @@ func runRequestIDCases(t *testing.T, tgt s3Target) {
 			"x-amz-request-id must mirror the preserved rid")
 	})
 
-	t.Run("UniquePerRequest", func(t *testing.T) {
+	ginkgo.It("generates a unique ID per request", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		// Two back-to-back unmarked requests must receive distinct rids.
 		first := newRequestIDProbe(t, endpoint)
 		second := newRequestIDProbe(t, endpoint)
@@ -79,7 +95,7 @@ func runRequestIDCases(t *testing.T, tgt s3Target) {
 	})
 }
 
-func newRequestIDProbe(t *testing.T, endpoint string) string {
+func newRequestIDProbe(t testing.TB, endpoint string) string {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
 	require.NoError(t, err)

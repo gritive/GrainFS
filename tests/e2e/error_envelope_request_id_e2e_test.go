@@ -18,26 +18,38 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestErrorEnvelopeRequestIDE2E covers §5 T42 on single + cluster targets.
-func TestErrorEnvelopeRequestIDE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runErrorEnvelopeRequestIDCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runErrorEnvelopeRequestIDCases(t, newSharedClusterS3Target(t))
-	})
-}
+var _ = ginkgo.Describe("Error envelope request ID", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func() s3Target
+	}{
+		{name: "SingleNode", mk: newSingleNodeS3Target},
+		{name: "Cluster4Node", mk: func() s3Target { return newSharedClusterS3Target(ginkgo.GinkgoTB()) }},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var tgt s3Target
 
-func runErrorEnvelopeRequestIDCases(t *testing.T, tgt s3Target) {
-	endpoint := tgt.endpoint(0)
+			ginkgo.BeforeEach(func() {
+				tgt = tc.mk()
+			})
 
-	t.Run("S3_PreservesIncomingRid", func(t *testing.T) {
+			runErrorEnvelopeRequestIDCases(func() s3Target { return tgt })
+		})
+	}
+})
+
+func runErrorEnvelopeRequestIDCases(getTgt func() s3Target) {
+	ginkgo.It("propagates an incoming request ID into S3 XML errors", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		const incoming = "rid-test-s3"
 		// Unsigned GET on a non-existent bucket — SigV4 gate produces an XML
 		// auth error envelope via writeXMLError. We don't care WHICH XML
@@ -66,7 +78,9 @@ func runErrorEnvelopeRequestIDCases(t *testing.T, tgt s3Target) {
 			"S3 XML <RequestId> must echo X-GrainFS-Request-Id; body=%s", body)
 	})
 
-	t.Run("S3_GeneratesRidWhenAbsent", func(t *testing.T) {
+	ginkgo.It("propagates a generated request ID into S3 XML errors", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		// Omit the incoming header — server generates a UUIDv7; the rid in the
 		// response body must match the rid in the response header.
 		req, err := http.NewRequest(http.MethodGet, endpoint+"/no-such-bucket-rid-gen/", nil)
@@ -90,7 +104,9 @@ func runErrorEnvelopeRequestIDCases(t *testing.T, tgt s3Target) {
 			"S3 XML <RequestId> must match X-GrainFS-Request-Id header (generated path)")
 	})
 
-	t.Run("Iceberg_PreservesIncomingRid", func(t *testing.T) {
+	ginkgo.It("propagates an incoming request ID into Iceberg JSON errors", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		const incoming = "rid-test-iceberg"
 		// Unsigned Iceberg request — SigV4 gate rejects → writeIcebergError
 		// remaps to 401 JSON envelope.
@@ -119,7 +135,9 @@ func runErrorEnvelopeRequestIDCases(t *testing.T, tgt s3Target) {
 			"Iceberg JSON request_id must echo X-GrainFS-Request-Id; body=%s", body)
 	})
 
-	t.Run("Iceberg_GeneratesRidWhenAbsent", func(t *testing.T) {
+	ginkgo.It("propagates a generated request ID into Iceberg JSON errors", func() {
+		t := ginkgo.GinkgoTB()
+		endpoint := getTgt().endpoint(0)
 		req, err := http.NewRequest(http.MethodGet,
 			endpoint+"/iceberg/v1/config?warehouse=rid-test-warehouse-gen", nil)
 		require.NoError(t, err)
