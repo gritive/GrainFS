@@ -14,8 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 func getBinary() string {
@@ -56,7 +55,7 @@ var _ = ginkgo.Describe("Cluster and no-peers behavior", func() {
 func runNoPeersRestartPersistenceCases(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-e2e-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	binary := getBinary()
@@ -79,7 +78,7 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 	)
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
-	require.NoError(t, cmd1.Start())
+	gomega.Expect(cmd1.Start()).To(gomega.Succeed())
 	cmd1Running := true
 	ginkgo.DeferCleanup(func() {
 		if cmd1Running {
@@ -95,7 +94,7 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 
 	ctx := context.Background()
 
-	require.NoError(t, adminCreateBucketWithPolicyAttachAny([]string{dir}, bootstrap.SAID, "persist-test", 30*time.Second))
+	gomega.Expect(adminCreateBucketWithPolicyAttachAny([]string{dir}, bootstrap.SAID, "persist-test", 30*time.Second)).To(gomega.Succeed())
 
 	testData := map[string]string{
 		"file1.txt":           "hello from local",
@@ -104,16 +103,16 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 	}
 
 	for key, content := range testData {
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return tryPutObject(ctx, client1, "persist-test", key, []byte(content)) == nil
-		}, 30*time.Second, 500*time.Millisecond, "put %s", key)
+		}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "put %s", key)
 	}
 
 	listOut, err := client1.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String("persist-test"),
 	})
-	require.NoError(t, err)
-	assert.Len(t, listOut.Contents, len(testData))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(listOut.Contents).To(gomega.HaveLen(len(testData)))
 
 	// Stop server and wait for full teardown
 	terminateProcess(cmd1)
@@ -134,7 +133,7 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
-	require.NoError(t, cmd2.Start())
+	gomega.Expect(cmd2.Start()).To(gomega.Succeed())
 	ginkgo.DeferCleanup(terminateProcess, cmd2)
 
 	endpoint2 := fmt.Sprintf("http://127.0.0.1:%d", port2)
@@ -142,7 +141,7 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 	client2 := s3ClientFor(endpoint2, ak, sk)
 
 	var listOut2 *s3.ListObjectsV2Output
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		listOut2, err = client2.ListObjectsV2(attemptCtx, &s3.ListObjectsV2Input{
@@ -151,33 +150,33 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 			o.RetryMaxAttempts = 1
 		})
 		return err == nil && len(listOut2.Contents) == len(testData)
-	}, 60*time.Second, 1*time.Second, "list objects after restart: %v", err)
-	assert.Len(t, listOut2.Contents, len(testData), "all objects should survive restart")
+	}).WithTimeout(60*time.Second).WithPolling(1*time.Second).Should(gomega.BeTrue(), "list objects after restart: %v", err)
+	gomega.Expect(listOut2.Contents).To(gomega.HaveLen(len(testData)), "all objects should survive restart")
 
 	for key, expectedContent := range testData {
 		getOut, err := client2.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String("persist-test"),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err, "get %s after restart", key)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "get %s after restart", key)
 		body, _ := io.ReadAll(getOut.Body)
 		getOut.Body.Close()
-		assert.Equal(t, expectedContent, string(body), "content mismatch for %s", key)
+		gomega.Expect(string(body)).To(gomega.Equal(expectedContent), "content mismatch for %s", key)
 	}
 
 	// Verify new writes work after restart
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		return tryPutObject(ctx, client2, "persist-test", "post-restart.txt", []byte("new data after restart")) == nil
-	}, 30*time.Second, 500*time.Millisecond, "put post-restart.txt")
+	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "put post-restart.txt")
 
 	getOut, err := client2.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("persist-test"),
 		Key:    aws.String("post-restart.txt"),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	body, _ := io.ReadAll(getOut.Body)
 	getOut.Body.Close()
-	assert.Equal(t, "new data after restart", string(body))
+	gomega.Expect(string(body)).To(gomega.Equal("new data after restart"))
 }
 
 // TestNoPeersMultipartE2E exercises multipart against a single-binary
@@ -186,7 +185,7 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 func runNoPeersMultipartCases(t testing.TB) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-cluster-mp-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 	binary := getBinary()
@@ -203,7 +202,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 	ginkgo.DeferCleanup(terminateProcess, cmd)
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -213,7 +212,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 
 	ctx := context.Background()
 
-	require.NoError(t, adminCreateBucketWithPolicyAttachAny([]string{dir}, bootstrap.SAID, "mp-cluster", 30*time.Second))
+	gomega.Expect(adminCreateBucketWithPolicyAttachAny([]string{dir}, bootstrap.SAID, "mp-cluster", 30*time.Second)).To(gomega.Succeed())
 	waitForS3Write(t, client, "mp-cluster", "__grainfs_e2e_ready", 30*time.Second)
 	_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String("mp-cluster"),
@@ -229,7 +228,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 		Bucket: aws.String("mp-cluster"),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String("mp-cluster"),
@@ -238,7 +237,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 		PartNumber: aws.Int32(1),
 		Body:       bytes.NewReader(part1Data),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	p2, err := client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String("mp-cluster"),
@@ -247,7 +246,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 		PartNumber: aws.Int32(2),
 		Body:       bytes.NewReader(part2Data),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String("mp-cluster"),
@@ -260,18 +259,18 @@ func runNoPeersMultipartCases(t testing.TB) {
 			},
 		},
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("mp-cluster"),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer getOut.Body.Close()
 
 	body, _ := io.ReadAll(getOut.Body)
 	expected := append(part1Data, part2Data...)
-	assert.Equal(t, expected, body)
+	gomega.Expect(body).To(gomega.Equal(expected))
 }
 
 // Multipart list fanout verifies that an incomplete multipart
@@ -284,7 +283,7 @@ func runNoPeersMultipartCases(t testing.TB) {
 // assertion on top of the same fixture.
 func runMultipartListFanoutCases(t testing.TB, tgt s3Target) {
 	t.Helper()
-	require.True(t, tgt.isCluster, "multipart list fanout requires cluster fixture")
+	gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "multipart list fanout requires cluster fixture")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	ginkgo.DeferCleanup(cancel)
