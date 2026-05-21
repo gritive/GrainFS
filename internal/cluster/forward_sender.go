@@ -353,6 +353,9 @@ func forwardReplyStatusString(op raftpb.ForwardOp, reply []byte) string {
 	if len(reply) == 0 {
 		return ""
 	}
+	defer func() {
+		_ = recover()
+	}()
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	status := fr.Status()
 	if status == raftpb.ForwardStatusOK && op == raftpb.ForwardOpPutObject && fr.Object(nil) == nil {
@@ -368,6 +371,9 @@ func forwardReplyHasObject(reply []byte) bool {
 	if len(reply) == 0 {
 		return false
 	}
+	defer func() {
+		_ = recover()
+	}()
 	return raftpb.GetRootAsForwardReply(reply, 0).Object(nil) != nil
 }
 

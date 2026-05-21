@@ -765,21 +765,14 @@ func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 }
 
 func logForwardReplyDecodeError(err error, bucket, key, groupID string, op raftpb.ForwardOp, reply []byte) {
-	status := ""
-	hasObject := false
-	if len(reply) > 0 {
-		fr := raftpb.GetRootAsForwardReply(reply, 0)
-		status = fr.Status().String()
-		hasObject = fr.Object(nil) != nil
-	}
 	log.Warn().
 		Err(err).
 		Str("bucket", bucket).
 		Str("key", key).
 		Str("group_id", groupID).
 		Str("op", op.String()).
-		Str("forward_status", status).
-		Bool("has_object", hasObject).
+		Str("forward_status", forwardReplyStatusString(op, reply)).
+		Bool("has_object", forwardReplyHasObject(reply)).
 		Int("reply_bytes", len(reply)).
 		Msg("forward: decode reply failed")
 }
