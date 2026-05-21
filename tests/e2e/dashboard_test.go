@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,33 +20,48 @@ import (
 // rotate from invalidating another case's expectations.
 type dashboardFactory func(args ...string) s3Target
 
-// TestDashboardE2E exercises the Web UI surface (static serve, Phase 16
-// Self-Healing card markup + SSE, dashboard CLI token rotate) against both
-// single-node and 4-node cluster fixtures. The cluster branch is the first
-// end-to-end coverage of these endpoints on a 4-node DynamicJoin fixture
-// and may surface placement / leader-redirect quirks — captured as signals,
-// not fixed in this PR.
-func TestDashboardE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runDashboardCases(t, func(args ...string) s3Target {
-			return newDedicatedSingleNodeS3Target(t, args)
-		})
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runDashboardCases(t, func(args ...string) s3Target {
-			return newClusterS3TargetWithExtraArgs(t, 4, args)
-		})
-	})
-}
+var _ = ginkgo.Describe("Dashboard", func() {
+	for _, tc := range []struct {
+		name string
+		mk   func(t testing.TB) dashboardFactory
+	}{
+		{
+			name: "SingleNode",
+			mk: func(t testing.TB) dashboardFactory {
+				return func(args ...string) s3Target {
+					return newDedicatedSingleNodeS3Target(t, args)
+				}
+			},
+		},
+		{
+			name: "Cluster4Node",
+			mk: func(t testing.TB) dashboardFactory {
+				return func(args ...string) s3Target {
+					return newClusterS3TargetWithExtraArgs(t, 4, args)
+				}
+			},
+		},
+	} {
+		tc := tc
+		ginkgo.Context(tc.name, func() {
+			var mk dashboardFactory
 
-func runDashboardCases(t *testing.T, mk dashboardFactory) {
-	t.Helper()
+			ginkgo.BeforeEach(func() {
+				mk = tc.mk(ginkgo.GinkgoTB())
+			})
 
-	t.Run("Serves", func(t *testing.T) {
-		tgt := mk()
+			runDashboardCases(func() dashboardFactory { return mk })
+		})
+	}
+})
+
+func runDashboardCases(mk func() dashboardFactory) {
+	ginkgo.It("serves the UI", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := mk()()
 		resp, err := http.Get(tgt.endpoint(0) + "/ui/")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		body, _ := io.ReadAll(resp.Body)
@@ -54,11 +70,12 @@ func runDashboardCases(t *testing.T, mk dashboardFactory) {
 		assert.Contains(t, s, "<!DOCTYPE html>")
 	})
 
-	t.Run("HealingCardHTMLMarkup", func(t *testing.T) {
-		tgt := mk()
+	ginkgo.It("renders healing card markup", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := mk()()
 		resp, err := http.Get(tgt.endpoint(0) + "/ui/")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		body, err := io.ReadAll(resp.Body)
@@ -77,11 +94,12 @@ func runDashboardCases(t *testing.T, mk dashboardFactory) {
 		assert.Contains(t, html, `FD exhaustion risk`, "FD incident label missing")
 	})
 
-	t.Run("HealingCardSSEStream", func(t *testing.T) {
-		tgt := mk()
+	ginkgo.It("streams healing events as SSE", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := mk()()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, tgt.endpoint(0)+"/api/events/heal/stream", nil)
 		require.NoError(t, err)
@@ -89,7 +107,7 @@ func runDashboardCases(t *testing.T, mk dashboardFactory) {
 		client := &http.Client{Timeout: 3 * time.Second}
 		resp, err := client.Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		ct := resp.Header.Get("Content-Type")
@@ -98,8 +116,9 @@ func runDashboardCases(t *testing.T, mk dashboardFactory) {
 		assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
 	})
 
-	t.Run("TokenURLAndRotate", func(t *testing.T) {
-		tgt := mk()
+	ginkgo.It("rotates dashboard tokens", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := mk()()
 		dataDir := dashboardDataDir(tgt)
 		port := dashboardPort(tgt, 0)
 
@@ -149,7 +168,7 @@ func dashboardPort(tgt s3Target, nodeIdx int) int {
 	return port
 }
 
-func callUI(t *testing.T, port int, token string) int {
+func callUI(t testing.TB, port int, token string) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ui/api/volumes", port), nil)
 	require.NoError(t, err)
@@ -158,7 +177,7 @@ func callUI(t *testing.T, port int, token string) int {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	ginkgo.DeferCleanup(resp.Body.Close)
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
 }
