@@ -8,12 +8,11 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 func registerWaitForWritableEndpointUsesPerAttemptTimeout() {
 	ginkgo.It("uses the per-attempt timeout", func() {
-		t := ginkgo.GinkgoTB()
 		endpoints := []string{"node-a", "node-b", "node-c"}
 		var calls int32
 
@@ -37,16 +36,15 @@ func registerWaitForWritableEndpointUsesPerAttemptTimeout() {
 			},
 		)
 
-		require.NoError(t, err)
-		require.Equal(t, 2, idx)
-		require.Equal(t, int32(3), atomic.LoadInt32(&calls))
-		require.Less(t, time.Since(start), 500*time.Millisecond)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(idx).To(gomega.Equal(2))
+		gomega.Expect(atomic.LoadInt32(&calls)).To(gomega.Equal(int32(3)))
+		gomega.Expect(time.Since(start)).To(gomega.BeNumerically("<", 500*time.Millisecond))
 	})
 }
 
 func registerWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail() {
 	ginkgo.It("returns an error when all endpoints fail", func() {
-		t := ginkgo.GinkgoTB()
 		endpoints := []string{"node-a", "node-b"}
 
 		_, err := waitForWritableEndpoint(
@@ -61,8 +59,8 @@ func registerWaitForWritableEndpointReturnsErrorWhenAllEndpointsFail() {
 			},
 		)
 
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "no writable endpoint found within")
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect(err.Error()).To(gomega.ContainSubstring("no writable endpoint found within"))
 	})
 }
 
