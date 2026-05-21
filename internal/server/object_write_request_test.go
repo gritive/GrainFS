@@ -39,3 +39,26 @@ func TestPutObjectBodyReader_DecodesAWSChunkedStreamingBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hello world", string(got))
 }
+
+func TestPutObjectShouldStreamLargeNonChunkedBody(t *testing.T) {
+	c := app.NewContext(0)
+	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+
+	require.True(t, putObjectShouldStream(c))
+}
+
+func TestPutObjectShouldNotStreamAWSChunkedBody(t *testing.T) {
+	c := app.NewContext(0)
+	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+	c.Request.Header.Set("Content-Encoding", "aws-chunked")
+
+	require.False(t, putObjectShouldStream(c))
+}
+
+func TestExactLengthReaderReturnsUnexpectedEOFOnShortBody(t *testing.T) {
+	r := newExactLengthReader(bytes.NewReader([]byte("abc")), 5)
+
+	got, err := io.ReadAll(r)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.Equal(t, []byte("abc"), got)
+}

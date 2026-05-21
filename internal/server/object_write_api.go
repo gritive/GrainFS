@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -99,19 +100,34 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	}
 
 	contentType := putObjectContentType(c)
-	rawBody, err := putObjectBody(c)
-	if err != nil {
-		c.AbortWithMsg(err.Error(), consts.StatusBadRequest)
-		return
+	var body io.Reader
+	var sizeHint *int64
+	bodyBytes := int64(0)
+	if putObjectShouldStream(c) {
+		stream, err := putObjectPayloadReader(c)
+		if err != nil {
+			c.AbortWithMsg(err.Error(), consts.StatusBadRequest)
+			return
+		}
+		contentLength := int64(c.Request.Header.ContentLength())
+		sizeHint = &contentLength
+		bodyBytes = contentLength
+		body = newExactLengthReader(stream, contentLength)
+	} else {
+		rawBody, err := putObjectBody(c)
+		if err != nil {
+			c.AbortWithMsg(err.Error(), consts.StatusBadRequest)
+			return
+		}
+		bodyBytes = int64(len(rawBody))
+		body = bytes.NewReader(rawBody)
 	}
-
-	body := bytes.NewReader(rawBody)
 	userMetadata := copyUserMetadata(c)
 	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutPrepare, prepareStart, cluster.PutTraceStageFields{
-		Bytes: int64(len(rawBody)),
+		Bytes: bodyBytes,
 	})
 
-	result, putErr := s.putObjectWithUserMetadata(ctx, bucket, key, body, contentType, putObjectACL(c), userMetadata, systemMetadata)
+	result, putErr := s.putObjectWithUserMetadata(ctx, bucket, key, body, sizeHint, contentType, putObjectACL(c), userMetadata, systemMetadata)
 	if putErr != nil {
 		mapError(c, putErr)
 		return

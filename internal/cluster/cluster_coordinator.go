@@ -1556,7 +1556,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 		})
 		ObservePutTraceStage(ctx, PutTraceStageRouteWrite, routeStart, PutTraceStageFields{})
 		var obj *storage.Object
-		if req.SystemMetadata.SSEAlgorithm != "" || req.ACL != nil {
+		if req.SystemMetadata.SSEAlgorithm != "" || req.ACL != nil || req.SizeHint != nil {
 			obj, err = gb.PutObjectWithRequest(ctx, req)
 		} else {
 			obj, err = gb.PutObjectWithUserMetadata(ctx, bucket, key, r, contentType, userMetadata)

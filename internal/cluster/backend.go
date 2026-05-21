@@ -1552,6 +1552,10 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		if handled || err != nil {
 			return obj, err
 		}
+		obj, handled, err = b.tryPutObjectSingleLocalShardKnownSize(ctx, bucket, key, versionID, r, req.SizeHint, contentType, userMetadata, sseAlgorithm)
+		if handled || err != nil {
+			return obj, err
+		}
 		obj, handled, err = b.tryPutObjectECDataInMemory(ctx, bucket, key, versionID, r, contentType, userMetadata, sseAlgorithm)
 		if handled || err != nil {
 			return obj, err
@@ -1633,6 +1637,70 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		sseAlgorithm,
 		"ec_single_memory",
 		h,
+		nil,
+		nil,
+		"",
+	)
+	return obj, true, err
+}
+
+func (b *DistributedBackend) tryPutObjectSingleLocalShardKnownSize(
+	ctx context.Context,
+	bucket, key, versionID string,
+	r io.Reader,
+	sizeHint *int64,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+) (*storage.Object, bool, error) {
+	if sizeHint == nil || *sizeHint < 0 {
+		return nil, false, nil
+	}
+	placementGroupID, ok := PlacementGroupFromContext(ctx)
+	if !ok {
+		if b.bypassBucketCheck {
+			return nil, false, nil
+		}
+		placementGroupID = "group-0"
+	}
+	liveNodes := b.ecWriteNodes()
+	effectiveCfg := EffectiveConfig(len(liveNodes), b.currentECConfig())
+	if effectiveCfg.NumShards() == 0 && !b.bypassBucketCheck {
+		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
+	}
+	shardKey := ecObjectShardKey(key, versionID)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
+	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
+		placementGroupID = group.ID
+		effectiveCfg = cfg
+		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
+	} else if PlacementGroupHasFullEntry(ctx) {
+		return nil, false, err
+	}
+	if effectiveCfg.DataShards != 1 || effectiveCfg.ParityShards != 0 {
+		return nil, false, nil
+	}
+	if len(placement) != 1 || placement[0] != b.currentSelfAddr() {
+		return nil, false, nil
+	}
+
+	sp := &spooledObject{
+		Size: *sizeHint,
+	}
+	obj, err := b.putObjectSingleLocalShardFromReader(
+		ctx,
+		bucket,
+		key,
+		versionID,
+		placementGroupID,
+		placement,
+		sp,
+		r,
+		contentType,
+		userMetadata,
+		sseAlgorithm,
+		"ec_single_stream",
+		md5.New(),
 		nil,
 		nil,
 		"",
