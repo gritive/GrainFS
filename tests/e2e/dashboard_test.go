@@ -11,8 +11,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // dashboardFactory mirrors volumeScrubFactory. TokenURLAndRotate rotates the
@@ -57,63 +56,59 @@ var _ = ginkgo.Describe("Dashboard", func() {
 
 func runDashboardCases(mk func() dashboardFactory) {
 	ginkgo.It("serves the UI", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := mk()()
 		resp, err := http.Get(tgt.endpoint(0) + "/ui/")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 		body, _ := io.ReadAll(resp.Body)
 		s := string(body)
-		assert.Contains(t, s, "GrainFS")
-		assert.Contains(t, s, "<!DOCTYPE html>")
+		gomega.Expect(s).To(gomega.ContainSubstring("GrainFS"))
+		gomega.Expect(s).To(gomega.ContainSubstring("<!DOCTYPE html>"))
 	})
 
 	ginkgo.It("renders healing card markup", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := mk()()
 		resp, err := http.Get(tgt.endpoint(0) + "/ui/")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 
 		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		html := string(body)
 
-		assert.Contains(t, html, `id="heal-section"`, "Self-Healing card section missing")
-		assert.Contains(t, html, `id="heal-last-when"`, "Last Heal value element missing")
-		assert.Contains(t, html, `id="heal-rate"`, "Heal Rate element missing")
-		assert.Contains(t, html, `id="heal-restart-count"`, "Restart Recovery line missing")
-		assert.Contains(t, html, `id="heal-events-table"`, "Live Heal Events table missing")
-		assert.Contains(t, html, `/api/events/heal/stream`, "heal SSE endpoint not wired in JS")
-		assert.Contains(t, html, `id="incident-section"`, "Zero-ops incident section missing")
-		assert.Contains(t, html, `id="incident-table"`, "Incident table missing")
-		assert.Contains(t, html, `/api/incidents`, "incident API not wired in JS")
-		assert.Contains(t, html, `FD exhaustion risk`, "FD incident label missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="heal-section"`), "Self-Healing card section missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="heal-last-when"`), "Last Heal value element missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="heal-rate"`), "Heal Rate element missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="heal-restart-count"`), "Restart Recovery line missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="heal-events-table"`), "Live Heal Events table missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`/api/events/heal/stream`), "heal SSE endpoint not wired in JS")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="incident-section"`), "Zero-ops incident section missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`id="incident-table"`), "Incident table missing")
+		gomega.Expect(html).To(gomega.ContainSubstring(`/api/incidents`), "incident API not wired in JS")
+		gomega.Expect(html).To(gomega.ContainSubstring(`FD exhaustion risk`), "FD incident label missing")
 	})
 
 	ginkgo.It("streams healing events as SSE", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := mk()()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		ginkgo.DeferCleanup(cancel)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, tgt.endpoint(0)+"/api/events/heal/stream", nil)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		client := &http.Client{Timeout: 3 * time.Second}
 		resp, err := client.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 		ct := resp.Header.Get("Content-Type")
-		assert.True(t, strings.HasPrefix(ct, "text/event-stream"),
-			"expected SSE content-type, got %q", ct)
-		assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
+		gomega.Expect(ct).To(gomega.HavePrefix("text/event-stream"), "expected SSE content-type, got %q", ct)
+		gomega.Expect(resp.Header.Get("Cache-Control")).To(gomega.Equal("no-cache"))
 	})
 
 	ginkgo.It("rotates dashboard tokens", func() {
@@ -123,28 +118,28 @@ func runDashboardCases(mk func() dashboardFactory) {
 		port := dashboardPort(tgt, 0)
 
 		out1, code := runCLI(t, dataDir, "dashboard", "--format", "json")
-		require.Equal(t, 0, code, out1)
+		gomega.Expect(code).To(gomega.Equal(0), out1)
 		var resp1 struct {
 			Token string `json:"token"`
 			URL   string `json:"url"`
 		}
-		require.NoError(t, json.Unmarshal([]byte(out1), &resp1))
-		require.NotEmpty(t, resp1.Token)
-		require.Contains(t, resp1.URL, "#token="+resp1.Token)
+		gomega.Expect(json.Unmarshal([]byte(out1), &resp1)).To(gomega.Succeed())
+		gomega.Expect(resp1.Token).NotTo(gomega.BeEmpty())
+		gomega.Expect(resp1.URL).To(gomega.ContainSubstring("#token=" + resp1.Token))
 
-		require.Equal(t, http.StatusOK, callUI(t, port, resp1.Token), "old token must work")
-		require.Equal(t, http.StatusUnauthorized, callUI(t, port, ""), "no token must 401")
+		gomega.Expect(callUI(t, port, resp1.Token)).To(gomega.Equal(http.StatusOK), "old token must work")
+		gomega.Expect(callUI(t, port, "")).To(gomega.Equal(http.StatusUnauthorized), "no token must 401")
 
 		out2, code := runCLI(t, dataDir, "dashboard", "--rotate", "--format", "json")
-		require.Equal(t, 0, code, out2)
+		gomega.Expect(code).To(gomega.Equal(0), out2)
 		var resp2 struct {
 			Token string `json:"token"`
 		}
-		require.NoError(t, json.Unmarshal([]byte(out2), &resp2))
-		require.NotEqual(t, resp1.Token, resp2.Token)
+		gomega.Expect(json.Unmarshal([]byte(out2), &resp2)).To(gomega.Succeed())
+		gomega.Expect(resp2.Token).NotTo(gomega.Equal(resp1.Token))
 
-		require.Equal(t, http.StatusUnauthorized, callUI(t, port, resp1.Token), "rotated old token must be dead")
-		require.Equal(t, http.StatusOK, callUI(t, port, resp2.Token), "new token must work")
+		gomega.Expect(callUI(t, port, resp1.Token)).To(gomega.Equal(http.StatusUnauthorized), "rotated old token must be dead")
+		gomega.Expect(callUI(t, port, resp2.Token)).To(gomega.Equal(http.StatusOK), "new token must work")
 	})
 }
 
@@ -171,12 +166,12 @@ func dashboardPort(tgt s3Target, nodeIdx int) int {
 func callUI(t testing.TB, port int, token string) int {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/ui/api/volumes", port), nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
