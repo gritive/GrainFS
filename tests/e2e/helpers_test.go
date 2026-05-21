@@ -799,10 +799,20 @@ func terminateProcess(cmd *exec.Cmd) {
 		return
 	}
 	pid := cmd.Process.Pid
-	// If Setpgid was set, pid == pgid; killing the negative pid kills the
-	// entire process group (the grainfs leader and any children it spawned).
-	// Falls back to a plain Kill if syscall.Kill returns ESRCH.
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+	killTarget := pid
+	kill := func(sig syscall.Signal) error {
+		if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid {
+			pgid := pid
+			if cmd.SysProcAttr.Pgid != 0 {
+				pgid = cmd.SysProcAttr.Pgid
+			}
+			killTarget = -pgid
+			return syscall.Kill(killTarget, sig)
+		}
+		return cmd.Process.Signal(sig)
+	}
+
+	if err := kill(syscall.SIGTERM); err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 		return
@@ -815,7 +825,11 @@ func terminateProcess(cmd *exec.Cmd) {
 	select {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		if killTarget < 0 {
+			_ = syscall.Kill(killTarget, syscall.SIGKILL)
+		} else {
+			_ = cmd.Process.Kill()
+		}
 		<-done // wait for the reaper goroutine to finish after SIGKILL takes effect
 	}
 }

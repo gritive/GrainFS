@@ -76,7 +76,7 @@ var _ = ginkgo.Describe("Vlog watcher", ginkgo.Ordered, func() {
 	registerWatcherTarget := func(name string, newTarget func(testing.TB, []string) s3Target) {
 		ginkgo.Context("Predictive watcher "+name, func() {
 			var tgt s3Target
-			ginkgo.BeforeEach(func() {
+			ginkgo.BeforeAll(func() {
 				tgt = newTarget(ginkgo.GinkgoTB(), vlogWatcherArgs)
 			})
 
