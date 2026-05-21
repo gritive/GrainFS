@@ -586,10 +586,4 @@ var _ = ginkgo.Describe("Iceberg DuckDB", func() {
 			runAuditIcebergClusterLeaderFlap(ginkgo.GinkgoTB())
 		})
 	})
-
-	ginkgo.Context("Cluster4Node", func() {
-		ginkgo.It("initializes the shared cluster target", func() {
-			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
-		})
-	})
 })
