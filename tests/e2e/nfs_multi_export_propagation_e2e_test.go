@@ -6,27 +6,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func TestNFSMultiExportPropagationMultiNodeE2E(t *testing.T) {
-	t.Run("MRCluster3Node", func(t *testing.T) {
-		runNFSMultiExportPropagationCases(t)
-	})
-}
+var _ = ginkgo.Describe("NFS multi-export propagation", func() {
+	ginkgo.Context("MRCluster3Node", func() {
+		var c *mrCluster
 
-func runNFSMultiExportPropagationCases(t *testing.T) {
-	t.Helper()
-	c := startMRCluster(t, 3, mrClusterOptions{
-		disableNFS4:   true,
-		disableNBD:    true,
-		FastBootstrap: true,
-	})
+		ginkgo.BeforeEach(func() {
+			c = startMRCluster(ginkgo.GinkgoTB(), 3, mrClusterOptions{
+				disableNFS4:   true,
+				disableNBD:    true,
+				FastBootstrap: true,
+			})
+		})
 
-	t.Run("AdminAddPropagatesToAllNodes", func(t *testing.T) {
+		runNFSMultiExportPropagationCases(func() *mrCluster { return c })
+	})
+})
+
+func runNFSMultiExportPropagationCases(getCluster func() *mrCluster) {
+	ginkgo.It("propagates an admin-added export to all nodes", func() {
+		t := ginkgo.GinkgoTB()
+		c := getCluster()
 		bucket := fmt.Sprintf("nfs-prop-e2e-%d", freePort())
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 		requireMRCreateBucketEventually(t, ctx, c, bucket)
 
 		adminNode := (c.leaderIdx + 1) % c.nodeCount
@@ -43,7 +49,7 @@ func runNFSMultiExportPropagationCases(t *testing.T) {
 	})
 }
 
-func runNfsExportJSONOnDataDir(t *testing.T, dataDir, verb, bucket string, flags ...string) e2eNfsExport {
+func runNfsExportJSONOnDataDir(t testing.TB, dataDir, verb, bucket string, flags ...string) e2eNfsExport {
 	t.Helper()
 	args := []string{"nfs", "export", verb, bucket, "--json"}
 	args = append(args, flags...)
@@ -56,7 +62,7 @@ func runNfsExportJSONOnDataDir(t *testing.T, dataDir, verb, bucket string, flags
 	return parseSingleNfsExport(t, out)
 }
 
-func jsonExportListContains(t *testing.T, dataDir, bucket string, minGeneration uint64) bool {
+func jsonExportListContains(t testing.TB, dataDir, bucket string, minGeneration uint64) bool {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--json")
 	if code != 0 {

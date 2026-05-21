@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +33,7 @@ type nfsTarget struct {
 
 // uniqueExport creates a per-case bucket + NFS export and registers cleanup.
 // Returns (bucket, export-generation).
-func (tgt *nfsTarget) uniqueExport(t *testing.T, caseName string) (string, uint64) {
+func (tgt *nfsTarget) uniqueExport(t testing.TB, caseName string) (string, uint64) {
 	t.Helper()
 	id := tgt.caseSeq.Add(1)
 	bucket := fmt.Sprintf("nfs-%s-%s-%d", tgt.name, sanitizeForBucket(caseName), id)
@@ -50,7 +51,7 @@ func (tgt *nfsTarget) uniqueExport(t *testing.T, caseName string) (string, uint6
 	require.Equal(t, bucket, created.Bucket)
 	require.NotZero(t, created.Generation)
 
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		// Best-effort: bucket may already be gone (e.g. delete-cascade case
 		// removed the export). Use --quiet and ignore non-zero exit.
 		_, _ = runCLI(t, tgt.dataDir(tgt.leaderIdx), "nfs", "export", "remove", bucket, "--quiet")
@@ -59,7 +60,7 @@ func (tgt *nfsTarget) uniqueExport(t *testing.T, caseName string) (string, uint6
 }
 
 // newSingleNodeNFSTarget reuses the existing single-node fixture from TestMain.
-func newSingleNodeNFSTarget(t *testing.T) *nfsTarget {
+func newSingleNodeNFSTarget(t testing.TB) *nfsTarget {
 	t.Helper()
 	return &nfsTarget{
 		name:       "single",
@@ -76,7 +77,7 @@ func newSingleNodeNFSTarget(t *testing.T) *nfsTarget {
 }
 
 // newSharedClusterNFSTarget reuses the shared mrCluster (NFS+iceberg).
-func newSharedClusterNFSTarget(t *testing.T) *nfsTarget {
+func newSharedClusterNFSTarget(t testing.TB) *nfsTarget {
 	t.Helper()
 	c := getOrInitSharedMRCluster(t)
 	return &nfsTarget{
@@ -101,7 +102,7 @@ func newSharedClusterNFSTarget(t *testing.T) *nfsTarget {
 // listNfsExportsOnDataDir is the dataDir-parameterized form of listNfsExports.
 // Used by matrix cases that need to query exports on a specific cluster node's
 // dataDir. The single-fixture listNfsExports remains for non-matrix callers.
-func listNfsExportsOnDataDir(t *testing.T, dataDir string) []e2eNfsExport {
+func listNfsExportsOnDataDir(t testing.TB, dataDir string) []e2eNfsExport {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--json")
 	require.Equalf(t, 0, code, "%s", out)

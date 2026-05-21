@@ -215,7 +215,7 @@ func tryStartStaticMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) 
 //
 // If opts.MaxNodes > numNodes, port/slice arrays are pre-allocated to MaxNodes
 // so addNode can attach more nodes later without reallocating.
-func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
+func tryStartMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) (*mrCluster, error) {
 	t.Helper()
 	maxNodes := opts.MaxNodes
 	if maxNodes < numNodes {
@@ -302,7 +302,7 @@ func tryStartMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) (*mrCl
 
 // startMRCluster retries tryStartMRCluster up to 3 times with fresh ports on
 // transient port-allocation or election-timing failures.
-func startMRCluster(t *testing.T, numNodes int, opts mrClusterOptions) *mrCluster {
+func startMRCluster(t testing.TB, numNodes int, opts mrClusterOptions) *mrCluster {
 	t.Helper()
 	const maxAttempts = 3
 	var lastErr error
@@ -469,7 +469,7 @@ func countGroupDirsAcrossNodes(c *mrCluster) map[string]int {
 
 // waitForShardGroupCount polls GET /v1/cluster/status via the admin UDS on
 // dataDir until at least minGroups shard groups are present or timeout.
-func waitForShardGroupCount(t *testing.T, dataDir string, minGroups int, timeout time.Duration) {
+func waitForShardGroupCount(t testing.TB, dataDir string, minGroups int, timeout time.Duration) {
 	t.Helper()
 	sock := filepath.Join(dataDir, "admin.sock")
 	cli := clusteradmin.NewClient(sock)
@@ -826,7 +826,7 @@ func tryPutObjectVersioned(parent context.Context, client *s3.Client, bucket, ke
 	return *out.VersionId, nil
 }
 
-func requireMRCreateBucketEventually(t *testing.T, ctx context.Context, c *mrCluster, bucket string) {
+func requireMRCreateBucketEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket string) {
 	t.Helper()
 	leaderIdx := max(c.leaderIdx, 0)
 	client := ecS3Client(c.httpURLs[leaderIdx], c.accessKey, c.secretKey)

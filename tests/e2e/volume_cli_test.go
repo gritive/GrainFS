@@ -101,7 +101,7 @@ func waitForVolumeReady(t *testing.T, dataDir string, timeout time.Duration) {
 	t.Fatalf("volume bucket never became ready within %v: last output:\n%s", timeout, lastOut)
 }
 
-func runCLI(t *testing.T, dataDir string, args ...string) (stdout string, exitCode int) {
+func runCLI(t testing.TB, dataDir string, args ...string) (stdout string, exitCode int) {
 	t.Helper()
 	full := append([]string{}, args...)
 	if !containsFlag(full, "--endpoint") {

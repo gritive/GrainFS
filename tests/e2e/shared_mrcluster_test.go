@@ -24,7 +24,7 @@ var (
 // multiraft_sharding_test.go:433 — "static clusters set all nodes before
 // setting nodeCount"). Matrix Target factories (nfsTarget, icebergTarget)
 // use c.nodeCount for index modulo, so we set it explicitly here.
-func getOrInitSharedMRCluster(t *testing.T) *mrCluster {
+func getOrInitSharedMRCluster(t testing.TB) *mrCluster {
 	t.Helper()
 	sharedMRClusterOnce.Do(func() {
 		c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
