@@ -1593,13 +1593,11 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		effectiveCfg = AutoECConfigForClusterSize(len(liveNodes))
 	}
 	shardKey := ecObjectShardKey(key, versionID)
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
 		placementGroupID = group.ID
 		effectiveCfg = cfg
 		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-		ringVer = 0
 	} else if PlacementGroupHasFullEntry(ctx) {
 		return nil, false, err
 	}
@@ -1627,7 +1625,7 @@ func (b *DistributedBackend) tryPutObjectSingleLocalShardInMemory(
 		key,
 		versionID,
 		placementGroupID,
-		ringVer,
+		RingVersion(0),
 		placement,
 		sp,
 		body,
@@ -2051,38 +2049,9 @@ func (b *DistributedBackend) encryptedShardStorage() bool {
 	return b.shardSvc != nil && b.shardSvc.encryptor != nil
 }
 
-// selectECPlacement decides where each shard for shardKey should land.
-//
-// Preference order:
-//  1. Ring-deterministic placement when ring exists AND every candidate node is
-//     in liveNodes (allLive). Returns (placement, ring.Version).
-//  2. PlacementForNodes(liveNodes) fallback when ring is missing OR any
-//     candidate is offline/unhealthy. Returns (placement, 0).
-//
-// The ringVer=0 fallback is required because EC has write-all consistency: if
-// even one ring-chosen node is dead, the whole PUT fails and the object is
-// unrecoverable. Read paths that see ringVer=0 must reconstruct via
-// metaNodeIDs (always written into object metadata) instead of recomputing
-// from a stale ring.
-func selectECPlacement(ring *Ring, ringErr error, cfg ECConfig, liveNodes []string, shardKey string) (placement []string, ringVer RingVersion) {
-	if ringErr == nil && ring != nil {
-		candidate := ring.PlacementForKey(cfg, shardKey)
-		liveSet := make(map[string]bool, len(liveNodes))
-		for _, n := range liveNodes {
-			liveSet[n] = true
-		}
-		allLive := true
-		for _, n := range candidate {
-			if !liveSet[n] {
-				allLive = false
-				break
-			}
-		}
-		if allLive {
-			return candidate, ring.Version
-		}
-	}
-	return PlacementForNodes(cfg, liveNodes, shardKey), 0
+// selectECPlacement selects shard placement for shardKey using rendezvous hashing over liveNodes.
+func selectECPlacement(cfg ECConfig, liveNodes []string, shardKey string) []string {
+	return PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
 }
 
 func placementTargetsFromContext(ctx context.Context, operation string) (ShardGroupEntry, ECConfig, error) {
@@ -2156,8 +2125,7 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 	// for different versions land at different paths without changing the API.
 	shardKey := ecObjectShardKey(key, versionID)
 
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
 	topologyWrite := false
 	topologyGroup := ShardGroupEntry{}
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -2166,7 +2134,6 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		placementGroupID = group.ID
 		effectiveCfg = cfg
 		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-		ringVer = 0
 	} else if PlacementGroupHasFullEntry(ctx) {
 		return nil, err
 	}
@@ -2191,7 +2158,7 @@ func (b *DistributedBackend) putObjectECData(ctx context.Context, bucket, key, v
 		PlacementGroupID: placementGroupID,
 		Config:           effectiveCfg,
 		Placement:        placement,
-		RingVersion:      ringVer,
+		RingVersion:      0,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,
@@ -2248,8 +2215,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 
 	shardKey := ecObjectShardKey(key, versionID)
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, effectiveCfg, liveNodes, shardKey)
+	placement := selectECPlacement(effectiveCfg, liveNodes, shardKey)
 	topologyWrite := false
 	topologyGroup := ShardGroupEntry{}
 	if group, cfg, err := placementTargetsFromContext(ctx, "put_object"); err == nil {
@@ -2258,7 +2224,6 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		placementGroupID = group.ID
 		effectiveCfg = cfg
 		placement = cloneStringSlice(group.PeerIDs[:cfg.NumShards()])
-		ringVer = 0
 	}
 	if len(placement) != effectiveCfg.NumShards() {
 		return nil, fmt.Errorf("putObjectEC: placement has %d nodes, need %d (k=%d m=%d)",
@@ -2273,11 +2238,11 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 
 	selfID := b.currentSelfAddr()
 	if beforeCommit == nil && effectiveCfg.DataShards == 1 && effectiveCfg.ParityShards == 0 && len(placement) == 1 && placement[0] == selfID {
-		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
+		return b.putObjectSingleLocalShardSpooled(ctx, bucket, key, versionID, placementGroupID, RingVersion(0), placement, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
 	}
 
 	if beforeCommit == nil && ecMemoryShardFastPathEnabled(effectiveCfg) && sp.Size <= maxECMemoryShardFastPathBytesForCfg(effectiveCfg) {
-		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, ringVer, placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
+		obj, handled, err := b.tryPutObjectECMemoryShards(ctx, bucket, key, versionID, placementGroupID, RingVersion(0), placement, effectiveCfg, sp, contentType, userMetadata, sseAlgorithm, parts, tags, multipartUploadID)
 		if err != nil && topologyWrite {
 			return nil, topologyShardWriteError(topologyGroup, effectiveCfg, err)
 		}
@@ -2296,7 +2261,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 		ExpectedETag:     expectedETag,
 		Config:           effectiveCfg,
 		Placement:        placement,
-		RingVersion:      ringVer,
+		RingVersion:      0,
 		ContentType:      contentType,
 		UserMetadata:     cloneStringMap(userMetadata),
 		SSEAlgorithm:     sseAlgorithm,

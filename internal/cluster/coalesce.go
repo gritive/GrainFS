@@ -194,8 +194,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		cleanupMerged()
 		return fmt.Errorf("coalesce: no effective EC config for %d live nodes", len(liveNodes))
 	}
-	currentRing, ringErr := b.fsm.GetRingStore().GetCurrentRing()
-	placement, ringVer := selectECPlacement(currentRing, ringErr, cfg, liveNodes, shardKey)
+	placement := selectECPlacement(cfg, liveNodes, shardKey)
 	if len(placement) != cfg.NumShards() {
 		cleanupMerged()
 		return fmt.Errorf("coalesce: placement has %d nodes, need %d (k=%d m=%d)",
@@ -208,7 +207,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		VersionID:   "coalesced/" + coalescedID,
 		Config:      cfg,
 		Placement:   placement,
-		RingVersion: ringVer,
+		RingVersion: 0,
 	}
 	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
@@ -247,7 +246,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		Placement:          placement,
 		ECData:             uint8(cfg.DataShards),
 		ECParity:           uint8(cfg.ParityShards),
-		RingVersion:        uint64(ringVer),
+		RingVersion:        0,
 	}
 	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
 		// EC shards committed but never referenced. Best-effort orphan cleanup
