@@ -22,27 +22,42 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
-func TestPresignedE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runPresignedCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("Presigned URL and metrics", func() {
+	describePresignedContext("SingleNode", func() s3Target {
+		return newSingleNodeS3Target()
 	})
 
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runPresignedCases(t, newSharedClusterS3Target(t))
+	describePresignedContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describePresignedContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, func() {
+		var tgt s3Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory()
+		})
+
+		runPresignedCases(func() s3Target { return tgt })
+		runMetricsEndpointCases(func() s3Target { return tgt })
 	})
 }
 
-func runPresignedCases(t *testing.T, tgt s3Target) {
-	client := tgt.pickNode(0)
-	endpoint := tgt.endpoint(0)
-
-	t.Run("GET", func(t *testing.T) {
+func runPresignedCases(getTgt func() s3Target) {
+	ginkgo.It("serves presigned GET URLs (GET)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		endpoint := tgt.endpoint(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-presign-get"
 		tgt.createBkt(t, bucket)
@@ -62,14 +77,18 @@ func runPresignedCases(t *testing.T, tgt s3Target) {
 
 		resp, err := http.Get(presigned)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		body, _ := io.ReadAll(resp.Body)
 		assert.Equal(t, content, string(body))
 	})
 
-	t.Run("PUT", func(t *testing.T) {
+	ginkgo.It("accepts presigned PUT URLs (PUT)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		endpoint := tgt.endpoint(0)
 		ctx := context.Background()
 		bucket := tgt.name + "-presign-put"
 		tgt.createBkt(t, bucket)
@@ -99,13 +118,16 @@ func runPresignedCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("uploaded.txt"),
 		})
 		require.NoError(t, err)
-		defer getOut.Body.Close()
+		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		assert.Equal(t, content, string(body))
 	})
 
-	t.Run("Expired", func(t *testing.T) {
+	ginkgo.It("rejects expired presigned URLs (Expired)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		endpoint := tgt.endpoint(0)
 		presigned, err := s3auth.PresignURLAt(http.MethodGet,
 			endpoint+"/"+tgt.name+"-presign-exp/file.txt",
 			tgt.accessKey, tgt.secretKey, "us-east-1", 1, time.Now().Add(-10*time.Second))
@@ -113,11 +135,14 @@ func runPresignedCases(t *testing.T, tgt s3Target) {
 
 		resp, err := http.Get(presigned)
 		require.NoError(t, err)
-		resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 
-	t.Run("WrongKey", func(t *testing.T) {
+	ginkgo.It("rejects presigned URLs signed with the wrong key (WrongKey)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		endpoint := tgt.endpoint(0)
 		presigned, err := s3auth.PresignURL(http.MethodGet,
 			endpoint+"/"+tgt.name+"-presign-wrong/file.txt",
 			tgt.accessKey, "wrongsecret", "us-east-1", 3600)
@@ -125,7 +150,7 @@ func runPresignedCases(t *testing.T, tgt s3Target) {
 
 		resp, err := http.Get(presigned)
 		require.NoError(t, err)
-		resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 }
@@ -145,7 +170,7 @@ type authServer struct {
 }
 
 // startAuthServer starts grainfs and bootstraps an admin SA via UDS.
-func startAuthServer(t *testing.T) authServer {
+func startAuthServer(t testing.TB) authServer {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-auth-e2e-*")
 	require.NoError(t, err)
@@ -193,22 +218,13 @@ func startAuthServer(t *testing.T) authServer {
 	}
 }
 
-func TestMetricsEndpointE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runMetricsEndpointCases(t, newSingleNodeS3Target())
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runMetricsEndpointCases(t, newSharedClusterS3Target(t))
-	})
-}
-
-func runMetricsEndpointCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	ctx := context.Background()
-	cli := tgt.pickNode(0)
-	endpoint := tgt.endpoint(0)
-
-	t.Run("ExposesHTTPMetrics", func(t *testing.T) {
+func runMetricsEndpointCases(getTgt func() s3Target) {
+	ginkgo.It("exposes HTTP metrics (ExposesHTTPMetrics)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		ctx := context.Background()
+		cli := tgt.pickNode(0)
+		endpoint := tgt.endpoint(0)
 		bucket := tgt.uniqueBucket(t, "metrics")
 		_, _ = cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
@@ -220,7 +236,7 @@ func runMetricsEndpointCases(t *testing.T, tgt s3Target) {
 		req.Header.Set("Accept-Encoding", "identity")
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		ginkgo.DeferCleanup(resp.Body.Close)
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		body, _ := io.ReadAll(resp.Body)
