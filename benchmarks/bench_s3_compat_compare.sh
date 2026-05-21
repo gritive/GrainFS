@@ -23,7 +23,7 @@ BENCH_DIR_PROVIDED=0
 if [[ -n "${BENCH_DIR:-}" ]]; then
   BENCH_DIR_PROVIDED=1
 else
-  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"
+  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gfsb.XXXXXX")"
 fi
 BUCKET="${BUCKET:-bench}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
@@ -273,6 +273,10 @@ start_grainfs_single() {
   if [[ "$BENCH_PPROF" == "1" ]]; then
     GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
     extra+=(--pprof-port "$PPROF_BASE_PORT")
+  fi
+  if [[ -n "${GRAINFS_SINGLE_EXTRA_FLAGS:-}" ]]; then
+    read -r -a grainfs_single_extra_flags <<<"$GRAINFS_SINGLE_EXTRA_FLAGS"
+    extra+=("${grainfs_single_extra_flags[@]}")
   fi
   "$BINARY" serve \
     --data "$data_dir" \
