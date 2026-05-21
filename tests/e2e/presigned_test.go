@@ -23,8 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
@@ -68,20 +67,20 @@ func runPresignedCases(getTgt func() s3Target) {
 			Key:    aws.String("secret.txt"),
 			Body:   strings.NewReader(content),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		presigned, err := s3auth.PresignURL(http.MethodGet,
 			endpoint+"/"+bucket+"/secret.txt",
 			tgt.accessKey, tgt.secretKey, "us-east-1", 3600)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := http.Get(presigned)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 		body, _ := io.ReadAll(resp.Body)
-		assert.Equal(t, content, string(body))
+		gomega.Expect(string(body)).To(gomega.Equal(content))
 	})
 
 	ginkgo.It("accepts presigned PUT URLs (PUT)", func() {
@@ -96,12 +95,12 @@ func runPresignedCases(getTgt func() s3Target) {
 		presigned, err := s3auth.PresignURL(http.MethodPut,
 			endpoint+"/"+bucket+"/uploaded.txt",
 			tgt.accessKey, tgt.secretKey, "us-east-1", 3600)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		content := "uploaded via presigned"
 		var lastErr error
 		var lastStatus int
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			req, _ := http.NewRequest(http.MethodPut, presigned, strings.NewReader(content))
 			resp, err := http.DefaultClient.Do(req)
 			lastErr = err
@@ -111,47 +110,45 @@ func runPresignedCases(getTgt func() s3Target) {
 			defer resp.Body.Close()
 			lastStatus = resp.StatusCode
 			return resp.StatusCode == http.StatusOK
-		}, 30*time.Second, 500*time.Millisecond, "presigned PUT status=%d err=%v", lastStatus, lastErr)
+		}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "presigned PUT status=%d err=%v", lastStatus, lastErr)
 
 		getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String("uploaded.txt"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
-		assert.Equal(t, content, string(body))
+		gomega.Expect(string(body)).To(gomega.Equal(content))
 	})
 
 	ginkgo.It("rejects expired presigned URLs (Expired)", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		endpoint := tgt.endpoint(0)
 		presigned, err := s3auth.PresignURLAt(http.MethodGet,
 			endpoint+"/"+tgt.name+"-presign-exp/file.txt",
 			tgt.accessKey, tgt.secretKey, "us-east-1", 1, time.Now().Add(-10*time.Second))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := http.Get(presigned)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
-		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
 	})
 
 	ginkgo.It("rejects presigned URLs signed with the wrong key (WrongKey)", func() {
-		t := ginkgo.GinkgoTB()
 		tgt := getTgt()
 		endpoint := tgt.endpoint(0)
 		presigned, err := s3auth.PresignURL(http.MethodGet,
 			endpoint+"/"+tgt.name+"-presign-wrong/file.txt",
 			tgt.accessKey, "wrongsecret", "us-east-1", 3600)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := http.Get(presigned)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
-		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
 	})
 }
 
@@ -173,7 +170,7 @@ type authServer struct {
 func startAuthServer(t testing.TB) authServer {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "grainfs-auth-e2e-*")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	binary := getBinary()
 	port := freePort()
@@ -187,7 +184,7 @@ func startAuthServer(t testing.TB) authServer {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
+	gomega.Expect(cmd.Start()).To(gomega.Succeed())
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
@@ -200,7 +197,7 @@ func startAuthServer(t testing.TB) authServer {
 		Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
 		UsePathStyle: true,
 	})
-	require.NoError(t, waitForIAMReady(client, 30*time.Second))
+	gomega.Expect(waitForIAMReady(client, 30*time.Second)).To(gomega.Succeed())
 
 	cleanup := func() {
 		cmd.Process.Kill()
@@ -235,14 +232,14 @@ func runMetricsEndpointCases(getTgt func() s3Target) {
 		req, _ := http.NewRequest(http.MethodGet, endpoint+"/metrics", nil)
 		req.Header.Set("Accept-Encoding", "identity")
 		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(resp.Body.Close)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 		body, _ := io.ReadAll(resp.Body)
 		bodyStr := string(body)
 
-		assert.Contains(t, bodyStr, "grainfs_http_requests_total")
-		assert.Contains(t, bodyStr, "grainfs_http_request_duration_seconds")
+		gomega.Expect(bodyStr).To(gomega.ContainSubstring("grainfs_http_requests_total"))
+		gomega.Expect(bodyStr).To(gomega.ContainSubstring("grainfs_http_request_duration_seconds"))
 	})
 }
