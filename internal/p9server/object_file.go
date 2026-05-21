@@ -30,6 +30,17 @@ type objectFile struct {
 
 const maxFallbackObjectSize = 64 << 20
 
+// resolveContentType returns the existing object's Content-Type, or
+// "application/octet-stream" for new objects. One HeadObject RTT is
+// acceptable here because both callers (resize, flush) already perform a
+// full object rewrite on the same path.
+func resolveContentType(ctx context.Context, backend storage.Backend, bucket, key string) string {
+	if obj, err := backend.HeadObject(ctx, bucket, key); err == nil && obj.ContentType != "" {
+		return obj.ContentType
+	}
+	return "application/octet-stream"
+}
+
 func (f *objectFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
 		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta}, nil
@@ -162,7 +173,11 @@ func (f *objectFile) resize(ctx context.Context, size int64) error {
 	} else if int64(len(data)) < size {
 		data = append(data, make([]byte, size-int64(len(data)))...)
 	}
-	_, err = f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(data), "application/octet-stream")
+	ct := obj.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	_, err = f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(data), ct)
 	return err
 }
 
@@ -300,7 +315,8 @@ func (f *objectFile) flush(ctx context.Context) error {
 	if !f.dirty {
 		return nil
 	}
-	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(f.dirtyData), "application/octet-stream")
+	ct := resolveContentType(ctx, f.backend, f.bucket, f.key)
+	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(f.dirtyData), ct)
 	if err != nil {
 		log.Warn().Err(err).Str("bucket", f.bucket).Str("key", f.key).Int("bytes", len(f.dirtyData)).Msg("9p flush: put object failed")
 		return err

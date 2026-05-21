@@ -1131,9 +1131,14 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		}
 	} else {
 		// Fallback: RMW for backends that don't implement WriteAt.
+		// Capture existingSize and contentType in a single HeadObject call.
 		var existingSize uint64
+		existingContentType := "application/octet-stream"
 		if obj, herr := d.backend.HeadObject(context.Background(), bucket, key); herr == nil {
 			existingSize = uint64(obj.Size)
+			if obj.ContentType != "" {
+				existingContentType = obj.ContentType
+			}
 		}
 		writeLen := uint64(len(writeData))
 		if offset > maxInt64Uint || writeLen > maxInt64Uint-offset {
@@ -1149,13 +1154,13 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 
 		if offset == 0 && end >= existingSize {
 			br.Reset(writeData)
-			_, err = d.backend.PutObject(context.Background(), bucket, key, br, "application/octet-stream")
+			_, err = d.backend.PutObject(context.Background(), bucket, key, br, existingContentType)
 		} else {
 			var ra storage.PartialIO
 			if partial, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
 				ra = partial
 			}
-			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize, ra)
+			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize, existingContentType, ra)
 		}
 		if err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1170,7 +1175,19 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64, ra storage.PartialIO) error {
+// resolveContentType returns the existing object's Content-Type, or
+// "application/octet-stream" for new objects. It is used at write sites that do
+// not have a prior HeadObject result available (SETATTR truncate). One
+// HeadObject RTT is acceptable because these paths are not on the hot data
+// path (they imply a full object rewrite anyway).
+func (d *Dispatcher) resolveContentType(ctx context.Context, bucket, key string) string {
+	if obj, err := d.backend.HeadObject(ctx, bucket, key); err == nil && obj.ContentType != "" {
+		return obj.ContentType
+	}
+	return "application/octet-stream"
+}
+
+func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64, contentType string, ra storage.PartialIO) error {
 	var (
 		rc      io.ReadCloser
 		readers []io.Reader
@@ -1221,7 +1238,7 @@ func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key stri
 			readers = append(readers, &skipThenReader{r: rc, n: int64(end - min(offset, existingSize))})
 		}
 	}
-	_, err := d.backend.PutObject(ctx, bucket, key, io.MultiReader(readers...), "application/octet-stream")
+	_, err := d.backend.PutObject(ctx, bucket, key, io.MultiReader(readers...), contentType)
 	return err
 }
 
@@ -1419,6 +1436,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		} else {
+			ct := d.resolveContentType(context.Background(), bucket, key)
 			var existing []byte
 			if rc, _, err := d.backend.GetObject(context.Background(), bucket, key); err == nil {
 				existing, _ = io.ReadAll(rc)
@@ -1431,7 +1449,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 			} else if cur < sz {
 				existing = append(existing, make([]byte, sz-cur)...)
 			}
-			if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+			if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(existing), ct); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		}
