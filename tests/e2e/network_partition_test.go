@@ -13,85 +13,82 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
-	"github.com/stretchr/testify/suite"
 )
 
-type NetworkPartitionSuite struct {
-	suite.Suite
-	dir          string
-	binary       string
-	port         int
-	toxiPort     int
-	proxyPort    int
-	toxiproxyCmd *exec.Cmd
-}
+var _ = ginkgo.Describe("Network partition", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("keeps pre-partition writes intact after recovery", func() {
+			runNetworkPartitionWithWrite(ginkgo.GinkgoTB())
+		})
+	})
+})
 
-func (s *NetworkPartitionSuite) SetupSuite() {
-	s.dir = s.T().TempDir()
-	s.binary = getBinary()
-	s.port = freePort()
-	s.toxiPort = freePort()
-	s.proxyPort = freePort()
+func runNetworkPartitionWithWrite(t testing.TB) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "grainfs-network-partition-*")
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
+	binary := getBinary()
+	port := freePort()
+	toxiPort := freePort()
+	proxyPort := freePort()
 
-	// Start toxiproxy
-	s.toxiproxyCmd = exec.Command("toxiproxy-server", "-port", fmt.Sprintf("%d", s.toxiPort))
-	s.toxiproxyCmd.Stdout = os.Stdout
-	s.toxiproxyCmd.Stderr = os.Stderr
-	err := s.toxiproxyCmd.Start()
+	toxiproxyCmd := exec.Command("toxiproxy-server", "-port", fmt.Sprintf("%d", toxiPort))
+	toxiproxyCmd.Stdout = os.Stdout
+	toxiproxyCmd.Stderr = os.Stderr
+	err = toxiproxyCmd.Start()
 	if err != nil {
 	}
+	ginkgo.DeferCleanup(func() {
+		if toxiproxyCmd != nil && toxiproxyCmd.Process != nil {
+			_ = toxiproxyCmd.Process.Kill()
+			_ = toxiproxyCmd.Wait()
+		}
+	})
 	time.Sleep(2 * time.Second)
-}
 
-func (s *NetworkPartitionSuite) TearDownSuite() {
-	if s.toxiproxyCmd != nil {
-		s.toxiproxyCmd.Process.Kill()
-		s.toxiproxyCmd.Wait()
-	}
-}
-
-func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	// Start grainfs behind toxiproxy proxy
 	ctx := context.Background()
 
 	// Create proxy: 127.0.0.1:{proxyPort} -> 127.0.0.1:{port}. Avoid
 	// localhost here because Toxiproxy may resolve it to ::1 while GrainFS is
 	// only readiness-checked on IPv4 in this e2e harness.
-	proxyURL := fmt.Sprintf("http://127.0.0.1:%d/proxies", s.toxiPort)
-	proxyPayload := fmt.Sprintf(`{"name":"grainfs","upstream":"127.0.0.1:%d","listen":"127.0.0.1:%d"}`, s.port, s.proxyPort)
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d/proxies", toxiPort)
+	proxyPayload := fmt.Sprintf(`{"name":"grainfs","upstream":"127.0.0.1:%d","listen":"127.0.0.1:%d"}`, port, proxyPort)
 	req, _ := http.NewRequest("POST", proxyURL, strings.NewReader(proxyPayload))
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
-	require.NoError(s.T(), err, "create toxiproxy proxy")
-	require.Equal(s.T(), http.StatusCreated, resp.StatusCode, "create toxiproxy proxy")
+	require.NoError(t, err, "create toxiproxy proxy")
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "create toxiproxy proxy")
 	resp.Body.Close()
 
 	// Start grainfs on actual port
-	cmd := exec.Command(s.binary, "serve",
-		"--data", s.dir,
-		"--port", fmt.Sprintf("%d", s.port),
+	cmd := exec.Command(binary, "serve",
+		"--data", dir,
+		"--port", fmt.Sprintf("%d", port),
 		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(s.T(), cmd.Start())
-	defer terminateProcess(cmd)
+	require.NoError(t, cmd.Start())
+	ginkgo.DeferCleanup(func() { terminateProcess(cmd) })
 
-	waitForPort(s.T(), s.proxyPort, 30*time.Second)
-	waitForPort(s.T(), s.port, 30*time.Second)
+	waitForPort(t, proxyPort, 30*time.Second)
+	waitForPort(t, port, 30*time.Second)
 
 	// Bootstrap admin SA via the on-disk admin UDS (not through the
 	// proxy — UDS is on the same host as grainfs).
-	bootstrap, _ := bootstrapAdminViaUDSAnyResult(s.T(), []string{s.dir}, 30*time.Second)
+	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
 	ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
 
 	// Create bucket and write data via proxy
-	s3Client := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", s.proxyPort), ak, sk)
-	createBucketWithAdminPolicyAttachViaUDSAny(s.T(), []string{s.dir}, bootstrap.SAID, "partition-test", s3Client)
+	s3Client := s3ClientFor(fmt.Sprintf("http://127.0.0.1:%d", proxyPort), ak, sk)
+	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, bootstrap.SAID, "partition-test", s3Client)
 
 	// Write data before partition
 	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
@@ -99,31 +96,31 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 		Key:    aws.String("before-partition"),
 		Body:   strings.NewReader("data before partition"),
 	})
-	require.NoError(s.T(), err)
+	require.NoError(t, err)
 
 	// Inject network partition: 100% packet loss
-	toxicURL := fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics", s.toxiPort)
+	toxicURL := fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics", toxiPort)
 	toxicPayload := `{"name":"partition","type":"timeout","stream":"upstream","toxicity":1.0,"attributes":{"timeout":0}}`
 	req, _ = http.NewRequest("POST", toxicURL, strings.NewReader(toxicPayload))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = client.Do(req)
-	require.NoError(s.T(), err)
-	require.Contains(s.T(), []int{http.StatusOK, http.StatusCreated}, resp.StatusCode, "create network partition toxic")
+	require.NoError(t, err)
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, resp.StatusCode, "create network partition toxic")
 	resp.Body.Close()
 
 	// Attempt write during partition (should fail or timeout)
-	s.T().Log("Writing during network partition (expected to fail)...")
+	t.Log("Writing during network partition (expected to fail)...")
 	partitionCtx, cancelPartitionWrite := context.WithTimeout(ctx, 3*time.Second)
-	defer cancelPartitionWrite()
+	ginkgo.DeferCleanup(cancelPartitionWrite)
 	_, err = s3Client.PutObject(partitionCtx, &s3.PutObjectInput{
 		Bucket: aws.String("partition-test"),
 		Key:    aws.String("during-partition"),
 		Body:   strings.NewReader("data during partition"),
 	})
-	require.Error(s.T(), err, "write during network partition should fail")
+	require.Error(t, err, "write during network partition should fail")
 
 	// Remove partition
-	req, _ = http.NewRequest("DELETE", fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics/partition", s.toxiPort), nil)
+	req, _ = http.NewRequest("DELETE", fmt.Sprintf("http://127.0.0.1:%d/proxies/grainfs/toxics/partition", toxiPort), nil)
 	resp, err = client.Do(req)
 	if err == nil {
 		resp.Body.Close()
@@ -133,23 +130,17 @@ func (s *NetworkPartitionSuite) TestNetworkPartition_WithWrite() {
 	time.Sleep(5 * time.Second)
 
 	// Verify data before partition is still there
-	s.T().Log("Verifying data integrity after partition recovery...")
+	t.Log("Verifying data integrity after partition recovery...")
 	getResp, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("partition-test"),
 		Key:    aws.String("before-partition"),
 	})
-	require.NoError(s.T(), err, "data before partition should be intact")
-	defer getResp.Body.Close()
+	require.NoError(t, err, "data before partition should be intact")
+	ginkgo.DeferCleanup(func() { _ = getResp.Body.Close() })
 
 	content, err := io.ReadAll(getResp.Body)
-	require.NoError(s.T(), err)
-	require.Equal(s.T(), "data before partition", string(content))
+	require.NoError(t, err)
+	require.Equal(t, "data before partition", string(content))
 
-	s.T().Log("✅ Network partition test passed - data integrity verified")
-}
-
-func TestNetworkPartitionSuite(t *testing.T) {
-	t.Run("Cluster3Node", func(t *testing.T) {
-		suite.Run(t, new(NetworkPartitionSuite))
-	})
+	t.Log("Network partition test passed - data integrity verified")
 }
