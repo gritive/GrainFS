@@ -12,6 +12,7 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -40,12 +41,16 @@ func (f *objectFile) isReadOnly() bool {
 }
 
 // anonRejected mirrors bucketFile.anonRejected for objectFile. See the
-// bucketFile method for the full contract.
+// bucketFile method for the full contract, including the FU#6 carve-out for
+// the "default" bucket's D#2 implicit-anon promise.
 func (f *objectFile) anonRejected() bool {
 	if f.cfg == nil {
 		return false
 	}
 	if f.binding.saID != "" {
+		return false
+	}
+	if f.bucket == reservedname.DefaultBucketName {
 		return false
 	}
 	anon, ok := f.cfg.GetBool("iam.anon-enabled")

@@ -17,9 +17,13 @@ import (
 //
 // Cases (per Context viability noted inline):
 //   - AnameAnon_PublicBucket_OK: anon attach to "default". SingleNode only —
-//     mrCluster always bootstraps to Phase 2, where the 9P attach gate denies
-//     anon (does not honor S3's default-bucket implicit-anon allow path).
-//     Reported as F-§B-9P-anon-attach-phase2 (production-level gap).
+//     mrCluster fixture does not auto-seed "default" (cluster bootstrap gates
+//     ShouldCreateDefaultBucketOnStartup on len(peers)==0; admin UDS refuses
+//     reserved names via public API), so cluster cannot run this case without
+//     extra fixture plumbing. FU#6 (F-§B-9P-anon-attach-phase2) fixed the
+//     underlying gap: bucketFile/objectFile.anonRejected now carves out the
+//     "default" bucket so the per-op flip gate honors the D#2 implicit-anon
+//     promise from rootFile.resolveAnon — see tests/e2e/phase2_p9_anon_default_test.go.
 //   - AnameMountSAHit_OK: enabled — FU#5 (F-§B-resolver-mountsa) wires
 //     resolver to consult the mount-SA pool when RequestContext.PrincipalType
 //     is PrincipalTypeMount, which 9P attach now sets via p9AttachReqCtx.
