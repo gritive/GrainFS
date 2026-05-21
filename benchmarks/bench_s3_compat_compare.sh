@@ -19,7 +19,12 @@ cd "$REPO_ROOT"
 BINARY="${BINARY:-./bin/grainfs}"
 TARGETS="${TARGETS:-grainfs-single,minio,rustfs}"
 PROFILE_ROOT="${PROFILE_ROOT:-benchmarks/profiles/s3-compat-compare-$(date +%Y%m%d-%H%M%S)}"
-BENCH_DIR="${BENCH_DIR:-/tmp/grainfs-s3-compat-compare}"
+BENCH_DIR_PROVIDED=0
+if [[ -n "${BENCH_DIR:-}" ]]; then
+  BENCH_DIR_PROVIDED=1
+else
+  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"
+fi
 BUCKET="${BUCKET:-bench}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
 WARP_DURATION="${WARP_DURATION:-30s}"
@@ -64,7 +69,9 @@ if [[ -z "$WARP_BIN" ]]; then
 fi
 
 mkdir -p "$PROFILE_ROOT"
-rm -rf "$BENCH_DIR"
+if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then
+  rm -rf "$BENCH_DIR"
+fi
 mkdir -p "$BENCH_DIR"
 
 PIDS=()
@@ -81,6 +88,64 @@ set_start_info() {
   START_ACCESS_KEY="$2"
   START_SECRET_KEY="$3"
   START_MODE="$4"
+}
+
+capture_cluster_status_snapshot() {
+  local target="$1"
+  local label="$2"
+  local base_urls="$3"
+  [[ "$target" == "grainfs-cluster" ]] || return 0
+  [[ -n "$base_urls" ]] || return 0
+
+  local out_dir="$PROFILE_ROOT/$target/cluster-status-$label"
+  local urls=()
+  local idx=1
+  local url
+  mkdir -p "$out_dir"
+  IFS=',' read -r -a urls <<<"$base_urls"
+  for url in "${urls[@]}"; do
+    curl -sf "$url/api/cluster/status" >"$out_dir/node${idx}.json" 2>/dev/null || true
+    idx=$((idx + 1))
+  done
+  python3 - "$out_dir" <<'PY' || true
+import collections
+import glob
+import json
+import os
+import sys
+
+out_dir = sys.argv[1]
+by_group = {}
+conflicts = {}
+groups = set()
+for path in sorted(glob.glob(os.path.join(out_dir, "node*.json"))):
+    try:
+        with open(path, encoding="utf-8") as f:
+            status = json.load(f)
+    except Exception:
+        continue
+    for group in status.get("shard_groups") or []:
+        group_id = group.get("id") or ""
+        leader = group.get("leader_id") or ""
+        if group_id:
+            groups.add(group_id)
+        if leader:
+            prev = by_group.setdefault(group_id, leader)
+            if prev != leader:
+                conflicts.setdefault(group_id, set()).update((prev, leader))
+leaders = collections.Counter(by_group.values())
+with open(os.path.join(out_dir, "leaders.tsv"), "w", encoding="utf-8") as f:
+    f.write("leader_id\tgroups\n")
+    for leader, count in sorted(leaders.items()):
+        f.write(f"{leader}\t{count}\n")
+with open(os.path.join(out_dir, "summary.txt"), "w", encoding="utf-8") as f:
+    f.write(f"groups_seen\t{len(groups)}\n")
+    f.write(f"groups_with_leader\t{len(by_group)}\n")
+    for leader, count in sorted(leaders.items()):
+        f.write(f"leader\t{leader}\t{count}\n")
+    for group_id, seen in sorted(conflicts.items()):
+        f.write(f"conflict\t{group_id}\t{','.join(sorted(seen))}\n")
+PY
 }
 
 cleanup() {
@@ -199,7 +264,6 @@ start_grainfs_single() {
   local data_dir="$BENCH_DIR/grainfs-single"
   local port
   local extra=()
-  local extra_flags=()
   port="$(bench_free_port)"
   mkdir -p "$data_dir"
   register_target_data_dir "$data_dir"
@@ -210,10 +274,6 @@ start_grainfs_single() {
     GRAINFS_PPROF_PORTS=("$PPROF_BASE_PORT")
     extra+=(--pprof-port "$PPROF_BASE_PORT")
   fi
-  if [[ -n "${EXTRA_GRAINFS_SERVE_FLAGS:-}" ]]; then
-    read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"
-  fi
-
   "$BINARY" serve \
     --data "$data_dir" \
     --port "$port" \
@@ -225,7 +285,6 @@ start_grainfs_single() {
     --lifecycle-interval 0 \
     --log-level warn \
     "${extra[@]}" \
-    "${extra_flags[@]}" \
     >"$PROFILE_ROOT/grainfs-single.log" 2>&1 &
   PIDS+=($!)
   bench_wait_tcp_port "127.0.0.1" "$port" "grainfs-single S3" 180 0.2 >&2
@@ -285,10 +344,6 @@ start_grainfs_cluster() {
     if [[ "$BENCH_PPROF" == "1" ]]; then
       extra+=(--pprof-port "${pprof_ports[$zero_idx]}")
     fi
-    local extra_flags=()
-    if [[ -n "${EXTRA_GRAINFS_SERVE_FLAGS:-}" ]]; then
-      read -r -a extra_flags <<<"$EXTRA_GRAINFS_SERVE_FLAGS"
-    fi
     "$BINARY" serve \
       --data "$cluster_dir/n${node_idx}" \
       --port "${http_ports[$zero_idx]}" \
@@ -302,7 +357,6 @@ start_grainfs_cluster() {
       --lifecycle-interval 0 \
       --log-level warn \
       "${extra[@]}" \
-      "${extra_flags[@]}" \
       >"$PROFILE_ROOT/grainfs-cluster-node-${node_idx}.log" 2>&1 &
     PIDS+=($!)
     bench_wait_tcp_port "127.0.0.1" "${http_ports[$zero_idx]}" "grainfs-cluster node${node_idx} S3" 180 0.2 >&2
@@ -333,6 +387,11 @@ start_grainfs_cluster() {
   # × 0.25s = 30s budget; the legacy fixed 45s sleep is gone. Followers
   # report state="Follower" on the same endpoint, so we don't poll them.
   bench_wait_cluster_leader "${urls[0]}" 120 0.25 >&2
+  local expected_shard_groups=$((GRAINFS_CLUSTER_NODES * 4))
+  if (( expected_shard_groups < 8 )); then
+    expected_shard_groups=8
+  fi
+  bench_wait_shard_group_count "${urls[0]}" "$expected_shard_groups" 240 0.5 >&2
   GRAINFS_ADMIN_DATA_DIR="$cluster_dir/n1"
   GRAINFS_SA_ID="$SA_ID"
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$ACCESS_KEY" "$SECRET_KEY" "local"
@@ -459,6 +518,12 @@ start_minio_cluster() {
     return 1
   fi
   echo "  minio-cluster S3 cluster-ready"
+  echo "  waiting for minio-cluster signed write readiness..."
+  bench_wait_s3_signed_write_ready "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "warp-minio-cluster-ready" "${MINIO_CLUSTER_WRITE_READY_ATTEMPTS:-120}" "${MINIO_CLUSTER_WRITE_READY_SLEEP:-0.5}" >&2 || {
+    echo "  minio-cluster signed write readiness failed; aborting" >&2
+    return 1
+  }
+  echo "  minio-cluster signed write-ready"
   set_start_info "$(IFS=','; echo "${urls[*]}")" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" "local"
 }
 
@@ -652,10 +717,12 @@ run_warp_case() {
   if [[ "$WARP_NOCLEAR" == "1" ]]; then
     args+=(--noclear)
   fi
+  capture_cluster_status_snapshot "$target" "$op-before" "$base_url"
   if ! "$WARP_BIN" "${args[@]}" >"$out_dir/warp.out" 2>&1; then
     RUN_FAILURES=1
     echo "warp-$op: non-zero exit for $target; see $out_dir/warp.out" | tee -a "$PROFILE_ROOT/skipped.txt"
   fi
+  capture_cluster_status_snapshot "$target" "$op-after" "$base_url"
 
   if [[ ! -f "$data_file" ]]; then
     RUN_FAILURES=1

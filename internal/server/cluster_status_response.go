@@ -42,7 +42,7 @@ func buildClusterStatus(info ClusterInfo, degraded bool, bucket string) adminapi
 		status.BucketAssignments = snap.BucketAssignments
 	}
 	if snap.ShardGroups != nil {
-		status.ShardGroups = clusterStatusShardGroups(snap.ShardGroups)
+		status.ShardGroups = clusterStatusShardGroups(snap.ShardGroups, snap.ShardGroupLeaders)
 	}
 	summary := info.ObjectIndexSummary(bucket)
 	status.ObjectIndexSummary = &adminapi.ObjectIndexSummary{

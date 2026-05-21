@@ -88,7 +88,7 @@ func TestStatus_JSONRoundTrip(t *testing.T) {
 		PeerAddrs:         map[string]string{"n1": "127.0.0.1:7001"},
 		PeerStates:        map[string]string{"n1": "live"},
 		BucketAssignments: map[string]string{"b": "g1"},
-		ShardGroups:       []ShardGroup{{ID: "g1", PeerIDs: []string{"n1", "n2"}}},
+		ShardGroups:       []ShardGroup{{ID: "g1", PeerIDs: []string{"n1", "n2"}, LeaderID: "n2"}},
 	}
 	buf, err := json.Marshal(in)
 	require.NoError(t, err)
