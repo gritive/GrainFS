@@ -8,8 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestCacheE2E probes the cache-coherence surface (PUT-overwrite, DELETE,
@@ -53,17 +52,17 @@ func runCacheCases(getTgt func() s3Target) {
 			Body:        strings.NewReader(body),
 			ContentType: aws.String("text/plain"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		for i := 0; i < 2; i++ {
 			resp, err := cli.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			data, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			assert.Equal(t, body, string(data))
+			gomega.Expect(string(data)).To(gomega.Equal(body))
 		}
 
 		bodyV2 := "cache-test-data-v2"
@@ -73,16 +72,16 @@ func runCacheCases(getTgt func() s3Target) {
 			Body:        strings.NewReader(bodyV2),
 			ContentType: aws.String("text/plain"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		assert.Equal(t, bodyV2, string(data))
+		gomega.Expect(string(data)).To(gomega.Equal(bodyV2))
 	})
 
 	ginkgo.It("invalidates reads after delete (DeleteInvalidation)", func() {
@@ -98,26 +97,26 @@ func runCacheCases(getTgt func() s3Target) {
 			Key:    aws.String(key),
 			Body:   strings.NewReader("to-be-deleted"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		resp, err := cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		resp.Body.Close()
 
 		_, err = cli.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = cli.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		assert.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("updates HEAD metadata after PUT overwrite (HeadAfterPut)", func() {
@@ -133,27 +132,27 @@ func runCacheCases(getTgt func() s3Target) {
 			Key:    aws.String(key),
 			Body:   strings.NewReader("short"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		head1, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		assert.Equal(t, int64(5), *head1.ContentLength)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(*head1.ContentLength).To(gomega.Equal(int64(5)))
 
 		_, err = cli.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 			Body:   strings.NewReader("much longer content"),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		head2, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		assert.Equal(t, int64(19), *head2.ContentLength)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(*head2.ContentLength).To(gomega.Equal(int64(19)))
 	})
 }
