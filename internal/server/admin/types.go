@@ -27,6 +27,7 @@ type Deps struct {
 	IAM                  IAMService               // optional; nil disables IAM admin endpoints
 	IAMPolicy            IAMPolicyService         // optional; nil disables IAM policy admin endpoints
 	IAMGroup             IAMGroupService          // optional; nil disables IAM group admin endpoints
+	IAMMountSA           IAMMountSAService        // optional; nil disables IAM mount-SA admin endpoints
 	BucketWithPolicyProp BucketWithPolicyProposer // optional; nil → create-only path (no attach)
 	ConfigProposer       ConfigProposer           // optional; nil disables config write endpoints
 	ConfigStore          ConfigStoreReader        // optional; nil disables config read endpoints

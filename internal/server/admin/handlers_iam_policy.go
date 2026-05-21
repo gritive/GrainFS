@@ -7,6 +7,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/iam/builtin"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 )
 
@@ -105,6 +106,8 @@ func DeletePolicy(ctx context.Context, d *Deps, name string) error {
 }
 
 // AttachPolicyToSA attaches a policy to a ServiceAccount via Raft.
+// It rejects policies that contain mount-SA-only actions (grainfs:NFSMount /
+// grainfs:9PAttach) to enforce cross-namespace isolation.
 func AttachPolicyToSA(ctx context.Context, d *Deps, policyName, saID string) error {
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
@@ -112,11 +115,53 @@ func AttachPolicyToSA(ctx context.Context, d *Deps, policyName, saID string) err
 	if policyName == "" || saID == "" {
 		return NewInvalid("policy and sa_id are required")
 	}
+	// Cross-namespace pre-check: reject Mount SA actions on S3 SA policies.
+	// Policy may not exist yet (attach before put is not normally valid) — skip
+	// when the doc is unavailable rather than blocking on a not-found condition.
+	if raw, err := d.IAMPolicy.PolicyDoc(ctx, policyName); err == nil && raw != nil {
+		if nsErr := policy.ValidateForS3SAAttach(string(raw)); nsErr != nil {
+			return NewForbidden(fmt.Sprintf("cross-namespace attach rejected: %v", nsErr))
+		}
+	}
 	payload, err := cluster.EncodePolicyAttachToSAPutPayload(saID, policyName)
 	if err != nil {
 		return err
 	}
 	return d.IAMPolicy.Propose(ctx, clusterpb.MetaCmdTypePolicyAttachToSAPut, payload)
+}
+
+// AttachPolicyToMountSA attaches a policy to a MountSA (NFS/9P principal) via Raft.
+// It rejects policies that contain S3/Iceberg actions or wildcards to enforce
+// cross-namespace isolation.
+func AttachPolicyToMountSA(ctx context.Context, d *Deps, policyName, mountSA string) error {
+	if d.IAMMountSA == nil {
+		return NewInternal("iam mount-sa admin disabled")
+	}
+	if policyName == "" || mountSA == "" {
+		return NewInvalid("policy and mount_sa are required")
+	}
+	// Cross-namespace pre-check: reject non-mount actions on MountSA policies.
+	if d.IAMPolicy != nil {
+		if raw, err := d.IAMPolicy.PolicyDoc(ctx, policyName); err == nil && raw != nil {
+			if nsErr := policy.ValidateForMountSAAttach(string(raw)); nsErr != nil {
+				return NewForbidden(fmt.Sprintf("cross-namespace attach rejected: %v", nsErr))
+			}
+		}
+	}
+	payload := mountsastore.EncodeAttachPolicyPayload(mountSA, policyName)
+	return d.IAMMountSA.Propose(ctx, clusterpb.MetaCmdTypeMountSAAttachPolicy, payload)
+}
+
+// DetachPolicyFromMountSA detaches a policy from a MountSA via Raft.
+func DetachPolicyFromMountSA(ctx context.Context, d *Deps, policyName, mountSA string) error {
+	if d.IAMMountSA == nil {
+		return NewInternal("iam mount-sa admin disabled")
+	}
+	if policyName == "" || mountSA == "" {
+		return NewInvalid("policy and mount_sa are required")
+	}
+	payload := mountsastore.EncodeDetachPolicyPayload(mountSA, policyName)
+	return d.IAMMountSA.Propose(ctx, clusterpb.MetaCmdTypeMountSADetachPolicy, payload)
 }
 
 // DetachPolicyFromSA detaches a policy from a ServiceAccount via Raft.

@@ -121,6 +121,14 @@ type IAMGroupService interface {
 	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
 }
 
+// IAMMountSAService is the slim interface Mount SA admin handlers need.
+// Kept separate from IAMGroupService / IAMPolicyService because MountSA
+// operations use distinct Raft MetaCmdTypes (61-64) and a distinct Badger
+// store. nil disables mount-SA admin endpoints.
+type IAMMountSAService interface {
+	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
+}
+
 // ConfigProposer is the slim interface config admin handlers need to write
 // cluster-wide config via Raft. Satisfied by *cluster.MetaRaft.
 // nil disables config write endpoints.
