@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.308.0] - 2026-05-21
+
+### Fixed
+
+- **S3 default-bucket implicit anon policy is now fail-closed on transient
+  resolver errors.** When the policy resolver returned a transient Badger error
+  while checking whether `default` had an explicit bucket policy, the
+  authorizer previously fell through to the Phase 0 anon check and allowed the
+  request, silently turning an unreadable Deny policy into an Allow. The
+  authorizer now returns Deny with `resolver: HasBucketPolicy: <err>` when the
+  resolver fails. (F#43)
+
+- **First `grainfs iam sa create` now refuses to commit when the local node's
+  TLS posture would block the implied anon-disable flip.** Previously, the
+  cluster committed the SA, then `iam.anon-enabled` failed to flip to false
+  because the reload hook refused on bad TLS posture, and the warning was
+  swallowed in the FSM apply log — leaving the cluster with an authenticated
+  SA in store but anon still enabled. The admin UDS now pre-checks the
+  posture: with no TLS cert and no `trusted-proxy.cidr`, the first SA create
+  returns HTTP 412 with a remediation hint naming all three operator knobs
+  (cert path, `GRAINFS_TLS_CERT/KEY`, `grainfs config set trusted-proxy.cidr`).
+  Subsequent SA creates are unaffected. (F#26-tls-posture)
+
+### Changed
+
+- Server boot now fails fast when the S3 server-options phase finds
+  `cfgStore` or `iamPolicyStores` unwired, instead of silently skipping the
+  Phase 0 anon middleware and policy authorizer. Surfaces boot-phase ordering
+  bugs at the right place rather than at runtime. (F#45)
+
 ## [0.0.307.0] - 2026-05-21
 
 ### Documentation
