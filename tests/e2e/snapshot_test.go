@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,7 +51,7 @@ func postJSON(url string, body interface{}) (*http.Response, error) {
 	return client.Post(url, "application/json", &buf) //nolint:noctx
 }
 
-func createSnapshotE2E(t *testing.T, serverURL, reason string) snapshotResponse {
+func createSnapshotE2E(t testing.TB, serverURL, reason string) snapshotResponse {
 	t.Helper()
 	var lastErr error
 	var lastStatus int
@@ -88,27 +89,45 @@ func createSnapshotE2E(t *testing.T, serverURL, reason string) snapshotResponse 
 	return snapshotResponse{}
 }
 
-// TestSnapshotE2E exercises the /admin/snapshots HTTP surface (create / list
+// Snapshot specs exercise the /admin/snapshots HTTP surface (create / list
 // / restore / 404) against both single-node and 4-node cluster fixtures.
-// /admin/snapshots restore mutates global metadata state, so this group
-// uses a dedicated per-branch fixture (single boot per fixture, sub-tests
-// run in sequence on it) to avoid contaminating the shared fixtures.
-func TestSnapshotE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runSnapshotCases(t, newDedicatedSingleNodeS3Target(t, nil))
+// /admin/snapshots restore mutates global metadata state, so each spec starts
+// a dedicated fixture instead of sharing one across cases.
+var _ = ginkgo.Describe("Snapshots", func() {
+	describeSnapshotContext("SingleNode", func() s3Target {
+		return newDedicatedSingleNodeS3Target(ginkgo.GinkgoTB(), nil)
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runSnapshotCases(t, newClusterS3TargetWithExtraArgs(t, 4, nil))
+
+	describeSnapshotContext("Cluster4Node", func() s3Target {
+		return newClusterS3TargetWithExtraArgs(ginkgo.GinkgoTB(), 4, nil)
+	})
+})
+
+func describeSnapshotContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, func() {
+		var (
+			tgt       s3Target
+			serverURL string
+			client    *s3.Client
+		)
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory()
+			serverURL = tgt.endpoint(0)
+			client = tgt.pickNode(0)
+		})
+
+		runSnapshotCases(func() s3Target { return tgt }, func() string { return serverURL }, func() *s3.Client { return client })
 	})
 }
 
-func runSnapshotCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	serverURL := tgt.endpoint(0)
-	client := tgt.pickNode(0)
-	ctx := context.Background()
-
-	t.Run("CreateAndRestore", func(t *testing.T) {
+func runSnapshotCases(getTgt func() s3Target, getServerURL func() string, getClient func() *s3.Client) {
+	ginkgo.It("creates a snapshot and restores object state", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		serverURL := getServerURL()
+		client := getClient()
+		ctx := context.Background()
 		bucket := tgt.uniqueBucket(t, "create")
 
 		objects := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}
@@ -145,7 +164,7 @@ func runSnapshotCases(t *testing.T, tgt s3Target) {
 		restoreURL := fmt.Sprintf("%s/admin/snapshots/%d/restore", serverURL, snap.Seq)
 		restoreResp, err := postJSON(restoreURL, nil)
 		require.NoError(t, err)
-		defer restoreResp.Body.Close()
+		ginkgo.DeferCleanup(restoreResp.Body.Close)
 		restoreBody, err := io.ReadAll(restoreResp.Body)
 		require.NoError(t, err)
 		require.Equalf(t, http.StatusOK, restoreResp.StatusCode, "restore status: %s", restoreBody)
@@ -167,8 +186,8 @@ func runSnapshotCases(t *testing.T, tgt s3Target) {
 				Key:    aws.String(key),
 			})
 			require.NoError(t, err, "get %s after restore", key)
+			ginkgo.DeferCleanup(getResp.Body.Close)
 			body, _ := io.ReadAll(getResp.Body)
-			getResp.Body.Close()
 			require.Equal(t, "content-"+key, string(body))
 		}
 
@@ -181,14 +200,16 @@ func runSnapshotCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("List", func(t *testing.T) {
+	ginkgo.It("lists snapshots in sequence order", func() {
+		t := ginkgo.GinkgoTB()
+		serverURL := getServerURL()
 		for i := 0; i < 2; i++ {
 			createSnapshotE2E(t, serverURL, fmt.Sprintf("list-test-%d", i))
 		}
 
 		listResp, err := http.Get(serverURL + "/admin/snapshots") //nolint:noctx
 		require.NoError(t, err)
-		defer listResp.Body.Close()
+		ginkgo.DeferCleanup(listResp.Body.Close)
 		require.Equal(t, http.StatusOK, listResp.StatusCode)
 
 		var lr snapshotListResponse
@@ -200,10 +221,12 @@ func runSnapshotCases(t *testing.T, tgt s3Target) {
 		}
 	})
 
-	t.Run("NotFound", func(t *testing.T) {
+	ginkgo.It("returns not found for missing snapshot restores", func() {
+		t := ginkgo.GinkgoTB()
+		serverURL := getServerURL()
 		restoreResp, err := postJSON(serverURL+"/admin/snapshots/999999/restore", nil)
 		require.NoError(t, err)
-		defer restoreResp.Body.Close()
+		ginkgo.DeferCleanup(restoreResp.Body.Close)
 		require.Equal(t, http.StatusNotFound, restoreResp.StatusCode)
 
 		var er errorResponse
