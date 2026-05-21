@@ -1,0 +1,101 @@
+package datawal
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestAppendRollbackAfterPartialWrite(t *testing.T) {
+	f := &failingWALFile{failAfter: 10}
+	w := &WAL{file: f}
+
+	_, err := w.Append(context.Background(), Record{Op: OpSegmentPut, Payload: []byte("first")})
+	require.Error(t, err)
+	require.Equal(t, uint64(0), w.lastSeq)
+	require.Empty(t, f.data)
+
+	f.failAfter = -1
+	seq, err := w.Append(context.Background(), Record{Op: OpSegmentPut, Payload: []byte("second")})
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), seq)
+
+	rec, err := DecodeRecord(bytes.NewReader(f.data))
+	require.NoError(t, err)
+	require.Equal(t, []byte("second"), rec.Payload)
+}
+
+type failingWALFile struct {
+	data      []byte
+	off       int64
+	failAfter int
+}
+
+func (f *failingWALFile) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (f *failingWALFile) Write(p []byte) (int, error) {
+	if f.failAfter >= 0 && int(f.off)+len(p) > f.failAfter {
+		n := f.failAfter - int(f.off)
+		if n < 0 {
+			n = 0
+		}
+		f.write(p[:n])
+		return n, errors.New("injected write failure")
+	}
+	f.write(p)
+	return len(p), nil
+}
+
+func (f *failingWALFile) Close() error { return nil }
+
+func (f *failingWALFile) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		f.off = offset
+	case io.SeekEnd:
+		f.off = int64(len(f.data)) + offset
+	default:
+		return 0, errors.New("unsupported seek")
+	}
+	return f.off, nil
+}
+
+func (f *failingWALFile) Stat() (os.FileInfo, error) {
+	return osFileInfo(len(f.data)), nil
+}
+
+func (f *failingWALFile) Sync() error { return nil }
+
+func (f *failingWALFile) Truncate(size int64) error {
+	f.data = f.data[:size]
+	if f.off > size {
+		f.off = size
+	}
+	return nil
+}
+
+func (f *failingWALFile) write(p []byte) {
+	end := int(f.off) + len(p)
+	if end > len(f.data) {
+		f.data = append(f.data, make([]byte, end-len(f.data))...)
+	}
+	copy(f.data[f.off:], p)
+	f.off = int64(end)
+}
+
+type osFileInfo int
+
+func (o osFileInfo) Name() string       { return "" }
+func (o osFileInfo) Size() int64        { return int64(o) }
+func (o osFileInfo) Mode() os.FileMode  { return 0 }
+func (o osFileInfo) ModTime() time.Time { return time.Time{} }
+func (o osFileInfo) IsDir() bool        { return false }
+func (o osFileInfo) Sys() any           { return nil }

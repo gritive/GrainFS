@@ -26,6 +26,7 @@ const (
 
 const (
 	maxRecordBodyBytes = MaxPayloadBytes + 1<<20
+	maxMetadataBytes   = 1 << 20
 	encryptedRecordAAD = "datawal:record:v1"
 )
 
@@ -98,6 +99,7 @@ func DecodeEncryptedRecord(r io.Reader, enc *encrypt.Encryptor) (Record, error) 
 	return rec, nil
 }
 
+// PayloadReader returns a reader over the decoded in-memory payload.
 func PayloadReader(rec Record) io.Reader {
 	return bytes.NewReader(rec.Payload)
 }
@@ -160,8 +162,14 @@ func marshalRecordBody(rec Record) ([]byte, error) {
 	bucket := []byte(rec.Bucket)
 	key := []byte(rec.Key)
 	target := []byte(rec.Target)
+	if len(bucket)+len(key)+len(target) > maxMetadataBytes {
+		return nil, fmt.Errorf("datawal: metadata too large")
+	}
 	checksum := sha256.Sum256(rec.Payload)
 	size := 8 + 8 + 1 + 8 + 8 + 4 + len(bucket) + 4 + len(key) + 4 + len(target) + 32 + 8 + len(rec.Payload)
+	if size > maxRecordBodyBytes {
+		return nil, fmt.Errorf("datawal: record body too large: %d", size)
+	}
 	body := make([]byte, size)
 	off := 0
 	binary.BigEndian.PutUint64(body[off:], rec.Seq)

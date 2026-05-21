@@ -19,6 +19,9 @@ import (
 const (
 	fileMagic   = uint32(0x4457414c) // "DWAL"
 	fileVersion = uint32(1)
+
+	fileModePlain     = byte(1)
+	fileModeEncrypted = byte(2)
 )
 
 type WAL struct {
@@ -26,8 +29,18 @@ type WAL struct {
 	enc *encrypt.Encryptor
 
 	mu      sync.Mutex
-	file    *os.File
+	file    walFile
 	lastSeq uint64
+}
+
+type walFile interface {
+	io.Reader
+	io.Writer
+	Close() error
+	Seek(offset int64, whence int) (int64, error)
+	Stat() (os.FileInfo, error)
+	Sync() error
+	Truncate(size int64) error
 }
 
 func Open(dir string, enc *encrypt.Encryptor) (*WAL, error) {
@@ -71,6 +84,10 @@ func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64
 	if w.file == nil {
 		return 0, fmt.Errorf("datawal: wal is closed")
 	}
+	offset, err := w.file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
 	w.lastSeq++
 	rec.Seq = w.lastSeq
 	rec.Timestamp = time.Now().UnixNano()
@@ -81,6 +98,9 @@ func (w *WAL) AppendReader(ctx context.Context, rec Record, r io.Reader) (uint64
 	}
 	if err != nil {
 		w.lastSeq--
+		if rollbackErr := w.rollbackAppend(offset); rollbackErr != nil {
+			return 0, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+		}
 		return 0, err
 	}
 	return rec.Seq, nil
@@ -141,7 +161,7 @@ func AppendRawForTest(dir string, data []byte) error {
 	}
 	defer f.Close()
 	if info, err := f.Stat(); err == nil && info.Size() == 0 {
-		if err := writeHeader(f); err != nil {
+		if err := writeHeader(f, fileModePlain); err != nil {
 			return err
 		}
 	}
@@ -156,6 +176,7 @@ func (w *WAL) openAppendFile() error {
 	}
 	var path string
 	if len(files) == 0 {
+		// Task 1 intentionally uses one active segment; rotation will be added with later materializers.
 		path = filepath.Join(w.dir, segmentName(w.lastSeq+1))
 	} else {
 		path = files[len(files)-1]
@@ -170,12 +191,29 @@ func (w *WAL) openAppendFile() error {
 		return err
 	}
 	if info.Size() == 0 {
-		if err := writeHeader(f); err != nil {
+		if err := writeHeader(f, modeForEncryptor(w.enc)); err != nil {
 			f.Close()
 			return err
 		}
+	} else if _, err := readHeaderForMode(f, modeForEncryptor(w.enc)); err != nil {
+		f.Close()
+		return err
 	}
 	w.file = f
+	return nil
+}
+
+func (w *WAL) rollbackAppend(offset int64) error {
+	if err := w.file.Truncate(offset); err != nil {
+		_ = w.file.Close()
+		w.file = nil
+		return err
+	}
+	if _, err := w.file.Seek(offset, io.SeekStart); err != nil {
+		_ = w.file.Close()
+		w.file = nil
+		return err
+	}
 	return nil
 }
 
@@ -216,48 +254,113 @@ func scanFile(path string, enc *encrypt.Encryptor, fn func(Record) error) error 
 		return err
 	}
 	defer f.Close()
-	if err := readHeader(f); err != nil {
+	mode, err := readHeader(f)
+	if err != nil {
+		return err
+	}
+	if err := checkMode(mode, enc); err != nil {
 		return err
 	}
 	for {
 		var rec Record
-		if enc != nil {
-			rec, err = DecodeEncryptedRecord(f, enc)
-		} else {
-			rec, err = DecodeRecord(f)
-		}
-		if err == nil {
-			if err := fn(rec); err != nil {
-				return err
-			}
-			continue
-		}
+		body, err := readFrame(f)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return nil
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		if mode == fileModeEncrypted {
+			plain, err := enc.OpenValueAAD([]byte(encryptedRecordAAD), body)
+			if err != nil {
+				return fmt.Errorf("datawal: decrypt record: %w", err)
+			}
+			rec, err = unmarshalRecordBody(plain)
+			clear(plain)
+			if err != nil {
+				return err
+			}
+		} else {
+			rec, err = unmarshalRecordBody(body)
+			if err != nil {
+				return err
+			}
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
 	}
 }
 
-func writeHeader(w io.Writer) error {
-	var buf [8]byte
+func writeHeader(w io.Writer, mode byte) error {
+	var buf [12]byte
 	binary.BigEndian.PutUint32(buf[0:4], fileMagic)
 	binary.BigEndian.PutUint32(buf[4:8], fileVersion)
+	buf[8] = mode
 	return writeAll(w, buf[:])
 }
 
-func readHeader(r io.Reader) error {
-	var buf [8]byte
+func readHeader(r io.Reader) (byte, error) {
+	var buf [12]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return err
+		return 0, err
 	}
 	if binary.BigEndian.Uint32(buf[0:4]) != fileMagic {
-		return fmt.Errorf("datawal: invalid magic")
+		return 0, fmt.Errorf("datawal: invalid magic")
 	}
 	if version := binary.BigEndian.Uint32(buf[4:8]); version != fileVersion {
-		return fmt.Errorf("datawal: unsupported version %d", version)
+		return 0, fmt.Errorf("datawal: unsupported version %d", version)
+	}
+	mode := buf[8]
+	if mode != fileModePlain && mode != fileModeEncrypted {
+		return 0, fmt.Errorf("datawal: unsupported mode %d", mode)
+	}
+	return mode, nil
+}
+
+func readHeaderForMode(f walFile, want byte) (byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	mode, err := readHeader(f)
+	if err != nil {
+		return 0, err
+	}
+	if mode != want {
+		return 0, modeMismatch(mode, want)
+	}
+	_, err = f.Seek(0, io.SeekEnd)
+	return mode, err
+}
+
+func checkMode(mode byte, enc *encrypt.Encryptor) error {
+	want := modeForEncryptor(enc)
+	if mode != want {
+		return modeMismatch(mode, want)
 	}
 	return nil
+}
+
+func modeMismatch(got, want byte) error {
+	return fmt.Errorf("datawal: segment mode mismatch: got %s, want %s", modeName(got), modeName(want))
+}
+
+func modeForEncryptor(enc *encrypt.Encryptor) byte {
+	if enc == nil {
+		return fileModePlain
+	}
+	return fileModeEncrypted
+}
+
+func modeName(mode byte) string {
+	switch mode {
+	case fileModePlain:
+		return "plain"
+	case fileModeEncrypted:
+		return "encrypted"
+	default:
+		return fmt.Sprintf("unknown(%d)", mode)
+	}
 }
 
 func segmentFiles(dir string) ([]string, error) {
@@ -276,7 +379,18 @@ func segmentFiles(dir string) ([]string, error) {
 }
 
 func isSegmentName(name string) bool {
-	return strings.HasPrefix(name, "datawal-") && strings.HasSuffix(name, ".bin")
+	if len(name) != len("datawal-0000000000.bin") {
+		return false
+	}
+	if !strings.HasPrefix(name, "datawal-") || !strings.HasSuffix(name, ".bin") {
+		return false
+	}
+	for _, ch := range name[len("datawal-") : len("datawal-")+10] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func segmentName(seq uint64) string {
