@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -36,14 +34,14 @@ func newStitchedCluster(t cleanupTestTB, peerNames ...string) *stitchedCluster {
 	t.Helper()
 	localDB := openTestDB(t)
 	local, err := NewStore(localDB, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(local.Close)
 
 	peers := make(map[string]*Store)
 	for _, name := range peerNames {
 		db := openTestDB(t)
 		s, err := NewStore(db, StoreOptions{Retention: time.Hour, FlushThreshold: 1, FlushInterval: time.Hour})
-		require.NoError(t, err)
+		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(s.Close)
 		peers[name] = s
 	}
@@ -116,10 +114,10 @@ func (c *stitchedCluster) put(t cleanupTestTB, location string, id string, ts ti
 	} else {
 		var ok bool
 		s, ok = c.peers[location]
-		require.True(t, ok, "unknown location %q", location)
+		Expect(ok).To(BeTrue(), "unknown location %q", location)
 	}
-	require.NoError(t, s.Put(r))
-	require.NoError(t, s.Flush())
+	Expect(s.Put(r)).To(Succeed())
+	Expect(s.Flush()).To(Succeed())
 }
 
 // get exercises the API through the full resolution chain.

@@ -10,7 +10,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/volume"
@@ -33,19 +32,19 @@ type nbdTestTB interface {
 func dialNBD(t nbdTestTB, addr, export string) *nbdClient {
 	t.Helper()
 	conn, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	// Receive server header (18 bytes)
 	hdr := make([]byte, 18)
 	_, err = io.ReadFull(conn, hdr)
-	require.NoError(t, err)
-	require.Equal(t, nbdMagic, binary.BigEndian.Uint64(hdr[0:8]))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(binary.BigEndian.Uint64(hdr[0:8])).To(Equal(nbdMagic))
 
 	// Send client flags
 	clientFlags := make([]byte, 4)
 	binary.BigEndian.PutUint32(clientFlags, 1)
 	_, err = conn.Write(clientFlags)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	// Send OPT_EXPORT_NAME
 	name := []byte(export)
@@ -55,12 +54,12 @@ func dialNBD(t nbdTestTB, addr, export string) *nbdClient {
 	binary.BigEndian.PutUint32(opt[12:16], uint32(len(name)))
 	copy(opt[16:], name)
 	_, err = conn.Write(opt)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	// Receive export data (134 bytes)
 	exportData := make([]byte, 134)
 	_, err = io.ReadFull(conn, exportData)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	DeferCleanup(conn.Close)
 	return &nbdClient{conn: conn}
@@ -77,12 +76,12 @@ func (c *nbdClient) write(t nbdTestTB, offset uint64, data []byte) {
 	binary.BigEndian.PutUint32(req[24:28], uint32(len(data)))
 	copy(req[28:], data)
 	_, err := c.conn.Write(req)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	reply := make([]byte, 16)
 	_, err = io.ReadFull(c.conn, reply)
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), binary.BigEndian.Uint32(reply[4:8]), "write error")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(binary.BigEndian.Uint32(reply[4:8])).To(Equal(uint32(0)), "write error")
 }
 
 func (c *nbdClient) read(t nbdTestTB, offset uint64, length uint32) []byte {
@@ -95,12 +94,12 @@ func (c *nbdClient) read(t nbdTestTB, offset uint64, length uint32) []byte {
 	binary.BigEndian.PutUint64(req[16:24], offset)
 	binary.BigEndian.PutUint32(req[24:28], length)
 	_, err := c.conn.Write(req)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	buf := make([]byte, 16+length)
 	_, err = io.ReadFull(c.conn, buf)
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), binary.BigEndian.Uint32(buf[4:8]), "read error")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(binary.BigEndian.Uint32(buf[4:8])).To(Equal(uint32(0)), "read error")
 	return buf[16:]
 }
 
@@ -108,15 +107,15 @@ func setupTCPNBD(t nbdTestTB) (string, *volume.Manager) {
 	t.Helper()
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	mgr := volume.NewManager(backend)
 	_, err = mgr.Create("vol", 4*1024*1024) // 4MB volume
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	srv := NewServer(mgr, "vol")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 	addr := ln.Addr().String()
 
 	go srv.Serve(ln) //nolint:errcheck

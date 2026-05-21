@@ -7,7 +7,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -25,17 +24,17 @@ func startTestNFS4Server(t nfsTestTB) (string, *Server) {
 
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	// Create the NFS4 bucket
-	require.NoError(t, backend.CreateBucket(context.Background(), legacyNFS4Bucket))
+	Expect(backend.CreateBucket(context.Background(), legacyNFS4Bucket)).To(Succeed())
 
 	srv := NewServer(backend)
 	srv.SetExportsForTest(buildSnap(map[string]exportConfig{
 		legacyNFS4Bucket: {fsidMajor: 1, fsidMinor: 1, generation: 1},
 	}))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 
 	srv.mu.Lock()
 	srv.listener = ln

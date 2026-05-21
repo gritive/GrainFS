@@ -13,13 +13,14 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 func putBytes(t clusterTestTB, b *DistributedBackend, bucket, key string, data []byte) {
 	t.Helper()
 	_, err := b.PutObject(context.Background(), bucket, key, bytes.NewReader(data), "application/octet-stream")
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("PutObject failed: %v", err)
+	}
 }
 
 // proposeRing은 테스트 전용 — nodeIDs로 Ring v1을 FSM에 직접 propose한다.
@@ -31,7 +32,9 @@ func proposeRing(t clusterTestTB, b *DistributedBackend, nodeIDs []string) {
 		VNodes:   ring.VNodes,
 		VPerNode: ring.VPerNode,
 	})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("propose ring failed: %v", err)
+	}
 }
 
 var _ = Describe("Ring integration", func() {
