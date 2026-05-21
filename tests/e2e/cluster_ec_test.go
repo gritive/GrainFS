@@ -16,7 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestClusterECPutGet5NodeE2E verifies Phase 18 Cluster EC end-to-end with
@@ -57,7 +57,7 @@ func runClusterECPutGet5Node(t testing.TB) {
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
 		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-cluster-ec-%d-*", i))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		dataDirs[i] = d
 		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(d) })
 	}
@@ -65,7 +65,7 @@ func runClusterECPutGet5Node(t testing.TB) {
 
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/ec5-node-%d-stderr.log", i))
-		require.NoError(t, err, "create stderr file for node %d", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create stderr file for node %d", i)
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
@@ -81,7 +81,7 @@ func runClusterECPutGet5Node(t testing.TB) {
 		)
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
-		require.NoError(t, cmd.Start(), "start node %d", i)
+		gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 		ginkgo.DeferCleanup(func() {
 			stderrFile.Close()
 			if t.Failed() {
@@ -109,7 +109,7 @@ func runClusterECPutGet5Node(t testing.TB) {
 	waitForPortsParallel(t, httpPorts[:1], 60*time.Second)
 	time.Sleep(2 * time.Second)
 	for i := 1; i < numNodes; i++ {
-		require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
+		gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
 		procs[i] = startNode(i)
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -119,14 +119,14 @@ func runClusterECPutGet5Node(t testing.TB) {
 	// admin-UDS-only, so seed the test bucket through the admin endpoint.
 	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, dataDirs, 60*time.Second)
 	accessKey, secretKey = bootstrap.AccessKey, bootstrap.SecretKey
-	require.NotEmpty(t, bootstrap.SAID, "bootstrap SA ID")
-	require.NoError(t, adminCreateBucketWithPolicyAttachAny(dataDirs, bootstrap.SAID, bucketName, 60*time.Second))
+	gomega.Expect(bootstrap.SAID).NotTo(gomega.BeEmpty(), "bootstrap SA ID")
+	gomega.Expect(adminCreateBucketWithPolicyAttachAny(dataDirs, bootstrap.SAID, bucketName, 60*time.Second)).To(gomega.Succeed())
 
 	var client *s3.Client
 	var leaderIdx int
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	ginkgo.DeferCleanup(cancel)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i := 0; i < numNodes; i++ {
 			candidate := ecS3Client(httpURL(i), accessKey, secretKey)
 			if tryPutObject(ctx, candidate, bucketName, "__leader_probe", []byte("probe")) == nil {
@@ -136,7 +136,8 @@ func runClusterECPutGet5Node(t testing.TB) {
 			}
 		}
 		return false
-	}, 240*time.Second, 500*time.Millisecond, "no leader found or PutObject never succeeded")
+	}).WithTimeout(240*time.Second).WithPolling(500*time.Millisecond).
+		Should(gomega.BeTrue(), "no leader found or PutObject never succeeded")
 	t.Logf("leader: node %d at %s", leaderIdx, httpURL(leaderIdx))
 
 	// Write 5 random objects of varied sizes. Verify each round-trips.
@@ -155,11 +156,12 @@ func runClusterECPutGet5Node(t testing.TB) {
 	for i := range objects {
 		data := make([]byte, objects[i].sz)
 		_, err := rand.Read(data)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		objects[i].sum = sha256.Sum256(data)
-		require.Eventuallyf(t, func() bool {
+		gomega.Eventually(func() bool {
 			return tryPutObject(ctx, client, bucketName, objects[i].key, data) == nil
-		}, 60*time.Second, 1*time.Second, "PutObject %s (%d bytes)", objects[i].key, objects[i].sz)
+		}).WithTimeout(60*time.Second).WithPolling(time.Second).
+			Should(gomega.BeTrue(), "PutObject %s (%d bytes)", objects[i].key, objects[i].sz)
 	}
 
 	// Round-trip check — all shards available.
@@ -168,11 +170,11 @@ func runClusterECPutGet5Node(t testing.TB) {
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(obj.key),
 		})
-		require.NoErrorf(t, err, "GetObject %s", obj.key)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "GetObject %s", obj.key)
 		got, err := io.ReadAll(out.Body)
 		_ = out.Body.Close()
-		require.NoError(t, err)
-		require.Equalf(t, obj.sum, sha256.Sum256(got),
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(sha256.Sum256(got)).To(gomega.Equal(obj.sum),
 			"sha256 mismatch for %s (len=%d)", obj.key, len(got))
 	}
 	t.Logf("cluster EC: %d/%d objects round-tripped with all shards present", len(objects), len(objects))
@@ -192,7 +194,7 @@ func runClusterECPutGet5Node(t testing.TB) {
 	for _, obj := range objects {
 		obj := obj
 		var lastErr error
-		require.Eventuallyf(t, func() bool {
+		gomega.Eventually(func() bool {
 			for i := 0; i < numNodes; i++ {
 				if i == victim {
 					continue
@@ -222,7 +224,8 @@ func runClusterECPutGet5Node(t testing.TB) {
 			}
 			t.Logf("GetObject %s after node kill failed on all surviving nodes: %v", obj.key, lastErr)
 			return false
-		}, 45*time.Second, 1*time.Second, "GetObject %s after node kill", obj.key)
+		}).WithTimeout(45*time.Second).WithPolling(time.Second).
+			Should(gomega.BeTrue(), "GetObject %s after node kill", obj.key)
 	}
 	t.Logf("cluster EC: %d/%d objects reconstructed after single-node failure", len(objects), len(objects))
 }
@@ -248,13 +251,13 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 		DisableNFS: true,
 		DisableNBD: true,
 	})
-	require.NoError(t, adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucketName, 60*time.Second))
+	gomega.Expect(adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucketName, 60*time.Second)).To(gomega.Succeed())
 	accessKey, secretKey := c.accessKey, c.secretKey
 
 	var client *s3.Client
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	ginkgo.DeferCleanup(cancel)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i := 0; i < numNodes; i++ {
 			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
 			if tryPutObject(ctx, candidate, bucketName, "__leader_probe", []byte("probe")) == nil {
@@ -263,14 +266,14 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 			}
 		}
 		return false
-	}, 120*time.Second, 1*time.Second, "no leader found")
+	}).WithTimeout(120*time.Second).WithPolling(time.Second).Should(gomega.BeTrue(), "no leader found")
 
 	data := make([]byte, 8192)
 	_, _ = rand.Read(data)
 	sum := sha256.Sum256(data)
 
 	// PUT: EC must be active on 3-node cluster (k=2, m=1).
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i := 0; i < numNodes; i++ {
 			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
 			if tryPutObject(ctx, candidate, bucketName, "ec-obj", data) == nil {
@@ -279,24 +282,25 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 			}
 		}
 		return false
-	}, 60*time.Second, 1*time.Second, "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
+	}).WithTimeout(60*time.Second).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "PutObject on 3-node cluster with dynamic EC k=2,m=1 must succeed")
 
 	// GET with all 3 nodes up: must reconstruct correctly.
 	out, gerr := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String("ec-obj"),
 	})
-	require.NoError(t, gerr, "GetObject with all 3 nodes up")
+	gomega.Expect(gerr).NotTo(gomega.HaveOccurred(), "GetObject with all 3 nodes up")
 	got, rerr := io.ReadAll(out.Body)
 	_ = out.Body.Close()
-	require.NoError(t, rerr)
-	require.Equal(t, sum, sha256.Sum256(got), "data integrity check with all 3 nodes")
+	gomega.Expect(rerr).NotTo(gomega.HaveOccurred())
+	gomega.Expect(sha256.Sum256(got)).To(gomega.Equal(sum), "data integrity check with all 3 nodes")
 
 	// The post-failure assertion specifically depends on nodes 0 and 1. Wait
 	// until both planned survivors can see the EC metadata and read the object
 	// before killing node 2; a single successful GET through client does not
 	// prove every survivor has applied the committed object metadata yet.
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i := 0; i < numNodes-1; i++ {
 			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
 			out2, err2 := candidate.GetObject(ctx, &s3.GetObjectInput{
@@ -319,7 +323,8 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 			}
 		}
 		return true
-	}, 60*time.Second, 1*time.Second, "surviving nodes must see EC object before node kill")
+	}).WithTimeout(60*time.Second).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "surviving nodes must see EC object before node kill")
 
 	// Kill the last node (index 2). With k=2 data shards remaining on nodes 0
 	// and 1, getObjectEC can reconstruct using at most one dead-peer fetch
@@ -335,7 +340,7 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 	// even while the dead peer's QUIC connection is timing out. 30s covers
 	// both the per-shard timeout (3s) and any Raft re-election (~5-10s).
 	var gotAfterKill []byte
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		for i := 0; i < numNodes-1; i++ {
 			candidate := ecS3Client(c.httpURLs[i], accessKey, secretKey)
 			out2, err2 := candidate.GetObject(ctx, &s3.GetObjectInput{
@@ -354,8 +359,9 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 			}
 		}
 		return false
-	}, 30*time.Second, 1*time.Second, "GET must succeed with 2 surviving nodes (k=2 threshold)")
-	require.Equal(t, sum, sha256.Sum256(gotAfterKill), "data integrity with 1 node down")
+	}).WithTimeout(30*time.Second).WithPolling(time.Second).
+		Should(gomega.BeTrue(), "GET must succeed with 2 surviving nodes (k=2 threshold)")
+	gomega.Expect(sha256.Sum256(gotAfterKill)).To(gomega.Equal(sum), "data integrity with 1 node down")
 	t.Logf("3-node EC dynamic: k=2,m=1 verified — 1 node killed, GET reconstructed from 2 shards")
 }
 
@@ -402,7 +408,7 @@ func runClusterECTopologyChange(t testing.TB) {
 	dataDirs := make([]string, numNodes)
 	for i := range dataDirs {
 		d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-topo-%d-*", i))
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		dataDirs[i] = d
 		ginkgo.DeferCleanup(func() { _ = os.RemoveAll(d) })
 	}
@@ -413,10 +419,10 @@ func runClusterECTopologyChange(t testing.TB) {
 	// Without this, stage-2 nodes timeout and send higher-term RequestVotes that
 	// force the existing leader to step down (standard Raft), causing a livelock.
 	// With a uniform 6-node config, quorum=4, so no election succeeds until ≥4
-	// nodes are up — handled by the require.Eventually 120s window on CreateBucket.
+	// nodes are up — handled by the Eventually 120s window on CreateBucket.
 	startNode := func(i int) *exec.Cmd {
 		stderrFile, err := os.Create(fmt.Sprintf("/tmp/tp-node-%d-stderr.log", i))
-		require.NoError(t, err, "create stderr file for node %d", i)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "create stderr file for node %d", i)
 		cmd := exec.Command(binary, "serve",
 			"--data", dataDirs[i],
 			"--port", fmt.Sprintf("%d", httpPorts[i]),
@@ -431,7 +437,7 @@ func runClusterECTopologyChange(t testing.TB) {
 		)
 		cmd.Stdout = stderrFile
 		cmd.Stderr = stderrFile
-		require.NoError(t, cmd.Start(), "start node %d", i)
+		gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 		ginkgo.DeferCleanup(func() {
 			stderrFile.Close()
 			if t.Failed() {
@@ -456,12 +462,12 @@ func runClusterECTopologyChange(t testing.TB) {
 
 	// Start seed node, then let followers join sequentially via .join-pending.
 	procs[0] = startNode(0)
-	require.NoError(t, waitForPortsParallelErrWithProcesses(httpPorts[:1], procs[:1], 60*time.Second))
+	gomega.Expect(waitForPortsParallelErrWithProcesses(httpPorts[:1], procs[:1], 60*time.Second)).To(gomega.Succeed())
 	time.Sleep(2 * time.Second)
 	for i := 1; i < numNodes; i++ {
-		require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
+		gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
 		procs[i] = startNode(i)
-		require.NoError(t, waitForPortsParallelErrWithProcesses(httpPorts[i:i+1], procs[i:i+1], 90*time.Second))
+		gomega.Expect(waitForPortsParallelErrWithProcesses(httpPorts[i:i+1], procs[i:i+1], 90*time.Second)).To(gomega.Succeed())
 	}
 	time.Sleep(4 * time.Second)
 	for i, port := range httpPorts {
@@ -472,8 +478,8 @@ func runClusterECTopologyChange(t testing.TB) {
 	// the admin endpoint; data-plane CreateBucket is denied by design.
 	bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, dataDirs, 60*time.Second)
 	accessKey, secretKey = bootstrap.AccessKey, bootstrap.SecretKey
-	require.NotEmpty(t, bootstrap.SAID, "bootstrap SA ID")
-	require.NoError(t, adminCreateBucketWithPolicyAttachAny(dataDirs, bootstrap.SAID, bucketName, 60*time.Second))
+	gomega.Expect(bootstrap.SAID).NotTo(gomega.BeEmpty(), "bootstrap SA ID")
+	gomega.Expect(adminCreateBucketWithPolicyAttachAny(dataDirs, bootstrap.SAID, bucketName, 60*time.Second)).To(gomega.Succeed())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	ginkgo.DeferCleanup(cancel)
@@ -493,7 +499,7 @@ func runClusterECTopologyChange(t testing.TB) {
 			return tryPutObject(attemptCtx, c, bucketName, "__leader_probe", []byte("probe"))
 		},
 	)
-	require.NoError(t, err, "no leader found or PutObject never succeeded")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "no leader found or PutObject never succeeded")
 	client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
 	t.Logf("topology test: leader node %d at %s (N=%d, auto EC width=%d)", leaderIdx, httpURL(leaderIdx), numNodes, cluster.AutoECConfigForClusterSize(numNodes).NumShards())
 
@@ -512,11 +518,11 @@ func runClusterECTopologyChange(t testing.TB) {
 	for i := range preObjects {
 		data := make([]byte, 32*1024)
 		_, err := rand.Read(data)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		preObjects[i].sum = sha256.Sum256(data)
 		putData := append([]byte(nil), data...)
 		objKey := preObjects[i].key
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			for j := 0; j < numNodes; j++ {
 				c := ecS3Client(httpURL(j), accessKey, secretKey)
 				putErr := tryPutObject(ctx, c, bucketName, objKey, putData)
@@ -526,12 +532,13 @@ func runClusterECTopologyChange(t testing.TB) {
 				}
 			}
 			return false
-		}, 30*time.Second, 500*time.Millisecond, "pre-topology PutObject %s", objKey)
+		}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
+			Should(gomega.BeTrue(), "pre-topology PutObject %s", objKey)
 	}
 
 	for _, obj := range preObjects {
 		obj := obj
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			out, err := client.GetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String(obj.key),
@@ -542,7 +549,8 @@ func runClusterECTopologyChange(t testing.TB) {
 			got, _ := io.ReadAll(out.Body)
 			_ = out.Body.Close()
 			return sha256.Sum256(got) == obj.sum
-		}, 15*time.Second, 1*time.Second, "pre-topology GetObject %s", obj.key)
+		}).WithTimeout(15*time.Second).WithPolling(time.Second).
+			Should(gomega.BeTrue(), "pre-topology GetObject %s", obj.key)
 	}
 	t.Logf("topology test: %d pre-topology objects written+verified via cluster EC", len(preObjects))
 
@@ -558,7 +566,7 @@ func runClusterECTopologyChange(t testing.TB) {
 	// Old objects: FSM placement records are immutable. GET must reconstruct
 	// using the original 6-node placement even though one shard node is gone
 	// (k=3 data shards needed; the victim held 1 of 5 shards, so 4 remain ≥ 3).
-	// Use require.Eventually — dead node's QUIC connection takes up to 3s per shard
+	// Use Eventually — dead node's QUIC connection takes up to 3s per shard
 	// to time out before the remaining shards are fetched.
 	for _, obj := range preObjects {
 		obj := obj
@@ -613,8 +621,7 @@ func runClusterECTopologyChange(t testing.TB) {
 		if ok {
 			continue
 		}
-		require.Failf(t, "post-topology GetObject failed",
-			"%s (FSM placement must be immutable), last error: %v", obj.key, lastGetErr)
+		ginkgo.Fail(fmt.Sprintf("post-topology GetObject failed: %s (FSM placement must be immutable), last error: %v", obj.key, lastGetErr))
 	}
 	t.Logf("topology test: %d pre-topology objects reconstructed after node kill (placement immutable)", len(preObjects))
 
