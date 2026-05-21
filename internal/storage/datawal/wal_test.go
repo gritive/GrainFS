@@ -210,6 +210,46 @@ func TestReplayFromCheckpointSkipsOldRecords(t *testing.T) {
 	require.Equal(t, []string{"b"}, keys)
 }
 
+type recordingMaterializer struct {
+	applied  []datawal.Record
+	existing map[string]bool
+}
+
+func (m *recordingMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
+	_ = ctx
+	m.applied = append(m.applied, rec)
+	return nil
+}
+
+func (m *recordingMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
+	_ = ctx
+	return m.existing[rec.Target], nil
+}
+
+func TestRecoverSkipsExistingReplacementButReplaysPatch(t *testing.T) {
+	w, err := datawal.Open(t.TempDir(), nil)
+	require.NoError(t, err)
+	defer w.Close()
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Bucket: "b", Key: "k", Target: "blob", Payload: []byte("full")})
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "k", Offset: 2, Payload: []byte("patch")})
+	require.NoError(t, err)
+	require.NoError(t, w.Flush())
+
+	m := &recordingMaterializer{existing: map[string]bool{"blob": true}}
+	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, m))
+	require.Len(t, m.applied, 1)
+	require.Equal(t, datawal.OpObjectWriteAt, m.applied[0].Op)
+}
+
+func TestCheckpointRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, datawal.SaveCheckpoint(dir, 42))
+	seq, err := datawal.LoadCheckpoint(dir)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), seq)
+}
+
 func TestRecordReaderStreamsPayload(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, datawal.EncodeRecord(&buf, datawal.Record{Op: datawal.OpShardPut, Bucket: "b", Key: "k", Payload: []byte("payload")}))
