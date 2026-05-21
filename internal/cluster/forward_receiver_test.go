@@ -141,6 +141,27 @@ func TestForwardReceiver_HandlePutObject_CommitsObjectIndex(t *testing.T) {
 	require.False(t, proposer.entries[0].IsDeleteMarker)
 }
 
+func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+
+	rcv := NewForwardReceiver(mgr).WithObjectIndexProposer(&recordingObjectIndexProposer{})
+
+	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256")
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
+	reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+
+	require.NotNil(t, reply)
+	obj, err := objectFromReply(reply.Payload)
+	require.NoError(t, err)
+	require.Equal(t, "AES256", obj.SSEAlgorithm)
+
+	head, err := gb.HeadObject(context.Background(), "bucket", "sse-key")
+	require.NoError(t, err)
+	require.Equal(t, "AES256", head.SSEAlgorithm)
+}
+
 func TestForwardReceiver_HandlePutObject_MissingIndexProposerReturnsInternal(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-1")
 	mgr := NewDataGroupManager()

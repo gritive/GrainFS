@@ -7,6 +7,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/rs/zerolog/log"
 )
 
 func (s *Server) putObjectWithUserMetadata(
@@ -34,6 +35,14 @@ func (s *Server) putObjectWithUserMetadata(
 	})
 	cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutBackend, backendStart, cluster.PutTraceStageFields{})
 	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("bucket", bucket).
+			Str("key", key).
+			Str("content_type", contentType).
+			Bool("has_acl", acl != nil).
+			Bool("has_sse", systemMetadata.SSEAlgorithm != "").
+			Msg("s3 put: backend mutation failed")
 		return nil, err
 	}
 	mutationStart := time.Now()

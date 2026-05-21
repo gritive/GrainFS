@@ -13,6 +13,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/rs/zerolog/log"
 )
 
 // ForwardSender encodes a single transport.Message frame for the 0x08 stream
@@ -200,13 +201,18 @@ func (s *ForwardSender) Send(
 	attempts := 0
 	notLeaderRetries := 0
 	leaderHintUsed := false
+	replyStatus := ""
 	defer func() {
-		ObservePutTraceStage(ctx, PutTraceStageForwardSendFrame, stageStart, PutTraceStageFields{
+		fields := PutTraceStageFields{
 			Bytes:            int64(len(payload)),
 			ForwardAttempts:  attempts,
 			LeaderHintUsed:   leaderHintUsed,
 			NotLeaderRetries: notLeaderRetries,
-		})
+		}
+		if replyStatus != "" && replyStatus != raftpb.ForwardStatusOK.String() {
+			fields.Error = replyStatus
+		}
+		ObservePutTraceStage(ctx, PutTraceStageForwardSendFrame, stageStart, fields)
 	}()
 
 	for {
@@ -217,11 +223,20 @@ func (s *ForwardSender) Send(
 				return nil, err
 			}
 			attempts++
+			log.Debug().Str("peer", peer).Str("group_id", groupID).Str("op", op.String()).Msg("forward: send")
 			reply, err := s.dialer(ctx, peer, payload)
 			if err != nil {
+				log.Debug().Err(err).Str("peer", peer).Str("group_id", groupID).Str("op", op.String()).Msg("forward: send failed")
 				lastDialErr = err
 				continue // try next peer
 			}
+			log.Debug().
+				Str("peer", peer).
+				Str("group_id", groupID).
+				Str("op", op.String()).
+				Str("status", forwardReplyStatusString(op, reply)).
+				Bool("has_object", forwardReplyHasObject(reply)).
+				Msg("forward: reply")
 			if isNotLeaderReply(reply) {
 				notLeaderRetries++
 				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
@@ -231,10 +246,20 @@ func (s *ForwardSender) Send(
 					s.rememberLeader(groupID, hint)
 					leaderHintUsed = true
 					attempts++
+					log.Debug().Str("peer", hint).Str("group_id", groupID).Str("op", op.String()).Msg("forward: retry leader hint")
 					r2, err2 := s.dialer(ctx, hint, payload)
 					if err2 == nil {
+						log.Debug().
+							Str("peer", hint).
+							Str("group_id", groupID).
+							Str("op", op.String()).
+							Str("status", forwardReplyStatusString(op, r2)).
+							Bool("has_object", forwardReplyHasObject(r2)).
+							Msg("forward: leader hint reply")
+						replyStatus = forwardReplyStatusString(op, r2)
 						return r2, nil
 					}
+					log.Debug().Err(err2).Str("peer", hint).Str("group_id", groupID).Str("op", op.String()).Msg("forward: leader hint failed")
 					if callerHasDeadline {
 						retryableNotLeader = true
 						continue
@@ -249,6 +274,7 @@ func (s *ForwardSender) Send(
 				}
 			}
 			s.rememberLeader(groupID, peer)
+			replyStatus = forwardReplyStatusString(op, reply)
 			return reply, nil
 		}
 		if lastDialErr == nil && !retryableNotLeader {
@@ -321,6 +347,34 @@ func preferForwardPeer(peers []string, first string) []string {
 		}
 	}
 	return out
+}
+
+func forwardReplyStatusString(op raftpb.ForwardOp, reply []byte) string {
+	if len(reply) == 0 {
+		return ""
+	}
+	defer func() {
+		_ = recover()
+	}()
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	status := fr.Status()
+	if status == raftpb.ForwardStatusOK && op == raftpb.ForwardOpPutObject && fr.Object(nil) == nil {
+		return "forward_status=OK_missing_object"
+	}
+	if status == raftpb.ForwardStatusOK {
+		return status.String()
+	}
+	return "forward_status=" + status.String()
+}
+
+func forwardReplyHasObject(reply []byte) bool {
+	if len(reply) == 0 {
+		return false
+	}
+	defer func() {
+		_ = recover()
+	}()
+	return raftpb.GetRootAsForwardReply(reply, 0).Object(nil) != nil
 }
 
 // SendStream delivers a forward call whose body is streamed after the metadata

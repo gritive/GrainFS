@@ -41,6 +41,10 @@ type userMetadataResultPutter interface {
 	PutObjectWithUserMetadataResult(ctx context.Context, bucket, key string, r io.Reader, contentType string, userMetadata map[string]string) (*PutObjectResult, error)
 }
 
+type requestResultPutter interface {
+	PutObjectWithRequestResult(ctx context.Context, req PutObjectRequest) (*PutObjectResult, error)
+}
+
 func (o *Operations) PutObject(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*Object, error) {
 	return o.backend.PutObject(ctx, bucket, key, r, contentType)
 }
@@ -73,6 +77,9 @@ func (o *Operations) PutObjectWithUserMetadataResult(ctx context.Context, bucket
 func (o *Operations) PutObjectWithRequestResult(ctx context.Context, req PutObjectRequest) (*PutObjectResult, error) {
 	if req.Body == nil {
 		return nil, InvalidMutationResultError{Op: "PutObjectWithRequest", Field: "body", Reason: "nil body"}
+	}
+	if putter, ok := o.backend.(requestResultPutter); ok {
+		return putter.PutObjectWithRequestResult(ctx, req)
 	}
 	if putter, ok := o.backend.(userMetadataResultPutter); ok {
 		if req.ACL == nil && req.SystemMetadata.empty() {

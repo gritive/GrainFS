@@ -175,7 +175,7 @@ func validateObjectGovernanceBoundary(markdown string) error {
 
 func validateClientSmokeEvidence(markdown string) error {
 	required := map[string]string{
-		"MinIO client (`mc`)": "TestS3ClientSmoke/MinIOMC",
+		"MinIO client (`mc`)": "S3 client smoke",
 		"s3fs":                "TestFUSE_S3_S3FS",
 		"goofys":              "TestFUSE_S3_Goofys",
 	}

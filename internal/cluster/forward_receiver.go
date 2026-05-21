@@ -201,8 +201,10 @@ func groupProposeReply(index uint64, err error) *transport.Message {
 func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
 	if err != nil {
+		log.Debug().Err(err).Msg("forward: decode payload failed")
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
+	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: receive")
 
 	// ScrubSessionStat is node-scoped (Director-scoped), not group-scoped.
 	// It bypasses the DataGroup lookup + leader gate that the rest of the
@@ -216,6 +218,7 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: not voter")
 		return errReply(raftpb.ForwardStatusNotVoter, "")
 	}
 
@@ -225,8 +228,10 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 		if node != nil {
 			hint = node.LeaderID()
 		}
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward: not leader")
 		return errReply(raftpb.ForwardStatusNotLeader, hint)
 	}
+	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: dispatch leader")
 
 	switch op {
 	case raftpb.ForwardOpPutObject:
@@ -280,17 +285,21 @@ func (r *ForwardReceiver) Handle(req *transport.Message) *transport.Message {
 func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *transport.Message {
 	groupID, op, fbsArgs, err := decodeForwardPayload(req.Payload)
 	if err != nil {
+		log.Debug().Err(err).Msg("forward body: decode payload failed")
 		drainForwardBody(body)
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
+	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: receive")
 	spec, ok := lookupBucketForwardOpSpec(op)
 	if !ok || !spec.allowedOn(forwardBodyStream) {
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: unsupported op")
 		drainForwardBody(body)
 		return errReply(raftpb.ForwardStatusInternal, "")
 	}
 
 	dg := r.groups.Get(groupID)
 	if dg == nil || dg.Backend() == nil {
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: not voter")
 		drainForwardBody(body)
 		return errReply(raftpb.ForwardStatusNotVoter, "")
 	}
@@ -302,8 +311,10 @@ func (r *ForwardReceiver) HandleBody(req *transport.Message, body io.Reader) *tr
 		if node != nil {
 			hint = node.LeaderID()
 		}
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward body: not leader")
 		return errReply(raftpb.ForwardStatusNotLeader, hint)
 	}
+	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: dispatch leader")
 
 	switch op {
 	case raftpb.ForwardOpPutObject:
@@ -420,7 +431,13 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) *transport
 	})
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
-	obj, err := dg.Backend().PutObject(ctx, bucket, key, bytes.NewReader(pa.BodyBytes()), string(pa.ContentType()))
+	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:         bucket,
+		Key:            key,
+		Body:           bytes.NewReader(pa.BodyBytes()),
+		ContentType:    string(pa.ContentType()),
+		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
+	})
 	fields := PutTraceStageFields{Bytes: int64(len(pa.BodyBytes()))}
 	if err != nil {
 		fields.Error = err.Error()
@@ -461,7 +478,13 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 	})
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
-	obj, err := dg.Backend().PutObject(ctx, bucket, key, body, string(pa.ContentType()))
+	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:         bucket,
+		Key:            key,
+		Body:           body,
+		ContentType:    string(pa.ContentType()),
+		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
+	})
 	fields := PutTraceStageFields{}
 	if err != nil {
 		fields.Error = err.Error()

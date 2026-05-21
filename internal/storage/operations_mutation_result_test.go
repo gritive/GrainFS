@@ -53,6 +53,25 @@ func TestOperationsPutObjectWithResultUsesBackendNativeResult(t *testing.T) {
 	require.Equal(t, []string{"native:b/k:text/plain:new"}, backend.calls)
 }
 
+func TestOperationsPutObjectWithRequestResultUsesBackendNativeResult(t *testing.T) {
+	backend := &nativeRequestMutationResultBackend{}
+	ops := NewOperations(backend)
+
+	result, err := ops.PutObjectWithRequestResult(context.Background(), PutObjectRequest{
+		Bucket:         "b",
+		Key:            "k",
+		Body:           strings.NewReader("new"),
+		ContentType:    "text/plain",
+		SystemMetadata: ObjectSystemMetadata{SSEAlgorithm: "AES256"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "native-request", result.Object.ETag)
+	require.Equal(t, "AES256", result.Object.SSEAlgorithm)
+	require.Equal(t, PreviousObject{Exists: true, Size: 7, ETag: "old", VersionID: "v1"}, result.Previous)
+	require.Equal(t, []string{"native-request:b/k:text/plain:AES256:new"}, backend.calls)
+}
+
 func TestOperationsPutObjectWithResultFailsBeforeMutationWhenPreviousReadFails(t *testing.T) {
 	readErr := errors.New("head failed")
 	backend := &mutationResultBackend{previousErr: readErr}
@@ -272,6 +291,31 @@ func (b *nativeMutationResultBackend) PutObjectWithUserMetadataResult(
 	b.calls = append(b.calls, "native:"+bucket+"/"+key+":"+contentType+":"+string(data))
 	return &PutObjectResult{
 		Object:   ObjectFacts{Size: int64(len(data)), ETag: "native", VersionID: "v2"},
+		Previous: PreviousObject{Exists: true, Size: 7, ETag: "old", VersionID: "v1"},
+	}, nil
+}
+
+type nativeRequestMutationResultBackend struct {
+	basicBackend
+	calls []string
+}
+
+func (b *nativeRequestMutationResultBackend) PutObjectWithRequestResult(
+	_ context.Context,
+	req PutObjectRequest,
+) (*PutObjectResult, error) {
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	b.calls = append(b.calls, "native-request:"+req.Bucket+"/"+req.Key+":"+req.ContentType+":"+req.SystemMetadata.SSEAlgorithm+":"+string(data))
+	return &PutObjectResult{
+		Object: ObjectFacts{
+			Size:         int64(len(data)),
+			ETag:         "native-request",
+			VersionID:    "v2",
+			SSEAlgorithm: req.SystemMetadata.SSEAlgorithm,
+		},
 		Previous: PreviousObject{Exists: true, Size: 7, ETag: "old", VersionID: "v1"},
 	}, nil
 }

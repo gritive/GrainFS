@@ -145,8 +145,16 @@ func (rcv *ForwardObjectMeta) TagsLength() int {
 	return 0
 }
 
+func (rcv *ForwardObjectMeta) SseAlgorithm() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func ForwardObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func ForwardObjectMetaAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -180,6 +188,9 @@ func ForwardObjectMetaAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOf
 }
 func ForwardObjectMetaStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func ForwardObjectMetaAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(sseAlgorithm), 0)
 }
 func ForwardObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
