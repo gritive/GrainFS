@@ -49,7 +49,7 @@ func PlaceShards(key string, nodes []string, weights []float64, count int) []str
 		var s float64
 		if weights == nil {
 			// Fast path: 모든 weight 동일 → ranking ∝ u 단조. math.Log 스킵.
-			// 큰 u일수록 작은 -1/ln(u) 이므로 u 내림차순 = score 내림차순.
+			// u → 1일수록 -1/ln(u) → +∞ 으로 단조 증가하므로, u 내림차순 = score 내림차순.
 			s = u
 		} else {
 			s = -w / math.Log(u)
