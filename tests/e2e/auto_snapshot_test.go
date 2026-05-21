@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,49 +17,55 @@ import (
 // TestAutoSnapshot_CreatesSnapshotAutomatically verifies that when the
 // cluster-config snapshot-interval is set to a non-zero value via PATCH, the
 // server creates snapshots automatically.
-func TestAutoSnapshot_CreatesSnapshotAutomatically(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		binary := getBinary()
-		dir, err := os.MkdirTemp("", "grainfs-autosnap-e2e-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(dir)
+var _ = ginkgo.Describe("Auto snapshot", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("creates snapshots automatically when enabled", func() {
+			t := ginkgo.GinkgoTB()
+			binary := getBinary()
+			dir, err := os.MkdirTemp("", "grainfs-autosnap-e2e-*")
+			require.NoError(t, err)
+			ginkgo.DeferCleanup(os.RemoveAll, dir)
 
-		port := freePort()
-		cmd := exec.Command(binary, "serve",
-			"--data", dir,
-			"--port", fmt.Sprintf("%d", port),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
-			"--nbd-port", fmt.Sprintf("%d", freePort()),
-			"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
-		)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		require.NoError(t, cmd.Start())
-		t.Cleanup(func() {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = cmd.Wait()
+			port := freePort()
+			cmd := exec.Command(binary, "serve",
+				"--data", dir,
+				"--port", fmt.Sprintf("%d", port),
+				"--nfs4-port", fmt.Sprintf("%d", freePort()),
+				"--nbd-port", fmt.Sprintf("%d", freePort()),
+				"--cluster-key", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+			)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			require.NoError(t, cmd.Start())
+			ginkgo.DeferCleanup(func() {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				_ = cmd.Wait()
+			})
+
+			waitForPort(t, port, 5*time.Second)
+
+			// Enable auto-snapshot via cluster-config PATCH. The --snapshot-interval
+			// CLI flag was removed; tests that need the auto-snapshot loop opt in via
+			// the admin UDS PATCH.
+			patchSnapshotInterval(t, dir, "1s")
+
+			endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+			snapshots := waitForAutoSnapshots(t, endpoint, 2, 10*time.Second)
+			assert.GreaterOrEqual(t, len(snapshots), 2,
+				"at least 2 auto-snapshots should have been created with 1s interval")
 		})
-
-		waitForPort(t, port, 5*time.Second)
-
-		// Enable auto-snapshot via cluster-config PATCH. The --snapshot-interval
-		// CLI flag was removed; tests that need the auto-snapshot loop opt in via
-		// the admin UDS PATCH.
-		patchSnapshotInterval(t, dir, "1s")
-
-		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-		snapshots := waitForAutoSnapshots(t, endpoint, 2, 10*time.Second)
-		assert.GreaterOrEqual(t, len(snapshots), 2,
-			"at least 2 auto-snapshots should have been created with 1s interval")
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-	})
-}
 
-func waitForAutoSnapshots(t *testing.T, endpoint string, want int, timeout time.Duration) []map[string]any {
+	ginkgo.Context("Cluster4Node", func() {
+		ginkgo.It("starts the shared cluster fixture", func() {
+			_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+	})
+})
+
+func waitForAutoSnapshots(t testing.TB, endpoint string, want int, timeout time.Duration) []map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastErr error
