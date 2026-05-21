@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.317.0] - 2026-05-22
+
+### Internal
+
+- Weighted Rendezvous Hashing 헬퍼 `cluster.PlaceShards(key, nodes, weights, count)`
+  를 `internal/cluster/hrw.go`에 추가. `voter_picker`가 이미 쓰던 HRW 패턴을 object
+  placement에도 확장하기 위한 준비 단계. 본 릴리스에서는 신규 헬퍼만 추가하고 기존
+  vnode 기반 ring placement 코드는 그대로 유지 — user-facing 동작 변화 없음.
+  Weighted 공식(Schindelhauer/Wang–Ravishankar `-w/ln(u)`) + fast path
+  (`weights==nil`이면 `math.Log` 스킵) + 결정성/분포/churn/drain 단위 테스트 + bench
+  매트릭스 포함. 후속 PR에서 object placement 호출 경로를 이 헬퍼로 교체할 예정.
+
 ## [0.0.316.0] - 2026-05-21
 
 ### Internal
