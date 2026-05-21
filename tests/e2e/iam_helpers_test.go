@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
@@ -192,110 +193,106 @@ func tryPolicyAttachAdminOnBucket(sock, saID, bucket string) error {
 	return nil
 }
 
-func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
-		t.Cleanup(func() { _ = os.Remove(sock) })
-		ln, err := net.Listen("unix", sock)
-		require.NoError(t, err)
-		defer ln.Close()
+func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("grainfs-bootstrap-helper-%d.sock", time.Now().UnixNano()))
+	ginkgo.DeferCleanup(func() { _ = os.Remove(sock) })
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(func() { _ = ln.Close() })
 
-		srv := &http.Server{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, "/v1/iam/sa", r.URL.Path)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "/v1/iam/sa", r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{
 				"sa_id":"019e-test-sa",
 				"name":"admin",
 				"access_key":"ak",
 				"secret_key":"sk",
 				"created_at":"2026-05-13T00:00:00Z"
 			}`)
-			}),
-		}
-		done := make(chan struct{})
-		go func() {
-			_ = srv.Serve(ln)
-			close(done)
-		}()
-		t.Cleanup(func() {
-			_ = srv.Close()
-			<-done
-		})
-
-		got, err := tryBootstrapAdminViaUDSResult(sock)
-		require.NoError(t, err)
-		require.Equal(t, "019e-test-sa", got.SAID)
-		require.Equal(t, "ak", got.AccessKey)
-		require.Equal(t, "sk", got.SecretKey)
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	ginkgo.DeferCleanup(func() {
+		_ = srv.Close()
+		<-done
 	})
+
+	got, err := tryBootstrapAdminViaUDSResult(sock)
+	require.NoError(t, err)
+	require.Equal(t, "019e-test-sa", got.SAID)
+	require.Equal(t, "ak", got.AccessKey)
+	require.Equal(t, "sk", got.SecretKey)
 }
 
-func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		sock := filepath.Join(dir, "admin.sock")
-		ln, err := net.Listen("unix", sock)
-		require.NoError(t, err)
-		defer ln.Close()
+func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
+	dir, err := os.MkdirTemp("/tmp", "grainfs-bootstrap-grant-*")
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(func() { _ = ln.Close() })
 
-		policyPut := make(chan string, 1)
-		policyAttach := make(chan string, 1)
-		srv := &http.Server{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case r.URL.Path == "/v1/iam/sa":
-					require.Equal(t, http.MethodPost, r.Method)
-					_, _ = io.WriteString(w, `{
+	policyPut := make(chan string, 1)
+	policyAttach := make(chan string, 1)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/v1/iam/sa":
+				require.Equal(t, http.MethodPost, r.Method)
+				_, _ = io.WriteString(w, `{
 						"sa_id":"regular-sa",
 						"name":"admin",
 						"access_key":"ak",
 						"secret_key":"sk",
 						"created_at":"2026-05-13T00:00:00Z"
 					}`)
-				case strings.HasPrefix(r.URL.Path, "/v1/iam/policy/") && r.Method == http.MethodPut &&
-					!strings.Contains(r.URL.Path, "/attach/"):
-					policyPut <- r.URL.Path
-					w.WriteHeader(http.StatusNoContent)
-				case strings.HasPrefix(r.URL.Path, "/v1/iam/policy/") && r.Method == http.MethodPut &&
-					strings.Contains(r.URL.Path, "/attach/sa/"):
-					policyAttach <- r.URL.Path
-					w.WriteHeader(http.StatusNoContent)
-				default:
-					http.NotFound(w, r)
-				}
-			}),
-		}
-		done := make(chan struct{})
-		go func() {
-			_ = srv.Serve(ln)
-			close(done)
-		}()
-		t.Cleanup(func() {
-			_ = srv.Close()
-			<-done
-		})
-
-		ak, sk := bootstrapAdminViaUDSAnyWithBucketGrants(t, []string{dir}, time.Second, "__probe")
-		require.Equal(t, "ak", ak)
-		require.Equal(t, "sk", sk)
-
-		select {
-		case path := <-policyPut:
-			require.Contains(t, path, "harness-admin-__probe")
-		case <-time.After(time.Second):
-			t.Fatal("expected policy PUT request")
-		}
-		select {
-		case path := <-policyAttach:
-			require.Contains(t, path, "regular-sa")
-		case <-time.After(time.Second):
-			t.Fatal("expected policy attach request")
-		}
+			case strings.HasPrefix(r.URL.Path, "/v1/iam/policy/") && r.Method == http.MethodPut &&
+				!strings.Contains(r.URL.Path, "/attach/"):
+				policyPut <- r.URL.Path
+				w.WriteHeader(http.StatusNoContent)
+			case strings.HasPrefix(r.URL.Path, "/v1/iam/policy/") && r.Method == http.MethodPut &&
+				strings.Contains(r.URL.Path, "/attach/sa/"):
+				policyAttach <- r.URL.Path
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = srv.Serve(ln)
+		close(done)
+	}()
+	ginkgo.DeferCleanup(func() {
+		_ = srv.Close()
+		<-done
 	})
+
+	ak, sk := bootstrapAdminViaUDSAnyWithBucketGrants(t, []string{dir}, time.Second, "__probe")
+	require.Equal(t, "ak", ak)
+	require.Equal(t, "sk", sk)
+
+	select {
+	case path := <-policyPut:
+		require.Contains(t, path, "harness-admin-__probe")
+	case <-time.After(time.Second):
+		t.Fatal("expected policy PUT request")
+	}
+	select {
+	case path := <-policyAttach:
+		require.Contains(t, path, "regular-sa")
+	case <-time.After(time.Second):
+		t.Fatal("expected policy attach request")
+	}
 }
 
 func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
@@ -683,25 +680,30 @@ func s3ClientFor(endpoint, ak, sk string) *s3.Client {
 // startIAMTestServer brings up a server with bootstrap creds wired
 // correctly: HeadBucket on a bucket provisioned for the bootstrap SA succeeds,
 // proving the SigV4 verifier accepts the bootstrap key pair.
-func runIAMHelpersStartServerBootstrapAccepted(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		srv := startIAMTestServer(t)
-		defer srv.Stop()
+func runIAMHelpersStartServerBootstrapAccepted(t testing.TB) {
+	srv := startIAMTestServer(t)
+	ginkgo.DeferCleanup(srv.Stop)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		const bucket = "bootstrap-probe"
-		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{srv.DataDir}, srv.BootstrapSAID, bucket, srv.Client)
-		_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
-			Bucket: aws.String(bucket),
-		})
-		require.NoError(t, err, "HeadBucket with bootstrap creds")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ginkgo.DeferCleanup(cancel)
+	const bucket = "bootstrap-probe"
+	createBucketWithAdminPolicyAttachViaUDSAny(t, []string{srv.DataDir}, srv.BootstrapSAID, bucket, srv.Client)
+	_, err := srv.Client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(bucket),
 	})
+	require.NoError(t, err, "HeadBucket with bootstrap creds")
 }
 
-// TestIAMBootstrapHelpersE2E groups single-node IAM bootstrap helper checks.
-func TestIAMBootstrapHelpersE2E(t *testing.T) {
-	t.Run("BootstrapAdminViaUDSAnyWithBucketGrants", runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants)
-	t.Run("TryBootstrapAdminViaUDSResultPreservesSAID", runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID)
-	t.Run("StartServerBootstrapAccepted", runIAMHelpersStartServerBootstrapAccepted)
-}
+var _ = ginkgo.Describe("IAM bootstrap helpers", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("attaches bucket grants through any admin UDS", func() {
+			runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(ginkgo.GinkgoTB())
+		})
+		ginkgo.It("preserves the bootstrap service account ID", func() {
+			runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(ginkgo.GinkgoTB())
+		})
+		ginkgo.It("starts a server that accepts bootstrap credentials", func() {
+			runIAMHelpersStartServerBootstrapAccepted(ginkgo.GinkgoTB())
+		})
+	})
+})
