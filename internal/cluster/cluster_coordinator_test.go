@@ -815,6 +815,124 @@ func TestClusterCoordinator_GetObjectFallsBackToPlacementWhenIndexIsLagging(t *t
 	require.Equal(t, "image", string(body))
 }
 
+// FU#4 missing-object-500: when an object-index proposer is configured (the
+// production wiring), the object-index has no row for (bucket,key), and
+// the local node cannot serve the read (not a voter for the placement
+// group), GetObject/HeadObject must surface ErrObjectNotFound rather than
+// forward to the routeWriteOrBucket-picked placement group and bubble out
+// ErrNoReachablePeer → S3 500. This is the cluster bug observed when a
+// follower receives a GET for a key that has never been written.
+func TestClusterCoordinator_GetObject_NeverExistedKeyReturnsNotFoundWithoutForward(t *testing.T) {
+	base := &fakeBackend{}
+	// Voters are remote — self is not in the group, so ResolveRead returns
+	// nil and we fall through to the forward path (where the fix lives).
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-1", []string{"peer-a", "peer-b"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"peer-a", "peer-b"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	d := &recordingDialer{defaultErr: errors.New("forward should not be reached for never-existed key")}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	_, _, err := c.GetObject(context.Background(), "photos", "never-existed.jpg")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound, "never-existed key must surface as ErrObjectNotFound")
+	require.Empty(t, d.calls, "forward path must not be reached when object index has no entry")
+	require.Empty(t, d.readCalls, "read-stream forward must not be reached either")
+}
+
+func TestClusterCoordinator_HeadObject_NeverExistedKeyReturnsNotFoundWithoutForward(t *testing.T) {
+	base := &fakeBackend{}
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("group-1", []string{"peer-a", "peer-b"}))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"peer-a", "peer-b"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	d := &recordingDialer{defaultErr: errors.New("forward should not be reached for never-existed key")}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{}).
+		WithForwardSender(NewForwardSender(d.dial))
+
+	_, err := c.HeadObject(context.Background(), "photos", "never-existed.jpg")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+	require.Empty(t, d.calls)
+}
+
+// F#46: when the object index's latest row for (bucket,key) is a delete
+// marker, an unversioned GET/HEAD must surface ErrObjectNotFound — not
+// ErrMethodNotAllowed, which is the correct response only for an explicit
+// versioned read of the marker. Single-node hits headObjectMeta which already
+// folds delete-marker → ErrObjectNotFound; cluster must match.
+func TestClusterCoordinator_GetObject_DeleteMarkerLatestReturnsNotFound(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "photos"))
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket:           "photos",
+		Key:              "img.jpg",
+		VersionID:        "delete-marker-v1",
+		PlacementGroupID: "group-1",
+		ETag:             deleteMarkerETag,
+		ECData:           1,
+		ECParity:         0,
+		NodeIDs:          []string{"test-node"},
+		IsDeleteMarker:   true,
+	}, false)))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	_, _, err := c.GetObject(context.Background(), "photos", "img.jpg")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound,
+		"unversioned GET against delete-marker latest must be 404, not 405")
+	require.NotErrorIs(t, err, storage.ErrMethodNotAllowed)
+}
+
+func TestClusterCoordinator_HeadObject_DeleteMarkerLatestReturnsNotFound(t *testing.T) {
+	base := &fakeBackend{}
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "photos"))
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("photos", "group-1")
+	meta := NewMetaFSM()
+	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
+	require.NoError(t, meta.applyCmd(makePutBucketAssignmentCmd(t, "photos", "group-1")))
+	require.NoError(t, meta.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
+		Bucket:           "photos",
+		Key:              "img.jpg",
+		VersionID:        "delete-marker-v1",
+		PlacementGroupID: "group-1",
+		ETag:             deleteMarkerETag,
+		ECData:           1,
+		ECParity:         0,
+		NodeIDs:          []string{"test-node"},
+		IsDeleteMarker:   true,
+	}, false)))
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0}).
+		WithObjectIndexProposer(noopObjectIndexProposer{})
+
+	_, err := c.HeadObject(context.Background(), "photos", "img.jpg")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+	require.NotErrorIs(t, err, storage.ErrMethodNotAllowed)
+}
+
 func TestClusterCoordinator_GetObjectECIndexedLocalVoterSurvivesMissingLeader(t *testing.T) {
 	base := &fakeBackend{}
 	gb := newTestGroupBackend(t, "group-1")
