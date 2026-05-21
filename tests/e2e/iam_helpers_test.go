@@ -505,7 +505,7 @@ func (s iamTestServer) Stop() {}
 // startIAMTestServer launches a single-node grainfs binary, bootstraps an
 // Admin SA via the admin UDS POST /v1/iam/sa, and returns a handle the IAM
 // e2e tests can use to drive both the S3 plane and the admin UDS.
-func startIAMTestServer(t *testing.T) iamTestServer {
+func startIAMTestServer(t testing.TB) iamTestServer {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-iam-e2e-*")
