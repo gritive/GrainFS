@@ -387,6 +387,18 @@ func runObjectCases(getTgt func() s3Target) {
 		data, _ := io.ReadAll(out.Body)
 		gomega.Expect(string(data)).To(gomega.Equal("form upload content"))
 	})
+
+	ginkgo.PIt("[TODO:e2e] DeleteObjects removes multiple keys in one request", func() {
+		// POST /:bucket?delete with XML body listing keys to delete.
+		// aws-sdk-go-v2: s3.DeleteObjects. Cover success path + partial-failure
+		// reporting in the Deleted/Errors response shape.
+	})
+
+	ginkgo.PIt("[TODO:e2e] ListObjects V1 paginates with Marker (no list-type=2)", func() {
+		// GET /:bucket without list-type=2 → legacy V1 listing.
+		// aws-sdk-go-v2: s3.ListObjects. Cover Marker pagination + IsTruncated
+		// + NextMarker semantics distinct from V2's ContinuationToken.
+	})
 }
 
 func writeSignedPostPolicy(t testing.TB, w *multipart.Writer, tgt s3Target, bucket, key string) {
