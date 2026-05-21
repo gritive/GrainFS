@@ -13,7 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 type ClusterMode string
@@ -76,7 +76,7 @@ type e2eCluster struct {
 func startE2ECluster(t testing.TB, opts e2eClusterOptions) *e2eCluster {
 	t.Helper()
 	c := startE2EClusterNoCleanup(t, opts)
-	t.Cleanup(c.Stop)
+	ginkgo.DeferCleanup(c.Stop)
 	return c
 }
 
@@ -97,7 +97,7 @@ func startE2EClusterNoCleanup(t testing.TB, opts e2eClusterOptions) *e2eCluster 
 		t.Logf("e2e cluster start attempt %d failed: %v", attempt, err)
 		time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
 	}
-	require.NoError(t, lastErr)
+	gomega.Expect(lastErr).NotTo(gomega.HaveOccurred())
 	return nil
 }
 
@@ -140,11 +140,11 @@ func rejectRemovedECExtraArgs(args []string) {
 func runNormalizeOptionsRejectsRemovedZeroConfigFlags(t testing.TB) {
 	t.Helper()
 	for _, arg := range []string{"--ec-data=2", "--ec-data", "--ec-parity=1", "--ec-parity", "--seed-groups=2", "--seed-groups"} {
-		require.PanicsWithValue(t,
+		gomega.Expect(func() {
+			normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
+		}).To(gomega.PanicWith(
 			fmt.Sprintf("removed zero-config flag %q: use Nodes to select the automatic profile", arg),
-			func() {
-				normalizeE2EClusterOptions(e2eClusterOptions{ExtraArgs: []string{arg}})
-			})
+		))
 	}
 }
 
@@ -153,7 +153,7 @@ func runNormalizeOptionsAllowsNonECExtraArgs(t testing.TB) {
 	opts := normalizeE2EClusterOptions(e2eClusterOptions{
 		ExtraArgs: []string{"--vlog-warn-ratio=0.001"},
 	})
-	require.Equal(t, []string{"--vlog-warn-ratio=0.001"}, opts.ExtraArgs)
+	gomega.Expect(opts.ExtraArgs).To(gomega.Equal([]string{"--vlog-warn-ratio=0.001"}))
 }
 
 func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, error) {
@@ -385,7 +385,7 @@ func (c *e2eCluster) EnsureBucketWritable(ctx context.Context, bucket string, ti
 func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 	t.Helper()
 	logFile, err := os.CreateTemp("", fmt.Sprintf("%s-node-%d-*.log", c.logPrefix, i))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	t.Cleanup(func() {
 		_ = logFile.Close()
 		if t.Failed() && keepE2EArtifacts() {
@@ -417,7 +417,7 @@ func (c *e2eCluster) startNode(t testing.TB, i int) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start(), "start e2e cluster node %d", i)
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start e2e cluster node %d", i)
 	return cmd
 }
 
