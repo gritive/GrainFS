@@ -18,7 +18,7 @@ import (
 
 // newTestGroupBackend wires a single-voter GroupBackend backed by fresh
 // BadgerDB + RaftNode. Mirrors newTestDistributedBackend (single-node leader).
-func newTestGroupBackend(t testing.TB, groupID string) *GroupBackend {
+func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 	t.Helper()
 	dir := t.TempDir()
 

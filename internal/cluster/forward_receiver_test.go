@@ -26,7 +26,7 @@ func (f *failingObjectIndexProposer) ProposeDeleteObjectIndex(_ context.Context,
 
 // Test helpers
 
-func setupReceiver(t *testing.T, selfID string) (*ForwardReceiver, *DataGroupManager) {
+func setupReceiver(_ interface{}, selfID string) (*ForwardReceiver, *DataGroupManager) {
 	mgr := NewDataGroupManager()
 	rcv := NewForwardReceiver(mgr)
 	return rcv, mgr
