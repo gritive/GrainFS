@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // CoW (copy-on-write) tests exercise the volume snapshot/rollback/clone CLI
@@ -39,10 +39,10 @@ func cowCreateVolume(t testing.TB, dataDir, name string, sizeBytes int64) {
 		out  string
 		code int
 	)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		out, code = runCLI(t, dataDir, "volume", "create", name, "--size", fmt.Sprintf("%d", sizeBytes))
 		return code == 0
-	}, 30*time.Second, 500*time.Millisecond, "create volume %s: code=%d output=%s", name, code, out)
+	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "create volume %s: code=%d output=%s", name, code, out)
 }
 
 func cowDeleteVolume(t testing.TB, dataDir, name string) {
@@ -51,10 +51,10 @@ func cowDeleteVolume(t testing.TB, dataDir, name string) {
 		out  string
 		code int
 	)
-	require.Eventually(t, func() bool {
+	gomega.Eventually(func() bool {
 		out, code = runCLI(t, dataDir, "volume", "delete", name, "--force")
 		return code == 0 || strings.Contains(out, "volume not found")
-	}, 30*time.Second, 500*time.Millisecond, "delete volume %s: code=%d output=%s", name, code, out)
+	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "delete volume %s: code=%d output=%s", name, code, out)
 }
 
 func cowCleanupVolume(t testing.TB, dataDir, name string) {
@@ -80,44 +80,44 @@ func cowCleanupVolume(t testing.TB, dataDir, name string) {
 func cowCreateSnapshot(t testing.TB, dataDir, volName string) string {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "create", volName, "--format", "json")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	var snap cowSnapResp
-	require.NoError(t, json.Unmarshal([]byte(out), &snap))
-	require.NotEmpty(t, snap.ID, "snapshot ID must be non-empty")
+	gomega.Expect(json.Unmarshal([]byte(out), &snap)).To(gomega.Succeed())
+	gomega.Expect(snap.ID).NotTo(gomega.BeEmpty(), "snapshot ID must be non-empty")
 	return snap.ID
 }
 
 func cowRollback(t testing.TB, dataDir, volName, snapID string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "rollback", volName, snapID)
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 }
 
 func cowListSnapshots(t testing.TB, dataDir, volName string) []cowSnapResp {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "list", volName, "--format", "json")
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	var snaps []cowSnapResp
-	require.NoError(t, json.Unmarshal([]byte(out), &snaps))
+	gomega.Expect(json.Unmarshal([]byte(out), &snaps)).To(gomega.Succeed())
 	return snaps
 }
 
 func cowDeleteSnapshot(t testing.TB, dataDir, volName, snapID string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "snapshot", "delete", volName, snapID)
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 }
 
 func cowWriteAt(t testing.TB, dataDir, volName string, offset int64, content string) {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "write-at", volName, "--offset", fmt.Sprintf("%d", offset), "--content", content)
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 }
 
 func cowReadAt(t testing.TB, dataDir, volName string, offset, length int64) string {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "volume", "read-at", volName, "--offset", fmt.Sprintf("%d", offset), "--length", fmt.Sprintf("%d", length))
-	require.Equal(t, 0, code, out)
+	gomega.Expect(code).To(gomega.Equal(0), out)
 	return out
 }
 
@@ -161,11 +161,11 @@ func runCoWCases(getTgt func() s3Target) {
 
 		cowWriteAt(t, dataDir(), volName, 0, modified)
 		got := cowReadAt(t, dataDir(), volName, 0, int64(len(modified)))
-		require.Equal(t, modified, got)
+		gomega.Expect(got).To(gomega.Equal(modified))
 
 		cowRollback(t, dataDir(), volName, snapID)
 		got = cowReadAt(t, dataDir(), volName, 0, int64(len(original)))
-		require.Equal(t, original, got)
+		gomega.Expect(got).To(gomega.Equal(original))
 	})
 
 	ginkgo.It("lists and deletes snapshots", func() {
@@ -183,15 +183,15 @@ func runCoWCases(getTgt func() s3Target) {
 		}
 
 		snaps := cowListSnapshots(t, dataDir(), volName)
-		require.Len(t, snaps, 3, "expected 3 snapshots after creation")
+		gomega.Expect(snaps).To(gomega.HaveLen(3), "expected 3 snapshots after creation")
 
 		cowDeleteSnapshot(t, dataDir(), volName, ids[1])
 
 		snaps = cowListSnapshots(t, dataDir(), volName)
-		require.Len(t, snaps, 2, "expected 2 snapshots after deleting one")
+		gomega.Expect(snaps).To(gomega.HaveLen(2), "expected 2 snapshots after deleting one")
 
 		for _, s := range snaps {
-			require.NotEqual(t, ids[1], s.ID, "deleted snapshot must not appear in list")
+			gomega.Expect(s.ID).NotTo(gomega.Equal(ids[1]), "deleted snapshot must not appear in list")
 		}
 	})
 
@@ -218,21 +218,21 @@ func runCoWCases(getTgt func() s3Target) {
 		cowWriteAt(t, dataDir(), srcName, 0, original)
 
 		out, code := runCLI(t, dataDir(), "volume", "clone", srcName, dstName)
-		require.Equal(t, 0, code, out)
+		gomega.Expect(code).To(gomega.Equal(0), out)
 		ginkgo.DeferCleanup(cowCleanupVolume, t, dataDir(), dstName)
 
 		got := cowReadAt(t, dataDir(), dstName, 0, int64(len(original)))
-		require.Equal(t, original, got)
+		gomega.Expect(got).To(gomega.Equal(original))
 
 		cowWriteAt(t, dataDir(), dstName, 0, modified)
 		got = cowReadAt(t, dataDir(), srcName, 0, int64(len(original)))
-		require.Equal(t, original, got, "clone writes must not modify source")
+		gomega.Expect(got).To(gomega.Equal(original), "clone writes must not modify source")
 
 		cowDeleteVolume(t, dataDir(), srcName)
 		srcDeleted = true
 		out, code = runCLI(t, dataDir(), "volume", "info", dstName)
-		require.Equal(t, 0, code, "clone must survive deletion of its source: %s", out)
+		gomega.Expect(code).To(gomega.Equal(0), "clone must survive deletion of its source: %s", out)
 		got = cowReadAt(t, dataDir(), dstName, 0, int64(len(modified)))
-		require.Equal(t, modified, got)
+		gomega.Expect(got).To(gomega.Equal(modified))
 	})
 }
