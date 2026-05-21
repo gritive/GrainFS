@@ -250,6 +250,14 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	require.Equal(t, uint64(42), seq)
 }
 
+func TestSaveCheckpointCreatesMissingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	require.NoError(t, datawal.SaveCheckpoint(dir, 99))
+	seq, err := datawal.LoadCheckpoint(dir)
+	require.NoError(t, err)
+	require.Equal(t, uint64(99), seq)
+}
+
 func TestRecordReaderStreamsPayload(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, datawal.EncodeRecord(&buf, datawal.Record{Op: datawal.OpShardPut, Bucket: "b", Key: "k", Payload: []byte("payload")}))

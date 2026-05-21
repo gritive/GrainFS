@@ -68,6 +68,9 @@ func LoadCheckpoint(dir string) (uint64, error) {
 }
 
 func SaveCheckpoint(dir string, seq uint64) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, checkpointName+".tmp-*")
 	if err != nil {
 		return err
