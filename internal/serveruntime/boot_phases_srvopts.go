@@ -58,6 +58,17 @@ import (
 func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
+	// Fail fast on missing deps that bootMetaRaftWiring must have populated.
+	// A silent nil-skip here masks boot-phase ordering bugs: the S3 server
+	// would start with no anon middleware wiring, violating the Phase 0 anon
+	// contract. See F#45.
+	if state.cfgStore == nil {
+		return fmt.Errorf("boot phase srvopts: cfgStore nil; bootMetaRaftWiring must run first")
+	}
+	if state.iamPolicyStores == nil {
+		return fmt.Errorf("boot phase srvopts: iamPolicyStores nil; bootMetaRaftWiring must run first")
+	}
+
 	// Route webhook URL + secret through ClusterConfig so a PATCH that
 	// rotates either lands without a serve restart. The serveruntime.Config
 	// flag-derived fields (AlertWebhook, AlertSecret) are bootstrap seeds for
@@ -153,18 +164,14 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
 	// T33: wire the policy authorizer so Layer 1 (iamCheck) evaluates
-	// policy.Evaluate. Both iamPolicyStores and cfgStore are populated by
-	// bootMetaRaftWiring before this phase runs.
-	if state.iamPolicyStores != nil && state.cfgStore != nil {
-		policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
-		srvOpts = append(srvOpts, server.WithPolicyAuthorizer(policyAuthz))
-	}
+	// policy.Evaluate. Both iamPolicyStores and cfgStore are guaranteed non-nil
+	// by the fail-fast guards at the top of this function.
+	policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
+	srvOpts = append(srvOpts, server.WithPolicyAuthorizer(policyAuthz))
 	// F#41: wire the same cfgStore into the bearer/anon middleware so the S3
 	// authn middleware's Phase 0 anon fast path can read iam.anon-enabled. The
 	// iceberg bearer-skip path uses the same reader.
-	if state.cfgStore != nil {
-		srvOpts = append(srvOpts, server.WithBearerConfig(state.cfgStore))
-	}
+	srvOpts = append(srvOpts, server.WithBearerConfig(state.cfgStore))
 	if state.balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(NewBalancerInfoAdapter(state.balancerProposer)))
 	}
