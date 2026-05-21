@@ -242,6 +242,40 @@ func TestRecoverSkipsExistingReplacementButReplaysPatch(t *testing.T) {
 	require.Equal(t, datawal.OpObjectWriteAt, m.applied[0].Op)
 }
 
+func TestRecoverSavesCheckpointToLastReplayedSeq(t *testing.T) {
+	w, err := datawal.Open(t.TempDir(), nil)
+	require.NoError(t, err)
+	defer w.Close()
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "a", Payload: []byte("1")})
+	require.NoError(t, err)
+	lastSeq, err := w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "b", Payload: []byte("2")})
+	require.NoError(t, err)
+	require.NoError(t, w.Flush())
+
+	m := &recordingMaterializer{}
+	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, m))
+	checkpoint, err := datawal.LoadCheckpoint(w.Dir())
+	require.NoError(t, err)
+	require.Equal(t, lastSeq, checkpoint)
+}
+
+func TestRecoverHonorsExistingCheckpoint(t *testing.T) {
+	w, err := datawal.Open(t.TempDir(), nil)
+	require.NoError(t, err)
+	defer w.Close()
+	firstSeq, err := w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "old", Payload: []byte("1")})
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpObjectWriteAt, Bucket: "b", Key: "new", Payload: []byte("2")})
+	require.NoError(t, err)
+	require.NoError(t, w.Flush())
+	require.NoError(t, datawal.SaveCheckpoint(w.Dir(), firstSeq))
+
+	m := &recordingMaterializer{}
+	require.NoError(t, datawal.Recover(context.Background(), w.Dir(), 0, nil, m))
+	require.Len(t, m.applied, 1)
+	require.Equal(t, "new", m.applied[0].Key)
+}
+
 func TestCheckpointRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, datawal.SaveCheckpoint(dir, 42))
@@ -256,6 +290,13 @@ func TestSaveCheckpointCreatesMissingDir(t *testing.T) {
 	seq, err := datawal.LoadCheckpoint(dir)
 	require.NoError(t, err)
 	require.Equal(t, uint64(99), seq)
+}
+
+func TestLoadCheckpointRejectsInvalidLength(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "checkpoint"), []byte{1, 2, 3}, 0o644))
+	_, err := datawal.LoadCheckpoint(dir)
+	require.Error(t, err)
 }
 
 func TestRecordReaderStreamsPayload(t *testing.T) {

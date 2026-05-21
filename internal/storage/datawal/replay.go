@@ -12,11 +12,20 @@ import (
 
 const checkpointName = "checkpoint"
 
+// Materializer applies WAL records during recovery.
+//
+// Recover saves its checkpoint only after a full successful replay. Until that
+// checkpoint is saved, records that were already materialized can be replayed
+// after a later failure or process crash. Replacement records can use
+// HasReplacement to skip already-present targets; Materialize implementations
+// for patch or logical mutation records must be idempotent.
 type Materializer interface {
 	Materialize(context.Context, Record) error
 	HasReplacement(context.Context, Record) (bool, error)
 }
 
+// Recover replays records after max(fromSeq, LoadCheckpoint(dir)) through m and
+// saves the checkpoint to the last replayed sequence after replay completes.
 func Recover(ctx context.Context, dir string, fromSeq uint64, enc *encrypt.Encryptor, m Materializer) error {
 	if m == nil {
 		return fmt.Errorf("datawal: nil materializer")
