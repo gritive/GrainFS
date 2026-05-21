@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Jepsen raft cluster", func() {
@@ -17,7 +17,7 @@ var _ = ginkgo.Describe("Jepsen raft cluster", func() {
 		// Skip in short mode
 
 		dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 		binary := getBinary()
@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("Jepsen raft cluster", func() {
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		require.NoError(t, cmd.Start())
+		gomega.Expect(cmd.Start()).To(gomega.Succeed())
 		ginkgo.DeferCleanup(terminateProcess, cmd)
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -58,7 +58,7 @@ var _ = ginkgo.Describe("Jepsen raft cluster", func() {
 
 		// All operations should succeed
 		for i, err := range errors {
-			require.NoError(t, err, "client %d put should succeed", i)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "client %d put should succeed", i)
 		}
 
 		t.Log("✓ All concurrent writes succeeded")

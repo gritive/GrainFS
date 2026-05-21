@@ -10,8 +10,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TestAutoSnapshot_CreatesSnapshotAutomatically verifies that when the
@@ -23,7 +22,7 @@ var _ = ginkgo.Describe("Auto snapshot", func() {
 			t := ginkgo.GinkgoTB()
 			binary := getBinary()
 			dir, err := os.MkdirTemp("", "grainfs-autosnap-e2e-*")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 			port := freePort()
@@ -36,7 +35,7 @@ var _ = ginkgo.Describe("Auto snapshot", func() {
 			)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
-			require.NoError(t, cmd.Start())
+			gomega.Expect(cmd.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(func() {
 				if cmd.Process != nil {
 					_ = cmd.Process.Kill()
@@ -53,7 +52,7 @@ var _ = ginkgo.Describe("Auto snapshot", func() {
 
 			endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 			snapshots := waitForAutoSnapshots(t, endpoint, 2, 10*time.Second)
-			assert.GreaterOrEqual(t, len(snapshots), 2,
+			gomega.Expect(len(snapshots)).To(gomega.BeNumerically(">=", 2),
 				"at least 2 auto-snapshots should have been created with 1s interval")
 		})
 	})
