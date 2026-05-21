@@ -44,7 +44,10 @@ func freePort(t serverTestTB) int {
 
 const testServerShutdownTimeout = 10 * time.Millisecond
 
-func waitForTCP(t testing.TB, addr string) {
+func waitForTCP(t interface {
+	serverTestTB
+	Fatalf(format string, args ...interface{})
+}, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	var lastErr error
