@@ -17,7 +17,6 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 // BucketPolicy test set probes admin-UDS policy CRUD, data-plane policy read,
@@ -147,7 +146,7 @@ func runBucketPolicyCases(getTgt func() s3Target) {
 func adminPolicyClient(t testing.TB, tgt s3Target) *bucketadmin.Client {
 	t.Helper()
 	c, err := bucketadmin.NewClient(tgt.adminSockPath())
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return c
 }
 
@@ -155,7 +154,7 @@ func adminPolicySet(t testing.TB, tgt s3Target, bucket string, policy []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, adminPolicyClient(t, tgt).PolicySet(ctx, bucket, policy))
+	gomega.Expect(adminPolicyClient(t, tgt).PolicySet(ctx, bucket, policy)).To(gomega.Succeed())
 }
 
 func adminPolicyGet(t testing.TB, tgt s3Target, bucket string) []byte {
@@ -163,7 +162,7 @@ func adminPolicyGet(t testing.TB, tgt s3Target, bucket string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	raw, err := adminPolicyClient(t, tgt).PolicyGetRaw(ctx, bucket)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return raw
 }
 
@@ -171,7 +170,7 @@ func adminPolicyDelete(t testing.TB, tgt s3Target, bucket string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, adminPolicyClient(t, tgt).PolicyDelete(ctx, bucket))
+	gomega.Expect(adminPolicyClient(t, tgt).PolicyDelete(ctx, bucket)).To(gomega.Succeed())
 }
 
 func adminPolicySetRaw(t testing.TB, tgt s3Target, bucket string, body []byte) (int, []byte) {
@@ -180,19 +179,19 @@ func adminPolicySetRaw(t testing.TB, tgt s3Target, bucket string, body []byte) (
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
 		"http://unix/v1/buckets/"+url.PathEscape(bucket)+"/policy", bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err := iamUDSClient(tgt.adminSockPath()).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return resp.StatusCode, respBody
 }
 
-func signedPolicyRequest(t *testing.T, tgt s3Target, method, bucket string, body io.Reader) *http.Request {
+func signedPolicyRequest(t testing.TB, tgt s3Target, method, bucket string, body io.Reader) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(method, tgt.endpoint(0)+"/"+bucket+"?policy", body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Host = req.URL.Host
 	s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
 	return req

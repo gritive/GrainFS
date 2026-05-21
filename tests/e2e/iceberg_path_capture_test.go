@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // Iceberg path capture specs pin the URL path that iceberg-go's REST driver
@@ -116,17 +116,17 @@ func runIcebergPathCaptureOutboundTokenPathExactMatch(t testing.TB, tgt *iceberg
 	}
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
-	require.Equal(t, http.StatusOK, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 		"outbound token POST must succeed through proxy")
 
 	got, _ := capturedPath.Load().(string)
-	require.Equal(t, "/iceberg/v1/oauth/tokens", got,
+	gomega.Expect(got).To(gomega.Equal("/iceberg/v1/oauth/tokens"),
 		"F#8: outbound token request MUST hit /iceberg/v1/oauth/tokens exactly")
 }
 
@@ -147,17 +147,17 @@ func runIcebergPathCaptureCatalogBaseURINoTrailingV1(t testing.TB, tgt *icebergT
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodGet, tgt.endpoint(0)+"/iceberg/v1/config", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
 
-	require.NotEqual(t, http.StatusNotFound, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).NotTo(gomega.Equal(http.StatusNotFound),
 		"catalog must expose /v1/config under /iceberg base (catalog base must NOT include /v1)")
-	require.Contains(t, []int{
+	gomega.Expect([]int{
 		http.StatusOK,
 		http.StatusUnauthorized,
 		http.StatusForbidden,
-	}, resp.StatusCode,
+	}).To(gomega.ContainElement(resp.StatusCode),
 		"expected 200/401/403 (path exists, auth posture varies), got %d", resp.StatusCode)
 }

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Iceberg auth", func() {
@@ -37,9 +37,9 @@ func runIcebergAuthNoAuthRejectedSingleNode(t testing.TB) {
 
 	resp, err := http.Post(srv.S3URL+"/iceberg/v1/namespaces", "application/json",
 		bytes.NewReader([]byte(`{"namespace":["x"]}`)))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusUnauthorized))
 }
 
 func runIcebergAuthAfterBootstrapAcceptsSingleNode(t testing.TB) {
@@ -50,13 +50,13 @@ func runIcebergAuthAfterBootstrapAcceptsSingleNode(t testing.TB) {
 	client := newIcebergSigV4Client(t, srv.BootstrapAK, srv.BootstrapSK, "us-east-1")
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		srv.S3URL+"/iceberg/v1/config?warehouse=warehouse", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err := client.Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
-	require.NotEqual(t, http.StatusUnauthorized, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).NotTo(gomega.Equal(http.StatusUnauthorized),
 		"signed request should pass authn (got 401)")
-	require.NotEqual(t, http.StatusForbidden, resp.StatusCode,
+	gomega.Expect(resp.StatusCode).NotTo(gomega.Equal(http.StatusForbidden),
 		"signed request should not be 403 either")
 }
 
@@ -67,8 +67,8 @@ func runIcebergAuthFailuresRejectedSingleNode(t testing.TB) {
 	for i := 0; i < 3; i++ {
 		resp, err := http.Post(srv.S3URL+"/iceberg/v1/warehouses", "application/json",
 			bytes.NewReader([]byte(`{}`)))
-		require.NoError(t, err)
-		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusUnauthorized))
 		_ = resp.Body.Close()
 	}
 }
