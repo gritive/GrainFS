@@ -145,12 +145,44 @@ func TestNFSReadlinkRegularFileReturnsINVAL(t *testing.T) {
 	require.Equal(t, NFS4ERR_INVAL, readlink.Status)
 }
 
+func TestNFSReadlinkWithoutFilehandleReturnsNOFILEHANDLE(t *testing.T) {
+	d, _ := newSymlinkDispatcherForTest(t)
+	d.currentPath = ""
+
+	readlink := d.opReadLink()
+	require.Equal(t, NFS4ERR_NOFILEHANDLE, readlink.Status)
+}
+
 func TestNFSCreateSymlinkOverDirectoryReturnsINVAL(t *testing.T) {
 	d, _ := newSymlinkDispatcherForTest(t)
 	d.state.MarkDir("/" + legacyNFS4Bucket + "/dir")
 
 	create := d.opCreate(buildCreateSymlinkArgs("dir", "target.txt"))
 	require.Equal(t, NFS4ERR_INVAL, create.Status)
+}
+
+func TestNFSCreateSymlinkRejectsReservedAndExistingNames(t *testing.T) {
+	d, backend := newSymlinkDispatcherForTest(t)
+	_, err := backend.PutObject(context.Background(), legacyNFS4Bucket, "exists.txt", bytes.NewReader([]byte("data")), "application/octet-stream")
+	require.NoError(t, err)
+
+	create := d.opCreate(buildCreateSymlinkArgs("__meta", "target.txt"))
+	require.Equal(t, NFS4ERR_ACCESS, create.Status)
+
+	create = d.opCreate(buildCreateSymlinkArgs("exists.txt", "target.txt"))
+	require.Equal(t, NFS4ERR_INVAL, create.Status)
+}
+
+func TestNFSRemoveSymlinkDeletesSharedMetadata(t *testing.T) {
+	d, backend := newSymlinkDispatcherForTest(t)
+	create := d.opCreate(buildCreateSymlinkArgs("link.txt", "target.txt"))
+	require.Equal(t, NFS4_OK, create.Status)
+	d.currentPath = "/" + legacyNFS4Bucket
+
+	remove := d.opRemove([]byte("link.txt"))
+	require.Equal(t, NFS4_OK, remove.Status)
+	_, _, err := backend.GetObject(context.Background(), legacyNFS4Bucket, "__meta/link.txt")
+	require.Error(t, err)
 }
 
 func TestNFSGetAttrTypeReportsNF4LNK(t *testing.T) {

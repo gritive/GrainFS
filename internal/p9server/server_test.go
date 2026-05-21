@@ -653,6 +653,21 @@ func TestBucketFile_SymlinkCreatesLinkAndReadlinkReturnsTarget(t *testing.T) {
 	require.Equal(t, "target.txt", target)
 }
 
+func TestBucketFile_SymlinkRejectsExistingAndReservedNames(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "bkt"))
+	_, err := backend.PutObject(ctx, "bkt", "exists.txt", strings.NewReader("data"), "text/plain")
+	require.NoError(t, err)
+	bf := &bucketFile{backend: backend, locks: newObjectLocks(), bucket: "bkt"}
+
+	_, err = bf.Symlink("target.txt", "exists.txt", 0, 0)
+	require.ErrorIs(t, err, syscall.EEXIST)
+
+	_, err = bf.Symlink("target.txt", "__meta", 0, 0)
+	require.ErrorIs(t, err, syscall.EPERM)
+}
+
 func TestBucketFile_ReaddirReportsSymlinkType(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()

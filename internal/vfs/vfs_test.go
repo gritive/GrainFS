@@ -313,6 +313,18 @@ func TestReadlinkReturnsExactTarget(t *testing.T) {
 	assert.Equal(t, "../target.txt", target)
 }
 
+func TestStatSymlinkReportsTargetSizeAndMode(t *testing.T) {
+	fs := setupFS(t)
+
+	require.NoError(t, fs.Symlink("../target.txt", "link.txt"))
+
+	info, err := fs.Stat("link.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "link.txt", info.Name())
+	assert.Equal(t, int64(len("../target.txt")), info.Size())
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+}
+
 func TestReadlinkRegularFileAndDirectoryReturnInvalid(t *testing.T) {
 	fs := setupFS(t)
 
@@ -345,6 +357,40 @@ func TestSymlinkOverExistingDirectoryReturnsExist(t *testing.T) {
 	err := fs.Symlink("target.txt", "dir")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, os.ErrExist)
+}
+
+func TestSymlinkOverExistingFileReturnsExist(t *testing.T) {
+	fs := setupFS(t)
+	f, err := fs.Create("file.txt")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	err = fs.Symlink("target.txt", "file.txt")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrExist)
+}
+
+func TestRenameSymlinkMovesSharedMetadata(t *testing.T) {
+	fs := setupFS(t)
+
+	require.NoError(t, fs.Symlink("../target.txt", "old-link.txt"))
+	require.NoError(t, fs.Rename("old-link.txt", "new-link.txt"))
+
+	_, _, err := fs.backend.GetObject(context.Background(), fs.bucket, fsmeta.SidecarKey("old-link.txt"))
+	require.Error(t, err)
+	target, err := fs.Readlink("new-link.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "../target.txt", target)
+}
+
+func TestRemoveSymlinkDeletesSharedMetadata(t *testing.T) {
+	fs := setupFS(t)
+
+	require.NoError(t, fs.Symlink("../target.txt", "link.txt"))
+	require.NoError(t, fs.Remove("link.txt"))
+
+	_, _, err := fs.backend.GetObject(context.Background(), fs.bucket, fsmeta.SidecarKey("link.txt"))
+	require.Error(t, err)
 }
 
 func TestReadDirHidesMetaAndMarksSymlinkMode(t *testing.T) {
