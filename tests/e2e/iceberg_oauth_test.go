@@ -11,7 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // Iceberg OAuth specs exercise the §4 OAuth2 client_credentials token endpoint
@@ -86,17 +86,17 @@ func runIcebergOAuthS3SigV4NoBearerNeededPutGetRoundtrip(t testing.TB, tgt *iceb
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(body),
 	})
-	require.NoError(t, err, "SigV4 PutObject must succeed without minting a bearer")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "SigV4 PutObject must succeed without minting a bearer")
 
 	out, err := tgt.s3Client(0).GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err, "SigV4 GetObject must succeed without minting a bearer")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "SigV4 GetObject must succeed without minting a bearer")
 	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
-	require.NoError(t, err)
-	require.Equal(t, body, got)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got).To(gomega.Equal(body))
 }
 
 // runIcebergOAuthMintTokenHappyPath mints a bearer for a fresh SA with
@@ -109,9 +109,9 @@ func runIcebergOAuthMintTokenHappyPath(t testing.TB, tgt *icebergTarget) {
 	tgt.adminAttachPolicy(t, saID, "readwrite")
 
 	jwt, status := tgt.mintToken(t, ak, sk, warehouse)
-	require.Equal(t, http.StatusOK, status, "mintToken happy-path status")
-	require.NotEmpty(t, jwt, "mintToken happy-path JWT must be non-empty")
-	require.Equal(t, 2, strings.Count(jwt, "."),
+	gomega.Expect(status).To(gomega.Equal(http.StatusOK), "mintToken happy-path status")
+	gomega.Expect(jwt).NotTo(gomega.BeEmpty(), "mintToken happy-path JWT must be non-empty")
+	gomega.Expect(strings.Count(jwt, ".")).To(gomega.Equal(2),
 		"compact JWT must have exactly 2 dots (3 base64url segments): %q", jwt)
 }
 
@@ -125,8 +125,8 @@ func runIcebergOAuthMintTokenWrongSecret401(t testing.TB, tgt *icebergTarget) {
 	tgt.adminAttachPolicy(t, saID, "readwrite")
 
 	jwt, status := tgt.mintToken(t, ak, "WRONG-SECRET", warehouse)
-	require.Equal(t, http.StatusUnauthorized, status, "wrong secret must yield 401")
-	require.Empty(t, jwt, "wrong-secret response must not include a JWT")
+	gomega.Expect(status).To(gomega.Equal(http.StatusUnauthorized), "wrong secret must yield 401")
+	gomega.Expect(jwt).To(gomega.BeEmpty(), "wrong-secret response must not include a JWT")
 }
 
 // runIcebergOAuthPostMintTokenSigV4StillWorks confirms that an SA which has
@@ -141,8 +141,8 @@ func runIcebergOAuthPostMintTokenSigV4StillWorks(t testing.TB, tgt *icebergTarge
 	tgt.adminAttachPolicy(t, saID, "readwrite")
 
 	jwt, status := tgt.mintToken(t, ak, sk, warehouse)
-	require.Equal(t, http.StatusOK, status)
-	require.NotEmpty(t, jwt)
+	gomega.Expect(status).To(gomega.Equal(http.StatusOK))
+	gomega.Expect(jwt).NotTo(gomega.BeEmpty())
 
 	cli := ecS3Client(tgt.endpoint(0), ak, sk)
 	key := "objects/probe.txt"
@@ -153,15 +153,15 @@ func runIcebergOAuthPostMintTokenSigV4StillWorks(t testing.TB, tgt *icebergTarge
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(body),
 	})
-	require.NoError(t, err, "post-mint SigV4 PutObject must succeed")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "post-mint SigV4 PutObject must succeed")
 
 	out, err := cli.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(warehouse),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err, "post-mint SigV4 GetObject must succeed")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "post-mint SigV4 GetObject must succeed")
 	ginkgo.DeferCleanup(out.Body.Close)
 	got, err := io.ReadAll(out.Body)
-	require.NoError(t, err)
-	require.Equal(t, body, got)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(got).To(gomega.Equal(body))
 }
