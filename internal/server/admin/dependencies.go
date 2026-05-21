@@ -121,6 +121,26 @@ type IAMGroupService interface {
 	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
 }
 
+// MountSAItem is the JSON wire shape for a single MountSA entry.
+type MountSAItem struct {
+	Name       string `json:"name"`
+	NumericUID uint32 `json:"uid"`
+	CreatedAt  int64  `json:"created_at"`
+	CreatedBy  string `json:"created_by,omitempty"`
+}
+
+// IAMMountSAService is the slim interface Mount SA admin handlers need.
+// Kept separate from IAMGroupService / IAMPolicyService because MountSA
+// operations use distinct Raft MetaCmdTypes (65-68) and a distinct Badger
+// store. nil disables mount-SA admin endpoints.
+type IAMMountSAService interface {
+	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
+	// List returns all MountSAs. Never returns nil slice.
+	List() []MountSAItem
+	// Get returns one MountSA by name, ok=false if not found.
+	Get(name string) (MountSAItem, bool)
+}
+
 // ConfigProposer is the slim interface config admin handlers need to write
 // cluster-wide config via Raft. Satisfied by *cluster.MetaRaft.
 // nil disables config write endpoints.

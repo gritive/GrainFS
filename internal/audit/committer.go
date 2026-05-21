@@ -501,6 +501,9 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"26"})},
 		{Name: "condition_context_json", Type: arrow.BinaryTypes.LargeString,
 			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"27"})},
+		// T15 NFS§C: source column (Iceberg schema field id 28).
+		{Name: "source", Type: arrow.BinaryTypes.LargeString,
+			Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"28"})},
 	}, nil)
 
 	builder := array.NewRecordBuilder(pool, arrowSchema)
@@ -533,6 +536,7 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 	matchedSIDB := builder.Field(24).(*array.LargeStringBuilder)
 	authzLatencyUSB := builder.Field(25).(*array.Int32Builder)
 	conditionContextB := builder.Field(26).(*array.LargeStringBuilder)
+	sourceB := builder.Field(27).(*array.LargeStringBuilder)
 
 	for _, e := range events {
 		tsB.Append(arrow.Timestamp(e.Ts))
@@ -566,6 +570,7 @@ func encodeParquet(events []S3Event) ([]byte, error) {
 			return nil, fmt.Errorf("condition_context: %w", err)
 		}
 		conditionContextB.Append(ccJSON)
+		sourceB.Append(e.Source)
 	}
 
 	rec := builder.NewRecordBatch()

@@ -70,6 +70,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		IcebergConfig:        newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:            iamPolicyAdminService(state),
 		IAMGroup:             iamGroupAdminService(state),
+		IAMMountSA:           iamMountSAAdminService(state),
 		BucketWithPolicyProp: state.iamProposer,
 		ConfigProposer:       state.metaRaft,
 		ConfigStore:          state.cfgStore,
@@ -161,6 +162,19 @@ func iamGroupAdminService(state *bootState) admin.IAMGroupService {
 		return nil
 	}
 	return &iamGroupAdminAdapter{propose: state.metaRaft.Propose}
+}
+
+// iamMountSAAdminService returns a wired admin.IAMMountSAService if MetaRaft
+// and mountSAStore are available; otherwise returns nil (disables mount-SA
+// admin endpoints).
+func iamMountSAAdminService(state *bootState) admin.IAMMountSAService {
+	if state.metaRaft == nil || state.mountSAStore == nil {
+		return nil
+	}
+	return &iamMountSAAdminAdapter{
+		store:   state.mountSAStore,
+		propose: state.metaRaft.Propose,
+	}
 }
 
 func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {

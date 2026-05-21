@@ -15,7 +15,7 @@ var (
 	ErrInvalidCondition = errors.New("invalid Condition operator or key")
 )
 
-var allowedActionNamespaces = map[string]bool{"s3": true, "iceberg": true}
+var allowedActionNamespaces = map[string]bool{"s3": true, "iceberg": true, "grainfs": true}
 
 var allowedCondKeys = map[string]string{
 	"aws:SourceIp": "IpAddress|NotIpAddress",

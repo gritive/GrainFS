@@ -97,6 +97,10 @@ func EncodeS3Batch(events []S3Event) ([]byte, error) {
 		if buf, err = appendString16(buf, "condition_context_json", ccJSON); err != nil {
 			return nil, err
 		}
+		// T15 NFS§C: source column.
+		if buf, err = appendString16(buf, "source", e.Source); err != nil {
+			return nil, err
+		}
 	}
 	return buf, nil
 }
@@ -230,6 +234,10 @@ func DecodeS3Batch(data []byte) ([]S3Event, error) {
 		e.ConditionContext, err = decodeConditionContext(ccJSON)
 		if err != nil {
 			return nil, fmt.Errorf("event %d condition_context: %w", i, err)
+		}
+		// T15 NFS§C: source column.
+		if e.Source, err = r.readString16(); err != nil {
+			return nil, err
 		}
 		out = append(out, e)
 	}

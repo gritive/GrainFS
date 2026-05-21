@@ -17,27 +17,68 @@ import (
 
 type objectFile struct {
 	noopFile
-	backend storage.Backend
-	locks   *objectLocks
-	bucket  string
-	key     string
-	meta    *storage.Object
+	backend     storage.Backend
+	locks       *objectLocks
+	bucket      string
+	key         string
+	meta        *storage.Object
+	exportStore exportGetter // nil = no gate
+	binding     fhBinding    // inherited from the bucketFile that produced this file
+	cfg         ConfigReader // inherited; nil = no anon flip gate
 
 	dirtyLoaded bool
 	dirty       bool
 	dirtyData   []byte
 }
 
+func (f *objectFile) isReadOnly() bool {
+	if f.exportStore == nil {
+		return false
+	}
+	cfg, ok := f.exportStore.Get(f.bucket)
+	return ok && cfg.ReadOnly
+}
+
+// anonRejected mirrors bucketFile.anonRejected for objectFile. See the
+// bucketFile method for the full contract.
+func (f *objectFile) anonRejected() bool {
+	if f.cfg == nil {
+		return false
+	}
+	if f.binding.saID != "" {
+		return false
+	}
+	anon, ok := f.cfg.GetBool("iam.anon-enabled")
+	if !ok {
+		return false
+	}
+	return !anon
+}
+
 const maxFallbackObjectSize = 64 << 20
+
+// resolveContentType returns the existing object's Content-Type, or
+// "application/octet-stream" for new objects. One HeadObject RTT is
+// acceptable here because both callers (resize, flush) already perform a
+// full object rewrite on the same path.
+func resolveContentType(ctx context.Context, backend storage.Backend, bucket, key string) string {
+	if obj, err := backend.HeadObject(ctx, bucket, key); err == nil && obj.ContentType != "" {
+		return obj.ContentType
+	}
+	return "application/octet-stream"
+}
 
 func (f *objectFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta}, nil
+		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta, exportStore: f.exportStore, binding: f.binding, cfg: f.cfg}, nil
 	}
 	return nil, nil, syscall.ENOTDIR
 }
 
 func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
+	if f.anonRejected() {
+		return p9.QID{}, 0, syscall.EACCES
+	}
 	switch mode.Mode() {
 	case p9.ReadOnly, p9.WriteOnly, p9.ReadWrite:
 	default:
@@ -50,6 +91,9 @@ func (f *objectFile) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 }
 
 func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, error) {
+	if f.anonRejected() {
+		return p9.QID{}, p9.AttrMask{}, p9.Attr{}, syscall.EACCES
+	}
 	qid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, f.key)}
 	if f.dirtyLoaded {
 		fileMeta := loadP9FileMeta(context.Background(), f.backend, f.bucket, f.key)
@@ -84,9 +128,27 @@ func (f *objectFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 }
 
 func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
+	if f.anonRejected() {
+		return syscall.EACCES
+	}
 	if isP9ReservedKey(f.key) {
 		return syscall.EPERM
 	}
+	// D#8: mode/uid/gid changes are cosmetic — always EPERM regardless of export
+	// read-only state. This check must run before the RO gate so that mode change
+	// on a RO export returns EPERM, not EROFS.
+	if valid.Permissions || valid.UID || valid.GID {
+		return syscall.EPERM
+	}
+	// Size and mtime changes are genuine mutations — reject on RO export.
+	if (valid.Size || valid.MTime) && f.isReadOnly() {
+		return syscall.EROFS
+	}
+	// Fast path: nothing to do.
+	if !valid.Size && !valid.MTime {
+		return nil
+	}
+
 	unlock := f.locks.lock(f.bucket, f.key)
 	defer unlock()
 
@@ -108,10 +170,6 @@ func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
 
 	meta := loadP9FileMeta(ctx, f.backend, f.bucket, f.key)
 	changed := false
-	if valid.Permissions {
-		meta.Mode = uint32(attr.Permissions) & 0777
-		changed = true
-	}
 	if valid.MTime {
 		if valid.MTimeNotSystemTime {
 			meta.Mtime = time.Unix(int64(attr.MTimeSeconds), int64(attr.MTimeNanoSeconds)).UnixNano()
@@ -162,11 +220,18 @@ func (f *objectFile) resize(ctx context.Context, size int64) error {
 	} else if int64(len(data)) < size {
 		data = append(data, make([]byte, size-int64(len(data)))...)
 	}
-	_, err = f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(data), "application/octet-stream")
+	ct := obj.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	_, err = f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(data), ct)
 	return err
 }
 
 func (f *objectFile) ReadAt(buf []byte, offset int64) (int, error) {
+	if f.anonRejected() {
+		return 0, syscall.EACCES
+	}
 	if f.dirtyLoaded {
 		return bytes.NewReader(f.dirtyData).ReadAt(buf, offset)
 	}
@@ -195,11 +260,17 @@ func (f *objectFile) ReadAt(buf []byte, offset int64) (int, error) {
 }
 
 func (f *objectFile) WriteAt(buf []byte, offset int64) (int, error) {
+	if f.anonRejected() {
+		return 0, syscall.EACCES
+	}
 	if offset < 0 {
 		return 0, syscall.EINVAL
 	}
 	if isP9ReservedKey(f.key) {
 		return 0, syscall.EPERM
+	}
+	if f.isReadOnly() {
+		return 0, syscall.EROFS
 	}
 	unlock := f.locks.lock(f.bucket, f.key)
 	defer unlock()
@@ -300,7 +371,8 @@ func (f *objectFile) flush(ctx context.Context) error {
 	if !f.dirty {
 		return nil
 	}
-	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(f.dirtyData), "application/octet-stream")
+	ct := resolveContentType(ctx, f.backend, f.bucket, f.key)
+	obj, err := f.backend.PutObject(ctx, f.bucket, f.key, bytes.NewReader(f.dirtyData), ct)
 	if err != nil {
 		log.Warn().Err(err).Str("bucket", f.bucket).Str("key", f.key).Int("bytes", len(f.dirtyData)).Msg("9p flush: put object failed")
 		return err

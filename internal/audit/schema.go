@@ -68,6 +68,11 @@ type S3Event struct {
 	// rather than Iceberg `map<string,string>` to keep the row-serializer
 	// path simple; a future migration can promote it to a real map type.)
 	ConditionContext map[string]string
+
+	// Source identifies the protocol that produced this event (T15 NFS§C).
+	// Valid values: "s3" | "nfs4" | "9p" | "iceberg". Empty for legacy rows
+	// written before this field existed.
+	Source string
 }
 
 // S3InitialMetadata is the Iceberg v2 metadata.json for an empty audit.s3 table.
@@ -99,7 +104,8 @@ const auditIcebergSchemaJSON = `{"type":"struct","schema-id":0,"fields":[` +
 	`{"id":24,"name":"matched_policy_id","required":false,"type":"string"},` +
 	`{"id":25,"name":"matched_sid","required":false,"type":"string"},` +
 	`{"id":26,"name":"authz_latency_us","required":false,"type":"int"},` +
-	`{"id":27,"name":"condition_context_json","required":false,"type":"string"}` +
+	`{"id":27,"name":"condition_context_json","required":false,"type":"string"},` +
+	`{"id":28,"name":"source","required":false,"type":"string"}` +
 	`]}`
 
 const auditPartitionSpecJSON = `[{"name":"ts_day","transform":"day","source-id":1,"field-id":1000}]`
@@ -109,10 +115,18 @@ const auditPartitionSpecJSON = `[{"name":"ts_day","transform":"day","source-id":
 // below; TestS3InitialMetadata_LastColumnID_Updated catches drift. The
 // migration trigger reads this to decide whether an existing table needs its
 // schema rewritten.
-const currentSchemaLastColumnID = 27
+const currentSchemaLastColumnID = 28
+
+// AuditIcebergSchemaJSONForTest exposes auditIcebergSchemaJSON for test
+// assertions (test package cannot access unexported constants).
+const AuditIcebergSchemaJSONForTest = auditIcebergSchemaJSON
+
+// CurrentSchemaLastColumnIDForTest exposes currentSchemaLastColumnID for test
+// assertions.
+const CurrentSchemaLastColumnIDForTest = currentSchemaLastColumnID
 
 const S3InitialMetadata = `{"format-version":2,"table-uuid":%q,"location":%q,` +
-	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":27,` +
+	`"last-sequence-number":0,"last-updated-ms":%d,"last-column-id":28,` +
 	`"current-schema-id":0,"schemas":[` + auditIcebergSchemaJSON + `],` +
 	`"partition-specs":[{"spec-id":0,"fields":` + auditPartitionSpecJSON + `}],` +
 	`"default-spec-id":0,"last-partition-id":1000,` +

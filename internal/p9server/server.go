@@ -10,14 +10,40 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
+	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// exportGetter is the read-only view of the NFS export store used by the 9P
+// server. The concrete *nfsexport.ExportService satisfies this interface
+// (via its Get method); tests may inject stubs.
+type exportGetter interface {
+	Get(bucket string) (nfsexport.Config, bool)
+}
+
+// p9Authorizer is the slice of s3auth.Authorizer consumed by the 9P IAM gate.
+// Defined here so tests can inject stubs without a full policy store.
+type p9Authorizer interface {
+	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
+}
+
+// ConfigReader is the small slice of the config store that the 9P server
+// reads. The concrete *config.Store satisfies it; tests inject stubs.
+// Used per-op to re-check iam.anon-enabled for anon-bound sessions
+// (NFS§B T12, §9 T73 parity).
+type ConfigReader interface {
+	GetBool(key string) (bool, bool)
+}
+
 // Server is a 9P2000.L server backed by a storage.Backend.
 type Server struct {
-	backend storage.Backend
-	locks   *objectLocks
-	p9srv   *p9.Server
+	backend  storage.Backend
+	locks    *objectLocks
+	p9srv    *p9.Server
+	attacher *attacher
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -25,12 +51,62 @@ type Server struct {
 	conns  map[net.Conn]struct{}
 }
 
+// ServerOption configures a Server.
+type ServerOption func(*attacher)
+
+// WithMountSAStore wires the mount-SA store into the 9P server for
+// aname-based auth (NFS§B T9, spec D#6).
+func WithMountSAStore(s *mountsastore.Store) ServerOption {
+	return func(a *attacher) { a.mountSAStore = s }
+}
+
+// WithAuthorizer wires the IAM authorizer for grainfs:9PAttach evaluation.
+// The concrete *s3auth.Authorizer satisfies p9Authorizer; tests may inject stubs.
+func WithAuthorizer(authz p9Authorizer) ServerOption {
+	return func(a *attacher) { a.authorizer = authz }
+}
+
+// WithExportStore wires the NFS export store so the 9P server can enforce
+// per-bucket ReadOnly on all mutation operations (T11).
+func WithExportStore(store exportGetter) ServerOption {
+	return func(a *attacher) { a.exportStore = store }
+}
+
+// WithConfigReader wires the config store so the 9P server can re-check
+// iam.anon-enabled on every fh-bearing op for anon-bound sessions
+// (NFS§B T12, §9 T73 parity). nil keeps the previous behaviour
+// (no per-op anon flip gate).
+func WithConfigReader(c ConfigReader) ServerOption {
+	return func(a *attacher) { a.cfg = c }
+}
+
+// WithAuditHook wires a hook that is called with a populated audit.S3Event
+// after every grainfs:9PAttach allow/deny decision (T15 NFS§C). The hook is
+// called synchronously on the Walk goroutine; implementations must not block.
+// nil keeps the previous behaviour (no audit emit).
+func WithAuditHook(hook func(audit.S3Event)) ServerOption {
+	return func(a *attacher) { a.auditHook = hook }
+}
+
 // NewServer creates a 9P server backed by backend.
-func NewServer(backend storage.Backend) *Server {
+func NewServer(backend storage.Backend, opts ...ServerOption) *Server {
 	locks := newObjectLocks()
-	s := &Server{backend: backend, locks: locks, conns: make(map[net.Conn]struct{})}
-	s.p9srv = p9.NewServer(&attacher{backend: backend, locks: locks})
+	att := &attacher{backend: backend, locks: locks}
+	for _, opt := range opts {
+		opt(att)
+	}
+	s := &Server{backend: backend, locks: locks, conns: make(map[net.Conn]struct{}), attacher: att}
+	s.p9srv = p9.NewServer(att)
 	return s
+}
+
+// SetExportStore updates the export store on a running server. New connections
+// and new Walk calls (per-session root fids) will see the updated store.
+// Existing open fids retain the store they received at Walk time.
+func (s *Server) SetExportStore(store exportGetter) {
+	s.mu.Lock()
+	s.attacher.exportStore = store
+	s.mu.Unlock()
 }
 
 // ListenAndServe starts the TCP listener and serves 9P connections until ctx is cancelled.
@@ -133,10 +209,23 @@ func (c *trackedConn) Close() error {
 }
 
 type attacher struct {
-	backend storage.Backend
-	locks   *objectLocks
+	backend      storage.Backend
+	locks        *objectLocks
+	mountSAStore *mountsastore.Store
+	authorizer   p9Authorizer
+	exportStore  exportGetter
+	cfg          ConfigReader
+	auditHook    func(audit.S3Event)
 }
 
 func (a *attacher) Attach() (p9.File, error) {
-	return &rootFile{backend: a.backend, locks: a.locks}, nil
+	return &rootFile{
+		backend:      a.backend,
+		locks:        a.locks,
+		mountSAStore: a.mountSAStore,
+		authorizer:   a.authorizer,
+		exportStore:  a.exportStore,
+		cfg:          a.cfg,
+		auditHook:    a.auditHook,
+	}, nil
 }

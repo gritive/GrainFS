@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
@@ -93,6 +94,7 @@ type bootState struct {
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
 	iamPolicyStores  *IAMStores
+	mountSAStore     *mountsastore.Store
 	cfgStore         *config.Store
 	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper

@@ -22,9 +22,15 @@ In another terminal:
 echo "hello grainfs" > file.txt
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 cp file.txt s3://default/
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/
+
+# NFS mount (Linux) — register the export first, then mount.
+grainfs nfs export add default --endpoint ./tmp/admin.sock
+sudo mount -t nfs4 -o nolock,nfsvers=4.0 localhost:/default /mnt/data
 ```
 
-That's it. You have a working S3 + Iceberg server.
+That's it. You have a working S3 + Iceberg server. Files written via NFS appear
+in S3 and vice versa. See [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md)
+for 9P mounts, authenticated Mount SAs, and read-only exports.
 
 > ⚠ **Phase 0 anonymous mode**: any client on this port can read/write `s3://default`. To require authentication, run `grainfs iam sa create <name>` — this flips the cluster to Phase 2. See [`docs/operators/cluster-lifecycle.md`](docs/operators/cluster-lifecycle.md).
 

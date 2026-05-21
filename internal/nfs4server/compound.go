@@ -15,9 +15,20 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// decisionAllow mirrors policy.DecisionAllow (iota value 1) without an import
+// cycle. The package-level unit test in nfs4_mount_auth_test.go verifies the
+// value stays in sync.
+const decisionAllow = policy.DecisionAllow
+
+// nfsMountReqCtx is the immutable policy.RequestContext used for every
+// grainfs:NFSMount evaluation. Resource="*" per spec D#5.
+var nfsMountReqCtx = policy.RequestContext{Action: "grainfs:NFSMount", Resource: "*"}
 
 var opReadBufPool = pool.New(func() *bytes.Buffer { return new(bytes.Buffer) })
 var bytesReaderPool = pool.New(func() *bytes.Reader { return new(bytes.Reader) })
@@ -424,12 +435,25 @@ func (d *Dispatcher) opGetFH() OpResult {
 }
 
 func (d *Dispatcher) opLookup(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+	}
 	name := string(data)
 	if err := validateComponentName(name); err != nil {
 		return OpResult{OpCode: OpLookup, Status: NFS4ERR_INVAL}
 	}
 	childPath := path.Join(d.currentPath, name)
 	childBucket, childKey := extractBucketAndKey(childPath)
+
+	// NFS§B T8: 2-phase lazy binding (spec D#5).
+	// When the IAM gate is wired (server.mountSAStore != nil) and the current fh
+	// is a bucket-level pending fh (saID="(pending)"), this LOOKUP is the
+	// resolution step: determine if 'name' is a mount-SA or an anon file path.
+	if d.server != nil && d.server.mountSAStore != nil {
+		if binding, ok := d.state.FHBinding(d.currentFH); ok && binding.saID == fhSAIDPending {
+			return d.opLookupResolvePending(name, childPath, childBucket, childKey, binding)
+		}
+	}
 
 	// Check existence: backend file, tracked directory, or root
 	exists := d.state.IsDir(childPath)
@@ -468,14 +492,172 @@ func (d *Dispatcher) opLookup(data []byte) OpResult {
 
 	fh := d.state.GetOrCreateFH(childPath)
 	if d.server != nil && childBucket != "" {
-		d.state.BindFHGeneration(fh, childBucket, d.server.exportGeneration(childBucket))
+		gen := d.server.exportGeneration(childBucket)
+		// When mount-SA store is wired: issue bucket fh with saID="(pending)" so the
+		// next LOOKUP can resolve whether this is a mount-SA path or anon access.
+		if d.server.mountSAStore != nil && childKey == "" {
+			d.state.BindFHWithSAID(fh, childBucket, fhSAIDPending, gen)
+		} else {
+			// T12 propagation fix: a fresh subdir fh must inherit the parent's
+			// saID binding so the per-op anon flip gate (anonRejected) can
+			// distinguish mount-SA-bound subdir sessions from anon ones.
+			// BindFHGeneration preserves an existing saID, but a freshly-
+			// created fh has saID="" which would mis-classify as anon. Pull
+			// parent's saID explicitly when it is set.
+			parentBind, ok := d.state.FHBinding(d.currentFH)
+			if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+				d.state.BindFHWithSAID(fh, childBucket, parentBind.saID, gen)
+			} else {
+				d.state.BindFHGeneration(fh, childBucket, gen)
+			}
+		}
 	}
 	d.currentFH = fh
 	d.currentPath = childPath
 	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
 }
 
+// fhSAIDPending is the sentinel stored in stateBinding.saID for a bucket-level
+// fh that is awaiting the next LOOKUP to determine mount-SA vs anon binding.
+const fhSAIDPending = "(pending)"
+
+// anonRejected reports whether the given fh's anon binding is no longer
+// allowed: the binding has saID="" (anon confirmed) AND iam.anon-enabled is
+// false. Returns false when the gate is not wired (cfg==nil), when the fh
+// has no binding (pseudo-root / unbound), when the binding is mount-SA
+// confirmed (saID!="" and not pending), or when iam.anon-enabled=true.
+//
+// NFS§B T12: per-op guard for Phase 0 → Phase 2 transitions. Mirrors the
+// S3 path (§9 T73): active anon-bound sessions must be rejected on the
+// next op after the first SA create flips iam.anon-enabled=false.
+//
+// Hot path: one map RLock + one cfg RLock per op when the gate is wired.
+// Zero allocation. The branch is dead when cfg==nil (the production wiring
+// passes config.Store; tests inject a stub).
+func (d *Dispatcher) anonRejected(fh FileHandle) bool {
+	if d.server == nil || d.server.cfg == nil {
+		return false
+	}
+	binding, ok := d.state.FHBinding(fh)
+	if !ok {
+		return false
+	}
+	if binding.saID != "" {
+		// "(pending)" or "<mount-sa-name>" — not an anon binding.
+		return false
+	}
+	anon, ok := d.server.cfg.GetBool("iam.anon-enabled")
+	if !ok {
+		// Key not registered: be conservative and do not block.
+		return false
+	}
+	return !anon
+}
+
+// opLookupResolvePending handles the 2nd LOOKUP from a bucket fh with
+// saID="(pending)". It resolves the 'name' component as either a mount-SA
+// (grainfs:NFSMount eval) or an anon file/dir (anon grainfs:NFSMount eval).
+// Spec D#5 error code policy:
+//   - mount-SA pool hit + grainfs:NFSMount deny → NFS4ERR_ACCESS
+//   - pool miss + file/dir exists + anon deny  → NFS4ERR_ACCESS
+//   - pool miss + no file/dir                  → NFS4ERR_NOENT
+func (d *Dispatcher) opLookupResolvePending(name, childPath, childBucket, childKey string, parentBinding stateBinding) OpResult {
+	ctx := context.Background()
+	gen := d.server.exportGeneration(childBucket)
+
+	if _, ok := d.server.mountSAStore.Get(name); ok {
+		// mount-SA hit: evaluate grainfs:NFSMount for this SA.
+		if d.server.authorizer != nil {
+			res := d.server.authorizer.Authorize(ctx, name, childBucket, nfsMountReqCtx)
+			if res.Decision != decisionAllow {
+				log.Debug().Str("saID", name).Str("bucket", childBucket).
+					Str("reason", res.Reason).Msg("nfs4: NFSMount denied")
+				if d.server.auditHook != nil {
+					d.server.auditHook(audit.S3Event{
+						Ts:         time.Now().UnixMicro(),
+						SAID:       name,
+						SourceIP:   d.clientAddr,
+						Bucket:     childBucket,
+						AuthStatus: "deny",
+						Source:     "nfs4",
+					})
+				}
+				return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+			}
+		}
+		// Confirmed mount-SA binding.
+		fh := d.state.GetOrCreateFH(childPath)
+		d.state.BindFHWithSAID(fh, childBucket, name, gen)
+		d.currentFH = fh
+		d.currentPath = childPath
+		log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP mount-SA confirmed")
+		if d.server.auditHook != nil {
+			d.server.auditHook(audit.S3Event{
+				Ts:         time.Now().UnixMicro(),
+				SAID:       name,
+				SourceIP:   d.clientAddr,
+				Bucket:     childBucket,
+				AuthStatus: "allow",
+				Source:     "nfs4",
+			})
+		}
+		return OpResult{OpCode: OpLookup, Status: NFS4_OK}
+	}
+
+	// Pool miss: check if it's a real backend file/dir (anon path).
+	exists := d.state.IsDir(childPath)
+	if !exists && d.backend != nil {
+		_, err := d.backend.HeadObject(ctx, childBucket, childKey)
+		exists = err == nil
+	}
+	if !exists {
+		return OpResult{OpCode: OpLookup, Status: NFS4ERR_NOENT}
+	}
+
+	// Anon path: evaluate grainfs:NFSMount with saID="" (anon).
+	// Error code policy: deny returns ACCESS, not NOENT (mount-SA existence leak avoidance).
+	if d.server.authorizer != nil {
+		res := d.server.authorizer.Authorize(ctx, "", childBucket, nfsMountReqCtx)
+		if res.Decision != decisionAllow {
+			log.Debug().Str("bucket", childBucket).
+				Str("reason", res.Reason).Msg("nfs4: anon NFSMount denied")
+			if d.server.auditHook != nil {
+				d.server.auditHook(audit.S3Event{
+					Ts:         time.Now().UnixMicro(),
+					SAID:       "", // anon: empty string (F#39)
+					SourceIP:   d.clientAddr,
+					Bucket:     childBucket,
+					AuthStatus: "deny",
+					Source:     "nfs4",
+				})
+			}
+			return OpResult{OpCode: OpLookup, Status: NFS4ERR_ACCESS}
+		}
+	}
+
+	// Anon confirmed: issue fh with saID="" (empty = anon).
+	fh := d.state.GetOrCreateFH(childPath)
+	d.state.BindFHWithSAID(fh, childBucket, "", gen)
+	d.currentFH = fh
+	d.currentPath = childPath
+	log.Debug().Str("name", name).Str("bucket", childBucket).Msg("nfs4: LOOKUP anon path confirmed")
+	if d.server.auditHook != nil {
+		d.server.auditHook(audit.S3Event{
+			Ts:         time.Now().UnixMicro(),
+			SAID:       "", // anon: empty string (F#39)
+			SourceIP:   d.clientAddr,
+			Bucket:     childBucket,
+			AuthStatus: "allow",
+			Source:     "nfs4",
+		})
+	}
+	return OpResult{OpCode: OpLookup, Status: NFS4_OK}
+}
+
 func (d *Dispatcher) opCreate(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpCreate, Status: NFS4ERR_ACCESS}
+	}
 	// data pre-processed by readOpArgs: objType(uint32) + objname(string)
 	if len(data) < 8 {
 		return OpResult{OpCode: OpCreate, Status: NFS4ERR_INVAL}
@@ -499,7 +681,15 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 	fh := d.state.GetOrCreateFH(newPath)
 	if d.server != nil {
 		bucket, _ := extractBucketAndKey(newPath)
-		d.state.BindFHGeneration(fh, bucket, d.server.exportGeneration(bucket))
+		gen := d.server.exportGeneration(bucket)
+		// T12: propagate parent's saID so the new fh inherits the session
+		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		parentBind, ok := d.state.FHBinding(d.currentFH)
+		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
+		} else {
+			d.state.BindFHGeneration(fh, bucket, gen)
+		}
 	}
 	d.currentFH = fh
 	d.currentPath = newPath
@@ -516,6 +706,9 @@ func (d *Dispatcher) opCreate(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opGetAttr(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpGetAttr, Status: NFS4ERR_ACCESS}
+	}
 	// Parse client's requested bitmap (GETATTR4args.attr_request = bitmap4<>)
 	var reqBit attrBitmap
 	if len(data) >= 4 {
@@ -816,6 +1009,9 @@ func (d *Dispatcher) isPathReadOnly(p string) bool {
 }
 
 func (d *Dispatcher) opAccess(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpAccess, Status: NFS4ERR_ACCESS}
+	}
 	var requested uint32
 	if len(data) >= 4 {
 		requested = binary.BigEndian.Uint32(data)
@@ -827,6 +1023,9 @@ func (d *Dispatcher) opAccess(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opReadDir(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpReadDir, Status: NFS4ERR_ACCESS}
+	}
 	var reqBit attrBitmap
 	if len(data) >= 28 {
 		bitmapLen := binary.BigEndian.Uint32(data[24:28])
@@ -896,6 +1095,9 @@ func (d *Dispatcher) opReadDir(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opRead(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpRead, Status: NFS4ERR_ACCESS}
+	}
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpRead, Status: NFS4ERR_SERVERFAULT}
 	}
@@ -1005,6 +1207,9 @@ func (d *Dispatcher) opRead(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opWrite(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpWrite, Status: NFS4ERR_ACCESS}
+	}
 	if d.backend == nil || len(data) < 28 {
 		return OpResult{OpCode: OpWrite, Status: NFS4ERR_SERVERFAULT}
 	}
@@ -1040,9 +1245,14 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 		}
 	} else {
 		// Fallback: RMW for backends that don't implement WriteAt.
+		// Capture existingSize and contentType in a single HeadObject call.
 		var existingSize uint64
+		existingContentType := "application/octet-stream"
 		if obj, herr := d.backend.HeadObject(context.Background(), bucket, key); herr == nil {
 			existingSize = uint64(obj.Size)
+			if obj.ContentType != "" {
+				existingContentType = obj.ContentType
+			}
 		}
 		writeLen := uint64(len(writeData))
 		if offset > maxInt64Uint || writeLen > maxInt64Uint-offset {
@@ -1058,13 +1268,13 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 
 		if offset == 0 && end >= existingSize {
 			br.Reset(writeData)
-			_, err = d.backend.PutObject(context.Background(), bucket, key, br, "application/octet-stream")
+			_, err = d.backend.PutObject(context.Background(), bucket, key, br, existingContentType)
 		} else {
 			var ra storage.PartialIO
 			if partial, ok := partialIOBackend(d.backend); ok && preferReadAt(d.backend, bucket) {
 				ra = partial
 			}
-			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize, ra)
+			err = d.putObjectRMWStreaming(context.Background(), bucket, key, offset, writeData, existingSize, existingContentType, ra)
 		}
 		if err != nil {
 			return OpResult{OpCode: OpWrite, Status: NFS4ERR_IO}
@@ -1079,7 +1289,19 @@ func (d *Dispatcher) opWrite(data []byte) OpResult {
 	return OpResult{OpCode: OpWrite, Status: NFS4_OK, Data: xdrWriterBytes(w)}
 }
 
-func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64, ra storage.PartialIO) error {
+// resolveContentType returns the existing object's Content-Type, or
+// "application/octet-stream" for new objects. It is used at write sites that do
+// not have a prior HeadObject result available (SETATTR truncate). One
+// HeadObject RTT is acceptable because these paths are not on the hot data
+// path (they imply a full object rewrite anyway).
+func (d *Dispatcher) resolveContentType(ctx context.Context, bucket, key string) string {
+	if obj, err := d.backend.HeadObject(ctx, bucket, key); err == nil && obj.ContentType != "" {
+		return obj.ContentType
+	}
+	return "application/octet-stream"
+}
+
+func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key string, offset uint64, writeData []byte, existingSize uint64, contentType string, ra storage.PartialIO) error {
 	var (
 		rc      io.ReadCloser
 		readers []io.Reader
@@ -1130,7 +1352,7 @@ func (d *Dispatcher) putObjectRMWStreaming(ctx context.Context, bucket, key stri
 			readers = append(readers, &skipThenReader{r: rc, n: int64(end - min(offset, existingSize))})
 		}
 	}
-	_, err := d.backend.PutObject(ctx, bucket, key, io.MultiReader(readers...), "application/octet-stream")
+	_, err := d.backend.PutObject(ctx, bucket, key, io.MultiReader(readers...), contentType)
 	return err
 }
 
@@ -1193,6 +1415,9 @@ func (r *skipThenReader) Read(p []byte) (int, error) {
 }
 
 func (d *Dispatcher) opOpen(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpOpen, Status: NFS4ERR_ACCESS}
+	}
 	if len(data) < 8 {
 		return OpResult{OpCode: OpOpen, Status: NFS4ERR_INVAL}
 	}
@@ -1238,7 +1463,15 @@ func (d *Dispatcher) opOpen(data []byte) OpResult {
 	fh := d.state.GetOrCreateFH(childPath)
 	if d.server != nil {
 		bucket, _ := extractBucketAndKey(childPath)
-		d.state.BindFHGeneration(fh, bucket, d.server.exportGeneration(bucket))
+		gen := d.server.exportGeneration(bucket)
+		// T12: propagate parent's saID so the new fh inherits the session
+		// binding (anon "" vs mount-SA "<name>") for the per-op anon flip gate.
+		parentBind, ok := d.state.FHBinding(d.currentFH)
+		if ok && parentBind.saID != "" && parentBind.saID != fhSAIDPending {
+			d.state.BindFHWithSAID(fh, bucket, parentBind.saID, gen)
+		} else {
+			d.state.BindFHGeneration(fh, bucket, gen)
+		}
 	}
 	d.currentFH = fh
 	d.currentPath = childPath
@@ -1299,6 +1532,9 @@ func (d *Dispatcher) opRestoreFH() OpResult {
 }
 
 func (d *Dispatcher) opSetAttr(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_ACCESS}
+	}
 	if d.currentPath == "" {
 		return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_NOFILEHANDLE}
 	}
@@ -1328,6 +1564,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		} else {
+			ct := d.resolveContentType(context.Background(), bucket, key)
 			var existing []byte
 			if rc, _, err := d.backend.GetObject(context.Background(), bucket, key); err == nil {
 				existing, _ = io.ReadAll(rc)
@@ -1340,7 +1577,7 @@ func (d *Dispatcher) opSetAttr(data []byte) OpResult {
 			} else if cur < sz {
 				existing = append(existing, make([]byte, sz-cur)...)
 			}
-			if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(existing), "application/octet-stream"); err != nil {
+			if _, err := d.backend.PutObject(context.Background(), bucket, key, bytes.NewReader(existing), ct); err != nil {
 				return OpResult{OpCode: OpSetAttr, Status: NFS4ERR_IO}
 			}
 		}
@@ -1433,6 +1670,9 @@ func (d *Dispatcher) opSetClientIDConfirm(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opRemove(data []byte) OpResult {
+	if d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpRemove, Status: NFS4ERR_ACCESS}
+	}
 	name := string(data)
 	if err := validateComponentName(name); err != nil {
 		return OpResult{OpCode: OpRemove, Status: NFS4ERR_INVAL}
@@ -1473,6 +1713,11 @@ func (d *Dispatcher) opRemove(data []byte) OpResult {
 }
 
 func (d *Dispatcher) opRename(data []byte) OpResult {
+	// Rename involves both savedFH (source parent) and currentFH (dest parent).
+	// Reject if either is anon-bound and the flip happened.
+	if d.anonRejected(d.savedFH) || d.anonRejected(d.currentFH) {
+		return OpResult{OpCode: OpRename, Status: NFS4ERR_ACCESS}
+	}
 	r := NewXDRReader(data)
 	oldName, err := r.ReadString()
 	if err != nil {

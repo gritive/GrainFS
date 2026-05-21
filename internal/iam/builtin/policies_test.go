@@ -150,3 +150,42 @@ func TestIsBuiltinName(t *testing.T) {
 		t.Fatal("'nope' should not be builtin")
 	}
 }
+
+// TestBuiltins_MountSASeeded verifies NFSMountOnly and 9PAttachOnly are seeded,
+// parseable, and satisfy ValidateForMountSAAttach.
+func TestBuiltins_MountSASeeded(t *testing.T) {
+	ps := policystore.NewInMemoryStore()
+	require.NoError(t, SeedAll(context.Background(), ps))
+
+	for _, name := range []string{"NFSMountOnly", "9PAttachOnly"} {
+		raw, err := ps.GetRaw(context.Background(), name)
+		require.NoError(t, err, "GetRaw(%q)", name)
+		require.NotEmpty(t, raw, "builtin %q doc should not be empty", name)
+		_, err = policy.Parse(raw)
+		require.NoError(t, err, "Parse(%q)", name)
+		assert.True(t, ps.IsBuiltin(name), "builtin %q should be marked builtin", name)
+	}
+}
+
+// TestBuiltins_MountSA_CrossNamespaceGuard verifies the MountSA builtins pass
+// ValidateForMountSAAttach and the S3 builtins are rejected by it.
+func TestBuiltins_MountSA_CrossNamespaceGuard(t *testing.T) {
+	ps := policystore.NewInMemoryStore()
+	require.NoError(t, SeedAll(context.Background(), ps))
+
+	// MountSA policies must pass ValidateForMountSAAttach.
+	for _, name := range []string{"NFSMountOnly", "9PAttachOnly"} {
+		raw, err := ps.GetRaw(context.Background(), name)
+		require.NoError(t, err)
+		require.NoError(t, policy.ValidateForMountSAAttach(string(raw)),
+			"builtin %q should pass ValidateForMountSAAttach", name)
+	}
+
+	// S3/Iceberg policies must be rejected by ValidateForMountSAAttach.
+	for _, name := range []string{"readonly", "readwrite", "writeonly", "bucket-admin"} {
+		raw, err := ps.GetRaw(context.Background(), name)
+		require.NoError(t, err)
+		assert.Error(t, policy.ValidateForMountSAAttach(string(raw)),
+			"S3/Iceberg builtin %q must be rejected by ValidateForMountSAAttach", name)
+	}
+}

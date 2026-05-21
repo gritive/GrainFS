@@ -19,7 +19,7 @@ func TestMigrateMetadataV1ToCurrent(t *testing.T) {
 
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(got, &meta))
-	require.Equal(t, float64(27), meta["last-column-id"])
+	require.Equal(t, float64(28), meta["last-column-id"])
 	require.Equal(t, float64(1000), meta["last-partition-id"])
 	specs := meta["partition-specs"].([]any)
 	require.Len(t, specs, 2)
@@ -78,7 +78,7 @@ const s3InitialMetadataV2_23ForTest = `{"format-version":2,"table-uuid":%q,"loca
 	`"properties":{},"current-snapshot-id":-1,"snapshots":[],` +
 	`"snapshot-log":[],"metadata-log":[]}`
 
-func TestMigration_BumpsExistingV2Table_LastColumnID23to27(t *testing.T) {
+func TestMigration_BumpsExistingV2Table_LastColumnID23to28(t *testing.T) {
 	v2 := fmt.Sprintf(s3InitialMetadataV2_23ForTest, "uuid", "s3://grainfs-audit", time.Now().UnixMilli())
 	got, changed, err := audit.MigrateMetadataToCurrent(json.RawMessage(v2), time.Now().UnixMilli())
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestMigration_BumpsExistingV2Table_LastColumnID23to27(t *testing.T) {
 
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(got, &meta))
-	require.Equal(t, float64(27), meta["last-column-id"])
+	require.Equal(t, float64(28), meta["last-column-id"])
 
 	gotJSON := string(got)
 	for _, want := range []string{
@@ -94,6 +94,7 @@ func TestMigration_BumpsExistingV2Table_LastColumnID23to27(t *testing.T) {
 		`"name":"matched_sid"`,
 		`"name":"authz_latency_us"`,
 		`"name":"condition_context_json"`,
+		`"name":"source"`,
 	} {
 		require.Contains(t, gotJSON, want)
 	}

@@ -604,14 +604,19 @@ func TestObjectFile_SetAttr_ModeMtimeAndServerTime(t *testing.T) {
 	require.NoError(t, err)
 	of := &objectFile{backend: backend, locks: newObjectLocks(), bucket: "bkt", key: "hello.txt", meta: obj}
 
+	// D#8: Permissions (mode) change → always EPERM; cosmetic in 9P2000.L.
 	err = of.SetAttr(p9.SetAttrMask{Permissions: true, MTime: true, MTimeNotSystemTime: true},
 		p9.SetAttr{Permissions: 0600, MTimeSeconds: 1704067200, MTimeNanoSeconds: 55})
+	require.ErrorIs(t, err, syscall.EPERM)
+
+	// MTime-only change: succeeds (no RO export wired).
+	before := time.Now().Add(-time.Second).UnixNano()
+	err = of.SetAttr(p9.SetAttrMask{MTime: true, MTimeNotSystemTime: true},
+		p9.SetAttr{MTimeSeconds: 1704067200, MTimeNanoSeconds: 55})
 	require.NoError(t, err)
 	meta := loadP9FileMeta(ctx, backend, "bkt", "hello.txt")
-	require.Equal(t, uint32(0600), meta.Mode)
 	require.Equal(t, time.Unix(1704067200, 55).UnixNano(), meta.Mtime)
 
-	before := time.Now().Add(-time.Second).UnixNano()
 	err = of.SetAttr(p9.SetAttrMask{MTime: true}, p9.SetAttr{})
 	require.NoError(t, err)
 	after := loadP9FileMeta(ctx, backend, "bkt", "hello.txt").Mtime

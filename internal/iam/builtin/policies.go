@@ -1,6 +1,7 @@
-// Package builtin holds the four managed policy documents seeded at cluster
-// bootstrap. Names: readonly, readwrite, writeonly, bucket-admin. Per spec
-// §"IAM Model / Built-in managed policies". bucket-admin intentionally
+// Package builtin holds managed policy documents seeded at cluster bootstrap.
+// S3/Iceberg managed policies: readonly, readwrite, writeonly, bucket-admin.
+// MountSA managed policies: NFSMountOnly, 9PAttachOnly.
+// Per spec §"IAM Model / Built-in managed policies". bucket-admin intentionally
 // excludes s3:CreateBucket / s3:DeleteBucket / s3:PutBucketPolicy /
 // s3:DeleteBucketPolicy (Decision #8: admin-UDS only).
 package builtin
@@ -12,10 +13,16 @@ import (
 )
 
 var builtinDocs = map[string][]byte{
+	// S3 / Iceberg managed policies.
 	"readonly":     []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:HeadObject","s3:ListBucket","s3:GetBucketLocation","s3:GetBucketVersioning","s3:ListBucketVersions","s3:GetBucketObjectLockConfiguration","s3:GetBucketLifecycleConfiguration","s3:GetObjectRetention","s3:GetObjectTagging","iceberg:GetCatalogConfig","iceberg:ListNamespaces","iceberg:LoadNamespace","iceberg:HeadNamespace","iceberg:ListTables","iceberg:LoadTable","iceberg:HeadTable"],"Resource":"*"}]}`),
 	"readwrite":    []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:HeadObject","s3:ListBucket","s3:GetBucketLocation","s3:GetBucketVersioning","s3:PutBucketVersioning","s3:ListBucketVersions","s3:GetBucketObjectLockConfiguration","s3:GetBucketLifecycleConfiguration","s3:GetObjectRetention","s3:PutObjectRetention","s3:PutObject","s3:DeleteObject","s3:CopyObject","s3:AbortMultipartUpload","s3:ListMultipartUploads","s3:GetObjectTagging","s3:PutObjectTagging","s3:DeleteObjectTagging","iceberg:GetCatalogConfig","iceberg:ListNamespaces","iceberg:LoadNamespace","iceberg:HeadNamespace","iceberg:ListTables","iceberg:LoadTable","iceberg:HeadTable","iceberg:CreateNamespace","iceberg:CreateTable","iceberg:CommitTable","iceberg:DeleteTable","iceberg:DropTable","iceberg:DeleteNamespace","iceberg:DropNamespace","iceberg:CommitTransaction"],"Resource":"*"}]}`),
 	"writeonly":    []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:PutBucketVersioning","s3:PutObjectRetention","s3:AbortMultipartUpload","s3:PutObjectTagging","s3:DeleteObjectTagging","iceberg:CreateTable","iceberg:CommitTable","iceberg:CommitTransaction"],"Resource":"*"}]}`),
 	"bucket-admin": []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:HeadObject","s3:PutObject","s3:DeleteObject","s3:CopyObject","s3:ListBucket","s3:ListMultipartUploads","s3:AbortMultipartUpload","s3:GetBucketLocation","s3:GetBucketPolicy","s3:GetBucketVersioning","s3:PutBucketVersioning","s3:ListBucketVersions","s3:GetBucketObjectLockConfiguration","s3:GetBucketLifecycleConfiguration","s3:PutBucketLifecycleConfiguration","s3:DeleteBucketLifecycleConfiguration","s3:GetObjectRetention","s3:PutObjectRetention","s3:GetObjectTagging","s3:PutObjectTagging","s3:DeleteObjectTagging","iceberg:GetCatalogConfig","iceberg:ListNamespaces","iceberg:LoadNamespace","iceberg:HeadNamespace","iceberg:CreateNamespace","iceberg:DeleteNamespace","iceberg:DropNamespace","iceberg:ListTables","iceberg:LoadTable","iceberg:HeadTable","iceberg:CreateTable","iceberg:CommitTable","iceberg:DeleteTable","iceberg:DropTable","iceberg:CommitTransaction"],"Resource":"*"}]}`),
+	// MountSA managed policies — grainfs:NFSMount / grainfs:9PAttach only.
+	// Attaching an S3 SA policy to a MountSA is rejected at attach time by
+	// ValidateForMountSAAttach, and vice versa (Decision T4 cross-namespace guard).
+	"NFSMountOnly": []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["grainfs:NFSMount"],"Resource":"*"}]}`),
+	"9PAttachOnly": []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["grainfs:9PAttach"],"Resource":"*"}]}`),
 }
 
 // SeedAll writes each built-in policy with builtin=true. Idempotent: re-seeding

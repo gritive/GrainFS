@@ -11,6 +11,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -26,6 +29,67 @@ type Server struct {
 	lookups  *LookupRing
 
 	exportSource exportSource
+
+	// Mount-SA IAM gate (NFS§B T8). Both are optional (nil = no IAM gate).
+	// When non-nil, opLookup performs 2-phase lazy binding (D#5):
+	//   /<bucket>/<mount-sa> → evaluate grainfs:NFSMount
+	//   /<bucket>            → evaluate grainfs:NFSMount with anon saID
+	mountSAStore *mountsastore.Store
+	authorizer   nfsAuthorizer
+
+	// NFS§B T12: per-op anon-binding gate. cfg is read at the top of each
+	// fh-bearing op to reject active anon-bound sessions on the next op
+	// after iam.anon-enabled is flipped false (Phase 0 → Phase 2).
+	// nil = no gate (backward compat).
+	cfg ConfigReader
+
+	// T15 NFS§C: audit hook. When non-nil, called after every grainfs:NFSMount
+	// allow/deny decision with a populated audit.S3Event (Source="nfs4").
+	// nil = no audit emit (backward compat, tests without audit wired).
+	auditHook func(audit.S3Event)
+}
+
+// ConfigReader is the small slice of the config store that the NFS server
+// reads. The concrete *config.Store satisfies it; tests inject stubs.
+type ConfigReader interface {
+	GetBool(key string) (bool, bool)
+}
+
+// nfsAuthorizer is the slice of s3auth.Authorizer consumed by the NFS IAM gate.
+// Defined here (not in s3auth) so tests can inject stubs without building
+// a full policy store + resolver.
+type nfsAuthorizer interface {
+	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
+}
+
+// ServerOption configures a Server.
+type ServerOption func(*Server)
+
+// WithMountSAStore wires the mount-SA store into the NFS4 server for
+// 2-phase lazy binding auth (NFS§B T8, spec D#5).
+func WithMountSAStore(s *mountsastore.Store) ServerOption {
+	return func(srv *Server) { srv.mountSAStore = s }
+}
+
+// WithNFS4Authorizer wires the IAM authorizer for grainfs:NFSMount evaluation.
+// The concrete *s3auth.Authorizer satisfies nfsAuthorizer; tests may inject stubs.
+func WithNFS4Authorizer(a nfsAuthorizer) ServerOption {
+	return func(srv *Server) { srv.authorizer = a }
+}
+
+// WithConfigReader wires the config store so the NFS server can re-check
+// iam.anon-enabled on every fh-bearing op (NFS§B T12, §9 T73 parity). nil
+// keeps the previous behaviour (no per-op anon flip gate).
+func WithConfigReader(c ConfigReader) ServerOption {
+	return func(srv *Server) { srv.cfg = c }
+}
+
+// WithAuditHook wires a hook that is called with a populated audit.S3Event
+// after every grainfs:NFSMount allow/deny decision (T15 NFS§C). The hook is
+// called synchronously on the RPC goroutine; implementations must not block.
+// nil keeps the previous behaviour (no audit emit).
+func WithAuditHook(hook func(audit.S3Event)) ServerOption {
+	return func(srv *Server) { srv.auditHook = hook }
 }
 
 // NewServer creates an NFSv4 server backed by the given storage backend.
@@ -36,13 +100,16 @@ type Server struct {
 //
 //	grainfs bucket create __grainfs_nfs4
 //	grainfs nfs export add __grainfs_nfs4
-func NewServer(backend storage.Backend) *Server {
+func NewServer(backend storage.Backend, opts ...ServerOption) *Server {
 	s := &Server{
 		backend: backend,
 		state:   NewStateManager(),
 		logger:  log.With().Str("component", "nfs4").Logger(),
 		hinter:  newUnknownExportHinter(hinterTTL),
 		lookups: NewLookupRing(1024),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.exports.Store(emptySnap)
 	if err := s.RefreshExports(context.Background()); err != nil {

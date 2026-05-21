@@ -941,3 +941,89 @@ leader with:
 1. Stop every node. This causes S3, NFS, and NBD downtime.
 2. Restart every node with the new `--cluster-key`.
 3. Confirm peer reconnection with `grainfs cluster --endpoint <data-dir>/admin.sock status`.
+
+---
+
+## NFS / 9P Mount Operations
+
+### Creating a Mount SA
+
+A Mount SA scopes NFS/9P access to a named principal with an attached IAM policy.
+Use the `NFSMountOnly` builtin for NFSv4 clients and `9PAttachOnly` for 9P clients.
+
+```bash
+# Create the Mount SA with a numeric UID hint (advisory, for AUTH_SYS mapping).
+grainfs iam mount-sa create alice-mount --uid 1000 --endpoint <data>/admin.sock
+
+# Attach a builtin policy.
+grainfs iam mount-sa policy attach alice-mount NFSMountOnly --endpoint <data>/admin.sock
+
+# Register the target bucket as an NFS export if not already present.
+grainfs nfs export add my-bucket --endpoint <data>/admin.sock
+
+# List existing Mount SAs.
+grainfs iam mount-sa list --endpoint <data>/admin.sock
+```
+
+Mount path for NFSv4: `:<bucket>/<mount-sa>` (e.g. `localhost:/my-bucket/alice-mount`).
+Mount path for 9P: `aname=<mount-sa>@<bucket>` (e.g. `aname=alice-mount@my-bucket`).
+
+### Cross-namespace policy rejection
+
+Attaching a regular IAM policy (action namespace `s3:*`) to a Mount SA returns
+HTTP 412 Precondition Failed. Mount SAs accept only policies whose actions
+are in the `grainfs:` namespace (`NFSMountOnly`, `9PAttachOnly`, or a custom
+policy that uses only `grainfs:NFSRead` / `grainfs:NFSWrite` / `grainfs:9PAttach`).
+
+Remediation: create or use a policy in the `grainfs:` action namespace, then retry
+`grainfs iam mount-sa policy attach`.
+
+### Read-only export
+
+```bash
+# Register as read-only from the start.
+grainfs nfs export add my-bucket --ro --endpoint <data>/admin.sock
+
+# Flip an existing export to read-only (with optional quiesce).
+grainfs nfs export update my-bucket --ro --quiesce-wait 30s --endpoint <data>/admin.sock
+```
+
+Clients on a read-only export receive `NFS4ERR_ROFS` / 9P `EROFS` on writes.
+
+### Auditing NFS/9P access
+
+The `audit.s3` Iceberg table records every NFS and 9P operation with
+`source = 'nfs4'` or `source = '9p'` and the client `source_ip`:
+
+```bash
+grainfs audit query "
+  SELECT sa_id, source, source_ip, operation, bucket, ts
+  FROM grainfs_iceberg.audit.s3
+  WHERE source IN ('nfs4', '9p')
+  ORDER BY ts DESC
+  LIMIT 20
+" --endpoint <data>/admin.sock
+```
+
+### TLS posture gate (Phase 2)
+
+When `iam.anon-enabled=false` (Phase 2), GrainFS refuses to start NFS/9P
+listeners unless at least one of the following is true:
+
+- A TLS certificate is on disk (`<data>/tls/cert.pem`), or
+- `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
+
+Boot error prefix: `NFS/9P boot: auth required + no TLS cert + no trusted proxy`.
+
+Remediation options:
+
+```bash
+# Option A: place the TLS cert (and restart).
+cp server.crt <data>/tls/cert.pem
+cp server.key <data>/tls/key.pem
+
+# Option B: configure a trusted proxy CIDR (hot-applied, no restart needed).
+grainfs config set trusted-proxy.cidr 10.0.0.0/8 --endpoint <data>/admin.sock
+```
+
+See also: `docs/operators/cluster-lifecycle.md` (FU#3 TLS posture details).

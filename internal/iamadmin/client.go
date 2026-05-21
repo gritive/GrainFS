@@ -169,6 +169,52 @@ func (c *Client) GroupPolicyDetach(ctx context.Context, group, policy string) er
 		nil)
 }
 
+// --- MountSA ---
+
+// MountSACreate creates a NFS/9P mount service account.
+func (c *Client) MountSACreate(ctx context.Context, name string, uid uint32, createdBy string) (MountSAItem, error) {
+	body := map[string]any{"name": name, "uid": uid}
+	if createdBy != "" {
+		body["created_by"] = createdBy
+	}
+	var resp MountSAItem
+	err := c.Post(ctx, "/v1/iam/mount-sa", body, &resp)
+	return resp, err
+}
+
+// MountSAList returns all MountSAs known to the admin server.
+func (c *Client) MountSAList(ctx context.Context) ([]MountSAItem, error) {
+	var resp []MountSAItem
+	err := c.Get(ctx, "/v1/iam/mount-sa", &resp)
+	return resp, err
+}
+
+// MountSAGet returns metadata for the named MountSA.
+func (c *Client) MountSAGet(ctx context.Context, name string) (MountSAItem, error) {
+	var resp MountSAItem
+	err := c.Get(ctx, "/v1/iam/mount-sa/"+url.PathEscape(name), &resp)
+	return resp, err
+}
+
+// MountSADelete removes a MountSA via Raft.
+func (c *Client) MountSADelete(ctx context.Context, name string) error {
+	return c.Delete(ctx, "/v1/iam/mount-sa/"+url.PathEscape(name), nil)
+}
+
+// MountSAPolicyAttach attaches a policy to a MountSA via Raft.
+func (c *Client) MountSAPolicyAttach(ctx context.Context, mountSA, policy string) error {
+	return c.Put(ctx,
+		"/v1/iam/mount-sa/"+url.PathEscape(mountSA)+"/policy/"+url.PathEscape(policy),
+		nil, nil)
+}
+
+// MountSAPolicyDetach detaches a policy from a MountSA via Raft.
+func (c *Client) MountSAPolicyDetach(ctx context.Context, mountSA, policy string) error {
+	return c.Delete(ctx,
+		"/v1/iam/mount-sa/"+url.PathEscape(mountSA)+"/policy/"+url.PathEscape(policy),
+		nil)
+}
+
 // --- Bucket (iam bucket subtree) ---
 
 // BucketCreate creates a bucket. When both attachSA and attachPolicy are

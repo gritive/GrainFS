@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.311.0] - 2026-05-21
+
+### Added
+
+- **Mount-SA + IAM 권한 게이트 for NFSv4 / 9P mount.** S3 SA 와 별도의 mount-SA pool 신설. `grainfs iam mount-sa create/list/get/delete/attach-policy/detach-policy` 로 운영. 새 IAM action `grainfs:NFSMount` 와 `grainfs:9PAttach` 로 정책 게이트. mount-SA pool 은 cluster-replicated (Raft FSM Snapshot/Restore 통합).
+- **NFSv4 mount path `:/<bucket>/<mount-sa>`** — lazy fh binding 으로 첫 LOOKUP 은 bucket fh (saID="pending"), 두 번째 LOOKUP 에서 mount-sa pool hit / pool miss + file-or-dir / pool miss + no file 분기. anon mount 는 `mount -t nfs4 <ip>:/<bucket>` 만 (bucket 이 public 인 경우만).
+- **9P attach `aname=<mount-sa>@<bucket>`** — hugelgupf/p9 lib 한계로 wire 컨벤션을 aname 한 슬롯에 `@` 구분자로 인코딩. `aname=<bucket>` (단독) 은 anon path. mount-sa pool miss 는 ENOENT (anon downgrade 없음).
+- **NFSv4 / 9P 정책 builtin policies**: `NFSMountOnly`, `9PAttachOnly`.
+- **Cross-namespace policy attach-time reject** — Mount SA 에 `s3:*` action 포함 정책 attach 시도, 또는 S3 SA 에 `grainfs:*Mount` 포함 정책 attach 시도 시 HTTP 412 precondition.
+- **TLS posture gate NFS/9P 확장** (§5 / FU#3 동등): `iam.anon-enabled=false` + no TLS cert + no `trusted-proxy.cidr` → NFS/9P listener 부팅 거절.
+
+### Changed
+
+- **NFSv4 / 9P write 시 기존 S3 Content-Type 보존.** S3 PUT 으로 들어온 객체 (예: `image/png`) 를 NFS 로 overwrite 해도 Content-Type 유지. NFS/9P 가 backend.PutObject 호출 전에 HeadObject 로 기존 객체의 ContentType 추출 후 재사용. 새 객체는 `application/octet-stream`.
+- **NFSv4 / 9P export `--ro` 게이트가 모든 mutation op 에 적용.** WRITE / CREATE / REMOVE / RENAME / SETATTR(size) → NFS4ERR_ROFS 또는 9P EROFS. NFSv4 enforcement 는 이미 존재했고, 9P side 동등 enforcement 추가.
+- **Phase 0 → Phase 2 atomic flip 이 active anon NFS/9P session 도 닫는다.** 첫 SA create 로 `iam.anon-enabled=false` 가 flip 되면 anon-bound fh 의 다음 op 부터 NFS4ERR_ACCESS / 9P EACCES.
+- **`audit.s3` table 에 `source` + `source_ip` 컬럼 추가.** `source ∈ {'s3','nfs4','9p','iceberg'}` 로 mount/attach event 분리 가능. `grainfs audit query "SELECT * FROM audit_s3 WHERE source='nfs4'"` 형태로 NFS/9P traffic 조회.
+
+### Fixed
+
+- **`bucketFile.Create` 가 자식 `objectFile` 로 `exportStore` 를 propagate 안 했던 9P bug.** Create 직후 작성된 file 이 export ReadOnly 게이트 무시. 단위 test (`TestP9_Create_ThenWrite_ReadOnlyExport_EROFS`) 추가.
+- **NFSv4 subdir LOOKUP / CREATE / OPEN 이 parent fh 의 saID binding 을 안 propagate.** 결과: mount-sa 로 mount 후 subdir 들어가면 anon binding 으로 잘못 평가. Phase 2 flip 때 mount-sa session 까지 끊기는 부수 효과 있음. 수정 후 subdir 가 parent 의 saID 상속.
+
 ## [0.0.310.0] - 2026-05-21
 
 ### Changed
