@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +16,7 @@ import (
 // (.../shards/__grainfs_volumes/__vol/<name>/blk_NNN[_vUUID]/<version>/shard_N).
 // The block key may carry a versionID suffix on initial allocation, so we glob
 // rather than reconstruct the full path.
-func findVolumeBlockOnDisk(t *testing.T, dataDir, vol string, blockNum int) string {
+func findVolumeBlockOnDisk(t testing.TB, dataDir, vol string, blockNum int) string {
 	t.Helper()
 	want := blockKeyName(blockNum)
 	var hit string
@@ -97,49 +98,102 @@ func filepathWalkBlock(dataDir, vol string, blockNum int, hits *[]string) error 
 	})
 }
 
-// TestFindVolumeBlockOnDisk verifies the helper resolves both on-disk
+// Volume scrub verifies the helper resolves both on-disk
 // layouts (legacy `current` and EC `shard_N`). Pure unit test — no fixture.
-// TestFindVolumeBlockOnDiskE2E verifies the helper resolves both on-disk
+// FindVolumeBlockOnDisk verifies the helper resolves both on-disk
 // layouts (legacy `current` and EC `shard_N`). Pure helper unit check, no
 // fixture used, but wrapped in the canonical SingleNode/Cluster4Node shape
 // for grep/inventory consistency.
-func TestFindVolumeBlockOnDiskE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+var _ = ginkgo.Describe("Volume scrub", func() {
+	registerFindTarget := func(name string, setup func(testing.TB)) {
+		ginkgo.Context("FindVolumeBlockOnDisk "+name, func() {
+			ginkgo.BeforeEach(func() {
+				setup(ginkgo.GinkgoTB())
+			})
+			ginkgo.It("finds a legacy current-layout block", func() {
+				runFindVolumeBlockOnDiskLegacyCurrentLayout(ginkgo.GinkgoTB())
+			})
+			ginkgo.It("finds an EC shard-layout block", func() {
+				runFindVolumeBlockOnDiskShardLayout(ginkgo.GinkgoTB())
+			})
+		})
+	}
+
+	registerScrubTarget := func(name string, mk volumeScrubFactory) {
+		ginkgo.Context("Scrub "+name, func() {
+			ginkgo.It("is a no-op on a healthy volume", func() {
+				runVolumeScrubHealthyNoop(ginkgo.GinkgoTB(), mk, false)
+			})
+			ginkgo.It("is a no-op on a healthy dedup volume", func() {
+				runVolumeScrubHealthyNoop(ginkgo.GinkgoTB(), mk, true)
+			})
+			ginkgo.It("detects corruption in dry-run mode", func() {
+				runVolumeScrubDryRunDetectsCorruption(ginkgo.GinkgoTB(), mk, false)
+			})
+			ginkgo.It("detects corruption in dry-run mode for dedup", func() {
+				runVolumeScrubDryRunDetectsCorruption(ginkgo.GinkgoTB(), mk, true)
+			})
+			ginkgo.It("repairs or reports corruption according to target shape", func() {
+				runVolumeScrubRepairBehavior(ginkgo.GinkgoTB(), mk, false)
+			})
+			ginkgo.It("repairs or reports dedup corruption according to target shape", func() {
+				runVolumeScrubRepairBehavior(ginkgo.GinkgoTB(), mk, true)
+			})
+			ginkgo.It("supports admin trigger with zero scrub interval", func() {
+				runVolumeScrubAdminTriggerWorksAtZeroInterval(ginkgo.GinkgoTB(), mk)
+			})
+			ginkgo.It("supports status, list, and cancel commands", func() {
+				runVolumeScrubStatusListCancel(ginkgo.GinkgoTB(), mk)
+			})
+		})
+	}
+
+	registerFindTarget("SingleNode", func(testing.TB) {
 		_ = newSingleNodeS3Target()
-		runFindVolumeBlockOnDiskCases(t)
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
+	registerFindTarget("Cluster4Node", func(t testing.TB) {
 		_ = newSharedClusterS3Target(t)
-		runFindVolumeBlockOnDiskCases(t)
 	})
+	registerScrubTarget("SingleNode", func(t testing.TB, args ...string) s3Target {
+		return newDedicatedSingleNodeS3Target(t, args)
+	})
+	registerScrubTarget("Cluster4Node", func(t testing.TB, args ...string) s3Target {
+		return newClusterS3TargetWithExtraArgs(t, 4, args)
+	})
+})
+
+func tempVolumeScrubDir(t testing.TB) string {
+	t.Helper()
+	dataDir, err := os.MkdirTemp("", "grainfs-volume-scrub-*")
+	require.NoError(t, err)
+	ginkgo.DeferCleanup(os.RemoveAll, dataDir)
+	return dataDir
 }
 
-func runFindVolumeBlockOnDiskCases(t *testing.T) {
+func runFindVolumeBlockOnDiskLegacyCurrentLayout(t testing.TB) {
 	t.Helper()
+	dataDir := tempVolumeScrubDir(t)
+	blockPath := filepath.Join(dataDir, "groups", "g1", "data", "__grainfs_volumes", ".obj", "__vol", "vs2", "blk_000000000000_vabc", "current")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
+	require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
 
-	t.Run("LegacyCurrentLayout", func(t *testing.T) {
-		dataDir := t.TempDir()
-		blockPath := filepath.Join(dataDir, "groups", "g1", "data", "__grainfs_volumes", ".obj", "__vol", "vs2", "blk_000000000000_vabc", "current")
-		require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
-		require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
+	require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
+}
 
-		require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
-	})
+func runFindVolumeBlockOnDiskShardLayout(t testing.TB) {
+	t.Helper()
+	dataDir := tempVolumeScrubDir(t)
+	blockPath := filepath.Join(dataDir, "shards", "__grainfs_volumes", "__vol", "vs2", "blk_000000000000_vabc", "019e20ca-0000-7000-8000-000000000000", "shard_0")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
+	require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
 
-	t.Run("ShardLayout", func(t *testing.T) {
-		dataDir := t.TempDir()
-		blockPath := filepath.Join(dataDir, "shards", "__grainfs_volumes", "__vol", "vs2", "blk_000000000000_vabc", "019e20ca-0000-7000-8000-000000000000", "shard_0")
-		require.NoError(t, os.MkdirAll(filepath.Dir(blockPath), 0o755))
-		require.NoError(t, os.WriteFile(blockPath, []byte("data"), 0o644))
-
-		require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
-	})
+	require.Equal(t, blockPath, findVolumeBlockOnDisk(t, dataDir, "vs2", 0))
 }
 
 // volumeScrubFactory builds a fresh per-case fixture with the given grainfs
 // serve args. Each scrub case needs its own dedup/scrub-interval, so the case
 // set is parametrised on a fixture factory rather than a single s3Target.
-type volumeScrubFactory func(args ...string) s3Target
+type volumeScrubFactory func(t testing.TB, args ...string) s3Target
 
 // scrubDataDir returns the dataDir to drive CLI commands against tgt for the
 // given node index. Single-node fixtures ignore nodeIdx.
@@ -154,7 +208,7 @@ func scrubDataDir(tgt s3Target, nodeIdx int) string {
 // returns (nodeIdx, path). For single-node the dataDir is the unique server
 // dir; for cluster the function picks the first node holding an EC shard for
 // that block.
-func truncateAVolumeBlock(t *testing.T, tgt s3Target, vol string, blockNum int) (int, string) {
+func truncateAVolumeBlock(t testing.TB, tgt s3Target, vol string, blockNum int) (int, string) {
 	t.Helper()
 	if !tgt.isCluster {
 		dataDir := scrubDataDir(tgt, 0)
@@ -177,183 +231,138 @@ func truncateAVolumeBlock(t *testing.T, tgt s3Target, vol string, blockNum int) 
 	return 0, ""
 }
 
-// TestVolumeScrubE2E exercises the volume scrubber against both single-node
+// VolumeScrub exercises the volume scrubber against both single-node
 // and 4-node cluster fixtures. The shared case set covers healthy-noop,
 // dry-run detection, repair behavior, zero-interval admin trigger, and the
 // status/list/cancel CLI subcommands. RepairBehavior asserts diverging
 // expectations per fixture: single → Unrepairable=1 (no peer), cluster →
 // Repaired=1 (EC peer-pull). MultiNodeRepair (formerly its own test) is
 // absorbed by RepairBehavior's cluster branch.
-func TestVolumeScrubE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runVolumeScrubCases(t, func(args ...string) s3Target {
-			return newDedicatedSingleNodeS3Target(t, args)
-		})
-	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runVolumeScrubCases(t, func(args ...string) s3Target {
-			return newClusterS3TargetWithExtraArgs(t, 4, args)
-		})
-	})
-}
-
-func runVolumeScrubCases(t *testing.T, mk volumeScrubFactory) {
+func runVolumeScrubHealthyNoop(t testing.TB, mk volumeScrubFactory, dedup bool) {
 	t.Helper()
 
-	t.Run("HealthyNoop", func(t *testing.T) {
-		tgt := mk("--dedup=false")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vs1", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vs1", "--offset", "0", "--content", "hello")
-		require.Equal(t, 0, code, out)
+	dedupArg := "--dedup=false"
+	vol := "vs1"
+	if dedup {
+		dedupArg = "--dedup=true"
+		vol = "vsd1"
+	}
+	tgt := mk(t, dedupArg)
+	dd := scrubDataDir(tgt, 0)
+	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "write-at", vol, "--offset", "0", "--content", "hello")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "scrub", vol)
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "Repaired=0", "got:\n%s", out)
+	require.Contains(t, out, "Detected=0", "got:\n%s", out)
+}
 
-		out, code = runCLI(t, dd, "volume", "scrub", "vs1")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, "Repaired=0", "got:\n%s", out)
-		require.Contains(t, out, "Detected=0", "got:\n%s", out)
-	})
+func runVolumeScrubDryRunDetectsCorruption(t testing.TB, mk volumeScrubFactory, dedup bool) {
+	t.Helper()
 
-	t.Run("HealthyNoop_Dedup", func(t *testing.T) {
-		tgt := mk("--dedup=true")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vsd1", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vsd1", "--offset", "0", "--content", "hello")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "scrub", "vsd1")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, "Repaired=0", "got:\n%s", out)
-		require.Contains(t, out, "Detected=0", "got:\n%s", out)
-	})
+	dedupArg := "--dedup=false"
+	vol := "vs2"
+	if dedup {
+		dedupArg = "--dedup=true"
+		vol = "vsd2"
+	}
+	tgt := mk(t, dedupArg, "--pack-threshold=0", "--shard-pack-threshold=0")
+	dd := scrubDataDir(tgt, 0)
+	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "write-at", vol, "--offset", "0", "--content", "abcd1234")
+	require.Equal(t, 0, code, out)
 
-	t.Run("DryRunDetectsCorruption", func(t *testing.T) {
-		tgt := mk("--dedup=false", "--pack-threshold=0", "--shard-pack-threshold=0")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vs2", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vs2", "--offset", "0", "--content", "abcd1234")
-		require.Equal(t, 0, code, out)
+	nodeIdx, blockPath := truncateAVolumeBlock(t, tgt, vol, 0)
+	nodeDD := scrubDataDir(tgt, nodeIdx)
 
-		nodeIdx, blockPath := truncateAVolumeBlock(t, tgt, "vs2", 0)
-		nodeDD := scrubDataDir(tgt, nodeIdx)
+	out, code = runCLI(t, nodeDD, "volume", "scrub", vol, "--dry-run")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "Detected=1", "got:\n%s", out)
+	require.Contains(t, out, "Repaired=0", "dry-run must not repair; got:\n%s", out)
 
-		out, code = runCLI(t, nodeDD, "volume", "scrub", "vs2", "--dry-run")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, "Detected=1", "got:\n%s", out)
-		require.Contains(t, out, "Repaired=0", "dry-run must not repair; got:\n%s", out)
+	fi, err := os.Stat(blockPath)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), fi.Size(), "dry-run must leave the local file untouched")
+}
 
-		fi, err := os.Stat(blockPath)
-		require.NoError(t, err)
-		require.Equal(t, int64(1), fi.Size(), "dry-run must leave the local file untouched")
-	})
+func runVolumeScrubRepairBehavior(t testing.TB, mk volumeScrubFactory, dedup bool) {
+	t.Helper()
 
-	t.Run("DryRunDetectsCorruption_Dedup", func(t *testing.T) {
-		tgt := mk("--dedup=true", "--pack-threshold=0", "--shard-pack-threshold=0")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vsd2", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vsd2", "--offset", "0", "--content", "abcd1234")
-		require.Equal(t, 0, code, out)
+	dedupArg := "--dedup=false"
+	vol := "vs3"
+	if dedup {
+		dedupArg = "--dedup=true"
+		vol = "vsd3"
+	}
+	// Single-node: no peer to pull from → Unrepairable=1.
+	// Cluster:      EC peer-pull repair  → Repaired=1.
+	tgt := mk(t, dedupArg, "--pack-threshold=0", "--shard-pack-threshold=0")
+	dd := scrubDataDir(tgt, 0)
+	out, code := runCLI(t, dd, "volume", "create", vol, "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "write-at", vol, "--offset", "0", "--content", "QWERTY")
+	require.Equal(t, 0, code, out)
 
-		nodeIdx, blockPath := truncateAVolumeBlock(t, tgt, "vsd2", 0)
-		nodeDD := scrubDataDir(tgt, nodeIdx)
+	nodeIdx, _ := truncateAVolumeBlock(t, tgt, vol, 0)
+	nodeDD := scrubDataDir(tgt, nodeIdx)
 
-		out, code = runCLI(t, nodeDD, "volume", "scrub", "vsd2", "--dry-run")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, "Detected=1", "got:\n%s", out)
-		require.Contains(t, out, "Repaired=0", "dry-run must not repair; got:\n%s", out)
+	out, code = runCLI(t, nodeDD, "volume", "scrub", vol)
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "Detected=1", "got:\n%s", out)
+	if tgt.isCluster {
+		require.Contains(t, out, "Repaired=1", "cluster peer-pull must repair; got:\n%s", out)
+	} else {
+		require.Contains(t, out, "Unrepairable=1", "single node has no peer; got:\n%s", out)
+	}
+}
 
-		fi, err := os.Stat(blockPath)
-		require.NoError(t, err)
-		require.Equal(t, int64(1), fi.Size(), "dry-run must leave the local file untouched")
-	})
+func runVolumeScrubAdminTriggerWorksAtZeroInterval(t testing.TB, mk volumeScrubFactory) {
+	t.Helper()
 
-	t.Run("RepairBehavior", func(t *testing.T) {
-		// Single-node: no peer to pull from → Unrepairable=1.
-		// Cluster:      EC peer-pull repair  → Repaired=1.
-		tgt := mk("--dedup=false", "--pack-threshold=0", "--shard-pack-threshold=0")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vs3", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vs3", "--offset", "0", "--content", "QWERTY")
-		require.Equal(t, 0, code, out)
+	// Regression guard for Director-wiring fix. --scrub-interval=0
+	// disables the periodic loop but admin trigger must keep working
+	// (pre-fix returned "scrub director not configured").
+	tgt := mk(t, "--dedup=false", "--scrub-interval=0")
+	dd := scrubDataDir(tgt, 0)
+	out, code := runCLI(t, dd, "volume", "create", "vsi0", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "write-at", "vsi0", "--offset", "0", "--content", "x")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "scrub", "vsi0")
+	require.Equal(t, 0, code, out)
+	require.NotContains(t, out, "scrub director not configured", "got:\n%s", out)
+	require.Contains(t, out, "Detected=0", "got:\n%s", out)
+	require.Contains(t, out, "Repaired=0", "got:\n%s", out)
+}
 
-		nodeIdx, _ := truncateAVolumeBlock(t, tgt, "vs3", 0)
-		nodeDD := scrubDataDir(tgt, nodeIdx)
+func runVolumeScrubStatusListCancel(t testing.TB, mk volumeScrubFactory) {
+	t.Helper()
 
-		out, code = runCLI(t, nodeDD, "volume", "scrub", "vs3")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, "Detected=1", "got:\n%s", out)
-		if tgt.isCluster {
-			require.Contains(t, out, "Repaired=1", "cluster peer-pull must repair; got:\n%s", out)
-		} else {
-			require.Contains(t, out, "Unrepairable=1", "single node has no peer; got:\n%s", out)
-		}
-	})
+	tgt := mk(t, "--dedup=false")
+	dd := scrubDataDir(tgt, 0)
+	out, code := runCLI(t, dd, "volume", "create", "vs4", "--size", "1Mi")
+	require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "write-at", "vs4", "--offset", "0", "--content", "data")
+	require.Equal(t, 0, code, out)
 
-	t.Run("RepairBehavior_Dedup", func(t *testing.T) {
-		tgt := mk("--dedup=true", "--pack-threshold=0", "--shard-pack-threshold=0")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vsd3", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vsd3", "--offset", "0", "--content", "QWERTY")
-		require.Equal(t, 0, code, out)
+	out, code = runCLI(t, dd, "volume", "scrub", "vs4", "--detach")
+	require.Equal(t, 0, code, out)
+	// Parse session id out of "Triggered scrub: session=<uuid> ..."
+	idx := strings.Index(out, "session=")
+	require.Greater(t, idx, -1, "no session id in output: %s", out)
+	rest := out[idx+len("session="):]
+	end := strings.IndexByte(rest, ' ')
+	require.Greater(t, end, 0)
+	sessionID := rest[:end]
 
-		nodeIdx, _ := truncateAVolumeBlock(t, tgt, "vsd3", 0)
-		nodeDD := scrubDataDir(tgt, nodeIdx)
+	out, code = runCLI(t, dd, "volume", "scrub", "list")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, sessionID)
 
-		out, code = runCLI(t, nodeDD, "volume", "scrub", "vsd3")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, "Detected=1", "got:\n%s", out)
-		if tgt.isCluster {
-			require.Contains(t, out, "Repaired=1", "cluster peer-pull must repair; got:\n%s", out)
-		} else {
-			require.Contains(t, out, "Unrepairable=1", "single node has no peer; got:\n%s", out)
-		}
-	})
-
-	t.Run("AdminTriggerWorksAtZeroInterval", func(t *testing.T) {
-		// Regression guard for Director-wiring fix. --scrub-interval=0
-		// disables the periodic loop but admin trigger must keep working
-		// (pre-fix returned "scrub director not configured").
-		tgt := mk("--dedup=false", "--scrub-interval=0")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vsi0", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vsi0", "--offset", "0", "--content", "x")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "scrub", "vsi0")
-		require.Equal(t, 0, code, out)
-		require.NotContains(t, out, "scrub director not configured", "got:\n%s", out)
-		require.Contains(t, out, "Detected=0", "got:\n%s", out)
-		require.Contains(t, out, "Repaired=0", "got:\n%s", out)
-	})
-
-	t.Run("StatusListCancel", func(t *testing.T) {
-		tgt := mk("--dedup=false")
-		dd := scrubDataDir(tgt, 0)
-		out, code := runCLI(t, dd, "volume", "create", "vs4", "--size", "1Mi")
-		require.Equal(t, 0, code, out)
-		out, code = runCLI(t, dd, "volume", "write-at", "vs4", "--offset", "0", "--content", "data")
-		require.Equal(t, 0, code, out)
-
-		out, code = runCLI(t, dd, "volume", "scrub", "vs4", "--detach")
-		require.Equal(t, 0, code, out)
-		// Parse session id out of "Triggered scrub: session=<uuid> ..."
-		idx := strings.Index(out, "session=")
-		require.Greater(t, idx, -1, "no session id in output: %s", out)
-		rest := out[idx+len("session="):]
-		end := strings.IndexByte(rest, ' ')
-		require.Greater(t, end, 0)
-		sessionID := rest[:end]
-
-		out, code = runCLI(t, dd, "volume", "scrub", "list")
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, sessionID)
-
-		out, code = runCLI(t, dd, "volume", "scrub", "status", sessionID)
-		require.Equal(t, 0, code, out)
-		require.Contains(t, out, sessionID)
-	})
+	out, code = runCLI(t, dd, "volume", "scrub", "status", sessionID)
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, sessionID)
 }
