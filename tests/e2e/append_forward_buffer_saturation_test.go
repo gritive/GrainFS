@@ -18,6 +18,7 @@ import (
 	"time"
 
 	smithy "github.com/aws/smithy-go"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,16 +27,22 @@ import (
 // only a Cluster4Node branch today; the shape stays consistent with the
 // other dual-integrated entries so a future single-node analogue (e.g.,
 // per-bucket admission control) can drop in.
-func runAppendForwardBufferSaturation(t *testing.T) {
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runAppendForwardBufferSaturationCases(t, newClusterS3TargetWithExtraArgs(t, 4, []string{
-			"--cluster-append-forward-buffer-total-bytes", fmt.Sprintf("%d", 4*1024*1024),
-			"--cluster-append-forward-buffer-max-per-request", fmt.Sprintf("%d", 64*1024*1024),
-		}))
+func runAppendForwardBufferSaturationSpecs() {
+	ginkgo.Context("ForwardBufferSaturation Cluster4Node", func() {
+		var tgt s3Target
+		ginkgo.BeforeEach(func() {
+			tgt = newClusterS3TargetWithExtraArgs(ginkgo.GinkgoTB(), 4, []string{
+				"--cluster-append-forward-buffer-total-bytes", fmt.Sprintf("%d", 4*1024*1024),
+				"--cluster-append-forward-buffer-max-per-request", fmt.Sprintf("%d", 64*1024*1024),
+			})
+		})
+		ginkgo.It("reports SlowDown and exposes the rejected counter", func() {
+			runAppendForwardBufferSaturationCases(ginkgo.GinkgoTB(), tgt)
+		})
 	})
 }
 
-func runAppendForwardBufferSaturationCases(t *testing.T, tgt s3Target) {
+func runAppendForwardBufferSaturationCases(t testing.TB, tgt s3Target) {
 	t.Helper()
 	bucket := tgt.uniqueBucket(t, "appendsatur")
 
