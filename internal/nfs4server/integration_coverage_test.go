@@ -5,8 +5,7 @@ import (
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/gomega"
 )
 
 // nfs4Client wraps a TCP connection with helpers for building NFS4 compounds.
@@ -19,7 +18,7 @@ type nfs4Client struct {
 func newNFS4Client(t nfsTestTB, addr string) *nfs4Client {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	require.NoError(t, err)
+	Expect(err).NotTo(HaveOccurred())
 	t.Cleanup(func() { conn.Close() })
 	return &nfs4Client{t: t, conn: conn}
 }
@@ -35,10 +34,10 @@ func (c *nfs4Client) sendCompound(ops []byte, opCount uint32) []byte {
 	compound.buf.Write(ops)
 
 	frame := buildRPCCallFrame(c.xid, compound.Bytes())
-	require.NoError(c.t, writeRPCFrame(c.conn, frame))
+	Expect(writeRPCFrame(c.conn, frame)).To(Succeed())
 
 	reply, err := readRPCFrame(c.conn)
-	require.NoError(c.t, err)
+	Expect(err).NotTo(HaveOccurred())
 	return reply
 }
 
@@ -103,7 +102,7 @@ func (c *nfs4Client) writeTestFile(name string, data []byte) {
 
 	reply := c.sendCompound(ops.Bytes(), 5)
 	status, _ := c.parseCompoundReply(reply)
-	assert.Equal(c.t, uint32(NFS4_OK), status, "writeTestFile %q should succeed", name)
+	Expect(status).To(Equal(uint32(NFS4_OK)), "writeTestFile %q should succeed", name)
 }
 
 var _ = Describe("NFS4 integration coverage", func() {
@@ -135,7 +134,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 3)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
@@ -143,9 +142,9 @@ var _ = Describe("NFS4 integration coverage", func() {
 		r.ReadUint32()
 
 		readDirOp, _ := r.ReadUint32()
-		assert.Equal(t, uint32(OpReadDir), readDirOp)
+		Expect(readDirOp).To(Equal(uint32(OpReadDir)))
 		readDirStatus, _ := r.ReadUint32()
-		require.Equal(t, uint32(NFS4_OK), readDirStatus)
+		Expect(readDirStatus).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint64()
 		var names []string
@@ -161,9 +160,9 @@ var _ = Describe("NFS4 integration coverage", func() {
 			names = append(names, name)
 		}
 
-		assert.Contains(t, names, "alpha.txt")
-		assert.Contains(t, names, "beta.txt")
-		assert.Contains(t, names, "gamma.txt")
+		Expect(names).To(ContainElement("alpha.txt"))
+		Expect(names).To(ContainElement("beta.txt"))
+		Expect(names).To(ContainElement("gamma.txt"))
 	})
 
 	It("propagates requested READDIR attrs", func() {
@@ -184,7 +183,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 3)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
@@ -192,14 +191,14 @@ var _ = Describe("NFS4 integration coverage", func() {
 		r.ReadUint32()
 
 		readDirOp, _ := r.ReadUint32()
-		assert.Equal(t, uint32(OpReadDir), readDirOp)
+		Expect(readDirOp).To(Equal(uint32(OpReadDir)))
 		readDirStatus, _ := r.ReadUint32()
-		require.Equal(t, uint32(NFS4_OK), readDirStatus)
+		Expect(readDirStatus).To(Equal(uint32(NFS4_OK)))
 		r.ReadUint64()
 
 		for {
 			follows, err := r.ReadUint32()
-			require.NoError(t, err)
+			Expect(err).NotTo(HaveOccurred())
 			if follows == 0 {
 				break
 			}
@@ -214,21 +213,21 @@ var _ = Describe("NFS4 integration coverage", func() {
 				}
 			}
 			attrVals, err := r.ReadOpaque()
-			require.NoError(t, err)
+			Expect(err).NotTo(HaveOccurred())
 			if name != "with-attrs.txt" {
 				continue
 			}
 
-			require.NotZero(t, word0&(1<<1), "READDIR entry should include requested TYPE attr")
-			require.NotZero(t, word0&(1<<4), "READDIR entry should include requested SIZE attr")
+			Expect(word0&(1<<1)).NotTo(BeZero(), "READDIR entry should include requested TYPE attr")
+			Expect(word0&(1<<4)).NotTo(BeZero(), "READDIR entry should include requested SIZE attr")
 			ar := NewXDRReader(attrVals)
 			fileType, _ := ar.ReadUint32()
 			fileSize, _ := ar.ReadUint64()
-			require.Equal(t, uint32(NF4REG), fileType)
-			require.Equal(t, uint64(len(content)), fileSize)
+			Expect(fileType).To(Equal(uint32(NF4REG)))
+			Expect(fileSize).To(Equal(uint64(len(content))))
 			return
 		}
-		require.Fail(t, "READDIR did not return with-attrs.txt")
+		Fail("READDIR did not return with-attrs.txt")
 	})
 
 	It("returns file GETATTR type and size", func() {
@@ -246,7 +245,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 4)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
@@ -256,24 +255,24 @@ var _ = Describe("NFS4 integration coverage", func() {
 		r.ReadUint32()
 
 		getAttrOp, _ := r.ReadUint32()
-		assert.Equal(t, uint32(OpGetAttr), getAttrOp)
+		Expect(getAttrOp).To(Equal(uint32(OpGetAttr)))
 		getAttrStatus, _ := r.ReadUint32()
-		require.Equal(t, uint32(NFS4_OK), getAttrStatus)
+		Expect(getAttrStatus).To(Equal(uint32(NFS4_OK)))
 
 		bitmapLen, _ := r.ReadUint32()
 		for range bitmapLen {
 			r.ReadUint32()
 		}
 		attrVals, err := r.ReadOpaque()
-		require.NoError(t, err)
+		Expect(err).NotTo(HaveOccurred())
 
-		require.GreaterOrEqual(t, len(attrVals), 12)
+		Expect(len(attrVals)).To(BeNumerically(">=", 12))
 		attrReader := NewXDRReader(attrVals)
 		fileType, _ := attrReader.ReadUint32()
 		fileSize, _ := attrReader.ReadUint64()
 
-		assert.Equal(t, uint32(NF4REG), fileType, "should be a regular file")
-		assert.Equal(t, uint64(len(content)), fileSize, "size should match content length")
+		Expect(fileType).To(Equal(uint32(NF4REG)), "should be a regular file")
+		Expect(fileSize).To(Equal(uint64(len(content))), "size should match content length")
 	})
 
 	It("reads from a non-zero offset", func() {
@@ -292,7 +291,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 4)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
@@ -302,14 +301,14 @@ var _ = Describe("NFS4 integration coverage", func() {
 		r.ReadUint32()
 
 		readOp, _ := r.ReadUint32()
-		assert.Equal(t, uint32(OpRead), readOp)
+		Expect(readOp).To(Equal(uint32(OpRead)))
 		readStatus, _ := r.ReadUint32()
-		require.Equal(t, uint32(NFS4_OK), readStatus)
+		Expect(readStatus).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		data, err := r.ReadOpaque()
-		require.NoError(t, err)
-		assert.Equal(t, []byte("world"), data)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(data).To(Equal([]byte("world")))
 	})
 
 	It("returns eof for reads beyond EOF", func() {
@@ -328,7 +327,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 4)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
@@ -341,10 +340,10 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		eof, _ := r.ReadUint32()
 		data, err := r.ReadOpaque()
-		require.NoError(t, err)
+		Expect(err).NotTo(HaveOccurred())
 
-		assert.Equal(t, uint32(1), eof, "should be EOF")
-		assert.Equal(t, []byte("hi"), data)
+		Expect(eof).To(Equal(uint32(1)), "should be EOF")
+		Expect(data).To(Equal([]byte("hi")))
 	})
 
 	It("echoes requested ACCESS permission bits", func() {
@@ -355,19 +354,19 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 2)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
 
 		accessOp, _ := r.ReadUint32()
-		assert.Equal(t, uint32(OpAccess), accessOp)
+		Expect(accessOp).To(Equal(uint32(OpAccess)))
 		accessStatus, _ := r.ReadUint32()
-		require.Equal(t, uint32(NFS4_OK), accessStatus)
+		Expect(accessStatus).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		access, _ := r.ReadUint32()
-		assert.Equal(t, uint32(0x1F), access, "ACCESS should grant all requested bits")
+		Expect(access).To(Equal(uint32(0x1F)), "ACCESS should grant all requested bits")
 	})
 
 	It("confirms SETCLIENTID", func() {
@@ -382,7 +381,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 1)
 		status, r := c.parseCompoundReply(reply)
-		require.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 
 		r.ReadUint32()
 		r.ReadUint32()
@@ -396,7 +395,7 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply2 := c.sendCompound(ops2.Bytes(), 1)
 		status2, _ := c.parseCompoundReply(reply2)
-		assert.Equal(t, uint32(NFS4_OK), status2)
+		Expect(status2).To(Equal(uint32(NFS4_OK)))
 	})
 
 	It("reuses a retrieved filehandle via PUTFH", func() {
@@ -411,8 +410,8 @@ var _ = Describe("NFS4 integration coverage", func() {
 		r.ReadUint32()
 		r.ReadUint32()
 		rootFH, err := r.ReadOpaque()
-		require.NoError(t, err)
-		require.Len(t, rootFH, 16)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rootFH).To(HaveLen(16))
 
 		ops2 := &XDRWriter{}
 		ops2.WriteUint32(uint32(OpPutFH))
@@ -421,15 +420,15 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply2 := c.sendCompound(ops2.Bytes(), 2)
 		status2, r2 := c.parseCompoundReply(reply2)
-		require.Equal(t, uint32(NFS4_OK), status2)
+		Expect(status2).To(Equal(uint32(NFS4_OK)))
 
 		r2.ReadUint32()
 		r2.ReadUint32()
 		r2.ReadUint32()
 		r2.ReadUint32()
 		returnedFH, err := r2.ReadOpaque()
-		require.NoError(t, err)
-		assert.Equal(t, rootFH, returnedFH, "PUTFH + GETFH should return same filehandle")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(returnedFH).To(Equal(rootFH), "PUTFH + GETFH should return same filehandle")
 	})
 
 	It("accepts RENEW lease renewal", func() {
@@ -439,6 +438,6 @@ var _ = Describe("NFS4 integration coverage", func() {
 
 		reply := c.sendCompound(ops.Bytes(), 1)
 		status, _ := c.parseCompoundReply(reply)
-		assert.Equal(t, uint32(NFS4_OK), status)
+		Expect(status).To(Equal(uint32(NFS4_OK)))
 	})
 })
