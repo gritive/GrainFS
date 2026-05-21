@@ -50,12 +50,16 @@ func walkAnonBucket(t *testing.T, root *rootFile, name string) *bucketFile {
 // TestAnon9PSession_FlipAtPhase2_NextOpRejected — anon attach, first GetAttr
 // succeeds, flip iam.anon-enabled=false, next op (Readdir/Create/etc.)
 // returns EACCES.
+//
+// Uses "userbucket" (not "default") because FU#6 carved the "default" bucket
+// out of the per-op anon flip gate to honor D#2 implicit-anon. Default-bucket
+// flip behavior is covered by TestAnon9PSession_DefaultBucket_FlipNotRejected.
 func TestAnon9PSession_FlipAtPhase2_NextOpRejected(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
-	require.NoError(t, backend.CreateBucket(ctx, "default"))
+	require.NoError(t, backend.CreateBucket(ctx, "userbucket"))
 
-	authz := &stubAuthorizer{allow: map[[2]string]bool{{"", "default"}: true}}
+	authz := &stubAuthorizer{allow: map[[2]string]bool{{"", "userbucket"}: true}}
 	cfg := newStubAnonCfg(true)
 	root := &rootFile{
 		backend:      backend,
@@ -65,7 +69,7 @@ func TestAnon9PSession_FlipAtPhase2_NextOpRejected(t *testing.T) {
 		cfg:          cfg,
 	}
 
-	bf := walkAnonBucket(t, root, "default")
+	bf := walkAnonBucket(t, root, "userbucket")
 	require.Equal(t, cfg, bf.cfg, "cfg must propagate")
 
 	// First op succeeds.
@@ -165,15 +169,18 @@ func TestNonAnon9PSession_FlipAtPhase2_OpsContinue(t *testing.T) {
 
 // TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected — anon-bound objectFile
 // (created via bucketFile.Create or .Walk) also rejects ops after flip.
+//
+// Uses "userbucket" (not "default") because FU#6 carved the "default" bucket
+// out of the per-op anon flip gate.
 func TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected(t *testing.T) {
 	backend := newTestBackend(t)
 	ctx := context.Background()
-	require.NoError(t, backend.CreateBucket(ctx, "default"))
-	_, err := backend.PutObject(ctx, "default", "file.txt",
+	require.NoError(t, backend.CreateBucket(ctx, "userbucket"))
+	_, err := backend.PutObject(ctx, "userbucket", "file.txt",
 		bytes.NewReader([]byte("hello")), "text/plain")
 	require.NoError(t, err)
 
-	authz := &stubAuthorizer{allow: map[[2]string]bool{{"", "default"}: true}}
+	authz := &stubAuthorizer{allow: map[[2]string]bool{{"", "userbucket"}: true}}
 	cfg := newStubAnonCfg(true)
 	root := &rootFile{
 		backend:      backend,
@@ -183,7 +190,7 @@ func TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected(t *testing.T) {
 		cfg:          cfg,
 	}
 
-	bf := walkAnonBucket(t, root, "default")
+	bf := walkAnonBucket(t, root, "userbucket")
 
 	_, file, err := bf.Walk([]string{"file.txt"})
 	require.NoError(t, err)
@@ -211,6 +218,42 @@ func TestAnon9PObjectFile_FlipAtPhase2_NextOpRejected(t *testing.T) {
 
 	err = of.SetAttr(p9.SetAttrMask{Permissions: true}, p9.SetAttr{Permissions: 0600})
 	assert.ErrorIs(t, err, syscall.EACCES, "objectFile.SetAttr after flip must be EACCES")
+}
+
+// TestAnon9PSession_DefaultBucket_FlipNotRejected — FU#6: anon-bound session
+// on the "default" bucket must NOT be rejected after the Phase 0→2 flip. The
+// D#2 carve-out (ReasonDefaultBucketImplicitAnon) guarantees default-bucket
+// anon access survives the flip; the per-op gate honors that.
+func TestAnon9PSession_DefaultBucket_FlipNotRejected(t *testing.T) {
+	backend := newTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "default"))
+
+	authz := &stubAuthorizer{allow: map[[2]string]bool{{"", "default"}: true}}
+	cfg := newStubAnonCfg(true)
+	root := &rootFile{
+		backend:      backend,
+		locks:        newObjectLocks(),
+		mountSAStore: newStubMountSAStore(t),
+		authorizer:   authz,
+		cfg:          cfg,
+	}
+
+	bf := walkAnonBucket(t, root, "default")
+
+	// First op succeeds.
+	_, _, _, err := bf.GetAttr(p9.AttrMask{Mode: true})
+	require.NoError(t, err, "GetAttr must succeed while anon-enabled=true")
+
+	// Flip Phase 2.
+	cfg.flip(false)
+
+	// Default-bucket anon ops must continue to work — D#2 implicit anon is
+	// Phase-agnostic.
+	_, _, _, err = bf.GetAttr(p9.AttrMask{Mode: true})
+	assert.NoError(t, err, "GetAttr on /default after flip must succeed (D#2)")
+	_, err = bf.Readdir(0, 16)
+	assert.NoError(t, err, "Readdir on /default after flip must succeed (D#2)")
 }
 
 // TestAnon9P_NoConfigReader_NoGate — without cfg wired, the guard is inert

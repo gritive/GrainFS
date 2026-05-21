@@ -28,7 +28,15 @@ const decisionAllow = policy.DecisionAllow
 
 // nfsMountReqCtx is the immutable policy.RequestContext used for every
 // grainfs:NFSMount evaluation. Resource="*" per spec D#5.
-var nfsMountReqCtx = policy.RequestContext{Action: "grainfs:NFSMount", Resource: "*"}
+// PrincipalType=PrincipalTypeMount routes resolver lookups to the
+// mount-SA pool (FU#5 / F-§B-resolver-mountsa); the anon (saID="") path
+// short-circuits before the pool is consulted so the type tag is a no-op
+// for anon callers.
+var nfsMountReqCtx = policy.RequestContext{
+	Action:        "grainfs:NFSMount",
+	Resource:      "*",
+	PrincipalType: policy.PrincipalTypeMount,
+}
 
 var opReadBufPool = pool.New(func() *bytes.Buffer { return new(bytes.Buffer) })
 var bytesReaderPool = pool.New(func() *bytes.Reader { return new(bytes.Reader) })

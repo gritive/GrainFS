@@ -11,6 +11,7 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -55,11 +56,26 @@ func (f *bucketFile) isReadOnly() bool {
 //
 // NFS§B T12: per-op guard for Phase 0 → Phase 2 transitions. Mirrors the
 // S3 path (§9 T73) and the NFSv4 anonRejected (Dispatcher).
+//
+// FU#6 (F-§B-9P-anon-attach-phase2): the "default" bucket carries the D#2
+// implicit-anon Allow (s3auth.ReasonDefaultBucketImplicitAnon) which is
+// explicitly action-agnostic and Phase-agnostic — it survives the Phase 0→2
+// flip. The attach-time grainfs:9PAttach gate in rootFile.resolveAnon already
+// honors D#2, so an anon binding on /default is intentional. The per-op flip
+// gate must NOT retract that promise; otherwise the first GetAttr after the
+// flip returns EACCES and 9P parity with S3 anon GET on /default/* breaks.
+//
+// TOCTOU note: if an operator attaches an explicit bucket policy to /default
+// AFTER attach, the per-op gate still skips here. Killing the session is the
+// operator's responsibility (same as any other Phase 0→2 policy edit window).
 func (f *bucketFile) anonRejected() bool {
 	if f.cfg == nil {
 		return false
 	}
 	if f.binding.saID != "" {
+		return false
+	}
+	if f.bucket == reservedname.DefaultBucketName {
 		return false
 	}
 	anon, ok := f.cfg.GetBool("iam.anon-enabled")
