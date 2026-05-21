@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.313.0] - 2026-05-21
+
+### Fixed
+
+- **Colima cluster fixture bootstrap now seeds `trusted-proxy.cidr` before the
+  first admin service-account create.** This matches the e2e IAM bootstrap
+  helper and satisfies the TLS-posture precondition that flips
+  `iam.anon-enabled` off on first SA creation.
+
 ## [0.0.312.0] - 2026-05-21
 
 ### Changed
