@@ -13,7 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Degraded mode writes", func() {
@@ -49,7 +49,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 			dataDirs := make([]string, numNodes)
 			for i := range dataDirs {
 				d, err := os.MkdirTemp("", fmt.Sprintf("grainfs-degraded-%d-*", i))
-				require.NoError(t, err)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				dataDirs[i] = d
 				ginkgo.DeferCleanup(os.RemoveAll, d)
 			}
@@ -73,7 +73,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 					cmd.Stdout = os.Stdout
 					cmd.Stderr = os.Stderr
 				}
-				require.NoError(t, cmd.Start(), "start node %d", i)
+				gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start node %d", i)
 				return cmd
 			}
 
@@ -97,7 +97,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 			accessKey, secretKey, saID = bootstrap.AccessKey, bootstrap.SecretKey, bootstrap.SAID
 
 			for i := 1; i < numNodes; i++ {
-				require.NoError(t, writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0)))
+				gomega.Expect(writeNodeJoinPending(dataDirs[i], dataDirs[0], raftAddr(0))).To(gomega.Succeed())
 				procs[i] = startNode(i)
 				time.Sleep(150 * time.Millisecond)
 			}
@@ -113,7 +113,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 				endpoints[i] = httpURL(i)
 			}
 			leaderIdx, err := waitForAdminBucketWritable(ctx, dataDirs, endpoints, accessKey, secretKey, saID, bucketName, 180*time.Second)
-			require.NoError(t, err, "no leader found or PutObject never succeeded")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "no leader found or PutObject never succeeded")
 			client := ecS3Client(httpURL(leaderIdx), accessKey, secretKey)
 			t.Logf("degraded test: leader node %d at %s", leaderIdx, httpURL(leaderIdx))
 
@@ -123,7 +123,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 				Key:    aws.String("before-kill"),
 				Body:   bytes.NewReader([]byte("healthy")),
 			})
-			require.NoError(t, err, "PutObject should succeed with all nodes up")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "PutObject should succeed with all nodes up")
 
 			// Kill 3 nodes — leave only 2 alive (< MinECNodes=3 → degraded).
 			// Pick 3 non-leader nodes to avoid forcing a re-election that could confuse
@@ -146,7 +146,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 			// test uses a 1 s monitor interval so the post-kill transition is observed
 			// quickly and does not depend on the production 30 s tick boundary.
 			// Poll the surviving nodes until one returns 503 for a PUT.
-			require.Eventually(t, func() bool {
+			gomega.Eventually(func() bool {
 				for i := 0; i < numNodes; i++ {
 					if procs[i] == nil {
 						continue
@@ -166,7 +166,7 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 					}
 				}
 				return false
-			}, 120*time.Second, 500*time.Millisecond, "expected writes to be blocked (503) after degraded")
+			}, 120*time.Second, 500*time.Millisecond).Should(gomega.BeTrue(), "expected writes to be blocked (503) after degraded")
 		})
 	})
 })

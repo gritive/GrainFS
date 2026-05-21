@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // Dedup snapshot specs validate the full dedup+snapshot lifecycle via the
@@ -38,28 +38,28 @@ var _ = ginkgo.Describe("Dedup snapshots", func() {
 
 			// First snapshot — pre-PR-B this worked.
 			snap1 := cowCreateSnapshot(t, dataDir, volName)
-			require.NotEmpty(t, snap1)
+			gomega.Expect(snap1).NotTo(gomega.BeEmpty())
 
 			// Second snapshot — pre-PR-B this returned the "dedup + snapshots not
 			// supported in Phase A" hard error. After PR-B it must succeed.
 			snap2 := cowCreateSnapshot(t, dataDir, volName)
-			require.NotEmpty(t, snap2)
-			require.NotEqual(t, snap1, snap2)
+			gomega.Expect(snap2).NotTo(gomega.BeEmpty())
+			gomega.Expect(snap2).NotTo(gomega.Equal(snap1))
 
 			// List: both snapshots should appear.
 			snaps := cowListSnapshots(t, dataDir, volName)
-			require.Len(t, snaps, 2, "expected 2 snapshots under dedup")
+			gomega.Expect(snaps).To(gomega.HaveLen(2), "expected 2 snapshots under dedup")
 
 			// Rollback to snap1 — must not error; snapshot maps are preserved.
 			cowRollback(t, dataDir, volName, snap1)
 			snaps = cowListSnapshots(t, dataDir, volName)
-			require.GreaterOrEqual(t, len(snaps), 1, "rollback must preserve at least the target snap")
+			gomega.Expect(len(snaps)).To(gomega.BeNumerically(">=", 1), "rollback must preserve at least the target snap")
 
 			// Delete snap2 to exercise the dedup DeleteSnapshot path.
 			cowDeleteSnapshot(t, dataDir, volName, snap2)
 			snaps = cowListSnapshots(t, dataDir, volName)
 			for _, s := range snaps {
-				require.NotEqual(t, snap2, s.ID, "deleted snap must not reappear")
+				gomega.Expect(s.ID).NotTo(gomega.Equal(snap2), "deleted snap must not reappear")
 			}
 		})
 	})
