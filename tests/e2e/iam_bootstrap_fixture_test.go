@@ -64,7 +64,7 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 // bootstrapped. Returns the *e2eCluster; cleanup is registered via
 // startE2ECluster's t.Cleanup. Admin UDS sock paths are
 // c.dataDirs[i]+"/admin.sock".
-func startUnbootstrappedCluster(t *testing.T, nodes int) *e2eCluster {
+func startUnbootstrappedCluster(t testing.TB, nodes int) *e2eCluster {
 	t.Helper()
 	return startE2ECluster(t, e2eClusterOptions{
 		Nodes:       nodes,

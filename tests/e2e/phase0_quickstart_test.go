@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,12 +23,24 @@ import (
 //   - AnonPutDefaultBucket    — PUT to s3://default with NO Authorization header.
 //   - AnonListShowsObject     — ListObjectsV2 (anon) returns the just-PUT key.
 //   - AnonGetReadsBack        — GET round-trips the body that anon PUT wrote.
-func TestPhase0QuickstartE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runPhase0QuickstartCases(t, newPhase0SingleNodeTarget(t))
+var _ = ginkgo.Describe("Phase 0 quickstart", func() {
+	describePhase0QuickstartContext("SingleNode", func(tb testing.TB) *phase0Target {
+		return newPhase0SingleNodeTarget(tb)
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runPhase0QuickstartCases(t, newPhase0ClusterTarget(t))
+	describePhase0QuickstartContext("Cluster3Node", func(tb testing.TB) *phase0Target {
+		return newPhase0ClusterTarget(tb)
+	})
+})
+
+func describePhase0QuickstartContext(name string, factory func(testing.TB) *phase0Target) {
+	ginkgo.Context(name, func() {
+		var tgt *phase0Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runPhase0QuickstartCases(func() *phase0Target { return tgt })
 	})
 }
 
@@ -47,7 +60,7 @@ type phase0Target struct {
 	nodeCount int
 }
 
-func newPhase0SingleNodeTarget(t *testing.T) *phase0Target {
+func newPhase0SingleNodeTarget(t testing.TB) *phase0Target {
 	t.Helper()
 	_, url, sock, _ := startUnbootstrappedSingleNode(t)
 	return &phase0Target{
@@ -58,7 +71,7 @@ func newPhase0SingleNodeTarget(t *testing.T) *phase0Target {
 	}
 }
 
-func newPhase0ClusterTarget(t *testing.T) *phase0Target {
+func newPhase0ClusterTarget(t testing.TB) *phase0Target {
 	t.Helper()
 	c := startUnbootstrappedCluster(t, 3)
 	urls := append([]string(nil), c.httpURLs...)
@@ -70,8 +83,10 @@ func newPhase0ClusterTarget(t *testing.T) *phase0Target {
 	}
 }
 
-func runPhase0QuickstartCases(t *testing.T, tgt *phase0Target) {
-	t.Run("AnonPutDefaultBucket", func(t *testing.T) {
+func runPhase0QuickstartCases(getTgt func() *phase0Target) {
+	ginkgo.It("accepts anonymous PUTs to the default bucket (AnonPutDefaultBucket)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		body := []byte("hello grainfs")
 		req, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut,
@@ -88,7 +103,9 @@ func runPhase0QuickstartCases(t *testing.T, tgt *phase0Target) {
 			resp.StatusCode, string(respBody))
 	})
 
-	t.Run("AnonListShowsObject", func(t *testing.T) {
+	ginkgo.It("shows anonymously written objects in default bucket listings (AnonListShowsObject)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		body := []byte("listme")
 		putReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut,
@@ -117,7 +134,9 @@ func runPhase0QuickstartCases(t *testing.T, tgt *phase0Target) {
 			"ListObjectsV2 response must show the anon-PUT key")
 	})
 
-	t.Run("AnonGetReadsBack", func(t *testing.T) {
+	ginkgo.It("reads back anonymously written default bucket objects (AnonGetReadsBack)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		body := []byte("readback content")
 		putReq, err := http.NewRequestWithContext(context.Background(),
 			http.MethodPut,
@@ -145,7 +164,9 @@ func runPhase0QuickstartCases(t *testing.T, tgt *phase0Target) {
 		require.Equal(t, body, got, "anon GET must read back what anon PUT wrote")
 	})
 
-	t.Run("AnonDeleteRoundTrips", func(t *testing.T) {
+	ginkgo.It("round-trips anonymous default bucket deletes (AnonDeleteRoundTrips)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		// Phase 0 banner: "any client can read/write s3://default" — DELETE is
 		// part of write semantics. Verify the wire-level contract is honored.
 		key := "/default/delete-me.txt"
@@ -197,7 +218,9 @@ func runPhase0QuickstartCases(t *testing.T, tgt *phase0Target) {
 			getResp.StatusCode, expectedNotFound)
 	})
 
-	t.Run("IcebergAnonRequestStillRequiresBearer", func(t *testing.T) {
+	ginkgo.It("keeps Iceberg anonymous behavior separate from the S3 fast path (IcebergAnonRequestStillRequiresBearer)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		// F#41 anon fast-path is for S3 surface only. Iceberg REST has its own
 		// bearer auth path (iceberg_authn.go). Verify a Phase 0 anon GET to the
 		// iceberg catalog config endpoint is denied (not silently allowed by

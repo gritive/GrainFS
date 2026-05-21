@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
@@ -28,18 +29,31 @@ import (
 // Each sub-case spins up its own fresh Phase 0 fixture via newFixture(t) because
 // the first-SA-create flip is one-way (anon-enabled can't roll back through the
 // same hook), and every case needs a fresh Phase 0 start.
-func TestPhaseTransitionE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runPhaseTransitionCases(t, "single", newPhase0SingleNodeTarget)
+var _ = ginkgo.Describe("Phase transition", func() {
+	describePhaseTransitionContext("SingleNode", "single", func(tb testing.TB) *phase0Target {
+		return newPhase0SingleNodeTarget(tb)
 	})
-	t.Run("Cluster3Node", func(t *testing.T) {
-		runPhaseTransitionCases(t, "cluster3", newPhase0ClusterTarget)
+	describePhaseTransitionContext("Cluster3Node", "cluster3", func(tb testing.TB) *phase0Target {
+		return newPhase0ClusterTarget(tb)
+	})
+})
+
+func describePhaseTransitionContext(name, tgtName string, factory func(testing.TB) *phase0Target) {
+	ginkgo.Context(name, func() {
+		var tgt *phase0Target
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runPhaseTransitionCases(tgtName, func() *phase0Target { return tgt })
 	})
 }
 
-func runPhaseTransitionCases(t *testing.T, tgtName string, newFixture func(*testing.T) *phase0Target) {
-	t.Run("DefaultBucketAnonSurvivesFlip", func(t *testing.T) {
-		tgt := newFixture(t)
+func runPhaseTransitionCases(tgtName string, getTgt func() *phase0Target) {
+	ginkgo.It("keeps default bucket anonymous access alive after the Phase 2 flip (DefaultBucketAnonSurvivesFlip)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		// Phase 0 anon PUT to /default — success.
@@ -113,8 +127,9 @@ func runPhaseTransitionCases(t *testing.T, tgtName string, newFixture func(*test
 			"LIST response must show the post-flip anon PUT key")
 	})
 
-	t.Run("NonDefaultBucketAnonDeniedAfterFlip", func(t *testing.T) {
-		tgt := newFixture(t)
+	ginkgo.It("denies anonymous access to non-default buckets after the Phase 2 flip (NonDefaultBucketAnonDeniedAfterFlip)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		// Trigger Phase 2 via first SA create.
@@ -143,8 +158,9 @@ func runPhaseTransitionCases(t *testing.T, tgtName string, newFixture func(*test
 			bucket, resp.StatusCode)
 	})
 
-	t.Run("NoTornStateDuringFlip", func(t *testing.T) {
-		tgt := newFixture(t)
+	ginkgo.It("does not expose torn anonymous auth state during the flip (NoTornStateDuringFlip)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		// Seed a probe object on /default so cluster GET-routing has a real
@@ -227,7 +243,7 @@ func runPhaseTransitionCases(t *testing.T, tgtName string, newFixture func(*test
 // is silently dropped on first-SA-create when TLS posture is unsafe. The
 // Phase 0 → Phase 2 "magical moment" has an unstated precondition (TLS cert OR
 // trusted-proxy.cidr must be set).
-func seedTrustedProxyForFlip(t *testing.T, sock string) {
+func seedTrustedProxyForFlip(t testing.TB, sock string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"value": "127.0.0.1/32"})
 	require.NoError(t, err)
@@ -247,7 +263,7 @@ func seedTrustedProxyForFlip(t *testing.T, sock string) {
 // flipToPhase2 creates the first SA via admin UDS, which triggers the
 // Phase 0 → Phase 2 atomic flip server-side (iam.anon-enabled set to false).
 // Returns the new SA's id and key pair; callers typically discard them.
-func flipToPhase2(t *testing.T, sock string) (saID, ak, sk string) {
+func flipToPhase2(t testing.TB, sock string) (saID, ak, sk string) {
 	t.Helper()
 	out := iamCreateSA(t, sock, "phase-tx-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 	return out.SAID, out.AccessKey, out.SecretKey
@@ -255,7 +271,7 @@ func flipToPhase2(t *testing.T, sock string) (saID, ak, sk string) {
 
 // isAnonEnabled reads iam.anon-enabled via admin UDS GET /v1/config/<key>
 // and returns the parsed bool value. Fatals on transport/decode errors.
-func isAnonEnabled(t *testing.T, sock string) bool {
+func isAnonEnabled(t testing.TB, sock string) bool {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodGet, "http://unix/v1/config/iam.anon-enabled", nil)
@@ -279,7 +295,7 @@ func isAnonEnabled(t *testing.T, sock string) bool {
 // adminCreateBucket creates a bucket via admin UDS with no SA/policy attach.
 // Anon access to the resulting bucket is then governed solely by the global
 // iam.anon-enabled config.
-func adminCreateBucket(t *testing.T, sock, bucket string) error {
+func adminCreateBucket(t testing.TB, sock, bucket string) error {
 	t.Helper()
 	cli := iamadmin.NewClientForURL(sock)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

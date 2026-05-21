@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,21 +29,33 @@ import (
 // newSharedClusterIAMAdminTarget). "3-node" in the task title is semantic
 // intent ("small cluster"); the label tracks the actual fixture per repo
 // convention.
-func TestThreeNodeRevocationE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runRevocationCases(t, newSingleNodeIAMAdminTarget())
+var _ = ginkgo.Describe("Three-node revocation", func() {
+	describeRevocationContext("SingleNode", func(testing.TB) iamAdminTarget {
+		return newSingleNodeIAMAdminTarget()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runRevocationCases(t, newSharedClusterIAMAdminTarget(t))
+	describeRevocationContext("Cluster4Node", func(tb testing.TB) iamAdminTarget {
+		return newSharedClusterIAMAdminTarget(tb)
+	})
+})
+
+func describeRevocationContext(name string, factory func(testing.TB) iamAdminTarget) {
+	ginkgo.Context(name, func() {
+		var tgt iamAdminTarget
+
+		ginkgo.BeforeEach(func() {
+			tgt = factory(ginkgo.GinkgoTB())
+		})
+
+		runRevocationCases(func() iamAdminTarget { return tgt })
 	})
 }
 
-func runRevocationCases(t *testing.T, tgt iamAdminTarget) {
-	t.Run("DetachedSANextRequestDenied", func(t *testing.T) {
-		runRevocationDetachPolicy(t, tgt)
+func runRevocationCases(getTgt func() iamAdminTarget) {
+	ginkgo.It("denies the next follower request after policy detach (DetachedSANextRequestDenied)", func() {
+		runRevocationDetachPolicy(ginkgo.GinkgoTB(), getTgt())
 	})
-	t.Run("DetachedKeyRevokedNextRequestDenied", func(t *testing.T) {
-		runRevocationKeyRevoke(t, tgt)
+	ginkgo.It("denies the next follower request after key revocation (DetachedKeyRevokedNextRequestDenied)", func() {
+		runRevocationKeyRevoke(ginkgo.GinkgoTB(), getTgt())
 	})
 }
 
@@ -68,7 +81,7 @@ func pickFollowerIdx(tgt iamAdminTarget) int {
 // PUT on a follower (proves both key and policy reached the follower), detach
 // on the leader, then assert the next PUT on the follower is denied within
 // one apply round-trip.
-func runRevocationDetachPolicy(t *testing.T, tgt iamAdminTarget) {
+func runRevocationDetachPolicy(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -86,7 +99,7 @@ func runRevocationDetachPolicy(t *testing.T, tgt iamAdminTarget) {
 	)
 	require.NoError(t, cli.PolicyPut(ctx, polName, doc))
 	require.NoError(t, cli.PolicyAttachToSA(ctx, polName, saID))
-	t.Cleanup(func() {
+	ginkgo.DeferCleanup(func() {
 		_ = cli.PolicyDetachFromSA(ctx, polName, saID)
 		_ = cli.PolicyDelete(ctx, polName)
 	})
@@ -142,7 +155,7 @@ func runRevocationDetachPolicy(t *testing.T, tgt iamAdminTarget) {
 // runRevocationKeyRevoke: same shape, but the revocation mechanism is the
 // access-key revoke RPC. Proves "policy detach" and "key revoke" propagate
 // with identical cross-node semantics.
-func runRevocationKeyRevoke(t *testing.T, tgt iamAdminTarget) {
+func runRevocationKeyRevoke(t testing.TB, tgt iamAdminTarget) {
 	t.Helper()
 	ctx := context.Background()
 
