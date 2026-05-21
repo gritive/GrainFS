@@ -73,8 +73,16 @@ func (s *blockingSnapshotter) Restore(raft.SnapshotMeta, []byte) error {
 	return nil
 }
 
+type clusterTestTB interface {
+	Helper()
+	Cleanup(func())
+	TempDir() string
+	Errorf(format string, args ...interface{})
+	FailNow()
+}
+
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
-func newTestDistributedBackend(t testing.TB) *DistributedBackend {
+func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
 

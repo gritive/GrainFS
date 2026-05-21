@@ -4,154 +4,143 @@ import (
 	"context"
 	"io"
 	"strings"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/storage/wal"
 )
 
-// TestWAL_WrapDistributedBackend_PutRecordsVersionID verifies that wrapping a
-// DistributedBackend with the WAL backend records Put entries whose VersionID
-// matches the version assigned by the FSM.
-func TestWAL_WrapDistributedBackend_PutRecordsVersionID(t *testing.T) {
-	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket(context.Background(), "vbucket"))
+var _ = Describe("WAL distributed backend integration", func() {
+	var (
+		ctx     context.Context
+		dist    *DistributedBackend
+		walDir  string
+		w       *wal.WAL
+		backend *wal.Backend
+	)
 
-	walDir := t.TempDir()
-	w, err := wal.Open(walDir)
-	require.NoError(t, err)
-	backend := wal.NewBackend(dist, w)
+	BeforeEach(func() {
+		ctx = context.Background()
+		dist = newTestDistributedBackend(GinkgoT())
+		walDir = GinkgoT().TempDir()
 
-	obj1, err := backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
-	require.NoError(t, err)
-	require.NotEmpty(t, obj1.VersionID, "DistributedBackend must assign a VersionID")
+		var err error
+		w, err = wal.Open(walDir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			if w != nil {
+				_ = w.Close()
+			}
+		})
 
-	obj2, err := backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
-	require.NoError(t, err)
-	require.NotEmpty(t, obj2.VersionID)
-	require.NotEqual(t, obj1.VersionID, obj2.VersionID)
-
-	require.NoError(t, w.Flush())
-	require.NoError(t, w.Close())
-
-	var entries []wal.Entry
-	n, err := wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
-		entries = append(entries, e)
+		backend = wal.NewBackend(dist, w)
 	})
-	require.NoError(t, err)
-	require.Equal(t, 2, n, "both PUTs must produce WAL entries")
-	assert.Equal(t, wal.OpPut, entries[0].Op)
-	assert.Equal(t, obj1.VersionID, entries[0].VersionID, "WAL entry 1 carries FSM-assigned VersionID")
-	assert.Equal(t, wal.OpPut, entries[1].Op)
-	assert.Equal(t, obj2.VersionID, entries[1].VersionID, "WAL entry 2 carries FSM-assigned VersionID")
-}
 
-// TestWAL_WrapDistributedBackend_DeleteObjectVersion verifies that hard-version
-// delete flows through the WAL wrapper and appears as OpDeleteVersion.
-func TestWAL_WrapDistributedBackend_DeleteObjectVersion(t *testing.T) {
-	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket(context.Background(), "vbucket"))
+	closeWAL := func() {
+		Expect(w.Flush()).To(Succeed())
+		Expect(w.Close()).To(Succeed())
+		w = nil
+	}
 
-	walDir := t.TempDir()
-	w, err := wal.Open(walDir)
-	require.NoError(t, err)
-	backend := wal.NewBackend(dist, w)
+	It("records Put entries with FSM-assigned version IDs", func() {
+		Expect(dist.CreateBucket(ctx, "vbucket")).To(Succeed())
 
-	obj, err := backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
-	require.NoError(t, err)
+		obj1, err := backend.PutObject(ctx, "vbucket", "k", strings.NewReader("v1"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj1.VersionID).NotTo(BeEmpty(), "DistributedBackend must assign a VersionID")
 
-	// Hard-delete this specific version via the WAL wrapper.
-	require.NoError(t, backend.DeleteObjectVersion("vbucket", "k", obj.VersionID))
+		obj2, err := backend.PutObject(ctx, "vbucket", "k", strings.NewReader("v2-longer"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj2.VersionID).NotTo(BeEmpty())
+		Expect(obj2.VersionID).NotTo(Equal(obj1.VersionID))
 
-	require.NoError(t, w.Flush())
-	require.NoError(t, w.Close())
+		closeWAL()
 
-	var entries []wal.Entry
-	_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
-		entries = append(entries, e)
+		var entries []wal.Entry
+		n, err := wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
+			entries = append(entries, e)
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n).To(Equal(2), "both PUTs must produce WAL entries")
+		Expect(entries[0].Op).To(Equal(wal.OpPut))
+		Expect(entries[0].VersionID).To(Equal(obj1.VersionID), "WAL entry 1 carries FSM-assigned VersionID")
+		Expect(entries[1].Op).To(Equal(wal.OpPut))
+		Expect(entries[1].VersionID).To(Equal(obj2.VersionID), "WAL entry 2 carries FSM-assigned VersionID")
 	})
-	require.NoError(t, err)
-	require.Len(t, entries, 2, "Put + DeleteVersion")
-	assert.Equal(t, wal.OpPut, entries[0].Op)
-	assert.Equal(t, wal.OpDeleteVersion, entries[1].Op)
-	assert.Equal(t, obj.VersionID, entries[1].VersionID)
-}
 
-func TestWAL_WrapDistributedBackend_DeleteObjectRecordsMarkerVersionID(t *testing.T) {
-	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket(context.Background(), "vbucket"))
+	It("records hard-version deletes as OpDeleteVersion", func() {
+		Expect(dist.CreateBucket(ctx, "vbucket")).To(Succeed())
 
-	walDir := t.TempDir()
-	w, err := wal.Open(walDir)
-	require.NoError(t, err)
-	backend := wal.NewBackend(dist, w)
+		obj, err := backend.PutObject(ctx, "vbucket", "k", strings.NewReader("v1"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(backend.DeleteObjectVersion("vbucket", "k", obj.VersionID)).To(Succeed())
 
-	_, err = backend.PutObject(context.Background(), "vbucket", "k", strings.NewReader("v1"), "text/plain")
-	require.NoError(t, err)
-	markerID, err := backend.DeleteObjectReturningMarker("vbucket", "k")
-	require.NoError(t, err)
-	require.NotEmpty(t, markerID)
+		closeWAL()
 
-	require.NoError(t, w.Flush())
-	require.NoError(t, w.Close())
-
-	var entries []wal.Entry
-	_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
-		entries = append(entries, e)
+		var entries []wal.Entry
+		_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
+			entries = append(entries, e)
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(HaveLen(2), "Put + DeleteVersion")
+		Expect(entries[0].Op).To(Equal(wal.OpPut))
+		Expect(entries[1].Op).To(Equal(wal.OpDeleteVersion))
+		Expect(entries[1].VersionID).To(Equal(obj.VersionID))
 	})
-	require.NoError(t, err)
-	require.Len(t, entries, 2, "Put + delete marker")
-	assert.Equal(t, wal.OpDelete, entries[1].Op)
-	assert.Equal(t, markerID, entries[1].VersionID)
-}
 
-// TestWAL_WrapDistributedBackend_ReplayProducesSameState verifies end-to-end
-// that the WAL captures enough to rebuild the logical object state: PUT two
-// versions, replay the WAL, and confirm the final "latest" state matches what
-// DistributedBackend holds.
-func TestWAL_WrapDistributedBackend_ReplayProducesSameState(t *testing.T) {
-	dist := newTestDistributedBackend(t)
-	require.NoError(t, dist.CreateBucket(context.Background(), "b"))
+	It("records delete markers with marker version IDs", func() {
+		Expect(dist.CreateBucket(ctx, "vbucket")).To(Succeed())
 
-	walDir := t.TempDir()
-	w, err := wal.Open(walDir)
-	require.NoError(t, err)
-	backend := wal.NewBackend(dist, w)
+		_, err := backend.PutObject(ctx, "vbucket", "k", strings.NewReader("v1"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+		markerID, err := backend.DeleteObjectReturningMarker("vbucket", "k")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(markerID).NotTo(BeEmpty())
 
-	_, err = backend.PutObject(context.Background(), "b", "a", strings.NewReader("A"), "text/plain")
-	require.NoError(t, err)
-	_, err = backend.PutObject(context.Background(), "b", "b", strings.NewReader("BB"), "text/plain")
-	require.NoError(t, err)
-	_, err = backend.PutObject(context.Background(), "b", "a", strings.NewReader("A-v2"), "text/plain")
-	require.NoError(t, err)
+		closeWAL()
 
-	require.NoError(t, w.Flush())
-	require.NoError(t, w.Close())
-
-	// Replay WAL to reconstruct latest-state map.
-	latest := map[string]wal.Entry{}
-	_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
-		switch e.Op {
-		case wal.OpPut:
-			latest[e.Bucket+"/"+e.Key] = e
-		case wal.OpDelete, wal.OpDeleteVersion:
-			delete(latest, e.Bucket+"/"+e.Key)
-		}
+		var entries []wal.Entry
+		_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
+			entries = append(entries, e)
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(HaveLen(2), "Put + delete marker")
+		Expect(entries[1].Op).To(Equal(wal.OpDelete))
+		Expect(entries[1].VersionID).To(Equal(markerID))
 	})
-	require.NoError(t, err)
 
-	// Sanity: we wrote 3 entries, resolved state has 2 keys.
-	require.Len(t, latest, 2)
+	It("replays to the same latest logical object state", func() {
+		Expect(dist.CreateBucket(ctx, "b")).To(Succeed())
 
-	// Each replayed key has the newest PUT's VersionID, ETag, and size.
-	rcA, objA, err := dist.GetObject(context.Background(), "b", "a")
-	require.NoError(t, err)
-	defer rcA.Close()
-	_, _ = io.ReadAll(rcA)
-	replayed := latest["b/a"]
-	assert.Equal(t, objA.VersionID, replayed.VersionID)
-	assert.Equal(t, objA.Size, replayed.Size)
-}
+		_, err := backend.PutObject(ctx, "b", "a", strings.NewReader("A"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = backend.PutObject(ctx, "b", "b", strings.NewReader("BB"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = backend.PutObject(ctx, "b", "a", strings.NewReader("A-v2"), "text/plain")
+		Expect(err).NotTo(HaveOccurred())
+
+		closeWAL()
+
+		latest := map[string]wal.Entry{}
+		_, err = wal.Replay(walDir, 0, time.Now().Add(time.Second), func(e wal.Entry) {
+			switch e.Op {
+			case wal.OpPut:
+				latest[e.Bucket+"/"+e.Key] = e
+			case wal.OpDelete, wal.OpDeleteVersion:
+				delete(latest, e.Bucket+"/"+e.Key)
+			}
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(latest).To(HaveLen(2))
+
+		rcA, objA, err := dist.GetObject(ctx, "b", "a")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(rcA.Close)
+		_, _ = io.ReadAll(rcA)
+		replayed := latest["b/a"]
+		Expect(replayed.VersionID).To(Equal(objA.VersionID))
+		Expect(replayed.Size).To(Equal(objA.Size))
+	})
+})
