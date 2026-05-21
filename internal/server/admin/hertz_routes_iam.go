@@ -31,6 +31,14 @@ func registerIAM(g router, d *Deps) {
 	g.DELETE(routePathIAMGroupPolicyAttach, iamGroupPolicyDetachHandler(d))
 	g.PUT(routePathIAMGroupByName, iamGroupPutHandler(d))
 	g.DELETE(routePathIAMGroupByName, iamGroupDeleteHandler(d))
+	// MountSA (create/delete/policy-attach/detach + list/get)
+	// Policy sub-path (:name/policy/:policy) must be registered before bare :name.
+	g.PUT(routePathIAMMountSAPolicyAttach, iamMountSAPolicyAttachHandler(d))
+	g.DELETE(routePathIAMMountSAPolicyAttach, iamMountSAPolicyDetachHandler(d))
+	g.POST(routePathIAMMountSA, iamMountSAPostHandler(d))
+	g.GET(routePathIAMMountSA, iamMountSAListHandler(d))
+	g.GET(routePathIAMMountSAByName, iamMountSAGetHandler(d))
+	g.DELETE(routePathIAMMountSAByName, iamMountSADeleteHandler(d))
 	// Bucket upstream (PUT upsert -> 204). Routes under /upstreams (not
 	// /buckets/upstream) to avoid Hertz static-beats-param collision with
 	// GET /buckets/:name used by AdminGetBucket.

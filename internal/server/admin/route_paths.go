@@ -61,6 +61,12 @@ const (
 	routePathIAMGroupMember       = "/iam/group/:name/member/:said"
 	routePathIAMGroupPolicyAttach = "/iam/group/:name/policy/:policy"
 
+	// MountSA routes: policy sub-path listed before bare :name to ensure
+	// more-specific routes are registered first (avoids Hertz param capture).
+	routePathIAMMountSA             = "/iam/mount-sa"
+	routePathIAMMountSAByName       = "/iam/mount-sa/:name"
+	routePathIAMMountSAPolicyAttach = "/iam/mount-sa/:name/policy/:policy"
+
 	routePathAuditQuery        = "/audit/query"
 	routePathAuditRecentDenies = "/audit/recent-denies"
 	routePathAuditBySA         = "/audit/by-sa/:said"
