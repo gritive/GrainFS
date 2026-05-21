@@ -19,8 +19,6 @@ func TestGetObjectVersion_ReconstructsEC(t *testing.T) {
 	backend.SetShardService(svc, []string{selfAddr})
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1}) // 1+1 so single node works
 
-	proposeRing(t, backend, []string{selfAddr})
-
 	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := []byte("ec versioned round-trip")
 	obj, err := backend.PutObject(context.Background(), "bucket", "key", bytes.NewReader(content), "application/octet-stream")

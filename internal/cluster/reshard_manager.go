@@ -43,10 +43,6 @@ type Converter interface {
 	EffectiveECConfig() ECConfig
 	// upgradeObjectEC re-encodes an EC object from oldRec's k,m to newCfg's k,m.
 	upgradeObjectEC(ctx context.Context, bucket, key string, oldRec PlacementRecord, newCfg ECConfig) error
-	// CurrentRingVersion returns the current ring version (0 if no ring).
-	CurrentRingVersion() RingVersion
-	// ReshardToRing reshards the object to the current ring layout.
-	ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error
 	ResolvePlacement(ctx context.Context, bucket, key string, meta PlacementMeta) (ResolvedPlacement, error)
 }
 
@@ -234,60 +230,10 @@ func (m *ReshardManager) desiredConfigForRef(ref ObjectMetaRef) (ECConfig, bool)
 	return m.backend.EffectiveECConfig(), true
 }
 
-// runRingOnly walks EC objects and reshards any whose RingVersion differs from
-// the current ring. Non-EC objects are skipped. Returns (converted, skipped, errs).
-func (m *ReshardManager) runRingOnly(ctx context.Context) (converted, skipped, errs int) {
-	currentRingVersion := m.backend.CurrentRingVersion()
-	if currentRingVersion == 0 {
-		m.logger.Debug().Msg("ring-reshard: skipping — no ring configured")
-		return 0, 0, 0
-	}
-
-	fsm := m.backend.FSMRef()
-	if fsm == nil {
-		return 0, 0, 0
-	}
-
-	var refs []ObjectMetaRef
-	err := fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
-		refs = append(refs, ref)
-		return nil
-	})
-	if err != nil {
-		m.logger.Warn().Err(err).Msg("ring-reshard: iter failed")
-		return 0, 0, 1
-	}
-
-	for _, ref := range refs {
-		if ctx.Err() != nil {
-			break
-		}
-		if m.leader != nil && !m.leader.IsLeader() {
-			break
-		}
-		if ref.ECData == 0 {
-			skipped++
-			continue
-		}
-		if ref.RingVersion == currentRingVersion {
-			skipped++
-			continue
-		}
-		if rerr := m.backend.ReshardToRing(ctx, ref.Bucket, ref.Key, ref.RingVersion); rerr != nil {
-			errs++
-			m.logger.Warn().Str("bucket", ref.Bucket).Str("key", ref.Key).
-				Uint64("obj_ring_ver", uint64(ref.RingVersion)).
-				Uint64("current_ring_ver", uint64(currentRingVersion)).
-				Err(rerr).Msg("ring-reshard: reshard failed")
-			continue
-		}
-		converted++
-	}
-
-	if converted > 0 || errs > 0 {
-		m.logger.Info().Int("converted", converted).Int("skipped", skipped).Int("errors", errs).Msg("ring-reshard: pass complete")
-	}
-	return converted, skipped, errs
+// runRingOnly is a no-op stub; ring-based resharding has been removed.
+// NewRingReshardManager and this function will be deleted in Task 6.
+func (m *ReshardManager) runRingOnly(_ context.Context) (converted, skipped, errs int) {
+	return 0, 0, 0
 }
 
 // Start runs Run in a loop until ctx is cancelled.

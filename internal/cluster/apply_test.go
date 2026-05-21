@@ -368,7 +368,6 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, int64(1), fsm.GetRingStore().refCount[RingVersion(17)])
 }
 
 func TestFSM_CompleteMultipartRejectsDuplicateApply(t *testing.T) {

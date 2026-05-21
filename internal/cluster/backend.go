@@ -2921,68 +2921,6 @@ func (b *DistributedBackend) EffectiveECConfig() ECConfig {
 	return EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
 }
 
-// CurrentRingVersion returns the version of the current ring (0 if none).
-func (b *DistributedBackend) CurrentRingVersion() RingVersion {
-	ring, err := b.fsm.GetRingStore().GetCurrentRing()
-	if err != nil {
-		return 0
-	}
-	return ring.Version
-}
-
-// ReshardToRing reshards an object from oldRingVer's placement to the current
-// ring's placement. It reconstructs the object data from the old layout and
-// re-fans it out using putObjectEC (which will use the current ring).
-func (b *DistributedBackend) ReshardToRing(ctx context.Context, bucket, key string, oldRingVer RingVersion) error {
-	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
-	if err != nil {
-		return err
-	}
-
-	currentRing, err := b.fsm.GetRingStore().GetCurrentRing()
-	if err != nil {
-		return fmt.Errorf("reshard: no current ring: %w", err)
-	}
-	if currentRing.Version == oldRingVer {
-		return nil // already up to date
-	}
-
-	cfg := EffectiveConfig(len(b.ecWriteNodes()), b.currentECConfig())
-
-	if placementMeta.ECData == 0 {
-		placementMeta.ECData = uint8(cfg.DataShards)
-		placementMeta.ECParity = uint8(cfg.ParityShards)
-	}
-	resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
-	if rerr != nil {
-		return fmt.Errorf("reshard: resolve old placement: %w", rerr)
-	}
-	oldData, err := b.newECObjectReader().ReadObject(ctx, bucket, resolved.ShardKey, resolved.Record)
-	if err != nil {
-		return fmt.Errorf("reshard: reconstruct: %w", err)
-	}
-
-	// EC 디코딩 결과가 원본과 일치하는지 검증 (Reed-Solomon은 무손실이어야 함).
-	// ETag 길이로 알고리즘 선택: 32=MD5 (S3 user bucket), 16=xxhash3 (internal bucket).
-	var computedETag string
-	switch len(obj.ETag) {
-	case 32: // MD5
-		h := md5.Sum(oldData)
-		computedETag = hex.EncodeToString(h[:])
-	case 16: // xxhash3
-		computedETag = storage.InternalETag(oldData)
-	default:
-		return fmt.Errorf("reshard: unknown ETag format for %s/%s: %q", bucket, key, obj.ETag)
-	}
-	if computedETag != obj.ETag {
-		return fmt.Errorf("reshard: ETag mismatch after EC reconstruction for %s/%s: got %s, want %s",
-			bucket, key, computedETag, obj.ETag)
-	}
-
-	_, err = b.putObjectEC(ctx, bucket, key, obj.VersionID, oldData, obj.ContentType)
-	return err
-}
-
 // ConvertObjectToEC migrates an existing N×-replicated object to Phase 18
 // EC placement. Used by the background re-placement manager (Slice 5).
 // Idempotent: if the object already has a placement record, returns nil

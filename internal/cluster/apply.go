@@ -46,8 +46,6 @@ type FSM struct {
 	// Protected by mu. Updated via SetCoalesceCfg (called from
 	// DistributedBackend.SetCoalesceConfig so the apply loop sees fresh caps).
 	coalesceCfg CoalesceConfig
-
-	rings *ringStore
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
@@ -88,7 +86,7 @@ func NewFSM(db *badger.DB, keys *stateKeyspace) *FSM {
 	if keys == nil {
 		keys = newStateKeyspaceEmpty()
 	}
-	return &FSM{db: db, keys: keys, rings: newRingStore()}
+	return &FSM{db: db, keys: keys}
 }
 
 // Apply processes a committed command and updates the metadata store.
@@ -327,9 +325,6 @@ func (f *FSM) applyPutObjectMeta(data []byte) error {
 	}); err != nil {
 		return err
 	}
-	if c.RingVersion != 0 {
-		f.rings.incRef(c.RingVersion)
-	}
 	return nil
 }
 
@@ -342,20 +337,14 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 	// proposer). Treat it as a hard delete of the legacy latest-only records —
 	// preserves prior semantics for pre-versioning log replay.
 	if c.VersionID == "" {
-		var rv RingVersion
 		if err := f.db.Update(func(txn *badger.Txn) error {
+			// Validate (decrypt) the meta before deleting; surfaces corruption errors.
 			if item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key)); gerr == nil {
-				if err := item.Value(func(raw []byte) error {
-					v, err := f.openValue(item.Key(), raw)
-					if err != nil {
-						return err
-					}
-					if m, derr := unmarshalObjectMeta(v); derr == nil {
-						rv = RingVersion(m.RingVersion)
-					}
-					return nil
-				}); err != nil {
+				if verr := item.Value(func(raw []byte) error {
+					_, err := f.openValue(item.Key(), raw)
 					return err
+				}); verr != nil {
+					return verr
 				}
 			}
 			if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != badger.ErrKeyNotFound {
@@ -367,9 +356,6 @@ func (f *FSM) applyDeleteObject(data []byte) error {
 			return nil
 		}); err != nil {
 			return err
-		}
-		if rv != 0 {
-			f.rings.decRef(rv)
 		}
 		return nil
 	}
@@ -433,26 +419,6 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 	metaKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
 	latKey := f.keys.LatestKey(c.Bucket, c.Key)
 
-	var rv RingVersion
-	if err := f.db.View(func(txn *badger.Txn) error {
-		item, gerr := txn.Get(metaKey)
-		if gerr != nil {
-			return gerr
-		}
-		return item.Value(func(raw []byte) error {
-			v, err := f.openValue(item.Key(), raw)
-			if err != nil {
-				return err
-			}
-			if m, derr := unmarshalObjectMeta(v); derr == nil {
-				rv = RingVersion(m.RingVersion)
-			}
-			return nil
-		})
-	}); err != nil && err != badger.ErrKeyNotFound {
-		return err
-	}
-
 	if err := f.db.Update(func(txn *badger.Txn) error {
 		if _, gerr := txn.Get(metaKey); gerr == badger.ErrKeyNotFound {
 			return nil // idempotent
@@ -508,9 +474,6 @@ func (f *FSM) applyDeleteObjectVersion(data []byte) error {
 		return nil
 	}); err != nil {
 		return err
-	}
-	if rv != 0 {
-		f.rings.decRef(rv)
 	}
 	return nil
 }
@@ -595,9 +558,6 @@ func (f *FSM) applyCompleteMultipart(data []byte) error {
 		return txn.Delete(mpuKey)
 	}); err != nil {
 		return err
-	}
-	if c.RingVersion != 0 {
-		f.rings.incRef(c.RingVersion)
 	}
 	return nil
 }
@@ -1308,20 +1268,6 @@ func (f *FSM) Restore(meta raft.SnapshotMeta, data []byte) error {
 	})
 }
 
-// applySetRing commits a new ring snapshot to the in-memory ring store.
-// Called when cluster membership changes; version must be monotonically increasing.
-func (f *FSM) applySetRing(data []byte) error {
-	c, err := decodeSetRingCmd(data)
-	if err != nil {
-		return fmt.Errorf("decode SetRingCmd: %w", err)
-	}
-	f.rings.putRing(&Ring{
-		Version:  c.Version,
-		VNodes:   c.VNodes,
-		VPerNode: c.VPerNode,
-	})
-	return nil
-}
-
-// GetRingStore returns the FSM's ring store for use by the backend.
-func (f *FSM) GetRingStore() *ringStore { return f.rings }
+// applySetRing is a no-op stub; ring-based placement has been removed.
+// The switch case and this function will be deleted in Task 7 along with ring.go.
+func (f *FSM) applySetRing(_ []byte) error { return nil }
