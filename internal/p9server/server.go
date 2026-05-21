@@ -10,8 +10,16 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/iam/mountsastore"
+	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// p9Authorizer is the slice of s3auth.Authorizer consumed by the 9P IAM gate.
+// Defined here so tests can inject stubs without a full policy store.
+type p9Authorizer interface {
+	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
+}
 
 // Server is a 9P2000.L server backed by a storage.Backend.
 type Server struct {
@@ -25,11 +33,30 @@ type Server struct {
 	conns  map[net.Conn]struct{}
 }
 
+// ServerOption configures a Server.
+type ServerOption func(*attacher)
+
+// WithMountSAStore wires the mount-SA store into the 9P server for
+// aname-based auth (NFS§B T9, spec D#6).
+func WithMountSAStore(s *mountsastore.Store) ServerOption {
+	return func(a *attacher) { a.mountSAStore = s }
+}
+
+// WithAuthorizer wires the IAM authorizer for grainfs:9PAttach evaluation.
+// The concrete *s3auth.Authorizer satisfies p9Authorizer; tests may inject stubs.
+func WithAuthorizer(authz p9Authorizer) ServerOption {
+	return func(a *attacher) { a.authorizer = authz }
+}
+
 // NewServer creates a 9P server backed by backend.
-func NewServer(backend storage.Backend) *Server {
+func NewServer(backend storage.Backend, opts ...ServerOption) *Server {
 	locks := newObjectLocks()
+	att := &attacher{backend: backend, locks: locks}
+	for _, opt := range opts {
+		opt(att)
+	}
 	s := &Server{backend: backend, locks: locks, conns: make(map[net.Conn]struct{})}
-	s.p9srv = p9.NewServer(&attacher{backend: backend, locks: locks})
+	s.p9srv = p9.NewServer(att)
 	return s
 }
 
@@ -133,10 +160,17 @@ func (c *trackedConn) Close() error {
 }
 
 type attacher struct {
-	backend storage.Backend
-	locks   *objectLocks
+	backend      storage.Backend
+	locks        *objectLocks
+	mountSAStore *mountsastore.Store
+	authorizer   p9Authorizer
 }
 
 func (a *attacher) Attach() (p9.File, error) {
-	return &rootFile{backend: a.backend, locks: a.locks}, nil
+	return &rootFile{
+		backend:      a.backend,
+		locks:        a.locks,
+		mountSAStore: a.mountSAStore,
+		authorizer:   a.authorizer,
+	}, nil
 }

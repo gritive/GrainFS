@@ -22,17 +22,25 @@ type objectKeyWalker interface {
 	WalkObjectKeys(ctx context.Context, bucket, prefix string, fn func(string) error) error
 }
 
+// fhBinding records the mount-SA binding established during Walk's IAM gate.
+// saID is empty for anonymous access; bucket identifies the mounted bucket.
+type fhBinding struct {
+	saID   string
+	bucket string
+}
+
 type bucketFile struct {
 	noopFile
 	backend storage.Backend
 	locks   *objectLocks
 	bucket  string
 	prefix  string
+	binding fhBinding // set by rootFile.Walk when IAM gate is wired
 }
 
 func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix}, nil
+		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix, binding: f.binding}, nil
 	}
 	name := names[0]
 	if isP9ReservedName(name) {
