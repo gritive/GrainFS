@@ -34,7 +34,7 @@ type routerSnap struct {
 }
 
 // Router provides bucket-level routing (design doc Layer 1).
-// Layer 2 (object→EC shard within group) is handled by ringFNV32 in ring.go.
+// Layer 2 (object→EC shard within group) is handled by PlaceShards (HRW).
 // key-range sharding is explicitly excluded per design doc.
 type Router struct {
 	snap atomic.Pointer[routerSnap]
@@ -134,7 +134,7 @@ func (r *Router) ExplicitGroup(bucket string) (string, bool) {
 }
 
 // RouteKey returns the DataGroup for the given bucket.
-// key is accepted but unused at Layer 1; reserved for future Layer 2 (ringFNV32) integration.
+// key is accepted but unused at Layer 1.
 func (r *Router) RouteKey(bucket, _ string) (*DataGroup, error) {
 	snap := r.snap.Load()
 	gid, ok := snap.bucketMap[bucket]

@@ -13,57 +13,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ─── Ring ────────────────────────────────────────────────────────────────────
-
-func BenchmarkNewRing_3nodes(b *testing.B) {
-	nodes := []string{"node-a", "node-b", "node-c"}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = NewRing(1, nodes, 150)
-	}
-}
-
-func BenchmarkNewRing_10nodes(b *testing.B) {
-	nodes := make([]string, 10)
-	for i := range nodes {
-		nodes[i] = fmt.Sprintf("node-%d", i)
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = NewRing(1, nodes, 150)
-	}
-}
-
-func BenchmarkPlacementForKey_3nodes_4plus2(b *testing.B) {
-	ring := NewRing(1, []string{"n0", "n1", "n2"}, 150)
-	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = ring.PlacementForKey(cfg, "bucket/object/key")
-	}
-}
-
-func BenchmarkPlacementForKey_6nodes_4plus2(b *testing.B) {
-	nodes := []string{"n0", "n1", "n2", "n3", "n4", "n5"}
-	ring := NewRing(1, nodes, 150)
-	cfg := ECConfig{DataShards: 4, ParityShards: 2}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = ring.PlacementForKey(cfg, "bucket/object/key")
-	}
-}
-
-func BenchmarkPlacementForKey_parallel(b *testing.B) {
-	nodes := []string{"n0", "n1", "n2", "n3", "n4", "n5"}
-	ring := NewRing(1, nodes, 150)
-	cfg := ECConfig{DataShards: 4, ParityShards: 2}
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_ = ring.PlacementForKey(cfg, "bucket/object/key")
-		}
-	})
-}
-
 // ─── FSM IterObjectMetas ──────────────────────────────────────────────────────
 
 func benchmarkIterObjectMetas(b *testing.B, count int) {
