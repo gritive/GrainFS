@@ -1,14 +1,16 @@
 package e2e
 
 import (
-	"testing"
-
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func TestFindOwnerForSingleGroup(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		require.Equal(t, -1, findOwnerForSingleGroup(nil))
-		require.Equal(t, 2, findOwnerForSingleGroup(&e2eCluster{leaderIdx: 2}))
+var _ = ginkgo.Describe("Append leader helpers", func() {
+	ginkgo.Context("SingleNode", func() {
+		ginkgo.It("finds the single-group owner", func() {
+			t := ginkgo.GinkgoTB()
+			require.Equal(t, -1, findOwnerForSingleGroup(nil))
+			require.Equal(t, 2, findOwnerForSingleGroup(&e2eCluster{leaderIdx: 2}))
+		})
 	})
-}
+})

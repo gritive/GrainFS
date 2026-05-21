@@ -2,9 +2,9 @@ package e2e
 
 import (
 	"context"
-	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -13,21 +13,25 @@ import (
 // sub-tests are pure unit checks on the helper function — no fixture is
 // touched — but we run them under SingleNode/Cluster4Node sub-test
 // branches for shape parity with the rest of the suite.
-func TestClusterECS3OpContextE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
+var _ = ginkgo.Describe("Cluster EC S3 op context", func() {
+	describeClusterECS3OpContext("SingleNode", func() {
 		_ = newSingleNodeS3Target()
-		runClusterECS3OpContextCases(t)
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		_ = newSharedClusterS3Target(t)
-		runClusterECS3OpContextCases(t)
+	describeClusterECS3OpContext("Cluster4Node", func() {
+		_ = newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describeClusterECS3OpContext(name string, setup func()) {
+	ginkgo.Context(name, func() {
+		ginkgo.BeforeEach(setup)
+		runClusterECS3OpContextCases()
 	})
 }
 
-func runClusterECS3OpContextCases(t *testing.T) {
-	t.Helper()
-
-	t.Run("ExpiredParentGetsFreshBudget", func(t *testing.T) {
+func runClusterECS3OpContextCases() {
+	ginkgo.It("gives expired parent contexts a fresh budget (ExpiredParentGetsFreshBudget)", func() {
+		t := ginkgo.GinkgoTB()
 		parent, cancelParent := context.WithCancel(context.Background())
 		cancelParent()
 
@@ -43,7 +47,8 @@ func runClusterECS3OpContextCases(t *testing.T) {
 		}
 	})
 
-	t.Run("LiveParentStillCancelsChild", func(t *testing.T) {
+	ginkgo.It("inherits cancellation from live parent contexts (LiveParentStillCancelsChild)", func() {
+		t := ginkgo.GinkgoTB()
 		parent, cancelParent := context.WithCancel(context.Background())
 		ctx, cancel := clusterECS3OpContext(parent, time.Second)
 		defer cancel()
