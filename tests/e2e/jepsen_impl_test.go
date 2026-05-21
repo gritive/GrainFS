@@ -5,19 +5,20 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"testing"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/require"
 )
 
-func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
-	t.Run("Cluster", func(t *testing.T) {
+var _ = ginkgo.Describe("Jepsen raft cluster", func() {
+	ginkgo.It("keeps concurrent writes linearizable", func() {
+		t := ginkgo.GinkgoTB()
 		// Skip in short mode
 
 		dir, err := os.MkdirTemp("", "grainfs-jepsen-*")
 		require.NoError(t, err)
-		defer os.RemoveAll(dir)
+		ginkgo.DeferCleanup(os.RemoveAll, dir)
 
 		binary := getBinary()
 		port := freePort()
@@ -35,13 +36,13 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		require.NoError(t, cmd.Start())
-		defer terminateProcess(cmd)
+		ginkgo.DeferCleanup(terminateProcess, cmd)
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
 		waitForPort(t, port, 30*time.Second)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
+		ginkgo.DeferCleanup(cancel)
 
 		bootstrap, _ := bootstrapAdminViaUDSAnyResult(t, []string{dir}, 30*time.Second)
 		ak, sk := bootstrap.AccessKey, bootstrap.SecretKey
@@ -68,4 +69,4 @@ func TestJepsen_RaftCluster_ConcurrentWrites(t *testing.T) {
 
 		t.Log("✅ Jepsen test passed - linearizability verified")
 	})
-}
+})
