@@ -23,8 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Append objects", func() {
@@ -77,34 +76,34 @@ func runCommonAppendCases(getTgt func() s3Target) {
 		t, _, bucket, client := appendFixture(getTgt, "append-")
 
 		key := "obj-init"
-		require.NoError(t, putAppend(client, bucket, key, 0, []byte("hello")))
-		require.Equal(t, []byte("hello"), getObject(t, client, bucket, key))
+		gomega.Expect(putAppend(client, bucket, key, 0, []byte("hello"))).To(gomega.Succeed())
+		gomega.Expect(getObject(t, client, bucket, key)).To(gomega.Equal([]byte("hello")))
 	})
 
 	ginkgo.It("performs sequential appends", func() {
 		t, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-seq"
-		require.NoError(t, putAppend(client, bucket, key, 0, []byte("foo")))
-		require.NoError(t, putAppend(client, bucket, key, 3, []byte("bar")))
-		require.NoError(t, putAppend(client, bucket, key, 6, []byte("baz")))
-		require.Equal(t, []byte("foobarbaz"), getObject(t, client, bucket, key))
+		gomega.Expect(putAppend(client, bucket, key, 0, []byte("foo"))).To(gomega.Succeed())
+		gomega.Expect(putAppend(client, bucket, key, 3, []byte("bar"))).To(gomega.Succeed())
+		gomega.Expect(putAppend(client, bucket, key, 6, []byte("baz"))).To(gomega.Succeed())
+		gomega.Expect(getObject(t, client, bucket, key)).To(gomega.Equal([]byte("foobarbaz")))
 	})
 
 	ginkgo.It("rejects an offset mismatch", func() {
-		t, _, bucket, client := appendFixture(getTgt, "append-")
+		_, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-mismatch"
-		require.NoError(t, putAppend(client, bucket, key, 0, []byte("aaa")))
+		gomega.Expect(putAppend(client, bucket, key, 0, []byte("aaa"))).To(gomega.Succeed())
 		err := putAppend(client, bucket, key, 99, []byte("bbb"))
-		require.Error(t, err)
+		gomega.Expect(err).To(gomega.HaveOccurred())
 		var apiErr smithy.APIError
-		require.ErrorAs(t, err, &apiErr)
-		assert.Equal(t, "InvalidWriteOffset", apiErr.ErrorCode())
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("InvalidWriteOffset"))
 	})
 
 	ginkgo.It("lets a plain PUT overwrite an appendable object", func() {
 		t, _, bucket, client := appendFixture(getTgt, "append-")
 		key := "obj-overwrite"
-		require.NoError(t, putAppend(client, bucket, key, 0, []byte("aaaa")))
+		gomega.Expect(putAppend(client, bucket, key, 0, []byte("aaaa"))).To(gomega.Succeed())
 		// Plain PUT (no x-amz-write-offset-bytes header) overwrites the
 		// appendable object.
 		_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
@@ -112,8 +111,8 @@ func runCommonAppendCases(getTgt func() s3Target) {
 			Key:    aws.String(key),
 			Body:   bytes.NewReader([]byte("xx")),
 		})
-		require.NoError(t, err)
-		require.Equal(t, []byte("xx"), getObject(t, client, bucket, key))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(getObject(t, client, bucket, key)).To(gomega.Equal([]byte("xx")))
 	})
 
 	ginkgo.It("appends to an existing plain PUT at the current offset", func() {
@@ -124,10 +123,10 @@ func runCommonAppendCases(getTgt func() s3Target) {
 			Key:    aws.String(key),
 			Body:   bytes.NewReader([]byte("plain")),
 		})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		require.NoError(t, putAppend(client, bucket, key, 5, []byte("-append")))
-		require.Equal(t, []byte("plain-append"), getObject(t, client, bucket, key))
+		gomega.Expect(putAppend(client, bucket, key, 5, []byte("-append"))).To(gomega.Succeed())
+		gomega.Expect(getObject(t, client, bucket, key)).To(gomega.Equal([]byte("plain-append")))
 	})
 }
 
@@ -159,7 +158,7 @@ func findOwnerForSingleGroup(c *e2eCluster) int {
 func runClusterOnlyAppendCases(getTgt func() s3Target) {
 	ginkgo.It("serializes concurrent appends from different nodes", func() {
 		t, tgt, bucket, _ := appendFixture(getTgt, "append-")
-		require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
+		gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "clusterOnly cases require cluster fixture")
 		// All N goroutines race for offset 0 from different nodes. Exactly
 		// one must win; the rest must surface InvalidWriteOffset. This
 		// exercises the cluster forwarding + raft-serialized offset check.
@@ -186,13 +185,13 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 			}(i)
 		}
 		wg.Wait()
-		assert.Equal(t, int64(1), atomic.LoadInt64(&successes), "exactly one append must win the offset-0 race")
-		assert.Equal(t, int64(tgt.nodes-1), atomic.LoadInt64(&mismatches), "all losers must surface InvalidWriteOffset")
+		gomega.Expect(atomic.LoadInt64(&successes)).To(gomega.Equal(int64(1)), "exactly one append must win the offset-0 race")
+		gomega.Expect(atomic.LoadInt64(&mismatches)).To(gomega.Equal(int64(tgt.nodes-1)), "all losers must surface InvalidWriteOffset")
 	})
 
 	ginkgo.It("forwards appends from different nodes to the owner", func() {
 		t, tgt, bucket, _ := appendFixture(getTgt, "append-")
-		require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
+		gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "clusterOnly cases require cluster fixture")
 		// Serial appends, each issued against a different node. The
 		// distributed backend must forward to the owner so the final
 		// object reflects every chunk in order. This validates the
@@ -202,12 +201,12 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 		var offset int64
 		for i, chunk := range chunks {
 			cli := tgt.pickNode(i)
-			require.NoError(t, putAppend(cli, bucket, key, offset, chunk),
+			gomega.Expect(putAppend(cli, bucket, key, offset, chunk)).To(gomega.Succeed(),
 				"append chunk %d via node %d at offset %d", i, i%tgt.nodes, offset)
 			offset += int64(len(chunk))
 		}
 		// Read back from any node — every replica must converge.
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			for i := 0; i < tgt.nodes; i++ {
 				body := getObject(t, tgt.pickNode(i), bucket, key)
 				if !bytes.Equal([]byte("alphabetagammadelta"), body) {
@@ -215,15 +214,15 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 				}
 			}
 			return true
-		}, 10*time.Second, 200*time.Millisecond)
+		}).WithTimeout(10 * time.Second).WithPolling(200 * time.Millisecond).Should(gomega.BeTrue())
 	})
 
 	ginkgo.It("keeps stat then append linearizable across nodes", func() {
 		t, tgt, bucket, _ := appendFixture(getTgt, "append-")
-		require.True(t, tgt.isCluster, "clusterOnly cases require cluster fixture")
+		gomega.Expect(tgt.isCluster).To(gomega.BeTrue(), "clusterOnly cases require cluster fixture")
 		key := "obj-stat-append-roundrobin"
 		chunk := []byte("0123456789abcdef")
-		require.NoError(t, putAppend(tgt.pickNode(0), bucket, key, 0, chunk))
+		gomega.Expect(putAppend(tgt.pickNode(0), bucket, key, 0, chunk)).To(gomega.Succeed())
 
 		for i := 1; i < 64; i++ {
 			cli := tgt.pickNode(i)
@@ -231,8 +230,8 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 				Bucket: aws.String(bucket),
 				Key:    aws.String(key),
 			})
-			require.NoError(t, err, "head via node %d", i%tgt.nodes)
-			require.NotNil(t, head.ContentLength)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "head via node %d", i%tgt.nodes)
+			gomega.Expect(head.ContentLength).NotTo(gomega.BeNil())
 
 			observed := *head.ContentLength
 			if err := putAppend(cli, bucket, key, observed, chunk); err != nil {
@@ -256,7 +255,7 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 					t.Fatalf("append via node %d at observed offset %d failed: %v; size after failure=%d; node sizes=%v",
 						i%tgt.nodes, observed, err, *after.ContentLength, nodeSizes)
 				}
-				require.NoError(t, err, "append via node %d at observed offset %d", i%tgt.nodes, observed)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "append via node %d at observed offset %d", i%tgt.nodes, observed)
 			}
 			expectedSize := observed + int64(len(chunk))
 			nodeSizes := make([]int64, tgt.nodes)
@@ -276,7 +275,7 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 					allFresh = false
 				}
 			}
-			require.True(t, allFresh, "append via node %d returned before all nodes observed size %d; node sizes=%v",
+			gomega.Expect(allFresh).To(gomega.BeTrue(), "append via node %d returned before all nodes observed size %d; node sizes=%v",
 				i%tgt.nodes, expectedSize, nodeSizes)
 		}
 
@@ -284,16 +283,16 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		})
-		require.NoError(t, err)
-		require.NotNil(t, head.ContentLength)
-		assert.Equal(t, int64(64*len(chunk)), *head.ContentLength)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(head.ContentLength).NotTo(gomega.BeNil())
+		gomega.Expect(*head.ContentLength).To(gomega.Equal(int64(64 * len(chunk))))
 	})
 
 	ginkgo.It("survives owner kill after coalesce", func() {
 		t, tgt, _, _ := appendFixture(getTgt, "append-")
-		require.True(t, tgt.isCluster)
+		gomega.Expect(tgt.isCluster).To(gomega.BeTrue())
 		c := tgt.cluster
-		require.NotNil(t, c)
+		gomega.Expect(c).NotTo(gomega.BeNil())
 
 		ownerBucket := "append-owner-kill-" + tgt.name
 		tgt.createBkt(t, ownerBucket)
@@ -307,18 +306,18 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 		var expected []byte
 		for i := 0; i < 16; i++ {
 			chunk := bytes.Repeat([]byte{byte(i + 1)}, chunkSize)
-			require.NoError(t, putAppend(tgt.pickNode(0), ownerBucket, key, off, chunk))
+			gomega.Expect(putAppend(tgt.pickNode(0), ownerBucket, key, off, chunk)).To(gomega.Succeed())
 			off += int64(len(chunk))
 			expected = append(expected, chunk...)
 		}
 		// Wait for coalesce to land (Metrics endpoint reports success).
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return metricCounterTotal(t, tgt, `grainfs_append_coalesce_total{result="success"}`) > coalesceMetricBaseline
-		}, 10*time.Second, 200*time.Millisecond)
+		}).WithTimeout(10 * time.Second).WithPolling(200 * time.Millisecond).Should(gomega.BeTrue())
 
 		// Identify the data-Raft leader (Task 23) and kill it.
 		ownerIdx := findOwnerForSingleGroup(c)
-		require.GreaterOrEqual(t, ownerIdx, 0)
+		gomega.Expect(ownerIdx).To(gomega.BeNumerically(">=", 0))
 		killedNodeID := c.nodeID(ownerIdx)
 
 		c.KillNode(ownerIdx)
@@ -336,7 +335,7 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 		// ServiceUnavailable. Status-poll is the correct rotation signal when
 		// EC stripe width equals cluster size.
 		surviving := (ownerIdx + 1) % tgt.nodes
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			resp, err := http.Get(c.httpURLs[surviving] + "/api/cluster/status")
 			if err != nil {
 				return false
@@ -348,13 +347,14 @@ func runClusterOnlyAppendCases(getTgt func() s3Target) {
 			}
 			leader, _ := s["leader_id"].(string)
 			return leader != "" && leader != killedNodeID
-		}, 60*time.Second, 500*time.Millisecond, "no new leader elected within 60s")
+		}).WithTimeout(60*time.Second).WithPolling(500*time.Millisecond).
+			Should(gomega.BeTrue(), "no new leader elected within 60s")
 
 		// GET from a surviving non-owner peer; EC reconstruct must yield the
 		// full body bytes. With k=2 parity=2, we only need k=2 shards; the
 		// 3 surviving nodes satisfy that constraint.
 		body := getObject(t, tgt.pickNode(surviving), ownerBucket, key)
-		require.Equal(t, expected, body)
+		gomega.Expect(body).To(gomega.Equal(expected))
 	})
 }
 
@@ -379,9 +379,9 @@ func getObject(t testing.TB, client *s3.Client, bucket, key string) []byte {
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return data
 }
