@@ -53,23 +53,56 @@ type GrantDeleteRequest struct {
 	Bucket string `json:"bucket"`
 }
 
+// PostureChecker is an optional dependency that the AdminAPI consults before
+// performing the FIRST SA create on an empty store. CheckAnonOff must return
+// nil when the node-local TLS posture (server cert on disk OR trusted-proxy
+// CIDR set) is safe to drive iam.anon-enabled → false, or an error whose
+// Error() string carries an operator-facing remediation hint otherwise.
+//
+// F#26-tls-posture: the first SA create atomically flips iam.anon-enabled to
+// false at FSM apply time (see internal/cluster/meta_fsm.go:applyIAMSACreate).
+// The flip's reload hook refuses if no TLS cert and no trusted-proxy CIDR are
+// configured, but the SA itself is already committed by then — leaving the
+// cluster in a "SA exists, anon still on" silent-violation state. The
+// PostureChecker rejects the admin UDS RPC before propose so the operator
+// hears about it instead of discovering anon stuck open later.
+type PostureChecker interface {
+	CheckAnonOff(ctx context.Context) error
+}
+
 // AdminAPI hosts HTTP handlers for /admin/iam/* endpoints. Stdlib handlers
 // are wrapped onto Hertz at the admin UDS in Task 21.
 type AdminAPI struct {
 	store    *Store
 	proposer Proposer
 	enc      *encrypt.Encryptor
+	posture  PostureChecker // optional; nil = skip first-SA pre-check (legacy/test default)
 }
 
 func NewAdminAPI(store *Store, proposer Proposer, enc *encrypt.Encryptor) *AdminAPI {
 	return &AdminAPI{store: store, proposer: proposer, enc: enc}
 }
 
+// SetPostureChecker installs the optional PostureChecker. Wired by
+// internal/serveruntime at boot; left nil in unit tests that don't exercise
+// the F#26 pre-check.
+func (a *AdminAPI) SetPostureChecker(pc PostureChecker) { a.posture = pc }
+
 // CreateSA creates a new ServiceAccount and an initial access key for it.
 // Returns *adminapi.Error on validation or conflict; use errors.As to inspect.
 func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateResponse, error) {
 	if req.Name == "" {
 		return SACreateResponse{}, &adminapi.Error{Code: "invalid", Message: "name required"}
+	}
+	// F#26-tls-posture: gate the first SA create on local TLS posture. The FSM
+	// applies the SA AND atomically flips iam.anon-enabled → false; if posture
+	// is bad the flip's reload hook would refuse and silently leave anon on.
+	// Reject the RPC up front with the remediation hint instead. Subsequent
+	// SA creates (store non-empty) skip the check — they don't trigger the flip.
+	if a.posture != nil && a.store.IsEmpty() {
+		if err := a.posture.CheckAnonOff(ctx); err != nil {
+			return SACreateResponse{}, &adminapi.Error{Code: "precondition", Message: err.Error()}
+		}
 	}
 	now := time.Now().UTC()
 	accessKey, secretKey := genCredentialPair()
@@ -497,6 +530,8 @@ func writeAdminError(w http.ResponseWriter, err error) {
 			status = http.StatusConflict
 		case "forbidden":
 			status = http.StatusForbidden
+		case "precondition":
+			status = http.StatusPreconditionFailed
 		}
 		http.Error(w, ae.Message, status)
 		return
