@@ -492,6 +492,10 @@ enum MetaCmdType : uint8 {
   CreateBucketWithPolicyAttach = 62, // IAM: atomic create-bucket + attach initial policy to SA (D#13, F#2)
   JWTSigningKeyRotate          = 63, // IAM JWT: generate new signing key, add to dual-key set
   JWTSigningKeyPrune           = 64, // IAM JWT: prune old signing keys past grace period
+  MountSACreate                = 65, // MountSA: create NFS/9P mount service account
+  MountSADelete                = 66, // MountSA: delete NFS/9P mount service account
+  MountSAAttachPolicy          = 67, // MountSA: attach policy to mount SA
+  MountSADetachPolicy          = 68, // MountSA: detach policy from mount SA
 }
 
 table MetaNodeEntry {
@@ -1088,4 +1092,29 @@ table MetaIAMPolicyStoresSnapshot {
   sa_attachments:[MetaIAMPolicyAttachSAEntry];
   group_attachments:[MetaIAMPolicyAttachGroupEntry];
   bucket_policies:[MetaIAMBucketPolicyEntry];
+}
+
+// MountSACreatePayload: create a NFS/9P mount service account.
+table MountSACreatePayload {
+  name:string;
+  numeric_uid:uint32;
+  created_at:int64;
+  created_by:string;
+}
+
+// MountSADeletePayload: delete a NFS/9P mount service account by name.
+table MountSADeletePayload {
+  name:string;
+}
+
+// MountSAAttachPolicyPayload: attach a policy to a mount SA.
+table MountSAAttachPolicyPayload {
+  mount_sa:string;
+  policy:string;
+}
+
+// MountSADetachPolicyPayload: detach a policy from a mount SA.
+table MountSADetachPolicyPayload {
+  mount_sa:string;
+  policy:string;
 }
