@@ -53,7 +53,7 @@ func Open(dir string, enc *encrypt.Encryptor) (*WAL, error) {
 		return nil, err
 	}
 	w := &WAL{dir: dir, enc: enc, lastSeq: state.seq, lastTimestamp: state.timestamp}
-	if err := w.openAppendFile(); err != nil {
+	if err := w.openAppendFile(state); err != nil {
 		return nil, err
 	}
 	return w, nil
@@ -173,7 +173,7 @@ func AppendRawForTest(dir string, data []byte) error {
 	return err
 }
 
-func (w *WAL) openAppendFile() error {
+func (w *WAL) openAppendFile(state walState) error {
 	files, err := segmentFiles(w.dir)
 	if err != nil {
 		return err
@@ -199,12 +199,35 @@ func (w *WAL) openAppendFile() error {
 			f.Close()
 			return err
 		}
+		if err := syncDir(w.dir); err != nil {
+			f.Close()
+			return err
+		}
 	} else if _, err := readHeaderForMode(f, modeForEncryptor(w.enc)); err != nil {
 		f.Close()
 		return err
 	}
+	if path == state.activePath && state.activeGoodBytes < info.Size() {
+		if err := f.Truncate(state.activeGoodBytes); err != nil {
+			f.Close()
+			return err
+		}
+		if _, err := f.Seek(state.activeGoodBytes, io.SeekStart); err != nil {
+			f.Close()
+			return err
+		}
+	}
 	w.file = f
 	return nil
+}
+
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 func (w *WAL) rollbackAppend(offset int64) error {
@@ -230,8 +253,10 @@ func (w *WAL) nextTimestamp(now int64) int64 {
 }
 
 type walState struct {
-	seq       uint64
-	timestamp int64
+	seq             uint64
+	timestamp       int64
+	activePath      string
+	activeGoodBytes int64
 }
 
 func scanState(dir string, enc *encrypt.Encryptor) (walState, error) {
@@ -241,7 +266,7 @@ func scanState(dir string, enc *encrypt.Encryptor) (walState, error) {
 	}
 	var state walState
 	for _, path := range files {
-		if err := scanFile(path, enc, func(rec Record) error {
+		goodBytes, err := scanFileWithOffset(path, enc, func(rec Record) error {
 			if rec.Seq > state.seq {
 				state.seq = rec.Seq
 			}
@@ -249,9 +274,12 @@ func scanState(dir string, enc *encrypt.Encryptor) (walState, error) {
 				state.timestamp = rec.Timestamp
 			}
 			return nil
-		}); err != nil {
+		})
+		if err != nil {
 			return walState{}, err
 		}
+		state.activePath = path
+		state.activeGoodBytes = goodBytes
 	}
 	return state, nil
 }
@@ -269,49 +297,67 @@ func replayFile(ctx context.Context, path string, fromSeq uint64, enc *encrypt.E
 }
 
 func scanFile(path string, enc *encrypt.Encryptor, fn func(Record) error) error {
+	_, err := scanFileWithOffset(path, enc, fn)
+	return err
+}
+
+func scanFileWithOffset(path string, enc *encrypt.Encryptor, fn func(Record) error) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
 	mode, err := readHeader(f)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := checkMode(mode, enc); err != nil {
-		return err
+		return 0, err
 	}
-	return scanRecords(f, mode, enc, fn)
+	goodBytes, err := scanRecords(f, mode, enc, fn)
+	return goodBytes, err
 }
 
-func scanRecords(r io.Reader, mode byte, enc *encrypt.Encryptor, fn func(Record) error) error {
+func scanRecords(r io.ReadSeeker, mode byte, enc *encrypt.Encryptor, fn func(Record) error) (int64, error) {
+	goodBytes, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
 	for {
 		var rec Record
+		beforeFrame, err := r.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return goodBytes, err
+		}
 		body, err := readFrame(r)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil
+			return beforeFrame, nil
 		}
 		if err != nil {
-			return err
+			return goodBytes, err
 		}
 		if mode == fileModeEncrypted {
 			plain, err := enc.OpenValueAAD([]byte(encryptedRecordAAD), body)
 			if err != nil {
-				return fmt.Errorf("datawal: decrypt record: %w", err)
+				return goodBytes, fmt.Errorf("datawal: decrypt record: %w", err)
 			}
 			rec, err = unmarshalRecordBody(plain)
 			clear(plain)
 			if err != nil {
-				return err
+				return goodBytes, err
 			}
 		} else {
 			rec, err = unmarshalRecordBody(body)
 			if err != nil {
-				return err
+				return goodBytes, err
 			}
 		}
 		if err := fn(rec); err != nil {
-			return err
+			return goodBytes, err
+		}
+		goodBytes, err = r.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return goodBytes, err
 		}
 	}
 }

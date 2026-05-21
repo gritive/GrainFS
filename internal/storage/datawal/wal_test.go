@@ -226,6 +226,30 @@ func TestOpenScansRecordsForNextSequence(t *testing.T) {
 	require.Equal(t, seq1+1, seq2)
 }
 
+func TestOpenTruncatesTornTailBeforeAppending(t *testing.T) {
+	dir := t.TempDir()
+	w, err := datawal.Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "first", Payload: []byte("1")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	require.NoError(t, datawal.AppendRawForTest(dir, []byte{0x00, 0x00, 0x00, 0x20, 0xaa, 0xbb}))
+
+	w, err = datawal.Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), datawal.Record{Op: datawal.OpSegmentPut, Key: "second", Payload: []byte("2")})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	var keys []string
+	err = datawal.Replay(context.Background(), dir, 0, nil, func(rec datawal.Record) error {
+		keys = append(keys, rec.Key)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first", "second"}, keys)
+}
+
 func TestEncryptedWALRejectsNilEncryptor(t *testing.T) {
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x77}, 32))
 	require.NoError(t, err)

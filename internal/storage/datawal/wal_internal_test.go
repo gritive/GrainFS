@@ -46,10 +46,11 @@ func TestAppendTimestampMonotonicWhenClockMovesBackward(t *testing.T) {
 	require.Greater(t, w.lastTimestamp, first)
 
 	var timestamps []int64
-	require.NoError(t, scanRecords(bytes.NewReader(f.data), fileModePlain, nil, func(rec Record) error {
+	_, err = scanRecords(bytes.NewReader(f.data), fileModePlain, nil, func(rec Record) error {
 		timestamps = append(timestamps, rec.Timestamp)
 		return nil
-	}))
+	})
+	require.NoError(t, err)
 	require.Len(t, timestamps, 2)
 	require.Greater(t, timestamps[0], time.Now().UnixNano())
 	require.Greater(t, timestamps[1], timestamps[0])
