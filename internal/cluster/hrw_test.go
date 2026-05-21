@@ -125,3 +125,51 @@ func TestPlaceShards_NilEquivalentToOnes(t *testing.T) {
 		assert.Equal(t, a, b, "nil weights must equal all-ones weights for key %s", key)
 	}
 }
+
+func TestPlaceShards_NodeChurn_Uniform(t *testing.T) {
+	const trials = 5000
+	before := []string{"n1", "n2", "n3", "n4", "n5"}
+	after := append([]string{}, before...)
+	after = append(after, "n6") // 1 node added (1/6 churn 기대)
+
+	moved := 0
+	for i := 0; i < trials; i++ {
+		key := fmt.Sprintf("key/%d", i)
+		a := PlaceShards(key, before, nil, 1)
+		b := PlaceShards(key, after, nil, 1)
+		require.Len(t, a, 1)
+		require.Len(t, b, 1)
+		if a[0] != b[0] {
+			moved++
+		}
+	}
+
+	ratio := float64(moved) / float64(trials)
+	expected := 1.0 / float64(len(after)) // 1/N
+	assert.InDelta(t, expected, ratio, 0.05,
+		"churn ratio %v not within ±0.05 of %v", ratio, expected)
+}
+
+func TestPlaceShards_NodeChurn_Weighted(t *testing.T) {
+	const trials = 5000
+	beforeNodes := []string{"n1", "n2", "n3"}
+	beforeW := []float64{1, 1, 1}
+	afterNodes := append([]string{}, beforeNodes...)
+	afterNodes = append(afterNodes, "n4")
+	afterW := []float64{1, 1, 1, 2} // 2 weight 노드 추가, 총 5
+
+	moved := 0
+	for i := 0; i < trials; i++ {
+		key := fmt.Sprintf("k/%d", i)
+		a := PlaceShards(key, beforeNodes, beforeW, 1)
+		b := PlaceShards(key, afterNodes, afterW, 1)
+		if len(a) > 0 && len(b) > 0 && a[0] != b[0] {
+			moved++
+		}
+	}
+
+	ratio := float64(moved) / float64(trials)
+	expected := 2.0 / 5.0 // Δw/Σw_after
+	assert.InDelta(t, expected, ratio, 0.07,
+		"weighted churn ratio %v not within ±0.07 of %v", ratio, expected)
+}
