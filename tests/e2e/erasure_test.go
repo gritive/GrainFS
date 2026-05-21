@@ -5,45 +5,59 @@ import (
 	"context"
 	"io"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestECObjectsE2E exercises the default storage path under the project's
-// standard erasure-coded layout (Reed-Solomon 4+2). Five bucket-isolated S3
-// surface cases ride the shared single + shared cluster fixtures.
-//
-// Any per-test cluster topology mutation belongs in cluster_test.go behind
-// newClusterS3Target — this group stays bucket-isolated.
-func TestECObjectsE2E(t *testing.T) {
-	t.Run("SingleNode", func(t *testing.T) {
-		runECObjectsCases(t, newSingleNodeS3Target())
+var _ = ginkgo.Describe("EC objects", ginkgo.Label("bucket"), func() {
+	describeECObjectsContext("SingleNode", func() s3Target {
+		return newSingleNodeS3Target()
 	})
-	t.Run("Cluster4Node", func(t *testing.T) {
-		runECObjectsCases(t, newSharedClusterS3Target(t))
+
+	describeECObjectsContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describeECObjectsContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, func() {
+		var (
+			ctx context.Context
+			tgt s3Target
+			cli *s3.Client
+		)
+
+		ginkgo.BeforeEach(func() {
+			t := ginkgo.GinkgoTB()
+			ctx = context.Background()
+			tgt = factory()
+			cli = tgt.pickNode(0)
+
+			if tgt.isCluster {
+				probe := tgt.name + "-ec-mp-probe"
+				tgt.createBkt(t, probe)
+				gateCtx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+				ginkgo.DeferCleanup(cancel)
+				waitForMultipartListingCreate(t, gateCtx, cli, probe, multipartListingKey, 120*time.Second)
+			}
+		})
+
+		runECObjectsCases(func() context.Context { return ctx }, func() s3Target { return tgt }, func() *s3.Client { return cli })
 	})
 }
 
-func runECObjectsCases(t *testing.T, tgt s3Target) {
-	t.Helper()
-	ctx := context.Background()
-	cli := tgt.pickNode(0)
-
-	if tgt.isCluster {
-		probe := tgt.name + "-ec-mp-probe"
-		tgt.createBkt(t, probe)
-		gateCtx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
-		defer cancel()
-		waitForMultipartListingCreate(t, gateCtx, cli, probe, multipartListingKey, 120*time.Second)
-	}
-
-	t.Run("BasicPutGet", func(t *testing.T) {
+func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, getClient func() *s3.Client) {
+	ginkgo.It("puts and gets basic objects (BasicPutGet)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
+		cli := getClient()
 		bucket := tgt.uniqueBucket(t, "basic")
 		cases := []struct {
 			name    string
@@ -55,29 +69,31 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 			{"nested_key", "path/to/deep/file.txt", "nested EC content"},
 		}
 		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-					Bucket: aws.String(bucket),
-					Key:    aws.String(tc.key),
-					Body:   strings.NewReader(tc.content),
-				})
-				require.NoError(t, err)
-
-				getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
-					Bucket: aws.String(bucket),
-					Key:    aws.String(tc.key),
-				})
-				require.NoError(t, err)
-				defer getOut.Body.Close()
-
-				body, _ := io.ReadAll(getOut.Body)
-				assert.Equal(t, tc.content, string(body))
-				assert.Equal(t, int64(len(tc.content)), aws.ToInt64(getOut.ContentLength))
+			_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(tc.key),
+				Body:   strings.NewReader(tc.content),
 			})
+			require.NoError(t, err, tc.name)
+
+			getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(tc.key),
+			})
+			require.NoError(t, err, tc.name)
+			ginkgo.DeferCleanup(getOut.Body.Close)
+
+			body, _ := io.ReadAll(getOut.Body)
+			assert.Equal(t, tc.content, string(body), tc.name)
+			assert.Equal(t, int64(len(tc.content)), aws.ToInt64(getOut.ContentLength), tc.name)
 		}
 	})
 
-	t.Run("LargeObject", func(t *testing.T) {
+	ginkgo.It("round-trips a large object (LargeObject)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
+		cli := getClient()
 		bucket := tgt.uniqueBucket(t, "large")
 		// 5MiB body — exceeds the default shard size, forcing a true EC stripe.
 		data := bytes.Repeat([]byte("X"), 5*1024*1024)
@@ -93,13 +109,17 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("large.bin"),
 		})
 		require.NoError(t, err)
-		defer getOut.Body.Close()
+		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		assert.Equal(t, data, body)
 	})
 
-	t.Run("MultipartUpload", func(t *testing.T) {
+	ginkgo.It("completes multipart upload (MultipartUpload)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
+		cli := getClient()
 		bucket := tgt.uniqueBucket(t, "multipart")
 		key := "multipart-ec.bin"
 		part1Data := bytes.Repeat([]byte("A"), 5*1024*1024)
@@ -147,14 +167,18 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String(key),
 		})
 		require.NoError(t, err)
-		defer getOut.Body.Close()
+		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		expected := append(part1Data, part2Data...)
 		assert.Equal(t, expected, body)
 	})
 
-	t.Run("BucketOperations", func(t *testing.T) {
+	ginkgo.It("exposes bucket operations (BucketOperations)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
+		cli := getClient()
 		bucket := tgt.uniqueBucket(t, "bktops")
 
 		_, err := cli.HeadBucket(ctx, &s3.HeadBucketInput{
@@ -177,7 +201,11 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 		// bucket coverage here is HeadBucket/ListBuckets visibility.
 	})
 
-	t.Run("DeleteAndOverwrite", func(t *testing.T) {
+	ginkgo.It("deletes and overwrites objects (DeleteAndOverwrite)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
+		cli := getClient()
 		bucket := tgt.uniqueBucket(t, "delover")
 
 		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
@@ -218,7 +246,7 @@ func runECObjectsCases(t *testing.T, tgt s3Target) {
 			Key:    aws.String("over.txt"),
 		})
 		require.NoError(t, err)
-		defer getOut.Body.Close()
+		ginkgo.DeferCleanup(getOut.Body.Close)
 
 		body, _ := io.ReadAll(getOut.Body)
 		assert.Equal(t, "version2", string(body))
