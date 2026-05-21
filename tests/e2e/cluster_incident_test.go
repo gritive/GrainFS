@@ -20,7 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/logging"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 type incidentState struct {
@@ -41,11 +41,11 @@ type incidentState struct {
 func fetchIncidents(t testing.TB, endpoint string) []incidentState {
 	t.Helper()
 	resp, err := http.Get(endpoint + "/api/incidents?limit=50")
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 	var out []incidentState
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	gomega.Expect(json.NewDecoder(resp.Body).Decode(&out)).To(gomega.Succeed())
 	return out
 }
 
@@ -72,15 +72,15 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 		ginkgo.DeferCleanup(cancel)
 		endpoints := c.httpURLs
 		leaderIdx, err := c.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		accessKey, secretKey := c.accessKey, c.secretKey
 		client := ecS3Client(endpoints[leaderIdx], accessKey, secretKey)
 
 		payload := make([]byte, 256*1024)
 		_, err = rand.Read(payload)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_, err = client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucketName), Key: aws.String(keyName), Body: bytes.NewReader(payload)})
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		var victimNode int
 		var victimShard string
@@ -97,16 +97,16 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 				break
 			}
 		}
-		require.NotEmpty(t, victimShard)
-		require.NoError(t, os.Remove(victimShard))
+		gomega.Expect(victimShard).NotTo(gomega.BeEmpty())
+		gomega.Expect(os.Remove(victimShard)).To(gomega.Succeed())
 
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			info, err := os.Stat(victimShard)
 			return err == nil && info.Size() > 0
-		}, 30*time.Second, 500*time.Millisecond)
+		}).WithTimeout(30 * time.Second).WithPolling(500 * time.Millisecond).Should(gomega.BeTrue())
 
 		var found incidentState
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			for _, item := range fetchIncidents(t, endpoints[victimNode]) {
 				if item.Cause == "missing_shard" && item.Scope.Bucket == bucketName && item.Scope.Key == keyName && item.State == "fixed" {
 					found = item
@@ -114,7 +114,7 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 				}
 			}
 			return false
-		}, 30*time.Second, 500*time.Millisecond, "fixed missing-shard incident with signed proof not found")
+		}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).Should(gomega.BeTrue(), "fixed missing-shard incident with signed proof not found")
 
 		signer := v4.NewSigner(func(o *v4.SignerOptions) {
 			o.DisableURIPathEscaping = true
@@ -125,7 +125,7 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 		})
 		creds := aws.Credentials{AccessKeyID: accessKey, SecretAccessKey: secretKey}
 		_, receiptStatus := signedGet(t, ctx, signer, creds, endpoints[victimNode]+"/api/receipts/"+url.PathEscape(found.Proof.ReceiptID))
-		require.Equal(t, http.StatusOK, receiptStatus)
+		gomega.Expect(receiptStatus).To(gomega.Equal(http.StatusOK))
 	})
 
 	ginkgo.It("isolates a corrupt shard incident without blocking unrelated objects", func() {
@@ -151,15 +151,15 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 		ginkgo.DeferCleanup(cancel)
 		leaderIdx, err := c.EnsureBucketWritable(ctx, bucketName, 120*time.Second)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		client := c.S3Client(leaderIdx)
 		badPayload := []byte(strings.Repeat("bad", 128*1024))
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return tryPutObject(ctx, client, bucketName, "bad", badPayload) == nil
-		}, 120*time.Second, time.Second)
-		require.Eventually(t, func() bool {
+		}).WithTimeout(120 * time.Second).WithPolling(time.Second).Should(gomega.BeTrue())
+		gomega.Eventually(func() bool {
 			return tryPutObject(ctx, client, bucketName, "good", []byte("good")) == nil
-		}, 120*time.Second, time.Second)
+		}).WithTimeout(120 * time.Second).WithPolling(time.Second).Should(gomega.BeTrue())
 
 		var corruptShard string
 		for i := range numNodes {
@@ -175,16 +175,16 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 				break
 			}
 		}
-		require.NotEmpty(t, corruptShard)
+		gomega.Expect(corruptShard).NotTo(gomega.BeEmpty())
 		f, err := os.OpenFile(corruptShard, os.O_RDWR, 0)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_, err = f.Seek(-1, io.SeekEnd)
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_, err = f.Write([]byte{0xff})
-		require.NoError(t, err)
-		require.NoError(t, f.Close())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(f.Close()).To(gomega.Succeed())
 
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			for _, endpoint := range c.httpURLs {
 				for _, item := range fetchIncidents(t, endpoint) {
 					if item.Cause == "corrupt_blob" || item.Cause == "corrupt_shard" {
@@ -193,9 +193,9 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 				}
 			}
 			return false
-		}, 90*time.Second, 500*time.Millisecond)
+		}).WithTimeout(90 * time.Second).WithPolling(500 * time.Millisecond).Should(gomega.BeTrue())
 
 		_, err = client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucketName), Key: aws.String("good")})
-		require.NoError(t, err, "unrelated object in same bucket must keep working")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "unrelated object in same bucket must keep working")
 	})
 })
