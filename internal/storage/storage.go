@@ -28,7 +28,6 @@ type Object struct {
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
 	PlacementGroupID string
-	RingVersion      uint64
 	ECData           uint8
 	ECParity         uint8
 	NodeIDs          []string
@@ -70,7 +69,6 @@ type SegmentRef struct {
 	Checksum         []byte // xxhash3-128 of plaintext segment bytes (16 B)
 	PlacementGroupID string // placement group (EC stripe) identifier; empty for legacy
 	ShardSize        int32  // EC shard size for this segment; 0 for legacy
-	RingVersion      uint64 // cluster ring version for this segment; 0 for direct node placement
 	ECData           uint8  // EC data shard count; 0 for legacy/local segments
 	ECParity         uint8  // EC parity shard count; 0 for legacy/local segments
 	NodeIDs          []string
@@ -78,7 +76,7 @@ type SegmentRef struct {
 
 // CoalescedRef identifies one coalesced blob produced by merging a prefix of
 // Object.Segments. Phase B2 stores each entry owner-locally; Phase B3 distributes
-// via EC across NodeIDs (k=ECData + m=ECParity) at RingVersion.
+// via EC across NodeIDs (k=ECData + m=ECParity).
 //
 // EC fields are zero-valued for legacy/B2 owner-local entries; reader falls
 // back to owner-local + forward-on-read in that case.
@@ -87,7 +85,6 @@ type CoalescedRef struct {
 	Size        int64  // plaintext bytes in this coalesced blob
 	ETag        string // MD5 hex of the concatenated body
 	ShardKey    string // "<key>/coalesced/<coalescedID>" — used by EC reader (B3)
-	RingVersion uint64
 	ECData      uint8
 	ECParity    uint8
 	NodeIDs     []string

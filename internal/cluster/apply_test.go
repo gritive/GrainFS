@@ -314,7 +314,6 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 			NodeIDs:          []string{"n1", "n2", "n3"},
 			ECData:           2,
 			ECParity:         1,
-			RingVersion:      11,
 		},
 		{
 			BlobID:           "blob-1",
@@ -326,7 +325,6 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 			NodeIDs:          []string{"n4", "n5", "n6"},
 			ECData:           2,
 			ECParity:         1,
-			RingVersion:      12,
 		},
 	}
 
@@ -343,7 +341,6 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 		ECData:           2,
 		ECParity:         1,
 		NodeIDs:          []string{"n1", "n2", "n3"},
-		RingVersion:      17,
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             tags,
@@ -363,7 +360,6 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 		require.NoError(t, err)
 		require.Equal(t, parts, meta.Parts)
 		require.Equal(t, segmentMetaEntriesToRefs(segments), meta.Segments)
-		require.Equal(t, uint64(17), meta.RingVersion)
 		require.Equal(t, tags, meta.Tags)
 		return nil
 	})

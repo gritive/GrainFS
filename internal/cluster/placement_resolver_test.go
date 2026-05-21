@@ -99,7 +99,6 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 		ContentType: "application/octet-stream",
 		ETag:        "etag",
 		ModTime:     1,
-		RingVersion: 7,
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{"n0", "n1", "n2"},

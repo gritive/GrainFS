@@ -1,10 +1,9 @@
 package cluster
 
-// ec_metadata_test.go: NodeIDs-in-metadata fallback path for EC GetObject.
+// ec_metadata_test.go: NodeIDs-in-metadata path for EC GetObject.
 //
-// When no ring is set up (RingVersion=0) and CmdPutShardPlacement is a no-op,
-// GetObject must still reconstruct EC objects using NodeIDs stored in
-// PutObjectMetaCmd. These tests verify that path end-to-end.
+// CmdPutShardPlacement is a no-op; GetObject reconstructs EC objects using
+// NodeIDs stored in PutObjectMetaCmd. These tests verify that path end-to-end.
 //
 // To force EC active (IsActive requires >= 3 nodes), we set allNodes to
 // contain the same selfAddr repeated 3 times. liveNodes() returns 3 entries,
@@ -47,7 +46,6 @@ func setupECBackend(t *testing.T) *DistributedBackend {
 func TestEC_NoRing_PutGetRoundTrip(t *testing.T) {
 	backend := setupECBackend(t)
 
-	// No ring initialized — RingVersion stays 0.
 	// CmdPutShardPlacement is a no-op — no placement records in FSM.
 	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := bytes.Repeat([]byte("hello-ec-no-ring-"), 50) // 850 bytes

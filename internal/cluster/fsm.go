@@ -74,10 +74,9 @@ type PutObjectMetaCmd struct {
 	ETag        string
 	ModTime     int64
 	VersionID   string
-	RingVersion RingVersion // 쓰기에 사용된 Ring 버전 (0 = 링 사용 전 레거시)
-	ECData      uint8       // EC k (data shards)
-	ECParity    uint8       // EC m (parity shards)
-	NodeIDs     []string    // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
+	ECData      uint8    // EC k (data shards)
+	ECParity    uint8    // EC m (parity shards)
+	NodeIDs     []string // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
 	// PlacementGroupID is the data Raft group that owns this object version.
 	PlacementGroupID string
 	UserMetadata     map[string]string
@@ -109,7 +108,7 @@ type PutObjectMetaCmd struct {
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The
-// per-segment EC params (NodeIDs/ECData/ECParity/RingVersion) are required
+// per-segment EC params (NodeIDs/ECData/ECParity) are required
 // for Task 2.4 GETs to read segments outside the segment-0 mirror.
 type SegmentMetaEntry struct {
 	BlobID           string
@@ -121,14 +120,20 @@ type SegmentMetaEntry struct {
 	NodeIDs          []string
 	ECData           uint8
 	ECParity         uint8
-	RingVersion      RingVersion
+}
+
+// virtualNode는 SetRingCmd 역직렬화 경로에서 사용되는 레거시 타입이다.
+// SetRingCmd.applySetRing은 no-op stub — 레거시 Raft 로그 재생 호환용.
+type virtualNode struct {
+	Token  uint32
+	NodeID string
 }
 
 // SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.
-// 멤버십 변경 시에만 propose된다.
+// 멤버십 변경 시에만 propose됐다. applySetRing은 no-op stub — 레거시 Raft 로그 재생용.
 type SetRingCmd struct {
-	Version  RingVersion
-	VNodes   []VirtualNode
+	Version  uint64
+	VNodes   []virtualNode
 	VPerNode int
 }
 
@@ -180,7 +185,6 @@ type CompleteMultipartCmd struct {
 	ECData           uint8
 	ECParity         uint8
 	NodeIDs          []string
-	RingVersion      RingVersion
 	Parts            []storage.MultipartPartEntry
 	Segments         []SegmentMetaEntry
 	Tags             []storage.Tag

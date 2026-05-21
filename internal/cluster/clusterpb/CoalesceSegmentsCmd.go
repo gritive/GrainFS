@@ -151,20 +151,8 @@ func (rcv *CoalesceSegmentsCmd) MutateEcParity(n byte) bool {
 	return rcv._tab.MutateByteSlot(22, n)
 }
 
-func (rcv *CoalesceSegmentsCmd) RingVersion() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *CoalesceSegmentsCmd) MutateRingVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(24, n)
-}
-
 func CoalesceSegmentsCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(10)
 }
 func CoalesceSegmentsCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -201,9 +189,6 @@ func CoalesceSegmentsCmdAddEcData(builder *flatbuffers.Builder, ecData byte) {
 }
 func CoalesceSegmentsCmdAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
 	builder.PrependByteSlot(9, ecParity, 0)
-}
-func CoalesceSegmentsCmdAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
-	builder.PrependUint64Slot(10, ringVersion, 0)
 }
 func CoalesceSegmentsCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -38,7 +38,6 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 		PlacementGroupID: "group-1",
 		Config:           ECConfig{DataShards: 1, ParityShards: 1},
 		Placement:        []string{"node-a", "node-b"},
-		RingVersion:      7,
 		ContentType:      "application/octet-stream",
 	}
 	sp := &spooledObject{Size: 11, ETag: "etag"}
@@ -64,7 +63,6 @@ func TestECObjectWriter_WriteSingleLocalReaderAddsHeaderAndHash(t *testing.T) {
 		PlacementGroupID: "group-1",
 		Config:           ECConfig{DataShards: 1, ParityShards: 0},
 		Placement:        []string{"node-a"},
-		RingVersion:      7,
 		ContentType:      "text/plain",
 	}
 	sp := &spooledObject{Size: 5}
@@ -103,7 +101,6 @@ func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t 
 		PlacementGroupID: "group-1",
 		Config:           ECConfig{DataShards: 1, ParityShards: 0},
 		Placement:        []string{"node-b"},
-		RingVersion:      7,
 		ContentType:      "text/plain",
 	}
 
@@ -136,7 +133,6 @@ func TestECObjectWriter_WriteMemoryShardsUsesBufferedRemoteShardWrites(t *testin
 		PlacementGroupID: "group-1",
 		Config:           ECConfig{DataShards: 1, ParityShards: 0},
 		Placement:        []string{"node-b"},
-		RingVersion:      7,
 		ContentType:      "text/plain",
 	}
 
@@ -166,7 +162,6 @@ func TestECObjectWriter_WriteMemoryShardsUsesBufferedLocalShardWrites(t *testing
 		PlacementGroupID: "group-1",
 		Config:           ECConfig{DataShards: 1, ParityShards: 0},
 		Placement:        []string{"node-a"},
-		RingVersion:      7,
 		ContentType:      "text/plain",
 	}
 
@@ -240,7 +235,6 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 		PlacementGroupID: "group-1",
 		Config:           ECConfig{DataShards: 1, ParityShards: 0},
 		Placement:        []string{"node-a"},
-		RingVersion:      7,
 		ContentType:      "text/plain",
 	}
 

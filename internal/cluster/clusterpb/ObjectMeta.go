@@ -101,20 +101,8 @@ func (rcv *ObjectMeta) MutateAcl(n byte) bool {
 	return rcv._tab.MutateByteSlot(14, n)
 }
 
-func (rcv *ObjectMeta) RingVersion() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
-	if o != 0 {
-		return rcv._tab.GetUint64(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *ObjectMeta) MutateRingVersion(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(16, n)
-}
-
 func (rcv *ObjectMeta) EcData() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetByte(o + rcv._tab.Pos)
 	}
@@ -122,11 +110,11 @@ func (rcv *ObjectMeta) EcData() byte {
 }
 
 func (rcv *ObjectMeta) MutateEcData(n byte) bool {
-	return rcv._tab.MutateByteSlot(18, n)
+	return rcv._tab.MutateByteSlot(16, n)
 }
 
 func (rcv *ObjectMeta) EcParity() byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		return rcv._tab.GetByte(o + rcv._tab.Pos)
 	}
@@ -134,11 +122,11 @@ func (rcv *ObjectMeta) EcParity() byte {
 }
 
 func (rcv *ObjectMeta) MutateEcParity(n byte) bool {
-	return rcv._tab.MutateByteSlot(20, n)
+	return rcv._tab.MutateByteSlot(18, n)
 }
 
 func (rcv *ObjectMeta) NodeIds(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
@@ -147,7 +135,7 @@ func (rcv *ObjectMeta) NodeIds(j int) []byte {
 }
 
 func (rcv *ObjectMeta) NodeIdsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -155,7 +143,7 @@ func (rcv *ObjectMeta) NodeIdsLength() int {
 }
 
 func (rcv *ObjectMeta) PlacementGroupId() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -163,7 +151,7 @@ func (rcv *ObjectMeta) PlacementGroupId() []byte {
 }
 
 func (rcv *ObjectMeta) UserMetadata(obj *KeyValue, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -175,7 +163,7 @@ func (rcv *ObjectMeta) UserMetadata(obj *KeyValue, j int) bool {
 }
 
 func (rcv *ObjectMeta) UserMetadataLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -183,7 +171,7 @@ func (rcv *ObjectMeta) UserMetadataLength() int {
 }
 
 func (rcv *ObjectMeta) SseAlgorithm() []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
 	}
@@ -191,7 +179,7 @@ func (rcv *ObjectMeta) SseAlgorithm() []byte {
 }
 
 func (rcv *ObjectMeta) Segments(obj *SegmentRef, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -203,7 +191,7 @@ func (rcv *ObjectMeta) Segments(obj *SegmentRef, j int) bool {
 }
 
 func (rcv *ObjectMeta) SegmentsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -211,7 +199,7 @@ func (rcv *ObjectMeta) SegmentsLength() int {
 }
 
 func (rcv *ObjectMeta) Coalesced(obj *CoalescedShardRef, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -223,7 +211,7 @@ func (rcv *ObjectMeta) Coalesced(obj *CoalescedShardRef, j int) bool {
 }
 
 func (rcv *ObjectMeta) CoalescedLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -231,7 +219,7 @@ func (rcv *ObjectMeta) CoalescedLength() int {
 }
 
 func (rcv *ObjectMeta) IsAppendable() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -239,11 +227,11 @@ func (rcv *ObjectMeta) IsAppendable() bool {
 }
 
 func (rcv *ObjectMeta) MutateIsAppendable(n bool) bool {
-	return rcv._tab.MutateBoolSlot(34, n)
+	return rcv._tab.MutateBoolSlot(32, n)
 }
 
 func (rcv *ObjectMeta) Parts(obj *MultipartPartEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -255,7 +243,7 @@ func (rcv *ObjectMeta) Parts(obj *MultipartPartEntry, j int) bool {
 }
 
 func (rcv *ObjectMeta) PartsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -263,7 +251,7 @@ func (rcv *ObjectMeta) PartsLength() int {
 }
 
 func (rcv *ObjectMeta) Tags(obj *Tag, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -275,7 +263,7 @@ func (rcv *ObjectMeta) Tags(obj *Tag, j int) bool {
 }
 
 func (rcv *ObjectMeta) TagsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -283,7 +271,7 @@ func (rcv *ObjectMeta) TagsLength() int {
 }
 
 func ObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(18)
+	builder.StartObject(17)
 }
 func ObjectMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -303,56 +291,53 @@ func ObjectMetaAddLastModified(builder *flatbuffers.Builder, lastModified int64)
 func ObjectMetaAddAcl(builder *flatbuffers.Builder, acl byte) {
 	builder.PrependByteSlot(5, acl, 0)
 }
-func ObjectMetaAddRingVersion(builder *flatbuffers.Builder, ringVersion uint64) {
-	builder.PrependUint64Slot(6, ringVersion, 0)
-}
 func ObjectMetaAddEcData(builder *flatbuffers.Builder, ecData byte) {
-	builder.PrependByteSlot(7, ecData, 0)
+	builder.PrependByteSlot(6, ecData, 0)
 }
 func ObjectMetaAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
-	builder.PrependByteSlot(8, ecParity, 0)
+	builder.PrependByteSlot(7, ecParity, 0)
 }
 func ObjectMetaAddNodeIds(builder *flatbuffers.Builder, nodeIds flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(nodeIds), 0)
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(nodeIds), 0)
 }
 func ObjectMetaStartNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ObjectMetaAddPlacementGroupId(builder *flatbuffers.Builder, placementGroupId flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(placementGroupId), 0)
+	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(placementGroupId), 0)
 }
 func ObjectMetaAddUserMetadata(builder *flatbuffers.Builder, userMetadata flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(userMetadata), 0)
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(userMetadata), 0)
 }
 func ObjectMetaStartUserMetadataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ObjectMetaAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(sseAlgorithm), 0)
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(sseAlgorithm), 0)
 }
 func ObjectMetaAddSegments(builder *flatbuffers.Builder, segments flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(segments), 0)
+	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(segments), 0)
 }
 func ObjectMetaStartSegmentsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ObjectMetaAddCoalesced(builder *flatbuffers.Builder, coalesced flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(coalesced), 0)
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(coalesced), 0)
 }
 func ObjectMetaStartCoalescedVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ObjectMetaAddIsAppendable(builder *flatbuffers.Builder, isAppendable bool) {
-	builder.PrependBoolSlot(15, isAppendable, false)
+	builder.PrependBoolSlot(14, isAppendable, false)
 }
 func ObjectMetaAddParts(builder *flatbuffers.Builder, parts flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(parts), 0)
+	builder.PrependUOffsetTSlot(15, flatbuffers.UOffsetT(parts), 0)
 }
 func ObjectMetaStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func ObjectMetaAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(tags), 0)
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(tags), 0)
 }
 func ObjectMetaStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
