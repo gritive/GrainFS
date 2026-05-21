@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.312.0] - 2026-05-21
+
+### Changed
+
+- **Internal integration tests now run as native Ginkgo specs.** Cluster, NBD,
+  NFSv4, receipt, server, direct I/O, and packblob integration tests use one
+  top-level `Describe` per file, shared Ginkgo setup, and `DeferCleanup` for
+  fixture teardown.
+- **E2E Ginkgo specs now use Gomega-native assertions.** Converted the remaining
+  e2e specs and helpers away from `require.` / `assert.` calls while preserving
+  the existing single-node and cluster test coverage.
+
+### Fixed
+
+- Ginkgo-converted integration and e2e tests no longer retain `testify`
+  assertions in their spec bodies, keeping setup, cleanup, and failure reporting
+  consistent with native Ginkgo/Gomega behavior.
+
 ## [0.0.311.0] - 2026-05-21
 
 ### Added
