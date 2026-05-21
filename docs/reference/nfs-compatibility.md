@@ -47,7 +47,7 @@ coverage. Unit-test-only coverage is not enough.
 | POSIX-like behavior | Atomic rename               | Supported     |                                                                                                                                   |
 | POSIX-like behavior | File locking                | Partial       | Validate full lock-manager behavior per client workload.                                                                          |
 | POSIX-like behavior | Hard links                  | Not supported |                                                                                                                                   |
-| POSIX-like behavior | Symlinks                    | Partial       | Supports `CREATE` with `NF4LNK`, `READLINK`, `GETATTR type` as `NF4LNK`, and `symlink_support`. Server-side target resolution is not implemented. |
+| POSIX-like behavior | Symlinks                    | Partial       | Protocol-unit coverage for `CREATE` with `NF4LNK`, `READLINK`, `GETATTR type` as `NF4LNK`, and `symlink_support`. Real-client integration coverage and server-side target resolution are not implemented. |
 | POSIX-like behavior | ACLs                        | Not supported |                                                                                                                                   |
 | POSIX-like behavior | chown/chgrp                 | Not supported |                                                                                                                                   |
 | Capacity/quota      | Quota attributes            | Not supported |                                                                                                                                   |

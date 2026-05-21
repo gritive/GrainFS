@@ -40,7 +40,7 @@ coverage. Unit-test-only coverage is not enough.
 | POSIX-like behavior | Directories | Partial | Directory markers and nested object prefixes are modeled; full filesystem semantics are not claimed. |
 | POSIX-like behavior | Advisory lock enforcement | Not supported | Lock requests are not a compatibility guarantee for multi-client coordination. |
 | POSIX-like behavior | Hard links | Not supported |  |
-| POSIX-like behavior | Symlinks | Partial | Supports create, readlink, readdir, walk, and getattr type exposure. Server-side target resolution is not implemented. |
+| POSIX-like behavior | Symlinks | Partial | Protocol-unit coverage for create, readlink, readdir, walk, and getattr type exposure. Real-client integration coverage and server-side target resolution are not implemented. |
 | POSIX-like behavior | Special files and xattrs | Not supported |  |
 
 ## Related
