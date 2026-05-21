@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/hugelgupf/p9/p9"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // p9Target abstracts a grainfs fixture exposing both an admin UDS and a 9P TCP
@@ -40,7 +40,7 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-p9-e2e-*")
-	require.NoError(t, err)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	httpPort := freePort()
@@ -59,7 +59,7 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start single-node 9P e2e server")
+	gomega.Expect(cmd.Start()).ToNot(gomega.HaveOccurred(), "start single-node 9P e2e server")
 	t.Cleanup(func() { terminateProcess(cmd) })
 
 	waitForPort(t, httpPort, 30*time.Second)
@@ -68,7 +68,7 @@ func newSingleNodeP9Target(t testing.TB) *p9Target {
 	requireFileWithin(t, sock, 10*time.Second)
 	// Disable auto-snapshot for deterministic behavior. PATCH does not require
 	// IAM bootstrap.
-	require.NoError(t, patchSnapshotIntervalM(dir, "0s"))
+	gomega.Expect(patchSnapshotIntervalM(dir, "0s")).ToNot(gomega.HaveOccurred())
 
 	s3URL := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
 	p9Endpoint := fmt.Sprintf("127.0.0.1:%d", p9Port)
@@ -135,9 +135,9 @@ func newClusterP9Target(t testing.TB) *p9Target {
 func dialP9(t testing.TB, tgt *p9Target, nodeIdx int) *p9.Client {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", tgt.p9Addr(nodeIdx), 5*time.Second)
-	require.NoError(t, err, "dial 9p %s", tgt.p9Addr(nodeIdx))
+	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "dial 9p %s", tgt.p9Addr(nodeIdx))
 	cli, err := p9.NewClient(conn, p9.WithMessageSize(64*1024))
-	require.NoError(t, err, "p9 NewClient")
+	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "p9 NewClient")
 	return cli
 }
 
@@ -203,9 +203,9 @@ func ensureBootstrapped(t testing.TB, tgt *p9Target) {
 	}
 	// Seed trusted-proxy.cidr so the F#26-tls-posture pre-check accepts the
 	// first SA create on a loopback fixture without TLS.
-	require.NoError(t, seedBootstrapTrustedProxyCIDR(sock))
+	gomega.Expect(seedBootstrapTrustedProxyCIDR(sock)).ToNot(gomega.HaveOccurred())
 	_, _, err := tryBootstrapAdminViaUDS(sock)
-	require.NoError(t, err, "bootstrap admin SA for p9 e2e")
+	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "bootstrap admin SA for p9 e2e")
 }
 
 // isAdminBootstrapped reports whether the admin UDS already has an admin SA.

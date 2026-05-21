@@ -7,7 +7,6 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/iamadmin"
@@ -80,13 +79,13 @@ func describeP9AttachAuthContext(name string, isCluster bool, factory func(testi
 				bobName = "bob-mount-" + sanitizeForBucket(tgt.name)
 
 				_, err := adminClient.MountSACreate(ctx, mountSAName, 200001, "p9-e2e-alice")
-				require.NoError(t, err, "create alice mount-sa")
-				require.NoError(t,
+				gomega.Expect(err).ToNot(gomega.HaveOccurred(), "create alice mount-sa")
+				gomega.Expect(
 					adminClient.MountSAPolicyAttach(ctx, mountSAName, "9PAttachOnly"),
-					"attach 9PAttachOnly to alice mount-sa")
+				).ToNot(gomega.HaveOccurred(), "attach 9PAttachOnly to alice mount-sa")
 
 				_, err = adminClient.MountSACreate(ctx, bobName, 200002, "p9-e2e-bob")
-				require.NoError(t, err, "create bob mount-sa (no policy)")
+				gomega.Expect(err).ToNot(gomega.HaveOccurred(), "create bob mount-sa (no policy)")
 			})
 
 			ginkgo.AfterAll(func() {

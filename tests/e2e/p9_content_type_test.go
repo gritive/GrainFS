@@ -10,7 +10,6 @@ import (
 	"github.com/hugelgupf/p9/p9"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/require"
 )
 
 // P9 Content-Type preservation exercises the cross-protocol invariant
@@ -59,12 +58,12 @@ func describeP9ContentTypeContext(name string, factory func(testing.TB) *p9Targe
 			// allows; Phase 2 /default retains implicit anon allow).
 			req, err := http.NewRequest(http.MethodPut, objURL,
 				bytes.NewReader([]byte("\x89PNG\r\n\x1a\nseed")))
-			require.NoError(t, err)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			req.Header.Set("Content-Type", "image/png")
 			resp, err := anonHTTPClient().Do(req)
-			require.NoError(t, err, "S3 PUT seed image/png")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "S3 PUT seed image/png")
 			_ = resp.Body.Close()
-			require.Equal(t, http.StatusOK, resp.StatusCode,
+			gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 				"S3 anon PUT to /default must succeed (target=%s)", tgt.name)
 
 			ginkgo.DeferCleanup(func() { anonDelete(objURL) })
@@ -72,33 +71,33 @@ func describeP9ContentTypeContext(name string, factory func(testing.TB) *p9Targe
 			// Overwrite via 9P: Attach /default, Walk to key, Open WriteOnly,
 			// WriteAt.
 			root, cli, err := attachP9(t, tgt, 0, bucket)
-			require.NoError(t, err)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			defer cli.Close()
 			defer closeP9File(root)
 
 			_, file, err := root.Walk([]string{key})
-			require.NoError(t, err, "9P Walk to existing key")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "9P Walk to existing key")
 			defer closeP9File(file)
 
 			_, _, err = file.Open(p9.WriteOnly)
-			require.NoError(t, err, "9P Open WriteOnly")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "9P Open WriteOnly")
 
 			newBody := []byte("9P-overwrite-body")
 			n, err := file.WriteAt(newBody, 0)
-			require.NoError(t, err, "9P WriteAt")
-			require.Equal(t, len(newBody), n)
-			require.NoError(t, file.FSync(), "9P FSync after write")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "9P WriteAt")
+			gomega.Expect(n).To(gomega.Equal(len(newBody)))
+			gomega.Expect(file.FSync()).ToNot(gomega.HaveOccurred(), "9P FSync after write")
 
 			// Force the 9P-side fid release so the write commits before HEAD.
 			closeP9File(file)
 
 			// S3 HEAD must still report image/png.
 			headReq, err := http.NewRequest(http.MethodHead, objURL, nil)
-			require.NoError(t, err)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			headResp, err := anonHTTPClient().Do(headReq)
-			require.NoError(t, err, "S3 HEAD after 9P overwrite")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "S3 HEAD after 9P overwrite")
 			_ = headResp.Body.Close()
-			require.Equal(t, http.StatusOK, headResp.StatusCode,
+			gomega.Expect(headResp.StatusCode).To(gomega.Equal(http.StatusOK),
 				"S3 anon HEAD on /default must succeed")
 			gotCT := headResp.Header.Get("Content-Type")
 			gomega.Expect(strings.ToLower(gotCT)).To(gomega.Equal("image/png"),
@@ -114,28 +113,28 @@ func describeP9ContentTypeContext(name string, factory func(testing.TB) *p9Targe
 			ginkgo.DeferCleanup(func() { anonDelete(objURL) })
 
 			root, cli, err := attachP9(t, tgt, 0, bucket)
-			require.NoError(t, err)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			defer cli.Close()
 			defer closeP9File(root)
 
 			newFile, _, _, err := root.Create(key, p9.WriteOnly, 0644, 0, 0)
-			require.NoError(t, err, "9P Create new key")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "9P Create new key")
 			defer closeP9File(newFile)
 
 			body := []byte("brand-new-mount-write")
 			n, err := newFile.WriteAt(body, 0)
-			require.NoError(t, err)
-			require.Equal(t, len(body), n)
-			require.NoError(t, newFile.FSync())
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			gomega.Expect(n).To(gomega.Equal(len(body)))
+			gomega.Expect(newFile.FSync()).ToNot(gomega.HaveOccurred())
 			closeP9File(newFile)
 
 			// S3 HEAD on the new key.
 			headReq, err := http.NewRequest(http.MethodHead, objURL, nil)
-			require.NoError(t, err)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			headResp, err := anonHTTPClient().Do(headReq)
-			require.NoError(t, err, "S3 HEAD on new 9P-created key")
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "S3 HEAD on new 9P-created key")
 			_ = headResp.Body.Close()
-			require.Equal(t, http.StatusOK, headResp.StatusCode)
+			gomega.Expect(headResp.StatusCode).To(gomega.Equal(http.StatusOK))
 			ct := strings.ToLower(headResp.Header.Get("Content-Type"))
 			gomega.Expect(ct).To(gomega.Equal("application/octet-stream"),
 				"new 9P file Content-Type must default to application/octet-stream (got %q)", ct)
