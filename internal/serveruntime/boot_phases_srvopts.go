@@ -159,6 +159,12 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
 		srvOpts = append(srvOpts, server.WithPolicyAuthorizer(policyAuthz))
 	}
+	// F#41: wire the same cfgStore into the bearer/anon middleware so the S3
+	// authn middleware's Phase 0 anon fast path can read iam.anon-enabled. The
+	// iceberg bearer-skip path uses the same reader.
+	if state.cfgStore != nil {
+		srvOpts = append(srvOpts, server.WithBearerConfig(state.cfgStore))
+	}
 	if state.balancerProposer != nil {
 		srvOpts = append(srvOpts, server.WithBalancerInfo(NewBalancerInfoAdapter(state.balancerProposer)))
 	}
