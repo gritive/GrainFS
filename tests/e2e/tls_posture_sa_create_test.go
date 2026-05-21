@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // TLS posture SA create proves that the admin UDS rejects the first SA create
@@ -45,15 +45,14 @@ var _ = ginkgo.Describe("TLS posture SA create", func() {
 })
 
 func setEnvForSpec(key, value string) {
-	t := ginkgo.GinkgoTB()
 	old, ok := os.LookupEnv(key)
-	require.NoError(t, os.Setenv(key, value))
+	gomega.Expect(os.Setenv(key, value)).To(gomega.Succeed())
 	ginkgo.DeferCleanup(func() {
 		if ok {
-			require.NoError(t, os.Setenv(key, old))
+			gomega.Expect(os.Setenv(key, old)).To(gomega.Succeed())
 			return
 		}
-		require.NoError(t, os.Unsetenv(key))
+		gomega.Expect(os.Unsetenv(key)).To(gomega.Succeed())
 	})
 }
 
@@ -69,13 +68,13 @@ func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *pha
 		tgt := newFixture(t)
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "admin")
-		require.Equalf(t, http.StatusPreconditionFailed, status,
+		gomega.Expect(status).To(gomega.Equal(http.StatusPreconditionFailed),
 			"first SA create on bad-posture fixture must return 412 Precondition Failed; body=%s", body)
 		// Body must mention all three remediation knobs (the
 		// enforceTLSPostureValues error message is reused).
-		require.Containsf(t, body, "GRAINFS_TLS_CERT",
+		gomega.Expect(body).To(gomega.ContainSubstring("GRAINFS_TLS_CERT"),
 			"error body must name the GRAINFS_TLS_CERT env var remediation; body=%s", body)
-		require.Containsf(t, body, "trusted-proxy.cidr",
+		gomega.Expect(body).To(gomega.ContainSubstring("trusted-proxy.cidr"),
 			"error body must name the trusted-proxy.cidr remediation; body=%s", body)
 	})
 
@@ -92,13 +91,13 @@ func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *pha
 		// only needs the file to exist (it doesn't read or validate the cert
 		// at SA-create time).
 		certDir := filepath.Join(dataDirFor(t, tgt.adminSock(0)), "tls")
-		require.NoError(t, ensureDir(certDir))
+		gomega.Expect(ensureDir(certDir)).To(gomega.Succeed())
 		certPath := filepath.Join(certDir, "cert.pem")
 		keyPath := filepath.Join(certDir, "key.pem")
 		writeSelfSignedCertE2E(t, certPath, keyPath)
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "admin")
-		require.Containsf(t, []int{http.StatusOK, http.StatusCreated}, status,
+		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
 			"SA create with cert on disk must succeed; body=%s", body)
 	})
 
@@ -108,7 +107,7 @@ func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *pha
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "admin")
-		require.Containsf(t, []int{http.StatusOK, http.StatusCreated}, status,
+		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
 			"SA create with trusted-proxy.cidr set must succeed; body=%s", body)
 	})
 
@@ -119,20 +118,20 @@ func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *pha
 		seedTrustedProxyForFlip(t, tgt.adminSock(0))
 
 		status, body := postIAMSARaw(t, tgt.adminSock(0), "first-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-		require.Containsf(t, []int{http.StatusOK, http.StatusCreated}, status,
+		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
 			"first SA create with trusted-proxy.cidr must succeed; body=%s", body)
 
 		// Clear trusted-proxy.cidr so the local posture is now "bad". A second
 		// SA create must still succeed — the pre-check fires only on an empty
 		// store.
 		unsetTrustedProxy(t, tgt.adminSock(0))
-		require.Eventually(t, func() bool {
+		gomega.Eventually(func() bool {
 			return getTrustedProxy(t, tgt.adminSock(0)) == ""
-		}, 2*time.Second, 50*time.Millisecond,
+		}).WithTimeout(2*time.Second).WithPolling(50*time.Millisecond).Should(gomega.BeTrue(),
 			"trusted-proxy.cidr must clear before second SA create probe")
 
 		status, body = postIAMSARaw(t, tgt.adminSock(0), "second-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-		require.Containsf(t, []int{http.StatusOK, http.StatusCreated}, status,
+		gomega.Expect([]int{http.StatusOK, http.StatusCreated}).To(gomega.ContainElement(status),
 			"second SA create must succeed even with bad posture (pre-check is empty-store-only); body=%s", body)
 	})
 }
@@ -143,13 +142,13 @@ func runTLSPostureSACreateCases(tgtName string, newFixture func(testing.TB) *pha
 func postIAMSARaw(t testing.TB, sock, name string) (int, string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"name": name})
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodPost, "http://unix/v1/iam/sa", bytes.NewReader(body))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(respBody)
@@ -176,12 +175,11 @@ func unsetTrustedProxy(t testing.TB, sock string) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodDelete, "http://unix/v1/config/trusted-proxy.cidr", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
-	require.Truef(t,
-		resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent,
+	gomega.Expect(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent).To(gomega.BeTrue(),
 		"DELETE /v1/config/trusted-proxy.cidr → %d", resp.StatusCode)
 }
 
@@ -190,18 +188,18 @@ func getTrustedProxy(t testing.TB, sock string) string {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodGet, "http://unix/v1/config/trusted-proxy.cidr", nil)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	resp, err := iamUDSClient(sock).Do(req)
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return ""
 	}
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK))
 	body, _ := io.ReadAll(resp.Body)
 	var entry struct {
 		Value string `json:"value"`
 	}
-	require.NoError(t, json.Unmarshal(body, &entry))
+	gomega.Expect(json.Unmarshal(body, &entry)).To(gomega.Succeed())
 	return entry.Value
 }
