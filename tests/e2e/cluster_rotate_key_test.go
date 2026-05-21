@@ -16,7 +16,7 @@ import (
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 var _ = ginkgo.Describe("Cluster rotate key", func() {
@@ -47,14 +47,14 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 				"--lifecycle-interval", "0",
 			}
 			logFile, err := os.CreateTemp("", "rotate-test-*.log")
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.DeferCleanup(os.Remove, logFile.Name())
 
 			srv := exec.CommandContext(ctx, getBinary(), args...)
 			srv.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			srv.Stdout = logFile
 			srv.Stderr = logFile
-			require.NoError(t, srv.Start())
+			gomega.Expect(srv.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(func() {
 				cancel()
 				_ = srv.Wait()
@@ -66,14 +66,14 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 
 			// Initial status: must be steady.
 			st := runRotateKeyCLI(t, dir, "status")
-			require.Equal(t, 1, st.Phase, "initial phase should be steady, got %d", st.Phase)
+			gomega.Expect(st.Phase).To(gomega.Equal(1), "initial phase should be steady, got %d", st.Phase)
 
 			// Begin rotation with --generate so the test doesn't hardcode a key.
 			beginOut := runRotateKeyCLIBeginGenerate(t, dir)
-			require.Empty(t, beginOut.Error, "begin error: %s", beginOut.Error)
-			require.NotEmpty(t, beginOut.RotationID)
-			require.NotEmpty(t, beginOut.NewSPKI)
-			require.NotEqual(t, beginOut.OldSPKI, beginOut.NewSPKI, "OLD and NEW SPKI must differ")
+			gomega.Expect(beginOut.Error).To(gomega.BeEmpty(), "begin error: %s", beginOut.Error)
+			gomega.Expect(beginOut.RotationID).NotTo(gomega.BeEmpty())
+			gomega.Expect(beginOut.NewSPKI).NotTo(gomega.BeEmpty())
+			gomega.Expect(beginOut.NewSPKI).NotTo(gomega.Equal(beginOut.OldSPKI), "OLD and NEW SPKI must differ")
 
 			// Poll until steady-on-NEW (phase=1, OldSPKI = previous NEW). Auto-progress
 			// is RotationPhaseGrace=5s per transition; allow 30s slack.
@@ -86,20 +86,20 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-			require.Equal(t, 1, final.Phase, "expected steady after auto-progress; got phase=%d (rotation_id=%s)", final.Phase, final.RotationID)
-			require.Equal(t, beginOut.NewSPKI, final.OldSPKI, "active SPKI should now be NEW")
+			gomega.Expect(final.Phase).To(gomega.Equal(1), "expected steady after auto-progress; got phase=%d (rotation_id=%s)", final.Phase, final.RotationID)
+			gomega.Expect(final.OldSPKI).To(gomega.Equal(beginOut.NewSPKI), "active SPKI should now be NEW")
 
 			// Verify keystore on disk reflects the rotation.
 			currentKeyBytes, err := os.ReadFile(filepath.Join(dir, "keys.d", "current.key"))
-			require.NoError(t, err)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			currentKey := strings.TrimSpace(string(currentKeyBytes))
-			require.Len(t, currentKey, 64, "current.key should be 64 hex chars")
-			require.NotEqual(t, oldKey, currentKey, "current.key should have rotated away from initial key")
+			gomega.Expect(currentKey).To(gomega.HaveLen(64), "current.key should be 64 hex chars")
+			gomega.Expect(currentKey).NotTo(gomega.Equal(oldKey), "current.key should have rotated away from initial key")
 
 			previousKeyBytes, err := os.ReadFile(filepath.Join(dir, "keys.d", "previous.key"))
-			require.NoError(t, err, "previous.key should exist after Drop")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "previous.key should exist after Drop")
 			previousKey := strings.TrimSpace(string(previousKeyBytes))
-			require.Equal(t, oldKey, previousKey, "previous.key should hold the OLD PSK")
+			gomega.Expect(previousKey).To(gomega.Equal(oldKey), "previous.key should hold the OLD PSK")
 		})
 	})
 
@@ -135,7 +135,7 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 			srv.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			srv.Stdout = logFile
 			srv.Stderr = logFile
-			require.NoError(t, srv.Start())
+			gomega.Expect(srv.Start()).To(gomega.Succeed())
 			ginkgo.DeferCleanup(func() {
 				cancel()
 				_ = srv.Wait()
@@ -145,8 +145,8 @@ var _ = ginkgo.Describe("Cluster rotate key", func() {
 			waitSocketReady(t, filepath.Join(dir, "rotate.sock"), 10*time.Second)
 
 			st := runRotateKeyCLI(t, dir, "status")
-			require.Equal(t, 1, st.Phase, "solo node should report steady")
-			require.Empty(t, st.RotationID, "no in-flight rotation")
+			gomega.Expect(st.Phase).To(gomega.Equal(1), "solo node should report steady")
+			gomega.Expect(st.RotationID).To(gomega.BeEmpty(), "no in-flight rotation")
 		})
 	})
 })
@@ -190,12 +190,12 @@ func runRotateKeyCLI(t testing.TB, dataDir, action string, extra ...func(map[str
 		buf, _ := json.Marshal(body)
 		resp, err = cli.Post("http://unix/v1/rotate-key/"+action, "application/json", bytes.NewReader(buf))
 	default:
-		t.Fatalf("unknown rotate-key action %q", action)
+		ginkgo.Fail(fmt.Sprintf("unknown rotate-key action %q", action))
 	}
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.DeferCleanup(resp.Body.Close)
 	var out rotationCLIResp
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	gomega.Expect(json.NewDecoder(resp.Body).Decode(&out)).To(gomega.Succeed())
 	return out
 }
 
@@ -210,7 +210,7 @@ func runRotateKeyCLIBeginGenerate(t testing.TB, dataDir string) rotationCLIResp 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	require.NoError(t, err, "cli begin failed: stdout=%s stderr=%s", stdout.String(), stderr.String())
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "cli begin failed: stdout=%s stderr=%s", stdout.String(), stderr.String())
 	out := stdout.String()
 	// Expected shape:
 	//   Generated new PSK: <hex>
@@ -263,7 +263,7 @@ func waitHTTPReady(t testing.TB, port int, timeout time.Duration) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("HTTP port %d not ready within %s", port, timeout)
+	ginkgo.Fail(fmt.Sprintf("HTTP port %d not ready within %s", port, timeout))
 }
 
 func waitSocketReady(t testing.TB, sockPath string, timeout time.Duration) {
@@ -277,5 +277,5 @@ func waitSocketReady(t testing.TB, sockPath string, timeout time.Duration) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("rotate.sock at %s not ready within %s", sockPath, timeout)
+	ginkgo.Fail(fmt.Sprintf("rotate.sock at %s not ready within %s", sockPath, timeout))
 }
