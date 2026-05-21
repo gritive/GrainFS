@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,6 +134,100 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 			rc.Close()
 		})
 	}
+}
+
+func TestLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), nil)
+	require.NoError(t, err)
+
+	b, err := NewLocalBackendWithDataWAL(root, dwal)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+	payload := []byte(strings.Repeat("wal segment payload", 1024))
+	obj, err := b.PutObject(ctx, "b", "k", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments)
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, os.Remove(b.segmentPath("b", "k", obj.Segments[0].BlobID)))
+	require.NoError(t, b.RecoverDataWAL(ctx))
+
+	rc, _, err := b.GetObject(ctx, "b", "k")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+func TestEncryptedLocalBackend_DataWALRestoresMissingSegment(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	enc := testEncryptor(t)
+	dwal, err := datawal.Open(filepath.Join(root, "datawal"), enc)
+	require.NoError(t, err)
+
+	b, err := NewEncryptedLocalBackendWithDataWAL(root, enc, dwal)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+	payload := []byte(strings.Repeat("encrypted wal segment payload", 1024))
+	obj, err := b.PutObject(ctx, "b", "k", bytes.NewReader(payload), "application/octet-stream")
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments)
+	require.NoError(t, dwal.Flush())
+
+	require.NoError(t, os.Remove(b.segmentPath("b", "k", obj.Segments[0].BlobID)))
+	require.NoError(t, b.RecoverDataWAL(ctx))
+
+	rc, _, err := b.GetObject(ctx, "b", "k")
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+func TestLocalBackend_SyncFlushesDataWAL(t *testing.T) {
+	dwal := &countingDataWAL{dir: filepath.Join(t.TempDir(), "datawal")}
+	b, err := NewLocalBackendWithDataWAL(t.TempDir(), dwal)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, b.Close()) })
+
+	require.NoError(t, b.CreateBucket(context.Background(), "b"))
+	_, err = b.PutObject(context.Background(), "b", "k", strings.NewReader("payload"), "text/plain")
+	require.NoError(t, err)
+
+	before := dwal.flushes
+	require.NoError(t, b.Sync("b", "k"))
+	require.Equal(t, before+1, dwal.flushes)
+}
+
+type countingDataWAL struct {
+	dir     string
+	flushes int
+}
+
+func (w *countingDataWAL) Append(context.Context, datawal.Record) (uint64, error) {
+	return 1, nil
+}
+
+func (w *countingDataWAL) AppendReader(context.Context, datawal.Record, io.Reader) (uint64, error) {
+	return 1, nil
+}
+
+func (w *countingDataWAL) Flush() error {
+	w.flushes++
+	return nil
+}
+
+func (w *countingDataWAL) Dir() string {
+	return w.dir
 }
 
 func requireReaderEqualBytes(r io.Reader, want []byte) error {

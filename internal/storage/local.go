@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
+	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 // localTraceEnabled activates per-stage PutObject/HeadObject latency logging.
@@ -27,9 +29,18 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	root      string
-	db        *badger.DB
-	encryptor *encrypt.Encryptor
+	root       string
+	db         *badger.DB
+	encryptor  *encrypt.Encryptor
+	dataWAL    DataWAL
+	dataWALDir string
+}
+
+type DataWAL interface {
+	Append(context.Context, datawal.Record) (uint64, error)
+	AppendReader(context.Context, datawal.Record, io.Reader) (uint64, error)
+	Flush() error
+	Dir() string
 }
 
 var (
@@ -54,6 +65,35 @@ func NewEncryptedLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBacken
 	return newLocalBackend(root, enc)
 }
 
+func NewLocalBackendWithDataWAL(root string, dwal DataWAL) (*LocalBackend, error) {
+	if dwal == nil {
+		return nil, fmt.Errorf("local backend data wal requires wal")
+	}
+	b, err := newLocalBackend(root, nil)
+	if err != nil {
+		return nil, err
+	}
+	b.dataWAL = dwal
+	b.dataWALDir = dwal.Dir()
+	return b, nil
+}
+
+func NewEncryptedLocalBackendWithDataWAL(root string, enc *encrypt.Encryptor, dwal DataWAL) (*LocalBackend, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("encrypted local backend requires encryptor")
+	}
+	if dwal == nil {
+		return nil, fmt.Errorf("encrypted local backend data wal requires wal")
+	}
+	b, err := newLocalBackend(root, enc)
+	if err != nil {
+		return nil, err
+	}
+	b.dataWAL = dwal
+	b.dataWALDir = dwal.Dir()
+	return b, nil
+}
+
 func newLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error) {
 	dataDir := filepath.Join(root, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -67,7 +107,7 @@ func newLocalBackend(root string, enc *encrypt.Encryptor) (*LocalBackend, error)
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &LocalBackend{root: root, db: db, encryptor: enc}, nil
+	return &LocalBackend{root: root, db: db, encryptor: enc, dataWALDir: filepath.Join(root, "datawal")}, nil
 }
 
 // Close closes the metadata database.
@@ -901,8 +941,74 @@ func (b *LocalBackend) PreferWriteAt(bucket string) bool {
 	return b.encryptor == nil && IsInternalBucket(bucket)
 }
 
+func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
+	return datawal.Recover(ctx, b.dataWALDir, 0, b.encryptor, localDataWALMaterializer{b: b})
+}
+
+type localDataWALMaterializer struct {
+	b *LocalBackend
+}
+
+func (m localDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
+	_ = ctx
+	if rec.Op != datawal.OpSegmentPut {
+		return false, nil
+	}
+
+	path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
+	if m.b.encryptor == nil {
+		info, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return info.Size() == rec.Size, nil
+	}
+
+	rc, err := openEncryptedObjectFile(path, m.b.encryptor, encryptedObjectFileDomain(rec.Bucket, rec.Key+"/segments/"+rec.Target), rec.Size)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(got, rec.Payload), nil
+}
+
+func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
+	switch rec.Op {
+	case datawal.OpSegmentPut:
+		path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if m.b.encryptor != nil {
+			_, err := writeEncryptedObjectFile(path, m.b.encryptor, encryptedObjectFileDomain(rec.Bucket, rec.Key+"/segments/"+rec.Target), bytes.NewReader(rec.Payload), io.Discard)
+			return err
+		}
+		return os.WriteFile(path, rec.Payload, 0o644)
+	case datawal.OpObjectWriteAt:
+		_, err := m.b.WriteAt(ctx, rec.Bucket, rec.Key, uint64(rec.Offset), rec.Payload)
+		return err
+	case datawal.OpObjectTruncate:
+		return m.b.Truncate(ctx, rec.Bucket, rec.Key, rec.Size)
+	default:
+		return nil
+	}
+}
+
 // Sync implements storage.Syncable.
 func (b *LocalBackend) Sync(bucket, key string) error {
+	if b.dataWAL != nil {
+		return b.dataWAL.Flush()
+	}
 	obj, err := b.HeadObject(context.Background(), bucket, key)
 	if err != nil {
 		return err
