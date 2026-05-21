@@ -955,7 +955,7 @@ func TestTopologyDurabilityFullTargetWriteGuardE2E(t *testing.T) {
 	})
 }
 
-func requireS3PutEventually503(t *testing.T, ctx context.Context, client *s3.Client, bucket, key string) {
+func requireS3PutEventually503(t testing.TB, ctx context.Context, client *s3.Client, bucket, key string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		putCtx, cancelPut := context.WithTimeout(ctx, 5*time.Second)
