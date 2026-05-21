@@ -17,15 +17,24 @@ import (
 
 type objectFile struct {
 	noopFile
-	backend storage.Backend
-	locks   *objectLocks
-	bucket  string
-	key     string
-	meta    *storage.Object
+	backend     storage.Backend
+	locks       *objectLocks
+	bucket      string
+	key         string
+	meta        *storage.Object
+	exportStore exportGetter // nil = no gate
 
 	dirtyLoaded bool
 	dirty       bool
 	dirtyData   []byte
+}
+
+func (f *objectFile) isReadOnly() bool {
+	if f.exportStore == nil {
+		return false
+	}
+	cfg, ok := f.exportStore.Get(f.bucket)
+	return ok && cfg.ReadOnly
 }
 
 const maxFallbackObjectSize = 64 << 20
@@ -43,7 +52,7 @@ func resolveContentType(ctx context.Context, backend storage.Backend, bucket, ke
 
 func (f *objectFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta}, nil
+		return nil, &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: f.key, meta: f.meta, exportStore: f.exportStore}, nil
 	}
 	return nil, nil, syscall.ENOTDIR
 }
@@ -98,6 +107,21 @@ func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
 	if isP9ReservedKey(f.key) {
 		return syscall.EPERM
 	}
+	// D#8: mode/uid/gid changes are cosmetic — always EPERM regardless of export
+	// read-only state. This check must run before the RO gate so that mode change
+	// on a RO export returns EPERM, not EROFS.
+	if valid.Permissions || valid.UID || valid.GID {
+		return syscall.EPERM
+	}
+	// Size and mtime changes are genuine mutations — reject on RO export.
+	if (valid.Size || valid.MTime) && f.isReadOnly() {
+		return syscall.EROFS
+	}
+	// Fast path: nothing to do.
+	if !valid.Size && !valid.MTime {
+		return nil
+	}
+
 	unlock := f.locks.lock(f.bucket, f.key)
 	defer unlock()
 
@@ -119,10 +143,6 @@ func (f *objectFile) SetAttr(valid p9.SetAttrMask, attr p9.SetAttr) error {
 
 	meta := loadP9FileMeta(ctx, f.backend, f.bucket, f.key)
 	changed := false
-	if valid.Permissions {
-		meta.Mode = uint32(attr.Permissions) & 0777
-		changed = true
-	}
 	if valid.MTime {
 		if valid.MTimeNotSystemTime {
 			meta.Mtime = time.Unix(int64(attr.MTimeSeconds), int64(attr.MTimeNanoSeconds)).UnixNano()
@@ -215,6 +235,9 @@ func (f *objectFile) WriteAt(buf []byte, offset int64) (int, error) {
 	}
 	if isP9ReservedKey(f.key) {
 		return 0, syscall.EPERM
+	}
+	if f.isReadOnly() {
+		return 0, syscall.EROFS
 	}
 	unlock := f.locks.lock(f.bucket, f.key)
 	defer unlock()

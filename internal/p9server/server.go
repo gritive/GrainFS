@@ -12,8 +12,16 @@ import (
 
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
+	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// exportGetter is the read-only view of the NFS export store used by the 9P
+// server. The concrete *nfsexport.ExportService satisfies this interface
+// (via its Get method); tests may inject stubs.
+type exportGetter interface {
+	Get(bucket string) (nfsexport.Config, bool)
+}
 
 // p9Authorizer is the slice of s3auth.Authorizer consumed by the 9P IAM gate.
 // Defined here so tests can inject stubs without a full policy store.
@@ -23,9 +31,10 @@ type p9Authorizer interface {
 
 // Server is a 9P2000.L server backed by a storage.Backend.
 type Server struct {
-	backend storage.Backend
-	locks   *objectLocks
-	p9srv   *p9.Server
+	backend  storage.Backend
+	locks    *objectLocks
+	p9srv    *p9.Server
+	attacher *attacher
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -48,6 +57,12 @@ func WithAuthorizer(authz p9Authorizer) ServerOption {
 	return func(a *attacher) { a.authorizer = authz }
 }
 
+// WithExportStore wires the NFS export store so the 9P server can enforce
+// per-bucket ReadOnly on all mutation operations (T11).
+func WithExportStore(store exportGetter) ServerOption {
+	return func(a *attacher) { a.exportStore = store }
+}
+
 // NewServer creates a 9P server backed by backend.
 func NewServer(backend storage.Backend, opts ...ServerOption) *Server {
 	locks := newObjectLocks()
@@ -55,9 +70,18 @@ func NewServer(backend storage.Backend, opts ...ServerOption) *Server {
 	for _, opt := range opts {
 		opt(att)
 	}
-	s := &Server{backend: backend, locks: locks, conns: make(map[net.Conn]struct{})}
+	s := &Server{backend: backend, locks: locks, conns: make(map[net.Conn]struct{}), attacher: att}
 	s.p9srv = p9.NewServer(att)
 	return s
+}
+
+// SetExportStore updates the export store on a running server. New connections
+// and new Walk calls (per-session root fids) will see the updated store.
+// Existing open fids retain the store they received at Walk time.
+func (s *Server) SetExportStore(store exportGetter) {
+	s.mu.Lock()
+	s.attacher.exportStore = store
+	s.mu.Unlock()
 }
 
 // ListenAndServe starts the TCP listener and serves 9P connections until ctx is cancelled.
@@ -164,6 +188,7 @@ type attacher struct {
 	locks        *objectLocks
 	mountSAStore *mountsastore.Store
 	authorizer   p9Authorizer
+	exportStore  exportGetter
 }
 
 func (a *attacher) Attach() (p9.File, error) {
@@ -172,5 +197,6 @@ func (a *attacher) Attach() (p9.File, error) {
 		locks:        a.locks,
 		mountSAStore: a.mountSAStore,
 		authorizer:   a.authorizer,
+		exportStore:  a.exportStore,
 	}, nil
 }

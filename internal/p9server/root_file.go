@@ -23,6 +23,7 @@ type rootFile struct {
 	locks        *objectLocks
 	mountSAStore *mountsastore.Store
 	authorizer   p9Authorizer
+	exportStore  exportGetter
 }
 
 // Walk processes the first-path-component as <mount-sa>@<bucket> per D#6 of
@@ -45,14 +46,14 @@ type rootFile struct {
 //   - bucket not found                          → ENOENT
 func (f *rootFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &rootFile{backend: f.backend, locks: f.locks, mountSAStore: f.mountSAStore, authorizer: f.authorizer}, nil
+		return nil, &rootFile{backend: f.backend, locks: f.locks, mountSAStore: f.mountSAStore, authorizer: f.authorizer, exportStore: f.exportStore}, nil
 	}
 	bucket, binding, err := f.resolveFirstComponent(names[0])
 	if err != nil {
 		return nil, nil, err
 	}
 	bqid := p9.QID{Type: p9.TypeDir, Path: qidPath(bucket)}
-	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: bucket, binding: binding}
+	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: bucket, binding: binding, exportStore: f.exportStore}
 	if len(names) == 1 {
 		return []p9.QID{bqid}, bf, nil
 	}

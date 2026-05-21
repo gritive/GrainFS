@@ -31,16 +31,25 @@ type fhBinding struct {
 
 type bucketFile struct {
 	noopFile
-	backend storage.Backend
-	locks   *objectLocks
-	bucket  string
-	prefix  string
-	binding fhBinding // set by rootFile.Walk when IAM gate is wired
+	backend     storage.Backend
+	locks       *objectLocks
+	bucket      string
+	prefix      string
+	binding     fhBinding    // set by rootFile.Walk when IAM gate is wired
+	exportStore exportGetter // nil = no gate
+}
+
+func (f *bucketFile) isReadOnly() bool {
+	if f.exportStore == nil {
+		return false
+	}
+	cfg, ok := f.exportStore.Get(f.bucket)
+	return ok && cfg.ReadOnly
 }
 
 func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 0 {
-		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix, binding: f.binding}, nil
+		return nil, &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: f.prefix, binding: f.binding, exportStore: f.exportStore}, nil
 	}
 	name := names[0]
 	if isP9ReservedName(name) {
@@ -53,7 +62,7 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 	if len(names) == 1 {
 		if obj, err := f.backend.HeadObject(context.Background(), f.bucket, key); err == nil {
 			oqid := p9.QID{Type: p9.TypeRegular, Path: qidPath(f.bucket, key)}
-			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj}
+			of := &objectFile{backend: f.backend, locks: f.locks, bucket: f.bucket, key: key, meta: obj, exportStore: f.exportStore}
 			return []p9.QID{oqid}, of, nil
 		}
 	}
@@ -61,7 +70,7 @@ func (f *bucketFile) Walk(names []string) ([]p9.QID, p9.File, error) {
 		return nil, nil, syscall.ENOENT
 	}
 	bqid := p9.QID{Type: p9.TypeDir, Path: qidPath(f.bucket, key)}
-	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: key + "/"}
+	bf := &bucketFile{backend: f.backend, locks: f.locks, bucket: f.bucket, prefix: key + "/", exportStore: f.exportStore}
 	if len(names) == 1 {
 		return []p9.QID{bqid}, bf, nil
 	}
@@ -88,6 +97,9 @@ func (f *bucketFile) GetAttr(req p9.AttrMask) (p9.QID, p9.AttrMask, p9.Attr, err
 }
 
 func (f *bucketFile) Create(name string, flags p9.OpenFlags, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.File, p9.QID, uint32, error) {
+	if f.isReadOnly() {
+		return nil, p9.QID{}, 0, syscall.EROFS
+	}
 	if isP9ReservedName(name) {
 		return nil, p9.QID{}, 0, syscall.EPERM
 	}
@@ -155,6 +167,9 @@ func isTransientCreateHeadError(err error) bool {
 }
 
 func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid p9.GID) (p9.QID, error) {
+	if f.isReadOnly() {
+		return p9.QID{}, syscall.EROFS
+	}
 	if !validObjectName(name) {
 		return p9.QID{}, syscall.EINVAL
 	}
@@ -200,6 +215,9 @@ func (f *bucketFile) Mkdir(name string, permissions p9.FileMode, uid p9.UID, gid
 }
 
 func (f *bucketFile) UnlinkAt(name string, flags uint32) error {
+	if f.isReadOnly() {
+		return syscall.EROFS
+	}
 	const atRemovedir = 0x200
 	if flags != 0 && flags != atRemovedir {
 		return syscall.EINVAL
@@ -293,6 +311,9 @@ func (f *bucketFile) rmdir(key string) error {
 // crash-atomic rename, so this copies destination data and metadata before
 // deleting the source.
 func (f *bucketFile) RenameAt(oldName string, newDir p9.File, newName string) error {
+	if f.isReadOnly() {
+		return syscall.EROFS
+	}
 	dst, ok := newDir.(*bucketFile)
 	if !ok {
 		return syscall.EXDEV

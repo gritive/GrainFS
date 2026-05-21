@@ -78,6 +78,9 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 	if n.nfs4Srv != nil {
 		n.nfs4Srv.SetExportSource(src)
 	}
+	if n.p9Srv != nil && src != nil {
+		n.p9Srv.SetExportStore(src)
+	}
 }
 
 // NodeServicesIAMConfig carries optional IAM gate dependencies for NFS/9P
