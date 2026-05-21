@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	fileMagic   = uint32(0x4457414c) // "DWAL"
-	fileVersion = uint32(1)
+	fileMagic       = uint32(0x4457414c) // "DWAL"
+	fileVersion     = uint32(1)
+	fileHeaderBytes = 12
 
 	fileModePlain     = byte(1)
 	fileModeEncrypted = byte(2)
@@ -209,16 +210,29 @@ func (w *WAL) openAppendFile(state walState) error {
 		f.Close()
 		return err
 	}
+	repairedHeader := false
 	if info.Size() == 0 {
-		if err := writeHeader(f, modeForEncryptor(w.enc)); err != nil {
+		if err := initSegment(f, w.dir, modeForEncryptor(w.enc)); err != nil {
 			f.Close()
 			return err
 		}
-		if err := f.Sync(); err != nil {
+		repairedHeader = true
+	} else if path == state.activePath && info.Size() < fileHeaderBytes && state.activeGoodBytes == 0 {
+		if err := f.Truncate(0); err != nil {
 			f.Close()
 			return err
 		}
-		if err := syncDir(w.dir); err != nil {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			f.Close()
+			return err
+		}
+		if err := initSegment(f, w.dir, modeForEncryptor(w.enc)); err != nil {
+			f.Close()
+			return err
+		}
+		repairedHeader = true
+		info, err = f.Stat()
+		if err != nil {
 			f.Close()
 			return err
 		}
@@ -226,7 +240,7 @@ func (w *WAL) openAppendFile(state walState) error {
 		f.Close()
 		return err
 	}
-	if path == state.activePath && state.activeGoodBytes < info.Size() {
+	if !repairedHeader && path == state.activePath && state.activeGoodBytes < info.Size() {
 		if err := f.Truncate(state.activeGoodBytes); err != nil {
 			f.Close()
 			return err
@@ -235,9 +249,23 @@ func (w *WAL) openAppendFile(state walState) error {
 			f.Close()
 			return err
 		}
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return err
+		}
 	}
 	w.file = f
 	return nil
+}
+
+func initSegment(f walFile, dir string, mode byte) error {
+	if err := writeHeader(f, mode); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return syncDir(dir)
 }
 
 func syncDir(dir string) error {
@@ -336,6 +364,16 @@ func scanFileWithOffset(path string, enc *encrypt.Encryptor, allowTruncatedTail 
 		return 0, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() < fileHeaderBytes {
+		if allowTruncatedTail {
+			return 0, nil
+		}
+		return 0, io.ErrUnexpectedEOF
+	}
 	mode, err := readHeader(f)
 	if err != nil {
 		return 0, err
@@ -395,7 +433,7 @@ func scanRecords(r io.ReadSeeker, mode byte, enc *encrypt.Encryptor, allowTrunca
 }
 
 func writeHeader(w io.Writer, mode byte) error {
-	var buf [12]byte
+	var buf [fileHeaderBytes]byte
 	binary.BigEndian.PutUint32(buf[0:4], fileMagic)
 	binary.BigEndian.PutUint32(buf[4:8], fileVersion)
 	buf[8] = mode
@@ -403,7 +441,7 @@ func writeHeader(w io.Writer, mode byte) error {
 }
 
 func readHeader(r io.Reader) (byte, error) {
-	var buf [12]byte
+	var buf [fileHeaderBytes]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
 		return 0, err
 	}

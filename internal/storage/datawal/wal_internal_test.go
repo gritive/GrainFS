@@ -113,6 +113,66 @@ func TestNonLatestSegmentTornTailFailsReplayAndOpen(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestOpenRecoversEmptyLatestSegment(t *testing.T) {
+	dir := t.TempDir()
+	writePlainSegmentForTest(t, dir, 1, []Record{{Seq: 1, Timestamp: 1, Op: OpSegmentPut, Key: "first"}}, nil)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, segmentName(2)), nil, 0o644))
+
+	w, err := Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), Record{Op: OpSegmentPut, Key: "second"})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	var keys []string
+	require.NoError(t, Replay(context.Background(), dir, 0, nil, func(rec Record) error {
+		keys = append(keys, rec.Key)
+		return nil
+	}))
+	require.Equal(t, []string{"first", "second"}, keys)
+}
+
+func TestOpenRecoversPartialHeaderLatestSegment(t *testing.T) {
+	dir := t.TempDir()
+	writePlainSegmentForTest(t, dir, 1, []Record{{Seq: 1, Timestamp: 1, Op: OpSegmentPut, Key: "first"}}, nil)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, segmentName(2)), []byte{0x44, 0x57, 0x41}, 0o644))
+
+	w, err := Open(dir, nil)
+	require.NoError(t, err)
+	_, err = w.Append(context.Background(), Record{Op: OpSegmentPut, Key: "second"})
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	var keys []string
+	require.NoError(t, Replay(context.Background(), dir, 0, nil, func(rec Record) error {
+		keys = append(keys, rec.Key)
+		return nil
+	}))
+	require.Equal(t, []string{"first", "second"}, keys)
+}
+
+func TestNonLatestEmptyOrPartialHeaderSegmentFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: nil},
+		{name: "partial", data: []byte{0x44, 0x57, 0x41}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, segmentName(1)), tc.data, 0o644))
+			writePlainSegmentForTest(t, dir, 2, []Record{{Seq: 2, Timestamp: 2, Op: OpSegmentPut, Key: "second"}}, nil)
+
+			err := Replay(context.Background(), dir, 0, nil, func(Record) error { return nil })
+			require.Error(t, err)
+
+			_, err = Open(dir, nil)
+			require.Error(t, err)
+		})
+	}
+}
+
 type cancelAfterReadReader struct {
 	cancel context.CancelFunc
 	data   []byte
