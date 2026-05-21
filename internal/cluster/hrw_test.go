@@ -76,3 +76,52 @@ func TestPlaceShards_Distribution_Uniform(t *testing.T) {
 			"node %s primary count %v not within ±%v of %v", n, got, tolerance, expected)
 	}
 }
+
+func TestPlaceShards_Distribution_Weighted(t *testing.T) {
+	const trials = 20000
+	const tolerance = 0.15 // ±15% (weighted 분산 더 큼)
+	nodes := []string{"n1", "n2", "n3"}
+	weights := []float64{1, 2, 4} // 합 7
+
+	counts := map[string]int{}
+	for i := 0; i < trials; i++ {
+		got := PlaceShards(fmt.Sprintf("key/%d", i), nodes, weights, 1)
+		require.Len(t, got, 1)
+		counts[got[0]]++
+	}
+
+	totalW := 0.0
+	for _, w := range weights {
+		totalW += w
+	}
+	for i, n := range nodes {
+		got := float64(counts[n])
+		expected := float64(trials) * weights[i] / totalW
+		ratio := got / expected
+		assert.InDelta(t, 1.0, ratio, tolerance,
+			"node %s (w=%v) primary count %v not within ±%v of %v", n, weights[i], got, tolerance, expected)
+	}
+}
+
+func TestPlaceShards_ZeroWeightDrain(t *testing.T) {
+	nodes := []string{"n1", "n2", "n3"}
+	weights := []float64{0, 1, 1}
+	for i := 0; i < 1000; i++ {
+		got := PlaceShards(fmt.Sprintf("k/%d", i), nodes, weights, 2)
+		require.Len(t, got, 2)
+		for _, n := range got {
+			assert.NotEqual(t, "n1", n, "zero-weight node must be excluded")
+		}
+	}
+}
+
+func TestPlaceShards_NilEquivalentToOnes(t *testing.T) {
+	nodes := []string{"n1", "n2", "n3", "n4", "n5"}
+	ones := []float64{1, 1, 1, 1, 1}
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("k/%d", i)
+		a := PlaceShards(key, nodes, nil, 3)
+		b := PlaceShards(key, nodes, ones, 3)
+		assert.Equal(t, a, b, "nil weights must equal all-ones weights for key %s", key)
+	}
+}
