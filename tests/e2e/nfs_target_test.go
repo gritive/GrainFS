@@ -9,7 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 )
 
 // nfsTarget abstracts an NFS4-capable grainfs fixture. Cluster variant
@@ -48,8 +48,8 @@ func (tgt *nfsTarget) uniqueExport(t testing.TB, caseName string) (string, uint6
 	}
 
 	created := runNfsExportJSONOnDataDir(t, tgt.dataDir(tgt.leaderIdx), "add", bucket)
-	require.Equal(t, bucket, created.Bucket)
-	require.NotZero(t, created.Generation)
+	gomega.Expect(created.Bucket).To(gomega.Equal(bucket))
+	gomega.Expect(created.Generation).NotTo(gomega.BeZero())
 
 	ginkgo.DeferCleanup(func() {
 		// Best-effort: bucket may already be gone (e.g. delete-cascade case
@@ -105,6 +105,6 @@ func newSharedClusterNFSTarget(t testing.TB) *nfsTarget {
 func listNfsExportsOnDataDir(t testing.TB, dataDir string) []e2eNfsExport {
 	t.Helper()
 	out, code := runCLI(t, dataDir, "nfs", "export", "list", "--json")
-	require.Equalf(t, 0, code, "%s", out)
+	gomega.Expect(code).To(gomega.Equal(0), "%s", out)
 	return parseNfsExportList(t, out)
 }

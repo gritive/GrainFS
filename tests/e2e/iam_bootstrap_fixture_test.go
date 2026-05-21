@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 // startUnbootstrappedSingleNode spawns a single-node grainfs binary like
@@ -19,8 +20,8 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 	t.Helper()
 
 	dir, err := os.MkdirTemp("", "grainfs-e2e-bootstrap-*")
-	require.NoError(t, err, "mkdtemp")
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
+	ginkgo.DeferCleanup(func() { _ = os.RemoveAll(dir) })
 
 	port = freePort()
 	cmd := exec.Command(getBinary(), "serve",
@@ -34,8 +35,8 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "start unbootstrapped e2e server")
-	t.Cleanup(func() { terminateProcess(cmd) })
+	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start unbootstrapped e2e server")
+	ginkgo.DeferCleanup(func() { terminateProcess(cmd) })
 
 	s3URL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForPort(t, port, 30*time.Second)
@@ -56,7 +57,7 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	require.NoError(t, patchSnapshotIntervalM(dir, "0s"), "disable auto-snapshot")
+	gomega.Expect(patchSnapshotIntervalM(dir, "0s")).To(gomega.Succeed(), "disable auto-snapshot")
 	return dir, s3URL, adminSock, port
 }
 

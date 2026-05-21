@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/volumeadmin"
 )
@@ -54,10 +54,10 @@ func (tgt *nbdTarget) uniqueDevice(t testing.TB, caseName string, sizeBytes int6
 func ensureSingleNodeNBDVolume(t testing.TB, ctx context.Context, name string, size int64) {
 	t.Helper()
 	cli, err := volumeadmin.NewClient(filepath.Join(testServerDataDir, "admin.sock"))
-	require.NoError(t, err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	_, err = cli.CreateVolume(ctx, volumeadmin.CreateVolumeReq{Name: name, Size: size})
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		require.NoError(t, err)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 }
 

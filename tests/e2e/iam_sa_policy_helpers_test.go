@@ -11,7 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/stretchr/testify/require"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
@@ -56,9 +57,9 @@ func attachAdminPolicyOnBucket(t testing.TB, tgt iamAdminTarget, saID, bucket, r
 
 	cli := iamadmin.NewClientForURL(tgt.adminSockPath())
 	ctx := context.Background()
-	require.NoError(t, cli.PolicyPut(ctx, polName, doc), "PolicyPut %s", polName)
-	require.NoError(t, cli.PolicyAttachToSA(ctx, polName, saID), "PolicyAttachToSA %s->%s", polName, saID)
-	t.Cleanup(func() {
+	gomega.Expect(cli.PolicyPut(ctx, polName, doc)).To(gomega.Succeed(), "PolicyPut %s", polName)
+	gomega.Expect(cli.PolicyAttachToSA(ctx, polName, saID)).To(gomega.Succeed(), "PolicyAttachToSA %s->%s", polName, saID)
+	ginkgo.DeferCleanup(func() {
 		_ = cli.PolicyDetachFromSA(ctx, polName, saID)
 		_ = cli.PolicyDelete(ctx, polName)
 	})
